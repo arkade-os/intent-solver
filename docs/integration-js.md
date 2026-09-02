@@ -38,7 +38,7 @@ There is no `rfq_fill` — see `rfq-protocol.md` § 7.2.)
 ## Quickstart
 
 ```js
-import { createArkadeContext, loadConfig } from 'lightning-swap-service' // this repo's dist
+import { createArkadeContext, loadConfig } from 'intent-solver' // this repo's dist
 import {
   httpTransport, relayTransport, sendToLightning, pollStatus, lockupSpent,
 } from './examples/lib/swap-client.mjs'

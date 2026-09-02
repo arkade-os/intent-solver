@@ -762,7 +762,7 @@ describe('renewExpiringVtxos', () => {
    *
    * That is what makes the pool split load-bearing for near-expiry coins
    * rather than merely tidy, and it is why `poolPlan` deliberately does NOT
-   * filter them out. @see arkade-os/lightning-swap-service#144
+   * filter them out.
    */
   it('can never renew a coin that alone exceeds the per-output ceiling', async () => {
     const oversized = coin(2_000_000, 10 * HOUR, 9 * HOUR)

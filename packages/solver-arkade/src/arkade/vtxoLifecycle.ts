@@ -573,7 +573,7 @@ export interface VtxoLifecycleDeps {
    * sats, and fatal once the float holds an Arkade asset: settle carries assets
    * onto the wallet's own output, so the whole float lands on one asset-bearing
    * coin that may not fund a sats lockup. Splitting afterwards is what keeps the
-   * float spendable. @see arkade-os/lightning-swap-service#123
+   * float spendable.
    *
    * Optional so a deployment that has no pool — or a test that is not about
    * this — can leave it out and get the previous behaviour exactly.

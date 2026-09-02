@@ -234,7 +234,7 @@ are deployment-specific):
 
 ```ts
 // src/entry.ts — the deployer owns this file; it is the only wiring
-import { makeWorkerEntry, SwapStore, d1Driver /*, ...service deps */ } from 'lightning-swap-service'
+import { makeWorkerEntry, SwapStore, d1Driver /*, ...service deps */ } from 'intent-solver'
 
 export default makeWorkerEntry(async (env: Env) => {
   const store = await SwapStore.open(d1Driver(env.SWAPS_DB))
@@ -446,7 +446,7 @@ un-redact.
   `cli pool --mint` works because the split isolates the asset: it lands on
   exactly one piece and the rest come out clean. It is a recovery, not a fix —
   nothing re-splits automatically after a renewal consolidates. Tracked in
-  arkade-os/lightning-swap-service#123.
+  the solver's own tracker.
 
   The refusal reason is true (there really are no spendable sats) but names the
   wrong cause, which is why this is worth recognising by its signature: a large
@@ -1166,11 +1166,11 @@ COVCLAIMD_IMAGE=ghcr.io/arkade-os/covclaimd:v0.0.1-rc.4 \
 node regtest.mjs start --clean
 
 # 2. extract boltz-lnd's TLS cert and macaroon
-docker cp boltz-lnd:/root/.lnd/tls.cert ../lightning-swap-service/boltz-lnd-tls.cert
-docker cp boltz-lnd:/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon ../lightning-swap-service/boltz-lnd-admin.macaroon
+docker cp boltz-lnd:/root/.lnd/tls.cert ../intent-solver/boltz-lnd-tls.cert
+docker cp boltz-lnd:/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon ../intent-solver/boltz-lnd-admin.macaroon
 
 # 3. this repo
-cd ../lightning-swap-service
+cd ../intent-solver
 cp .env.regtest.lnd.example .env.regtest.lnd    # fill ARK_MNEMONIC with any bip39 phrase
 pnpm install && pnpm build
 
@@ -1184,7 +1184,7 @@ cli balances
 # 6. full send E2E: a REAL invoice from the counterparty lnd -> quote -> fund own derivation -> pay over the boltz-lnd<->lnd channel -> claim
 cd ../arkade-regtest
 INVOICE=$(node regtest.mjs create-invoice --secondary)
-cd ../lightning-swap-service
+cd ../intent-solver
 cli send "$INVOICE"
 ```
 

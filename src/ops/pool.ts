@@ -39,7 +39,6 @@ export const poolPlan = async (services: Services): Promise<PoolPlan> => {
   // every pass, and declines in wording `BENIGN_RENEWAL` matches — no failure reported
   // while the coin marches to expiry. Splitting early otherwise costs one cycle.
   //
-  // @see arkade-os/lightning-swap-service#144
   const reserved = services.arkade.reservations.reserved()
   const spendable = (await services.arkade.wallet.getSpendableVtxos())
     .filter((vtxo) => !reserved.has(outpointKey(vtxo.txid, vtxo.vout)))
@@ -129,7 +128,6 @@ export const mintPool = async (services: Services, opts: { force?: boolean } = {
  * in the float puts the WHOLE float on a single asset-bearing coin, which cannot fund a
  * sats lockup without destroying the asset, and every corridor then refuses against a
  * healthy-looking balance. Splitting isolates the asset onto one piece.
- * @see arkade-os/lightning-swap-service#123
  *
  * NO COMMITTED-ROWS GATE, unlike {@link mintPool}: that gate proxies for a SECOND
  * provider, and here `poolPlan` already filters this process's reservations — the

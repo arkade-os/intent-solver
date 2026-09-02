@@ -1,6 +1,9 @@
-# lightning-swap-service
+# intent-solver
 
-Swap provider ("solver") for Lightning ⇄ Arkade swaps. Closed source.
+Swap provider ("solver") for Lightning ⇄ Arkade swaps, and the LND reference
+implementation of the corridor framework.
+
+MIT licensed — see [LICENSE](LICENSE).
 
 Four corridors, two per direction:
 
