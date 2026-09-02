@@ -11,27 +11,6 @@ importers:
       '@arkade-os/sdk':
         specifier: 0.4.67
         version: 0.4.67
-      '@hono/node-server':
-        specifier: ^2.1.0
-        version: 2.1.0(hono@4.13.0)
-      '@noble/curves':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@noble/hashes':
-        specifier: ^2.0.0
-        version: 2.2.0
-      '@scure/base':
-        specifier: ^2.0.0
-        version: 2.2.0
-      '@scure/bip32':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@scure/bip39':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@scure/btc-signer':
-        specifier: ^2.0.1
-        version: 2.0.1
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:packages/solver-arkade
@@ -65,6 +44,27 @@ importers:
       '@arkade-os/solver-transport':
         specifier: workspace:*
         version: link:packages/solver-transport
+      '@hono/node-server':
+        specifier: ^2.1.0
+        version: 2.1.0(hono@4.13.0)
+      '@noble/curves':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/hashes':
+        specifier: ^2.0.0
+        version: 2.2.0
+      '@scure/base':
+        specifier: ^2.0.0
+        version: 2.2.0
+      '@scure/bip32':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@scure/bip39':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@scure/btc-signer':
+        specifier: ^2.0.1
+        version: 2.0.1
       better-sqlite3:
         specifier: ^12.11.1
         version: 12.11.1
@@ -112,11 +112,71 @@ importers:
         specifier: ^8.21.2
         version: 8.21.2
 
+  packages/solver-app:
+    dependencies:
+      '@arkade-os/sdk':
+        specifier: 0.4.67
+        version: 0.4.67
+      '@arkade-os/solver-arkade':
+        specifier: workspace:*
+        version: link:../solver-arkade
+      '@arkade-os/solver-core':
+        specifier: workspace:*
+        version: link:../solver-core
+      '@arkade-os/solver-corridors':
+        specifier: workspace:*
+        version: link:../solver-corridors
+      '@arkade-os/solver-corridors-evm':
+        specifier: workspace:*
+        version: link:../solver-corridors-evm
+      '@arkade-os/solver-db':
+        specifier: workspace:*
+        version: link:../solver-db
+      '@arkade-os/solver-rails':
+        specifier: workspace:*
+        version: link:../solver-rails
+      '@arkade-os/solver-rails-esplora':
+        specifier: workspace:*
+        version: link:../solver-rails-esplora
+      '@arkade-os/solver-rails-evm':
+        specifier: workspace:*
+        version: link:../solver-rails-evm
+      '@arkade-os/solver-rails-fake':
+        specifier: workspace:*
+        version: link:../solver-rails-fake
+      '@arkade-os/solver-rails-lnd':
+        specifier: workspace:*
+        version: link:../solver-rails-lnd
+      '@arkade-os/solver-transport':
+        specifier: workspace:*
+        version: link:../solver-transport
+      '@hono/node-server':
+        specifier: ^2.1.0
+        version: 2.1.0(hono@4.13.0)
+      '@noble/curves':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/hashes':
+        specifier: ^2.0.0
+        version: 2.2.0
+      '@scure/base':
+        specifier: ^2.0.0
+        version: 2.2.0
+      '@scure/btc-signer':
+        specifier: ^2.0.1
+        version: 2.0.1
+      hono:
+        specifier: ^4.13.0
+        version: 4.13.0
+
   packages/solver-arkade:
     dependencies:
       '@arkade-os/solver-core':
         specifier: workspace:*
         version: link:../solver-core
+      '@arkade-os/swap':
+        specifier: 0.0.10
+        version: 0.0.10(nostr-tools@2.24.1(typescript@5.9.3))
 
   packages/solver-core: {}
 
@@ -140,9 +200,6 @@ importers:
       '@arkade-os/sdk':
         specifier: 0.4.67
         version: 0.4.67
-      '@scure/base':
-        specifier: ^2.0.0
-        version: 2.2.0
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -155,6 +212,9 @@ importers:
       '@arkade-os/solver-rails-evm':
         specifier: workspace:*
         version: link:../solver-rails-evm
+      '@scure/base':
+        specifier: ^2.0.0
+        version: 2.2.0
       zod:
         specifier: ^3.24.1
         version: 3.25.76
@@ -176,6 +236,9 @@ importers:
 
   packages/solver-rails-esplora:
     dependencies:
+      '@arkade-os/solver-core':
+        specifier: workspace:*
+        version: link:../solver-core
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.2.0
@@ -185,54 +248,51 @@ importers:
       '@scure/btc-signer':
         specifier: ^2.0.1
         version: 2.0.1
-      '@arkade-os/solver-core':
-        specifier: workspace:*
-        version: link:../solver-core
 
   packages/solver-rails-evm:
     dependencies:
-      '@noble/curves':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@noble/hashes':
-        specifier: ^2.0.0
-        version: 2.2.0
       '@arkade-os/solver-core':
         specifier: workspace:*
         version: link:../solver-core
-
-  packages/solver-rails-fake:
-    dependencies:
       '@noble/curves':
         specifier: ^2.2.0
         version: 2.2.0
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.2.0
-      '@scure/base':
-        specifier: ^2.0.0
-        version: 2.2.0
-      '@scure/btc-signer':
-        specifier: ^2.0.1
-        version: 2.0.1
+
+  packages/solver-rails-fake:
+    dependencies:
       '@arkade-os/solver-core':
         specifier: workspace:*
         version: link:../solver-core
       '@arkade-os/solver-rails':
         specifier: workspace:*
         version: link:../solver-rails
-
-  packages/solver-rails-lnd:
-    dependencies:
+      '@noble/curves':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/hashes':
+        specifier: ^2.0.0
+        version: 2.2.0
       '@scure/base':
         specifier: ^2.0.0
         version: 2.2.0
+      '@scure/btc-signer':
+        specifier: ^2.0.1
+        version: 2.0.1
+
+  packages/solver-rails-lnd:
+    dependencies:
       '@arkade-os/solver-core':
         specifier: workspace:*
         version: link:../solver-core
       '@arkade-os/solver-rails-esplora':
         specifier: workspace:*
         version: link:../solver-rails-esplora
+      '@scure/base':
+        specifier: ^2.0.0
+        version: 2.2.0
       lightning:
         specifier: ^12.2.3
         version: 12.2.3
