@@ -149,30 +149,41 @@ export const fetchEmulatorPubkey = async (emulatorUrl) =>
  * free of any added trust, since every candidate still pins the refund to
  * THIS trader's own `refundAddress`; `verifyLockupAddress` picks whichever
  * one the quote's own `lockup_address` matches.
+ *
+ * The two candidates are the CURRENT suite and the pre-timelocked-refund one,
+ * selected by `legacy` — which moves `pkScript`, hence two addresses to try.
+ * A solver on today's build always produces the first.
  */
 export const deriveLockup = ({ quote, invoice, refundAddress, arkade, emulatorPubkey, clientRefundPubkey }) => {
   const decoded = typeof invoice === 'string' ? decodeInvoice(invoice) : invoice
   const serverKey = arkade.wallet.arkServerPublicKey
-  const build = (nonInteractiveRefundWithoutReceiver) => {
+  const build = (legacy) => {
     const script = new CovenantSwapScript({
       receiver: hex.decode(quote.solver_pubkey), //  binding field #1
       refundLocktime: quote.refund_locktime, //      binding field #2
       server: serverKey,
       preimageHash: scriptHashFromPaymentHash(decoded.paymentHash),
       claimDelay: arkade.unilateralDelays.unilateralClaimDelay,
-      emulatorPubkey: hex.decode(emulatorPubkey),
-      refundPkScript: ArkAddress.decode(refundAddress).pkScript,
+      // The leaves no participant has to be online for. Grouped rather than
+      // flat because they are one unit: a row rebuilt from stored state has to
+      // reproduce the shape it was funded with, and `legacy` is what moves it.
+      nonInteractiveParameters: {
+        emulatorPubkey: hex.decode(emulatorPubkey),
+        // Compare-only, from the quote: the solver's own claim destination —
+        // it binds ONLY where the solver may pay itself on nonInteractiveClaim,
+        // so a solver lying here would be robbing itself. None of this
+        // trader's refund leaves depend on it. See docs/rfq-protocol.md
+        // § 7.1.1.1 for why the trader cannot derive it itself.
+        receiverPkScript: hex.decode(quote.profile.receiver_pk_script),
+        // Where a refund lands: THIS trader's own address, never the quote's.
+        senderPkScript: ArkAddress.decode(refundAddress).pkScript,
+        ...(legacy ? { legacy: 'preTimelockedRefund' } : {}),
+      },
       // Same key the request already carried as client_refund_pubkey — the
       // solver bakes it into the same covenant this derivation re-derives.
       client: hex.decode(clientRefundPubkey),
       clientRefundDelay: arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay,
       refundWithoutServerDelay: arkade.unilateralDelays.unilateralRefundDelay,
-      // Compare-only, from the quote: the solver's own claim destination —
-      // needed only so nonInteractiveClaim's covenant key can be derived; see
-      // docs/rfq-protocol.md § 7.1.1.1 for why the trader cannot derive this
-      // itself.
-      receiverPkScript: hex.decode(quote.profile.receiver_pk_script),
-      nonInteractiveRefundWithoutReceiver,
     })
     return {
       script,
@@ -180,7 +191,7 @@ export const deriveLockup = ({ quote, invoice, refundAddress, arkade, emulatorPu
       pkScript: hex.encode(script.pkScript),
     }
   }
-  return { decoded, candidates: [build(true), build(false)] }
+  return { decoded, candidates: [build(false), build(true)] }
 }
 
 /** True once the lockup vtxo is spent — the solver claimed; the swap is complete. */
