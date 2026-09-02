@@ -15,6 +15,7 @@ import {
   buildOffchainTx,
   ConditionWitness,
   EmulatorPacket,
+  EsploraProvider,
   Extension,
   getArkPsbtFields,
   hasTerminalSpend,
@@ -110,6 +111,23 @@ export interface ArkadeWalletConfig {
    * snapshot, so changing this moves new swaps only.
    */
   unilateralExitDelayOverride?: number
+  /**
+   * Where the SDK reads the Bitcoin chain, as an Esplora REST base URL. Unset
+   * takes the SDK's own per-network default.
+   *
+   * Those defaults name PUBLIC deployments and one of them names `localhost`,
+   * which is why this has to be settable. On regtest the SDK falls back to
+   * `http://localhost:3000/api`; inside a container that resolves to the
+   * container itself, nothing answers, and the wallet degrades QUIETLY —
+   * "Failed to fetch chain tip; height-based expiry will not be evaluated" is
+   * logged once and the process carries on with block-denominated VTXO expiry
+   * simply unwatched. Nothing else reports it.
+   *
+   * Distinct from the Lightning side's explorer, which the onchain corridors
+   * configure separately: this one is the ARKADE wallet's view of L1, and the
+   * two can legitimately differ.
+   */
+  esploraUrl?: string
   /** Network name the server must report at /v1/info — refused at startup otherwise. */
   expectedArkdNetwork: string
 }
@@ -150,6 +168,11 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     // same thing; the explicit undefined is what makes that checkable.
     minCheckpointExitDelaySeconds:
       config.minCheckpointExitDelaySeconds === undefined ? undefined : BigInt(config.minCheckpointExitDelaySeconds),
+    // Safe for the same reason, by a different operator: the SDK takes
+    // `config.onchainProvider || new EsploraProvider(default)` (pinned SDK
+    // `dist/chunk-AEWJU6NZ.js:12457`), so an explicit undefined falls through
+    // to the per-network default rather than blanking the provider.
+    onchainProvider: config.esploraUrl === undefined ? undefined : new EsploraProvider(config.esploraUrl),
     // NOT a performance tweak, and UNSET IS NOT OFF. The SDK folds an absent
     // `settlementConfig` into its DEFAULT (`pollIntervalMs` 60s) and starts a
     // boarding poll that calls `getSpendableVtxos()` — an UNFILTERED

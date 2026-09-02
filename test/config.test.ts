@@ -308,6 +308,40 @@ describe('loadConfig — checkpoint exit delay override', () => {
 })
 
 /**
+ * The Arkade wallet's own view of L1, which is NOT `LND_ESPLORA_URL`.
+ *
+ * Unset is a real deployment state and stays supported — the SDK falls back to
+ * a per-network default. What makes the knob necessary is that the regtest
+ * default is `http://localhost:3000/api`: inside a container that resolves to
+ * the container itself, and the wallet degrades SILENTLY, logging "Failed to
+ * fetch chain tip; height-based expiry will not be evaluated" once and then
+ * leaving block-denominated VTXO expiry unwatched. A test that only covered
+ * the set case would leave the fallback — the state every existing deployment
+ * is in — unpinned.
+ */
+describe('loadConfig — ARK_ESPLORA_URL', () => {
+  it('passes the operator-supplied explorer through to the wallet config', () => {
+    process.env.ARK_ESPLORA_URL = 'http://mempool_web/api'
+    expect(loadConfig().arkade.esploraUrl).toBe('http://mempool_web/api')
+  })
+
+  it('leaves it undefined when unset, keeping the SDK per-network default', () => {
+    delete process.env.ARK_ESPLORA_URL
+    expect(loadConfig().arkade.esploraUrl).toBeUndefined()
+  })
+
+  it('is independent of the Lightning side explorer', () => {
+    // Two chains' worth of questions answered by one host only by coincidence.
+    // Setting one must not move the other, or a deployment that points the
+    // Lightning side at a private Esplora silently repoints the Arkade wallet
+    // with it.
+    process.env.LND_ESPLORA_URL = 'http://lightning-side/api'
+    delete process.env.ARK_ESPLORA_URL
+    expect(loadConfig().arkade.esploraUrl).toBeUndefined()
+  })
+})
+
+/**
  * `NOSTR_AD_PUBLISH` belongs beside LN_BACKEND for the same reason the file's
  * header gives: it is enum-shaped, and the value an operator most needs it to
  * hold is the one a typo would silently produce. `off` is the default AND the

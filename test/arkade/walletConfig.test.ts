@@ -31,4 +31,21 @@ describe('createArkadeContext', () => {
   it('still runs deprecated-signer migration itself, having taken it over', () => {
     expect(floatSource).toContain('migrateDeprecatedSignerVtxos()')
   })
+
+  /**
+   * Source-asserted for the same reason as the two above: `onchainProvider` is
+   * consumed inside `Wallet.create` and no public API reads it back.
+   *
+   * The whole expression, not just the field name, because the CONDITIONAL is
+   * the part that matters. The SDK takes `config.onchainProvider || new
+   * EsploraProvider(default)`, so passing a provider unconditionally would
+   * construct one against `undefined` and blank the per-network fallback that
+   * every deployment not setting `ARK_ESPLORA_URL` relies on. A `toContain`
+   * on the field alone would stay green through exactly that rewrite.
+   */
+  it('passes an onchain provider only when one was configured', () => {
+    expect(walletSource).toContain(
+      'onchainProvider: config.esploraUrl === undefined ? undefined : new EsploraProvider(config.esploraUrl)',
+    )
+  })
 })

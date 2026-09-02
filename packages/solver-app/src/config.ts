@@ -745,6 +745,12 @@ export const loadConfig = (): Config => {
       // A network fact, deliberately not an env knob: see NetworkProfile.
       minCheckpointExitDelaySeconds: profile.minCheckpointExitDelaySeconds,
       unilateralExitDelayOverride: unilateralExitDelayOverride(),
+      // Separate from LND_ESPLORA_URL above on purpose. That one is the
+      // Lightning side's explorer; this is the Arkade wallet's view of L1, and
+      // a deployment can legitimately point them at different hosts. Unset
+      // takes the SDK's per-network default, which on regtest is a localhost
+      // URL that resolves to the container itself.
+      esploraUrl: process.env.ARK_ESPLORA_URL,
       expectedArkdNetwork: profile.arkdNetwork,
     },
   }
