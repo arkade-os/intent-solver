@@ -1095,6 +1095,13 @@ Three more things that cost time if forgotten:
   container removed) by `node scripts/e2e-stack.mjs`; without them the EVM
   files skip rather than fail, which is why a missing feed can look like
   "e2e passes" on a machine that never ran them.
+- **`assetOffer.e2e.test.ts` needs an asset the wallet already holds**, and
+  unlike the EVM files it FAILS rather than skips — `this wallet holds no
+  asset; mint one`. It is the only suite that exercises `fulfillOffer` for
+  real, so leaving it red leaves that path with no live coverage.
+  `scripts/regtest-mint-asset.mjs` issues one. Settle afterwards: straight
+  after issuance the balance shows no asset AND fewer sats, which reads as a
+  burn and is one wallet mid-restructure — the settle brings back both.
 
 ## Replicating end to end on regtest
 
