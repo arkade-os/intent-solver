@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { applyOverrides, validateOverride, describeSettings, editableKeys } from '../../src/admin/settings.js'
-import type { Config } from '../../src/config.js'
+import {
+  applyOverrides,
+  validateOverride,
+  describeSettings,
+  editableKeys,
+} from '@arkade-os/solver-app/admin/settings.js'
+import type { Config } from '@arkade-os/solver-app/config.js'
 
 const config = {
   network: 'regtest',

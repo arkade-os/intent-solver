@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
-import { buildWorker, makeWorkerEntry, type DriveJob, type QueueMessageLike } from '../../src/worker.js'
+import { buildWorker, makeWorkerEntry, type DriveJob, type QueueMessageLike } from '@arkade-os/solver-app/worker.js'
 import { SendSwapService, type ArkadeOps } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
@@ -165,7 +165,7 @@ describe('scheduled, inline (no queue binding)', () => {
       getBalance: unreachable,
       newReceiveAddress: unreachable,
       settleReceiveAddress: async () => {
-        throw new Error('SSP outage')
+        throw new Error('backend outage')
       },
     }
     const explodingOnchainService = new OnchainSendSwapService({

@@ -16,7 +16,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { corridorSetFromDeps } from '../../src/ops/corridorSet.js'
+import { corridorSetFromDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 import { createServicesBody, servicesSource } from '../support/createServicesBody.js'
 import { evmCorridorFor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { EvmCorridorPolicy } from '@arkade-os/solver-core/core/evmCorridorConfig.js'

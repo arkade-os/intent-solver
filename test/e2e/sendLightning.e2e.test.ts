@@ -2,7 +2,7 @@
  * E2E — `arkade:BTC->lightning:BTC` (send), against a live regtest stack and
  * REAL LIGHTNING.
  *
- * The in-code equivalent of `src/cli.ts`'s `send` command and of
+ * The in-code equivalent of `packages/solver-app/src/cli.ts`'s `send` command and of
  * `scripts/e2e-relay.sh`'s money path (that script additionally proves the
  * outbound RELAY transport with two processes; this proves the money path with
  * one, and asserts on the row rather than on grepped stdout).

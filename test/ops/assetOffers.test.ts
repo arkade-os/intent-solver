@@ -6,7 +6,7 @@
  * outpoint, and submitting without first marking the row in flight.
  */
 import { describe, it, expect, vi } from 'vitest'
-import { AssetOfferService, parseAssetMarkets, type AssetOfferDeps } from '../../src/ops/assetOffers.js'
+import { AssetOfferService, parseAssetMarkets, type AssetOfferDeps } from '@arkade-os/solver-app/ops/assetOffers.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'

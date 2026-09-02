@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { AdminStore, adminDbPath } from '../../src/admin/db.js'
+import { AdminStore, adminDbPath } from '@arkade-os/solver-app/admin/db.js'
 
 let now = 1_000_000
 const clock = () => now

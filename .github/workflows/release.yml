@@ -5,6 +5,10 @@ name: Release
 #
 #   ghcr.io/arkade-os/intent-solver   the runnable solver, what a CD points at
 #   @arkade-os/solver-*               the eleven packages, what a corridor author builds on
+#
+# `packages/solver-app` is the source of the FIRST of those and appears in
+# neither list of the second: it is `private: true`, which is what keeps the
+# deployable out of a publish matrix that globs `./packages/*`.
 on:
   push:
     tags: ['v*']
@@ -121,7 +125,12 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
+          # The context stays the repo root — a pnpm workspace image needs the
+          # lockfile, the workspace manifest and every packages/*. `file` names
+          # the Dockerfile, which lives with the app it builds. Neither the
+          # image name above nor anything it consumes changes with that move.
           context: .
+          file: packages/solver-app/Dockerfile
           push: ${{ inputs.dry_run != true }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -135,6 +144,6 @@ jobs:
         run: |
           set -eu
           tag=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
-          docker build -t smoke:local .
+          docker build -f packages/solver-app/Dockerfile -t smoke:local .
           (docker run --rm smoke:local help || true) 2>&1 | grep -q "usage:"
           echo "image ok: $tag"

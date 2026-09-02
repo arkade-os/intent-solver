@@ -11,7 +11,7 @@
  * so one bad hint among several is an invoice every real payer settles, while a
  * single bad hint is an invoice no one can route cheaply. The first is a
  * backend limitation on this deployment (see `hintCltvBlocks` in
- * `src/core/send.ts`), the second is the payee's problem.
+ * `packages/solver-core/src/core/send.ts`), the second is the payee's problem.
  *
  * Pure decode, no SDK and no wallet: it reads the string and nothing else, so
  * it is safe to run anywhere and needs no `.env`, no build, and no network.

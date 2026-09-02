@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildAdminApp } from '../../src/admin/server.js'
+import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 
 const app = (over: Partial<Parameters<typeof buildAdminApp>[0]> = {}) =>
   buildAdminApp({

@@ -28,10 +28,12 @@ import { fileURLToPath } from 'node:url'
  *
  * 1. beside this module — true under vitest (`src/admin/static/`) and in the
  *    container, where the Dockerfile copies the directory into `dist/admin/`;
- * 2. the source tree, reached from `dist/admin/` — the case that made this a
- *    list rather than one path. Running the COMPILED cli locally (`pnpm start`,
- *    `node dist/cli.js serve`) resolves (1) to a directory tsc never created,
- *    so the console would 404 everything while working perfectly in Docker.
+ * 2. this package's source tree, reached from `dist/admin/` — the case that
+ *    made this a list rather than one path. Running the COMPILED cli locally
+ *    (`pnpm start`, `node packages/solver-app/dist/cli.js serve`) resolves (1)
+ *    to a directory tsc never created, so the console would 404 everything
+ *    while working perfectly in Docker. Both hops stayed two levels deep when
+ *    this tree became a package, so neither path changed.
  */
 export const staticRoot = (): string => {
   const beside = resolve(fileURLToPath(new URL('./static', import.meta.url)))

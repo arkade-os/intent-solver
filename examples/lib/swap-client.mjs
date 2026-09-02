@@ -17,12 +17,12 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { finalizeEvent } from 'nostr-tools/pure'
 import { getConversationKey, encrypt, decrypt } from 'nostr-tools/nip44'
-import { CovenantSwapScript, decodeInvoice, findLockups, scriptHashFromPaymentHash } from '../../dist/index.js'
+import { CovenantSwapScript, decodeInvoice, findLockups, scriptHashFromPaymentHash } from '../../packages/solver-app/dist/index.js'
 import { assertFundable, expectQuote, newRfqId, requestQuote, verifyLockupAddress } from './rfq-core.mjs'
 
 export * from './rfq-core.mjs'
 
-/** The two event kinds this protocol uses; mirrors `src/relay/nostr.ts`. */
+/** The two event kinds this protocol uses; mirrors `packages/solver-transport/src/relay/nostr.ts`. */
 const NOSTR_KIND_DIRECTED = 4859
 
 /**
@@ -35,7 +35,7 @@ const NOSTR_KIND_DIRECTED = 4859
  * This file already depends on the repo's stack, so it is where the dependency
  * belongs.
  *
- * The wire format is `src/relay/nostr.ts`'s, which is the thing this has to
+ * The wire format is `packages/solver-transport/src/relay/nostr.ts`'s, which is the thing this has to
  * match exactly: kind 4859 addressed with a `p` tag, the RFQ payload sealed to
  * the recipient with NIP-44, and a subscription of
  * `{kinds:[4859], '#p':[me]}`.

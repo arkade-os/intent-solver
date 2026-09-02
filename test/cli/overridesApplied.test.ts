@@ -11,8 +11,8 @@
  * Asserted against the source text rather than by calling the function, because
  * constructing the stack needs live backends a unit test has none of.
  *
- * Two sources. `createServices` lives in `src/ops/services.ts`; the `card`
- * command and the transport wiring checked below are still in `src/cli.ts`,
+ * Two sources. `createServices` lives in `packages/solver-app/src/ops/services.ts`; the `card`
+ * command and the transport wiring checked below are still in `packages/solver-app/src/cli.ts`,
  * which runs `main()` then `process.exit()` at module load and exports nothing,
  * so importing IT from a test would kill the runner.
  *
@@ -28,7 +28,7 @@ import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { createServicesBody } from '../support/createServicesBody.js'
 
-const cliSource = readFileSync(fileURLToPath(new URL('../../src/cli.ts', import.meta.url)), 'utf8')
+const cliSource = readFileSync(fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)), 'utf8')
 const createServices = createServicesBody
 
 /** The body of the `card` command, up to the command that follows it. */
@@ -102,7 +102,7 @@ describe('what must agree with the quoted terms reads policy, not env', () => {
   it('the registry card, which would otherwise advertise a fee nobody charges', () => {
     // Scoped to the CARD COMMAND, not the whole file. The previous form looked
     // for `policy.corridorFees['arkade:BTC->lightning:BTC']` anywhere in
-    // `src/cli.ts` — and passed while the card was built from `config`,
+    // `packages/solver-app/src/cli.ts` — and passed while the card was built from `config`,
     // because a dead `lnFees` binding and an LN_SEND guard that no longer
     // gated anything still carried those exact strings. A whole-file substring
     // cannot tell the code under test from the code about to be deleted.

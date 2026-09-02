@@ -19,7 +19,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { loadConfig } from '../../src/config.js'
+import { loadConfig } from '@arkade-os/solver-app/config.js'
 
 const BASE_ENV: Record<string, string> = {
   SWAP_NETWORK: 'regtest',

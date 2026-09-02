@@ -3,7 +3,7 @@
  * corridors depend on when covclaimd is not driving the claim.
  *
  * This is client-side code, like `claimPacket.ts`: a real integration lives in
- * the client's own wallet. It is here for the same reason `src/cli.ts`'s
+ * the client's own wallet. It is here for the same reason `packages/solver-app/src/cli.ts`'s
  * `send-onchain` carries the client's claim-transaction signing — an e2e that
  * plays both roles has to.
  *

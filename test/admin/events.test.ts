@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createChangeFeed } from '../../src/admin/events.js'
-import type { Services } from '../../src/ops/services.js'
+import { createChangeFeed } from '@arkade-os/solver-app/admin/events.js'
+import type { Services } from '@arkade-os/solver-app/ops/services.js'
 
 const row = (id: string, state: string) => ({
   id,

@@ -20,7 +20,7 @@
 (*   src/receive/covclaimd.ts    the optional autonomous claimer           *)
 (*   src/arkade/wallet.ts        findLockups (spendableOnly) and           *)
 (*                               findClaimPreimage (hash-verified)         *)
-(*   src/worker.ts               the queue fan-out and its safety claim    *)
+(*   packages/solver-app/src/worker.ts               the queue fan-out and its safety claim    *)
 (*                                                                         *)
 (* AUTHORITY FOR THE EDGE TABLE                                            *)
 (*                                                                         *)

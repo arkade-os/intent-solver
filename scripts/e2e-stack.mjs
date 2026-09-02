@@ -31,7 +31,7 @@
 //
 // The feed answers EVERY GET with the flat regtest price
 // {"btc":{"asset":100000000}} - one token unit per sat, the rate the e2e
-// fixtures assume - because `src/price/feed.ts` resolves the market's
+// fixtures assume - because `packages/solver-core/src/price/feed.ts` resolves the market's
 // price_path as an RFC 6901 pointer IN THE BODY, not a URL suffix: whichever
 // path a fixture names, `/btc/asset` or otherwise, the body carries it.
 // Override the ports/image with E2E_ANVIL_PORT / E2E_FEED_PORT /

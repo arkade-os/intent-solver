@@ -32,7 +32,10 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-const appSource = readFileSync(fileURLToPath(new URL('../../src/admin/static/app.js', import.meta.url)), 'utf8')
+const appSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
+  'utf8',
+)
 
 /**
  * The body of a top-level `const NAME = ` arrow function.
@@ -215,7 +218,10 @@ describe('the detail modal keeps its place', () => {
 })
 
 describe('the spinner is visible without motion', () => {
-  const css = readFileSync(fileURLToPath(new URL('../../src/admin/static/styles.css', import.meta.url)), 'utf8')
+  const css = readFileSync(
+    fileURLToPath(new URL('../../packages/solver-app/src/admin/static/styles.css', import.meta.url)),
+    'utf8',
+  )
 
   it('has a rule for the spinner and for a disabled action', () => {
     expect(css).toContain('.spinner')

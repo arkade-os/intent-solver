@@ -3,8 +3,8 @@
  *
  * These replace what `test/cli/poolMint.test.ts` could only assert against
  * source text: that file's own docstring says it matched on the source
- * "rather than by calling the function because `src/cli.ts` runs `main()` and
- * then `process.exit()` at module load and does not export". `src/ops/pool.ts`
+ * "rather than by calling the function because `packages/solver-app/src/cli.ts` runs `main()` and
+ * then `process.exit()` at module load and does not export". `packages/solver-app/src/ops/pool.ts`
  * has no such problem, so the same money-safety property is asserted here by
  * actually calling it — the spend must never happen without the opt-in, and
  * never while another provider may hold reservations this process cannot see.
@@ -14,9 +14,9 @@
 
 import { createCorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
 import { describe, it, expect, vi } from 'vitest'
-import { mintPool, poolPlan, committedAcrossCorridors } from '../../src/ops/pool.js'
-import type { Services } from '../../src/ops/services.js'
-import { readerSetFromDeps, type FlatCorridorDeps } from '../../src/ops/corridorSet.js'
+import { mintPool, poolPlan, committedAcrossCorridors } from '@arkade-os/solver-app/ops/pool.js'
+import type { Services } from '@arkade-os/solver-app/ops/services.js'
+import { readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 
 const zero = () => ({ committedSats: vi.fn().mockResolvedValue(0) })
 

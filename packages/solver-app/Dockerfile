@@ -15,6 +15,19 @@
 #
 # Two stages so the runtime image carries no compilers: better-sqlite3 needs a
 # native build when no prebuild matches, and that toolchain must not ship.
+#
+# THE BUILD CONTEXT IS THE REPO ROOT, not this directory. Every path below is
+# root-relative and the build is:
+#
+#   docker build -f packages/solver-app/Dockerfile .
+#
+# It has to be, and the file lives here anyway. A pnpm workspace image needs
+# `pnpm-lock.yaml`, `pnpm-workspace.yaml` and every `packages/*` — this app
+# resolves eleven of them through `workspace:*` links the lockfile records — so
+# a context rooted at this directory could not install at all. Keeping the file
+# beside the thing it builds is what makes the deployable self-describing; a
+# platform that is pointed at it must be told the context, and `-f` is the whole
+# of that instruction.
 
 # Which Node the image is built on. Defaults to 22 — active LTS until April
 # 2027, and the conservative choice for something that moves money — while
@@ -42,13 +55,19 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # cannot preserve the directory each manifest belongs to — separating manifests
 # from sources would mean one COPY per package, re-listed by hand on every split.
 # Correctness first; the cost is a slower rebuild, not a wrong image.
+#
+# This app's own source arrives in the same COPY: it is `packages/solver-app`,
+# one workspace project among twelve, and there is deliberately no second copy
+# of it.
 COPY packages ./packages
 RUN pnpm install --frozen-lockfile
-COPY tsconfig.json tsconfig.build.json ./
-COPY src ./src
+# The root tsconfig, which every package's `tsconfig.build.json` extends — not
+# an emit config in its own right. The root emits nothing at all now.
+COPY tsconfig.json ./
 COPY scripts ./scripts
-# `pnpm build` is now `pnpm -r build && tsc`: the packages resolve through their
-# `exports` maps to dist/, so theirs must exist before the root compiles.
+# `pnpm build` is `pnpm -r build`, and pnpm orders that topologically: each
+# package resolves its dependencies through their `exports` maps to dist/, so
+# the app compiles last, after everything it imports exists.
 RUN pnpm build
 # Drop dev dependencies; keep the compiled native module.
 #
@@ -67,7 +86,6 @@ FROM node:${NODE_VERSION}-slim
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
 # The workspace packages, and they are NOT optional. pnpm links `@arkade-os/solver-*` into
 # node_modules as SYMLINKS to /app/packages/<pkg>; copying node_modules without
@@ -77,11 +95,21 @@ COPY --from=build /app/package.json ./package.json
 # Their dist/ is what actually runs — the .ts sources ride along because
 # splitting them out would need one COPY per package, re-listed on every split,
 # to save a few hundred kilobytes.
+#
+# This is now the ONLY copy that matters: the app itself is
+# `packages/solver-app`, so the line below carries the entrypoint too. There is
+# no root `dist/` any more.
 COPY --from=build /app/packages ./packages
 # The admin console's client, copied as-is: `pnpm build` is plain `tsc`, which
 # does not carry non-TS files, and the console resolves this directory from
 # import.meta.url. It has to sit beside the compiled module that reads it.
-COPY --from=build /app/src/admin/static ./dist/admin/static
+#
+# Redundant on paper — the `packages` copy above already carries the app's
+# `src/`, which is `staticRoot()`'s second candidate — and kept anyway, because
+# the first candidate is the one that should hit. A future `.dockerignore` rule
+# or a slimmed COPY that drops package sources would otherwise turn the console
+# into a 404 with nothing red anywhere.
+COPY --from=build /app/packages/solver-app/src/admin/static ./packages/solver-app/dist/admin/static
 # The operator diagnostics, which are only ever needed ON the box that has the
 # problem. They are plain .mjs run by the same node and against the same
 # node_modules, so they ship as source rather than through `tsc`.
@@ -109,7 +137,7 @@ USER node
 # healthy for as long as it stays deaf — which is how one shipped.
 #
 # It covers socket connectivity, not reachability: a relay that tears down our
-# subscription leaves the socket up. See src/cli.ts's heartbeat.
+# subscription leaves the socket up. See this package's src/cli.ts heartbeat.
 #
 # 60s of staleness is six missed beats, but that is the PROBE's threshold, not
 # when the container turns unhealthy — Docker needs `--retries` consecutive
@@ -144,5 +172,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=2 \
 
 # Secrets come from the environment (docker secrets / --env-file), never from
 # the image. `relay` additionally needs RELAY_URL.
-ENTRYPOINT ["node", "--enable-source-maps", "--experimental-eventsource", "dist/cli.js"]
+ENTRYPOINT ["node", "--enable-source-maps", "--experimental-eventsource", "packages/solver-app/dist/cli.js"]
 CMD ["relay"]

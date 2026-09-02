@@ -49,7 +49,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "── starting provider in OUTBOUND relay mode (no listening ports) ────"
-RELAY_URL="$RELAY_URL" $NODE --env-file="$ENV_FILE" dist/cli.js relay >"$LOGDIR/provider.log" 2>&1 &
+RELAY_URL="$RELAY_URL" $NODE --env-file="$ENV_FILE" packages/solver-app/dist/cli.js relay >"$LOGDIR/provider.log" 2>&1 &
 provider_pid=$!
 
 for _ in $(seq 1 40); do

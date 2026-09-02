@@ -6,7 +6,7 @@
 // Requires the stack to be up (arkd + bitcoin + miner). Prints the settled
 // balance at the end; afterwards `cli send` / `cli test-refund` just work.
 import { execFileSync } from 'node:child_process'
-import { loadConfig } from '../dist/config.js'
+import { loadConfig } from '../packages/solver-app/dist/config.js'
 import { createArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const [stackPath, amountBtc = '0.001'] = process.argv.slice(2)

@@ -1,9 +1,9 @@
 /**
- * A consumer's BTC rail reaches the shipped daemon, WITHOUT forking `src/cli.ts`.
+ * A consumer's BTC rail reaches the shipped daemon, WITHOUT forking `packages/solver-app/src/cli.ts`.
  *
  * The same claim `corridorInjection.test.ts` makes for corridors, for the other
  * injectable unit — and it is the harder of the two, because the CLI is the
- * obstacle rather than the host. `src/cli.ts` calls `createServices` at sixteen
+ * obstacle rather than the host. `packages/solver-app/src/cli.ts` calls `createServices` at sixteen
  * sites and runs `main()` at module load, so a rail passed as an OPTION could
  * only reach the daemon through a copy of that file: a consumer maintaining a
  * fork of every command in order to add one backend. A registry keyed by name
@@ -17,15 +17,24 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import * as sdk from '../../src/index.js'
-import { lightningRailFor, lightningRailNames, registerLightningRail } from '../../src/ops/rails.js'
-import type { LightningRail, LightningRailModule } from '../../src/index.js'
-import { loadConfig } from '../../src/config.js'
+import * as sdk from '@arkade-os/solver-app/index.js'
+import { lightningRailFor, lightningRailNames, registerLightningRail } from '@arkade-os/solver-app/ops/rails.js'
+import type { LightningRail, LightningRailModule } from '@arkade-os/solver-app/index.js'
+import { loadConfig } from '@arkade-os/solver-app/config.js'
 import { valueImports } from '../support/importScan.js'
 
-const servicesSource = readFileSync(fileURLToPath(new URL('../../src/ops/services.ts', import.meta.url)), 'utf8')
-const configSource = readFileSync(fileURLToPath(new URL('../../src/config.ts', import.meta.url)), 'utf8')
-const railsSource = readFileSync(fileURLToPath(new URL('../../src/ops/rails.ts', import.meta.url)), 'utf8')
+const servicesSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/ops/services.ts', import.meta.url)),
+  'utf8',
+)
+const configSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/config.ts', import.meta.url)),
+  'utf8',
+)
+const railsSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/ops/rails.ts', import.meta.url)),
+  'utf8',
+)
 
 /**
  * A rail with both legs, exactly as a private repo would write one: a vendor

@@ -27,7 +27,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { LEGAL_EDGES_FOR_TEST } from '@arkade-os/solver-corridors/db/swaps.js'
-import { phaseOf } from '../../src/admin/projection.js'
+import { phaseOf } from '@arkade-os/solver-app/admin/projection.js'
 
 const source = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
 
@@ -66,7 +66,7 @@ describe('a refunded row does not read as success', () => {
 })
 
 describe('refundNow closes the row only when it actually refunded', () => {
-  const refunds = source('../../src/ops/refunds.ts')
+  const refunds = source('../../packages/solver-app/src/ops/refunds.ts')
   const body = refunds.slice(
     refunds.indexOf('export const refundNow'),
     refunds.indexOf('export const onchainRefundNow'),

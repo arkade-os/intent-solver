@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import { SwapStore, type QuoteRecord } from '@arkade-os/solver-corridors/db/swaps.js'
-import { claimNow, parkSwap } from '../../src/ops/claims.js'
+import { claimNow, parkSwap } from '@arkade-os/solver-app/ops/claims.js'
 import type { SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 
 const PREIMAGE = 'ab'.repeat(32)

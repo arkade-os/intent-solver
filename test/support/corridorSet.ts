@@ -12,7 +12,7 @@
  * did reach one, the test would crash on `{}` instead of passing quietly — which
  * is the information you want.
  */
-import { corridorSetFromDeps } from '../../src/ops/corridorSet.js'
+import { corridorSetFromDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 import type { CorridorSet } from '@arkade-os/solver-core/core/corridor.js'
 import type { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'

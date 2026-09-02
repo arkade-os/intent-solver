@@ -141,7 +141,7 @@ describe('the wire contract, enforced on a corridor’s way out', () => {
  * THE ACID TEST for the whole SDK effort.
  *
  * A corridor this build has never been compiled against must quote, tick, page
- * and report detail with ZERO edits under `src/core/`, `src/admin/` or
+ * and report detail with ZERO edits under `src/core/`, `packages/solver-app/src/admin/` or
  * `src/ingress/`. If serving one needs a change in any of those, the interface
  * is incomplete and the fix is to extend `Corridor` — never to special-case the
  * host.

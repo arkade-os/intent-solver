@@ -2,7 +2,7 @@
  * A rail whose Lightning and onchain legs are ONE pool, and why that has to be
  * said out loud rather than reported as a second number.
  *
- * A rail is a pair (`src/ops/rails.ts`), and on some vendors the pair is one
+ * A rail is a pair (`packages/solver-app/src/ops/rails.ts`), and on some vendors the pair is one
  * wallet: the onchain leg pays out of the same balance the Lightning leg
  * reports, so the honest onchain figure — the one that answers "can this
  * corridor fund a swap" — is a number the console has ALREADY shown on another
@@ -54,7 +54,7 @@ describe('the console says it, because the payload alone cannot', () => {
    * reading a DIFFERENT probe's body.
    */
   const onchainProbe = (): string => {
-    const probes = source('../../src/admin/probes.ts')
+    const probes = source('../../packages/solver-app/src/admin/probes.ts')
     const start = probes.indexOf("probe('onchain'")
     expect(start, 'no onchain probe to read — the probe list was renamed').toBeGreaterThan(-1)
     const next = probes.indexOf("probe('", start + 1)

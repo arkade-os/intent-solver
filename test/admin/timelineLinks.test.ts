@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url'
 
 const read = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
 
-const appSource = read('../../src/admin/static/app.js')
+const appSource = read('../../packages/solver-app/src/admin/static/app.js')
 
 /** The four corridor row types, and the file each lives in. */
 const ROW_SOURCES = {

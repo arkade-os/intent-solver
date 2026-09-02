@@ -1250,7 +1250,7 @@ describe('OnchainSendSwapService', () => {
   it('settleRefundDeposits() hands back exactly what the backend settled, failures included', async () => {
     const settlements = [
       { settled: true as const, txid: 'txa', vout: 0, reference: 'transfer-a' },
-      { settled: false as const, txid: 'txb', vout: 1, reason: 'ssp unavailable' },
+      { settled: false as const, txid: 'txb', vout: 1, reason: 'backend unavailable' },
     ]
     const settling = new OnchainSendSwapService({
       store: deps.store,

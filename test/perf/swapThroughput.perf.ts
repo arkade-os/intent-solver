@@ -40,7 +40,7 @@
  * corridor — two quotes, two Arkade lockups, no htlc anywhere — so they are
  * reported as their own corridor rather than folded into the Lightning ones.
  *
- * The services below are wired exactly as `src/cli.ts` wires them, coupling
+ * The services below are wired exactly as `packages/solver-app/src/cli.ts` wires them, coupling
  * included: the receive store is passed to the send corridor as `coupling`
  * rather than in `peerStores`, because in both places the duplicate check would
  * refuse the very quote that creates the coupling. That fidelity is the point —
@@ -1031,7 +1031,7 @@ describe('perf — parallel swaps across all four corridors', () => {
     const refundScript = OutScript.encode(Address(ONCHAIN_NETWORKS[arkade.network]).decode(refundAddress))
     const signer: OnchainSigner = { sign: (tx, indexes) => arkade.ctx.identity.sign(tx, indexes) }
 
-    // Wired exactly as `src/cli.ts` wires it, coupling included. The receive
+    // Wired exactly as `packages/solver-app/src/cli.ts` wires it, coupling included. The receive
     // store leaves `peerStores` and arrives as `coupling`; in both at once the
     // loop would re-refuse every coupling, and in neither the duplicate check
     // against it would silently vanish.

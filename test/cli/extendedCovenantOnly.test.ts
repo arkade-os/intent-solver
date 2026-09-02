@@ -26,7 +26,7 @@ const source = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, 
 
 describe('no code path mints a base three-leaf lockup', () => {
   it('passes a client refund pubkey at every Lightning-send quote in the CLI', () => {
-    const cli = source('../../src/cli.ts')
+    const cli = source('../../packages/solver-app/src/cli.ts')
     // `.quote(` calls on the Lightning send service, with the 400 characters
     // that follow — enough to cover the options object on the same call.
     const calls = [...cli.matchAll(/services\.(?:onchainS|s)ervice[!?]?\.quote\([\s\S]{0,400}/g)].map((m) => m[0])

@@ -18,7 +18,10 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-const appSource = readFileSync(fileURLToPath(new URL('../../src/admin/static/app.js', import.meta.url)), 'utf8')
+const appSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
+  'utf8',
+)
 
 /** The arming block inside `detailDialog`. */
 const armingBlock = (): string => {
@@ -61,7 +64,7 @@ describe('the phase vocabulary this relies on', () => {
     // deliver. If it ever moved into `done`, the gate above would start hiding
     // the actions on rows that may still need them, so pin the classification
     // the gate reads rather than trusting it stays put.
-    const { phaseOf } = await import('../../src/admin/projection.js')
+    const { phaseOf } = await import('@arkade-os/solver-app/admin/projection.js')
     expect(phaseOf('arkade:BTC->lightning:BTC', 'claimed')).toBe('done')
     expect(phaseOf('arkade:BTC->onchain:BTC', 'claimed')).toBe('done')
     expect(phaseOf('arkade:BTC->lightning:BTC', 'refused')).toBe('failed')

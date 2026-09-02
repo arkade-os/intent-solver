@@ -69,7 +69,7 @@ export const loadE2eEnv = (): void => {
   loadEnvFile(process.env.E2E_ENV_FILE ?? '.env.regtest.lnd')
 }
 
-/** covclaimd's base URL. No `src/config.ts` knob exists for it — the receive legs are not wired into the CLI yet. */
+/** covclaimd's base URL. No `packages/solver-app/src/config.ts` knob exists for it — the receive legs are not wired into the CLI yet. */
 export const covclaimdUrl = (): string => process.env.COVCLAIMD_URL ?? 'http://localhost:7271'
 
 /** The stack's Esplora-compatible chain index (arkade-regtest's mempool proxy). */

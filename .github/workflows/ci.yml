@@ -98,14 +98,15 @@ jobs:
       - name: Build
         run: pnpm build
 
-      # What a CONSUMER imports is dist/, and the unit suite runs before the
-      # build so it only ever sees src/. This also proves importing the SDK does
-      # not run the CLI: cli.ts calls main() and process.exit() at module load,
-      # so a stray edge back into it would end this process before the check.
+      # What a CONSUMER imports is the app's dist/, and the unit suite runs
+      # before the build so it only ever sees src/. This also proves importing
+      # the SDK does not run the CLI: cli.ts calls main() and process.exit() at
+      # module load, so a stray edge back into it would end this process before
+      # the check.
       - name: The built entrypoint exports a usable surface
         run: |
           node -e "
-          import('./dist/index.js').then((m) => {
+          import('./packages/solver-app/dist/index.js').then((m) => {
             const want = ['createServices', 'corridorSetFromDeps', 'createCorridorSet', 'buildApp', 'BaseSwapStore']
             const missing = want.filter((k) => typeof m[k] !== 'function')
             if (missing.length) { console.error('missing from dist:', missing.join(', ')); process.exit(1) }
@@ -186,8 +187,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `-f` names the Dockerfile, the trailing `.` names the CONTEXT, and the
+      # two are deliberately different: a pnpm workspace image needs the
+      # lockfile, the workspace manifest and every packages/*, so the context
+      # has to be the repo root while the file lives with the app it builds.
       - name: Build image
-        run: docker build --build-arg NODE_VERSION=${{ matrix.node }} -t swap-provider:ci-${{ matrix.node }} .
+        run: >-
+          docker build -f packages/solver-app/Dockerfile
+          --build-arg NODE_VERSION=${{ matrix.node }}
+          -t swap-provider:ci-${{ matrix.node }} .
 
       # The CLI prints usage and exits non-zero when given no valid command;
       # seeing that usage text proves node, the compiled output and the native

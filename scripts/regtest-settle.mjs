@@ -25,7 +25,7 @@
 // would spend them too. That is fine here — this runs against a test wallet
 // between e2e runs, never against one mid-swap — but it is why this lives in
 // `scripts/` and not in the service.
-import { loadConfig } from '../dist/config.js'
+import { loadConfig } from '../packages/solver-app/dist/config.js'
 import { createArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const config = loadConfig()

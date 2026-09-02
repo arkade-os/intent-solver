@@ -10,7 +10,7 @@
  *   within seconds and lives under swaps; an expired or refused one goes
  *   terminal and drops out of `findRecoverable` entirely.
  * - `bids` is an in-memory ring buffer cleared on every restart, because open-RFQ
- *   bids are persisted nowhere (`src/admin/bids.ts`).
+ *   bids are persisted nowhere (`packages/solver-app/src/admin/bids.ts`).
  *
  * Both were reported as confusing by an operator asking "why are we only
  * getting swaps but not quotes" — after a day of redeploys, which is precisely
@@ -26,7 +26,10 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-const appSource = readFileSync(fileURLToPath(new URL('../../src/admin/static/app.js', import.meta.url)), 'utf8')
+const appSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
+  'utf8',
+)
 
 const quotesView = (): string => {
   const start = appSource.indexOf('const quotesView')
@@ -86,7 +89,10 @@ describe('the bid list keeps saying it is ephemeral', () => {
 })
 
 describe('the server half these messages describe', () => {
-  const status = readFileSync(fileURLToPath(new URL('../../src/admin/routes/status.ts', import.meta.url)), 'utf8')
+  const status = readFileSync(
+    fileURLToPath(new URL('../../packages/solver-app/src/admin/routes/status.ts', import.meta.url)),
+    'utf8',
+  )
 
   it('really does filter to the single `quoted` state', () => {
     // If this ever became a history query, every message above would be wrong.
@@ -100,7 +106,10 @@ describe('the server half these messages describe', () => {
   })
 
   it('still ships the ephemeral flag with the bids, whatever the UI does with it', () => {
-    const bids = readFileSync(fileURLToPath(new URL('../../src/admin/bids.ts', import.meta.url)), 'utf8')
+    const bids = readFileSync(
+      fileURLToPath(new URL('../../packages/solver-app/src/admin/bids.ts', import.meta.url)),
+      'utf8',
+    )
     expect(bids).toContain('ephemeral')
   })
 })

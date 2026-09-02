@@ -10,21 +10,16 @@
     "node": ">=22.6.0 <27",
     "pnpm": ">=10"
   },
-  "bin": {
-    "lnswap": "dist/cli.js"
-  },
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
   "scripts": {
-    "build": "pnpm -r build && tsc -p tsconfig.build.json",
+    "build": "pnpm -r build",
     "typecheck": "tsc -p tsconfig.json",
-    "start": "node --enable-source-maps --experimental-eventsource --env-file=.env dist/cli.js watch",
-    "cli": "pnpm build && node --enable-source-maps --experimental-eventsource --env-file=.env dist/cli.js",
+    "start": "node --enable-source-maps --experimental-eventsource --env-file=.env packages/solver-app/dist/cli.js watch",
+    "cli": "pnpm build && node --enable-source-maps --experimental-eventsource --env-file=.env packages/solver-app/dist/cli.js",
     "test": "vitest run --exclude e2e",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:watch": "vitest",
-    "format": "prettier --write src test packages",
-    "format:check": "prettier --check src test packages",
+    "format": "prettier --write test packages",
+    "format:check": "prettier --check test packages",
     "test:perf": "vitest run --config vitest.perf.config.ts"
   },
   "dependencies": {

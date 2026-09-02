@@ -1,6 +1,6 @@
 /**
  * A source-level guard on ONE line of `createServices`, exactly as
- * `sweepConcurrency.test.ts` is and for the same reason: `src/cli.ts` runs
+ * `sweepConcurrency.test.ts` is and for the same reason: `packages/solver-app/src/cli.ts` runs
  * `main()` and then `process.exit()` at module load and does not export
  * `createServices`, so importing it from a test would kill the runner.
  *
@@ -23,7 +23,10 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-const servicesSource = readFileSync(fileURLToPath(new URL('../../src/ops/services.ts', import.meta.url)), 'utf8')
+const servicesSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/ops/services.ts', import.meta.url)),
+  'utf8',
+)
 
 /** The dependency object `createServices` hands to the Lightning-send orchestrator. */
 const sendServiceDeps = (): string => {

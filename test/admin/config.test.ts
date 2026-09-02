@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { loadConfig } from '../../src/config.js'
+import { loadConfig } from '@arkade-os/solver-app/config.js'
 
 const CONFIG_KEYS = ['ADMIN_PORT', 'ADMIN_HOST', 'LN_BACKEND', 'LN_MNEMONIC', 'PORT', 'HOST']
 

@@ -1,5 +1,13 @@
-node_modules
-dist
+# The build context is the REPO ROOT even though the Dockerfile lives in
+# packages/solver-app — a pnpm workspace image needs the lockfile, the workspace
+# manifest and every packages/*. So these patterns are root-relative.
+#
+# `**/` on the two build outputs rather than a bare name: the app's own build
+# output is now packages/solver-app/dist, one of twelve, and a host copy of any
+# of them entering the context is worse than useless — tsc is incremental, so a
+# stale dist/.tsbuildinfo can make the image's own build emit nothing at all.
+**/node_modules
+**/dist
 .data
 .env
 *.log

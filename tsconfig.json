@@ -35,9 +35,10 @@
       "@arkade-os/solver-rails-evm/*.js": ["./packages/solver-rails-evm/src/*.ts"],
       "@arkade-os/solver-corridors/*.js": ["./packages/solver-corridors/src/*.ts"],
       "@arkade-os/solver-corridors-evm/*.js": ["./packages/solver-corridors-evm/src/*.ts"],
-      "@arkade-os/solver-transport/*.js": ["./packages/solver-transport/src/*.ts"]
+      "@arkade-os/solver-transport/*.js": ["./packages/solver-transport/src/*.ts"],
+      "@arkade-os/solver-app/*.js": ["./packages/solver-app/src/*.ts"]
     }
   },
-  "include": ["src/**/*", "test/**/*", "scripts/**/*"],
+  "include": ["test/**/*", "scripts/**/*"],
   "exclude": ["node_modules", "dist", "packages"]
 }

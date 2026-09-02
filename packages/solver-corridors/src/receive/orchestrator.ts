@@ -300,7 +300,7 @@ export class ReceiveSwapService {
    * Safe to skip by this class own contract — a tick is re-entrant and re-reads
    * the row — so a skipped tick costs latency on a swap that was failing anyway,
    * and spares the backend a question whose answer has not changed.
-   * @see src/ops/tickErrors.ts
+   * @see packages/solver-app/src/ops/tickErrors.ts
    */
   shouldSkipTick?: (id: string) => boolean
 

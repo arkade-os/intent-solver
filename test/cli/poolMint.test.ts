@@ -1,7 +1,7 @@
 /**
  * Source-level guards on the only command that spends.
  *
- * The spend itself moved to `src/ops/pool.ts` so the admin console and the CLI
+ * The spend itself moved to `packages/solver-app/src/ops/pool.ts` so the admin console and the CLI
  * drive one implementation, which SPLIT this guard in two: the `--mint`
  * opt-in is a CLI concern (an argv flag), and the concurrent-provider check is
  * a money concern that belongs with the spend. Both halves are pinned below,
@@ -13,7 +13,7 @@
  * that mints on sight would reshape an operator's float from a command they
  * ran to read it.
  *
- * `src/ops/pool.ts` is importable, unlike `src/cli.ts` (which runs `main()`
+ * `packages/solver-app/src/ops/pool.ts` is importable, unlike `packages/solver-app/src/cli.ts` (which runs `main()`
  * then `process.exit()` at module load and exports nothing), so the ops half
  * is ALSO asserted behaviourally by actually calling it — see
  * `test/ops/pool.test.ts`. These text guards remain because they catch a
@@ -24,8 +24,11 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-const cliSource = readFileSync(fileURLToPath(new URL('../../src/cli.ts', import.meta.url)), 'utf8')
-const opsSource = readFileSync(fileURLToPath(new URL('../../src/ops/pool.ts', import.meta.url)), 'utf8')
+const cliSource = readFileSync(fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)), 'utf8')
+const opsSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/ops/pool.ts', import.meta.url)),
+  'utf8',
+)
 
 /** The body of the `pool` command, up to the closing brace of its entry in `commands`. */
 const poolCommand = (): string => {
@@ -122,7 +125,7 @@ describe('mintPool (ops half)', () => {
  *
  * A source-text guard that silently measures the wrong span does not fail — it
  * passes against code it was never pointed at, which is the worst outcome
- * available to a test. These pin the boundary against the shapes `src/ops/pool.ts`
+ * available to a test. These pin the boundary against the shapes `packages/solver-app/src/ops/pool.ts`
  * does not currently contain, so the hole cannot reopen by someone adding one.
  */
 describe('the body extractor', () => {

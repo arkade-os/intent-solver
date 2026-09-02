@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { Hono } from 'hono'
-import { registerDiagnosticsRoutes } from '../../src/admin/routes/diagnostics.js'
-import { buildAdminApp } from '../../src/admin/server.js'
+import { registerDiagnosticsRoutes } from '@arkade-os/solver-app/admin/routes/diagnostics.js'
+import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { AdPublisher, type AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 
 /** Every corridor at the same cap, so a test that cares about caps must say so. */

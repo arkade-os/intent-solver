@@ -12,7 +12,10 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-export const servicesSource = readFileSync(fileURLToPath(new URL('../../src/ops/services.ts', import.meta.url)), 'utf8')
+export const servicesSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/ops/services.ts', import.meta.url)),
+  'utf8',
+)
 
 /**
  * Bounded by the closing brace at column 0. Prettier keeps every brace inside
@@ -22,7 +25,7 @@ export const servicesSource = readFileSync(fileURLToPath(new URL('../../src/ops/
 export const createServicesBody = (): string => {
   const lines = servicesSource.split(/\r?\n/)
   const start = lines.findIndex((line) => line.startsWith('export const createServices'))
-  if (start === -1) throw new Error('createServices is gone from src/ops/services.ts')
+  if (start === -1) throw new Error('createServices is gone from packages/solver-app/src/ops/services.ts')
   const offset = lines.slice(start + 1).findIndex((line) => line === '}')
   if (offset === -1) throw new Error('createServices has no closing brace at column 0; the bound is broken')
   return lines.slice(start, start + 1 + offset + 1).join('\n')

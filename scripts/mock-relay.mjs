@@ -1,5 +1,5 @@
 // Mock relay: a tiny in-memory pub/sub broker speaking the provider's frame
-// protocol (src/relay/connection.ts). Dev tool only — a real deployment points
+// protocol (packages/solver-transport/src/relay/connection.ts). Dev tool only — a real deployment points
 // the frame codec at a production relay instead. Run: node scripts/mock-relay.mjs
 import { WebSocketServer } from 'ws'
 
@@ -10,7 +10,7 @@ const server = new WebSocketServer({ port })
 const subscribers = new Map()
 
 // A relay is untyped infrastructure, so this dev broker hand-rolls the frame
-// handling rather than importing the codec from src/relay/connection.ts (which
+// handling rather than importing the codec from packages/solver-transport/src/relay/connection.ts (which
 // is the ONE place the client speaks the protocol). Keep the two in step: `sub`
 // carries { id, filter }, `event` carries { event }, and this filter mirrors
 // `matchesFilter`.

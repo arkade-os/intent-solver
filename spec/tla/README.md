@@ -5,7 +5,7 @@ OnchainSend, OnchainReceive, EvmSend, EvmReceive — checked with TLC. Each modu
 models the corridor's row as a state machine with N concurrent workers, each
 Worker's read separated from its write, and Worker crashes between the store CAS
 and the irreversible side effect. The claim under test is the one the TypeScript
-itself makes (`src/worker.ts:20-25`): money-safety rests on the store's
+itself makes (`packages/solver-app/src/worker.ts:20-25`): money-safety rests on the store's
 compare-and-swap alone, not on the in-process `inFlight` Set, and therefore
 survives a rewrite with more processes.
 

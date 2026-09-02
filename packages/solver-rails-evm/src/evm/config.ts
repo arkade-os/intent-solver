@@ -100,7 +100,7 @@ const required = (env: NodeJS.ProcessEnv, name: string): string => {
 }
 
 /**
- * A number knob with the same empty-string discipline as `src/config.ts`'s
+ * A number knob with the same empty-string discipline as `packages/solver-app/src/config.ts`'s
  * `intFromEnv`: `Number('')` is 0, so a set-but-empty variable would otherwise
  * become zero while the logs claim otherwise.
  *
@@ -127,7 +127,7 @@ const intFrom = (env: NodeJS.ProcessEnv, name: string, min: number): number => {
 
 /**
  * An integer knob WITH a default, and a ceiling as well as a floor. Set-but-empty
- * reads as unset, matching `src/config.ts`'s `intFromEnv`: `Number('')` is 0, and
+ * reads as unset, matching `packages/solver-app/src/config.ts`'s `intFromEnv`: `Number('')` is 0, and
  * a set-but-empty variable would otherwise become the floor while the logs claim
  * otherwise.
  */

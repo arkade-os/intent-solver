@@ -84,31 +84,46 @@ removed unserved — nothing was ever deployed against it.
 
 ## Layout
 
+A pnpm workspace. Twelve packages under `packages/`; the repo root holds the
+orchestration scripts, the shared dev tooling and the one `test/` tree.
+
 ```
-src/core/     pure decision logic — no I/O, clock injected (limits, timing gates, networks)
-src/invoice/  strict BOLT11 decode with closed rejection enums
-src/arkade/   Arkade wallet, covenant swap script, claim + covenant-refund spends,
-              and the solver's own float: renewal/recovery, funding selection,
-              the reservation ledger, the vtxo-pool planner
-src/ln/       LightningBackend port; the LND adapter, and a fake backend that
-              forges its own invoices for regtest E2E
-src/onchain/  OnchainBackend port, the L1 HTLC script, and the esplora client
-src/db/       durable swap store over an async SqlDriver (better-sqlite3 / Cloudflare D1)
-              — one store per corridor, one SQLite file each
-src/send/     both send corridors' orchestrators — the money path outbound
-src/receive/  both receive corridors' orchestrators, and the ONE lockup-funding path
-src/wire/     the RFQ payload schemas and quote/status mappers, one module per pair
-src/util/     poll, log, and the GiveUp sentinel the orchestrators share
-src/http/     Hono app, bus-shaped versioned payloads (runs on Node and Workers)
-src/relay/    outbound relay client (WebSocket, reconnect + subscription replay)
-src/ingress/  the ingress seam: HTTP (inbound) or relay (purely outbound)
-src/worker.ts Cloudflare Workers entry: fetch / scheduled / queue
-src/cli.ts    every operation by hand — the reproducibility surface
-examples/     reference clients + the JS trader library (examples/lib/)
-scripts/      regtest funding, mock relay, relay client
+packages/solver-core/           pure decision logic — no I/O, clock injected (limits,
+                                timing gates, networks); strict BOLT11 decode with closed
+                                rejection enums; the rail PORT types; and poll, log and the
+                                GiveUp sentinel the orchestrators share
+packages/solver-arkade/         Arkade wallet, covenant swap script, claim + covenant-refund
+                                spends, and the solver's own float: renewal/recovery, funding
+                                selection, the reservation ledger, the vtxo-pool planner
+packages/solver-db/             the SqlDriver implementation over better-sqlite3, its own
+                                package because it carries a NATIVE binding
+packages/solver-rails/          the L1 HTLC script and the spends over it, vendor-neutral
+packages/solver-rails-esplora/  the esplora chain-read client every onchain vendor needs
+packages/solver-rails-lnd/      the LND rail — a rail is a PAIR, one wallet answering both
+                                the Lightning and the onchain port
+packages/solver-rails-fake/     a rail that forges and self-settles its own invoices for
+                                regtest E2E, and is refused on `bitcoin`
+packages/solver-rails-evm/      the EVM rail: RPC, the ERC20 swap contract, broadcast
+packages/solver-corridors/      the four BTC corridors — send and receive orchestrators (the
+                                money paths, and the ONE lockup-funding path), a durable
+                                store per corridor, and the RFQ payload schemas and
+                                quote/status mappers, one module per pair
+packages/solver-corridors-evm/  the same shape, for arkade <-> ERC20
+packages/solver-transport/      the ingress seam: the Hono app (inbound HTTP, bus-shaped
+                                versioned payloads, runs on Node and Workers) and the
+                                outbound relay client (WebSocket, reconnect + subscription
+                                replay). Either one feeds the same dispatcher
+packages/solver-app/            THE DEPLOYABLE, and the only package that is not a library:
+                                the composition root (`ops/`), the admin console (`admin/`),
+                                `config.ts`, `cli.ts` — every operation by hand, the
+                                reproducibility surface — `worker.ts` for the Cloudflare
+                                Workers entry, and its own Dockerfile
+examples/                       reference clients + the JS trader library (examples/lib/)
+scripts/                        regtest funding, mock relay, relay client
+test/                           one suite, covering every package
 ```
 
-`src/core/` modules take a `now` and return a decision — never a clock read, a
+`solver-core`'s modules take a `now` and return a decision — never a clock read, a
 socket or a database — which is what makes the money gates testable at their
 exact boundaries. The orchestrator holds the one rule that matters
 operationally: **the row is the truth**; every step commits intent before the
@@ -218,7 +233,7 @@ Two kinds of number live in this service and they must not be confused:
 
 - **config** — an environment variable, with a default where one is safe. The
   full operator-facing list is `docs/runbook.md` § "Configuration
-  (environment)"; the table below is the same set read off `src/config.ts`,
+  (environment)"; the table below is the same set read off `packages/solver-app/src/config.ts`,
   with what breaks when it is missing.
 - **invariant** — a constant in `src/`, deliberately not reachable from the
   environment. Changing one is a commit, a review and a redeploy, which is the
@@ -243,7 +258,7 @@ that is the only knob that touches an amount at risk at all.
 | Var                                           | Default                                                  | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | --------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SWAP_NETWORK`                                | `regtest`                                                | `bitcoin` \| `mutinynet` \| `signet` \| `regtest`. Anything else throws. Selects the whole profile: limits, invoice/Arkade prefixes, backend network name |
-| `LN_BACKEND`                                  | none                                                     | `lnd` \| `fake`, or the name of a rail a consumer registered (`registerLightningRail`, `src/ops/rails.ts`); matched exactly after trimming, and an unrecognised value throws naming the accepted set rather than falling through to one. **No default, and required unless all four BTC corridors are disabled** — a rail is a PAIR, one wallet answering both the Lightning and the onchain port, so the onchain corridors take their backend from this value too. A deployment serving only EVM or asset flow says so with `<CORRIDOR>_ENABLED=false` on the four and leaves this unset; `Services.ln` and `Services.onchain` are then null and throw by name if anything reaches for them. `lnd` talks to a real LND node's gRPC; `fake` forges and self-settles its own invoices for regtest E2E and is refused on `bitcoin` |
+| `LN_BACKEND`                                  | none                                                     | `lnd` \| `fake`, or the name of a rail a consumer registered (`registerLightningRail`, `packages/solver-app/src/ops/rails.ts`); matched exactly after trimming, and an unrecognised value throws naming the accepted set rather than falling through to one. **No default, and required unless all four BTC corridors are disabled** — a rail is a PAIR, one wallet answering both the Lightning and the onchain port, so the onchain corridors take their backend from this value too. A deployment serving only EVM or asset flow says so with `<CORRIDOR>_ENABLED=false` on the four and leaves this unset; `Services.ln` and `Services.onchain` are then null and throw by name if anything reaches for them. `lnd` talks to a real LND node's gRPC; `fake` forges and self-settles its own invoices for regtest E2E and is refused on `bitcoin` |
 | `ARK_UNILATERAL_EXIT_DELAY`                   | none (believe the server)                                | Seconds. What to treat as the Arkade server's unilateral exit delay instead of the value it advertises at `/v1/info`, for a deployment where arkd enforces a shorter minimum than it announces — mainnet does: `/v1/info` reports its _Public_ unilateral exit (605184) while covenant leaves are checked against the plain _Unilateral exit_ (259584), so `260096` is the value to set there. Not cosmetic: every covenant's CSV timelocks come from it, and the Lightning receive corridor sizes its final CLTV delta against it — at mainnet's advertised `605184` that corridor needs 4074 blocks and cannot be served, while at or below **296448s (~3.43 days)** it is served with every gate intact (`maxServableExitDelay`). **The directions are not symmetric:** too high is merely wasteful, too low writes a script the server rejects **at spend rather than at funding**, with money already in it. Confirm the server accepts the script with one small real spend first (a collaborative claim or refund proves that much; the CSV leaves are only reachable through a unilateral exit, which nothing in `src/` performs yet). In-flight swaps are unaffected — each row snapshots its own delays at quote time |
 | `LN_RECEIVE_ACCEPT_UNILATERAL_GAP`            | `false`                                                  | `true` \| `false`, exactly — a typo throws rather than reading as agreement. Serves `lightning:BTC->arkade:BTC` even when the solver's own solo recourse opens AFTER the incoming htlc's `E`, which is the ONLY way the corridor runs on mainnet today: arkd reports `unilateralExitDelay=605184` (7 days), so the solo leaf opens at 7.05 days and the strict rule demands 4074 blocks of final CLTV — roughly 28 days of a payer's funds, which nothing routes, so every quote is refused `recourse_window_unservable`. Raising `MAX_FINAL_CLTV_BLOCKS` does not help (2016 reports the wall, it is not the wall) and neither does finishing `TODO(unilateral-exit)` (the 7-day CSV is unchanged). **What it accepts:** with the Arkade server gone or censoring past its exit delay AND `E` passed, a trader can let the htlc fail back for free and only then claim the Arkade payout, taking both sides (#69). Bounded by `LN_RECEIVE_MAX_SATS`, which `bitcoin` therefore requires you to set explicitly alongside it. Gates (a)–(c) are untouched. Shown in the admin console; not editable there                                                                                                                        |
 | `DB_DIR`                                      | `.data` (`/data` in the image)                           | the directory every database file goes in — the whole set below, unless a variable names one individually. Point it at the volume and there is nothing else to place. Set-but-empty reads as unset                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -685,11 +700,11 @@ operator who knows no provider is running. Liveness itself is not detectable:
 
 | Constant                                                       | Value                                             | Where                                                                                                                                                                                                                                                                  |
 | -------------------------------------------------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HOT_TICK_MS`                                                  | 250 ms                                            | `src/cli.ts` — states where we have already paid and are exposed until we claim                                                                                                                                                                                        |
-| `FULL_SWEEP_MS`                                                | 3000 ms                                           | `src/cli.ts` — waiting on a client's funding, a human action minutes wide                                                                                                                                                                                              |
-| `REFUND_SWEEP_MS`                                              | 60,000 ms                                         | `src/cli.ts` — deadlines are hours out and mature against the chain tip, so sweeping faster only produces rejected pushes                                                                                                                                              |
-| `VTXO_LIFECYCLE_MS`                                            | 300,000 ms                                        | `src/cli.ts` — the solver's own coins, days from expiry; a missed pass is harmless                                                                                                                                                                                     |
-| `RELAY_HEARTBEAT_MS`                                           | 10,000 ms                                         | `src/cli.ts` — what refreshes `RELAY_HEALTH_PATH`'s mtime                                                                                                                                                                                                              |
+| `HOT_TICK_MS`                                                  | 250 ms                                            | `packages/solver-app/src/cli.ts` — states where we have already paid and are exposed until we claim                                                                                                                                                                    |
+| `FULL_SWEEP_MS`                                                | 3000 ms                                           | `packages/solver-app/src/cli.ts` — waiting on a client's funding, a human action minutes wide                                                                                                                                                                          |
+| `REFUND_SWEEP_MS`                                              | 60,000 ms                                         | `packages/solver-app/src/cli.ts` — deadlines are hours out and mature against the chain tip, so sweeping faster only produces rejected pushes                                                                                                                          |
+| `VTXO_LIFECYCLE_MS`                                            | 300,000 ms                                        | `packages/solver-app/src/cli.ts` — the solver's own coins, days from expiry; a missed pass is harmless                                                                                                                                                                 |
+| `RELAY_HEARTBEAT_MS`                                           | 10,000 ms                                         | `packages/solver-app/src/cli.ts` — what refreshes `RELAY_HEALTH_PATH`'s mtime                                                                                                                                                                                          |
 | `poll` default `intervalMs`                                    | 2000 ms                                           | `packages/solver-core/src/util/poll.ts`. A probe that _throws_ costs an attempt and the loop continues — these loops run in the window where we have paid and not yet claimed, so one dropped packet must not abandon the claim. A probe that means it throws `GiveUp` |
 | `cli test-refund` budgets                                      | 30 attempts (lockup), then 6 × 30 s (refund push) | few on purpose: every rejected push writes an error line in the emulator operator's log, and the refund leaf has no expiry — a later run costs nothing                                                                                                                 |
 | `DEFAULT_RECONNECT_MS` / `DEFAULT_MAX_RECONNECT_MS`            | 1000 / 30,000 ms                                  | `packages/solver-arkade/src/arkade/lockupWatcher.ts`, doubling backoff                                                                                                                                                                                                 |
@@ -771,8 +786,8 @@ Three more stack requirements, all covered in the runbook:
 The API, and anything a client can observe, uses only generic terms: `swap`,
 `lockup`, `claim`, `refund`, `timeout`, "the swap provider". Which Lightning
 implementation sits behind the port is an implementation detail of this
-service; it stays behind `src/ln/` and out of state names, error codes and log
-lines.
+service; it stays behind `packages/solver-rails-lnd/` and out of state names,
+error codes and log lines.
 
 ## The preimage is not ours to hold (receive leg)
 

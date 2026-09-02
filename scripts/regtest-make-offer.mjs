@@ -11,7 +11,7 @@
 //
 // `--experimental-eventsource` is required for the same reason regtest-settle
 // gives: without it the SDK's ContractWatcher throws out of its listen loop.
-import { loadConfig } from '../dist/config.js'
+import { loadConfig } from '../packages/solver-app/dist/config.js'
 import { createArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { createOffer } from '@arkade-os/swap'
 import { asset } from '@arkade-os/sdk'

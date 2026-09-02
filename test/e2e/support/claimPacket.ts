@@ -6,7 +6,7 @@
  * "the client encrypts to covclaimd directly, and the provider only ever sees
  * the preimage once it appears in a claim witness"). A real integration seals
  * this in the client wallet. An e2e that plays both roles has to do it here,
- * the same way `src/cli.ts`'s `send-onchain` command carries the client's own
+ * the same way `packages/solver-app/src/cli.ts`'s `send-onchain` command carries the client's own
  * claim-transaction signing for the send leg.
  *
  * The scheme is transcribed from `docs/environment.md` § "covclaimd wire

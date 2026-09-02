@@ -26,7 +26,7 @@
 (*   src/onchain/claim.ts            the L1 sweep (no CLTV on the claim    *)
 (*                                   leaf; sequence 0xfffffffd, RBF)       *)
 (*   src/receive/orchestrator.ts:86-99  EMPTY_LOCKUP_GRACE                 *)
-(*   src/worker.ts                   the queue fan-out and its safety claim*)
+(*   packages/solver-app/src/worker.ts                   the queue fan-out and its safety claim*)
 (*                                                                         *)
 (* AUTHORITY FOR THE EDGE TABLE                                            *)
 (*                                                                         *)

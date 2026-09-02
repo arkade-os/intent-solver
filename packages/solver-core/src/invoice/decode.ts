@@ -381,7 +381,7 @@ export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DE
     })
 
   // A denylisted scid is one an OPERATOR has authoritative grounds to say cannot
-  // route — see `LN_SEND_HINT_SCID_DENYLIST` in `src/config.ts`. No payer can
+  // route — see `LN_SEND_HINT_SCID_DENYLIST` in `packages/solver-app/src/config.ts`. No payer can
   // take such a hint, so pricing our refund deadline against it prices a route
   // that does not exist; dropping it is not lifting a bound, it is declining to
   // bound against a fiction.

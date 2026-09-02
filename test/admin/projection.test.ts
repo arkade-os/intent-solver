@@ -5,7 +5,7 @@ import {
   projectReceive,
   projectOnchainSend,
   projectOnchainReceive,
-} from '../../src/admin/projection.js'
+} from '@arkade-os/solver-app/admin/projection.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import type { ReceiveSwapRow } from '@arkade-os/solver-corridors/db/receiveSwaps.js'

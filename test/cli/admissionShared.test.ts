@@ -4,8 +4,8 @@
  * the source text because constructing the stack needs live backends — an
  * Arkade wallet, a Lightning node and a chain — none of which a unit test has.
  *
- * Two sources, deliberately. `createServices` now lives in `src/ops/services.ts`;
- * the `card` command that the last assertion covers is still in `src/cli.ts`,
+ * Two sources, deliberately. `createServices` now lives in `packages/solver-app/src/ops/services.ts`;
+ * the `card` command that the last assertion covers is still in `packages/solver-app/src/cli.ts`,
  * which runs `main()` and `process.exit()` at module load and so can never be
  * imported by a test at all.
  *
@@ -30,7 +30,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createServicesBody } from '../support/createServicesBody.js'
 
-const cliSource = readFileSync(fileURLToPath(new URL('../../src/cli.ts', import.meta.url)), 'utf8')
+const cliSource = readFileSync(fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)), 'utf8')
 
 describe('createServices — one admission control for every corridor', () => {
   it('constructs exactly one AdmissionControl', () => {

@@ -29,7 +29,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { staticRoot } from '../../src/admin/static.js'
+import { staticRoot } from '@arkade-os/solver-app/admin/static.js'
 
 const APP = readFileSync(join(staticRoot(), 'app.js'), 'utf8')
 

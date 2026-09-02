@@ -27,7 +27,7 @@
 (*   src/onchain/refund.ts           the solver's refund spend, nLockTime  *)
 (*                                   = htlc_locktime, sequence 0xfffffffd  *)
 (*   src/send/arkadeOps.ts           claim() and assertScriptMatchesRow    *)
-(*   src/worker.ts                   the queue fan-out and its safety claim*)
+(*   packages/solver-app/src/worker.ts                   the queue fan-out and its safety claim*)
 (*                                                                         *)
 (* AUTHORITY FOR THE EDGE TABLE                                            *)
 (*                                                                         *)

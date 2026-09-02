@@ -20,7 +20,17 @@ import { join } from 'node:path'
 const root = fileURLToPath(new URL('../..', import.meta.url))
 const readme = readFileSync(join(root, 'README.md'), 'utf8')
 
-/** Every `.ts` under src/, so a knob added anywhere is caught, not just in config.ts. */
+/**
+ * Every `.ts` under the app's src/, so a knob added anywhere in it is caught,
+ * not just in config.ts.
+ *
+ * The app is where env reading lives — it is the composition root, and every
+ * other package is handed its settings. The one `process.env` elsewhere in
+ * `packages/` is a default parameter in `solver-rails-evm` that names nothing.
+ * This scanned the repo root's `src/` before that tree became a package and
+ * covers exactly the same files; widening it to all of `packages/` would be a
+ * change of scope, not of path.
+ */
 const sourceFiles = (dir: string): string[] =>
   readdirSync(dir).flatMap((entry) => {
     const path = join(dir, entry)
@@ -29,7 +39,7 @@ const sourceFiles = (dir: string): string[] =>
   })
 
 /**
- * The env names src/ reads, however it reads them:
+ * The env names the app's src/ reads, however it reads them:
  *  - `process.env.NAME` and `process.env['NAME']`
  *  - passed by name to a reader helper — `required('NAME')`, `intFromEnv('NAME', …)`
  *  - built from a corridor stem — `<STEM>_<SUFFIX>`, expanded below
@@ -39,7 +49,7 @@ const CORRIDOR_STEMS = ['LN_SEND', 'LN_RECEIVE', 'ONCHAIN_SEND', 'ONCHAIN_RECEIV
 
 const envNamesInSource = (): Set<string> => {
   const names = new Set<string>()
-  for (const file of sourceFiles(join(root, 'src'))) {
+  for (const file of sourceFiles(join(root, 'packages', 'solver-app', 'src'))) {
     const text = readFileSync(file, 'utf8')
     for (const m of text.matchAll(/process\.env(?:\.([A-Z][A-Z0-9_]+)|\['([A-Z][A-Z0-9_]+)'\])/g)) {
       names.add((m[1] ?? m[2]) as string)

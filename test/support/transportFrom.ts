@@ -9,7 +9,7 @@
 import type { Hono } from 'hono'
 import { buildApp, type HttpDeps } from '@arkade-os/solver-transport/http/server.js'
 import { RelayIngress, type RelayIngressDeps } from '@arkade-os/solver-transport/ingress/relay.js'
-import { corridorSetFromDeps, readerSetFromDeps, type FlatCorridorDeps } from '../../src/ops/corridorSet.js'
+import { corridorSetFromDeps, readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 
 /** The two fields the composition root supplies, which these helpers stand in for. */
 type Assembled = 'corridors' | 'readers'

@@ -2,7 +2,7 @@
  * E2E — `arkade:BTC->onchain:BTC` (send), against a live regtest stack with a
  * real LND onchain wallet (boltz-lnd).
  *
- * The in-code equivalent of `src/cli.ts`'s `send-onchain` command and of
+ * The in-code equivalent of `packages/solver-app/src/cli.ts`'s `send-onchain` command and of
  * `scripts/e2e-onchain-send.sh`. Plays both roles in one process, and unlike
  * the Lightning leg that means an ACTIVE CLIENT CLAIM: an onchain HTLC only
  * reveals `P` when its claim leaf is spent, so the test signs and broadcasts

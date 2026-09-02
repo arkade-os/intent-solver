@@ -690,7 +690,7 @@ export class SendSwapService {
    * Consulted by the SWEEP ONLY. {@link tick} itself is never gated, so an
    * operator who has just fixed the backend and pressed recheck gets a real
    * tick rather than a stale row and a minute's wait.
-   * @see src/ops/tickErrors.ts
+   * @see packages/solver-app/src/ops/tickErrors.ts
    */
   shouldSkipTick?: (id: string) => boolean
 

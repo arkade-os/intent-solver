@@ -8,8 +8,8 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { buildAdminApp } from '../../src/admin/server.js'
-import { ACTIONS } from '../../src/admin/routes/actions.js'
+import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
+import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
 
 const adminStore = () => ({
   recordAction: vi.fn().mockResolvedValue(undefined),

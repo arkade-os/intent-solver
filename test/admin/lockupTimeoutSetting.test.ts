@@ -17,9 +17,14 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { applyOverrides, describeSettings, editableKeys, validateOverride } from '../../src/admin/settings.js'
+import {
+  applyOverrides,
+  describeSettings,
+  editableKeys,
+  validateOverride,
+} from '@arkade-os/solver-app/admin/settings.js'
 import { MAX_LOCKUP_TIMEOUT, DEFAULT_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
-import type { Config } from '../../src/config.js'
+import type { Config } from '@arkade-os/solver-app/config.js'
 import { CORRIDORS, FREE } from '@arkade-os/solver-core/core/corridorPolicy.js'
 
 const config = (over: Partial<Config> = {}): Config =>

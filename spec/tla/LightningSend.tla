@@ -17,7 +17,7 @@
 (*   src/send/arkadeOps.ts     claim() and assertScriptMatchesRow          *)
 (*   src/ln/lnd/adapter.ts     FAILED_PAYMENT_REASONS — the terminal-failure*)
 (*                             ALLOWLIST that decides what "failed" means  *)
-(*   src/worker.ts             the queue fan-out and its safety claim      *)
+(*   packages/solver-app/src/worker.ts             the queue fan-out and its safety claim      *)
 (*                                                                         *)
 (* AUTHORITY FOR THE EDGE TABLE                                            *)
 (*                                                                         *)

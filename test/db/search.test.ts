@@ -189,7 +189,10 @@ describe('the console and the server agree on the minimum', () => {
     // knows is a 400. Drift either way is visible only as a bug report: too low
     // and every short term flashes an error banner mid-typing, too high and the
     // console refuses searches the server would have run.
-    const app = readFileSync(fileURLToPath(new URL('../../src/admin/static/app.js', import.meta.url)), 'utf8')
+    const app = readFileSync(
+      fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
+      'utf8',
+    )
     const client = app.match(/const MIN_SEARCH = (\d+)/)?.[1]
     expect(client, 'MIN_SEARCH is gone from app.js').toBeDefined()
     expect(Number(client)).toBe(MIN_SEARCH_LENGTH)

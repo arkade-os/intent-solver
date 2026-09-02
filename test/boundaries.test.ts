@@ -6,13 +6,13 @@ import { compiledFilesUnder, externalImports, localImports } from './support/imp
 
 // fileURLToPath, not .pathname: on Windows a URL's pathname keeps a leading `/`
 // before the drive letter, which fs functions mishandle into a doubled path.
-const SRC = fileURLToPath(new URL('../src/', import.meta.url))
 const PACKAGES = fileURLToPath(new URL('../packages/', import.meta.url))
+const APP_SRC = fileURLToPath(new URL('../packages/solver-app/src/', import.meta.url))
 const REPO = fileURLToPath(new URL('../', import.meta.url))
 
 /**
- * The layer each top-level `src/` directory belongs to, and what that layer may
- * import.
+ * The layer each top-level directory of the APP's `src/` belongs to, and what
+ * that layer may import.
  *
  * This is the target topology from the SDK spec §3, asserted BEFORE the packages
  * exist. Encoding it as a test rather than waiting for tsconfig project
@@ -81,7 +81,7 @@ const MAY_IMPORT: Record<Layer, readonly Layer[]> = {
 }
 
 /**
- * Top-level `src/*.ts` files, which have no directory to key off.
+ * Top-level files of the app's `src/`, which have no directory to key off.
  *
  * `config.ts` is `node`, not `core`, because that is what it currently IS:
  * it reads `process.env`, reads files off disk, and assembles every subsystem's
@@ -139,6 +139,15 @@ const KNOWN_VIOLATIONS: readonly string[] = []
  * A package is a whole layer, so every file under it carries that layer no
  * matter which subdirectory it sits in — `solver-core` holds `core/`, `util/`,
  * `invoice/` and `price/`, and `LAYER_OF` already called all four `core`.
+ *
+ * `solver-app` is deliberately ABSENT, and is the one package that is not a
+ * layer: it is the composition root, and it still holds `admin/` beside
+ * `ops/` — two layers the DAG distinguishes, with `admin -> node` the only
+ * edge `MAY_IMPORT.admin` was written to permit. Naming it here would make
+ * every file in it `node`, `node` may import anything, and the three `admin`
+ * rules would stop being checked while the suite stayed green. `layerOf`
+ * therefore keys it on its own subdirectories, exactly as it did when the same
+ * tree was the repo root's `src/`.
  */
 const PACKAGE_LAYER: Record<string, Layer> = {
   'solver-core': 'core',
@@ -197,10 +206,18 @@ const LAYER_OF_SPECIFIER: Record<string, Layer> = {
   '@arkade-os/solver-corridors': 'corridor',
   '@arkade-os/solver-corridors-evm': 'corridor',
   '@arkade-os/solver-transport': 'transport',
+  /**
+   * Nothing imports the app today — it is the deployable, and the Dockerfile
+   * runs its `dist/cli.js` by path. The entry is here so that the day a package
+   * DOES reach for it, the edge is measured rather than ignored: `node` sits
+   * above every layer, so any inbound edge but `admin -> node` is a violation
+   * and this is what makes it visible.
+   */
+  '@arkade-os/solver-app': 'node',
 }
 
 /**
- * Every compiled source file in the workspace — `src/` plus each package.
+ * Every compiled source file in the workspace: each package, the app included.
  *
  * Two directories must be excluded, and BOTH produce false results rather than
  * merely extra work:
@@ -220,20 +237,26 @@ const LAYER_OF_SPECIFIER: Record<string, Layer> = {
  * gets its list treated as noise, and the real entry is then read past.
  */
 const workspaceSources = (): string[] =>
-  [...compiledFilesUnder(SRC), ...compiledFilesUnder(PACKAGES)].filter((file) => {
+  compiledFilesUnder(PACKAGES).filter((file) => {
     const segments = file.split(/[\\/]/)
     return !segments.includes('dist') && !segments.includes('node_modules')
   })
 
 const layerOf = (file: string): Layer | null => {
+  // The app first, because it is under PACKAGES and is NOT one layer — see
+  // `PACKAGE_LAYER`. Its subdirectories answer the question, exactly as they
+  // did when this same tree was the repo root's `src/`.
+  if (file.startsWith(APP_SRC)) {
+    const segments = relative(APP_SRC, file).split(/[\\/]/)
+    const top = segments[0]
+    if (top === undefined) return null
+    return (segments.length === 1 ? ROOT_FILE_LAYER[top] : LAYER_OF[top]) ?? null
+  }
   if (file.startsWith(PACKAGES)) {
     const pkg = relative(PACKAGES, file).split(/[\\/]/)[0]
     return pkg === undefined ? null : (PACKAGE_LAYER[pkg] ?? null)
   }
-  const segments = relative(SRC, file).split(/[\\/]/)
-  const top = segments[0]
-  if (top === undefined) return null
-  return (segments.length === 1 ? ROOT_FILE_LAYER[top] : LAYER_OF[top]) ?? null
+  return null
 }
 
 describe('layer boundaries', () => {
@@ -323,7 +346,7 @@ describe('layer boundaries', () => {
  * no migration could ever clear.
  */
 const CORRIDOR_RECORD_CENSUS: Readonly<Record<string, number>> = {
-  'src/config.ts': 9,
+  'packages/solver-app/src/config.ts': 9,
 }
 
 describe('the corridor record census', () => {

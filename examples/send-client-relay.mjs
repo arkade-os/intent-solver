@@ -14,7 +14,7 @@
 // SWAP_NETWORK — its own view of every service, never taken from the solver.
 
 import { hex } from '@scure/base'
-import { createArkadeContext, deriveNostrIdentity, loadConfig } from '../dist/index.js'
+import { createArkadeContext, deriveNostrIdentity, loadConfig } from '../packages/solver-app/dist/index.js'
 import { lockupSpent, nostrRelayTransport, relayTransport, sendToLightning } from './lib/swap-client.mjs'
 
 const [relayUrl, solverPubkey, bolt11] = process.argv.slice(2)

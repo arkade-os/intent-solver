@@ -4,7 +4,12 @@
 # image's default command and the end-state architecture.
 services:
   swap-provider:
-    build: .
+    # Context stays the repo root and the Dockerfile lives with the app it
+    # builds. A pnpm workspace image needs the lockfile, the workspace manifest
+    # and every packages/*, so the two cannot be the same directory.
+    build:
+      context: .
+      dockerfile: packages/solver-app/Dockerfile
     restart: unless-stopped
     # RELAY_URL is required in this mode; the process exits immediately without
     # it rather than coming up deaf.
@@ -16,7 +21,9 @@ services:
   # connection. Uncomment in place of `swap-provider` above — running both
   # would give one swap DB two money-movers.
   # swap-provider-http:
-  #   build: .
+  #   build:
+  #     context: .
+  #     dockerfile: packages/solver-app/Dockerfile
   #   restart: unless-stopped
   #   command: ["serve"]
   #   env_file: .env

@@ -30,19 +30,27 @@ import { defineConfig } from 'vitest/config'
  */
 export default defineConfig({
   /**
-   * `examples/` imports the BUILT output (`../../dist/index.js`) because that
-   * is what an integrator consumes. Under test it resolves to the source
-   * instead, so a test may import an example without `pnpm build` having run —
-   * CI builds AFTER the unit suite, so the alternative is a test that passes
-   * locally and cannot pass in CI.
+   * `examples/` imports the BUILT output
+   * (`../../packages/solver-app/dist/index.js`) because that is what an
+   * integrator consumes. Under test it resolves to the source instead, so a
+   * test may import an example without `pnpm build` having run — CI builds
+   * AFTER the unit suite, so the alternative is a test that passes locally and
+   * cannot pass in CI.
    *
    * Pointing at source is also the more honest target: a test that loaded
    * `dist/` would be asserting against whatever was built last, which on a
    * developer's machine is routinely not the working tree.
+   *
+   * The leading `../` run is matched as a group rather than spelled out, so the
+   * one alias covers both depths `examples/` uses: `../packages/…` from the top
+   * level and `../../packages/…` from `examples/lib/`.
    */
   resolve: {
     alias: [
-      { find: /^\.\.\/\.\.\/dist\/index\.js$/, replacement: new URL('src/index.ts', import.meta.url).pathname },
+      {
+        find: /^(?:\.\.\/)+packages\/solver-app\/dist\/index\.js$/,
+        replacement: new URL('packages/solver-app/src/index.ts', import.meta.url).pathname,
+      },
       /**
        * Workspace packages resolve to SOURCE under test, for the same reason
        * the `dist/index.js` alias above does: the unit suite runs BEFORE the

@@ -1,5 +1,5 @@
 /**
- * The SDK surface is what `src/index.ts` exports, and nothing else.
+ * The SDK surface is what `packages/solver-app/src/index.ts` exports, and nothing else.
  *
  * This exists because the gap it closes was invisible from inside the tree:
  * `Corridor`, `CorridorDescriptor`, the registry and all four policy strategies
@@ -14,7 +14,7 @@
  * the failure.
  */
 import { describe, it, expect } from 'vitest'
-import * as sdk from '../../src/index.js'
+import * as sdk from '@arkade-os/solver-app/index.js'
 import type {
   Corridor,
   CorridorReader,
@@ -29,7 +29,7 @@ import type {
   RailId,
   CovenantScriptRow,
   StoreShape,
-} from '../../src/index.js'
+} from '@arkade-os/solver-app/index.js'
 
 /** Referenced so the type imports above are load-bearing rather than elidable. */
 type _Surface = [

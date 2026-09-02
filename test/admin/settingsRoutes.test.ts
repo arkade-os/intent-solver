@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { buildAdminApp } from '../../src/admin/server.js'
+import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 
 const baseConfig = {
   network: 'regtest',

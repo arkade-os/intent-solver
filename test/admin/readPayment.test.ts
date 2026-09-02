@@ -15,8 +15,8 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { ACTIONS } from '../../src/admin/routes/actions.js'
-import type { Services } from '../../src/ops/services.js'
+import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
+import type { Services } from '@arkade-os/solver-app/ops/services.js'
 
 const LN_SEND = 'arkade:BTC->lightning:BTC'
 

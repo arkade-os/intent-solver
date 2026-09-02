@@ -191,7 +191,7 @@ export class RelayIngress implements SwapIngress {
   /**
    * Held once at construction rather than looked up per event. Assembly — and
    * with it the pair/stem collision check, a composition-time fault rather than
-   * one to rediscover per quote — happens in `src/ops/corridorSet.ts`, before
+   * one to rediscover per quote — happens in `packages/solver-app/src/ops/corridorSet.ts`, before
    * this is ever constructed.
    */
   private readonly corridors: CorridorSet

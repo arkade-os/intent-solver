@@ -6,7 +6,7 @@
  * this one is about the balance the solver claims proceeds INTO and funds
  * receive-leg lockups OUT OF. Nothing in the four corridor suites exercises it
  * because nothing in the orchestrators calls it — its only caller is
- * `src/cli.ts`'s watch loop, and the e2e harness deliberately builds services
+ * `packages/solver-app/src/cli.ts`'s watch loop, and the e2e harness deliberately builds services
  * without the CLI. So without this file it is reachable end to end only by
  * leaving `pnpm start` running for hours.
  *
@@ -58,7 +58,7 @@ import { openArkade, SETUP_TIMEOUT_MS, SWAP_TIMEOUT_MS, type E2eArkade } from '.
 let arkade: E2eArkade
 
 /**
- * The real callbacks, assembled exactly as `src/cli.ts`'s watch loop assembles
+ * The real callbacks, assembled exactly as `packages/solver-app/src/cli.ts`'s watch loop assembles
  * them — the point of the test is that THESE work, so a stub anywhere here
  * would test nothing.
  */

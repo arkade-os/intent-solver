@@ -11,13 +11,18 @@
  */
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { ACTIONS } from '../../src/admin/routes/actions.js'
-import * as floatOps from '../../src/ops/float.js'
+import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
+import * as floatOps from '@arkade-os/solver-app/ops/float.js'
 import type { VtxoLifecycleReport } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
-import { maybeMintPool, migrationClock, resetMigrationThrottle, runFloatLifecycle } from '../../src/ops/float.js'
+import {
+  maybeMintPool,
+  migrationClock,
+  resetMigrationThrottle,
+  runFloatLifecycle,
+} from '@arkade-os/solver-app/ops/float.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
-import type { Services } from '../../src/ops/services.js'
-import { readerSetFromDeps, type FlatCorridorDeps } from '../../src/ops/corridorSet.js'
+import type { Services } from '@arkade-os/solver-app/ops/services.js'
+import { readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 
 /**
  * Enough of `Services` for `poolPlan`, which is all `maybeMintPool` reaches.

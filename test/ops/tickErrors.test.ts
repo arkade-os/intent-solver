@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { signatureOf, TickErrorTracker } from '../../src/ops/tickErrors.js'
+import { signatureOf, TickErrorTracker } from '@arkade-os/solver-app/ops/tickErrors.js'
 
 /**
  * Both halves of what was observed on mainnet: 98 identical lines in 28s from a

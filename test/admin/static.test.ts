@@ -8,9 +8,9 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { resolveWithin, contentTypeFor, readStaticFile, staticRoot } from '../../src/admin/static.js'
-import { ACTIONS } from '../../src/admin/routes/actions.js'
-import { buildAdminApp } from '../../src/admin/server.js'
+import { resolveWithin, contentTypeFor, readStaticFile, staticRoot } from '@arkade-os/solver-app/admin/static.js'
+import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
+import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 
 const root = staticRoot()
 

@@ -28,8 +28,8 @@
 import { existsSync } from 'node:fs'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { resolveDbLayout } from '@arkade-os/solver-corridors/db/layout.js'
-import { swapDbPath } from '../dist/config.js'
-import { summariseLatency } from '../dist/ops/latency.js'
+import { swapDbPath } from '../packages/solver-app/dist/config.js'
+import { summariseLatency } from '../packages/solver-app/dist/ops/latency.js'
 
 const arg = (name, fallback = null) => {
   const i = process.argv.indexOf(`--${name}`)

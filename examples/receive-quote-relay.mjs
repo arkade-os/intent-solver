@@ -21,7 +21,7 @@ import { hkdf } from '@noble/hashes/hkdf.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { utf8ToBytes } from '@noble/hashes/utils.js'
 import { base64, hex } from '@scure/base'
-import { createArkadeContext, deriveNostrIdentity, loadConfig } from '../dist/index.js'
+import { createArkadeContext, deriveNostrIdentity, loadConfig } from '../packages/solver-app/dist/index.js'
 import { newRfqId, nostrRelayTransport } from './lib/swap-client.mjs'
 
 const [relayUrl, solverPubkey, amountArg] = process.argv.slice(2)
@@ -115,5 +115,5 @@ try {
 // stop, so an otherwise-finished process sits there forever — every tick then
 // querying the handle we just released ("database connection is not open").
 // send-client-relay.mjs ends the same way. Order matters: close() first,
-// because process.exit() skips the WAL checkpoint (src/arkade/wallet.ts:51).
+// because process.exit() skips the WAL checkpoint (packages/solver-arkade/src/arkade/wallet.ts:51).
 process.exit(process.exitCode ?? 0)

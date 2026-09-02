@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 
 const walletSource = readFileSync(new URL('../../packages/solver-arkade/src/arkade/wallet.ts', import.meta.url), 'utf8')
-const floatSource = readFileSync(new URL('../../src/ops/float.ts', import.meta.url), 'utf8')
+const floatSource = readFileSync(new URL('../../packages/solver-app/src/ops/float.ts', import.meta.url), 'utf8')
 
 /**
  * Source assertions rather than runtime ones, deliberately: `settlementConfig`

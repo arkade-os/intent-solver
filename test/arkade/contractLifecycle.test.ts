@@ -1,4 +1,4 @@
-import { readerSetFromDeps, type FlatCorridorDeps } from '../../src/ops/corridorSet.js'
+import { readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 import { describe, expect, it } from 'vitest'
 import {
   lockupSource,

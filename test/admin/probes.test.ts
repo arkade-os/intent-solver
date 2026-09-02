@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { probeBackends } from '../../src/admin/probes.js'
+import { probeBackends } from '@arkade-os/solver-app/admin/probes.js'
 
 const servicesWith = (
   onchain: Partial<{

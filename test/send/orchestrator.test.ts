@@ -26,7 +26,7 @@ import {
   worstCaseHtlcBlocks,
 } from '@arkade-os/solver-core/core/send.js'
 import { QUOTE_RATE_LIMIT } from '@arkade-os/solver-core/core/rateLimit.js'
-import { TickErrorTracker } from '../../src/ops/tickErrors.js'
+import { TickErrorTracker } from '@arkade-os/solver-app/ops/tickErrors.js'
 import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { PaymentHashRegistered } from '@arkade-os/solver-core/ports/lightning.js'
 import type {
@@ -2337,7 +2337,8 @@ describe('a payment whose commitment outlived its id', () => {
 
     const row = await service.tick(wedged.id)
 
-    // Undecided: the sats are committed and the SSP may still reveal. Nothing
+    // Undecided: the sats are committed and the Lightning backend may still
+    // reveal the preimage. Nothing
     // may be pushed on that, but re-submitting is still pointless.
     expect(row.state).toBe('paying')
     expect(arkade.refundCalls).toHaveLength(0)

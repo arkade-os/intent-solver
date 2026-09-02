@@ -4,9 +4,9 @@
  * regression would reappear. Asserted against the source text because
  * constructing the stack needs live backends, which a unit test has none of.
  *
- * Two sources: the factory lives in `src/ops/services.ts`, while the operator
+ * Two sources: the factory lives in `packages/solver-app/src/ops/services.ts`, while the operator
  * COMMANDS whose `allCorridors` opt-out is checked below are still in
- * `src/cli.ts` — a module that runs `main()` and `process.exit()` at import and
+ * `packages/solver-app/src/cli.ts` — a module that runs `main()` and `process.exit()` at import and
  * so can never be called from a test at all.
  *
  * Worth pinning because the failure is silent in every runtime test: an
@@ -19,7 +19,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createServicesBody } from '../support/createServicesBody.js'
 
-const cliSource = readFileSync(fileURLToPath(new URL('../../src/cli.ts', import.meta.url)), 'utf8')
+const cliSource = readFileSync(fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)), 'utf8')
 
 describe('createServices — corridor enablement', () => {
   it.each([

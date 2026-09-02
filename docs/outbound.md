@@ -89,10 +89,10 @@ disappears.
 #   .env.regtest.client  a DISTINCT client wallet, funded the same way
 node scripts/mock-relay.mjs &   # dev broker :7447 — requires RELAY_PROTOCOL=dev on both ends
 RELAY_URL=ws://localhost:7447 RELAY_PROTOCOL=dev \
-  node --experimental-eventsource --env-file=.env.regtest dist/cli.js relay &   # provider, no ports
+  node --experimental-eventsource --env-file=.env.regtest packages/solver-app/dist/cli.js relay &   # provider, no ports
 
 # client: request over the relay, fund own derivation, watch on-chain
-invoice=$(node --experimental-eventsource --env-file=.env.regtest dist/cli.js invoice 1000 | tail -1)
+invoice=$(node --experimental-eventsource --env-file=.env.regtest packages/solver-app/dist/cli.js invoice 1000 | tail -1)
 node --experimental-eventsource --env-file=.env.regtest.client \
   examples/send-client-relay.mjs ws://localhost:7447 <providerPubkey> "$invoice"
 ```
@@ -129,7 +129,8 @@ inbound connection at any point.
 - **The mock relay is dev-only.** It speaks the same frames but is not a real
   relay; production points the codec at a hardened broker.
 - **This is the image's default.** `CMD` is `relay`, so a platform that just
-  builds the Dockerfile gets the outbound mode with no command override — and
+  builds the Dockerfile (`packages/solver-app/Dockerfile`, built with the repo
+  root as its context) gets the outbound mode with no command override — and
   `swap-provider` in `docker-compose.yml` is that same default. Health is the
   mtime of `RELAY_HEALTH_PATH`, refreshed only while the relay socket is up: a
   process check would report a disconnected solver healthy for as long as it

@@ -26,7 +26,10 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-const css = readFileSync(fileURLToPath(new URL('../../src/admin/static/styles.css', import.meta.url)), 'utf8')
+const css = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/admin/static/styles.css', import.meta.url)),
+  'utf8',
+)
 
 /** Relative luminance, per WCAG 2.1. */
 const luminance = (hex: string): number => {

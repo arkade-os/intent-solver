@@ -2,7 +2,7 @@
  * Every corridor is on the funding fast path, not just the one that got it first.
  *
  * A source-level guard for the same reason `refundDestination.test.ts` gives:
- * `src/cli.ts` runs `main()` then `process.exit()` at module load and exports
+ * `packages/solver-app/src/cli.ts` runs `main()` then `process.exit()` at module load and exports
  * nothing, so the wiring cannot be called from a test.
  *
  * This is worth pinning because the failure is invisible. A corridor left off
@@ -17,7 +17,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-const cliSource = readFileSync(fileURLToPath(new URL('../../src/cli.ts', import.meta.url)), 'utf8')
+const cliSource = readFileSync(fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)), 'utf8')
 
 /** The body of the function that decides which scripts the watcher subscribes to. */
 const resyncBody = (): string => {

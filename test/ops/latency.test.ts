@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { summariseLatency, type SwapEvent } from '../../src/ops/latency.js'
+import { summariseLatency, type SwapEvent } from '@arkade-os/solver-app/ops/latency.js'
 
 /** Terse builder: `at` and `to`, with `from` inferred as the previous `to`. */
 const track = (swapId: string, ...steps: [number, string][]): SwapEvent[] =>

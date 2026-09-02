@@ -4,7 +4,7 @@
  *
  * This corridor has NO CLI command and NO RFQ ingress routing, so there is
  * nothing to shell out to: the test constructs `ReceiveSwapService` against
- * real adapters and drives `quote`/`tick` — the same thing `src/cli.ts`'s
+ * real adapters and drives `quote`/`tick` — the same thing `packages/solver-app/src/cli.ts`'s
  * self-test commands do internally, minus the CLI. That is a genuine exercise
  * of the money path and does not depend on wiring that does not exist yet.
  *

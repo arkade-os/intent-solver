@@ -8,12 +8,15 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import * as sdk from '../../src/index.js'
-import { corridorSetFromDeps, readerSetFromDeps, type FlatCorridorDeps } from '../../src/ops/corridorSet.js'
+import * as sdk from '@arkade-os/solver-app/index.js'
+import { corridorSetFromDeps, readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
-import type { Corridor, CorridorDescriptor } from '../../src/index.js'
+import type { Corridor, CorridorDescriptor } from '@arkade-os/solver-app/index.js'
 
-const servicesSource = readFileSync(fileURLToPath(new URL('../../src/ops/services.ts', import.meta.url)), 'utf8')
+const servicesSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/ops/services.ts', import.meta.url)),
+  'utf8',
+)
 
 const descriptor = (pair: string, envStem: string): CorridorDescriptor => ({
   pair,

@@ -36,14 +36,21 @@ const specifiers = (source: string): string[] => [
  * guard has no opinion about.
  *
  * Both forms map onto the same tree: `@arkade-os/solver-rails/ln/port.js` is emitted from
- * `packages/solver-rails/src/ln/port.ts`, and a legacy `../dist/x.js` from
- * `src/x.ts` — which only still resolves while a root `src/` exists.
+ * `packages/solver-rails/src/ln/port.ts`, and `../packages/solver-app/dist/config.js`
+ * from `packages/solver-app/src/config.ts`.
+ *
+ * The second form is a PATH into a package's build output rather than a
+ * specifier, and it is what these scripts actually use — plain `.mjs` reaching
+ * for compiled output that no `exports` map has to admit. Matching any
+ * `packages/<pkg>/dist/…` rather than only the app's brings
+ * `regtest-watch-offers.mjs` under the guard too: it already used this shape,
+ * resolved to null, and was therefore being checked by nobody.
  */
 const sourceFor = (specifier: string): string | null => {
   const workspace = specifier.match(/^@arkade-os\/solver-([a-z-]+)\/(.+)\.js$/)
   if (workspace) return join(REPO, 'packages', `solver-${workspace[1]}`, 'src', `${workspace[2]}.ts`)
-  const legacy = specifier.match(/^\.\.\/dist\/(.+)\.js$/)
-  if (legacy) return join(REPO, 'src', `${legacy[1]}.ts`)
+  const built = specifier.match(/^(?:\.\.\/)+packages\/(solver-[a-z-]+)\/dist\/(.+)\.js$/)
+  if (built) return join(REPO, 'packages', built[1] as string, 'src', `${built[2] as string}.ts`)
   return null
 }
 

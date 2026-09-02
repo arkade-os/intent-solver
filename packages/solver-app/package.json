@@ -1,0 +1,40 @@
+{
+  "name": "@arkade-os/solver-app",
+  "version": "0.1.0",
+  "description": "Part of the Arkade intent-solver: the reference solver daemon.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arkade-os/intent-solver.git",
+    "directory": "packages/solver-app"
+  },
+  "homepage": "https://github.com/arkade-os/intent-solver#readme",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "lnswap": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@arkade-os/sdk": "0.4.67",
+    "@arkade-os/solver-arkade": "workspace:*",
+    "@arkade-os/solver-core": "workspace:*",
+    "@arkade-os/solver-corridors": "workspace:*",
+    "@arkade-os/solver-corridors-evm": "workspace:*",
+    "@arkade-os/solver-db": "workspace:*",
+    "@arkade-os/solver-rails": "workspace:*",
+    "@arkade-os/solver-rails-esplora": "workspace:*",
+    "@arkade-os/solver-rails-evm": "workspace:*",
+    "@arkade-os/solver-rails-fake": "workspace:*",
+    "@arkade-os/solver-rails-lnd": "workspace:*",
+    "@arkade-os/solver-transport": "workspace:*",
+    "@hono/node-server": "^2.1.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.0.0",
+    "@scure/base": "^2.0.0",
+    "@scure/btc-signer": "^2.0.1",
+    "hono": "^4.13.0"
+  }
+}

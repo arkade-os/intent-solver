@@ -56,7 +56,7 @@ the API on Workers if you want Workers at all.
 
 ```
 pnpm install && pnpm build
-node --experimental-eventsource --env-file=.env dist/cli.js serve
+node --experimental-eventsource --env-file=.env packages/solver-app/dist/cli.js serve
 ```
 
 One process = API + recovery + tick loop + refund sweep. Restart-safe: on boot
@@ -105,7 +105,10 @@ files it replaced.
 ## Shape 1a — the same thing as a Docker image (recommended)
 
 ```
-docker compose up -d          # Dockerfile + docker-compose.yml in the repo root
+docker compose up -d          # docker-compose.yml in the repo root; it names
+                              # packages/solver-app/Dockerfile, and the build
+                              # CONTEXT stays the root — a pnpm workspace image
+                              # needs the lockfile and every packages/*
 ```
 
 One container = Shape 1 (`serve`), with `/data` as the volume carrying every
@@ -134,8 +137,11 @@ SQLite file — the swap database(s) and the Arkade wallet. CI builds and smoke-
   funded rows are not backed up.
 - **The image defaults to `relay`**, not `serve` — a platform that just builds
   the Dockerfile (Dokploy, Railway, Fly, plain `docker run`) gets the mode that
-  actually serves traffic. Any other command needs its HEALTHCHECK overridden
-  too: the default probes the relay heartbeat, which only `relay` writes.
+  actually serves traffic. Point it at `packages/solver-app/Dockerfile` with the
+  repo root as the build context; a PaaS that auto-detects a Dockerfile at the
+  root will find none, and that is the one setting such a platform needs told.
+  Any other command needs its HEALTHCHECK overridden too: the default probes the
+  relay heartbeat, which only `relay` writes.
   `serve` has `/healthz` instead (the compose file carries the override);
   `watch` has neither and wants no healthcheck at all.
 
@@ -144,7 +150,7 @@ SQLite file — the swap database(s) and the Arkade wallet. CI builds and smoke-
 **Full write-up, flow diagram and the verified E2E: [`outbound.md`](./outbound.md).**
 
 ```
-RELAY_URL=wss://your-relay ... dist/cli.js relay      # or just: docker compose up
+RELAY_URL=wss://your-relay ... packages/solver-app/dist/cli.js relay      # or just: docker compose up
 ```
 
 The `relay` command replaces the HTTP ingress with an outbound relay
@@ -233,12 +239,14 @@ are deployment-specific):
 ```
 
 ```ts
-// src/entry.ts — the deployer owns this file; it is the only wiring
-import { makeWorkerEntry, SwapStore, d1Driver /*, ...service deps */ } from 'intent-solver'
+// src/entry.ts — the deployer owns this file, in their own repo; it is the only
+// wiring. Nothing here is published to npm, so the surface it imports is
+// `packages/solver-app`'s build output, vendored or path-linked.
+import { makeWorkerEntry, SwapStore, d1Driver /*, ...service deps */ } from '@arkade-os/solver-app'
 
 export default makeWorkerEntry(async (env: Env) => {
   const store = await SwapStore.open(d1Driver(env.SWAPS_DB))
-  // Build SendSwapService exactly as src/cli.ts createServices does, from env
+  // Build SendSwapService exactly as packages/solver-app/src/cli.ts createServices does, from env
   // secrets. This is the unverified-in-isolate part for the money-mover; for
   // an API-only worker, a service wired with quote-time deps suffices.
   return { service, store, network: 'bitcoin', driveQueue: env.DRIVE_QUEUE }
@@ -314,7 +322,7 @@ is only up while the provider is.
 
 The console is a strict _reader_ of the money layer: it polls the stores and
 diffs them for live updates rather than instrumenting any orchestrator. The one
-exception is actions, which call the same `src/ops/` functions the CLI calls.
+exception is actions, which call the same `packages/solver-app/src/ops/` functions the CLI calls.
 
 ### Actions, and the confirmation they require
 
@@ -1117,7 +1125,7 @@ pnpm install && pnpm build
 node --experimental-eventsource --env-file=.env.regtest scripts/regtest-fund.mjs ../arkade-regtest
 
 # 4. full send E2E: forged invoice -> quote -> fund own derivation -> claim
-cli() { node --experimental-eventsource --env-file=.env.regtest dist/cli.js "$@"; }
+cli() { node --experimental-eventsource --env-file=.env.regtest packages/solver-app/dist/cli.js "$@"; }
 cli invoice 1000 | tail -1 | xargs -I{} sh -c 'cli send "{}"'
 
 # 5. covenant refund E2E against the local emulator
@@ -1178,7 +1186,7 @@ pnpm install && pnpm build
 node --experimental-eventsource --env-file=.env.regtest.lnd scripts/regtest-fund.mjs ../arkade-regtest
 
 # 5. sanity-check the LND connection
-cli() { node --experimental-eventsource --env-file=.env.regtest.lnd dist/cli.js "$@"; }
+cli() { node --experimental-eventsource --env-file=.env.regtest.lnd packages/solver-app/dist/cli.js "$@"; }
 cli balances
 
 # 6. full send E2E: a REAL invoice from the counterparty lnd -> quote -> fund own derivation -> pay over the boltz-lnd<->lnd channel -> claim
@@ -1204,7 +1212,7 @@ pointing this service at `boltz-lnd` already gives it a real onchain wallet
 # steps 1-5 as above (stack + boltz profile, cert/macaroon extraction, fund
 # the Arkade wallet, sanity-check the LND connection)
 
-# 6. full onchain-send E2E, both roles in one process (src/cli.ts's
+# 6. full onchain-send E2E, both roles in one process (packages/solver-app/src/cli.ts's
 #    send-onchain command): quote -> fund the Arkade lockup from our own
 #    wallet -> observe the solver fund the onchain HTLC via boltz-lnd's
 #    onchain wallet -> sign and broadcast the CLIENT's claim transaction with
@@ -1256,7 +1264,7 @@ files, but asserting on the swap ROW rather than on grepped stdout — and
 covering the two RECEIVE corridors, which have no CLI command and no RFQ
 ingress routing to shell out to. For those the test constructs
 `ReceiveSwapService` / `OnchainReceiveSwapService` against real adapters and
-drives `quote`/`tick` directly, which is what `src/cli.ts`'s self-tests do
+drives `quote`/`tick` directly, which is what `packages/solver-app/src/cli.ts`'s self-tests do
 internally anyway.
 
 ```bash
@@ -1288,7 +1296,7 @@ covers separately — see "covclaimd" below.
   `test/e2e/support/preflight.ts` so `pnpm test:e2e` stays one command.
   Anything already exported wins, so a one-off override still works.
   `COVCLAIMD_URL` (default `http://localhost:7271`) and `ESPLORA_URL` (default
-  `http://localhost:3000/api`) are e2e-only knobs — no `src/config.ts` setting
+  `http://localhost:3000/api`) are e2e-only knobs — no `packages/solver-app/src/config.ts` setting
   exists for covclaimd yet, because the receive legs are not wired into the CLI.
 - **A missing dependency FAILS, it never skips.** A suite that runs this rarely
   and skips quietly is a suite that rots into one that cannot pass at all. The
@@ -1360,7 +1368,7 @@ note says otherwise.
 
 **Required operator action: leave covclaimd unwired.** There is no safe middle
 setting to pick here. `createServices` leaves `covclaimd` unset on purpose
-(`src/cli.ts:444`), and every quote path now writes
+(`packages/solver-app/src/cli.ts:444`), and every quote path now writes
 `nonInteractiveParameters: true` unconditionally — all six `insertQuote` call
 sites, with no config gate and no per-swap opt-out — so wiring covclaimd would
 put it against a nine-leaf tree on EVERY newly funded lockup, not on some

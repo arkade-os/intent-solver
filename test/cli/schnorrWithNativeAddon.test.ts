@@ -1,13 +1,13 @@
 /**
  * `@noble/curves` and better-sqlite3's native addon, loaded statically in one
- * process — the condition a workaround in `src/cli.ts` used to defer around.
+ * process — the condition a workaround in `packages/solver-app/src/cli.ts` used to defer around.
  *
  * That workaround replaced the module-level `import { schnorr }` with a lazy
  * `getSchnorr()`, on the stated grounds that the static form "triggers an
  * initialisation-time failure under Node.js 24 when loaded statically alongside
  * better-sqlite3's native addon". It was removed because that does not
  * reproduce — but removing it left nothing watching the condition, and the
- * review that asked for coverage was right that there was none: `src/cli.ts`'s
+ * review that asked for coverage was right that there was none: `packages/solver-app/src/cli.ts`'s
  * four call sites are reachable only by running the CLI by hand. No test
  * imports that module (every `test/cli/*` case reads it as TEXT and asserts
  * against the source), and no test spawns the binary.
@@ -42,7 +42,7 @@ describe('schnorr alongside the native sqlite addon', () => {
       await driver.run('insert into probe values (?)', [1])
       expect(await driver.all<{ a: number }>('select a from probe')).toEqual([{ a: 1 }])
 
-      // The same shape `src/cli.ts` uses at each of its four call sites.
+      // The same shape `packages/solver-app/src/cli.ts` uses at each of its four call sites.
       const secret = schnorr.utils.randomSecretKey()
       const pub = schnorr.getPublicKey(secret)
       expect(pub).toHaveLength(32)

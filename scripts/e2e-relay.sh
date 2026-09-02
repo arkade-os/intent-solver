@@ -56,7 +56,7 @@ else
 fi
 
 echo "── starting provider in OUTBOUND relay mode (no listening ports) ────"
-RELAY_URL="$RELAY_URL" $NODE --env-file=.env.regtest dist/cli.js relay >"$LOGDIR/provider.log" 2>&1 &
+RELAY_URL="$RELAY_URL" $NODE --env-file=.env.regtest packages/solver-app/dist/cli.js relay >"$LOGDIR/provider.log" 2>&1 &
 provider_pid=$!
 
 # Wait for the provider to be subscribed and print its pubkey.
@@ -69,7 +69,7 @@ provider_pubkey=$(grep -oE "as [0-9a-f]{64}" "$LOGDIR/provider.log" | head -1 | 
 echo "provider pubkey: $provider_pubkey"
 
 echo "── forging an invoice (provider's fake LN) ──────────────────────────"
-invoice=$($NODE --env-file=.env.regtest dist/cli.js invoice 1000 2>/dev/null | tail -1)
+invoice=$($NODE --env-file=.env.regtest packages/solver-app/dist/cli.js invoice 1000 2>/dev/null | tail -1)
 
 echo "── client requests over the relay, funds, waits for the claim ───────"
 if $NODE --env-file=.env.regtest.client examples/send-client-relay.mjs \

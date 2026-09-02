@@ -78,7 +78,7 @@ export const evaluateCouplingDeadlines = (input: CouplingDeadlineInput): Couplin
 
 /**
  * How long a quoted swap stays fundable before we consider it abandoned.
- * Default for the `LOCKUP_TIMEOUT_SECONDS` env knob (`src/config.ts`).
+ * Default for the `LOCKUP_TIMEOUT_SECONDS` env knob (`packages/solver-app/src/config.ts`).
  */
 export const DEFAULT_LOCKUP_TIMEOUT = 15 * MINUTE
 

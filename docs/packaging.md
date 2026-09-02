@@ -1,11 +1,17 @@
 # Packaging: two deployable sets from one workspace
 
 This repo builds two independent solvers. Each is a subset of the eleven
-workspace packages, and each **builds with the other absent from its dependency
+LIBRARY packages, and each **builds with the other absent from its dependency
 graph** — not merely unused, but not installed.
 
 `.github/workflows/ci.yml` (`package-sets`) asserts the exact resolved set for
 each, so a leak and an accidental removal both fail the build.
+
+The twelfth package, `packages/solver-app`, is in neither set and is not a
+library: it is the DEPLOYABLE — the composition root, the CLI, the admin
+console and the Dockerfile that bundles them. It is `private: true`, so the
+release workflow's `./packages/*` publish glob passes it over, and
+`test/packaging.test.ts` pins that rather than trusting it.
 
 ## The sets
 
@@ -35,27 +41,33 @@ Two different contracts, and both are enforced:
   stray dependency is what puts another vendor's source in a partner's checkout.
 
 `@arkade-os/solver-transport` depends on `@arkade-os/solver-core` alone. Corridor registry assembly
-lives at the composition root (`src/ops/corridorSet.ts`), because naming every
-corridor a deployment might register is the property of the thing that
-configures it — not of the RFQ dispatcher, and not of another corridor package.
+lives at the composition root (`packages/solver-app/src/ops/corridorSet.ts`),
+because naming every corridor a deployment might register is the property of the
+thing that configures it — not of the RFQ dispatcher, and not of another
+corridor package.
 
 ## Splitting into repos
 
 Reusable unchanged — neither names a package:
 
-- `Dockerfile` — copies `packages/`, installs, builds, runs `dist/cli.js`.
+- `packages/solver-app/Dockerfile` — copies `packages/`, installs, builds, runs
+  `packages/solver-app/dist/cli.js`. Its build CONTEXT is the repo root even
+  though it lives in the package (`docker build -f packages/solver-app/Dockerfile .`):
+  a pnpm workspace image needs the lockfile, the workspace manifest and every
+  `packages/*`.
 - `ci.yml`'s `build` and `docker` jobs.
 
 Needs per-repo work:
 
-- **Composition root.** `src/ops/services.ts` is where the built-in rails are
-  named, and a repo drops the ones it does not ship from that one file;
-  `src/config.ts`'s `BUILT_IN_LN_BACKENDS` and `src/ops/rails.ts`'s `BUILT_IN`
-  list the same set and have to agree with it. A rail a consumer registers needs
-  none of this — see "Extending, rather than forking" — so this is only about
-  what the repo itself ships. `cli.ts` reaches past the composition root for
-  exactly one, `@arkade-os/solver-rails-fake` for the `invoice` regtest helper, so a repo
-  that ships no fake backend has that call site to answer for too.
+- **Composition root.** `packages/solver-app/src/ops/services.ts` is where the
+  built-in rails are named, and a repo drops the ones it does not ship from that
+  one file; `config.ts`'s `BUILT_IN_LN_BACKENDS` and `ops/rails.ts`'s `BUILT_IN`
+  — both in the same package — list the same set and have to agree with it. A
+  rail a consumer registers needs none of this — see "Extending, rather than
+  forking" — so this is only about what the repo itself ships. `cli.ts` reaches
+  past the composition root for exactly one, `@arkade-os/solver-rails-fake` for
+  the `invoice` regtest helper, so a repo that ships no fake backend has that
+  call site to answer for too.
 - **README and runbook.** Both are deployment documents and heavily
   backend-specific; each repo keeps only the backends it ships.
 - **`package-sets` CI job.** Collapses to the single set that repo contains.
@@ -85,21 +97,30 @@ registerLightningRail('my-rail', { create: async (config) => ({ ln, onchain }) }
 ```
 
 `LN_BACKEND=my-rail` then selects it, because `loadConfig` asks the registry what
-exists (`src/ops/rails.ts`). A rail is a PAIR — one wallet answering both the
-Lightning and the onchain port — so a vendor with no onchain facility still
-answers that port with a backend that refuses, rather than leaving two corridors
-unservable. Registration is module-level state read once at `loadConfig`, so it
-has to happen at import time, above the entrypoint; and a name already taken,
-built-in or not, is refused at registration rather than silently shadowed.
+exists (`packages/solver-app/src/ops/rails.ts`). A rail is a PAIR — one wallet
+answering both the Lightning and the onchain port — so a vendor with no onchain
+facility still answers that port with a backend that refuses, rather than
+leaving two corridors unservable. Registration is module-level state read once
+at `loadConfig`, so it has to happen at import time, above the entrypoint; and a
+name already taken, built-in or not, is refused at registration rather than
+silently shadowed.
 
 `test/packaging/corridorInjection.test.ts` and `sdkSurface.test.ts` pin this.
 
 ## Publishing
 
-Not published. The packages are `private: true` under the `@arkade-os/solver-*` scope,
-which is a workspace-local name — `workspace:*` resolution is the only consumer.
+Not published yet. The eleven library packages carry a full publish manifest —
+`exports`, `files`, `publishConfig` — and `release.yml` resolves a `--dry-run`
+publish for them on every release so a rotted manifest is caught while it is
+cheap; the real publish is held behind a manual input, because the names are
+unclaimed on npm and a first publish cannot be undone. `workspace:*` resolution
+is the only consumer today.
 
-When that changes, the decision on record is **`@arkade-os/*` on GitHub
-Packages**, private first: it is tied to the org that owns the repos, needs no
-npm org billing, and going public later is a registry change rather than a
+`packages/solver-app` is excluded from all of that by `private: true`, and
+always will be: it is the deployable, its artifact is the GHCR image, and there
+is no version of it anyone should `npm install`.
+
+When the library packages do ship, the decision on record is **`@arkade-os/*` on
+GitHub Packages**, private first: it is tied to the org that owns the repos,
+needs no npm org billing, and going public later is a registry change rather than a
 rename.

@@ -13,7 +13,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { respondToRfqStatus } from '@arkade-os/solver-transport/ingress/rfq.js'
-import { readerSetFromDeps, type FlatCorridorDeps } from '../../src/ops/corridorSet.js'
+import { readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 import { createCorridorReaderSet, type CorridorReader } from '@arkade-os/solver-core/core/corridor.js'
 
 const RFQ_ID = 'd'.repeat(64)
@@ -124,7 +124,7 @@ describe('rfq status dispatch — all four corridors', () => {
   })
 
   /**
-   * A deployment without the receive stores (src/worker.ts) must answer for the
+   * A deployment without the receive stores (packages/solver-app/src/worker.ts) must answer for the
    * corridors it does serve rather than throw into the transport. With readers
    * the absent legs are simply not registered, so there is nothing to skip.
    */

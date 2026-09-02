@@ -4,7 +4,7 @@ import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
 import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { OnchainReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
-import { AdminStore } from '../../src/admin/db.js'
+import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 
 /**
  * The consolidated layout hands ONE driver to all five stores. `resolveDbLayout`

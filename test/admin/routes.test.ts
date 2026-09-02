@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { buildAdminApp, type AdminDeps } from '../../src/admin/server.js'
-import { readerSetFromDeps, type FlatCorridorDeps } from '../../src/ops/corridorSet.js'
+import { buildAdminApp, type AdminDeps } from '@arkade-os/solver-app/admin/server.js'
+import { readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 
 const emptyPage = { rows: [], nextCursor: null }
 

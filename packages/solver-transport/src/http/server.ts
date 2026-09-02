@@ -34,7 +34,7 @@ import { rfqRefusalPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
 export interface HttpDeps {
   /**
    * The corridors this host serves, assembled by the composition root
-   * (`src/ops/corridorSet.ts`) — the only place that knows which corridors a
+   * (`packages/solver-app/src/ops/corridorSet.ts`) — the only place that knows which corridors a
    * deployment has. Being handed a set rather than deriving one is what lets a
    * consumer serve a corridor this build never compiled against.
    */

@@ -27,7 +27,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { getRequestListener } from '@hono/node-server'
 
-const cli = readFileSync(fileURLToPath(new URL('../../src/cli.ts', import.meta.url)), 'utf8')
+const cli = readFileSync(fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)), 'utf8')
 
 describe('the admin console leaves the global fetch classes alone', () => {
   it('keeps globalThis.Response identical when the flag is passed', () => {
@@ -42,7 +42,7 @@ describe('the admin console leaves the global fetch classes alone', () => {
 
   it('passes the shared options at every serve() call site in cli.ts', () => {
     const calls = cli.match(/serve\(\{[^}]*\}\)/g) ?? []
-    expect(calls.length, 'expected serve() call sites in src/cli.ts').toBeGreaterThan(0)
+    expect(calls.length, 'expected serve() call sites in packages/solver-app/src/cli.ts').toBeGreaterThan(0)
     const missing = calls.filter((call) => !call.includes('HONO_SERVE_OPTIONS'))
     expect(missing, `serve() without HONO_SERVE_OPTIONS: ${missing.join(' | ')}`).toEqual([])
   })

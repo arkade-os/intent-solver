@@ -1,4 +1,4 @@
-import { readerSetFromDeps, type FlatCorridorDeps } from '../../src/ops/corridorSet.js'
+import { readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 import { describe, it, expect } from 'vitest'
 import { hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'

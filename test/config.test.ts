@@ -38,9 +38,9 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { basename, join } from 'node:path'
-import { loadConfig } from '../src/config.js'
-import { adminDbPath } from '../src/admin/db.js'
-import { registerLightningRail, type LightningRailModule } from '../src/ops/rails.js'
+import { loadConfig } from '@arkade-os/solver-app/config.js'
+import { adminDbPath } from '@arkade-os/solver-app/admin/db.js'
+import { registerLightningRail, type LightningRailModule } from '@arkade-os/solver-app/ops/rails.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { REFUND_SAFETY_MARGIN } from '@arkade-os/solver-core/core/send.js'
@@ -194,7 +194,7 @@ describe('loadConfig — LN_BACKEND', () => {
  *
  * This is the whole reason `LN_BACKEND` is no longer a closed union: the private
  * repo that adds a custodial, an LSP or any other vendor backend must run the
- * SHIPPED cli — `src/cli.ts` calls `createServices` at sixteen sites and runs
+ * SHIPPED cli — `packages/solver-app/src/cli.ts` calls `createServices` at sixteen sites and runs
  * `main()` at module load, so an option would have meant forking it.
  *
  * The shadow case is the money one. `LN_BACKEND=lnd` silently resolving to
@@ -382,7 +382,7 @@ describe('loadConfig — DB_DIR', () => {
     expect(config.fakeLnStatePath).toBe(join('/data', 'fake-ln.json'))
     // The four siblings are suffixed off the swap path rather than named, so
     // moving the directory has to carry them along. adminDbPath is the one that
-    // is exported; the corridor stores use the identical rule in src/cli.ts.
+    // is exported; the corridor stores use the identical rule in packages/solver-app/src/cli.ts.
     expect(adminDbPath(config.swapDbPath)).toBe(join('/data', 'swaps-admin.sqlite'))
   })
 

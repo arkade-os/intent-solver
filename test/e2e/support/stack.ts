@@ -2,7 +2,7 @@
  * Real adapters, real wallets, real regtest — the pieces every corridor test
  * assembles its service out of.
  *
- * This is deliberately the same construction `src/cli.ts`'s `createServices`
+ * This is deliberately the same construction `packages/solver-app/src/cli.ts`'s `createServices`
  * performs, minus the CLI: the same `createArkadeContext`, the same
  * `RestEmulatorProvider` key fetch, the same adapter classes. Two corridors
  * (`lightning:BTC->arkade:BTC` and `onchain:BTC->arkade:BTC`) have no CLI
@@ -30,7 +30,7 @@ import { join } from 'node:path'
 import { RestEmulatorProvider } from '@arkade-os/sdk'
 import { base64 } from '@scure/base'
 import { createArkadeContext, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import { arkDbPath } from '../../../src/config.js'
+import { arkDbPath } from '@arkade-os/solver-app/config.js'
 import { resolveLimits, type Limits } from '@arkade-os/solver-core/core/limits.js'
 import { NETWORKS, isSwapNetwork, type NetworkProfile, type SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { ONCHAIN_SECONDS_PER_BLOCK } from '@arkade-os/solver-core/core/onchainReceive.js'
@@ -62,7 +62,7 @@ const required = (name: string): string => {
 /**
  * A credential given either inline or as a path to read and base64-encode.
  *
- * The same either/or `src/config.ts` accepts for `LND_CERT`/`LND_MACAROON`, so
+ * The same either/or `packages/solver-app/src/config.ts` accepts for `LND_CERT`/`LND_MACAROON`, so
  * an existing `.env.regtest.lnd` works here unchanged. Shared by the onchain
  * and Lightning LND adapters, which are two connections to the SAME node and
  * must never drift onto different credentials.
