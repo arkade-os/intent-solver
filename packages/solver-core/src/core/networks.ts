@@ -45,11 +45,6 @@ export interface NetworkProfile {
    */
   arkdNetwork: string
   /**
-   * Emulator service that co-signs covenant (ArkadeScript) spends, or undefined
-   * where none is known — EMULATOR_URL must then be configured explicitly.
-   */
-  emulatorUrl: string | undefined
-  /**
    * Whether BIP32 derivation should use the mainnet coin type.
    *
    * Genuinely a boolean — the derivation path is binary — but it belongs to the
@@ -89,7 +84,6 @@ export const NETWORKS = {
     invoicePrefix: 'bc',
     arkadeHrp: 'ark',
     arkdNetwork: 'bitcoin',
-    emulatorUrl: '<emulator-url>',
     isMainnet: true,
     minCheckpointExitDelaySeconds: undefined,
     explorers: { arkade: 'https://arkade.space', onchain: 'https://mempool.arkade.sh' },
@@ -102,7 +96,6 @@ export const NETWORKS = {
     invoicePrefix: 'tbs',
     arkadeHrp: 'tark',
     arkdNetwork: 'mutinynet',
-    emulatorUrl: undefined,
     isMainnet: false,
     // The hosted Service advertises 4096s, and the SDK cannot tell mutinynet from
     // signet — both are byte-identical `Network` structs — so it applies the 86400s
@@ -124,7 +117,6 @@ export const NETWORKS = {
     invoicePrefix: 'tbs',
     arkadeHrp: 'tark',
     arkdNetwork: 'signet',
-    emulatorUrl: undefined,
     isMainnet: false,
     minCheckpointExitDelaySeconds: undefined,
     explorers: { arkade: 'https://explorer.signet.arkade.sh', onchain: 'https://mempool.signet.arkade.sh' },
@@ -135,7 +127,6 @@ export const NETWORKS = {
     invoicePrefix: 'bcrt',
     arkadeHrp: 'tark',
     arkdNetwork: 'regtest',
-    emulatorUrl: undefined,
     isMainnet: false,
     // The SDK's regtest floor is already 1200, and the stack's own
     // ARKD_CHECKPOINT_EXIT_DELAY=1536 clears it. Nothing to relax.

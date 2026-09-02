@@ -731,11 +731,11 @@ export const loadConfig = (): Config => {
       if (raw === 'manual' || raw === 'auto' || raw === 'off') return raw
       throw new Error(`NOSTR_AD_PUBLISH must be off, manual or auto (got "${raw}")`)
     })(),
-    emulatorUrl: (() => {
-      const url = process.env.EMULATOR_URL ?? profile.emulatorUrl
-      if (!url) throw new Error(`no emulator known for ${raw}; set EMULATOR_URL`)
-      return url
-    })(),
+    // The operator's to supply, on every network, with no default shipped. The
+    // emulator co-signs covenant spends, so a URL baked in here would point a
+    // deployment's money path at whichever service this repository happened to
+    // name — a choice that belongs to whoever runs the solver.
+    emulatorUrl: required('EMULATOR_URL'),
     arkade: {
       mnemonic: required('ARK_MNEMONIC'),
       arkServerUrl: required('ARK_SERVER_URL'),

@@ -123,8 +123,10 @@ export const openArkade = async (): Promise<E2eArkade> => {
     arkadeHrp: profile.arkadeHrp,
     expectedArkdNetwork: profile.arkdNetwork,
   })
-  const emulatorUrl = process.env.EMULATOR_URL ?? profile.emulatorUrl
-  if (!emulatorUrl) throw new Error(`no emulator known for ${network}; set EMULATOR_URL`)
+  // The same rule the service applies: no network profile ships an emulator, so
+  // whoever runs this suite supplies one.
+  const emulatorUrl = process.env.EMULATOR_URL
+  if (!emulatorUrl) throw new Error('EMULATOR_URL is not set')
   const info = await new RestEmulatorProvider(emulatorUrl).getInfo()
   const limits = resolveLimits(network)
   return {
