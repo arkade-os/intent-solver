@@ -13,8 +13,17 @@ export {
   type QuoteRefusal,
   type SendServiceDeps,
 } from '@arkade-os/solver-corridors/send/orchestrator.js'
-export { arkadeOpsFromContext, covenantScriptFromRow, type EmulatorInfo } from '@arkade-os/solver-corridors/send/arkadeOps.js'
-export { SwapStore, type SendSwapRow, type SendSwapState, type QuoteRecord } from '@arkade-os/solver-corridors/db/swaps.js'
+export {
+  arkadeOpsFromContext,
+  covenantScriptFromRow,
+  type EmulatorInfo,
+} from '@arkade-os/solver-corridors/send/arkadeOps.js'
+export {
+  SwapStore,
+  type SendSwapRow,
+  type SendSwapState,
+  type QuoteRecord,
+} from '@arkade-os/solver-corridors/db/swaps.js'
 export { betterSqliteDriver, d1Driver, type SqlDriver, type D1Like } from '@arkade-os/solver-corridors/db/driver.js'
 export {
   createArkadeContext,
@@ -152,7 +161,12 @@ export {
 // rendezvous data rather than terms. `AdPublishMode` is exported because the
 // exported `Config` now carries one, so a consumer reading `nostrAdPublish`
 // would otherwise have no way to name its type.
-export { buildSolverAd, type SolverAd, type SolverAdInputs, type SolverAdPair } from '@arkade-os/solver-core/core/solverAd.js'
+export {
+  buildSolverAd,
+  type SolverAd,
+  type SolverAdInputs,
+  type SolverAdPair,
+} from '@arkade-os/solver-core/core/solverAd.js'
 export {
   AdPublisher,
   type AdPublishMode,
@@ -164,7 +178,11 @@ export {
 // the registry card advertises as `discovery_pubkey`. Exported because a
 // relay CLIENT needs exactly this to sign its own events, and re-deriving
 // BIP86 in a second place is how the two silently stop matching.
-export { deriveNostrIdentity, NOSTR_KIND_DIRECTED, NOSTR_KIND_BROADCAST } from '@arkade-os/solver-transport/relay/nostr.js'
+export {
+  deriveNostrIdentity,
+  NOSTR_KIND_DIRECTED,
+  NOSTR_KIND_BROADCAST,
+} from '@arkade-os/solver-transport/relay/nostr.js'
 
 // --------------------------------------------------------------------------
 // The solver SDK surface: everything needed to WRITE a corridor, and to swap

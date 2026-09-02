@@ -19,7 +19,12 @@
 
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
-import { defaultBidding, tokenBucket, type BiddingStrategy, type TokenBucket } from '@arkade-os/solver-core/core/openRfq.js'
+import {
+  defaultBidding,
+  tokenBucket,
+  type BiddingStrategy,
+  type TokenBucket,
+} from '@arkade-os/solver-core/core/openRfq.js'
 import { marketKeyForPair } from '@arkade-os/solver-core/core/marketKey.js'
 import type { RelayConnection, RelayEvent, RelaySubscription } from '../relay/connection.js'
 import { eventId } from '../relay/connection.js'

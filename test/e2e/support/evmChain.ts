@@ -26,7 +26,11 @@
  */
 
 import { hex } from '@scure/base'
-import { addressFromPrivateKey, signTransaction, type Eip1559Fields } from '@arkade-os/solver-rails-evm/evm/transaction.js'
+import {
+  addressFromPrivateKey,
+  signTransaction,
+  type Eip1559Fields,
+} from '@arkade-os/solver-rails-evm/evm/transaction.js'
 
 /** Where the e2e chain listens. Overridable for a differently-mapped container. */
 export const evmRpcUrl = (): string => process.env.EVM_E2E_RPC_URL ?? 'http://localhost:8545'

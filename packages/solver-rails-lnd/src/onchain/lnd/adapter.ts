@@ -25,7 +25,12 @@ import {
 } from 'lightning'
 import { hex } from '@scure/base'
 import { toFundedOutputs, witnessFromRawTx } from '@arkade-os/solver-rails-esplora/esplora.js'
-import { createEsploraClient, type EsploraAuth, type EsploraClient, spenderOf } from '@arkade-os/solver-rails-esplora/esplora.js'
+import {
+  createEsploraClient,
+  type EsploraAuth,
+  type EsploraClient,
+  spenderOf,
+} from '@arkade-os/solver-rails-esplora/esplora.js'
 import type {
   FundedOnchainOutput,
   OnchainBalance,

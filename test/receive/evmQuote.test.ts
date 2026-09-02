@@ -17,7 +17,10 @@
 import { describe, it, expect, vi } from 'vitest'
 import { hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { EvmReceiveSwapService, type EvmReceiveServiceDeps } from '@arkade-os/solver-corridors-evm/receive/evmOrchestrator.js'
+import {
+  EvmReceiveSwapService,
+  type EvmReceiveServiceDeps,
+} from '@arkade-os/solver-corridors-evm/receive/evmOrchestrator.js'
 import { EvmReceiveSwapStore } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { EVM_ORDER_MARGIN_SECONDS } from '@arkade-os/solver-core/core/evmSend.js'

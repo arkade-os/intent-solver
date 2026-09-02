@@ -59,7 +59,11 @@ import { lockupSource, runContractLifecycle } from '@arkade-os/solver-arkade/ark
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { RFQ_PAIR_SEND } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
-import { MAX_FINAL_CLTV_BLOCKS, maxServableExitDelay, minFinalCltvBlocksFor } from '@arkade-os/solver-core/core/receive.js'
+import {
+  MAX_FINAL_CLTV_BLOCKS,
+  maxServableExitDelay,
+  minFinalCltvBlocksFor,
+} from '@arkade-os/solver-core/core/receive.js'
 import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
 import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
 import { FakeLightningBackend } from '@arkade-os/solver-rails-fake/ln/fake/backend.js'

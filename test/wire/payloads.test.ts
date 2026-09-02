@@ -9,7 +9,12 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { rfqBidPayload, RFQ_PAIR_SEND, RFQ_REFUSAL_REASONS, toRfqReason } from '@arkade-os/solver-corridors/wire/payloads.js'
+import {
+  rfqBidPayload,
+  RFQ_PAIR_SEND,
+  RFQ_REFUSAL_REASONS,
+  toRfqReason,
+} from '@arkade-os/solver-corridors/wire/payloads.js'
 import type { QuoteRefusal as SendQuoteRefusal } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { QuoteRefusal as ReceiveQuoteRefusal } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import type { QuoteRefusal as OnchainSendQuoteRefusal } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'

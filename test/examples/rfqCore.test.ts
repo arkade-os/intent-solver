@@ -19,7 +19,11 @@ import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.
 import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
 import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
 import { FakeOnchainBackend } from '@arkade-os/solver-rails-fake/onchain/fake/backend.js'
-import { webSocketRelayConnection, matchesFilter, type RelayEvent } from '@arkade-os/solver-transport/relay/connection.js'
+import {
+  webSocketRelayConnection,
+  matchesFilter,
+  type RelayEvent,
+} from '@arkade-os/solver-transport/relay/connection.js'
 import { forgeInvoice } from '@arkade-os/solver-rails-fake/ln/fake/bolt11.js'
 import { ROUTE_CLTV_BUDGET_BLOCKS } from '@arkade-os/solver-core/core/send.js'
 import {

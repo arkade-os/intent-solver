@@ -41,7 +41,13 @@ import { approvalStepFor, encodeAllowance, encodeApprove } from './erc20Token.js
 // The port types live in core since the vendor-package split: a rail may only
 // import core, so the interface a vendor implements cannot live in rails.
 // Re-exported here so existing importers keep resolving.
-export type { EvmCall, JsonRpc, Erc20SwapLock, EvmHtlcBackend, EvmHtlcBackendDeps } from '@arkade-os/solver-core/ports/evm.js'
+export type {
+  EvmCall,
+  JsonRpc,
+  Erc20SwapLock,
+  EvmHtlcBackend,
+  EvmHtlcBackendDeps,
+} from '@arkade-os/solver-core/ports/evm.js'
 import type { EvmCall, EvmHtlcBackend, EvmHtlcBackendDeps, JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
 
 /** A call for someone else to sign and broadcast: where it goes, the calldata, and any value. */

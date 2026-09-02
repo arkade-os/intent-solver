@@ -5,7 +5,11 @@
  * Amounts are atomic units: USDT at 6 decimals against sats at 8.
  */
 import { describe, it, expect } from 'vitest'
-import { offerWithinTolerance, offerDirectionOn, type OfferPriceMarket } from '@arkade-os/solver-core/core/assetOfferPrice.js'
+import {
+  offerWithinTolerance,
+  offerDirectionOn,
+  type OfferPriceMarket,
+} from '@arkade-os/solver-core/core/assetOfferPrice.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
 
 /** BTC/USDT: base is BTC (8 decimals), quote is USDT (6). Feed is USDT per BTC. */

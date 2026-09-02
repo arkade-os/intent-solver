@@ -51,7 +51,10 @@ import { schnorr, secp256k1 } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { Address, OutScript } from '@scure/btc-signer'
 import { HOUR, MINUTE } from '@arkade-os/solver-core/core/timelocks.js'
-import { OnchainReceiveSwapStore, type OnchainReceiveSwapRow } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
+import {
+  OnchainReceiveSwapStore,
+  type OnchainReceiveSwapRow,
+} from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import type { OnchainSendBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'

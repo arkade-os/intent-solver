@@ -7,9 +7,18 @@ import { createCorridorRegistry, type CorridorDescriptor } from '@arkade-os/solv
 import { ALL_DESCRIPTORS, CORRIDOR_REGISTRY, descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { valueImports } from '../support/importScan.js'
 import { EXPOSED as LN_SEND_EXPOSED, NON_TERMINAL as LN_SEND_LIVE } from '@arkade-os/solver-corridors/db/swaps.js'
-import { EXPOSED as LN_RECV_EXPOSED, NON_TERMINAL as LN_RECV_LIVE } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
-import { EXPOSED as ON_SEND_EXPOSED, NON_TERMINAL as ON_SEND_LIVE } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
-import { EXPOSED as ON_RECV_EXPOSED, NON_TERMINAL as ON_RECV_LIVE } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
+import {
+  EXPOSED as LN_RECV_EXPOSED,
+  NON_TERMINAL as LN_RECV_LIVE,
+} from '@arkade-os/solver-corridors/db/receiveSwaps.js'
+import {
+  EXPOSED as ON_SEND_EXPOSED,
+  NON_TERMINAL as ON_SEND_LIVE,
+} from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import {
+  EXPOSED as ON_RECV_EXPOSED,
+  NON_TERMINAL as ON_RECV_LIVE,
+} from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 
 const CORRIDORS_DIR = fileURLToPath(new URL('../../packages/solver-corridors/src/corridors/', import.meta.url))
 

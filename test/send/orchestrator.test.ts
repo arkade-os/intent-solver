@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
-import { SendSwapService, type ArkadeOps, type CoupledReceiveRow } from '@arkade-os/solver-corridors/send/orchestrator.js'
+import {
+  SendSwapService,
+  type ArkadeOps,
+  type CoupledReceiveRow,
+} from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
@@ -25,7 +29,12 @@ import { QUOTE_RATE_LIMIT } from '@arkade-os/solver-core/core/rateLimit.js'
 import { TickErrorTracker } from '../../src/ops/tickErrors.js'
 import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { PaymentHashRegistered } from '@arkade-os/solver-core/ports/lightning.js'
-import type { HoldState, PayInvoiceParams, PaymentResult, SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
+import type {
+  HoldState,
+  PayInvoiceParams,
+  PaymentResult,
+  SendHtlcState,
+} from '@arkade-os/solver-core/ports/lightning.js'
 import { ORPHANED_REGISTRATION_SECONDS } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { rfqStateFromRow, rfqStatusPayload } from '@arkade-os/solver-corridors/wire/payloads.js'
 

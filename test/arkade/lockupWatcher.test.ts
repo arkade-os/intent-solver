@@ -19,7 +19,11 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { LockupWatcher, type ContractEvent, type ContractSource } from '@arkade-os/solver-arkade/arkade/lockupWatcher.js'
+import {
+  LockupWatcher,
+  type ContractEvent,
+  type ContractSource,
+} from '@arkade-os/solver-arkade/arkade/lockupWatcher.js'
 
 /** A stand-in for `ContractManager`, narrowed to what the watcher uses. */
 class FakeContracts implements ContractSource {

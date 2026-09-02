@@ -72,7 +72,10 @@ import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr, secp256k1 } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { Address, OutScript } from '@scure/btc-signer'
-import { OnchainReceiveSwapStore, type OnchainReceiveSwapRow } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
+import {
+  OnchainReceiveSwapStore,
+  type OnchainReceiveSwapRow,
+} from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import type { OnchainSendBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'

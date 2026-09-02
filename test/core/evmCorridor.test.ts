@@ -9,7 +9,13 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { CORRIDORS, evmCorridorFor, evmTokenOf, isCorridor, isEvmCorridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import {
+  CORRIDORS,
+  evmCorridorFor,
+  evmTokenOf,
+  isCorridor,
+  isEvmCorridor,
+} from '@arkade-os/solver-core/core/corridorPolicy.js'
 
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
 

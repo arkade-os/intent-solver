@@ -42,7 +42,13 @@ import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { hex } from '@scure/base'
 import { sha256 } from '@noble/hashes/sha2.js'
-import { encodeClaim, encodeLock, encodeRefund, swapKey, type Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
+import {
+  encodeClaim,
+  encodeLock,
+  encodeRefund,
+  swapKey,
+  type Erc20SwapLock,
+} from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import { createEvmHtlcBackend, type EvmHtlcBackend } from '@arkade-os/solver-rails-evm/evm/backend.js'
 import { createNonceSource } from '@arkade-os/solver-rails-evm/evm/nonce.js'
 import { addressFromPrivateKey } from '@arkade-os/solver-rails-evm/evm/transaction.js'
