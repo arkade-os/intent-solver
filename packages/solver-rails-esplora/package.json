@@ -1,0 +1,34 @@
+{
+  "name": "@arkade-os/solver-rails-esplora",
+  "version": "0.1.0",
+  "description": "Part of the Arkade intent-solver: rails-esplora primitives.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arkade-os/intent-solver.git",
+    "directory": "packages/solver-rails-esplora"
+  },
+  "homepage": "https://github.com/arkade-os/intent-solver#readme",
+  "type": "module",
+  "exports": {
+    "./*.js": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@arkade-os/solver-core": "workspace:*",
+    "@noble/hashes": "^2.0.0",
+    "@scure/base": "^2.0.0",
+    "@scure/btc-signer": "^2.0.1"
+  }
+}

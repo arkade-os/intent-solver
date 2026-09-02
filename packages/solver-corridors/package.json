@@ -1,0 +1,34 @@
+{
+  "name": "@arkade-os/solver-corridors",
+  "version": "0.1.0",
+  "description": "Part of the Arkade intent-solver: corridors primitives.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arkade-os/intent-solver.git",
+    "directory": "packages/solver-corridors"
+  },
+  "homepage": "https://github.com/arkade-os/intent-solver#readme",
+  "type": "module",
+  "exports": {
+    "./*.js": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@arkade-os/solver-arkade": "workspace:*",
+    "@arkade-os/solver-core": "workspace:*",
+    "@arkade-os/solver-db": "workspace:*",
+    "@arkade-os/solver-rails": "workspace:*"
+  }
+}

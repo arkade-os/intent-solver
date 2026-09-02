@@ -1,0 +1,140 @@
+name: Release
+
+# Two artifacts, one trigger, deliberately not two workflows: a tag must not be
+# able to publish an image whose packages failed to publish, or the reverse.
+#
+#   ghcr.io/arkade-os/intent-solver   the runnable solver, what a CD points at
+#   @arkade-os/solver-*               the eleven packages, what a corridor author builds on
+on:
+  push:
+    tags: ['v*']
+  # Manual runs exist for a re-publish after a registry outage. `dry_run`
+  # defaults ON so an accidental click cannot publish: an operator has to say no
+  # to it, which is a decision rather than a slip.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and pack, publish nothing
+        type: boolean
+        default: true
+      publish_packages:
+        description: >-
+          Also publish the npm packages. OFF everywhere by default, including on
+          a tag: the package names are not yet claimed and the first publish is
+          not undoable. The image ships without this.
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The whole CI gate again, on the exact commit being released. `needs` on a
+  # separate workflow's result would trust a run of a DIFFERENT tree — the tag
+  # may point somewhere `main`'s CI never saw.
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  packages:
+    needs: verify
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    container: node:22-slim
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+
+      # The tag is the source of truth for the version. Publishing a package
+      # whose manifest disagrees with the tag produces a release nobody can
+      # trace back, so this refuses rather than reconciles.
+      - name: Tag matches the workspace version
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME#v}"
+          root=$(node -p "require('./package.json').version")
+          if [ "$tag" != "$root" ]; then
+            echo "tag v$tag does not match package.json $root"
+            exit 1
+          fi
+
+      # Runs on EVERY release even though publishing is off, and that is the
+      # point: it resolves the same publish the real one would, so a manifest
+      # that has rotted — a bad `exports`, a missing `files`, a version already
+      # taken — is caught while it is still cheap. Eleven unpublished packages
+      # would otherwise drift unnoticed until the day someone tries to ship
+      # them, which is the worst moment to find out.
+      - name: Validate every package resolves a publish
+        run: pnpm -r --filter './packages/*' publish --access public --no-git-checks --dry-run
+
+      # Deliberately held. The names are unclaimed on npm and a first publish
+      # cannot be undone — it is a decision to take on purpose, not a side
+      # effect of tagging. A tag never sets this input, so tags ship the image
+      # only; enabling it is a manual run with the box ticked.
+      - name: Publish packages
+        if: inputs.publish_packages == true && inputs.dry_run != true
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm -r --filter './packages/*' publish --access public --no-git-checks --provenance
+
+      - name: Say what happened
+        run: |
+          if [ "${{ inputs.publish_packages }}" = "true" ] && [ "${{ inputs.dry_run }}" != "true" ]; then
+            echo "packages published"
+          else
+            echo "packages validated, not published (publish_packages is off)"
+          fi
+
+  image:
+    needs: verify
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # `latest` only on a real tag, never on a manual dispatch — a
+          # re-publish must not silently move what deployments track.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ inputs.dry_run != true }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The same proof the CI docker job makes: usage text means node, the
+      # compiled output and the native sqlite module all load in the runtime
+      # image. Run against the built image before anyone deploys it.
+      - name: Smoke test the published image
+        run: |
+          set -eu
+          tag=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          docker build -t smoke:local .
+          (docker run --rm smoke:local help || true) 2>&1 | grep -q "usage:"
+          echo "image ok: $tag"

@@ -1,0 +1,43 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "verbatimModuleSyntax": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "sourceMap": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    /**
+     * Typecheck resolves workspace packages to SOURCE, not `dist/`.
+     *
+     * The package `exports` map points at `dist/`, which is right for a
+     * consumer and wrong here: it would make `pnpm typecheck` require a build
+     * first, so a type error in a package would surface only after the build
+     * that its own error prevents. Mapping `*.js` -> `*.ts` explicitly (rather
+     * than a bare `*`) keeps the substitution exact under NodeNext, where
+     * specifiers carry the `.js` extension the emitted code will use.
+     */
+    "paths": {
+      "@arkade-os/solver-core/*.js": ["./packages/solver-core/src/*.ts"],
+      "@arkade-os/solver-db/*.js": ["./packages/solver-db/src/*.ts"],
+      "@arkade-os/solver-arkade/*.js": ["./packages/solver-arkade/src/*.ts"],
+      "@arkade-os/solver-rails/*.js": ["./packages/solver-rails/src/*.ts"],
+      "@arkade-os/solver-rails-esplora/*.js": ["./packages/solver-rails-esplora/src/*.ts"],
+      "@arkade-os/solver-rails-lnd/*.js": ["./packages/solver-rails-lnd/src/*.ts"],
+      "@arkade-os/solver-rails-fake/*.js": ["./packages/solver-rails-fake/src/*.ts"],
+      "@arkade-os/solver-rails-evm/*.js": ["./packages/solver-rails-evm/src/*.ts"],
+      "@arkade-os/solver-corridors/*.js": ["./packages/solver-corridors/src/*.ts"],
+      "@arkade-os/solver-corridors-evm/*.js": ["./packages/solver-corridors-evm/src/*.ts"],
+      "@arkade-os/solver-transport/*.js": ["./packages/solver-transport/src/*.ts"]
+    }
+  },
+  "include": ["src/**/*", "test/**/*", "scripts/**/*"],
+  "exclude": ["node_modules", "dist", "packages"]
+}

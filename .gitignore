@@ -1,0 +1,38 @@
+node_modules/
+dist/
+*.log
+*.sqlite
+# WAL is the mode this project actually runs (`journal_mode = WAL`,
+# src/db/driver.ts), so its sidecars are what a local run leaves behind;
+# -journal belongs to the rollback mode we do not use.
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+*.db
+.env
+.env.*
+# The committed templates. `.env.*` above is deliberately broad — a real config
+# holds the mnemonics — so every template has to be named back in explicitly,
+# and one that is not is silently absent rather than refused.
+!.env.example
+!.env.sample
+!.env.*.example
+.DS_Store
+coverage/
+
+# scratch probes and benchmark scratch from local experimentation
+__probe*
+.benchdata/
+
+# local wallet state — never commit
+.data/
+.vscode
+
+# LND credentials extracted for local testing (docs/runbook.md's LND regtest
+# walkthrough) — a macaroon is a bearer credential, never commit one.
+*.cert
+*.macaroon
+
+# TLC model-checker output (spec/tla) — state queues and fingerprints,
+# regenerable on every run, never source.
+spec/tla/states/

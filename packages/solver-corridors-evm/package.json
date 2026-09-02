@@ -1,0 +1,37 @@
+{
+  "name": "@arkade-os/solver-corridors-evm",
+  "version": "0.1.0",
+  "description": "Part of the Arkade intent-solver: corridors-evm primitives.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arkade-os/intent-solver.git",
+    "directory": "packages/solver-corridors-evm"
+  },
+  "homepage": "https://github.com/arkade-os/intent-solver#readme",
+  "type": "module",
+  "exports": {
+    "./*.js": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@arkade-os/solver-arkade": "workspace:*",
+    "@arkade-os/solver-core": "workspace:*",
+    "@arkade-os/solver-db": "workspace:*",
+    "@arkade-os/solver-rails-evm": "workspace:*",
+    "@arkade-os/sdk": "0.4.67",
+    "@scure/base": "^2.0.0",
+    "zod": "^3.24.1"
+  }
+}

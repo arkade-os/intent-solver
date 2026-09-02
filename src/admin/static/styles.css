@@ -1,0 +1,595 @@
+/*
+ * Solver console.
+ *
+ * The one design rule, and everything else follows from it: COLOUR IS RESERVED
+ * FOR RISK. `exposed` is amber, `failed` is brick, and `open`/`done` get no
+ * colour at all — they are plain text.
+ *
+ * That is not minimalism for its own sake. The four corridors disagree about
+ * what their state words mean (`claimed` is terminal success on the two send
+ * legs and money-still-out on the two receive legs), so the word alone is
+ * misleading and the PHASE has to carry the signal. If "fine" were green and
+ * "done" were blue, amber would be one of five competing colours instead of
+ * the only saturated thing on the screen.
+ *
+ * Monospace is the primary face, not an accent: every column here is a txid, a
+ * payment hash, a pubkey or a sat amount. System stack only — no webfont,
+ * because there is no build step and an ops box should not need a CDN.
+ */
+
+:root {
+  /* Cool near-black, deliberately off the framework ramps. Dark because this
+     is read in dim rooms during long sessions, not for fashion. */
+  --ground: #0d0f12;
+  --raised: #14171c;
+  --line: #232830;
+  --line-strong: #333a45;
+
+  --text: #d5d9df;
+  --text-dim: #8a929e;
+  /* Was #5b636e — 3.16:1 on ground, 2.96:1 on raised, both under the 4.5:1 AA
+     floor. This is the token the raw row JSON and the timeline use: small
+     monospace, the worst place to be short of contrast. */
+  --text-faint: #7a818a;
+
+  /* The only two saturated colours in the interface. */
+  --exposed: #e0a33e;
+  --exposed-bg: #2a2113;
+  /* Was #c05a4d — 4.40:1 on ground, 3.85:1 on its own chip. Both under AA, on
+     the colour whose whole job is to say a swap FAILED. */
+  --failed: #c66b5f;
+  --failed-bg: #2a1917;
+
+  --focus: #6d8ba6;
+
+  --mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Segoe UI Mono', 'Roboto Mono', Menlo, Consolas, monospace;
+  --sans: ui-sans-serif, system-ui, 'Segoe UI', Roboto, sans-serif;
+}
+
+/**
+ * Light mode.
+ *
+ * Only the tokens change; every rule below reads through them, which is what
+ * makes a second theme a block of values rather than a second stylesheet.
+ *
+ * Every value here was solved for the AA floor against the background it is
+ * actually composed over, not chosen by eye. `test/admin/contrast.test.ts`
+ * re-derives the ratios from THIS file and fails the build if a retune drops one
+ * under 4.5:1 — and holds both themes to the same bar, because whoever changes
+ * one of them cannot see the other.
+ */
+[data-theme='light'] {
+  --ground: #fbfbfc;
+  --raised: #ffffff;
+  --line: #e2e5ea;
+  --line-strong: #c2c8d1;
+
+  --text: #1a1d22;
+  --text-dim: #565d66;
+  /* Sits at the AA floor exactly: the lightest this may be and stay legible,
+     which is what a "faint" token is for. `--text-dim` is deliberately darker
+     so the hierarchy survives the inversion. */
+  --text-faint: #6e757e;
+
+  --exposed: #8d6727;
+  --exposed-bg: #fbf0d8;
+  --failed: #ab5045;
+  --failed-bg: #fdeae8;
+
+  --focus: #5d768d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--text);
+  font: 13px/1.5 var(--mono);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+}
+
+/* ---- status bar -------------------------------------------------------- */
+/* Always visible, always first. The question at 3am is "is money at risk right
+   now", so the answer is pinned to the top of every view rather than living on
+   a dashboard the operator has to navigate to. */
+
+.status {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 1.5rem;
+  align-items: baseline;
+  padding: 0.5rem 1rem;
+  background: var(--raised);
+  border-bottom: 1px solid var(--line);
+}
+
+.status b {
+  font-weight: 600;
+}
+
+.status .sep {
+  color: var(--text-faint);
+}
+
+.status .at-risk {
+  color: var(--exposed);
+  font-weight: 600;
+}
+
+/* ---- navigation -------------------------------------------------------- */
+
+nav {
+  display: flex;
+  gap: 0;
+  padding: 0 1rem;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+
+nav button {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font: inherit;
+  padding: 0.6rem 0.9rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+nav button:hover {
+  color: var(--text);
+}
+
+nav button[aria-current='true'] {
+  color: var(--text);
+  border-bottom-color: var(--text);
+}
+
+/* Pushed to the far end of the nav by the shared `.spacer`: reachable, never in
+   the way of the views. Dimmer than the view tabs — it is a preference, not
+   navigation. */
+nav button.theme {
+  color: var(--text-faint);
+}
+
+nav button.theme:hover {
+  color: var(--text);
+}
+
+main {
+  padding: 1rem;
+  max-width: 1400px;
+}
+
+/* ---- tables ------------------------------------------------------------ */
+/* Dense on purpose. An operator scanning for the one bad row wants as many
+   rows on screen as will fit, not generous padding. */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--line-strong);
+  padding: 0.35rem 0.6rem;
+  white-space: nowrap;
+}
+
+td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.35rem 0.6rem;
+  white-space: nowrap;
+}
+
+tbody tr:hover {
+  background: var(--raised);
+}
+
+tbody tr.clickable {
+  cursor: pointer;
+}
+
+td.num {
+  text-align: right;
+}
+
+/* ---- phase, the only coloured thing ------------------------------------ */
+
+.phase {
+  display: inline-block;
+  padding: 0 0.4rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  color: var(--text-dim);
+}
+
+.phase-exposed {
+  color: var(--exposed);
+  border-color: var(--exposed);
+  background: var(--exposed-bg);
+  font-weight: 600;
+}
+
+.phase-failed {
+  color: var(--failed);
+  border-color: var(--failed);
+  background: var(--failed-bg);
+}
+
+/* The corridor's own word, secondary to the phase beside it. */
+.state {
+  color: var(--text-dim);
+}
+
+/* `stuck` is spelled the same on all four corridors and always needs a human. */
+.state-stuck {
+  color: var(--failed);
+  font-weight: 600;
+}
+
+/* ---- panels ------------------------------------------------------------ */
+
+.panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 0.75rem;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  background: var(--raised);
+  padding: 0.75rem;
+}
+
+/*
+ * A signed card is long, and its signature and pubkeys are unbroken runs of
+ * hex with nowhere to wrap. Left alone, one card stretches the grid column and
+ * every panel beside it. Wrapping mid-token is the right trade here: this is
+ * JSON to be read and copied, not aligned.
+ */
+.panel pre {
+  margin: 0;
+  max-height: 18rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 0.8rem;
+}
+
+.panel h2 {
+  margin: 0 0 0.5rem;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 0.75rem;
+}
+
+.kv dt {
+  color: var(--text-dim);
+}
+
+.kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ---- backend status ---------------------------------------------------- */
+/* A dot, not a traffic light: only "down" is coloured, for the same reason
+   only "exposed" is. */
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  margin-right: 0.4rem;
+}
+
+.dot.down {
+  background: var(--failed);
+}
+
+/* ---- forms and buttons ------------------------------------------------- */
+
+button.act,
+input,
+select {
+  font: inherit;
+  background: var(--ground);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  padding: 0.3rem 0.6rem;
+}
+
+button.act {
+  cursor: pointer;
+}
+
+button.act:hover {
+  border-color: var(--text-dim);
+}
+
+button.act.armed {
+  border-color: var(--exposed);
+  color: var(--exposed);
+}
+
+button.act:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* ---- dialog ------------------------------------------------------------ */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  z-index: 50;
+}
+
+.dialog {
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  max-width: 620px;
+  width: 100%;
+  padding: 1rem;
+  /*
+   * Scrolls INSIDE the scrim rather than overflowing it. The scrim centres its
+   * child, so a dialog taller than the viewport was clipped at BOTH ends with
+   * no way to reach either — and this dialog is long by design: state, meaning,
+   * timeline, explorer links, the action groups and the raw row. On a laptop
+   * the actions were simply not reachable.
+   *
+   * `2rem` is the scrim's own padding, top and bottom.
+   */
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  /* Keeps a sticky-free footer from being flush against the scroll edge. */
+  overscroll-behavior: contain;
+}
+
+.dialog h2 {
+  margin: 0 0 0.5rem;
+  font-size: 14px;
+}
+
+.dialog .warning {
+  border-left: 3px solid var(--exposed);
+  background: var(--exposed-bg);
+  color: var(--text);
+  padding: 0.6rem 0.75rem;
+  margin: 0 0 0.75rem;
+  font-family: var(--sans);
+  line-height: 1.45;
+}
+
+.dialog .row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.75rem;
+}
+
+.dialog input {
+  flex: 1;
+}
+
+/* ---- banners ----------------------------------------------------------- */
+/* Errors are shown, never swallowed into the console: an operator who cannot
+   see that a request failed will assume it succeeded. */
+
+.banner {
+  border: 1px solid var(--failed);
+  background: var(--failed-bg);
+  color: var(--text);
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+  font-family: var(--sans);
+}
+
+.notice {
+  border: 1px solid var(--line-strong);
+  background: var(--raised);
+  color: var(--text-dim);
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+  font-family: var(--sans);
+}
+
+.muted {
+  color: var(--text-dim);
+}
+
+.faint {
+  color: var(--text-faint);
+}
+
+.sans {
+  font-family: var(--sans);
+}
+
+.right {
+  text-align: right;
+}
+
+.bar {
+  height: 6px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.bar > span {
+  display: block;
+  height: 100%;
+  background: var(--text-faint);
+}
+
+.bar.at-risk > span {
+  background: var(--exposed);
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* Operator-facing explanation of a failure or state (src/core/refusalReasons.ts). */
+.explain {
+  border-left: 2px solid var(--line);
+  padding: 0.25rem 0 0.25rem 0.75rem;
+  margin: 0.5rem 0;
+}
+.explain-title {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.72rem;
+  opacity: 0.65;
+  margin: 0 0 0.2rem;
+}
+.explain p {
+  margin: 0.2rem 0;
+}
+
+/*
+ * An armed action the last check does NOT support, versus one it does.
+ *
+ * The console used to present five equal buttons, three of which move real
+ * money, and an operator with no way to tell them apart pressed them in turn to
+ * see what happened. These two rules are the difference between guessing and
+ * being told; the contrary one still works, it just has to be meant.
+ */
+.act.armed.contrary {
+  border-color: var(--bad, #e5484d);
+  opacity: 0.72;
+}
+.act.armed.supported {
+  border-color: var(--good, #30a46c);
+}
+
+/* The action area: three numbered groups, not one row of equal options. */
+.nextstep {
+  border-left: 3px solid var(--accent, #6b8afd);
+  padding: 0.5rem 0.75rem;
+  margin: 0.75rem 0 0.25rem;
+  font-family: system-ui, sans-serif;
+  line-height: 1.45;
+}
+.actgroup {
+  margin-top: 0.6rem;
+}
+.actlabel {
+  font-size: 0.82em;
+  margin-bottom: 0.25rem;
+  letter-spacing: 0.03em;
+}
+/* A note in the timeline is a thing that HAPPENED, not a step through it. */
+tr.note td {
+  border-left: 3px solid var(--accent, #6b8afd);
+}
+
+/* Evidence sits under the step it belongs to, not in a list of its own. */
+.steplink {
+  margin-top: 0.15rem;
+  font-size: 0.92em;
+}
+
+/* The reassuring half of a stuck-but-refunded row, which was missing entirely. */
+.settled {
+  border-left: 3px solid var(--good, #30a46c);
+  padding: 0.5rem 0.75rem;
+  margin: 0 0 0.75rem;
+  font-family: system-ui, sans-serif;
+  line-height: 1.45;
+}
+
+/*
+ * An action in flight. Every action button is disabled while ANY of them runs —
+ * the hazard is two writes racing one row, not two clicks on one button — and
+ * the one actually running says which request is outstanding, so a row of dead
+ * buttons is legible rather than a console that has stopped responding.
+ */
+.act:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.act.running {
+  opacity: 1;
+}
+.spinner {
+  display: inline-block;
+  width: 0.7em;
+  height: 0.7em;
+  margin-right: 0.4em;
+  vertical-align: -0.05em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: act-spin 0.7s linear infinite;
+}
+@keyframes act-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The state still has to be visible without the motion. */
+  .spinner {
+    animation: none;
+    border-right-color: currentColor;
+    opacity: 0.5;
+  }
+}
+
+/*
+ * The swap search. Wide enough for a full payment hash, because the commonest
+ * use is pasting one whole and seeing whether this solver ever saw it.
+ */
+.toolbar input.search {
+  flex: 1 1 22rem;
+  min-width: 12rem;
+  max-width: 34rem;
+  font: inherit;
+  padding: 0.3rem 0.5rem;
+}

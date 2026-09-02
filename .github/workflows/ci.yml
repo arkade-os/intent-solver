@@ -1,0 +1,196 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Called by release.yml so a tag re-runs this whole gate on the EXACT commit
+  # being released. Depending on `main`'s last run instead would trust a result
+  # from a different tree — a tag can point anywhere.
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # This repository is the public LND reference solver. A proprietary Lightning
+  # backend lives in a separate private repo, and no trace of it may appear here
+  # — not an import, not a type, not a comment, not a doc line.
+  #
+  # A one-time scrub is not a guarantee; a merge or a copied comment reintroduces
+  # a name in seconds and nothing else would notice. This job is the guarantee.
+  # It runs first and takes ~2s.
+  #
+  # `grep -r` over the tree minus the directories git does not track. If this
+  # fails, do not weaken the pattern: rewrite the offending line to describe the
+  # CAPABILITY rather than the vendor ("a backend that cannot pre-commit a
+  # payment id"), which is what the rest of this codebase already does.
+  vendor-names:
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: No proprietary backend names anywhere in the tree
+        run: |
+          set -eu
+          # The names live in a data file, not in this pattern, for one reason:
+          # a literal here would match ITSELF and fail the job on a clean tree.
+          # That file is therefore the only thing excluded from the scan, and
+          # holding the list is its entire purpose — a reviewer sees the whole
+          # exclusion in one place rather than as a flag on a grep.
+          pattern=$(paste -sd'|' .github/forbidden-names.txt)
+          # `|| true`: grep exits 1 for "no matches", which is the SUCCESS case
+          # here, and `set -e` would otherwise kill the step on it.
+          found=$(grep -rniE "$pattern" . \
+            --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist \
+            --exclude=forbidden-names.txt \
+            || true)
+          if [ -n "$found" ]; then
+            echo "Proprietary backend names must not appear in this repository."
+            echo "Rewrite the line to describe the CAPABILITY rather than the"
+            echo "vendor — e.g. 'a backend that cannot pre-commit a payment id'"
+            echo "— which is what the rest of this codebase already does."
+            echo
+            echo "$found"
+            exit 1
+          fi
+          echo "clean"
+
+  build:
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    # Runs inside the same node:*-slim images the docker job below builds from,
+    # not on the bare runner: the bare ubuntu-latest runner crashes tsup's DTS
+    # worker thread while building the @arkade-os/sdk git dependency's prepack
+    # step, on every Node 22/24 patch tried, while the identical install under
+    # node:*-slim (containerized) is consistently fine — a runner-environment
+    # issue, not a Node version.
+    strategy:
+      # BOTH ends of the supported range, because `engines.node` is
+      # `>=22.6.0 <27` and a range nothing exercises is a claim, not a
+      # guarantee. 22 is active LTS until April 2027 and is what most operators
+      # are on; 24 is what this change was originally about.
+      #
+      # fail-fast is off deliberately: with it on, whichever version breaks
+      # first cancels the other, and the report cannot distinguish "24 is
+      # broken" from "22 is broken" — which is the only question a matrix
+      # exists to answer.
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    container: node:${{ matrix.node }}-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      # What a CONSUMER imports is dist/, and the unit suite runs before the
+      # build so it only ever sees src/. This also proves importing the SDK does
+      # not run the CLI: cli.ts calls main() and process.exit() at module load,
+      # so a stray edge back into it would end this process before the check.
+      - name: The built entrypoint exports a usable surface
+        run: |
+          node -e "
+          import('./dist/index.js').then((m) => {
+            const want = ['createServices', 'corridorSetFromDeps', 'createCorridorSet', 'buildApp', 'BaseSwapStore']
+            const missing = want.filter((k) => typeof m[k] !== 'function')
+            if (missing.length) { console.error('missing from dist:', missing.join(', ')); process.exit(1) }
+            console.log('dist exports:', want.join(', '))
+          }).catch((e) => { console.error('dist import failed:', e.message); process.exit(1) })
+          "
+
+      # Every step above runs as root inside the container, so the tree checkout
+      # wrote is root-owned. The `docker` job below runs directly on the runner
+      # as a non-root user and shares this workspace: its own checkout starts by
+      # clearing the previous one, which fails with EACCES against root's files.
+      # Hand the tree back before leaving. `/__w` is the container's view of the
+      # runner's work directory, and the mount root still carries the runner's
+      # own uid/gid, so it is the source of truth rather than a hardcoded number.
+      # `always()` because a red build must not also block the next job.
+      - name: Restore workspace ownership
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' /__w)" /__w
+
+  # Each shippable package set must resolve to EXACTLY its own packages, and
+  # build alone.
+  #
+  # test/boundaries.test.ts checks import direction; nothing in it stops a
+  # package.json declaring a dependency that drags another vendor's source into
+  # a partner's checkout. This pins the manifests. The expected list is exact,
+  # so a leak and an accidental removal both fail.
+  package-sets:
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    container: node:22-slim
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Arkade <-> EVM: no Lightning.
+          - name: evm
+            filters: --filter "@arkade-os/solver-corridors-evm..." --filter "@arkade-os/solver-transport..."
+            expected: solver-arkade solver-core solver-corridors-evm solver-db solver-rails-evm solver-transport
+          # LN + onchain on LND: no EVM.
+          - name: lnd
+            filters: --filter "@arkade-os/solver-corridors..." --filter "@arkade-os/solver-rails-lnd..." --filter "@arkade-os/solver-rails-fake..." --filter "@arkade-os/solver-transport..."
+            expected: solver-arkade solver-core solver-corridors solver-db solver-rails solver-rails-esplora solver-rails-fake solver-rails-lnd solver-transport
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+
+      - name: The ${{ matrix.name }} set resolves to exactly its own packages
+        # `set -eu`, not `-o pipefail`: the container's /bin/sh is dash, which
+        # has no pipefail. A failing pnpm still fails the step — `got` comes
+        # back empty and the comparison below rejects it.
+        run: |
+          set -eu
+          got=$(pnpm ${{ matrix.filters }} list --depth -1 --parseable \
+            | sed 's#.*[/\\]##' | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//')
+          want=$(echo "${{ matrix.expected }}" | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//')
+          echo "want: $want"
+          echo "got:  $got"
+          test "$got" = "$want"
+
+      - name: ...and builds alone
+        run: pnpm ${{ matrix.filters }} build
+
+      - name: Restore workspace ownership
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' /__w)" /__w
+
+  docker:
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    strategy:
+      # Same range as the build job, for the same reason. The Dockerfile's
+      # NODE_VERSION defaults to 22, so the unqualified `docker build` an
+      # operator or PaaS runs is the 22 leg; passing 24 proves the other end of
+      # `engines.node` produces a working image rather than merely being
+      # permitted by the manifest.
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build --build-arg NODE_VERSION=${{ matrix.node }} -t swap-provider:ci-${{ matrix.node }} .
+
+      # The CLI prints usage and exits non-zero when given no valid command;
+      # seeing that usage text proves node, the compiled output and the native
+      # sqlite module all load inside the runtime image.
+      - name: Smoke test image
+        run: (docker run --rm swap-provider:ci-${{ matrix.node }} help || true) 2>&1 | grep -q "usage:"

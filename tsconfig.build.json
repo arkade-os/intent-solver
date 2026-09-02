@@ -1,0 +1,30 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    /**
+     * Clear the source `paths` the typecheck config sets.
+     *
+     * Emitting is the one place the package must resolve through its `exports`
+     * map to `dist/`, exactly as a consumer does. Left inherited, the mapping
+     * pulls `packages/solver-core/src/*.ts` into THIS program, and every one of
+     * them is outside `rootDir: "src"` — so the build fails on files it should
+     * never have compiled in the first place.
+     */
+    "paths": {},
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": true,
+    "noEmit": false,
+    "incremental": true,
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "packages",
+    "test"
+  ]
+}

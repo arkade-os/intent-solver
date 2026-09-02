@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- An operator console is never something to index or preview. -->
+    <meta name="robots" content="noindex, nofollow" />
+    <title>solver console</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <!-- No CDN and no build step: everything this page needs is served from
+         the same process, so the console works on a box with no egress. -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>
+      <p style="padding: 1rem">This console needs JavaScript. The same data is available from the CLI.</p>
+    </noscript>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

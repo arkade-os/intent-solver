@@ -1,0 +1,68 @@
+# Single-VPS deployment. Purely outbound: no HTTP ingress and no published
+# ports at all. Swap requests arrive over a relay connection the container
+# OPENS, so nothing is accepted and nothing needs to be reachable. This is the
+# image's default command and the end-state architecture.
+services:
+  swap-provider:
+    build: .
+    restart: unless-stopped
+    # RELAY_URL is required in this mode; the process exits immediately without
+    # it rather than coming up deaf.
+    env_file: .env # SWAP_NETWORK, LN_BACKEND, ARK_MNEMONIC, ARK_SERVER_URL, RELAY_URL, ...
+    volumes:
+      - swap-data:/data # also carries the relay heartbeat the healthcheck reads
+
+  # HTTP variant: the same image with an API port instead of a relay
+  # connection. Uncomment in place of `swap-provider` above — running both
+  # would give one swap DB two money-movers.
+  # swap-provider-http:
+  #   build: .
+  #   restart: unless-stopped
+  #   command: ["serve"]
+  #   env_file: .env
+  #   environment:
+  #     HOST: 0.0.0.0         # container-internal only; reachability is decided below
+  #   # The image's default probes the relay heartbeat, which this mode never
+  #   # writes — so replace it with the real HTTP probe.
+  #   healthcheck:
+  #     test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT??8787)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+  #     interval: 30s
+  #   volumes:
+  #     - swap-data:/data
+  #   # ports:
+  #   #   - "127.0.0.1:8787:8787"   # host-local only; front with a VPN or tunnel
+
+  # Continuous SQLite replication of the money-critical files to any S3-style
+  # bucket. Optional but strongly recommended: a funded script whose row is
+  # lost is unclaimable and unrefundable by us.
+  #
+  # EVERY corridor gets its own database, so this needs a config file rather
+  # than the single-file `replicate <db> <url>` form: one stanza replicates one
+  # file, and a corridor missing from the list is a corridor whose funded rows
+  # are not backed up. Write /etc/litestream.yml as below and mount it.
+  #
+  #   dbs:
+  #     - path: /data/swaps.sqlite                  # Lightning send
+  #       replicas: [{ url: s3://YOUR_BUCKET/swaps.sqlite }]
+  #     - path: /data/swaps-onchain.sqlite          # onchain send
+  #       replicas: [{ url: s3://YOUR_BUCKET/swaps-onchain.sqlite }]
+  #     - path: /data/swaps-receive.sqlite          # Lightning receive
+  #       replicas: [{ url: s3://YOUR_BUCKET/swaps-receive.sqlite }]
+  #     - path: /data/swaps-onchain-receive.sqlite  # onchain receive
+  #       replicas: [{ url: s3://YOUR_BUCKET/swaps-onchain-receive.sqlite }]
+  #     - path: /data/swaps-admin.sqlite            # overrides + audit log
+  #       replicas: [{ url: s3://YOUR_BUCKET/swaps-admin.sqlite }]
+  #
+  # litestream:
+  #   image: litestream/litestream
+  #   restart: unless-stopped
+  #   command: replicate -config /etc/litestream.yml
+  #   environment:
+  #     LITESTREAM_ACCESS_KEY_ID: ...
+  #     LITESTREAM_SECRET_ACCESS_KEY: ...
+  #   volumes:
+  #     - swap-data:/data
+  #     - ./litestream.yml:/etc/litestream.yml:ro
+
+volumes:
+  swap-data:

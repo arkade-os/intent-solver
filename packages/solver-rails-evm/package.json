@@ -1,0 +1,33 @@
+{
+  "name": "@arkade-os/solver-rails-evm",
+  "version": "0.1.0",
+  "description": "Part of the Arkade intent-solver: rails-evm primitives.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arkade-os/intent-solver.git",
+    "directory": "packages/solver-rails-evm"
+  },
+  "homepage": "https://github.com/arkade-os/intent-solver#readme",
+  "type": "module",
+  "exports": {
+    "./*.js": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@arkade-os/solver-core": "workspace:*",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.0.0"
+  }
+}
