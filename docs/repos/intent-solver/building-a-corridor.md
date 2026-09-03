@@ -129,6 +129,20 @@ unfindable by `rfq_status_request` while still being served.
 - **Bound your exposure.** `AdmissionControl` is shared and passed in; use it, or
   your corridor is uncapped while every other one is not.
 
+## A worked one, that runs
+
+[`examples/lib/example-corridor.mjs`](../../../examples/lib/example-corridor.mjs)
+is every member above in plain code, with no state machine, no store and no
+settlement in the way. [`examples/corridor-host.mjs`](../../../examples/corridor-host.mjs)
+serves it:
+
+```sh
+pnpm build && node examples/corridor-host.mjs
+```
+
+No wallet, no database, no environment. It settles nothing — it issues a paper
+voucher — which is the point: every line is about the interface.
+
 ## Pinning it
 
 `test/packaging/sdkSurface.test.ts` asserts a consumer can define a corridor,
@@ -136,5 +150,9 @@ register it and serve it through the shipped host importing nothing but the
 entrypoint. `test/packaging/corridorInjection.test.ts` asserts it reaches the
 daemon: quotable, driven by `tickAll`, answering status, and refused at
 composition on a pair or stem collision.
+`test/examples/exampleCorridor.test.ts` drives the worked example above through
+the real host and asserts the obligations that are documented and unenforced.
 
-Copy those as the starting point for your own.
+Copy any of them as the starting point for your own. What the framework costs,
+counted, and the traps that have already been sprung:
+[`docs/authoring.md`](../../authoring.md).

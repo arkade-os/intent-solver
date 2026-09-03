@@ -82,6 +82,43 @@ profile: { invoice, refund_address } }`
 The RFQ family is the only wire family. The pre-RFQ `ln_send_*` shape was
 removed unserved — nothing was ever deployed against it.
 
+## Building your own solver
+
+Nothing about the four built-in corridors is privileged: they implement the same
+`Corridor` interface you would, and a corridor this build was never compiled
+against is served by the same host, driven by the same sweep and answered for by
+the same status route. Registering one is a single call —
+`createServices(config, { corridors: [mine] })` — and a BTC backend is a single
+call too, `registerLightningRail('mine', module)` with `LN_BACKEND=mine`.
+
+The **whole deployment** is describable in code as well: `Config` is a plain
+exported interface, `loadConfig()` is the environment adapter that produces one
+rather than the only source of one, and a solver serving its own corridors sets
+`lnBackend: null` and needs no rail at all.
+
+```ts
+const services = await createServices(myConfig, { corridors: [mine] })
+const app = buildApp({ corridors: services.corridors, readers: services.readers, network: 'bitcoin' })
+```
+
+The sweep loop is the one piece that is not reachable — it lives inside
+`cli.ts` — so an app assembled this way must run its own; see `docs/authoring.md`
+§ "The solver as a value" for the four lines and what they leave out.
+
+- **The guide:**
+  [`docs/repos/intent-solver/building-a-corridor.md`](docs/repos/intent-solver/building-a-corridor.md)
+  — the descriptor, the ten required members, the closed refusal vocabulary, and
+  what the host will _not_ do for you.
+- **A corridor that runs:**
+  [`examples/corridor-host.mjs`](examples/corridor-host.mjs) over
+  [`examples/lib/example-corridor.mjs`](examples/lib/example-corridor.mjs) — a
+  whole solver with no wallet, no database and no environment.
+  `pnpm build && node examples/corridor-host.mjs`.
+- **An app written as a value:** `test/packaging/appInjection.test.ts` — a whole
+  `Config` as a literal, no `process.env`, plus the sweep a consumer supplies.
+- **What it costs, measured, and the obligations nothing checks:**
+  [`docs/authoring.md`](docs/authoring.md).
+
 ## Layout
 
 A pnpm workspace. Twelve packages under `packages/`; the repo root holds the
