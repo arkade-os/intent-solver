@@ -331,17 +331,73 @@ field matching an expected value, **checked by the server** before anything
 runs — the browser dialog is a convenience, and bypassing it with a bare
 `fetch` gets refused the same way.
 
-| action               | confirm with       |
-| -------------------- | ------------------ |
-| `refund-now`         | the swap id        |
-| `onchain-refund-now` | the swap id        |
-| `reclaim-l1-htlc`    | the swap id        |
-| `pool-mint`          | the literal `MINT` |
+| action               | confirm with            |
+| -------------------- | ----------------------- |
+| `refund-now`         | the swap id             |
+| `onchain-refund-now` | the swap id             |
+| `reclaim-l1-htlc`    | the swap id             |
+| `pool-mint`          | the literal `MINT`      |
+| `fund-withdraw`      | the destination address |
 
 `onchain-refund-now` deserves the caution it asks for: for a `stuck` row it is
 correct in some cases and **a double-payout in others**, because the solver may
 already have paid out on the onchain leg. Read the row and the onchain HTLC
 first.
+
+### Funding: moving the solver's own liquidity
+
+A solver holds its money in more than one place — the Arkade float every
+corridor pays out of, the BTC rail's channel and onchain balances, and (with a
+chain configured) token liquidity for the EVM corridors. The wallet page's
+**funding** panel is one screen over all of them, driven by the fund-source seam
+in `packages/solver-app/src/ops/fundSources.ts`.
+
+A source declares three things: what it is, what it holds, and which of three
+operations it can perform. `depositAddress`, `settleDeposits` and `withdraw` are
+**optional methods**, so a source that cannot do one omits it — the same way
+`SendBackend.estimateSendFee` and `OnchainBackend.settleReceiveAddress` are
+optional on the ports below. The console reads those capabilities and draws only
+the buttons that can work; pressing one a source lacks (by `fetch`, say) is
+refused by name.
+
+Amounts are **decimal strings in the source's own base units**, not numbers. An
+ERC20 quantity is 256-bit and routinely past what a JS number holds exactly,
+which is why the EVM corridor's store declares `evm_amount` as TEXT.
+
+| source            | balance split                                          | deposit          | settle                      | withdraw |
+| ----------------- | ------------------------------------------------------ | ---------------- | --------------------------- | -------- |
+| `rail` (BTC rail) | channel out/in, onchain confirmed/unconfirmed, fee rate | onchain address  | if the backend has the step | yes      |
+| `arkade` (float)  | available, boarding, recoverable, total                 | boarding address | no — use `float-lifecycle`  | no       |
+
+`rail` is absent entirely on a deployment with no `LN_BACKEND`, the same way the
+four BTC corridors are. `arkade` declines to settle or withdraw on purpose:
+settling boarded sats is `float-lifecycle`'s job (it carries the CLTV guard, and
+a bare `settle()` would merge the whole float into one coin), and paying an
+arbitrary address out of the float would spend coins outside the process-local
+reservation ledger.
+
+**Nothing here opens Lightning channels.** Neither port has a channel primitive,
+so a rail deposit lands in its onchain wallet and whether it becomes inbound or
+outbound capacity is decided at the node. The console says so on the panel.
+
+A consumer adds its own source with `registerFundSource`, at import time above
+the entrypoint — same shape and same reasoning as `registerLightningRail`.
+
+`fund-withdraw` is the only action in the console whose destination is not fixed
+by a swap, which is why it is confirmed with the destination address rather than
+a fixed word: a literal becomes muscle memory, and a confirmation that differs
+per request cannot. The source then applies its own checks before touching a
+backend — the rail decodes the address against this deployment's network (the
+one mistake retyping cannot catch, since an operator confirming a wrong-chain
+address types the same wrong string twice) and refuses an amount above the
+**confirmed** balance. It is **not safe to repeat**: nothing persists or
+re-drives it, so each attempt is a separate payment and a withdrawal that timed
+out must be checked against the chain before retrying.
+
+Remember what `ADMIN_HOST` is: with the console reachable, `fund-withdraw` lets
+anything that can reach the port send a source's balance to an address of its
+choosing, and no `confirm` value can prevent that — the confirmation is supplied
+by the same caller. It is friction against operator error, not access control.
 
 Every action is written to an audit log — successes and failures both — in
 `<SWAP_DB_PATH>-admin.sqlite`, alongside settings overrides. Separate from the
