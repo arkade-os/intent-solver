@@ -251,11 +251,26 @@ describe('confirmKind is declared, not inferred', () => {
     }
   })
 
-  it('asks for a swap id only where an action is scoped to one swap', () => {
+  /**
+   * Anchored on what the SERVER compares, not on whether a `target` exists.
+   *
+   * `target` is "what this action acted on, for the audit row", which is not the
+   * same claim as "scoped to one swap" — `fund-withdraw` targets a destination
+   * ADDRESS and is scoped to no swap at all. Reading `target !== undefined` as
+   * swap-scoping was an accident of every targeted action having been swap-shaped
+   * until then, and it would have forced a wallet-level action to either prompt
+   * for a swap id it has none of or drop itself out of the audit log.
+   *
+   * Strictly stronger than that reading for the case it was written for: the
+   * regression was a new armed action inheriting `swap-id` and prompting for an
+   * identifier the operator cannot supply, and such an action's
+   * `expectedConfirm` does not read `body.id`, so it still fails here.
+   */
+  it('asks for a swap id only where the confirmation IS the swap id', () => {
     for (const [name, definition] of armedEntries) {
       if (definition.tier !== 'armed') continue
-      const scoped = definition.target !== undefined
-      expect(definition.confirmKind === 'swap-id', `${name} scoped=${scoped}`).toBe(scoped)
+      const readsTheId = definition.expectedConfirm({ id: 'swap-1' }) === 'swap-1'
+      expect(definition.confirmKind === 'swap-id', `${name} readsTheId=${readsTheId}`).toBe(readsTheId)
     }
   })
 
