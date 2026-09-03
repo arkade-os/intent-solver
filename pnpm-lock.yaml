@@ -168,6 +168,10 @@ importers:
       hono:
         specifier: ^4.13.0
         version: 4.13.0
+    devDependencies:
+      '@arkade-os/swap':
+        specifier: 0.0.10
+        version: 0.0.10(nostr-tools@2.24.1(typescript@5.9.3))
 
   packages/solver-arkade:
     dependencies:

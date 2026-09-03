@@ -36,5 +36,8 @@
     "@scure/base": "^2.0.0",
     "@scure/btc-signer": "^2.0.1",
     "hono": "^4.13.0"
+  },
+  "devDependencies": {
+    "@arkade-os/swap": "0.0.10"
   }
 }
