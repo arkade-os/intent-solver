@@ -898,8 +898,8 @@ client — so this looks like a client bug and is not one.
 Neither obvious lever helps. Raising `MAX_FINAL_CLTV_BLOCKS` moves nothing real:
 4074 blocks is about **28 days of a payer's funds** at nominal block time, and no
 routing node holds an htlc that long, so 2016 is reporting the wall rather than
-being it. Finishing `TODO(unilateral-exit)` does not help either — it would let
-the solver USE the leaf, but the 7-day CSV is unchanged.
+being it. The server-independent exit does not help either — the solver can now
+USE the leaf (`cli unilateral-exit`), but the 7-day CSV is unchanged.
 
 There are two ways out, and they are different decisions.
 
@@ -971,9 +971,10 @@ collaborative claim or refund exercises script construction and the server's
 willingness to co-sign a vtxo built at the override's delay — which is the thing
 that would fail if the value is under arkd's real floor, so it IS the test worth
 running. It does not exercise the CSV leaves themselves: those are reachable only
-through a unilateral exit, which nothing in `src/` performs
-(`TODO(unilateral-exit)`). A green swap therefore says the delay is accepted, not
-that the recourse it encodes has ever been executed.
+through a unilateral exit, which is operator-driven (`cli unilateral-exit <id>
+--go`) and has never been driven to completion on any network. A green swap
+therefore says the delay is accepted, not that the recourse it encodes has ever
+been executed.
 
 This is the better outcome by a distance, and it carries its own hazard, which
 is not symmetric with the one it removes:
@@ -1019,13 +1020,15 @@ Worth knowing before running a signet or mutinynet deployment against
 real-value assets, where the default cap is the only thing standing behind the
 window and nobody was asked to look at it.
 
-Two things make it a trade rather than a hole. The solver cannot execute that
-recourse today anyway (`TODO(unilateral-exit)`), so the window gate (d) reserves
-protects an action nothing in `src/` can take. And a same-sized loss on the other
-side is already accepted and documented in `packages/solver-arkade/src/arkade/covenant.ts`: with no
-unilateral-claim implementation, a censoring server after payment costs the
-CLIENT their claim, for exactly the same missing work. Gate (d) was guarding one
-leak in a hull with an acknowledged hole of the same size.
+This grew MORE expensive, not less. It used to be a trade rather than a hole
+because the solver could not execute the reserved recourse at all, so the window
+gate (d) reserves protected an action nothing could take — and a same-sized loss
+on the other side was accepted for exactly the same missing work. Both halves
+have changed: the exit exists now
+(`packages/solver-arkade/src/arkade/unilateralExit.ts`), so what this flag waives
+is a real recourse rather than a notional one. It is still not a window mainnet
+can serve this corridor without, which is the trade — but the trade is now
+against something the solver could otherwise do.
 
 The honest summary is that this corridor trusts mainnet arkd not to censor for
 as long as its exit delay. Prefer the shorter delay above where the real number
@@ -1037,10 +1040,13 @@ Two more worth knowing before wiring a deployment:
 - **A backend with no final-CLTV parameter on hold invoices cannot serve this
   corridor.** Without one, `createHoldInvoice` throws rather than mint an
   invoice whose `E` silently fails the bound. LND supports it via `cltv_delta`.
-- **The recourse is reserved but not yet executable.** `TODO(unilateral-exit)`
-  in `packages/solver-arkade/src/arkade/covenant.ts`: the leaf exists in the script and nothing in
-  `src/` spends it. The gate keeps the window open; running the exit inside it
-  still needs the on-chain unroll flow.
+- **The recourse is executable, and unproven.**
+  `packages/solver-arkade/src/arkade/unilateralExit.ts` spends the leaf through
+  the SDK's `UnilateralExit`, driven by `cli unilateral-exit <id> --go`. It is
+  operator-initiated by design — an exit costs the solver's own onchain fees and
+  gives up the cheap collaborative path a transient outage would have restored —
+  and NOTHING HAS DRIVEN ONE TO COMPLETION on any network, so the window it runs
+  in is reasoned rather than measured.
 
 ## Self-payment refresh, and what it does to hold invoices
 

@@ -49,6 +49,7 @@ import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.
 import { decodeInvoice, type DroppedHint } from '@arkade-os/solver-core/invoice/decode.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import type { HoldState, ReceiveBackend, SendBackend, SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 import { PaymentHashRegistered } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
@@ -1563,15 +1564,22 @@ export class SendSwapService {
       await store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: txid })
       return false
     } catch (error) {
-      // Past the deadline, a persistently failing claim means the Arkade server is
-      // censoring or down while the client's refund is open and racing us. Since
-      // this service has no server-independent exit yet (see TODO(unilateral-exit)),
-      // there is nothing left to retry that could win — so escalate to a human
-      // rather than loop silently. Before the deadline the failure is transient:
-      // rethrow so tickAll records it and the next sweep retries.
+      // Past the deadline, a persistently failing claim means the Arkade Service
+      // is censoring or down while the client's refund is open and racing us.
+      // Nothing COLLABORATIVE is left to retry that could win, so escalate to a
+      // human rather than loop silently. Before the deadline the failure is
+      // transient: rethrow so tickAll records it and the next sweep retries.
+      //
+      // What IS left is the server-independent exit, and the parked row names
+      // it. On this leg the client funds and the solver is the covenant
+      // receiver, so the solo path is `unilateralClaim` — the leaf that reveals
+      // the preimage this row already holds. `unilateralExitRecourse` reads that
+      // off the row's own roles rather than assuming the leg, and never throws,
+      // so it cannot turn an escalation into an error about the escalation.
       if (await this.refundDeadlineReached(row.refundLocktime)) {
         const detail = error instanceof Error ? error.message : String(error)
-        await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail}`)
+        const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
+        await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail} — ${recourse}`)
         return false
       }
       throw error

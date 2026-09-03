@@ -1668,6 +1668,22 @@ const detailDialog = () => {
               'read payment',
             )
           : null,
+        // On EVERY row, with no corridor gate and no `corridor` in the body:
+        // the action iterates the registry to find whichever corridor holds the
+        // id, so gating it here would re-close what that opened. The answer it
+        // gives — which leaf the solver can spend without the Arkade Service,
+        // and how long its CSV runs — is the same question on every corridor.
+        actButton(
+          'button.act',
+          {
+            'data-action': 'unilateral-exit-plan',
+            title:
+              'Which covenant leaf the solver can spend WITHOUT the Arkade Service, and how long its CSV runs. ' +
+              'Read-only. Performing the exit is `cli unilateral-exit <id> --go`.',
+            onclick: () => runAction('unilateral-exit-plan', { id: d.swap.id }),
+          },
+          'exit plan',
+        ),
       ),
       actionGroup(
         '2 · resolve',

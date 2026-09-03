@@ -52,6 +52,7 @@ import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/co
 import { RFQ_PAIR_RECEIVE } from '../wire/lightningReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
@@ -1121,7 +1122,16 @@ export class ReceiveSwapService {
       // gives a human somewhere to go — which is what makes escalating safe at all.
       if (this.now() - row.updatedAt >= REFUND_CENSORSHIP_GRACE) {
         const detail = error instanceof Error ? error.message : String(error)
-        await store.fail(row.id, 'refunding', `refund failing past the refund deadline: ${detail}`)
+        // Name the server-independent recourse ON THE ROW, not only in a log
+        // line: this is the row a human reads days later, and a refund the
+        // Arkade Service will not co-sign is exactly the case the exit exists
+        // for. On this leg the solver funds the lockup, so its solo path is
+        // `unilateralRefundWithoutReceiver` — `unilateralExitRecourse` reads
+        // that off the row's own roles rather than assuming the leg, and never
+        // throws, so a diagnosis can never be replaced by an error about the
+        // diagnosis.
+        const recourse = unilateralExitRecourse(receiveCovenantRowFor(row), { solverPubkey: arkade.solverPubkey })
+        await store.fail(row.id, 'refunding', `refund failing past the refund deadline: ${detail} — ${recourse}`)
         return false
       }
       throw error

@@ -134,6 +134,32 @@ export interface CorridorReader {
    */
   liveLockups?(): Promise<readonly unknown[]>
 
+  /**
+   * ONE row's Arkade lockup, in the same shape {@link liveLockups} reports, plus
+   * whatever preimage that row has learned — or null when this corridor holds no
+   * such id.
+   *
+   * Not `liveLockups` filtered, and the difference is the whole point: that one
+   * reports RECOVERABLE rows, and the row a server-independent exit is reached
+   * for is a parked one. `stuck` is terminal, so it is in no sweep and in no
+   * live set — and it is exactly the state a censored refund or claim lands in.
+   *
+   * `unknown` for the same reason `liveLockups` uses it: core must not name
+   * `CovenantScriptRow`, which belongs to the Arkade layer. The caller narrows
+   * it through `assertCovenantScriptRow`, which is what stops a malformed row
+   * from being carried into script construction.
+   *
+   * The preimage rides along because it is the other half of the same question:
+   * on a leg where the solver is the covenant receiver its solo leaf is the
+   * CLAIM, whose witness is the secret, and a lever that made an operator paste
+   * one by hand would be reached for at the worst possible moment.
+   *
+   * OPTIONAL, and absence means "no Arkade lockup of mine" — never "skip me",
+   * the same contract {@link liveLockups} states. A corridor that has them and
+   * omits this leaves its rows with no operator-driven recourse at all.
+   */
+  lockupFor?(id: string): Promise<{ lockup: unknown; preimage: string | null } | null>
+
   committedSats(): Promise<number>
 
   page(options: PageOptions): Promise<{ swaps: CorridorSwapView[]; nextCursor: string | null }>

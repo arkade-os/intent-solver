@@ -76,6 +76,9 @@ import { applyOverrides } from './admin/settings.js'
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import type { Services } from './ops/services.js'
 import { refundNow, onchainRefundNow, reclaimL1Htlc } from './ops/refunds.js'
+import { planExitForSwap } from './ops/unilateralExit.js'
+import { quoteUnilateralExit, startUnilateralExit } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
+import { unilateralExitDepsFor } from '@arkade-os/solver-arkade/arkade/unilateralExitOps.js'
 import { claimNow } from './ops/claims.js'
 import { poolPlan, mintPool } from './ops/pool.js'
 import { maybeMintPool, runFloatLifecycle } from './ops/float.js'
@@ -1387,6 +1390,63 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    * It neither refunds nor claims — that decision is separate, and `read-payment`
    * is what informs it. This only stops the machine.
    */
+  /**
+   * The recourse that had no code behind it until now: spend this lockup's leaf
+   * WITHOUT the Arkade Service, by landing the VTXO on Bitcoin first.
+   *
+   * Reach for it when a row is parked with `claim failing past the refund
+   * deadline` or `refund failing past the refund deadline` — the failure detail
+   * on such a row already names which leaf this would spend. Both mean the
+   * Service is censoring or gone, which is the only situation an exit is worth
+   * its cost: it is slow (the leaf's CSV runs from when the lockup CONFIRMS
+   * onchain, not from now), it spends the solver's own onchain sats on fees, and
+   * it forfeits the cheap collaborative path that a transient outage would have
+   * restored.
+   *
+   * QUOTES BY DEFAULT. Without `--go` nothing is signed, broadcast or spent, and
+   * every refusal the real thing would make is reached — so the quote is the
+   * check, not a preview of one. `--go` runs `UnilateralExit.prepare`, which
+   * signs every transaction of the exit and BROADCASTS a funding splitter as a
+   * side effect. That is not reversible.
+   *
+   * The preimage is read off the row for a leg where the solver is the covenant
+   * receiver; passing one overrides it. Either way it is checked against the
+   * row's own payment hash before any witness is built.
+   */
+  async 'unilateral-exit'([id, ...rest]) {
+    if (!id) throw new GiveUp('usage: unilateral-exit <id> [preimage] [--go]')
+    const go = rest.includes('--go')
+    const preimage = rest.find((arg) => !arg.startsWith('--'))
+    const config = loadConfig()
+    // `allCorridors`: this unwinds an EXISTING row, including one belonging to a
+    // corridor since switched off — the same reasoning every refund command uses.
+    const services = await createServices(config, { allCorridors: true })
+    try {
+      const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
+      const { pair, plan } = await planExitForSwap(services.corridors, id, { solverPubkey, preimage })
+      log('swap', id, 'on', pair)
+      log(`leaf ${plan.leaf} as the covenant ${plan.role}, ${plan.delay.value} ${plan.delay.unit} of CSV`)
+      log('  the CSV runs from the moment the lockup CONFIRMS onchain, not from now')
+
+      const deps = await unilateralExitDepsFor(services.arkade)
+      log('sweeping to', deps.options.sweepAddress)
+      const quote = await quoteUnilateralExit(deps, plan)
+      log('quote:', json(quote.result.totals), 'shortfall', quote.result.shortfallSats, 'sats')
+      for (const skip of quote.skipped) log('SKIPPED', skip.outpoint, '—', skip.reason)
+
+      if (!go) {
+        log('nothing done — re-run with --go to sign the exit and broadcast its funding splitter')
+        return
+      }
+      const started = await startUnilateralExit(deps, plan)
+      log('EXIT PREPARED,', started.result.steps.length, 'step(s), funding splitter broadcast')
+      log('package:', json(started.result))
+      log('drive it with UnilateralExit.Executor against any Esplora endpoint; it is keyless from here')
+    } finally {
+      await services.close()
+    }
+  },
+
   async 'park-swap'([id, ...reason]) {
     const why = reason.join(' ').trim()
     if (!id || !why) throw new GiveUp('usage: park-swap <id> <reason...>')

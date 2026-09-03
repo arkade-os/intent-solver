@@ -81,7 +81,7 @@ interface ReadableStore<Row> {
  * id it does not hold, and "this corridor has no such swap" is a routine answer
  * rather than a fault.
  */
-const readerFor = <Row extends { id: string; pkScript: string }>(
+const readerFor = <Row extends { id: string; pkScript: string; preimage: string | null }>(
   descriptor: CorridorDescriptor,
   store: ReadableStore<Row>,
   project: (row: Row) => CorridorSwapView,
@@ -98,6 +98,19 @@ const readerFor = <Row extends { id: string; pkScript: string }>(
 ): CorridorReader => ({
   descriptor,
   liveLockups: async () => (await store.findRecoverable()).map(toCovenantRow),
+  // Written once here rather than four times, so all four BTC corridors gain
+  // the server-independent exit together and none can be forgotten — the shape
+  // of bug `tick` and `park-swap` each shipped once. `store.get` throws on an id
+  // this corridor does not hold, which is the routine answer during
+  // fall-through, not a fault; `detail` above reads it the same way.
+  //
+  // `preimage` is on the row type by CONSTRAINT, not by hope: `Row` requires it,
+  // so a fifth corridor whose row has no such column fails to compile here
+  // rather than reporting null for a secret it actually holds.
+  lockupFor: async (id) => {
+    const row = await store.get(id).catch(() => null)
+    return row ? { lockup: toCovenantRow(row), preimage: row.preimage } : null
+  },
   statusFor: async (rfqId) => {
     const row = await store.findByRfqId(rfqId)
     return row ? statusPayload(row, rfqId) : null

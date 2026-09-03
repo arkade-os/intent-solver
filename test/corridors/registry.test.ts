@@ -5,6 +5,12 @@ import { fileURLToPath } from 'node:url'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { createCorridorRegistry, type CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 import { ALL_DESCRIPTORS, CORRIDOR_REGISTRY, descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
+import {
+  lightningReceiveReader,
+  lightningSendReader,
+  onchainReceiveReader,
+  onchainSendReader,
+} from '@arkade-os/solver-corridors/corridors/adapters.js'
 import { valueImports } from '../support/importScan.js'
 import { EXPOSED as LN_SEND_EXPOSED, NON_TERMINAL as LN_SEND_LIVE } from '@arkade-os/solver-corridors/db/swaps.js'
 import {
@@ -53,6 +59,28 @@ describe('the corridor registry', () => {
 
   it('gives every corridor a shell-safe env stem', () => {
     for (const descriptor of ALL_DESCRIPTORS) expect(descriptor.envStem).toMatch(/^[A-Z][A-Z0-9_]*$/)
+  })
+
+  /**
+   * The server-independent exit is offered on EVERY row, so it must be able to
+   * reach every corridor's rows. A lever rendered everywhere and keyed to one
+   * store is the shape of bug `tick` and `park-swap` each shipped once, and this
+   * one is reached for a parked row on the leg where the Arkade Service stopped
+   * answering — the worst moment to discover it only ever read one table.
+   *
+   * `readerFor` writes `lockupFor` once for all four, which is what makes this
+   * hold; the check exists so a fifth reader built by hand cannot quietly skip
+   * it. Stub stores, because what is under test is which methods exist.
+   */
+  it('lets every BTC corridor describe one row’s lockup, not just its live ones', () => {
+    const store = {} as never
+    const readers = [
+      lightningSendReader(store),
+      lightningReceiveReader(store),
+      onchainSendReader(store),
+      onchainReceiveReader(store),
+    ]
+    for (const reader of readers) expect(typeof reader.lockupFor).toBe('function')
   })
 
   it('never lists a delivered state as live', () => {
