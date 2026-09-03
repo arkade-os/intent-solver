@@ -249,17 +249,25 @@ describe('detailDialog — actions offered on every corridor', () => {
     return [...found].sort()
   }
 
-  it('is exactly the two known ones — a third must be a decision, not a surprise', () => {
+  it('is exactly the known ones — a new one must be a decision, not a surprise', () => {
     // Pinned so the derivation above cannot quietly stop working: if a refactor
     // moves the gates and every action starts reading as universal, this fails
     // rather than passing an emptier rule.
-    expect(universalActions()).toEqual(['park-swap', 'tick'])
+    //
+    // `unilateral-exit-plan` arrived third and this test is why it was checked
+    // rather than assumed: it resolves its corridor by searching the registry
+    // for the id, which is right for an operator who has a swap id and no pair.
+    expect(universalActions()).toEqual(['park-swap', 'tick', 'unilateral-exit-plan'])
   })
 
   it('dispatches each of them through the corridor REGISTRY, not the closed union', () => {
     for (const name of universalActions()) {
       const run = runBlockOf(name)
-      expect(run, `${name} must resolve its corridor from services.corridors`).toContain('services.corridors.get(')
+      // `services.corridors` rather than `.get(` specifically: an action that
+      // knows the pair looks it up, and one that has only an id hands the whole
+      // registry to a helper that searches it. Both are the registry; only the
+      // closed union is the bug, and the assertion below is what names it.
+      expect(run, `${name} must resolve its corridor from services.corridors`).toContain('services.corridors')
       // `requireCorridor` is the closed-union validator and belongs to
       // `read-payment`, which is genuinely Lightning-send-only. On an action
       // rendered everywhere it is the bug: it refuses by naming four pairs.
