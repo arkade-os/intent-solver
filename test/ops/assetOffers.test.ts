@@ -10,7 +10,10 @@ import { AssetOfferService, parseAssetMarkets, type AssetOfferDeps } from '@arka
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
-import type { Offer } from '@arkade-os/swap'
+import { encodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap'
+import { Extension, UnknownPacket, asset } from '@arkade-os/sdk'
+import { Transaction } from '@scure/btc-signer'
+import { base64, hex } from '@scure/base'
 
 const USDT = '11'.repeat(34)
 const SCRIPT = new Uint8Array(34).fill(0xab)
@@ -288,6 +291,89 @@ describe('tickAll', () => {
     await service.consider(found)
     expect(await service.tickAll()).toBe(0)
     expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+  })
+})
+
+describe('consumeOfferTxs — the discovery intake', () => {
+  /**
+   * A real funding transaction, encoded the way the maker's wallet encodes one
+   * and the way arkd hands it back. Nothing here is hand-rolled TLV: `encodeOffer`
+   * is the same function that produced the packet solverd would emit, so a change
+   * to the wire format breaks this rather than passing against our own dialect.
+   */
+  const fundingTx = (over: Partial<Offer> = {}): string => {
+    const published = {
+      swapPkScript: SCRIPT,
+      wantAmount: 1_000n,
+      offerAsset: asset.AssetId.fromString(USDT),
+      makerPkScript: new Uint8Array(34).fill(0xcd),
+      makerPublicKey: new Uint8Array(32).fill(0x11),
+      emulatorPubkey: new Uint8Array(32).fill(0x22),
+      ...over,
+    } as Offer
+    const tx = new Transaction({ allowUnknownOutputs: true, disableScriptCheck: true })
+    tx.addOutput({ script: published.swapPkScript, amount: 500n })
+    const out = Extension.create([new UnknownPacket(OFFER_PACKET_TYPE, encodeOffer(published))]).txOut()
+    tx.addOutput({ script: out.script, amount: out.amount })
+    return base64.encode(tx.toPSBT())
+  }
+
+  const stream = async function* (txs: readonly string[]): AsyncGenerator<{ txid: string; tx: string }> {
+    for (const tx of txs) yield { txid: 'announced', tx }
+  }
+
+  it('decides an offer decoded off the stream, keyed to the outpoint it funds', async () => {
+    const { store, service } = await build()
+    const raw = fundingTx()
+    await service.consumeOfferTxs(stream([raw]))
+
+    const row = await store.findById('fill-1')
+    expect(row).toMatchObject({ state: 'fillable', wantAmount: 1_000n, offerAssetId: USDT })
+    // The txid comes from the transaction, not from the `txid` the stream
+    // announced beside it: the row must name the outpoint settlement will spend.
+    expect(row!.offerTxid).toBe(Transaction.fromPSBT(base64.decode(raw)).id)
+    expect(row!.offerVout).toBe(0)
+    expect(row!.offerPkScript).toBe(SCRIPT_HEX)
+  })
+
+  it('does not let one undecodable transaction end the stream', async () => {
+    // Anyone can put a transaction on this stream. A malformed packet is normal
+    // traffic, and a loop that dies on it goes deaf to every offer after it.
+    const { store, service } = await build()
+    await service.consumeOfferTxs(stream(['not a transaction at all', fundingTx()]))
+    expect(await store.listNonTerminal()).toHaveLength(1)
+  })
+
+  it('keeps going when deciding one offer throws, and reports it', async () => {
+    const errors: unknown[] = []
+    const { store, service } = await build({
+      outputsAt: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('indexer down'))
+        .mockResolvedValue([{ script: SCRIPT_HEX, value: 500, assets: [{ assetId: USDT, amount: 900n }] }]),
+      onError: (_id, error) => void errors.push(error),
+    })
+    // Two DIFFERENT offers: one outpoint would be deduplicated by the store.
+    await service.consumeOfferTxs(stream([fundingTx(), fundingTx({ wantAmount: 1_100n })]))
+    expect(errors).toHaveLength(1)
+    expect(await store.listNonTerminal()).toHaveLength(1)
+  })
+
+  it('ignores a transaction carrying no offer packet without recording anything', async () => {
+    const bare = new Transaction({ allowUnknownOutputs: true, disableScriptCheck: true })
+    bare.addOutput({ script: SCRIPT, amount: 500n })
+    const { store, service } = await build()
+    await service.consumeOfferTxs(stream([base64.encode(bare.toPSBT())]))
+    expect(await store.listNonTerminal()).toHaveLength(0)
+  })
+
+  it('observes the deposit at the script rather than trusting the funding output', async () => {
+    // The transaction says 500 sats landed. What decides is what the chain still
+    // holds there, which is the read `outputsAt` performs — an offer whose
+    // deposit has since been spent must not be recorded as fillable.
+    const { store, service } = await build({ outputsAt: async () => [] })
+    await service.consumeOfferTxs(stream([fundingTx()]))
+    expect(await store.listNonTerminal()).toHaveLength(0)
   })
 })
 

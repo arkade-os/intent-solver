@@ -23,6 +23,7 @@ import {
 } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
 import { isSwapNetwork, NETWORKS, type NetworkProfile, type SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { lightningRailNames } from './ops/rails.js'
+import { parseAssetMarkets, type AssetMarket } from './ops/assetOffers.js'
 import type { ArkadeWalletConfig } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 
@@ -46,6 +47,29 @@ const intFromEnv = (name: string, fallback: number, min: number, max = Infinity)
     throw new Error(`${name} must be ${range}, got ${process.env[name]}`)
   }
   return value
+}
+
+/**
+ * A whole, non-negative amount in the want leg's own units — asset units, or
+ * sats when the leg is BTC.
+ *
+ * `bigint`, and not `intFromEnv`: an asset amount is 256-bit and routinely
+ * exceeds `Number.MAX_SAFE_INTEGER` (`db/offerFills.ts` stores these as TEXT for
+ * the same reason). Reading a payout ceiling through a double is how a bound
+ * becomes larger than the operator wrote.
+ *
+ * No fallback. These are only read when {@link Config.offerMarkets} is
+ * non-empty, and there is no safe default for "how much of the float may one
+ * offer take" — that number is the deployment's to state.
+ */
+const requiredBigintFromEnv = (name: string): bigint => {
+  const raw = process.env[name]?.trim()
+  if (!raw) throw new Error(`${name} is not set, and OFFER_MARKETS names a market to fill`)
+  // `BigInt` accepts `0x`/`0o` prefixes and rejects `5e5` and `1.0`; the digit
+  // test pins it to the plain decimal an operator would write, so a value that
+  // parses to something other than what was typed cannot get through.
+  if (!/^\d+$/.test(raw)) throw new Error(`${name} must be a whole number of units, got ${JSON.stringify(raw)}`)
+  return BigInt(raw)
 }
 
 export interface LndConfig {
@@ -166,6 +190,33 @@ export interface Config {
    * directions of a token share it. @see core/evmCorridorConfig
    */
   evmMarkets: readonly EvmMarket[]
+  /**
+   * Asset-swap markets this solver TAKES offers on (`OFFER_MARKETS`).
+   *
+   * Empty is the whole offer-packet path off, and is the default: nothing
+   * subscribes, nothing is decided, nothing is spent. Not a corridor — both legs
+   * are on Arkade and the maker's covenant obliges the fill to pay them, so
+   * there is no HTLC, no deadline and no refund. @see ops/assetOffers.ts
+   *
+   * The solver is always the TAKER. There is deliberately no knob for
+   * publishing an offer: an offer is a standing commitment with no expiry, so
+   * publishing one writes a free option.
+   */
+  offerMarkets: readonly AssetMarket[]
+  /**
+   * Inclusive bounds on ONE offer's payout, in the want leg's own units.
+   *
+   * Both `0n` exactly when {@link Config.offerMarkets} is empty — unread rather
+   * than meaningful, since a deployment serving no market never gets as far as
+   * an amount. With a market named, both are required: they are the ceiling on
+   * how much of the float a single discovered offer may take, and no default
+   * this repository could ship would be the operator's answer.
+   *
+   * A market's own `pricing` entry can narrow them per DIRECTION; these are the
+   * deployment-wide fallback. @see AssetMarketPricing
+   */
+  offerMinFillAmount: bigint
+  offerMaxFillAmount: bigint
   /**
    * Whether `lightning:BTC->arkade:BTC` may be served when the solver's own
    * solo recourse opens AFTER the incoming htlc's `E` — the #69 window.
@@ -828,6 +879,22 @@ export const loadConfig = (): Config => {
     )
   }
 
+  // The bounds are read ONLY when a market is served, so a deployment that
+  // serves none needs neither variable — the same shape as the EVM knobs, which
+  // are inert without `EVM_TOKENS`. Zeroes here are unread, not permissive.
+  const offerMarkets = parseAssetMarkets(process.env.OFFER_MARKETS)
+  const offerMinFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv('OFFER_MIN_FILL_AMOUNT') : 0n
+  const offerMaxFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv('OFFER_MAX_FILL_AMOUNT') : 0n
+  // Refused at boot rather than per offer: inverted bounds refuse every offer,
+  // which is indistinguishable from a quiet market and would be diagnosed as
+  // one. `evaluateOfferFill` compares against both, so it cannot report this.
+  if (offerMaxFillAmount < offerMinFillAmount) {
+    throw new Error(
+      `OFFER_MAX_FILL_AMOUNT ${offerMaxFillAmount} is below OFFER_MIN_FILL_AMOUNT ${offerMinFillAmount}, ` +
+        'which would refuse every offer',
+    )
+  }
+
   return {
     network: raw,
     profile,
@@ -847,6 +914,9 @@ export const loadConfig = (): Config => {
     // resolved stops the deployment instead of advertising a pair it will then
     // refuse every request against.
     evmMarkets: evmMarkets(parseEvmTokens(process.env.EVM_TOKENS), (name) => process.env[name]),
+    offerMarkets,
+    offerMinFillAmount,
+    offerMaxFillAmount,
     swapDbPath: swapDbPath(),
     poolAutoMint: poolAutoMintFromEnv(),
     lnReceiveAcceptUnilateralGap: lnReceiveAcceptUnilateralGapFromEnv(raw),

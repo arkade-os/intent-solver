@@ -54,7 +54,7 @@ const envNamesInSource = (): Set<string> => {
     for (const m of text.matchAll(/process\.env(?:\.([A-Z][A-Z0-9_]+)|\['([A-Z][A-Z0-9_]+)'\])/g)) {
       names.add((m[1] ?? m[2]) as string)
     }
-    for (const m of text.matchAll(/\b(required|intFromEnv)\(\s*'([A-Z][A-Z0-9_]+)'/g)) {
+    for (const m of text.matchAll(/\b(required|intFromEnv|requiredBigintFromEnv)\(\s*'([A-Z][A-Z0-9_]+)'/g)) {
       names.add(m[2] as string)
     }
     // `resolveLndSecret(NAME)` reads BOTH `NAME` and `NAME_PATH` — inline or

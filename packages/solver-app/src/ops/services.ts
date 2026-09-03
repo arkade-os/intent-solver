@@ -72,6 +72,10 @@ import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive
 import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import { poolPlan, mintPool, committedAcrossCorridors } from './pool.js'
+import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
+import { AssetOfferService } from './assetOffers.js'
+import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
+import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 
 export interface Services {
   /**
@@ -127,6 +131,21 @@ export interface Services {
    */
   evmSendService: EvmSendSwapService | null
   evmReceiveService: EvmReceiveSwapService | null
+  /**
+   * The offer-packet path, or NULL when this deployment serves no market
+   * (`OFFER_MARKETS` unset, which is the default).
+   *
+   * NOT a corridor, and absent from `corridors`/`readers` rather than missing
+   * from them: both legs are on Arkade and the maker's covenant obliges the fill
+   * to pay them, so there is no HTLC, no deadline and no refund for a corridor's
+   * machinery to drive. @see ops/assetOffers.ts
+   *
+   * Nullable together with its store on one condition, the way the EVM pair is:
+   * a deployment serving no market would otherwise get an `offer_fill` table it
+   * never asked for and a subscription to a stream it has no use for.
+   */
+  offerStore: OfferFillStore | null
+  assetOffers: AssetOfferService | null
   /**
    * Settings overrides and the action audit log, in their own database. Open
    * whether or not the console is running: operator actions are auditable from
@@ -336,6 +355,42 @@ export const createServices = async (
   // only affects new quotes, never the reconstruction of funded scripts.
   const emulatorInfo = await new RestEmulatorProvider(config.emulatorUrl).getInfo()
   const arkadeOps = await arkadeOpsFromContext(arkade, { url: config.emulatorUrl, pubkey: emulatorInfo.signerPubkey })
+
+  /**
+   * The offer-packet path. Off unless a market is named, like the EVM pair, and
+   * in the swap file for the reason `db/layout.ts` gives about the EVM tables:
+   * `offer_fill` has no previous release and so no legacy split file to preserve.
+   *
+   * The solver is always the TAKER here, and nothing in this construction can
+   * publish an offer — there is no maker seam to configure.
+   *
+   * Read off `policy`, not `config`, by the rule this file states for anything
+   * that decides what gets served. No override touches these three today, so the
+   * two carry the same values — reading `policy` is what keeps that true if one
+   * is ever added, rather than something to remember at that point.
+   */
+  const servesOffers = policy.offerMarkets.length > 0
+  const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
+  const assetOffers = offerStore
+    ? new AssetOfferService({
+        store: offerStore,
+        markets: policy.offerMarkets,
+        minFillAmount: policy.offerMinFillAmount,
+        maxFillAmount: policy.offerMaxFillAmount,
+        // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
+        balance: () => arkade.wallet.getBalance(),
+        outputsAt: (offerPkScript) => offerOutputsAt(arkade, offerPkScript),
+        // Swap Protocol V1 § 5.1 is a MUST, and the key it needs is one this
+        // process already holds — so it is passed rather than left optional.
+        // Absent, `consider()` documents itself as skipping that check.
+        serverPubkey: arkade.wallet.arkServerPublicKey,
+        // THE SPEND. Wired here because this is where the wallet and the
+        // emulator meet; every guard on it lives in `arkade/offerSettle.ts`.
+        settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
+        onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
+      })
+    : null
+
   /**
    * Whether to build a BTC corridor's service — its own switch, and a rail to
    * run on.
@@ -817,6 +872,8 @@ export const createServices = async (
     evmReceiveStore,
     evmSendService,
     evmReceiveService,
+    offerStore,
+    assetOffers,
     adminStore,
     arkade,
     ln: rail?.ln ?? null,
@@ -847,6 +904,7 @@ export const createServices = async (
         ['onchainStore', () => onchainStore.close()],
         ['receiveStore', () => receiveStore.close()],
         ['onchainReceiveStore', () => onchainReceiveStore.close()],
+        ['offerStore', () => offerStore?.close()],
         ['adminStore', () => adminStore.close()],
         ['arkade', () => arkade.close()],
         ['ln', () => rail?.ln.close?.()],

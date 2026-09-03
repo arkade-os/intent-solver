@@ -10,12 +10,16 @@
  * why offers are absent from `CORRIDORS` rather than missing from it. The solver
  * is always the TAKER: publishing an offer would write a free option.
  *
- * Two seams are NOT built and are injected rather than faked:
+ * Both ends are now built, and both stay INJECTED rather than reached for:
  *
- * - discovery — nothing yet receives offer packets (`OFFER_PACKET_TYPE = 3`)
- *   off the relay and decodes them. `consider()` takes what discovery produces.
- * - settlement — `settle` spends the offer's deposit while paying the maker.
- *   Absent, every fillable offer is recorded and left `fillable`.
+ * - discovery — `consumeOfferTxs` feeds `consider()` from a stream of funding
+ *   transactions. `streamOfferTxs` produces them and `offerFromFundingTx`
+ *   decodes the packet (`OFFER_PACKET_TYPE = 3`); this module takes the
+ *   iterable, so a test needs neither arkd nor a socket.
+ * - settlement — `settle` spends the offer's deposit while paying the maker;
+ *   `arkade/offerSettle.ts` is the implementation the CLI injects. Still
+ *   optional, and absent it leaves every fillable offer recorded and
+ *   `fillable`: a deployment that decides but cannot spend is a valid one.
  */
 import type { Offer } from '@arkade-os/swap'
 import { hex } from '@scure/base'
@@ -28,6 +32,7 @@ import {
 import { offerDirectionOn, offerWithinTolerance } from '@arkade-os/solver-core/core/assetOfferPrice.js'
 import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import { offerFillInputFrom } from '@arkade-os/solver-arkade/arkade/offerFill.js'
+import { offerFromFundingTx } from '@arkade-os/solver-arkade/arkade/offerPacket.js'
 import { offerDepositFrom, type OfferOutputView } from '@arkade-os/solver-arkade/arkade/offerDeposit.js'
 import { offerInventoryFrom, type SpendableBalance } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { offerIsConsistent } from '@arkade-os/solver-arkade/arkade/offerConsistency.js'
@@ -229,6 +234,36 @@ export class AssetOfferService {
       offerAmount: input.offerAmount,
     })
     return { fill: true, id: row.id }
+  }
+
+  /**
+   * Decide every offer a stream of funding transactions carries.
+   *
+   * The discovery half. `streamOfferTxs` says WHICH transactions carry an offer
+   * packet — arkd evaluates that filter, so it proves presence and nothing more
+   * — and `offerFromFundingTx` says what the packet is and which outpoint funds
+   * it. Anything it cannot use is skipped rather than raised: a transaction with
+   * no offer we can read is not an error, it is the filter being broader than
+   * the decoder.
+   *
+   * ONE OFFER'S FAILURE MUST NOT END THE STREAM. Every input here arrives from
+   * a public relay, so a packet that breaks `consider` is normal traffic — and a
+   * loop that dies on it goes deaf to every offer after it, silently, for as
+   * long as the process runs. Reported through `onError` and stepped over.
+   *
+   * Runs until the stream ends, which for `streamOfferTxs` means its signal
+   * aborted: this is a long-lived consumer, not a pass.
+   */
+  async consumeOfferTxs(txs: AsyncIterable<{ txid: string; tx: string }>): Promise<void> {
+    for await (const event of txs) {
+      try {
+        const found = offerFromFundingTx(event.tx)
+        if (found === null) continue
+        await this.consider(found)
+      } catch (error) {
+        this.deps.onError?.(event.txid, error)
+      }
+    }
   }
 
   /**
