@@ -186,6 +186,30 @@ export interface Corridor extends CorridorReader {
    */
   tickAll(): Promise<number>
 
+  /**
+   * Take ONE row out of the sweep, with the reason recorded on it.
+   *
+   * REQUIRED, and required for the same reason {@link tickAll} is: only the
+   * corridor knows which of its own states are still live, and where a failed
+   * row belongs once it is not. A row that cannot be parked is one the sweep
+   * retries forever, so a corridor without this has no way to end an incident.
+   *
+   * The console offers it on EVERY row — it is the only lever that stops the
+   * sweep — and that promise went unenforced while this lived in the app as a
+   * function reaching one corridor's store directly. Onchain-send, both receive
+   * legs and every EVM pair threw from a store that had never held their rows.
+   *
+   * Answers the state the row LANDED in, which the caller must not assume: a
+   * corridor routes by exposure, so a row where the solver may already be out of
+   * pocket lands somewhere a human has to look at, and a clean one does not.
+   *
+   * MUST refuse a terminal row rather than reporting success. MUST re-read after
+   * the write and refuse if the row moved, because a sweep racing the park makes
+   * it a silent no-op — and reporting whatever state was then found would tell
+   * an operator the lever worked at the exact moment they most rely on it.
+   */
+  park(id: string, reason: string): Promise<{ state: string }>
+
   // ---- Optional capabilities. Absence degrades, documented per method. ----
 
   /**
@@ -279,4 +303,52 @@ export const createCorridorReaderSet = (corridors: readonly CorridorReader[]): C
     },
     [Symbol.iterator]: () => byPair.values(),
   }
+}
+
+/**
+ * The reference {@link Corridor.park}, over any store that can `get` and `fail`.
+ *
+ * Shared rather than written six times because the obligations are short to
+ * state and easy to get subtly wrong — the re-read especially, whose absence
+ * turns a park the sweep raced into a reported success. A corridor is free to
+ * write its own; none of the built-ins needs to.
+ *
+ * The state lists are PASSED, not read off the store, because each store keeps
+ * its own vocabulary private and that is right: which states are live, and
+ * which a failure lands in, are the corridor's facts and not this module's.
+ */
+export const parkVia = async <State extends string>(
+  store: {
+    get(id: string): Promise<{ state: State }>
+    fail(id: string, from: State, reason: string): Promise<void>
+  },
+  states: { readonly live: readonly State[]; readonly parked: readonly State[] },
+  id: string,
+  reason: string,
+): Promise<{ state: string }> => {
+  const trimmed = reason.trim()
+  if (!trimmed) throw new Error('a reason is required: a parked row with no explanation is a mystery later')
+
+  const row = await store.get(id)
+  if (!states.live.includes(row.state)) {
+    throw new Error(`swap ${id} is already ${row.state}; only a live swap can be parked`)
+  }
+
+  // `fail` routes by exposure — a row where the solver may already be out of
+  // pocket lands somewhere a human has to look at, a clean one does not — so
+  // where this ends up is the corridor's decision and gets reported, not assumed.
+  await store.fail(id, row.state, trimmed)
+
+  // Re-read and CHECK, because `fail` delegates to a compare-and-swap and
+  // DISCARDS its result. A sweep that advanced the row between the read above
+  // and the write leaves the park a silent no-op, and answering with whatever
+  // state we happen to find would tell an operator `PARKED -> paid` — nonsense
+  // at the exact moment they are relying on the lever. Asserting membership in
+  // `parked` rather than merely "no longer live" is what catches that: a row the
+  // sweep drove to its own terminal success is not live either.
+  const after = await store.get(id)
+  if (!states.parked.includes(after.state)) {
+    throw new Error(`swap ${id} moved to ${after.state} while being parked — the sweep raced us; re-read it and retry`)
+  }
+  return { state: after.state }
 }

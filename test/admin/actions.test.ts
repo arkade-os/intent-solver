@@ -287,6 +287,29 @@ describe('tick across corridors', () => {
     expect(await response.json()).toMatchObject({ result: { row: { id: 'swap-1', state: 'locked' } } })
   })
 
+  /**
+   * `park-swap` is the second action the console renders on EVERY row, and it
+   * broke the same way `tick` did — wider, in fact, because it reached the
+   * Lightning-send store DIRECTLY rather than dispatching at all. Onchain-send,
+   * both receive legs and every EVM pair got a throw from a store that has never
+   * held their rows, on the one lever that stops the sweep re-driving them.
+   */
+  it('parks a row on a corridor that is not Lightning-send', async () => {
+    const park = vi.fn().mockResolvedValue({ state: 'stuck' })
+    const services = fakeServices({
+      corridors: corridorSet({
+        'arkade:BTC->onchain:BTC': { park, detail: async () => ({ raw: {} }) },
+      }),
+    })
+    const response = await post(
+      'park-swap',
+      { id: 'swap-1', corridor: 'arkade:BTC->onchain:BTC', reason: 'indexer will never confirm', confirm: 'swap-1' },
+      services,
+    )
+    expect(response.status).toBe(200)
+    expect(park).toHaveBeenCalledWith('swap-1', 'indexer will never confirm')
+  })
+
   it('still says "not enabled" for a corridor the registry does not serve', async () => {
     // The disabled case must stay distinguishable from the unknown one: an
     // operator reading "not enabled" reaches for config, and that is right.
@@ -560,17 +583,20 @@ describe('park-swap', () => {
   })
 
   it('parks with the reason once confirmed', async () => {
-    const fail = vi.fn()
+    const park = vi.fn().mockResolvedValue({ state: 'stuck' })
     const services = fakeServices({
-      store: {
-        get: vi.fn().mockResolvedValueOnce({ id: 'swap-1', state: 'paying' }).mockResolvedValue({ state: 'stuck' }),
-        fail,
-      },
+      corridors: corridorSet({ 'arkade:BTC->lightning:BTC': { park, detail: async () => ({ raw: {} }) } }),
     })
-    const response = await post('park-swap', { id: 'swap-1', reason: 'orphaned request', confirm: 'swap-1' }, services)
+    const response = await post(
+      'park-swap',
+      { id: 'swap-1', corridor: 'arkade:BTC->lightning:BTC', reason: 'orphaned request', confirm: 'swap-1' },
+      services,
+    )
 
     expect(response.status).toBe(200)
-    expect(fail).toHaveBeenCalledWith('swap-1', 'paying', 'orphaned request')
+    // The corridor's own `park`, not a store write reached around it: which
+    // states are live and where a given-up row lands are the corridor's facts.
+    expect(park).toHaveBeenCalledWith('swap-1', 'orphaned request')
   })
 })
 

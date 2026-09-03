@@ -59,6 +59,7 @@ import { lockupSource, runContractLifecycle } from '@arkade-os/solver-arkade/ark
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { RFQ_PAIR_SEND } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import type { Corridor } from '@arkade-os/solver-core/core/corridor.js'
 import {
   MAX_FINAL_CLTV_BLOCKS,
   maxServableExitDelay,
@@ -75,7 +76,7 @@ import { applyOverrides } from './admin/settings.js'
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import type { Services } from './ops/services.js'
 import { refundNow, onchainRefundNow, reclaimL1Htlc } from './ops/refunds.js'
-import { claimNow, parkSwap } from './ops/claims.js'
+import { claimNow } from './ops/claims.js'
 import { poolPlan, mintPool } from './ops/pool.js'
 import { maybeMintPool, runFloatLifecycle } from './ops/float.js'
 import { lightningRailFor, requireLn, requireOnchain } from './ops/rails.js'
@@ -612,6 +613,25 @@ const startAdminServer = async (
       }
     },
   }
+}
+
+/**
+ * The corridor whose store holds `id`, or null.
+ *
+ * Only for commands that take an id and NOT a corridor. The console never needs
+ * this — every row it renders carries its own pair — and `actions.ts` refuses to
+ * guess for exactly the reason this is safe here and not there: a swap id is
+ * unique only within its own store, so a search is sound only because ids are
+ * `randomUUID()` and no second store can answer for one.
+ *
+ * `detail` rather than `get`: it already answers null for an id a corridor does
+ * not hold, where `get` throws.
+ */
+const corridorHolding = async (services: Services, id: string): Promise<Corridor | null> => {
+  for (const corridor of services.corridors) {
+    if (await corridor.detail(id)) return corridor
+  }
+  return null
 }
 
 const commands: Record<string, (args: string[]) => Promise<void>> = {
@@ -1373,9 +1393,17 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const config = loadConfig()
     const services = await createServices(config, { allCorridors: true })
     try {
-      const row = await services.store.get(id)
-      log('swap', row.id, 'is', row.state)
-      const { state } = await parkSwap(services, id, why)
+      // Which corridor holds it has to be DISCOVERED here, unlike in the console
+      // where every rendered row carries its own. Searching the stores is safe
+      // in a way `tick`'s doc rules out for itself: ids are `randomUUID()`, so
+      // the first store to answer is the only store that can answer. This read
+      // the Lightning-send store alone, so parking an onchain, receive or EVM
+      // row failed with "not found" on a row that plainly existed.
+      const owner = await corridorHolding(services, id)
+      if (!owner) throw new GiveUp(`no corridor on this deployment holds swap ${id}`)
+      const detail = await owner.detail(id)
+      log('swap', id, 'is', detail?.swap.state, 'on', owner.descriptor.pair)
+      const { state } = await owner.park(id, why)
       log('PARKED ->', state, '—', why)
     } finally {
       await services.close()

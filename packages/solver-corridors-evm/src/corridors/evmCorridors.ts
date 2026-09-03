@@ -24,7 +24,12 @@
  *   inherited unnoticed.
  */
 
-import type { Corridor, CorridorReader, CorridorSwapView } from '@arkade-os/solver-core/core/corridor.js'
+import {
+  parkVia,
+  type Corridor,
+  type CorridorReader,
+  type CorridorSwapView,
+} from '@arkade-os/solver-core/core/corridor.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 import type { PageOptions } from '@arkade-os/solver-core/core/page.js'
 import { diagnose, phaseOfStates } from '@arkade-os/solver-core/core/swapView.js'
@@ -197,6 +202,11 @@ export const evmSendCorridor = (
     await service.tick(id)
   },
   tickAll: async () => (await service.tickAll()).length,
+  // One parked state, not the BTC pair: these stores' `fail` transitions to
+  // `stuck` whatever the row was doing, because an EVM lock is on a chain
+  // somebody else confirms — there is no leg where the solver can say for itself
+  // that nothing of its own was exposed.
+  park: (id, reason) => parkVia(store, { live: EVM_SEND_NON_TERMINAL, parked: ['stuck'] }, id, reason),
   refundSweep: () => service.refundSweep(),
 })
 
@@ -211,4 +221,5 @@ export const evmReceiveCorridor = (
     await service.tick(id)
   },
   tickAll: async () => (await service.tickAll()).length,
+  park: (id, reason) => parkVia(store, { live: EVM_RECEIVE_NON_TERMINAL, parked: ['stuck'] }, id, reason),
 })

@@ -1440,7 +1440,9 @@ const armedButton = (name, d) => {
         if (name !== 'park-swap') return armDialog(name, { id: d.swap.id }, contrary ? because : null)
         const why = window.prompt('Why is this swap being parked? Recorded on the row.')
         if (!why || !why.trim()) return
-        return armDialog(name, { id: d.swap.id, reason: why.trim() })
+        // `corridor` because park-swap is offered on EVERY row and now dispatches
+        // through the registry: a swap id is unique only within its own store.
+        return armDialog(name, { id: d.swap.id, corridor: d.swap.corridor, reason: why.trim() })
       },
     },
     name,

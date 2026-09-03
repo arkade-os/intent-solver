@@ -29,7 +29,7 @@ import {
   onchainReceiveRefundNow,
   onchainReceiveClaimNow,
 } from '../../ops/refunds.js'
-import { claimNow, parkSwap } from '../../ops/claims.js'
+import { claimNow } from '../../ops/claims.js'
 import { requireLn } from '../../ops/rails.js'
 import { capabilityRefusal, fundSources, requireFundSource, summarise } from '../../ops/fundSources.js'
 import { mintPool, poolPlan } from '../../ops/pool.js'
@@ -459,7 +459,20 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'STOPS this swap being driven. The sweep will not touch it again and it cannot resolve itself afterwards; an ' +
       'exposed row lands in `stuck` for a human, an unexposed one in `refused`. Use it when a swap is failing in a ' +
       'way that retrying cannot fix. It does NOT refund or claim — decide that separately, with read-payment.',
-    run: (services, body) => parkSwap(services, requireId(body), requireReason(body)),
+    // Through the registry, like `tick`. This reached the Lightning-send store
+    // directly, so the button the console renders on EVERY row threw on
+    // onchain-send, both receive legs and every EVM pair — the one lever that
+    // stops the sweep re-driving a row, absent exactly where a row was stuck.
+    run: async (services, body) => {
+      // Validate the REQUEST before routing it: an operator who forgot the
+      // reason should be told that, not told about a corridor they did supply.
+      const id = requireId(body)
+      const reason = requireReason(body)
+      const corridor = requireCorridorName(body)
+      const served = services.corridors.get(corridor)
+      if (!served) throw new Error(`the ${corridor} corridor is not enabled on this deployment`)
+      return served.park(id, reason)
+    },
   },
 
   'onchain-refund-now': {

@@ -118,7 +118,7 @@ The sweep loop is the one piece that is not reachable — it lives inside
 
 - **The guide:**
   [`docs/repos/intent-solver/building-a-corridor.md`](docs/repos/intent-solver/building-a-corridor.md)
-  — the descriptor, the ten required members, the closed refusal vocabulary, and
+  — the descriptor, the eleven required members, the closed refusal vocabulary, and
   what the host will _not_ do for you.
 - **A corridor that runs:**
   [`examples/corridor-host.mjs`](examples/corridor-host.mjs) over

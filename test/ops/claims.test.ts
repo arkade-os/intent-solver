@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
-import { SwapStore, type QuoteRecord } from '@arkade-os/solver-corridors/db/swaps.js'
-import { claimNow, parkSwap } from '@arkade-os/solver-app/ops/claims.js'
+import { NON_TERMINAL, SwapStore, type QuoteRecord } from '@arkade-os/solver-corridors/db/swaps.js'
+import { claimNow } from '@arkade-os/solver-app/ops/claims.js'
+import { parkVia } from '@arkade-os/solver-core/core/corridor.js'
 import type { SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 
 const PREIMAGE = 'ab'.repeat(32)
@@ -99,8 +100,16 @@ describe('claimNow', () => {
  * tick throws had NO operator action that could stop it. Parking it took a
  * hand-written script against the live database, inside the container, during
  * an incident — the exact shape of thing that should be a button.
+ *
+ * These now drive `parkVia` with the SAME two lists `lightningSendCorridor.park`
+ * passes it, so they exercise the production path rather than a copy of it. The
+ * app-level `parkSwap` they used to call is gone: it reached this one store
+ * directly while the console offered its button on every corridor.
  */
-describe('parkSwap', () => {
+describe('Corridor.park, over the Lightning-send store', () => {
+  const park = (id: string, reason: string, target: unknown = store) =>
+    parkVia(target as never, { live: NON_TERMINAL, parked: ['stuck', 'refused'] }, id, reason)
+
   const payingRow = async () => {
     await store.insertQuote(quote())
     await store.transition('swap-1', 'quoted', 'funded')
@@ -110,7 +119,7 @@ describe('parkSwap', () => {
   it('moves an exposed row to stuck with the operator’s reason on it', async () => {
     await payingRow()
 
-    const outcome = await parkSwap(services(), 'swap-1', 'orphaned preimage request')
+    const outcome = await park('swap-1', 'orphaned preimage request')
 
     expect(outcome).toEqual({ state: 'stuck' })
     const row = await store.get('swap-1')
@@ -121,7 +130,7 @@ describe('parkSwap', () => {
   it('REQUIRES a reason — a parked row with no explanation is a mystery later', async () => {
     await payingRow()
 
-    await expect(parkSwap(services(), 'swap-1', '  ')).rejects.toThrow(/reason/i)
+    await expect(park('swap-1', '  ')).rejects.toThrow(/reason/i)
     expect((await store.get('swap-1')).state).toBe('paying')
   })
 
@@ -139,7 +148,7 @@ describe('parkSwap', () => {
       },
     }
 
-    await expect(parkSwap({ store: racing, ln: {} } as never, 'swap-1', 'because')).rejects.toThrow(/raced/i)
+    await expect(park('swap-1', 'because', racing)).rejects.toThrow(/raced/i)
 
     expect((await store.get('swap-1')).state).toBe('paid')
   })
@@ -148,13 +157,13 @@ describe('parkSwap', () => {
     await payingRow()
     await store.fail('swap-1', 'paying', 'already done')
 
-    await expect(parkSwap(services(), 'swap-1', 'again')).rejects.toThrow(/stuck/)
+    await expect(park('swap-1', 'again')).rejects.toThrow(/stuck/)
   })
 
   it('parks from quoted and funded too, where nothing is exposed', async () => {
     await store.insertQuote(quote())
 
-    const outcome = await parkSwap(services(), 'swap-1', 'client vanished')
+    const outcome = await park('swap-1', 'client vanished')
 
     // `fail` routes a non-exposed state to `refused`, not `stuck` — the row
     // never moved money, so it needs no operator afterwards.
