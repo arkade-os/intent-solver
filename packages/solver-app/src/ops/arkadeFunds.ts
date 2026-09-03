@@ -12,7 +12,8 @@
  *  - `readBalance` — a completely different split. The rail reports two pools of
  *    two figures; this reports what can fund a swap RIGHT NOW versus what is
  *    boarded, waiting or stuck. A seam with fixed fields could not carry both.
- *  - `depositAddress` — the boarding address, an L1 address that boards into
+ *  - `depositOptions` — an Arkade address (float on arrival) and the boarding
+ *    address, an L1 address that boards into
  *    Arkade. `settleRequired` is true and there is deliberately no
  *    `settleDeposits` below; those are two different facts and this source is
  *    the reason they are separate fields.
@@ -116,6 +117,31 @@ const arkadeDeposit = async (services: Services): Promise<FundDeposit> => {
 }
 
 /**
+ * The Arkade address: a VTXO sent here IS float on arrival.
+ *
+ * The other half of the answer, and usually the one an operator wants. Boarding
+ * takes L1 sats and needs a settlement before they are spendable; this takes a
+ * VTXO from anyone already on Arkade and needs nothing afterwards. Offering only
+ * the first — which this source did — quietly told an operator already holding
+ * VTXOs to go out to L1 and wait.
+ *
+ * NOT prefix-checked, unlike the boarding address, and the asymmetry is
+ * deliberate. That one is a bech32 L1 address which would be equally valid on
+ * the wrong network, so a prefix is the only thing separating a regtest faucet
+ * from a mainnet loss. An Arkade address encodes the SERVER key beside the
+ * wallet key and is derived from the server this wallet is connected to, so
+ * there is no wrong-chain form of it for a guard to catch.
+ */
+const arkadeOffchainDeposit = async (services: Services): Promise<FundDeposit> => ({
+  address: await services.arkade.wallet.getAddress(),
+  addressKind: `arkade ${services.config.network}`,
+  // FALSE, and the contrast with boarding is the whole reason both are offered:
+  // a VTXO arriving here is already float. Nothing has to be run afterwards.
+  settleRequired: false,
+  note: 'Spendable float on arrival — no settlement step. Reachable only from a wallet already on Arkade.',
+})
+
+/**
  * Always present — unlike the rail's, which is null without `LN_BACKEND`.
  *
  * Every deployment has an Arkade wallet: `createServices` builds one
@@ -126,5 +152,7 @@ export const arkadeFundSource = (services: Services): FundSource => ({
   label: 'arkade float',
   unit: 'sats',
   readBalance: () => arkadeBalance(services),
-  depositAddress: () => arkadeDeposit(services),
+  // Arkade FIRST: it is the one that needs no settlement, so an operator who
+  // takes the top option gets spendable float rather than a second chore.
+  depositOptions: async () => [await arkadeOffchainDeposit(services), await arkadeDeposit(services)],
 })

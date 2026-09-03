@@ -221,9 +221,14 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
 
 - **Funding sources:** every place this deployment keeps coins answers one
   interface (`packages/solver-app/src/ops/fundSources.ts`), so the console can
-  read a balance, hand out a deposit address, settle what has arrived and
-  withdraw — without knowing whether it is talking to the Lightning rail or the
-  Arkade wallet. Two ship (`rail`, `arkade`); the rail one is simply absent
+  read a balance, list the ways in, settle what has arrived and withdraw —
+  without knowing whether it is talking to the Lightning rail or the Arkade
+  wallet. Deposits are a **list**, because a source has more than one route and
+  they differ in speed, in chore and in whether they expire: the Arkade float
+  takes an Arkade address (spendable float on arrival) or its boarding address
+  (L1, settle first), and the rail takes an invoice or an onchain address. The
+  chore-free option is listed first. Two sources ship (`rail`, `arkade`); the
+  rail one is simply absent
   without `LN_BACKEND`, so **the list is the availability decision** rather than
   a set of buttons that fail when pressed. Only `readBalance` is required, and a
   source that cannot do an operation says so in its capabilities instead of

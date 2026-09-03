@@ -353,7 +353,7 @@ chain configured) token liquidity for the EVM corridors. The wallet page's
 in `packages/solver-app/src/ops/fundSources.ts`.
 
 A source declares three things: what it is, what it holds, and which of three
-operations it can perform. `depositAddress`, `settleDeposits` and `withdraw` are
+operations it can perform. `depositOptions`, `settleDeposits` and `withdraw` are
 **optional methods**, so a source that cannot do one omits it — the same way
 `SendBackend.estimateSendFee` and `OnchainBackend.settleReceiveAddress` are
 optional on the ports below. The console reads those capabilities and draws only
@@ -364,10 +364,24 @@ Amounts are **decimal strings in the source's own base units**, not numbers. An
 ERC20 quantity is 256-bit and routinely past what a JS number holds exactly,
 which is why the EVM corridor's store declares `evm_amount` as TEXT.
 
-| source            | balance split                                          | deposit          | settle                      | withdraw |
-| ----------------- | ------------------------------------------------------ | ---------------- | --------------------------- | -------- |
-| `rail` (BTC rail) | channel out/in, onchain confirmed/unconfirmed, fee rate | onchain address  | if the backend has the step | yes      |
-| `arkade` (float)  | available, boarding, recoverable, total                 | boarding address | no — use `float-lifecycle`  | no       |
+`depositOptions` returns a **list**, because the sources genuinely have more than
+one way in and they are not interchangeable: the option needing no follow-up
+chore is listed first, and each carries its own `settleRequired`, an optional
+`expiresAt` and a note. Choosing one for the operator chooses wrong about half
+the time — offering only the boarding address told someone already holding VTXOs
+to go out to L1 and wait for a settlement.
+
+| source            | balance split                                          | deposit options                                     | settle                      | withdraw |
+| ----------------- | ------------------------------------------------------ | --------------------------------------------------- | --------------------------- | -------- |
+| `rail` (BTC rail) | channel out/in, onchain confirmed/unconfirmed, fee rate | invoice (if the backend mints one), onchain address | if the backend has the step | yes      |
+| `arkade` (float)  | available, boarding, recoverable, total                 | Arkade address, boarding address                    | no — use `float-lifecycle`  | no       |
+
+The rail's invoice comes from `LightningBackend.createInvoice`, itself optional —
+a backend without it keeps its onchain option rather than losing both. An invoice
+**expires**, and its deadline is read off the BOLT11 rather than from anything
+the node echoed back, because that encoded value is what a payer's node enforces.
+The console renders the time remaining and replaces it with a banner once it has
+passed; press the button again for a fresh one.
 
 `rail` is absent entirely on a deployment with no `LN_BACKEND`, the same way the
 four BTC corridors are. `arkade` declines to settle or withdraw on purpose:

@@ -137,6 +137,38 @@ const railDeposit = async (services: Services): Promise<FundDeposit> => {
 }
 
 /**
+ * A Lightning invoice, when the rail can mint one.
+ *
+ * The FAST option, and the one whose effect on the rail differs: sats paid over
+ * Lightning arrive as outbound capacity that already exists, so this tops up a
+ * balance without touching the onchain wallet at all. The onchain option adds
+ * sats the node must then spend to use.
+ *
+ * AMOUNTLESS on purpose. The console asks for no amount before showing a deposit
+ * option, and minting for a guessed one would hand an operator an invoice they
+ * cannot pay what they meant to. The payer chooses.
+ *
+ * Returns null rather than throwing when the backend cannot mint one:
+ * `createInvoice` is an optional port capability, and a rail without it still
+ * has a perfectly good onchain option to offer.
+ */
+const railInvoiceDeposit = async (services: Services): Promise<FundDeposit | null> => {
+  const ln = services.ln
+  if (!ln?.createInvoice) return null
+  const minted = await ln.createInvoice({ memo: 'solver float deposit' })
+  return {
+    address: minted.invoice,
+    addressKind: 'lightning invoice',
+    // FALSE: a settled Lightning payment is spendable balance the moment it
+    // lands. Nothing to run afterwards, unlike the onchain option on a backend
+    // that has a settle step.
+    settleRequired: false,
+    expiresAt: minted.expiresAt,
+    note: 'Amountless — pay whatever you mean to deposit. Arrives as spendable balance; it does not add channel capacity.',
+  }
+}
+
+/**
  * Turn deposits the rail is holding into balance it can spend.
  *
  * Present only where the backend HAS the step — see `railFundSource` below,
@@ -257,7 +289,13 @@ export const railFundSource = (services: Services): FundSource | null => {
     label: 'lightning rail',
     unit: 'sats',
     readBalance: () => railBalance(services),
-    depositAddress: () => railDeposit(services),
+    // Lightning FIRST where the rail can mint one: it is the faster route and
+    // the one that needs no settle step. The onchain option is always present,
+    // so a backend without `createInvoice` still has somewhere to send.
+    depositOptions: async () => {
+      const invoice = await railInvoiceDeposit(services)
+      return invoice ? [invoice, await railDeposit(services)] : [await railDeposit(services)]
+    },
     ...(onchain.settleReceiveAddress === undefined ? {} : { settleDeposits: () => railSettle(services) }),
     withdraw: (params) => railWithdraw(services, params),
   }

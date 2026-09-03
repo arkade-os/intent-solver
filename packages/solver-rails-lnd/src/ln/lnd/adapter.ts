@@ -10,6 +10,7 @@ import {
   authenticatedLndGrpc,
   cancelHodlInvoice,
   createHodlInvoice,
+  createInvoice as lndCreateInvoice,
   getChannelBalance,
   getInvoice,
   getPayment as lndGetPayment,
@@ -21,7 +22,7 @@ import {
 } from 'lightning'
 import { htlcDeadlineFromHeight } from '@arkade-os/solver-core/core/receive.js'
 import { ROUTE_CLTV_BUDGET_BLOCKS } from '@arkade-os/solver-core/core/send.js'
-import { paymentHashOf } from '@arkade-os/solver-core/invoice/decode.js'
+import { decodeInvoice, paymentHashOf } from '@arkade-os/solver-core/invoice/decode.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import type {
   PaymentEvidence,
@@ -576,6 +577,44 @@ export class LndLightningBackendAdapter implements LightningBackend {
       if (/not.?found|already.*(cancel|settl)|terminal state|invoice.*(cancel|settl)ed/i.test(message)) return
       throw error
     }
+  }
+
+  /**
+   * A plain invoice, for an operator funding this node — never for a swap.
+   *
+   * `createInvoice`, not `createHodlInvoice`: the receive corridor holds an HTLC
+   * because it must not settle before the Arkade side is funded, and that is
+   * exactly wrong for a deposit. A held deposit is the operator's own money
+   * parked in flight, waiting on a preimage this side would have to store and
+   * settle. Nothing here does that, so it would simply never arrive.
+   *
+   * `expiresAt` is read back OFF THE BOLT11 rather than from a value this side
+   * chose or the call echoed. Two reasons, and the second is why the obvious
+   * version of this is wrong:
+   *
+   *  - the invoice string is the contract. Its encoded expiry is what a payer's
+   *    node enforces, so decoding it reports the deadline that will actually be
+   *    applied rather than one this side believes;
+   *  - `createInvoice`'s result does not carry the expiry AT ALL — neither in
+   *    its type nor at run time, where the resolved object is built field by
+   *    field and `expires_at` is not among them. Reaching for it yields
+   *    `undefined`, and `new Date(undefined)` is `NaN`, so a console would count
+   *    down from a number that is not one. The node's own default applies when
+   *    none is requested, which is exactly the case that has no value to echo.
+   */
+  async createInvoice(params: { amountSats?: number; memo?: string }): Promise<{
+    invoice: string
+    expiresAt: number
+  }> {
+    const created = await lndCreateInvoice({
+      lnd: this.lnd,
+      // Omitted rather than zero: `tokens: 0` is a zero-amount invoice on some
+      // nodes and an amountless one on others, and the two differ in whether a
+      // payer may choose. Leaving it out is unambiguously amountless.
+      ...(params.amountSats === undefined ? {} : { tokens: params.amountSats }),
+      ...(params.memo === undefined ? {} : { description: params.memo }),
+    })
+    return { invoice: created.request, expiresAt: decodeInvoice(created.request).expiresAt }
   }
 
   /** `this.lnd` is one raw gRPC client per LND subservice — close every one. */

@@ -22,7 +22,7 @@
  *
  * ## Capability, never requirement
  *
- * `depositAddress`, `settleDeposits` and `withdraw` are OPTIONAL, the same way
+ * `depositOptions`, `settleDeposits` and `withdraw` are OPTIONAL, the same way
  * `SendBackend.estimateSendFee` and `OnchainBackend.settleReceiveAddress` are
  * optional on the ports below: a source that cannot do one omits it, and
  * {@link capabilitiesOf} reports what is left so the console renders only the
@@ -108,6 +108,26 @@ export interface FundDeposit {
    * this the operator is left watching a balance that will never move on its own.
    */
   settleRequired: boolean
+  /**
+   * When this option stops being usable, unix seconds — absent for one that does
+   * not expire.
+   *
+   * An address is good indefinitely; an invoice is not, and an operator who
+   * copies one and pays it ten minutes later has sent nothing and has no error
+   * to read. The console renders the time remaining rather than the timestamp,
+   * because "expired 40 seconds ago" is the sentence that explains a failed
+   * payment and a unix integer is not.
+   */
+  expiresAt?: number
+  /**
+   * The amount this option is bound to, in the source's own unit — absent when
+   * any amount is accepted.
+   *
+   * An address takes whatever arrives. An invoice may be minted for a fixed
+   * amount, and a payer node refuses a different one, so the number belongs
+   * beside it rather than assumed.
+   */
+  amountSats?: number
   /** Anything that must be read before sending. Rendered verbatim. */
   note?: string
 }
@@ -143,14 +163,26 @@ export interface FundSource extends FundSourceInfo {
   readBalance(): Promise<FundBalance>
 
   /**
-   * An address the operator can send to, which this source controls.
+   * EVERY way an operator can put money into this source, not one.
    *
-   * Optional: a source may have no inbound address at all. Implementations MUST
-   * validate what they hand back — an address for the wrong chain is the one
-   * mistake nobody downstream can catch, because the operator never typed it and
-   * has no reason to doubt it.
+   * Plural because the sources genuinely have more than one, and choosing for
+   * the operator chooses wrong half the time: the Arkade float takes a boarding
+   * address (L1, and not float until it is settled) AND an Arkade address (a
+   * VTXO, spendable on arrival); a Lightning rail takes an onchain address AND
+   * an invoice. Those differ in speed, in fees, and in whether
+   * {@link FundSource.settleDeposits} is needed afterwards — which is the whole
+   * of what an operator is deciding between.
+   *
+   * Optional: a source may have no inbound route at all. An EMPTY array is a
+   * different answer from the method being absent — "deposits are possible here
+   * but none can be offered right now" — and the console says so differently.
+   *
+   * Implementations MUST validate what they hand back, PER OPTION. An address
+   * for the wrong chain is the one mistake nobody downstream can catch, because
+   * the operator never typed it and has no reason to doubt it; one bad entry in
+   * a list of three is no safer than one bad entry alone.
    */
-  depositAddress?(): Promise<FundDeposit>
+  depositOptions?(): Promise<readonly FundDeposit[]>
 
   /**
    * Turn what has arrived into balance this source can spend.
@@ -194,7 +226,7 @@ export interface FundSourceCapabilities {
  * operator is moving money.
  */
 export const capabilitiesOf = (source: FundSource): FundSourceCapabilities => ({
-  deposit: source.depositAddress !== undefined,
+  deposit: source.depositOptions !== undefined,
   settle: source.settleDeposits !== undefined,
   withdraw: source.withdraw !== undefined,
 })
