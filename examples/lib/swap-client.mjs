@@ -22,8 +22,25 @@ import { assertFundable, expectQuote, newRfqId, requestQuote, verifyLockupAddres
 
 export * from './rfq-core.mjs'
 
-/** The two event kinds this protocol uses; mirrors `packages/solver-transport/src/relay/nostr.ts`. */
-const NOSTR_KIND_DIRECTED = 4859
+/**
+ * The event kind this protocol uses; mirrors
+ * `packages/solver-transport/src/relay/nostr.ts`, and MUST equal it.
+ *
+ * EPHEMERAL (20000–29999), which is why it is 24859 and not the 4859 this
+ * file used to carry. The solver moved for privacy and replay correctness —
+ * a stored kind leaves a permanent public record of who negotiated with whom
+ * and re-delivers a stale backlog on every reconnect — and this client was
+ * left behind.
+ *
+ * The failure that causes has no error in it. Two disjoint `kinds` filters
+ * do not fail to match, they simply never match: the request is published,
+ * the relay accepts it, the solver is subscribed to a different kind and
+ * never sees it, and the client times out with `no reply within 30000ms` as
+ * though nobody were listening. Confirmed against a solver with its ingress
+ * demonstrably open, which is what makes it worth this many lines: nothing
+ * anywhere reports the mismatch.
+ */
+const NOSTR_KIND_DIRECTED = 24859
 
 /**
  * `rfq-core.mjs`'s `relayTransport`, but over REAL NOSTR.
@@ -36,9 +53,9 @@ const NOSTR_KIND_DIRECTED = 4859
  * belongs.
  *
  * The wire format is `packages/solver-transport/src/relay/nostr.ts`'s, which is the thing this has to
- * match exactly: kind 4859 addressed with a `p` tag, the RFQ payload sealed to
+ * match exactly: kind 24859 addressed with a `p` tag, the RFQ payload sealed to
  * the recipient with NIP-44, and a subscription of
- * `{kinds:[4859], '#p':[me]}`.
+ * `{kinds:[24859], '#p':[me]}`.
  *
  * `scripts/mock-relay.mjs` could never have caught the difference: both halves
  * spoke its `{op:'sub'}` framing, so the flow passed while being unable to
