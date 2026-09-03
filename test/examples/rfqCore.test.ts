@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { WebSocketServer, WebSocket as WsClient } from 'ws'
 import { schnorr } from '@noble/curves/secp256k1.js'
@@ -190,6 +191,43 @@ afterEach(async () => {
 /** The library's fetch, pointed at the in-process app — no socket, real code. */
 const transport = () =>
   httpTransport('', { fetchImpl: (url, init) => app.request(url, init) as unknown as Promise<Response> })
+
+/**
+ * `rfq-core.d.mts` is HAND-WRITTEN — it is the only such file in the repo —
+ * and nothing generated it from the implementation it describes.
+ *
+ * `checkJs` over `examples/` catches a declaration that disagrees about a
+ * symbol the examples USE. It cannot see one that is simply absent, or one
+ * declared for something that no longer exists: the examples import neither,
+ * so nothing resolves against them. `expectQuote` sat missing here for as
+ * long as the Nostr transport has needed it.
+ *
+ * Compared against the module's REAL runtime exports rather than a parse of
+ * the implementation, so the check cannot drift with the regex that reads it.
+ * Types are excluded on purpose — they have no runtime counterpart to compare.
+ */
+describe('rfq-core.d.mts', () => {
+  it('declares exactly the values rfq-core.mjs exports', async () => {
+    // Typed, despite being `.mjs`, BY THE VERY FILE UNDER TEST — which is why
+    // the runtime keys and not the static type are what gets compared.
+    const implementation = await import('../../examples/lib/rfq-core.mjs')
+    const exported = Object.keys(implementation)
+      .filter((name) => name !== 'default')
+      .sort()
+
+    const source = readFileSync(new URL('../../examples/lib/rfq-core.d.mts', import.meta.url), 'utf8')
+    const declared = [...source.matchAll(/^export declare (?:const|class|function)\s+(\w+)/gm)]
+      .map((match) => match[1] as string)
+      .sort()
+
+    // Neither list empty: a regex that stopped matching, or a module that
+    // failed to load, would otherwise make this agree with itself about
+    // nothing.
+    expect(exported.length).toBeGreaterThan(0)
+    expect(declared.length).toBeGreaterThan(0)
+    expect(declared).toEqual(exported)
+  })
+})
 
 describe('rfq-core over HTTP against the real service', () => {
   it('runs the taker flow: quote → derive → verify → gates', async () => {
