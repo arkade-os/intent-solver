@@ -99,9 +99,14 @@ const arkade: ArkadeOps = {
  * which `tsc -p tsconfig.json` cannot resolve without a prior `pnpm build`
  * (vitest tolerates it only via `vitest.config.ts`'s own alias, which `tsc`
  * does not share) — importing it here would trade one drift risk for a
- * `pnpm typecheck` regression. Kept in sync by hand instead, same as before;
- * see the note on the earlier version of this function for why that is a
- * real, known risk and not a hypothetical one.
+ * `pnpm typecheck` regression.
+ *
+ * So it is still a hand-kept copy, but it is no longer an UNCHECKED one:
+ * "derives byte-identical lockups to the example client it mirrors" runs both
+ * against the same inputs and requires the same two addresses in the same
+ * order. That test loads `swap-client.mjs` through a specifier assembled at
+ * runtime, which tsc does not resolve and vitest does — the copy exists
+ * because of a static-import constraint that a dynamic one does not have.
  *
  * Returns BOTH candidate addresses, matching `deriveLockup`'s own contract
  * exactly: nothing on the wire says which shape the solver quoted (see
@@ -226,6 +231,64 @@ describe('rfq-core.d.mts', () => {
     expect(exported.length).toBeGreaterThan(0)
     expect(declared.length).toBeGreaterThan(0)
     expect(declared).toEqual(exported)
+  })
+
+  /**
+   * `traderDerivation` above is a HAND-KEPT COPY of `deriveLockup`, and the
+   * comment on it says so — "a real, known risk and not a hypothetical one".
+   * This is that risk, measured instead of described.
+   *
+   * The copy exists because `swap-client.mjs` imports the app's BUILT
+   * `dist/index.js`, which `tsc -p tsconfig.json` cannot resolve without a
+   * prior `pnpm build`; a static import here would trade a drift risk for a
+   * typecheck that only passes on a warm tree. The specifier is therefore
+   * assembled at runtime — tsc does not resolve a non-literal one, and
+   * `vitest.config.ts` already aliases that dist path to source, so the module
+   * loads with no build.
+   *
+   * Both derivations are given the SAME inputs and must produce the SAME two
+   * addresses, in the same order. Nothing about the copy is asserted
+   * structurally: if it drifts in any way that moves an address — a parameter
+   * renamed, a delay swapped, the legacy variant reordered — this fails, and
+   * if it drifts in a way that does not, the copy is still correct.
+   */
+  it('derives byte-identical lockups to the example client it mirrors', async () => {
+    const specifier = ['..', '..', 'examples', 'lib', 'swap-client.mjs'].join('/')
+    const { deriveLockup } = (await import(specifier)) as {
+      deriveLockup: (input: Record<string, unknown>) => { candidates: { address: string }[] }
+    }
+
+    const quote = {
+      solver_pubkey: key(1),
+      refund_locktime: 1_800_000_000,
+      profile: { receiver_pk_script: hex.encode(Uint8Array.from([0x51, 0x20, ...keyBytes(1)])) },
+    }
+
+    const mine = deriveLockup({
+      quote,
+      // `deriveLockup` decodes a string and passes an object through; the
+      // object form keeps this independent of bolt11 parsing.
+      invoice: { paymentHash: PAYMENT_HASH },
+      refundAddress: REFUND_ADDRESS,
+      arkade: {
+        wallet: { arkServerPublicKey: keyBytes(3) },
+        unilateralDelays: {
+          unilateralClaimDelay: 4096,
+          unilateralRefundWithoutReceiverDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
+          unilateralRefundDelay: arkade.delays.unilateralRefundDelay,
+        },
+        hrp: 'ark',
+      },
+      emulatorPubkey: key(9),
+      clientRefundPubkey: key(20),
+    })
+
+    const theirs = mine.candidates.map((candidate) => candidate.address)
+    // Two, not one: the current suite and the pre-timelocked-refund variant.
+    // A single address would mean one derivation lost a shape and this
+    // compared a shorter list to itself.
+    expect(theirs).toHaveLength(2)
+    expect(traderDerivation(quote)).toEqual(theirs)
   })
 })
 
