@@ -171,17 +171,48 @@ importers:
 
   packages/solver-arkade:
     dependencies:
+      '@arkade-os/sdk':
+        specifier: 0.4.67
+        version: 0.4.67
       '@arkade-os/solver-core':
         specifier: workspace:*
         version: link:../solver-core
       '@arkade-os/swap':
         specifier: 0.0.10
         version: 0.0.10(nostr-tools@2.24.1(typescript@5.9.3))
+      '@noble/hashes':
+        specifier: ^2.0.0
+        version: 2.2.0
+      '@scure/base':
+        specifier: ^2.0.0
+        version: 2.2.0
+      better-sqlite3:
+        specifier: ^12.11.1
+        version: 12.11.1
 
-  packages/solver-core: {}
+  packages/solver-core:
+    dependencies:
+      '@noble/curves':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/hashes':
+        specifier: ^2.0.0
+        version: 2.2.0
+      '@scure/base':
+        specifier: ^2.0.0
+        version: 2.2.0
+      light-bolt11-decoder:
+        specifier: ^3.2.0
+        version: 3.2.0
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
 
   packages/solver-corridors:
     dependencies:
+      '@arkade-os/sdk':
+        specifier: 0.4.67
+        version: 0.4.67
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -194,6 +225,15 @@ importers:
       '@arkade-os/solver-rails':
         specifier: workspace:*
         version: link:../solver-rails
+      '@noble/hashes':
+        specifier: ^2.0.0
+        version: 2.2.0
+      '@scure/base':
+        specifier: ^2.0.0
+        version: 2.2.0
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
 
   packages/solver-corridors-evm:
     dependencies:
@@ -233,6 +273,15 @@ importers:
       '@arkade-os/solver-core':
         specifier: workspace:*
         version: link:../solver-core
+      '@noble/hashes':
+        specifier: ^2.0.0
+        version: 2.2.0
+      '@scure/base':
+        specifier: ^2.0.0
+        version: 2.2.0
+      '@scure/btc-signer':
+        specifier: ^2.0.1
+        version: 2.0.1
 
   packages/solver-rails-esplora:
     dependencies:
@@ -302,6 +351,30 @@ importers:
       '@arkade-os/solver-core':
         specifier: workspace:*
         version: link:../solver-core
+      '@noble/curves':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/hashes':
+        specifier: ^2.0.0
+        version: 2.2.0
+      '@scure/base':
+        specifier: ^2.0.0
+        version: 2.2.0
+      '@scure/bip32':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@scure/bip39':
+        specifier: ^2.2.0
+        version: 2.2.0
+      hono:
+        specifier: ^4.13.0
+        version: 4.13.0
+      nostr-tools:
+        specifier: ^2.24.1
+        version: 2.24.1(typescript@5.9.3)
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
 
 packages:
 

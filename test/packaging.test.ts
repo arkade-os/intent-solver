@@ -79,26 +79,26 @@ describe('packaging', () => {
    * app's own imports of that package are type-only, so the guard above is
    * honestly green while `packages/solver-arkade/dist` cannot load.
    *
-   * What survives is therefore the package's OWN dependencies plus the ROOT's
-   * production ones, and that union is what this checks. Counting the root is
-   * not a concession — it is the image's real resolution rule, and a guard
-   * that ignored it would be asserting something the deployable does not do.
+   * Checked against the package's OWN manifest and nothing else, which is
+   * strictly more than the image needs and exactly what PUBLISHING needs.
    *
-   * DELIBERATELY WEAKER THAN PUBLISH-READINESS. A consumer installing
-   * `@arkade-os/solver-arkade` from npm gets that package's `dependencies`
-   * and no root to walk up into, so every one of the 61 imports this union
-   * currently forgives would break there. Nothing is published yet, so that
-   * is a live follow-up rather than a bug: declaring them per package is what
-   * makes `release.yml`'s `publish --dry-run` mean something. Tightening this
-   * to the package's own manifest alone is the check that proves it done.
+   * The weaker question — "does it survive the prune" — would also pass by
+   * counting the root's production dependencies, because the image prunes once
+   * at the root and node resolution walks up. That is how sixty imports across
+   * six packages resolved by accident for as long as they did: `solver-core`
+   * declared nothing while importing `zod`, `@noble/hashes` and
+   * `light-bolt11-decoder`, and every one of them was found in the root's
+   * `node_modules`.
+   *
+   * A CONSUMER HAS NO ROOT TO WALK UP INTO. `npm i @arkade-os/solver-core`
+   * gets that package's `dependencies` and stops, so each of those sixty was
+   * an ERR_MODULE_NOT_FOUND waiting for the first person to install it — and
+   * `release.yml`'s `publish --dry-run` would not have caught one, because
+   * packing a manifest says nothing about what the code inside it imports.
+   * Asking each package alone is what makes that dry-run mean something.
    */
-  it('imports nothing, in any library package, that `pnpm prune --prod` would delete', () => {
+  it('declares, in every library package, everything that package imports', () => {
     const PACKAGES = new URL('../packages/', import.meta.url)
-    const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as Record<
-      string,
-      Record<string, string> | undefined
-    >
-    const survivesPrune = new Set(Object.keys(root.dependencies ?? {}))
 
     const names = readdirSync(fileURLToPath(PACKAGES), { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
@@ -116,14 +116,14 @@ describe('packaging', () => {
         string,
         Record<string, string> | undefined
       >
-      const resolvable = new Set([...survivesPrune, ...Object.keys(manifest.dependencies ?? {})])
+      const resolvable = new Set([...Object.keys(manifest.dependencies ?? {})])
       const src = fileURLToPath(new URL('src/', dir))
       return compiledFilesUnder(src).flatMap((file) => {
         const source = readFileSync(file, 'utf8')
         const erased = typeOnlyImports(source)
         return externalImports(source)
           .filter((pkg) => !resolvable.has(pkg) && !erased.has(pkg))
-          .map((pkg) => `${name}/${relative(src, file).replace(/\\/g, '/')} imports ${pkg}, deleted by the prune`)
+          .map((pkg) => `${name}/${relative(src, file).replace(/\\/g, '/')} imports ${pkg}, which it does not declare`)
       })
     })
     expect(offenders).toEqual([])
