@@ -1,11 +1,11 @@
 # intent-solver
 
-Swap provider ("solver") for Lightning ⇄ Arkade swaps, and the LND reference
-implementation of the corridor framework.
+Swap provider ("solver") between Arkade and Lightning, onchain BTC and ERC20
+tokens — and the LND reference implementation of the corridor framework.
 
 MIT licensed — see [LICENSE](LICENSE).
 
-Four corridors, two per direction:
+Four BTC corridors ship built in, two per direction:
 
 - **`arkade:BTC->lightning:BTC`** (send) — the user pays a Lightning invoice out
   of an Arkade balance. **Working.** Proven end-to-end on `bitcoin` (real sats:
@@ -19,7 +19,14 @@ Four corridors, two per direction:
 - **`onchain:BTC->arkade:BTC`** (receive) — the user pays onchain and the sats
   land on Arkade. **Working on regtest**, same.
 
-All four are quoted through RFQ v1 and driven by the same `watch` loop. The
+Two more appear per token named by `EVM_TOKENS` —
+**`arkade:BTC->ethereum:<token>`** and its reverse, on any EVM chain, off unless
+that variable is set. A corridor exists per TOKEN rather than once per family,
+and every chain fact is configuration rather than something compiled in, so a
+custom network needs no code. Their settings are their own block in
+[§ Settings and defaults](#settings-and-defaults) below.
+
+All of them are quoted through RFQ v1 and driven by the same `watch` loop. The
 receive legs fund a lockup out of the solver's own float, which is why
 `packages/solver-arkade/src/arkade/lockupFunding.ts` and `packages/solver-arkade/src/arkade/reservations.ts` exist — see
 "Settings and defaults" below.
@@ -84,12 +91,16 @@ removed unserved — nothing was ever deployed against it.
 
 ## Building your own solver
 
-Nothing about the four built-in corridors is privileged: they implement the same
+Nothing about the built-in corridors is privileged: they implement the same
 `Corridor` interface you would, and a corridor this build was never compiled
 against is served by the same host, driven by the same sweep and answered for by
 the same status route. Registering one is a single call —
 `createServices(config, { corridors: [mine] })` — and a BTC backend is a single
 call too, `registerLightningRail('mine', module)` with `LN_BACKEND=mine`.
+Somewhere to keep the coins is the third: `registerFundSource(services => …)`
+puts your own wallet in the console beside the built-in two, with the same
+read/deposit/settle/withdraw buttons, and a factory returning `null` means "not
+on this deployment" rather than a source that is present and broken.
 
 The **whole deployment** is describable in code as well: `Config` is a plain
 exported interface, `loadConfig()` is the environment adapter that produces one
@@ -193,9 +204,10 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   file included), purely-outbound relay mode, and the Cloudflare Workers shape
   with its caveat stated.
 - **Admin console:** `ADMIN_PORT=8788 pnpm cli relay` serves an operator
-  console — swaps across all four corridors, quotes, wallet and VTXO pool,
-  backend status, settings and an action audit log — on its own port, from
-  inside the running provider. Off unless `ADMIN_PORT` is set. **It has no
+  console — swaps across every corridor the deployment serves, quotes, the
+  wallet (sats and every Arkade asset it holds) and VTXO pool, the funding
+  sources, backend status, settings and an action audit log — on its own port,
+  from inside the running provider. Off unless `ADMIN_PORT` is set. **It has no
   authentication: anything that can reach that port can move money.** Put a
   reverse proxy in front of it, or tunnel to the default loopback bind. See
   `docs/runbook.md` § "The admin console".
@@ -206,6 +218,17 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   that only behind something that authenticates. `ADMIN_PORT` is an integer in
   `[1, 65535]` and a bad value throws rather than reading as "off", so a typo
   cannot silently darken the console an operator believes is up.
+
+- **Funding sources:** every place this deployment keeps coins answers one
+  interface (`packages/solver-app/src/ops/fundSources.ts`), so the console can
+  read a balance, hand out a deposit address, settle what has arrived and
+  withdraw — without knowing whether it is talking to the Lightning rail or the
+  Arkade wallet. Two ship (`rail`, `arkade`); the rail one is simply absent
+  without `LN_BACKEND`, so **the list is the availability decision** rather than
+  a set of buttons that fail when pressed. Only `readBalance` is required, and a
+  source that cannot do an operation says so in its capabilities instead of
+  throwing at the end of it. Withdrawal is the one `armed`-tier action here —
+  it is the only one that moves coins to an address the operator typed.
 
 - **Theme:** follows your system's light/dark preference, with a toggle in the
   nav that overrides and persists. Both palettes are held to WCAG AA (4.5:1) by
@@ -227,10 +250,24 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   first thing to try on a `stuck` row — most resolve themselves once the backend
   is re-read.
 - **CLI:** `quote · status · timeline · list · drive · watch · serve · relay ·
-send · send-onchain · refund · refund-now · onchain-refund-now ·
-test-refund · invoice · card · balances · pool` — every command goes through
-  the same orchestrator the service runs. `pool` is the only one that spends,
-  and only under `--mint`.
+send · send-onchain · refund · refund-now · claim-now · onchain-refund-now ·
+reclaim-l1-htlc · park-swap · test-refund · invoice · card · balances · pool` —
+  every command goes through the same orchestrator the service runs. `pool` is
+  the only one that spends the float on the operator's say-so rather than a
+  swap's, and only under `--mint`.
+
+  Five of them act on ONE existing row and are built for the incident rather
+  than the happy path, so all five open every corridor
+  (`createServices(config, { allCorridors: true })`) — a row whose corridor has
+  since been disabled must still be unwindable, and the config that darkened it
+  is usually the reason someone is unwinding. `refund-now` and
+  `onchain-refund-now` push the refund for a swap the solver funded;
+  `reclaim-l1-htlc` broadcasts the refund of an L1 HTLC; `claim-now` records a
+  preimage and returns the row to `claiming` for the sweep to push, rather than
+  broadcasting anything itself; and `park-swap <id> <reason>` moves no coins at
+  all — it takes a row out of the sweep with the reason recorded, for when no
+  automatic outcome is reachable and a human has to own it.
+
 - **Settings:** every environment variable and every constant, with which are
   yours to change, is in [§ Settings and defaults](#settings-and-defaults)
   below. Operator-facing deployment detail lives in
