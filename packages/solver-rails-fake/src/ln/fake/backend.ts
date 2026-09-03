@@ -26,19 +26,21 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
-import { paymentHashOf } from '@arkade-os/solver-core/invoice/decode.js'
+import { amountSatsOf, paymentHashOf } from '@arkade-os/solver-core/invoice/decode.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { forgeInvoice, forgeInvoiceWithPreimage } from './bolt11.js'
 import { ROUTE_CLTV_BUDGET_BLOCKS } from '@arkade-os/solver-core/core/send.js'
 import type {
   Balance,
   CreateHoldInvoiceParams,
+  EstimateSendFeeParams,
   HoldInvoice,
   HoldState,
   HoldStatus,
   LightningBackend,
   PayInvoiceParams,
   PaymentResult,
+  SendFeeEstimate,
 } from '@arkade-os/solver-core/ports/lightning.js'
 
 /** One hold invoice's state, as this fake tracks it. */
@@ -48,6 +50,54 @@ interface HoldRecord {
   expiresAt: number | null
   amountSats: number
 }
+
+/**
+ * How this fake answers {@link FakeLightningBackend.estimateSendFee}.
+ *
+ * A policy rather than a fixed number because the three things a test needs from a fee
+ * estimator are all shape, not value: an exact figure it can assert on, a way to make the
+ * backend decline to answer, and a way to make it mint a token. `null` in place of the
+ * whole policy is the decline — the fake then behaves like a backend that has no routing
+ * to price, which is the honest default for one that has no network.
+ */
+export interface FakeFeePolicy {
+  /** Parts per million of the invoice's amount. */
+  ppm: number
+  /** Least it will ever report, in sats, so a tiny invoice still costs something. */
+  floorSats: number
+  /**
+   * Mint a {@link SendFeeEstimate.feeHandle} and require it back at
+   * {@link FakeLightningBackend.payInvoice}.
+   *
+   * Off by default, because the one real backend in this tree mints none and the default
+   * fake should behave like the default rail. A test turns it on to exercise the
+   * prepare-then-execute half of the port, which is otherwise unreachable here.
+   */
+  handle: boolean
+}
+
+/**
+ * 0.1% with a one-sat floor: comfortably inside `maxRoutingFeeSats`' 0.5% cap and its
+ * 25-sat floor, so a corridor that ever does price off this cannot quote itself into a
+ * payment its own budget would refuse.
+ */
+export const DEFAULT_FAKE_FEE_POLICY: FakeFeePolicy = { ppm: 1000, floorSats: 1, handle: false }
+
+/** Deterministic, and shaped like `maxRoutingFeeSats` so the two round the same way. */
+export const fakeFeeSats = (amountSats: number, policy: FakeFeePolicy): number =>
+  Math.max(policy.floorSats, Math.ceil((amountSats * policy.ppm) / 1_000_000))
+
+/**
+ * The token, derived rather than stored.
+ *
+ * Every other id this fake mints says `fake-` in it, and this one says what it is
+ * committing to as well. Derivation is what lets it survive the CLI's
+ * process-per-command model without a fourth state file: the process that pays can
+ * recompute exactly what the process that estimated would have minted, so a token is
+ * verifiable anywhere and a token for a different invoice or a different price cannot
+ * pass.
+ */
+export const fakeFeeHandle = (paymentHash: string, feeSats: number): string => `fake-fee-${paymentHash}-${feeSats}`
 
 export class FakeLightningBackend implements LightningBackend {
   /**
@@ -76,6 +126,8 @@ export class FakeLightningBackend implements LightningBackend {
     /** bech32 currency prefix forged invoices carry, e.g. 'bcrt'. */
     private readonly network: string,
     private readonly now: () => number = nowSeconds,
+    /** null makes this a backend that never estimates — see {@link FakeFeePolicy}. */
+    private readonly feePolicy: FakeFeePolicy | null = DEFAULT_FAKE_FEE_POLICY,
   ) {}
 
   private load(): Record<string, string> {
@@ -123,8 +175,48 @@ export class FakeLightningBackend implements LightningBackend {
     return { invoice: forged.invoice, paymentHash }
   }
 
+  /**
+   * A deterministic routing fee for an invoice nothing will actually route.
+   *
+   * Obviously fake and openly so: the figure is a pure function of the amount, the token
+   * says `fake-` in it, and no network is consulted. What it is FOR is the plumbing —
+   * a caller can assert an exact number, exercise the null branch by being constructed
+   * without a policy, and carry a token through to `payInvoice`.
+   *
+   * `timeoutMs` is ignored, as the port permits a backend that cannot express the
+   * ceiling to do: there is nothing here that takes time, so there is nothing to bound.
+   *
+   * Null for an amountless invoice rather than a throw. The send leg never holds one
+   * (`decodeInvoice` refuses it), so reaching this means a caller asked about something
+   * outside the corridor, and "no estimate for this payment" is the honest answer to a
+   * payment whose amount is not decided yet.
+   */
+  async estimateSendFee(params: EstimateSendFeeParams): Promise<SendFeeEstimate | null> {
+    if (this.feePolicy === null) return null
+    let amountSats: number
+    try {
+      amountSats = amountSatsOf(params.invoice)
+    } catch {
+      return null
+    }
+    const feeSats = fakeFeeSats(amountSats, this.feePolicy)
+    if (!this.feePolicy.handle) return { feeSats }
+    return { feeSats, feeHandle: fakeFeeHandle(paymentHashOf(params.invoice), feeSats) }
+  }
+
   async payInvoice(params: PayInvoiceParams): Promise<PaymentResult> {
     const paymentHash = paymentHashOf(params.invoice)
+    // The execute half of prepare-then-execute, and the only implementation of it in the
+    // tree. An absent handle leaves every existing caller exactly as it was; a handle
+    // this backend would not have minted THROWS rather than paying anyway, which is what
+    // the port requires — a caller that priced its quote off a token it turns out cannot
+    // spend must not have that quietly become a payment at some other price.
+    if (params.feeHandle !== undefined) {
+      const estimate = await this.estimateSendFee({ invoice: params.invoice, timeoutMs: 0 })
+      if (estimate?.feeHandle !== params.feeHandle) {
+        throw new Error(`fake payInvoice: fee handle ${params.feeHandle} is not one this backend minted`)
+      }
+    }
     const preimage = this.load()[paymentHash]
     // An invoice we did not forge is unroutable here — terminal failure, the
     // same allowlisted shape the real adapter reports.
