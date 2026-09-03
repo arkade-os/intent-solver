@@ -1617,8 +1617,8 @@ describe('tick: failure and recovery', () => {
   })
 
   it('escalates a claim that keeps failing PAST the deadline to stuck', async () => {
-    // No server-independent exit exists, so looping the collaborative claim past
-    // the deadline cannot win the race with the client refund. Surface it.
+    // The collaborative claim cannot win the race with the client refund once
+    // the deadline has passed, so looping it is pointless. Surface it.
     const row = await claiming()
     clock = row.refundLocktime + 1
     arkade.claim = async () => {
@@ -1627,6 +1627,26 @@ describe('tick: failure and recovery', () => {
     const done = await service.tick(row.id)
     expect(done.state).toBe('stuck')
     expect(done.failureReason).toContain('past the refund deadline')
+  })
+
+  /**
+   * The other half of the same escalation, and the leg where the roles invert.
+   *
+   * Here the CLIENT funds and the solver is the covenant receiver, so the
+   * solver's solo path is `unilateralClaim` — the leaf that reveals the preimage
+   * this row already holds. Naming the refund leaf instead would point an
+   * operator at the client's own recourse.
+   */
+  it('names the server-independent recourse on the row it parks', async () => {
+    const row = await claiming()
+    clock = row.refundLocktime + 1
+    arkade.claim = async () => {
+      throw new Error('arkade server censoring the claim')
+    }
+    const done = await service.tick(row.id)
+    expect(done.failureReason).toContain('unilateralClaim')
+    expect(done.failureReason).not.toContain('unilateralRefundWithoutReceiver')
+    expect(done.failureReason).toContain(String(row.claimDelay))
   })
 })
 

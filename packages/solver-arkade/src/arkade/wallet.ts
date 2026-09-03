@@ -669,8 +669,9 @@ export const attachEmulatorPackets = (tx: Transaction, packets: Parameters<typeo
  * The receive legs therefore use {@link refundWithoutReceiverSwapScript} instead,
  * which spends `refundWithoutReceiver` (`client` + server after `refundLocktime`, no
  * receiver key). Not `refundUnilateral`: that drops the SERVER as well as the
- * receiver, so it is only reachable through the unilateral-exit flow this service
- * does not implement, and it needs a CSV rule that does not exist yet.
+ * receiver, so it is reachable only through the on-chain exit flow in
+ * `arkade/unilateralExit.ts` — slow, paid for in the solver's own onchain fees,
+ * and worth reaching for only once the Service has stopped answering at all.
  * `refundWithoutReceiver` keeps the server, so it is an ordinary offchain spend, and
  * its ABSOLUTE timelock is the same `refundLocktime` the receive orchestrators
  * already gate on.

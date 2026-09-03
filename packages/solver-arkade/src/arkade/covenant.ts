@@ -41,16 +41,18 @@
  *                      and the money can only go one place. The client holds no
  *                      key, signs nothing, and keeps no state.
  * - `unilateralClaim`  preimage + receiver alone, after a CSV delay. The
- *                      receiver's recourse if the Arkade server disappears
+ *                      receiver's recourse if the Arkade Service disappears
  *                      between paying the invoice and claiming.
- *                      TODO(unilateral-exit): this leaf EXISTS in the script but
- *                      the service has no code to spend it — that needs the
- *                      on-chain unroll/exit flow. Until then the receiver's only
- *                      claim path is the collaborative one, so a censoring (not
- *                      merely absent) Arkade server after payment is an
- *                      unmitigated loss. The `refundLocktimeFor` bound reserves
- *                      the window for this recourse; the recourse itself is still
- *                      owed.
+ *                      Spendable since `arkade/unilateralExit.ts`: the on-chain
+ *                      exit flow lands the VTXO on Bitcoin through the SDK's
+ *                      `UnilateralExit` and then sweeps this leaf once its CSV
+ *                      matures. Operator-driven (`cli unilateral-exit <id>
+ *                      --go`), never automatic — an exit costs onchain fees and
+ *                      forfeits the cheap collaborative path a transient outage
+ *                      would have restored. NOTHING HAS DRIVEN ONE TO COMPLETION
+ *                      on any network, so the flow is reasoned and reviewed
+ *                      rather than proven. The `refundLocktimeFor` bound reserves
+ *                      the window this recourse runs in.
  *
  * The refund leaf carries no explicit second key: the compiler sees its
  * `arkadeScript` segment and appends the covenant co-signer automatically. That

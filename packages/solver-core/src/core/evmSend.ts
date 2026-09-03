@@ -153,11 +153,12 @@ export type EvmSendAcceptance =
  *
  * WHAT THAT MARGIN IS AND IS NOT SIZED FOR. `EVM_ORDER_MARGIN_SECONDS` covers
  * observing the client's claim and getting the solver's own Arkade claim
- * SETTLED — the cooperative path. It does not cover a censoring Arkade
- * operator, where the solver's only recourse is the unilateral claim leaf, and
- * that leaf is not yet implemented (`src/arkade/covenant.ts`'s
- * `TODO(unilateral-exit)`). This is the same exposure every other corridor
- * carries and is called out here rather than silently inherited.
+ * SETTLED — the cooperative path. It does not cover a censoring Arkade Service,
+ * where the solver's only recourse is the unilateral claim leaf: that leaf is
+ * spendable now (`arkade/unilateralExit.ts`), but only through an on-chain exit
+ * whose CSV runs from the moment the lockup CONFIRMS onchain, which this margin
+ * makes no room for. This is the same exposure every other corridor carries and
+ * is called out here rather than silently inherited.
  *
  * The result is re-checked through {@link evaluateEvmSendLock} rather than
  * trusted: deriving a deadline and validating it are different jobs, and a

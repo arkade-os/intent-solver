@@ -177,19 +177,23 @@ export interface Config {
    * (605184s, 7 days), so the solo leaf opens at 7.05 days and gate (d) demands 4074
    * blocks of final CLTV — ~28 days of a payer's funds, which nothing routes, so every
    * quote is refused `recourse_window_unservable`. Raising `MAX_FINAL_CLTV_BLOCKS`
-   * does not help (2016 reports the wall, it is not the wall), and finishing
-   * `TODO(unilateral-exit)` does not either, since the 7-day CSV is unchanged.
+   * does not help (2016 reports the wall, it is not the wall), and neither does the
+   * server-independent exit now in `arkade/unilateralExit.ts`, since the 7-day CSV is
+   * unchanged.
    *
-   * WHAT TURNING IT ON ACCEPTS: with the Arkade server gone or censoring past the exit
+   * WHAT TURNING IT ON ACCEPTS: with the Arkade Service gone or censoring past the exit
    * delay AND `E` passed, a trader can let the htlc fail back for free and only then
    * claim the Arkade payout, taking both sides. Bounded by the corridor's own cap,
    * which is why mainnet requires `LN_RECEIVE_MAX_SATS` set explicitly — the operator
    * states the number they are risking rather than inheriting it.
    *
-   * Defensible because the solver cannot execute that recourse today anyway
-   * (`TODO(unilateral-exit)`), so the reserved window protects an action nothing in
-   * `src/` can take, and a same-sized loss on the other side is already accepted in
-   * `src/arkade/covenant.ts` for the same missing implementation.
+   * THIS GREW MORE EXPENSIVE, not less. The justification used to be that the solver
+   * could not execute the reserved recourse at all, so the window protected an action
+   * nothing could take. It can now (`cli unilateral-exit`), so what this flag gives up
+   * is a real recourse rather than a notional one — which is why it stays opt-in,
+   * mainnet-gated on an explicit cap, and shown in the console. The window it waives is
+   * still not one this corridor can be served without on mainnet; that is the trade,
+   * stated as a trade.
    *
    * Lightning leg only. `onchain:BTC->arkade:BTC` carries the same gate and is
    * deliberately NOT covered: there `E` is the client's own onchain locktime with no

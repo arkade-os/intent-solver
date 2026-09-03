@@ -32,8 +32,9 @@ export const SETTLE_SAFETY_MARGIN = 15 * MINUTE
  * Gap kept between the solver's own solo recourse opening and `E`.
  *
  * Room to run an on-chain unilateral exit, not to settle a Lightning htlc. Reasoned
- * rather than measured — nothing in `src/` spends the unilateral leaf yet
- * (`TODO(unilateral-exit)` in `src/arkade/covenant.ts`).
+ * rather than measured, and still is: the exit exists now (`arkade/unilateralExit.ts`),
+ * but nothing has driven one to completion on any network, so there is no observed
+ * duration to size this against.
  */
 export const UNILATERAL_RECOURSE_MARGIN = 30 * MINUTE
 

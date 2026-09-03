@@ -29,7 +29,9 @@ import {
   onchainReceiveRefundNow,
   onchainReceiveClaimNow,
 } from '../../ops/refunds.js'
+import { hex } from '@scure/base'
 import { claimNow } from '../../ops/claims.js'
+import { planExitForSwap } from '../../ops/unilateralExit.js'
 import { requireLn } from '../../ops/rails.js'
 import { capabilityRefusal, fundSources, requireFundSource, summarise } from '../../ops/fundSources.js'
 import { mintPool, poolPlan } from '../../ops/pool.js'
@@ -472,6 +474,49 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       const served = services.corridors.get(corridor)
       if (!served) throw new Error(`the ${corridor} corridor is not enabled on this deployment`)
       return served.park(id, reason)
+    },
+  },
+
+  /**
+   * What a server-independent exit of this row's lockup would do: which leaf the
+   * solver can spend alone, how long its CSV runs, and what it would cost.
+   *
+   * READ-ONLY, and deliberately the only half of the exit the console offers.
+   * The other half — `UnilateralExit.prepare` — signs every transaction of the
+   * exit and BROADCASTS a funding splitter as a side effect, spending the
+   * solver's own onchain sats and forfeiting the collaborative path a transient
+   * outage would have restored. That belongs behind `cli unilateral-exit <id>
+   * --go`, where the deliberation is a shell flag rather than a browser button
+   * that could be reached by a mis-click on the wrong row.
+   *
+   * Dispatched through the corridor REGISTRY, and not by corridor NAME either:
+   * `planExitForSwap` iterates the reader set, so this reaches an EVM pair or an
+   * injected corridor without a case to keep in step. The reader set rather than
+   * the serving one for the same reason every refund command takes it — an
+   * operator who switched a corridor off did not un-fund its lockups.
+   *
+   * NEVER returns the preimage, for the same reason `read-payment` does not: the
+   * plan says which leaf and when, and that is the whole decision. The secret
+   * itself would then live in a browser, a screenshot and a support thread.
+   */
+  'unilateral-exit-plan': {
+    tier: 'safe',
+    target: idTarget,
+    run: async (services, body) => {
+      const id = requireId(body)
+      const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
+      const { pair, plan } = await planExitForSwap(services.corridors, id, { solverPubkey })
+      return {
+        corridor: pair,
+        pkScript: plan.pkScript,
+        role: plan.role,
+        leaf: plan.leaf,
+        delay: plan.delay,
+        delaySeconds: plan.delaySeconds,
+        // The CSV starts when the lockup CONFIRMS onchain, not now, so an
+        // operator reading a duration here must not read it as "ready in".
+        note: 'the CSV runs from the moment the lockup confirms onchain, not from now',
+      }
     },
   },
 

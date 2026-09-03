@@ -109,10 +109,11 @@ export interface UnilateralDelays {
 /**
  * How long after the claimant's claim the funder's SOLO refund opens.
  *
- * The window a claimant holding the preimage needs to finish, which with the server
- * gone is a full unilateral exit. REASONED, not measured — nothing has driven one to
- * completion yet (`TODO(unilateral-exit)`). A multiple of the granularity, or BIP68
- * would round it away from the number written here.
+ * The window a claimant holding the preimage needs to finish, which with the Arkade
+ * Service gone is a full unilateral exit. REASONED, not measured — the exit exists
+ * (`arkade/unilateralExit.ts`) but nothing has driven one to completion on any network,
+ * so there is still no observed duration behind this number. A multiple of the
+ * granularity, or BIP68 would round it away from the number written here.
  */
 export const SOLO_REFUND_HEADROOM_SECONDS = 8 * SEQUENCE_GRANULARITY_SECONDS
 

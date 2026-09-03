@@ -1443,6 +1443,31 @@ describe('ReceiveSwapService.tick — refund path', () => {
       // thing an operator needs, and the log line will have scrolled.
       expect(row.failureReason).toContain('server refused to co-sign')
     })
+
+    /**
+     * `stuck` is where a censored refund ends, and until the server-independent
+     * exit existed there was nothing to say next — the leaf the solver could
+     * spend alone was in every script this service has ever funded and
+     * unreachable from any code.
+     *
+     * The recourse is named ON THE ROW rather than only in a log line, because
+     * this is precisely the row a human reads days later. On THIS leg the solver
+     * funds the lockup and the client is the covenant receiver, so the solver's
+     * solo path is `unilateralRefundWithoutReceiver` — never the claim.
+     */
+    it('names the server-independent recourse on the row it parks', async () => {
+      const { id } = await censored()
+      await expect(service.tick(id)).rejects.toThrow('server refused to co-sign')
+      const entered = await store.get(id)
+      now = entered.updatedAt + REFUND_CENSORSHIP_GRACE
+      const row = await service.tick(id)
+
+      expect(row.failureReason).toContain('unilateralRefundWithoutReceiver')
+      // The claim leaf is the CLIENT's here. Naming it would send an operator
+      // after a secret they do not hold and a spend they cannot make.
+      expect(row.failureReason).not.toContain('unilateralClaim')
+      expect(row.failureReason).toContain(String(entered.refundWithoutReceiverDelay))
+    })
   })
 })
 

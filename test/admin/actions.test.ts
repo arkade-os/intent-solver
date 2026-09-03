@@ -8,8 +8,13 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { hex } from '@scure/base'
+import { schnorr } from '@noble/curves/secp256k1.js'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { ripemd160 } from '@noble/hashes/legacy.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
+import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 
 const adminStore = () => ({
   recordAction: vi.fn().mockResolvedValue(undefined),
@@ -657,5 +662,100 @@ describe('read-payment across a provider or wallet change', () => {
     const body = await ask(rowPaidBy(null, null), 'bbbb')
 
     expect(body.result?.verdict).toBe('undecided-push-nothing')
+  })
+})
+
+/**
+ * The exit plan the console offers on every row.
+ *
+ * Two properties, and both have been shipped wrong here before in other levers:
+ * it must reach EVERY corridor the console lists (`tick` and `park-swap` were
+ * each keyed to one store), and it must not carry the preimage back into a
+ * browser (`read-payment` states the same rule for the same reason).
+ */
+describe('unilateral-exit-plan', () => {
+  const key = (fill: number) => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
+  const p2trScript = (program: Uint8Array) => Uint8Array.from([0x51, 0x20, ...program])
+  const PREIMAGE = new Uint8Array(32).fill(7)
+  const PAYMENT_HASH = hex.encode(sha256(PREIMAGE))
+
+  const lockupRow = () => {
+    const base = {
+      id: 'swap-1',
+      receiverPubkey: hex.encode(key(1)),
+      serverPubkey: hex.encode(key(3)),
+      paymentHash: PAYMENT_HASH,
+      refundLocktime: 1_800_000_000,
+      claimDelay: 4096,
+      emulatorPubkey: hex.encode(key(9)),
+      refundPkScript: hex.encode(p2trScript(key(5))),
+      pkScript: '',
+      clientRefundPubkey: hex.encode(key(11)),
+      refundWithoutReceiverDelay: 8192,
+      refundDelay: 4096,
+      receiverPkScript: hex.encode(p2trScript(key(13))),
+      nonInteractiveParameters: true,
+    }
+    const script = new CovenantSwapScript({
+      receiver: hex.decode(base.receiverPubkey),
+      server: hex.decode(base.serverPubkey),
+      preimageHash: ripemd160(hex.decode(base.paymentHash)),
+      refundLocktime: base.refundLocktime,
+      claimDelay: base.claimDelay,
+      client: hex.decode(base.clientRefundPubkey),
+      clientRefundDelay: base.refundWithoutReceiverDelay,
+      refundWithoutServerDelay: base.refundDelay,
+      nonInteractiveParameters: {
+        emulatorPubkey: hex.decode(base.emulatorPubkey),
+        receiverPkScript: hex.decode(base.receiverPkScript),
+        senderPkScript: hex.decode(base.refundPkScript),
+      },
+    })
+    return { ...base, pkScript: hex.encode(script.pkScript) }
+  }
+
+  /** A corridor the closed `CORRIDORS` union does not name, so only the registry can reach it. */
+  const injected = (pair: string) => ({
+    descriptor: { pair },
+    lockupFor: async (id: string) => (id === 'swap-1' ? { lockup: lockupRow(), preimage: hex.encode(PREIMAGE) } : null),
+  })
+
+  const servicesHolding = (pair: string, solverKey: Uint8Array) =>
+    fakeServices({
+      arkade: { identity: { xOnlyPublicKey: async () => solverKey } },
+      corridors: corridorSet({ [pair]: injected(pair) }),
+    })
+
+  it('stays read-only: nothing about it signs, spends or broadcasts', () => {
+    expect(ACTIONS['unilateral-exit-plan']?.tier).toBe('safe')
+  })
+
+  it('reaches a corridor the closed union never named', async () => {
+    const body = (await (
+      await post('unilateral-exit-plan', { id: 'swap-1' }, servicesHolding('bespoke:X->Y', key(11)))
+    ).json()) as { result?: Record<string, unknown> }
+
+    expect(body.result).toMatchObject({
+      corridor: 'bespoke:X->Y',
+      role: 'sender',
+      leaf: 'unilateralRefundWithoutReceiver',
+      delaySeconds: 8192,
+    })
+  })
+
+  it('names the CLAIM leaf where the solver is the covenant receiver', async () => {
+    const body = (await (
+      await post('unilateral-exit-plan', { id: 'swap-1' }, servicesHolding('bespoke:X->Y', key(1)))
+    ).json()) as { result?: Record<string, unknown> }
+
+    expect(body.result).toMatchObject({ role: 'receiver', leaf: 'unilateralClaim', delaySeconds: 4096 })
+  })
+
+  it('never hands the preimage back, even on the leg whose leaf needs one', async () => {
+    const raw = await (
+      await post('unilateral-exit-plan', { id: 'swap-1' }, servicesHolding('bespoke:X->Y', key(1)))
+    ).text()
+
+    expect(raw).not.toContain(hex.encode(PREIMAGE))
   })
 })
