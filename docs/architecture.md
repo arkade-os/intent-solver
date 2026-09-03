@@ -16,11 +16,11 @@ of the Lightning legs.
 
 Discovery is live through the **solver-registry corridor card** — a signed
 rendezvous (`discovery_pubkey`, relays, per-market fee and limits) emitted
-from live config by `cli card` (`src/core/registryCard.ts`) — and
+from live config by `cli card` (`packages/solver-core/src/core/registryCard.ts`) — and
 multi-solver **broadcast bidding** (open RFQ → sealed bids → directed close)
 is specified in [`rfq-protocol.md`](./rfq-protocol.md) § 4.6. The solver
-side of it is implemented (`src/core/openRfq.ts`, the topic subscription in
-`src/ingress/relay.ts`, rate-capped by `OPEN_RFQ_MAX_BIDS_PER_MIN`); the
+side of it is implemented (`packages/solver-core/src/core/openRfq.ts`, the topic subscription in
+`packages/solver-transport/src/ingress/relay.ts`, rate-capped by `OPEN_RFQ_MAX_BIDS_PER_MIN`); the
 client side lives in the ts-sdk, tracked in issue #4.
 
 ## SEND — Arkade → Lightning
@@ -109,10 +109,10 @@ already uses for send-leg refunds, proven on mainnet and regtest.)
 | Send: offer discovered on the arkd stream, no API/relay | **Rescoped: spot pairs only** | Stream discovery is the liquid-spot-pair model (e.g. BTC/USD), not a pending step for this leg — the Lightning legs negotiate by RFQ permanently ([`rfq-protocol.md`](./rfq-protocol.md)). `subscribeForScripts`/`getSubscription` verified available for when the spot flow is built |
 | Send: open claim — ANY solver claims with `P`, keeps deposit | **Rescoped: spot-market feature** | Today the claim leaf carries the quoted solver's key, and under RFQ it stays that way. The open-claim leaf belongs to the spot-pair flow; its deposit/fee economics are still to design |
 | Receive: RFQ over relay, both sides outbound-only | **Implemented** | The relay ingress + outbound WS client carry the `rfq_*` family on all four corridors (the only wire family — the pre-RFQ `ln_send_*` shape was removed unserved) |
-| Receive: hold invoice for `H` | **Implemented** | `createHoldInvoice`/`getHoldState`/`settleHold` in the LN port + adapters, driven by `src/receive/orchestrator.ts` |
+| Receive: hold invoice for `H` | **Implemented** | `createHoldInvoice`/`getHoldState`/`settleHold` in the LN port + adapters, driven by `packages/solver-corridors/src/receive/orchestrator.ts` |
 | Receive: ClaimPacket sealed to covclaimd; covclaimd pushes claim | **Implemented, covclaimd optional** | Wire protocol + ECIES documented in `environment.md`; covclaimd is a separate service, deliberately — this provider never accepts a preimage. The client holds the covenant's `receiver` key and can claim its own lockup, so a deployment runs correctly with covclaimd unset |
 | Receive: covenant pins payout to the user's script | **Implemented** | Same covenant as send-leg refunds; both receive corridors fund through it |
-| "nostr relay" specifically | **Implemented** | The Nostr codec (`src/relay/nostr.ts`) is the default relay dialect: NIP-01 `REQ`/`EVENT`/`CLOSE`, NIP-44-sealed directed traffic, wallet identity as the transport key. The dev broker framing remains behind `RELAY_PROTOCOL=dev` for integration tests |
+| "nostr relay" specifically | **Implemented** | The Nostr codec (`packages/solver-transport/src/relay/nostr.ts`) is the default relay dialect: NIP-01 `REQ`/`EVENT`/`CLOSE`, NIP-44-sealed directed traffic, wallet identity as the transport key. The dev broker framing remains behind `RELAY_PROTOCOL=dev` for integration tests |
 
 **Verdict:** the diagram is consistent with everything built so far — nothing
 in the running code contradicts it. Its two unbuilt elements, *stream

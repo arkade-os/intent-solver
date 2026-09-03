@@ -791,9 +791,10 @@ which is why the boundary is the funding window and not the margin.
 A row that reaches it from `paying` lands in **`stuck`**, not `refused` — the
 crash-recovery path re-submits without re-asking any pay-time gate, so the gate
 lives in `submitPayment` too, and a row leaving an exposed state needs a human
-rather than the refund sweep. Settle it the usual way (`read-payment`,
-`scripts/lookup-htlc.mjs`) before refunding or claiming. From `funded` it lands
-in `refused` and refunds on its own.
+rather than the refund sweep. Settle it the usual way — `read-payment` first,
+plus whatever HTLC lookup the rail in use provides, since that half is
+backend-specific and lives with the backend — before refunding or claiming.
+From `funded` it lands in `refused` and refunds on its own.
 
 Never "fix" it by widening the deadline after the fact. The refusal is the gate
 holding: on a rail that cannot cap the route, an HTLC longer than the stored

@@ -29,10 +29,10 @@ an outbound relay connection changes the transport and nothing downstream.
 | `scripts/mock-relay.mjs` | a ~60-line dev broker for local runs | — |
 
 The relay's specific wire protocol lives behind ONE codec seam. The default
-dialect is Nostr (`src/relay/nostr.ts`, `RELAY_PROTOCOL=nostr`): NIP-01
+dialect is Nostr (`packages/solver-transport/src/relay/nostr.ts`, `RELAY_PROTOCOL=nostr`): NIP-01
 `REQ`/`EVENT`/`CLOSE`, NIP-44-sealed directed traffic, wallet identity as the
 transport key. The minimal generic broker framing (`{op:'sub'|'unsub'|'event',
-...}`, `encodeFrame`/`decodeFrame` in `src/relay/connection.ts`) stays
+...}`, `encodeFrame`/`decodeFrame` in `packages/solver-transport/src/relay/connection.ts`) stays
 available behind `RELAY_PROTOCOL=dev` for local runs against
 `scripts/mock-relay.mjs`. Nothing above the codec changes between the two.
 

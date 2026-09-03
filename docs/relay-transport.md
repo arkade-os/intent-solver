@@ -218,7 +218,7 @@ and are not one.
 This also preserves the exit. Because rendezvous is keyed by protocol in the
 card (`transports: { nostr: { relays } }`, `additionalProperties: false`), a
 genuinely different bus is a new key plus a new `WireCodec` — the seam that
-already exists in `src/relay/connection.ts` and is already exercised by two
+already exists in `packages/solver-transport/src/relay/connection.ts` and is already exercised by two
 dialects. If measurement later shows a bespoke protocol earns its keep,
 nothing above the codec has to move. Nothing measured so far says it does.
 
@@ -235,7 +235,7 @@ socket. Plus `scripts/probe-relay.mjs`, which answers "is the solver
 reachable, and which side is at fault" in one command.
 
 **(b) Landed on this side — the RFQ kinds are in the ephemeral range.** 4859 →
-24859, 4860 → 24860 (`src/relay/nostr.ts`). This is pure NIP-01, works on
+24859, 4860 → 24860 (`packages/solver-transport/src/relay/nostr.ts`). This is pure NIP-01, works on
 strfry today (verified: accepted and delivered), and it was the highest-value
 change available because it fixes a *privacy* defect and a *correctness*
 defect at once: plaintext trade intent stops being permanently archived, and

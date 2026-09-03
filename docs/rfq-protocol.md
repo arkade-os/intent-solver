@@ -103,7 +103,7 @@ it whole.
 
 ### 2.1 Amount encoding *(specified; NOT yet implemented — the solver ingress
 
-still declares these fields as JSON numbers in `src/wire/payloads.ts` and its
+still declares these fields as JSON numbers in `packages/solver-corridors/src/wire/payloads.ts` and its
 three sibling schemas, and the ts-sdk client does the same in
 `packages/swap/src/rfq.ts`. Both sides must change together; this section is
 the contract they change against.)*
@@ -205,7 +205,7 @@ the directional form above.
 
 ### 3.1 Nostr (production)
 
-The reference solver implements this transport (`src/relay/nostr.ts` behind
+The reference solver implements this transport (`packages/solver-transport/src/relay/nostr.ts` behind
 the `WireCodec` seam; `RELAY_PROTOCOL=nostr`, the default): NIP-01 framing,
 signature verification on every inbound event, NIP-44 v2 on directed
 content, and the wallet identity as the transport key — asserted against the
@@ -281,7 +281,7 @@ corridor card** rather than the kind-38859 ad: a git-reviewed, BIP340-signed
 listing carrying the solver's `discovery_pubkey`, its **transport map**, and
 per-market `fee_bps`, `fee_flat` and limits (`schema/card.schema.json` in
 `arkade-os/solver-registry`; this deployment emits its own card from live
-config via `cli card` — `src/core/registryCard.ts`). Card and ad share the
+config via `cli card` — `packages/solver-core/src/core/registryCard.ts`). Card and ad share the
 same key model — the card's `discovery_pubkey` is the pubkey RFQ traffic is
 addressed to — and both are **indicative**: rendezvous data, never terms.
 
@@ -319,14 +319,14 @@ rather than silently ignored.
 
 The reference implementation also speaks a minimal generic broker framing —
 `{op: "sub"|"unsub"|"event", …}` over WebSocket — defined in one codec pair,
-`encodeFrame`/`decodeFrame` (`src/relay/connection.ts`). Its event shape
+`encodeFrame`/`decodeFrame` (`packages/solver-transport/src/relay/connection.ts`). Its event shape
 (`id`, `author`, `recipient`, `payload`) is deliberately Nostr-shaped; moving
 to Nostr is a codec swap (`REQ`/`EVENT`/`CLOSE` + NIP-44 on the payload) and
 nothing above the codec changes. Teams MAY use the dev framing against
 `scripts/mock-relay.mjs` for integration tests.
 
 Transport requirements that are load-bearing regardless of codec (all
-implemented and tested in `src/relay/connection.ts`):
+implemented and tested in `packages/solver-transport/src/relay/connection.ts`):
 
 - Reconnect MUST arm on **both** `error` and `close` — a connect that fails
   outright fires only `error`, so retrying solely from `close` stops forever
@@ -339,7 +339,7 @@ implemented and tested in `src/relay/connection.ts`):
 The open-RFQ flow (§ 4.6) adds one thing to this framing: a topic —
 `topic?: string` on both the event shape and the subscription filter, exact
 string match, carrying the § 2 canonical market key; the broker analogue of
-the kind-24860 `t` tag (implemented: `src/relay/connection.ts`,
+the kind-24860 `t` tag (implemented: `packages/solver-transport/src/relay/connection.ts`,
 `scripts/mock-relay.mjs`).
 
 ## 4. Message family
@@ -363,11 +363,11 @@ except the broadcast kind: on kind 24860 nothing is ever refused; a malformed
 or unserved `rfq_open` is ignored silently (§ 4.6). An `rfq_open` payload
 arriving on the **directed** kind is out of place; the reference ingress
 ignores it silently along with any other unrecognised payload type (a refusal
-here is specified but not yet implemented — `src/ingress/relay.ts` refuses
+here is specified but not yet implemented — `packages/solver-transport/src/ingress/relay.ts` refuses
 only a malformed `rfq_request` or `rfq_status_request`).
 Any other unparseable or unaddressed event MUST be ignored silently — on a
 shared relay, scolding every stray event is noise. (This is exactly the
-behaviour of the reference ingress, `src/ingress/relay.ts`.)
+behaviour of the reference ingress, `packages/solver-transport/src/ingress/relay.ts`.)
 
 **There is NO accept message in any class.** Acceptance is an action, not a
 message: the client accepts a quote by funding the settlement contract it
@@ -487,8 +487,8 @@ Relays redeliver, clients retry, and networks duplicate. The rules:
   `rfq_request` (same `rfq_id`, same content) MUST re-emit the **existing**
   quote — byte-identical terms, never a second swap, never a re-price. The
   reference implementation derives this from a UNIQUE constraint on the
-  natural key plus a deterministic re-emit (`src/ingress/relay.ts`,
-  `src/db/swaps.ts`).
+  natural key plus a deterministic re-emit (`packages/solver-transport/src/ingress/relay.ts`,
+  `packages/solver-corridors/src/db/swaps.ts`).
 - Re-emission applies only while the negotiation is still in `quoted`. Once
   the contract is funded — or the swap has otherwise progressed
   (`funded`/`filling`/`filled`/`settled`/`stuck`) — a repeated `rfq_request`
@@ -496,7 +496,7 @@ Relays redeliver, clients retry, and networks duplicate. The rules:
   from then on. A negotiation that ended in `refused`/`expired`/`refunded`
   releases the natural key and is quoted fresh.
 - The same `rfq_id` bound to a **different natural key** is `quote_conflict`
-  (`src/ingress/rfq.ts`). Content matters beyond the natural key, too: a
+  (`packages/solver-transport/src/ingress/rfq.ts`). Content matters beyond the natural key, too: a
   repeat re-emits the existing quote only while it is still live AND the
   request's client-binding fields match it — the send profile's
   `client_refund_pubkey` and `refund_address` pin the covenant, so a retry
@@ -506,7 +506,7 @@ Relays redeliver, clients retry, and networks duplicate. The rules:
   exposure (a hash whose preimage the solver may already know is burned
   forever).
 
-### 4.6 Open RFQ — broadcast bidding _(solver side implemented — `src/core/openRfq.ts`, `src/ingress/relay.ts`; the client side lives in the ts-sdk, tracked in issue #4)_
+### 4.6 Open RFQ — broadcast bidding _(solver side implemented — `packages/solver-core/src/core/openRfq.ts`, `packages/solver-transport/src/ingress/relay.ts`; the client side lives in the ts-sdk, tracked in issue #4)_
 
 Directed negotiation (§ 4.1–4.5) presumes the client has already picked a
 solver from discovery data. When several solvers serve a pair — and
@@ -725,7 +725,7 @@ observed in time**. This is the tolerance parameter of the whole protocol:
   the market during the window): windows on the order of **~30 seconds**.
 - **Same-asset pairs** (`…:BTC->…:BTC`): windows of **minutes**. The
   reference implementation's 15-minute `DEFAULT_LOCKUP_TIMEOUT`
-  (`src/core/send.ts`) maps directly onto it, as an UPPER bound: on the
+  (`packages/solver-core/src/core/send.ts`) maps directly onto it, as an UPPER bound: on the
   Lightning send leg the window is also clipped to the invoice's own expiry
   (`lockupDeadlineFor`), so a short invoice yields a correspondingly short
   `valid_until` rather than a refusal.
@@ -796,8 +796,8 @@ signature and carrying no timelock. § 7.2.)
 The client pays a BOLT11 invoice out of an Arkade balance. The reference
 implementation **serves this profile natively on both transports**:
 `rfq_request` over `POST /v1/swap` or the relay, `rfq_status_request` over
-the relay, `GET /v1/rfq/<rfq_id>` over HTTP (`src/wire/payloads.ts`,
-`src/ingress/rfq.ts`). A JavaScript trader library implements this profile
+the relay, `GET /v1/rfq/<rfq_id>` over HTTP (`packages/solver-corridors/src/wire/payloads.ts`,
+`packages/solver-transport/src/ingress/rfq.ts`). A JavaScript trader library implements this profile
 end to end (`examples/lib/`, `docs/integration-js.md`); the reference clients
 `examples/send-client.mjs` (HTTP) and `examples/send-client-relay.mjs`
 (relay) are thin consumers of it.
@@ -872,7 +872,7 @@ corridor: the solver is the VHTLC `receiver` (it claims with `P`), the client
 is the `sender` (it is refunded if the swap fails). The receive corridors
 (§ 7.1.2, § 7.1.4) carry the same leaves with the roles inverted — the client
 is `receiver` there, the solver `sender` — so "who refunds whom" flips with
-them; see `src/arkade/covenant.ts`'s role-inversion note.
+them; see `packages/solver-arkade/src/arkade/covenant.ts`'s role-inversion note.
 
 A NINTH leaf, **timelocked non-interactive refund** (below), is additional to
 the original eight and changes the tree — and therefore `lockup_address` —
@@ -898,7 +898,7 @@ reason that has nothing to do with that swap.
 per-leaf covenant options (`VHTLC.Options.nonInteractiveRefund.withoutReceiver`
 and siblings). A single `nonInteractiveParameters` opt-in group replaces those
 per-leaf options once `arkade-os/ts-sdk#818` ships; the reference solver maps
-between the two in `src/arkade/covenant.ts` until then, so the minimum
+between the two in `packages/solver-arkade/src/arkade/covenant.ts` until then, so the minimum
 published version is 0.4.67 either way. This is not merely "upgrade before
 you can use the feature": an `@arkade-os/sdk` that predates 0.4.67 accepts
 `withoutReceiver: true` silently and ignores it rather than rejecting it, so
@@ -983,7 +983,7 @@ there.
 #### 7.1.2 `lightning:BTC->arkade:BTC` — implemented today
 
 The client is paid over Lightning and the sats land on Arkade
-(`src/receive/orchestrator.ts`, `src/wire/lightningReceivePayloads.ts`).
+(`packages/solver-corridors/src/receive/orchestrator.ts`, `packages/solver-corridors/src/wire/lightningReceivePayloads.ts`).
 
 - **request.profile**: `payment_hash` (`H = sha256(P)`, client-chosen — the
   client generates `P` and never sends it), `payout_address` (the client's
@@ -1010,7 +1010,7 @@ The client is paid over Lightning and the sats land on Arkade
   MUST NOT assume a default**: the backend picks `E` and may pick one shorter
   than its documented norm; a hardcoded guess that runs long is exactly the
   case where the solver pays out and cannot collect
-  (`src/core/receive.ts`).
+  (`packages/solver-core/src/core/receive.ts`).
 - **Settlement**: the solver funds the Arkade side under a covenant that
   **pins the payout to the client's script** — the same `enforcePayTo`
   covenant proven on the send leg's refunds — so neither the solver nor
@@ -1028,12 +1028,12 @@ The client is paid over Lightning and the sats land on Arkade
 #### 7.1.3 `arkade:BTC->onchain:BTC` — implemented today
 
 The client locks Arkade balance; the solver funds a Bitcoin L1 Taproot HTLC
-the client claims on-chain (`src/send/onchainOrchestrator.ts`,
-`src/wire/onchainPayloads.ts`). Same flow shape as 7.1.1: the client derives
+the client claims on-chain (`packages/solver-corridors/src/send/onchainOrchestrator.ts`,
+`packages/solver-corridors/src/wire/onchainPayloads.ts`). Same flow shape as 7.1.1: the client derives
 BOTH contracts locally (the Arkade covenant is the same tree as § 7.1.1.1 —
 eight leaves, nine once the solver has deployed the timelocked non-interactive
 refund leaf; the onchain HTLC is a two-leaf claim/refund P2TR,
-`src/onchain/htlc.ts`), funds
+`packages/solver-rails/src/onchain/htlc.ts`), funds
 only its own derivation, and goes offline. The client reveals `P` by
 claiming the onchain HTLC — unlike Lightning, nothing reveals it
 automatically — and the solver reads `P` off that witness to claim the
@@ -1057,8 +1057,8 @@ Arkade lockup.
 #### 7.1.4 `onchain:BTC->arkade:BTC` — implemented today
 
 The mirror: the client funds the onchain HTLC (holding its refund role) and
-receives Arkade (`src/receive/onchainOrchestrator.ts`,
-`src/wire/onchainReceivePayloads.ts`). The solver watches for the client's
+receives Arkade (`packages/solver-corridors/src/receive/onchainOrchestrator.ts`,
+`packages/solver-corridors/src/wire/onchainReceivePayloads.ts`). The solver watches for the client's
 funding output, waits `min_confirmations`, funds the Arkade lockup pinned to
 the client's payout script, and claims the onchain HTLC once `P` is public.
 
@@ -1088,15 +1088,15 @@ profile:
 
 This is the generalisation of the send leg's rule (worst-case Lightning HTLC
 lifetime + margin before the Arkade refund opens, `refundLocktimeFor` in
-`src/core/send.ts`; the onchain send leg's `htlcLocktimeFor` /
-`onchainRefundLocktimeFor` in `src/core/onchainSend.ts` are the same rule
+`packages/solver-core/src/core/send.ts`; the onchain send leg's `htlcLocktimeFor` /
+`onchainRefundLocktimeFor` in `packages/solver-core/src/core/onchainSend.ts` are the same rule
 with the onchain HTLC's CLTV standing in for the Lightning lifetime): the
 solver is exposed between paying the cross side and claiming the client's
 lockup, and the client's escape hatch must not open while the solver's
 outbound commitment can still be live. For solver-funded contracts the
 mirror applies (§ 9: the solver's refund opens before the cross-side
 deadline `E`, minus a settle margin — the onchain receive leg's
-`arkadeRefundLocktimeFor` in `src/core/onchainReceive.ts`).
+`arkadeRefundLocktimeFor` in `packages/solver-core/src/core/onchainReceive.ts`).
 
 #### 7.1.5 `arkade:BTC<->ethereum:<asset>` — forward spec
 
@@ -1393,7 +1393,7 @@ stuck      exposure exists and progress is impossible without a human
 Mapping to the reference implementation's store states. Each corridor keeps
 its own state machine (its own table, its own names); the mappers live in
 `src/wire/*.ts` (`rfqStateFromRow` and siblings). The send leg
-(`SendSwapState` in `src/db/swaps.ts`):
+(`SendSwapState` in `packages/solver-corridors/src/db/swaps.ts`):
 
 | RFQ state  | send-leg state                                      | note                                                                                                                                          |
 | ---------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1407,8 +1407,8 @@ its own state machine (its own table, its own names); the mappers live in
 | `refunded` | `refused` + refund outcome recorded                 | the refund is an outcome fact on the terminal row, not a state                                                                                |
 | `stuck`    | `stuck`                                             |                                                                                                                                               |
 
-The other three corridors (`src/db/receiveSwaps.ts`, `src/db/onchainSwaps.ts`,
-`src/db/onchainReceiveSwaps.ts`):
+The other three corridors (`packages/solver-corridors/src/db/receiveSwaps.ts`, `packages/solver-corridors/src/db/onchainSwaps.ts`,
+`packages/solver-corridors/src/db/onchainReceiveSwaps.ts`):
 
 | RFQ state             | Lightning receive                                 | onchain send                           | onchain receive                      |
 | --------------------- | ------------------------------------------------- | -------------------------------------- | ------------------------------------ |
@@ -1429,7 +1429,7 @@ implementation and MUST hold in any implementation):
   exactly one writer wins a race, anything outside the edge set fails loudly.
   This is what stops two workers double-paying one invoice and stops any
   retry tool walking a swap backwards into re-paying
-  (`LEGAL_EDGES` + `transition()` in `src/db/swaps.ts`).
+  (`LEGAL_EDGES` + `transition()` in `packages/solver-corridors/src/db/swaps.ts`).
 - **Stuck-over-silence.** A swap in an exposed state (`filling` onward) that
   cannot make progress MUST escalate to `stuck` — visibly, for a human — and
   MUST NOT be flattened into a generic failure state or silently retried
@@ -1438,13 +1438,13 @@ implementation and MUST hold in any implementation):
 ## 9. Safety invariants
 
 These are **invariants, not tunables**. A deployment that could switch them
-off could lose money, so there is no switch (`src/core/send.ts`,
-`src/core/receive.ts`, `src/core/onchainSend.ts`,
-`src/core/onchainReceive.ts`). Every gate is **re-evaluated at action time** —
+off could lose money, so there is no switch (`packages/solver-core/src/core/send.ts`,
+`packages/solver-core/src/core/receive.ts`, `packages/solver-core/src/core/onchainSend.ts`,
+`packages/solver-core/src/core/onchainReceive.ts`). Every gate is **re-evaluated at action time** —
 immediately before the irreversible step it guards; quoting, funding and
 filling are separated by network waits, and a check that passed at quote time
 can be false by the time money moves. A quote-time pre-check is permitted and
-the reference does one (`evaluateSendAcceptance`, `src/core/send.ts`), but it is
+the reference does one (`evaluateSendAcceptance`, `packages/solver-core/src/core/send.ts`), but it is
 never sufficient. Note how narrow that pre-check is: the ONLY expiry a quote is
 refused for is an invoice with no fundable window left at all. A solver SHOULD
 NOT impose a quoting floor on invoice expiry beyond that. Shorten `valid_until`
@@ -1505,7 +1505,7 @@ reason as a generic decline (no retry semantics inferred).
 | `rate_limited`        | the requester has opened too many quotes recently — back off and retry later                                                                                                                                 |
 
 The reference implementation's internal refusal names map onto the closed set
-(`toRfqReason`, `src/wire/payloads.ts` — anything unrecognised degrades to
+(`toRfqReason`, `packages/solver-corridors/src/wire/payloads.ts` — anything unrecognised degrades to
 `unsupported_payload` rather than leaking a non-spec string):
 
 | internal                     | RFQ v1                |
@@ -1543,27 +1543,27 @@ have a tested reference in this repo.
 1. **Transport** — outbound WebSocket to relays; reconnect arming on **both**
    `error` and `close` with backoff; subscription replay on every reconnect;
    bounded outbound queue for events published while disconnected (ref:
-   `src/relay/connection.ts`, killed-and-restarted-broker test in
+   `packages/solver-transport/src/relay/connection.ts`, killed-and-restarted-broker test in
    `test/relay/websocket.test.ts`).
 2. **NIP-44** — encrypt/decrypt kind-24859 content; validate event signatures;
    address by `p` tag.
 3. **Strict parsing** — schema-validate requests, reject unknown fields with
    `unsupported_payload`; ignore stray events silently (ref:
-   `src/ingress/relay.ts`).
+   `packages/solver-transport/src/ingress/relay.ts`).
 4. **Idempotent store** — UNIQUE on the natural key; duplicate request →
    re-emit the existing quote while `quoted`, `quote_conflict` once the swap
    has progressed; a `refused`/`expired`/`refunded` prior releases the key
-   (ref: `src/db/swaps.ts`, `src/ingress/relay.ts`).
+   (ref: `packages/solver-corridors/src/db/swaps.ts`, `packages/solver-transport/src/ingress/relay.ts`).
 5. **Pricing & validity sizing** — resolve both amounts, fee in the spread;
    size `valid_until` to the pair class (~30 s cross-asset, minutes
    same-asset).
 6. **Gates at action time** — the § 9 invariants, each checked immediately
    before the step it guards, clock injected for testability (ref:
-   `src/core/send.ts`, `src/core/receive.ts` — pure functions, no I/O).
+   `packages/solver-core/src/core/send.ts`, `packages/solver-core/src/core/receive.ts` — pure functions, no I/O).
 7. **State machine** — closed edge set, single-writer CAS transitions,
    crash recovery by re-reading rows (the row is the truth; commit intent
    before every irreversible side effect), stuck-over-silence (ref:
-   `src/db/swaps.ts`, `src/send/orchestrator.ts`).
+   `packages/solver-corridors/src/db/swaps.ts`, `packages/solver-corridors/src/send/orchestrator.ts`).
 8. **Per-profile settlement** — the § 7 mechanics for each pair served;
    derive-locally/compare-only on every contract; preimages only ever read
    from public settlement artifacts.
@@ -1574,7 +1574,7 @@ have a tested reference in this repo.
     served market keyed by the canonical market-key tag; a bid handler that
     prices from config (no invoice decode) and seals `rfq_bid` to the
     broadcast's author; a per-pair rate limit. The directed path is
-    untouched (ref: `src/core/openRfq.ts`, `src/ingress/relay.ts`,
+    untouched (ref: `packages/solver-core/src/core/openRfq.ts`, `packages/solver-transport/src/ingress/relay.ts`,
     `test/core/openRfq.test.ts`).
 
 ## 12. Open questions
