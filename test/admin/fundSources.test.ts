@@ -158,11 +158,29 @@ registerFundSource(() => ({
   },
 }))
 
+/**
+ * A source that CAN take deposits and has none to offer right now — the case the
+ * empty list exists to express, and the only one that separates "this source has
+ * no inbound route" from "its node is unreachable this second".
+ *
+ * A second registration rather than a flag on `token-vault`: that one is the
+ * source with no deposit capability at all, and the whole point here is the
+ * difference between the two. Collapsing them into one fixture would leave the
+ * distinction untested by construction.
+ */
+registerFundSource(() => ({
+  id: 'drained-vault',
+  label: 'drained vault',
+  unit: 'USDX',
+  readBalance: async () => ({ unit: 'USDX', figures: [{ label: 'held', amount: '0' }] }),
+  depositOptions: async () => [],
+}))
+
 describe('the seam is general, not Lightning-shaped', () => {
   it('lists a consumer source beside the built-ins', async () => {
     const summaries = fundSources(fakeServices()).map(summarise)
 
-    expect(summaries.map((s) => s.id)).toEqual(['rail', 'arkade', 'token-vault'])
+    expect(summaries.map((s) => s.id)).toEqual(['rail', 'arkade', 'token-vault', 'drained-vault'])
   })
 
   it('lets each source declare its own unit and its own balance split', async () => {
@@ -257,6 +275,38 @@ describe('capability, not requirement', () => {
 
     expect(response.status).toBe(500)
     expect(await response.json()).toMatchObject({ message: expect.stringContaining('cannot settle deposits') })
+  })
+
+  it('refuses an EMPTY option list distinctly from a source that cannot take deposits at all', async () => {
+    // The same trap as the settle refusal above, one seam over. `{ options: [] }`
+    // would reach the console as a 200 and render as blank space, so an operator
+    // would press the button, watch nothing appear, and have no reason to think
+    // anything is wrong — the worst of the three answers, because it is the only
+    // one that looks like it worked.
+    const drained = await post('fund-deposit-address', { source: 'drained-vault' }, fakeServices())
+    expect(drained.status).toBe(500)
+    expect(await drained.json()).toMatchObject({
+      message: expect.stringContaining('no deposit route available right now'),
+    })
+
+    // And the OTHER refusal still reads differently: this source never had an
+    // inbound route, which is a deployment fact rather than a transient one.
+    const never = await post('fund-deposit-address', { source: 'token-vault' }, fakeServices())
+    expect(never.status).toBe(500)
+    expect(await never.json()).toMatchObject({ message: expect.stringContaining('no inbound route of its own') })
+  })
+
+  it('hands back every option a source offers, not the first', async () => {
+    // The regression this whole change is about. Asserting the COUNT is what
+    // fails if the action ever goes back to answering with one.
+    const body = (await resultOf(await post('fund-deposit-address', { source: 'arkade' }, fakeServices()))) as {
+      options: { addressKind: string; settleRequired: boolean }[]
+    }
+
+    expect(body.options).toHaveLength(2)
+    // Chore-free first: an operator taking the top option gets spendable float.
+    expect(body.options[0]!.settleRequired).toBe(false)
+    expect(body.options[1]!.settleRequired).toBe(true)
   })
 
   it('names what IS available when the source is unknown', async () => {
