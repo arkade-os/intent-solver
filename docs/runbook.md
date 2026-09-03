@@ -377,11 +377,17 @@ to go out to L1 and wait for a settlement.
 | `arkade` (float)  | available, boarding, recoverable, total                 | Arkade address, boarding address                    | no — use `float-lifecycle`  | no       |
 
 The rail's invoice comes from `LightningBackend.createInvoice`, itself optional —
-a backend without it keeps its onchain option rather than losing both. An invoice
-**expires**, and its deadline is read off the BOLT11 rather than from anything
-the node echoed back, because that encoded value is what a payer's node enforces.
-The console renders the time remaining and replaces it with a banner once it has
-passed; press the button again for a fresh one.
+a backend without it keeps its onchain option rather than losing both. The same
+holds when a backend HAS it and the call fails: a node that is down, or one whose
+macaroon lacks `invoices:write`, still hands out its onchain address, and the
+reason the Lightning option is missing is printed on the option you are left
+with. Only a **wrong-chain** address refuses outright, because that one is a
+misconfiguration where handing over something is the dangerous answer.
+
+An invoice **expires**, and its deadline is read off the BOLT11 rather than from
+anything the node echoed back, because that encoded value is what a payer's node
+enforces. The console renders the time remaining and replaces it with a banner
+once it has passed; press the button again for a fresh one.
 
 `rail` is absent entirely on a deployment with no `LN_BACKEND`, the same way the
 four BTC corridors are. `arkade` declines to settle or withdraw on purpose:
