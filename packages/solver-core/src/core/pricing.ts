@@ -101,6 +101,28 @@ export interface NetworkFeeInputs {
    * units, otherwise quotes an absurd price rather than a refusal.
    */
   capSats: number
+  /**
+   * The least this will charge flat, however cheap execution turns out to be.
+   * Defaults to 0, which is the behaviour of not setting it.
+   *
+   * A SEPARATE NUMBER FROM `base.flatSats`, and the distinction is the point.
+   * `base.flatSats` answers "what do I think this costs" and is the fallback
+   * when nothing better is known; this answers "what is the least I will do
+   * this for". Reusing one field for both would over-collect exactly when the
+   * estimate is good: an operator who configured 300 as a guess at chain cost
+   * would keep charging 300 on a quiet mempool that actually cost 50.
+   *
+   * It exists because network cost is not the solver's only cost. A swap ties
+   * up float, carries the risk of a refund, and takes operational attention,
+   * none of which fall to zero because fees did. `bps` covers what scales with
+   * size; this covers what does not.
+   *
+   * A floor above the ceiling is rejected at construction, which is what makes
+   * the two safe to combine — and makes the order they are applied in
+   * unobservable, since they can only ever disagree on a pair that never gets
+   * built. Do not read significance into it; the guard is the thing.
+   */
+  minSats?: number
 }
 
 /**
@@ -147,11 +169,20 @@ export const onchainCostSats = (vsize: number, feeRate: () => number | null) => 
  * The bps component is untouched. It covers proportional risk — capital tied
  * up, inventory — and that does not move with a fee market.
  */
-export const networkFeePricing = ({ base, costSats, capSats }: NetworkFeeInputs): PricingStrategy => {
+export const networkFeePricing = ({ base, costSats, capSats, minSats = 0 }: NetworkFeeInputs): PricingStrategy => {
+  // At construction, where it is loud and once, rather than per quote. A floor
+  // above the ceiling is not a preference to resolve — it is two settings that
+  // cannot both be honoured, and picking a winner silently would leave an
+  // operator believing in whichever one this chose.
+  if (minSats > capSats) {
+    throw new Error(`networkFeePricing: minSats ${minSats} exceeds capSats ${capSats}, so the cap can never hold`)
+  }
   const feeNow = (input: { pair: string; giveSats: number }): Fee => {
     const cost = costSats(input)
-    if (cost === null || !Number.isFinite(cost) || cost < 0) return base
-    return { bps: base.bps, flatSats: Math.min(Math.ceil(cost), capSats) }
+    // The floor applies to the fallback too: not knowing the cost is not a
+    // reason to work for less than the minimum.
+    const known = cost === null || !Number.isFinite(cost) || cost < 0 ? base.flatSats : Math.ceil(cost)
+    return { bps: base.bps, flatSats: Math.max(minSats, Math.min(known, capSats)) }
   }
   // Read ONCE per call and shared by both directions of that call, so a
   // refresh landing mid-quote cannot make `payoutFor` and `giveFor` disagree

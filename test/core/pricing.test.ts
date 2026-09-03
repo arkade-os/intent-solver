@@ -254,3 +254,58 @@ describe('networkFeePricing with a prepared per-swap fee', () => {
     )
   })
 })
+
+/**
+ * A floor under the flat charge, because network cost is not the solver's only
+ * cost.
+ *
+ * A swap ties up float, carries refund risk and takes operational attention,
+ * none of which fall to zero because fees did. `bps` covers what scales with
+ * size; this covers what does not.
+ */
+describe('networkFeePricing with a minimum', () => {
+  const BASE: Fee = { bps: 25, flatSats: 300 }
+
+  it('charges the minimum when execution turns out cheaper', () => {
+    const priced = networkFeePricing({ base: BASE, costSats: () => 40, capSats: 50_000, minSats: 250 })
+    expect(priced.payoutFor({ pair: PAIR, giveSats: 100_000 })).toBe(payoutSatsFor(100_000, { bps: 25, flatSats: 250 }))
+  })
+
+  it('charges the real cost once it clears the minimum', () => {
+    const priced = networkFeePricing({ base: BASE, costSats: () => 1_800, capSats: 50_000, minSats: 250 })
+    expect(priced.payoutFor({ pair: PAIR, giveSats: 100_000 })).toBe(
+      payoutSatsFor(100_000, { bps: 25, flatSats: 1_800 }),
+    )
+  })
+
+  it('is NOT base.flatSats — a guess must not become a floor', () => {
+    // The whole reason these are separate fields. An operator who configured
+    // 300 as a guess at chain cost should not keep charging 300 on a quiet
+    // network that actually cost 40.
+    const noFloor = networkFeePricing({ base: BASE, costSats: () => 40, capSats: 50_000 })
+    expect(noFloor.payoutFor({ pair: PAIR, giveSats: 100_000 })).toBe(payoutSatsFor(100_000, { bps: 25, flatSats: 40 }))
+  })
+
+  it('floors the fallback too — not knowing the cost is not a discount', () => {
+    const priced = networkFeePricing({
+      base: { bps: 25, flatSats: 10 },
+      costSats: () => null,
+      capSats: 50_000,
+      minSats: 250,
+    })
+    expect(priced.payoutFor({ pair: PAIR, giveSats: 100_000 })).toBe(payoutSatsFor(100_000, { bps: 25, flatSats: 250 }))
+  })
+
+  it('defaults to no floor, so not setting it changes nothing', () => {
+    const priced = networkFeePricing({ base: BASE, costSats: () => 40, capSats: 50_000 })
+    expect(priced.payoutFor({ pair: PAIR, giveSats: 100_000 })).toBe(payoutSatsFor(100_000, { bps: 25, flatSats: 40 }))
+  })
+
+  it('refuses a floor above the ceiling, at construction and once', () => {
+    // Two settings that cannot both hold. Picking a winner silently would
+    // leave an operator believing in whichever one was chosen.
+    expect(() => networkFeePricing({ base: BASE, costSats: () => 40, capSats: 100, minSats: 500 })).toThrow(
+      /minSats 500 exceeds capSats 100/,
+    )
+  })
+})
