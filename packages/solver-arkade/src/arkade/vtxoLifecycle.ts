@@ -723,6 +723,15 @@ export const runVtxoLifecycle = async (deps: VtxoLifecycleDeps): Promise<VtxoLif
     const now = deps.nowSeconds()
     // Only the immature ones matter. A matured lockup in the sweep set is fine
     // — its leaf is spendable, which is the whole point of waiting.
+    //
+    // SECONDS ONLY, and knowingly so: against a block-typed arkd
+    // (`core/timelocks.ts`) `refundLocktime` is a HEIGHT, so this comparison
+    // reads every lockup as matured and the guard is simply off. Closing it
+    // needs a chain tip threaded through the lifecycle pass, which no caller
+    // has one to give today. The cost is bounded and self-announcing — a
+    // recovery settlement rejected for an immature CLTV, retried next pass —
+    // and block mode is a regtest capability, so it is recorded rather than
+    // fixed here.
     const immature = new Map(
       deadlines
         .filter((lockup) => now < lockup.refundLocktime + LOCKUP_RECOVERY_MTP_MARGIN_SECONDS)

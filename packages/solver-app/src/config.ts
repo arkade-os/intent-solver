@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { base64 } from '@scure/base'
 import { narrow, resolveLimits, type Limits } from '@arkade-os/solver-core/core/limits.js'
 import { DEFAULT_LOCKUP_TIMEOUT, MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
-import { MAX_BIP68_SECONDS, SEQUENCE_GRANULARITY_SECONDS } from '@arkade-os/solver-core/core/timelocks.js'
+import { MAX_BIP68_BLOCKS, MAX_BIP68_SECONDS, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
 import { FREE, type Corridor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { ALL_DESCRIPTORS } from '@arkade-os/solver-corridors/corridors/index.js'
 import {
@@ -216,6 +216,18 @@ export interface Config {
   contractRetentionMs: number
   /** How many swaps one Lightning-leg sweep drives at once; bounded by what the indexer/LN backend can sustain. */
   sweepConcurrency: number
+  /**
+   * Esplora base URL used only to read the chain tip height.
+   *
+   * Needed by a deployment whose arkd advertises BLOCK-typed delays: its covenant
+   * timelocks — the CSV ladder and the absolute refund locktime alike — mature on
+   * height, so the service needs somewhere to read one. A seconds-typed deployment never
+   * reads it and may leave this unset.
+   *
+   * Falls back to `LND_ESPLORA_URL`, which points at the same indexer on every deployment
+   * that has one, so block mode usually needs no new variable at all.
+   */
+  chainTipEsploraUrl?: string
   /**
    * Funding window a Lightning-send quote grants, seconds — an UPPER bound on
    * it, not the window itself. `lockupDeadlineFor` (`src/core/send.ts`) clips it
@@ -583,7 +595,11 @@ const corridorEnabledFromEnv = (): Record<Corridor, boolean> => {
 
 /**
  * `ARK_UNILATERAL_EXIT_DELAY` — what to believe instead of the server's own
- * advertised unilateral exit delay, in seconds.
+ * advertised unilateral exit delay.
+ *
+ * Seconds or blocks, told apart the way every other relative delay in this service is
+ * (`relativeDelayFrom`). It must agree in UNIT with what the server advertises, which
+ * `createArkadeContext` enforces once it has both numbers in hand.
  *
  * See `ArkadeWalletConfig.unilateralExitDelayOverride` for what this changes
  * (the CSV timelocks in every covenant, and the invoice delta the Lightning
@@ -600,17 +616,26 @@ const unilateralExitDelayOverride = (): number | undefined => {
   if (!raw) return undefined
   const value = Number(raw)
   if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`ARK_UNILATERAL_EXIT_DELAY must be a positive whole number of seconds, got ${raw}`)
+    throw new Error(`ARK_UNILATERAL_EXIT_DELAY must be a positive whole number, got ${raw}`)
   }
   // The SAME window `deriveUnilateralDelays` enforces, checked here so the error names
   // the variable the operator set. Downstream it is caught inside
   // `createArkadeContext` by a message beginning "server exit delay", which would send
-  // an operator who typed ARK_UNILATERAL_EXIT_DELAY=300 to arkd to debug their own
-  // value, at a moment that looks like a connection problem.
-  if (value < SEQUENCE_GRANULARITY_SECONDS) {
-    throw new Error(
-      `ARK_UNILATERAL_EXIT_DELAY is ${value}, below ${SEQUENCE_GRANULARITY_SECONDS}s — it is seconds, not a block count`,
-    )
+  // an operator who typed their own value to arkd to debug it, at a moment that looks
+  // like a connection problem.
+  //
+  // WHICH UNIT this is stays unasked here, because it is not this function's to decide:
+  // the unit is a fact about the arkd being overridden, checked against that server's
+  // own advertised delay in `createArkadeContext`. Asking the operator to declare it too
+  // would create a second source of truth able to disagree with the first.
+  if (relativeDelayFrom(value).unit === 'blocks') {
+    if (value > MAX_BIP68_BLOCKS) {
+      throw new Error(
+        `ARK_UNILATERAL_EXIT_DELAY is ${value} blocks, beyond the ${MAX_BIP68_BLOCKS} a ladder can carry ` +
+          'before its top rung re-types itself as seconds',
+      )
+    }
+    return value
   }
   if (value > MAX_BIP68_SECONDS) {
     throw new Error(`ARK_UNILATERAL_EXIT_DELAY is ${value}s, beyond the ${MAX_BIP68_SECONDS}s BIP68 can encode`)
@@ -824,6 +849,7 @@ export const loadConfig = (): Config => {
     maxExposedSats,
     contractRetentionMs: contractRetentionDays * 86_400_000,
     sweepConcurrency,
+    chainTipEsploraUrl: process.env.CHAIN_TIP_ESPLORA_URL?.trim() || process.env.LND_ESPLORA_URL?.trim(),
     // Ceiling is `MAX_LOCKUP_TIMEOUT` (= REFUND_SAFETY_MARGIN), DERIVED there and
     // imported rather than written as a number here, so it cannot drift from the
     // margin it is the same quantity as. This is NOT the 3480 that used to sit

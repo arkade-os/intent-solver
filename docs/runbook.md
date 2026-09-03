@@ -47,7 +47,7 @@ the API on Workers if you want Workers at all.
 | `RELAY_HEALTH_PATH`                  | no (`.data/relay-health`; `/data/relay-health` in the image) | `relay` refreshes this file's mtime every 10s while the relay socket is up; the image's HEALTHCHECK reads it                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `RELAY_PROTOCOL`                     | no (`nostr`)                                                 | relay wire dialect; `dev` speaks the mock-relay broker framing                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `OPEN_RFQ_MAX_BIDS_PER_MIN`          | no (`30`)                                                    | open-RFQ bidding rate cap (`relay` mode); `0` disables bidding                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `ARK_UNILATERAL_EXIT_DELAY`          | no (believe the server)                                      | seconds. Overrides the unilateral exit delay arkd advertises, for a server that enforces a shorter minimum than it announces. Sets the CSV timelocks in every covenant — too LOW writes a script rejected at SPEND, with money already in it. See "The recourse window on mainnet"                                                                                                                                                                                                                                                     |
+| `ARK_UNILATERAL_EXIT_DELAY`          | no (believe the server)                                      | seconds, or BLOCKS if this deployment's arkd is block-typed (below 512 is a block count — see "Block-typed timelocks"). Must match the server's own unit or boot refuses it. Overrides the unilateral exit delay arkd advertises, for a server that enforces a shorter minimum than it announces. Sets the CSV timelocks in every covenant — too LOW writes a script rejected at SPEND, with money already in it. See "The recourse window on mainnet"                                                                                  |
 | `LN_RECEIVE_ACCEPT_UNILATERAL_GAP`   | no (`false`)                                                 | `true`/`false` exactly. Serves `lightning:BTC->arkade:BTC` when the solver's solo recourse opens after the htlc's `E` — **required for the corridor to run on mainnet at all**, see "The recourse window on mainnet" below. Accepts a bounded loss; `bitcoin` additionally requires `LN_RECEIVE_MAX_SATS` to be set explicitly                                                                                                                                                                                                         |
 | `<CORRIDOR>_ENABLED`                 | no (`true`)                                                  | `false` darkens that corridor (`LN_SEND`, `LN_RECEIVE`, `ONCHAIN_SEND`, `ONCHAIN_RECEIVE`): never constructed, and its pair is refused `unsupported_pair` at the ingress. Rows already on disk stay readable and refundable                                                                                                                                                                                                                                                                                                            |
 | `PAYEE_MNEMONIC`                     | test-only                                                    | payee wallet for `invoice` self-tests, which mint from a wallet of their own                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -1598,3 +1598,76 @@ variable:
 
 Read medians per row, not across: median(TOTAL) is not the sum of the phase
 medians, because they come from different swaps.
+
+## Block-typed timelocks (regtest)
+
+An arkd configured with **block** delays makes this service write block-typed
+covenant leaves. Nothing is set here to switch that on: the unit is read off the
+`unilateralExitDelay` arkd advertises, the same value the ladder's length already
+comes from. Below 512 it is a block count, at or above it seconds — the rule is
+the SDK's own `toTimelock`, not ours.
+
+Two reasons to want it, both regtest-only:
+
+- **One arkd for both.** VHTLC chain swaps need a block-typed `vtxoTreeExpiry`
+  (the stack's `boltz` profile, above). A seconds-only solver forces a second
+  arkd beside it.
+- **Timelocks that mature by mining.** `generatetoaddress` advances a block-typed
+  CSV immediately. A seconds-typed one waits on median-time-past, which regtest
+  does **not** fast-forward just because blocks were produced — mine a hundred
+  blocks and a seconds timelock is exactly as unripe as before. To move those,
+  use `setmocktime` and mine one block.
+
+Boot says which mode it is in. A block-typed server is announced in the log, and
+**refused outright on mainnet** — block-interval variance is far too wide to hold
+a Lightning HTLC deadline against.
+
+### Limits
+
+| | |
+|---|---|
+| Longest base delay | **503 blocks.** Not BIP68's ceiling: the ladder stacks 8 blocks of solo-refund headroom on top, and a top rung of 512 stops meaning blocks and starts meaning seconds — an ~85-minute window where ~3.5 days was meant. Boot refuses a base above this. |
+| Override unit | `ARK_UNILATERAL_EXIT_DELAY` must be expressed in the **server's** unit. Against a block-typed arkd, `4096` looks like "about an hour" and would be read as seconds; boot refuses it and names both values. |
+| Ladder consistency | All three rungs must count one clock. A mixed ladder compiles and funds — it just inverts which recourse opens first, which is the ordering that lets a funder take money from a claimant holding the preimage. `CovenantSwapScript` refuses it at construction. |
+| Deadline arithmetic | Unchanged, and still entirely in unix seconds. A block delay is converted at 600s/block (`NOMINAL_BLOCK_SECONDS`) wherever it meets a wall clock. |
+
+### Regtest recipe
+
+```sh
+# arkd with a block-typed unilateral exit delay, e.g. 20 blocks.
+# Nothing to set on the solver — it reads the unit from /v1/info.
+
+# mature a unilateral leaf:
+bitcoin-cli -regtest generatetoaddress 30 "$(bitcoin-cli -regtest getnewaddress)"
+
+# the client's refund is a block HEIGHT here too, so mine to it as well:
+bitcoin-cli -regtest generatetoaddress 15 "$(bitcoin-cli -regtest getnewaddress)"
+```
+
+Set `CHAIN_TIP_ESPLORA_URL` (or rely on `LND_ESPLORA_URL`) so the service can
+read a height. Without one, a block-typed row makes the orchestrator throw a
+named error rather than guess — guessing "not reached" strands a refund forever,
+and "reached" pushes one the chain will reject.
+
+### Which clock each deadline counts
+
+| deadline | block-typed deployment | seconds-typed |
+|---|---|---|
+| CSV ladder (`unilateralClaim`, `unilateralRefund`, solo refund) | blocks — `generatetoaddress` | seconds — `setmocktime` |
+| `refund_locktime` (client's refund opens) | block height — `generatetoaddress` | unix seconds — `setmocktime` |
+| Invoice expiry, HTLC `E`, settle windows | **always unix seconds** — they belong to Lightning | same |
+
+The third row is the one to remember: Lightning's deadlines are wall-clock
+whatever arkd is configured with, so an end-to-end regtest run still needs the
+clock to move. Mining alone matures the Arkade side of a swap and nothing else.
+
+Internally every deadline is still REASONED about in seconds. A height is
+projected from the tip at 600s/block wherever a duration is needed ("how much
+claim window is left"), and compared against the tip directly wherever the
+question is "has it opened" — which is the only one that must not drift from
+what the chain will enforce.
+
+No database migration is involved. Both encodings are self-describing, so a
+`claim_delay` of `20` on disk unambiguously means twenty blocks and a row written
+before this feature reads back exactly as it always did — the two shapes coexist
+in one database.

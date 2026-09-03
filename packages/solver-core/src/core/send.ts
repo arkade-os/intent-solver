@@ -18,7 +18,7 @@
  * never needs to see P until the payment itself yields it.
  */
 
-import { HOUR, MINUTE } from './timelocks.js'
+import { HOUR, MINUTE, rawDelaySeconds } from './timelocks.js'
 import { MAX_CLIENT_CLTV_BLOCKS } from '../invoice/decode.js'
 
 /**
@@ -383,7 +383,13 @@ export const refundLocktimeFor = (
   // without the server. Otherwise a server outage between paying and claiming
   // lets the client refund while we are still days away from any recourse,
   // having already paid the invoice.
-  const unilateralBound = now + unilateralClaimDelay + REFUND_SAFETY_MARGIN
+  //
+  // CONVERTED, not added raw. `unilateralClaimDelay` may count BLOCKS against a
+  // block-typed arkd, and this bound is a unix-seconds deadline: adding a block count to
+  // a timestamp does not lose precision, it collapses the bound — 20 blocks read as 20
+  // seconds puts the client's refund essentially at `now`, which is the double-collect
+  // window this bound exists to close.
+  const unilateralBound = now + rawDelaySeconds(unilateralClaimDelay) + REFUND_SAFETY_MARGIN
 
   return Math.max(htlcBound, unilateralBound)
 }
