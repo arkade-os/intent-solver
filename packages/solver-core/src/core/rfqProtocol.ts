@@ -214,6 +214,15 @@ export const RFQ_REFUSAL_REASONS: Record<string, RfqRefusalReason> = {
   exposure_cap: 'exposure_cap',
   rate_limited: 'rate_limited',
 
+  // ---- the atomic class, `arkade:<X>->arkade:<Y>` ----------------------------
+  // The solver pays the client out of its own float in the leg being bought, so
+  // "I do not hold enough of that asset right now" is a capacity answer rather
+  // than a pricing one: the corridor serves this pair at this size and would
+  // quote it again once the float recovers. § 10's gloss on `exposure_cap` -
+  // "solver at aggregate capacity right now" - is what tells a client to back
+  // off and retry instead of dropping the pair.
+  insufficient_inventory: 'exposure_cap',
+
   // ---- the EVM corridors ----------------------------------------------------
   // A token this deployment does not serve is a PAIR it does not serve: the
   // token is what distinguishes one EVM pair from another, so the client should

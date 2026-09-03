@@ -1272,7 +1272,7 @@ same transaction that locks, or a solver-operated claim address that claims and
 forwards. A solver serving the `arkade:BTC->ethereum:<asset>` direction SHOULD
 implement one and say which.
 
-### 7.2 Atomic class (`arkade:X->arkade:Y`) — forward spec
+### 7.2 Atomic class (`arkade:X->arkade:Y`) — settlement confirmed; served over RFQ today (§ 7.2.1)
 
 Both assets live in the same Arkade, so nothing can be half-done. But the
 settlement is **not a co-signed transaction**, which is what an earlier revision
@@ -1374,6 +1374,120 @@ is TLV, type `3`, with tagged fields for `swapPkScript`, `wantAmount`,
 `offerAsset`; `encodeOffer` refuses a packet naming both a want asset and an
 offer asset, or neither.
 
+#### 7.2.1 `arkade:X->arkade:Y` over RFQ — implemented today
+
+Everything above describes the settlement. This describes reaching it by
+NEGOTIATION, which is the primary path: § 0 makes RFQ "the standard negotiation
+layer for **all** swap corridors: Lightning, cross-chain, and arkade-to-arkade".
+The two paths coexist permanently and neither replaces the other. Reference
+implementation: `packages/solver-core/src/core/assetRfq.ts` (the decisions),
+`packages/solver-corridors/src/asset/assetRfqOrchestrator.ts` (the state
+machine), `packages/solver-corridors/src/corridors/assetRfq.ts` (the corridor),
+`packages/solver-corridors/src/wire/assetRfqPayloads.ts` (the wire).
+
+**The one difference that matters is WHO NAMES THE PRICE.** On the packet path a
+maker publishes an offer at a price of its own choosing and a solver decides
+whether to take it; the solver's price gate is a feed and a tolerance. Over RFQ
+the client asks first and the solver answers with a **binding, signed price** it
+chose, and the client then funds an offer carrying exactly those terms. Nothing
+else about the settlement changes: the same covenant, the same `fulfill`, the
+same `cancel`.
+
+**The solver remains the TAKER, and this is a money constraint rather than a
+convention.** § 7.2 is explicit that "the offer IS the contract, and the CLIENT
+funds it", so a solver serving this corridor over RFQ still never publishes an
+offer and never funds a covenant. That matters because an offer is a **standing
+on-chain commitment with no intrinsic expiry** — it sits at an address while the
+market moves, and a rational counterparty fills it only once it has turned
+against the writer, which is a free option written to the world. A quote is
+neither standing nor on chain: it expires at `valid_until`, and until the client
+itself deposits, nothing exists anywhere that anyone could take. A solver MUST
+NOT publish standing offers in order to serve this corridor.
+
+**Pairs.** `arkade:BTC->arkade:<68-hex>` and `arkade:<68-hex>->arkade:BTC`, with
+the asset leg written as a literal asset id per § 2. **Exactly one leg may name
+an asset.** This is not a policy choice: `encodeOffer` refuses a packet naming
+both a want asset and an offer asset, or neither, so an `arkade:<A>->arkade:<B>`
+offer is not expressible at all. A solver MUST refuse such a pair with
+`unsupported_pair` at quote time rather than discovering it at fill time.
+
+**Exact-in only.** `amount_side` MUST be `"from"`; `"to"` is refused with
+`unsupported_payload`. Every pair here is cross-asset by construction, and
+§ 7.1.5 already gives the reason for the EVM legs: exact-out "would mean
+inverting a fetched, rounded, directional rate".
+
+**Amounts are the § 2.1 string form and nothing else.** A JSON number is refused
+rather than accepted under the `v: 1` carve-out, because that carve-out is
+bounded to assets of 8 decimals or fewer and an Arkade asset's precision is
+declared at its own genesis — so losslessness cannot be checked here. This
+corridor is new and has no client already sending numbers.
+
+- **request.profile**: `maker_pk_script` (the client's own taproot scriptPubKey,
+  34 bytes hex — the covenant's `makerWP` is this value minus its 2-byte prefix,
+  and it is where the fill MUST pay) and `maker_public_key` (the client's x-only
+  key, the `cancel` path's `user` signer). Both are the CLIENT's position in the
+  offer script, which is what makes the swap trustless for it. Natural key:
+  `rfq_id` alone, per § 4.5 — this profile has no payment hash.
+- **quote.profile**: `offer_address` and `offer_pk_script`, both **compare-only**
+  (§ 6). There is **no `refund_locktime`** at top level; § 4.2 already makes it
+  HTLC-class only, and § 7.2 gives the reason — neither program carries a
+  timelock, so there is no such deadline to name.
+- **status.profile**: `offer_address`, `fill_txid` once one exists, and
+  `failure_reason`. The receipt here is the **fill txid**, not a preimage: there
+  is no hash lock in this class, and `classifySpend` lets the client read the
+  outcome off the chain without asking anyone.
+
+**The address is the commitment, which is what removes the need for an accept
+message.** `offerVtxoScript` compiles the covenant from `(makerWP, wantAmount,
+wantAsset, server, user)`, so BOTH SIDES derive the same address from the quote's
+own `to_amount` plus the client's two profile fields — and a deposit funded on
+terms the solver did not quote derives a DIFFERENT address, which the solver is
+not watching. Neither side has to trust the other's arithmetic. Funding is
+acceptance, exactly as in the HTLC class.
+
+The emulator key is the client's own fetch, per § 6's corollary — it is not
+carried in the quote. A disagreement between the two sides' emulator keys
+surfaces as an address mismatch, which is a refusal to fund rather than a loss.
+
+**Flow.** Client requests → solver quotes and starts watching the address it
+derived → client funds that address, embedding the offer extension on the
+funding transaction → solver observes the deposit, re-checks its gates, and
+spends through `fulfill`, paying the client in the same transaction. The client
+may go offline after funding; the fill needs no client signature.
+
+**Late funding, and who can undo it.** § 5's rule holds: a deposit first
+observed after `valid_until` MUST NOT be filled. It bites harder here than on a
+same-asset corridor, because the solver is short the market for the whole
+window. But the § 5 phrase "and refunded at the contract's refund path" does
+**not** describe an action the solver can take: `cancel` is a 2-of-2 of the
+FUNDER and the Arkade Service, and the solver holds neither key. So the solver
+refuses and stops, and the CLIENT reclaims its own deposit with `cancelOffer`
+whenever it likes — which it can always do, needing nothing from the solver.
+A solver serving this corridor therefore has no refund sweep and no
+operator-forced refund, and their absence is a fact about the covenant rather
+than a missing feature.
+
+**Discovery: this corridor is not advertisable on a registry card today, and it
+does not need to be.** The card classifies a market by its LEGS, not by how the
+market is reached: with both legs on `arkade` it is a **spot** market, priced by
+`price_feed` and understood to be filled through the extension-packet path,
+while a **corridor** (RFQ) market is one with at least one non-arkade leg and is
+what `transports`/`discovery_pubkey` exist for. A cross-asset, both-legs-arkade
+market negotiated over RFQ falls between those two, and there is no field
+meaning "this arkade-to-arkade market is also negotiable over RFQ".
+
+That is a **discovery** gap, not a functional one. A directed `rfq_request` needs
+only the solver's `discovery_pubkey` and a relay, both of which a taker that
+already knows the solver has — so the corridor is fully usable without any card
+entry, and this is how it is expected to be reached in v1. What a taker must
+therefore already know, out of band, is: the solver's pubkey, a relay it is
+reachable on, and the exact pair string (asset id included, lowercase). What it
+cannot do is DISCOVER those from a published card, so this corridor will not be
+found by a client browsing the registry. Closing that gap is a schema change to
+`@arkade-os/solver-discovery` and is deliberately not made here; `transports` is
+the wrong home for it, since that map means "address a message to the solver"
+rather than "this market accepts negotiation".
+
 ## 8. Lifecycle
 
 One state vocabulary for all profiles:
@@ -1420,6 +1534,23 @@ The other three corridors (`packages/solver-corridors/src/db/receiveSwaps.ts`, `
 | `refunded`            | `refunded`                                        | `refunded`                             | `refunded`                           |
 | `refused` / `expired` | `refused` (reason-refined)                        | `refused` (reason-refined)             | `refused` (reason-refined)           |
 | `stuck`               | `stuck`                                           | `stuck`                                | `stuck`                              |
+
+The atomic class over RFQ (`packages/solver-corridors/src/db/assetRfqSwaps.ts`):
+
+| RFQ state  | asset-RFQ state | note                                                                                                                                                  |
+| ---------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `quoted`   | `quoted`        | terms issued; awaiting the client's deposit until `valid_until`                                                                                       |
+| `funded`   | `funded`        | a deposit matching the quoted terms sits at the offer's script. Funding is still how a client accepts here, so the word is exact despite § 8's HTLC gloss |
+| `filling`  | `filling`       | `fulfill` submitted — the only state in which solver capital is committed                                                                              |
+| `settled`  | `filled`        | NOT `filled`: `fulfill` pays the client and takes the deposit in ONE transaction, so there is no interval of "fill landed, solver still collecting"    |
+| `expired`  | `refused`       | folded into `refused` and distinguished by the reason, as the send leg does                                                                           |
+| `refused`  | `refused`       |                                                                                                                                                       |
+| `stuck`    | `stuck`         |                                                                                                                                                       |
+
+There is deliberately **no `refunded`** state on this corridor. The refund is
+`cancel`, a 2-of-2 of the funder and the Arkade Service, which the solver cannot
+perform — so an unfilled deposit is the client's to withdraw, and recording
+`refunded` would claim an action the solver never took (§ 7.2.1).
 
 Normative solver invariants (both are load-bearing in the reference
 implementation and MUST hold in any implementation):
@@ -1566,7 +1697,11 @@ have a tested reference in this repo.
    `packages/solver-corridors/src/db/swaps.ts`, `packages/solver-corridors/src/send/orchestrator.ts`).
 8. **Per-profile settlement** — the § 7 mechanics for each pair served;
    derive-locally/compare-only on every contract; preimages only ever read
-   from public settlement artifacts.
+   from public settlement artifacts. On the atomic class (§ 7.2.1) there is no
+   preimage and no timelock: derive the offer covenant from the terms you
+   quoted, watch THAT address, and never fill a deposit observed after
+   `valid_until` — you cannot refund it, and the client does not need you to
+   (ref: `packages/solver-corridors/src/asset/assetRfqOrchestrator.ts`).
 9. **Solver ad** — publish and refresh kind 38859; keep it honest and
    indicative. In practice, also file the solver-registry corridor card
    (§ 3.1) — today it is the discovery path clients actually use.
@@ -1596,8 +1731,15 @@ have a tested reference in this repo.
   a solver reads it off the transaction stream and fills it through `fulfill`,
   which the Arkade Service signs alone after executing the covenant. Refund is
   `cancel`, a 2-of-2 of the funder and the Service, with no timelock (§ 7.2).
-  Still open: whether a solver should publish offers of its own rather than only
-  filling them.
+  **Resolved since**: a solver does NOT publish offers of its own. Serving this
+  class over RFQ (§ 7.2.1) gets the solver a price it chose without one, because
+  the client funds an offer carrying the quoted terms — where a published offer
+  would be a standing on-chain commitment with no expiry, i.e. a free option.
+  Still open: whether an arkade-to-arkade market can be ADVERTISED as
+  RFQ-negotiable at all. The registry card classifies a market by its legs, so
+  both-legs-arkade reads as spot and therefore as packet-only, and no field means
+  "also negotiable over RFQ" (§ 7.2.1). Until one exists, a taker must already
+  know the solver's pubkey, a relay, and the exact pair string.
 - **Atomic-class fill format.** The exact partially-signed Arkade transaction
   encoding for `rfq_fill` (and who broadcasts) is unspecified.
 - **Canonical Ethereum HTLC contract — RESOLVED for 7.1.5**: Boltz

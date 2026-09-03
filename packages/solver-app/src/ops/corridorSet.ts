@@ -46,6 +46,26 @@ import type { EvmSendSwapStore } from '@arkade-os/solver-corridors-evm/db/evmSen
 import type { EvmReceiveSwapStore } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
 import type { EvmSendSwapService } from '@arkade-os/solver-corridors-evm/send/evmOrchestrator.js'
 import type { EvmReceiveSwapService } from '@arkade-os/solver-corridors-evm/receive/evmOrchestrator.js'
+import {
+  assetRfqCorridor,
+  assetRfqDescriptor,
+  assetRfqReader,
+  type AssetRfqDirection,
+} from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import type { AssetRfqMarket, AssetRfqSwapService } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import type { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+
+/**
+ * Both directions of every asset market, always in this order.
+ *
+ * A market is a market in both directions (`core/assetOffer.ts` says so of the
+ * packet path), but a PAIR is directional — so one configured market registers
+ * two corridors. A direction an operator closed with `max: 0n` still registers
+ * and refuses by amount, which is the honest answer: the pair IS served, at no
+ * size, and darkening it entirely would answer `unsupported_pair` about a pair
+ * the registry card still advertises.
+ */
+const ASSET_RFQ_DIRECTIONS: readonly AssetRfqDirection[] = ['sell_base', 'buy_base']
 
 /** The flat service+store shape both transports and `Services` already carry. */
 export interface FlatCorridorDeps {
@@ -68,6 +88,14 @@ export interface FlatCorridorDeps {
   evmReceiveService?: EvmReceiveSwapService | null
   evmReceiveStore?: EvmReceiveSwapStore | null
   evmCorridors?: readonly EvmCorridorPolicy[]
+  /**
+   * The atomic class: ONE store and ONE service for every asset market, and the
+   * markets they serve. A corridor exists per market per direction, so the list
+   * is what turns one service into corridors the registry can dispatch by pair.
+   */
+  assetRfqService?: AssetRfqSwapService | null
+  assetRfqStore?: AssetRfqSwapStore | null
+  assetRfqMarkets?: readonly AssetRfqMarket[]
 }
 
 /**
@@ -106,6 +134,19 @@ export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corr
       corridors.push(evmReceiveCorridor(policy, deps.evmReceiveService, deps.evmReceiveStore))
     }
   }
+  // The atomic class, on the same rule as the EVM family: a corridor per market
+  // per DIRECTION, registered only when both the service and the store exist.
+  // No service means no market was configured, and every asset pair then
+  // refuses by name as `unsupported_pair`.
+  if (deps.assetRfqService && deps.assetRfqStore) {
+    for (const market of deps.assetRfqMarkets ?? []) {
+      for (const direction of ASSET_RFQ_DIRECTIONS) {
+        corridors.push(
+          assetRfqCorridor(assetRfqDescriptor(market, direction), deps.assetRfqService, deps.assetRfqStore),
+        )
+      }
+    }
+  }
   // Consumer corridors go THROUGH createCorridorSet, so a pair or stem
   // colliding with a built-in is refused at composition rather than shadowing
   // it at dispatch. Last, so they never delay a built-in's status answer.
@@ -135,6 +176,16 @@ export const readerSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corrid
     }
     if (policy.direction === 'receive' && deps.evmReceiveStore) {
       readers.push(evmReceiveReader(evmReceiveDescriptor(policy.token), deps.evmReceiveStore))
+    }
+  }
+  // A READER per asset market per direction wherever the STORE exists, service
+  // or not — the same width argument as above: a market an operator switched
+  // off keeps its in-flight negotiations listed and answerable.
+  if (deps.assetRfqStore) {
+    for (const market of deps.assetRfqMarkets ?? []) {
+      for (const direction of ASSET_RFQ_DIRECTIONS) {
+        readers.push(assetRfqReader(assetRfqDescriptor(market, direction), deps.assetRfqStore))
+      }
     }
   }
   // `Corridor` extends `CorridorReader`, so the same objects serve here. Omit
