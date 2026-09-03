@@ -64,7 +64,7 @@ const arkade = await createArkadeContext(config.arkade)
 // covclaimd's key is read LIVE, never hardcoded: it generates its own.
 const covclaimdUrl = process.env.COVCLAIMD_URL ?? 'http://localhost:7271'
 const covclaimdPubKey = await fetch(`${covclaimdUrl}/v1/preimage/covclaimd-pubkey`)
-  .then((r) => r.json())
+  .then((r) => /** @type {Promise<{ covclaimd_pub_key: string }>} */ (r.json()))
   .then((body) => body.covclaimd_pub_key)
 
 const preimage = randomBytes(32)

@@ -1,0 +1,33 @@
+{
+  // `examples/` is the integration surface — the code an integrator copies —
+  // and until this file existed nothing checked it. Twice in one week it
+  // shipped silently broken to anyone following it: `deriveLockup` calling a
+  // covenant constructor whose parameter shape had moved, and the Nostr client
+  // sitting on a retired event kind. Both compiled, both passed every test,
+  // both failed only at runtime, in someone else's project.
+  //
+  // A separate config rather than folding `examples/` into the root `include`,
+  // because these are `.mjs` and need `allowJs`/`checkJs`, which the rest of
+  // the program has no reason to carry.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+
+    // OFF deliberately, and the only two relaxed.
+    //
+    // `noImplicitAny` would demand a JSDoc annotation on every parameter of
+    // code whose whole job is to be read as a tutorial — 32 of the 45 errors
+    // this config first produced, not one of them a defect. It catches
+    // under-annotation; this exists to catch drift.
+    "noImplicitAny": false,
+    // `useUnknownInCatchVariables` accounts for eight more:
+    // `catch (error) { if (error.name === 'AddressMismatch') ... }` is the
+    // idiom these examples use to show a caller telling one refusal from
+    // another. Narrowing each would add ceremony to the lines most worth
+    // reading.
+    "useUnknownInCatchVariables": false
+  },
+  "include": ["examples/**/*"]
+}

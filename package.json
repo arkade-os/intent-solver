@@ -12,7 +12,7 @@
   },
   "scripts": {
     "build": "pnpm -r build",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.examples.json",
     "start": "node --enable-source-maps --experimental-eventsource --env-file=.env packages/solver-app/dist/cli.js watch",
     "cli": "pnpm build && node --enable-source-maps --experimental-eventsource --env-file=.env packages/solver-app/dist/cli.js",
     "test": "vitest run --exclude e2e",

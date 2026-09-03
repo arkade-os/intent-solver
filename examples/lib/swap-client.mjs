@@ -229,7 +229,17 @@ export const lockupSpent = async (arkade, pkScript) => (await findLockups(arkade
  *
  * `onEvent(name, data)` narrates each step for logging; never load-bearing.
  */
-export const sendToLightning = async ({ transport, arkade, emulatorPubkey, emulatorUrl, bolt11, onEvent }) => {
+// `emulatorPubkey = undefined` is not decoration: it is optional — the body
+// falls back to `fetchEmulatorPubkey(emulatorUrl)` — and a bare destructure
+// makes that indistinguishable from required to anything reading the shape.
+export const sendToLightning = async ({
+  transport,
+  arkade,
+  emulatorPubkey = undefined,
+  emulatorUrl,
+  bolt11,
+  onEvent,
+}) => {
   const emit = (name, data) => onEvent?.(name, data)
   const rfqId = newRfqId()
   const decoded = decodeInvoice(bolt11)
@@ -265,6 +275,14 @@ export const sendToLightning = async ({ transport, arkade, emulatorPubkey, emula
     lockup.candidates.map((candidate) => candidate.address),
   )
   const matched = lockup.candidates.find((candidate) => candidate.address === matchedAddress)
+  // `verifyLockupAddress` returns one of the addresses it was handed, so this
+  // find cannot miss today. Checked anyway because of where the value goes:
+  // four lines down it is the `address` of a real `wallet.send`. If the two
+  // ever disagree, the failure without this is
+  // `Cannot read properties of undefined` at the funding call — money moving
+  // against an address nothing verified is the one outcome worth an explicit
+  // refusal rather than a TypeError.
+  if (!matched) throw new Error(`no derived candidate matches the verified address ${matchedAddress}`)
   emit('verified', { address: matched.address })
 
   assertFundable({ quote, invoiceExpiresAt: decoded.expiresAt, now: Math.floor(Date.now() / 1000) })

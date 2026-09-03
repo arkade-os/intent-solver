@@ -69,6 +69,16 @@ export declare const verifyLockupAddress: (quote: RfqQuote, derivedAddress: stri
 
 export declare const assertFundable: (input: { quote: RfqQuote; invoiceExpiresAt: number; now: number }) => void
 
+/**
+ * A reply is OUR quote, or it throws — `SwapRefusal` when the solver refused,
+ * a plain `Error` when the payload is neither that nor a quote for `rfqId`.
+ *
+ * Declared late. It has been exported from the implementation since the Nostr
+ * transport needed it, and this file never said so; nothing noticed because
+ * nothing typechecked the example that imports it.
+ */
+export declare const expectQuote: (payload: unknown, rfqId: string) => RfqQuote
+
 export declare const httpTransport: (
   baseUrl: string,
   options?: { fetchImpl?: (url: string, init?: RequestInit) => Promise<Response> },
