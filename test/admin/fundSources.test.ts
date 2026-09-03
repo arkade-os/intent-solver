@@ -444,6 +444,43 @@ describe('the lightning rail source', () => {
     ])
   })
 
+  /**
+   * The other half of the same promise, and the one an unguarded `await` breaks:
+   * a backend that HAS `createInvoice` and fails the call. A node that is down,
+   * restarting, or holding a macaroon without `invoices:write` — that last one
+   * answers `newReceiveAddress` perfectly well while refusing to mint, so the
+   * onchain option is genuinely available and would have been thrown away.
+   *
+   * This is the state an operator is in precisely when they are trying to fund a
+   * node that is already unwell, which is when a way in matters most. Before the
+   * guard, `depositOptions()` rejected outright and the console showed neither
+   * option.
+   */
+  it('keeps the onchain option when the backend HAS createInvoice and the call fails', async () => {
+    const createInvoice = vi.fn().mockRejectedValue(new Error('14 UNAVAILABLE: connection refused'))
+    const source = railFundSource(fakeServices({ ln: lnBackend({ createInvoice }) }))!
+
+    const options = await source.depositOptions!()
+
+    expect(options.map((o) => o.addressKind)).toEqual(['bitcoin regtest'])
+    // The reason travels with it. An option that just disappears reads as "this
+    // rail cannot do Lightning deposits" — a different, permanent-sounding claim
+    // than "it could not right now".
+    expect(options[0]!.note).toContain('Lightning deposit unavailable')
+    expect(options[0]!.note).toContain('14 UNAVAILABLE')
+    // And the note it already carried is still there, not replaced.
+    expect(options[0]!.note).toMatch(/does not open a channel/i)
+  })
+
+  it('says nothing about Lightning when the backend simply cannot mint', async () => {
+    // The contrast that makes the note above meaningful: absent capability is a
+    // deployment fact, not a fault, and annotating it would report a problem
+    // that does not exist on every deployment without the capability.
+    const options = await railFundSource(fakeServices())!.depositOptions!()
+
+    expect(options[0]!.note).not.toContain('Lightning deposit unavailable')
+  })
+
   it('runs the backend’s own claim step and reports each outcome', async () => {
     const settleReceiveAddress = vi.fn().mockResolvedValue([
       { settled: true, txid: 'bb'.repeat(32), vout: 0, reference: 'transfer-1' },
