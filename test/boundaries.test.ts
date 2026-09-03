@@ -300,25 +300,40 @@ describe('layer boundaries', () => {
  *
  * These are the tables the SDK spec §4.1 inverts. Each one is a compile-time
  * forcing function — `Record` over a closed union will not typecheck until a new
- * corridor answers it — so the count may only fall as each is replaced by a
+ * corridor answers it — so the intended direction is DOWN, each replaced by a
  * REQUIRED descriptor field that forces the same question. A table removed
  * without its question being re-asked somewhere is a money-path regression, not
  * a cleanup, which is why this counts rather than merely forbidding.
  *
+ * It has risen once, and the rule is worth stating precisely rather than
+ * softening: a rise is DEBT, not a neutral event. `corridorNetworkFees` was
+ * added as a fourth table because its three siblings are tables and matching
+ * them was the smaller change; the alternative — making it the descriptor field
+ * it should eventually be — is the migration this count exists to push toward,
+ * and it was not done. Recorded here so the next reader sees a deliberate
+ * exception with its cost named, rather than a number that quietly grew.
+ *
  * Three of the original four files are gone: `CORRIDOR_ENV_STEM`, `DELIVERED`,
  * `VOCABULARY` and `PAYOUT_RAIL` are now the required `envStem`, `states` and
  * `payoutRail` fields on `CorridorDescriptor`. What remains is `config.ts`,
- * whose nine are three fields on the EXPORTED `Config` type plus each reader's
+ * whose twelve are four fields on the EXPORTED `Config` type plus each reader's
  * return annotation and `as` cast — changing those changes a public shape, so
  * they land with the Corridor interface rather than here.
  *
- * These are OCCURRENCES, not distinct tables: `config.ts` declares three fields
+ * These are OCCURRENCES, not distinct tables: `config.ts` declares four fields
  * and then repeats the type across each reader's return annotation and its
  * closing `as` cast.
  *
+ * The count ROSE by three when `corridorNetworkFees` joined its three siblings.
+ * That is a per-corridor question a new corridor genuinely has to answer — what
+ * bounds does it price its execution cost inside — and it is asked in the shape
+ * the other three fee and limit knobs already use. It forces nothing, for the
+ * same reason none of the others do (see below), so the honest reading is that
+ * this file gained a fourth entry to migrate, not a fourth guard.
+ *
  * WHAT ACTUALLY FORCES THE ANSWER NOW, measured rather than assumed, twice.
  *
- * `config.ts`'s nine occurrences force NOTHING. They all sit behind
+ * `config.ts`'s twelve occurrences force NOTHING. They all sit behind
  * `Object.fromEntries(...) as Record<Corridor, …>`, and a cast suppresses the
  * very exhaustiveness error the table is credited with. That was confirmed by
  * adding a fifth member to `CORRIDORS` and reading the errors.
@@ -346,7 +361,7 @@ describe('layer boundaries', () => {
  * no migration could ever clear.
  */
 const CORRIDOR_RECORD_CENSUS: Readonly<Record<string, number>> = {
-  'packages/solver-app/src/config.ts': 9,
+  'packages/solver-app/src/config.ts': 12,
 }
 
 describe('the corridor record census', () => {
