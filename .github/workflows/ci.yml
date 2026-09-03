@@ -83,8 +83,27 @@ jobs:
 
       - uses: pnpm/action-setup@v4
 
+      # Retried, because one dependency's install script has a fallback that
+      # cannot work here. better-sqlite3 runs
+      # `prebuild-install || node-gyp rebuild --release`, and `node:*-slim`
+      # carries no python3, no make and no cc — so a blip fetching the prebuilt
+      # binary does not degrade into a slower source build, it goes hard red
+      # with a `gyp ERR!` that names the compiler rather than the download it
+      # actually lost. Seen once on a docs-only commit, green on re-run of the
+      # identical tree.
+      #
+      # Retrying the install is safe against the failure this must NOT hide: a
+      # genuinely outdated lockfile fails deterministically, three times, and
+      # still goes red with its own message.
       - name: Install
-        run: pnpm install --frozen-lockfile
+        run: |
+          set -eu
+          for attempt in 1 2 3; do
+            if pnpm install --frozen-lockfile; then exit 0; fi
+            echo "install attempt ${attempt} failed; retrying"
+            sleep 5
+          done
+          exit 1
 
       - name: Format check
         run: pnpm format:check
@@ -151,7 +170,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-      - run: pnpm install --frozen-lockfile
+      # Same retry, same reason as the build job above: this container is
+      # `node:22-slim` too, and this install is UNFILTERED — the filters below
+      # scope what is listed and built, not what is installed — so it fetches
+      # better-sqlite3's prebuilt binary whatever set is under test. This is
+      # the job that lost that fetch.
+      - name: Install
+        run: |
+          set -eu
+          for attempt in 1 2 3; do
+            if pnpm install --frozen-lockfile; then exit 0; fi
+            echo "install attempt ${attempt} failed; retrying"
+            sleep 5
+          done
+          exit 1
 
       - name: The ${{ matrix.name }} set resolves to exactly its own packages
         # `set -eu`, not `-o pipefail`: the container's /bin/sh is dash, which
