@@ -78,7 +78,7 @@ import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import { poolPlan, mintPool, committedAcrossCorridors } from './pool.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
-import { AssetOfferService } from './assetOffers.js'
+import { assertMarketsPriced, AssetOfferService } from './assetOffers.js'
 import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 
@@ -414,11 +414,26 @@ export const createServices = async (
    * is ever added, rather than something to remember at that point.
    */
   const servesOffers = policy.offerMarkets.length > 0
+  // BEFORE the store is opened, so a deployment that cannot price what it serves
+  // does not come up at all. `withinTolerance` returns TRUE on an empty pricing
+  // list, so a market without one is not gated leniently — it is not gated. The
+  // two halves arrived by different routes (`OFFER_MARKETS` from the
+  // environment, the feed from the console's market rows) and nothing until now
+  // required them to meet.
+  if (servesOffers) assertMarketsPriced(policy.offerMarkets, assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
   const assetOffers = offerStore
     ? new AssetOfferService({
         store: offerStore,
         markets: policy.offerMarkets,
+        // The console's market rows, in the shape this service consumes. The
+        // assertion above is what guarantees this covers every served market;
+        // without both, `withinTolerance` waves every offer through.
+        pricing: assetMarkets.pricing,
+        // Same reader the EVM corridors price from — the market config
+        // deliberately speaks `evmCorridorConfig.ts`'s feed-plus-pointer dialect
+        // so one implementation serves both.
+        fetchPrice: createPriceFeed(),
         minFillAmount: policy.offerMinFillAmount,
         maxFillAmount: policy.offerMaxFillAmount,
         // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts

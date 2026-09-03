@@ -6,7 +6,12 @@
  * outpoint, and submitting without first marking the row in flight.
  */
 import { describe, it, expect, vi } from 'vitest'
-import { AssetOfferService, parseAssetMarkets, type AssetOfferDeps } from '@arkade-os/solver-app/ops/assetOffers.js'
+import {
+  AssetOfferService,
+  assertMarketsPriced,
+  parseAssetMarkets,
+  type AssetOfferDeps,
+} from '@arkade-os/solver-app/ops/assetOffers.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
@@ -400,5 +405,60 @@ describe('parseAssetMarkets', () => {
   it('refuses a malformed entry rather than silently serving fewer markets', () => {
     expect(() => parseAssetMarkets('BTC')).toThrow(/not A\/B/)
     expect(() => parseAssetMarkets('a/b/c')).toThrow(/not A\/B/)
+  })
+})
+
+/**
+ * A served market with no pricing takes an offer at ANY price the maker names —
+ * `assetOffers.ts` says so on `AssetMarketPricing`, and `withinTolerance`
+ * returns true when the pricing list is empty. That is a FAIL-OPEN: the gate
+ * reads as optional, and absent it is not lenient but disabled.
+ *
+ * It only became reachable when a producer for `markets` arrived without one for
+ * `pricing` — `OFFER_MARKETS` names pairs, and the console's market rows are
+ * what carry a feed. Either alone is a configuration a deployment can express;
+ * this refuses the combination rather than serving it quietly.
+ *
+ * Note which direction is safe. Pricing WITHOUT a matching market is fine —
+ * nothing is served. Pricing set but unreadable already refuses (`fetchPrice`
+ * absent returns false). Only market-without-pricing fills blind.
+ */
+describe('assertMarketsPriced', () => {
+  const BTC = null
+  const USDA = 'aa'.repeat(32)
+  const EURX = 'bb'.repeat(32)
+  const priced = (base: string | null, quote: string | null) =>
+    ({
+      base,
+      quote,
+      baseDecimals: 8,
+      quoteDecimals: 6,
+      feedUrl: 'https://f',
+      pricePath: '/p',
+      toleranceBps: 100,
+    }) as never
+
+  it('accepts a market its pricing covers', () => {
+    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [priced(BTC, USDA)])).not.toThrow()
+  })
+
+  it('accepts it in either orientation — the market is unordered, the feed is not', () => {
+    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [priced(USDA, BTC)])).not.toThrow()
+  })
+
+  it('REFUSES a served market with no pricing at all', () => {
+    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [])).toThrow(/pricing|price/i)
+  })
+
+  it('refuses when the pricing covers a different market', () => {
+    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [priced(BTC, EURX)])).toThrow(/pricing|price/i)
+  })
+
+  it('names the market that is unpriced, so an operator can fix it', () => {
+    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [])).toThrow(new RegExp(USDA.slice(0, 16)))
+  })
+
+  it('allows pricing with no market — nothing is served, nothing is at risk', () => {
+    expect(() => assertMarketsPriced([], [priced(BTC, USDA)])).not.toThrow()
   })
 })
