@@ -6,7 +6,12 @@
  * clothes, and it would move it for every deployment at once.
  */
 import { describe, it, expect } from 'vitest'
-import { fixedFeePricing, networkFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
+import {
+  fixedFeePricing,
+  networkFeePricing,
+  onchainCostSats,
+  type PricingStrategy,
+} from '@arkade-os/solver-core/core/pricing.js'
 import { giveSatsFor, payoutSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 
 const FEE: Fee = { bps: 25, flatSats: 100 }
@@ -93,7 +98,7 @@ describe('networkFeePricing', () => {
   const CAP = 50_000
 
   const at = (rate: number | null): PricingStrategy =>
-    networkFeePricing({ base: BASE, feeRate: () => rate, vsize: VSIZE, capSats: CAP })
+    networkFeePricing({ base: BASE, costSats: onchainCostSats(VSIZE, () => rate), capSats: CAP })
 
   it('charges the rate times the size it will actually broadcast', () => {
     // 10 sat/vB * 154 vB = 1540, and the bps term is untouched.
@@ -130,7 +135,11 @@ describe('networkFeePricing', () => {
   })
 
   it('caps the chain cost, so a spike refuses rather than quoting absurdly', () => {
-    const capped = networkFeePricing({ base: BASE, feeRate: () => 1_000_000, vsize: VSIZE, capSats: 5_000 })
+    const capped = networkFeePricing({
+      base: BASE,
+      costSats: onchainCostSats(VSIZE, () => 1_000_000),
+      capSats: 5_000,
+    })
     expect(capped.payoutFor({ pair: PAIR, giveSats: 100_000 })).toBe(
       payoutSatsFor(100_000, { bps: 25, flatSats: 5_000 }),
     )
@@ -156,8 +165,92 @@ describe('networkFeePricing', () => {
     // `payoutFor` and `giveFor` disagree about the same swap — which is the
     // drift `giveFor` exists to prevent.
     let calls = 0
-    const moving = networkFeePricing({ base: BASE, feeRate: () => ++calls, vsize: VSIZE, capSats: CAP })
+    const moving = networkFeePricing({ base: BASE, costSats: onchainCostSats(VSIZE, () => ++calls), capSats: CAP })
     moving.payoutFor({ pair: PAIR, giveSats: 100_000 })
     expect(calls).toBe(1)
+  })
+})
+
+/**
+ * The reason the cost is a FUNCTION OF THE SWAP and not a rate.
+ *
+ * Chain cost is `vsize x sats/vbyte` and is the same whatever the amount. A
+ * Lightning routing fee is not: it depends on the amount and the destination,
+ * and a real backend already computes one — today the solver only learns it by
+ * being REFUSED for budgeting too little (`maxFeeSats does not cover fee
+ * estimate`). Anything that can answer "what will this one cost me" fits here.
+ */
+describe('networkFeePricing with an amount-dependent cost', () => {
+  const BASE: Fee = { bps: 25, flatSats: 300 }
+  // A routing fee shaped like a real one: a floor plus a proportional part.
+  const routing = ({ giveSats }: { giveSats: number }) => 25 + Math.ceil(giveSats / 1_000)
+
+  it('charges more on a larger swap, which a fixed vsize cannot express', () => {
+    const priced = networkFeePricing({ base: BASE, costSats: routing, capSats: 50_000 })
+    const smallFee = 10_000 - priced.payoutFor({ pair: PAIR, giveSats: 10_000 })
+    const largeFee = 1_000_000 - priced.payoutFor({ pair: PAIR, giveSats: 1_000_000 })
+    // Both terms grow, but the point is that the FLAT one did too: bps alone
+    // would scale identically for any cost function.
+    expect(largeFee - smallFee).toBeGreaterThan(Math.ceil((1_000_000 - 10_000) * 25) / 10_000)
+  })
+
+  it('is handed the pair, so one strategy can serve corridors that differ', () => {
+    const seen: string[] = []
+    const priced = networkFeePricing({
+      base: BASE,
+      costSats: ({ pair }) => {
+        seen.push(pair)
+        return 100
+      },
+      capSats: 50_000,
+    })
+    priced.payoutFor({ pair: PAIR, giveSats: 10_000 })
+    expect(seen).toEqual([PAIR])
+  })
+})
+
+/**
+ * The shape a prepare-then-execute backend gives you.
+ *
+ * Some backends split a send in two: the first call returns the fee for THIS
+ * payment, the second spends against it. A corridor that awaits the prepare at
+ * quote time has an exact figure, not a model of one — and pricing reads it
+ * synchronously because by then it is just a number. The synchronous interface
+ * is about WHERE the asking happens, not whether it can be asked.
+ */
+describe('networkFeePricing with a prepared per-swap fee', () => {
+  const BASE: Fee = { bps: 25, flatSats: 300 }
+
+  it('prices the exact fee a prepare returned, with no modelling', () => {
+    // What a corridor does: `const prepared = await ln.prepareSend(invoice)`,
+    // then close over it. No rate, no vsize, no sampling.
+    const preparedFeeSats = 187
+    const priced = networkFeePricing({ base: BASE, costSats: () => preparedFeeSats, capSats: 50_000 })
+    expect(priced.payoutFor({ pair: PAIR, giveSats: 100_000 })).toBe(payoutSatsFor(100_000, { bps: 25, flatSats: 187 }))
+  })
+
+  it('asks nothing itself — the corridor already did', () => {
+    // The guarantee that matters for the hot path: pricing performs no I/O and
+    // cannot, so a taker cannot amplify load onto the fee source through it.
+    let asked = 0
+    const priced = networkFeePricing({
+      base: BASE,
+      costSats: () => {
+        asked++
+        return 187
+      },
+      capSats: 50_000,
+    })
+    priced.payoutFor({ pair: PAIR, giveSats: 100_000 })
+    priced.payoutFor({ pair: PAIR, giveSats: 200_000 })
+    // Once per quote, and only because the corridor handed over a closure.
+    expect(asked).toBe(2)
+  })
+
+  it('still caps a prepared fee, because a backend can return anything', () => {
+    const priced = networkFeePricing({ base: BASE, costSats: () => 900_000, capSats: 5_000 })
+    expect(priced.payoutFor({ pair: PAIR, giveSats: 100_000 })).toBe(
+      payoutSatsFor(100_000, { bps: 25, flatSats: 5_000 }),
+    )
   })
 })

@@ -50,73 +50,119 @@ export const fixedFeePricing = (fee: Fee): PricingStrategy => ({
   giveFor: ({ payoutSats }) => giveSatsFor(payoutSats, fee),
 })
 
-/** What {@link networkFeePricing} needs to price one corridor's chain cost. */
+/** What {@link networkFeePricing} needs to price one corridor's execution cost. */
 export interface NetworkFeeInputs {
-  /** The spread, and the flat used when no rate is available. */
+  /** The spread, and the flat used when no estimate is available. */
   base: Fee
   /**
-   * Current sats/vbyte, or null when unknown.
+   * What executing THIS swap is expected to cost the solver, in sats, or null
+   * when unknown.
    *
-   * SYNCHRONOUS, and that is the design rather than a limitation.
-   * `PricingStrategy` is synchronous because quoting is on the hot path: an
-   * upstream call per quote adds its latency to every request and hands a
-   * taker a way to amplify load onto the fee source. The caller is expected to
-   * hand over a value it refreshes on its own schedule, and to return null
-   * rather than a stale one it no longer trusts.
-   */
-  feeRate: () => number | null
-  /**
-   * vbytes of the transaction THIS corridor's solver must broadcast — and only
-   * that one.
+   * A COST, not a rate, and that is the whole generality. Chain cost is
+   * `vsize x sats/vbyte` and is the same for every amount; a Lightning routing
+   * fee depends on the amount and the destination and is not expressible as a
+   * rate at all. Both backends can answer "what will this one cost me" — LND
+   * already answers it, though only by REFUSING with `maxFeeSats does not
+   * cover fee estimate [value: 10, expected: 11 sats]` — so that is the
+   * question to ask. See {@link onchainCostSats} for the chain shape.
    *
-   * The two onchain directions do not pay the same chain cost, which is why
-   * this is per corridor and not per market. On receive the solver claims the
-   * taker's HTLC and pays for that spend, which `solver-rails`' claim sizing
-   * measures exactly. On send the solver funds the HTLC and the TAKER pays to
-   * claim it, so charging a claim's worth on a send quote bills the taker for
-   * a transaction the solver never broadcasts.
+   * SYNCHRONOUS, which does NOT mean the number has to come from a cache.
+   * It means the asking happens BEFORE pricing is consulted, and that the
+   * corridor owns it rather than this.
+   *
+   * Two shapes both fit, and they are quite different:
+   *
+   *  - A REFRESHED value. Chain cost is `vsize x sats/vbyte`; the rate moves
+   *    slowly, is the same for every swap, and is worth sampling on a schedule
+   *    rather than per quote. `onchainCostSats` closes over such a value.
+   *  - A PREPARED one. Some backends split a send into prepare-then-execute:
+   *    the first call returns the fee for THIS payment, the second spends
+   *    against it. A corridor that awaits the prepare at quote time can close
+   *    over the exact figure it was quoted — no rate, no modelling, no
+   *    sampling — and this reads it synchronously because by then it is just a
+   *    number.
+   *
+   * What it must not become is an upstream call made from inside pricing, on
+   * the hot path, once per quote request, by anything a taker can trigger.
+   *
+   * A prepared fee is still not a promise. A quote is followed by the client
+   * funding a lockup, which takes as long as it takes, so the fee can move
+   * before the corridor executes. That gap is what `maxFeeSats` guards at
+   * payment time; this only makes the QUOTE honest.
    */
-  vsize: number
+  costSats: (input: { pair: string; giveSats: number }) => number | null
   /**
-   * The most this may charge for chain cost, whatever the mempool says.
+   * The most this may charge for execution, whatever the estimate says.
    *
    * Not a safety rail so much as the number worth publishing: a signed
-   * registry card cannot carry a live rate, so a taker's only durable
-   * guarantee is a ceiling the solver undertakes not to exceed. It also caps
-   * the damage from a bad reading — a fee source returning a spike, or the
-   * wrong units, otherwise quotes an absurd price rather than a refusal.
+   * registry card cannot carry a live estimate, so a taker's only durable
+   * guarantee is a ceiling the solver undertakes not to exceed. It also bounds
+   * the damage from a bad reading — a source returning a spike, or the wrong
+   * units, otherwise quotes an absurd price rather than a refusal.
    */
   capSats: number
 }
 
 /**
- * The corridor's spread, plus the chain cost it will actually pay, priced now.
+ * The chain shape of {@link NetworkFeeInputs.costSats}: a transaction of a
+ * known size at the current rate.
+ *
+ * `vsize` is per CORRIDOR, not per market, because the two onchain directions
+ * do not pay the same cost. On receive the solver claims the taker's HTLC and
+ * pays for that spend, which `solver-rails`' claim sizing measures exactly. On
+ * send the solver funds the HTLC and the TAKER pays to claim it, so charging a
+ * claim's worth on a send quote bills for a transaction the solver never
+ * broadcasts.
+ *
+ * Ignores `giveSats`: a transaction's size does not depend on the amount it
+ * carries. A Lightning estimator's does, which is why the general form takes
+ * the swap and this one throws it away.
+ */
+export const onchainCostSats = (vsize: number, feeRate: () => number | null) => (): number | null => {
+  const rate = feeRate()
+  return rate === null ? null : rate * vsize
+}
+
+/**
+ * The corridor's spread, plus the cost it will actually pay to execute,
+ * priced now.
  *
  * `fixedFeePricing`'s flat is a number an operator guessed at boot against a
- * cost that moves: a spike and the solver eats the difference, a calm mempool
- * and the taker is overcharged for a transaction that cost less.
+ * cost that moves: a fee spike and the solver eats the difference, a quiet
+ * network and the taker is overcharged for an execution that cost less.
+ *
+ * NOT ONLY ONCHAIN. A Lightning routing fee moves the same way and is just as
+ * knowable in advance — a real backend already computes one, and today the
+ * solver only ever learns it by being refused for budgeting too little. Any
+ * corridor whose backend can answer "what will this cost me" can use this;
+ * `onchainCostSats` is one shape of that answer, not the only one.
  *
  * The flat is REPLACED rather than added to. `Fee.flatSats` already means "the
- * fixed chain cost this corridor pays" — adding a live estimate on top would
- * charge it twice — so the configured number becomes the fallback for when no
- * rate is available, which is the one case where a guess still beats nothing.
- * Never zero on a missing rate: quoting no chain cost is how the solver ends
- * up paying it.
+ * fixed cost this corridor pays" — adding a live estimate on top would charge
+ * it twice — so the configured number becomes the fallback for when no
+ * estimate is available, which is the one case where a guess still beats
+ * nothing. Never zero on a missing estimate: quoting no execution cost is how
+ * the solver ends up paying it.
  *
  * The bps component is untouched. It covers proportional risk — capital tied
- * up, a routing fee that scales — and none of that varies with the mempool.
+ * up, inventory — and that does not move with a fee market.
  */
-export const networkFeePricing = ({ base, feeRate, vsize, capSats }: NetworkFeeInputs): PricingStrategy => {
-  const feeNow = (): Fee => {
-    const rate = feeRate()
-    if (rate === null || !Number.isFinite(rate) || rate < 0) return base
-    return { bps: base.bps, flatSats: Math.min(Math.ceil(rate * vsize), capSats) }
+export const networkFeePricing = ({ base, costSats, capSats }: NetworkFeeInputs): PricingStrategy => {
+  const feeNow = (input: { pair: string; giveSats: number }): Fee => {
+    const cost = costSats(input)
+    if (cost === null || !Number.isFinite(cost) || cost < 0) return base
+    return { bps: base.bps, flatSats: Math.min(Math.ceil(cost), capSats) }
   }
   // Read ONCE per call and shared by both directions of that call, so a
   // refresh landing mid-quote cannot make `payoutFor` and `giveFor` disagree
   // about the same swap — which is exactly the drift `giveFor` exists to stop.
   return {
-    payoutFor: ({ giveSats }) => payoutSatsFor(giveSats, feeNow()),
-    giveFor: ({ payoutSats }) => giveSatsFor(payoutSats, feeNow()),
+    payoutFor: ({ pair, giveSats }) => payoutSatsFor(giveSats, feeNow({ pair, giveSats })),
+    // Priced against the GIVE, which `giveFor` is solving for and does not yet
+    // have. A Lightning estimate varies with the amount, so this is the one
+    // place the two directions can disagree: the payout is the closest known
+    // proxy, and it understates the give by exactly the fee. Corridors whose
+    // cost is amount-independent — every onchain one — are unaffected.
+    giveFor: ({ pair, payoutSats }) => giveSatsFor(payoutSats, feeNow({ pair, giveSats: payoutSats })),
   }
 }
