@@ -249,6 +249,28 @@ export interface LockupDeadline {
    * A caller that cannot resolve the role must not have its lockups blocked
    * forever by omission; the one production caller (`lockupDeadlinesOf`)
    * answers it explicitly.
+   *
+   * KNOWN GAP, and it is narrower than this field looks. The deadlines come
+   * from each corridor's `liveLockups`, which is `findRecoverable()`, which is
+   * `findByStates(shape.live)` — LIVE ROWS ONLY. So this protects the window
+   * where the swap is still live, and stops protecting the moment the row goes
+   * TERMINAL: the deadline disappears, this guard has nothing to match on, and
+   * an unsignable output still sitting in the wallet's recoverable set goes
+   * straight back into the all-or-nothing batch. The block clearing is what
+   * re-opens the failure, not what resolves it.
+   *
+   * The honest fix is not here. A send-leg lockup's money is the TRADER's —
+   * the leaf names them — so it should never have been a candidate for a sweep
+   * that pays the solver's own address. Excluding one input is what
+   * `recoverVtxos` cannot express, and this module deliberately does not
+   * reimplement that sweep (see the head comment). Closing it properly means
+   * either settling explicit inputs instead, or not registering a lockup this
+   * wallet can never spend.
+   *
+   * Note also that the guard is an EARLY RETURN: one blocked lockup skips the
+   * whole recovery pass. That predates this field — the immature arm did the
+   * same — but it means the float stays unrecovered either way. What this buys
+   * is an accurate reason in the log instead of an opaque batch failure.
    */
   refundable?: boolean
 }
