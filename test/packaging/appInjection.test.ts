@@ -71,6 +71,23 @@ const solverConfig = (): Config => {
       'arkade:BTC->onchain:BTC': free,
       'onchain:BTC->arkade:BTC': free,
     },
+    // Null on every corridor: no live chain-cost pricing, which is what an
+    // unset `<STEM>_FEE_CAP_SATS` produces and the only shape this app —
+    // which serves no built-in corridor — could want.
+    //
+    // These three fields arrived AFTER this test was written, on a branch that
+    // never touched this file, and the merge of the two failed to compile.
+    // That is this test doing its job rather than a merge going wrong: a new
+    // REQUIRED field on `Config` is a new question every hand-built solver has
+    // to answer, and the compile is what asks it. See the header.
+    corridorNetworkFees: {
+      'arkade:BTC->lightning:BTC': null,
+      'lightning:BTC->arkade:BTC': null,
+      'arkade:BTC->onchain:BTC': null,
+      'onchain:BTC->arkade:BTC': null,
+    },
+    onchainFeeRateRefreshMs: 60_000,
+    onchainFeeRateStaleMs: 900_000,
     // Every built-in OFF: this deployment serves its own corridor and nothing
     // else, which is what makes `lnBackend: null` legal below.
     corridorEnabled: {
