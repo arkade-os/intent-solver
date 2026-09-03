@@ -367,9 +367,15 @@ which is why the EVM corridor's store declares `evm_amount` as TEXT.
 `depositOptions` returns a **list**, because the sources genuinely have more than
 one way in and they are not interchangeable: the option needing no follow-up
 chore is listed first, and each carries its own `settleRequired`, an optional
-`expiresAt` and a note. Choosing one for the operator chooses wrong about half
-the time — offering only the boarding address told someone already holding VTXOs
-to go out to L1 and wait for a settlement.
+`expiresAt`, an optional `amountSats` and a note. Choosing one for the operator
+chooses wrong about half the time — offering only the boarding address told
+someone already holding VTXOs to go out to L1 and wait for a settlement.
+
+`amountSats` is the amount an option is **bound** to. When the console shows one,
+send exactly that: the option is an invoice minted for a fixed amount and a payer
+node refuses a different one. When it is absent — which is every option both
+shipped sources produce, addresses and the rail's deliberately amountless invoice
+alike — any amount is accepted and you choose at pay time.
 
 | source            | balance split                                          | deposit options                                     | settle                      | withdraw |
 | ----------------- | ------------------------------------------------------ | --------------------------------------------------- | --------------------------- | -------- |

@@ -865,9 +865,45 @@ describe('the wallet page’s funding panel', () => {
     // read as a caption, not as "do not pay this".
     expect(depositBlock()).toMatch(/left <= 0[\s\S]{0,80}h\('p\.banner'/)
     // Recomputed per render against the clock, never a value frozen when the
-    // option was fetched — the page re-renders on the stream tick, so a live
-    // countdown stays honest and a captured one does not.
+    // option was fetched.
     expect(depositBlock()).toContain('Math.floor(Date.now() / 1000)')
+  })
+
+  /**
+   * Recomputing per render is necessary and not sufficient, and the difference
+   * is a whole deployment: the `swaps` stream event is the only other thing that
+   * renders, and it fires on swap ACTIVITY. An idle solver — the one an operator
+   * is topping up — never ticks, so the countdown freezes at whatever it read
+   * when the button was pressed and the expiry banner never arrives.
+   */
+  it('re-renders on a timer so the expiry banner arrives on an idle solver', () => {
+    const tick = (): string => {
+      const start = appSource.indexOf('const armExpiryTick')
+      if (start === -1) throw new Error('armExpiryTick is gone')
+      return appSource.slice(start, start + 800)
+    }
+
+    // Armed from render, so it exists only while something is counting down.
+    expect(appSource).toMatch(/armExpiryTick\(\)\s*\n\}/)
+    expect(tick()).toContain('setInterval')
+    // And DISARMED, or a page left on the wallet view keeps rebuilding itself
+    // after the last expiring option is gone.
+    expect(tick()).toContain('clearInterval')
+
+    const guard = (): string => {
+      const start = appSource.indexOf('const countingDown')
+      if (start === -1) throw new Error('countingDown is gone')
+      return appSource.slice(start, appSource.indexOf('const armExpiryTick', start))
+    }
+    // Only where an option actually expires: an address does not, and a timer on
+    // a page showing only addresses rebuilds the tree to change nothing.
+    expect(guard()).toContain('option.expiresAt !== undefined')
+    expect(guard()).toContain('!state.dialog')
+
+    // Never under a focused field. `render` restores the caret for `.search`
+    // alone, so a rebuild beneath any other input eats what is being typed — and
+    // an operator pasting a withdrawal address is on this very view.
+    expect(tick()).toMatch(/INPUT|TEXTAREA|SELECT/)
   })
 
   it('distinguishes an empty option list from an answer it cannot render', () => {

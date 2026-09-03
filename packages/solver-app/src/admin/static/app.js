@@ -823,9 +823,13 @@ const fundFigureRows = (balance) =>
  *
  * EXPIRY IS A BANNER, not a faint note, once it has passed. A paid-too-late
  * invoice fails at the payer's node with an error that names none of this, so
- * the console has to be the thing that says the string is dead. It recomputes
- * on every render, and the page re-renders on the stream tick, so a countdown
- * left on screen goes stale by seconds rather than silently.
+ * the console has to be the thing that says the string is dead.
+ *
+ * It recomputes on every render, which is necessary and NOT sufficient: the
+ * stream's `swaps` event is the only other thing that renders, and that is an
+ * activity signal rather than a clock. `armExpiryTick` is what makes the banner
+ * actually arrive on an idle deployment — see its comment for why a page that
+ * rebuilds itself on a timer needs three guards to be safe.
  */
 const fundDepositOption = (option) => {
   const left = option.expiresAt === undefined ? null : option.expiresAt - Math.floor(Date.now() / 1000)
@@ -2312,9 +2316,61 @@ const render = () => {
       box.setSelectionRange(typing.start, typing.end)
     }
   }
+  armExpiryTick()
 }
 
 /* ---- live updates ------------------------------------------------------- */
+
+/**
+ * Keep a deposit countdown honest on a solver where nothing is happening.
+ *
+ * `fundDepositOption` recomputes the time remaining on every render, and the
+ * ONLY automatic render is the `swaps` stream event below. That is a swap-
+ * activity signal, not a clock: on an idle deployment — which is exactly the one
+ * an operator is topping up — nothing re-renders, so a countdown minted at
+ * button-press freezes and an expired invoice keeps advertising itself as live.
+ * The banner that is supposed to replace it never arrives.
+ *
+ * Armed from `render` rather than started once, so it exists only while there is
+ * something to count down. Three guards, each removing a way a periodic
+ * whole-tree rebuild does harm:
+ *
+ *  - only on the view that shows deposit options, and only when one of them
+ *    actually carries an expiry — an address never expires and must not put a
+ *    timer on the page;
+ *  - never while a dialog is open, the same guard the `swaps` listener uses;
+ *  - never while a field has focus. `render` restores the caret for `.search`
+ *    alone, so a rebuild under any other input would eat what is being typed —
+ *    and an operator pasting a withdrawal address is the case that must not be
+ *    disturbed by a countdown.
+ *
+ * 15 seconds, not one: the display is minute-granular apart from `<1m`, so a
+ * faster tick would rebuild the tree sixty times to change nothing.
+ */
+let expiryTick = null
+
+const countingDown = () =>
+  state.view === 'wallet' &&
+  !state.dialog &&
+  (state.data.fundRead?.result?.options ?? []).some((option) => option.expiresAt !== undefined)
+
+const armExpiryTick = () => {
+  if (countingDown()) {
+    if (expiryTick === null) {
+      expiryTick = setInterval(() => {
+        const active = document.activeElement
+        const tag = active?.tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+        render()
+      }, 15_000)
+    }
+    return
+  }
+  if (expiryTick !== null) {
+    clearInterval(expiryTick)
+    expiryTick = null
+  }
+}
 
 const listen = () => {
   const source = new EventSource('/api/events')
