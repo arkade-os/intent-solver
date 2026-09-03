@@ -410,6 +410,27 @@ the range). In atomic units that is ~9e15: no constraint for a 6-decimal token
 such as USDC or USDT, but an 18-decimal token cannot be served until the
 downstream `number`s are widened to bigint, since one whole token is 1e18.
 
+### Environment — Arkade asset offers (the packet path), off unless `OFFER_MARKETS` is set
+
+Not a corridor, and absent from the corridor tables above rather than missing
+from them. Both legs are on Arkade and the maker's covenant obliges the fill to
+pay them in the same transaction, so there is no HTLC, no deadline and no refund
+— which is also why there is no `_ENABLED` knob and no fee row of its own.
+
+**The solver is always the TAKER.** There is deliberately no option for
+publishing an offer. An offer is a standing commitment with no expiry, so
+publishing one writes a free option against this deployment's float.
+
+A deployment that sets none of these behaves exactly as it did before they
+existed: no `offer_fill` table is opened, no subscription to arkd's filtered
+transaction stream, nothing decided and nothing spent.
+
+| Var                     | Notes                                                                                                                                                                                                                                                                                                                                              |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OFFER_MARKETS`         | the markets taken, `A/B` pairs comma-separated, where `BTC` is the sats leg and anything else is a 68-hex asset id: `BTC/<assetId>,<assetIdA>/<assetIdB>`. Unordered — one entry serves both directions. Unset serves none, which is the whole path off. An entry naming one thing twice, or not shaped `A/B`, throws                              |
+| `OFFER_MIN_FILL_AMOUNT` | **required once `OFFER_MARKETS` names a market**, with no default shipped: this is how much of the float one discovered offer may take, which is the deployment's answer rather than this repository's. A whole number in the WANT leg's own units — asset units, or sats when that leg is BTC — parsed as bigint, since an asset amount is 256-bit |
+| `OFFER_MAX_FILL_AMOUNT` | same rule, the upper bound. A max below the min throws at startup: it would refuse every offer, which is indistinguishable from a quiet market and would be diagnosed as one                                                                                                                                                                       |
+
 ### Environment — `LN_BACKEND=lnd` only
 
 | Var                                  | Default         | Notes                                                                                                                                                                                                                                                                                                     |

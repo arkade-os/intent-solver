@@ -105,6 +105,12 @@ const CONFIG_KEYS = [
   'POOL_AUTO_MINT',
   'CONTRACT_RETENTION_DAYS',
   'LN_SEND_HINT_SCID_DENYLIST',
+  // Listed for the same reason `EVM_TOKENS` is: a leaked `OFFER_MARKETS` would
+  // give every later test in the run an offer path it never asked for, and one
+  // that then demands bounds those tests do not set.
+  'OFFER_MARKETS',
+  'OFFER_MIN_FILL_AMOUNT',
+  'OFFER_MAX_FILL_AMOUNT',
 ]
 
 /**
@@ -835,5 +841,68 @@ describe('LN_SEND_HINT_SCID_DENYLIST', () => {
     // silently honouring half of it is how the half that matters goes missing.
     process.env.LN_SEND_HINT_SCID_DENYLIST = 'f42400f424000001,oops'
     expect(() => loadConfig()).toThrow(/got 'oops'/)
+  })
+})
+
+/**
+ * The offer-packet path's switch, and the bounds it pays out under.
+ *
+ * `OFFER_MARKETS` earns a place here on the same grounds as `POOL_AUTO_MINT`:
+ * it decides whether the daemon SPENDS unattended. An offer fill pays a maker
+ * out of the float with no request from anyone — the offer is discovered on a
+ * public stream, not asked for — so a market enabled by accident is money moving
+ * on a pair nobody chose to serve.
+ *
+ * The bounds are required rather than defaulted for the reason `EMULATOR_URL`
+ * has no default: a shipped `maxFillAmount` would be this repository choosing
+ * how much of somebody else's float one offer may take.
+ */
+describe('OFFER_MARKETS', () => {
+  it('serves no market when unset, which is the whole path off', () => {
+    expect(loadConfig().offerMarkets).toEqual([])
+  })
+
+  it('reads BTC as the null leg and needs no bounds while it serves nothing', () => {
+    const config = loadConfig()
+    expect(config.offerMarkets).toEqual([])
+    expect(config.offerMinFillAmount).toBe(0n)
+    expect(config.offerMaxFillAmount).toBe(0n)
+  })
+
+  it('parses the markets and their bounds', () => {
+    const usd = '41bcbb06921a0e9f6fe4f1b003b878cbb43d9ca3f6d14cab7940090458765a390000'
+    process.env.OFFER_MARKETS = `BTC/${usd}`
+    process.env.OFFER_MIN_FILL_AMOUNT = '1000'
+    process.env.OFFER_MAX_FILL_AMOUNT = '500000'
+    const config = loadConfig()
+    expect(config.offerMarkets).toEqual([{ a: null, b: usd }])
+    expect(config.offerMinFillAmount).toBe(1_000n)
+    expect(config.offerMaxFillAmount).toBe(500_000n)
+  })
+
+  it('refuses a market with no bounds rather than filling at any size', () => {
+    process.env.OFFER_MARKETS = 'BTC/' + '11'.repeat(34)
+    expect(() => loadConfig()).toThrow(/OFFER_MIN_FILL_AMOUNT/)
+  })
+
+  it('refuses a bound that is not a whole number', () => {
+    process.env.OFFER_MARKETS = 'BTC/' + '11'.repeat(34)
+    process.env.OFFER_MIN_FILL_AMOUNT = '1000'
+    process.env.OFFER_MAX_FILL_AMOUNT = '5e5'
+    expect(() => loadConfig()).toThrow(/OFFER_MAX_FILL_AMOUNT/)
+  })
+
+  it('refuses a negative bound', () => {
+    process.env.OFFER_MARKETS = 'BTC/' + '11'.repeat(34)
+    process.env.OFFER_MIN_FILL_AMOUNT = '-1'
+    process.env.OFFER_MAX_FILL_AMOUNT = '500000'
+    expect(() => loadConfig()).toThrow(/OFFER_MIN_FILL_AMOUNT/)
+  })
+
+  it('refuses a max below the min, which could only ever refuse every offer', () => {
+    process.env.OFFER_MARKETS = 'BTC/' + '11'.repeat(34)
+    process.env.OFFER_MIN_FILL_AMOUNT = '5000'
+    process.env.OFFER_MAX_FILL_AMOUNT = '1000'
+    expect(() => loadConfig()).toThrow(/OFFER_MAX_FILL_AMOUNT/)
   })
 })
