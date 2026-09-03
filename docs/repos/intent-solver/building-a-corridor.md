@@ -45,6 +45,7 @@ Required:
 | `statusFor(rfqId)`         | your row as an `rfq_status` payload, or `null` if you do not hold it         |
 | `tick(id)`                 | drive one swap one step                                                      |
 | `tickAll()`                | drive every live swap; returns how many moved                                |
+| `park(id, reason)`         | take one row out of the sweep; returns the state it landed in               |
 | `findRecoverable()`        | rows whose funds are still at a script                                       |
 | `committedSats()`          | sats this corridor currently has at risk                                     |
 | `page(options)`            | rows for the console, as `CorridorSwapView`                                  |

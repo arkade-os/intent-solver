@@ -146,8 +146,39 @@ describe('CovenantSwapScript', () => {
     expect(script.unilateralClaim()).toBeDefined()
   })
 
-  it('rejects a locktime that would read as a block height', () => {
-    expect(() => new CovenantSwapScript({ ...params(), refundLocktime: 1000 })).toThrow(/height/)
+  // A height is no longer a mistake here: a block-typed deployment builds one
+  // deliberately, and the covenant reads the unit off the value rather than
+  // dictating it. What the constructor still refuses is a ladder whose rungs
+  // count DIFFERENT clocks — see `test/core/blockTimelocks.test.ts` for the rule.
+  it('accepts a block-height locktime alongside a block-typed ladder', () => {
+    const script = new CovenantSwapScript({
+      ...params(),
+      refundLocktime: 812,
+      claimDelay: 20,
+      refundWithoutServerDelay: 20,
+      clientRefundDelay: 28,
+    })
+    expect(script.pkScript).toBeDefined()
+  })
+
+  it('rejects a ladder that mixes blocks and seconds', () => {
+    // Compiles and funds; it just inverts which recourse opens first, and the
+    // solo refund opening before the claim is the ordering that lets a funder
+    // take money from a claimant holding the preimage.
+    expect(
+      () =>
+        new CovenantSwapScript({
+          ...params(),
+          refundLocktime: 812,
+          claimDelay: 20,
+          refundWithoutServerDelay: 20,
+          clientRefundDelay: CLIENT_REFUND_DELAY,
+        }),
+    ).toThrow(/mixes units/)
+  })
+
+  it('rejects a non-positive locktime in either unit', () => {
+    expect(() => new CovenantSwapScript({ ...params(), refundLocktime: 0 })).toThrow(/positive/)
   })
 
   it('rejects a claim delay BIP68 cannot encode', () => {
@@ -617,5 +648,72 @@ describe('CovenantSwapScript — an asset it cannot enforce', () => {
     // passes no asset and must be untouched.
     expect(() => new CovenantSwapScript(params())).not.toThrow()
     expect(() => new CovenantSwapScript(paramsV2())).not.toThrow()
+  })
+})
+
+/**
+ * NO DATABASE MIGRATION: both encodings are self-describing, so the two shapes
+ * coexist in one database and a row written before block mode must rebuild
+ * BYTE-IDENTICALLY.
+ *
+ * The claim is asserted against the SDK's own encoder rather than against a
+ * literal captured from this tree, because that is what the claim is about:
+ * a seconds row must still reach `VHTLC.ScriptV2` as `{ type: 'seconds' }`,
+ * exactly as it did when the unit was hardcoded one line above the call.
+ */
+describe('CovenantSwapScript — a stored row rebuilds in the unit it was written in', () => {
+  const reference = (
+    unit: 'seconds' | 'blocks',
+    over: { refundLocktime: number; claimDelay: number; refundWithoutServerDelay: number; clientRefundDelay: number },
+  ): string => {
+    const delay = (value: number) => ({ type: unit, value: BigInt(value) }) as const
+    return hex.encode(
+      new VHTLC.ScriptV2({
+        sender: CLIENT,
+        receiver: RECEIVER,
+        server: SERVER,
+        preimageHash: PREIMAGE_HASH,
+        refundLocktime: BigInt(over.refundLocktime),
+        unilateralClaimDelay: delay(over.claimDelay),
+        unilateralRefundDelay: delay(over.refundWithoutServerDelay),
+        unilateralRefundWithoutReceiverDelay: delay(over.clientRefundDelay),
+        nonInteractiveClaim: { receiverPkScript: RECEIVER_PAYOUT, emulatorPubkey: EMULATOR },
+        nonInteractiveRefund: { senderPkScript: DEST, emulatorPubkey: EMULATOR, withoutReceiver: true },
+      }).pkScript,
+    )
+  }
+
+  const SECONDS_ROW = {
+    refundLocktime: REFUND_LOCKTIME,
+    claimDelay: CLAIM_DELAY,
+    refundWithoutServerDelay: REFUND_WITHOUT_SERVER_DELAY,
+    clientRefundDelay: CLIENT_REFUND_DELAY,
+  }
+  const BLOCK_ROW = { refundLocktime: 812, claimDelay: 20, refundWithoutServerDelay: 20, clientRefundDelay: 28 }
+
+  it('hands the SDK seconds for a pre-existing row, exactly as the hardcoded unit did', () => {
+    const script = new CovenantSwapScript({ ...params(), ...SECONDS_ROW })
+    expect(hex.encode(script.pkScript)).toBe(reference('seconds', SECONDS_ROW))
+  })
+
+  it('hands the SDK blocks for a block-typed row', () => {
+    const script = new CovenantSwapScript({ ...params(), ...BLOCK_ROW })
+    expect(hex.encode(script.pkScript)).toBe(reference('blocks', BLOCK_ROW))
+  })
+
+  it('derives a DIFFERENT script from the same numbers in the other unit', () => {
+    // Without this the two assertions above could both pass on an encoder that
+    // ignored the unit, and "byte-identical" would be proving nothing.
+    //
+    // Ladder values valid in BOTH units, which is what makes the comparison
+    // possible at all: the SDK refuses a seconds delay off the 512 grid, so the
+    // block row above cannot be re-encoded as seconds to compare against.
+    const AMBIGUOUS = {
+      refundLocktime: REFUND_LOCKTIME,
+      claimDelay: 1024,
+      refundWithoutServerDelay: 1024,
+      clientRefundDelay: 1536,
+    }
+    expect(reference('blocks', AMBIGUOUS)).not.toBe(reference('seconds', AMBIGUOUS))
   })
 })

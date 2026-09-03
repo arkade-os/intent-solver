@@ -29,8 +29,11 @@ import {
   onchainReceiveRefundNow,
   onchainReceiveClaimNow,
 } from '../../ops/refunds.js'
-import { claimNow, parkSwap } from '../../ops/claims.js'
+import { hex } from '@scure/base'
+import { claimNow } from '../../ops/claims.js'
+import { planExitForSwap } from '../../ops/unilateralExit.js'
 import { requireLn } from '../../ops/rails.js'
+import { capabilityRefusal, fundSources, requireFundSource, summarise } from '../../ops/fundSources.js'
 import { mintPool, poolPlan } from '../../ops/pool.js'
 import { runFloatLifecycle } from '../../ops/float.js'
 import type { Services } from '../../ops/services.js'
@@ -50,15 +53,31 @@ interface ActionBody {
   preimage?: unknown
   /** `park-swap` only: why this row is being stopped. Required, and recorded. */
   reason?: unknown
+  /** The `fund-*` actions: which source of the solver's own liquidity this is about. */
+  source?: unknown
+  /** `fund-withdraw` only: where the money goes. Also what must be typed back. */
+  address?: unknown
+  /**
+   * `fund-withdraw` only: how much leaves, as a decimal STRING in the source's
+   * own base units.
+   *
+   * A string rather than a number for the reason `evm_amount` is TEXT in the EVM
+   * corridor's own store: an ERC20 quantity is 256-bit and routinely past what a
+   * JSON number holds exactly, so a numeric field here would work for every BTC
+   * source and silently truncate the first token one.
+   */
+  amount?: unknown
 }
 
 /**
  * What the UI must ask the operator to type.
  *
  * `swap-id` for anything scoped to one row; `literal:WORD` where there is no
- * per-swap identifier and a fixed word supplies the deliberation instead.
+ * per-swap identifier and a fixed word supplies the deliberation instead;
+ * `destination-address` where the request itself carries the string that must be
+ * proof-read — see `fund-withdraw`.
  */
-export type ConfirmKind = 'swap-id' | `literal:${string}`
+export type ConfirmKind = 'swap-id' | 'destination-address' | `literal:${string}`
 
 interface ActionShape {
   /** What this action acted on, for the audit row. */
@@ -121,6 +140,48 @@ const idConfirm = (body: ActionBody): string | null => (typeof body.id === 'stri
 const idTarget = (body: ActionBody): string | null => (typeof body.id === 'string' ? body.id : null)
 
 /**
+ * Where a withdrawal is going. Trimmed, because a trailing space pasted out of a
+ * chat window would otherwise be a decode failure the operator cannot see.
+ *
+ * NOT validated as an address here — the SOURCE decodes it against whatever it
+ * needs to (the rail, against this deployment's network), and that check is the one that matters. A weaker
+ * duplicate here would only be a second answer to disagree with, exactly as
+ * `optionalPreimage` says of the preimage.
+ */
+const requireAddress = (body: ActionBody): string => {
+  if (typeof body.address !== 'string' || body.address.trim().length === 0) {
+    throw new Error('address is required: there is no default destination for a withdrawal')
+  }
+  return body.address.trim()
+}
+
+/**
+ * The confirmation a withdrawal must carry: the destination address, typed back.
+ *
+ * Trimmed on BOTH sides through {@link requireAddress}, so what is compared is
+ * what will be paid. Null when the body carries no address at all — the route
+ * then answers 400 without running anything, which is the correct outcome for a
+ * request that names no destination.
+ */
+const addressConfirm = (body: ActionBody): string | null =>
+  typeof body.address === 'string' && body.address.trim().length > 0 ? body.address.trim() : null
+
+/**
+ * How much leaves, as the seam's string.
+ *
+ * Checked here only for PRESENCE and type. What counts as a well-formed quantity
+ * is the source's own question — sats are whole, an ERC20 has decimals, and a
+ * source must refuse anything it cannot honour exactly — so a numeric check here
+ * would be a second answer to disagree with.
+ */
+const requireAmount = (body: ActionBody): string => {
+  if (typeof body.amount !== 'string' || body.amount.trim().length === 0) {
+    throw new Error(`amount is required and must be a decimal string in the source's own units`)
+  }
+  return body.amount.trim()
+}
+
+/**
  * The corridor whose store owns this id.
  *
  * Required rather than inferred, and that is not pedantry: a swap id is unique
@@ -138,23 +199,25 @@ const requireCorridor = (body: ActionBody): Corridor => {
 }
 
 /**
- * Each corridor's orchestrator, or undefined where the operator disabled it.
+ * The corridor NAME, with membership left to the registry that will serve it.
  *
- * All four are optional on {@link Services} by design — a deployment constructs
- * only the corridors it serves — so an absent one is a normal answer, not a bug,
- * and has to read as "not enabled here" rather than a crash.
+ * Deliberately weaker than {@link requireCorridor}: it checks that a name was
+ * given, not that it is one of the four this build was compiled with. The list
+ * of corridors an operator can SEE is the registry (`admin/routes/swaps.ts`
+ * pages the reader set), so validating an action against the closed union
+ * refused a row the console had just rendered — and refused it by naming four
+ * pairs, which reads as a malformed request rather than as "not here".
+ *
+ * "Which corridor" still has to be answered by the caller and never guessed: a
+ * swap id is unique only within its own store, so trying each in turn would tick
+ * whichever answered first — the wrong swap, driven a step down a money path.
  */
-const serviceFor = (services: Services, corridor: Corridor): { tick(id: string): Promise<unknown> } | undefined => {
-  switch (corridor) {
-    case 'arkade:BTC->lightning:BTC':
-      return services.service
-    case 'lightning:BTC->arkade:BTC':
-      return services.receiveService
-    case 'arkade:BTC->onchain:BTC':
-      return services.onchainService
-    case 'onchain:BTC->arkade:BTC':
-      return services.onchainReceiveService
+const requireCorridorName = (body: ActionBody): string => {
+  const corridor = body.corridor
+  if (typeof corridor !== 'string' || corridor.trim() === '') {
+    throw new Error('corridor is required: a swap id is unique only within its own corridor’s store')
   }
+  return corridor
 }
 
 export const ACTIONS: Record<string, ActionDefinition> = {
@@ -162,16 +225,30 @@ export const ACTIONS: Record<string, ActionDefinition> = {
    * Drive one swap a single step. Safe because it is exactly what the sweep
    * does on its own cadence — the orchestrators are re-entrant by contract and
    * re-read the row first, so an extra tick costs one redundant pass.
+   *
+   * Dispatched through the corridor REGISTRY rather than a switch over the four
+   * BTC pairs. The console renders `recheck` on every row it lists, and it lists
+   * every registered corridor — so on an EVM token corridor, or on one a
+   * consumer injected, the button was unreachable while the row was visible.
+   * `Corridor` already carries `tick`, so the registry answers for all of them
+   * and there is no per-corridor case to keep in step with what ships.
+   *
+   * The SERVING set, not the reader set: a corridor with a store but no service
+   * is one an operator disabled, and "not enabled" is the honest answer there —
+   * its rows stay listed and inspectable, which is what the reader set is for.
    */
   tick: {
     tier: 'safe',
     target: idTarget,
     run: async (services, body) => {
       const id = requireId(body)
-      const corridor = requireCorridor(body)
-      const service = serviceFor(services, corridor)
-      if (!service) throw new Error(`the ${corridor} corridor is not enabled on this deployment`)
-      return { row: await service.tick(id) }
+      const corridor = requireCorridorName(body)
+      const served = services.corridors.get(corridor)
+      if (!served) throw new Error(`the ${corridor} corridor is not enabled on this deployment`)
+      await served.tick(id)
+      // Re-read rather than return what `tick` gave: `Corridor.tick` answers
+      // void, and the row AFTER the step is the whole point of the button.
+      return { row: (await served.detail(id))?.raw ?? null }
     },
   },
 
@@ -384,7 +461,63 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'STOPS this swap being driven. The sweep will not touch it again and it cannot resolve itself afterwards; an ' +
       'exposed row lands in `stuck` for a human, an unexposed one in `refused`. Use it when a swap is failing in a ' +
       'way that retrying cannot fix. It does NOT refund or claim — decide that separately, with read-payment.',
-    run: (services, body) => parkSwap(services, requireId(body), requireReason(body)),
+    // Through the registry, like `tick`. This reached the Lightning-send store
+    // directly, so the button the console renders on EVERY row threw on
+    // onchain-send, both receive legs and every EVM pair — the one lever that
+    // stops the sweep re-driving a row, absent exactly where a row was stuck.
+    run: async (services, body) => {
+      // Validate the REQUEST before routing it: an operator who forgot the
+      // reason should be told that, not told about a corridor they did supply.
+      const id = requireId(body)
+      const reason = requireReason(body)
+      const corridor = requireCorridorName(body)
+      const served = services.corridors.get(corridor)
+      if (!served) throw new Error(`the ${corridor} corridor is not enabled on this deployment`)
+      return served.park(id, reason)
+    },
+  },
+
+  /**
+   * What a server-independent exit of this row's lockup would do: which leaf the
+   * solver can spend alone, how long its CSV runs, and what it would cost.
+   *
+   * READ-ONLY, and deliberately the only half of the exit the console offers.
+   * The other half — `UnilateralExit.prepare` — signs every transaction of the
+   * exit and BROADCASTS a funding splitter as a side effect, spending the
+   * solver's own onchain sats and forfeiting the collaborative path a transient
+   * outage would have restored. That belongs behind `cli unilateral-exit <id>
+   * --go`, where the deliberation is a shell flag rather than a browser button
+   * that could be reached by a mis-click on the wrong row.
+   *
+   * Dispatched through the corridor REGISTRY, and not by corridor NAME either:
+   * `planExitForSwap` iterates the reader set, so this reaches an EVM pair or an
+   * injected corridor without a case to keep in step. The reader set rather than
+   * the serving one for the same reason every refund command takes it — an
+   * operator who switched a corridor off did not un-fund its lockups.
+   *
+   * NEVER returns the preimage, for the same reason `read-payment` does not: the
+   * plan says which leaf and when, and that is the whole decision. The secret
+   * itself would then live in a browser, a screenshot and a support thread.
+   */
+  'unilateral-exit-plan': {
+    tier: 'safe',
+    target: idTarget,
+    run: async (services, body) => {
+      const id = requireId(body)
+      const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
+      const { pair, plan } = await planExitForSwap(services.corridors, id, { solverPubkey })
+      return {
+        corridor: pair,
+        pkScript: plan.pkScript,
+        role: plan.role,
+        leaf: plan.leaf,
+        delay: plan.delay,
+        delaySeconds: plan.delaySeconds,
+        // The CSV starts when the lockup CONFIRMS onchain, not now, so an
+        // operator reading a duration here must not read it as "ready in".
+        note: 'the CSV runs from the moment the lockup confirms onchain, not from now',
+      }
+    },
   },
 
   'onchain-refund-now': {
@@ -516,6 +649,145 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'Spends: splits the float into smaller pieces in one Arkade transaction. Refused while any corridor has a ' +
       'non-terminal swap, because coin reservations are process-local and a concurrent provider could be holding them.',
     run: (services, body) => mintPool(services, { force: body.force === true }),
+  },
+
+  /**
+   * The solver's own liquidity, across every source it holds it in.
+   *
+   * SOURCE-PARAMETERISED, not one set of buttons per backend. A solver keeps
+   * money in the Arkade float, in the BTC rail's channel and onchain balances,
+   * and — with a chain configured — in token liquidity for the EVM corridors,
+   * and each of those splits its balance differently and can perform a different
+   * subset of the three operations. Four actions plus a `source` field is the
+   * whole surface; the seam that makes it work is `ops/fundSources.ts`.
+   *
+   * Nothing here needed a new port method. @see ops/railFunds.ts for why: a rail
+   * is a PAIR, so `newReceiveAddress`/`settleReceiveAddress`/`fund` and the two
+   * `getBalance()`s already said everything.
+   */
+
+  /**
+   * What this deployment can fund, and what each source can do.
+   *
+   * Read FIRST by the console, because a source's capabilities decide which
+   * buttons exist at all — and they are derived from which optional methods the
+   * source implements, so a button is never drawn for a call that cannot work.
+   */
+  'fund-sources': {
+    tier: 'safe',
+    run: async (services) => ({ sources: fundSources(services).map(summarise) }),
+  },
+
+  /**
+   * One source's holdings, split its own way. Reads only; safe.
+   *
+   * The one to reach for BEFORE the three below, since it is what says whether
+   * there is anything to withdraw or anything still waiting to be settled.
+   */
+  'fund-balance': {
+    tier: 'safe',
+    run: async (services, body) => requireFundSource(fundSources(services), body.source).readBalance(),
+  },
+
+  /**
+   * Where to send money so a source can use it.
+   *
+   * Safe: it mints or reads an address and moves nothing. A fresh one per call is
+   * normal — that is what a backend's own `newReceiveAddress` does — so pressing
+   * it twice costs a keychain index, not money.
+   */
+  'fund-deposit-address': {
+    tier: 'safe',
+    run: async (services, body) => {
+      const source = requireFundSource(fundSources(services), body.source)
+      if (!source.depositAddress) {
+        throw capabilityRefusal(source, 'hand out a deposit address', 'it has no inbound address of its own')
+      }
+      return source.depositAddress()
+    },
+  },
+
+  /**
+   * Credit what has arrived but is not yet spendable.
+   *
+   * Safe for exactly the reason `tick` is: on the rail it is the same sweep the
+   * daemon already runs (`settleRefundDeposits`, worker.ts), and the seam defines
+   * it as re-listing whatever is still unsettled — so an extra pass costs one
+   * redundant listing. Reaching it from here matters on a deployment with the
+   * `arkade:BTC->onchain:BTC` corridor switched off, where that sweep is never
+   * constructed and a deposit would otherwise strand.
+   *
+   * A source that has no settle step refuses BY NAME, rather than reporting the
+   * empty list that "nothing was waiting" also produces — and the console does
+   * not draw the button at all, because the capability is read off the method.
+   */
+  'fund-settle-deposits': {
+    tier: 'safe',
+    run: async (services, body) => {
+      const source = requireFundSource(fundSources(services), body.source)
+      if (!source.settleDeposits) {
+        throw capabilityRefusal(
+          source,
+          'settle deposits',
+          'it credits arrivals without help, or the step belongs to another action — check the deposit note',
+        )
+      }
+      return source.settleDeposits()
+    },
+  },
+
+  /**
+   * Send a source's money to an address the operator names.
+   *
+   * THE ONLY ACTION IN THIS FILE WHOSE DESTINATION IS NOT FIXED BY THE PROTOCOL.
+   * Every other spend here goes where a swap already decided — a covenant refund
+   * to the client, a claim to our own script, a float settlement to ourselves —
+   * so the worst a wrong click does is unwind the wrong swap. This one pays an
+   * arbitrary string, irreversibly, and this port has no authentication
+   * (`ADMIN_HOST` is the whole of its access control), so the gating is the
+   * feature rather than dressing on it:
+   *
+   *  - the confirmation is THE DESTINATION ADDRESS, not a fixed word. A literal
+   *    like `MINT` is the same five keystrokes every time and becomes muscle
+   *    memory; a confirmation that differs per request cannot, and it puts the
+   *    exact string the money is going to in front of the operator at the moment
+   *    they commit.
+   *  - the console adds a second gate on top (`armDialog`'s override checkbox,
+   *    naming the source, amount and destination) — but that is a convenience,
+   *    and this comparison is the boundary, checked before `run` for a bare
+   *    `fetch` too.
+   *  - the SOURCE then applies its own checks before it touches a backend. The
+   *    rail decodes the address against this deployment's network and bounds the
+   *    amount by the confirmed balance, because a wrong-chain address is
+   *    precisely the mistake retyping cannot catch: the operator confirms the
+   *    same wrong string twice.
+   *  - and MOST SOURCES DO NOT OFFER IT AT ALL. The Arkade float does not,
+   *    because paying an arbitrary address out of it would spend coins outside
+   *    the process-local reservation ledger.
+   */
+  'fund-withdraw': {
+    tier: 'armed',
+    confirmKind: 'destination-address',
+    expectedConfirm: addressConfirm,
+    // The address, so the audit log's own column says at a glance that this row
+    // moved money OUT rather than around. `detail` carries the reference and
+    // amount on success; on a failure that is not about the address, this column
+    // is the only rendered place the destination appears. The source is in
+    // `params`, which is recorded beside it.
+    target: addressConfirm,
+    warning:
+      'SENDS THIS SOURCE’S MONEY OUT OF THE SOLVER, to an address you type. Irreversible, and it is the only ' +
+      'action here whose destination is not fixed by a swap. On the lightning rail it moves the ONCHAIN wallet and ' +
+      'NOT channel liquidity — that is the wallet the onchain corridors fund from, so withdrawing leaves less to ' +
+      'fund them with. NOT SAFE TO REPEAT: each attempt is a separate payment, so a withdrawal that times out must ' +
+      'be checked against the chain before you try again.',
+    run: async (services, body) => {
+      const source = requireFundSource(fundSources(services), body.source)
+      if (!source.withdraw) {
+        throw capabilityRefusal(source, 'withdraw', 'it has no way to pay an arbitrary destination')
+      }
+      return source.withdraw({ address: requireAddress(body), amount: requireAmount(body) })
+    },
   },
 }
 

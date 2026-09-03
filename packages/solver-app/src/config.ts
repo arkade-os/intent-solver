@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { base64 } from '@scure/base'
 import { narrow, resolveLimits, type Limits } from '@arkade-os/solver-core/core/limits.js'
 import { DEFAULT_LOCKUP_TIMEOUT, MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
-import { MAX_BIP68_SECONDS, SEQUENCE_GRANULARITY_SECONDS } from '@arkade-os/solver-core/core/timelocks.js'
+import { MAX_BIP68_BLOCKS, MAX_BIP68_SECONDS, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
 import { FREE, type Corridor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { ALL_DESCRIPTORS } from '@arkade-os/solver-corridors/corridors/index.js'
 import {
@@ -23,6 +23,7 @@ import {
 } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
 import { isSwapNetwork, NETWORKS, type NetworkProfile, type SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { lightningRailNames } from './ops/rails.js'
+import { parseAssetMarkets, type AssetMarket } from './ops/assetOffers.js'
 import type { ArkadeWalletConfig } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 
@@ -46,6 +47,29 @@ const intFromEnv = (name: string, fallback: number, min: number, max = Infinity)
     throw new Error(`${name} must be ${range}, got ${process.env[name]}`)
   }
   return value
+}
+
+/**
+ * A whole, non-negative amount in the want leg's own units — asset units, or
+ * sats when the leg is BTC.
+ *
+ * `bigint`, and not `intFromEnv`: an asset amount is 256-bit and routinely
+ * exceeds `Number.MAX_SAFE_INTEGER` (`db/offerFills.ts` stores these as TEXT for
+ * the same reason). Reading a payout ceiling through a double is how a bound
+ * becomes larger than the operator wrote.
+ *
+ * No fallback. These are only read when {@link Config.offerMarkets} is
+ * non-empty, and there is no safe default for "how much of the float may one
+ * offer take" — that number is the deployment's to state.
+ */
+const requiredBigintFromEnv = (name: string): bigint => {
+  const raw = process.env[name]?.trim()
+  if (!raw) throw new Error(`${name} is not set, and OFFER_MARKETS names a market to fill`)
+  // `BigInt` accepts `0x`/`0o` prefixes and rejects `5e5` and `1.0`; the digit
+  // test pins it to the plain decimal an operator would write, so a value that
+  // parses to something other than what was typed cannot get through.
+  if (!/^\d+$/.test(raw)) throw new Error(`${name} must be a whole number of units, got ${JSON.stringify(raw)}`)
+  return BigInt(raw)
 }
 
 export interface LndConfig {
@@ -167,6 +191,33 @@ export interface Config {
    */
   evmMarkets: readonly EvmMarket[]
   /**
+   * Asset-swap markets this solver TAKES offers on (`OFFER_MARKETS`).
+   *
+   * Empty is the whole offer-packet path off, and is the default: nothing
+   * subscribes, nothing is decided, nothing is spent. Not a corridor — both legs
+   * are on Arkade and the maker's covenant obliges the fill to pay them, so
+   * there is no HTLC, no deadline and no refund. @see ops/assetOffers.ts
+   *
+   * The solver is always the TAKER. There is deliberately no knob for
+   * publishing an offer: an offer is a standing commitment with no expiry, so
+   * publishing one writes a free option.
+   */
+  offerMarkets: readonly AssetMarket[]
+  /**
+   * Inclusive bounds on ONE offer's payout, in the want leg's own units.
+   *
+   * Both `0n` exactly when {@link Config.offerMarkets} is empty — unread rather
+   * than meaningful, since a deployment serving no market never gets as far as
+   * an amount. With a market named, both are required: they are the ceiling on
+   * how much of the float a single discovered offer may take, and no default
+   * this repository could ship would be the operator's answer.
+   *
+   * A market's own `pricing` entry can narrow them per DIRECTION; these are the
+   * deployment-wide fallback. @see AssetMarketPricing
+   */
+  offerMinFillAmount: bigint
+  offerMaxFillAmount: bigint
+  /**
    * Whether `lightning:BTC->arkade:BTC` may be served when the solver's own
    * solo recourse opens AFTER the incoming htlc's `E` — the #69 window.
    *
@@ -177,19 +228,23 @@ export interface Config {
    * (605184s, 7 days), so the solo leaf opens at 7.05 days and gate (d) demands 4074
    * blocks of final CLTV — ~28 days of a payer's funds, which nothing routes, so every
    * quote is refused `recourse_window_unservable`. Raising `MAX_FINAL_CLTV_BLOCKS`
-   * does not help (2016 reports the wall, it is not the wall), and finishing
-   * `TODO(unilateral-exit)` does not either, since the 7-day CSV is unchanged.
+   * does not help (2016 reports the wall, it is not the wall), and neither does the
+   * server-independent exit now in `arkade/unilateralExit.ts`, since the 7-day CSV is
+   * unchanged.
    *
-   * WHAT TURNING IT ON ACCEPTS: with the Arkade server gone or censoring past the exit
+   * WHAT TURNING IT ON ACCEPTS: with the Arkade Service gone or censoring past the exit
    * delay AND `E` passed, a trader can let the htlc fail back for free and only then
    * claim the Arkade payout, taking both sides. Bounded by the corridor's own cap,
    * which is why mainnet requires `LN_RECEIVE_MAX_SATS` set explicitly — the operator
    * states the number they are risking rather than inheriting it.
    *
-   * Defensible because the solver cannot execute that recourse today anyway
-   * (`TODO(unilateral-exit)`), so the reserved window protects an action nothing in
-   * `src/` can take, and a same-sized loss on the other side is already accepted in
-   * `src/arkade/covenant.ts` for the same missing implementation.
+   * THIS GREW MORE EXPENSIVE, not less. The justification used to be that the solver
+   * could not execute the reserved recourse at all, so the window protected an action
+   * nothing could take. It can now (`cli unilateral-exit`), so what this flag gives up
+   * is a real recourse rather than a notional one — which is why it stays opt-in,
+   * mainnet-gated on an explicit cap, and shown in the console. The window it waives is
+   * still not one this corridor can be served without on mainnet; that is the trade,
+   * stated as a trade.
    *
    * Lightning leg only. `onchain:BTC->arkade:BTC` carries the same gate and is
    * deliberately NOT covered: there `E` is the client's own onchain locktime with no
@@ -216,6 +271,18 @@ export interface Config {
   contractRetentionMs: number
   /** How many swaps one Lightning-leg sweep drives at once; bounded by what the indexer/LN backend can sustain. */
   sweepConcurrency: number
+  /**
+   * Esplora base URL used only to read the chain tip height.
+   *
+   * Needed by a deployment whose arkd advertises BLOCK-typed delays: its covenant
+   * timelocks — the CSV ladder and the absolute refund locktime alike — mature on
+   * height, so the service needs somewhere to read one. A seconds-typed deployment never
+   * reads it and may leave this unset.
+   *
+   * Falls back to `LND_ESPLORA_URL`, which points at the same indexer on every deployment
+   * that has one, so block mode usually needs no new variable at all.
+   */
+  chainTipEsploraUrl?: string
   /**
    * Funding window a Lightning-send quote grants, seconds — an UPPER bound on
    * it, not the window itself. `lockupDeadlineFor` (`src/core/send.ts`) clips it
@@ -583,7 +650,11 @@ const corridorEnabledFromEnv = (): Record<Corridor, boolean> => {
 
 /**
  * `ARK_UNILATERAL_EXIT_DELAY` — what to believe instead of the server's own
- * advertised unilateral exit delay, in seconds.
+ * advertised unilateral exit delay.
+ *
+ * Seconds or blocks, told apart the way every other relative delay in this service is
+ * (`relativeDelayFrom`). It must agree in UNIT with what the server advertises, which
+ * `createArkadeContext` enforces once it has both numbers in hand.
  *
  * See `ArkadeWalletConfig.unilateralExitDelayOverride` for what this changes
  * (the CSV timelocks in every covenant, and the invoice delta the Lightning
@@ -600,17 +671,26 @@ const unilateralExitDelayOverride = (): number | undefined => {
   if (!raw) return undefined
   const value = Number(raw)
   if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`ARK_UNILATERAL_EXIT_DELAY must be a positive whole number of seconds, got ${raw}`)
+    throw new Error(`ARK_UNILATERAL_EXIT_DELAY must be a positive whole number, got ${raw}`)
   }
   // The SAME window `deriveUnilateralDelays` enforces, checked here so the error names
   // the variable the operator set. Downstream it is caught inside
   // `createArkadeContext` by a message beginning "server exit delay", which would send
-  // an operator who typed ARK_UNILATERAL_EXIT_DELAY=300 to arkd to debug their own
-  // value, at a moment that looks like a connection problem.
-  if (value < SEQUENCE_GRANULARITY_SECONDS) {
-    throw new Error(
-      `ARK_UNILATERAL_EXIT_DELAY is ${value}, below ${SEQUENCE_GRANULARITY_SECONDS}s — it is seconds, not a block count`,
-    )
+  // an operator who typed their own value to arkd to debug it, at a moment that looks
+  // like a connection problem.
+  //
+  // WHICH UNIT this is stays unasked here, because it is not this function's to decide:
+  // the unit is a fact about the arkd being overridden, checked against that server's
+  // own advertised delay in `createArkadeContext`. Asking the operator to declare it too
+  // would create a second source of truth able to disagree with the first.
+  if (relativeDelayFrom(value).unit === 'blocks') {
+    if (value > MAX_BIP68_BLOCKS) {
+      throw new Error(
+        `ARK_UNILATERAL_EXIT_DELAY is ${value} blocks, beyond the ${MAX_BIP68_BLOCKS} a ladder can carry ` +
+          'before its top rung re-types itself as seconds',
+      )
+    }
+    return value
   }
   if (value > MAX_BIP68_SECONDS) {
     throw new Error(`ARK_UNILATERAL_EXIT_DELAY is ${value}s, beyond the ${MAX_BIP68_SECONDS}s BIP68 can encode`)
@@ -799,6 +879,22 @@ export const loadConfig = (): Config => {
     )
   }
 
+  // The bounds are read ONLY when a market is served, so a deployment that
+  // serves none needs neither variable — the same shape as the EVM knobs, which
+  // are inert without `EVM_TOKENS`. Zeroes here are unread, not permissive.
+  const offerMarkets = parseAssetMarkets(process.env.OFFER_MARKETS)
+  const offerMinFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv('OFFER_MIN_FILL_AMOUNT') : 0n
+  const offerMaxFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv('OFFER_MAX_FILL_AMOUNT') : 0n
+  // Refused at boot rather than per offer: inverted bounds refuse every offer,
+  // which is indistinguishable from a quiet market and would be diagnosed as
+  // one. `evaluateOfferFill` compares against both, so it cannot report this.
+  if (offerMaxFillAmount < offerMinFillAmount) {
+    throw new Error(
+      `OFFER_MAX_FILL_AMOUNT ${offerMaxFillAmount} is below OFFER_MIN_FILL_AMOUNT ${offerMinFillAmount}, ` +
+        'which would refuse every offer',
+    )
+  }
+
   return {
     network: raw,
     profile,
@@ -818,12 +914,16 @@ export const loadConfig = (): Config => {
     // resolved stops the deployment instead of advertising a pair it will then
     // refuse every request against.
     evmMarkets: evmMarkets(parseEvmTokens(process.env.EVM_TOKENS), (name) => process.env[name]),
+    offerMarkets,
+    offerMinFillAmount,
+    offerMaxFillAmount,
     swapDbPath: swapDbPath(),
     poolAutoMint: poolAutoMintFromEnv(),
     lnReceiveAcceptUnilateralGap: lnReceiveAcceptUnilateralGapFromEnv(raw),
     maxExposedSats,
     contractRetentionMs: contractRetentionDays * 86_400_000,
     sweepConcurrency,
+    chainTipEsploraUrl: process.env.CHAIN_TIP_ESPLORA_URL?.trim() || process.env.LND_ESPLORA_URL?.trim(),
     // Ceiling is `MAX_LOCKUP_TIMEOUT` (= REFUND_SAFETY_MARGIN), DERIVED there and
     // imported rather than written as a number here, so it cannot drift from the
     // margin it is the same quantity as. This is NOT the 3480 that used to sit

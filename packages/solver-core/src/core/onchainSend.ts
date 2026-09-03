@@ -8,7 +8,7 @@
  * delta and no routing budget to add.
  */
 
-import { HOUR, MINUTE } from './timelocks.js'
+import { HOUR, MINUTE, rawDelaySeconds } from './timelocks.js'
 import type { Limits } from './limits.js'
 
 /** How long a quoted swap stays fundable before it is considered abandoned. */
@@ -82,7 +82,10 @@ export const ARKADE_CLAIM_WINDOW_SECONDS = 90 * MINUTE
  */
 export const onchainRefundLocktimeFor = (htlcLocktime: number, unilateralClaimDelay: number, now: number): number => {
   const chainBound = htlcLocktime + 2 * ONCHAIN_ORDER_MARGIN_SECONDS
-  const serverIndependentBound = now + unilateralClaimDelay + ONCHAIN_ORDER_MARGIN_SECONDS
+  // Converted, not added raw — the same bound, and the same reason, as `core/send.ts`'s
+  // `unilateralBound`: a block-typed delay against a unix-seconds deadline collapses
+  // this bound to nothing rather than merely blurring it.
+  const serverIndependentBound = now + rawDelaySeconds(unilateralClaimDelay) + ONCHAIN_ORDER_MARGIN_SECONDS
   const claimAnswerBound = latestClaimArrival(htlcLocktime) + ARKADE_CLAIM_WINDOW_SECONDS
   return Math.max(chainBound, serverIndependentBound, claimAnswerBound)
 }

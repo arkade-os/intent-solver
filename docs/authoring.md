@@ -92,7 +92,7 @@ this work is additive by remit.
 **The reader half, twice.** `corridors/adapters.ts:79-115` (`readerFor`) and
 `corridors/evmCorridors.ts:139-170` (`evmReaderFor`) differ in two lines:
 `findRecoverable` vs `findLive`, and whether `statusFor` can answer. Six of a
-corridor's ten required members are that function.
+corridor's eleven required members are that function.
 
 **The stub, five times.** `corridorInterface.test.ts:16` and `:157`,
 `corridorInjection.test.ts:28`, `sdkSurface.test.ts:91` and `:136` each hand-roll

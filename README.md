@@ -1,11 +1,11 @@
 # intent-solver
 
-Swap provider ("solver") for Lightning ⇄ Arkade swaps, and the LND reference
-implementation of the corridor framework.
+Swap provider ("solver") between Arkade and Lightning, onchain BTC and ERC20
+tokens — and the LND reference implementation of the corridor framework.
 
 MIT licensed — see [LICENSE](LICENSE).
 
-Four corridors, two per direction:
+Four BTC corridors ship built in, two per direction:
 
 - **`arkade:BTC->lightning:BTC`** (send) — the user pays a Lightning invoice out
   of an Arkade balance. **Working.** Proven end-to-end on `bitcoin` (real sats:
@@ -19,7 +19,14 @@ Four corridors, two per direction:
 - **`onchain:BTC->arkade:BTC`** (receive) — the user pays onchain and the sats
   land on Arkade. **Working on regtest**, same.
 
-All four are quoted through RFQ v1 and driven by the same `watch` loop. The
+Two more appear per token named by `EVM_TOKENS` —
+**`arkade:BTC->ethereum:<token>`** and its reverse, on any EVM chain, off unless
+that variable is set. A corridor exists per TOKEN rather than once per family,
+and every chain fact is configuration rather than something compiled in, so a
+custom network needs no code. Their settings are their own block in
+[§ Settings and defaults](#settings-and-defaults) below.
+
+All of them are quoted through RFQ v1 and driven by the same `watch` loop. The
 receive legs fund a lockup out of the solver's own float, which is why
 `packages/solver-arkade/src/arkade/lockupFunding.ts` and `packages/solver-arkade/src/arkade/reservations.ts` exist — see
 "Settings and defaults" below.
@@ -84,12 +91,16 @@ removed unserved — nothing was ever deployed against it.
 
 ## Building your own solver
 
-Nothing about the four built-in corridors is privileged: they implement the same
+Nothing about the built-in corridors is privileged: they implement the same
 `Corridor` interface you would, and a corridor this build was never compiled
 against is served by the same host, driven by the same sweep and answered for by
 the same status route. Registering one is a single call —
 `createServices(config, { corridors: [mine] })` — and a BTC backend is a single
 call too, `registerLightningRail('mine', module)` with `LN_BACKEND=mine`.
+Somewhere to keep the coins is the third: `registerFundSource(services => …)`
+puts your own wallet in the console beside the built-in two, with the same
+read/deposit/settle/withdraw buttons, and a factory returning `null` means "not
+on this deployment" rather than a source that is present and broken.
 
 The **whole deployment** is describable in code as well: `Config` is a plain
 exported interface, `loadConfig()` is the environment adapter that produces one
@@ -107,7 +118,7 @@ The sweep loop is the one piece that is not reachable — it lives inside
 
 - **The guide:**
   [`docs/repos/intent-solver/building-a-corridor.md`](docs/repos/intent-solver/building-a-corridor.md)
-  — the descriptor, the ten required members, the closed refusal vocabulary, and
+  — the descriptor, the eleven required members, the closed refusal vocabulary, and
   what the host will _not_ do for you.
 - **A corridor that runs:**
   [`examples/corridor-host.mjs`](examples/corridor-host.mjs) over
@@ -193,9 +204,10 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   file included), purely-outbound relay mode, and the Cloudflare Workers shape
   with its caveat stated.
 - **Admin console:** `ADMIN_PORT=8788 pnpm cli relay` serves an operator
-  console — swaps across all four corridors, quotes, wallet and VTXO pool,
-  backend status, settings and an action audit log — on its own port, from
-  inside the running provider. Off unless `ADMIN_PORT` is set. **It has no
+  console — swaps across every corridor the deployment serves, quotes, the
+  wallet (sats and every Arkade asset it holds) and VTXO pool, the funding
+  sources, backend status, settings and an action audit log — on its own port,
+  from inside the running provider. Off unless `ADMIN_PORT` is set. **It has no
   authentication: anything that can reach that port can move money.** Put a
   reverse proxy in front of it, or tunnel to the default loopback bind. See
   `docs/runbook.md` § "The admin console".
@@ -206,6 +218,17 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   that only behind something that authenticates. `ADMIN_PORT` is an integer in
   `[1, 65535]` and a bad value throws rather than reading as "off", so a typo
   cannot silently darken the console an operator believes is up.
+
+- **Funding sources:** every place this deployment keeps coins answers one
+  interface (`packages/solver-app/src/ops/fundSources.ts`), so the console can
+  read a balance, hand out a deposit address, settle what has arrived and
+  withdraw — without knowing whether it is talking to the Lightning rail or the
+  Arkade wallet. Two ship (`rail`, `arkade`); the rail one is simply absent
+  without `LN_BACKEND`, so **the list is the availability decision** rather than
+  a set of buttons that fail when pressed. Only `readBalance` is required, and a
+  source that cannot do an operation says so in its capabilities instead of
+  throwing at the end of it. Withdrawal is the one `armed`-tier action here —
+  it is the only one that moves coins to an address the operator typed.
 
 - **Theme:** follows your system's light/dark preference, with a toggle in the
   nav that overrides and persists. Both palettes are held to WCAG AA (4.5:1) by
@@ -227,10 +250,24 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   first thing to try on a `stuck` row — most resolve themselves once the backend
   is re-read.
 - **CLI:** `quote · status · timeline · list · drive · watch · serve · relay ·
-send · send-onchain · refund · refund-now · onchain-refund-now ·
-test-refund · invoice · card · balances · pool` — every command goes through
-  the same orchestrator the service runs. `pool` is the only one that spends,
-  and only under `--mint`.
+send · send-onchain · refund · refund-now · claim-now · onchain-refund-now ·
+reclaim-l1-htlc · park-swap · test-refund · invoice · card · balances · pool` —
+  every command goes through the same orchestrator the service runs. `pool` is
+  the only one that spends the float on the operator's say-so rather than a
+  swap's, and only under `--mint`.
+
+  Five of them act on ONE existing row and are built for the incident rather
+  than the happy path, so all five open every corridor
+  (`createServices(config, { allCorridors: true })`) — a row whose corridor has
+  since been disabled must still be unwindable, and the config that darkened it
+  is usually the reason someone is unwinding. `refund-now` and
+  `onchain-refund-now` push the refund for a swap the solver funded;
+  `reclaim-l1-htlc` broadcasts the refund of an L1 HTLC; `claim-now` records a
+  preimage and returns the row to `claiming` for the sweep to push, rather than
+  broadcasting anything itself; and `park-swap <id> <reason>` moves no coins at
+  all — it takes a row out of the sweep with the reason recorded, for when no
+  automatic outcome is reachable and a human has to own it.
+
 - **Settings:** every environment variable and every constant, with which are
   yours to change, is in [§ Settings and defaults](#settings-and-defaults)
   below. Operator-facing deployment detail lives in
@@ -296,9 +333,9 @@ that is the only knob that touches an amount at risk at all.
 | --------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SWAP_NETWORK`                                | `regtest`                                                | `bitcoin` \| `mutinynet` \| `signet` \| `regtest`. Anything else throws. Selects the whole profile: limits, invoice/Arkade prefixes, backend network name |
 | `LN_BACKEND`                                  | none                                                     | `lnd` \| `fake`, or the name of a rail a consumer registered (`registerLightningRail`, `packages/solver-app/src/ops/rails.ts`); matched exactly after trimming, and an unrecognised value throws naming the accepted set rather than falling through to one. **No default, and required unless all four BTC corridors are disabled** — a rail is a PAIR, one wallet answering both the Lightning and the onchain port, so the onchain corridors take their backend from this value too. A deployment serving only EVM or asset flow says so with `<CORRIDOR>_ENABLED=false` on the four and leaves this unset; `Services.ln` and `Services.onchain` are then null and throw by name if anything reaches for them. `lnd` talks to a real LND node's gRPC; `fake` forges and self-settles its own invoices for regtest E2E and is refused on `bitcoin` |
-| `ARK_UNILATERAL_EXIT_DELAY`                   | none (believe the server)                                | Seconds. What to treat as the Arkade server's unilateral exit delay instead of the value it advertises at `/v1/info`, for a deployment where arkd enforces a shorter minimum than it announces — mainnet does: `/v1/info` reports its _Public_ unilateral exit (605184) while covenant leaves are checked against the plain _Unilateral exit_ (259584), so `260096` is the value to set there. Not cosmetic: every covenant's CSV timelocks come from it, and the Lightning receive corridor sizes its final CLTV delta against it — at mainnet's advertised `605184` that corridor needs 4074 blocks and cannot be served, while at or below **296448s (~3.43 days)** it is served with every gate intact (`maxServableExitDelay`). **The directions are not symmetric:** too high is merely wasteful, too low writes a script the server rejects **at spend rather than at funding**, with money already in it. Confirm the server accepts the script with one small real spend first (a collaborative claim or refund proves that much; the CSV leaves are only reachable through a unilateral exit, which nothing in `src/` performs yet). In-flight swaps are unaffected — each row snapshots its own delays at quote time |
+| `ARK_UNILATERAL_EXIT_DELAY`                   | none (believe the server)                                | Seconds. What to treat as the Arkade server's unilateral exit delay instead of the value it advertises at `/v1/info`, for a deployment where arkd enforces a shorter minimum than it announces — mainnet does: `/v1/info` reports its _Public_ unilateral exit (605184) while covenant leaves are checked against the plain _Unilateral exit_ (259584), so `260096` is the value to set there. Not cosmetic: every covenant's CSV timelocks come from it, and the Lightning receive corridor sizes its final CLTV delta against it — at mainnet's advertised `605184` that corridor needs 4074 blocks and cannot be served, while at or below **296448s (~3.43 days)** it is served with every gate intact (`maxServableExitDelay`). **Served is not routable, and the difference has been misread here before:** at `260096` the strict rule still wants **1774 blocks** of final CLTV — ~12 days of a payer's funds, leaving ~242 blocks for the whole route under the 2016 gate. Setting this does NOT make `LN_RECEIVE_ACCEPT_UNILATERAL_GAP` unnecessary; that flag is what takes the requirement to 54 blocks, and it does so at any exit delay. **The directions are not symmetric:** too high is merely wasteful, too low writes a script the server rejects **at spend rather than at funding**, with money already in it. Confirm the server accepts the script with one small real spend first (a collaborative claim or refund proves that much; the CSV leaves are only reachable through a unilateral exit, which nothing in `src/` performs yet). In-flight swaps are unaffected — each row snapshots its own delays at quote time |
 | `ARK_ESPLORA_URL`                             | none (SDK per-network default)                           | the Arkade wallet's view of the Bitcoin chain. Unset takes the SDK's per-network default, which on regtest is `http://localhost:3000/api` and inside a container resolves to the container itself. The failure is QUIET — one `Failed to fetch chain tip` line, then block-denominated VTXO expiry goes unwatched. Not `LND_ESPLORA_URL`, which is the Lightning side's                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `LN_RECEIVE_ACCEPT_UNILATERAL_GAP`            | `false`                                                  | `true` \| `false`, exactly — a typo throws rather than reading as agreement. Serves `lightning:BTC->arkade:BTC` even when the solver's own solo recourse opens AFTER the incoming htlc's `E`, which is the ONLY way the corridor runs on mainnet today: arkd reports `unilateralExitDelay=605184` (7 days), so the solo leaf opens at 7.05 days and the strict rule demands 4074 blocks of final CLTV — roughly 28 days of a payer's funds, which nothing routes, so every quote is refused `recourse_window_unservable`. Raising `MAX_FINAL_CLTV_BLOCKS` does not help (2016 reports the wall, it is not the wall) and neither does finishing `TODO(unilateral-exit)` (the 7-day CSV is unchanged). **What it accepts:** with the Arkade server gone or censoring past its exit delay AND `E` passed, a trader can let the htlc fail back for free and only then claim the Arkade payout, taking both sides (#69). Bounded by `LN_RECEIVE_MAX_SATS`, which `bitcoin` therefore requires you to set explicitly alongside it. Gates (a)–(c) are untouched. Shown in the admin console; not editable there                                                                                                                        |
+| `LN_RECEIVE_ACCEPT_UNILATERAL_GAP`            | `false`                                                  | `true` \| `false`, exactly — a typo throws rather than reading as agreement. Serves `lightning:BTC->arkade:BTC` even when the solver's own solo recourse opens AFTER the incoming htlc's `E`, which is in practice the only way the corridor runs on mainnet: arkd reports `unilateralExitDelay=605184` (7 days), so the solo leaf opens at 7.05 days and the strict rule demands 4074 blocks of final CLTV — roughly 28 days of a payer's funds, which nothing routes, so every quote is refused `recourse_window_unservable`. Raising `MAX_FINAL_CLTV_BLOCKS` does not help (2016 reports the wall, it is not the wall) and neither does the server-independent exit (`cli unilateral-exit`), which lets the solver USE the leaf but leaves the 7-day CSV unchanged. `ARK_UNILATERAL_EXIT_DELAY` moves the strict requirement without removing it: at `260096` it is 1774 blocks rather than 4074, under the 2016 gate so quotes stop being refused — but that is still ~12 days of a payer's funds with ~242 blocks left for the whole route. **Servable is not routable**, which is why this flag exists at all; with it set the requirement is 54 blocks at any exit delay, because accepting the gap is what removes the dependency. **What it accepts:** with the Arkade server gone or censoring past its exit delay AND `E` passed, a trader can let the htlc fail back for free and only then claim the Arkade payout, taking both sides (#69). Bounded by `LN_RECEIVE_MAX_SATS`, which `bitcoin` therefore requires you to set explicitly alongside it. Gates (a)–(c) are untouched. Shown in the admin console; not editable there                                                                                                                        |
 | `DB_DIR`                                      | `.data` (`/data` in the image)                           | the directory every database file goes in — the whole set below, unless a variable names one individually. Point it at the volume and there is nothing else to place. Set-but-empty reads as unset                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `SWAP_DB_PATH`                                | `<DB_DIR>/swaps.sqlite`                                  | swap rows. THE file to back up. Readable by `status`/`list`/`timeline` without any key material. **Names four sibling files, not one**: each corridor opens its own SQLite store, and the admin console its own, derived by suffixing this path — `-onchain`, `-receive`, `-onchain-receive`, `-admin`. Back up the set, not the file                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `ARK_DB_PATH`                                 | `<DB_DIR>/ark.sqlite`                                    | Arkade wallet state — a separate file from the swap DB                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -373,6 +410,27 @@ the range). In atomic units that is ~9e15: no constraint for a 6-decimal token
 such as USDC or USDT, but an 18-decimal token cannot be served until the
 downstream `number`s are widened to bigint, since one whole token is 1e18.
 
+### Environment — Arkade asset offers (the packet path), off unless `OFFER_MARKETS` is set
+
+Not a corridor, and absent from the corridor tables above rather than missing
+from them. Both legs are on Arkade and the maker's covenant obliges the fill to
+pay them in the same transaction, so there is no HTLC, no deadline and no refund
+— which is also why there is no `_ENABLED` knob and no fee row of its own.
+
+**The solver is always the TAKER.** There is deliberately no option for
+publishing an offer. An offer is a standing commitment with no expiry, so
+publishing one writes a free option against this deployment's float.
+
+A deployment that sets none of these behaves exactly as it did before they
+existed: no `offer_fill` table is opened, no subscription to arkd's filtered
+transaction stream, nothing decided and nothing spent.
+
+| Var                     | Notes                                                                                                                                                                                                                                                                                                                                              |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OFFER_MARKETS`         | the markets taken, `A/B` pairs comma-separated, where `BTC` is the sats leg and anything else is a 68-hex asset id: `BTC/<assetId>,<assetIdA>/<assetIdB>`. Unordered — one entry serves both directions. Unset serves none, which is the whole path off. An entry naming one thing twice, or not shaped `A/B`, throws                              |
+| `OFFER_MIN_FILL_AMOUNT` | **required once `OFFER_MARKETS` names a market**, with no default shipped: this is how much of the float one discovered offer may take, which is the deployment's answer rather than this repository's. A whole number in the WANT leg's own units — asset units, or sats when that leg is BTC — parsed as bigint, since an asset amount is 256-bit |
+| `OFFER_MAX_FILL_AMOUNT` | same rule, the upper bound. A max below the min throws at startup: it would refuse every offer, which is indistinguishable from a quiet market and would be diagnosed as one                                                                                                                                                                       |
+
 ### Environment — `LN_BACKEND=lnd` only
 
 | Var                                  | Default         | Notes                                                                                                                                                                                                                                                                                                     |
@@ -380,6 +438,7 @@ downstream `number`s are widened to bigint, since one whole token is 1e18.
 | `LND_SOCKET`                         | none            | required; `host:port` of the gRPC listener                                                                                                                                                                                                                                                                |
 | `LND_CERT` / `LND_CERT_PATH`         | none            | **exactly one.** Both set, or neither, is an error — silently preferring one is how a stale file ships the wrong cert                                                                                                                                                                                     |
 | `LND_MACAROON` / `LND_MACAROON_PATH` | none            | same rule. `_PATH` is read and base64-encoded at load                                                                                                                                                                                                                                                     |
+| `CHAIN_TIP_ESPLORA_URL`              | `LND_ESPLORA_URL` | **block-typed deployments only.** Where to read the chain tip height. A deployment whose arkd advertises a BLOCK-typed unilateral exit delay writes covenant timelocks that mature on HEIGHT — both the CSV ladder and the absolute refund locktime — so the service needs somewhere to read one. Falls back to `LND_ESPLORA_URL`, which points at the same indexer wherever one exists, so block mode usually needs no new variable. A seconds-typed deployment never reads it; if a block-typed row ever reaches an orchestrator without a tip source, it throws a named error rather than guessing — guessing "not reached" strands a refund forever, and "reached" pushes one the chain rejects |
 | `LND_ESPLORA_URL`                    | none (optional) | **onchain-receive corridor only.** LND's own chain view is wallet-scoped and carries no per-output values, so it cannot see a client's funding transaction. Unset is fine for a send-only deployment; the receive path fails loudly (`onchain receive needs an Esplora URL…`) rather than under-reporting |
 
 ### Environment — test and tooling only

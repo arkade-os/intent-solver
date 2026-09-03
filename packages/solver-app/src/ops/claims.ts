@@ -76,45 +76,11 @@ export const claimNow = async (services: Services, id: string, preimageHex?: str
   return { state: 'claiming' }
 }
 
-/** Where the parked row landed. `fail` picks by whether the state was exposed. */
-export type ParkOutcome = { state: 'stuck' | 'refused' }
-
-/**
- * Stop driving ONE swap, and say why on the row.
- *
- * A row whose every tick throws is re-driven by the sweep forever, and nothing else an
- * operator can reach stops it: `refund-now` does not change state, `tick` drives it
- * again, and `stuck` is only reachable from inside the orchestrator.
- *
- * Deliberately NOT a repair — the "I have looked at this and it must stop" lever. The
- * reason is mandatory because a parked row with no explanation is a mystery for
- * whoever finds it next, including the operator who parked it.
- *
- * Terminal states are refused rather than re-parked: `fail` cannot transition out of
- * one, and answering "done" to an action that did nothing teaches an operator to
- * distrust the console.
+/*
+ * `parkSwap` used to live here, reaching `services.store` — the Lightning-send
+ * store — while the console offered its button on every row. It is now
+ * `Corridor.park`, implemented once as `parkVia` in
+ * `@arkade-os/solver-core/core/corridor.ts` and supplied by each corridor with
+ * its OWN live and parked state lists, which is the only place that knowledge
+ * correctly lives.
  */
-export const parkSwap = async (services: Services, id: string, reason: string): Promise<ParkOutcome> => {
-  const trimmed = reason.trim()
-  if (!trimmed) throw new Error('a reason is required: a parked row with no explanation is a mystery later')
-
-  const row = await services.store.get(id)
-  if (!NON_TERMINAL.includes(row.state)) {
-    throw new Error(`swap ${id} is already ${row.state}; only a live swap can be parked`)
-  }
-
-  // `fail` routes by exposure: `paying`/`paid`/`claiming` land in `stuck` for a
-  // human, everything else in `refused` because nothing of ours ever moved.
-  await services.store.fail(id, row.state, trimmed)
-
-  // Re-read and CHECK, because `fail` discards its compare-and-swap result. A
-  // sweep that advanced the row between the read above and the write here
-  // leaves the park a silent no-op, and reporting the state we happen to find
-  // would tell an operator `PARKED -> paid` — nonsense at the exact moment they
-  // are relying on it. Better to say the lever missed and let them re-read.
-  const after = await services.store.get(id)
-  if (after.state !== 'stuck' && after.state !== 'refused') {
-    throw new Error(`swap ${id} moved to ${after.state} while being parked — the sweep raced us; re-read it and retry`)
-  }
-  return { state: after.state }
-}

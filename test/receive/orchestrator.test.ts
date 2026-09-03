@@ -1443,6 +1443,31 @@ describe('ReceiveSwapService.tick — refund path', () => {
       // thing an operator needs, and the log line will have scrolled.
       expect(row.failureReason).toContain('server refused to co-sign')
     })
+
+    /**
+     * `stuck` is where a censored refund ends, and until the server-independent
+     * exit existed there was nothing to say next — the leaf the solver could
+     * spend alone was in every script this service has ever funded and
+     * unreachable from any code.
+     *
+     * The recourse is named ON THE ROW rather than only in a log line, because
+     * this is precisely the row a human reads days later. On THIS leg the solver
+     * funds the lockup and the client is the covenant receiver, so the solver's
+     * solo path is `unilateralRefundWithoutReceiver` — never the claim.
+     */
+    it('names the server-independent recourse on the row it parks', async () => {
+      const { id } = await censored()
+      await expect(service.tick(id)).rejects.toThrow('server refused to co-sign')
+      const entered = await store.get(id)
+      now = entered.updatedAt + REFUND_CENSORSHIP_GRACE
+      const row = await service.tick(id)
+
+      expect(row.failureReason).toContain('unilateralRefundWithoutReceiver')
+      // The claim leaf is the CLIENT's here. Naming it would send an operator
+      // after a secret they do not hold and a spend they cannot make.
+      expect(row.failureReason).not.toContain('unilateralClaim')
+      expect(row.failureReason).toContain(String(entered.refundWithoutReceiverDelay))
+    })
   })
 })
 
@@ -1908,5 +1933,112 @@ describe('retiring a hold invoice the quote never used (#99)', () => {
 
     expect(row.state).toBe('refused')
     expect((await ln.getHoldState(paymentHash)).status).toBe('cancelled')
+  })
+})
+
+/**
+ * BLOCK-TYPED TIMELOCKS, through the orchestrator rather than the arithmetic.
+ *
+ * The unit test in `test/core/blockTimelocks.test.ts` proves the two functions
+ * answer differently. This is where using the wrong one actually moves money:
+ * a freshly funded block-typed row has a `refund_locktime` of a few hundred,
+ * and the clock is 1.8 billion. Anything that asks "has it opened?" against the
+ * clock says yes, immediately, and refunds a swap that is minutes old.
+ */
+describe('ReceiveSwapService — block-typed timelocks', () => {
+  const BLOCK_DELAYS = {
+    unilateralClaimDelay: 20,
+    unilateralRefundDelay: 20,
+    unilateralRefundWithoutReceiverDelay: 28,
+  }
+  const TIP = 800
+
+  /** A tip a test can advance, which is what "mining" is on this side. */
+  const movableTip = (start: number) => {
+    let height = start
+    return { provider: { height: async () => height }, mine: (n: number) => (height += n) }
+  }
+
+  const blockService = (chainTip?: { height(): Promise<number> }) =>
+    new ReceiveSwapService({
+      acceptUnilateralGap: false,
+      store,
+      ln,
+      arkade: { ...arkade.ops, delays: BLOCK_DELAYS },
+      covclaimd: covclaimd.client,
+      limits: LIMITS,
+      maxExposedSats: 1_000_000,
+      totalCommitted: () => store.committedSats(),
+      admission: new AdmissionControl(),
+      chainTip,
+      now: clock,
+    })
+
+  /** `E` past gate (d): 28 blocks converts to 16800s, plus the recourse margin. */
+  const armWindow = 8 * 3600
+
+  it('writes the refund deadline as a HEIGHT, projected from the tip', async () => {
+    const tip = movableTip(TIP)
+    const outcome = await blockService(tip.provider).quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const row = await store.get(outcome.swap.id)
+    // MAX_REFUND_HORIZON is 2h, which is 12 blocks at the nominal interval.
+    expect(row.refundLocktime).toBe(TIP + 12)
+  })
+
+  it('builds the covenant from that same height, so the row can spend its own lockup', async () => {
+    const tip = movableTip(TIP)
+    const outcome = await blockService(tip.provider).quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const row = await store.get(outcome.swap.id)
+    // The check `assertScriptMatchesRow` runs before every claim and refund: a
+    // second conversion anywhere would derive a script the row cannot spend.
+    const rebuilt = covenantScriptFromRow(receiveCovenantRowFor(row))
+    expect(hex.encode(rebuilt.pkScript)).toBe(row.pkScript)
+  })
+
+  it('refuses to quote at all when block mode has nowhere to read a height', async () => {
+    await expect(blockService(undefined).quote(quoteRequest())).rejects.toThrow(/no chainTip provider is wired/)
+  })
+
+  it('does NOT read a fresh block-typed row as past its deadline, though the clock dwarfs it', async () => {
+    // The regression this pins: `now >= row.refundLocktime` is `1800000000 >= 812`.
+    // A swap minutes old would refund itself on its first tick.
+    const tip = movableTip(TIP)
+    const service = blockService(tip.provider)
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + armWindow)
+    const funded = await service.tick(outcome.swap.id)
+    expect(funded.state).toBe('funded')
+    // Still funded on the next tick, with nothing refunded.
+    expect((await service.tick(funded.id)).state).toBe('funded')
+    expect(arkade.state.refundCalls).toBe(0)
+  })
+
+  it('refunds once the CHAIN passes the height, with the wall clock unmoved', async () => {
+    const tip = movableTip(TIP)
+    const service = blockService(tip.provider)
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + armWindow)
+    const funded = await service.tick(outcome.swap.id)
+    expect(funded.state).toBe('funded')
+
+    const before = now
+    tip.mine(20)
+    expect(now).toBe(before)
+    const row = await service.tick(funded.id)
+    expect(row.state).toBe('refunded')
+    expect(arkade.state.refundCalls).toBe(1)
+  })
+
+  it('leaves a seconds-typed deployment reading its deadline off the clock', async () => {
+    // The additive claim at this level: the default service has no `chainTip`
+    // and must behave exactly as it always did.
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const row = await store.get(outcome.swap.id)
+    expect(row.refundLocktime).toBe(now + MAX_REFUND_HORIZON)
   })
 })

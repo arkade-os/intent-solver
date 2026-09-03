@@ -12,6 +12,7 @@ import {
   deriveUnilateralDelays,
   HOUR,
   MINUTE,
+  rawDelaySeconds,
   SEQUENCE_GRANULARITY_SECONDS,
 } from './timelocks.js'
 
@@ -31,8 +32,9 @@ export const SETTLE_SAFETY_MARGIN = 15 * MINUTE
  * Gap kept between the solver's own solo recourse opening and `E`.
  *
  * Room to run an on-chain unilateral exit, not to settle a Lightning htlc. Reasoned
- * rather than measured — nothing in `src/` spends the unilateral leaf yet
- * (`TODO(unilateral-exit)` in `src/arkade/covenant.ts`).
+ * rather than measured, and still is: the exit exists now (`arkade/unilateralExit.ts`),
+ * but nothing has driven one to completion on any network, so there is no observed
+ * duration to size this against.
  */
 export const UNILATERAL_RECOURSE_MARGIN = 30 * MINUTE
 
@@ -87,7 +89,11 @@ export const minHtlcWindowFor = (
     // (d) the solver's own recourse must open before `E`. Zero, not reduced, when the
     // operator accepts the gap: (b) and (c) still bind, so this is "no solo-recourse
     // guarantee", not "no deadline".
-    acceptUnilateralGap ? 0 : unilateralRefundWithoutReceiverDelay + UNILATERAL_RECOURSE_MARGIN,
+    //
+    // CONVERTED: every other term here is seconds and this delay may count blocks. Left
+    // raw, a 28-block recourse reads as 28 seconds and this gate — the one guaranteeing
+    // the solver's own recourse opens before `E` — stops binding at all.
+    acceptUnilateralGap ? 0 : rawDelaySeconds(unilateralRefundWithoutReceiverDelay) + UNILATERAL_RECOURSE_MARGIN,
   )
 
 /**

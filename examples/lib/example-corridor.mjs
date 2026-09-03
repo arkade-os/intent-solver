@@ -31,6 +31,7 @@ import { extractRfqId, phaseOfStates, rfqRefusalPayload } from '../../packages/s
  * @property {string} pkScript
  * @property {number} createdAt
  * @property {number} updatedAt
+ * @property {string} [failureReason] why a parked row was given up on — see `park`
  */
 
 /**
@@ -267,6 +268,25 @@ export const voucherCorridor = (options = {}) => {
         }
       }
       return driven
+    },
+
+    /**
+     * Take one row out of the sweep, with the reason on it.
+     *
+     * REQUIRED, and only this corridor can write it: `live` is its own list, and
+     * `abandoned` is its own word for where a given-up row goes. The host has no
+     * way to guess either, which is why the interface asks rather than assumes.
+     *
+     * Refusing a row that is already terminal matters more than it looks: the
+     * console reports whatever comes back, so answering "parked" to something
+     * that did not move teaches an operator to distrust the button.
+     */
+    park: async (id, reason) => {
+      const row = rows.get(id)
+      if (!row) throw new Error(`no voucher ${id}`)
+      if (!isLive(row)) throw new Error(`voucher ${id} is already ${row.state}; only a live one can be parked`)
+      rows.set(id, { ...row, state: 'abandoned', failureReason: reason, updatedAt: now() })
+      return { state: 'abandoned' }
     },
 
     /** Rows the sweep should drive, with the lockup scripts worth watching. */

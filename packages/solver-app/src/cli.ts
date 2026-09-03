@@ -54,11 +54,13 @@ import { type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainS
 import { findLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { lazyContractSource } from '@arkade-os/solver-arkade/arkade/lazyContractSource.js'
 import { LockupWatcher } from '@arkade-os/solver-arkade/arkade/lockupWatcher.js'
+import { streamOfferTxs } from '@arkade-os/solver-arkade/arkade/offerStream.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { lockupSource, runContractLifecycle } from '@arkade-os/solver-arkade/arkade/contractLifecycle.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { RFQ_PAIR_SEND } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import type { Corridor } from '@arkade-os/solver-core/core/corridor.js'
 import {
   MAX_FINAL_CLTV_BLOCKS,
   maxServableExitDelay,
@@ -75,7 +77,10 @@ import { applyOverrides } from './admin/settings.js'
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import type { Services } from './ops/services.js'
 import { refundNow, onchainRefundNow, reclaimL1Htlc } from './ops/refunds.js'
-import { claimNow, parkSwap } from './ops/claims.js'
+import { planExitForSwap } from './ops/unilateralExit.js'
+import { quoteUnilateralExit, startUnilateralExit } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
+import { unilateralExitDepsFor } from '@arkade-os/solver-arkade/arkade/unilateralExitOps.js'
+import { claimNow } from './ops/claims.js'
 import { poolPlan, mintPool } from './ops/pool.js'
 import { maybeMintPool, runFloatLifecycle } from './ops/float.js'
 import { lightningRailFor, requireLn, requireOnchain } from './ops/rails.js'
@@ -258,6 +263,31 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
   watcher.start()
 
   /**
+   * The offer-packet path's intake, on a deployment that serves a market.
+   *
+   * Its OWN subscription rather than a share of the lockup watcher's: an offer
+   * sits at the MAKER's script, which this wallet does not own and cannot know
+   * in advance, so `subscribeForScripts` — the only subscription the TS SDK
+   * exposes — cannot reach it. @see arkade/offerStream.ts
+   *
+   * Not awaited, and that is the whole point: it runs until `offers.abort()`
+   * below, so awaiting it here would mean the sweep never starts.
+   */
+  const offers = new AbortController()
+  if (services.assetOffers) {
+    log(`taking offers on ${services.config.offerMarkets.length} market(s); never publishing one`)
+    void services.assetOffers
+      .consumeOfferTxs(
+        streamOfferTxs({
+          arkdUrl: services.config.arkade.arkServerUrl,
+          signal: offers.signal,
+          onError: (error) => log('offer stream:', error instanceof Error ? error.message : String(error)),
+        }),
+      )
+      .catch((error) => log('offer discovery stopped:', error instanceof Error ? error.message : String(error)))
+  }
+
+  /**
    * Point the subscription at exactly the swaps still worth watching, across
    * ALL FOUR corridors.
    *
@@ -401,6 +431,20 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       // depth is minutes wide, so a sub-second cadence would buy nothing but
       // RPC calls), and their rows are driven by the sweep alone.
       for (const corridor of services.corridors) await corridor.tickAll()
+      // The offer path rides the same cadence and needs no other: a fill is one
+      // Arkade transaction with no confirmation to wait on, so there is nothing
+      // a faster loop could observe.
+      //
+      // WRAPPED, unlike the corridors above. This path is new and optional, and
+      // an offer store that throws must not be able to end a watch loop those
+      // four corridors were already depending on. Per-fill failures are already
+      // recorded on their own rows by `tickAll`; this catches only what is left.
+      try {
+        const filled = (await services.assetOffers?.tickAll()) ?? 0
+        if (filled > 0) log(`filled ${filled} offer(s)`)
+      } catch (error) {
+        log('offer fill sweep failed:', error instanceof Error ? error.message : String(error))
+      }
       // After the sweep, so a swap it just retired is dropped and one it just
       // adopted is watched from here on.
       await resyncWatchedScripts()
@@ -480,6 +524,10 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       }
     }
   }
+  // Aborted after the loop rather than inside `stop`: the stream is a consumer
+  // of arkd, not of the loop, and tearing it down while a fill sweep is still
+  // running would cut discovery off mid-decision for no gain.
+  offers.abort()
   await watcher.stop()
 }
 
@@ -612,6 +660,25 @@ const startAdminServer = async (
       }
     },
   }
+}
+
+/**
+ * The corridor whose store holds `id`, or null.
+ *
+ * Only for commands that take an id and NOT a corridor. The console never needs
+ * this — every row it renders carries its own pair — and `actions.ts` refuses to
+ * guess for exactly the reason this is safe here and not there: a swap id is
+ * unique only within its own store, so a search is sound only because ids are
+ * `randomUUID()` and no second store can answer for one.
+ *
+ * `detail` rather than `get`: it already answers null for an id a corridor does
+ * not hold, where `get` throws.
+ */
+const corridorHolding = async (services: Services, id: string): Promise<Corridor | null> => {
+  for (const corridor of services.corridors) {
+    if (await corridor.detail(id)) return corridor
+  }
+  return null
 }
 
 const commands: Record<string, (args: string[]) => Promise<void>> = {
@@ -1367,15 +1434,80 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    * It neither refunds nor claims — that decision is separate, and `read-payment`
    * is what informs it. This only stops the machine.
    */
+  /**
+   * The recourse that had no code behind it until now: spend this lockup's leaf
+   * WITHOUT the Arkade Service, by landing the VTXO on Bitcoin first.
+   *
+   * Reach for it when a row is parked with `claim failing past the refund
+   * deadline` or `refund failing past the refund deadline` — the failure detail
+   * on such a row already names which leaf this would spend. Both mean the
+   * Service is censoring or gone, which is the only situation an exit is worth
+   * its cost: it is slow (the leaf's CSV runs from when the lockup CONFIRMS
+   * onchain, not from now), it spends the solver's own onchain sats on fees, and
+   * it forfeits the cheap collaborative path that a transient outage would have
+   * restored.
+   *
+   * QUOTES BY DEFAULT. Without `--go` nothing is signed, broadcast or spent, and
+   * every refusal the real thing would make is reached — so the quote is the
+   * check, not a preview of one. `--go` runs `UnilateralExit.prepare`, which
+   * signs every transaction of the exit and BROADCASTS a funding splitter as a
+   * side effect. That is not reversible.
+   *
+   * The preimage is read off the row for a leg where the solver is the covenant
+   * receiver; passing one overrides it. Either way it is checked against the
+   * row's own payment hash before any witness is built.
+   */
+  async 'unilateral-exit'([id, ...rest]) {
+    if (!id) throw new GiveUp('usage: unilateral-exit <id> [preimage] [--go]')
+    const go = rest.includes('--go')
+    const preimage = rest.find((arg) => !arg.startsWith('--'))
+    const config = loadConfig()
+    // `allCorridors`: this unwinds an EXISTING row, including one belonging to a
+    // corridor since switched off — the same reasoning every refund command uses.
+    const services = await createServices(config, { allCorridors: true })
+    try {
+      const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
+      const { pair, plan } = await planExitForSwap(services.corridors, id, { solverPubkey, preimage })
+      log('swap', id, 'on', pair)
+      log(`leaf ${plan.leaf} as the covenant ${plan.role}, ${plan.delay.value} ${plan.delay.unit} of CSV`)
+      log('  the CSV runs from the moment the lockup CONFIRMS onchain, not from now')
+
+      const deps = await unilateralExitDepsFor(services.arkade)
+      log('sweeping to', deps.options.sweepAddress)
+      const quote = await quoteUnilateralExit(deps, plan)
+      log('quote:', json(quote.result.totals), 'shortfall', quote.result.shortfallSats, 'sats')
+      for (const skip of quote.skipped) log('SKIPPED', skip.outpoint, '—', skip.reason)
+
+      if (!go) {
+        log('nothing done — re-run with --go to sign the exit and broadcast its funding splitter')
+        return
+      }
+      const started = await startUnilateralExit(deps, plan)
+      log('EXIT PREPARED,', started.result.steps.length, 'step(s), funding splitter broadcast')
+      log('package:', json(started.result))
+      log('drive it with UnilateralExit.Executor against any Esplora endpoint; it is keyless from here')
+    } finally {
+      await services.close()
+    }
+  },
+
   async 'park-swap'([id, ...reason]) {
     const why = reason.join(' ').trim()
     if (!id || !why) throw new GiveUp('usage: park-swap <id> <reason...>')
     const config = loadConfig()
     const services = await createServices(config, { allCorridors: true })
     try {
-      const row = await services.store.get(id)
-      log('swap', row.id, 'is', row.state)
-      const { state } = await parkSwap(services, id, why)
+      // Which corridor holds it has to be DISCOVERED here, unlike in the console
+      // where every rendered row carries its own. Searching the stores is safe
+      // in a way `tick`'s doc rules out for itself: ids are `randomUUID()`, so
+      // the first store to answer is the only store that can answer. This read
+      // the Lightning-send store alone, so parking an onchain, receive or EVM
+      // row failed with "not found" on a row that plainly existed.
+      const owner = await corridorHolding(services, id)
+      if (!owner) throw new GiveUp(`no corridor on this deployment holds swap ${id}`)
+      const detail = await owner.detail(id)
+      log('swap', id, 'is', detail?.swap.state, 'on', owner.descriptor.pair)
+      const { state } = await owner.park(id, why)
       log('PARKED ->', state, '—', why)
     } finally {
       await services.close()

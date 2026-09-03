@@ -23,12 +23,17 @@
 import {
   createCorridorReaderSet,
   createCorridorSet,
+  parkVia,
   type Corridor,
   type CorridorReader,
   type CorridorReaderSet,
   type CorridorSet,
   type CorridorSwapView,
 } from '@arkade-os/solver-core/core/corridor.js'
+import { NON_TERMINAL as LN_SEND_LIVE } from '../db/swaps.js'
+import { NON_TERMINAL as LN_RECEIVE_LIVE } from '../db/receiveSwaps.js'
+import { NON_TERMINAL as ONCHAIN_SEND_LIVE } from '../db/onchainSwaps.js'
+import { NON_TERMINAL as ONCHAIN_RECEIVE_LIVE } from '../db/onchainReceiveSwaps.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
 import { covenantRowFor } from '../send/onchainOrchestrator.js'
@@ -76,7 +81,7 @@ interface ReadableStore<Row> {
  * id it does not hold, and "this corridor has no such swap" is a routine answer
  * rather than a fault.
  */
-const readerFor = <Row extends { id: string; pkScript: string }>(
+const readerFor = <Row extends { id: string; pkScript: string; preimage: string | null }>(
   descriptor: CorridorDescriptor,
   store: ReadableStore<Row>,
   project: (row: Row) => CorridorSwapView,
@@ -93,6 +98,19 @@ const readerFor = <Row extends { id: string; pkScript: string }>(
 ): CorridorReader => ({
   descriptor,
   liveLockups: async () => (await store.findRecoverable()).map(toCovenantRow),
+  // Written once here rather than four times, so all four BTC corridors gain
+  // the server-independent exit together and none can be forgotten — the shape
+  // of bug `tick` and `park-swap` each shipped once. `store.get` throws on an id
+  // this corridor does not hold, which is the routine answer during
+  // fall-through, not a fault; `detail` above reads it the same way.
+  //
+  // `preimage` is on the row type by CONSTRAINT, not by hope: `Row` requires it,
+  // so a fifth corridor whose row has no such column fails to compile here
+  // rather than reporting null for a secret it actually holds.
+  lockupFor: async (id) => {
+    const row = await store.get(id).catch(() => null)
+    return row ? { lockup: toCovenantRow(row), preimage: row.preimage } : null
+  },
   statusFor: async (rfqId) => {
     const row = await store.findByRfqId(rfqId)
     return row ? statusPayload(row, rfqId) : null
@@ -126,6 +144,16 @@ export const onchainSendReader = (store: OnchainSendSwapStore): CorridorReader =
 export const onchainReceiveReader = (store: OnchainReceiveSwapStore): CorridorReader =>
   readerFor(ONCHAIN_RECEIVE, store, projectOnchainReceive, onchainReceiveRfqStatusPayload, onchainReceiveCovenantRowFor)
 
+/**
+ * Where a parked row lands, for all four BTC corridors.
+ *
+ * One constant because all four stores declare the same
+ * `failStates: { exposed: 'stuck', clean: 'refused' }` — see each store's shape.
+ * A corridor that renamed either word would need its own list, which is exactly
+ * why `parkVia` takes it rather than assuming these two.
+ */
+const BTC_PARKED = ['stuck', 'refused'] as const
+
 export const lightningSendCorridor = (service: SendSwapService, store: SwapStore): Corridor => ({
   ...lightningSendReader(store),
   quote: (payload, options) => respondToLightningRfqRequest(service, store, payload, options),
@@ -136,6 +164,7 @@ export const lightningSendCorridor = (service: SendSwapService, store: SwapStore
   tickHot: async () => {
     await service.tickHot()
   },
+  park: (id, reason) => parkVia(store, { live: LN_SEND_LIVE, parked: BTC_PARKED }, id, reason),
   refundSweep: () => service.refundSweep(),
 })
 
@@ -146,6 +175,7 @@ export const lightningReceiveCorridor = (service: ReceiveSwapService, store: Rec
     await service.tick(id)
   },
   tickAll: async () => (await service.tickAll()).length,
+  park: (id, reason) => parkVia(store, { live: LN_RECEIVE_LIVE, parked: BTC_PARKED }, id, reason),
   refundNow: (id) => service.refundNow(id),
 })
 
@@ -156,6 +186,7 @@ export const onchainSendCorridor = (service: OnchainSendSwapService, store: Onch
     await service.tick(id)
   },
   tickAll: async () => (await service.tickAll()).length,
+  park: (id, reason) => parkVia(store, { live: ONCHAIN_SEND_LIVE, parked: BTC_PARKED }, id, reason),
   refundSweep: () => service.refundSweep(),
   refundNow: (id) => service.refundNow(id),
 })
@@ -170,6 +201,7 @@ export const onchainReceiveCorridor = (
     await service.tick(id)
   },
   tickAll: async () => (await service.tickAll()).length,
+  park: (id, reason) => parkVia(store, { live: ONCHAIN_RECEIVE_LIVE, parked: BTC_PARKED }, id, reason),
   claimNow: (id) => service.claimNow(id),
   refundNow: (id) => service.refundNow(id),
 })

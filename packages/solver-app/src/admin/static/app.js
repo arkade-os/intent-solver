@@ -116,6 +116,75 @@ const balanceRows = (balance) => {
   )
 }
 
+/* ---- assets (block owned by the asset work) ----------------------------- */
+
+/**
+ * An asset's identity: the id, with a ticker in front of it when one is known.
+ *
+ * THE ID IS THE IDENTITY. A ticker is metadata the issuer chose — optional, and
+ * not unique — so two different assets may both call themselves the same thing.
+ * Shown as the identity it would let an operator confirm they hold something
+ * they do not. The full id is on the title so it can be read and copied without
+ * spending a line of the panel on 64 characters of hex.
+ */
+const assetLabel = (asset) =>
+  h(
+    'span',
+    asset.ticker ? h('span', asset.ticker, ' ') : null,
+    h('span.faint', { title: asset.assetId }, asset.shortId),
+  )
+
+/**
+ * What the solver holds in Arkade assets, and what it could pay out of RIGHT NOW.
+ *
+ * TWO NUMBERS, NOT ONE, whenever they differ. An offer fill is decided against
+ * `availableAssets`; `assets` also counts holdings that are gated, intent-locked
+ * or awaiting recovery. Showing only the total is how an operator concludes they
+ * can cover a fill that would fail at submission after the maker was told yes.
+ *
+ * Amounts are BASE UNITS, matching what an offer names, and are strings because
+ * an asset supply overflows a double. `decimals` rides alongside as a label
+ * rather than being applied, so nothing here is a number an operator could
+ * compare against a taker's request and be wrong by a power of ten.
+ */
+const assetRows = (balance) => {
+  if (balance === null || typeof balance !== 'object') return null
+  const held = Array.isArray(balance.assets) ? balance.assets : []
+  if (held.length === 0) return null
+  const available = new Map(
+    (Array.isArray(balance.availableAssets) ? balance.availableAssets : []).map((a) => [a.assetId, a.amount]),
+  )
+  return h(
+    'span',
+    held.map((asset, index) => {
+      const spendable = available.get(asset.assetId) ?? '0'
+      return h(
+        'span',
+        index > 0 ? h('span.faint', ' · ') : null,
+        assetLabel(asset),
+        ' ',
+        h('span', spendable),
+        spendable === asset.amount ? null : h('span.muted', ` of ${asset.amount} held`),
+        typeof asset.decimals === 'number' && asset.decimals > 0 ? h('span.faint', ` (${asset.decimals}dp)`) : null,
+      )
+    }),
+  )
+}
+
+/**
+ * The `assets` row of a `dl.kv`, or nothing at all when no asset is held.
+ *
+ * Returns the pair so the row disappears entirely for a sats-only solver rather
+ * than showing an empty label — most operators never hold one, and a permanent
+ * blank row is a question they have to re-answer on every glance.
+ */
+const assetRowsPair = (balance) => {
+  const rows = assetRows(balance)
+  return rows ? [h('dt', 'assets'), h('dd', rows)] : []
+}
+
+/* ---- end assets block --------------------------------------------------- */
+
 /** Corridor label short enough for a table cell. */
 const corridorLabel = (corridor) =>
   ({
@@ -439,6 +508,9 @@ const overviewView = () => {
           ),
           h('dt', 'arkade'),
           h('dd', o.balances.arkadeError ? h('span.muted', o.balances.arkadeError) : balanceRows(o.balances.arkade)),
+          /* assets: begin */
+          ...(o.balances.arkadeError ? [] : assetRowsPair(o.balances.arkade)),
+          /* assets: end */
           h('dt', 'pubkey'),
           h('dd.faint', shortId(o.providerPubkey)),
         ),
@@ -601,6 +673,230 @@ const quotesView = () => {
   )
 }
 
+/* ---- fund sources: BEGIN ------------------------------------------------- */
+/* Self-contained: this block plus one `fundsPanel()` call inside `walletView`. */
+
+/**
+ * A quantity in a source's own base units, grouped only when that is safe.
+ *
+ * The seam carries amounts as STRINGS because an ERC20 quantity is 256-bit and
+ * routinely past what a JS number holds exactly. Grouping goes through `Number`,
+ * so it is applied only where the value round-trips: a grouped-but-wrong figure
+ * is worse than an ungrouped right one on a screen someone funds a wallet from.
+ */
+const fundAmount = (raw) => {
+  if (raw === null || raw === undefined) return '—'
+  const n = Number(raw)
+  return Number.isSafeInteger(n) && String(n) === String(raw) ? n.toLocaleString('en-US') : String(raw)
+}
+
+/**
+ * Run one of the fund actions and keep its answer next to the source it is about.
+ *
+ * Its OWN slice rather than the shared `state.result`, because two of these
+ * answers are strings an operator copies — a deposit address above all — and the
+ * result banner truncates at 160 characters. A silently shortened address is a
+ * send to nowhere, which is the one failure this panel exists to avoid.
+ *
+ * `state.data.funds*` survives every reload: `load()` only writes keys named
+ * after a view, and there is no `funds` view.
+ *
+ * A refusal is kept IN the panel rather than raised as a page banner. Most of
+ * them are policy answers, not faults — "this source has no way to pay an
+ * arbitrary destination", "no BTC rail on this deployment" — and the red banner
+ * would read as a broken console.
+ */
+const fundAction = async (name, source) => {
+  if (state.running) return
+  state.running = { name, forSwap: null }
+  render()
+  try {
+    const response = await api(`/api/actions/${name}`, { method: 'POST', body: JSON.stringify({ source }) })
+    state.banner = null
+    state.data.fundRead = { source, name, result: response.result, error: null }
+  } catch (error) {
+    state.data.fundRead = { source, name, result: null, error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    state.running = null
+    render()
+  }
+}
+
+/**
+ * Which sources this deployment has, and what each holds.
+ *
+ * Two round trips because they answer different questions and fail
+ * independently: the catalogue decides which panels and buttons exist at all,
+ * while a balance is a backend read that can be down without taking the panel
+ * with it.
+ */
+const loadFunds = async () => {
+  try {
+    const catalogue = await api('/api/actions/fund-sources', { method: 'POST', body: JSON.stringify({}) })
+    const sources = catalogue.result?.sources ?? []
+    const balances = {}
+    for (const source of sources) {
+      try {
+        const read = await api('/api/actions/fund-balance', {
+          method: 'POST',
+          body: JSON.stringify({ source: source.id }),
+        })
+        balances[source.id] = { balance: read.result, error: null }
+      } catch (error) {
+        // Per source, so one unreachable backend leaves the others readable —
+        // and so "this one is down" reads as itself rather than as the whole
+        // page failing.
+        balances[source.id] = { balance: null, error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+    state.data.funds = { sources, balances, error: null }
+  } catch (error) {
+    state.data.funds = { sources: [], balances: {}, error: error instanceof Error ? error.message : String(error) }
+  }
+  render()
+}
+
+/**
+ * Collect a destination and an amount, then hand both to the ordinary armed
+ * dialog.
+ *
+ * `window.prompt` for the same reason `editKnob` uses it: the whole page
+ * re-renders on a two-second stream tick, so a form field living in the tree
+ * would be rebuilt out from under whoever is typing into it.
+ *
+ * The `override` argument is the second gate. It renders the source, amount and
+ * destination back as a banner with a checkbox that must be ticked before the
+ * confirm box does anything — so the operator sees what they are about to send
+ * spelled out, and then has to type the address itself. The server checks that
+ * address independently; this is the part that stops a reflex.
+ */
+const fundWithdraw = (source) => {
+  const typed = window.prompt(
+    `Withdraw from ${source.label} to which address?\n\nThis leaves the solver and cannot be undone.`,
+  )
+  if (typed === null) return
+  const address = typed.trim()
+  if (!address) return
+  const raw = window.prompt(`How much (${source.unit}) to ${address}?`)
+  if (raw === null) return
+  const amount = String(raw).trim()
+  if (!amount) return
+  return armDialog(
+    'fund-withdraw',
+    { source: source.id, address, amount },
+    `About to send ${fundAmount(amount)} ${source.unit} from ${source.label} to ${address}. It is irreversible, ` +
+      'and each attempt is a separate payment.',
+  )
+}
+
+/**
+ * The figure rows, FLAT — a `dt` and a `dd` per figure, never a wrapper.
+ *
+ * `.kv` is a two-column grid and its grid items are its direct children, so
+ * pairing each label with its value inside one element collapses the whole list
+ * into a single stacked column. `h()` flattens nested arrays when appending,
+ * which is what makes the flat pairs work without a fragment.
+ *
+ * A figure that could not be read carries the reason INSTEAD of a number, never
+ * a zero beside it: unreachable and empty must not look the same on the screen
+ * where someone decides whether to send more money.
+ */
+const fundFigureRows = (balance) =>
+  balance.figures.flatMap((f) => [
+    h('dt', f.label),
+    h(
+      'dd',
+      f.amount === null ? h('span.sans', f.note ?? '—') : `${fundAmount(f.amount)} ${balance.unit}`,
+      f.amount !== null && f.note ? h('span.faint', ` ${f.note}`) : null,
+    ),
+  ])
+
+/**
+ * One source: what it holds, and only the buttons it can honour.
+ *
+ * The buttons come from `can`, which the server derives from which optional
+ * methods the source implements. Drawing one the source cannot perform would put
+ * a click in front of an operator that is guaranteed to fail — and on this
+ * screen "cannot" and "is broken" must not look the same.
+ */
+const fundSourcePanel = (source, slot) => {
+  const read = state.data.fundRead?.source === source.id ? state.data.fundRead : null
+  return h(
+    'section.panel',
+    h('h2', source.label),
+    slot?.error ? h('p.banner', slot.error) : slot?.balance ? h('dl.kv', fundFigureRows(slot.balance)) : null,
+    // Untruncated and selectable, like the registry card: a deposit address is
+    // copied by hand as often as by button, and a shortened one is a total loss.
+    read ? h('pre.faint', read.error ?? JSON.stringify(read.result, null, 2)) : null,
+    h(
+      'div.toolbar',
+      source.can.deposit
+        ? actButton(
+            'button.act',
+            { 'data-action': 'fund-deposit-address', onclick: () => fundAction('fund-deposit-address', source.id) },
+            'deposit address',
+          )
+        : null,
+      source.can.settle
+        ? actButton(
+            'button.act',
+            { 'data-action': 'fund-settle-deposits', onclick: () => fundAction('fund-settle-deposits', source.id) },
+            'settle deposits',
+          )
+        : null,
+      source.can.withdraw
+        ? actButton(
+            'button.act.armed',
+            { 'data-action': 'fund-withdraw', onclick: () => fundWithdraw(source) },
+            'withdraw…',
+          )
+        : null,
+    ),
+  )
+}
+
+/**
+ * Every place this solver holds its own money, and how to move it.
+ *
+ * Lazily loaded rather than folded into the wallet view's own fetch: this is two
+ * round trips per source and the wallet page reloads on every stream tick, so
+ * hanging it off that cadence would re-read every backend every two seconds.
+ */
+const fundsPanel = () => {
+  const f = state.data.funds
+  if (f === undefined) {
+    // Marked before the fetch so the re-render this triggers does not fire a
+    // second one.
+    state.data.funds = { sources: [], balances: {}, error: null, loading: true }
+    void loadFunds()
+    return h('section.panel', h('h2', 'funding'), h('p.muted', 'loading…'))
+  }
+  return h(
+    'div',
+    h('h2.sans', 'funding'),
+    // The honest headline, and the reason no button here is called "fund
+    // lightning". Neither the Lightning port nor the onchain one has a channel
+    // primitive, so a deposit lands in a wallet and becomes channel liquidity
+    // only if someone opens a channel with it at the node.
+    h(
+      'p.notice',
+      'Deposits and withdrawals move a source’s own wallet. Nothing here opens Lightning channels, so inbound and ' +
+        'outbound capacity still change only at the node itself.',
+    ),
+    f.error ? h('p.banner', f.error) : null,
+    h(
+      'div.panels',
+      f.sources.map((source) => fundSourcePanel(source, f.balances[source.id])),
+    ),
+    h(
+      'div.toolbar',
+      actButton('button.act', { 'data-action': 'fund-balance', onclick: () => loadFunds() }, 're-read balances'),
+    ),
+  )
+}
+
+/* ---- fund sources: END --------------------------------------------------- */
+
 const walletView = () => {
   const w = state.data.wallet
   if (!w) return h('p.muted', 'loading…')
@@ -618,6 +914,9 @@ const walletView = () => {
           h('dd.faint', w.arkade.addressError ? h('span.muted', w.arkade.addressError) : (w.arkade.address ?? '—')),
           h('dt', 'balance'),
           h('dd', w.arkade.balanceError ? h('span.muted', w.arkade.balanceError) : balanceRows(w.arkade.balance)),
+          /* assets: begin */
+          ...(w.arkade.balanceError ? [] : assetRowsPair(w.arkade.balance)),
+          /* assets: end */
         ),
       ),
       h(
@@ -641,6 +940,8 @@ const walletView = () => {
         ),
       ),
     ),
+    /* fund sources: the one call into the block above. */
+    fundsPanel(),
     h('h2.sans', 'vtxo pool'),
     // The number that actually constrains throughput: funding pins the coins it
     // spends, so one fat coin funds one swap and refuses the next however large.
@@ -652,6 +953,15 @@ const walletView = () => {
             'div',
             h('p', `${pool.pieces.length} piece(s): `, h('span.faint', pool.pieces.slice(0, 16).map(sats).join('  '))),
             h('p.muted', pool.plan.reason),
+            /* assets: begin — why the pieces above add up to less than the balance */
+            pool.assetEncumberedSats
+              ? h(
+                  'p.muted',
+                  `${sats(pool.assetEncumberedSats)} sat across ${pool.assetBearingPieces} piece(s) cannot fund a swap: ` +
+                    'those sats are carrying an asset, and an asset has to ride on sats.',
+                )
+              : null,
+            /* assets: end */
             h(
               'div.toolbar',
               actButton(
@@ -1345,7 +1655,9 @@ const armedButton = (name, d) => {
         if (name !== 'park-swap') return armDialog(name, { id: d.swap.id }, contrary ? because : null)
         const why = window.prompt('Why is this swap being parked? Recorded on the row.')
         if (!why || !why.trim()) return
-        return armDialog(name, { id: d.swap.id, reason: why.trim() })
+        // `corridor` because park-swap is offered on EVERY row and now dispatches
+        // through the registry: a swap id is unique only within its own store.
+        return armDialog(name, { id: d.swap.id, corridor: d.swap.corridor, reason: why.trim() })
       },
     },
     name,
@@ -1571,6 +1883,22 @@ const detailDialog = () => {
               'read payment',
             )
           : null,
+        // On EVERY row, with no corridor gate and no `corridor` in the body:
+        // the action iterates the registry to find whichever corridor holds the
+        // id, so gating it here would re-close what that opened. The answer it
+        // gives — which leaf the solver can spend without the Arkade Service,
+        // and how long its CSV runs — is the same question on every corridor.
+        actButton(
+          'button.act',
+          {
+            'data-action': 'unilateral-exit-plan',
+            title:
+              'Which covenant leaf the solver can spend WITHOUT the Arkade Service, and how long its CSV runs. ' +
+              'Read-only. Performing the exit is `cli unilateral-exit <id> --go`.',
+            onclick: () => runAction('unilateral-exit-plan', { id: d.swap.id }),
+          },
+          'exit plan',
+        ),
       ),
       actionGroup(
         '2 · resolve',
@@ -1666,9 +1994,15 @@ const armDialog = async (name, body, override = null) => {
     // types the right word, the comparison never matches, and the button stays
     // disabled - an action unusable through the console while correct on the
     // server. @see ActionDefinition in admin/routes/actions.ts
-    expects: definition?.confirmKind?.startsWith('literal:')
-      ? definition.confirmKind.slice('literal:'.length)
-      : body.id,
+    // `destination-address` first: the confirmation is the request's OWN
+    // destination, so it differs per withdrawal and cannot become the muscle
+    // memory a fixed literal becomes. The server compares the same field.
+    expects:
+      definition?.confirmKind === 'destination-address'
+        ? body.address
+        : definition?.confirmKind?.startsWith('literal:')
+          ? definition.confirmKind.slice('literal:'.length)
+          : body.id,
     typed: '',
   }
   render()

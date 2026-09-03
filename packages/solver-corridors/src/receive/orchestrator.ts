@@ -38,12 +38,21 @@ import {
   minFinalCltvBlocksFor,
 } from '@arkade-os/solver-core/core/receive.js'
 import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
+import {
+  absoluteLocktimeIn,
+  absoluteLocktimeReached,
+  absoluteLocktimeSeconds,
+  absoluteLocktimeUnit,
+  relativeDelayFrom,
+} from '@arkade-os/solver-core/core/timelocks.js'
+import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { RFQ_PAIR_RECEIVE } from '../wire/lightningReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
@@ -222,6 +231,12 @@ export interface ReceiveServiceDeps {
    * nothing ever claims their lockup back.
    */
   coupledSendStore?: { findLiveByPaymentHash(paymentHash: string): Promise<CoupledSendRow | null> }
+  /**
+   * Where the chain tip is. Required only when this deployment's timelocks count blocks
+   * — see `core/timelocks.ts`. Absent is correct for a seconds-typed deployment, which
+   * never asks.
+   */
+  chainTip?: ChainTipProvider
   now?: () => number
 }
 
@@ -284,6 +299,74 @@ export class ReceiveSwapService {
     this.now = deps.now ?? nowSeconds
     this.fee = deps.fee ?? FREE
     this.pricing = deps.pricing ?? fixedFeePricing(this.fee)
+  }
+
+  /**
+   * A unix-seconds deadline as the locktime this deployment writes.
+   *
+   * The unit is taken from the unilateral LADDER rather than from a setting of its own:
+   * the ladder was derived from the server's advertised delay, so its unit already IS
+   * this deployment's, and reading it here keeps the covenant's relative and absolute
+   * timelocks from ever disagreeing about which clock the swap runs on.
+   */
+  private async absoluteLocktimeFor(deadlineSeconds: number, ladderDelay: number): Promise<number> {
+    if (relativeDelayFrom(ladderDelay).unit === 'seconds') return deadlineSeconds
+    const chainTip = this.deps.chainTip
+    if (!chainTip) {
+      throw new Error(
+        'this deployment has block-typed timelocks, so a refund deadline must be written as a height — ' +
+          'but no chainTip provider is wired',
+      )
+    }
+    return absoluteLocktimeIn(deadlineSeconds, 'blocks', { now: this.now(), tipHeight: await chainTip.height() })
+  }
+
+  /**
+   * A stored refund locktime as a unix-seconds deadline, for DURATION questions.
+   *
+   * `evaluateReceiveFunding` orders this deadline against the HTLC's own `E`, which is
+   * wall-clock and belongs to Lightning — so the comparison has to happen in seconds
+   * even when the covenant counts blocks. A height is projected from the current tip and
+   * is therefore an estimate.
+   *
+   * NEVER to ask whether the deadline has OPENED: that is
+   * {@link ReceiveSwapService.refundDeadlineReached}, which compares in the locktime's
+   * own unit.
+   */
+  private async refundDeadlineSeconds(refundLocktime: number): Promise<number> {
+    const now = this.now()
+    if (absoluteLocktimeUnit(refundLocktime) === 'seconds') return refundLocktime
+    const chainTip = this.deps.chainTip
+    if (!chainTip) {
+      throw new Error(
+        `refund locktime ${refundLocktime} is a block height, but no chainTip provider is wired — ` +
+          'a block-typed deployment needs one to order the refund deadline against the HTLC',
+      )
+    }
+    return absoluteLocktimeSeconds(refundLocktime, { now, tipHeight: await chainTip.height() })
+  }
+
+  /**
+   * Has this swap's refund deadline opened?
+   *
+   * Asked in the locktime's OWN unit — a height against the chain tip, seconds against
+   * the clock. The tip is read only when there is a height to compare, so a
+   * seconds-typed deployment never issues the request and needs no `chainTip` at all.
+   */
+  private async refundDeadlineReached(refundLocktime: number): Promise<boolean> {
+    const now = this.now()
+    if (absoluteLocktimeUnit(refundLocktime) === 'seconds') return now >= refundLocktime
+    const chainTip = this.deps.chainTip
+    if (!chainTip) {
+      // A block-typed row with nowhere to read a height is a wiring error, and guessing
+      // either answer moves money the wrong way: "not reached" strands a refund forever,
+      // "reached" pushes one the chain will reject.
+      throw new Error(
+        `refund locktime ${refundLocktime} is a block height, but no chainTip provider is wired — ` +
+          'a block-typed deployment needs one to tell whether a deadline has opened',
+      )
+    }
+    return absoluteLocktimeReached(refundLocktime, { now, tipHeight: await chainTip.height() })
   }
 
   onTickError?: (id: string, error: unknown) => void
@@ -411,7 +494,13 @@ export class ReceiveSwapService {
       // against it here. `evaluateReceiveFunding` CHECKS this value against `E`
       // at the armed->funded edge and refuses to fund if it lands too late,
       // rather than recomputing it.
-      const refundLocktime = now + MAX_REFUND_HORIZON
+      //
+      // Converted to the unit the script is written in exactly here, once, and the SAME
+      // value goes into both the covenant and the row — see `absoluteLocktimeFor`.
+      const refundLocktime = await this.absoluteLocktimeFor(
+        now + MAX_REFUND_HORIZON,
+        arkade.delays.unilateralClaimDelay,
+      )
       const script = new CovenantSwapScript({
         receiver: hex.decode(request.payoutPubkey),
         server: serverKey,
@@ -767,7 +856,10 @@ export class ReceiveSwapService {
         htlcExpiresAt,
         // The deadline the lockup script already commits to — checked here, not
         // recomputed. See the note on `refundLocktime` in `quote` above.
-        refundLocktime: row.refundLocktime,
+        //
+        // Resolved to seconds, because this gate orders it against `E`, which is
+        // Lightning's and is wall-clock whatever unit our covenant uses.
+        refundLocktime: await this.refundDeadlineSeconds(row.refundLocktime),
         // Read from the ROW, not from live config: the covenant was built from
         // the snapshot, so a rotated operator delay must not change what this
         // gate reasons about.
@@ -827,7 +919,7 @@ export class ReceiveSwapService {
       // whether settlement is still going well. Past the deadline there is
       // also no point revealing any more: `whenRefunding`'s own recheck still
       // catches a claim that lands right at the boundary.
-      if (this.now() >= row.refundLocktime) {
+      if (await this.refundDeadlineReached(row.refundLocktime)) {
         return store.transition(row.id, 'funded', 'refunding', {})
       }
       // No covclaimd configured: nothing to reveal to, and nothing else to do
@@ -863,7 +955,7 @@ export class ReceiveSwapService {
     // seeing the output gone and findClaimPreimage's own read of what spent
     // it. Keep waiting until the refund deadline; `refunding`'s own recheck
     // covers this resolving a moment later.
-    if (this.now() >= row.refundLocktime) {
+    if (await this.refundDeadlineReached(row.refundLocktime)) {
       return store.transition(row.id, 'funded', 'refunding', {})
     }
     return false
@@ -1030,7 +1122,16 @@ export class ReceiveSwapService {
       // gives a human somewhere to go — which is what makes escalating safe at all.
       if (this.now() - row.updatedAt >= REFUND_CENSORSHIP_GRACE) {
         const detail = error instanceof Error ? error.message : String(error)
-        await store.fail(row.id, 'refunding', `refund failing past the refund deadline: ${detail}`)
+        // Name the server-independent recourse ON THE ROW, not only in a log
+        // line: this is the row a human reads days later, and a refund the
+        // Arkade Service will not co-sign is exactly the case the exit exists
+        // for. On this leg the solver funds the lockup, so its solo path is
+        // `unilateralRefundWithoutReceiver` — `unilateralExitRecourse` reads
+        // that off the row's own roles rather than assuming the leg, and never
+        // throws, so a diagnosis can never be replaced by an error about the
+        // diagnosis.
+        const recourse = unilateralExitRecourse(receiveCovenantRowFor(row), { solverPubkey: arkade.solverPubkey })
+        await store.fail(row.id, 'refunding', `refund failing past the refund deadline: ${detail} — ${recourse}`)
         return false
       }
       throw error

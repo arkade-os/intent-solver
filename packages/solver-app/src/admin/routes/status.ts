@@ -13,6 +13,7 @@ import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
 import { applyOverrides } from '../settings.js'
 import { probeBackends } from '../probes.js'
+import { consoleBalance, type AssetDetailSource } from '../assets.js'
 import { poolPlan } from '../../ops/pool.js'
 import { requireLn, requireOnchain } from '../../ops/rails.js'
 import {
@@ -25,6 +26,18 @@ import {
 import type { AdminDeps } from '../server.js'
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+/**
+ * The wallet's asset-metadata reader, when there is one.
+ *
+ * Optional rather than assumed: `assetManager` is on the SDK's wallet interface, but a
+ * route must not 500 because something stood a narrower wallet in its place. Labels
+ * are decoration — {@link consoleBalance} renders ids without them.
+ */
+const assetSource = (wallet: unknown): AssetDetailSource | undefined => {
+  const manager = (wallet as { assetManager?: Partial<AssetDetailSource> } | null)?.assetManager
+  return typeof manager?.getAssetDetails === 'function' ? (manager as AssetDetailSource) : undefined
+}
 
 /**
  * Read a value that depends on a backend, or report why it could not be read.
@@ -182,7 +195,10 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       balances: {
         lightningSats: lightning.value,
         lightningError: lightning.error,
-        arkade: arkade.value,
+        // Projected, never passed through: the raw balance carries `bigint` asset
+        // amounts and `c.json` throws on one, which took this whole route — and so
+        // every view of the console — down for any solver holding an asset.
+        arkade: arkade.value ? consoleBalance(arkade.value, assetSource(services.arkade.wallet)) : null,
         arkadeError: arkade.error,
       },
     })
@@ -206,13 +222,20 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       arkade: {
         address: arkadeAddress.value,
         addressError: arkadeAddress.error,
-        balance: arkadeBalance.value,
+        // Same projection as `/api/overview`, from the same helper, so the two pages
+        // cannot report different holdings.
+        balance: arkadeBalance.value ? consoleBalance(arkadeBalance.value, assetSource(services.arkade.wallet)) : null,
         balanceError: arkadeBalance.error,
         pool: pool.value
           ? {
               pieces: [...pool.value.spendable].sort((a, b) => b - a),
               target: pool.value.target,
               plan: pool.value.plan,
+              // What the float holds but cannot fund a swap with, because those sats
+              // are pinned under an asset. Reported beside the pieces so an operator
+              // reading a healthy piece count can see why it funds less than it looks.
+              assetEncumberedSats: pool.value.assetEncumberedSats,
+              assetBearingPieces: pool.value.assetBearingPieces,
             }
           : null,
         poolError: pool.error,

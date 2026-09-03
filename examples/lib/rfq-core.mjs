@@ -102,7 +102,7 @@ export const verifyLockupAddress = (quote, derivedAddress) => {
  * The maker's gates, checked immediately before funding — not at quote time.
  * Throws with a stable `reason` property; returns void when funding is safe.
  */
-export const assertFundable = ({ quote, invoiceExpiresAt, now }) => {
+export const assertFundable = ({ quote, invoiceExpiresAt, now, maxFee }) => {
   const fail = (reason, message) => {
     const error = new Error(message)
     error.reason = reason
@@ -112,6 +112,43 @@ export const assertFundable = ({ quote, invoiceExpiresAt, now }) => {
   if (now >= quote.valid_until) fail('quote_expired', 'quote expired — request a fresh one')
   if (quote.refund_locktime - now < MIN_HEADROOM_SECONDS) {
     fail('insufficient_headroom', 'refund deadline headroom below 90 minutes')
+  }
+  // A MIRROR of `@arkade-os/swap`'s gate of the same name, reason codes
+  // included. The two must not disagree about a money gate — that drift is what
+  // `test/interop/clientGates.test.ts` was written to catch, one repository out.
+  if (maxFee) {
+    const { bps, sats, referenceRate } = maxFee
+    if (bps === undefined && sats === undefined) fail('max_fee_unbounded', 'maxFee names neither bps nor sats')
+    if (bps !== undefined && (!Number.isInteger(bps) || bps < 0 || bps > 10_000)) {
+      fail('max_fee_out_of_range', `maxFee.bps must be an integer in 0..10000, got ${bps}`)
+    }
+    if (sats !== undefined && (!Number.isInteger(sats) || sats < 0)) {
+      fail('max_fee_out_of_range', `maxFee.sats must be a non-negative integer, got ${sats}`)
+    }
+    // `from_amount - to_amount` is a fee only while both legs name the same
+    // asset. Across assets it is the spread against a reference rate, and only
+    // the caller can supply one — theirs, not the solver's own published feed.
+    const legs = quote.pair.split('->')
+    const assetOf = (leg) => leg.slice(leg.indexOf(':') + 1)
+    const sameAsset = legs.length === 2 && assetOf(legs[0]) === assetOf(legs[1])
+    if (!sameAsset && referenceRate === undefined) {
+      // Loud: a caller who set a ceiling and silently got no gate would fund
+      // believing they were protected.
+      fail('fee_gate_unavailable', `maxFee cannot gate ${quote.pair}: its legs name different assets`)
+    }
+    if (!sameAsset && (!Number.isFinite(referenceRate) || referenceRate <= 0)) {
+      fail('max_fee_out_of_range', `maxFee.referenceRate must be a positive finite number, got ${referenceRate}`)
+    }
+    // Both branches yield a fee in FROM units, so one ceiling covers both.
+    // Cross-asset rounds UP: a borderline quote is refused rather than funded on
+    // a rounding artefact.
+    const fee = sameAsset
+      ? quote.from_amount - quote.to_amount
+      : Math.ceil((quote.from_amount * referenceRate - quote.to_amount) / referenceRate)
+    // The GREATER of the two, because a flat charge is a large proportion of a
+    // small swap. @see the swap package for the full reasoning.
+    const allowed = Math.max(sats ?? 0, Math.floor((quote.from_amount * (bps ?? 0)) / 10_000))
+    if (fee > allowed) fail('fee_too_high', `fee ${fee} exceeds the ${allowed} this client allows`)
   }
 }
 
@@ -160,7 +197,10 @@ export const httpTransport = (baseUrl, { fetchImpl = fetch } = {}) => ({
  * Moving to Nostr changes only this file's frames (REQ/EVENT + NIP-44), per
  * the spec's § 3. One socket, replies correlated by rfq_id.
  */
-export const relayTransport = (relayUrl, { solverPubkey, clientPubkey, WebSocketCtor = WebSocket, timeoutMs = 30_000 }) => {
+export const relayTransport = (
+  relayUrl,
+  { solverPubkey, clientPubkey, WebSocketCtor = WebSocket, timeoutMs = 30_000 },
+) => {
   /** @type {Map<string, (payload: any) => void>} */
   const pending = new Map()
   let sequence = 0

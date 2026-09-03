@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { WIRE_AMOUNT } from '@arkade-os/solver-core/core/wireAmount.js'
+import { WIRE_AMOUNT, WIRE_ASSET_AMOUNT } from '@arkade-os/solver-core/core/wireAmount.js'
 
 const parse = (value: unknown) => WIRE_AMOUNT.safeParse(value)
 
@@ -110,5 +110,69 @@ describe('types this field is not', () => {
     ['an array', [1]],
   ])('refuses %s', (_why, value) => {
     expect(parse(value).success).toBe(false)
+  })
+})
+
+/**
+ * The ASSET form of the same field — `docs/rfq-protocol.md` § 2.1 without the
+ * `Number.MAX_SAFE_INTEGER` ceiling.
+ *
+ * {@link WIRE_AMOUNT} refuses anything above that ceiling on purpose: its own
+ * docstring says it "lands the ENCODING, not the RANGE", because every amount
+ * downstream of it — `Limits`, the fee arithmetic, `amount_sats` in four
+ * tables — is a `number`. That is true of the four BTC corridors and false of
+ * an Arkade ASSET leg, where the amount is a `bigint` end to end: `Offer.wantAmount`
+ * is one, `evaluateOfferFill` compares them, and `offer_fill` already persists
+ * them as TEXT for exactly this reason.
+ *
+ * So this is the same canonical grammar with the ceiling removed and the value
+ * preserved as a bigint. Rejecting the ceiling here would refuse an ordinary
+ * amount of an 18-decimal asset — 1.0 of one is 10^18, a hundred times the
+ * ceiling — which is the misprice § 2.1 exists to prevent, arriving as a
+ * refusal instead of a rounding.
+ */
+describe('WIRE_ASSET_AMOUNT — the same grammar, carried as a bigint', () => {
+  const assetParse = (value: unknown) => WIRE_ASSET_AMOUNT.safeParse(value)
+
+  it('keeps a value far above what a double represents exactly', () => {
+    // 10^18 — one whole unit of an 18-decimal asset, and the § 2.1 worked example.
+    expect(assetParse('1000000000000000000')).toMatchObject({ success: true, data: 10n ** 18n })
+  })
+
+  it('does not lose a digit anywhere in that range', () => {
+    // The digit that a double would eat. `1e18 + 1` is indistinguishable from
+    // `1e18` as a Number, so this is the assertion that would fail if the
+    // schema ever routed through one.
+    expect(assetParse('1000000000000000001').data).toBe(1000000000000000001n)
+  })
+
+  it('accepts a value the sats schema refuses, and agrees below the ceiling', () => {
+    const beyond = String(BigInt(Number.MAX_SAFE_INTEGER) + 1n)
+    expect(parse(beyond).success).toBe(false)
+    expect(assetParse(beyond).success).toBe(true)
+    expect(assetParse('50000').data).toBe(50000n)
+  })
+
+  it.each([
+    ['a fraction', '1.5'],
+    ['exponent notation', '1e18'],
+    ['a signed value', '+50000'],
+    ['a negative', '-1'],
+    ['a leading zero', '0100'],
+    ['surrounding whitespace', ' 50000 '],
+    ['an empty string', ''],
+    ['zero, which is not a swap', '0'],
+  ])('refuses %s, exactly as the sats form does', (_why, value) => {
+    expect(assetParse(value).success).toBe(false)
+  })
+
+  it('refuses a JSON number outright, unlike the sats form', () => {
+    // The § 2.1 backward-compatibility carve-out is bounded to assets of 8
+    // decimals or fewer. This schema is reached only for an ASSET leg, whose
+    // precision is fixed by its own genesis and is not knowable here, so the
+    // one encoding that cannot be checked for losslessness is refused rather
+    // than guessed at. A new corridor has no legacy client to keep.
+    expect(assetParse(50000).success).toBe(false)
+    expect(parse(50000).success).toBe(true)
   })
 })

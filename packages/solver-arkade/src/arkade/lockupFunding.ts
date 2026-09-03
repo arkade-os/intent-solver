@@ -60,6 +60,23 @@ export interface FundingCandidate {
 }
 
 /**
+ * How many of a coin's sats can actually fund something, given what it carries.
+ *
+ * An asset must ride on sats, so spending an asset-bearing coin leaves one dust
+ * behind on the change output that carries the asset onward — see the long note in
+ * {@link selectLockupFunding} for the measurement and the failure it prevents. A coin
+ * worth no more than dust therefore funds nothing at all and returns a non-positive
+ * number, which every caller drops.
+ *
+ * EXPORTED SO THE POOL SHARES IT. `poolPlan` answers "how many swaps can this float
+ * fund at once", and this is the rule that decides what a coin can fund; two spellings
+ * of that would be two different answers to one question in one process, with the pool
+ * planning against sats the funding path already knows it cannot reach.
+ */
+export const usableSatsOf = (coin: Pick<FundingCandidate, 'value' | 'assets'>, dustSats: number): number =>
+  coin.assets?.length ? coin.value - dustSats : coin.value
+
+/**
  * Why a funding selection was refused. A closed set, like the corridors' own
  * refusal enums, so a caller cannot invent a reason or ignore one.
  *
@@ -171,7 +188,7 @@ export const selectLockupFunding = <T extends FundingCandidate>(
   // Excluding asset coins would also get worse over time: once asset corridors exist
   // the solver holding assets is the normal state, so the exclusion would shrink the
   // sats float by most of it.
-  const usableSats = (coin: T): number => (coin.assets?.length ? coin.value - dustSats : coin.value)
+  const usableSats = (coin: T): number => usableSatsOf(coin, dustSats)
   const unreserved = candidates
     .filter((coin) => !reserved.has(outpointKey(coin.txid, coin.vout)))
     .filter((coin) => usableSats(coin) > 0)

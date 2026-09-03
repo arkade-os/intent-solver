@@ -47,7 +47,7 @@ the API on Workers if you want Workers at all.
 | `RELAY_HEALTH_PATH`                  | no (`.data/relay-health`; `/data/relay-health` in the image) | `relay` refreshes this file's mtime every 10s while the relay socket is up; the image's HEALTHCHECK reads it                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `RELAY_PROTOCOL`                     | no (`nostr`)                                                 | relay wire dialect; `dev` speaks the mock-relay broker framing                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `OPEN_RFQ_MAX_BIDS_PER_MIN`          | no (`30`)                                                    | open-RFQ bidding rate cap (`relay` mode); `0` disables bidding                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `ARK_UNILATERAL_EXIT_DELAY`          | no (believe the server)                                      | seconds. Overrides the unilateral exit delay arkd advertises, for a server that enforces a shorter minimum than it announces. Sets the CSV timelocks in every covenant — too LOW writes a script rejected at SPEND, with money already in it. See "The recourse window on mainnet"                                                                                                                                                                                                                                                     |
+| `ARK_UNILATERAL_EXIT_DELAY`          | no (believe the server)                                      | seconds, or BLOCKS if this deployment's arkd is block-typed (below 512 is a block count — see "Block-typed timelocks"). Must match the server's own unit or boot refuses it. Overrides the unilateral exit delay arkd advertises, for a server that enforces a shorter minimum than it announces. Sets the CSV timelocks in every covenant — too LOW writes a script rejected at SPEND, with money already in it. See "The recourse window on mainnet"                                                                                  |
 | `LN_RECEIVE_ACCEPT_UNILATERAL_GAP`   | no (`false`)                                                 | `true`/`false` exactly. Serves `lightning:BTC->arkade:BTC` when the solver's solo recourse opens after the htlc's `E` — **required for the corridor to run on mainnet at all**, see "The recourse window on mainnet" below. Accepts a bounded loss; `bitcoin` additionally requires `LN_RECEIVE_MAX_SATS` to be set explicitly                                                                                                                                                                                                         |
 | `<CORRIDOR>_ENABLED`                 | no (`true`)                                                  | `false` darkens that corridor (`LN_SEND`, `LN_RECEIVE`, `ONCHAIN_SEND`, `ONCHAIN_RECEIVE`): never constructed, and its pair is refused `unsupported_pair` at the ingress. Rows already on disk stay readable and refundable                                                                                                                                                                                                                                                                                                            |
 | `PAYEE_MNEMONIC`                     | test-only                                                    | payee wallet for `invoice` self-tests, which mint from a wallet of their own                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -331,17 +331,73 @@ field matching an expected value, **checked by the server** before anything
 runs — the browser dialog is a convenience, and bypassing it with a bare
 `fetch` gets refused the same way.
 
-| action               | confirm with       |
-| -------------------- | ------------------ |
-| `refund-now`         | the swap id        |
-| `onchain-refund-now` | the swap id        |
-| `reclaim-l1-htlc`    | the swap id        |
-| `pool-mint`          | the literal `MINT` |
+| action               | confirm with            |
+| -------------------- | ----------------------- |
+| `refund-now`         | the swap id             |
+| `onchain-refund-now` | the swap id             |
+| `reclaim-l1-htlc`    | the swap id             |
+| `pool-mint`          | the literal `MINT`      |
+| `fund-withdraw`      | the destination address |
 
 `onchain-refund-now` deserves the caution it asks for: for a `stuck` row it is
 correct in some cases and **a double-payout in others**, because the solver may
 already have paid out on the onchain leg. Read the row and the onchain HTLC
 first.
+
+### Funding: moving the solver's own liquidity
+
+A solver holds its money in more than one place — the Arkade float every
+corridor pays out of, the BTC rail's channel and onchain balances, and (with a
+chain configured) token liquidity for the EVM corridors. The wallet page's
+**funding** panel is one screen over all of them, driven by the fund-source seam
+in `packages/solver-app/src/ops/fundSources.ts`.
+
+A source declares three things: what it is, what it holds, and which of three
+operations it can perform. `depositAddress`, `settleDeposits` and `withdraw` are
+**optional methods**, so a source that cannot do one omits it — the same way
+`SendBackend.estimateSendFee` and `OnchainBackend.settleReceiveAddress` are
+optional on the ports below. The console reads those capabilities and draws only
+the buttons that can work; pressing one a source lacks (by `fetch`, say) is
+refused by name.
+
+Amounts are **decimal strings in the source's own base units**, not numbers. An
+ERC20 quantity is 256-bit and routinely past what a JS number holds exactly,
+which is why the EVM corridor's store declares `evm_amount` as TEXT.
+
+| source            | balance split                                          | deposit          | settle                      | withdraw |
+| ----------------- | ------------------------------------------------------ | ---------------- | --------------------------- | -------- |
+| `rail` (BTC rail) | channel out/in, onchain confirmed/unconfirmed, fee rate | onchain address  | if the backend has the step | yes      |
+| `arkade` (float)  | available, boarding, recoverable, total                 | boarding address | no — use `float-lifecycle`  | no       |
+
+`rail` is absent entirely on a deployment with no `LN_BACKEND`, the same way the
+four BTC corridors are. `arkade` declines to settle or withdraw on purpose:
+settling boarded sats is `float-lifecycle`'s job (it carries the CLTV guard, and
+a bare `settle()` would merge the whole float into one coin), and paying an
+arbitrary address out of the float would spend coins outside the process-local
+reservation ledger.
+
+**Nothing here opens Lightning channels.** Neither port has a channel primitive,
+so a rail deposit lands in its onchain wallet and whether it becomes inbound or
+outbound capacity is decided at the node. The console says so on the panel.
+
+A consumer adds its own source with `registerFundSource`, at import time above
+the entrypoint — same shape and same reasoning as `registerLightningRail`.
+
+`fund-withdraw` is the only action in the console whose destination is not fixed
+by a swap, which is why it is confirmed with the destination address rather than
+a fixed word: a literal becomes muscle memory, and a confirmation that differs
+per request cannot. The source then applies its own checks before touching a
+backend — the rail decodes the address against this deployment's network (the
+one mistake retyping cannot catch, since an operator confirming a wrong-chain
+address types the same wrong string twice) and refuses an amount above the
+**confirmed** balance. It is **not safe to repeat**: nothing persists or
+re-drives it, so each attempt is a separate payment and a withdrawal that timed
+out must be checked against the chain before retrying.
+
+Remember what `ADMIN_HOST` is: with the console reachable, `fund-withdraw` lets
+anything that can reach the port send a source's balance to an address of its
+choosing, and no `confirm` value can prevent that — the confirmation is supplied
+by the same caller. It is friction against operator error, not access control.
 
 Every action is written to an audit log — successes and failures both — in
 `<SWAP_DB_PATH>-admin.sqlite`, alongside settings overrides. Separate from the
@@ -842,8 +898,8 @@ client — so this looks like a client bug and is not one.
 Neither obvious lever helps. Raising `MAX_FINAL_CLTV_BLOCKS` moves nothing real:
 4074 blocks is about **28 days of a payer's funds** at nominal block time, and no
 routing node holds an htlc that long, so 2016 is reporting the wall rather than
-being it. Finishing `TODO(unilateral-exit)` does not help either — it would let
-the solver USE the leaf, but the 7-day CSV is unchanged.
+being it. The server-independent exit does not help either — the solver can now
+USE the leaf (`cli unilateral-exit`), but the 7-day CSV is unchanged.
 
 There are two ways out, and they are different decisions.
 
@@ -915,9 +971,10 @@ collaborative claim or refund exercises script construction and the server's
 willingness to co-sign a vtxo built at the override's delay — which is the thing
 that would fail if the value is under arkd's real floor, so it IS the test worth
 running. It does not exercise the CSV leaves themselves: those are reachable only
-through a unilateral exit, which nothing in `src/` performs
-(`TODO(unilateral-exit)`). A green swap therefore says the delay is accepted, not
-that the recourse it encodes has ever been executed.
+through a unilateral exit, which is operator-driven (`cli unilateral-exit <id>
+--go`) and has never been driven to completion on any network. A green swap
+therefore says the delay is accepted, not that the recourse it encodes has ever
+been executed.
 
 This is the better outcome by a distance, and it carries its own hazard, which
 is not symmetric with the one it removes:
@@ -963,13 +1020,15 @@ Worth knowing before running a signet or mutinynet deployment against
 real-value assets, where the default cap is the only thing standing behind the
 window and nobody was asked to look at it.
 
-Two things make it a trade rather than a hole. The solver cannot execute that
-recourse today anyway (`TODO(unilateral-exit)`), so the window gate (d) reserves
-protects an action nothing in `src/` can take. And a same-sized loss on the other
-side is already accepted and documented in `packages/solver-arkade/src/arkade/covenant.ts`: with no
-unilateral-claim implementation, a censoring server after payment costs the
-CLIENT their claim, for exactly the same missing work. Gate (d) was guarding one
-leak in a hull with an acknowledged hole of the same size.
+This grew MORE expensive, not less. It used to be a trade rather than a hole
+because the solver could not execute the reserved recourse at all, so the window
+gate (d) reserves protected an action nothing could take — and a same-sized loss
+on the other side was accepted for exactly the same missing work. Both halves
+have changed: the exit exists now
+(`packages/solver-arkade/src/arkade/unilateralExit.ts`), so what this flag waives
+is a real recourse rather than a notional one. It is still not a window mainnet
+can serve this corridor without, which is the trade — but the trade is now
+against something the solver could otherwise do.
 
 The honest summary is that this corridor trusts mainnet arkd not to censor for
 as long as its exit delay. Prefer the shorter delay above where the real number
@@ -981,10 +1040,13 @@ Two more worth knowing before wiring a deployment:
 - **A backend with no final-CLTV parameter on hold invoices cannot serve this
   corridor.** Without one, `createHoldInvoice` throws rather than mint an
   invoice whose `E` silently fails the bound. LND supports it via `cltv_delta`.
-- **The recourse is reserved but not yet executable.** `TODO(unilateral-exit)`
-  in `packages/solver-arkade/src/arkade/covenant.ts`: the leaf exists in the script and nothing in
-  `src/` spends it. The gate keeps the window open; running the exit inside it
-  still needs the on-chain unroll flow.
+- **The recourse is executable, and unproven.**
+  `packages/solver-arkade/src/arkade/unilateralExit.ts` spends the leaf through
+  the SDK's `UnilateralExit`, driven by `cli unilateral-exit <id> --go`. It is
+  operator-initiated by design — an exit costs the solver's own onchain fees and
+  gives up the cheap collaborative path a transient outage would have restored —
+  and NOTHING HAS DRIVEN ONE TO COMPLETION on any network, so the window it runs
+  in is reasoned rather than measured.
 
 ## Self-payment refresh, and what it does to hold invoices
 
@@ -1598,3 +1660,76 @@ variable:
 
 Read medians per row, not across: median(TOTAL) is not the sum of the phase
 medians, because they come from different swaps.
+
+## Block-typed timelocks (regtest)
+
+An arkd configured with **block** delays makes this service write block-typed
+covenant leaves. Nothing is set here to switch that on: the unit is read off the
+`unilateralExitDelay` arkd advertises, the same value the ladder's length already
+comes from. Below 512 it is a block count, at or above it seconds — the rule is
+the SDK's own `toTimelock`, not ours.
+
+Two reasons to want it, both regtest-only:
+
+- **One arkd for both.** VHTLC chain swaps need a block-typed `vtxoTreeExpiry`
+  (the stack's `boltz` profile, above). A seconds-only solver forces a second
+  arkd beside it.
+- **Timelocks that mature by mining.** `generatetoaddress` advances a block-typed
+  CSV immediately. A seconds-typed one waits on median-time-past, which regtest
+  does **not** fast-forward just because blocks were produced — mine a hundred
+  blocks and a seconds timelock is exactly as unripe as before. To move those,
+  use `setmocktime` and mine one block.
+
+Boot says which mode it is in. A block-typed server is announced in the log, and
+**refused outright on mainnet** — block-interval variance is far too wide to hold
+a Lightning HTLC deadline against.
+
+### Limits
+
+| | |
+|---|---|
+| Longest base delay | **503 blocks.** Not BIP68's ceiling: the ladder stacks 8 blocks of solo-refund headroom on top, and a top rung of 512 stops meaning blocks and starts meaning seconds — an ~85-minute window where ~3.5 days was meant. Boot refuses a base above this. |
+| Override unit | `ARK_UNILATERAL_EXIT_DELAY` must be expressed in the **server's** unit. Against a block-typed arkd, `4096` looks like "about an hour" and would be read as seconds; boot refuses it and names both values. |
+| Ladder consistency | All three rungs must count one clock. A mixed ladder compiles and funds — it just inverts which recourse opens first, which is the ordering that lets a funder take money from a claimant holding the preimage. `CovenantSwapScript` refuses it at construction. |
+| Deadline arithmetic | Unchanged, and still entirely in unix seconds. A block delay is converted at 600s/block (`NOMINAL_BLOCK_SECONDS`) wherever it meets a wall clock. |
+
+### Regtest recipe
+
+```sh
+# arkd with a block-typed unilateral exit delay, e.g. 20 blocks.
+# Nothing to set on the solver — it reads the unit from /v1/info.
+
+# mature a unilateral leaf:
+bitcoin-cli -regtest generatetoaddress 30 "$(bitcoin-cli -regtest getnewaddress)"
+
+# the client's refund is a block HEIGHT here too, so mine to it as well:
+bitcoin-cli -regtest generatetoaddress 15 "$(bitcoin-cli -regtest getnewaddress)"
+```
+
+Set `CHAIN_TIP_ESPLORA_URL` (or rely on `LND_ESPLORA_URL`) so the service can
+read a height. Without one, a block-typed row makes the orchestrator throw a
+named error rather than guess — guessing "not reached" strands a refund forever,
+and "reached" pushes one the chain will reject.
+
+### Which clock each deadline counts
+
+| deadline | block-typed deployment | seconds-typed |
+|---|---|---|
+| CSV ladder (`unilateralClaim`, `unilateralRefund`, solo refund) | blocks — `generatetoaddress` | seconds — `setmocktime` |
+| `refund_locktime` (client's refund opens) | block height — `generatetoaddress` | unix seconds — `setmocktime` |
+| Invoice expiry, HTLC `E`, settle windows | **always unix seconds** — they belong to Lightning | same |
+
+The third row is the one to remember: Lightning's deadlines are wall-clock
+whatever arkd is configured with, so an end-to-end regtest run still needs the
+clock to move. Mining alone matures the Arkade side of a swap and nothing else.
+
+Internally every deadline is still REASONED about in seconds. A height is
+projected from the tip at 600s/block wherever a duration is needed ("how much
+claim window is left"), and compared against the tip directly wherever the
+question is "has it opened" — which is the only one that must not drift from
+what the chain will enforce.
+
+No database migration is involved. Both encodings are self-describing, so a
+`claim_delay` of `20` on disk unambiguously means twenty blocks and a row written
+before this feature reads back exactly as it always did — the two shapes coexist
+in one database.

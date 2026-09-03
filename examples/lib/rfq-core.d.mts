@@ -67,7 +67,33 @@ export declare const buildSendRequest: (input: {
  */
 export declare const verifyLockupAddress: (quote: RfqQuote, derivedAddress: string | string[]) => string
 
-export declare const assertFundable: (input: { quote: RfqQuote; invoiceExpiresAt: number; now: number }) => void
+export declare const assertFundable: (input: {
+  quote: RfqQuote
+  invoiceExpiresAt: number
+  now: number
+  /**
+   * The most this client will pay, as the GREATER of a proportion of
+   * `from_amount` and an absolute number of sats. Absent gates nothing, which
+   * is what every caller written before this got.
+   *
+   * Mirrors `@arkade-os/swap`'s `assertFundable` deliberately: the shipped
+   * client and this reference must not disagree about a money gate, which is
+   * the drift `test/interop/clientGates.test.ts` exists to catch. See that
+   * implementation for why BOTH bounds are needed and why a cross-asset pair
+   * is refused rather than skipped.
+   */
+  maxFee?: {
+    bps?: number
+    sats?: number
+    /**
+     * To-units per from-unit, for a CROSS-ASSET pair; without it such a pair is
+     * refused rather than waved through. Must come from a source of YOUR OWN —
+     * reading it off the solver's published feed checks the solver against its
+     * own number. Ignored on a same-asset pair, where the fee is exact.
+     */
+    referenceRate?: number
+  }
+}) => void
 
 /**
  * A reply is OUR quote, or it throws — `SwapRefusal` when the solver refused,

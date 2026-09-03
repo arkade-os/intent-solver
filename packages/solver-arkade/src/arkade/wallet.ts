@@ -31,7 +31,12 @@ import {
 import { SQLiteContractRepository, SQLiteWalletRepository, type SQLExecutor } from '@arkade-os/sdk/repositories/sqlite'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { base64, hex } from '@scure/base'
-import { deriveUnilateralDelays, type UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
+import {
+  deriveUnilateralDelays,
+  relativeDelayFrom,
+  type TimelockUnit,
+  type UnilateralDelays,
+} from '@arkade-os/solver-core/core/timelocks.js'
 import { log } from '@arkade-os/solver-core/util/poll.js'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import { claimIdentity } from './claimIdentity.js'
@@ -137,6 +142,15 @@ export interface ArkadeContext {
   identity: MnemonicIdentity
   /** Unilateral delays this server will accept, derived from its own minimum. */
   unilateralDelays: UnilateralDelays
+  /**
+   * Which clock this deployment's covenant timelocks count on, INFERRED from the
+   * server's own advertised exit delay rather than configured beside it.
+   *
+   * Also decides the absolute `refundLocktime`: a block-typed deployment writes a
+   * HEIGHT, so every deadline in a swap matures the same way — by mining — rather than a
+   * ladder that mines and a refund that waits out median-time-past.
+   */
+  timelockUnit: TimelockUnit
   /** bech32 prefix for Arkade addresses on this network. */
   hrp: string
   /**
@@ -148,6 +162,85 @@ export interface ArkadeContext {
   reservations: ReservationLedger
   /** Checkpoint and release the SQLite handle. */
   close(): void
+}
+
+/**
+ * Which clock this deployment's covenant timelocks count on, plus whatever boot has to
+ * say out loud about it.
+ *
+ * THE UNIT COMES FROM THE SERVER, not from an environment variable.
+ * `deriveUnilateralDelays` already takes the exit delay from arkd because it cannot be
+ * hardcoded — the server refuses any script below its own minimum. The unit is part of
+ * that same fact: an arkd configured with block delays advertises a value that IS blocks
+ * by the SDK's own `toTimelock` rule, so believing it is one source of truth rather than
+ * two that can drift. An `ARK_TIMELOCK_UNIT` knob was considered and dropped for exactly
+ * that: a disagreement there writes a script whose leaves count a different clock than
+ * the server enforcing them.
+ *
+ * Pure, and separate from `createArkadeContext`, so its two boot-time refusals are
+ * reachable without a live arkd — neither is observable at runtime by anything short of
+ * a spend against money already locked.
+ */
+export const resolveTimelockUnit = (params: {
+  /** What arkd reports at `/v1/info`, in its own unit. */
+  advertisedExitDelay: number
+  /** `ARK_UNILATERAL_EXIT_DELAY`, if the operator set one. */
+  unilateralExitDelayOverride?: number
+  isMainnet: boolean
+}): { unit: TimelockUnit; notices: string[] } => {
+  const { advertisedExitDelay, unilateralExitDelayOverride, isMainnet } = params
+  const unit = relativeDelayFrom(advertisedExitDelay).unit
+  const notices: string[] = []
+
+  if (unilateralExitDelayOverride !== undefined) {
+    const overrideUnit = relativeDelayFrom(unilateralExitDelayOverride).unit
+    // REFUSED rather than converted. An override in the other unit is almost always a
+    // typo with a catastrophic reading, in both directions: against a block-typed server
+    // `4096` looks like "a bit over an hour" and would be taken as seconds, and against a
+    // seconds-typed one `300` reads as 300 blocks — two days where five minutes were
+    // meant. Converting either would be this service quietly deciding which of two
+    // disagreeing sources was right.
+    if (overrideUnit !== unit) {
+      throw new Error(
+        `ARK_UNILATERAL_EXIT_DELAY=${unilateralExitDelayOverride} is ${overrideUnit}, but this server ` +
+          `advertises ${advertisedExitDelay}, which is ${unit} — an override must be expressed in the ` +
+          'same unit as the server it overrides',
+      )
+    }
+    // Said out loud rather than applied quietly. This changes the timelocks in
+    // every covenant the process writes from here on, so an operator reading a
+    // boot log has to be able to see that the scripts do not match what the
+    // server claims to require — and to see BOTH numbers, since the whole reason
+    // the override exists is that they disagree.
+    notices.push(
+      `ARK_UNILATERAL_EXIT_DELAY=${unilateralExitDelayOverride} ${overrideUnit} overrides the ` +
+        `${advertisedExitDelay} ${unit} this server advertises; every covenant written from now uses the override`,
+    )
+  }
+
+  // Blocks are a REGTEST capability — the SDK's own timelock policy sets
+  // `requireSeconds: true` on every other network. An operator who has pointed this
+  // service at a block-typed arkd on mainnet has almost certainly misconfigured arkd
+  // rather than chosen this, and block-interval variance is far too wide to hold a
+  // Lightning HTLC deadline against — so it is refused there, and said loudly elsewhere
+  // instead of being discovered when a deadline behaves unlike its name. Same rule shape
+  // as `LN_BACKEND=fake`'s.
+  if (unit === 'blocks') {
+    if (isMainnet) {
+      throw new Error(
+        `this Arkade server advertises a block-typed unilateral exit delay (${advertisedExitDelay}), which is a ` +
+          'regtest configuration: block-interval variance is far too wide to hold a Lightning HTLC deadline ' +
+          'against, and it is refused on mainnet',
+      )
+    }
+    notices.push(
+      `this Arkade server advertises a BLOCK-typed unilateral exit delay (${advertisedExitDelay} blocks); ` +
+        'every covenant written from now carries block-typed timelocks, which mature by mining rather than ' +
+        'by the passage of time',
+    )
+  }
+
+  return { unit, notices }
 }
 
 export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<ArkadeContext> => {
@@ -217,22 +310,18 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   }
 
   const advertisedExitDelay = Number(info.unilateralExitDelay)
-  // Said out loud rather than applied quietly. This changes the timelocks in
-  // every covenant the process writes from here on, so an operator reading a
-  // boot log has to be able to see that the scripts do not match what the
-  // server claims to require — and to see BOTH numbers, since the whole reason
-  // the override exists is that they disagree.
-  if (config.unilateralExitDelayOverride !== undefined) {
-    log(
-      `ARK_UNILATERAL_EXIT_DELAY=${config.unilateralExitDelayOverride}s overrides the ` +
-        `${advertisedExitDelay}s this server advertises; every covenant written from now uses the override`,
-    )
-  }
+  const { unit: advertisedUnit, notices } = resolveTimelockUnit({
+    advertisedExitDelay,
+    unilateralExitDelayOverride: config.unilateralExitDelayOverride,
+    isMainnet: config.isMainnet,
+  })
+  for (const notice of notices) log(notice)
 
   return {
     wallet,
     identity,
     unilateralDelays: deriveUnilateralDelays(config.unilateralExitDelayOverride ?? advertisedExitDelay),
+    timelockUnit: advertisedUnit,
     hrp: config.arkadeHrp,
     reservations: createReservationLedger(),
     close: () => executor.close(),
@@ -580,8 +669,9 @@ export const attachEmulatorPackets = (tx: Transaction, packets: Parameters<typeo
  * The receive legs therefore use {@link refundWithoutReceiverSwapScript} instead,
  * which spends `refundWithoutReceiver` (`client` + server after `refundLocktime`, no
  * receiver key). Not `refundUnilateral`: that drops the SERVER as well as the
- * receiver, so it is only reachable through the unilateral-exit flow this service
- * does not implement, and it needs a CSV rule that does not exist yet.
+ * receiver, so it is reachable only through the on-chain exit flow in
+ * `arkade/unilateralExit.ts` — slow, paid for in the solver's own onchain fees,
+ * and worth reaching for only once the Service has stopped answering at all.
  * `refundWithoutReceiver` keeps the server, so it is an ordinary offchain spend, and
  * its ABSOLUTE timelock is the same `refundLocktime` the receive orchestrators
  * already gate on.

@@ -19,6 +19,7 @@ const stub = (pair: string, envStem: string): Corridor => ({
   statusFor: async () => null,
   tick: async () => {},
   tickAll: async () => 0,
+  park: async () => ({ state: 'stuck' }),
   findRecoverable: async () => [],
   committedSats: async () => 0,
   page: async () => ({ swaps: [], nextCursor: null }),
@@ -178,6 +179,13 @@ describe('a corridor the host has never compiled against', () => {
       const due = rows.filter((r) => r.state === 'dreaming')
       for (const row of due) row.state = 'woken'
       return due.length
+    },
+    // Its OWN parked word, not the built-ins' `stuck`/`refused`: the point of
+    // this fixture is a corridor whose vocabulary the host has never seen.
+    park: async (id) => {
+      const row = rows.find((r) => r.id === id)
+      if (row) row.state = 'abandoned'
+      return { state: 'abandoned' }
     },
     findRecoverable: async () => rows.filter((r) => r.state === 'dreaming'),
     committedSats: async () => rows.length * 100,

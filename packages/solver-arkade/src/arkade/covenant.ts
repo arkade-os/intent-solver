@@ -41,16 +41,18 @@
  *                      and the money can only go one place. The client holds no
  *                      key, signs nothing, and keeps no state.
  * - `unilateralClaim`  preimage + receiver alone, after a CSV delay. The
- *                      receiver's recourse if the Arkade server disappears
+ *                      receiver's recourse if the Arkade Service disappears
  *                      between paying the invoice and claiming.
- *                      TODO(unilateral-exit): this leaf EXISTS in the script but
- *                      the service has no code to spend it — that needs the
- *                      on-chain unroll/exit flow. Until then the receiver's only
- *                      claim path is the collaborative one, so a censoring (not
- *                      merely absent) Arkade server after payment is an
- *                      unmitigated loss. The `refundLocktimeFor` bound reserves
- *                      the window for this recourse; the recourse itself is still
- *                      owed.
+ *                      Spendable since `arkade/unilateralExit.ts`: the on-chain
+ *                      exit flow lands the VTXO on Bitcoin through the SDK's
+ *                      `UnilateralExit` and then sweeps this leaf once its CSV
+ *                      matures. Operator-driven (`cli unilateral-exit <id>
+ *                      --go`), never automatic — an exit costs onchain fees and
+ *                      forfeits the cheap collaborative path a transient outage
+ *                      would have restored. NOTHING HAS DRIVEN ONE TO COMPLETION
+ *                      on any network, so the flow is reasoned and reviewed
+ *                      rather than proven. The `refundLocktimeFor` bound reserves
+ *                      the window this recourse runs in.
  *
  * The refund leaf carries no explicit second key: the compiler sees its
  * `arkadeScript` segment and appends the covenant co-signer automatically. That
@@ -107,8 +109,10 @@
 import { arkade, VHTLC, type TapLeafScript } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import {
+  absoluteLocktimeUnit,
   assertAbsoluteLocktime,
-  isEncodableRelativeDelay,
+  isEncodableDelay,
+  relativeDelayFrom,
   SEQUENCE_GRANULARITY_SECONDS,
 } from '@arkade-os/solver-core/core/timelocks.js'
 import type { XOnlyKey } from '@arkade-os/solver-core/core/preimage.js'
@@ -532,10 +536,16 @@ export class CovenantSwapScript {
   private readonly extended: InstanceType<typeof VHTLC.ScriptV2>
 
   constructor(params: CovenantSwapParams) {
-    assertAbsoluteLocktime(params.refundLocktime)
-    if (!isEncodableRelativeDelay(params.claimDelay)) {
+    // The locktime's unit is whatever its own magnitude says: this validates the value
+    // is well-formed rather than dictating a unit, because a block-typed deployment
+    // legitimately builds heights here. Which unit is right for this deployment is
+    // decided upstream, where the ladder is — and the mixed-unit guard below is what
+    // stops the two disagreeing.
+    assertAbsoluteLocktime(params.refundLocktime, 'refundLocktime', absoluteLocktimeUnit(params.refundLocktime))
+    if (!isEncodableDelay(params.claimDelay)) {
       throw new Error(
-        `claimDelay must be a positive multiple of ${SEQUENCE_GRANULARITY_SECONDS}s, got ${params.claimDelay}`,
+        `claimDelay must be a positive block count below ${SEQUENCE_GRANULARITY_SECONDS}, ` +
+          `or a positive multiple of ${SEQUENCE_GRANULARITY_SECONDS}s, got ${params.claimDelay}`,
       )
     }
     const covenants = params.nonInteractiveParameters
@@ -574,20 +584,56 @@ export class CovenantSwapScript {
           'Needs VHTLC.ScriptV2 asset support (arkade-os/ts-sdk#763) before an asset lockup may be built.',
       )
     }
-    if (!isEncodableRelativeDelay(params.clientRefundDelay)) {
+    if (!isEncodableDelay(params.clientRefundDelay)) {
       throw new Error(
-        `clientRefundDelay must be a positive multiple of ${SEQUENCE_GRANULARITY_SECONDS}s, got ${params.clientRefundDelay}`,
+        `clientRefundDelay must be a positive block count below ${SEQUENCE_GRANULARITY_SECONDS}, ` +
+          `or a positive multiple of ${SEQUENCE_GRANULARITY_SECONDS}s, got ${params.clientRefundDelay}`,
       )
     }
-    if (!isEncodableRelativeDelay(params.refundWithoutServerDelay)) {
+    if (!isEncodableDelay(params.refundWithoutServerDelay)) {
       throw new Error(
-        `refundWithoutServerDelay must be a positive multiple of ${SEQUENCE_GRANULARITY_SECONDS}s, got ${params.refundWithoutServerDelay}`,
+        `refundWithoutServerDelay must be a positive block count below ${SEQUENCE_GRANULARITY_SECONDS}, ` +
+          `or a positive multiple of ${SEQUENCE_GRANULARITY_SECONDS}s, got ${params.refundWithoutServerDelay}`,
+      )
+    }
+
+    // THE THREE RUNGS MUST SHARE ONE UNIT.
+    //
+    // Each is validated alone above, so nothing there notices a ladder whose claim leaf
+    // counts blocks and whose refund leaf counts seconds. Such a script compiles, funds
+    // and is spendable — just not in the order the ladder was designed to enforce: 20
+    // blocks against 4096 seconds inverts which recourse opens first, and the solo
+    // refund opening before the claim is precisely the ordering that lets a funder take
+    // money from a claimant holding the preimage.
+    //
+    // It cannot arise from `deriveUnilateralDelays`, which builds all three in one unit.
+    // It arises from a caller assembling them by hand, or a row half-written across a
+    // unit change — so it is caught HERE, at construction, where the script is still
+    // cheap to refuse.
+    const units = new Set([
+      relativeDelayFrom(params.claimDelay).unit,
+      relativeDelayFrom(params.clientRefundDelay).unit,
+      relativeDelayFrom(params.refundWithoutServerDelay).unit,
+    ])
+    if (units.size !== 1) {
+      throw new Error(
+        `the unilateral ladder mixes units: claimDelay ${params.claimDelay} ` +
+          `(${relativeDelayFrom(params.claimDelay).unit}), refundWithoutServerDelay ` +
+          `${params.refundWithoutServerDelay} (${relativeDelayFrom(params.refundWithoutServerDelay).unit}), ` +
+          `clientRefundDelay ${params.clientRefundDelay} ` +
+          `(${relativeDelayFrom(params.clientRefundDelay).unit}) — all three must count the same clock`,
       )
     }
     assertP2trPkScript(covenants.receiverPkScript)
 
     {
-      const seconds = (value: number): { type: 'seconds'; value: bigint } => ({ type: 'seconds', value: BigInt(value) })
+      // The unit rides on the value, so the leaves are encoded in whichever clock the
+      // ladder was derived in. `VHTLC.ScriptV2` takes a `RelativeTimelock` and needs no
+      // help beyond being told which it is.
+      const delay = (value: number): { type: 'seconds' | 'blocks'; value: bigint } => ({
+        type: relativeDelayFrom(value).unit,
+        value: BigInt(value),
+      })
       this.extended = new VHTLC.ScriptV2({
         // Kept as one object literal, read back below through the script's own
         // `options`, so registration can never be handed a second, drifted copy.
@@ -596,9 +642,9 @@ export class CovenantSwapScript {
         server: params.server,
         preimageHash: params.preimageHash,
         refundLocktime: BigInt(params.refundLocktime),
-        unilateralClaimDelay: seconds(params.claimDelay),
-        unilateralRefundDelay: seconds(params.refundWithoutServerDelay!),
-        unilateralRefundWithoutReceiverDelay: seconds(params.clientRefundDelay!),
+        unilateralClaimDelay: delay(params.claimDelay),
+        unilateralRefundDelay: delay(params.refundWithoutServerDelay!),
+        unilateralRefundWithoutReceiverDelay: delay(params.clientRefundDelay!),
         // The SDK spells the suite per leaf until its own `nonInteractiveParameters`
         // group ships (arkade-os/ts-sdk#818); the mapping is exact — one key,
         // one suite — and collapses to a passthrough then.

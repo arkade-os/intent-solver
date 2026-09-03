@@ -8,14 +8,37 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { hex } from '@scure/base'
+import { schnorr } from '@noble/curves/secp256k1.js'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { ripemd160 } from '@noble/hashes/legacy.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
+import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 
 const adminStore = () => ({
   recordAction: vi.fn().mockResolvedValue(undefined),
   listActions: vi.fn().mockResolvedValue([]),
   getOverrides: vi.fn().mockResolvedValue({}),
 })
+
+/**
+ * A minimal `CorridorSet` over a pair -> corridor map.
+ *
+ * `tick` dispatches through the registry rather than a switch over the four BTC
+ * pairs, so a test that wants a corridor ticked registers one — which is what
+ * `createServices` does for real. Iterable and sized because the interface says
+ * so, even though this action only ever calls `get`.
+ */
+const corridorSet = (byPair: Record<string, unknown>) => ({
+  get: (pair: string) => byPair[pair],
+  size: Object.keys(byPair).length,
+  [Symbol.iterator]: () => Object.values(byPair)[Symbol.iterator](),
+})
+
+/** One corridor's worth of the registry, for the common single-corridor case. */
+const oneCorridor = (pair: string, tick: ReturnType<typeof vi.fn>, row: unknown = { id: 'swap-1' }) =>
+  corridorSet({ [pair]: { tick, detail: async () => ({ raw: row }) } })
 
 /** Kept loosely typed rather than cast to `never`, so tests can read back the spies. */
 const fakeServices = (over: Record<string, unknown> = {}) => ({
@@ -24,6 +47,10 @@ const fakeServices = (over: Record<string, unknown> = {}) => ({
   onchainStore: { get: vi.fn().mockResolvedValue({ id: 'swap-1' }) },
   arkade: { wallet: {} },
   config: {},
+  // The real `Services` always carries one, so defaulting it keeps an omission
+  // reading as "this deployment serves nothing" — the state an operator can
+  // actually reach — rather than as a TypeError from a half-built fake.
+  corridors: corridorSet({}),
   ...over,
 })
 
@@ -114,7 +141,10 @@ describe('auditing', () => {
     const services = fakeServices({
       arkade: { wallet: {} },
       store: { get: vi.fn(), patch: vi.fn() },
-      service: { tick: vi.fn().mockResolvedValue({ id: 'swap-1', state: 'claimed' }) },
+      corridors: oneCorridor('arkade:BTC->lightning:BTC', vi.fn().mockResolvedValue(undefined), {
+        id: 'swap-1',
+        state: 'claimed',
+      }),
     })
     const response = await post('tick', { id: 'swap-1', corridor: 'arkade:BTC->lightning:BTC' }, services)
     expect(response.status).toBe(200)
@@ -125,7 +155,7 @@ describe('auditing', () => {
 
   it('records a FAILED action — the one an operator most needs a record of', async () => {
     const services = fakeServices({
-      service: { tick: vi.fn().mockRejectedValue(new Error('indexer unreachable')) },
+      corridors: oneCorridor('arkade:BTC->lightning:BTC', vi.fn().mockRejectedValue(new Error('indexer unreachable'))),
     })
     const response = await post('tick', { id: 'swap-1', corridor: 'arkade:BTC->lightning:BTC' }, services)
     expect(response.status).toBe(500)
@@ -203,11 +233,16 @@ describe('tick across corridors', () => {
     // A swap id is unique within its OWN corridor's store. Trying each in turn
     // would tick the wrong swap on a collision — a money path, one step, on a
     // row nobody asked about.
-    const receiveTick = vi.fn().mockResolvedValue({ id: 'swap-1', state: 'settled' })
+    const receiveTick = vi.fn().mockResolvedValue(undefined)
     const sendTick = vi.fn()
     const services = fakeServices({
-      service: { tick: sendTick },
-      receiveService: { tick: receiveTick },
+      corridors: corridorSet({
+        'arkade:BTC->lightning:BTC': { tick: sendTick, detail: async () => ({ raw: {} }) },
+        'lightning:BTC->arkade:BTC': {
+          tick: receiveTick,
+          detail: async () => ({ raw: { id: 'swap-1', state: 'settled' } }),
+        },
+      }),
     })
     const response = await post('tick', { id: 'swap-1', corridor: 'lightning:BTC->arkade:BTC' }, services)
     expect(response.status).toBe(200)
@@ -217,7 +252,11 @@ describe('tick across corridors', () => {
 
   it('says the corridor is disabled rather than crashing', async () => {
     // Every corridor is optional by design, so absent is a normal answer.
-    const response = await post('tick', { id: 'swap-1', corridor: 'onchain:BTC->arkade:BTC' }, fakeServices({}))
+    const response = await post(
+      'tick',
+      { id: 'swap-1', corridor: 'onchain:BTC->arkade:BTC' },
+      fakeServices({ corridors: corridorSet({}) }),
+    )
     expect(response.status).toBe(500)
     expect(await response.json()).toMatchObject({ message: expect.stringContaining('not enabled') })
   })
@@ -226,6 +265,63 @@ describe('tick across corridors', () => {
     const response = await post('tick', { id: 'swap-1' }, fakeServices({}))
     expect(response.status).toBe(500)
     expect(await response.json()).toMatchObject({ message: expect.stringContaining('corridor is required') })
+  })
+
+  /**
+   * The console lists every REGISTERED corridor — `admin/routes/swaps.ts` pages
+   * the reader set, not the closed `CORRIDORS` array, so an EVM token corridor's
+   * swaps appear like any other. It then renders `recheck` on every row it
+   * lists, unconditionally.
+   *
+   * Dispatching that button through the four-member union refused it by NAME
+   * ("must be one of …"), which reads to an operator as a malformed request
+   * rather than "this deployment cannot do that here" — on a screen that had
+   * just shown them the row.
+   */
+  it('drives a corridor this build was never compiled against', async () => {
+    const pair = 'arkade:BTC->ethereum:0xa0b86991'
+    const evmTick = vi.fn().mockResolvedValue(undefined)
+    const services = fakeServices({
+      corridors: corridorSet({
+        [pair]: { tick: evmTick, detail: async () => ({ raw: { id: 'swap-1', state: 'locked' } }) },
+      }),
+    })
+    const response = await post('tick', { id: 'swap-1', corridor: pair }, services)
+    expect(response.status).toBe(200)
+    expect(evmTick).toHaveBeenCalledWith('swap-1')
+    expect(await response.json()).toMatchObject({ result: { row: { id: 'swap-1', state: 'locked' } } })
+  })
+
+  /**
+   * `park-swap` is the second action the console renders on EVERY row, and it
+   * broke the same way `tick` did — wider, in fact, because it reached the
+   * Lightning-send store DIRECTLY rather than dispatching at all. Onchain-send,
+   * both receive legs and every EVM pair got a throw from a store that has never
+   * held their rows, on the one lever that stops the sweep re-driving them.
+   */
+  it('parks a row on a corridor that is not Lightning-send', async () => {
+    const park = vi.fn().mockResolvedValue({ state: 'stuck' })
+    const services = fakeServices({
+      corridors: corridorSet({
+        'arkade:BTC->onchain:BTC': { park, detail: async () => ({ raw: {} }) },
+      }),
+    })
+    const response = await post(
+      'park-swap',
+      { id: 'swap-1', corridor: 'arkade:BTC->onchain:BTC', reason: 'indexer will never confirm', confirm: 'swap-1' },
+      services,
+    )
+    expect(response.status).toBe(200)
+    expect(park).toHaveBeenCalledWith('swap-1', 'indexer will never confirm')
+  })
+
+  it('still says "not enabled" for a corridor the registry does not serve', async () => {
+    // The disabled case must stay distinguishable from the unknown one: an
+    // operator reading "not enabled" reaches for config, and that is right.
+    const services = fakeServices({ corridors: corridorSet({}) })
+    const response = await post('tick', { id: 'swap-1', corridor: 'arkade:BTC->ethereum:0xdead' }, services)
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ message: expect.stringContaining('not enabled') })
   })
 })
 
@@ -251,11 +347,26 @@ describe('confirmKind is declared, not inferred', () => {
     }
   })
 
-  it('asks for a swap id only where an action is scoped to one swap', () => {
+  /**
+   * Anchored on what the SERVER compares, not on whether a `target` exists.
+   *
+   * `target` is "what this action acted on, for the audit row", which is not the
+   * same claim as "scoped to one swap" — `fund-withdraw` targets a destination
+   * ADDRESS and is scoped to no swap at all. Reading `target !== undefined` as
+   * swap-scoping was an accident of every targeted action having been swap-shaped
+   * until then, and it would have forced a wallet-level action to either prompt
+   * for a swap id it has none of or drop itself out of the audit log.
+   *
+   * Strictly stronger than that reading for the case it was written for: the
+   * regression was a new armed action inheriting `swap-id` and prompting for an
+   * identifier the operator cannot supply, and such an action's
+   * `expectedConfirm` does not read `body.id`, so it still fails here.
+   */
+  it('asks for a swap id only where the confirmation IS the swap id', () => {
     for (const [name, definition] of armedEntries) {
       if (definition.tier !== 'armed') continue
-      const scoped = definition.target !== undefined
-      expect(definition.confirmKind === 'swap-id', `${name} scoped=${scoped}`).toBe(scoped)
+      const readsTheId = definition.expectedConfirm({ id: 'swap-1' }) === 'swap-1'
+      expect(definition.confirmKind === 'swap-id', `${name} readsTheId=${readsTheId}`).toBe(readsTheId)
     }
   })
 
@@ -477,17 +588,20 @@ describe('park-swap', () => {
   })
 
   it('parks with the reason once confirmed', async () => {
-    const fail = vi.fn()
+    const park = vi.fn().mockResolvedValue({ state: 'stuck' })
     const services = fakeServices({
-      store: {
-        get: vi.fn().mockResolvedValueOnce({ id: 'swap-1', state: 'paying' }).mockResolvedValue({ state: 'stuck' }),
-        fail,
-      },
+      corridors: corridorSet({ 'arkade:BTC->lightning:BTC': { park, detail: async () => ({ raw: {} }) } }),
     })
-    const response = await post('park-swap', { id: 'swap-1', reason: 'orphaned request', confirm: 'swap-1' }, services)
+    const response = await post(
+      'park-swap',
+      { id: 'swap-1', corridor: 'arkade:BTC->lightning:BTC', reason: 'orphaned request', confirm: 'swap-1' },
+      services,
+    )
 
     expect(response.status).toBe(200)
-    expect(fail).toHaveBeenCalledWith('swap-1', 'paying', 'orphaned request')
+    // The corridor's own `park`, not a store write reached around it: which
+    // states are live and where a given-up row lands are the corridor's facts.
+    expect(park).toHaveBeenCalledWith('swap-1', 'orphaned request')
   })
 })
 
@@ -548,5 +662,100 @@ describe('read-payment across a provider or wallet change', () => {
     const body = await ask(rowPaidBy(null, null), 'bbbb')
 
     expect(body.result?.verdict).toBe('undecided-push-nothing')
+  })
+})
+
+/**
+ * The exit plan the console offers on every row.
+ *
+ * Two properties, and both have been shipped wrong here before in other levers:
+ * it must reach EVERY corridor the console lists (`tick` and `park-swap` were
+ * each keyed to one store), and it must not carry the preimage back into a
+ * browser (`read-payment` states the same rule for the same reason).
+ */
+describe('unilateral-exit-plan', () => {
+  const key = (fill: number) => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
+  const p2trScript = (program: Uint8Array) => Uint8Array.from([0x51, 0x20, ...program])
+  const PREIMAGE = new Uint8Array(32).fill(7)
+  const PAYMENT_HASH = hex.encode(sha256(PREIMAGE))
+
+  const lockupRow = () => {
+    const base = {
+      id: 'swap-1',
+      receiverPubkey: hex.encode(key(1)),
+      serverPubkey: hex.encode(key(3)),
+      paymentHash: PAYMENT_HASH,
+      refundLocktime: 1_800_000_000,
+      claimDelay: 4096,
+      emulatorPubkey: hex.encode(key(9)),
+      refundPkScript: hex.encode(p2trScript(key(5))),
+      pkScript: '',
+      clientRefundPubkey: hex.encode(key(11)),
+      refundWithoutReceiverDelay: 8192,
+      refundDelay: 4096,
+      receiverPkScript: hex.encode(p2trScript(key(13))),
+      nonInteractiveParameters: true,
+    }
+    const script = new CovenantSwapScript({
+      receiver: hex.decode(base.receiverPubkey),
+      server: hex.decode(base.serverPubkey),
+      preimageHash: ripemd160(hex.decode(base.paymentHash)),
+      refundLocktime: base.refundLocktime,
+      claimDelay: base.claimDelay,
+      client: hex.decode(base.clientRefundPubkey),
+      clientRefundDelay: base.refundWithoutReceiverDelay,
+      refundWithoutServerDelay: base.refundDelay,
+      nonInteractiveParameters: {
+        emulatorPubkey: hex.decode(base.emulatorPubkey),
+        receiverPkScript: hex.decode(base.receiverPkScript),
+        senderPkScript: hex.decode(base.refundPkScript),
+      },
+    })
+    return { ...base, pkScript: hex.encode(script.pkScript) }
+  }
+
+  /** A corridor the closed `CORRIDORS` union does not name, so only the registry can reach it. */
+  const injected = (pair: string) => ({
+    descriptor: { pair },
+    lockupFor: async (id: string) => (id === 'swap-1' ? { lockup: lockupRow(), preimage: hex.encode(PREIMAGE) } : null),
+  })
+
+  const servicesHolding = (pair: string, solverKey: Uint8Array) =>
+    fakeServices({
+      arkade: { identity: { xOnlyPublicKey: async () => solverKey } },
+      corridors: corridorSet({ [pair]: injected(pair) }),
+    })
+
+  it('stays read-only: nothing about it signs, spends or broadcasts', () => {
+    expect(ACTIONS['unilateral-exit-plan']?.tier).toBe('safe')
+  })
+
+  it('reaches a corridor the closed union never named', async () => {
+    const body = (await (
+      await post('unilateral-exit-plan', { id: 'swap-1' }, servicesHolding('bespoke:X->Y', key(11)))
+    ).json()) as { result?: Record<string, unknown> }
+
+    expect(body.result).toMatchObject({
+      corridor: 'bespoke:X->Y',
+      role: 'sender',
+      leaf: 'unilateralRefundWithoutReceiver',
+      delaySeconds: 8192,
+    })
+  })
+
+  it('names the CLAIM leaf where the solver is the covenant receiver', async () => {
+    const body = (await (
+      await post('unilateral-exit-plan', { id: 'swap-1' }, servicesHolding('bespoke:X->Y', key(1)))
+    ).json()) as { result?: Record<string, unknown> }
+
+    expect(body.result).toMatchObject({ role: 'receiver', leaf: 'unilateralClaim', delaySeconds: 4096 })
+  })
+
+  it('never hands the preimage back, even on the leg whose leaf needs one', async () => {
+    const raw = await (
+      await post('unilateral-exit-plan', { id: 'swap-1' }, servicesHolding('bespoke:X->Y', key(1)))
+    ).text()
+
+    expect(raw).not.toContain(hex.encode(PREIMAGE))
   })
 })

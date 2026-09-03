@@ -221,6 +221,58 @@ export interface LockupDeadline {
    * dispatching on BIP65 form the way a general-purpose client must.
    */
   refundLocktime: number
+  /**
+   * Whether THIS wallet could satisfy the leaf a recovery would spend this
+   * lockup through — i.e. whether it holds the lockup's `sender` key.
+   *
+   * The CLTV alone is the wrong question, and on a SEND leg it opens at
+   * exactly the wrong moment. `VHTLCV2ContractHandler.deriveTapscripts`
+   * stamps ONE leaf onto every VTXO of a `vhtlc-v2` contract —
+   * `refundWithoutReceiver`, as both `forfeitTapLeafScript` and
+   * `intentTapLeafScript` — and it does so ROLE-BLIND, for the receiver's row
+   * as much as the sender's. That leaf is `client + server`, so the SDK's own
+   * note on it is that it "fails at intent registration" for any wallet
+   * without the `sender` key.
+   *
+   * This service holds `receiver` on send legs and `sender` on receive legs
+   * (`covenant.ts`, and `sender: params.client` there). So on a SEND leg the
+   * solver can NEVER settle its own registered lockup: the leaf names the
+   * trader. `assertVhtlcSpendableNow` does not catch it either — it refuses
+   * only when the wallet resolves to `sender`, and returns "no opinion" for a
+   * receiver — so the input stays in `recoverVtxos`' all-or-nothing batch and
+   * fails the whole settlement, every pass, for as long as the lockup exists.
+   * The CLTV guard below cannot see this: maturity is monotonic, so it opens
+   * and never closes again.
+   *
+   * OPTIONAL, and `undefined` means NO OPINION — the guard then asks the CLTV
+   * question alone, which is exactly what it did before this field existed.
+   * A caller that cannot resolve the role must not have its lockups blocked
+   * forever by omission; the one production caller (`lockupDeadlinesOf`)
+   * answers it explicitly.
+   *
+   * KNOWN GAP, and it is narrower than this field looks. The deadlines come
+   * from each corridor's `liveLockups`, which is `findRecoverable()`, which is
+   * `findByStates(shape.live)` — LIVE ROWS ONLY. So this protects the window
+   * where the swap is still live, and stops protecting the moment the row goes
+   * TERMINAL: the deadline disappears, this guard has nothing to match on, and
+   * an unsignable output still sitting in the wallet's recoverable set goes
+   * straight back into the all-or-nothing batch. The block clearing is what
+   * re-opens the failure, not what resolves it.
+   *
+   * The honest fix is not here. A send-leg lockup's money is the TRADER's —
+   * the leaf names them — so it should never have been a candidate for a sweep
+   * that pays the solver's own address. Excluding one input is what
+   * `recoverVtxos` cannot express, and this module deliberately does not
+   * reimplement that sweep (see the head comment). Closing it properly means
+   * either settling explicit inputs instead, or not registering a lockup this
+   * wallet can never spend.
+   *
+   * Note also that the guard is an EARLY RETURN: one blocked lockup skips the
+   * whole recovery pass. That predates this field — the immature arm did the
+   * same — but it means the float stays unrecovered either way. What this buys
+   * is an accurate reason in the log instead of an opaque batch failure.
+   */
+  refundable?: boolean
 }
 
 /**
@@ -721,19 +773,41 @@ export const runVtxoLifecycle = async (deps: VtxoLifecycleDeps): Promise<VtxoLif
 
     const deadlines = await deps.lockupDeadlines()
     const now = deps.nowSeconds()
-    // Only the immature ones matter. A matured lockup in the sweep set is fine
-    // — its leaf is spendable, which is the whole point of waiting.
-    const immature = new Map(
-      deadlines
-        .filter((lockup) => now < lockup.refundLocktime + LOCKUP_RECOVERY_MTP_MARGIN_SECONDS)
-        .map((lockup) => [lockup.script, lockup.refundLocktime]),
-    )
-    const blocking = recoverable.filter((vtxo) => immature.has(vtxo.script))
+    // Two ways a lockup is unsafe to sweep, and the second is not a clock
+    // question at all.
+    //
+    // IMMATURE: its leaf has not opened yet. A matured lockup in the sweep set
+    // is fine — its leaf is spendable, which is the whole point of waiting.
+    //
+    // SECONDS ONLY, and knowingly so: against a block-typed arkd
+    // (`core/timelocks.ts`) `refundLocktime` is a HEIGHT, so this comparison
+    // reads every lockup as matured and the guard is simply off. Closing it
+    // needs a chain tip threaded through the lifecycle pass, which no caller
+    // has one to give today. The cost is bounded and self-announcing — a
+    // recovery settlement rejected for an immature CLTV, retried next pass —
+    // and block mode is a regtest capability, so it is recorded rather than
+    // fixed here.
+    //
+    // NOT OURS: the leaf will never open FOR US, however long we wait. See
+    // {@link LockupDeadline.refundable} — a send-leg lockup's annotation leaf
+    // names the trader, so recovery cannot sign it at any time. Waiting out
+    // the CLTV does not help, and once it matures the immature arm stops
+    // holding the input back, which is precisely when the batch starts
+    // failing. Checked first so its reason is the one reported.
+    const blocked = new Map<string, string>()
+    for (const lockup of deadlines) {
+      if (lockup.refundable === false) {
+        blocked.set(lockup.script, 'no refund key of ours: its annotation leaf needs the lockup’s sender')
+      } else if (now < lockup.refundLocktime + LOCKUP_RECOVERY_MTP_MARGIN_SECONDS) {
+        blocked.set(lockup.script, `not yet safely past CLTV, refundLocktime ${lockup.refundLocktime}`)
+      }
+    }
+    const blocking = recoverable.filter((vtxo) => blocked.has(vtxo.script))
     if (blocking.length > 0) {
       const detail = blocking
-        .map((vtxo) => `${vtxo.txid}:${vtxo.vout} at ${vtxo.script} (refundLocktime ${immature.get(vtxo.script)})`)
+        .map((vtxo) => `${vtxo.txid}:${vtxo.vout} at ${vtxo.script} (${blocked.get(vtxo.script)})`)
         .join(', ')
-      recoverySkipped = `${blocking.length} recoverable lockup output(s) not yet safely past CLTV at ${now}: ${detail}`
+      recoverySkipped = `${blocking.length} recoverable lockup output(s) not safe to sweep at ${now}: ${detail}`
       return { renewed, resplit, recovered, recoverySkipped, migrated: 0, failures }
     }
 

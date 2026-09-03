@@ -23,6 +23,11 @@ const appSource = readFileSync(
   'utf8',
 )
 
+const actionsSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/admin/routes/actions.ts', import.meta.url)),
+  'utf8',
+)
+
 /** The arming block inside `detailDialog`. */
 const armingBlock = (): string => {
   const start = appSource.indexOf('const detailDialog')
@@ -30,6 +35,27 @@ const armingBlock = (): string => {
   const armed = appSource.indexOf('const armed', start)
   if (armed === -1) throw new Error('the arming list is gone')
   return appSource.slice(start, appSource.indexOf('return h(', armed))
+}
+
+/**
+ * The WHOLE of `detailDialog`, buttons included.
+ *
+ * Wider than {@link armingBlock}, which stops at `return h(`: the armed list
+ * sits above that line and the action buttons below it.
+ */
+const dialogBlock = (): string => {
+  const start = appSource.indexOf('const detailDialog')
+  if (start === -1) throw new Error('detailDialog is gone')
+  const end = appSource.indexOf('const attentionPanel', start)
+  return appSource.slice(start, end === -1 ? start + 12_000 : end)
+}
+
+/** Just the `armed` array literal, where the per-corridor ternaries live. */
+const armedList = (): string => {
+  const block = armingBlock()
+  const at = block.indexOf('const armed')
+  const end = block.indexOf('.filter(Boolean)', at)
+  return block.slice(at, end === -1 ? block.length : end)
 }
 
 describe('detailDialog — arming the unwind actions', () => {
@@ -158,5 +184,94 @@ describe('detailDialog — an action’s answer belongs in the modal', () => {
 
   it('drops a result belonging to a different swap when another is opened', () => {
     expect(appSource).toMatch(/state\.result\.forSwap !== row\.id\) state\.result = null/)
+  })
+})
+
+/**
+ * The actions the detail dialog offers on EVERY row, and the one rule they all
+ * have to obey.
+ *
+ * The console LISTS the registry — `admin/routes/swaps.ts` pages the reader set,
+ * so an EVM token corridor's swaps and an injected corridor's swaps appear like
+ * any other row. Operator ACTIONS stay closed, keyed to the four BTC pairs, and
+ * that split is deliberate. What it silently creates is one defect class: an
+ * action rendered on every row whose implementation only knows four corridors.
+ *
+ * There were exactly two, and both shipped broken. `tick` refused an EVM row by
+ * NAME ("must be one of …") on a screen that had just rendered it and, through
+ * `nextStep`, advised pressing it. `park-swap` was worse — it did not dispatch
+ * at all, reaching the Lightning-send store directly, so it threw on
+ * onchain-send, both receive legs and every EVM pair, on the only lever that
+ * stops the sweep re-driving a row.
+ *
+ * Nothing stopped a third. This is that.
+ */
+describe('detailDialog — actions offered on every corridor', () => {
+  /** An action's `run` body in `actions.ts`, by name. */
+  const runBlockOf = (name: string): string => {
+    const key = new RegExp(`^  '?${name}'?: \{$`, 'm')
+    const at = actionsSource.search(key)
+    if (at === -1) throw new Error(`no action named ${name} in actions.ts`)
+    const end = actionsSource.indexOf('\n  },', at)
+    return actionsSource.slice(at, end === -1 ? at + 2000 : end)
+  }
+
+  /**
+   * Derived, not listed — a new universal button has to trip this rather than
+   * arrive unnoticed.
+   *
+   * Two shapes carry an action into the dialog: an `actButton` wired to
+   * `runAction('x')`, and a bare string in the `armed` array. In both, the
+   * corridor gate is a `d.swap.corridor === '…' ?` ternary sitting IMMEDIATELY
+   * before the thing it guards, so proximity is what distinguishes a gated
+   * action from one offered everywhere. The distances are not close: a gated
+   * button's ternary is ~60 characters ahead of its `actButton(`, an ungated
+   * one's nearest comparison is thousands away and belongs to something else.
+   */
+  const universalActions = (): string[] => {
+    const block = dialogBlock()
+    const found = new Set<string>()
+
+    for (const m of block.matchAll(/runAction\('([a-z-]+)'/g)) {
+      const before = block.slice(0, m.index)
+      const gate = before.lastIndexOf('d.swap.corridor ===')
+      const button = before.lastIndexOf('actButton(')
+      const name = m[1]
+      if (name && !(gate !== -1 && gate < button && button - gate < 120)) found.add(name)
+    }
+
+    const armed = armedList()
+    for (const m of armed.matchAll(/'([a-z][a-z-]+)'/g)) {
+      const before = armed.slice(Math.max(0, m.index - 120), m.index)
+      const name = m[1]
+      if (name && !/corridor ===/.test(before)) found.add(name)
+    }
+    return [...found].sort()
+  }
+
+  it('is exactly the known ones — a new one must be a decision, not a surprise', () => {
+    // Pinned so the derivation above cannot quietly stop working: if a refactor
+    // moves the gates and every action starts reading as universal, this fails
+    // rather than passing an emptier rule.
+    //
+    // `unilateral-exit-plan` arrived third and this test is why it was checked
+    // rather than assumed: it resolves its corridor by searching the registry
+    // for the id, which is right for an operator who has a swap id and no pair.
+    expect(universalActions()).toEqual(['park-swap', 'tick', 'unilateral-exit-plan'])
+  })
+
+  it('dispatches each of them through the corridor REGISTRY, not the closed union', () => {
+    for (const name of universalActions()) {
+      const run = runBlockOf(name)
+      // `services.corridors` rather than `.get(` specifically: an action that
+      // knows the pair looks it up, and one that has only an id hands the whole
+      // registry to a helper that searches it. Both are the registry; only the
+      // closed union is the bug, and the assertion below is what names it.
+      expect(run, `${name} must resolve its corridor from services.corridors`).toContain('services.corridors')
+      // `requireCorridor` is the closed-union validator and belongs to
+      // `read-payment`, which is genuinely Lightning-send-only. On an action
+      // rendered everywhere it is the bug: it refuses by naming four pairs.
+      expect(run, `${name} must not validate against the closed CORRIDORS union`).not.toMatch(/requireCorridor\(/)
+    }
   })
 })

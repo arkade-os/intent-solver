@@ -285,6 +285,9 @@ importers:
       '@arkade-os/solver-core':
         specifier: workspace:*
         version: link:../solver-core
+      '@arkade-os/solver-rails-esplora':
+        specifier: workspace:*
+        version: link:../solver-rails-esplora
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.2.0

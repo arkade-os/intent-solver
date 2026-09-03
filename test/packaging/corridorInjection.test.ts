@@ -31,6 +31,7 @@ const corridorFor = (pair: string, envStem: string): Corridor => ({
   statusFor: async (rfqId) => (rfqId === 'known' ? { v: 1, type: 'rfq_status' } : null),
   tick: async () => {},
   tickAll: async () => 3,
+  park: async () => ({ state: 'stuck' }),
   findRecoverable: async () => [],
   committedSats: async () => 0,
   page: async () => ({ swaps: [], nextCursor: null }),

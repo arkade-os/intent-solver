@@ -11,10 +11,12 @@
  */
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
+import { hex } from '@scure/base'
 import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
 import * as floatOps from '@arkade-os/solver-app/ops/float.js'
-import type { VtxoLifecycleReport } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
+import type { LockupDeadline, VtxoLifecycleReport } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
 import {
+  lockupDeadlinesOf,
   maybeMintPool,
   migrationClock,
   resetMigrationThrottle,
@@ -148,6 +150,10 @@ const floatServices = (migrate: () => Promise<unknown>, vtxos: { txid: string; v
         getAddress: async () => 'ark1test',
       },
       reservations: createReservationLedger(),
+      // The recovery guard asks whether a lockup's `client` key is ours before
+      // it lets one into an all-or-nothing sweep. No lockups in these cases, so
+      // the key never matches anything — it just has to be readable.
+      identity: { xOnlyPublicKey: async () => new Uint8Array(32).fill(4) },
     },
     ...floatStores,
     // `liveLockupRows` reads this, not the stores directly.
@@ -156,6 +162,68 @@ const floatServices = (migrate: () => Promise<unknown>, vtxos: { txid: string; v
   }) as unknown as Services
 
 const NO_DEPRECATED = { rotated: false, expired: [], signers: [], skipped: 'no-deprecated-vtxos' }
+
+/**
+ * The role half of the recovery guard, derived where the deadlines are.
+ *
+ * `refundWithoutReceiver` is the only leaf `VHTLCV2ContractHandler` stamps onto
+ * a `vhtlc-v2` VTXO, and it needs the lockup's `sender` — which `covenant.ts`
+ * fills from the row's `client` key. So "can recovery spend this at all" is
+ * exactly "is that key ours", and a send leg's answer is no at every clock
+ * reading, not merely before the CLTV.
+ */
+describe('lockupDeadlinesOf', () => {
+  const SOLVER = hex.encode(new Uint8Array(32).fill(4))
+
+  const deadlinesFor = (rows: Record<string, unknown>[]): Promise<readonly LockupDeadline[]> =>
+    lockupDeadlinesOf({
+      arkade: { identity: { xOnlyPublicKey: async () => new Uint8Array(32).fill(4) } },
+      readers: readerSetFromDeps({
+        store: { findRecoverable: async () => rows },
+        onchainStore: { findRecoverable: async () => [] },
+        receiveStore: { findRecoverable: async () => [] },
+        onchainReceiveStore: { findRecoverable: async () => [] },
+      } as unknown as FlatCorridorDeps),
+    } as unknown as Services)
+
+  const sendRow = (clientRefundPubkey: string | null): Record<string, unknown> => ({
+    id: 'send-1',
+    receiverPubkey: SOLVER,
+    serverPubkey: 'server',
+    paymentHash: 'a'.repeat(64),
+    refundLocktime: 1_800_000_000,
+    claimDelay: 512,
+    emulatorPubkey: 'emulator',
+    refundPkScript: 'refund-pkscript',
+    pkScript: 'send-pkscript',
+    clientRefundPubkey,
+    refundWithoutReceiverDelay: 1024,
+    refundDelay: 2048,
+    receiverPkScript: 'send-receiver-pkscript',
+    nonInteractiveParameters: null,
+  })
+
+  it('marks a send-leg lockup unrefundable: the solver is receiver, not sender', async () => {
+    const [deadline] = await deadlinesFor([sendRow('the-traders-refund-key')])
+    expect(deadline).toMatchObject({ script: 'send-pkscript', refundable: false })
+  })
+
+  it('marks a lockup whose client key is the solver refundable — the receive-leg shape', async () => {
+    const [deadline] = await deadlinesFor([sendRow(SOLVER)])
+    expect(deadline).toMatchObject({ script: 'send-pkscript', refundable: true })
+  })
+
+  /**
+   * No client key at all predates that leaf; `covenantScriptFromRow` refuses to
+   * rebuild such a row, so it is never registered and never in the sweep set.
+   * Answering `false` would invent a refusal about a lockup the guard cannot
+   * see — `undefined` leaves the CLTV question to decide, as it always did.
+   */
+  it('has no opinion on a row carrying no client refund key', async () => {
+    const [deadline] = await deadlinesFor([sendRow(null)])
+    expect(deadline?.refundable).toBeUndefined()
+  })
+})
 
 describe('runFloatLifecycle — migration throttle and count', () => {
   let now: number
