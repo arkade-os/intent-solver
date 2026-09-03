@@ -117,6 +117,19 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # AFTER the build, and it cannot move earlier. `examples/` imports
+      # `packages/solver-app/dist/index.js` on purpose — the built output is
+      # what an integrator consumes, and typechecking against `src/` would
+      # check something no consumer sees. So the declarations have to exist
+      # first, and `paths` cannot paper over it: TypeScript does not apply
+      # path mapping to RELATIVE specifiers, which is what these are.
+      #
+      # This ran inside `pnpm typecheck` for exactly one commit, where it
+      # passed locally on an already-built tree and failed both legs here with
+      # four `TS2307: Cannot find module`.
+      - name: Typecheck examples
+        run: pnpm typecheck:examples
+
       # What a CONSUMER imports is the app's dist/, and the unit suite runs
       # before the build so it only ever sees src/. This also proves importing
       # the SDK does not run the CLI: cli.ts calls main() and process.exit() at
