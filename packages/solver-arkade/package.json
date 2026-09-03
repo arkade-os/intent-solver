@@ -32,5 +32,8 @@
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
     "better-sqlite3": "^12.11.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12"
   }
 }
