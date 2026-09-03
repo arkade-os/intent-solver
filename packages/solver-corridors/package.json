@@ -1,6 +1,6 @@
 {
   "name": "@arkade-os/solver-corridors",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Part of the Arkade intent-solver: corridors primitives.",
   "license": "MIT",
   "repository": {
