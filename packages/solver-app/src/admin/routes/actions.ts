@@ -197,23 +197,25 @@ const requireCorridor = (body: ActionBody): Corridor => {
 }
 
 /**
- * Each corridor's orchestrator, or undefined where the operator disabled it.
+ * The corridor NAME, with membership left to the registry that will serve it.
  *
- * All four are optional on {@link Services} by design — a deployment constructs
- * only the corridors it serves — so an absent one is a normal answer, not a bug,
- * and has to read as "not enabled here" rather than a crash.
+ * Deliberately weaker than {@link requireCorridor}: it checks that a name was
+ * given, not that it is one of the four this build was compiled with. The list
+ * of corridors an operator can SEE is the registry (`admin/routes/swaps.ts`
+ * pages the reader set), so validating an action against the closed union
+ * refused a row the console had just rendered — and refused it by naming four
+ * pairs, which reads as a malformed request rather than as "not here".
+ *
+ * "Which corridor" still has to be answered by the caller and never guessed: a
+ * swap id is unique only within its own store, so trying each in turn would tick
+ * whichever answered first — the wrong swap, driven a step down a money path.
  */
-const serviceFor = (services: Services, corridor: Corridor): { tick(id: string): Promise<unknown> } | undefined => {
-  switch (corridor) {
-    case 'arkade:BTC->lightning:BTC':
-      return services.service
-    case 'lightning:BTC->arkade:BTC':
-      return services.receiveService
-    case 'arkade:BTC->onchain:BTC':
-      return services.onchainService
-    case 'onchain:BTC->arkade:BTC':
-      return services.onchainReceiveService
+const requireCorridorName = (body: ActionBody): string => {
+  const corridor = body.corridor
+  if (typeof corridor !== 'string' || corridor.trim() === '') {
+    throw new Error('corridor is required: a swap id is unique only within its own corridor’s store')
   }
+  return corridor
 }
 
 export const ACTIONS: Record<string, ActionDefinition> = {
@@ -221,16 +223,30 @@ export const ACTIONS: Record<string, ActionDefinition> = {
    * Drive one swap a single step. Safe because it is exactly what the sweep
    * does on its own cadence — the orchestrators are re-entrant by contract and
    * re-read the row first, so an extra tick costs one redundant pass.
+   *
+   * Dispatched through the corridor REGISTRY rather than a switch over the four
+   * BTC pairs. The console renders `recheck` on every row it lists, and it lists
+   * every registered corridor — so on an EVM token corridor, or on one a
+   * consumer injected, the button was unreachable while the row was visible.
+   * `Corridor` already carries `tick`, so the registry answers for all of them
+   * and there is no per-corridor case to keep in step with what ships.
+   *
+   * The SERVING set, not the reader set: a corridor with a store but no service
+   * is one an operator disabled, and "not enabled" is the honest answer there —
+   * its rows stay listed and inspectable, which is what the reader set is for.
    */
   tick: {
     tier: 'safe',
     target: idTarget,
     run: async (services, body) => {
       const id = requireId(body)
-      const corridor = requireCorridor(body)
-      const service = serviceFor(services, corridor)
-      if (!service) throw new Error(`the ${corridor} corridor is not enabled on this deployment`)
-      return { row: await service.tick(id) }
+      const corridor = requireCorridorName(body)
+      const served = services.corridors.get(corridor)
+      if (!served) throw new Error(`the ${corridor} corridor is not enabled on this deployment`)
+      await served.tick(id)
+      // Re-read rather than return what `tick` gave: `Corridor.tick` answers
+      // void, and the row AFTER the step is the whole point of the button.
+      return { row: (await served.detail(id))?.raw ?? null }
     },
   },
 

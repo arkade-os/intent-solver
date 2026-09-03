@@ -17,6 +17,24 @@ const adminStore = () => ({
   getOverrides: vi.fn().mockResolvedValue({}),
 })
 
+/**
+ * A minimal `CorridorSet` over a pair -> corridor map.
+ *
+ * `tick` dispatches through the registry rather than a switch over the four BTC
+ * pairs, so a test that wants a corridor ticked registers one — which is what
+ * `createServices` does for real. Iterable and sized because the interface says
+ * so, even though this action only ever calls `get`.
+ */
+const corridorSet = (byPair: Record<string, unknown>) => ({
+  get: (pair: string) => byPair[pair],
+  size: Object.keys(byPair).length,
+  [Symbol.iterator]: () => Object.values(byPair)[Symbol.iterator](),
+})
+
+/** One corridor's worth of the registry, for the common single-corridor case. */
+const oneCorridor = (pair: string, tick: ReturnType<typeof vi.fn>, row: unknown = { id: 'swap-1' }) =>
+  corridorSet({ [pair]: { tick, detail: async () => ({ raw: row }) } })
+
 /** Kept loosely typed rather than cast to `never`, so tests can read back the spies. */
 const fakeServices = (over: Record<string, unknown> = {}) => ({
   adminStore: adminStore(),
@@ -24,6 +42,10 @@ const fakeServices = (over: Record<string, unknown> = {}) => ({
   onchainStore: { get: vi.fn().mockResolvedValue({ id: 'swap-1' }) },
   arkade: { wallet: {} },
   config: {},
+  // The real `Services` always carries one, so defaulting it keeps an omission
+  // reading as "this deployment serves nothing" — the state an operator can
+  // actually reach — rather than as a TypeError from a half-built fake.
+  corridors: corridorSet({}),
   ...over,
 })
 
@@ -114,7 +136,10 @@ describe('auditing', () => {
     const services = fakeServices({
       arkade: { wallet: {} },
       store: { get: vi.fn(), patch: vi.fn() },
-      service: { tick: vi.fn().mockResolvedValue({ id: 'swap-1', state: 'claimed' }) },
+      corridors: oneCorridor('arkade:BTC->lightning:BTC', vi.fn().mockResolvedValue(undefined), {
+        id: 'swap-1',
+        state: 'claimed',
+      }),
     })
     const response = await post('tick', { id: 'swap-1', corridor: 'arkade:BTC->lightning:BTC' }, services)
     expect(response.status).toBe(200)
@@ -125,7 +150,7 @@ describe('auditing', () => {
 
   it('records a FAILED action — the one an operator most needs a record of', async () => {
     const services = fakeServices({
-      service: { tick: vi.fn().mockRejectedValue(new Error('indexer unreachable')) },
+      corridors: oneCorridor('arkade:BTC->lightning:BTC', vi.fn().mockRejectedValue(new Error('indexer unreachable'))),
     })
     const response = await post('tick', { id: 'swap-1', corridor: 'arkade:BTC->lightning:BTC' }, services)
     expect(response.status).toBe(500)
@@ -203,11 +228,16 @@ describe('tick across corridors', () => {
     // A swap id is unique within its OWN corridor's store. Trying each in turn
     // would tick the wrong swap on a collision — a money path, one step, on a
     // row nobody asked about.
-    const receiveTick = vi.fn().mockResolvedValue({ id: 'swap-1', state: 'settled' })
+    const receiveTick = vi.fn().mockResolvedValue(undefined)
     const sendTick = vi.fn()
     const services = fakeServices({
-      service: { tick: sendTick },
-      receiveService: { tick: receiveTick },
+      corridors: corridorSet({
+        'arkade:BTC->lightning:BTC': { tick: sendTick, detail: async () => ({ raw: {} }) },
+        'lightning:BTC->arkade:BTC': {
+          tick: receiveTick,
+          detail: async () => ({ raw: { id: 'swap-1', state: 'settled' } }),
+        },
+      }),
     })
     const response = await post('tick', { id: 'swap-1', corridor: 'lightning:BTC->arkade:BTC' }, services)
     expect(response.status).toBe(200)
@@ -217,7 +247,11 @@ describe('tick across corridors', () => {
 
   it('says the corridor is disabled rather than crashing', async () => {
     // Every corridor is optional by design, so absent is a normal answer.
-    const response = await post('tick', { id: 'swap-1', corridor: 'onchain:BTC->arkade:BTC' }, fakeServices({}))
+    const response = await post(
+      'tick',
+      { id: 'swap-1', corridor: 'onchain:BTC->arkade:BTC' },
+      fakeServices({ corridors: corridorSet({}) }),
+    )
     expect(response.status).toBe(500)
     expect(await response.json()).toMatchObject({ message: expect.stringContaining('not enabled') })
   })
@@ -226,6 +260,40 @@ describe('tick across corridors', () => {
     const response = await post('tick', { id: 'swap-1' }, fakeServices({}))
     expect(response.status).toBe(500)
     expect(await response.json()).toMatchObject({ message: expect.stringContaining('corridor is required') })
+  })
+
+  /**
+   * The console lists every REGISTERED corridor — `admin/routes/swaps.ts` pages
+   * the reader set, not the closed `CORRIDORS` array, so an EVM token corridor's
+   * swaps appear like any other. It then renders `recheck` on every row it
+   * lists, unconditionally.
+   *
+   * Dispatching that button through the four-member union refused it by NAME
+   * ("must be one of …"), which reads to an operator as a malformed request
+   * rather than "this deployment cannot do that here" — on a screen that had
+   * just shown them the row.
+   */
+  it('drives a corridor this build was never compiled against', async () => {
+    const pair = 'arkade:BTC->ethereum:0xa0b86991'
+    const evmTick = vi.fn().mockResolvedValue(undefined)
+    const services = fakeServices({
+      corridors: corridorSet({
+        [pair]: { tick: evmTick, detail: async () => ({ raw: { id: 'swap-1', state: 'locked' } }) },
+      }),
+    })
+    const response = await post('tick', { id: 'swap-1', corridor: pair }, services)
+    expect(response.status).toBe(200)
+    expect(evmTick).toHaveBeenCalledWith('swap-1')
+    expect(await response.json()).toMatchObject({ result: { row: { id: 'swap-1', state: 'locked' } } })
+  })
+
+  it('still says "not enabled" for a corridor the registry does not serve', async () => {
+    // The disabled case must stay distinguishable from the unknown one: an
+    // operator reading "not enabled" reaches for config, and that is right.
+    const services = fakeServices({ corridors: corridorSet({}) })
+    const response = await post('tick', { id: 'swap-1', corridor: 'arkade:BTC->ethereum:0xdead' }, services)
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ message: expect.stringContaining('not enabled') })
   })
 })
 
