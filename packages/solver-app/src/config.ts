@@ -65,6 +65,20 @@ export interface LndConfig {
   esploraUrl?: string
 }
 
+/**
+ * The ceiling and floor a corridor's live execution charge is held between —
+ * `networkFeePricing`'s `capSats` and `minSats`, read from the environment.
+ *
+ * A PAIR rather than two independent knobs because the cap is what turns
+ * dynamic pricing on: a corridor with no ceiling has no number it can promise a
+ * taker in a signed card, and no bound on what a misreported fee rate could
+ * quote. Absent means the corridor keeps its fixed flat.
+ */
+export interface NetworkFeeBounds {
+  capSats: number
+  minSats: number
+}
+
 export interface Config {
   network: SwapNetwork
   profile: NetworkProfile
@@ -87,6 +101,30 @@ export interface Config {
    * solver charged before this existed.
    */
   corridorFees: Record<Corridor, Fee>
+  /**
+   * The bounds a corridor prices its own EXECUTION COST inside, or null to keep
+   * charging {@link Config.corridorFees}' flat and nothing else.
+   *
+   * Null everywhere by default, and that default is the whole safety of this:
+   * a deployment that sets none of these quotes exactly the numbers it quoted
+   * before dynamic pricing existed, because the corridor is handed no pricing
+   * strategy at all and falls back to the same `fixedFeePricing(fee)` it always
+   * used. @see core/pricing.ts
+   */
+  corridorNetworkFees: Record<Corridor, NetworkFeeBounds | null>
+  /**
+   * How old a sampled onchain fee rate may get before a refresh STARTS, and
+   * before the sample stops being believed at all. Milliseconds.
+   *
+   * Deployment-wide rather than per corridor, unlike the bounds above: the two
+   * onchain corridors read ONE backend's ONE estimate, so a per-corridor
+   * cadence would buy two sampling schedules over the same upstream call and
+   * let the two directions price the same instant differently.
+   *
+   * @see util/freshness.ts for what the two ages do and why there are two.
+   */
+  onchainFeeRateRefreshMs: number
+  onchainFeeRateStaleMs: number
   /**
    * Which corridors this deployment quotes. All four by default.
    *
@@ -444,6 +482,84 @@ const corridorFeesFromEnv = (): Record<Corridor, Fee> => {
 }
 
 /**
+ * The corridors that can answer "what will executing this swap cost me".
+ *
+ * The two onchain legs can: a chain cost is `vsize x sats/vbyte`, both halves of
+ * which the solver knows before it quotes. The Lightning legs cannot yet — the
+ * backend port has no "what would routing this cost" call, so a solver only
+ * learns a routing fee by being refused for budgeting too little, which is
+ * after the price is fixed. The EVM corridors price in token units and are not
+ * `Corridor`-keyed at all.
+ *
+ * Named here so setting a cap on a corridor that cannot use one is REFUSED
+ * rather than parsed and ignored. A knob that reads back fine and changes no
+ * quote is how an operator comes to believe they are pricing dynamically while
+ * still charging a flat they guessed at boot.
+ */
+const NETWORK_FEE_CAPABLE: readonly Corridor[] = ['arkade:BTC->onchain:BTC', 'onchain:BTC->arkade:BTC']
+
+/**
+ * What each corridor may charge for EXECUTION, from `<STEM>_FEE_CAP_SATS` and
+ * `<STEM>_FEE_MIN_SATS`.
+ *
+ * Null for every corridor by default. Unset and zero are DIFFERENT here, unlike
+ * `<STEM>_FEE_BPS` and unlike `<STEM>_FEE_FLAT_SATS`: an absent cap means "do
+ * not price this corridor's cost live at all", which is the behaviour of every
+ * deployment before this existed, so it cannot also be spelled `0`.
+ *
+ * The cap is the switch and the floor is optional, which is deliberate. The
+ * cap is what a taker is actually promised — a signed registry card cannot
+ * carry a live estimate — and it is what bounds a fee source that returns a
+ * spike or the wrong units. There is no safe way to read an estimate without
+ * one, so there is no way to ask for one.
+ */
+const corridorNetworkFeesFromEnv = (): Record<Corridor, NetworkFeeBounds | null> => {
+  const entries = ALL_DESCRIPTORS.map(({ pair, envStem: stem }) => {
+    // Same shape as `corridorLimitsFromEnv`'s `bound`, not `corridorFeesFromEnv`'s
+    // `component`: absence has to survive as `undefined` here rather than
+    // collapsing to 0, because absence is what keeps the old pricing.
+    const sats = (suffix: string, min: number): number | undefined => {
+      const name = `${stem}_${suffix}`
+      const raw = process.env[name]?.trim()
+      if (!raw) return undefined
+      const value = Number(raw)
+      // Same 1_000_000 sanity bound `<STEM>_FEE_FLAT_SATS` carries, and for the
+      // same reason: an execution charge in the millions is a typo, and one
+      // that would refuse every swap as unquotable rather than fail here.
+      if (!Number.isInteger(value) || value < min || value > 1_000_000) {
+        throw new Error(`${name} must be an integer between ${min} and 1000000, got ${process.env[name]}`)
+      }
+      return value
+    }
+    // A cap of 0 would mean "charge nothing for execution, ever", which is
+    // `<STEM>_FEE_FLAT_SATS=0` written so that it looks like it does something.
+    const capSats = sats('FEE_CAP_SATS', 1)
+    const minSats = sats('FEE_MIN_SATS', 0)
+    if (capSats === undefined) {
+      // Refused rather than ignored: a floor with no ceiling is dynamic pricing
+      // switched off, and the operator who set it believes otherwise.
+      if (minSats !== undefined) {
+        throw new Error(`${stem}_FEE_MIN_SATS is set without ${stem}_FEE_CAP_SATS, which is what enables live pricing`)
+      }
+      return [pair, null] as const
+    }
+    if (!NETWORK_FEE_CAPABLE.includes(pair as Corridor)) {
+      throw new Error(`${stem}_FEE_CAP_SATS is set, but ${pair} cannot price its execution cost live`)
+    }
+    // `networkFeePricing` refuses this combination too, at construction.
+    // Refused again here so the message names the two variables an operator can
+    // edit rather than the two numbers they resolved to.
+    if (minSats !== undefined && minSats > capSats) {
+      throw new Error(
+        `${stem}_FEE_MIN_SATS ${minSats} exceeds ${stem}_FEE_CAP_SATS ${capSats}, so the cap can never hold`,
+      )
+    }
+    return [pair, { capSats, minSats: minSats ?? 0 }] as const
+  })
+  return Object.fromEntries(entries) as Record<Corridor, NetworkFeeBounds | null>
+}
+
+/**
  * Which corridors this deployment quotes, from `<STEM>_ENABLED`.
  *
  * All four on by default, so a deployment that sets nothing serves what it
@@ -664,6 +780,25 @@ export const loadConfig = (): Config => {
     throw new Error(`SWEEP_CONCURRENCY must be a positive integer, got ${process.env.SWEEP_CONCURRENCY}`)
   }
 
+  // A minute, because a mempool's fee estimate does not move meaningfully
+  // faster than that and a read is what triggers the fetch — an idle solver
+  // makes no requests at all, and a busy one makes at most one a minute.
+  const onchainFeeRateRefreshMs = intFromEnv('ONCHAIN_FEE_RATE_REFRESH_MS', 60_000, 1)
+  // Fifteen minutes: longer than a block interval plus slack, so a source that
+  // is merely slow keeps its answer being served, while one that has been down
+  // long enough for the mempool to have turned over stops being believed and
+  // pricing falls back to the configured flat.
+  const onchainFeeRateStaleMs = intFromEnv('ONCHAIN_FEE_RATE_STALE_MS', 900_000, 1)
+  // `freshly` throws on this too, but from inside `createServices`, where the
+  // message would name neither variable. Below or equal, every read past the
+  // refresh age returns null and the sample degrades to "always null" —
+  // quietly, and only once quotes are actually flowing.
+  if (onchainFeeRateStaleMs <= onchainFeeRateRefreshMs) {
+    throw new Error(
+      `ONCHAIN_FEE_RATE_STALE_MS ${onchainFeeRateStaleMs} must exceed ONCHAIN_FEE_RATE_REFRESH_MS ${onchainFeeRateRefreshMs}`,
+    )
+  }
+
   return {
     network: raw,
     profile,
@@ -672,6 +807,9 @@ export const loadConfig = (): Config => {
     limits,
     corridorLimits: corridorLimitsFromEnv(limits),
     corridorFees: corridorFeesFromEnv(),
+    corridorNetworkFees: corridorNetworkFeesFromEnv(),
+    onchainFeeRateRefreshMs,
+    onchainFeeRateStaleMs,
     corridorEnabled,
     // Reads the ALREADY-NARROWED house limits, so a per-token knob inherits a
     // bound an override may have tightened rather than the raw environment's.

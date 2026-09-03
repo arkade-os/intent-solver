@@ -30,7 +30,8 @@ import {
   type OnchainSendAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/onchainSend.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
-import { FREE, giveSatsFor, payoutSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
@@ -50,6 +51,11 @@ import { MINUTE } from '@arkade-os/solver-core/core/timelocks.js'
 export type { ArkadeOps as OnchainArkadeOps } from './orchestrator.js'
 
 export interface OnchainSendServiceDeps {
+  /**
+   * How this corridor prices. Absent means the configured flat+bps `fee`,
+   * which is what every deployment used before pricing became injectable.
+   */
+  pricing?: PricingStrategy
   store: OnchainSendSwapStore
   onchain: OnchainSendBackend
   arkade: ArkadeOps
@@ -179,11 +185,15 @@ export class OnchainSendSwapService {
   private readonly now: () => number
   private readonly inFlight = new Set<string>()
   private readonly fee: Fee
+  /** How this corridor prices. Defaults to the configured flat+bps fee. */
+  private readonly pricing: PricingStrategy
+
   private readonly admission: AdmissionStrategy
 
   constructor(private readonly deps: OnchainSendServiceDeps) {
     this.now = deps.now ?? nowSeconds
     this.fee = deps.fee ?? FREE
+    this.pricing = deps.pricing ?? fixedFeePricing(this.fee)
     this.admission = deps.admission
   }
 
@@ -224,7 +234,10 @@ export class OnchainSendSwapService {
     // payout is then the request by construction (`giveSatsFor`), which is
     // why `fee_consumes_swap` cannot fire on this side. The acceptance
     // bounds and the exposure cap both deal in the GIVE.
-    const giveSats = request.amountSide === 'to' ? giveSatsFor(request.amountSats, this.fee) : request.amountSats
+    const giveSats =
+      request.amountSide === 'to'
+        ? this.pricing.giveFor({ pair: RFQ_PAIR_ONCHAIN_SEND, payoutSats: request.amountSats })
+        : request.amountSats
     const acceptance = evaluateOnchainSendAcceptance({
       amountSats: giveSats,
       limits,
@@ -241,7 +254,10 @@ export class OnchainSendSwapService {
     // cannot be priced. A payout below the dust floor would fund an HTLC
     // nobody can spend — the onchain legs' own floor, refused on BOTH sides:
     // a sub-dust payout is unfundable however the request named it.
-    const payoutSats = request.amountSide === 'to' ? request.amountSats : payoutSatsFor(giveSats, this.fee)
+    const payoutSats =
+      request.amountSide === 'to'
+        ? request.amountSats
+        : this.pricing.payoutFor({ pair: RFQ_PAIR_ONCHAIN_SEND, giveSats })
     if (request.amountSide !== 'to' && payoutSats <= 0) {
       return { accepted: false, reason: 'fee_consumes_swap' }
     }

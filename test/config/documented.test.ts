@@ -131,7 +131,15 @@ describe('README documents every config option', () => {
   it('expands the per-corridor pattern rather than demanding twenty rows', () => {
     const documented = documentedNames()
     for (const stem of CORRIDOR_STEMS) {
-      for (const suffix of ['MIN_SATS', 'MAX_SATS', 'FEE_BPS', 'FEE_FLAT_SATS', 'ENABLED']) {
+      for (const suffix of [
+        'MIN_SATS',
+        'MAX_SATS',
+        'FEE_BPS',
+        'FEE_FLAT_SATS',
+        'FEE_CAP_SATS',
+        'FEE_MIN_SATS',
+        'ENABLED',
+      ]) {
         expect(documented).toContain(`${stem}_${suffix}`)
       }
     }

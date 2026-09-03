@@ -24,6 +24,9 @@ import { hex } from '@scure/base'
 import { Transaction, SigHash, p2tr, Address, OutScript } from '@scure/btc-signer'
 import { corridorSetFromDeps, readerSetFromDeps } from './corridorSet.js'
 import { loadConfig, swapDbPath, type Config } from '../config.js'
+import type { PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
+import { onchainCorridorPricing, onchainFeeRateSampler } from './onchainPricing.js'
+import { claimSpendVsize, fundingTxVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 import type { Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { OnchainSendSwapStore, type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
@@ -359,6 +362,35 @@ export const createServices = async (
    */
   const selfPaymentCoupling = enabled('arkade:BTC->lightning:BTC') && enabled('lightning:BTC->arkade:BTC')
 
+  /**
+   * ONE sampled sats/vbyte reading, shared by BOTH onchain corridors, and null
+   * unless a corridor asked for live pricing — which is the default.
+   *
+   * Sampled rather than read per quote because `PricingStrategy` is synchronous
+   * on purpose: see `core/pricing.ts` on why a quote must not become an
+   * upstream call a taker can trigger. The cadence comes from `config` rather
+   * than `policy` because it is not a console-editable knob and must not become
+   * one by riding along in the overrides object.
+   */
+  const onchainFeeRate =
+    rail === null
+      ? null
+      : onchainFeeRateSampler({
+          bounds: policy.corridorNetworkFees,
+          estimateFeeRate: () => rail.onchain.estimateFeeRate(),
+          refreshAfterMs: config.onchainFeeRateRefreshMs,
+          staleAfterMs: config.onchainFeeRateStaleMs,
+        })
+
+  /** This corridor's pricing, or undefined to leave it exactly as it was. @see ops/onchainPricing.ts */
+  const onchainPricingFor = (corridor: Corridor, vsize: number): PricingStrategy | undefined =>
+    onchainCorridorPricing({
+      bounds: policy.corridorNetworkFees[corridor],
+      base: policy.corridorFees[corridor],
+      feeRate: onchainFeeRate,
+      vsize,
+    })
+
   const service = enabled('arkade:BTC->lightning:BTC')
     ? new SendSwapService({
         store,
@@ -418,6 +450,22 @@ export const createServices = async (
     service.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
   }
 
+  // The solver's own destination for reclaimed onchain HTLC funds — an address
+  // on the SAME onchain backend that funded the HTLC, so a reclaim lands back
+  // in the wallet the money left and is reusable straight away. NOT an Arkade
+  // boarding address: that money never came from Arkade, and routing it there
+  // forces an onboard now and an offboard again before the next HTLC can be
+  // funded. Resolved once here (not per-refund), same as the emulator key.
+  //
+  // Hoisted out of the constructor call because the funding transaction's
+  // SIZE depends on it: this is the solver's own script, and so the best
+  // evidence available of what its wallet's change output will look like.
+  // Still resolved only when the corridor is on — a disabled corridor must not
+  // put an address request to a backend nothing is going to use.
+  const onchainRefundDestinationScript = enabled('arkade:BTC->onchain:BTC')
+    ? OutScript.encode(Address(ONCHAIN_NETWORKS[config.network]).decode(await rail!.onchain.newReceiveAddress()))
+    : null
+
   const onchainService = enabled('arkade:BTC->onchain:BTC')
     ? new OnchainSendSwapService({
         store: onchainStore,
@@ -425,21 +473,23 @@ export const createServices = async (
         arkade: arkadeOps,
         limits: policy.corridorLimits['arkade:BTC->onchain:BTC'],
         fee: policy.corridorFees['arkade:BTC->onchain:BTC'],
+        // The transaction this corridor's solver broadcasts is the FUNDING of
+        // the client's HTLC. The client pays for its own claim, so pricing this
+        // side off a claim's vbytes would bill for a spend the solver never
+        // makes.
+        pricing: onchainPricingFor(
+          'arkade:BTC->onchain:BTC',
+          fundingTxVsize({
+            network: ONCHAIN_NETWORKS[config.network],
+            changeScript: onchainRefundDestinationScript!,
+          }),
+        ),
         network: config.network,
         maxExposedSats: policy.maxExposedSats,
         totalCommitted,
         admission,
         signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
-        // The solver's own destination for reclaimed onchain HTLC funds — an
-        // address on the SAME onchain backend that funded the HTLC, so a
-        // reclaim lands back in the wallet the money left and is reusable
-        // straight away. NOT an Arkade boarding address: that money never came
-        // from Arkade, and routing it there forces an onboard now and an
-        // offboard again before the next HTLC can be funded. Resolved once
-        // here (not per-refund), same as the emulator key above.
-        refundDestinationScript: OutScript.encode(
-          Address(ONCHAIN_NETWORKS[config.network]).decode(await rail!.onchain.newReceiveAddress()),
-        ),
+        refundDestinationScript: onchainRefundDestinationScript!,
         peerStores: [store, receiveStore, onchainReceiveStore],
       })
     : undefined
@@ -507,6 +557,17 @@ export const createServices = async (
     receiveService.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
   }
 
+  // Its own address, not the send leg's refund destination. The two are the
+  // same wallet and reusing one script would work, but they are opposite flows
+  // — money coming IN off a client's HTLC versus money coming BACK off our own
+  // — and giving each its own output keeps them separable in the wallet's
+  // history when reconciling. Resolved once at startup, like the refund
+  // destination above, and hoisted for the same reason: it is the claim
+  // spend's only variable-size field, so this corridor's cost depends on it.
+  const onchainClaimDestinationScript = enabled('onchain:BTC->arkade:BTC')
+    ? OutScript.encode(Address(ONCHAIN_NETWORKS[config.network]).decode(await rail!.onchain.newReceiveAddress()))
+    : null
+
   const onchainReceiveService = enabled('onchain:BTC->arkade:BTC')
     ? new OnchainReceiveSwapService({
         store: onchainReceiveStore,
@@ -517,20 +578,23 @@ export const createServices = async (
         }),
         limits: policy.corridorLimits['onchain:BTC->arkade:BTC'],
         fee: policy.corridorFees['onchain:BTC->arkade:BTC'],
+        // Here the CLIENT funds the HTLC and the solver claims it, so the
+        // transaction this corridor pays for is that claim — which
+        // `solver-rails` sizes exactly, down to this deployment's own
+        // destination script.
+        pricing: onchainPricingFor(
+          'onchain:BTC->arkade:BTC',
+          claimSpendVsize({
+            network: ONCHAIN_NETWORKS[config.network],
+            destinationScript: onchainClaimDestinationScript!,
+          }),
+        ),
         network: config.network,
         maxExposedSats: policy.maxExposedSats,
         totalCommitted,
         admission,
         signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
-        // Its own address, not the send leg's refund destination. The two are
-        // the same wallet and reusing one script would work, but they are
-        // opposite flows — money coming IN off a client's HTLC versus money
-        // coming BACK off our own — and giving each its own output keeps them
-        // separable in the wallet's history when reconciling. Resolved once at
-        // startup, like the refund destination above.
-        claimDestinationScript: OutScript.encode(
-          Address(ONCHAIN_NETWORKS[config.network]).decode(await rail!.onchain.newReceiveAddress()),
-        ),
+        claimDestinationScript: onchainClaimDestinationScript!,
         peerStores: [store, onchainStore, receiveStore],
       })
     : undefined
