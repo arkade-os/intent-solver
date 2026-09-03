@@ -313,7 +313,12 @@ describe('LndLightningBackendAdapter.createInvoice', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     // The vendor's REAL resolved shape — `request` and no expiry anywhere in it.
-    createInvoice.mockResolvedValue({ request: forged.invoice, id: 'x', secret: 'y', created_at: '2027-01-15T00:00:00Z' })
+    createInvoice.mockResolvedValue({
+      request: forged.invoice,
+      id: 'x',
+      secret: 'y',
+      created_at: '2027-01-15T00:00:00Z',
+    })
   })
 
   it('reports the expiry encoded in the invoice, which is what a payer enforces', async () => {

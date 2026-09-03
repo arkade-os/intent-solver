@@ -870,7 +870,8 @@ const fundResult = (read) => {
   if (read.error) return h('pre.faint', read.error)
   const options = read.result?.options
   if (!Array.isArray(options)) return h('pre.faint', JSON.stringify(read.result, null, 2))
-  if (options.length === 0) return h('p.banner', 'This source offered no way to deposit. That is a fault, not a policy.')
+  if (options.length === 0)
+    return h('p.banner', 'This source offered no way to deposit. That is a fault, not a policy.')
   return h('div', options.map(fundDepositOption))
 }
 
