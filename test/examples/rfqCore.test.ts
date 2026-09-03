@@ -469,3 +469,59 @@ describe('rfq-core over the relay against the real ingress', () => {
     })
   })
 })
+
+/**
+ * The max-fee gate, MIRRORED from `@arkade-os/swap`'s `assertFundable`.
+ *
+ * Same reason codes, same `max(proportional, absolute)` rule, same loud refusal
+ * on a cross-asset pair. The two implementations disagreeing about a money gate
+ * is precisely the drift `test/interop/clientGates.test.ts` was written to catch
+ * one repository further out; these cases are the local half of that.
+ */
+describe('assertFundable — the max-fee gate', () => {
+  const now = 1_800_000_000
+  const gate = (over: Record<string, unknown>, maxFee?: { bps?: number; sats?: number }) =>
+    assertFundable({
+      quote: {
+        pair: 'arkade:BTC->lightning:BTC',
+        from_amount: 100_000,
+        to_amount: 100_000,
+        valid_until: now + 900,
+        refund_locktime: now + 7200,
+        ...over,
+      } as never,
+      invoiceExpiresAt: now + 3600,
+      now,
+      maxFee,
+    })
+
+  it('gates nothing when no ceiling is given', () => {
+    expect(() => gate({ from_amount: 10_000, to_amount: 1 })).not.toThrow()
+  })
+
+  it('refuses a fee above the proportional ceiling', () => {
+    expect(() => gate({ to_amount: 99_000 }, { bps: 100 })).not.toThrow()
+    expect(() => gate({ to_amount: 98_999 }, { bps: 100 })).toThrow(/fee/i)
+  })
+
+  /** A flat charge is 8.4% of 5_420 and 0.084% of 500_000 — the case for `max()`. */
+  it('allows a flat network fee on a small swap that a bare percentage refuses', () => {
+    expect(() => gate({ from_amount: 5_420, to_amount: 5_000 }, { bps: 100 })).toThrow(/fee/i)
+    expect(() => gate({ from_amount: 5_420, to_amount: 5_000 }, { bps: 100, sats: 1_000 })).not.toThrow()
+  })
+
+  it('keeps the proportional bound on a large swap, where the absolute is slack', () => {
+    expect(() => gate({ from_amount: 500_000, to_amount: 495_000 }, { bps: 100, sats: 1_000 })).not.toThrow()
+    expect(() => gate({ from_amount: 500_000, to_amount: 494_999 }, { bps: 100, sats: 1_000 })).toThrow(/fee/i)
+  })
+
+  it('refuses to pretend it can gate a cross-asset pair', () => {
+    expect(() => gate({ pair: 'arkade:BTC->ethereum:0xa0b86991', to_amount: 42 }, { bps: 100 })).toThrow(
+      /different assets/i,
+    )
+  })
+
+  it('refuses a ceiling that names neither bound', () => {
+    expect(() => gate({ to_amount: 99_999 }, {})).toThrow(/bps|sats/i)
+  })
+})

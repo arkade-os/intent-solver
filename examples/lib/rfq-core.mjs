@@ -102,7 +102,7 @@ export const verifyLockupAddress = (quote, derivedAddress) => {
  * The maker's gates, checked immediately before funding — not at quote time.
  * Throws with a stable `reason` property; returns void when funding is safe.
  */
-export const assertFundable = ({ quote, invoiceExpiresAt, now }) => {
+export const assertFundable = ({ quote, invoiceExpiresAt, now, maxFee }) => {
   const fail = (reason, message) => {
     const error = new Error(message)
     error.reason = reason
@@ -112,6 +112,32 @@ export const assertFundable = ({ quote, invoiceExpiresAt, now }) => {
   if (now >= quote.valid_until) fail('quote_expired', 'quote expired — request a fresh one')
   if (quote.refund_locktime - now < MIN_HEADROOM_SECONDS) {
     fail('insufficient_headroom', 'refund deadline headroom below 90 minutes')
+  }
+  // A MIRROR of `@arkade-os/swap`'s gate of the same name, reason codes
+  // included. The two must not disagree about a money gate — that drift is what
+  // `test/interop/clientGates.test.ts` was written to catch, one repository out.
+  if (maxFee) {
+    const { bps, sats } = maxFee
+    if (bps === undefined && sats === undefined) fail('max_fee_unbounded', 'maxFee names neither bps nor sats')
+    if (bps !== undefined && (!Number.isInteger(bps) || bps < 0 || bps > 10_000)) {
+      fail('max_fee_out_of_range', `maxFee.bps must be an integer in 0..10000, got ${bps}`)
+    }
+    if (sats !== undefined && (!Number.isInteger(sats) || sats < 0)) {
+      fail('max_fee_out_of_range', `maxFee.sats must be a non-negative integer, got ${sats}`)
+    }
+    // Loud on a cross-asset pair. `from_amount - to_amount` is a fee only while
+    // both legs name the same asset; elsewhere it subtracts one asset from
+    // another. Skipping quietly would leave a caller believing a ceiling applied.
+    const legs = quote.pair.split('->')
+    const assetOf = (leg) => leg.slice(leg.indexOf(':') + 1)
+    if (legs.length !== 2 || assetOf(legs[0]) !== assetOf(legs[1])) {
+      fail('fee_gate_unavailable', `maxFee cannot gate ${quote.pair}: its legs name different assets`)
+    }
+    const fee = quote.from_amount - quote.to_amount
+    // The GREATER of the two, because a flat charge is a large proportion of a
+    // small swap. @see the swap package for the full reasoning.
+    const allowed = Math.max(sats ?? 0, Math.floor((quote.from_amount * (bps ?? 0)) / 10_000))
+    if (fee > allowed) fail('fee_too_high', `fee ${fee} exceeds the ${allowed} this client allows`)
   }
 }
 
