@@ -5,10 +5,11 @@ import { forgeInvoiceWithPreimage } from '@arkade-os/solver-rails-fake/ln/fake/b
 // a gRPC client the adapter constructs internally, so the only way to assert
 // what it SENDS is to module-mock the vendor -- the same pattern
 // test/onchain/lnd.test.ts already uses on this package.
-const { payViaPaymentRequest, getWalletInfo, getInvoice } = vi.hoisted(() => ({
+const { payViaPaymentRequest, getWalletInfo, getInvoice, getRoutingFeeEstimate } = vi.hoisted(() => ({
   payViaPaymentRequest: vi.fn(),
   getWalletInfo: vi.fn(),
   getInvoice: vi.fn(),
+  getRoutingFeeEstimate: vi.fn(),
 }))
 vi.mock('lightning', async (importOriginal) => {
   const actual = await importOriginal<typeof import('lightning')>()
@@ -18,19 +19,24 @@ vi.mock('lightning', async (importOriginal) => {
     payViaPaymentRequest,
     getWalletInfo,
     getInvoice,
+    getRoutingFeeEstimate,
   }
 })
 
 const {
+  feeSatsFromMtokens,
   heldTimeoutHeight,
   isInvoiceNotFound,
+  isNoFeeEstimate,
   isoToUnixSeconds,
+  probeTimeoutMs,
   rejectionReason,
   toExpiresAt,
   toGetPaymentRejection,
   toHoldStatus,
   toPaymentResult,
   FAILED_PAYMENT_REASONS,
+  MIN_ROUTE_FEE_PROBE_MS,
   LndLightningBackendAdapter,
 } = await import('@arkade-os/solver-rails-lnd/ln/lnd/adapter.js')
 
@@ -382,5 +388,138 @@ describe('FAILED_PAYMENT_REASONS covers a refused CLTV ceiling', () => {
   // SentPaymentNotFound afterwards -- the sats provably never moved.
   it('treats the vendor refusing the ceiling as terminal', () => {
     expect(FAILED_PAYMENT_REASONS.has('MaxTimeoutTooNearCurrentHeightToMakePayment')).toBe(true)
+  })
+})
+
+describe('feeSatsFromMtokens', () => {
+  // Rounding down is the direction that costs money: a fee reported a sat low
+  // is a quote priced a sat low, paid out of the solver's own spread.
+  it('rounds a millisat figure UP to whole sats', () => {
+    expect(feeSatsFromMtokens('1')).toBe(1)
+    expect(feeSatsFromMtokens('1001')).toBe(2)
+    expect(feeSatsFromMtokens('10999')).toBe(11)
+  })
+
+  it('leaves an exact satoshi figure alone', () => {
+    expect(feeSatsFromMtokens('2000')).toBe(2)
+  })
+
+  // A direct peer costs nothing to reach. The vendor guards on `!routing_fee_msat`
+  // but LND's gRPC options decode int64 as a STRING, so a zero fee arrives as
+  // the truthy '0' and reaches this conversion rather than being rejected.
+  it('reports a free route as zero rather than as an error', () => {
+    expect(feeSatsFromMtokens('0')).toBe(0)
+  })
+
+  // NaN compares false against every cap and floor downstream, and a coerced 0
+  // would quote a free execution. Both are silent; the throw is not.
+  it('throws on a figure it cannot read rather than coercing one', () => {
+    expect(() => feeSatsFromMtokens('not-a-number')).toThrow(/unreadable routing fee/)
+    expect(() => feeSatsFromMtokens('-1000')).toThrow(/unreadable routing fee/)
+  })
+})
+
+describe('probeTimeoutMs', () => {
+  // The vendor rounds our milliseconds to whole seconds and then reads 0 as
+  // "unset", falling back to its own 60s default -- so an un-floored 200ms would
+  // buy the LONGEST probe on offer instead of the shortest.
+  it('floors a sub-second budget at one whole second', () => {
+    expect(probeTimeoutMs(200)).toBe(MIN_ROUTE_FEE_PROBE_MS)
+    expect(probeTimeoutMs(0)).toBe(MIN_ROUTE_FEE_PROBE_MS)
+    expect(Math.round(MIN_ROUTE_FEE_PROBE_MS / 1000)).toBeGreaterThan(0)
+  })
+
+  it('passes a budget the conversion survives through unchanged', () => {
+    expect(probeTimeoutMs(5_000)).toBe(5_000)
+  })
+})
+
+describe('isNoFeeEstimate', () => {
+  // The vendor's own mapping of any failure_reason other than none, so it covers
+  // both "the probe found nothing" and "the probe ran out of its time".
+  it('recognises the probe not finding a route', () => {
+    expect(isNoFeeEstimate([404, 'RouteToDestinationNotFound', { failure: 'FAILURE_REASON_NO_ROUTE' }])).toBe(true)
+    expect(isNoFeeEstimate([404, 'RouteToDestinationNotFound', { failure: 'FAILURE_REASON_TIMEOUT' }])).toBe(true)
+  })
+
+  // estimateRouteFee does not exist before LND 0.18.4. A permanent, knowable
+  // absence of the capability is exactly what the port's null is for.
+  it('recognises a node too old to have the call at all', () => {
+    expect(isNoFeeEstimate([503, 'UnexpectedGetRoutingFeeEstimateError', { err: { code: 12 } }])).toBe(true)
+  })
+
+  // A node that cannot be reached is the same fault every other call would hit.
+  // Answering null would leave a dead backend looking exactly like a working one
+  // whose routes happen to be unpriceable.
+  it('does not read an unreachable node as a missing estimate', () => {
+    expect(isNoFeeEstimate([503, 'UnexpectedGetRoutingFeeEstimateError', { err: { code: 14 } }])).toBe(false)
+    expect(isNoFeeEstimate([503, 'UnexpectedGetRoutingFeeEstimateError', {}])).toBe(false)
+    expect(isNoFeeEstimate([503, 'ExpectedFeeInGetRoutingFeeEstimateResponse'])).toBe(false)
+    expect(isNoFeeEstimate(new Error('network error'))).toBe(false)
+  })
+})
+
+describe('LndLightningBackendAdapter.estimateSendFee', () => {
+  const forged = forgeInvoiceWithPreimage({
+    network: 'bcrt',
+    amountSats: 1000,
+    timestamp: 1_800_000_000,
+    expirySeconds: 3600,
+    minFinalCltvBlocks: 40,
+  })
+
+  const estimate = async (timeoutMs = 5_000) => {
+    const adapter = await LndLightningBackendAdapter.create({ socket: 's', cert: 'c', macaroon: 'm' })
+    return adapter.estimateSendFee({ invoice: forged.invoice, timeoutMs })
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    getWalletInfo.mockResolvedValue({ current_block_height: 840_000 })
+  })
+
+  it('answers the routing fee for THIS invoice, rounded up to sats', async () => {
+    getRoutingFeeEstimate.mockResolvedValue({ fee_mtokens: '10500', timeout: 144 })
+    await expect(estimate()).resolves.toEqual({ feeSats: 11 })
+  })
+
+  // The payment request goes over whole rather than being taken apart into a
+  // destination and an amount: what is measured has to be what gets paid.
+  it('hands the backend the invoice itself, under the caller’s time budget', async () => {
+    getRoutingFeeEstimate.mockResolvedValue({ fee_mtokens: '1000', timeout: 144 })
+    await estimate(5_000)
+    expect(getRoutingFeeEstimate).toHaveBeenCalledWith(expect.objectContaining({ request: forged.invoice }))
+    expect(getRoutingFeeEstimate).toHaveBeenCalledWith(expect.objectContaining({ timeout: 5_000 }))
+  })
+
+  it('never asks for a budget the vendor would round away into its own 60s default', async () => {
+    getRoutingFeeEstimate.mockResolvedValue({ fee_mtokens: '1000', timeout: 144 })
+    await estimate(200)
+    expect(getRoutingFeeEstimate).toHaveBeenCalledWith(expect.objectContaining({ timeout: MIN_ROUTE_FEE_PROBE_MS }))
+  })
+
+  // A probe fails where a payment succeeds, so this is a missing price and not a
+  // verdict on whether the invoice is payable.
+  it('answers null when the probe finds nothing', async () => {
+    getRoutingFeeEstimate.mockRejectedValue([404, 'RouteToDestinationNotFound', { failure: 'FAILURE_REASON_NO_ROUTE' }])
+    await expect(estimate()).resolves.toBeNull()
+  })
+
+  it('answers null on a node too old for the call', async () => {
+    getRoutingFeeEstimate.mockRejectedValue([503, 'UnexpectedGetRoutingFeeEstimateError', { err: { code: 12 } }])
+    await expect(estimate()).resolves.toBeNull()
+  })
+
+  // Null here would hide a dead node behind "every quote falls back to the flat".
+  it('re-throws a fault it does not recognise rather than quoting around it', async () => {
+    getRoutingFeeEstimate.mockRejectedValue([503, 'UnexpectedGetRoutingFeeEstimateError', { err: { code: 14 } }])
+    await expect(estimate()).rejects.toBeDefined()
+  })
+
+  // LND reserves nothing: the probe and the later payment are unconnected calls,
+  // and a token would claim a link between them that does not exist.
+  it('mints no handle, because nothing here is prepared to be spent against', async () => {
+    getRoutingFeeEstimate.mockResolvedValue({ fee_mtokens: '10500', timeout: 144 })
+    await expect(estimate()).resolves.not.toHaveProperty('feeHandle')
   })
 })

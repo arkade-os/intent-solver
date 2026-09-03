@@ -202,6 +202,97 @@ export interface PayInvoiceParams {
    * compile. Backends that cannot express a ceiling ignore it.
    */
   maxCltvBlocks: number
+  /**
+   * The token off a {@link SendFeeEstimate}, where the backend minted one and the
+   * caller is spending against it.
+   *
+   * The EXECUTE half of prepare-then-execute. Without a field here the shape is not
+   * expressible at all — an adapter whose prepare call reserves a price would have to
+   * key that reservation on state only it can see, and hope the payment leaves the same
+   * process. This send leg makes no such promise: it is crash-driven, re-reads the row,
+   * and may pay from a process that never ran the prepare. That is also why the token is
+   * a STRING rather than an object or a closure: what cannot be written to a row cannot
+   * be re-driven, and a handle that quietly works until the first restart is worse than
+   * one that was never offered.
+   *
+   * Optional on both sides. Absent means what it has always meant — pay at whatever the
+   * backend charges now, bounded by {@link maxFeeSats} — so a backend that mints no
+   * token never sees one and a caller that keeps none never sends one.
+   *
+   * A backend handed a token it cannot honour (expired, unknown, minted against a
+   * different invoice) MUST fail rather than fall back to paying at the current price.
+   * The caller passed it because the quote was priced off it, so a silent fallback pays
+   * a number nobody quoted, on a swap whose spread was computed against a different one.
+   */
+  feeHandle?: string
+}
+
+/** What {@link SendBackend.estimateSendFee} is asked about. */
+export interface EstimateSendFeeParams {
+  /**
+   * The very invoice {@link SendBackend.payInvoice} would be handed.
+   *
+   * Not a destination and an amount. A routing fee is a fact about the WHOLE payment —
+   * the route hints, the feature bits, the payment address that decides whether it can
+   * be split — and a backend handed only a pubkey and a number has to reconstruct those
+   * to answer. Reconstruction is where a wrong answer enters: miss a hint and the reply
+   * is "no route" for an invoice that pays fine; miss the split and the fee is for a
+   * route the payment would never take. Passing the string keeps the backend estimating
+   * the same thing it will later pay.
+   *
+   * No amount override beside it, because there is nothing here to override: the send
+   * leg never holds an amountless invoice (`decodeInvoice` refuses one with
+   * `missing_amount`), so the field would have no caller and would be a second source of
+   * truth about the one number the invoice already carries.
+   */
+  invoice: string
+  /**
+   * Longest this may take, in milliseconds.
+   *
+   * Required, not optional, for the reason {@link PayInvoiceParams.maxCltvBlocks} is:
+   * the caller that forgets to bound it should fail to compile. Estimating a routing fee
+   * can mean PROBING — real HTLCs sent at the destination so they fail there — and the
+   * backends that do it default to tens of seconds. Whoever asks this question is
+   * usually pricing a quote, and an unbounded probe on that path is a stall anyone who
+   * can request a quote may trigger.
+   *
+   * Backends that cannot express a ceiling ignore it, same as `maxCltvBlocks`.
+   */
+  timeoutMs: number
+}
+
+export interface SendFeeEstimate {
+  /**
+   * What routing THIS payment is expected to cost the solver, in sats.
+   *
+   * The quantity {@link PayInvoiceParams.maxFeeSats} has to cover — the number named by
+   * the mainnet refusal `maxFeeSats does not cover fee estimate [value: 10, expected: 11
+   * sats]`, learned BEFORE the refusal instead of from it.
+   *
+   * A COST rather than a rate, in exactly the sense `NetworkFeeInputs.costSats` means:
+   * it varies with the amount and the destination and is not expressible as a rate at
+   * all, which is why the question is asked per payment.
+   *
+   * Rounded UP where a backend answers in finer units than a sat. Under-reporting is the
+   * direction that costs money — a quote priced off it under-charges and the solver eats
+   * the difference — while over-reporting only makes one quote less competitive.
+   */
+  feeSats: number
+  /**
+   * An opaque token the backend will honour if it is handed back to
+   * {@link SendBackend.payInvoice} as {@link PayInvoiceParams.feeHandle}.
+   *
+   * Optional, and most backends mint nothing: an estimate is usually just a reading. It
+   * exists so the prepare-then-execute backends are expressible — the ones where the
+   * first call returns the fee for THIS payment and the second spends against it — since
+   * without it their exact figure would have to be re-derived by a second estimate that
+   * may answer differently.
+   *
+   * Opaque to everything above the adapter, and persistable by construction. See
+   * {@link PayInvoiceParams.feeHandle} for what a backend must do with one it cannot
+   * honour.
+   */
+  feeHandle?: string
 }
 
 export interface Balance {
@@ -288,6 +379,47 @@ export interface SendBackend {
   getBalance(): Promise<Balance>
 
   payInvoice(params: PayInvoiceParams): Promise<PaymentResult>
+
+  /**
+   * What paying this invoice is expected to cost in routing fees, or null when the
+   * backend cannot say for THIS payment.
+   *
+   * The question the port could not previously ask. {@link PayInvoiceParams.maxFeeSats}
+   * is a budget the solver IMPOSES, not a cost it learns, so the only way a real figure
+   * ever reached this tree was a refusal — `maxFeeSats does not cover fee estimate
+   * [value: 10, expected: 11 sats]`, which is why `MIN_ROUTING_FEE_CAP_SATS` is a
+   * guessed floor with headroom rather than a number anybody measured.
+   *
+   * Optional, and the two ways of not answering are different facts:
+   *
+   *  - ABSENT — this backend never estimates: nothing it does is routed, or the only
+   *    way it could find out is a probe too expensive or too unreliable to be worth
+   *    trusting. Known at wiring time, so a caller decides once rather than per payment.
+   *  - PRESENT, RETURNS NULL — it usually can, but not for this payment: no route found,
+   *    the probe ran out of the time it was given, the node is too old for the call.
+   *
+   * NULL RATHER THAN A THROW for those misses, which INVERTS what
+   * {@link getSendHtlcState} and {@link ReceiveBackend.getOwnInvoiceState} require. There
+   * a wrong null moves money — it re-submits against a live commitment, or skips a refund
+   * — so the conservative answer is to fail. Here a missing answer costs nothing: the
+   * caller falls back to whatever flat it was configured with, which is the number it
+   * used before this method existed. An implementation that throws on a routine miss
+   * turns a harmless non-answer into a failed quote. Implementations still throw for a
+   * fault they do not RECOGNISE, because an unmapped rejection is a fact about the
+   * adapter rather than about the route, and answering null for it would make a broken
+   * estimator indistinguishable from an expensive one.
+   *
+   * NOT A ROUTABILITY VERDICT. A backend that finds nothing here may well pay the invoice
+   * — a probe fails for reasons a payment does not — so a caller must never decline a
+   * swap, or refuse to quote one, because this answered null. It prices; it does not
+   * admit.
+   *
+   * NOT A PROMISE either, with or without a {@link SendFeeEstimate.feeHandle}. A quote is
+   * followed by the client funding a lockup, which takes as long as it takes, and the fee
+   * can move in between. `maxFeeSats` is what guards payment time; this only makes the
+   * quote honest.
+   */
+  estimateSendFee?(params: EstimateSendFeeParams): Promise<SendFeeEstimate | null>
 
   /**
    * A stable, PUBLIC identifier for the wallet this backend is pointed at.

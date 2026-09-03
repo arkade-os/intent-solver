@@ -13,6 +13,7 @@ import {
   getChannelBalance,
   getInvoice,
   getPayment as lndGetPayment,
+  getRoutingFeeEstimate,
   getWalletInfo,
   payViaPaymentRequest,
   settleHodlInvoice,
@@ -27,6 +28,7 @@ import type {
   PaymentFailureReason,
   Balance,
   CreateHoldInvoiceParams,
+  EstimateSendFeeParams,
   HoldInvoice,
   HoldState,
   HoldStatus,
@@ -34,6 +36,7 @@ import type {
   PayInvoiceParams,
   PaymentResult,
   PaymentStatus,
+  SendFeeEstimate,
 } from '@arkade-os/solver-core/ports/lightning.js'
 
 /**
@@ -232,6 +235,67 @@ export const isInvoiceNotFound = (error: unknown): boolean => {
   return inner?.code === 5 || (typeof inner?.details === 'string' && /unable to locate invoice/i.test(inner.details))
 }
 
+/**
+ * Shortest probe budget this adapter will ask for, in milliseconds.
+ *
+ * The vendor converts our millisecond ceiling to whole seconds with `Math.round` and
+ * then treats a zero as "unset", falling back to its OWN sixty-second default
+ * (`get_routing_fee_estimate.js`: `timeout: msAsSecs(timeout) || defaultTimeoutSeconds`).
+ * So a caller asking for 200ms would buy the longest probe on offer rather than the
+ * shortest, and the ceiling `EstimateSendFeeParams.timeoutMs` exists to impose would
+ * invert into its opposite at exactly the value a caller in a hurry would pick. Flooring
+ * at one whole second is the only budget that survives the conversion.
+ */
+export const MIN_ROUTE_FEE_PROBE_MS = 1000
+
+export const probeTimeoutMs = (timeoutMs: number): number => Math.max(MIN_ROUTE_FEE_PROBE_MS, timeoutMs)
+
+/**
+ * LND answers in millisats, as a decimal string; the port speaks whole sats.
+ *
+ * Rounds UP, per {@link SendFeeEstimate.feeSats}: a fee reported a sat low is a quote
+ * priced a sat low, which the solver pays out of its own spread on every swap.
+ *
+ * Throws rather than coercing an unparseable figure, because every fallback is worse. A
+ * NaN would compare false against every cap and floor downstream; a silent 0 would quote
+ * a free execution. The throw lands in `estimateSendFee`'s unrecognised branch, which is
+ * where a response this adapter cannot read belongs.
+ */
+export const feeSatsFromMtokens = (mtokens: string): number => {
+  const msat = Number(mtokens)
+  if (!Number.isFinite(msat) || msat < 0) throw new Error(`LND reported an unreadable routing fee: ${mtokens}`)
+  return Math.ceil(msat / 1000)
+}
+
+/**
+ * Whether a `getRoutingFeeEstimate` rejection is one of the ordinary misses the port
+ * answers null for, rather than a fault to re-throw.
+ *
+ * Two shapes, and both mean "no number for this payment" rather than "the node is
+ * broken":
+ *
+ *  - `RouteToDestinationNotFound` — the vendor's own mapping of any
+ *    `failure_reason` other than none, so it covers the probe finding no route AND the
+ *    probe running out of the time it was given. Neither is a verdict on whether the
+ *    invoice is payable: a probe fails where a payment succeeds, which is why the port
+ *    forbids reading a null as a reason to decline the swap.
+ *  - a nested gRPC UNIMPLEMENTED — `estimateRouteFee` does not exist before LND 0.18.4,
+ *    so an older node rejects every call. A permanent, knowable absence of the
+ *    capability, which is precisely what null is for.
+ *
+ * UNAVAILABLE is deliberately NOT here. A node that cannot be reached is the same fault
+ * every other call on this adapter would hit, and reporting it as "no estimate" would
+ * leave a dead backend looking exactly like a working one whose routes happen to be
+ * unpriceable — quotes would silently fall back to the configured flat and nothing would
+ * ever say why.
+ */
+export const isNoFeeEstimate = (error: unknown): boolean => {
+  if (!Array.isArray(error)) return false
+  if (error[1] === 'RouteToDestinationNotFound') return true
+  if (error[1] !== 'UnexpectedGetRoutingFeeEstimateError') return false
+  return (error[2] as { err?: { code?: number } } | undefined)?.err?.code === 12
+}
+
 export interface AdapterConfig {
   /** `host:port` of the LND node's gRPC listener. */
   socket: string
@@ -330,6 +394,55 @@ export class LndLightningBackendAdapter implements LightningBackend {
       // idempotencyKey goes unused here because LND already dedups by
       // payment hash: a retried call for the same invoice cannot double-pay.
       return { id: paymentHash, status: 'pending' }
+    }
+  }
+
+  /**
+   * LND can answer, so it does — by PROBING the invoice it would pay.
+   *
+   * ## Why this call and not `queryroutes`
+   *
+   * Both exist and only one is asked the port's question. `queryroutes` prices a
+   * destination, an amount and a hint list that this adapter would have to rebuild out
+   * of the BOLT11 itself, and the rebuild is where a wrong answer gets in: drop a route
+   * hint and it reports no route for an invoice that pays fine, miss the payment address
+   * that permits splitting and it prices a single route the payment would never take.
+   * `estimateRouteFee` is handed the payment request whole and drives LND's own
+   * pathfinding with the invoice's own parameters, so what is measured is what will
+   * later be paid. Given a choice between a cheap number about a different payment and a
+   * costly one about this payment, the port wants the second — a wrong estimate is worse
+   * than none, and the reconstruction is the wrong one.
+   *
+   * ## What it costs, and what the answer is worth
+   *
+   * It is a probe. Real HTLCs go to the destination and fail there, which takes seconds,
+   * briefly ties up outbound liquidity, and is traffic somebody else's node absorbs. LND
+   * is explicit that the `timeout` is not a hard stop either — "the probing process
+   * itself can take longer than the timeout if the HTLC becomes delayed or stuck" — so
+   * {@link EstimateSendFeeParams.timeoutMs} bounds the loop, not the call. A caller that
+   * asks this once per quote, for anything a taker can trigger, has built a free probing
+   * service; the port says as much, and this is the adapter that makes it true.
+   *
+   * LND also documents `routing_fee_msat` as a LOWER BOUND: the successful probe's route
+   * is priced, and a payment that has to retry past a failure pays more. Still worth
+   * having. The number it replaces is a flat an operator guessed at boot, and a measured
+   * floor for this invoice beats a guess about every invoice — the guess is what left
+   * `MIN_ROUTING_FEE_CAP_SATS` sitting one sat under a real backend's minimum.
+   */
+  async estimateSendFee(params: EstimateSendFeeParams): Promise<SendFeeEstimate | null> {
+    try {
+      const estimate = await getRoutingFeeEstimate({
+        lnd: this.lnd,
+        request: params.invoice,
+        timeout: probeTimeoutMs(params.timeoutMs),
+      })
+      // No `feeHandle`. LND reserves nothing: this probe and the later
+      // `payViaPaymentRequest` are unconnected calls, and minting a token would claim a
+      // link between them that does not exist.
+      return { feeSats: feeSatsFromMtokens(estimate.fee_mtokens) }
+    } catch (error) {
+      if (isNoFeeEstimate(error)) return null
+      throw error
     }
   }
 
