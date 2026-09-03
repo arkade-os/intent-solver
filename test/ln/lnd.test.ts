@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { forgeInvoiceWithPreimage } from '@arkade-os/solver-rails-fake/ln/fake/bolt11.js'
+import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
 
 // `payViaPaymentRequest` and `getWalletInfo` are request/response calls made on
 // a gRPC client the adapter constructs internally, so the only way to assert
@@ -303,9 +304,17 @@ describe('LndLightningBackendAdapter.getOwnInvoiceState', () => {
 describe('LndLightningBackendAdapter.createInvoice', () => {
   const TIMESTAMP = 1_800_000_000
   const EXPIRY_SECONDS = 900
+  /**
+   * AMOUNTLESS, because that is what this method asks LND for and therefore the
+   * only shape the real return value ever takes.
+   *
+   * An amountful forge here is the mock that hid a total failure: `decodeInvoice`
+   * REQUIRES an amount, so reading the expiry through it threw `missing_amount`
+   * on every deposit invoice ever minted, while a test feeding it a 1000-sat
+   * invoice passed. The mock has to be the invoice production produces.
+   */
   const forged = forgeInvoiceWithPreimage({
     network: 'bcrt',
-    amountSats: 1000,
     timestamp: TIMESTAMP,
     expirySeconds: EXPIRY_SECONDS,
   })
@@ -331,6 +340,20 @@ describe('LndLightningBackendAdapter.createInvoice', () => {
     // The `NaN` this guards against is not caught by a truthiness check —
     // `Number.isFinite` is, and the console arithmetic depends on it.
     expect(Number.isFinite(minted.expiresAt)).toBe(true)
+  })
+
+  it('reads an AMOUNTLESS invoice, which is the only kind it mints', async () => {
+    // The regression this describe block was blind to. The invoice above carries
+    // no amount, so a reader that requires one refuses it — and the refusal did
+    // not surface as a decoder error but as the Lightning deposit option quietly
+    // never appearing, with the reason printed on the onchain option instead.
+    expect(() => decodeInvoice(forged.invoice)).toThrow(/missing_amount/)
+
+    const adapter = await LndLightningBackendAdapter.create({ socket: 's', cert: 'c', macaroon: 'm' })
+
+    await expect(adapter.createInvoice!({ memo: 'solver float deposit' })).resolves.toMatchObject({
+      expiresAt: TIMESTAMP + EXPIRY_SECONDS,
+    })
   })
 
   it('asks for an AMOUNTLESS invoice unless an amount was given', async () => {

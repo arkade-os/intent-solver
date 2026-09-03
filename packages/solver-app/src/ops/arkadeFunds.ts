@@ -154,5 +154,10 @@ export const arkadeFundSource = (services: Services): FundSource => ({
   readBalance: () => arkadeBalance(services),
   // Arkade FIRST: it is the one that needs no settlement, so an operator who
   // takes the top option gets spendable float rather than a second chore.
-  depositOptions: async () => [await arkadeOffchainDeposit(services), await arkadeDeposit(services)],
+  //
+  // `Promise.all` because neither read depends on the other — same shape as
+  // `railBalance`'s three concurrent reads. The ORDER of the array is the policy
+  // above and is unaffected: `Promise.all` preserves it regardless of which
+  // settles first.
+  depositOptions: async () => Promise.all([arkadeOffchainDeposit(services), arkadeDeposit(services)]),
 })

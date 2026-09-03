@@ -22,7 +22,7 @@ import {
 } from 'lightning'
 import { htlcDeadlineFromHeight } from '@arkade-os/solver-core/core/receive.js'
 import { ROUTE_CLTV_BUDGET_BLOCKS } from '@arkade-os/solver-core/core/send.js'
-import { decodeInvoice, paymentHashOf } from '@arkade-os/solver-core/invoice/decode.js'
+import { expiresAtOf, paymentHashOf } from '@arkade-os/solver-core/invoice/decode.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import type {
   PaymentEvidence,
@@ -614,7 +614,10 @@ export class LndLightningBackendAdapter implements LightningBackend {
       ...(params.amountSats === undefined ? {} : { tokens: params.amountSats }),
       ...(params.memo === undefined ? {} : { description: params.memo }),
     })
-    return { invoice: created.request, expiresAt: decodeInvoice(created.request).expiresAt }
+    // `expiresAtOf`, NOT `decodeInvoice`: the latter requires an amount and this
+    // invoice deliberately has none, so it threw `missing_amount` on every
+    // deposit invoice this ever minted. See its doc comment in `invoice/decode.ts`.
+    return { invoice: created.request, expiresAt: expiresAtOf(created.request) }
   }
 
   /** `this.lnd` is one raw gRPC client per LND subservice — close every one. */
