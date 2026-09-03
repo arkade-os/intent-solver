@@ -468,8 +468,14 @@ describe('the lightning rail source', () => {
     // than "it could not right now".
     expect(options[0]!.note).toContain('Lightning deposit unavailable')
     expect(options[0]!.note).toContain('14 UNAVAILABLE')
-    // And the note it already carried is still there, not replaced.
-    expect(options[0]!.note).toMatch(/does not open a channel/i)
+
+    // The note it already carried is still there, not replaced — asserted
+    // against the note the UNFAILING path actually produces rather than against
+    // a phrase copied out of it. Prose gets rewritten; a test that hardcodes a
+    // sentence fails on the edit instead of on the behaviour, and one that
+    // reads the real base note keeps checking the thing it is named for.
+    const base = (await railFundSource(fakeServices())!.depositOptions!())[0]!.note!
+    expect(options[0]!.note!.startsWith(base)).toBe(true)
   })
 
   it('says nothing about Lightning when the backend simply cannot mint', async () => {
