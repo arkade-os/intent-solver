@@ -63,6 +63,29 @@ move independently.
 > If you change one of these because "90 seems long", check which reason you are
 > arguing with. Three of them will not care.
 
+### The unit these are all expressed in
+
+Every constant on this page is **unix seconds**, and the deadline model stays
+that way end to end. That is true even when the covenant's own CSV leaves count
+BLOCKS, which they do against a block-typed arkd (see the runbook's "Block-typed
+timelocks").
+
+The two meet at exactly three bounds, and each converts before it adds:
+
+| bound | where |
+|---|---|
+| `refundLocktimeFor`'s unilateral bound | `core/send.ts` |
+| `onchainRefundLocktimeFor`'s server-independent bound | `core/onchainSend.ts` |
+| `minHtlcWindowFor`'s gate (d) | `core/receive.ts` |
+
+Conversion is at `NOMINAL_BLOCK_SECONDS` (600), the SDK's own figure — this
+number's job is to agree with whoever derives the same script.
+
+> A block delay left unconverted at any of those three does not lose precision,
+> it collapses the bound: 20 blocks read as 20 seconds puts the client's refund
+> essentially at `now`. That is the double-collect window the bound exists to
+> close.
+
 ### 2 hours
 
 | Constant | Where | Why |

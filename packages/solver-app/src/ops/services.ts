@@ -27,6 +27,8 @@ import { loadConfig, swapDbPath, type Config } from '../config.js'
 import type { PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { onchainCorridorPricing, onchainFeeRateSampler } from './onchainPricing.js'
 import { claimSpendVsize, fundingTxVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
+import { esploraChainTip } from '@arkade-os/solver-rails/onchain/chainTip.js'
+import { createEsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
 import type { Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { OnchainSendSwapStore, type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
@@ -391,9 +393,25 @@ export const createServices = async (
       vsize,
     })
 
+  /**
+   * Where to read the chain tip, for a deployment whose timelocks count blocks.
+   *
+   * Built once and shared by both Lightning services so every swap in a tick resolves
+   * its deadlines against ONE height — two swaps in a tick deciding against different
+   * heights is how one refund gets pushed and its neighbour does not.
+   *
+   * Undefined on a seconds-typed deployment, which never asks for a height. The
+   * orchestrators throw a named error rather than guessing if a block-typed row ever
+   * reaches them without one.
+   */
+  const chainTip = config.chainTipEsploraUrl
+    ? esploraChainTip(createEsploraClient(config.chainTipEsploraUrl))
+    : undefined
+
   const service = enabled('arkade:BTC->lightning:BTC')
     ? new SendSwapService({
         store,
+        chainTip,
         ln: rail!.ln,
         arkade: arkadeOps,
         backendName: config.lnBackend ?? undefined,
@@ -523,6 +541,7 @@ export const createServices = async (
   const receiveService = enabled('lightning:BTC->arkade:BTC')
     ? new ReceiveSwapService({
         store: receiveStore,
+        chainTip,
         ln: rail!.ln,
         arkade: receiveOps,
         limits: policy.corridorLimits['lightning:BTC->arkade:BTC'],

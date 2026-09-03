@@ -37,6 +37,7 @@ import type {
 } from '@arkade-os/solver-core/ports/lightning.js'
 import { ORPHANED_REGISTRATION_SECONDS } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { rfqStateFromRow, rfqStatusPayload } from '@arkade-os/solver-corridors/wire/payloads.js'
+import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 
 /**
  * The CLTV terms, with no route hint and an enforcing backend unless stated.
@@ -2652,5 +2653,109 @@ describe('a denylisted route hint', () => {
     expect(row.state).toBe('paid')
     expect(row.failureReason).toBeNull()
     expect(ln.payCalls).toHaveLength(1)
+  })
+})
+
+/**
+ * BLOCK-TYPED TIMELOCKS on the send leg.
+ *
+ * Two things this leg has that the receive leg does not: the deadline is chosen
+ * by `refundLocktimeFor` before it is converted, and it must reach BOTH the
+ * covenant and the row as the same value. They derive each other, so a second
+ * conversion anywhere writes a script the row cannot spend.
+ */
+describe('SendSwapService — block-typed timelocks', () => {
+  const BLOCK_DELAYS = {
+    unilateralClaimDelay: 20,
+    unilateralRefundDelay: 20,
+    unilateralRefundWithoutReceiverDelay: 28,
+  }
+  const TIP = 800
+  const NOMINAL = 600
+
+  const blockService = (chainTip?: { height(): Promise<number> }) =>
+    new SendSwapService({
+      store,
+      ln,
+      arkade: { ...arkade, delays: BLOCK_DELAYS },
+      limits: { minSats: 500, maxSats: 10_000 },
+      invoicePrefix: 'bc',
+      maxExposedSats: 5_000,
+      totalCommitted: () => store.committedSats(),
+      admission: new AdmissionControl(),
+      chainTip,
+      now: () => clock,
+    })
+
+  const staticTip = { height: async () => TIP }
+
+  it('writes the refund deadline as a HEIGHT that still carries the unilateral bound', async () => {
+    const outcome = await blockService(staticTip).quote(INVOICE, REFUND_ADDRESS, {
+      clientRefundPubkey: CLIENT_REFUND_PUBKEY,
+    })
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+    const row = await store.get(outcome.swap.id)
+
+    // A height, not a timestamp — and out ahead of the tip.
+    expect(row.refundLocktime).toBeLessThan(500_000_000)
+    expect(row.refundLocktime).toBeGreaterThan(TIP)
+
+    // The money claim, projected back: the client's refund still opens after our
+    // own server-independent claim could. 20 blocks left raw would put it 20
+    // seconds out, which is the double-collect window the bound exists to close.
+    const asSeconds = clock + (row.refundLocktime - TIP) * NOMINAL
+    expect(asSeconds).toBeGreaterThanOrEqual(clock + BLOCK_DELAYS.unilateralClaimDelay * NOMINAL + REFUND_SAFETY_MARGIN)
+  })
+
+  it('builds the covenant from that same height, so the row can spend its own lockup', async () => {
+    const outcome = await blockService(staticTip).quote(INVOICE, REFUND_ADDRESS, {
+      clientRefundPubkey: CLIENT_REFUND_PUBKEY,
+    })
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+    const row = await store.get(outcome.swap.id)
+    // `assertScriptMatchesRow` runs this same check before every claim and
+    // refund: a second conversion anywhere derives a script the row cannot spend.
+    expect(hex.encode(covenantScriptFromRow(row).pkScript)).toBe(row.pkScript)
+  })
+
+  it('refuses to quote at all when block mode has nowhere to read a height', async () => {
+    await expect(
+      blockService(undefined).quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY }),
+    ).rejects.toThrow(/no chainTip provider is wired/)
+  })
+
+  it('resolves the height to seconds before ordering it against a route CLTV budget', async () => {
+    // The rail that cannot cap a route is the one that consults the deadline
+    // directly. A raw height there reads as a deadline in 1970, so the row is
+    // refused `uncapped_route_deadline_too_short` with a lockup already funded.
+    ln.enforcesRouteCltv = false
+    ln.routeCltvBudgetBlocks = UNENFORCED_ROUTE_CLTV_BUDGET_BLOCKS
+    const svc = blockService(staticTip)
+    const outcome = await svc.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+    const swap = outcome.swap
+    // Non-vacuous: the stored value taken at face value fails this very gate.
+    expect(
+      deadlineContainsHtlc(cltvOf(180, 0, UNENFORCED_ROUTE_CLTV_BUDGET_BLOCKS, false), swap.refundLocktime, clock),
+    ).toBe(false)
+
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+    const row = await svc.tick(swap.id)
+    expect(row.state).not.toBe('refused')
+    expect(row.failureReason ?? '').not.toContain('uncapped_route_deadline_too_short')
+    expect(ln.payCalls).toHaveLength(1)
+  })
+
+  it('leaves a seconds-typed deployment writing a unix-seconds deadline, as it always did', async () => {
+    // The additive claim at this level: the default service has no `chainTip`,
+    // its ladder is seconds, and nothing about block mode reaches it.
+    const outcome = await quoted()
+    const row = await store.get(outcome.swap.id)
+    expect(row.refundLocktime).toBeGreaterThanOrEqual(500_000_000)
+    // The unilateral bound, unconverted because a seconds delay converts to
+    // itself — which is the whole additive claim, at the one term that changed.
+    expect(row.refundLocktime).toBeGreaterThanOrEqual(clock + arkade.delays.unilateralClaimDelay + REFUND_SAFETY_MARGIN)
   })
 })

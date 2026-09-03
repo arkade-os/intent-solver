@@ -692,8 +692,12 @@ describe('ARK_UNILATERAL_EXIT_DELAY', () => {
   })
 
   it.each([
-    [300, /below 512s — it is seconds, not a block count/],
-    [511, /below 512s — it is seconds, not a block count/],
+    // 300 is no longer refused here: it is a valid BLOCK count, and whether this
+    // deployment counts blocks is a fact about its arkd, not about this variable. The
+    // typo that used to be caught here — seconds where the server counts blocks, or the
+    // reverse — is caught in `createArkadeContext`, which holds the server's own
+    // advertised delay and can say which of the two disagrees.
+    [511, /beyond the 503 a ladder can carry/],
     [999_999_999, /beyond the 33553920s BIP68 can encode/],
   ])('refuses %s at loadConfig, naming the variable rather than the server', (raw, message) => {
     // Both bounds are enforced downstream by `deriveUnilateralDelays` too, and
@@ -702,6 +706,11 @@ describe('ARK_UNILATERAL_EXIT_DELAY', () => {
     // debug arkd over a value they set themselves.
     process.env.ARK_UNILATERAL_EXIT_DELAY = String(raw)
     expect(() => loadConfig()).toThrow(message)
+  })
+
+  it.each([1, 20, 144, 503])('accepts %s as a block count, deferring the unit check to the server', (raw) => {
+    process.env.ARK_UNILATERAL_EXIT_DELAY = String(raw)
+    expect(loadConfig().arkade.unilateralExitDelayOverride).toBe(raw)
   })
 
   it('accepts the BIP68 ceiling itself, since the bound is inclusive', () => {

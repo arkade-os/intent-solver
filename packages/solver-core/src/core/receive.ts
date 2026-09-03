@@ -12,6 +12,7 @@ import {
   deriveUnilateralDelays,
   HOUR,
   MINUTE,
+  rawDelaySeconds,
   SEQUENCE_GRANULARITY_SECONDS,
 } from './timelocks.js'
 
@@ -87,7 +88,11 @@ export const minHtlcWindowFor = (
     // (d) the solver's own recourse must open before `E`. Zero, not reduced, when the
     // operator accepts the gap: (b) and (c) still bind, so this is "no solo-recourse
     // guarantee", not "no deadline".
-    acceptUnilateralGap ? 0 : unilateralRefundWithoutReceiverDelay + UNILATERAL_RECOURSE_MARGIN,
+    //
+    // CONVERTED: every other term here is seconds and this delay may count blocks. Left
+    // raw, a 28-block recourse reads as 28 seconds and this gate — the one guaranteeing
+    // the solver's own recourse opens before `E` — stops binding at all.
+    acceptUnilateralGap ? 0 : rawDelaySeconds(unilateralRefundWithoutReceiverDelay) + UNILATERAL_RECOURSE_MARGIN,
   )
 
 /**
