@@ -1478,6 +1478,28 @@ Three things worth knowing before a run:
 recoverable: 235696`, settled back to `available: 233338` (the 2358-sat
   difference is the operator's 1% intent fee).
 
+- **…but recovery can fail outright, and then re-funding is the only move.**
+  Observed 2026-09-03 against arkd `v0.9.16` with `@arkade-os/sdk` 0.4.67, on
+  two independent wallets — one holding an Arkade asset, one not, so the asset
+  is not implicated:
+
+  ```
+  balance before: available: 0, recoverable: 95000
+  settle skipped: INTERNAL_ERROR (0): missing forfeit transactions
+  balance after:  available: 0, recoverable: 95000
+  ```
+
+  `regtest-settle.mjs` reports the skip and exits 0, so a script that only
+  checks the exit code reads this as success. Check the `balance after` line,
+  not the status. Both wallets had been funded roughly three hours earlier,
+  comfortably past this stack's `ARKD_VTXO_TREE_EXPIRY`.
+
+  When this happens the advice above inverts: a fresh mnemonic funded from
+  scratch is the way through, and the stranded balance stays stranded. That is
+  the trade the paragraph above warns against, and it is still the right one
+  when the recovery path itself refuses — papering over a state you can clear
+  is a mistake, papering over one you cannot is just continuing.
+
 - **arkade-regtest's miner can be up but not mining.** Only `receiveOnchain`
   cares, and it names the miner rather than just timing out.
 - **Renewal pays an intent fee, and the SDK's own `renewVtxos` does not.**
