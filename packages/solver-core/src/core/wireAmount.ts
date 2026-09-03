@@ -88,3 +88,41 @@ export const WIRE_AMOUNT = z
     }
   })
   .transform((value) => (typeof value === 'number' ? value : Number(value)))
+
+/**
+ * The same field on an ASSET leg: § 2.1's grammar, carried as a `bigint`.
+ *
+ * {@link WIRE_AMOUNT} stops at `Number.MAX_SAFE_INTEGER` deliberately - its
+ * docstring says it lands the encoding and not the range, because everything
+ * downstream of it on the four BTC corridors is a `number`. That reasoning does
+ * not reach an Arkade asset leg, where the amount is a bigint the whole way:
+ * `Offer.wantAmount` is one, `evaluateOfferFill` compares them, and
+ * `db/offerFills.ts` already persists them as TEXT rather than INTEGER for the
+ * same reason. Reusing the sats schema here would refuse one whole unit of an
+ * 18-decimal asset - 10^18, a hundred times the ceiling - which is § 2.1's own
+ * worked example of the misprice it exists to prevent.
+ *
+ * NO JSON-NUMBER CARVE-OUT. § 2.1 admits one for `v: 1` compatibility, but only
+ * where it is provably lossless: the leg's asset must have 8 decimals or fewer.
+ * An Arkade asset's precision is declared at ITS OWN genesis and is not
+ * knowable from this schema, so the one encoding whose losslessness cannot be
+ * checked is refused rather than assumed. Nothing is lost by that strictness -
+ * the corridor this serves is new, so it has no client already sending numbers.
+ */
+export const WIRE_ASSET_AMOUNT = z
+  .string()
+  .superRefine((value, ctx) => {
+    if (!CANONICAL_DECIMAL.test(value)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'amount must be a canonical decimal string of atomic units (no sign, point or exponent)',
+      })
+      return
+    }
+    // Positive for the reason the sats form gives: a zero amount is not a swap,
+    // even though the canonical grammar admits "0" as a number in general.
+    if (BigInt(value) <= 0n) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'amount must be positive' })
+    }
+  })
+  .transform((value) => BigInt(value))
