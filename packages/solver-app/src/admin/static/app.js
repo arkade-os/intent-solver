@@ -116,6 +116,75 @@ const balanceRows = (balance) => {
   )
 }
 
+/* ---- assets (block owned by the asset work) ----------------------------- */
+
+/**
+ * An asset's identity: the id, with a ticker in front of it when one is known.
+ *
+ * THE ID IS THE IDENTITY. A ticker is metadata the issuer chose — optional, and
+ * not unique — so two different assets may both call themselves the same thing.
+ * Shown as the identity it would let an operator confirm they hold something
+ * they do not. The full id is on the title so it can be read and copied without
+ * spending a line of the panel on 64 characters of hex.
+ */
+const assetLabel = (asset) =>
+  h(
+    'span',
+    asset.ticker ? h('span', asset.ticker, ' ') : null,
+    h('span.faint', { title: asset.assetId }, asset.shortId),
+  )
+
+/**
+ * What the solver holds in Arkade assets, and what it could pay out of RIGHT NOW.
+ *
+ * TWO NUMBERS, NOT ONE, whenever they differ. An offer fill is decided against
+ * `availableAssets`; `assets` also counts holdings that are gated, intent-locked
+ * or awaiting recovery. Showing only the total is how an operator concludes they
+ * can cover a fill that would fail at submission after the maker was told yes.
+ *
+ * Amounts are BASE UNITS, matching what an offer names, and are strings because
+ * an asset supply overflows a double. `decimals` rides alongside as a label
+ * rather than being applied, so nothing here is a number an operator could
+ * compare against a taker's request and be wrong by a power of ten.
+ */
+const assetRows = (balance) => {
+  if (balance === null || typeof balance !== 'object') return null
+  const held = Array.isArray(balance.assets) ? balance.assets : []
+  if (held.length === 0) return null
+  const available = new Map(
+    (Array.isArray(balance.availableAssets) ? balance.availableAssets : []).map((a) => [a.assetId, a.amount]),
+  )
+  return h(
+    'span',
+    held.map((asset, index) => {
+      const spendable = available.get(asset.assetId) ?? '0'
+      return h(
+        'span',
+        index > 0 ? h('span.faint', ' · ') : null,
+        assetLabel(asset),
+        ' ',
+        h('span', spendable),
+        spendable === asset.amount ? null : h('span.muted', ` of ${asset.amount} held`),
+        typeof asset.decimals === 'number' && asset.decimals > 0 ? h('span.faint', ` (${asset.decimals}dp)`) : null,
+      )
+    }),
+  )
+}
+
+/**
+ * The `assets` row of a `dl.kv`, or nothing at all when no asset is held.
+ *
+ * Returns the pair so the row disappears entirely for a sats-only solver rather
+ * than showing an empty label — most operators never hold one, and a permanent
+ * blank row is a question they have to re-answer on every glance.
+ */
+const assetRowsPair = (balance) => {
+  const rows = assetRows(balance)
+  return rows ? [h('dt', 'assets'), h('dd', rows)] : []
+}
+
+/* ---- end assets block --------------------------------------------------- */
+
 /** Corridor label short enough for a table cell. */
 const corridorLabel = (corridor) =>
   ({
@@ -438,6 +507,9 @@ const overviewView = () => {
           ),
           h('dt', 'arkade'),
           h('dd', o.balances.arkadeError ? h('span.muted', o.balances.arkadeError) : balanceRows(o.balances.arkade)),
+          /* assets: begin */
+          ...(o.balances.arkadeError ? [] : assetRowsPair(o.balances.arkade)),
+          /* assets: end */
           h('dt', 'pubkey'),
           h('dd.faint', shortId(o.providerPubkey)),
         ),
@@ -617,6 +689,9 @@ const walletView = () => {
           h('dd.faint', w.arkade.addressError ? h('span.muted', w.arkade.addressError) : (w.arkade.address ?? '—')),
           h('dt', 'balance'),
           h('dd', w.arkade.balanceError ? h('span.muted', w.arkade.balanceError) : balanceRows(w.arkade.balance)),
+          /* assets: begin */
+          ...(w.arkade.balanceError ? [] : assetRowsPair(w.arkade.balance)),
+          /* assets: end */
         ),
       ),
       h(
@@ -651,6 +726,15 @@ const walletView = () => {
             'div',
             h('p', `${pool.pieces.length} piece(s): `, h('span.faint', pool.pieces.slice(0, 16).map(sats).join('  '))),
             h('p.muted', pool.plan.reason),
+            /* assets: begin — why the pieces above add up to less than the balance */
+            pool.assetEncumberedSats
+              ? h(
+                  'p.muted',
+                  `${sats(pool.assetEncumberedSats)} sat across ${pool.assetBearingPieces} piece(s) cannot fund a swap: ` +
+                    'those sats are carrying an asset, and an asset has to ride on sats.',
+                )
+              : null,
+            /* assets: end */
             h(
               'div.toolbar',
               actButton(

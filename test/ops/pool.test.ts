@@ -15,6 +15,7 @@
 import { createCorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
 import { describe, it, expect, vi } from 'vitest'
 import { mintPool, poolPlan, committedAcrossCorridors } from '@arkade-os/solver-app/ops/pool.js'
+import { usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 import type { Services } from '@arkade-os/solver-app/ops/services.js'
 import { readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 
@@ -26,12 +27,17 @@ const servicesWith = (over: {
   send?: ReturnType<typeof vi.fn>
   /** Outpoint keys the ledger is holding, as `txid:vout`. */
   reserved?: string[]
+  /**
+   * Whole coins, when a case needs a field beyond `value` — an asset, above all.
+   * `spendable` stays the shorthand for the sats-only cases that are most of them.
+   */
+  coins?: { txid: string; vout: number; value: number; assets?: { assetId: string; amount: bigint }[] }[]
 }) => {
   const committed = over.committed ?? 0
   const send = over.send ?? vi.fn().mockResolvedValue('ark-txid')
   // Real outpoints, not just values: the reserved filter keys on them, and a
   // fixture without them cannot tell a filtered coin from an unfiltered one.
-  const coins = (over.spendable ?? [300_000]).map((value, i) => ({ txid: `coin${i}`, vout: 0, value }))
+  const coins = over.coins ?? (over.spendable ?? [300_000]).map((value, i) => ({ txid: `coin${i}`, vout: 0, value }))
   const stores = {
     store: { committedSats: vi.fn().mockResolvedValue(committed) },
     onchainStore: zero(),
@@ -87,6 +93,85 @@ describe('poolPlan', () => {
     const result = await poolPlan(services)
     expect(result.spendable).toEqual([300_000])
     expect(send).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * The pool used to read a coin's whole `value` and drop its `assets`, which made an
+ * asset-bearing coin indistinguishable from ordinary sats inventory. It is not: an
+ * asset must ride on sats, so spending the coin leaves one dust pinned on the change
+ * output that carries the asset onward. `selectLockupFunding` has discounted for that
+ * since #114; the pool did not, so the two disagreed about what the same coin could
+ * fund — the pool planning against sats the funding path already knew it could not
+ * reach.
+ *
+ * `getSpendableVtxos` does not filter these out and cannot be asked to: the SDK builds
+ * `getBalance().availableAssets` by walking that very set and reading `vtxo.assets`,
+ * so a non-empty `availableAssets` and an asset-bearing spendable coin are the same
+ * fact.
+ */
+describe('poolPlan — an asset-bearing coin is not ordinary sats', () => {
+  const withAsset = (value: number) => ({
+    txid: 'asset0',
+    vout: 0,
+    value,
+    assets: [{ assetId: 'a'.repeat(64), amount: 500n }],
+  })
+  const plain = (value: number) => ({ txid: 'plain0', vout: 0, value })
+
+  it('counts a coin at what it can fund, not at what it holds', async () => {
+    const result = await poolPlan(servicesWith({ coins: [withAsset(100_000)] }))
+    // dust is 330 in this fixture, and that dust is spoken for before the pool gets
+    // a say.
+    expect(result.spendable).toEqual([99_670])
+    expect(result.assetEncumberedSats).toBe(330)
+    expect(result.assetBearingPieces).toBe(1)
+  })
+
+  it('drops a coin worth no more than dust instead of counting it as a piece', async () => {
+    // It can pay for its own asset change and nothing else. Counted, it would occupy
+    // a slot against the pool's `maxCount` ceiling while funding zero swaps — and an
+    // asset corridor mints these routinely as change.
+    const result = await poolPlan(servicesWith({ coins: [plain(300_000), withAsset(330)] }))
+    expect(result.spendable).toEqual([300_000])
+    // The whole coin is encumbered, not merely one dust of it.
+    expect(result.assetEncumberedSats).toBe(330)
+    expect(result.assetBearingPieces).toBe(1)
+  })
+
+  it('never reports more encumbered than a coin actually holds', async () => {
+    // Below dust, so the discount would run past the coin's own value. Unclamped this
+    // reports 330 sat pinned on a coin holding 200 — a figure larger than the float it
+    // is describing, which is worse than saying nothing.
+    const result = await poolPlan(servicesWith({ coins: [plain(300_000), withAsset(200)] }))
+    expect(result.spendable).toEqual([300_000])
+    expect(result.assetEncumberedSats).toBe(200)
+  })
+
+  it('leaves a coin carrying nothing completely alone', async () => {
+    // The constraint the change is held to: a float with no assets plans exactly as
+    // it did, and reports nothing encumbered.
+    const result = await poolPlan(servicesWith({ coins: [plain(300_000), { txid: 'c1', vout: 0, value: 250_000 }] }))
+    expect(result.spendable).toEqual([300_000, 250_000])
+    expect(result.assetEncumberedSats).toBe(0)
+    expect(result.assetBearingPieces).toBe(0)
+  })
+
+  it('does not charge for an asset on a coin a funding has already pinned', async () => {
+    // Reserved coins leave the float before any of this, so one cannot show up as
+    // float an operator is told is unavailable — it is not float at all right now.
+    const result = await poolPlan(servicesWith({ coins: [withAsset(100_000)], reserved: ['asset0:0'] }))
+    expect(result.spendable).toEqual([])
+    expect(result.assetEncumberedSats).toBe(0)
+    expect(result.assetBearingPieces).toBe(0)
+  })
+
+  it('agrees with the funding path about the same coin', async () => {
+    // One rule, shared, rather than two spellings that drift. Were the pool to keep
+    // its own, this is the assertion that would fail first.
+    const coins = [withAsset(100_000), plain(80_000)]
+    const result = await poolPlan(servicesWith({ coins }))
+    expect(result.spendable).toEqual(coins.map((coin) => usableSatsOf(coin, 330)))
   })
 })
 
