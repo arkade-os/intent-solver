@@ -6,15 +6,30 @@
  */
 
 import { planPool, poolTarget } from '@arkade-os/solver-arkade/arkade/vtxoPool.js'
-import { outpointKey } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
+import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 import type { Services } from './services.js'
 import type { CorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
 
 export interface PoolPlan {
-  /** Every spendable VTXO's value, unsorted. */
+  /**
+   * What each spendable VTXO can actually fund, unsorted — its value, less the dust
+   * an asset it carries pins in place. Identical to the raw values for a float
+   * holding no assets. @see usableSatsOf
+   */
   spendable: number[]
   target: ReturnType<typeof poolTarget>
   plan: ReturnType<typeof planPool>
+  /**
+   * Sats the float holds and cannot fund a swap with, because they are pinned under
+   * an asset. Zero for a float holding no assets.
+   *
+   * Reported rather than merely subtracted: silently shrinking the float leaves an
+   * operator reading a smaller number than their balance with nothing saying why, and
+   * "some of your money is doing another job" is the answer they need.
+   */
+  assetEncumberedSats: number
+  /** How many spendable coins carry an asset. Zero for a float holding no assets. */
+  assetBearingPieces: number
 }
 
 /**
@@ -39,16 +54,31 @@ export const poolPlan = async (services: Services): Promise<PoolPlan> => {
   // every pass, and declines in wording `BENIGN_RENEWAL` matches — no failure reported
   // while the coin marches to expiry. Splitting early otherwise costs one cycle.
   //
+  // AN ASSET-BEARING COIN IS NOT ORDINARY SATS INVENTORY, and counting it as such is
+  // how a pool plans against float it cannot spend. The asset has to land somewhere
+  // when the coin is spent, and the SDK routes it onto the sats change output, so one
+  // dust of the coin is committed before the pool gets a say — the same rule the
+  // funding path already applies, shared from it rather than restated here so the two
+  // cannot answer "what can this coin fund" differently. A coin worth no more than
+  // dust drops out entirely: it can pay for its own asset change and nothing else, and
+  // left in it would count as a whole piece against `maxCount` while funding nothing.
   const reserved = services.arkade.reservations.reserved()
-  const spendable = (await services.arkade.wallet.getSpendableVtxos())
-    .filter((vtxo) => !reserved.has(outpointKey(vtxo.txid, vtxo.vout)))
-    .map((vtxo) => vtxo.value)
-  const target = poolTarget(services.config.limits.maxSats, services.config.maxExposedSats)
   const { dust } = await services.arkade.wallet.arkProvider.getInfo()
+  const dustSats = Number(dust)
+  const unreserved = (await services.arkade.wallet.getSpendableVtxos()).filter(
+    (vtxo) => !reserved.has(outpointKey(vtxo.txid, vtxo.vout)),
+  )
+  const usable = unreserved.map((vtxo) => Math.max(0, usableSatsOf(vtxo, dustSats)))
+  const spendable = usable.filter((value) => value > 0)
+  const target = poolTarget(services.config.limits.maxSats, services.config.maxExposedSats)
   return {
     spendable,
     target,
-    plan: planPool({ spendable, target, maxCount: 64, maxOutputs: 8, dust: Number(dust) }),
+    plan: planPool({ spendable, target, maxCount: 64, maxOutputs: 8, dust: dustSats }),
+    // Derived from `usable` rather than re-deriving the dust rule, so this figure
+    // tracks `usableSatsOf` instead of drifting from it the next time it changes.
+    assetEncumberedSats: unreserved.reduce((sum, vtxo, i) => sum + vtxo.value - (usable[i] ?? 0), 0),
+    assetBearingPieces: unreserved.filter((vtxo) => vtxo.assets?.length).length,
   }
 }
 
