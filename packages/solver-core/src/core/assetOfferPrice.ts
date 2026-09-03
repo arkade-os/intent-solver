@@ -27,7 +27,20 @@ export interface OfferPriceMarket {
   feeBps: number
 }
 
-const BPS = 10_000n
+/**
+ * One whole unit, in basis points — and the EXCLUSIVE ceiling on both bps knobs
+ * below.
+ *
+ * Exported so configuration can refuse what this function refuses without
+ * copying the number. `assetMarketConfig.ts` validates an operator's spread
+ * against this exact constant: a config bound written as its own literal could
+ * be widened by one edit while the runtime guard stayed put, which would store
+ * a market that validates and is then refused on every offer — or, worse,
+ * loosened here alone, which is the fund-loss the guard exists to stop.
+ */
+export const BPS_DENOMINATOR = 10_000
+
+const BPS = BigInt(BPS_DENOMINATOR)
 const pow10 = (n: number): bigint => 10n ** BigInt(n)
 
 /**
@@ -59,8 +72,8 @@ export const offerWithinTolerance = (args: {
   // it, and `left >= right` is trivially true — the solver would accept ANY
   // buy_base offer at ANY price. A 100% tolerance is not a configuration, it is
   // the gate switched off, so it is refused rather than honoured.
-  if (market.toleranceBps < 0 || market.toleranceBps >= 10_000) return false
-  if (market.feeBps < 0 || market.feeBps >= 10_000) return false
+  if (market.toleranceBps < 0 || market.toleranceBps >= BPS_DENOMINATOR) return false
+  if (market.feeBps < 0 || market.feeBps >= BPS_DENOMINATOR) return false
 
   const tolerance = BigInt(market.toleranceBps)
   const fee = BigInt(market.feeBps)

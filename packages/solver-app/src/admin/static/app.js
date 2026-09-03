@@ -220,6 +220,7 @@ const VIEWS = [
   ['diagnostics', 'diagnostics'],
   ['discovery', 'discovery'],
   ['settings', 'settings'],
+  ['markets', 'markets'],
   ['audit', 'audit'],
 ]
 
@@ -728,6 +729,220 @@ const settingsView = () => {
     ),
   )
 }
+
+/* ==== asset markets — BEGIN =============================================== *
+ *
+ * CRUD for the asset pairs this solver trades: which asset against which, off
+ * which feed, at what spread and inside what bounds.
+ *
+ * Its own screen rather than rows on `settings`, for the reason
+ * `admin/routes/markets.ts` gives: that page edits a compiled-in list of
+ * scalars, and a market is a record an operator ADDS and DROPS.
+ *
+ * The draft lives here rather than on `state` so that typing into the form does
+ * not re-render the console — the same trick the confirm dialog uses, and for
+ * the same reason: a rebuild hands back a new input with no focus and a caret
+ * at zero, so the field looks fine and silently stops accepting input.
+ * ========================================================================== */
+
+/** The market being edited, or null when the form is closed. */
+let marketDraft = null
+
+/** `null` is the BTC leg everywhere below the wire; `BTC` is what an operator types. */
+const legLabel = (leg) => (leg === null ? 'BTC' : shortId(leg))
+
+const blankMarket = () => ({
+  base: 'BTC',
+  quote: '',
+  baseDecimals: '8',
+  quoteDecimals: '6',
+  feedUrl: '',
+  pricePath: '',
+  toleranceBps: '10',
+  feeBps: '0',
+  sellBaseMin: '',
+  sellBaseMax: '',
+  buyBaseMin: '',
+  buyBaseMax: '',
+  enabled: true,
+})
+
+const draftFrom = (market) => ({
+  base: market.base ?? 'BTC',
+  quote: market.quote ?? 'BTC',
+  baseDecimals: String(market.baseDecimals),
+  quoteDecimals: String(market.quoteDecimals),
+  feedUrl: market.feedUrl,
+  pricePath: market.pricePath,
+  toleranceBps: String(market.toleranceBps),
+  feeBps: String(market.feeBps),
+  sellBaseMin: market.sellBase?.min ?? '',
+  sellBaseMax: market.sellBase?.max ?? '',
+  buyBaseMin: market.buyBase?.min ?? '',
+  buyBaseMax: market.buyBase?.max ?? '',
+  enabled: market.enabled,
+})
+
+/**
+ * A bound is sent only when BOTH halves are filled, because the server rejects
+ * a half-stated one — one alone reads as a bound and is not one. Empty on both
+ * means the direction inherits the deployment-wide pair.
+ */
+const draftBounds = (min, max) => (min.trim() === '' && max.trim() === '' ? null : { min: min.trim(), max: max.trim() })
+
+/**
+ * Decimals and bps go as JSON NUMBERS because they are small and the server
+ * demands integers; the amount bounds go as STRINGS because they are atomic
+ * units and a bigint does not survive JSON.parse.
+ */
+const marketBody = (d) => ({
+  base: d.base,
+  quote: d.quote,
+  baseDecimals: Number(d.baseDecimals),
+  quoteDecimals: Number(d.quoteDecimals),
+  feedUrl: d.feedUrl,
+  pricePath: d.pricePath,
+  toleranceBps: Number(d.toleranceBps),
+  feeBps: Number(d.feeBps),
+  sellBase: draftBounds(d.sellBaseMin, d.sellBaseMax),
+  buyBase: draftBounds(d.buyBaseMin, d.buyBaseMax),
+  enabled: d.enabled,
+})
+
+const field = (label, key, hint) =>
+  h(
+    'p.toolbar',
+    h('span.muted', label),
+    h('input', {
+      value: String(marketDraft[key] ?? ''),
+      size: 44,
+      // No re-render: see the block header.
+      oninput: (e) => (marketDraft[key] = e.target.value),
+    }),
+    hint ? h('span.faint', hint) : null,
+  )
+
+const saveMarket = async () => {
+  try {
+    await api('/api/markets', { method: 'PUT', body: JSON.stringify(marketBody(marketDraft)) })
+    marketDraft = null
+    state.banner = null
+    await load('markets')
+  } catch (error) {
+    // Left OPEN on failure, deliberately. Every refusal here names one field,
+    // and closing the form would make the operator retype ten others to fix it.
+    fail(error)
+  }
+}
+
+const deleteMarket = async (key) => {
+  try {
+    await api(`/api/markets/${encodeURIComponent(key)}`, { method: 'DELETE' })
+    state.banner = null
+    await load('markets')
+  } catch (error) {
+    fail(error)
+  }
+}
+
+const marketForm = () =>
+  h(
+    'section.panel',
+    h('h2', 'market'),
+    // The key is derived from the legs, so re-submitting a pair edits it. Said
+    // out loud because there is no id field to make that obvious.
+    h('p.faint', 'A pair may be configured once. Submitting one that exists edits it.'),
+    field('base', 'base', 'BTC, or a 68-character asset id'),
+    field('quote', 'quote', 'BTC, or a 68-character asset id'),
+    field('base decimals', 'baseDecimals'),
+    field('quote decimals', 'quoteDecimals'),
+    field('feed url', 'feedUrl', 'fetched and checked before this is stored'),
+    field('price path', 'pricePath', 'RFC 6901 pointer; blank derives it where the provider is known'),
+    field('tolerance bps', 'toleranceBps', 'deviation from the feed accepted; below 10000'),
+    field('fee bps', 'feeBps', 'margin folded against the maker; below 10000'),
+    field('sell-base min', 'sellBaseMin', 'atomic units of the want leg; blank inherits'),
+    field('sell-base max', 'sellBaseMax', '0 closes this direction'),
+    field('buy-base min', 'buyBaseMin'),
+    field('buy-base max', 'buyBaseMax'),
+    h(
+      'p.toolbar',
+      h('span.muted', 'enabled'),
+      h('input', {
+        type: 'checkbox',
+        ...(marketDraft.enabled ? { checked: true } : {}),
+        oninput: (e) => (marketDraft.enabled = e.target.checked),
+      }),
+      h('span.faint', 'a disabled market is served by neither direction'),
+    ),
+    h(
+      'p.toolbar',
+      h('button.act', { onclick: saveMarket }, 'save'),
+      h('button.act', { onclick: () => ((marketDraft = null), render()) }, 'cancel'),
+    ),
+  )
+
+const marketsView = () => {
+  const m = state.data.markets
+  if (!m) return h('p.muted', 'loading…')
+  const active = new Set(m.active)
+  return h(
+    'div',
+    // The same honesty the settings page carries, and it matters more here: a
+    // market added now is invisible to this process, so an operator watching
+    // for fills against it would be watching for something that cannot happen.
+    h('p.notice', m.restartNotice),
+    h('p.toolbar', h('button.act', { onclick: () => ((marketDraft = blankMarket()), render()) }, 'add market')),
+    marketDraft ? marketForm() : null,
+    m.markets.length === 0
+      ? h('p.muted', 'no markets configured — this solver trades no asset pairs and refuses every offer')
+      : h(
+          'table',
+          h(
+            'thead',
+            h(
+              'tr',
+              h('th', 'pair'),
+              h('th', 'feed'),
+              h('th', 'tolerance'),
+              h('th', 'fee'),
+              h('th', 'state'),
+              h('th', ''),
+            ),
+          ),
+          h(
+            'tbody',
+            m.markets.map((market) =>
+              h(
+                'tr',
+                h('td', { title: market.marketKey }, `${legLabel(market.base)} / ${legLabel(market.quote)}`),
+                h('td.faint', { title: `${market.feedUrl} ${market.pricePath}` }, shortId(market.feedUrl)),
+                h('td.num', `${market.toleranceBps} bps`),
+                h('td.num', `${market.feeBps} bps`),
+                h(
+                  'td',
+                  // Three states, not two, and the middle one is the point of
+                  // this column: stored-and-enabled is NOT the same as being
+                  // traded by the process answering this request.
+                  !market.enabled
+                    ? h('span.muted', 'disabled')
+                    : active.has(market.marketKey)
+                      ? h('span.muted', 'trading')
+                      : h('span.phase.phase-exposed', 'pending restart'),
+                ),
+                h(
+                  'td',
+                  h('button.act', { onclick: () => ((marketDraft = draftFrom(market)), render()) }, 'edit'),
+                  ' ',
+                  h('button.act', { onclick: () => deleteMarket(market.marketKey) }, 'delete'),
+                ),
+              ),
+            ),
+          ),
+        ),
+  )
+}
+
+/* ==== asset markets — END ================================================= */
 
 const auditView = () => {
   const a = state.data.audit
@@ -1573,6 +1788,7 @@ const ENDPOINTS = {
   diagnostics: () => '/api/diagnostics',
   discovery: () => '/api/card',
   settings: () => '/api/settings',
+  markets: () => '/api/markets',
   audit: () => '/api/audit',
 }
 
@@ -1613,6 +1829,7 @@ const BODIES = {
   diagnostics: diagnosticsView,
   discovery: discoveryView,
   settings: settingsView,
+  markets: marketsView,
   audit: auditView,
 }
 
@@ -1706,7 +1923,11 @@ const listen = () => {
     // Reload rather than patching in place: the payload says WHICH swaps moved,
     // and re-asking is both simpler and guaranteed consistent with what the
     // other panels show.
-    if (state.view !== 'settings' && !state.dialog) load(state.view)
+    // `markets` joins `settings` here: neither is derived from swap state, so a
+    // reload buys nothing — and it would rebuild an open market form, handing
+    // back an input with no focus and a caret at zero while someone is typing a
+    // 68-character asset id into it.
+    if (state.view !== 'settings' && state.view !== 'markets' && !state.dialog) load(state.view)
   })
   // EventSource reconnects on its own; nothing to do but not treat it as fatal.
   source.addEventListener('error', () => {})

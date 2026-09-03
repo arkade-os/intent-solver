@@ -161,6 +161,49 @@ describe('refusals that would otherwise accept anything', () => {
   it('refuses a fee of 100% or more, which would zero the buy bound', () => {
     expect(buy(1, { feeBps: 10_000 })).toBe(false)
   })
+
+  /**
+   * Every out-of-range bps value, against an offer the price comparison would
+   * ACCEPT.
+   *
+   * The two cases above are real but they pass on the arithmetic as much as on
+   * the guard — a wildly underpriced offer is refused by the comparison too, so
+   * deleting the range checks left this file green. The guards return false
+   * UNCONDITIONALLY, so the way to see them is an offer so favourable that the
+   * comparison would say yes: then the only thing that can refuse it is the
+   * guard.
+   *
+   * A maker depositing a whole BTC for one USDT is that offer. Each of the four
+   * half-guards is exercised separately, because they fail in different
+   * directions and a combined case would let one cover for another.
+   *
+   * Found by mutating each half away and watching this file stay green.
+   */
+  describe('out-of-range bps, against an offer that would otherwise be taken', () => {
+    it('takes the offer when every knob is in range, so the refusals below are the guard', () => {
+      expect(sell(1)).toBe(true)
+      expect(buy(1_000_000)).toBe(true)
+    })
+
+    it('refuses a fee at or past 100%, even when the price is in our favour', () => {
+      expect(sell(1, { feeBps: 10_000 })).toBe(false)
+      expect(sell(1, { feeBps: 20_000 })).toBe(false)
+    })
+
+    it('refuses a negative fee, which deflates the offer price in the maker’s favour', () => {
+      expect(sell(1, { feeBps: -1 })).toBe(false)
+      expect(buy(1_000_000, { feeBps: -1 })).toBe(false)
+    })
+
+    it('refuses a negative tolerance, which is not a tighter band but an unstated one', () => {
+      expect(sell(1, { toleranceBps: -1 })).toBe(false)
+      expect(buy(1_000_000, { toleranceBps: -1 })).toBe(false)
+    })
+
+    it('refuses a tolerance at or past 100% on the sell side too', () => {
+      expect(sell(1, { toleranceBps: 10_000 })).toBe(false)
+    })
+  })
 })
 
 describe('exactness', () => {
