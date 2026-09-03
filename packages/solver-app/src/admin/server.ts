@@ -23,11 +23,13 @@ import { registerSwapRoutes } from './routes/swaps.js'
 import { registerStatusRoutes } from './routes/status.js'
 import { registerDiagnosticsRoutes } from './routes/diagnostics.js'
 import { registerSettingsRoutes } from './routes/settings.js'
+import { registerMarketRoutes } from './routes/markets.js'
 import { registerActionRoutes } from './routes/actions.js'
 import { registerCardRoutes } from './routes/card.js'
 import { registerEventRoutes } from './routes/events.js'
 import type { ChangeFeed } from './events.js'
 import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
+import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import { readStaticFile } from './static.js'
 
 /** Which long-lived command the console is running inside. */
@@ -59,6 +61,15 @@ export interface AdminDeps {
   adPublisher?: AdPublisher
   /** Drives `/api/events`. Absent means the stream answers 503 rather than hanging. */
   changes?: ChangeFeed
+  /**
+   * The price-feed read `PUT /api/markets` probes a new market's feed with.
+   *
+   * Injectable so a test can describe a feed without a network, and so the
+   * timeout is one a deployment could set. Defaults to `createPriceFeed()` —
+   * the same reader the offer path uses, deliberately, because a probe that
+   * accepted a feed the real reader would refuse proves nothing.
+   */
+  fetchPrice?: FetchPrice
 }
 
 export const buildAdminApp = (deps: AdminDeps): Hono => {
@@ -73,6 +84,7 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   registerDiagnosticsRoutes(app, deps)
   registerSwapRoutes(app, deps)
   registerSettingsRoutes(app, deps)
+  registerMarketRoutes(app, deps)
   // BEFORE the actions route, and it must stay there: that route claims
   // `/api/actions/:name`, which matches `/api/actions/post-ad` too, and Hono runs
   // handlers in registration order — so registering afterwards yields a 404

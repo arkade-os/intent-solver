@@ -319,3 +319,44 @@ export const parseAssetMarkets = (raw: string | undefined): readonly AssetMarket
       return market
     })
 }
+
+/**
+ * Refuse a served market this deployment cannot price.
+ *
+ * {@link AssetOfferService.withinTolerance} returns TRUE when the pricing list
+ * is empty — "a deployment that has not opted into price gating is unchanged".
+ * That is right for a deployment serving nothing, and a fail-OPEN the moment one
+ * market is served without one: the offer is then taken at any price the maker
+ * names, which is what {@link AssetMarketPricing} warns about.
+ *
+ * It became reachable only when the two halves arrived by different routes —
+ * `OFFER_MARKETS` names pairs from the environment, the console's market rows
+ * carry the feed. `assetMarketConfig.ts`'s `assetMarketPolicy` derives both from
+ * one filter precisely so they cannot separate; this is the same guarantee for
+ * a market that came from anywhere else.
+ *
+ * ONE DIRECTION ONLY. Pricing without a market is fine — nothing is served, so
+ * nothing is at risk. And pricing present but unreadable already refuses, since
+ * `withinTolerance` returns false with no `fetchPrice`. Market-without-pricing
+ * is the only combination that fills blind, so it is the only one refused.
+ *
+ * Thrown at STARTUP rather than per offer: an operator who configured a market
+ * meant to trade it, and discovering at the first fill that it was never priced
+ * is discovering it after the money moved.
+ */
+export const assertMarketsPriced = (markets: readonly AssetMarket[], pricing: readonly AssetMarketPricing[]): void => {
+  const label = (id: string | null): string => id ?? 'BTC'
+  for (const market of markets) {
+    // The market is unordered and the feed is not, so either orientation counts.
+    const covered = pricing.some(
+      (p) => (p.base === market.a && p.quote === market.b) || (p.base === market.b && p.quote === market.a),
+    )
+    if (!covered) {
+      throw new Error(
+        `asset market ${label(market.a)}/${label(market.b)} is served but has no pricing: an offer on it ` +
+          `would be filled at whatever price the maker named. Configure the market's price feed in the ` +
+          `console, or stop serving the pair.`,
+      )
+    }
+  }
+}

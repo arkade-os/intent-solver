@@ -65,6 +65,11 @@ import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchain
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { OnchainReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 import { AdminStore } from '../admin/db.js'
+import {
+  assetMarketPolicy,
+  type AssetMarketPair,
+  type AssetMarketPricingView,
+} from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { applyOverrides } from '../admin/settings.js'
 import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
@@ -73,7 +78,7 @@ import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import { poolPlan, mintPool, committedAcrossCorridors } from './pool.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
-import { AssetOfferService } from './assetOffers.js'
+import { assertMarketsPriced, AssetOfferService } from './assetOffers.js'
 import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 
@@ -97,6 +102,23 @@ export interface Services {
    * terms the corridor then refuses.
    */
   policy: Config
+  /**
+   * The Arkade asset markets this process trades, resolved once at startup from
+   * the console's stored rows.
+   *
+   * Both halves together, and never one without the other — @see
+   * `core/assetMarketConfig.ts`'s `assetMarketPolicy`, which derives them from
+   * one filter for exactly that reason. `assetMarketPairs` empty refuses every
+   * offer; `assetMarkets` empty means "this deployment has not opted into price
+   * gating" and fills at whatever a maker asks.
+   *
+   * EMPTY on a deployment that has configured none, which is the default and the
+   * whole of the additive claim: no market rows means both lists are empty, the
+   * offer path serves no pair, and the solver behaves exactly as it did before
+   * markets could be configured at all.
+   */
+  assetMarkets: readonly AssetMarketPricingView[]
+  assetMarketPairs: readonly AssetMarketPair[]
   store: SwapStore
   onchainStore: OnchainSendSwapStore
   receiveStore: ReceiveSwapStore
@@ -345,6 +367,28 @@ export const createServices = async (
    * but never raise it above what the deployment already permitted.
    */
   const policy = applyOverrides(config, await adminStore.getOverrides())
+  /**
+   * The asset markets, read once from the same store and validated HERE.
+   *
+   * THROWS on a stored market that no longer validates, and that is the
+   * opposite treatment `applyOverrides` gives a bad override — where skipping is
+   * right, because refusing to start would take a solver down over a preference.
+   * A market is not a preference, and the asymmetry is a fund-loss one:
+   *
+   * `AssetOfferService.withinTolerance` reads an EMPTY pricing list as "this
+   * deployment has not opted into price gating" and returns true for every
+   * offer — it fills at whatever a maker names. So a startup that dropped bad
+   * markets one at a time could empty the list and, in doing so, silently turn
+   * the price gate OFF on a deployment that had configured it on. Refusing to
+   * start is loud, is recoverable from the console, and cannot mislead.
+   *
+   * NO FEED PROBE. Whether the URL answers today is deliberately not a boot
+   * condition: it was checked when the market was written, the runtime already
+   * fails closed on a read that fails, and making a solver's startup depend on a
+   * third party's uptime would take four unrelated BTC corridors down with a
+   * price API. @see admin/routes/markets.ts
+   */
+  const assetMarkets = assetMarketPolicy(await adminStore.listMarkets())
   // NULL exactly when `config.lnBackend` is, which `loadConfig` permits only
   // while all four BTC corridors are disabled — a deployment serving EVM or
   // asset flow alone, which has no use for a Lightning node and is not made to
@@ -370,11 +414,26 @@ export const createServices = async (
    * is ever added, rather than something to remember at that point.
    */
   const servesOffers = policy.offerMarkets.length > 0
+  // BEFORE the store is opened, so a deployment that cannot price what it serves
+  // does not come up at all. `withinTolerance` returns TRUE on an empty pricing
+  // list, so a market without one is not gated leniently — it is not gated. The
+  // two halves arrived by different routes (`OFFER_MARKETS` from the
+  // environment, the feed from the console's market rows) and nothing until now
+  // required them to meet.
+  if (servesOffers) assertMarketsPriced(policy.offerMarkets, assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
   const assetOffers = offerStore
     ? new AssetOfferService({
         store: offerStore,
         markets: policy.offerMarkets,
+        // The console's market rows, in the shape this service consumes. The
+        // assertion above is what guarantees this covers every served market;
+        // without both, `withinTolerance` waves every offer through.
+        pricing: assetMarkets.pricing,
+        // Same reader the EVM corridors price from — the market config
+        // deliberately speaks `evmCorridorConfig.ts`'s feed-plus-pointer dialect
+        // so one implementation serves both.
+        fetchPrice: createPriceFeed(),
         minFillAmount: policy.offerMinFillAmount,
         maxFillAmount: policy.offerMaxFillAmount,
         // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
@@ -864,6 +923,8 @@ export const createServices = async (
   return {
     config,
     policy,
+    assetMarkets: assetMarkets.pricing,
+    assetMarketPairs: assetMarkets.pairs,
     store,
     onchainStore,
     receiveStore,
