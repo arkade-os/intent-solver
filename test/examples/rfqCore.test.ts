@@ -525,3 +525,49 @@ describe('assertFundable — the max-fee gate', () => {
     expect(() => gate({ to_amount: 99_999 }, {})).toThrow(/bps|sats/i)
   })
 })
+
+/** The cross-asset half, mirrored from `@arkade-os/swap` for the same reason. */
+describe('assertFundable — the max-fee gate, cross-asset', () => {
+  const now = 1_800_000_000
+  const CROSS = 'arkade:BTC->ethereum:0xa0b86991'
+  const gate = (over: Record<string, unknown>, maxFee?: Record<string, number>) =>
+    assertFundable({
+      quote: {
+        pair: CROSS,
+        from_amount: 100_000,
+        valid_until: now + 900,
+        refund_locktime: now + 7200,
+        ...over,
+      } as never,
+      invoiceExpiresAt: now + 3600,
+      now,
+      maxFee,
+    })
+
+  // R = 0.5 to-units per sat: 100_000 sats is fairly worth 50_000.
+  it('gates on the spread against the caller’s own rate', () => {
+    expect(() => gate({ to_amount: 49_500 }, { bps: 100, referenceRate: 0.5 })).not.toThrow()
+    expect(() => gate({ to_amount: 49_499 }, { bps: 100, referenceRate: 0.5 })).toThrow(/fee/i)
+  })
+
+  it('still refuses when no rate is supplied', () => {
+    expect(() => gate({ to_amount: 42 }, { bps: 100 })).toThrow(/different assets/i)
+  })
+
+  it('refuses a rate that cannot price anything', () => {
+    for (const referenceRate of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => gate({ to_amount: 49_500 }, { bps: 100, referenceRate })).toThrow(/referenceRate/i)
+    }
+  })
+
+  /** Rounds UP: R = 3 with 2_999 short is 999.67 sats — refused against 999, funded by floor. */
+  it('rounds a fractional cross-asset fee up, not down', () => {
+    expect(() => gate({ to_amount: 297_001 }, { sats: 999, referenceRate: 3 })).toThrow(/fee/i)
+  })
+
+  it('ignores a rate on a same-asset pair, where the exact fee is known', () => {
+    expect(() =>
+      gate({ pair: 'arkade:BTC->lightning:BTC', to_amount: 99_500 }, { bps: 100, referenceRate: 0.5 }),
+    ).not.toThrow()
+  })
+})

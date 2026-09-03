@@ -82,7 +82,17 @@ export declare const assertFundable: (input: {
    * implementation for why BOTH bounds are needed and why a cross-asset pair
    * is refused rather than skipped.
    */
-  maxFee?: { bps?: number; sats?: number }
+  maxFee?: {
+    bps?: number
+    sats?: number
+    /**
+     * To-units per from-unit, for a CROSS-ASSET pair; without it such a pair is
+     * refused rather than waved through. Must come from a source of YOUR OWN —
+     * reading it off the solver's published feed checks the solver against its
+     * own number. Ignored on a same-asset pair, where the fee is exact.
+     */
+    referenceRate?: number
+  }
 }) => void
 
 /**
