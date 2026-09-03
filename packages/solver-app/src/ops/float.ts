@@ -27,6 +27,7 @@
  * {@link runVtxoLifecycle} holds recovery back when that would happen.
  */
 
+import { hex } from '@scure/base'
 import {
   liveLockupRows,
   recoverableVtxosFrom,
@@ -50,13 +51,37 @@ import type { Services } from './services.js'
  * Registration and this guard want the same rows for different reasons, and
  * coupling them would mean a manual recovery could only be as safe as whatever
  * the last registration pass happened to leave behind.
+ *
+ * The ROLE travels with the deadline, because the deadline alone answers the
+ * wrong question on a send leg — see {@link LockupDeadline.refundable}. The
+ * discriminator is the lockup's `client` key: `covenant.ts` passes it as
+ * `VHTLC.ScriptV2`'s `sender`, and `refundWithoutReceiver` — the one leaf
+ * `deriveTapscripts` stamps onto these VTXOs — needs exactly that key. The
+ * receive legs store the solver's own there (`clientRefundPubkey:
+ * row.solverPubkey`); the send legs store the trader's.
  */
 export const lockupDeadlinesOf = async (services: Services): Promise<readonly LockupDeadline[]> => {
   // The READER set, deliberately — never `services.corridors`. That one holds
   // only corridors with a live SERVICE, and a corridor an operator switched off
   // still has funded lockups whose deadlines this guard exists to respect.
   const rows = await liveLockupRows(services.readers)
-  return rows.map((row) => ({ script: row.pkScript, refundLocktime: row.refundLocktime }))
+  // Both sides of this comparison are written by the same `hex.encode`, so it
+  // is an exact match rather than a normalised one. A send leg's value comes
+  // from the trader over the wire and could arrive in any case, but a
+  // mismatch there yields `false` — which is already the right answer for a
+  // send leg — so case can only ever confirm the correct outcome, never
+  // invert it.
+  const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
+  return rows.map((row) => ({
+    script: row.pkScript,
+    refundLocktime: row.refundLocktime,
+    // NULL IS "NO OPINION", not "not ours". A row carrying no client refund
+    // key at all predates that leaf, and `covenantScriptFromRow` refuses to
+    // rebuild it — so it is never registered, never in the contract snapshot,
+    // and never in the sweep set to block anything. Answering `false` for it
+    // would be inventing a refusal about a lockup this guard cannot see.
+    refundable: row.clientRefundPubkey === null ? undefined : row.clientRefundPubkey === solverPubkey,
+  }))
 }
 
 /**

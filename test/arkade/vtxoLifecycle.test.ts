@@ -388,6 +388,9 @@ describe('runVtxoLifecycle', () => {
     expect(calls.recover).toBe(0)
     expect(report.recovered).toBeNull()
     expect(report.recoverySkipped).toContain(scriptHex)
+    // The wording is a contract, not decoration: `vtxoLifecycle.e2e.test.ts`
+    // matches on this phrase to tell a CLTV hold apart from any other skip.
+    expect(report.recoverySkipped).toContain('not yet safely past CLTV')
   })
 
   it('recovers once the lockup CLTV has matured', async () => {
@@ -396,6 +399,76 @@ describe('runVtxoLifecycle', () => {
     const { deps: d, calls } = deps({
       recoverableVtxos: async () => [vtxo(scriptHex)],
       lockupDeadlines: async (): Promise<LockupDeadline[]> => [{ script: scriptHex, refundLocktime: REFUND_LOCKTIME }],
+      nowSeconds: () => REFUND_LOCKTIME + LOCKUP_RECOVERY_MTP_MARGIN_SECONDS,
+    })
+    const report = await runVtxoLifecycle(d)
+    expect(calls.recover).toBe(1)
+    expect(report.recoverySkipped).toBeNull()
+  })
+
+  /**
+   * The CLTV is not the only thing that decides whether a recovery can spend a
+   * lockup, and on a SEND leg it is the wrong question outright.
+   *
+   * `VHTLCV2ContractHandler.deriveTapscripts` stamps `refundWithoutReceiver`
+   * onto every VTXO of a `vhtlc-v2` contract as BOTH the forfeit and the
+   * intent leaf, role-blind. That leaf is `client + server`, and this service
+   * holds `receiver` on send legs — so the leaf names the trader's key and the
+   * settlement fails at intent registration. `assertVhtlcSpendableNow` does
+   * not save us: it refuses only for a wallet resolving to `sender`.
+   *
+   * Maturity is monotonic, so once such a lockup passes its CLTV the old guard
+   * opened and never closed again: every pass fed an unspendable input into an
+   * all-or-nothing batch and lost the operating-balance coins with it.
+   */
+  it('keeps skipping a matured lockup this wallet holds no refund key for', async () => {
+    const scriptHex = hex.encode(extendedScript().pkScript)
+    const { deps: d, calls } = deps({
+      recoverableVtxos: async () => [vtxo('deadbeef'), vtxo(scriptHex, 1)],
+      lockupDeadlines: async (): Promise<LockupDeadline[]> => [
+        { script: scriptHex, refundLocktime: REFUND_LOCKTIME, refundable: false },
+      ],
+      nowSeconds: () => REFUND_LOCKTIME + LOCKUP_RECOVERY_MTP_MARGIN_SECONDS,
+    })
+    const report = await runVtxoLifecycle(d)
+    expect(calls.recover).toBe(0)
+    expect(report.recovered).toBeNull()
+    expect(report.recoverySkipped).toContain(scriptHex)
+  })
+
+  /**
+   * The other direction, and the reason this is a field rather than a blanket
+   * refusal: on a RECEIVE leg the solver IS the lockup's `sender`, so the
+   * annotation leaf is one it can satisfy and a matured lockup recovers
+   * normally. Blocking that would strand the solver's own refund.
+   */
+  it('recovers a matured lockup this wallet does hold the refund key for', async () => {
+    const scriptHex = hex.encode(extendedScript().pkScript)
+    const { deps: d, calls } = deps({
+      recoverableVtxos: async () => [vtxo(scriptHex)],
+      lockupDeadlines: async (): Promise<LockupDeadline[]> => [
+        { script: scriptHex, refundLocktime: REFUND_LOCKTIME, refundable: true },
+      ],
+      nowSeconds: () => REFUND_LOCKTIME + LOCKUP_RECOVERY_MTP_MARGIN_SECONDS,
+    })
+    const report = await runVtxoLifecycle(d)
+    expect(calls.recover).toBe(1)
+    expect(report.recoverySkipped).toBeNull()
+  })
+
+  /**
+   * A lockup we cannot spend still must not block the batch unless it is
+   * actually IN it — the same narrowness the CLTV arm has, for the same
+   * reason: blocking on every open send-leg swap would wedge recovery for as
+   * long as the solver had business.
+   */
+  it('does not block recovery on an unspendable lockup that is not itself recoverable', async () => {
+    const scriptHex = hex.encode(extendedScript().pkScript)
+    const { deps: d, calls } = deps({
+      recoverableVtxos: async () => [vtxo('deadbeef')],
+      lockupDeadlines: async (): Promise<LockupDeadline[]> => [
+        { script: scriptHex, refundLocktime: REFUND_LOCKTIME, refundable: false },
+      ],
       nowSeconds: () => REFUND_LOCKTIME + LOCKUP_RECOVERY_MTP_MARGIN_SECONDS,
     })
     const report = await runVtxoLifecycle(d)
