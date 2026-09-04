@@ -183,9 +183,8 @@ export const planPool = (args: {
  * becomes a final piece if it can pay for itself, and is otherwise abandoned into
  * the last piece rather thancreating an output below dust.
  *
- * Returns a single whole-`gross` output when no rung fits — which is exactly
- * today's behaviour, so a deployment with no target, or too little to make even
- * one rung, renews as it always did.
+ * Returns a single whole-`gross` output when no rung fits, so a deployment with no
+ * target renews as it did — unless `gross` is past `maxAmount`, which is cut (#27).
  */
 export interface SplitRenewalArgs {
   /** Input value minus input fees — what there is to divide, before output fees. */
@@ -196,11 +195,19 @@ export interface SplitRenewalArgs {
   outputFeeOn: (amount: bigint) => bigint
   /** Outputs one settlement may create. */
   maxOutputs: number
+  /** Per-output ceiling; `-1n` means none. Required: forgetting it burns the tail. */
+  maxAmount: bigint
 }
 
 export const splitRenewalOutputs = (args: SplitRenewalArgs): bigint[] => {
-  const { gross, target, dust, outputFeeOn, maxOutputs } = args
+  const { gross, target, dust, outputFeeOn, maxOutputs, maxAmount } = args
   if (gross <= 0n || maxOutputs < 1) return []
+
+  const capped = (amount: bigint): bigint => (maxAmount >= 0n && amount > maxAmount ? maxAmount : amount)
+  const tailSlots = (value: bigint): number => {
+    const unit = maxAmount + outputFeeOn(maxAmount)
+    return unit <= 0n ? 1 : Number((value + unit - 1n) / unit)
+  }
 
   /** The largest piece that still leaves room for its own fee out of `budget`. */
   const fitWithin = (budget: bigint): bigint => {
@@ -220,17 +227,25 @@ export const splitRenewalOutputs = (args: SplitRenewalArgs): bigint[] => {
   for (const rung of [...target].sort((a, b) => b.size - a.size)) {
     const size = BigInt(rung.size)
     if (size < dust) continue
+    if (maxAmount >= 0n && size > maxAmount) continue
     for (let taken = 0; taken < rung.want && pieces.length < maxOutputs - 1; taken++) {
       const cost = size + outputFeeOn(size)
       // STRICTLY GREATER, not >=: the remainder still has to become an output,
       // and one that cannot pay its own fee is not an output.
       if (remaining - cost < dust) break
+      // Leave the remainder the outputs it needs: unplaced value is burnt.
+      if (maxAmount >= 0n && pieces.length + 1 + tailSlots(remaining - cost) > maxOutputs) break
       pieces.push(size)
       remaining -= cost
     }
   }
 
-  const last = fitWithin(remaining)
+  while (maxAmount >= 0n && pieces.length < maxOutputs - 1 && fitWithin(remaining) > maxAmount) {
+    pieces.push(maxAmount)
+    remaining -= maxAmount + outputFeeOn(maxAmount)
+  }
+
+  const last = capped(fitWithin(remaining))
   if (last >= dust) {
     pieces.push(last)
   } else if (pieces.length > 0) {
@@ -238,7 +253,7 @@ export const splitRenewalOutputs = (args: SplitRenewalArgs): bigint[] => {
     // sub-dust output the server would refuse. The fee is re-evaluated because
     // the piece just grew, and it stays affordable because `remaining` was
     // already reserved for an output of its own.
-    const grown = fitWithin(remaining + pieces[pieces.length - 1]! + outputFeeOn(pieces[pieces.length - 1]!))
+    const grown = capped(fitWithin(remaining + pieces[pieces.length - 1]! + outputFeeOn(pieces[pieces.length - 1]!)))
     pieces[pieces.length - 1] = grown
   }
   return pieces

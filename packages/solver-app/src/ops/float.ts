@@ -195,12 +195,15 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
     }
   }
 
+  const renewalWarnings: string[] = []
+
   const report = await runVtxoLifecycle({
     // Not `vtxoManager.renewVtxos()`: that asks for an output equal to the gross
     // input sum, so the intent it registers pays a zero fee and any operator
     // charging one rejects it outright. @see renewExpiringVtxos
     renewVtxos: () =>
       renewExpiringVtxos({
+        warn: (message) => renewalWarnings.push(`renew: ${message}`),
         serverInfo: async () => {
           const info = await wallet.arkProvider.getInfo()
           return { intentFee: info.fees.intentFee, vtxoMaxAmount: info.vtxoMaxAmount, dust: info.dust }
@@ -236,7 +239,11 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
   // no output anywhere is the difference between "the cooperative path ran"
   // and "every input quietly took sweep-then-recover", which nobody could
   // tell apart before.
-  return { ...report, migrated: migration.migrated, failures: [...migration.failures, ...report.failures] }
+  return {
+    ...report,
+    migrated: migration.migrated,
+    failures: [...migration.failures, ...report.failures, ...renewalWarnings],
+  }
 }
 
 /** Why an automatic mint did not spend, when it declined to. */
