@@ -39,8 +39,7 @@ jobs:
   e2e:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-e2e')
     runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
-    # On the host, not in a container: the suite reaches the stack on localhost
-    # ports that regtest.mjs binds on the runner, and drives docker itself.
+    # On the host, not in a container: the suite needs the stack's localhost ports.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -108,8 +107,10 @@ jobs:
           node --experimental-eventsource --env-file="$E2E_ENV_FILE" scripts/regtest-mint-asset.mjs 1000000 ARFQ
           node --experimental-eventsource --env-file="$E2E_ENV_FILE" scripts/regtest-settle.mjs
 
+      # No `--`: pnpm forwards it verbatim, and vitest then ignores every
+      # positional after it and runs the whole suite. `verbose` names what ran.
       - name: E2E suite
-        run: pnpm test:e2e -- $E2E_FILES
+        run: pnpm test:e2e --reporter=verbose $E2E_FILES
 
       - name: Dump diagnostics on failure
         if: failure()
