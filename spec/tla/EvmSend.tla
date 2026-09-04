@@ -489,14 +489,18 @@ GiveUp(w) ==
        \/ /\ loc[w].phase = "sentLock"
           /\ evm[loc[w].swap] = "none"
           /\ HeightUp
-       \* Held at sentRefund over a lock the CLIENT took: RecordEvmRefund
-       \* wants solverRefunded and RefundMines wants locked, so neither can
-       \* ever fire again.  The shell was never there anyway - it returns
-       \* after the broadcast (evmOrchestrator.ts:386) and the recording is a
-       \* later tick's decision - so the phase outliving its continuations is
-       \* the model's artefact, and (A8) makes it reachable for two workers
-       \* at once rather than one.
+       \* THE SHELL ALWAYS PARKS HERE.  `refund_evm` ends with return false
+       \* (evmOrchestrator.ts:388), so the tick loop exits and the recording
+       \* is a LATER tick's decision off a fresh read - RecordEvmRefund's own
+       \* comment says as much.  Holding the phase is the over-approximation;
+       \* parking is the shipped behaviour, so an unconditional arm would be
+       \* the faithful one.  This is deliberately NARROWER than that: only
+       \* the wedge, where the broadcast is out (refundSent) and the CLIENT
+       \* took the lock, so RecordEvmRefund (wants solverRefunded) and
+       \* RefundMines (wants locked) can both never fire again.  Green under
+       \* the narrow arm is the stronger statement, so the narrow arm ships.
        \/ /\ loc[w].phase = "sentRefund"
+          /\ refundSent[loc[w].swap]
           /\ evm[loc[w].swap] = "clientClaimed"
     /\ Park(w)
     /\ UNCHANGED << clock, st, conf, serverUp >>
