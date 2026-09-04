@@ -37,6 +37,7 @@
  * method that threw would put two buttons on the screen that can only ever fail.
  */
 
+import { networks } from '@arkade-os/sdk'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import type { Services } from './services.js'
 import type { FundBalance, FundDeposit, FundSource } from './fundSources.js'
@@ -125,21 +126,48 @@ const arkadeDeposit = async (services: Services): Promise<FundDeposit> => {
  * the first — which this source did — quietly told an operator already holding
  * VTXOs to go out to L1 and wait.
  *
- * NOT prefix-checked, unlike the boarding address, and the asymmetry is
- * deliberate. That one is a bech32 L1 address which would be equally valid on
- * the wrong network, so a prefix is the only thing separating a regtest faucet
- * from a mainnet loss. An Arkade address encodes the SERVER key beside the
- * wallet key and is derived from the server this wallet is connected to, so
- * there is no wrong-chain form of it for a guard to catch.
+ * PREFIX-CHECKED, exactly like the boarding address below.
+ *
+ * An earlier version of this skipped the check, on the reasoning that an Arkade
+ * address is derived from the server this wallet is connected to and so has no
+ * wrong-chain form. That reasoning is wrong, and the SDK's own network table is
+ * the proof: `hrp` is `ark` on bitcoin and `tark` on every test network, so a
+ * wallet pointed at a mainnet server on a regtest-configured deployment hands
+ * back a perfectly well-formed `ark1…` while this file labels it
+ * `arkade regtest`. That is the identical hazard the boarding guard exists for
+ * — an irreversible send to a wallet this solver is not running, against an
+ * address the operator never typed and has no reason to doubt.
+ *
+ * The HRP comes from the SDK's `networks` rather than a table written here, for
+ * the same reason the boarding check reads `ONCHAIN_NETWORKS`: a mapping
+ * maintained beside the thing it describes cannot drift from it.
+ *
+ * In practice the misconfiguration that produces a wrong `ark1…` also produces a
+ * wrong boarding address, which `arkadeDeposit` already refuses — and since
+ * `depositOptions` awaits both, either refusal takes the whole answer down and
+ * the operator is shown nothing rather than one good option beside one bad one.
+ * This guard is therefore belt-and-braces, which is the correct posture for the
+ * one mistake nobody downstream can catch.
  */
-const arkadeOffchainDeposit = async (services: Services): Promise<FundDeposit> => ({
-  address: await services.arkade.wallet.getAddress(),
-  addressKind: `arkade ${services.config.network}`,
-  // FALSE, and the contrast with boarding is the whole reason both are offered:
-  // a VTXO arriving here is already float. Nothing has to be run afterwards.
-  settleRequired: false,
-  note: 'Spendable float on arrival — no settlement step. Reachable only from a wallet already on Arkade.',
-})
+const arkadeOffchainDeposit = async (services: Services): Promise<FundDeposit> => {
+  const network = services.config.network
+  const address = await services.arkade.wallet.getAddress()
+  const hrp = networks[network].hrp
+  if (!address.startsWith(`${hrp}1`)) {
+    throw new Error(
+      `the Arkade wallet handed back ${address}, which is not a ${network} Arkade address (expected the ${hrp}1… ` +
+        'prefix) — the wallet is pointed at a different Arkade server. Do NOT send to it.',
+    )
+  }
+  return {
+    address,
+    addressKind: `arkade ${network}`,
+    // FALSE, and the contrast with boarding is the whole reason both are offered:
+    // a VTXO arriving here is already float. Nothing has to be run afterwards.
+    settleRequired: false,
+    note: 'Spendable float on arrival — no settlement step. Reachable only from a wallet already on Arkade.',
+  }
+}
 
 /**
  * Always present — unlike the rail's, which is null without `LN_BACKEND`.

@@ -543,6 +543,43 @@ describe('the arkade float source', () => {
   })
 
   /**
+   * The same guard on the OTHER address, which this source used to skip.
+   *
+   * The reasoning for skipping it was that an Arkade address is derived from the
+   * connected server and so has no wrong-chain form. The SDK's own network table
+   * refutes that: `hrp` is `ark` on bitcoin and `tark` on every test network, so
+   * a wallet pointed at a mainnet server hands back a well-formed `ark1…` that
+   * this file would have labelled `arkade regtest` — an irreversible send to a
+   * wallet this solver is not running, against an address the operator never
+   * typed.
+   */
+  it('refuses an Arkade address for another Arkade network', async () => {
+    const services = fakeServices({
+      arkade: { wallet: arkadeWallet({ getAddress: vi.fn().mockResolvedValue('ark1mainnetfloat') }) },
+    })
+
+    await expect(arkadeFundSource(services).depositOptions!()).rejects.toThrow(/not a regtest Arkade address/i)
+  })
+
+  it('shows NOTHING at all when the wallet is on the wrong network, not one good option', async () => {
+    // The realistic misconfiguration moves both addresses together — one server,
+    // one network, both derived from it. What matters to an operator is that the
+    // answer is all-or-nothing: `depositOptions` awaits both, so either refusal
+    // takes the whole answer down rather than leaving a valid-looking option
+    // beside a refused one.
+    const services = fakeServices({
+      arkade: {
+        wallet: arkadeWallet({
+          getAddress: vi.fn().mockResolvedValue('ark1mainnetfloat'),
+          getBoardingAddress: vi.fn().mockResolvedValue(MAINNET_ADDRESS),
+        }),
+      },
+    })
+
+    await expect(arkadeFundSource(services).depositOptions!()).rejects.toThrow()
+  })
+
+  /**
    * The plural half, and the reason this feature exists.
    *
    * Offering only the boarding address told an operator already holding VTXOs to
