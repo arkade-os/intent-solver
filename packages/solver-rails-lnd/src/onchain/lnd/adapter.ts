@@ -51,9 +51,9 @@ export interface AdapterConfig {
   cert: string
   macaroon: string
   /**
-   * Esplora base URL. Required for the RECEIVE corridor only — see
-   * {@link LndOnchainAdapter.findOutputs} for why LND's own chain view cannot
-   * answer that question. The send corridor never calls it.
+   * Esplora base URL, REQUIRED BY BOTH DIRECTIONS. The send leg has needed it
+   * since {@link LndOnchainAdapter.findSpendWitness} moved off lnd's spend
+   * subscription; `transactionOutcome` is a further caller, not the first.
    */
   esploraUrl?: string
   esploraAuth?: EsploraAuth
