@@ -38,7 +38,7 @@
 (* THE PRE-SWITCH RULE IS A GLOBAL INTERRUPT                               *)
 (*                                                                         *)
 (* planEvmSend checks the preimage BEFORE the state switch                 *)
-(* (evmSendPlan.ts:100-112), from EVERY non-terminal state:                *)
+(* (evmSendPlan.ts:98-110), from EVERY non-terminal state:                 *)
 (*   P seen, wall clock < refundLocktime  -> claim_arkade                  *)
 (*   P seen, wall clock >= refundLocktime -> stick                         *)
 (* That is why the edge table has -> claiming and -> stuck from every      *)
@@ -100,9 +100,9 @@
 (*  (A3) `ClaimLands`.  claimArkade is modelled as needing only serverUp   *)
 (*       and an unspent covenant; the send corridor never re-reads the     *)
 (*       outcome because `claiming` maps to `wait` in the planner          *)
-(*       (evmSendPlan.ts:178-180).  See THE PARKED STATES below.           *)
+(*       (evmSendPlan.ts:174-176).  See THE PARKED STATES below.           *)
 (*  (A4) `RefundSeesClaim`.  SHIPPED, not an open assumption               *)
-(*       (evmSendPlan.ts:165-176): `refunded` is written only for a        *)
+(*       (evmSendPlan.ts:163-172): `refunded` is written only for a        *)
 (*       refund whose own receipt says it MINED.  The row used to record   *)
 (*       it at SEND time, so a client claim that won the block race left   *)
 (*       a terminal row saying `refunded` over tokens the client held -    *)
@@ -143,7 +143,7 @@
 (*       NoSilentLoss fails.  Finding F4.                                  *)
 (*                                                                         *)
 (*  (A7) `TimeoutRefundCoversPresent`.  The locking_evm timeout refund    *)
-(*       fires only when the lock is ABSENT (evmSendPlan.ts:147-152); a    *)
+(*       fires only when the lock is ABSENT (evmSendPlan.ts:145-150); a    *)
 (*       lock that is present but never proven deep parks the swap past    *)
 (*       its own timeout, and the client can then claim the ERC20 at any   *)
 (*       height and refund its sats at the wall locktime - the double      *)
@@ -571,7 +571,7 @@ RefundMines(s) ==
     /\ UNCHANGED << arkFund, evmConfirmed, lockTxid, lockSends, refundSent >>
 
 \* The recording CAS, and (A4) its receipt check.  RefundSeesClaim = TRUE
-\* is the SHIPPED planner (evmSendPlan.ts:165-176): `refunded` is written
+\* is the SHIPPED planner (evmSendPlan.ts:163-172): `refunded` is written
 \* only for a refund the receipt says MINED.  The single arm is the point
 \* - see (A4) for why "there was nothing to refund" is not a second one.
 \* RefundSeesClaim = FALSE drops the check and writes the word over any
@@ -779,7 +779,7 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*     that won the block race left a terminal row lying over the money,   *)
 (*     and terminal ended the preimage scan that was the swap's way out.   *)
 (*     The shipped planner now records only a MINED refund                 *)
-(*     (evmSendPlan.ts:165-176), so EvmSend_NoReceipt.cfg is a genuine     *)
+(*     (evmSendPlan.ts:163-172), so EvmSend_NoReceipt.cfg is a genuine     *)
 (*     mutation - it deletes the shipped check - rather than a record of   *)
 (*     shipped behaviour.                                                  *)
 (* F4  (A6) THE LATE LOCK - STILL OPEN, and the (A4) fix moved which       *)
@@ -791,7 +791,7 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*     lands, the client claims it and still refunds its sats.             *)
 (*     EvmSend_LateLock.cfg: NoNetLoss, depth 20.                          *)
 (* F5  (A7) THE STRANDED LOCK.  The locking_evm timeout refund requires    *)
-(*     the lock ABSENT (evmSendPlan.ts:147-152); a lock present but never  *)
+(*     the lock ABSENT (evmSendPlan.ts:145-150); a lock present but never  *)
 (*     proven deep (the depth probe's failed read is UNPROVEN, never       *)
 (*     absent - lockDepth.ts) withholds the very timeout that ends the     *)
 (*     client's option, and the client takes both legs at the wall         *)
