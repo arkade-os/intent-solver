@@ -8,7 +8,8 @@
  * assertable. And the four Arkade seams are wired in this file because NOTHING
  * IN `packages/` WIRES THEM: `createServices` never builds an
  * `AssetRfqSwapService`, and no production `deriveOffer`/`depositAt`/`settle`
- * exists in the tree — a gap this test documents rather than papers over.
+ * exists in the tree — a gap this test documents rather than papers over, and
+ * that #23 tracks.
  * Service, corridor, store, `offerVtxoScript`, the deposit read, the float and
  * `fulfillOffer` are all the real ones against a real stack. This wallet is
  * both sides, and the client half goes through `@arkade-os/swap`'s own
@@ -192,7 +193,11 @@ interface Harness {
 }
 
 const harness = async (
-  over: { markets?: readonly AssetRfqMarket[]; quoteValiditySeconds?: number } = {},
+  over: {
+    markets?: readonly AssetRfqMarket[]
+    quoteValiditySeconds?: number
+    balance?: () => Promise<ReadonlyMap<AssetLeg, bigint>>
+  } = {},
 ): Promise<Harness> => {
   const markets = over.markets ?? [market()]
   const store = await AssetRfqSwapStore.open(join(dir, `assetrfq-${randomBytes(6).toString('hex')}.sqlite`))
@@ -203,7 +208,7 @@ const harness = async (
     quoteValiditySeconds: over.quoteValiditySeconds ?? 600,
     deriveOffer,
     depositAt,
-    balance,
+    balance: over.balance ?? balance,
     fetchPrice: createPriceFeed(),
     settle,
   })
@@ -373,6 +378,8 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       // Past `valid_until` before the corridor looks, so § 5's refusal is the
       // one taken: never silently filled, never silently re-priced.
       await sleep(3_000)
+      // `[0]` despite the sleep: nothing ticks in the background, and each
+      // harness opens its own store, so this row is still the one just quoted.
       const id = (await store.listNonTerminal())[0]!.id
       await corridor.tickAll()
       const row = await store.get(id)
@@ -383,6 +390,7 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       // and the Arkade Service — so the client takes it back itself.
       const stranded = await poll(() => depositAt(hex.encode(mine.swapPkScript)), {
         attempts: 20,
+        intervalMs: 2000,
         whenExhausted: 'the lapsed deposit never appeared at the offer script',
       })
       expect(stranded.txid).toBe(fundingTxid)
@@ -423,6 +431,52 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       const row = await store.get(id)
       expect(row.state).toBe('refused')
       expect(row.failureReason).toContain('deposit_short')
+      expect(row.fillTxid).toBeNull()
+      expect((await depositAt(row.offerPkScript))?.txid).toBe(fundingTxid)
+
+      await cancelOffer(arkade.ctx.wallet, ARKD_URL, mine.offerHex, {
+        repository: new InMemoryAssetSwapRepository(),
+        fundingTxid,
+        swapAddress: mine.address,
+      })
+      await store.close()
+    },
+    SWAP_TIMEOUT_MS,
+  )
+
+  it(
+    'never spends a deposit once the float has drained under the quoted payout',
+    async () => {
+      // § 9's ACTION-time gate, which the `exposure_cap` case above never
+      // reaches — that one refuses at quote time, before a row exists. Driven
+      // through the float seam because this wallet is BOTH sides: a competing
+      // fill pays our own maker script, so it cannot lower our own float.
+      let drained: bigint | null = null
+      const { corridor, store, pair } = await harness({
+        balance: async () =>
+          drained === null ? await balance() : new Map([...(await balance()), [assetId as AssetLeg, drained]]),
+      })
+      const amount = depositSats(5_000)
+      const outcome = await corridor.quote(requestFor(pair, amount))
+      expect(outcome.kind, JSON.stringify(outcome)).toBe('quote')
+      const quote = outcome.payload as { to_amount: string }
+
+      const mine = await clientOffer(BigInt(quote.to_amount))
+      const fundingTxid = await arkade.ctx.wallet.send({
+        address: mine.address,
+        amount: Number(amount),
+        extensions: [mine.extension],
+      })
+
+      const id = (await store.listNonTerminal())[0]!.id
+      await driveTo({ corridor, store }, id, 'funded')
+
+      // One short of the obliged payout: the boundary, not merely an empty float.
+      drained = BigInt(quote.to_amount) - 1n
+      await corridor.tickAll()
+      const row = await store.get(id)
+      expect(row.state).toBe('refused')
+      expect(row.failureReason).toContain('insufficient_inventory')
       expect(row.fillTxid).toBeNull()
       expect((await depositAt(row.offerPkScript))?.txid).toBe(fundingTxid)
 
