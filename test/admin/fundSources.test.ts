@@ -905,6 +905,10 @@ describe('the wallet page’s funding panel', () => {
     // a page showing only addresses rebuilds the tree to change nothing.
     expect(guard()).toContain('option.expiresAt !== undefined')
     expect(guard()).toContain('!state.dialog')
+    // And only while a deadline is STILL AHEAD. A lapsed option has nothing left
+    // to count — its banner is final — so a timer that kept running would
+    // rebuild the tree every 15s forever on a page an operator left open.
+    expect(guard()).toContain('option.expiresAt > Math.floor(Date.now() / 1000)')
 
     // Never under a focused field. `render` restores the caret for `.search`
     // alone, so a rebuild beneath any other input eats what is being typed — and

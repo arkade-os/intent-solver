@@ -2352,7 +2352,18 @@ let expiryTick = null
 const countingDown = () =>
   state.view === 'wallet' &&
   !state.dialog &&
-  (state.data.fundRead?.result?.options ?? []).some((option) => option.expiresAt !== undefined)
+  (state.data.fundRead?.result?.options ?? []).some(
+    // STILL IN THE FUTURE, not merely present. An option that has already lapsed
+    // has nothing left to count: its banner is final, and every later tick
+    // rebuilds the tree to render the identical sentence. Without this the timer
+    // never stops — an operator who leaves the wallet page open goes on
+    // rebuilding the DOM every 15s until they navigate away or close the tab.
+    //
+    // The banner still arrives, because `armExpiryTick` runs at the END of
+    // `render`: the tick that observes the expiry renders it and only then
+    // disarms.
+    (option) => option.expiresAt !== undefined && option.expiresAt > Math.floor(Date.now() / 1000),
+  )
 
 const armExpiryTick = () => {
   if (countingDown()) {
