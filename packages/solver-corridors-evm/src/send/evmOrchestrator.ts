@@ -20,6 +20,7 @@ import { planEvmSend, type EvmSendAction, type EvmSendObservation } from '@arkad
 import { blocksForDuration, type EvmBlockCadence } from '@arkade-os/solver-rails-evm/evm/blockTime.js'
 import type { EvmSendSwapRow, EvmSendSwapStore } from '../db/evmSendSwaps.js'
 import type { EvmCall, EvmHtlcBackend, EvmTransactionOutcome } from '@arkade-os/solver-core/ports/evm.js'
+import { EVM_SEND_EXPOSED } from '@arkade-os/solver-core/core/evmSwapState.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { provenDepth } from '@arkade-os/solver-rails-evm/evm/lockDepth.js'
@@ -241,11 +242,11 @@ export class EvmSendSwapService {
     // both sides. The lock's ABSENCE is the signal here, not a reason to stop
     // looking.
     //
-    // `evmLockTxid !== null` is the honest guard, and it keeps what the old one
-    // was reaching for: a Claim cannot precede the lock it spends, so before we
-    // have locked there is nothing to find.
+    // The ROW HAVING ENTERED `locking_evm` is the honest guard: its CAS
+    // precedes the broadcast. Gating on `evmLockTxid` read one write too late —
+    // that patch lands AFTER it, so a crash between blinded the scan (#243).
     let preimage = row.preimage
-    if (preimage === null && row.evmLockTxid !== null) {
+    if (preimage === null && (EVM_SEND_EXPOSED as readonly string[]).includes(row.state)) {
       // Reported and survived, as `provenDepth` treats its failed reads below.
       // The scan asks genesis-to-latest and many providers cap an `eth_getLogs`
       // range, so this THROWS every tick against one of those. Propagating

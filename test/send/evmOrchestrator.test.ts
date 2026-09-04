@@ -282,6 +282,24 @@ describe('the preimage is found AFTER the lock is gone', () => {
     await service.tick('swap-1')
     expect(findClaimPreimage).not.toHaveBeenCalled()
   })
+
+  it('still scans when a crash lost the txid patch', async () => {
+    const findClaimPreimage = vi.fn().mockResolvedValue(Uint8Array.from(Buffer.from('cd'.repeat(32), 'hex')))
+    const { store, service } = await build({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(false),
+        findClaimPreimage,
+        allowance: vi.fn().mockResolvedValue(0n),
+        lockCalls: vi.fn().mockReturnValue([LOCK_CALL]),
+        refundCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
+      } as unknown as EvmSendServiceDeps['evm'],
+    })
+    await store.transition('swap-1', 'quoted', 'locking_evm')
+
+    await service.tick('swap-1')
+    expect(findClaimPreimage, 'blinded by the lost patch').toHaveBeenCalled()
+    expect((await store.get('swap-1')).preimage).toBe('cd'.repeat(32))
+  })
 })
 
 describe('a preimage scan the node refuses must not strand the solver’s tokens', () => {
