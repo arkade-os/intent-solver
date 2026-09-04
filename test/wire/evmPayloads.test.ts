@@ -28,6 +28,8 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { evmSendRfqQuotePayload, evmReceiveRfqQuotePayload } from '@arkade-os/solver-corridors-evm/wire/evmPayloads.js'
+import { sendLockFromRow } from '@arkade-os/solver-corridors-evm/evm/lockFromRow.js'
+import { swapKey } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import type { EvmSendSwapRow } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import type { EvmReceiveSwapRow } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
 
@@ -170,6 +172,59 @@ describe('the send quote', () => {
     })
 
     expect(derived).toBe(profile.lockup_address)
+  })
+
+  it('carries the sixth field of the swap key, so a client can address the lock', () => {
+    // The contract stores `mapping(bytes32 => bool)` and nothing else, so this
+    // key IS the lock. Five of its six fields were already reachable from the
+    // payload; `evm_refund_address` is the sixth, and without it a client can
+    // neither prove the solver locked nor build the claim call.
+    const bytes20 = (value: string): Uint8Array => hex.decode(value.startsWith('0x') ? value.slice(2) : value)
+    const payload = evmSendRfqQuotePayload(row, REFUND_LOCKTIME, 'rfq-1')
+    const profile = payload.profile as Record<string, string | number>
+
+    // Built from the PAYLOAD and the client's own inputs only — never the row.
+    // Drop the field from the builder and this cannot even be constructed.
+    const fromPayload = {
+      preimageHash: hex.decode(profile.payment_hash as string),
+      amount: BigInt(payload.to_amount as string),
+      tokenAddress: bytes20(TOKEN),
+      // The client's own address, echoed back to it from its request.
+      claimAddress: bytes20(common.evmClaimAddress),
+      refundAddress: bytes20(profile.evm_refund_address as string),
+      timelock: BigInt(profile.evm_timeout_block as number),
+    }
+
+    expect(hex.encode(swapKey(fromPayload))).toBe(hex.encode(swapKey(sendLockFromRow(row))))
+  })
+
+  it('refuses to build a quote whose row has no solver address', () => {
+    // The invariant this field depends on. Emitting the value raw would put
+    // `"0xundefined"` on the wire; omitting the field would ship exactly the
+    // quote this change exists to prevent — one that parses, funds, and cannot
+    // be claimed. Both are quieter than throwing, and both are worse.
+    for (const missing of [undefined, '']) {
+      const broken = { ...row, evmRefundAddress: missing }
+      expect(() => evmSendRfqQuotePayload(broken as unknown as EvmSendSwapRow, REFUND_LOCKTIME, 'rfq-1')).toThrow(
+        /evm refund address missing from the row/,
+      )
+    }
+  })
+
+  it('prefixes a stored refund address that was written without 0x', () => {
+    // The row's two EVM addresses reach it by different routes and disagree:
+    // `evmClaimAddress` is echoed from a request that already matched
+    // `EVM_ADDRESS`, while `evmRefundAddress` is `hex.encode(solverEvmAddress)`
+    // and bare. `bytesFromHex` accepts either, so nothing internal noticed —
+    // the wire is the first reader that cares, and its regex is anchored.
+    const bare = { ...row, evmRefundAddress: '3333333333333333333333333333333333333333' }
+    const profile = evmSendRfqQuotePayload(bare as unknown as EvmSendSwapRow, REFUND_LOCKTIME, 'rfq-1')
+      .profile as Record<string, string>
+    expect(profile.evm_refund_address).toBe('0x3333333333333333333333333333333333333333')
+    expect(profile.evm_refund_address).toMatch(/^0x[0-9a-fA-F]{40}$/)
+    // …and idempotent, so an already-prefixed row is passed through unchanged.
+    const already = evmSendRfqQuotePayload(row, REFUND_LOCKTIME, 'rfq-1').profile as Record<string, string>
+    expect(already.evm_refund_address).toBe('0x3333333333333333333333333333333333333333')
   })
 
   it('echoes the payment hash the swap is keyed by', () => {

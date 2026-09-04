@@ -1140,12 +1140,42 @@ it holds that side's refund role and names where it takes the tokens:
   (the client's own EVM address — the only party `ERC20Swap.claim` will pay),
   `refund_address` (the client's Arkade address) and `client_refund_pubkey`
   (its x-only key, for the covenant's client-side refund leaves).
-- **quote.profile**: adds `evm_timeout_block` (a **block height**, see below) and
+- **quote.profile**: adds `evm_timeout_block` (a **block height**, see below),
   `receiver_pk_script` (compare-only, the § 7.1.1.1 role: the client's local
   reconstruction must fill in the `nonInteractiveClaim` leaf to compute a
-  matching merkle root, and only the solver knows that value).
+  matching merkle root, and only the solver knows that value), and
+  **`evm_refund_address` — the SOLVER's EVM address**, for which see below.
 - Exact-in only (`amount_side: "from"`): the two legs are different assets, so
   exact-out would mean inverting a fetched, rounded, directional rate.
+
+**`evm_refund_address` is the SOLVER's on this leg, and the client cannot
+settle without it.** Every EVM address field in this section names a ROLE, not
+a party: `evm_claim_address` is whoever claims, `evm_refund_address` is whoever
+the contract refunds. On this corridor the solver locks, so the solver holds
+the refund role — the mirror of `ethereum:<asset>->arkade:BTC`, where the
+client locks and sends its own `evm_refund_address` in the REQUEST. That
+symmetry is easy to miss, and missing it is how this field came to be omitted
+from the quote in the first place: the name reads as "the client's" on both
+legs until you notice what it actually tracks.
+
+A client needs it for **two distinct purposes**, and neither is optional:
+
+1. **It is the sixth field of the swap hash.** `ERC20Swap` stores no per-swap
+   struct — it keeps `mapping(bytes32 => bool)` keyed by
+   `keccak256(abi.encode(preimageHash, amount, tokenAddress, claimAddress,
+   refundAddress, timelock))`. With five of the six a client cannot compute the
+   key, so it cannot read `swaps(key)` to prove the solver ever locked, and has
+   no way to check the lock before parting with its preimage.
+2. **`claim` takes it as an explicit argument.** In
+   `claim(bytes32,uint256,address,address,uint256)` the caller is the claimer,
+   so the contract reads `claimAddress` from `msg.sender` and must be told the
+   other side. Without this value the client cannot construct the claim call at
+   all.
+
+A solver serving this direction MUST send it. Note for implementers of this
+spec other than the reference solver — solverd's Go side in particular — that
+this field is required on the send quote and is not optional for interop: a
+quote without it is one no client can settle.
 
 `ethereum:<asset>->arkade:BTC` — **the solver funds the Arkade covenant**, so
 the client must hand over the keys that pin the payout to it, exactly as
