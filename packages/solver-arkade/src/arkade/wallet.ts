@@ -14,6 +14,7 @@ import {
   assertSubmittedArkTxid,
   buildOffchainTx,
   ConditionWitness,
+  createAssetPacket,
   EmulatorPacket,
   EsploraProvider,
   Extension,
@@ -26,6 +27,7 @@ import {
   setArkPsbtField,
   Transaction,
   Wallet,
+  type Recipient,
   type TapLeafScript,
 } from '@arkade-os/sdk'
 import { SQLiteContractRepository, SQLiteWalletRepository, type SQLExecutor } from '@arkade-os/sdk/repositories/sqlite'
@@ -333,6 +335,14 @@ export interface FundedOutput {
   txid: string
   vout: number
   value: number
+  /** Assets carried, when any. Absent rather than empty on a sats lockup. */
+  assets?: readonly FundedAsset[]
+}
+
+/** One asset balance on a funded output. `assetId` is the canonical 68-hex serialization. */
+export interface FundedAsset {
+  assetId: string
+  amount: bigint
 }
 
 /**
@@ -366,7 +376,16 @@ export const findLockups = async (ctx: ArkadeContext, pkScriptHex: string): Prom
     })
     const batch = vtxos ?? []
     for (const vtxo of batch) {
-      outputs.push({ txid: vtxo.txid, vout: vtxo.vout, value: Number(vtxo.value) })
+      // 256-bit, and the indexer reports it as a STRING: never a `number`.
+      const assets = ((vtxo as { assets?: { assetId: string; amount: bigint | string }[] }).assets ?? [])
+        .map((entry) => ({ assetId: entry.assetId, amount: BigInt(entry.amount) }))
+        .filter((entry) => entry.amount > 0n)
+      outputs.push({
+        txid: vtxo.txid,
+        vout: vtxo.vout,
+        value: Number(vtxo.value),
+        ...(assets.length > 0 ? { assets } : {}),
+      })
     }
     if (batch.length === 0 || !page || page.current + 1 >= page.total) break
     pageIndex = page.current + 1
@@ -644,6 +663,49 @@ export const attachEmulatorPackets = (tx: Transaction, packets: Parameters<typeo
 }
 
 /**
+ * `per-input` is the covenant shape — its clause inspects the output at the
+ * CURRENT INPUT'S index — and `aggregate` the signature-leaf shape.
+ */
+export type RefundOutputLayout = 'per-input' | 'aggregate'
+
+/**
+ * The asset packet a refund of `funded` needs, or null when it carries none.
+ * EVERY asset on EVERY input must be declared, not just the denominating one:
+ * omitting one is refused with ASSET_NOT_FOUND, omitting all with `no asset packet`.
+ */
+export const refundAssetPacket = (
+  funded: readonly FundedOutput[],
+  layout: RefundOutputLayout,
+): ReturnType<typeof createAssetPacket> | null => {
+  const inputAssets = new Map<number, FundedAsset[]>()
+  funded.forEach((output, vin) => {
+    const assets = (output.assets ?? []).filter((entry) => entry.amount > 0n)
+    if (assets.length === 0) return
+    if (layout === 'per-input' && assets.length > 1) {
+      throw new Error(
+        `input ${vin} carries ${assets.length} assets, and the covenant bounds its output to exactly one asset: ` +
+          'such a refund is unsatisfiable, and the emulator would report only OP_VERIFY failed',
+      )
+    }
+    inputAssets.set(vin, [...assets])
+  })
+  if (inputAssets.size === 0) return null
+
+  const outputCount = layout === 'per-input' ? funded.length : 1
+  const totals = Array.from({ length: outputCount }, () => new Map<string, bigint>())
+  for (const [vin, assets] of inputAssets) {
+    const bucket = totals[layout === 'per-input' ? vin : 0]!
+    for (const entry of assets) bucket.set(entry.assetId, (bucket.get(entry.assetId) ?? 0n) + entry.amount)
+  }
+  // Positional: receivers[i] IS output i, hence the elided `Recipient.address`.
+  // `Omit` narrows the cast to that one field, so a later SDK field fails to compile.
+  const receivers: Omit<Recipient, 'address'>[] = totals.map((bucket) => ({
+    assets: [...bucket].map(([assetId, amount]) => ({ assetId, amount })),
+  }))
+  return createAssetPacket(inputAssets, receivers as Recipient[])
+}
+
+/**
  * Push a covenant refund: spend every funded output back to the refund
  * destination the script commits to.
  *
@@ -725,10 +787,12 @@ export const refundSwapScript = async (
     setArkPsbtField(arkTx, vin, PrevArkTxField, sourceTx)
   })
 
+  const assetPacket = refundAssetPacket(funded, 'per-input')
   attachEmulatorPackets(arkTx, [
     EmulatorPacket.create(
       funded.map((_, vin) => ({ vin, script: script.refundArkadeScript, witness: EMPTY_RAW_WITNESS })),
     ),
+    ...(assetPacket ? [assetPacket] : []),
   ])
 
   // No index list: every input spends the same refund leaf, so all are
@@ -828,6 +892,10 @@ export const refundWithoutReceiverSwapScript = async (
     [{ script: refundPkScript, amount: BigInt(totalValue(funded)) }],
     ctx.wallet.serverUnrollScript,
   )
+
+  // BEFORE signing: the packet changes the output set the signature covers.
+  const assetPacket = refundAssetPacket(funded, 'aggregate')
+  if (assetPacket) attachEmulatorPackets(arkTx, [assetPacket])
 
   // No index list: every input spends the same leaf, so all are signed.
   const signedArkTx = await ctx.identity.sign(arkTx)

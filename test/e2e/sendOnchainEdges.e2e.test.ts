@@ -299,9 +299,20 @@ describe('e2e arkade:BTC->onchain:BTC (send) — refusals, wrong preimages and t
       // clock, so the solver rebuilds the refund leaf FROM THE ROW, signs it,
       // and gets its own sats back.
       const present = await serviceWith()
+      // Holds at `refunding_onchain` until the refund CONFIRMS (#204) — ask for the block.
+      const broadcast = await poll(
+        async () => {
+          const row = await present.tick(swap.id)
+          return row.onchainRefundTxid || TERMINAL.has(row.state) ? row : null
+        },
+        { attempts: 200, intervalMs: 3_000, whenExhausted: `onchain swap ${swap.id} never broadcast its refund` },
+      )
+      expect(broadcast.onchainRefundTxid).toBeTruthy()
+      await mineBlocks(1)
+
       const refunded = await driveUntil(present, swap.id, new Set(['refunded', ...TERMINAL]))
       expect(refunded.state).toBe('refunded')
-      expect(refunded.onchainRefundTxid).toBeTruthy()
+      expect(refunded.onchainRefundTxid).toBe(broadcast.onchainRefundTxid)
 
       // The client's Arkade lockup is untouched by any of that and is theirs to
       // recover. `refundNow` is the operator override for exactly this — a

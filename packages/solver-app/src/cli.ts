@@ -60,6 +60,7 @@ import { lockupSource, runContractLifecycle } from '@arkade-os/solver-arkade/ark
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { RFQ_PAIR_SEND } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { assetMarketPolicy } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import type { Corridor } from '@arkade-os/solver-core/core/corridor.js'
 import {
   MAX_FINAL_CLTV_BLOCKS,
@@ -1761,14 +1762,17 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     // publish the unoverridden config as if the operator had never narrowed it.
     const cardAdminStore = await AdminStore.open(resolveDbLayout(config.swapDbPath).admin)
     let policy
+    let assetMarkets
     try {
       policy = applyOverrides(config, await cardAdminStore.getOverrides())
+      assetMarkets = assetMarketPolicy(await cardAdminStore.listMarkets()).pricing
     } finally {
       await cardAdminStore.close()
     }
     const { MnemonicIdentity } = await import('@arkade-os/sdk')
     const identity = MnemonicIdentity.fromMnemonic(config.arkade.mnemonic, { isMainnet: config.arkade.isMainnet })
-    const { buildSolverCard, signSolverCard } = await import('@arkade-os/solver-core/core/registryCard.js')
+    const { assetCardMarkets, buildSolverCard, signSolverCard, unpublishableCorridors } =
+      await import('@arkade-os/solver-core/core/registryCard.js')
     const card = await signSolverCard(
       buildSolverCard({
         name,
@@ -1793,6 +1797,10 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
             { limits: policy.corridorLimits[corridor], fee: policy.corridorFees[corridor] },
           ]),
         ),
+        assetMarkets: assetCardMarkets(assetMarkets, {
+          min: policy.offerMinFillAmount,
+          max: policy.offerMaxFillAmount,
+        }),
       }),
       (digest) => identity.signMessage(digest, 'schnorr'),
     )
@@ -1800,6 +1808,12 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     // checkout; the destination hint goes to stderr.
     console.log(JSON.stringify(card, null, 2))
     console.error(`registry path: solvers/${config.network}/${name}.json`)
+    // Stderr, beside the path: stdout is piped into the registry checkout.
+    for (const note of unpublishableCorridors(
+      policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
+    )) {
+      console.error(note)
+    }
   },
 
   async balances() {

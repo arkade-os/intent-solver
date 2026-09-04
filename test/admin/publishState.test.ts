@@ -64,7 +64,11 @@ const makeDeps = (over: { nostrAdPublish?: AdPublishMode; adPublisher?: AdPublis
         corridorFees: allCorridors({ bps: 0, flatSats: 0 }),
         corridorEnabled: allCorridors(true),
         maxExposedSats: 100_000,
+        evmCorridors: [],
+        offerMinFillAmount: 0n,
+        offerMaxFillAmount: 0n,
       },
+      assetMarkets: [],
       ln: { getBalance: async () => ({ availableSats: 100_000, incomingSats: 0 }) },
       arkade: {
         wallet: {

@@ -6,7 +6,13 @@
  * whether each is current, so both are reported together.
  */
 import type { Hono } from 'hono'
-import { buildSolverCard, signSolverCard, type SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
+import {
+  assetCardMarkets,
+  buildSolverCard,
+  signSolverCard,
+  unpublishableCorridors,
+  type SolverCard,
+} from '@arkade-os/solver-core/core/registryCard.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { SolverAd } from '@arkade-os/solver-core/core/solverAd.js'
 import type { Services } from '../../ops/services.js'
@@ -75,6 +81,11 @@ const deploymentCard = async (services: Services): Promise<SolverCard> => {
       discoveryPubkey: services.providerPubkey,
       relays,
       corridors: served,
+      // Already the ENABLED markets: `assetMarketPolicy` drops a paused pair.
+      assetMarkets: assetCardMarkets(services.assetMarkets, {
+        min: policy.offerMinFillAmount,
+        max: policy.offerMaxFillAmount,
+      }),
     }),
     (digest) => services.arkade.identity.signMessage(digest, 'schnorr'),
   )
@@ -110,6 +121,10 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
       // Named like `overridesError` on /api/diagnostics rather than a bare
       // `error`, which on this port means "the request failed".
       cardError,
+      // Reported even when the card failed: it describes the deployment, not the card.
+      cardOmitted: unpublishableCorridors(
+        deps.services.policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
+      ),
       ad,
       adError,
       publish: publishStateOf(deps),

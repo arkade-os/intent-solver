@@ -475,11 +475,14 @@ describe('OnchainReceiveSwapService', () => {
       // Step 5: covclaimd's autonomous claim lands, revealing P.
       deps.arkadeFake.spendLockup(swap.pkScript, P)
 
-      // Step 6: tick observes the claim and claims the onchain HTLC.
       row = await service.tick(swap.id)
-      expect(row.state).toBe('settled')
+      expect(row.state).toBe('claimed')
       expect(row.preimage).toBe(hex.encode(P))
       expect(row.onchainClaimTxid).toBeTruthy()
+
+      deps.onchain.mineBlocks(1)
+      row = await service.tick(swap.id)
+      expect(row.state).toBe('settled')
     })
 
     /**
@@ -517,9 +520,12 @@ describe('OnchainReceiveSwapService', () => {
 
       deps.arkadeFake.spendLockup(swap.pkScript, P)
       row = await solo.tick(swap.id)
-      expect(row.state).toBe('settled')
+      expect(row.state).toBe('claimed')
       expect(row.preimage).toBe(hex.encode(P))
       expect(row.onchainClaimTxid).toBeTruthy()
+
+      deps.onchain.mineBlocks(1)
+      expect((await solo.tick(swap.id)).state).toBe('settled')
     })
   })
 
@@ -782,7 +788,7 @@ describe('OnchainReceiveSwapService', () => {
       deps.arkadeFake.spendLockup(awaitingClaim.pkScript, P)
 
       const row = await service.tick(awaitingClaim.id)
-      expect(row.state).toBe('settled') // tick chains straight through claimed -> settled
+      expect(row.state).toBe('claimed') // chains into claimed, then waits on the L1 claim confirming
       expect(row.preimage).toBe(hex.encode(P))
       expect(deps.arkadeFake.refundCalls).toBe(0) // recovered before ever pushing the refund
     })
@@ -810,7 +816,7 @@ describe('OnchainReceiveSwapService', () => {
       // The indexer catches up and the claim becomes readable.
       deps.arkadeFake.spendLockup(awaitingClaim.pkScript, P)
       const row = await service.tick(awaitingClaim.id)
-      expect(row.state).toBe('settled')
+      expect(row.state).toBe('claimed')
       expect(row.preimage).toBe(hex.encode(P))
       expect(deps.arkadeFake.refundCalls).toBe(0)
     })
@@ -909,6 +915,34 @@ describe('OnchainReceiveSwapService', () => {
       expect(row.onchainClaimTxid).toBeNull()
     })
 
+    it('stays in claimed until the L1 claim confirms, and settles only then', async () => {
+      const claimed = await driveToClaimed()
+      const broadcast = await service.tick(claimed.id)
+      expect(broadcast.state).toBe('claimed')
+      expect(broadcast.onchainClaimTxid).toBeTruthy()
+      expect(await deps.onchain.transactionOutcome(broadcast.onchainClaimTxid!)).toBe('mempool')
+
+      // A whole tick with the claim still in the mempool.
+      expect((await service.tick(claimed.id)).state).toBe('claimed')
+
+      deps.onchain.mineBlocks(1)
+      const settled = await service.tick(claimed.id)
+      expect(settled.state).toBe('settled')
+      expect(settled.onchainClaimTxid).toBe(broadcast.onchainClaimTxid)
+    })
+
+    it('rebroadcasts a claim the mempool dropped rather than leaving it settled', async () => {
+      const claimed = await driveToClaimed()
+      const first = await service.tick(claimed.id)
+      deps.onchain.dropFromMempool(first.onchainClaimTxid!)
+
+      const retried = await service.tick(claimed.id)
+      expect(retried.state).toBe('claimed')
+      expect(await deps.onchain.transactionOutcome(retried.onchainClaimTxid!)).toBe('mempool')
+      deps.onchain.mineBlocks(1)
+      expect((await service.tick(claimed.id)).state).toBe('settled')
+    })
+
     /**
      * `claimNow` — the operator's fee-dust retry (TLA+ finding F4). arkana's
      * review of #172 raised two things about it, and this is the second: the
@@ -953,6 +987,26 @@ describe('OnchainReceiveSwapService', () => {
         expect(await service.claimNow(claimed.id)).toMatchObject({
           refused: expect.stringContaining('does not match'),
         })
+      })
+
+      it('recognises its OWN claim on re-entry rather than reporting the client refunded', async () => {
+        const claimed = await driveToClaimed()
+        // The claim reaches the network; the process dies before it is recorded.
+        const broadcastRaw = deps.onchain.broadcastRaw.bind(deps.onchain)
+        let sent: string | undefined
+        deps.onchain.broadcastRaw = async (txHex) => {
+          sent = (await broadcastRaw(txHex)).txid
+          deps.onchain.spendClaim(claimed.fundingTxid!, claimed.fundingVout!, [
+            new Uint8Array(64),
+            P,
+            new Uint8Array(1),
+          ])
+          throw new Error('process died after the broadcast')
+        }
+        await expect(service.claimNow(claimed.id)).rejects.toThrow('process died')
+        deps.onchain.broadcastRaw = broadcastRaw
+
+        expect(await service.claimNow(claimed.id)).toEqual({ txid: sent })
       })
     })
   })
