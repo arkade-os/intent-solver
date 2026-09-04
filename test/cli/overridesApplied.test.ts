@@ -125,4 +125,13 @@ describe('what must agree with the quoted terms reads policy, not env', () => {
     // refusing when NOTHING is served is the whole of the check now.
     expect(body).not.toContain("corridorEnabled['arkade:BTC->lightning:BTC']")
   })
+
+  it('the asset markets, through the same resolver the console uses', () => {
+    // Resolving pointers and inherited bounds twice is how the two cards drift.
+    const body = cardCommand()
+    expect(body).toContain('assetMarkets: assetCardMarkets(')
+    expect(body).toContain('policy.offerMinFillAmount')
+    expect(body).toContain('policy.offerMaxFillAmount')
+    expect(body).toContain('unpublishableCorridors(')
+  })
 })
