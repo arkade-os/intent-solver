@@ -44,6 +44,10 @@ const row = (over: Record<string, unknown> = {}) => ({
   evmContractAddress: '0x' + 'de'.repeat(20),
   evmChainId: 8453,
   evmClaimAddress: '0x' + '99'.repeat(20),
+  // The SOLVER's own address. Required on the row, and the send quote now
+  // carries it: it is the sixth field of the swap key and an explicit
+  // argument to `claim`, so a client cannot settle without it.
+  evmRefundAddress: '0x' + '88'.repeat(20),
   minConfirmations: 12,
   minAgeSeconds: 780,
   ...over,
