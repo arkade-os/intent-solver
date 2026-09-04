@@ -474,6 +474,32 @@ export interface SendBackend {
    * type here expresses: closing either ends both. Shut them down together.
    */
   close?(): Promise<void>
+
+  /**
+   * Mint a PLAIN invoice so an operator can fund this rail over Lightning.
+   *
+   * Deposits only, and deliberately separate from {@link
+   * ReceiveBackend.createHoldInvoice}. A hold invoice is the wrong instrument
+   * here by construction: it parks the payer's HTLC awaiting a preimage this
+   * side would have to remember and settle, so an operator topping up their own
+   * node would watch their money sit in flight. A deposit must credit on
+   * arrival.
+   *
+   * OPTIONAL, and absence is a documented degradation rather than a gap: the
+   * console simply does not offer a Lightning deposit option for a rail that
+   * cannot mint one, and the onchain option is unaffected. That is what keeps
+   * this additive for every rail that does not implement it — including ones
+   * that live outside this repository.
+   *
+   * `amountSats` omitted means an amountless invoice, which is what a deposit
+   * usually wants: the operator decides how much to send at pay time.
+   */
+  createInvoice?(params: { amountSats?: number; memo?: string }): Promise<{
+    /** The BOLT11 string. */
+    invoice: string
+    /** Unix seconds. Required: an invoice the console cannot age is one an operator pays late. */
+    expiresAt: number
+  }>
 }
 
 /** The receive leg's view: issue a hold invoice and settle it with the preimage. */

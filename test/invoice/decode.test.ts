@@ -3,6 +3,7 @@ import { hex } from '@scure/base'
 import {
   amountSatsOf,
   decodeInvoice,
+  expiresAtOf,
   finalCltvBlocksOf,
   paymentHashOf,
   InvalidInvoice,
@@ -340,6 +341,55 @@ describe('paymentHashOf / amountSatsOf — the already-accepted readers', () => 
  * running those defences over our own invoice threw `cltv_too_large` on every
  * receive quote. These pin that this reader does not.
  */
+/**
+ * The reader for invoices this solver MINTS, whose defining property is that
+ * they carry no amount — so the one thing that matters is that it answers where
+ * {@link decodeInvoice} refuses.
+ */
+describe('expiresAtOf', () => {
+  const TIMESTAMP = 1_734_606_755
+
+  const amountless = (expirySeconds: number): string =>
+    forgeInvoice({
+      network: 'bcrt',
+      paymentHash: new Uint8Array(32).fill(7),
+      timestamp: TIMESTAMP,
+      expirySeconds,
+    })
+
+  it('reads an AMOUNTLESS invoice, which decodeInvoice refuses outright', () => {
+    // The bug this exists for. A deposit invoice names no amount on purpose, and
+    // reading its expiry through `decodeInvoice` threw `missing_amount` on every
+    // one ever minted — so the Lightning deposit option never appeared.
+    const invoice = amountless(900)
+
+    expect(() => decodeInvoice(invoice)).toThrow(/missing_amount/)
+    expect(expiresAtOf(invoice)).toBe(TIMESTAMP + 900)
+  })
+
+  it('agrees with decodeInvoice wherever decodeInvoice will answer', () => {
+    // Not a second parser — the same value, minus the refusals that do not apply
+    // to an invoice we minted ourselves.
+    for (const expirySeconds of [60, 900, 1800, 3600]) {
+      const invoice = forgeInvoice({
+        network: 'bcrt',
+        amountSats: 50_000,
+        paymentHash: new Uint8Array(32).fill(7),
+        timestamp: TIMESTAMP,
+        expirySeconds,
+      })
+      expect(expiresAtOf(invoice)).toBe(decodeInvoice(invoice).expiresAt)
+    }
+  })
+
+  it('refuses a string that is not an invoice rather than answering NaN', () => {
+    // `undefined + 3600` is `NaN`, and a console counting down from a non-number
+    // is the exact failure this whole path was written to prevent.
+    expect(() => expiresAtOf('not-an-invoice')).toThrow(InvalidInvoice)
+    expect(() => expiresAtOf('x'.repeat(MAX_INVOICE_LENGTH + 1))).toThrow(/too_long/)
+  })
+})
+
 describe('finalCltvBlocksOf', () => {
   const withCltv = (blocks: number): string =>
     forgeInvoice({

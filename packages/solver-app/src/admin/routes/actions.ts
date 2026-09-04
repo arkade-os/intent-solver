@@ -700,10 +700,18 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     tier: 'safe',
     run: async (services, body) => {
       const source = requireFundSource(fundSources(services), body.source)
-      if (!source.depositAddress) {
-        throw capabilityRefusal(source, 'hand out a deposit address', 'it has no inbound address of its own')
+      if (!source.depositOptions) {
+        throw capabilityRefusal(source, 'hand out a deposit address', 'it has no inbound route of its own')
       }
-      return source.depositAddress()
+      const options = await source.depositOptions()
+      // An EMPTY list is not the same as an absent method, and the difference is
+      // worth a distinct refusal: the source CAN take deposits and has none to
+      // offer right now — a rail whose node is unreachable, say. Returning
+      // `{ options: [] }` would render as an empty panel with no reason in it.
+      if (options.length === 0) {
+        throw capabilityRefusal(source, 'hand out a deposit address', 'it has no deposit route available right now')
+      }
+      return { options }
     },
   },
 

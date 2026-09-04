@@ -1,15 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { forgeInvoiceWithPreimage } from '@arkade-os/solver-rails-fake/ln/fake/bolt11.js'
+import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
 
 // `payViaPaymentRequest` and `getWalletInfo` are request/response calls made on
 // a gRPC client the adapter constructs internally, so the only way to assert
 // what it SENDS is to module-mock the vendor -- the same pattern
 // test/onchain/lnd.test.ts already uses on this package.
-const { payViaPaymentRequest, getWalletInfo, getInvoice, getRoutingFeeEstimate } = vi.hoisted(() => ({
+const { payViaPaymentRequest, getWalletInfo, getInvoice, getRoutingFeeEstimate, createInvoice } = vi.hoisted(() => ({
   payViaPaymentRequest: vi.fn(),
   getWalletInfo: vi.fn(),
   getInvoice: vi.fn(),
   getRoutingFeeEstimate: vi.fn(),
+  createInvoice: vi.fn(),
 }))
 vi.mock('lightning', async (importOriginal) => {
   const actual = await importOriginal<typeof import('lightning')>()
@@ -20,6 +22,7 @@ vi.mock('lightning', async (importOriginal) => {
     getWalletInfo,
     getInvoice,
     getRoutingFeeEstimate,
+    createInvoice,
   }
 })
 
@@ -287,6 +290,89 @@ describe('LndLightningBackendAdapter.getOwnInvoiceState', () => {
  * we actually send is capped at that same worst case, so our outbound HTLC
  * cannot still be live when the refund path opens.
  */
+/**
+ * The operator-funding invoice, and one claim above all: the expiry is real.
+ *
+ * `createInvoice`'s result carries NO expiry — not in its type and not at run
+ * time, where the vendor assembles the resolved object field by field without
+ * one. Reading `created.expires_at` therefore yields `undefined`, and
+ * `new Date(undefined).getTime()` is `NaN`, so the console would count down from
+ * a number that is not one and an operator would be told a dead invoice was
+ * live. The mock below returns exactly what the vendor really returns, so a
+ * version that reaches for the echoed field fails here rather than in a browser.
+ */
+describe('LndLightningBackendAdapter.createInvoice', () => {
+  const TIMESTAMP = 1_800_000_000
+  const EXPIRY_SECONDS = 900
+  /**
+   * AMOUNTLESS, because that is what this method asks LND for and therefore the
+   * only shape the real return value ever takes.
+   *
+   * An amountful forge here is the mock that hid a total failure: `decodeInvoice`
+   * REQUIRES an amount, so reading the expiry through it threw `missing_amount`
+   * on every deposit invoice ever minted, while a test feeding it a 1000-sat
+   * invoice passed. The mock has to be the invoice production produces.
+   */
+  const forged = forgeInvoiceWithPreimage({
+    network: 'bcrt',
+    timestamp: TIMESTAMP,
+    expirySeconds: EXPIRY_SECONDS,
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    // The vendor's REAL resolved shape — `request` and no expiry anywhere in it.
+    createInvoice.mockResolvedValue({
+      request: forged.invoice,
+      id: 'x',
+      secret: 'y',
+      created_at: '2027-01-15T00:00:00Z',
+    })
+  })
+
+  it('reports the expiry encoded in the invoice, which is what a payer enforces', async () => {
+    const adapter = await LndLightningBackendAdapter.create({ socket: 's', cert: 'c', macaroon: 'm' })
+
+    const minted = await adapter.createInvoice!({ memo: 'solver float deposit' })
+
+    expect(minted.invoice).toBe(forged.invoice)
+    expect(minted.expiresAt).toBe(TIMESTAMP + EXPIRY_SECONDS)
+    // The `NaN` this guards against is not caught by a truthiness check —
+    // `Number.isFinite` is, and the console arithmetic depends on it.
+    expect(Number.isFinite(minted.expiresAt)).toBe(true)
+  })
+
+  it('reads an AMOUNTLESS invoice, which is the only kind it mints', async () => {
+    // The regression this describe block was blind to. The invoice above carries
+    // no amount, so a reader that requires one refuses it — and the refusal did
+    // not surface as a decoder error but as the Lightning deposit option quietly
+    // never appearing, with the reason printed on the onchain option instead.
+    expect(() => decodeInvoice(forged.invoice)).toThrow(/missing_amount/)
+
+    const adapter = await LndLightningBackendAdapter.create({ socket: 's', cert: 'c', macaroon: 'm' })
+
+    await expect(adapter.createInvoice!({ memo: 'solver float deposit' })).resolves.toMatchObject({
+      expiresAt: TIMESTAMP + EXPIRY_SECONDS,
+    })
+  })
+
+  it('asks for an AMOUNTLESS invoice unless an amount was given', async () => {
+    const adapter = await LndLightningBackendAdapter.create({ socket: 's', cert: 'c', macaroon: 'm' })
+
+    await adapter.createInvoice!({ memo: 'm' })
+
+    // Omitted, never `tokens: 0`: that is a zero-amount invoice on some nodes
+    // and an amountless one on others, and the two differ in whether a payer may
+    // choose what to send.
+    expect(createInvoice.mock.calls[0]![0]).not.toHaveProperty('tokens')
+    expect(createInvoice.mock.calls[0]![0]).toMatchObject({ description: 'm' })
+
+    await adapter.createInvoice!({ amountSats: 25_000 })
+    expect(createInvoice.mock.calls[1]![0]).toMatchObject({ tokens: 25_000 })
+    expect(createInvoice.mock.calls[1]![0]).not.toHaveProperty('description')
+  })
+})
+
 describe('LndLightningBackendAdapter.payInvoice', () => {
   const CURRENT_HEIGHT = 840_000
   const forged = forgeInvoiceWithPreimage({

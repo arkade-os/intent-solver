@@ -56,7 +56,15 @@ const wordsToBytes = (words: number[]): Uint8Array => {
 export interface ForgeParams {
   /** bech32 currency prefix: 'bcrt' for regtest, 'tbs' for signet. */
   network: string
-  amountSats: number
+  /**
+   * Sats the invoice is bound to — OMIT for an amountless one, where the payer
+   * chooses.
+   *
+   * Optional because the deposit invoices this solver mints are amountless, and
+   * a forge that could not express that let a decoder which requires an amount
+   * pass its tests while failing on every real invoice it would ever see.
+   */
+  amountSats?: number
   /** sha256(preimage), 32 bytes. */
   paymentHash: Uint8Array
   /** Unix seconds. */
@@ -101,12 +109,17 @@ const routeHintWords = (hops: readonly ForgeHop[]): number[] => {
 /** Encode a decodable BOLT11 invoice for the given payment hash. */
 export const forgeInvoice = (params: ForgeParams): string => {
   if (params.paymentHash.length !== 32) throw new Error('payment hash must be 32 bytes')
-  if (!Number.isInteger(params.amountSats) || params.amountSats <= 0) throw new Error('amount must be positive sats')
+  if (params.amountSats !== undefined && (!Number.isInteger(params.amountSats) || params.amountSats <= 0)) {
+    throw new Error('amount must be positive sats')
+  }
 
   // Amount in the HRP with the nano multiplier: n = 1e-9 BTC = 0.1 sat, so
   // N sats = 10·N n. Nano keeps EVERY integer-sat amount representable without
   // choosing a multiplier per magnitude.
-  const hrp = `ln${params.network}${params.amountSats * 10}n`
+  //
+  // An OMITTED amount leaves the HRP with nothing after the network prefix,
+  // which is exactly how BOLT11 spells "amountless" — the payer chooses.
+  const hrp = params.amountSats === undefined ? `ln${params.network}` : `ln${params.network}${params.amountSats * 10}n`
 
   const timestampWords = ((): number[] => {
     // Timestamp is ALWAYS 7 words (35 bits), zero-padded on the left.

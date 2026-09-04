@@ -12,7 +12,8 @@
  *  - `readBalance` — a completely different split. The rail reports two pools of
  *    two figures; this reports what can fund a swap RIGHT NOW versus what is
  *    boarded, waiting or stuck. A seam with fixed fields could not carry both.
- *  - `depositAddress` — the boarding address, an L1 address that boards into
+ *  - `depositOptions` — an Arkade address (float on arrival) and the boarding
+ *    address, an L1 address that boards into
  *    Arkade. `settleRequired` is true and there is deliberately no
  *    `settleDeposits` below; those are two different facts and this source is
  *    the reason they are separate fields.
@@ -36,6 +37,7 @@
  * method that threw would put two buttons on the screen that can only ever fail.
  */
 
+import { networks } from '@arkade-os/sdk'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import type { Services } from './services.js'
 import type { FundBalance, FundDeposit, FundSource } from './fundSources.js'
@@ -116,6 +118,58 @@ const arkadeDeposit = async (services: Services): Promise<FundDeposit> => {
 }
 
 /**
+ * The Arkade address: a VTXO sent here IS float on arrival.
+ *
+ * The other half of the answer, and usually the one an operator wants. Boarding
+ * takes L1 sats and needs a settlement before they are spendable; this takes a
+ * VTXO from anyone already on Arkade and needs nothing afterwards. Offering only
+ * the first — which this source did — quietly told an operator already holding
+ * VTXOs to go out to L1 and wait.
+ *
+ * PREFIX-CHECKED, exactly like the boarding address below.
+ *
+ * An earlier version of this skipped the check, on the reasoning that an Arkade
+ * address is derived from the server this wallet is connected to and so has no
+ * wrong-chain form. That reasoning is wrong, and the SDK's own network table is
+ * the proof: `hrp` is `ark` on bitcoin and `tark` on every test network, so a
+ * wallet pointed at a mainnet server on a regtest-configured deployment hands
+ * back a perfectly well-formed `ark1…` while this file labels it
+ * `arkade regtest`. That is the identical hazard the boarding guard exists for
+ * — an irreversible send to a wallet this solver is not running, against an
+ * address the operator never typed and has no reason to doubt.
+ *
+ * The HRP comes from the SDK's `networks` rather than a table written here, for
+ * the same reason the boarding check reads `ONCHAIN_NETWORKS`: a mapping
+ * maintained beside the thing it describes cannot drift from it.
+ *
+ * In practice the misconfiguration that produces a wrong `ark1…` also produces a
+ * wrong boarding address, which `arkadeDeposit` already refuses — and since
+ * `depositOptions` awaits both, either refusal takes the whole answer down and
+ * the operator is shown nothing rather than one good option beside one bad one.
+ * This guard is therefore belt-and-braces, which is the correct posture for the
+ * one mistake nobody downstream can catch.
+ */
+const arkadeOffchainDeposit = async (services: Services): Promise<FundDeposit> => {
+  const network = services.config.network
+  const address = await services.arkade.wallet.getAddress()
+  const hrp = networks[network].hrp
+  if (!address.startsWith(`${hrp}1`)) {
+    throw new Error(
+      `the Arkade wallet handed back ${address}, which is not a ${network} Arkade address (expected the ${hrp}1… ` +
+        'prefix) — the wallet is pointed at a different Arkade server. Do NOT send to it.',
+    )
+  }
+  return {
+    address,
+    addressKind: `arkade ${network}`,
+    // FALSE, and the contrast with boarding is the whole reason both are offered:
+    // a VTXO arriving here is already float. Nothing has to be run afterwards.
+    settleRequired: false,
+    note: 'Spendable float on arrival — no settlement step. Reachable only from a wallet already on Arkade.',
+  }
+}
+
+/**
  * Always present — unlike the rail's, which is null without `LN_BACKEND`.
  *
  * Every deployment has an Arkade wallet: `createServices` builds one
@@ -126,5 +180,12 @@ export const arkadeFundSource = (services: Services): FundSource => ({
   label: 'arkade float',
   unit: 'sats',
   readBalance: () => arkadeBalance(services),
-  depositAddress: () => arkadeDeposit(services),
+  // Arkade FIRST: it is the one that needs no settlement, so an operator who
+  // takes the top option gets spendable float rather than a second chore.
+  //
+  // `Promise.all` because neither read depends on the other — same shape as
+  // `railBalance`'s three concurrent reads. The ORDER of the array is the policy
+  // above and is unaffected: `Promise.all` preserves it regardless of which
+  // settles first.
+  depositOptions: async () => Promise.all([arkadeOffchainDeposit(services), arkadeDeposit(services)]),
 })

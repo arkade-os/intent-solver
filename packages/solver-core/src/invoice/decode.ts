@@ -30,14 +30,17 @@ const DEFAULT_MIN_FINAL_CLTV = 18
  * CLTV defences, and a caller that wants one scalar off a string it already
  * holds is not asking for those defences to run again.
  */
-const sectionReader = (raw: string): ((name: string) => unknown) => {
+const parseBolt11 = (raw: string): ReturnType<typeof bolt11.decode> => {
   if (raw.length > MAX_INVOICE_LENGTH) throw new InvalidInvoice('too_long')
-  let decoded: ReturnType<typeof bolt11.decode>
   try {
-    decoded = bolt11.decode(raw.toLowerCase())
+    return bolt11.decode(raw.toLowerCase())
   } catch {
     throw new InvalidInvoice('malformed')
   }
+}
+
+const sectionReader = (raw: string): ((name: string) => unknown) => {
+  const decoded = parseBolt11(raw)
   return (name) => ((decoded.sections.find((s) => s.name === name) ?? {}) as { value?: unknown }).value
 }
 
@@ -79,6 +82,42 @@ const sectionReader = (raw: string): ((name: string) => unknown) => {
 export const finalCltvBlocksOf = (raw: string): number => {
   const value = sectionReader(raw)('min_final_cltv_expiry')
   return typeof value === 'number' ? value : DEFAULT_MIN_FINAL_CLTV
+}
+
+/**
+ * When an invoice THIS SOLVER MINTED stops being payable, unix seconds.
+ *
+ * ## Why this exists rather than `decodeInvoice(raw).expiresAt`
+ *
+ * Because {@link decodeInvoice} REQUIRES AN AMOUNT — `missing_amount`, twice,
+ * and {@link DecodedInvoice} declares `amountSats` non-optional — and the
+ * invoice this reads is deliberately AMOUNTLESS. A deposit invoice names no
+ * amount on purpose: the operator decides how much to send at pay time.
+ *
+ * So the two are not merely a heavier and a lighter route to the same number.
+ * `decodeInvoice` cannot read this invoice at all, and reaching for it threw
+ * `missing_amount` on every deposit invoice ever minted — the Lightning deposit
+ * option never appeared, and the failure surfaced as the onchain option
+ * carrying "Lightning deposit unavailable" rather than as anything naming a
+ * decoder.
+ *
+ * That requirement is correct where it lives. `decodeInvoice` reads CLIENT
+ * invoices for the send leg, where an amount is what is being quoted and priced
+ * and an absent one is a malformed request. It is simply not a general-purpose
+ * BOLT11 reader, which is the same lesson {@link finalCltvBlocksOf} above
+ * records for the CLTV ceilings.
+ *
+ * Returns BOLT11's default of 3600 seconds when there is no `x` tag, exactly as
+ * {@link decodeInvoice} does: an absent tag is a real hour, not "unknown".
+ */
+export const expiresAtOf = (raw: string): number => {
+  const decoded = parseBolt11(raw)
+  const timestamp = ((decoded.sections.find((s) => s.name === 'timestamp') ?? {}) as { value?: unknown }).value
+  // The one field validated, because it is the one the answer is built from. An
+  // invoice with no timestamp has no expiry to compute, and `undefined + 3600`
+  // is the `NaN` this whole path exists to keep off the console.
+  if (typeof timestamp !== 'number' || timestamp <= 0) throw new InvalidInvoice('missing_timestamp')
+  return timestamp + (decoded.expiry ?? DEFAULT_EXPIRY_SECONDS)
 }
 
 /**

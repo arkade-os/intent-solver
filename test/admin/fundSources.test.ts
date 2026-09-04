@@ -35,6 +35,7 @@ import {
   registerFundSource,
   requireFundSource,
   summarise,
+  type FundDeposit,
   type FundSource,
 } from '@arkade-os/solver-app/ops/fundSources.js'
 import { railFundSource } from '@arkade-os/solver-app/ops/railFunds.js'
@@ -47,6 +48,30 @@ const addressOn = (network: 'regtest' | 'bitcoin', fill: number): string =>
 const REGTEST_ADDRESS = addressOn('regtest', 0x11)
 const OTHER_REGTEST_ADDRESS = addressOn('regtest', 0x22)
 const MAINNET_ADDRESS = addressOn('bitcoin', 0x11)
+
+/**
+ * A placeholder, unlike the three above, and the asymmetry mirrors the code: an
+ * Arkade address is handed over WITHOUT a decode, because it encodes the server
+ * key of the service this wallet is connected to and has no wrong-chain form for
+ * a guard to catch. Nothing here parses it, so a real one would prove nothing
+ * the short string does not.
+ */
+const ARKADE_ADDRESS = 'tark1solverfloat'
+
+/**
+ * The option a test is about, by KIND rather than by index.
+ *
+ * Position is a real decision — the option needing no follow-up chore goes first
+ * — and it is pinned on its own below. Everywhere else, indexing would couple a
+ * test about the boarding address to how many other options happen to exist, and
+ * the failure would arrive as a wrong assertion rather than as a missing option.
+ */
+const optionFor = async (source: FundSource, kind: RegExp): Promise<FundDeposit> => {
+  const options = await source.depositOptions!()
+  const found = options.find((o) => kind.test(o.addressKind))
+  if (!found) throw new Error(`no ${kind} option — got [${options.map((o) => o.addressKind).join(', ')}]`)
+  return found
+}
 
 const onchainBackend = (over: Record<string, unknown> = {}) => ({
   getBalance: vi.fn().mockResolvedValue({ confirmedSats: 1_000_000, unconfirmedSats: 25_000 }),
@@ -69,6 +94,7 @@ const arkadeWallet = (over: Record<string, unknown> = {}) => ({
     total: 367_000,
   }),
   getBoardingAddress: vi.fn().mockResolvedValue(REGTEST_ADDRESS),
+  getAddress: vi.fn().mockResolvedValue(ARKADE_ADDRESS),
   ...over,
 })
 
@@ -132,11 +158,29 @@ registerFundSource(() => ({
   },
 }))
 
+/**
+ * A source that CAN take deposits and has none to offer right now — the case the
+ * empty list exists to express, and the only one that separates "this source has
+ * no inbound route" from "its node is unreachable this second".
+ *
+ * A second registration rather than a flag on `token-vault`: that one is the
+ * source with no deposit capability at all, and the whole point here is the
+ * difference between the two. Collapsing them into one fixture would leave the
+ * distinction untested by construction.
+ */
+registerFundSource(() => ({
+  id: 'drained-vault',
+  label: 'drained vault',
+  unit: 'USDX',
+  readBalance: async () => ({ unit: 'USDX', figures: [{ label: 'held', amount: '0' }] }),
+  depositOptions: async () => [],
+}))
+
 describe('the seam is general, not Lightning-shaped', () => {
   it('lists a consumer source beside the built-ins', async () => {
     const summaries = fundSources(fakeServices()).map(summarise)
 
-    expect(summaries.map((s) => s.id)).toEqual(['rail', 'arkade', 'token-vault'])
+    expect(summaries.map((s) => s.id)).toEqual(['rail', 'arkade', 'token-vault', 'drained-vault'])
   })
 
   it('lets each source declare its own unit and its own balance split', async () => {
@@ -233,6 +277,38 @@ describe('capability, not requirement', () => {
     expect(await response.json()).toMatchObject({ message: expect.stringContaining('cannot settle deposits') })
   })
 
+  it('refuses an EMPTY option list distinctly from a source that cannot take deposits at all', async () => {
+    // The same trap as the settle refusal above, one seam over. `{ options: [] }`
+    // would reach the console as a 200 and render as blank space, so an operator
+    // would press the button, watch nothing appear, and have no reason to think
+    // anything is wrong — the worst of the three answers, because it is the only
+    // one that looks like it worked.
+    const drained = await post('fund-deposit-address', { source: 'drained-vault' }, fakeServices())
+    expect(drained.status).toBe(500)
+    expect(await drained.json()).toMatchObject({
+      message: expect.stringContaining('no deposit route available right now'),
+    })
+
+    // And the OTHER refusal still reads differently: this source never had an
+    // inbound route, which is a deployment fact rather than a transient one.
+    const never = await post('fund-deposit-address', { source: 'token-vault' }, fakeServices())
+    expect(never.status).toBe(500)
+    expect(await never.json()).toMatchObject({ message: expect.stringContaining('no inbound route of its own') })
+  })
+
+  it('hands back every option a source offers, not the first', async () => {
+    // The regression this whole change is about. Asserting the COUNT is what
+    // fails if the action ever goes back to answering with one.
+    const body = (await resultOf(await post('fund-deposit-address', { source: 'arkade' }, fakeServices()))) as {
+      options: { addressKind: string; settleRequired: boolean }[]
+    }
+
+    expect(body.options).toHaveLength(2)
+    // Chore-free first: an operator taking the top option gets spendable float.
+    expect(body.options[0]!.settleRequired).toBe(false)
+    expect(body.options[1]!.settleRequired).toBe(true)
+  })
+
   it('names what IS available when the source is unknown', async () => {
     // The id an operator typed is usually right for a deployment they are
     // thinking of; the useful answer is which deployment this one is.
@@ -313,13 +389,15 @@ describe('the lightning rail source', () => {
       onchain: onchainBackend({ newReceiveAddress: vi.fn().mockResolvedValue(MAINNET_ADDRESS) }),
     })
 
-    await expect(railFundSource(services)!.depositAddress!()).rejects.toThrow(/not a regtest address/i)
+    await expect(railFundSource(services)!.depositOptions!()).rejects.toThrow(/not a regtest address/i)
   })
 
   it('says arrivals need settling exactly when the backend has a settle step', async () => {
-    const plain = await railFundSource(fakeServices())!.depositAddress!()
-    const deposits = await railFundSource(fakeServices({ onchain: onchainBackend({ settleReceiveAddress: vi.fn() }) }))!
-      .depositAddress!()
+    const plain = await optionFor(railFundSource(fakeServices())!, /^bitcoin/)
+    const deposits = await optionFor(
+      railFundSource(fakeServices({ onchain: onchainBackend({ settleReceiveAddress: vi.fn() }) }))!,
+      /^bitcoin/,
+    )
 
     // Without this the operator is left watching a balance that will never move
     // on its own.
@@ -331,9 +409,82 @@ describe('the lightning rail source', () => {
     // Neither port has a channel primitive. A deposit that silently only funded
     // the onchain half would be read as the other thing, on the screen where the
     // corridor's capacity is being judged.
-    const deposit = await railFundSource(fakeServices())!.depositAddress!()
+    const deposit = await optionFor(railFundSource(fakeServices())!, /^bitcoin/)
 
     expect(deposit.note).toMatch(/does not open a channel/i)
+  })
+
+  /**
+   * `createInvoice` is an OPTIONAL port capability, so both halves are pinned:
+   * the rail that has one offers it, and the rail that does not still has
+   * somewhere to send. A backend without it must not lose its onchain option to
+   * a `TypeError`, which is what an unguarded call would produce.
+   */
+  it('offers an invoice first where the backend can mint one, and onchain regardless', async () => {
+    const expiresAt = Math.floor(Date.now() / 1000) + 3600
+    const createInvoice = vi.fn().mockResolvedValue({ invoice: 'lnbcrt1solverfloat', expiresAt })
+    const withInvoice = railFundSource(fakeServices({ ln: lnBackend({ createInvoice }) }))!
+
+    expect((await withInvoice.depositOptions!()).map((o) => o.addressKind)).toEqual([
+      'lightning invoice',
+      'bitcoin regtest',
+    ])
+    // Amountless, because the console asks for no amount before showing an
+    // option: minting for a guessed one hands over an invoice the operator
+    // cannot pay what they meant to.
+    expect(createInvoice).toHaveBeenCalledWith({ memo: expect.any(String) })
+    const invoice = (await withInvoice.depositOptions!())[0]!
+    expect(invoice).toMatchObject({ address: 'lnbcrt1solverfloat', settleRequired: false, expiresAt })
+    expect(invoice.amountSats).toBeUndefined()
+
+    // The fake `lnBackend` has no `createInvoice` — the shape of a backend that
+    // cannot mint one — and the onchain option survives it.
+    expect((await railFundSource(fakeServices())!.depositOptions!()).map((o) => o.addressKind)).toEqual([
+      'bitcoin regtest',
+    ])
+  })
+
+  /**
+   * The other half of the same promise, and the one an unguarded `await` breaks:
+   * a backend that HAS `createInvoice` and fails the call. A node that is down,
+   * restarting, or holding a macaroon without `invoices:write` — that last one
+   * answers `newReceiveAddress` perfectly well while refusing to mint, so the
+   * onchain option is genuinely available and would have been thrown away.
+   *
+   * This is the state an operator is in precisely when they are trying to fund a
+   * node that is already unwell, which is when a way in matters most. Before the
+   * guard, `depositOptions()` rejected outright and the console showed neither
+   * option.
+   */
+  it('keeps the onchain option when the backend HAS createInvoice and the call fails', async () => {
+    const createInvoice = vi.fn().mockRejectedValue(new Error('14 UNAVAILABLE: connection refused'))
+    const source = railFundSource(fakeServices({ ln: lnBackend({ createInvoice }) }))!
+
+    const options = await source.depositOptions!()
+
+    expect(options.map((o) => o.addressKind)).toEqual(['bitcoin regtest'])
+    // The reason travels with it. An option that just disappears reads as "this
+    // rail cannot do Lightning deposits" — a different, permanent-sounding claim
+    // than "it could not right now".
+    expect(options[0]!.note).toContain('Lightning deposit unavailable')
+    expect(options[0]!.note).toContain('14 UNAVAILABLE')
+
+    // The note it already carried is still there, not replaced — asserted
+    // against the note the UNFAILING path actually produces rather than against
+    // a phrase copied out of it. Prose gets rewritten; a test that hardcodes a
+    // sentence fails on the edit instead of on the behaviour, and one that
+    // reads the real base note keeps checking the thing it is named for.
+    const base = (await railFundSource(fakeServices())!.depositOptions!())[0]!.note!
+    expect(options[0]!.note!.startsWith(base)).toBe(true)
+  })
+
+  it('says nothing about Lightning when the backend simply cannot mint', async () => {
+    // The contrast that makes the note above meaningful: absent capability is a
+    // deployment fact, not a fault, and annotating it would report a problem
+    // that does not exist on every deployment without the capability.
+    const options = await railFundSource(fakeServices())!.depositOptions!()
+
+    expect(options[0]!.note).not.toContain('Lightning deposit unavailable')
   })
 
   it('runs the backend’s own claim step and reports each outcome', async () => {
@@ -373,7 +524,7 @@ describe('the arkade float source', () => {
   })
 
   it('hands out the boarding address and points at the action that settles it', async () => {
-    const deposit = await arkadeFundSource(fakeServices()).depositAddress!()
+    const deposit = await optionFor(arkadeFundSource(fakeServices()), /boarding/)
 
     expect(deposit.address).toBe(REGTEST_ADDRESS)
     // `settleRequired` true with NO settle method is not a contradiction — the
@@ -388,7 +539,62 @@ describe('the arkade float source', () => {
       arkade: { wallet: arkadeWallet({ getBoardingAddress: vi.fn().mockResolvedValue(MAINNET_ADDRESS) }) },
     })
 
-    await expect(arkadeFundSource(services).depositAddress!()).rejects.toThrow(/not a regtest address/i)
+    await expect(arkadeFundSource(services).depositOptions!()).rejects.toThrow(/not a regtest address/i)
+  })
+
+  /**
+   * The same guard on the OTHER address, which this source used to skip.
+   *
+   * The reasoning for skipping it was that an Arkade address is derived from the
+   * connected server and so has no wrong-chain form. The SDK's own network table
+   * refutes that: `hrp` is `ark` on bitcoin and `tark` on every test network, so
+   * a wallet pointed at a mainnet server hands back a well-formed `ark1…` that
+   * this file would have labelled `arkade regtest` — an irreversible send to a
+   * wallet this solver is not running, against an address the operator never
+   * typed.
+   */
+  it('refuses an Arkade address for another Arkade network', async () => {
+    const services = fakeServices({
+      arkade: { wallet: arkadeWallet({ getAddress: vi.fn().mockResolvedValue('ark1mainnetfloat') }) },
+    })
+
+    await expect(arkadeFundSource(services).depositOptions!()).rejects.toThrow(/not a regtest Arkade address/i)
+  })
+
+  it('shows NOTHING at all when the wallet is on the wrong network, not one good option', async () => {
+    // The realistic misconfiguration moves both addresses together — one server,
+    // one network, both derived from it. What matters to an operator is that the
+    // answer is all-or-nothing: `depositOptions` awaits both, so either refusal
+    // takes the whole answer down rather than leaving a valid-looking option
+    // beside a refused one.
+    const services = fakeServices({
+      arkade: {
+        wallet: arkadeWallet({
+          getAddress: vi.fn().mockResolvedValue('ark1mainnetfloat'),
+          getBoardingAddress: vi.fn().mockResolvedValue(MAINNET_ADDRESS),
+        }),
+      },
+    })
+
+    await expect(arkadeFundSource(services).depositOptions!()).rejects.toThrow()
+  })
+
+  /**
+   * The plural half, and the reason this feature exists.
+   *
+   * Offering only the boarding address told an operator already holding VTXOs to
+   * go out to L1 and wait for a settlement — a chore with a cheaper alternative
+   * the console simply did not mention.
+   */
+  it('offers the Arkade address BESIDE the boarding one, and puts the chore-free one first', async () => {
+    const options = await arkadeFundSource(fakeServices()).depositOptions!()
+
+    // Order is the recommendation. An operator who takes the top option should
+    // get spendable float rather than a second thing to run.
+    expect(options.map((o) => o.settleRequired)).toEqual([false, true])
+    expect(options[0]).toMatchObject({ address: ARKADE_ADDRESS, addressKind: 'arkade regtest' })
+    expect(options[0]!.note).toMatch(/on arrival/i)
+    expect(options[1]!.address).toBe(REGTEST_ADDRESS)
   })
 })
 
@@ -664,14 +870,95 @@ describe('the wallet page’s funding panel', () => {
     expect(block).toMatch(/About to send \$\{fundAmount\(amount\)\} \$\{source\.unit\} from \$\{source\.label\}/)
   })
 
+  /** One option's own render, bounded so an assertion cannot pass on its caller. */
+  const depositBlock = (): string => {
+    const start = appSource.indexOf('const fundDepositOption')
+    if (start === -1) throw new Error('fundDepositOption is gone')
+    return appSource.slice(start, appSource.indexOf('const fundResult', start))
+  }
+
+  /** The list around them, and the two answers that are not a list. */
+  const resultBlock = (): string => {
+    const start = appSource.indexOf('const fundResult')
+    if (start === -1) throw new Error('fundResult is gone')
+    return appSource.slice(start, appSource.indexOf('const fundSourcePanel', start))
+  }
+
   it('renders a deposit address untruncated', () => {
     // The shared result banner cuts at 160 characters. A silently shortened
     // address is a send to nowhere, so this answer gets its own slice and a
     // selectable block.
-    const start = appSource.indexOf('const fundSourcePanel')
-    const block = appSource.slice(start, appSource.indexOf('const fundsPanel', start))
-    expect(block).toContain("h('pre.faint'")
-    expect(block).not.toContain('slice(0, 160)')
+    expect(depositBlock()).toContain("h('pre.faint', option.address)")
+    expect(depositBlock()).not.toContain('slice(0, 160)')
+    expect(depositBlock()).not.toContain('shortId(')
+  })
+
+  it('renders EVERY option rather than the first', () => {
+    // The whole feature. A render that reached for `options[0]` would drop the
+    // boarding address on Arkade and the onchain one on the rail — and would
+    // look correct, because the option it kept is a real one.
+    expect(resultBlock()).toContain('options.map(fundDepositOption)')
+    expect(resultBlock()).not.toMatch(/options\[0\]/)
+  })
+
+  it('says an expired option is dead, rather than showing a stale countdown', () => {
+    // An invoice paid late fails at the payer's node with an error that names
+    // none of this. The console has to be what says the string is no longer
+    // good, and it must say it as a banner — a faint note beside an address is
+    // read as a caption, not as "do not pay this".
+    expect(depositBlock()).toMatch(/left <= 0[\s\S]{0,80}h\('p\.banner'/)
+    // Recomputed per render against the clock, never a value frozen when the
+    // option was fetched.
+    expect(depositBlock()).toContain('Math.floor(Date.now() / 1000)')
+  })
+
+  /**
+   * Recomputing per render is necessary and not sufficient, and the difference
+   * is a whole deployment: the `swaps` stream event is the only other thing that
+   * renders, and it fires on swap ACTIVITY. An idle solver — the one an operator
+   * is topping up — never ticks, so the countdown freezes at whatever it read
+   * when the button was pressed and the expiry banner never arrives.
+   */
+  it('re-renders on a timer so the expiry banner arrives on an idle solver', () => {
+    const tick = (): string => {
+      const start = appSource.indexOf('const armExpiryTick')
+      if (start === -1) throw new Error('armExpiryTick is gone')
+      return appSource.slice(start, start + 800)
+    }
+
+    // Armed from render, so it exists only while something is counting down.
+    expect(appSource).toMatch(/armExpiryTick\(\)\s*\n\}/)
+    expect(tick()).toContain('setInterval')
+    // And DISARMED, or a page left on the wallet view keeps rebuilding itself
+    // after the last expiring option is gone.
+    expect(tick()).toContain('clearInterval')
+
+    const guard = (): string => {
+      const start = appSource.indexOf('const countingDown')
+      if (start === -1) throw new Error('countingDown is gone')
+      return appSource.slice(start, appSource.indexOf('const armExpiryTick', start))
+    }
+    // Only where an option actually expires: an address does not, and a timer on
+    // a page showing only addresses rebuilds the tree to change nothing.
+    expect(guard()).toContain('option.expiresAt !== undefined')
+    expect(guard()).toContain('!state.dialog')
+    // And only while a deadline is STILL AHEAD. A lapsed option has nothing left
+    // to count — its banner is final — so a timer that kept running would
+    // rebuild the tree every 15s forever on a page an operator left open.
+    expect(guard()).toContain('option.expiresAt > Math.floor(Date.now() / 1000)')
+
+    // Never under a focused field. `render` restores the caret for `.search`
+    // alone, so a rebuild beneath any other input eats what is being typed — and
+    // an operator pasting a withdrawal address is on this very view.
+    expect(tick()).toMatch(/INPUT|TEXTAREA|SELECT/)
+  })
+
+  it('distinguishes an empty option list from an answer it cannot render', () => {
+    // A source that declared the capability and produced nothing is a fault.
+    // Rendering it as blank space leaves an operator pressing a button that
+    // appears to do nothing at all.
+    expect(resultBlock()).toMatch(/options\.length === 0[\s\S]{0,40}h\('p\.banner'/)
+    expect(resultBlock()).toContain('JSON.stringify(read.result, null, 2)')
   })
 
   it('emits the figure rows FLAT, as `.kv` grid children', () => {

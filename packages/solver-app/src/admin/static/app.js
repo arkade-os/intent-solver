@@ -812,6 +812,74 @@ const fundFigureRows = (balance) =>
   ])
 
 /**
+ * ONE way into a source, rendered so the choice between them is legible.
+ *
+ * The options are not interchangeable and the differences are the whole reason
+ * more than one is offered: an Arkade address is float on arrival while its
+ * boarding address needs a settlement first, and a Lightning invoice is instant
+ * but stops working. An operator picking between them needs the speed, the
+ * chore and the deadline in front of them, which a `JSON.stringify` dump — what
+ * this used to be — technically contains and nobody reads.
+ *
+ * EXPIRY IS A BANNER, not a faint note, once it has passed. A paid-too-late
+ * invoice fails at the payer's node with an error that names none of this, so
+ * the console has to be the thing that says the string is dead.
+ *
+ * It recomputes on every render, which is necessary and NOT sufficient: the
+ * stream's `swaps` event is the only other thing that renders, and that is an
+ * activity signal rather than a clock. `armExpiryTick` is what makes the banner
+ * actually arrive on an idle deployment — see its comment for why a page that
+ * rebuilds itself on a timer needs three guards to be safe.
+ */
+const fundDepositOption = (option) => {
+  const left = option.expiresAt === undefined ? null : option.expiresAt - Math.floor(Date.now() / 1000)
+  return h(
+    'div',
+    h(
+      'p.sans',
+      h('strong', option.addressKind),
+      // Absent means "any amount". Rendered only when the option is BOUND to
+      // one, because a payer node refuses a different amount and the number has
+      // to travel with the string rather than be assumed.
+      option.amountSats === undefined ? null : h('span.faint', ` · ${sats(option.amountSats)} sats`),
+      left === null || left <= 0 ? null : h('span.faint', ` · expires in ${left < 60 ? '<1m' : duration(left)}`),
+    ),
+    left !== null && left <= 0
+      ? h('p.banner', 'Expired — this will be refused. Press the button again for a fresh one.')
+      : null,
+    // Untruncated and selectable: an address is copied by hand as often as by
+    // button, and a shortened one is a send to nowhere.
+    h('pre.faint', option.address),
+    h(
+      'p.muted.sans',
+      option.settleRequired
+        ? 'Not spendable until it is settled. '
+        : 'Spendable on arrival — nothing to run afterwards. ',
+      option.note ?? '',
+    ),
+  )
+}
+
+/**
+ * The answer to `fund-deposit-address`, or whatever else a fund action returned.
+ *
+ * Shape-checked rather than switched on the action name, because only one of
+ * these answers has a render and the rest are small enough to read as JSON. An
+ * empty list is a case the server distinguishes and so does this: a source that
+ * declared the capability and produced nothing is a fault, and rendering it as
+ * blank space would leave an operator clicking a button that appears to do
+ * nothing.
+ */
+const fundResult = (read) => {
+  if (read.error) return h('pre.faint', read.error)
+  const options = read.result?.options
+  if (!Array.isArray(options)) return h('pre.faint', JSON.stringify(read.result, null, 2))
+  if (options.length === 0)
+    return h('p.banner', 'This source offered no way to deposit. That is a fault, not a policy.')
+  return h('div', options.map(fundDepositOption))
+}
+
+/**
  * One source: what it holds, and only the buttons it can honour.
  *
  * The buttons come from `can`, which the server derives from which optional
@@ -825,16 +893,17 @@ const fundSourcePanel = (source, slot) => {
     'section.panel',
     h('h2', source.label),
     slot?.error ? h('p.banner', slot.error) : slot?.balance ? h('dl.kv', fundFigureRows(slot.balance)) : null,
-    // Untruncated and selectable, like the registry card: a deposit address is
-    // copied by hand as often as by button, and a shortened one is a total loss.
-    read ? h('pre.faint', read.error ?? JSON.stringify(read.result, null, 2)) : null,
+    read ? fundResult(read) : null,
     h(
       'div.toolbar',
       source.can.deposit
         ? actButton(
             'button.act',
             { 'data-action': 'fund-deposit-address', onclick: () => fundAction('fund-deposit-address', source.id) },
-            'deposit address',
+            // PLURAL, because every source that has one has more than one and
+            // the singular label read as "here is the address" — which sent an
+            // operator holding VTXOs out to L1 to wait for a settlement.
+            'deposit options',
           )
         : null,
       source.can.settle
@@ -2247,9 +2316,72 @@ const render = () => {
       box.setSelectionRange(typing.start, typing.end)
     }
   }
+  armExpiryTick()
 }
 
 /* ---- live updates ------------------------------------------------------- */
+
+/**
+ * Keep a deposit countdown honest on a solver where nothing is happening.
+ *
+ * `fundDepositOption` recomputes the time remaining on every render, and the
+ * ONLY automatic render is the `swaps` stream event below. That is a swap-
+ * activity signal, not a clock: on an idle deployment — which is exactly the one
+ * an operator is topping up — nothing re-renders, so a countdown minted at
+ * button-press freezes and an expired invoice keeps advertising itself as live.
+ * The banner that is supposed to replace it never arrives.
+ *
+ * Armed from `render` rather than started once, so it exists only while there is
+ * something to count down. Three guards, each removing a way a periodic
+ * whole-tree rebuild does harm:
+ *
+ *  - only on the view that shows deposit options, and only when one of them
+ *    actually carries an expiry — an address never expires and must not put a
+ *    timer on the page;
+ *  - never while a dialog is open, the same guard the `swaps` listener uses;
+ *  - never while a field has focus. `render` restores the caret for `.search`
+ *    alone, so a rebuild under any other input would eat what is being typed —
+ *    and an operator pasting a withdrawal address is the case that must not be
+ *    disturbed by a countdown.
+ *
+ * 15 seconds, not one: the display is minute-granular apart from `<1m`, so a
+ * faster tick would rebuild the tree sixty times to change nothing.
+ */
+let expiryTick = null
+
+const countingDown = () =>
+  state.view === 'wallet' &&
+  !state.dialog &&
+  (state.data.fundRead?.result?.options ?? []).some(
+    // STILL IN THE FUTURE, not merely present. An option that has already lapsed
+    // has nothing left to count: its banner is final, and every later tick
+    // rebuilds the tree to render the identical sentence. Without this the timer
+    // never stops — an operator who leaves the wallet page open goes on
+    // rebuilding the DOM every 15s until they navigate away or close the tab.
+    //
+    // The banner still arrives, because `armExpiryTick` runs at the END of
+    // `render`: the tick that observes the expiry renders it and only then
+    // disarms.
+    (option) => option.expiresAt !== undefined && option.expiresAt > Math.floor(Date.now() / 1000),
+  )
+
+const armExpiryTick = () => {
+  if (countingDown()) {
+    if (expiryTick === null) {
+      expiryTick = setInterval(() => {
+        const active = document.activeElement
+        const tag = active?.tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+        render()
+      }, 15_000)
+    }
+    return
+  }
+  if (expiryTick !== null) {
+    clearInterval(expiryTick)
+    expiryTick = null
+  }
+}
 
 const listen = () => {
   const source = new EventSource('/api/events')
