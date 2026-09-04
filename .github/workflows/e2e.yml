@@ -110,10 +110,13 @@ jobs:
           node --experimental-eventsource --env-file="$E2E_ENV_FILE" scripts/regtest-mint-asset.mjs 1000000 ARFQ
           node --experimental-eventsource --env-file="$E2E_ENV_FILE" scripts/regtest-settle.mjs
 
-      # No `--`: pnpm forwards it verbatim, and vitest then ignores every
-      # positional after it and runs the whole suite. `verbose` names what ran.
+      # No `--`: pnpm forwards it verbatim and vitest ignores what follows.
+      # Array, not `$E2E_FILES`: a dispatch input is split, never interpreted.
       - name: E2E suite
-        run: pnpm test:e2e --reporter=verbose $E2E_FILES
+        run: |
+          set -eu
+          read -ra e2e_files <<< "$E2E_FILES"
+          pnpm test:e2e --reporter=verbose "${e2e_files[@]}"
 
       - name: Dump diagnostics on failure
         if: failure()
