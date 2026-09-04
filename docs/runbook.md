@@ -1369,9 +1369,12 @@ internally anyway.
 pnpm test:e2e
 ```
 
-**These never run in CI.** `pnpm test` is `vitest run --exclude test/e2e`, so
-the unit suite is unaffected by anything here; `pnpm test:e2e` is the only way
-to run them, and it is meant to be typed deliberately by someone who has just
+**These never gate a merge.** `pnpm test` is `vitest run --exclude test/e2e`, so
+the unit suite is unaffected by anything here. CI runs them only on demand:
+`.github/workflows/e2e.yml` stands its own arkade-regtest stack up, provisions a
+throwaway Arkade wallet and runs a chosen subset, triggered by the `run-e2e`
+label on a PR, a `workflow_dispatch`, or the nightly schedule. Locally,
+`pnpm test:e2e` is meant to be typed deliberately by someone who has just
 brought a stack up.
 
 | File                           | Corridor                    | Needs                                        |

@@ -1,8 +1,9 @@
 /**
  * What "the stack is up" means, checked before any e2e test moves money.
  *
- * These tests are never run by CI (`pnpm test` excludes `test/e2e`); they are
- * run deliberately, by someone who has just brought a regtest stack up. That
+ * These tests gate no merge (`pnpm test` excludes `test/e2e`); they are run
+ * deliberately — locally by someone who has just brought a regtest stack up, or
+ * by `.github/workflows/e2e.yml`, which stands one up on demand. That
  * makes the single worst outcome a SILENT SKIP: a suite that quietly passes
  * with nothing connected rots into one that cannot pass at all, and nobody
  * finds out for months. So an absent dependency is a FAILURE here, never a
