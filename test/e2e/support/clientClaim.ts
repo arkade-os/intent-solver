@@ -2,10 +2,12 @@
  * The CLIENT claiming the Arkade lockup itself — the fallback both receive
  * corridors depend on when covclaimd is not driving the claim.
  *
- * This is client-side code, like `claimPacket.ts`: a real integration lives in
- * the client's own wallet. It is here for the same reason `packages/solver-app/src/cli.ts`'s
- * `send-onchain` carries the client's claim-transaction signing — an e2e that
- * plays both roles has to.
+ * A TEST FIXTURE, not a template — `examples/lib/receive-client.mjs` is the
+ * reference client. That one holds a real quote and checks the funded amount
+ * against `to_amount` before it signs; this one cannot, because every caller
+ * takes its params off the solver's own row. It stays because an e2e playing
+ * both roles needs a claim path, the same reason `packages/solver-app/src/cli.ts`'s
+ * `send-onchain` carries the client's claim-transaction signing.
  *
  * The spend goes through the covenant's COLLABORATIVE claim leaf
  * (`preimage + receiver + arkade server`, `src/arkade/covenant.ts`). No CSV,
