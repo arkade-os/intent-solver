@@ -28,6 +28,14 @@ describe('FakeOnchainBackend', () => {
     expect(outputs[0]?.confirmations).toBe(3)
   })
 
+  it.each([0, -1, 1.5, Number.NaN])('mineBlocks(%s) throws without confirming anything', async (n) => {
+    const backend = new FakeOnchainBackend()
+    const tx = rawTx(4)
+    await backend.broadcastRaw(tx.hex)
+    expect(() => backend.mineBlocks(n)).toThrow(/whole number of blocks/)
+    expect(await backend.transactionOutcome(tx.txid)).toBe('mempool')
+  })
+
   it('findSpendWitness() returns null until the output is spent', async () => {
     const backend = new FakeOnchainBackend()
     const { txid } = await backend.fund({ address: 'bcrt1pexample', amountSats: 50_000, idempotencyKey: 'test-fund' })

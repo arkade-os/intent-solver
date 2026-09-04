@@ -568,9 +568,18 @@ export class OnchainSendSwapService {
     // Re-broadcasting then costs nothing: either it lands because the earlier
     // one never really did, or the node rejects it against the spend that
     // did, and the operator reads which from the error.
-    const attempt = await this.pushOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)
-    if (!attempt.broadcast) throw new Error(attempt.reason)
-    return attempt.txid
+
+    // The SAME slot `tick()` takes: each attempt re-reads the fee rate, so two
+    // interleaved pre-commit different txids and the row keeps the loser's (#169).
+    if (this.inFlight.has(id)) throw new Error(`swap ${id} is already being ticked; retry once that tick finishes`)
+    this.inFlight.add(id)
+    try {
+      const attempt = await this.pushOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)
+      if (!attempt.broadcast) throw new Error(attempt.reason)
+      return attempt.txid
+    } finally {
+      this.inFlight.delete(id)
+    }
   }
 
   /**

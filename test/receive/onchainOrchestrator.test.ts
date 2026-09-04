@@ -988,6 +988,26 @@ describe('OnchainReceiveSwapService', () => {
           refused: expect.stringContaining('does not match'),
         })
       })
+
+      it('recognises its OWN claim on re-entry rather than reporting the client refunded', async () => {
+        const claimed = await driveToClaimed()
+        // The claim reaches the network; the process dies before it is recorded.
+        const broadcastRaw = deps.onchain.broadcastRaw.bind(deps.onchain)
+        let sent: string | undefined
+        deps.onchain.broadcastRaw = async (txHex) => {
+          sent = (await broadcastRaw(txHex)).txid
+          deps.onchain.spendClaim(claimed.fundingTxid!, claimed.fundingVout!, [
+            new Uint8Array(64),
+            P,
+            new Uint8Array(1),
+          ])
+          throw new Error('process died after the broadcast')
+        }
+        await expect(service.claimNow(claimed.id)).rejects.toThrow('process died')
+        deps.onchain.broadcastRaw = broadcastRaw
+
+        expect(await service.claimNow(claimed.id)).toEqual({ txid: sent })
+      })
     })
   })
 })

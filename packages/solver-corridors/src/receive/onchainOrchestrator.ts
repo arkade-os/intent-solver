@@ -853,6 +853,12 @@ export class OnchainReceiveSwapService {
     if (!row.fundingTxid || row.fundingVout === null) {
       return { refused: 'no funding txid/vout on the row: nothing to claim from' }
     }
+    // OUR OWN EARLIER ATTEMPT, BY NAME (#204), and BEFORE the spend read below,
+    // which cannot tell whose spend it found. `unknown` never went out: rebuild.
+    if (row.onchainClaimTxid) {
+      const outcome = await onchain.transactionOutcome(row.onchainClaimTxid)
+      if (outcome !== 'unknown') return { txid: row.onchainClaimTxid }
+    }
     // The already-spent check `whenClaimed` makes, and the one this method
     // shipped without. Past `htlc_locktime` the CLIENT can sweep the HTLC on
     // their own refund leaf; without this, `broadcastRaw` takes a double-spend
@@ -904,12 +910,10 @@ export class OnchainReceiveSwapService {
     }
     const unsigned = buildOnchainClaimTx({ ...sizingParams, payoutAmountSats })
     const signed = await signOnchainClaimTx(unsigned, signer, preimage)
-    const result = await onchain.broadcastRaw(hex.encode(signed.extract()))
-    // `patch`, not `transition`: this runs from `stuck`, which has no outgoing
-    // edge — that is the whole reason it exists. The txid is the audit fact;
-    // whether the row's state should move is the operator's judgement.
-    await store.patch(row.id, { onchain_claim_txid: result.txid })
-    return { txid: result.txid }
+    // Recorded BEFORE the broadcast, so a resumed process has a key to ask about.
+    await store.patch(row.id, { onchain_claim_txid: signed.id })
+    await onchain.broadcastRaw(hex.encode(signed.extract()))
+    return { txid: signed.id }
   }
 
   /**

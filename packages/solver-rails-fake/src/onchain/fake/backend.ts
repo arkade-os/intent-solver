@@ -173,6 +173,9 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
 
   /** Advance the fake chain tip so previously-funded outputs gain confirmations. */
   mineBlocks(n: number): void {
+    // Before any state moves: `mineBlocks(0)` leaves the tip alone yet would still
+    // confirm the whole mempool, so a test that mined nothing reads like one that did.
+    if (!Number.isInteger(n) || n < 1) throw new Error(`mineBlocks needs a whole number of blocks, got ${n}`)
     for (const output of this.outputs) {
       if (output.minedAtBlock === null) output.minedAtBlock = this.currentBlock + 1
     }

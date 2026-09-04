@@ -1168,6 +1168,58 @@ describe('OnchainSendSwapService', () => {
     expect((await deps.store.get(row.id)).onchainRefundTxid).toBeNull()
   })
 
+  /** Automatic refund and operator override on one row, the second entering mid-attempt. */
+  const raceRefundAttempts = async (first: 'tick' | 'reclaim'): Promise<OnchainSendSwapRow> => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    const id = outcome.swap.id
+    now = (await service.tick(id)).htlcLocktime + HTLC_REFUND_MTP_MARGIN + 1
+
+    let broadcasts = 0
+    const broadcastRaw = deps.onchain.broadcastRaw.bind(deps.onchain)
+    deps.onchain.broadcastRaw = async (txHex) => {
+      if (broadcasts++ > 0) throw new Error('txn-mempool-conflict')
+      return broadcastRaw(txHex)
+    }
+    // Hold the leader mid-attempt; the follower's rate is what makes the txids differ.
+    let entered: () => void = () => {}
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const arrived = new Promise<void>((resolve) => (entered = resolve))
+    const estimateFeeRate = deps.onchain.estimateFeeRate.bind(deps.onchain)
+    deps.onchain.estimateFeeRate = async () => {
+      deps.onchain.estimateFeeRate = estimateFeeRate
+      entered()
+      await held
+      return 4
+    }
+
+    const run = (which: 'tick' | 'reclaim') =>
+      (which === 'tick' ? service.tick(id) : service.reclaimOnchainHtlc(id)).catch(() => null)
+    const leading = run(first)
+    await arrived
+    await run(first === 'tick' ? 'reclaim' : 'tick')
+    release()
+    await leading
+    return deps.store.get(id)
+  }
+
+  it.each(['tick', 'reclaim'] as const)(
+    'never leaves a refund txid nobody broadcast when %s gets there first',
+    async (first) => {
+      const after = await raceRefundAttempts(first)
+      expect(after.onchainRefundTxid).toBeTruthy()
+      expect(await deps.onchain.transactionOutcome(after.onchainRefundTxid!)).not.toBe('unknown')
+    },
+  )
+
   it('refundSweep() still refunds a refused row once its deadline passes, and records the push', async () => {
     const outcome = await service.quote({
       paymentHash,
