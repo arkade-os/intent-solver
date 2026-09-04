@@ -180,15 +180,11 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
 
     async transactionOutcome(txid) {
       const receipt = await rpc('eth_getTransactionReceipt', [txid])
-      // No receipt is "not mined here yet", which a node also answers for a
-      // hash it has never seen. Either way nothing failed, so this must not
-      // read as a revert.
+      // No receipt covers "not mined yet" and "never seen this hash". Neither
+      // is a failure, so neither may read as a revert.
       if (receipt === null || receipt === undefined) return 'pending'
-      // EIP-658 defines 0x1 and 0x0 and nothing else, so anything else — a
-      // missing `status` (pre-Byzantium), a malformed one, a third value —
-      // throws. Folding the unrecognised into `success` would put the blindness
-      // this read exists to remove straight back, for exactly the response
-      // nobody predicted.
+      // EIP-658 defines only 0x1 and 0x0; anything else throws. Folding the
+      // unrecognised into `success` restores the blindness this read removes.
       const status = quantityOf((receipt as { status?: unknown }).status, 'eth_getTransactionReceipt status')
       if (status === 0n) return 'reverted'
       if (status === 1n) return 'success'

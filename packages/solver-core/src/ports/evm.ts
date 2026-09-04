@@ -38,10 +38,8 @@ export interface EvmCall {
 export type JsonRpc = (method: string, params: readonly unknown[]) => Promise<unknown>
 
 /**
- * What became of a transaction the solver broadcast.
- *
- * `pending` is "no answer yet", and covers a node that has simply not seen the
- * hash — never evidence that anything failed.
+ * What became of a transaction the solver broadcast. `pending` is "no answer
+ * yet" — including a node that never saw the hash — never evidence of failure.
  */
 export type EvmTransactionOutcome = 'pending' | 'success' | 'reverted'
 
@@ -114,13 +112,9 @@ export interface EvmHtlcBackend {
   /** A block's own timestamp, for the age half of the same policy. */
   blockTimestampAt(block: bigint): Promise<number>
   /**
-   * What one of OUR OWN broadcasts did, by its transaction hash.
-   *
-   * The only read here that can tell a REVERTED money call from one that has
-   * not landed. Every other read asks the contract about a lock, and a revert
-   * leaves no lock — the same answer as pending, and as never sent. A caller
-   * that cannot tell them apart waits out the whole timeout on a swap that
-   * failed in its first block.
+   * The only read that distinguishes a REVERTED money call from one that has
+   * not landed: every other read asks the contract about a lock, and a revert
+   * leaves none — the same answer as pending, and as never sent.
    */
   transactionOutcome(txid: string): Promise<EvmTransactionOutcome>
   /**

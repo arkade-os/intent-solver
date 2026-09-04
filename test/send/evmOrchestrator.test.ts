@@ -432,11 +432,7 @@ describe('the solver`s own lock must be BURIED before the swap advances', () => 
   })
 })
 
-/**
- * A REVERTED lock and a lock that has not landed look identical to every read
- * this shell used to make: `isLocked` asks the contract whether the lock is
- * there, and a revert leaves nothing behind. The receipt is the only witness.
- */
+/** A revert leaves no lock, so only the receipt separates it from pending. */
 describe('a lock transaction that reverted is not a lock that has not landed', () => {
   const revertedRow = async (over: Partial<EvmSendServiceDeps> = {}) => {
     const built = await build({
@@ -456,9 +452,6 @@ describe('a lock transaction that reverted is not a lock that has not landed', (
   }
 
   it('stops on the revert instead of waiting out evmTimeout', async () => {
-    // The cost of not looking: the row sits exposed for the whole timeout, then
-    // refunds a lock that never existed — a refund which itself reverts, against
-    // a swap key the contract never held.
     const { store, service } = await revertedRow()
     await service.tick('swap-1')
     const row = await store.get('swap-1')
@@ -482,9 +475,6 @@ describe('a lock transaction that reverted is not a lock that has not landed', (
   })
 
   it('never broadcasts a refund for a lock that was never created', async () => {
-    // `refund` against a swap key the contract does not hold reverts, and the
-    // shell records `refunded` on the send rather than on the outcome — so the
-    // row would end terminal, claiming the ERC20 came back.
     const broadcast = vi.fn().mockResolvedValue('0xrefund')
     const { store, service } = await revertedRow({
       broadcast,
@@ -496,8 +486,6 @@ describe('a lock transaction that reverted is not a lock that has not landed', (
   })
 
   it('keeps waiting while the node cannot say yet', async () => {
-    // `pending` covers a node that has not seen the hash, so it is never
-    // evidence of failure — the row waits exactly as it did before.
     const { store, service } = await revertedRow({
       evm: {
         isLocked: vi.fn().mockResolvedValue(false),
@@ -512,8 +500,6 @@ describe('a lock transaction that reverted is not a lock that has not landed', (
   })
 
   it('does not read a receipt it has no txid for', async () => {
-    // A crash between the broadcast and the txid patch leaves `locking_evm` with
-    // nothing to ask about; a hash of `null` would be a fabricated question.
     const transactionOutcome = vi.fn().mockResolvedValue('reverted')
     const { store, service } = await build({
       evm: {
@@ -532,9 +518,6 @@ describe('a lock transaction that reverted is not a lock that has not landed', (
   })
 
   it('treats a receipt the node refuses to serve as no answer, not as a revert', async () => {
-    // The discipline `provenDepth` and the preimage scan already keep: a read
-    // that failed says nothing about the lock, and sticking the row on it would
-    // page a human for an RPC blip.
     const errors: unknown[] = []
     const { store, service } = await revertedRow({
       evm: {

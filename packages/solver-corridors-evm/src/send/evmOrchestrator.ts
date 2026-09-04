@@ -190,16 +190,9 @@ export class EvmSendSwapService {
   }
 
   /**
-   * Did the lock transaction this row recorded mine and FAIL?
-   *
-   * Asked only from `locking_evm`, which is the one state where "the lock is
-   * absent" is ambiguous — past it the lock has been seen, so there is nothing
-   * a receipt could still change, and asking anyway costs a round trip per live
-   * row per tick.
-   *
-   * A failed read degrades to `false`, as `provenDepth` and the preimage scan
-   * degrade: a node that cannot answer is not evidence the lock failed, and
-   * sticking a row on an RPC blip would page a human for nothing.
+   * Asked only from `locking_evm`, the one state where "the lock is absent" is
+   * ambiguous. A failed read degrades to `false` as the other reads do — a node
+   * that cannot answer is not evidence the lock failed.
    */
   private async lockReverted(row: EvmSendSwapRow): Promise<boolean> {
     if (row.state !== 'locking_evm' || row.evmLockTxid === null) return false
@@ -344,12 +337,9 @@ export class EvmSendSwapService {
         // approval txid recorded as the lock would send anyone reading the row
         // to a transaction that moved nothing.
         //
-        // RECORDED BEFORE ITS STATUS IS KNOWN, deliberately. The txid is the
-        // only handle on the transaction whose receipt says whether the lock
-        // exists at all, so holding it back until success would make a restart
-        // in that window unable to ask the question — and it is what gates the
-        // preimage scan above. The row says what happened through its state and
-        // `failure_reason`, not by withholding where to look.
+        // Recorded before its status is known, deliberately: the txid is the only
+        // handle on the receipt that answers whether the lock exists, so a
+        // restart in that window could not otherwise ask.
         await store.patch(row.id, { evm_lock_txid: txid })
         return true
       }

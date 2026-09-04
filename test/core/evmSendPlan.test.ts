@@ -157,8 +157,6 @@ describe('the confirmation policy is depth AND age', () => {
   })
 
   it('treats an absent lock as not-yet while nothing says otherwise, until the timeout', () => {
-    // Absent on its own is still "keep waiting"; only the timeout turns it into
-    // a refund. What separates this from rule 6 below is the receipt.
     expect(planEvmSend(row({ state: 'locking_evm' }), seen())).toEqual({ do: 'wait' })
     expect(planEvmSend(row({ state: 'locking_evm' }), seen({ evmBlockHeight: EVM_TIMEOUT }))).toEqual({
       do: 'refund_evm',
@@ -170,16 +168,10 @@ describe('rule 6 - a mined revert created no lock', () => {
   const reverted = { do: 'stick', reason: 'the ERC20 lock transaction reverted; no lock was created' }
 
   it('sticks at once rather than waiting out the timeout', () => {
-    // The cost of the old answer: the row holds house capacity for the entire
-    // timeout on a swap that failed in its first block.
     expect(planEvmSend(row({ state: 'locking_evm' }), seen({ evmLockReverted: true }))).toEqual(reverted)
   })
 
   it('does not refund a lock the contract never held', () => {
-    // THE EXPENSIVE ONE. At the timeout the old answer was `refund_evm`, and
-    // the shell records `refunded` on the send rather than on the outcome - so
-    // a refund that itself reverts leaves a terminal row claiming the ERC20
-    // came back.
     const action = planEvmSend(
       row({ state: 'locking_evm' }),
       seen({ evmLockReverted: true, evmBlockHeight: EVM_TIMEOUT }),
@@ -188,8 +180,6 @@ describe('rule 6 - a mined revert created no lock', () => {
   })
 
   it('is not consulted while the lock is present', () => {
-    // A lock that exists settles the question whatever any receipt says; the
-    // depth policy owns it from here.
     const action = planEvmSend(
       row({ state: 'locking_evm' }),
       seen({ evmLockPresent: true, evmLockReverted: true, evmLockConfirmations: 5, evmLockAgeSeconds: 720 }),
@@ -198,8 +188,7 @@ describe('rule 6 - a mined revert created no lock', () => {
   })
 
   it('still yields to a revealed preimage', () => {
-    // RULE 4 outranks it, as it outranks everything: a preimage cannot exist
-    // without a lock, so seeing one means the revert reading is the wrong fact.
+    // A preimage cannot exist without a lock, so rule 4 outranks the revert.
     const action = planEvmSend(
       row({ state: 'locking_evm' }),
       seen({ evmLockReverted: true, preimage: 'cd'.repeat(32) }),
