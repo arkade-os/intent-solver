@@ -9,11 +9,18 @@ import {
   CSVMultisigTapscript,
   setArkPsbtField,
   getArkPsbtFields,
+  asset,
   ConditionWitness,
+  Extension,
   PrevArkTxField,
 } from '@arkade-os/sdk'
-import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { CovenantSwapScript, parseAssetId } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import type { ArkadeContext, FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
+
+interface AssetGroupView {
+  assetId: { toString(): string }
+  outputs: { vout: number; amount: bigint | string }[]
+}
 
 // refundSwapScript constructs RestEmulatorProvider itself (not injected), so
 // the only way to intercept the submitted PSBTs without changing production
@@ -36,6 +43,7 @@ const {
   refundSwapScript,
   refundWithoutReceiverSwapScript,
   findClaimPreimage,
+  findLockups,
   findLockupOutpoints,
   lockupProvablySpent,
 } = await import('@arkade-os/solver-arkade/arkade/wallet.js')
@@ -259,6 +267,173 @@ describe('refundWithoutReceiverSwapScript', () => {
     await expect(refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), [], DEST)).rejects.toThrow(
       /nothing to refund/,
     )
+  })
+})
+
+/** Refunding an ASSET-carrying lockup. `buildOffchainTx` outputs are sats alone,
+ *  so nothing in a sats-only test notices a missing packet. */
+describe('refunding an asset-carrying lockup', () => {
+  const ASSET_A = 'ab'.repeat(32) + '0100'
+  const ASSET_B = 'cd'.repeat(32) + '0000'
+
+  const packetOn = (arkTxB64: string) => {
+    const tx = Transaction.fromPSBT(base64.decode(arkTxB64))
+    return Extension.fromTx(tx).getPacketByType(asset.Packet.PACKET_TYPE)
+  }
+
+  /** Every group's `(assetId, output index, amount)`. */
+  const allocations = (packet: ReturnType<typeof packetOn>) =>
+    (packet as unknown as { groups: AssetGroupView[] }).groups.flatMap((group) =>
+      group.outputs.map((entry) => ({
+        assetId: group.assetId.toString(),
+        vout: entry.vout,
+        amount: BigInt(entry.amount),
+      })),
+    )
+
+  const receiveLegScript = () =>
+    new CovenantSwapScript({
+      receiver: key(2),
+      server: SERVER,
+      preimageHash: PREIMAGE_HASH,
+      refundLocktime: REFUND_LOCKTIME,
+      claimDelay: CLAIM_DELAY,
+      client: RECEIVER,
+      clientRefundDelay: CLIENT_REFUND_DELAY,
+      refundWithoutServerDelay: REFUND_WITHOUT_SERVER_DELAY,
+      nonInteractiveParameters: {
+        emulatorPubkey: EMULATOR,
+        receiverPkScript: RECEIVER_PAYOUT,
+        senderPkScript: DEST,
+      },
+      asset: parseAssetId(ASSET_A),
+    })
+
+  const arkSubmitTx = vi.fn(async (_arkTxB64: string, checkpointsB64: string[]) => ({
+    arkTxid: 'a'.repeat(64),
+    signedCheckpointTxs: checkpointsB64,
+  }))
+  const arkCtx = (): ArkadeContext =>
+    ({
+      identity: receiverIdentity,
+      wallet: {
+        serverUnrollScript,
+        arkProvider: { submitTx: arkSubmitTx, finalizeTx: vi.fn(async () => undefined) },
+        indexerProvider: {
+          getVirtualTxs: vi.fn(async (txids: string[]) => ({ txs: txids.map(() => FUNDING.b64) })),
+        },
+      },
+    }) as unknown as ArkadeContext
+
+  it('routes the whole carried amount to the refund destination', async () => {
+    arkSubmitTx.mockClear()
+    const funded: FundedOutput[] = [{ ...FUNDED[0]!, assets: [{ assetId: ASSET_A, amount: 500n }] }]
+    await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), funded, DEST)
+    const [arkTxB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
+    expect(allocations(packetOn(arkTxB64))).toEqual([{ assetId: ASSET_A, vout: 0, amount: 500n }])
+  })
+
+  it('sums a lockup funded by more than one payment onto the single aggregate output', async () => {
+    arkSubmitTx.mockClear()
+    const funded: FundedOutput[] = [
+      { ...FUNDED[0]!, assets: [{ assetId: ASSET_A, amount: 500n }] },
+      { txid: FUNDING.id, vout: 1, value: 1_000, assets: [{ assetId: ASSET_A, amount: 250n }] },
+    ]
+    await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), funded, DEST)
+    const [arkTxB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
+    expect(allocations(packetOn(arkTxB64))).toEqual([{ assetId: ASSET_A, vout: 0, amount: 750n }])
+  })
+
+  it('declares EVERY asset the lockup carries, not only the one it is denominated in', async () => {
+    // An undeclared stray is answered with ASSET_NOT_FOUND, taking the refund down.
+    arkSubmitTx.mockClear()
+    const funded: FundedOutput[] = [
+      {
+        ...FUNDED[0]!,
+        assets: [
+          { assetId: ASSET_A, amount: 500n },
+          { assetId: ASSET_B, amount: 7n },
+        ],
+      },
+    ]
+    await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), funded, DEST)
+    const [arkTxB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
+    expect(allocations(packetOn(arkTxB64))).toEqual(
+      expect.arrayContaining([
+        { assetId: ASSET_A, vout: 0, amount: 500n },
+        { assetId: ASSET_B, vout: 0, amount: 7n },
+      ]),
+    )
+  })
+
+  it('attaches no packet at all when the lockup carries no asset', async () => {
+    arkSubmitTx.mockClear()
+    await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), FUNDED, DEST)
+    const [arkTxB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
+    expect(() => Extension.fromTx(Transaction.fromPSBT(base64.decode(arkTxB64)))).toThrow()
+  })
+
+  it('keeps the covenant refund index-aligned: input i’s asset lands on output i', async () => {
+    submitTx.mockClear()
+    const script = receiveLegScript()
+    const funded: FundedOutput[] = [
+      { txid: FUNDING.id, vout: 0, value: 50_000, assets: [{ assetId: ASSET_A, amount: 500n }] },
+      { txid: FUNDING.id, vout: 1, value: 30_000, assets: [{ assetId: ASSET_A, amount: 250n }] },
+    ]
+    await refundSwapScript(ctx(), 'http://emulator.test', script, funded, DEST)
+    const [arkTxB64] = submitTx.mock.calls[0] as [string, string[]]
+    expect(allocations(packetOn(arkTxB64))).toEqual([
+      { assetId: ASSET_A, vout: 0, amount: 500n },
+      { assetId: ASSET_A, vout: 1, amount: 250n },
+    ])
+  })
+
+  it('refuses an index-aligned refund of an input carrying two assets', async () => {
+    // Unsatisfiable, and the emulator would report only `OP_VERIFY failed`.
+    const funded: FundedOutput[] = [
+      {
+        ...FUNDED[0]!,
+        assets: [
+          { assetId: ASSET_A, amount: 500n },
+          { assetId: ASSET_B, amount: 7n },
+        ],
+      },
+    ]
+    await expect(refundSwapScript(ctx(), 'http://emulator.test', receiveLegScript(), funded, DEST)).rejects.toThrow(
+      /exactly one asset/,
+    )
+  })
+})
+
+describe('findLockups', () => {
+  const lockupCtx = (vtxos: unknown[]): ArkadeContext =>
+    ({
+      wallet: {
+        indexerProvider: { getVtxos: vi.fn(async () => ({ vtxos, page: { current: 0, total: 1 } })) },
+      },
+    }) as unknown as ArkadeContext
+
+  it('reports the assets an output carries, as bigints', async () => {
+    const found = await findLockups(
+      lockupCtx([{ txid: 'd'.repeat(64), vout: 0, value: '50000', assets: [{ assetId: 'ab', amount: '500' }] }]),
+      'aa',
+    )
+    expect(found).toEqual([{ txid: 'd'.repeat(64), vout: 0, value: 50_000, assets: [{ assetId: 'ab', amount: 500n }] }])
+  })
+
+  it('carries an amount larger than a double can hold, without rounding it', async () => {
+    // Through a `number` this comes back as ...992 and the refund under-declares.
+    const huge = '9007199254740993'
+    const found = await findLockups(
+      lockupCtx([{ txid: 'd'.repeat(64), vout: 0, value: '330', assets: [{ assetId: 'ab', amount: huge }] }]),
+      'aa',
+    )
+    expect(found[0]!.assets![0]!.amount).toBe(BigInt(huge))
+  })
+
+  it('leaves a sats-only output with no assets field', async () => {
+    const found = await findLockups(lockupCtx([{ txid: 'd'.repeat(64), vout: 0, value: '50000' }]), 'aa')
+    expect(found[0]!.assets).toBeUndefined()
   })
 })
 

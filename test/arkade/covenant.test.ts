@@ -601,53 +601,95 @@ describe('enforcePayToAsset — txid orientation', () => {
 })
 
 /**
- * The asset tripwire.
- *
- * `enforcePayToAsset` exists in this module but reaches no leaf: every leaf's
- * clause is `enforcePayToAsm`, which constrains the destination and
- * `INSPECTOUTPUTVALUE >= INSPECTINPUTVALUE` — sats, and nothing else. So a
- * spend paying the right sats to the right place satisfies the covenant while
- * carrying the asset anywhere it likes.
- *
- * The leaves that would need the clause (`nonInteractiveClaim`,
- * `nonInteractiveRefund`) live in `VHTLC.ScriptV2`, and SDK 0.4.62's
- * `VHTLC.Options` has no `asset` field to forward one through. Until
- * arkade-os/ts-sdk#763 lands, refusing is the only honest answer.
+ * A covenant denominated in an asset. This used to be a tripwire that refused,
+ * because `VHTLC.Options` carried no `asset`; SDK 0.4.67 ships one (ts-sdk#763).
  */
-describe('CovenantSwapScript — an asset it cannot enforce', () => {
-  const ASSET_ID = { txid: new Uint8Array(32).fill(0xab), groupIndex: 2 }
+describe('CovenantSwapScript — denominated in an asset', () => {
+  const ASSET_ID = { txid: new Uint8Array(32).fill(0).map((_unused, i) => i + 1), groupIndex: 2 }
+  const sats = () => new CovenantSwapScript(paramsV2())
+  const asset = () => new CovenantSwapScript({ ...paramsV2(), asset: ASSET_ID })
 
-  it('refuses to build the three-leaf script for an asset', () => {
-    expect(() => new CovenantSwapScript({ ...params(), asset: ASSET_ID })).toThrow(
-      /cannot be denominated in an Arkade asset/,
+  it('builds, rather than refusing', () => {
+    expect(() => asset()).not.toThrow()
+  })
+
+  it('binds the asset into both covenant leaves this class exposes', () => {
+    expect(hex.encode(asset().refundArkadeScript)).not.toBe(hex.encode(sats().refundArkadeScript))
+    expect(hex.encode(asset().nonInteractiveClaimArkadeScript!)).not.toBe(
+      hex.encode(sats().nonInteractiveClaimArkadeScript!),
     )
   })
 
-  it('refuses the ScriptV2 path too, which is the one live corridors take', () => {
-    // The extended path is what every RFQ-quoted row builds, so a guard that
-    // only covered the base artifact would miss every real swap.
-    expect(() => new CovenantSwapScript({ ...paramsV2(), asset: ASSET_ID })).toThrow(
-      /cannot be denominated in an Arkade asset/,
+  it('binds the asset on EVERY emulator-enforced leaf, including the one with no accessor', () => {
+    // THE WHOLE SAFETY ARGUMENT, and why the old refusal could go: an asset
+    // "spent away through the non-interactive leaves" is answered only if EVERY
+    // leaf the emulator co-signs binds it, and
+    // `nonInteractiveRefundWithoutReceiver` has no accessor a named check sees.
+    const enforced = (script: CovenantSwapScript): string[] =>
+      Object.keys(new VHTLC.ScriptV2(script.vhtlcOptions)).filter((leaf) => leaf.endsWith('ArkadeScript'))
+    expect(enforced(asset())).toEqual([
+      'nonInteractiveClaimArkadeScript',
+      'nonInteractiveRefundArkadeScript',
+      'nonInteractiveRefundWithoutReceiverArkadeScript',
+    ])
+    const reversed = hex.encode(Uint8Array.from(ASSET_ID.txid).reverse())
+    const built = new VHTLC.ScriptV2(asset().vhtlcOptions) as unknown as Record<string, Uint8Array>
+    for (const leaf of enforced(asset())) expect(hex.encode(built[leaf]!)).toContain(reversed)
+  })
+
+  it('leaves every signature leaf byte-identical', () => {
+    expect(asset().claimScript).toBe(sats().claimScript)
+    expect(asset().refundWithoutReceiverScript).toBe(sats().refundWithoutReceiverScript)
+    expect(asset().refundCollaborativeScript).toBe(sats().refundCollaborativeScript)
+    expect(asset().refundWithoutServerScript).toBe(sats().refundWithoutServerScript)
+    expect(asset().unilateralClaimScript).toBe(sats().unilateralClaimScript)
+    expect(asset().refundUnilateralScript).toBe(sats().refundUnilateralScript)
+  })
+
+  it('keeps the leaf count, so an asset adds no path', () => {
+    expect(asset().leafCount).toBe(sats().leafCount)
+  })
+
+  it('moves the address, so an asset lockup is never funded at the sats one', () => {
+    expect(hex.encode(asset().pkScript)).not.toBe(hex.encode(sats().pkScript))
+  })
+
+  it('pushes the txid REVERSED, from a caller-supplied wire order', () => {
+    // The SDK does the flip, so a pre-reversing caller gets an unspendable lockup.
+    const encoded = hex.encode(asset().refundArkadeScript)
+    expect(encoded).toContain(hex.encode(Uint8Array.from(ASSET_ID.txid).reverse()))
+    expect(encoded).not.toContain(hex.encode(ASSET_ID.txid))
+  })
+
+  it('does not mutate the caller’s asset id', () => {
+    const mine = { txid: Uint8Array.from(ASSET_ID.txid), groupIndex: 2 }
+    const before = hex.encode(mine.txid)
+    new CovenantSwapScript({ ...paramsV2(), asset: mine })
+    expect(hex.encode(mine.txid)).toBe(before)
+  })
+
+  it('binds the group index, so two groups of one genesis are different lockups', () => {
+    const other = new CovenantSwapScript({ ...paramsV2(), asset: { ...ASSET_ID, groupIndex: 3 } })
+    expect(hex.encode(other.pkScript)).not.toBe(hex.encode(asset().pkScript))
+  })
+
+  it('survives the contract-registration round trip', () => {
+    const script = asset()
+    const stored = VHTLCV2ContractHandler.serializeParams(script.vhtlcOptions)
+    expect(hex.encode(VHTLCV2ContractHandler.createScript(stored).pkScript)).toBe(hex.encode(script.pkScript))
+  })
+
+  it('refuses a malformed asset id rather than deriving an address from one', () => {
+    expect(() => new CovenantSwapScript({ ...paramsV2(), asset: { txid: new Uint8Array(31), groupIndex: 0 } })).toThrow(
+      /32 bytes/,
+    )
+    expect(() => new CovenantSwapScript({ ...paramsV2(), asset: { ...ASSET_ID, groupIndex: 0x10000 } })).toThrow(
+      /\[0, 65535\]/,
     )
   })
 
-  it('names the dependency, so the refusal is actionable', () => {
-    // A bare "not supported" sends the reader looking in this file, where the
-    // clause already exists and looks usable. The blocker is one repo over.
-    expect(() => new CovenantSwapScript({ ...paramsV2(), asset: ASSET_ID })).toThrow(/ts-sdk#763/)
-  })
-
-  it('says WHY, not just that it refuses', () => {
-    // The reason is the whole value: an asset here is spendable away through the
-    // non-interactive leaves, which is a silent loss rather than a failure.
-    expect(() => new CovenantSwapScript({ ...paramsV2(), asset: ASSET_ID })).toThrow(/sats only/)
-  })
-
-  it('still builds both paths when no asset is named', () => {
-    // The guard must be a tripwire, not a regression: every existing corridor
-    // passes no asset and must be untouched.
+  it('still builds when no asset is named', () => {
     expect(() => new CovenantSwapScript(params())).not.toThrow()
-    expect(() => new CovenantSwapScript(paramsV2())).not.toThrow()
   })
 })
 

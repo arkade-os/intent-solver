@@ -442,15 +442,7 @@ export interface CovenantSwapParams {
   refundLocktime: number
   /** CSV delay for the provider's server-independent claim, seconds. */
   claimDelay: number
-  /**
-   * The Arkade asset this lockup is denominated in, if it is denominated in one
-   * at all.
-   *
-   * ACCEPTED ONLY TO BE REFUSED, for now. See the constructor: passing it throws.
-   * The field exists so that an asset corridor cannot be wired by handing this
-   * class an asset-bearing VTXO and assuming the covenant covers it — which it
-   * does not, and which fails silently rather than loudly.
-   */
+  /** Denominating asset, if any. ONLY THE ONE NAMED IS PROTECTED: extras on a funded VTXO are the spender's. */
   asset?: ArkadeAssetId
   /**
    * The client's own refund key.
@@ -556,34 +548,6 @@ export class CovenantSwapScript {
       throw new Error(`preimage hash must be 20 bytes (HASH160), got ${params.preimageHash.length}`)
     }
     assertP2trPkScript(covenants.senderPkScript)
-    // THIS COVENANT CANNOT EXPRESS AN ASSET, SO IT REFUSES TO PRETEND OTHERWISE.
-    //
-    // Every leaf's covenant clause is `enforcePayToAsm`, which constrains two
-    // things: that the output pays the named destination, and that
-    // `INSPECTOUTPUTVALUE >= INSPECTINPUTVALUE`. Both are about SATS. Nothing in
-    // it inspects an asset, so a spend that pays the right sats to the right
-    // place satisfies the covenant *and may carry the asset anywhere it likes*.
-    // Put an asset behind this script and the non-interactive paths are a
-    // give-away, not a lockup.
-    //
-    // {@link enforcePayToAsset} in this file is the clause that would fix it —
-    // but it is not reachable from here. The leaves that need it
-    // (`nonInteractiveClaim`, `nonInteractiveRefund`) exist only in
-    // `VHTLC.ScriptV2`, which is the SDK's, and SDK 0.4.62's `VHTLC.Options` has
-    // no `asset` field to pass one through. arkade-os/ts-sdk#763 adds it. Until
-    // that lands and this class can forward it, the honest behaviour is to
-    // REFUSE an asset rather than build a script that ignores it.
-    //
-    // A tripwire, deliberately: it exists to fail the first time someone wires
-    // an asset corridor through this class, at construction, instead of after a
-    // client has funded a lockup that cannot hold what it was told to hold.
-    if (params.asset !== undefined) {
-      throw new Error(
-        'this covenant cannot be denominated in an Arkade asset: its clause constrains sats only, ' +
-          'so an asset behind it can be spent away through the non-interactive leaves. ' +
-          'Needs VHTLC.ScriptV2 asset support (arkade-os/ts-sdk#763) before an asset lockup may be built.',
-      )
-    }
     if (!isEncodableDelay(params.clientRefundDelay)) {
       throw new Error(
         `clientRefundDelay must be a positive block count below ${SEQUENCE_GRANULARITY_SECONDS}, ` +
@@ -665,6 +629,9 @@ export class CovenantSwapScript {
           // this script's pkScript stops matching the lockup on disk.
           withoutReceiver: covenants.legacy !== 'preTimelockedRefund',
         },
+        // WIRE order: the SDK reverses it for `INSPECTOUTASSETLOOKUP` itself, and
+        // pre-reversing here fails the covenant as a bare `OP_VERIFY failed`.
+        asset: params.asset,
       })
       this.pkScript = this.extended.pkScript
       this.claimScript = this.extended.claimScript
