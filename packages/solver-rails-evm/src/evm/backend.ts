@@ -184,11 +184,15 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
       // hash it has never seen. Either way nothing failed, so this must not
       // read as a revert.
       if (receipt === null || receipt === undefined) return 'pending'
-      // `quantityOf` rather than a comparison against '0x1': a receipt with no
-      // `status` (pre-Byzantium, or a node answering something else entirely)
-      // throws rather than being read as success.
+      // EIP-658 defines 0x1 and 0x0 and nothing else, so anything else — a
+      // missing `status` (pre-Byzantium), a malformed one, a third value —
+      // throws. Folding the unrecognised into `success` would put the blindness
+      // this read exists to remove straight back, for exactly the response
+      // nobody predicted.
       const status = quantityOf((receipt as { status?: unknown }).status, 'eth_getTransactionReceipt status')
-      return status === 0n ? 'reverted' : 'success'
+      if (status === 0n) return 'reverted'
+      if (status === 1n) return 'success'
+      throw new Error(`eth_getTransactionReceipt status: expected 0x0 or 0x1, got ${status}`)
     },
 
     async allowance(token, owner) {

@@ -203,6 +203,14 @@ describe('transactionOutcome', () => {
       await expect(backend.transactionOutcome('0xabc')).rejects.toThrow(/expected a 0x quantity/)
     }
   })
+
+  it('refuses a well-formed status the spec does not define', async () => {
+    // `0x2` is a valid quantity, so the decode above accepts it. EIP-658 gives
+    // two values and no third, and reading an unrecognised one as success is
+    // the same silent default by another route.
+    const { backend } = backendWith({ eth_getTransactionReceipt: { status: '0x2' } })
+    await expect(backend.transactionOutcome('0xabc')).rejects.toThrow(/expected 0x0 or 0x1/)
+  })
 })
 
 describe('the write half is built, never sent', () => {
