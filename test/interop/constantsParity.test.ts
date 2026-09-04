@@ -16,8 +16,8 @@
  * Importing every shared number would look tidier and would be worse. It
  * couples this service's release to the SDK's: changing our own margin would
  * need an SDK release and a version bump here, for a value the SDK has no
- * opinion about. That cost is already visible — ts-sdk#763 merged and is not in
- * any published release, so anything gated on it waits.
+ * opinion about. ts-sdk#763 is what that cost looks like: everything gated on
+ * it waited from merge until it shipped, in 0.4.67.
  *
  * Importing is right where a value is PROTOCOL — where the two sides must agree
  * byte for byte or the corridor breaks. It is wrong where a value is OUR

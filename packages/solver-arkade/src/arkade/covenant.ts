@@ -267,7 +267,12 @@ export const enforcePayTo = (destinationPkScript: Uint8Array): Uint8Array => {
  * mistake.
  */
 export interface ArkadeAssetId {
-  /** The issuance transaction id, 32 bytes. */
+  /**
+   * The issuance transaction id, 32 bytes, in CANONICAL order — the SDK's own
+   * name for them: the leading 32 bytes of a serialized Asset ID, unreversed.
+   * NOT "wire order", which the SDK spends on the REVERSED bytes that
+   * `INSPECTOUTASSETLOOKUP` matches.
+   */
   txid: Uint8Array
   /** The issuance group index within that transaction. */
   groupIndex: number
@@ -289,12 +294,12 @@ export const enforcePayToAsset = (destinationPkScript: Uint8Array, asset: Arkade
   assertP2trPkScript(destinationPkScript)
   assertAssetId(asset)
   // REVERSED here, once, so no caller has to know. `asset.txid` is the id in
-  // wire order — what `parseAssetId` returns and what the registry publishes —
-  // but `INSPECTOUTASSETLOOKUP` matches the reversed 32 bytes. Push wire order
-  // and the lookup reports the asset absent (`0 0`), which fails the covenant
-  // with nothing in the error naming the cause: the emulator says only
-  // `OP_VERIFY failed`. Established on regtest against a real minted asset,
-  // by elimination against a passing BTC-only control.
+  // canonical order — what `parseAssetId` returns and what the registry
+  // publishes — but `INSPECTOUTASSETLOOKUP` matches the reversed 32 bytes.
+  // Push canonical and the lookup reports the asset absent (`0 0`), which
+  // fails the covenant with nothing in the error naming the cause: the
+  // emulator says only `OP_VERIFY failed`. Established on regtest against a
+  // real minted asset, by elimination against a passing BTC-only control.
   //
   // A copy rather than an in-place `reverse()`, because the caller's id is
   // theirs and a covenant builder must not mutate it.
@@ -336,7 +341,7 @@ const ASSET_ID_HEX_LENGTH = 68
  *
  * `txid` is a byte string rather than an integer, so the endianness rule above
  * (which covers the integer fields) does not apply to it. It is returned here
- * exactly as it appears in the id.
+ * exactly as it appears in the id — CANONICAL order, per {@link ArkadeAssetId}.
  *
  * BUT a script that INSPECTS the asset must push those 32 bytes REVERSED.
  * `OP_INSPECTOUTASSETLOOKUP` matches the reversed form; pushing them as they
@@ -345,7 +350,7 @@ const ASSET_ID_HEX_LENGTH = 68
  * `OP_VERIFY failed`. Confirmed on regtest against a real minted asset.
  *
  * So: reverse when building a covenant, do not reverse when comparing ids on
- * the wire. {@link enforcePayToAsset} takes the id in wire order and is
+ * the wire. {@link enforcePayToAsset} takes the id in canonical order and is
  * responsible for that flip, so callers pass what they read.
  */
 export const parseAssetId = (hexId: string): ArkadeAssetId => {
@@ -629,8 +634,9 @@ export class CovenantSwapScript {
           // this script's pkScript stops matching the lockup on disk.
           withoutReceiver: covenants.legacy !== 'preTimelockedRefund',
         },
-        // WIRE order: the SDK reverses it for `INSPECTOUTASSETLOOKUP` itself, and
-        // pre-reversing here fails the covenant as a bare `OP_VERIFY failed`.
+        // CANONICAL order, the same name the SDK gives these bytes: it reverses
+        // them for `INSPECTOUTASSETLOOKUP` itself, and pre-reversing here fails
+        // the covenant as a bare `OP_VERIFY failed`.
         asset: params.asset,
       })
       this.pkScript = this.extended.pkScript

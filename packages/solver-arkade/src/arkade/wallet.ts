@@ -698,7 +698,8 @@ export const refundAssetPacket = (
     for (const entry of assets) bucket.set(entry.assetId, (bucket.get(entry.assetId) ?? 0n) + entry.amount)
   }
   // Positional: receivers[i] IS output i, hence the elided `Recipient.address`.
-  const receivers = totals.map((bucket) => ({
+  // `Omit` narrows the cast to that one field, so a later SDK field fails to compile.
+  const receivers: Omit<Recipient, 'address'>[] = totals.map((bucket) => ({
     assets: [...bucket].map(([assetId, amount]) => ({ assetId, amount })),
   }))
   return createAssetPacket(inputAssets, receivers as Recipient[])

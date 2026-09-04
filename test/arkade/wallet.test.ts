@@ -388,6 +388,28 @@ describe('refunding an asset-carrying lockup', () => {
     ])
   })
 
+  it('holds that alignment when only ONE of the inputs carries an asset', async () => {
+    // A sats-only input still owns an output: if the positional counter did not
+    // advance across it, input 1's asset would land on output 0.
+    const carrying = (vout: number): FundedOutput => ({
+      txid: FUNDING.id,
+      vout,
+      value: 50_000,
+      assets: [{ assetId: ASSET_A, amount: 500n }],
+    })
+    const satsOnly = (vout: number): FundedOutput => ({ txid: FUNDING.id, vout, value: 30_000 })
+    const arrangements: [FundedOutput[], number][] = [
+      [[carrying(0), satsOnly(1)], 0],
+      [[satsOnly(0), carrying(1)], 1],
+    ]
+    for (const [funded, vout] of arrangements) {
+      submitTx.mockClear()
+      await refundSwapScript(ctx(), 'http://emulator.test', receiveLegScript(), funded, DEST)
+      const [arkTxB64] = submitTx.mock.calls[0] as [string, string[]]
+      expect(allocations(packetOn(arkTxB64))).toEqual([{ assetId: ASSET_A, vout, amount: 500n }])
+    }
+  })
+
   it('refuses an index-aligned refund of an input carrying two assets', async () => {
     // Unsatisfiable, and the emulator would report only `OP_VERIFY failed`.
     const funded: FundedOutput[] = [

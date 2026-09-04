@@ -579,17 +579,17 @@ describe('enforcePayToAsset — txid orientation', () => {
   const ASSET = { txid: new Uint8Array(32).fill(0).map((_, i) => i + 1), groupIndex: 1 }
 
   it('pushes the txid REVERSED, because that is what the opcode matches', () => {
-    // The trap, pinned. `asset.txid` is wire order — what `parseAssetId`
+    // The trap, pinned. `asset.txid` is canonical order — what `parseAssetId`
     // returns and the registry publishes — but INSPECTOUTASSETLOOKUP matches
-    // the reversed 32 bytes. Pushing wire order makes the lookup report the
+    // the reversed 32 bytes. Pushing canonical makes the lookup report the
     // asset ABSENT (`0 0`), which fails the covenant with nothing in the error
     // naming the cause; the emulator says only `OP_VERIFY failed`. Established
     // on regtest against a real minted asset.
     const script = hex.encode(enforcePayToAsset(DEST, ASSET))
-    const wireOrder = hex.encode(ASSET.txid)
+    const canonical = hex.encode(ASSET.txid)
     const reversed = hex.encode(Uint8Array.from(ASSET.txid).reverse())
     expect(script).toContain(reversed)
-    expect(script).not.toContain(wireOrder)
+    expect(script).not.toContain(canonical)
   })
 
   it('does not mutate the caller’s asset id', () => {
@@ -627,6 +627,8 @@ describe('CovenantSwapScript — denominated in an asset', () => {
     // `nonInteractiveRefundWithoutReceiver` has no accessor a named check sees.
     const enforced = (script: CovenantSwapScript): string[] =>
       Object.keys(new VHTLC.ScriptV2(script.vhtlcOptions)).filter((leaf) => leaf.endsWith('ArkadeScript'))
+    // SDK-internal property names, and this assertion is what keeps a rename
+    // loud: the loop below only ever visits what `enforced` discovered.
     expect(enforced(asset())).toEqual([
       'nonInteractiveClaimArkadeScript',
       'nonInteractiveRefundArkadeScript',
@@ -654,7 +656,7 @@ describe('CovenantSwapScript — denominated in an asset', () => {
     expect(hex.encode(asset().pkScript)).not.toBe(hex.encode(sats().pkScript))
   })
 
-  it('pushes the txid REVERSED, from a caller-supplied wire order', () => {
+  it('pushes the txid REVERSED, from a caller-supplied canonical order', () => {
     // The SDK does the flip, so a pre-reversing caller gets an unspendable lockup.
     const encoded = hex.encode(asset().refundArkadeScript)
     expect(encoded).toContain(hex.encode(Uint8Array.from(ASSET_ID.txid).reverse()))
