@@ -54,46 +54,47 @@ try {
   console.log(`quote: pay ${quote.from_amount} sats, receive ${quote.to_amount} on Arkade`)
   console.log(`  invoice ${quote.profile.invoice}`)
 } catch (error) {
-  if (error.name === 'SwapRefusal') {
-    console.error('solver refused:', error.reason)
-    process.exit(2)
-  }
-  throw error
+  if (error.name !== 'SwapRefusal') throw error
+  console.error('solver refused:', error.reason)
+  process.exitCode = 2
 } finally {
   await transport.close()
 }
 
-try {
-  const claimed = await claimReceived({
-    arkade,
-    quote,
-    preimage,
-    payoutAddress,
-    payoutPubkey,
-    emulatorUrl: config.emulatorUrl,
-    attempts: Number(process.env.CLAIM_ATTEMPTS ?? 90),
-    onEvent: (name, data) => {
-      if (name === 'verified') console.log(`lockup matches own derivation: ${data.address}`)
-      if (name === 'funded') console.log(`solver funded the quoted ${data.sats} sats — claiming`)
-    },
-  })
-  console.log(`claimed to ${payoutAddress}, arkTxid ${claimed.txid}`)
-} catch (error) {
-  if (error.name === 'AddressMismatch') {
-    console.error('REFUSING TO CLAIM: solver lockup address does not match local derivation')
-    process.exit(3)
+if (quote) {
+  try {
+    const claimed = await claimReceived({
+      arkade,
+      quote,
+      preimage,
+      payoutAddress,
+      payoutPubkey,
+      emulatorUrl: config.emulatorUrl,
+      attempts: Number(process.env.CLAIM_ATTEMPTS ?? 90),
+      onEvent: (name, data) => {
+        if (name === 'verified') console.log(`lockup matches own derivation: ${data.address}`)
+        if (name === 'funded') console.log(`solver funded the quoted ${data.sats} sats — claiming`)
+      },
+    })
+    console.log(`claimed to ${payoutAddress}, arkTxid ${claimed.txid}`)
+  } catch (error) {
+    if (error.name === 'AddressMismatch') {
+      console.error('REFUSING TO CLAIM: solver lockup address does not match local derivation')
+      process.exitCode = 3
+    } else if (error.name === 'LockupAmountMismatch') {
+      console.error(`REFUSING TO CLAIM: ${error.message}`)
+      console.error('the covenant refunds the solver after refund_locktime; nothing to sign here')
+      process.exitCode = 4
+    } else if (error.name === 'LockupNotFunded') {
+      console.error('the solver never funded the lockup; the hold invoice fails back on its own')
+      process.exitCode = 5
+    } else {
+      arkade.close()
+      throw error
+    }
   }
-  if (error.name === 'LockupAmountMismatch') {
-    console.error(`REFUSING TO CLAIM: ${error.message}`)
-    console.error('the covenant refunds the solver after refund_locktime; nothing to sign here')
-    process.exit(4)
-  }
-  if (error.name === 'LockupNotFunded') {
-    console.error('the solver never funded the lockup; the hold invoice fails back on its own')
-    process.exit(5)
-  }
-  throw error
 }
 
+// close() before exit(): process.exit() skips the WAL checkpoint.
 arkade.close()
-process.exit(0)
+process.exit(process.exitCode ?? 0)
