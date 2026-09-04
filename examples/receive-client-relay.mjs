@@ -25,9 +25,8 @@ const config = loadConfig()
 const arkade = await createArkadeContext(config.arkade)
 let transport
 
-// One try/finally around everything after the wallet is open, as
-// receive-quote-relay.mjs does: every exit from here, refusal or crash, has to
-// reach `arkade.close()`, because process teardown skips the WAL checkpoint.
+// One try/finally around everything after the wallet is open: every exit,
+// refusal or crash, must reach the close, or the WAL goes uncheckpointed.
 try {
   // covclaimd's key is read LIVE: it generates its own.
   const covclaimdUrl = process.env.COVCLAIMD_URL ?? 'http://localhost:7271'

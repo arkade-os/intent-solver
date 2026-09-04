@@ -35,9 +35,8 @@ const arkade = await createArkadeContext(config.arkade)
 
 let transport
 
-// Everything after the wallet is open belongs inside the try: a throw in the
-// covclaimd fetch or in the sealing left `arkade` open, which is the whole
-// point of the finally below.
+// Inside the try, all of it: a throw in the covclaimd fetch or in the sealing
+// used to run above the finally below and leave `arkade` open.
 try {
   // covclaimd's key is read LIVE, never hardcoded: it generates its own.
   const covclaimdUrl = process.env.COVCLAIMD_URL ?? 'http://localhost:7271'
