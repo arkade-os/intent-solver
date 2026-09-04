@@ -33,22 +33,27 @@ const amountSats = Number(amountArg ?? 5000)
 const config = loadConfig()
 const arkade = await createArkadeContext(config.arkade)
 
-// covclaimd's key is read LIVE, never hardcoded: it generates its own.
-const covclaimdUrl = process.env.COVCLAIMD_URL ?? 'http://localhost:7271'
-const covclaimdPubKey = await fetch(`${covclaimdUrl}/v1/preimage/covclaimd-pubkey`)
-  .then((r) => /** @type {Promise<{ covclaimd_pub_key: string }>} */ (r.json()))
-  .then((body) => body.covclaimd_pub_key)
+let transport
 
-const preimage = randomBytes(32)
-const paymentHash = hex.encode(sha256(preimage))
-const claimPacket = sealToCovclaimd(preimage, covclaimdPubKey)
-
-const transport = nostrRelayTransport(relayUrl, {
-  solverPubkey,
-  secretKey: deriveNostrIdentity(config.arkade.mnemonic, config.arkade.isMainnet).secretKey,
-})
-
+// Everything after the wallet is open belongs inside the try: a throw in the
+// covclaimd fetch or in the sealing left `arkade` open, which is the whole
+// point of the finally below.
 try {
+  // covclaimd's key is read LIVE, never hardcoded: it generates its own.
+  const covclaimdUrl = process.env.COVCLAIMD_URL ?? 'http://localhost:7271'
+  const covclaimdPubKey = await fetch(`${covclaimdUrl}/v1/preimage/covclaimd-pubkey`)
+    .then((r) => /** @type {Promise<{ covclaimd_pub_key: string }>} */ (r.json()))
+    .then((body) => body.covclaimd_pub_key)
+
+  const preimage = randomBytes(32)
+  const paymentHash = hex.encode(sha256(preimage))
+  const claimPacket = sealToCovclaimd(preimage, covclaimdPubKey)
+
+  transport = nostrRelayTransport(relayUrl, {
+    solverPubkey,
+    secretKey: deriveNostrIdentity(config.arkade.mnemonic, config.arkade.isMainnet).secretKey,
+  })
+
   const rfqId = newRfqId()
   console.log(`asking for ${amountSats} sats over ${relayUrl}, payment hash ${paymentHash}`)
   const quote = await transport.requestQuote(
@@ -75,7 +80,7 @@ try {
     console.log('Receive quote received over a real Nostr relay.')
   }
 } finally {
-  await transport.close()
+  await transport?.close()
   arkade.close()
 }
 
