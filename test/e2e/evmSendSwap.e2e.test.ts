@@ -341,9 +341,8 @@ describe('e2e arkade:BTC->ethereum:<token> (send) — both stacks', () => {
       expect(settled.evmRefundTxid, 'no refund txid recorded').toMatch(/^0x[0-9a-f]+$/)
 
       // The broadcaster resolves once the node ACCEPTS the transaction, not once
-      // it is mined — so wait for the receipt before asserting the on-chain
-      // effect. A reverted refund would leave the row reading `refunded` with
-      // the lock still funded; the receipt is what rules that out.
+      // it is mined. Reaching `refunded` at all now means the planner read that
+      // receipt as a success; re-reading it here is the independent check.
       let receipt: { status: string } | null = null
       for (let attempt = 0; attempt < 30 && receipt === null; attempt += 1) {
         receipt = (await rpc('eth_getTransactionReceipt', [settled.evmRefundTxid])) as { status: string } | null
