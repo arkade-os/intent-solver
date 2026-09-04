@@ -210,8 +210,7 @@ describe('rule 7 - `refunded` means the ERC20 came back', () => {
   })
 
   it('never records a reverted refund as `refunded`', () => {
-    // THE FINDING. A refund that reverted returned nothing, so a terminal
-    // `refunded` row would be a lie about where the tokens went.
+    // THE FINDING: a reverted refund returned nothing to be terminal about.
     for (const evmLockPresent of [true, false]) {
       const action = planEvmSend(refunding, seen({ evmRefundOutcome: 'reverted', evmLockPresent }))
       expect(action).not.toEqual({ do: 'record_refund' })
@@ -219,7 +218,6 @@ describe('rule 7 - `refunded` means the ERC20 came back', () => {
   })
 
   it('sticks when the revert left the lock still funded', () => {
-    // Nobody took the tokens and nothing here retries a broadcast.
     const action = planEvmSend(refunding, seen({ evmRefundOutcome: 'reverted', evmLockPresent: true }))
     expect(action).toEqual({
       do: 'stick',
@@ -228,17 +226,11 @@ describe('rule 7 - `refunded` means the ERC20 came back', () => {
   })
 
   it('does not page when the revert was the client claiming first', () => {
-    // The benign cause, and the common one: the claim won the block race, so
-    // the ERC20 went where the swap intended. Sticking here would page an
-    // operator on every normally-claimed swap whose scan lagged a tick.
     const action = planEvmSend(refunding, seen({ evmRefundOutcome: 'reverted', evmLockPresent: false }))
     expect(action).toEqual({ do: 'wait' })
   })
 
   it('yields to the preimage that revert revealed', () => {
-    // The waiting above is only worth anything because rule 4 is still live
-    // from `refunding_evm`: the claim that beat the refund is what pays the
-    // solver its sats.
     const action = planEvmSend(refunding, seen({ evmRefundOutcome: 'reverted', preimage: 'cd'.repeat(32) }))
     expect(action).toEqual({ do: 'claim_arkade', preimage: 'cd'.repeat(32) })
   })

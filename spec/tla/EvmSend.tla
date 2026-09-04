@@ -18,7 +18,10 @@
 (*                                lock/claim/refund broadcasts, quote()    *)
 (*   src/db/evmSendSwaps.ts       from-state CAS, partial UNIQUE index     *)
 (*   src/evm/broadcast.ts         send-only broadcast: a hash comes back,  *)
-(*                                NO receipt/revert check (:91-95)         *)
+(*                                NO receipt/revert check (:91-95).  The   *)
+(*                                receipt is a SEPARATE read               *)
+(*                                (transactionOutcome, backend.ts:181-193) *)
+(*                                and only the planner acts on it.         *)
 (*   src/evm/blockTime.ts         seconds <-> blocks conversion            *)
 (*   src/evm/lockDepth.ts         the historical isLockedAt probe          *)
 (*                                                                         *)
@@ -35,7 +38,7 @@
 (* THE PRE-SWITCH RULE IS A GLOBAL INTERRUPT                               *)
 (*                                                                         *)
 (* planEvmSend checks the preimage BEFORE the state switch                 *)
-(* (evmSendPlan.ts:71-84), from EVERY non-terminal state:                  *)
+(* (evmSendPlan.ts:100-112), from EVERY non-terminal state:                *)
 (*   P seen, wall clock < refundLocktime  -> claim_arkade                  *)
 (*   P seen, wall clock >= refundLocktime -> stick                         *)
 (* That is why the edge table has -> claiming and -> stuck from every      *)
@@ -97,14 +100,32 @@
 (*  (A3) `ClaimLands`.  claimArkade is modelled as needing only serverUp   *)
 (*       and an unspent covenant; the send corridor never re-reads the     *)
 (*       outcome because `claiming` maps to `wait` in the planner          *)
-(*       (evmSendPlan.ts:133-136).  See THE PARKED STATES below.           *)
-(*  (A4) `RefundSeesClaim`.  Shipped truth (broadcast.ts:91-95): the row   *)
-(*       records `refunded` at SEND time, with no receipt.  If the         *)
-(*       client's claim lands before the refund mines, the broadcast       *)
-(*       reverts and the terminal row still says `refunded` - the word     *)
-(*       over the money.  Green waits for the outcome to be settled        *)
-(*       on-chain before recording; the mutation records anyway and        *)
-(*       NoSilentLoss fails.  Finding F3.                                  *)
+(*       (evmSendPlan.ts:178-180).  See THE PARKED STATES below.           *)
+(*  (A4) `RefundSeesClaim`.  SHIPPED, not an open assumption               *)
+(*       (evmSendPlan.ts:165-176): `refunded` is written only for a        *)
+(*       refund whose own receipt says it MINED.  The row used to record   *)
+(*       it at SEND time, so a client claim that won the block race left   *)
+(*       a terminal row saying `refunded` over tokens the client held -    *)
+(*       and terminal is what made it unrecoverable, because it ended the  *)
+(*       preimage scan that was still the swap's way out.  The mutation    *)
+(*       records with no receipt and NoSilentLoss fails.  Finding F3,      *)
+(*       fixed.                                                            *)
+(*                                                                         *)
+(*       ONE ARM IS DELIBERATELY NOT GREEN.  "The refund reverted and      *)
+(*       there was nothing to refund" (evm = "none") is a settled outcome  *)
+(*       to this model, which is an oracle, and NOT to the code, which     *)
+(*       cannot tell it from "the client claimed and my preimage scan is   *)
+(*       blind" - both present as (reverted, lock absent, no preimage).    *)
+(*       Recording the pair would restore the F3 lie for the second        *)
+(*       member, so the guard below is the single mined arm and those      *)
+(*       rows wait in refunding_evm instead.                               *)
+(*                                                                         *)
+(*       A refund that reverts with the lock STILL PRESENT is not          *)
+(*       modelled: RefundMines has no such behaviour, so the gas and       *)
+(*       mis-set-timelock failures it would stand for are abstracted away  *)
+(*       with the rest of the chain's error surface.  The shipped planner  *)
+(*       sends that case to `stuck`, which NoSilentLoss permits from any   *)
+(*       exposed state.                                                    *)
 (*  (A5) `TxidPatchAtomic`.  The txid patch is a separate write after the  *)
 (*       lock broadcast (evmOrchestrator.ts:306-310); a crash between      *)
 (*       them leaves evm_lock_txid null forever, and the preimage scan     *)
@@ -122,7 +143,7 @@
 (*       NoSilentLoss fails.  Finding F4.                                  *)
 (*                                                                         *)
 (*  (A7) `TimeoutRefundCoversPresent`.  The locking_evm timeout refund    *)
-(*       fires only when the lock is ABSENT (evmSendPlan.ts:118-119); a    *)
+(*       fires only when the lock is ABSENT (evmSendPlan.ts:147-152); a    *)
 (*       lock that is present but never proven deep parks the swap past    *)
 (*       its own timeout, and the client can then claim the ERC20 at any   *)
 (*       height and refund its sats at the wall locktime - the double      *)
@@ -132,11 +153,16 @@
 (*                                                                         *)
 (* THE PARKED STATES                                                       *)
 (*                                                                         *)
-(* The planner maps `claiming` and `refunding_evm` to `wait`,             *)
-(* unconditionally: nothing re-drives them (evmSendPlan.ts:133-136).  A    *)
-(* crash between the side effect and its recording CAS - or a thrown       *)
-(* claimArkade after the state CAS - parks the row forever: NON_TERMINAL,  *)
-(* EXPOSED, holding cap, with no `stuck` escalation and no admin op.       *)
+(* The planner maps `claiming` to `wait` unconditionally: nothing          *)
+(* re-drives it.  `refunding_evm` is no longer in that company - (A4) gave *)
+(* it a receipt to read, so it leaves on its own for `refunded`, `stuck`   *)
+(* or (via the pre-switch rule) `claiming`.  It still parks in the one     *)
+(* window the receipt cannot reach: a crash between the refund broadcast   *)
+(* and the txid patch (evmOrchestrator.ts:382-392) leaves nothing to ask   *)
+(* about, the mirror of (A5) on the lock side.  A parked row is            *)
+(* NON_TERMINAL, EXPOSED and holding cap with no `stuck` escalation of     *)
+(* its own; an operator can still force one (evmCorridors.ts:209 parks     *)
+(* any non-terminal row), which is not modelled here.                      *)
 (* The money outcome is still bounded (NoNetLoss / NoSilentLoss), and      *)
 (* Liveness below is stated so the parked states count as outcomes -       *)
 (* anything stricter is red for reasons that have nothing to do with       *)
@@ -174,8 +200,8 @@ CONSTANTS
     TimeoutRefundCoversPresent, \* (A7) MUTATION: the locking_evm timeout refund
                       \*      fires with the lock PRESENT too (TRUE, the fix),
                       \*      not only with it absent (FALSE, shipped; F5)
-    RefundSeesClaim,  \* (A4) MUTATION: refund recording re-reads the claim (TRUE)
-                      \*      or trusts the stale snapshot (FALSE, shipped)
+    RefundSeesClaim,  \* (A4) MUTATION: refund recording waits for the receipt
+                      \*      (TRUE, shipped) or records at send time (FALSE)
     AtomicAdmission,  \* MUTATION: quote re-checks the cap at insert
     BreakDeadlineOrder \* (A2) MUTATION: collapse the height/wall margin
 
@@ -505,8 +531,8 @@ RecordLock(w, s) ==
     /\ UNCHANGED LsVars
 
 \* refund_evm.  From locking_evm the planner requires the lock ABSENT
-\* (:118-119); from awaiting_claim it is unconditional at the height
-\* timeout (:131) - which is the (A4) window.  (A7): the absence condition
+\* (:138-143); from awaiting_claim it is unconditional at the height
+\* timeout (:151-154) - which is the (A4) window.  (A7): the absence condition
 \* defeats the whole margin whenever the lock is present but never proven
 \* deep - the timeout exists to end the client's option, and the shipped
 \* branch structure withholds it exactly then.  The CAS, then the broadcast
@@ -544,16 +570,23 @@ RefundMines(s) ==
     /\ UNCHANGED << clock, st, loc, conf, serverUp, evmHeight >>
     /\ UNCHANGED << arkFund, evmConfirmed, lockTxid, lockSends, refundSent >>
 
-\* The recording CAS, and (A4) its receipt check.  Shipped truth
-\* (broadcast.ts:91-95): the row records `refunded` at SEND time, with no
-\* receipt - RefundSeesClaim = FALSE records the word over any chain
-\* state, including a lock the client already claimed, and NoSilentLoss
-\* names the lie.  Green waits for the outcome to be settled on-chain
-\* (the refund mined, or there was nothing to refund) before writing it.
+\* The recording CAS, and (A4) its receipt check.  RefundSeesClaim = TRUE
+\* is the SHIPPED planner (evmSendPlan.ts:165-176): `refunded` is written
+\* only for a refund the receipt says MINED.  The single arm is the point
+\* - see (A4) for why "there was nothing to refund" is not a second one.
+\* RefundSeesClaim = FALSE drops the check and writes the word over any
+\* chain state, including a lock the client already claimed; NoSilentLoss
+\* names the lie.
+\*
+\* Still a push-phase step rather than a fresh read, which is the
+\* ADVERSARIAL abstraction: the shipped shell broadcasts and returns, so
+\* the recording is decided a tick later, while this lets it be attempted
+\* in the same breath as the broadcast.  Every ordering the shell can
+\* produce is included in that.
 RecordEvmRefund(w, s) ==
     /\ At(w, s, "sentRefund")
     /\ IF RefundSeesClaim
-        THEN evm[s] \in { "solverRefunded", "none" }
+        THEN evm[s] = "solverRefunded"
         ELSE TRUE
     /\ \/ CasWon(s, "refunding_evm", "refunded")
        \/ CasLost(s, "refunding_evm")
@@ -729,25 +762,31 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*                                                                         *)
 (* FINDINGS                                                                *)
 (*                                                                         *)
-(* F1  THE PARKED STATES.  The planner maps claiming and refunding_evm to  *)
-(*     wait unconditionally (evmSendPlan.ts:133-136): a crash between the  *)
-(*     side effect and its recording CAS - or a thrown claimArkade after   *)
-(*     the state CAS - parks the row forever, NON_TERMINAL and holding     *)
-(*     cap.  Liveness accepts the parking (EvmSend_Parked.cfg shows the    *)
-(*     strict statement is false); the money invariants bound the cost.    *)
+(* F1  THE PARKED STATES.  The planner maps claiming to wait               *)
+(*     unconditionally: a thrown claimArkade after the state CAS, or a     *)
+(*     crash between the side effect and its recording CAS, parks the row  *)
+(*     forever, NON_TERMINAL and holding cap.  refunding_evm now leaves    *)
+(*     on its receipt (F3), except in the one window with no receipt to    *)
+(*     read - a crash between the refund broadcast and the txid patch.     *)
+(*     Liveness accepts the parking (EvmSend_Parked.cfg shows the strict   *)
+(*     statement is false); the money invariants bound the cost.           *)
 (* F2  (A5) THE BLINDED SCAN.  A crash between the lock broadcast and the  *)
 (*     txid patch (evmOrchestrator.ts:306-310) leaves the preimage scan    *)
 (*     gated shut forever; the client claims invisibly and still refunds   *)
 (*     its sats.  EvmSend_BlindScan.cfg: NoNetLoss, depth 21.              *)
-(* F3  (A4) THE SEND-TIME RECORD.  The row records `refunded` when the     *)
-(*     refund is SENT, not when it lands (broadcast.ts:91-95); a claim     *)
-(*     that wins the block race leaves a terminal row lying over the       *)
-(*     money.  EvmSend_NoReceipt.cfg: NoSilentLoss, depth 15.              *)
+(* F3  (A4) THE SEND-TIME RECORD - FIXED.  The row USED TO record          *)
+(*     `refunded` when the refund was SENT, not when it landed; a claim    *)
+(*     that won the block race left a terminal row lying over the money,   *)
+(*     and terminal ended the preimage scan that was the swap's way out.   *)
+(*     The shipped planner now records only a MINED refund                 *)
+(*     (evmSendPlan.ts:165-176), so EvmSend_NoReceipt.cfg is a genuine     *)
+(*     mutation - it deletes the shipped check - rather than a record of   *)
+(*     shipped behaviour.                                                  *)
 (* F4  (A6) THE LATE LOCK.  A pending lock broadcast can land after the    *)
 (*     timeout refund already closed the books.  EvmSend_LateLock.cfg:     *)
 (*     NoSilentLoss, depth 15.                                             *)
 (* F5  (A7) THE STRANDED LOCK.  The locking_evm timeout refund requires    *)
-(*     the lock ABSENT (evmSendPlan.ts:118-119); a lock present but never  *)
+(*     the lock ABSENT (evmSendPlan.ts:147-152); a lock present but never  *)
 (*     proven deep (the depth probe's failed read is UNPROVEN, never       *)
 (*     absent - lockDepth.ts) withholds the very timeout that ends the     *)
 (*     client's option, and the client takes both legs at the wall         *)

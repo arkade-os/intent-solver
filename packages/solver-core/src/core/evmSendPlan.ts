@@ -28,10 +28,8 @@
  *    hours later: until it dies, the row holds capacity against the house cap.
  * 6. A mined-and-failed lock created no lock. Absent-and-reverted is a
  *    different fact from absent-and-pending; only the receipt carries it.
- * 7. `refunded` means the ERC20 came back. Only a mined refund says so, and a
- *    broadcast that reverted returned nothing - recording it anyway leaves a
- *    terminal row lying about where the tokens went, and closes the books on
- *    the preimage scan that was still the swap's way out.
+ * 7. `refunded` means the ERC20 came back, so only a mined refund earns it. A
+ *    terminal row over a reverted refund lies, and ends the preimage scan.
  */
 
 import type { EvmTransactionOutcome } from '../ports/evm.js'
@@ -163,16 +161,14 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
       return seen.evmBlockHeight >= row.evmTimeout ? { do: 'refund_evm' } : { do: 'wait' }
 
     case 'refunding_evm':
-      // RULE 7. Only a mined refund put the tokens back; `pending` is no
-      // answer yet, and a revert put back nothing.
+      // RULE 7, and the lock's presence splits the revert. Still there: nobody
+      // took it and nothing here retries, so a human must. GONE: someone did,
+      // and the usual someone is the client claiming — waiting keeps the row
+      // live for rule 4's scan, where sticking would page on every such swap.
       if (seen.evmRefundOutcome === 'success') return { do: 'record_refund' }
       if (seen.evmRefundOutcome === 'reverted' && seen.evmLockPresent) {
         return { do: 'stick', reason: 'the ERC20 refund transaction reverted; the lock is still funded' }
       }
-      // Reverted with the lock GONE: someone else emptied it, and the usual
-      // someone is the client claiming — the outcome the swap wanted. Waiting
-      // keeps the row live for rule 4's scan; sticking would page on every
-      // claim whose scan lagged a tick, and forfeit the Arkade side with it.
       return { do: 'wait' }
 
     case 'claiming':

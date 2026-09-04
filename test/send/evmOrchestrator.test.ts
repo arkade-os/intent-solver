@@ -560,9 +560,8 @@ describe('a refund that was broadcast is not a refund that landed', () => {
   }
 
   it('records the txid without closing the books', async () => {
-    // THE FINDING. Recording `refunded` here is terminal, and terminal is what
-    // makes it unrecoverable: nothing re-reads a row the sweep has stopped
-    // returning, so a refund that later reverts is never noticed.
+    // THE FINDING: terminal is what makes it unrecoverable, because the sweep
+    // stops returning the row and a later revert is never noticed.
     const { store, service } = await dueForRefund({
       isLocked: vi.fn().mockResolvedValue(true),
       transactionOutcome: vi.fn().mockResolvedValue('pending'),
@@ -598,9 +597,6 @@ describe('a refund that was broadcast is not a refund that landed', () => {
   })
 
   it('never says `refunded` when the client claimed the tokens instead', async () => {
-    // The block race the contract decides: the claim landed first, so the
-    // refund reverted and the ERC20 is the client's. A terminal `refunded` row
-    // here is the lie, and it also ends the scan that pays the solver.
     const transactionOutcome = vi.fn().mockResolvedValue('pending')
     const findClaimPreimage = vi.fn().mockResolvedValue(null)
     const { store, service } = await dueForRefund({
@@ -618,8 +614,6 @@ describe('a refund that was broadcast is not a refund that landed', () => {
   })
 
   it('does not page when the revert was a claim its scan has not caught up with', async () => {
-    // Same revert, scan still empty. Sticking would page an operator on every
-    // normally-claimed swap; the row waits so the next scan can rescue it.
     const transactionOutcome = vi.fn().mockResolvedValue('pending')
     const { store, service } = await dueForRefund({
       isLocked: vi.fn().mockResolvedValue(false),
@@ -660,8 +654,7 @@ describe('a refund that was broadcast is not a refund that landed', () => {
   })
 
   it('does not read a receipt it has no txid for', async () => {
-    // The crash window between the broadcast and the patch. Asking about a
-    // null hash would be a request the node answers for some other swap.
+    // The crash window between the broadcast and the patch.
     const transactionOutcome = vi.fn().mockResolvedValue('success')
     const { store, service } = await dueForRefund({
       isLocked: vi.fn().mockResolvedValue(true),
@@ -671,6 +664,20 @@ describe('a refund that was broadcast is not a refund that landed', () => {
     await service.tick('swap-1')
     expect(transactionOutcome).not.toHaveBeenCalled()
     expect((await store.get('swap-1')).state).toBe('refunding_evm')
+  })
+
+  it('stops asking once the row has left refunding_evm', async () => {
+    // The rescue path leaves a refund txid on a row no branch will read it for.
+    const transactionOutcome = vi.fn().mockResolvedValue('reverted')
+    const { store, service } = await dueForRefund({
+      isLocked: vi.fn().mockResolvedValue(false),
+      transactionOutcome,
+    })
+    await store.transition('swap-1', 'awaiting_claim', 'refunding_evm', { evm_refund_txid: REFUND_TXID })
+    await store.transition('swap-1', 'refunding_evm', 'claiming', { preimage: 'cd'.repeat(32) })
+    await service.tick('swap-1')
+    expect(transactionOutcome).not.toHaveBeenCalled()
+    expect((await store.get('swap-1')).state).toBe('claimed')
   })
 })
 

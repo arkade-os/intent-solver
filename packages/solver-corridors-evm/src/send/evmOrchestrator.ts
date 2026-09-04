@@ -204,11 +204,7 @@ export class EvmSendSwapService {
     }
   }
 
-  /**
-   * Asked only from `refunding_evm`, and degraded the same way: a node that
-   * cannot answer leaves the row waiting rather than recording an outcome
-   * nobody read.
-   */
+  /** Asked only from `refunding_evm`, and degraded as {@link lockReverted} is. */
   private async refundOutcome(row: EvmSendSwapRow): Promise<EvmTransactionOutcome> {
     if (row.state !== 'refunding_evm' || row.evmRefundTxid === null) return 'pending'
     try {
@@ -382,12 +378,11 @@ export class EvmSendSwapService {
       case 'refund_evm': {
         await store.transition(row.id, row.state, 'refunding_evm')
         const txid = await this.deps.broadcast(this.deps.evm.refundCall(this.deps.lockFor(row)))
-        // PATCHED, not transitioned. `refunding_evm` now means "broadcast,
-        // awaiting outcome": the row may only claim the ERC20 came back once a
-        // receipt says so, and this txid is the only handle on that receipt.
+        // PATCHED, not transitioned: `refunding_evm` means "awaiting outcome",
+        // and this txid is the only handle on the receipt that carries it.
         await store.patch(row.id, { evm_refund_txid: txid })
-        // Not a retry: a receipt for a transaction broadcast this instant is a
-        // guaranteed-empty read. The next sweep asks.
+        // A receipt for a transaction sent this instant is a guaranteed-empty
+        // read; the next sweep asks.
         return false
       }
 
