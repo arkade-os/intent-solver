@@ -3,11 +3,14 @@ import { FREE } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import {
+  assetCardMarkets,
   buildSolverCard,
   canonicalCardJson,
   cardDigest,
   signSolverCard,
+  unpublishableCorridors,
   verifyCardSig,
+  type AssetCardMarket,
   type SolverCardInputs,
 } from '@arkade-os/solver-core/core/registryCard.js'
 
@@ -272,6 +275,159 @@ describe('buildSolverCard', () => {
           }),
         ).markets[0]!,
     ).toBe(false)
+  })
+})
+
+const ASSET = `${'9c'.repeat(32)}0001`
+const OTHER_ASSET = `${'4d'.repeat(32)}0002`
+
+const market = (over: Partial<AssetCardMarket> = {}): AssetCardMarket => ({
+  base: null,
+  quote: ASSET,
+  baseDecimals: 8,
+  quoteDecimals: 6,
+  feedUrl: 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
+  pricePath: '/price',
+  feeBps: 30,
+  sellBase: { min: 1_000_000n, max: 500_000_000n },
+  buyBase: { min: 10_000n, max: 2_000_000n },
+  ...over,
+})
+
+describe('asset markets on the card', () => {
+  it('names a market the four-corridor record cannot hold', () => {
+    // The bug: served, not expressible in the corridor record, so unadvertised.
+    const card = buildSolverCard(inputs({ assetMarkets: [market()] }))
+    expect(card.markets).toHaveLength(2)
+    const asset = card.markets.find((m) => m.pair !== 'BTC/lightning:BTC')!
+    expect(asset.pair).toBe('BTC/9c9c9c9c')
+    expect(asset.base_asset).toEqual({ id: 'btc', name: 'Bitcoin', ticker: 'BTC', decimals: 8 })
+    expect(asset.quote_asset).toEqual({ id: ASSET, name: 'Arkade asset 9c9c9c9c', ticker: '9c9c9c9c', decimals: 6 })
+    expect('base_corridor' in asset).toBe(false)
+    expect('quote_corridor' in asset).toBe(false)
+    expect(asset.fee_bps).toBe(30)
+  })
+
+  it('carries the feed a cross-asset market is required to publish', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market()] })).markets[1]!
+    expect(asset.price_feed).toBe('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT')
+    expect(asset.price_feed_schema).toEqual({ type: 'json', price_path: '/price' })
+    expect(asset.price_decimals).toBe(2)
+  })
+
+  it('puts each direction`s bound on the side the maker receives', () => {
+    // Getting this backwards advertises each direction's limits as the other's.
+    const asset = buildSolverCard(inputs({ assetMarkets: [market()] })).markets[1]!
+    expect(asset.min_quote_amount).toBe('1000000')
+    expect(asset.max_quote_amount).toBe('500000000')
+    expect(asset.min_base_amount).toBe('10000')
+    expect(asset.max_base_amount).toBe('2000000')
+  })
+
+  it('publishes an unserved direction as the schema`s disabled zero', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market({ buyBase: { min: 0n, max: 0n } })] })).markets[1]!
+    expect(asset.min_base_amount).toBe('0')
+    expect(asset.max_base_amount).toBe('0')
+    expect(asset.min_quote_amount).toBe('1000000')
+  })
+
+  it('is a whole card on its own, with no BTC corridor served', () => {
+    const card = buildSolverCard(inputs({ corridors: {}, assetMarkets: [market()] }))
+    expect(card.markets).toHaveLength(1)
+    expect(card.markets[0]!.pair).toBe('BTC/9c9c9c9c')
+  })
+
+  it('refuses a market whose price_decimals the schema cannot hold', () => {
+    // 18 against BTC's 8 needs price_decimals -10; the registry bounds it at 0..18.
+    expect(() => buildSolverCard(inputs({ assetMarkets: [market({ quoteDecimals: 18 })] }))).toThrow(/price_decimals/)
+  })
+
+  it('refuses the parts of a market it cannot state honestly', () => {
+    const refused: Array<[Partial<AssetCardMarket>, RegExp]> = [
+      [{ quote: 'NOTHEX' }, /asset id/],
+      [{ quote: null }, /must differ/],
+      [{ base: ASSET, quote: OTHER_ASSET }, /neither leg is BTC/],
+      [{ baseDecimals: 6 }, /BTC leg/],
+      [{ quoteDecimals: 24 }, /in 0\.\.18/],
+      [{ pricePath: '' }, /price_path/],
+      [{ feedUrl: '' }, /price_feed/],
+      [{ feeBps: 10_001 }, /fee_bps/],
+      [{ sellBase: { min: 0n, max: 0n }, buyBase: { min: 0n, max: 0n } }, /neither side/],
+      [{ sellBase: { min: 0n, max: 5n } }, /min/],
+      [{ sellBase: { min: 9n, max: 5n } }, /max/],
+    ]
+    for (const [over, message] of refused) {
+      expect(() => buildSolverCard(inputs({ assetMarkets: [market(over)] })), String(message)).toThrow(message)
+    }
+  })
+
+  it('refuses two rows for one pair, which would publish two prices for it', () => {
+    expect(() =>
+      buildSolverCard(inputs({ assetMarkets: [market(), market({ baseDecimals: 8, feeBps: 10 })] })),
+    ).toThrow(/twice/)
+  })
+})
+
+describe('assetCardMarkets', () => {
+  it('resolves the two things the store leaves open', () => {
+    const [resolved] = assetCardMarkets(
+      [
+        {
+          base: null,
+          quote: ASSET,
+          baseDecimals: 8,
+          quoteDecimals: 6,
+          feedUrl: 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
+          pricePath: '',
+          toleranceBps: 10,
+          feeBps: 25,
+        },
+      ],
+      { min: 5_000n, max: 900_000n },
+    )
+    expect(resolved).toMatchObject({
+      pricePath: '/price',
+      sellBase: { min: 5_000n, max: 900_000n },
+      buyBase: { min: 5_000n, max: 900_000n },
+    })
+  })
+
+  it('leaves a stated bound alone, on either side', () => {
+    const [resolved] = assetCardMarkets(
+      [
+        {
+          base: null,
+          quote: ASSET,
+          baseDecimals: 8,
+          quoteDecimals: 6,
+          feedUrl: 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
+          pricePath: '/data/last',
+          toleranceBps: 10,
+          feeBps: 25,
+          sellBase: { min: 1n, max: 2n },
+          buyBase: { min: 3n, max: 4n },
+        },
+      ],
+      { min: 5_000n, max: 900_000n },
+    )
+    expect(resolved).toMatchObject({
+      pricePath: '/data/last',
+      sellBase: { min: 1n, max: 2n },
+      buyBase: { min: 3n, max: 4n },
+    })
+  })
+})
+
+describe('corridors no card can name', () => {
+  it('reports a served ERC20 corridor rather than dropping it silently', () => {
+    const notes = unpublishableCorridors(['arkade:BTC->ethereum:0xdac17f958d2ee523a2206206994597c13d831ec7'])
+    expect(notes).toHaveLength(1)
+    expect(notes[0]).toContain('0xdac17f958d2ee523a2206206994597c13d831ec7')
+    expect(notes[0]).toContain('solver-registry#23')
+  })
+
+  it('says nothing when nothing is unpublishable', () => {
+    expect(unpublishableCorridors([])).toEqual([])
   })
 })
 

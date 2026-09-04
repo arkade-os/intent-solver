@@ -77,6 +77,8 @@ const makeDeps = (
     relayUrl?: string | null
     nostrAdPublish?: AdPublishMode
     adPublisher?: AdPublisher
+    assetMarkets?: unknown[]
+    evmCorridors?: { corridor: string; enabled: boolean }[]
     /** Collects the audit rows the route writes, so they can be asserted. */
     audit?: Record<string, unknown>[]
   } = {},
@@ -104,7 +106,11 @@ const makeDeps = (
           'arkade:BTC->lightning:BTC': { bps: 30, flatSats: over.lnSendFlatSats ?? 0 },
           'lightning:BTC->arkade:BTC': { bps: 10, flatSats: 0 },
         },
+        evmCorridors: over.evmCorridors ?? [],
+        offerMinFillAmount: 5_000n,
+        offerMaxFillAmount: 900_000n,
       },
+      assetMarkets: over.assetMarkets ?? [],
       providerPubkey: PUBKEY,
       emulatorPubkey: EMULATOR_PUBKEY,
       arkade: {
@@ -124,9 +130,12 @@ const makeDeps = (
     ...(over.adPublisher ? { adPublisher: over.adPublisher } : {}),
   }) as never
 
+const ASSET = `${'9c'.repeat(32)}0001`
+
 interface CardBody {
   card: SolverCard | null
   cardError: string | null
+  cardOmitted: string[]
   ad: unknown
   adError: string | null
   publish: { mode: string; publisher: boolean; lastPublishedAt: number | null; lastError: string | null }
@@ -186,6 +195,57 @@ describe('GET /api/card', () => {
     // The HIGHER of the two Lightning spreads, as `cli card` publishes it:
     // overstating a fee is the safe direction, understating one is a lie.
     expect(body.card!.markets[0]).toMatchObject({ fee_bps: 30 })
+  })
+
+  it('advertises a configured asset market, and still verifies with it aboard', async () => {
+    // A market the deployment serves and the card omits is the whole bug.
+    const { body } = await getCard(
+      makeDeps({
+        assetMarkets: [
+          {
+            base: null,
+            quote: ASSET,
+            baseDecimals: 8,
+            quoteDecimals: 6,
+            feedUrl: 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
+            pricePath: '',
+            toleranceBps: 10,
+            feeBps: 25,
+            sellBase: { min: 1_000_000n, max: 500_000_000n },
+          },
+        ],
+      }),
+    )
+    expect(body.cardError).toBeNull()
+    const asset = body.card!.markets.find((m) => m.pair !== 'BTC/lightning:BTC' && m.pair !== 'BTC/onchain:BTC')!
+    expect(asset).toMatchObject({
+      pair: 'BTC/9c9c9c9c',
+      fee_bps: 25,
+      price_decimals: 2,
+      min_quote_amount: '1000000',
+    })
+    expect(asset.price_feed_schema).toEqual({ type: 'json', price_path: '/price' })
+    expect(asset.min_base_amount).toBe('5000')
+    expect(asset.max_base_amount).toBe('900000')
+    // The signature must cover the added market, not a card built before it.
+    expect(verifyCardSig(body.card!)).toBe(true)
+  })
+
+  it('reports a served ERC20 corridor the card cannot name', async () => {
+    const { body } = await getCard(
+      makeDeps({ evmCorridors: [{ corridor: 'arkade:BTC->ethereum:0xdac1', enabled: true }] }),
+    )
+    expect(body.cardOmitted).toHaveLength(1)
+    expect(body.cardOmitted[0]).toContain('arkade:BTC->ethereum:0xdac1')
+    // And absent from the card: it would take the Lightning markets with it.
+    expect(JSON.stringify(body.card)).not.toContain('ethereum')
+  })
+
+  it('says nothing about a disabled ERC20 corridor, which is not served either', async () => {
+    const { body } = await getCard(
+      makeDeps({ evmCorridors: [{ corridor: 'arkade:BTC->ethereum:0xdac1', enabled: false }] }),
+    )
+    expect(body.cardOmitted).toEqual([])
   })
 
   it('adds SOLVER_CARD_RELAYS beyond RELAY_URL, exactly as `cli card` does', async () => {
