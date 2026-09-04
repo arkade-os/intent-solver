@@ -1021,6 +1021,11 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*     liveness lasso sat until the arm was added.  WF(Crash) would force  *)
 (*     crashes, which is not the statement the model makes.                *)
 (*                                                                         *)
-(* Every other action fires in the green cfg.                              *)
+(* Every other action fires in the green cfg.  The (A8) actions were the   *)
+(* ones to check, because the GiveUp arm they needed could have made the   *)
+(* recording unreachable the way LockLands does to PatchTxid.  It did not: *)
+(* a full -coverage 1 green run (27min 51s, the same 21,513,363/2,841,354  *)
+(* at depth 48) reports BroadcastRefund 142,361:352,904, ResendEvmRefund   *)
+(* 22,411:31,696 and RecordEvmRefund 50,298:387,400.                       *)
 (***************************************************************************)
 =============================================================================
