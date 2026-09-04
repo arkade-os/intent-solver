@@ -178,6 +178,10 @@ const assetMarketEntries = (markets: readonly AssetCardMarket[]): Array<Record<s
     if (market.base !== null && market.quote !== null) {
       throw new Error(`an asset market where neither leg is BTC cannot be served, so it is not advertised`)
     }
+    // The CONFIGURED leg order, base then quote, is what the card publishes —
+    // while `marketKeyForPair` sorts its two arkade legs, so the two disagree
+    // for an asset id sorting before `btc`. Pre-existing; reachability is
+    // unaffected, because a directed RFQ goes to `discovery_pubkey`.
     const pair = `${baseAsset.ticker}/${quoteAsset.ticker}`
     const key = legPairKey(market)
     if (seen.has(key)) throw new Error(`${pair} is configured twice; one pair may publish only one price`)
@@ -235,6 +239,8 @@ export const assetCardMarkets = (
     baseDecimals: market.baseDecimals,
     quoteDecimals: market.quoteDecimals,
     feedUrl: market.feedUrl,
+    // `?? ''` cannot be reached by a stored market: `validateAssetMarket`
+    // refuses an empty path its feed url cannot supply one for.
     pricePath: market.pricePath || (defaultPricePath(market.feedUrl) ?? ''),
     feeBps: market.feeBps,
     // `undefined` inherits the deployment-wide pair — NOT an unserved direction.
