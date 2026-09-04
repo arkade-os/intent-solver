@@ -898,6 +898,13 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       // is shared by all clients (fail-closed, never spoofable).
       clientKey: (c) => getConnInfo(c).remote.address ?? 'unknown',
       onRefusal: (context, detail) => log(`${context}:`, detail),
+      // Same sink as `onRefusal`, deliberately different WORD: a refusal is
+      // this host answering correctly and belongs in the ordinary stream,
+      // whereas anything arriving here should not have happened. The relay
+      // ingress has carried both hooks since it was written; this transport
+      // had only the first, so a fault on the HTTP path was a bare 500 that no
+      // operator log recorded at all.
+      onError: (context, error) => log(`${context} FAULT:`, error instanceof Error ? error.message : String(error)),
     })
     const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host, ...HONO_SERVE_OPTIONS })
     log(`listening on ${config.host}:${config.port}`)
