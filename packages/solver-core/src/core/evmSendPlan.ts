@@ -142,12 +142,14 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
       // Absent means not landed YET or reverted; only the receipt separates
       // them. Waiting cannot make a reverted lock appear, and the refund it
       // would eventually attempt reverts too — terminal and named instead.
-      if (!seen.evmLockPresent) {
-        if (seen.evmLockReverted) {
-          return { do: 'stick', reason: 'the ERC20 lock transaction reverted; no lock was created' }
-        }
-        return seen.evmBlockHeight >= row.evmTimeout ? { do: 'refund_evm' } : { do: 'wait' }
+      if (!seen.evmLockPresent && seen.evmLockReverted) {
+        return { do: 'stick', reason: 'the ERC20 lock transaction reverted; no lock was created' }
       }
+      // RULE 3, ahead of the presence split: the depth probe reads a node that
+      // cannot answer as UNPROVEN, never absent, so gating the timeout on
+      // absence withholds it from exactly the lock that needs it.
+      if (seen.evmBlockHeight >= row.evmTimeout) return { do: 'refund_evm' }
+      if (!seen.evmLockPresent) return { do: 'wait' }
       // Depth AND age, both required. @see evm/config.ts - on a rollup a lock
       // can be many confirmations deep and still vanish, because safety comes
       // from the L1 posting finalising rather than from the count.

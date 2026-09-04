@@ -163,6 +163,14 @@ describe('the confirmation policy is depth AND age', () => {
       do: 'refund_evm',
     })
   })
+
+  it('does not withhold the timeout from a lock that is present but never proven deep', () => {
+    const action = planEvmSend(
+      row({ state: 'locking_evm' }),
+      seen({ evmLockPresent: true, evmLockConfirmations: 0, evmLockAgeSeconds: 0, evmBlockHeight: EVM_TIMEOUT }),
+    )
+    expect(action).toEqual({ do: 'refund_evm' })
+  })
 })
 
 describe('rule 6 - a mined revert created no lock', () => {
