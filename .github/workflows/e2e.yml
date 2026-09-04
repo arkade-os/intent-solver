@@ -69,7 +69,6 @@ jobs:
           done
           exit 1
 
-      # scripts/regtest-*.mjs import packages/solver-app/dist/config.js.
       - name: Build
         run: pnpm build
 
@@ -79,8 +78,7 @@ jobs:
         run: node regtest.mjs start --profile "$E2E_PROFILES"
 
       # Generated HERE, never committed and never a repository secret: a regtest
-      # seed is still a credential. No settle after the fund: that script ends
-      # settled, and a second races a stale boarding view into a hang (33916796535).
+      # seed is still a credential. No settle after the fund: it ends settled.
       - name: Provision a fresh Arkade wallet
         timeout-minutes: 10
         run: |
@@ -103,10 +101,13 @@ jobs:
           '
           node --experimental-eventsource --env-file="$E2E_ENV_FILE" scripts/regtest-fund.mjs arkade-regtest 0.05
 
+      # Mine first: until the fund's commitment confirms, the boarding view still
+      # offers the input it spent, a settle sweeps that and hangs. Automine is 600s.
       - name: Mint an asset for the asset corridors
         timeout-minutes: 10
         run: |
           set -eu
+          node arkade-regtest/regtest.mjs mine 2
           node --experimental-eventsource --env-file="$E2E_ENV_FILE" scripts/regtest-mint-asset.mjs 1000000 ARFQ
           node --experimental-eventsource --env-file="$E2E_ENV_FILE" scripts/regtest-settle.mjs
 
