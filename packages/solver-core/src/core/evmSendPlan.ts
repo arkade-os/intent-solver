@@ -9,7 +9,7 @@
  * derived from a row plus what was observed, so every ordering rule that can
  * lose funds is a unit test with no fixtures at all.
  *
- * THE FOUR RULES THAT COST MONEY, and each is a test:
+ * THE RULES THAT COST MONEY, and each is a test:
  *
  * 1. Never lock the ERC20 before the Arkade lockup is funded. The solver's
  *    tokens would be committed against nothing.
@@ -26,8 +26,13 @@
  *    fixed rate decays further against the solver. And a quote that expired
  *    unfunded is refused at that deadline rather than at the refund locktime
  *    hours later: until it dies, the row holds capacity against the house cap.
+ * 6. A mined-and-failed lock created no lock. Absent-and-reverted is a
+ *    different fact from absent-and-pending; only the receipt carries it.
+ * 7. `refunded` means the ERC20 came back, so only a mined refund earns it. A
+ *    terminal row over a reverted refund lies, and ends the preimage scan.
  */
 
+import type { EvmTransactionOutcome } from '../ports/evm.js'
 import type { EvmSendSwapState } from './evmSwapState.js'
 
 /**
@@ -53,6 +58,10 @@ export interface EvmSendObservation {
   arkadeLockupFunded: boolean
   /** Does the solver's ERC20 lock exist in the contract? */
   evmLockPresent: boolean
+  /** False also means "not known to have failed" — pending, or unreadable. */
+  evmLockReverted: boolean
+  /** What became of the solver's own refund broadcast. `pending` until read. */
+  evmRefundOutcome: EvmTransactionOutcome
   /** Confirmations on the lock, and how long it has been buried. */
   evmLockConfirmations: number
   evmLockAgeSeconds: number
@@ -74,6 +83,8 @@ export type EvmSendAction =
   | { do: 'claim_arkade'; preimage: string }
   /** Take the solver's own ERC20 back, past `evm_timeout`. */
   | { do: 'refund_evm' }
+  /** The refund is mined; the row may finally say the ERC20 came back. */
+  | { do: 'record_refund' }
   /** Nothing has moved; the swap can be abandoned safely. */
   | { do: 'refuse'; reason: string }
   /** Money is committed and cannot be recovered by this state machine. */
@@ -128,10 +139,13 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
       return { do: 'lock_evm' }
 
     case 'locking_evm':
-      // The lock call went out. Absent means it has not landed YET or it
-      // reverted - indistinguishable from here, and both are "keep waiting"
-      // until the refund timeout makes it a refund.
+      // Absent means not landed YET or reverted; only the receipt separates
+      // them. Waiting cannot make a reverted lock appear, and the refund it
+      // would eventually attempt reverts too — terminal and named instead.
       if (!seen.evmLockPresent) {
+        if (seen.evmLockReverted) {
+          return { do: 'stick', reason: 'the ERC20 lock transaction reverted; no lock was created' }
+        }
         return seen.evmBlockHeight >= row.evmTimeout ? { do: 'refund_evm' } : { do: 'wait' }
       }
       // Depth AND age, both required. @see evm/config.ts - on a rollup a lock
@@ -146,8 +160,18 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
       // refund and treating that as failure would strand the lock.
       return seen.evmBlockHeight >= row.evmTimeout ? { do: 'refund_evm' } : { do: 'wait' }
 
-    case 'claiming':
     case 'refunding_evm':
+      // RULE 7, and the lock's presence splits the revert. Still there: nobody
+      // took it and nothing here retries, so a human must. GONE: someone did,
+      // and the usual someone is the client claiming — waiting keeps the row
+      // live for rule 4's scan, where sticking would page on every such swap.
+      if (seen.evmRefundOutcome === 'success') return { do: 'record_refund' }
+      if (seen.evmRefundOutcome === 'reverted' && seen.evmLockPresent) {
+        return { do: 'stick', reason: 'the ERC20 refund transaction reverted; the lock is still funded' }
+      }
+      return { do: 'wait' }
+
+    case 'claiming':
       // In flight. The caller re-reads and retries; nothing here to decide.
       return { do: 'wait' }
 

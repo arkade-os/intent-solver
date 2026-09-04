@@ -16,7 +16,7 @@ survives a rewrite with more processes.
 | `LightningReceive.tla` | quoted → armed → funded → claimed → settled |
 | `OnchainSend.tla` | The L1 HTLC leg and its mempool race. Timing invariants are conditional on the `(A2) Urgent` assumption — read that note before trusting any timing pass. |
 | `OnchainReceive.tla` | The confirmation policy and the two-sided exposure. |
-| `EvmSend.tla` | The planner/shell split and the height-vs-wall margin. The timeout refund's present-lock hole (F5) and the send-time `refunded` record (F3) are shipped-truth mutations — read the findings before trusting a pass. |
+| `EvmSend.tla` | The planner/shell split and the height-vs-wall margin. The timeout refund's present-lock hole (F5) is still a shipped-truth mutation — read the findings before trusting a pass. F3, the send-time `refunded` record, is FIXED, so `EvmSend_NoReceipt.cfg` now mutates a guard the code really ships. |
 | `EvmReceive.tla` | The mirror corridor: the solver funds against a lock it does not control. The parked `refunding_arkade` with an unspent covenant (F4) is a double loss under a patient client. |
 
 Bugs the models prove in the shipped TypeScript are named F1... per module in

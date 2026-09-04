@@ -68,6 +68,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
 
       isLockedAt: vi.fn().mockResolvedValue(true),
       blockTimestampAt: vi.fn().mockResolvedValue(0),
+      transactionOutcome: vi.fn().mockResolvedValue('pending'),
       allowance: vi.fn().mockResolvedValue(0n),
       lockCalls: vi.fn().mockReturnValue([APPROVE_CALL, LOCK_CALL]),
       approveCall: vi.fn(),
@@ -182,6 +183,7 @@ describe('the lock is approved before it is broadcast', () => {
 
         isLockedAt: vi.fn().mockResolvedValue(true),
         blockTimestampAt: vi.fn().mockResolvedValue(0),
+        transactionOutcome: vi.fn().mockResolvedValue('pending'),
         allowance,
         lockCalls: vi.fn().mockReturnValue([LOCK_CALL]),
       } as unknown as EvmSendServiceDeps['evm'],
@@ -206,6 +208,7 @@ describe('the lock is approved before it is broadcast', () => {
 
         isLockedAt: vi.fn().mockResolvedValue(true),
         blockTimestampAt: vi.fn().mockResolvedValue(0),
+        transactionOutcome: vi.fn().mockResolvedValue('pending'),
         allowance: vi.fn().mockResolvedValue(999n),
         lockCalls,
       } as unknown as EvmSendServiceDeps['evm'],
@@ -309,7 +312,7 @@ describe('a preimage scan the node refuses must not strand the solver’s tokens
     await service.tick('swap-1')
 
     const row = await store.get('swap-1')
-    expect(row.state, 'the failed scan aborted the tick and stranded the lock').toBe('refunded')
+    expect(row.state, 'the failed scan aborted the tick and stranded the lock').toBe('refunding_evm')
     expect(row.evmRefundTxid).toBe('0xrefund')
     // Silent degradation would make a provider misconfiguration look like a slow
     // swap; a stall needs a cause an operator can read.
@@ -426,6 +429,255 @@ describe('the solver`s own lock must be BURIED before the swap advances', () => 
     await store.transition('deep', 'funded', 'locking_evm')
     await service.tick('deep')
     expect((await store.get('deep')).state).toBe('awaiting_claim')
+  })
+})
+
+/** A revert leaves no lock, so only the receipt separates it from pending. */
+describe('a lock transaction that reverted is not a lock that has not landed', () => {
+  const revertedRow = async (over: Partial<EvmSendServiceDeps> = {}) => {
+    const built = await build({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(false),
+        isLockedAt: vi.fn().mockResolvedValue(false),
+        blockTimestampAt: vi.fn().mockResolvedValue(0),
+        findClaimPreimage: vi.fn().mockResolvedValue(null),
+        transactionOutcome: vi.fn().mockResolvedValue('reverted'),
+        refundCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
+      } as never,
+      ...over,
+    })
+    await built.store.transition('swap-1', 'quoted', 'funded')
+    await built.store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xlock' })
+    return built
+  }
+
+  it('stops on the revert instead of waiting out evmTimeout', async () => {
+    const { store, service } = await revertedRow()
+    await service.tick('swap-1')
+    const row = await store.get('swap-1')
+    expect(row.state).toBe('stuck')
+    expect(row.failureReason).toMatch(/revert/i)
+  })
+
+  it('reads the receipt for the txid the row recorded', async () => {
+    const transactionOutcome = vi.fn().mockResolvedValue('reverted')
+    const { service } = await revertedRow({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(false),
+        isLockedAt: vi.fn().mockResolvedValue(false),
+        blockTimestampAt: vi.fn().mockResolvedValue(0),
+        findClaimPreimage: vi.fn().mockResolvedValue(null),
+        transactionOutcome,
+      } as never,
+    })
+    await service.tick('swap-1')
+    expect(transactionOutcome).toHaveBeenCalledWith('0xlock')
+  })
+
+  it('never broadcasts a refund for a lock that was never created', async () => {
+    const broadcast = vi.fn().mockResolvedValue('0xrefund')
+    const { store, service } = await revertedRow({
+      broadcast,
+      blockHeight: vi.fn().mockResolvedValue(21_000_000),
+    })
+    await service.tick('swap-1')
+    expect(broadcast).not.toHaveBeenCalled()
+    expect((await store.get('swap-1')).evmRefundTxid).toBeNull()
+  })
+
+  it('keeps waiting while the node cannot say yet', async () => {
+    const { store, service } = await revertedRow({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(false),
+        isLockedAt: vi.fn().mockResolvedValue(false),
+        blockTimestampAt: vi.fn().mockResolvedValue(0),
+        findClaimPreimage: vi.fn().mockResolvedValue(null),
+        transactionOutcome: vi.fn().mockResolvedValue('pending'),
+      } as never,
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('locking_evm')
+  })
+
+  it('does not read a receipt it has no txid for', async () => {
+    const transactionOutcome = vi.fn().mockResolvedValue('reverted')
+    const { store, service } = await build({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(false),
+        isLockedAt: vi.fn().mockResolvedValue(false),
+        blockTimestampAt: vi.fn().mockResolvedValue(0),
+        findClaimPreimage: vi.fn().mockResolvedValue(null),
+        transactionOutcome,
+      } as never,
+    })
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'locking_evm')
+    await service.tick('swap-1')
+    expect(transactionOutcome).not.toHaveBeenCalled()
+    expect((await store.get('swap-1')).state).toBe('locking_evm')
+  })
+
+  it('treats a receipt the node refuses to serve as no answer, not as a revert', async () => {
+    const errors: unknown[] = []
+    const { store, service } = await revertedRow({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(false),
+        isLockedAt: vi.fn().mockResolvedValue(false),
+        blockTimestampAt: vi.fn().mockResolvedValue(0),
+        findClaimPreimage: vi.fn().mockResolvedValue(null),
+        transactionOutcome: vi.fn().mockRejectedValue(new Error('rpc down')),
+      } as never,
+      onTickError: (_id, error) => void errors.push(error),
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('locking_evm')
+    expect(errors, 'the failed receipt read never reached the operator log').toHaveLength(1)
+  })
+})
+
+/** `refunded` is the word over the money; only a mined refund earns it. */
+describe('a refund that was broadcast is not a refund that landed', () => {
+  const REFUND_TXID = '0xrefund'
+
+  /** A row at `awaiting_claim` with the timeout matured — one tick from `refund_evm`. */
+  const dueForRefund = async (evm: Record<string, unknown>, over: Partial<EvmSendServiceDeps> = {}) => {
+    const built = await build({
+      evm: {
+        isLockedAt: vi.fn().mockResolvedValue(true),
+        blockTimestampAt: vi.fn().mockResolvedValue(0),
+        findClaimPreimage: vi.fn().mockResolvedValue(null),
+        refundCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
+        ...evm,
+      } as never,
+      blockHeight: vi.fn().mockResolvedValue(21_000_000),
+      broadcast: vi.fn().mockResolvedValue(REFUND_TXID),
+      ...over,
+    })
+    await built.store.transition('swap-1', 'quoted', 'funded')
+    await built.store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xlock' })
+    await built.store.transition('swap-1', 'locking_evm', 'awaiting_claim')
+    return built
+  }
+
+  it('records the txid without closing the books', async () => {
+    // THE FINDING: terminal is what makes it unrecoverable, because the sweep
+    // stops returning the row and a later revert is never noticed.
+    const { store, service } = await dueForRefund({
+      isLocked: vi.fn().mockResolvedValue(true),
+      transactionOutcome: vi.fn().mockResolvedValue('pending'),
+    })
+    await service.tick('swap-1')
+    const row = await store.get('swap-1')
+    expect(row.state).toBe('refunding_evm')
+    expect(row.evmRefundTxid).toBe(REFUND_TXID)
+  })
+
+  it('stays live and exposed while the receipt is pending', async () => {
+    const { store, service } = await dueForRefund({
+      isLocked: vi.fn().mockResolvedValue(true),
+      transactionOutcome: vi.fn().mockResolvedValue('pending'),
+    })
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('refunding_evm')
+    expect((await store.findLive()).map((r) => r.id)).toContain('swap-1')
+  })
+
+  it('reaches `refunded` once the receipt says the refund mined', async () => {
+    const transactionOutcome = vi.fn().mockResolvedValue('pending')
+    const { store, service } = await dueForRefund({
+      isLocked: vi.fn().mockResolvedValue(true),
+      transactionOutcome,
+    })
+    await service.tick('swap-1')
+    transactionOutcome.mockResolvedValue('success')
+    await service.tick('swap-1')
+    expect(transactionOutcome).toHaveBeenCalledWith(REFUND_TXID)
+    expect((await store.get('swap-1')).state).toBe('refunded')
+  })
+
+  it('never says `refunded` when the client claimed the tokens instead', async () => {
+    const transactionOutcome = vi.fn().mockResolvedValue('pending')
+    const findClaimPreimage = vi.fn().mockResolvedValue(null)
+    const { store, service } = await dueForRefund({
+      isLocked: vi.fn().mockResolvedValue(true),
+      findClaimPreimage,
+      transactionOutcome,
+    })
+    await service.tick('swap-1')
+    transactionOutcome.mockResolvedValue('reverted')
+    findClaimPreimage.mockResolvedValue(Uint8Array.from(Buffer.from('cd'.repeat(32), 'hex')))
+    await service.tick('swap-1')
+    const row = await store.get('swap-1')
+    expect(row.state, 'the reverted refund was recorded as money returned').toBe('claimed')
+    expect(row.preimage).toBe('cd'.repeat(32))
+  })
+
+  it('does not page when the revert was a claim its scan has not caught up with', async () => {
+    const transactionOutcome = vi.fn().mockResolvedValue('pending')
+    const { store, service } = await dueForRefund({
+      isLocked: vi.fn().mockResolvedValue(false),
+      transactionOutcome,
+    })
+    await service.tick('swap-1')
+    transactionOutcome.mockResolvedValue('reverted')
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('refunding_evm')
+  })
+
+  it('sticks when the revert left the lock still funded', async () => {
+    const transactionOutcome = vi.fn().mockResolvedValue('pending')
+    const { store, service } = await dueForRefund({
+      isLocked: vi.fn().mockResolvedValue(true),
+      transactionOutcome,
+    })
+    await service.tick('swap-1')
+    transactionOutcome.mockResolvedValue('reverted')
+    await service.tick('swap-1')
+    const row = await store.get('swap-1')
+    expect(row.state).toBe('stuck')
+    expect(row.failureReason).toMatch(/revert/i)
+  })
+
+  it('treats a receipt the node refuses to serve as no answer', async () => {
+    const errors: unknown[] = []
+    const transactionOutcome = vi.fn().mockResolvedValue('pending')
+    const { store, service } = await dueForRefund(
+      { isLocked: vi.fn().mockResolvedValue(true), transactionOutcome },
+      { onTickError: (_id, error) => void errors.push(error) },
+    )
+    await service.tick('swap-1')
+    transactionOutcome.mockRejectedValue(new Error('rpc down'))
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('refunding_evm')
+    expect(errors, 'the failed receipt read never reached the operator log').toHaveLength(1)
+  })
+
+  it('does not read a receipt it has no txid for', async () => {
+    // The crash window between the broadcast and the patch.
+    const transactionOutcome = vi.fn().mockResolvedValue('success')
+    const { store, service } = await dueForRefund({
+      isLocked: vi.fn().mockResolvedValue(true),
+      transactionOutcome,
+    })
+    await store.transition('swap-1', 'awaiting_claim', 'refunding_evm')
+    await service.tick('swap-1')
+    expect(transactionOutcome).not.toHaveBeenCalled()
+    expect((await store.get('swap-1')).state).toBe('refunding_evm')
+  })
+
+  it('stops asking once the row has left refunding_evm', async () => {
+    // The rescue path leaves a refund txid on a row no branch will read it for.
+    const transactionOutcome = vi.fn().mockResolvedValue('reverted')
+    const { store, service } = await dueForRefund({
+      isLocked: vi.fn().mockResolvedValue(false),
+      transactionOutcome,
+    })
+    await store.transition('swap-1', 'awaiting_claim', 'refunding_evm', { evm_refund_txid: REFUND_TXID })
+    await store.transition('swap-1', 'refunding_evm', 'claiming', { preimage: 'cd'.repeat(32) })
+    await service.tick('swap-1')
+    expect(transactionOutcome).not.toHaveBeenCalled()
+    expect((await store.get('swap-1')).state).toBe('claimed')
   })
 })
 

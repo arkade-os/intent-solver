@@ -1,5 +1,5 @@
 /**
- * The four ordering rules that can lose funds, one describe block each.
+ * The ordering rules that can lose funds, one describe block each.
  *
  * Pure inputs, no fixtures: that is the whole reason the decision was split out
  * of the service. Every case below is a scenario that costs real money if the
@@ -31,6 +31,8 @@ const row = (over: Partial<EvmSendSwapRow> = {}): EvmSendSwapRow =>
 const seen = (over: Partial<EvmSendObservation> = {}): EvmSendObservation => ({
   arkadeLockupFunded: false,
   evmLockPresent: false,
+  evmLockReverted: false,
+  evmRefundOutcome: 'pending',
   evmLockConfirmations: 0,
   evmLockAgeSeconds: 0,
   preimage: null,
@@ -155,13 +157,82 @@ describe('the confirmation policy is depth AND age', () => {
     expect(action).toEqual({ do: 'await_claim' })
   })
 
-  it('treats an absent lock as not-yet rather than reverted, until the timeout', () => {
-    // A revert and a pending call are indistinguishable from here. Both mean
-    // keep waiting; only the timeout turns it into a refund.
+  it('treats an absent lock as not-yet while nothing says otherwise, until the timeout', () => {
     expect(planEvmSend(row({ state: 'locking_evm' }), seen())).toEqual({ do: 'wait' })
     expect(planEvmSend(row({ state: 'locking_evm' }), seen({ evmBlockHeight: EVM_TIMEOUT }))).toEqual({
       do: 'refund_evm',
     })
+  })
+})
+
+describe('rule 6 - a mined revert created no lock', () => {
+  const reverted = { do: 'stick', reason: 'the ERC20 lock transaction reverted; no lock was created' }
+
+  it('sticks at once rather than waiting out the timeout', () => {
+    expect(planEvmSend(row({ state: 'locking_evm' }), seen({ evmLockReverted: true }))).toEqual(reverted)
+  })
+
+  it('does not refund a lock the contract never held', () => {
+    const action = planEvmSend(
+      row({ state: 'locking_evm' }),
+      seen({ evmLockReverted: true, evmBlockHeight: EVM_TIMEOUT }),
+    )
+    expect(action).toEqual(reverted)
+  })
+
+  it('is not consulted while the lock is present', () => {
+    const action = planEvmSend(
+      row({ state: 'locking_evm' }),
+      seen({ evmLockPresent: true, evmLockReverted: true, evmLockConfirmations: 5, evmLockAgeSeconds: 720 }),
+    )
+    expect(action).toEqual({ do: 'await_claim' })
+  })
+
+  it('still yields to a revealed preimage', () => {
+    // A preimage cannot exist without a lock, so rule 4 outranks the revert.
+    const action = planEvmSend(
+      row({ state: 'locking_evm' }),
+      seen({ evmLockReverted: true, preimage: 'cd'.repeat(32) }),
+    )
+    expect(action).toEqual({ do: 'claim_arkade', preimage: 'cd'.repeat(32) })
+  })
+})
+
+describe('rule 7 - `refunded` means the ERC20 came back', () => {
+  const refunding = row({ state: 'refunding_evm' })
+
+  it('waits while the receipt has not arrived', () => {
+    expect(planEvmSend(refunding, seen({ evmRefundOutcome: 'pending' }))).toEqual({ do: 'wait' })
+  })
+
+  it('records only once the refund is mined', () => {
+    expect(planEvmSend(refunding, seen({ evmRefundOutcome: 'success' }))).toEqual({ do: 'record_refund' })
+  })
+
+  it('never records a reverted refund as `refunded`', () => {
+    // THE FINDING: a reverted refund returned nothing to be terminal about.
+    for (const evmLockPresent of [true, false]) {
+      const action = planEvmSend(refunding, seen({ evmRefundOutcome: 'reverted', evmLockPresent }))
+      expect(action).not.toEqual({ do: 'record_refund' })
+    }
+  })
+
+  it('sticks when the revert left the lock still funded', () => {
+    const action = planEvmSend(refunding, seen({ evmRefundOutcome: 'reverted', evmLockPresent: true }))
+    expect(action).toEqual({
+      do: 'stick',
+      reason: 'the ERC20 refund transaction reverted; the lock is still funded',
+    })
+  })
+
+  it('does not page when the revert was the client claiming first', () => {
+    const action = planEvmSend(refunding, seen({ evmRefundOutcome: 'reverted', evmLockPresent: false }))
+    expect(action).toEqual({ do: 'wait' })
+  })
+
+  it('yields to the preimage that revert revealed', () => {
+    const action = planEvmSend(refunding, seen({ evmRefundOutcome: 'reverted', preimage: 'cd'.repeat(32) }))
+    expect(action).toEqual({ do: 'claim_arkade', preimage: 'cd'.repeat(32) })
   })
 })
 

@@ -178,6 +178,19 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
       return Number(quantityOf((header as { timestamp?: unknown }).timestamp, 'eth_getBlockByNumber timestamp'))
     },
 
+    async transactionOutcome(txid) {
+      const receipt = await rpc('eth_getTransactionReceipt', [txid])
+      // No receipt covers "not mined yet" and "never seen this hash". Neither
+      // is a failure, so neither may read as a revert.
+      if (receipt === null || receipt === undefined) return 'pending'
+      // EIP-658 defines only 0x1 and 0x0; anything else throws. Folding the
+      // unrecognised into `success` restores the blindness this read removes.
+      const status = quantityOf((receipt as { status?: unknown }).status, 'eth_getTransactionReceipt status')
+      if (status === 0n) return 'reverted'
+      if (status === 1n) return 'success'
+      throw new Error(`eth_getTransactionReceipt status: expected 0x0 or 0x1, got ${status}`)
+    },
+
     async allowance(token, owner) {
       const data = encodeAllowance(owner, contractAddress)
       const word = bytesOfHex(await rpc('eth_call', [{ to: hexOf(token), data: hexOf(data) }, 'latest']), 'allowance()')

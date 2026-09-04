@@ -168,6 +168,41 @@ describe('findClaimPreimage', () => {
   })
 })
 
+describe('transactionOutcome', () => {
+  it('asks for the receipt of the hash it was given', async () => {
+    const { backend, calls } = backendWith({ eth_getTransactionReceipt: { status: '0x1' } })
+    await backend.transactionOutcome('0xabc')
+    expect(calls).toEqual([{ method: 'eth_getTransactionReceipt', params: ['0xabc'] }])
+  })
+
+  it('reads a zero status as reverted and a one status as success', async () => {
+    const reverted = backendWith({ eth_getTransactionReceipt: { status: '0x0' } })
+    await expect(reverted.backend.transactionOutcome('0xabc')).resolves.toBe('reverted')
+    const ok = backendWith({ eth_getTransactionReceipt: { status: '0x1' } })
+    await expect(ok.backend.transactionOutcome('0xabc')).resolves.toBe('success')
+  })
+
+  it('reads a missing receipt as pending, never as a revert', async () => {
+    for (const absent of [null, undefined]) {
+      const { backend } = backendWith({ eth_getTransactionReceipt: absent })
+      await expect(backend.transactionOutcome('0xabc')).resolves.toBe('pending')
+    }
+  })
+
+  it('refuses a receipt with no readable status rather than assuming success', async () => {
+    for (const bad of [{}, { status: null }, { status: 1 }, { status: 'ok' }]) {
+      const { backend } = backendWith({ eth_getTransactionReceipt: bad })
+      await expect(backend.transactionOutcome('0xabc')).rejects.toThrow(/expected a 0x quantity/)
+    }
+  })
+
+  it('refuses a well-formed status the spec does not define', async () => {
+    // `0x2` decodes fine; EIP-658 gives no third value.
+    const { backend } = backendWith({ eth_getTransactionReceipt: { status: '0x2' } })
+    await expect(backend.transactionOutcome('0xabc')).rejects.toThrow(/expected 0x0 or 0x1/)
+  })
+})
+
 describe('the write half is built, never sent', () => {
   it('returns calldata addressed to the configured contract', () => {
     const { backend } = backendWith({})

@@ -19,7 +19,7 @@
 import { planEvmSend, type EvmSendAction, type EvmSendObservation } from '@arkade-os/solver-core/core/evmSendPlan.js'
 import { blocksForDuration, type EvmBlockCadence } from '@arkade-os/solver-rails-evm/evm/blockTime.js'
 import type { EvmSendSwapRow, EvmSendSwapStore } from '../db/evmSendSwaps.js'
-import type { EvmCall, EvmHtlcBackend } from '@arkade-os/solver-core/ports/evm.js'
+import type { EvmCall, EvmHtlcBackend, EvmTransactionOutcome } from '@arkade-os/solver-core/ports/evm.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { provenDepth } from '@arkade-os/solver-rails-evm/evm/lockDepth.js'
@@ -190,6 +190,32 @@ export class EvmSendSwapService {
   }
 
   /**
+   * Asked only from `locking_evm`, the one state where "the lock is absent" is
+   * ambiguous. A failed read degrades to `false` as the other reads do — a node
+   * that cannot answer is not evidence the lock failed.
+   */
+  private async lockReverted(row: EvmSendSwapRow): Promise<boolean> {
+    if (row.state !== 'locking_evm' || row.evmLockTxid === null) return false
+    try {
+      return (await this.deps.evm.transactionOutcome(row.evmLockTxid)) === 'reverted'
+    } catch (error) {
+      this.deps.onTickError?.(row.id, error)
+      return false
+    }
+  }
+
+  /** Asked only from `refunding_evm`, and degraded as {@link lockReverted} is. */
+  private async refundOutcome(row: EvmSendSwapRow): Promise<EvmTransactionOutcome> {
+    if (row.state !== 'refunding_evm' || row.evmRefundTxid === null) return 'pending'
+    try {
+      return await this.deps.evm.transactionOutcome(row.evmRefundTxid)
+    } catch (error) {
+      this.deps.onTickError?.(row.id, error)
+      return 'pending'
+    }
+  }
+
+  /**
    * Everything the planner needs, gathered before any decision is taken.
    *
    * Read in ONE pass on purpose: a planner shown the lock as present and the
@@ -198,10 +224,12 @@ export class EvmSendSwapService {
    */
   private async observe(row: EvmSendSwapRow): Promise<EvmSendObservation> {
     const lock = this.deps.lockFor(row)
-    const [funded, present, height] = await Promise.all([
+    const [funded, present, height, lockReverted, refundOutcome] = await Promise.all([
       this.deps.arkadeLockupFunded(row),
       this.deps.evm.isLocked(lock),
       this.deps.blockHeight(),
+      this.lockReverted(row),
+      this.refundOutcome(row),
     ])
     // Scanned once WE HAVE LOCKED, not while the lock is still present.
     //
@@ -249,6 +277,8 @@ export class EvmSendSwapService {
     return {
       arkadeLockupFunded: funded,
       evmLockPresent: present,
+      evmLockReverted: lockReverted,
+      evmRefundOutcome: refundOutcome,
       // MEASURED, not assumed. Feeding the row's own thresholds back here made
       // the planner's `>= minConfirmations` check true the instant any block
       // carried the lock, whatever depth the operator configured — the policy
@@ -319,6 +349,10 @@ export class EvmSendSwapService {
         // The LAST call is the lock, and its id is the one the row keeps: an
         // approval txid recorded as the lock would send anyone reading the row
         // to a transaction that moved nothing.
+        //
+        // Recorded before its status is known, deliberately: the txid is the only
+        // handle on the receipt that answers whether the lock exists, so a
+        // restart in that window could not otherwise ask.
         await store.patch(row.id, { evm_lock_txid: txid })
         return true
       }
@@ -344,9 +378,16 @@ export class EvmSendSwapService {
       case 'refund_evm': {
         await store.transition(row.id, row.state, 'refunding_evm')
         const txid = await this.deps.broadcast(this.deps.evm.refundCall(this.deps.lockFor(row)))
-        await store.transition(row.id, 'refunding_evm', 'refunded', { evm_refund_txid: txid })
+        // PATCHED, not transitioned: `refunding_evm` means "awaiting outcome",
+        // and this txid is the only handle on the receipt that carries it.
+        await store.patch(row.id, { evm_refund_txid: txid })
+        // A receipt for a transaction sent this instant is guaranteed empty.
         return false
       }
+
+      case 'record_refund':
+        await store.transition(row.id, 'refunding_evm', 'refunded')
+        return false
     }
   }
 
