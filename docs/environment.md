@@ -75,15 +75,17 @@ spent to the user's script.
 Surfaced by an adversarial review of the money paths. None block a first mainnet
 send, but each is a real edge an operator must know before scaling.
 
-- **No server-independent exit yet.** The swap script carries a `unilateralClaim`
-  leaf (provider-only, behind a CSV) but the service has no code to spend it —
-  that needs the on-chain unroll/exit flow. So the provider's only claim path is
-  the collaborative one, which the Arkade server co-signs. An *absent* server just
-  delays; a *censoring* server after the invoice is paid is an unmitigated
-  full-amount loss until the exit flow lands. `refundLocktimeFor` already reserves
-  the ~7-day window for this recourse; the recourse itself is owed. Mitigation in
-  place: past the refund deadline a persistently failing claim escalates a swap to
-  `stuck` rather than looping silently.
+- **The server-independent exit is operator-driven, not automatic.** The swap
+  script carries a `unilateralClaim` leaf (provider-only, behind a CSV) and
+  `cli unilateral-exit <id> [--go]` now spends it, so a *censoring* server is a
+  delay and a fee bill rather than the unmitigated full-amount loss it once was.
+  Nothing reaches for it on its own: an operator has to notice, and the exit costs
+  the solver's own onchain sats to fund its CPFP children — quote it first, which
+  signs and spends nothing. The CSV runs from the moment the lockup confirms
+  onchain, not from when it was funded, so the recovery is slow by construction
+  and `refundLocktimeFor` reserves the ~7-day window for it. Mitigation in place
+  meanwhile: past the refund deadline a persistently failing claim escalates a
+  swap to `stuck` rather than looping silently.
 
 - **The Arkade server's countersigning power is verified, not trusted.** A claim
   needs the server, but the checkpoint PSBTs it returns are txid-matched against
