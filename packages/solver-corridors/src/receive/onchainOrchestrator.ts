@@ -727,6 +727,12 @@ export class OnchainReceiveSwapService {
       await store.fail(row.id, 'claimed', 'claimed state with no funding txid/vout')
       return false
     }
+    // A BROADCAST CLAIM IS NOT A LANDED ONE, and `settled` is terminal (#204).
+    if (row.onchainClaimTxid) {
+      const outcome = await onchain.transactionOutcome(row.onchainClaimTxid)
+      if (outcome === 'confirmed') return store.transition(row.id, 'claimed', 'settled', {})
+      if (outcome === 'mempool') return false
+    }
     const priorSpend = await onchain.findSpendWitness({
       txid: row.fundingTxid,
       vout: row.fundingVout,
@@ -757,6 +763,7 @@ export class OnchainReceiveSwapService {
         // in the column. Leaving it null is the honest record — the state says
         // the money was collected, and inventing a txid to fill a field would
         // be worse than an empty one.
+        // Reachable only before the pre-commit above; no txid to poll (#204).
         return store.transition(row.id, 'claimed', 'settled', {})
       }
       await store.fail(
@@ -813,8 +820,10 @@ export class OnchainReceiveSwapService {
 
     const unsigned = buildOnchainClaimTx({ ...sizingParams, payoutAmountSats })
     const signed = await signOnchainClaimTx(unsigned, signer, preimage)
-    const result = await onchain.broadcastRaw(hex.encode(signed.extract()))
-    return store.transition(row.id, 'claimed', 'settled', { onchain_claim_txid: result.txid })
+    // Recorded BEFORE the broadcast, so a resumed process has a key to ask about.
+    await store.patch(row.id, { onchain_claim_txid: signed.id })
+    await onchain.broadcastRaw(hex.encode(signed.extract()))
+    return false
   }
 
   /**
@@ -843,6 +852,12 @@ export class OnchainReceiveSwapService {
     if (!row.preimage) return { refused: 'no preimage on the row: nothing to claim with' }
     if (!row.fundingTxid || row.fundingVout === null) {
       return { refused: 'no funding txid/vout on the row: nothing to claim from' }
+    }
+    // OUR OWN EARLIER ATTEMPT, BY NAME (#204), and BEFORE the spend read below,
+    // which cannot tell whose spend it found. `unknown` never went out: rebuild.
+    if (row.onchainClaimTxid) {
+      const outcome = await onchain.transactionOutcome(row.onchainClaimTxid)
+      if (outcome !== 'unknown') return { txid: row.onchainClaimTxid }
     }
     // The already-spent check `whenClaimed` makes, and the one this method
     // shipped without. Past `htlc_locktime` the CLIENT can sweep the HTLC on
@@ -895,12 +910,10 @@ export class OnchainReceiveSwapService {
     }
     const unsigned = buildOnchainClaimTx({ ...sizingParams, payoutAmountSats })
     const signed = await signOnchainClaimTx(unsigned, signer, preimage)
-    const result = await onchain.broadcastRaw(hex.encode(signed.extract()))
-    // `patch`, not `transition`: this runs from `stuck`, which has no outgoing
-    // edge — that is the whole reason it exists. The txid is the audit fact;
-    // whether the row's state should move is the operator's judgement.
-    await store.patch(row.id, { onchain_claim_txid: result.txid })
-    return { txid: result.txid }
+    // Recorded BEFORE the broadcast, so a resumed process has a key to ask about.
+    await store.patch(row.id, { onchain_claim_txid: signed.id })
+    await onchain.broadcastRaw(hex.encode(signed.extract()))
+    return { txid: signed.id }
   }
 
   /**

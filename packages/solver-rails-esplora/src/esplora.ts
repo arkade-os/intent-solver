@@ -20,7 +20,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import { Transaction } from '@scure/btc-signer'
 import { GiveUp, poll } from '@arkade-os/solver-core/util/poll.js'
-import type { FundedOnchainOutput } from '@arkade-os/solver-core/ports/onchain.js'
+import type { FundedOnchainOutput, OnchainTxOutcome } from '@arkade-os/solver-core/ports/onchain.js'
 
 export interface EsploraTx {
   txid: string
@@ -41,6 +41,8 @@ export interface EsploraClient {
    * "is this output spent" must never see a down indexer as "unspent".
    */
   getJson(path: string): Promise<unknown>
+  /** As {@link EsploraClient.getJson}, but ONLY a 404 answers `null`; a down indexer still throws. */
+  getJsonOrNull(path: string): Promise<unknown | null>
   /** As {@link EsploraClient.getJson}, for endpoints that answer in plain text. */
   getText(path: string): Promise<string>
 }
@@ -69,6 +71,13 @@ export const createEsploraClient = (baseUrl: string, auth?: EsploraAuth): Esplor
   return {
     async getJson(path) {
       return (await get(path)).json()
+    },
+
+    async getJsonOrNull(path) {
+      const response = await fetch(`${baseUrl}${path}`, { headers })
+      if (response.status === 404) return null
+      if (!response.ok) throw new Error(`esplora GET ${path} failed (${response.status}): ${await response.text()}`)
+      return response.json()
     },
 
     async getText(path) {
@@ -237,6 +246,13 @@ export const toFundedOutputs = (txs: EsploraTx[], address: string, tipHeight: nu
     outputs.push({ txid: tx.txid, vout, valueSats: tx.vout[vout]!.value, confirmations })
   }
   return outputs
+}
+
+/** Below {@link toFundedOutputs}: `test/onchain/lnd.test.ts` reads the source above it. */
+export const txOutcomeVia = async (esplora: EsploraClient, txid: string): Promise<OnchainTxOutcome> => {
+  const tx = (await esplora.getJsonOrNull(`/tx/${txid}`)) as { status?: { confirmed?: boolean } } | null
+  if (tx === null) return 'unknown'
+  return tx.status?.confirmed === true ? 'confirmed' : 'mempool'
 }
 
 /** The witness stack of input `inputIndex` in a raw, already-finalized transaction. */

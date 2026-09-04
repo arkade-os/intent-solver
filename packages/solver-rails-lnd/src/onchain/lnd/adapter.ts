@@ -24,7 +24,7 @@ import {
   type AuthenticatedLnd,
 } from 'lightning'
 import { hex } from '@scure/base'
-import { toFundedOutputs, witnessFromRawTx } from '@arkade-os/solver-rails-esplora/esplora.js'
+import { toFundedOutputs, txOutcomeVia, witnessFromRawTx } from '@arkade-os/solver-rails-esplora/esplora.js'
 import {
   createEsploraClient,
   type EsploraAuth,
@@ -36,6 +36,7 @@ import type {
   OnchainBalance,
   OnchainReceiveBackend,
   OnchainSendBackend,
+  OnchainTxOutcome,
 } from '@arkade-os/solver-core/ports/onchain.js'
 
 interface LndChainTx {
@@ -50,9 +51,9 @@ export interface AdapterConfig {
   cert: string
   macaroon: string
   /**
-   * Esplora base URL. Required for the RECEIVE corridor only — see
-   * {@link LndOnchainAdapter.findOutputs} for why LND's own chain view cannot
-   * answer that question. The send corridor never calls it.
+   * Esplora base URL, REQUIRED BY BOTH DIRECTIONS. The send leg has needed it
+   * since {@link LndOnchainAdapter.findSpendWitness} moved off lnd's spend
+   * subscription; `transactionOutcome` is a further caller, not the first.
    */
   esploraUrl?: string
   esploraAuth?: EsploraAuth
@@ -285,6 +286,17 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
   async broadcastRaw(txHex: string): Promise<{ txid: string }> {
     const result = await broadcastChainTransaction({ lnd: this.lnd, transaction: txHex })
     return { txid: result.id }
+  }
+
+  /** NOT `getChainTransactions`: an HTLC spend is not lnd's own, so it lists none of them. */
+  async transactionOutcome(txid: string): Promise<OnchainTxOutcome> {
+    if (!this.esplora) {
+      throw new Error(
+        'onchain transaction lookup needs an Esplora URL: lnd lists only its own wallet transactions, so it cannot ' +
+          'say whether a spend of a third-party output landed (set lnd.esploraUrl)',
+      )
+    }
+    return txOutcomeVia(this.esplora, txid)
   }
 
   async estimateFeeRate(): Promise<number> {

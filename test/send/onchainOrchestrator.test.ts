@@ -743,8 +743,11 @@ describe('OnchainSendSwapService', () => {
 
     now = row.htlcLocktime + HTLC_REFUND_MTP_MARGIN + 1 // client never claimed, and the timeout (plus MTP margin) has matured
     row = await service.tick(outcome.swap.id)
-    expect(row.state).toBe('refunded')
+    expect(row.state).toBe('refunding_onchain')
     expect(row.onchainRefundTxid).toBeTruthy()
+
+    deps.onchain.mineBlocks(1)
+    expect((await service.tick(outcome.swap.id)).state).toBe('refunded')
   })
 
   it('does not arm the refund at the bare htlcLocktime deadline — needs the MTP margin too', async () => {
@@ -810,7 +813,8 @@ describe('OnchainSendSwapService', () => {
     row = await service.tick(outcome.swap.id)
     expect(row.state).toBe('claimed')
     expect(row.claimArkTxid).toBe('claim-ark-txid')
-    expect(row.onchainRefundTxid).toBeNull() // never broadcast — recovered before racing it
+    expect(row.onchainRefundTxid).toBeTruthy()
+    expect(await deps.onchain.transactionOutcome(row.onchainRefundTxid!)).toBe('unknown')
   })
 
   it('routes to stuck rather than broadcasting a sub-dust refund output', async () => {
@@ -922,6 +926,61 @@ describe('OnchainSendSwapService', () => {
     expect(after.refundArkTxid).toBeNull()
   })
 
+  const driveToBroadcastRefund = async (): Promise<OnchainSendSwapRow> => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    let row = await service.tick(outcome.swap.id)
+    now = row.htlcLocktime + HTLC_REFUND_MTP_MARGIN + 1
+    row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('refunding_onchain')
+    expect(row.onchainRefundTxid).toBeTruthy()
+    return row
+  }
+
+  /** What our OWN refund leaves: no preimage, so shape alone cannot place it (#169). */
+  const plantRefundLeafWitness = (row: OnchainSendSwapRow): void =>
+    deps.onchain.spendClaim(row.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+
+  it('recognises its own confirmed refund by txid rather than failing the row to stuck', async () => {
+    const row = await driveToBroadcastRefund()
+    plantRefundLeafWitness(row)
+    deps.onchain.mineBlocks(1)
+    const after = await service.tick(row.id)
+    expect(after.state).toBe('refunded')
+    expect(after.failureReason).toBeNull()
+  })
+
+  it('waits rather than settling or sticking while its own refund is still in the mempool', async () => {
+    const row = await driveToBroadcastRefund()
+    plantRefundLeafWitness(row)
+    const after = await service.tick(row.id)
+    expect(after.state).toBe('refunding_onchain')
+    expect(after.failureReason).toBeNull()
+  })
+
+  it('rebuilds and rebroadcasts a refund the mempool dropped instead of calling it refunded', async () => {
+    const row = await driveToBroadcastRefund()
+    deps.onchain.dropFromMempool(row.onchainRefundTxid!)
+    const broadcasts = captureBroadcasts()
+
+    const after = await service.tick(row.id)
+    expect(broadcasts).toHaveLength(1)
+    expect(after.state).toBe('refunding_onchain')
+    deps.onchain.mineBlocks(1)
+    expect((await service.tick(row.id)).state).toBe('refunded')
+  })
+
   /**
    * Drive a swap to `stuck` the OTHER way `whenRefundingOnchain` reaches it:
    * the funding output turns out to be spent by something this code cannot
@@ -966,7 +1025,8 @@ describe('OnchainSendSwapService', () => {
     row = await service.tick(outcome.swap.id)
     expect(row.state).toBe('stuck')
     expect(row.failureReason).toMatch(/something other than a matching claim/)
-    expect(row.onchainRefundTxid).toBeNull() // the spend that "went out" was never recorded — the whole problem
+    expect(row.onchainRefundTxid).toBeTruthy()
+    expect(await deps.onchain.transactionOutcome(row.onchainRefundTxid!)).toBe('unknown')
     return row
   }
 
@@ -996,7 +1056,7 @@ describe('OnchainSendSwapService', () => {
     expect(await service.tickAll()).toEqual([])
     expect((await service.tick(row.id)).state).toBe('stuck')
     expect(broadcasts).toEqual([])
-    expect((await deps.store.get(row.id)).onchainRefundTxid).toBeNull()
+    expect((await deps.store.get(row.id)).onchainRefundTxid).toBe(row.onchainRefundTxid)
   })
 
   it('reclaimOnchainHtlc() re-broadcasts the solver’s own L1 refund for a row stuck on an unreadable spend', async () => {
@@ -1108,6 +1168,58 @@ describe('OnchainSendSwapService', () => {
     expect((await deps.store.get(row.id)).onchainRefundTxid).toBeNull()
   })
 
+  /** Automatic refund and operator override on one row, the second entering mid-attempt. */
+  const raceRefundAttempts = async (first: 'tick' | 'reclaim'): Promise<OnchainSendSwapRow> => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    const id = outcome.swap.id
+    now = (await service.tick(id)).htlcLocktime + HTLC_REFUND_MTP_MARGIN + 1
+
+    let broadcasts = 0
+    const broadcastRaw = deps.onchain.broadcastRaw.bind(deps.onchain)
+    deps.onchain.broadcastRaw = async (txHex) => {
+      if (broadcasts++ > 0) throw new Error('txn-mempool-conflict')
+      return broadcastRaw(txHex)
+    }
+    // Hold the leader mid-attempt; the follower's rate is what makes the txids differ.
+    let entered: () => void = () => {}
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const arrived = new Promise<void>((resolve) => (entered = resolve))
+    const estimateFeeRate = deps.onchain.estimateFeeRate.bind(deps.onchain)
+    deps.onchain.estimateFeeRate = async () => {
+      deps.onchain.estimateFeeRate = estimateFeeRate
+      entered()
+      await held
+      return 4
+    }
+
+    const run = (which: 'tick' | 'reclaim') =>
+      (which === 'tick' ? service.tick(id) : service.reclaimOnchainHtlc(id)).catch(() => null)
+    const leading = run(first)
+    await arrived
+    await run(first === 'tick' ? 'reclaim' : 'tick')
+    release()
+    await leading
+    return deps.store.get(id)
+  }
+
+  it.each(['tick', 'reclaim'] as const)(
+    'never leaves a refund txid nobody broadcast when %s gets there first',
+    async (first) => {
+      const after = await raceRefundAttempts(first)
+      expect(after.onchainRefundTxid).toBeTruthy()
+      expect(await deps.onchain.transactionOutcome(after.onchainRefundTxid!)).not.toBe('unknown')
+    },
+  )
+
   it('refundSweep() still refunds a refused row once its deadline passes, and records the push', async () => {
     const outcome = await service.quote({
       paymentHash,
@@ -1208,7 +1320,9 @@ describe('OnchainSendSwapService', () => {
 
     deps.onchain.broadcastRaw = originalBroadcast
     row = await service.tick(outcome.swap.id)
-    expect(row.state).toBe('refunded')
+    expect(row.state).toBe('refunding_onchain')
+    deps.onchain.mineBlocks(1)
+    expect((await service.tick(outcome.swap.id)).state).toBe('refunded')
   })
 
   it('refuses an out-of-range amount', async () => {

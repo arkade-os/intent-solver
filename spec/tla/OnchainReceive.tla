@@ -177,6 +177,14 @@
 (*       as permanent eviction rather than as re-broadcast; re-funding     *)
 (*       after an eviction would only re-enter states already reachable.   *)
 (*                                                                         *)
+(*  (A8) `SettleNeedsConfirmation`.  SHIPPED, not an open assumption      *)
+(*       (receive/onchainOrchestrator.ts:735-742): `settled` is written    *)
+(*       only for a claim whose own `transactionOutcome` reports CONFIRMED.*)
+(*       The mutation records on the broadcast alone, which is what this   *)
+(*       corridor shipped before #204, and NoSilentLoss then fails: the    *)
+(*       solver has PaidOut, the row is terminal, and nothing was          *)
+(*       collected.  See OnchainReceive_UnconfirmedSettle.cfg.             *)
+(*                                                                         *)
 (*  (A7) `MtpLag` is BOUNDED, i.e. blocks keep arriving.  `Tick` is        *)
 (*       disabled once wall clock would outrun the chain tip's clock by    *)
 (*       more than MtpLag, which is how the lag bound is realised without  *)
@@ -218,9 +226,13 @@
 (*     (:892-896).  refunding_arkade -> claimed is a RECOVERY, not a       *)
 (*     failure: it is what turns a lost Arkade race into a swap the solver *)
 (*     can still settle on L1.                                             *)
-(*  5. `settled` and `refunded` record a BROADCAST / a submission, never a *)
-(*     confirmation, and neither is in NON_TERMINAL.  Nothing revisits     *)
-(*     them.  See the Collected() definition and the report.               *)
+(*  5. FIXED (#204).  `settled` used to record a BROADCAST and was          *)
+(*     terminal, so a claim that never confirmed was invisible while the   *)
+(*     Arkade side was already funded.  It now records a CONFIRMATION: the *)
+(*     row holds in `claimed` until `transactionOutcome` on its own        *)
+(*     pre-committed txid says so.  Collected() lost the disjunct that     *)
+(*     counted a broadcast as collection with it.  `refunded` on this leg  *)
+(*     is the ARKADE refund, which is atomic and never had the gap.        *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC, SwapCore
 
@@ -242,6 +254,7 @@ CONSTANTS
     IndexerNeverLies,    \* MUTATION: see (A4)
     ClaimFeeAffordable,  \* MUTATION: see (A5)
     MempoolExclusive,    \* MUTATION: see (A3)
+    SettleNeedsConfirmation, \* MUTATION: see (A8)
     AtomicAdmission      \* MUTATION: quote() is one conditional INSERT
 
 MinOf(a, b) == IF a <= b THEN a ELSE b
@@ -468,23 +481,25 @@ PaidOut(s) == arkFund[s] >= 1
 \* The solver's own L1 sweep confirmed.
 L1Swept(s) == "solverClaim" \in l1[s]
 
-\* The sweep is broadcast, unopposed, and the outpoint it spends still exists.
-\* In THIS MODEL that is irreversible: ConfirmL1 can only pick a member of
-\* `bcast`, and nothing else is in it.  In reality it is not — the claim tx is
-\* RBF-signalling (src/onchain/claim.ts:44) and `settled` is terminal, so a
-\* claim that never confirms is a loss the state machine cannot express.  That
-\* residual is what (A3) MempoolExclusive = FALSE explores.
-L1SweepUnopposed(s) ==
-    /\ "solverClaim" \in bcast[s]
-    /\ "clientRefund" \notin bcast[s]
-    /\ l1[s] = {}
-    /\ L1Exists(s)
-
 \* The solver pulled its own lockup back.  Arkade arbitration is atomic, so
 \* there is no broadcast/confirm gap on this side.
 ArkRefunded(s) == SpentBy(s, "solverRefund")
 
-Collected(s) == L1Swept(s) \/ L1SweepUnopposed(s) \/ ArkRefunded(s)
+\* MONEY IN HAND MEANS A BLOCK, and this used to carry a third disjunct that
+\* said otherwise: `L1SweepUnopposed`, "we broadcast it, nothing conflicts with
+\* it, and the outpoint is still there".  That was the model bending to fit a
+\* state machine that went TERMINAL on `broadcastRaw` — with it, a claim that
+\* never confirmed counted as collected and NoSilentLoss could not see the
+\* loss.  The code no longer settles on a broadcast (#204), so the model no
+\* longer has to pretend one collects.
+Collected(s) == L1Swept(s) \/ ArkRefunded(s)
+
+\* whenClaimed's own read of `transactionOutcome` on the txid it pre-committed
+\* (:735-742).  `confirmed` is the only answer that settles; `mempool` waits and
+\* `unknown` rebuilds.  The mutation is the shipped behaviour BEFORE #204.
+SettleReadable(s) ==
+    /\ OwnClaimSeen(s)
+    /\ (SettleNeedsConfirmation => "solverClaim" \in l1[s])
 
 \* The client took the solver's Arkade float.
 ClientTookLockup(s) == SpentBy(s, "clientClaim")
@@ -619,7 +634,8 @@ Urgent(s) ==
     \/ (st[s] = "refunding_arkade" /\ ArkRefundPushable(s))    \* the refund can go out
     \/ (st[s] = "refunding_arkade" /\ ~ArkLockupSpendable(s))  \* empty read, judge it
     \/ (st[s] = "claimed" /\ ~WitnessSeen(s))                  \* SWEEP L1 NOW
-    \/ (st[s] = "claimed" /\ WitnessSeen(s))                   \* record the verdict
+    \/ (st[s] = "claimed" /\ ClientRefundSeen(s))              \* judge the prior spend
+    \/ (st[s] = "claimed" /\ SettleReadable(s))                \* record the verdict
 
 SolverBehind == \E s \in Swaps : Urgent(s)
 
@@ -880,7 +896,7 @@ ClaimSeesPriorSpend(w, s) ==
 \* discriminator was added here (#232).
 ClaimSeesOwnClaim(w, s) ==
     /\ Saw(w, s, "claimed")
-    /\ OwnClaimSeen(s)
+    /\ SettleReadable(s)
     /\ \/ CasWon(s, "claimed", "settled")
        \/ CasLost(s, "claimed")
     /\ Park(w)
@@ -912,15 +928,20 @@ SubmitL1Claim(w, s) ==
     /\ ~WitnessSeen(s)
     /\ L1Exists(s)
     /\ bcast' = [bcast EXCEPT ![s] = bcast[s] \cup { "solverClaim" }]
-    /\ Advance(w, "claimSent", "none")
+    /\ Park(w)
     /\ UNCHANGED << clock, st, conf, serverUp >>
     /\ UNCHANGED << chainTime, htlc, arkFund, l1, refEmptySeen >>
 
-\* onchain_claim_txid and the state change land together.  `settled` records a
-\* BROADCAST, not a confirmation, and is terminal — findRecoverable never
-\* revisits it.
+\* The settle verdict, and it is a LATER READ rather than the second half of
+\* the broadcast step.  `onchain_claim_txid` is patched BEFORE broadcastRaw and
+\* the row stays in `claimed`, so there is no pending write to lose and no
+\* `claimSent` phase for a crash to strand a row in — which is why SubmitL1Claim
+\* above parks instead of advancing.  A row still in `claimed` with its claim in
+\* the mempool simply waits: nothing here is enabled, and Urgent does not claim
+\* otherwise.
 RecordSettled(w, s) ==
-    /\ At(w, s, "claimSent")
+    /\ Saw(w, s, "claimed")
+    /\ SettleReadable(s)
     /\ \/ CasWon(s, "claimed", "settled")
        \/ CasLost(s, "claimed")
     /\ Park(w)
@@ -1101,14 +1122,32 @@ Init ==
 (* SwapCore's traps T1 (never write a conjunction inside a quantifier      *)
 (* body), T3 (TLC's ceiling on temporal actions) and T4 (symmetry is       *)
 (* unsound with per-swap fairness) all apply; this is the same shape       *)
-(* LightningSend uses.  ConfirmL1 deliberately carries NO fairness: a      *)
-(* broadcast that never confirms must not be assumed away, and no row      *)
-(* needs it to reach a terminal state.                                     *)
+(* LightningSend uses.                                                     *)
+(*                                                                         *)
+(* CHAIN PROGRESS IS NOW A LIVENESS ASSUMPTION, and #204 is what made it   *)
+(* one.  `settled` used to be written on the broadcast, so no row needed a *)
+(* block to terminate and ConfirmL1 carried no fairness at all.  A row now *)
+(* holds in `claimed` until its own claim mines, so without this the model *)
+(* reports a (correct, and useless) liveness counterexample in which the   *)
+(* miner simply never runs.                                                *)
+(*                                                                         *)
+(* It weakens NO SAFETY RESULT.  Invariants are checked over every         *)
+(* behaviour, fair or not, including all the ones where the claim never    *)
+(* confirms — which is exactly the case NoSilentLoss now catches.  What    *)
+(* this says is only that "every swap eventually terminates" is a claim    *)
+(* about a chain that mines blocks, and it always was.                     *)
+(*                                                                         *)
+(* Merged over swaps rather than stated per swap because ConfirmL1 fires   *)
+(* AT MOST ONCE per swap (it requires l1[s] = {} and then fills it), so    *)
+(* the merge cannot discharge one swap's obligation with another's — the   *)
+(* same boundedness test OnchainSend's fairness block applies to its own   *)
+(* merged conditions, and it keeps this block under trap T3's ceiling.     *)
 (***************************************************************************)
 Fairness ==
     /\ \A w \in Workers : WF_vars(GiveUp(w))
     /\ WF_vars(Tick)
     /\ WF_vars(ChainTick)
+    /\ WF_vars(\E s \in Swaps : ConfirmL1(s))
     \* "some worker eventually does this for this swap".  The \E is over
     \* WORKERS, never over swaps: swaps must each be driven, workers are
     \* interchangeable.

@@ -202,6 +202,16 @@
 (*       believe an empty spendableOnly read without a second, positive    *)
 (*       proof of the spend.                                               *)
 (*                                                                         *)
+(*  (A9) RefundNeedsConfirmation.  SHIPPED (#169, #204), not an open       *)
+(*       assumption.  send/onchainOrchestrator.ts writes onchain_refund_txid*)
+(*       BEFORE broadcasting and holds the row in refunding_onchain until   *)
+(*       transactionOutcome on that id reports `confirmed`.  Two findings   *)
+(*       close together: a refund that never mined is no longer terminal,   *)
+(*       and a refund that DID mine is recognised BY ID rather than guessed *)
+(*       at from witness shape, so it stops being failed to `stuck`.        *)
+(*       Setting this FALSE restores both — see                             *)
+(*       OnchainSend_UnconfirmedRefund.cfg.                                 *)
+(*                                                                         *)
 (*  (A8) THE `awaiting_claim -> stuck` EDGE IS NOT MODELLED, though it is  *)
 (*       in Edges and the code takes it twice: :610 (no funding txid/vout, *)
 (*       unreachable through the store's API for the same reason           *)
@@ -232,9 +242,11 @@
 (*  1. whenRefundingOnchain re-reads findSpendWitness IMMEDIATELY before   *)
 (*     broadcasting, and a hash-verified preimage takes the row to         *)
 (*     `claiming` instead.  See RefundSeesClaim and OnchainSend_Broken.cfg.*)
-(*  2. `refunded` records a BROADCAST, not a confirmation, and is          *)
-(*     terminal.  Either make it non-terminal until the spend confirms, or *)
-(*     stop signalling RBF on the refund.  See OnchainSend_MempoolRace.cfg.*)
+(*  2. DONE (#204): `refunded` records a CONFIRMATION.  The row holds in    *)
+(*     refunding_onchain until transactionOutcome on its own pre-committed *)
+(*     txid says the spend mined, so RBF on the refund is no longer a way  *)
+(*     to lose money silently.  See (A9) and OnchainSend_MempoolRace.cfg,  *)
+(*     which is green on the shipped guard and red without it.             *)
 (*  3. funded -> funding_onchain is committed BEFORE onchain.fund, but the *)
 (*     CAS gates ENTRY and not OCCUPANCY: the row sits in funding_onchain  *)
 (*     for the whole RPC and a second worker sees the same preconditions.  *)
@@ -276,6 +288,7 @@ CONSTANTS
     LockupDeadline,      \* created_at + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT (15 min)
     MinConfirmations,    \* min_confirmations — see (A6)
     BreakRefundRecheck,  \* MUTATION: drop whenRefundingOnchain's pre-broadcast read
+    RefundNeedsConfirmation, \* MUTATION: see (A9)
     BreakRefundTiming,   \* MUTATION: arm the refund without the MTP margin
     MempoolExclusive,    \* MUTATION: see (A3)
     FundIsIdempotent,    \* MUTATION: see (A4)
@@ -523,8 +536,13 @@ Censor == CensorCore /\ UNCHANGED OsVars
 \* witness and the refund not yet armed, and a `refunding_onchain` row whose
 \* refund is still non-final.  Those are exactly the waits the code is
 \* supposed to sit through, so the clock must be free to advance through them.
+\* (A9) ADDS ONE: a row whose own refund is in the mempool can do nothing but
+\* wait for a block, and claiming urgency there would freeze the wall clock
+\* against the very chain tick that would confirm it.
 RefundStepAvailable(s) ==
-    \/ (~BreakRefundRecheck /\ WitnessSeen(s))
+    \/ (~BreakRefundRecheck /\ ClaimWitness(s))                              \* the back-edge
+    \/ (~BreakRefundRecheck /\ AlienWitness(s) /\ ~RefundNeedsConfirmation)
+    \/ (RefundNeedsConfirmation /\ SolverRefundedL1(s))                     \* record the verdict
     \/ ((BreakRefundRecheck \/ ~WitnessSeen(s)) /\ RefundBroadcastable(s))
 
 Urgent(s) ==
@@ -844,13 +862,17 @@ RefundSeesClaim(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OsVars
 
-\* Spent by something that is not a recognisable claim — most likely our OWN
-\* refund from an earlier attempt that broadcast successfully but crashed
-\* before the transition recorded it.  Routed to a human, because witness
-\* shape alone cannot tell that apart from anything else.
+\* PRE-#169 ONLY.  Spent by something that is not a recognisable claim, which
+\* in this model is ALWAYS the solver's own refund — nothing else can write
+\* `refundSeen` — and that is the finding rather than a modelling shortcut:
+\* witness shape cannot tell the two apart, so a refund that succeeded was
+\* routed to a human.  With (A9) on, the pre-committed txid names it and this
+\* action is disabled.  A genuinely third-party spend is not modelled here; on
+\* the chain the only other spender of this outpoint is the claim leaf.
 RefundSeesAlien(w, s) ==
     /\ Saw(w, s, "refunding_onchain")
     /\ ~BreakRefundRecheck
+    /\ ~RefundNeedsConfirmation
     /\ AlienWitness(s)
     /\ \/ CasWon(s, "refunding_onchain", "stuck")
        \/ CasLost(s, "refunding_onchain")
@@ -869,15 +891,21 @@ BroadcastRefund(w, s) ==
     /\ RefundBroadcastable(s)
     /\ l1' = [l1 EXCEPT ![s] = IF l1[s] = "unspent" THEN "refundSeen"
                                                     ELSE "contested"]
-    /\ Advance(w, "refundSent", "none")
+    /\ IF RefundNeedsConfirmation THEN Park(w) ELSE Advance(w, "refundSent", "none")
     /\ UNCHANGED << clock, st, conf, serverUp >>
     /\ UNCHANGED << chainTime, lockup, fundOut, fundConf >>
 
-\* `refunded` RECORDS A BROADCAST, NOT A CONFIRMATION, and it is terminal and
-\* absent from NON_TERMINAL, so findRecoverable() never returns the row again.
-\* Whether that is safe is exactly the question MempoolExclusive (A3) settles.
+\* `refunded` RECORDS A CONFIRMATION (#204).  The txid is patched onto the row
+\* BEFORE broadcastRaw, so the verdict is a LATER READ — `transactionOutcome`
+\* on our own id — and there is no pending write for a crash to lose, which is
+\* why BroadcastRefund above parks.  The FALSE arm is what shipped before:
+\* terminal on the broadcast, out of NON_TERMINAL, never revisited.  That is
+\* the loss OnchainSend_MempoolRace.cfg used to demonstrate against the green
+\* model and now demonstrates only against this mutation.
 RecordRefunded(w, s) ==
-    /\ At(w, s, "refundSent")
+    /\ IF RefundNeedsConfirmation
+         THEN Saw(w, s, "refunding_onchain") /\ SolverRefundedL1(s)
+         ELSE At(w, s, "refundSent")
     /\ \/ CasWon(s, "refunding_onchain", "refunded")
        \/ CasLost(s, "refunding_onchain")
     /\ Park(w)

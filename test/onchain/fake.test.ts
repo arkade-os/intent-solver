@@ -1,7 +1,16 @@
 import { describe, it, expect } from 'vitest'
-import { Address, OutScript } from '@scure/btc-signer'
+import { hex } from '@scure/base'
+import { Address, OutScript, Transaction } from '@scure/btc-signer'
 import { FakeOnchainBackend } from '@arkade-os/solver-rails-fake/onchain/fake/backend.js'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
+
+/** A real, parseable transaction: the fake reads the txid out of the bytes. */
+const rawTx = (nonce: number): { hex: string; txid: string } => {
+  const tx = new Transaction({ allowUnknownInputs: true, allowUnknownOutputs: true })
+  tx.addInput({ txid: new Uint8Array(32).fill(nonce), index: 0, sequence: 0xfffffffd })
+  tx.addOutput({ script: Uint8Array.from([0x00, 0x14, ...new Uint8Array(20).fill(3)]), amount: 1000n })
+  return { hex: hex.encode(tx.toBytes(true, true)), txid: tx.id }
+}
 
 describe('FakeOnchainBackend', () => {
   it('fund() credits the address and findOutputs() reports it unconfirmed', async () => {
@@ -19,6 +28,14 @@ describe('FakeOnchainBackend', () => {
     expect(outputs[0]?.confirmations).toBe(3)
   })
 
+  it.each([0, -1, 1.5, Number.NaN])('mineBlocks(%s) throws without confirming anything', async (n) => {
+    const backend = new FakeOnchainBackend()
+    const tx = rawTx(4)
+    await backend.broadcastRaw(tx.hex)
+    expect(() => backend.mineBlocks(n)).toThrow(/whole number of blocks/)
+    expect(await backend.transactionOutcome(tx.txid)).toBe('mempool')
+  })
+
   it('findSpendWitness() returns null until the output is spent', async () => {
     const backend = new FakeOnchainBackend()
     const { txid } = await backend.fund({ address: 'bcrt1pexample', amountSats: 50_000, idempotencyKey: 'test-fund' })
@@ -33,11 +50,29 @@ describe('FakeOnchainBackend', () => {
     expect(await backend.findSpendWitness({ txid, vout: 0, outputScript: new Uint8Array() })).toEqual(witness)
   })
 
-  it('broadcastRaw() returns a fresh txid each call', async () => {
+  it('broadcastRaw() answers with the transaction’s OWN txid, not a fresh one', async () => {
     const backend = new FakeOnchainBackend()
-    const a = await backend.broadcastRaw('aabbcc')
-    const b = await backend.broadcastRaw('ddeeff')
-    expect(a.txid).not.toBe(b.txid)
+    const [a, b] = [rawTx(1), rawTx(2)]
+    expect((await backend.broadcastRaw(a.hex)).txid).toBe(a.txid)
+    expect((await backend.broadcastRaw(b.hex)).txid).toBe(b.txid)
+  })
+
+  it('transactionOutcome() tells a broadcast we never made from one waiting on a block', async () => {
+    const backend = new FakeOnchainBackend()
+    const tx = rawTx(3)
+    expect(await backend.transactionOutcome(tx.txid)).toBe('unknown')
+    await backend.broadcastRaw(tx.hex)
+    expect(await backend.transactionOutcome(tx.txid)).toBe('mempool')
+    backend.mineBlocks(1)
+    expect(await backend.transactionOutcome(tx.txid)).toBe('confirmed')
+  })
+
+  it('dropFromMempool() takes an unconfirmed broadcast back to unknown', async () => {
+    const backend = new FakeOnchainBackend()
+    const tx = rawTx(4)
+    await backend.broadcastRaw(tx.hex)
+    backend.dropFromMempool(tx.txid)
+    expect(await backend.transactionOutcome(tx.txid)).toBe('unknown')
   })
 
   it('estimateFeeRate() returns a fixed, sane sats/vbyte figure', async () => {

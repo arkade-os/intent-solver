@@ -154,6 +154,7 @@ export interface OnchainSendSwapRow {
   fundingVout: number | null
   preimage: string | null
   claimArkTxid: string | null
+  /** Written BEFORE the broadcast (#169): the refund ATTEMPTED, not one that landed. */
   onchainRefundTxid: string | null
   refundArkTxid: string | null
   refundOutcome: 'pushed' | 'external' | null
