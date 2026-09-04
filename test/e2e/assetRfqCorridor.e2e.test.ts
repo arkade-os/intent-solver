@@ -57,7 +57,6 @@ const NEEDED_SATS = 120_000
 /** One asset unit per sat at `baseDecimals: 8`, so every amount below reads as itself. */
 const FEED_PRICE = '100000000'
 
-/** 0.5%, the same order as the packet path's default margin. */
 const FEE_BPS = 50
 
 let arkade: E2eArkade
@@ -108,7 +107,8 @@ beforeAll(async () => {
 }, SETUP_TIMEOUT_MS)
 
 afterAll(async () => {
-  await new Promise<void>((resolve) => feed?.close(() => resolve()))
+  // Guarded, not optional-chained: unset, the executor never calls `resolve`.
+  if (feed) await new Promise<void>((resolve) => feed.close(() => resolve()))
   arkade?.close()
 })
 
