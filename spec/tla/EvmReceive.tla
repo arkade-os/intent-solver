@@ -19,16 +19,16 @@
 (*  1. Fund only against a lock proven deep AND old enough - the           *)
 (*     evmConfirmed snapshot gate in FundArkade.                           *)
 (*  2. Fund only with enough of the client's evm_timeout left to claim in  *)
-(*     - TooClose (EVM_RECEIVE_CLAIM_MARGIN_BLOCKS, plan:108).             *)
+(*     - TooClose (EVM_RECEIVE_CLAIM_MARGIN_BLOCKS, plan:139).             *)
 (*  3. A revealed preimage means CLAIM THE ERC20 NOW - the pre-switch      *)
-(*     rule, an interrupt from EVERY non-terminal state (plan:70-77).      *)
+(*     rule, an interrupt from EVERY non-terminal state (plan:87-108).     *)
 (*  4. Preimage in hand past the client's timeout: stick, loudly           *)
-(*     (plan:71-75).                                                       *)
-(*  5. A quote binds only until valid_until (plan:87-99).                  *)
+(*     (plan:92-94).                                                       *)
+(*  5. A quote binds only until valid_until (plan:112-133).                *)
 (*                                                                         *)
 (* TWO CLOCKS, as in EvmSend: the wall clock (validUntil, refundLocktime)  *)
 (* and the EVM block HEIGHT (evmTimeout, the CLIENT's choice - the quote   *)
-(* validates it and derives refundLocktime from it, orchestrator:356-367). *)
+(* validates it and derives refundLocktime from it, orchestrator:369-380). *)
 (* The quote-time bridge reads the client's height deadline at the FASTEST *)
 (* plausible cadence - the safe direction when it bounds somebody else's   *)
 (* recourse - so the modelled margin is:                                   *)
@@ -41,20 +41,20 @@
 (*                                                                         *)
 (* THE PRE-SWITCH RULE is a global interrupt, exactly as in EvmSend: rules *)
 (* 3 and 4 run BEFORE the state switch, off `seen.preimage ?? row.preimage`   *)
-(* (plan:64).  The preimage is read from the ARKADE side (the client       *)
+(* (plan:87).  The preimage is read from the ARKADE side (the client       *)
 (* reveals by claiming the lockup), and only once the lockup exists        *)
-(* (orchestrator:179) - which is why conf = {clientClaim} is exactly the   *)
+(* (orchestrator:187) - which is why conf = {clientClaim} is exactly the   *)
 (* readable precondition.                                                  *)
 (*                                                                         *)
-(* THE PARKED STATES.  The planner maps claiming and refunding_arkade to   *)
-(* wait (plan:125-127), and funding_arkade's only escape is the observed   *)
-(* lockup (plan:117-118):                                                  *)
+(* THE PARKED STATES.  funding_arkade's only escape is the observed lockup *)
+(* (plan:148-149), and claiming maps to wait as a state branch             *)
+(* (plan:162-163):                                                         *)
 (*   - claiming is NOT truly parked: the pre-switch rule re-fires from it  *)
-(*     off the persisted preimage (plan:64), so the claim retries until it *)
+(*     off the persisted preimage (plan:87), so the claim retries until it *)
 (*     records or the timeout sticks it.                                   *)
 (*   - refunding_arkade is parked only in the NARROW window the re-drive   *)
 (*     cannot see: the spend LANDED and the recording CAS was lost.  While *)
-(*     the covenant reads unspent the planner re-drives it (plan:139-147), *)
+(*     the covenant reads unspent the planner re-drives it (plan:156-160), *)
 (*     which is what closed F4; once it is spent there is nothing left to  *)
 (*     lose, only a row to finish.                                         *)
 (*   - funding_arkade with a crash before fundArkade IS parked: the sats   *)
@@ -68,7 +68,7 @@
 (*       client claims the sats at height >= evmTimeout, the row sticks    *)
 (*       loudly, and the client ALSO takes its ERC20 back - NoNetLoss.     *)
 (*  (B1) `FundCommitFirst`.  The row CASes into funding_arkade BEFORE the  *)
-(*       sats go out (orchestrator:230-237), so two readers cannot both    *)
+(*       sats go out (orchestrator:251-257), so two readers cannot both    *)
 (*       fund and a crash cannot leave a funded lockup against a row that  *)
 (*       still reads `locked`.  The mutation funds before the CAS and      *)
 (*       NoDoubleFund fails.                                               *)
@@ -79,7 +79,7 @@
 (*       flight against a still-locked contract.  The mutation lets the    *)
 (*       client's refund win the race and NoNetLoss fails.                 *)
 (*  (B3) `ClaimRecordsReceipt`.  SHIPPED, not an open assumption           *)
-(*       (evmReceivePlan.ts:96-105): `claimed` is written only for a claim *)
+(*       (evmReceivePlan.ts:99-105): `claimed` is written only for a claim *)
 (*       whose own receipt says it MINED.  The row used to record it when  *)
 (*       the broadcast RETURNED a txid - send-only, no receipt             *)
 (*       (broadcast.ts:91-95) - so the terminal word could stand over a    *)
@@ -110,7 +110,8 @@ CONSTANTS
     ClaimLandsPromptly, \* (B2) MUTATION: a broadcast claim mines before the
                        \*      height reaches the client timeout (TRUE)
     ClaimRecordsReceipt, \* (B3) MUTATION: record `claimed` only once mined
-                       \*      (TRUE) - FALSE is the shipped send-time record
+                       \*      (TRUE, shipped) - FALSE is the pre-fix
+                       \*      send-time record (F2 in RESULTS)
     FundLandsPromptly,  \* (B4) MUTATION: the fundArkade accept lands before
                        \*      the height runs the client's timeout down
                        \*      (TRUE) - FALSE is a hung funding RPC
@@ -170,7 +171,7 @@ Drivable == NonTerminal \cup { "none" }
 
 \* Every -> claiming / -> stuck pair is the pre-switch rule, not a state
 \* branch.  The dead rows carry the planner's own edges: `locked` funds
-\* unconditionally (plan:114-115) and shares quoted's pre-switch edges.
+\* unconditionally (plan:145-146) and shares quoted's pre-switch edges.
 Edges == [ x \in Row |->
     CASE x = "none"             -> { "quoted" }
       [] x = "quoted"           -> { "funding_arkade", "claiming", "refused",
@@ -225,7 +226,7 @@ HeightSane == clock >= evmHeight * FastCad
 \* The client's ERC20 refund opens at this height (plan:71).
 HeightUp == evmHeight >= EvmTimeoutH
 
-\* RULE 2: not enough of the client's timeout left to claim in (plan:108).
+\* RULE 2: not enough of the client's timeout left to claim in (plan:139).
 TooClose == evmHeight + ClaimMarginBlocks >= EvmTimeoutH
 
 \* The wall-clock deadlines.
@@ -394,7 +395,7 @@ Crash(w) == CrashCore(w) /\ UNCHANGED LrVars
 
 \* quote(): the INSERT, cap-checked at read; AtomicAdmission = FALSE drops
 \* the re-check here, which is the admission race the reservation lease
-\* closes in the shipped code (orchestrator:397-448).
+\* closes in the shipped code (orchestrator:410-461).
 InsertQuote(w, s) ==
     /\ Saw(w, s, "none")
     /\ loc[w].res \in { "capOk", "capFull" }
@@ -432,9 +433,9 @@ RefuseQuoted(w, s) ==
     /\ UNCHANGED LrVars
 
 \* fund_arkade: the CAS FIRST (B1) - "exposed BEFORE the sats go out"
-\* (orchestrator:231-234) - then the broadcast is a separate step so a
+\* (orchestrator:251-255) - then the broadcast is a separate step so a
 \* crash can land between them: the parked funding_arkade with no sats
-\* out, F1.  From `locked` the planner funds unconditionally (plan:115).
+\* out, F1.  From `locked` the planner funds unconditionally (plan:145-146).
 FundArkade(w, s) ==
     /\ \/ /\ Saw(w, s, loc[w].seen)
           /\ loc[w].seen \in { "quoted", "awaiting_lock" }
@@ -468,7 +469,7 @@ ArkFundLands(w, s) ==
     /\ UNCHANGED << clock, st, conf, serverUp, evmHeight >>
     /\ UNCHANGED << evm, evmConfirmed, claimSent >>
 
-\* funding_arkade, lockup observed -> awaiting_claim (plan:117-118).
+\* funding_arkade, lockup observed -> awaiting_claim (plan:148-149).
 AwaitClaim(w, s) ==
     /\ Saw(w, s, "funding_arkade")
     /\ loc[w].res = "funded"
@@ -483,7 +484,7 @@ AwaitClaim(w, s) ==
 \* (orchestrator:248-250) - then the claim broadcast is a separate step,
 \* then the recording CAS.  Enabled from ANY non-terminal state, claiming
 \* included: the retry IS the pre-switch rule re-firing off the persisted
-\* preimage (plan:64), and the shell skips the state CAS for it.
+\* preimage (plan:87), and the shell skips the state CAS for it.
 ClaimEvm(w, s) ==
     /\ Saw(w, s, loc[w].seen)
     /\ loc[w].seen \in NonTerminal
@@ -500,7 +501,7 @@ ClaimEvm(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LrVars
 
-\* claimCall: the ERC20 claim is broadcast (orchestrator:252-254).  The
+\* claimCall: the ERC20 claim is broadcast (orchestrator:265-277).  The
 \* broadcast rides the phase; the landing is ClaimMines, an environment
 \* step - a crashed worker cannot un-broadcast it.
 ClaimBroadcast(w, s) ==
@@ -510,12 +511,13 @@ ClaimBroadcast(w, s) ==
     /\ UNCHANGED << clock, st, loc, conf, serverUp, evmHeight >>
     /\ UNCHANGED << arkFund, evm, evmConfirmed, fundSends >>
 
-\* The recording CAS, and (B3) its receipt.  Shipped truth
-\* (orchestrator:255, broadcast.ts:91-95): `claimed` is written when the
-\* broadcast returns a txid - send-only, no receipt - so the word can
-\* stand over a claim that never landed.  Green writes it only once the
-\* claim is mined; the mutation writes it at send time and NoSilentLoss
-\* names the lie.
+\* The recording CAS, and (B3) its receipt.  SHIPPED (plan:99-105): the row
+\* records `claimed` only once the claim is MINED, and the broadcast itself
+\* only patches evm_claim_txid (orchestrator:277).  It USED TO write the
+\* terminal word when the broadcast RETURNED a txid - send-only, no receipt
+\* (broadcast.ts:91-95) - so the word could stand over a claim that never
+\* landed while the solver's sats were already out.  The mutation restores
+\* the send-time record and NoSilentLoss names the lie.
 RecordClaimed(w, s) ==
     /\ At(w, s, "sentClaim")
     /\ claimSent[s]
@@ -701,9 +703,10 @@ Liveness == ([]serverUp) =>
 
 \* The artifact property for EvmReceive_Parked.cfg: strict terminality, no
 \* accepted parking.  EXPECTED violated there - a crash in the fund or
-\* refund push leaves the row parked forever (the planner never re-drives
-\* either, F1), and only the money invariants bound what the parking
-\* costs.
+\* refund push leaves the row parked forever - funding_arkade always, and
+\* refunding_arkade in the one window past the re-drive (the spend landed,
+\* the recording CAS was lost), F1 - and only the money invariants bound
+\* what the parking costs.
 LivenessStrict == ([]serverUp) => EventuallyTerminal(Terminal)
 
 Perms == Permutations(Swaps) \cup Permutations(Workers)
@@ -740,7 +743,7 @@ ERSpendKinds == { "clientClaim", "solverRefund" }
 (*     when the claim broadcast returned a txid - send-only, no receipt    *)
 (*     (broadcast.ts:91-95) - so the terminal word could stand over a      *)
 (*     claim that reverted while the solver's sats were already out.  The  *)
-(*     planner now reads the receipt (evmReceivePlan.ts:96-105) and sticks *)
+(*     planner now reads the receipt (evmReceivePlan.ts:99-105) and sticks *)
 (*     on a revert, so EvmReceive_NoReceipt.cfg is a genuine mutation - it *)
 (*     deletes the shipped check - rather than a record of shipped         *)
 (*     behaviour.                                                          *)
@@ -749,7 +752,7 @@ ERSpendKinds == { "clientClaim", "solverRefund" }
 (*     only at the client's timeout height lets the client refund its      *)
 (*     ERC20 and claim the freshly-landed sats in one breath.              *)
 (*     EvmReceive_LateFund.cfg: NoNetLoss, depth 21.                       *)
-(* F4  (B5) THE STRANDED REFUND - FIXED.  refunding_arkade USED TO be     *)
+(* F4  (B5) THE STRANDED REFUND - FIXED.  refunding_arkade USED TO be      *)
 (*     parked, so a crash between the refund CAS and the refundArkade      *)
 (*     spend left the covenant unspent AND the row unwatched; the patient  *)
 (*     client waited for its own timeout, claimed the sats, and took its   *)
