@@ -28,8 +28,11 @@
  *    hours later: until it dies, the row holds capacity against the house cap.
  * 6. A mined-and-failed lock created no lock. Absent-and-reverted is a
  *    different fact from absent-and-pending; only the receipt carries it.
+ * 7. `refunded` means the ERC20 came back, so only a mined refund earns it. A
+ *    terminal row over a reverted refund lies, and ends the preimage scan.
  */
 
+import type { EvmTransactionOutcome } from '../ports/evm.js'
 import type { EvmSendSwapState } from './evmSwapState.js'
 
 /**
@@ -57,6 +60,8 @@ export interface EvmSendObservation {
   evmLockPresent: boolean
   /** False also means "not known to have failed" — pending, or unreadable. */
   evmLockReverted: boolean
+  /** What became of the solver's own refund broadcast. `pending` until read. */
+  evmRefundOutcome: EvmTransactionOutcome
   /** Confirmations on the lock, and how long it has been buried. */
   evmLockConfirmations: number
   evmLockAgeSeconds: number
@@ -78,6 +83,8 @@ export type EvmSendAction =
   | { do: 'claim_arkade'; preimage: string }
   /** Take the solver's own ERC20 back, past `evm_timeout`. */
   | { do: 'refund_evm' }
+  /** The refund is mined; the row may finally say the ERC20 came back. */
+  | { do: 'record_refund' }
   /** Nothing has moved; the swap can be abandoned safely. */
   | { do: 'refuse'; reason: string }
   /** Money is committed and cannot be recovered by this state machine. */
@@ -153,8 +160,18 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
       // refund and treating that as failure would strand the lock.
       return seen.evmBlockHeight >= row.evmTimeout ? { do: 'refund_evm' } : { do: 'wait' }
 
-    case 'claiming':
     case 'refunding_evm':
+      // RULE 7, and the lock's presence splits the revert. Still there: nobody
+      // took it and nothing here retries, so a human must. GONE: someone did,
+      // and the usual someone is the client claiming — waiting keeps the row
+      // live for rule 4's scan, where sticking would page on every such swap.
+      if (seen.evmRefundOutcome === 'success') return { do: 'record_refund' }
+      if (seen.evmRefundOutcome === 'reverted' && seen.evmLockPresent) {
+        return { do: 'stick', reason: 'the ERC20 refund transaction reverted; the lock is still funded' }
+      }
+      return { do: 'wait' }
+
+    case 'claiming':
       // In flight. The caller re-reads and retries; nothing here to decide.
       return { do: 'wait' }
 

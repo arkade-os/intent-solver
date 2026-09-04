@@ -30,7 +30,8 @@
  * - `awaiting_claim` the lock is confirmed; waiting for the client to reveal the preimage
  * - `claiming`       preimage on disk; claiming the Arkade lockup needs nothing external
  * - `claimed`        done
- * - `refunding_evm`  client never claimed past `evm_timeout`; the solver refunds its own lock
+ * - `refunding_evm`  client never claimed past `evm_timeout`; the solver's refund is broadcast
+ *                    and awaiting its receipt, so the tokens are still exposed
  * - `refunded`       the solver's EVM refund landed - the swap failed, no capital stuck
  * - `refused`        never locked on the EVM side, no exposure
  * - `stuck`          locked on the EVM side but could not claim the Arkade lockup before the
