@@ -1,19 +1,7 @@
 /**
  * What the HTTP transport does when something THROWS, as opposed to refusing.
- *
- * The relay ingress has always distinguished the two — `ingress/relay.ts`
- * catches around its quote call, answers `pricing_unavailable`, and reports the
- * fault through its own `onError` hook rather than the refusal one. This
- * transport had neither, so an unexpected throw fell through to the framework's
- * default: a bare 500 with no body, and nothing in the operator's log. Two
- * transports the server's own comment calls "byte for byte" identical
- * disagreed about what a failure IS.
- *
- * A corridor set whose lookup throws is the smallest honest stand-in for the
- * real cause. Every genuine version of this is a fault reached THROUGH the
- * lookup — a store that cannot be opened, a backend that rejects, a row whose
- * invariant is broken — so pinning the transport's behaviour needs a throw at
- * that seam and nothing else.
+ * The relay has always caught and answered `pricing_unavailable`; this side did
+ * not, so a throw became a bare 500 that no operator log recorded.
  */
 
 import { describe, it, expect, vi } from 'vitest'
@@ -35,9 +23,7 @@ const throwingReaders = (): CorridorReaderSet =>
   ({
     get: () => undefined,
     size: 1,
-    // Throws while ITERATING, because that is how `respondToRfqStatus` reads:
-    // it walks every reader asking `statusFor`, so a broken store surfaces
-    // there rather than at a lookup.
+    // Iterating, because that is how `respondToRfqStatus` reads.
     [Symbol.iterator]: function* () {
       throw BOOM
     },
@@ -77,9 +63,6 @@ describe('the HTTP transport answers a THROWN fault in the protocol’s own voca
 
     const response = await quote(app, request)
 
-    // 422 is where every other refusal on this path already lives, so a client
-    // reads the body at this status. A 500 would cost it the reason, because
-    // 5xx is exactly what a caller treats as "no body worth parsing".
     expect(response.status).toBe(422)
     expect(await response.json()).toEqual({ v: 1, type: 'rfq_refusal', rfq_id: RFQ_ID, reason: 'pricing_unavailable' })
   })
@@ -89,7 +72,6 @@ describe('the HTTP transport answers a THROWN fault in the protocol’s own voca
 
     const body = (await (await quote(app, request)).json()) as { rfq_id?: string }
 
-    // Without this a client with several in flight cannot tell WHICH one died.
     expect(body.rfq_id).toBe(RFQ_ID)
   })
 
@@ -106,9 +88,6 @@ describe('the HTTP transport answers a THROWN fault in the protocol’s own voca
 
     await quote(app, request)
 
-    // The whole point of two hooks: a refusal is this host answering
-    // correctly, and folding a fault into that stream buries it in the log an
-    // operator scans for ordinary business.
     expect(onError).toHaveBeenCalledWith('http quote', BOOM)
     expect(onRefusal).not.toHaveBeenCalled()
   })
@@ -130,10 +109,7 @@ describe('the status endpoint distinguishes “cannot read” from “no such sw
 
     const response = await status(app)
 
-    // The dangerous silent option. A client polling for its own swap reads 404
-    // as proof the swap never existed and stops asking — about a swap that may
-    // be funded and live. Same discipline as a null balance figure never being
-    // rendered as a zero.
+    // A client polling its own swap would read 404 as proof it never existed.
     expect(response.status).toBe(500)
     expect(response.status).not.toBe(404)
     expect(onError).toHaveBeenCalledWith('http status', BOOM)
@@ -144,8 +120,7 @@ describe('the status endpoint distinguishes “cannot read” from “no such sw
 
     const response = await status(app)
 
-    // The other half of the same claim: the catch must not have turned every
-    // miss into a fault.
+    // The catch must not have turned every miss into a fault.
     expect(response.status).toBe(404)
     expect(await response.json()).toEqual({ v: 1, type: 'not_found' })
   })

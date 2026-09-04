@@ -55,13 +55,7 @@ export interface HttpDeps {
   clientKey?: (c: Context) => string
   /** A request this host turned away, and why. See `RelayIngressDeps.onRefusal`. */
   onRefusal?: (context: string, detail: string) => void
-  /**
-   * A request that FAULTED — separate from {@link onRefusal} for the same
-   * reason `RelayIngressDeps` splits them: a refusal is the closed vocabulary
-   * answering correctly with nothing thrown, while this is something that
-   * should not have happened. Folding the two would bury a fault in the log an
-   * operator scans for ordinary business.
-   */
+  /** A request that FAULTED. Separate from {@link onRefusal}, which is this host answering correctly. */
   onError?: (context: string, error: unknown) => void
 }
 
@@ -92,24 +86,9 @@ export const buildApp = (deps: HttpDeps): Hono => {
         try {
           outcome = await respondToRfqRequest(corridors, body, { requesterKey: deps.clientKey?.(c) })
         } catch (error) {
-          // The relay arm of this same handler has always caught here
-          // (`ingress/relay.ts`); this one did not, so an unexpected throw fell
-          // through to the framework's default and answered a bare 500 with no
-          // body. Two transports the comment above calls byte-for-byte
-          // identical disagreed about what a failure IS, and the operator's
-          // refusal log had no record of it either.
-          //
-          // `pricing_unavailable` because the reason vocabulary is CLOSED: a
-          // client may only branch on reasons the protocol names, and from its
-          // side an unexpected fault and a pricing failure are the same event —
-          // no quote, try later. Inventing an `internal_error` reason here
-          // would put a word on the wire that no schema on either side knows.
-          //
-          // 422, not 500, and the envelope is this transport's own decision
-          // (see above): every other refusal on this path is a 422, so a client
-          // already reads the body at that status. A 500 would be more candid
-          // about whose fault it is and would cost the client the reason, since
-          // 5xx is exactly what a caller treats as "no body worth parsing".
+          // Matches the relay's catch. `pricing_unavailable` because the reason
+          // vocabulary is closed; 422 because that is where this path's other
+          // refusals live, and a client will not parse a 5xx body.
           deps.onError?.('http quote', error)
           const rfqId = (body as { rfq_id?: unknown }).rfq_id
           return c.json(rfqRefusalPayload(typeof rfqId === 'string' ? rfqId : undefined, 'pricing_unavailable'), 422)
@@ -136,17 +115,9 @@ export const buildApp = (deps: HttpDeps): Hono => {
     try {
       outcome = await respondToRfqStatus(readers, { v: 1, type: 'rfq_status_request', rfq_id: rfqId })
     } catch (error) {
-      // 500, and deliberately NOT the 404 below — that is the whole point of
-      // catching here rather than letting this fall through. "We could not
-      // read" and "no swap has this id" are different facts, and a store that
-      // throws is the case where they are easiest to confuse: a client polling
-      // for its own swap would read a 404 as proof the swap does not exist and
-      // stop asking, about a swap that may be funded and live. Same discipline
-      // as `FundFigure.amount` being nullable rather than zero.
-      //
-      // The relay's outer handler logs a status throw the same way and simply
-      // sends nothing; this transport must answer, so it answers with the one
-      // status that does not assert anything about the swap.
+      // 500, NOT the 404 below: a client polling its own swap would read that
+      // as proof it never existed and stop asking, about a swap that may be
+      // funded and live.
       deps.onError?.('http status', error)
       return c.json({ v: 1, type: 'error' }, 500)
     }
