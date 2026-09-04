@@ -54,6 +54,7 @@ const evmFake = () =>
 
     isLockedAt: vi.fn().mockResolvedValue(true),
     blockTimestampAt: vi.fn().mockResolvedValue(0),
+    transactionOutcome: vi.fn().mockResolvedValue('pending'),
     claimCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
     lockCall: vi.fn(),
     refundCall: vi.fn(),
@@ -146,8 +147,53 @@ describe('the preimage is persisted BEFORE the ERC20 claim', () => {
     await service.tick('swap-1')
     expect(preimageAtBroadcast).toBe('ab'.repeat(32))
     const row = await store.get('swap-1')
-    expect(row.state).toBe('claimed')
+    expect(row.state).toBe('claiming')
     expect(row.evmClaimTxid).toBe('0xclaimtx')
+  })
+})
+
+describe('`claimed` is written for a claim that landed, not one that was sent', () => {
+  const driveToClaiming = async (over: Partial<EvmReceiveServiceDeps> = {}) => {
+    const built = await build({
+      arkadeLockupFunded: vi.fn().mockResolvedValue(true),
+      arkadePreimage: vi.fn().mockResolvedValue('ab'.repeat(32)),
+      ...over,
+    })
+    await built.store.transition('swap-1', 'quoted', 'awaiting_lock')
+    await built.store.transition('swap-1', 'awaiting_lock', 'locked')
+    await built.store.transition('swap-1', 'locked', 'funding_arkade')
+    await built.store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
+    await built.service.tick('swap-1')
+    return built
+  }
+
+  it('records `claimed` once the receipt says mined', async () => {
+    const evm = evmFake()
+    const { store, service } = await driveToClaiming({ evm })
+    ;(evm.transactionOutcome as ReturnType<typeof vi.fn>).mockResolvedValue('success')
+
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('claimed')
+  })
+
+  it('does not re-broadcast while the receipt is pending', async () => {
+    const broadcast = vi.fn().mockResolvedValue('0xclaimtx')
+    const { store, service } = await driveToClaiming({ broadcast })
+
+    await service.tick('swap-1')
+    expect(broadcast).toHaveBeenCalledTimes(1)
+    expect((await store.get('swap-1')).state).toBe('claiming')
+  })
+
+  it('sticks rather than reporting payment collected when the claim reverted', async () => {
+    const evm = evmFake()
+    const { store, service } = await driveToClaiming({ evm })
+    ;(evm.transactionOutcome as ReturnType<typeof vi.fn>).mockResolvedValue('reverted')
+
+    await service.tick('swap-1')
+    const row = await store.get('swap-1')
+    expect(row.state).toBe('stuck')
+    expect(row.failureReason).toContain('reverted')
   })
 })
 
@@ -165,6 +211,47 @@ describe('the unclaimed path', () => {
     const row = await store.get('swap-1')
     expect(row.state).toBe('refunded')
     expect(row.refundArkTxid).toBe('ark-refund-txid')
+  })
+
+  it('re-drives a refund a crash stranded before the covenant spend', async () => {
+    const refundArkade = vi.fn().mockResolvedValue('ark-refund-txid')
+    const { store, service } = await build({
+      arkadeLockupFunded: vi.fn().mockResolvedValue(true),
+      refundArkade,
+      now: () => NOW + 86_400,
+    })
+    await store.transition('swap-1', 'quoted', 'awaiting_lock')
+    await store.transition('swap-1', 'awaiting_lock', 'locked')
+    await store.transition('swap-1', 'locked', 'funding_arkade')
+    await store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
+    await store.transition('swap-1', 'awaiting_claim', 'refunding_arkade')
+
+    await service.tick('swap-1')
+    expect(refundArkade).toHaveBeenCalledTimes(1)
+    const row = await store.get('swap-1')
+    expect(row.state).toBe('refunded')
+    expect(row.refundArkTxid).toBe('ark-refund-txid')
+    // A refund that keeps throwing must not append an event per tick.
+    const selfLoops = (await store.history('swap-1')).filter((e) => e.from === e.to)
+    expect(selfLoops).toEqual([])
+  })
+
+  it('leaves a refund whose spend already landed alone', async () => {
+    const refundArkade = vi.fn().mockResolvedValue('ark-refund-txid')
+    const { store, service } = await build({
+      arkadeLockupFunded: vi.fn().mockResolvedValue(false),
+      refundArkade,
+      now: () => NOW + 86_400,
+    })
+    await store.transition('swap-1', 'quoted', 'awaiting_lock')
+    await store.transition('swap-1', 'awaiting_lock', 'locked')
+    await store.transition('swap-1', 'locked', 'funding_arkade')
+    await store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
+    await store.transition('swap-1', 'awaiting_claim', 'refunding_arkade')
+
+    await service.tick('swap-1')
+    expect(refundArkade).not.toHaveBeenCalled()
+    expect((await store.get('swap-1')).state).toBe('refunding_arkade')
   })
 })
 

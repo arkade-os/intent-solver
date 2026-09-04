@@ -27,6 +27,7 @@ const row = (over: Partial<EvmReceiveSwapRow> = {}): EvmReceiveSwapRow =>
     minConfirmations: 5,
     minAgeSeconds: 720,
     preimage: null,
+    evmClaimTxid: null,
     ...over,
   }) as EvmReceiveSwapRow
 
@@ -35,6 +36,7 @@ const seen = (over: Partial<EvmReceiveObservation> = {}): EvmReceiveObservation 
   evmLockConfirmations: 5,
   evmLockAgeSeconds: 720,
   arkadeLockupFunded: false,
+  evmClaimOutcome: 'pending',
   preimage: null,
   nowSeconds: NOW,
   evmBlockHeight: SAFE_HEIGHT,
@@ -136,6 +138,51 @@ describe('rule 4 - past the client timeout with a preimage, the money is gone', 
   })
 })
 
+describe('`claimed` means the ERC20 arrived', () => {
+  const PREIMAGE = 'ab'.repeat(32)
+  const claiming = (over: Partial<EvmReceiveSwapRow> = {}) =>
+    row({ state: 'claiming', preimage: PREIMAGE, ...over } as Partial<EvmReceiveSwapRow>)
+
+  it('broadcasts while nothing has been sent', () => {
+    expect(planEvmReceive(claiming(), seen())).toEqual({ do: 'claim_evm', preimage: PREIMAGE })
+  })
+
+  it('waits on a broadcast claim rather than re-sending it', () => {
+    const action = planEvmReceive(claiming({ evmClaimTxid: '0xtx' } as Partial<EvmReceiveSwapRow>), seen())
+    expect(action).toEqual({ do: 'wait' })
+  })
+
+  it('records only once the claim is mined', () => {
+    const action = planEvmReceive(
+      claiming({ evmClaimTxid: '0xtx' } as Partial<EvmReceiveSwapRow>),
+      seen({ evmClaimOutcome: 'success' }),
+    )
+    expect(action).toEqual({ do: 'record_claim' })
+  })
+
+  it('never records a reverted claim as `claimed`', () => {
+    const action = planEvmReceive(
+      claiming({ evmClaimTxid: '0xtx' } as Partial<EvmReceiveSwapRow>),
+      seen({ evmClaimOutcome: 'reverted' }),
+    )
+    expect(action).toEqual({
+      do: 'stick',
+      reason: 'the ERC20 claim transaction reverted; the solver has not been paid',
+    })
+  })
+
+  it('still sticks past the client timeout, whatever the receipt says', () => {
+    const action = planEvmReceive(
+      claiming({ evmClaimTxid: '0xtx' } as Partial<EvmReceiveSwapRow>),
+      seen({ evmClaimOutcome: 'pending', evmBlockHeight: EVM_TIMEOUT }),
+    )
+    expect(action).toEqual({
+      do: 'stick',
+      reason: 'preimage revealed but the client ERC20 timeout has passed',
+    })
+  })
+})
+
 describe('the unclaimed path', () => {
   it('refunds the solver own sats once the Arkade window closes with no preimage', () => {
     const action = planEvmReceive(row({ state: 'awaiting_claim' }), seen({ nowSeconds: REFUND_LOCKTIME }))
@@ -149,5 +196,15 @@ describe('the unclaimed path', () => {
   it('advances once the funded lockup is visible', () => {
     const action = planEvmReceive(row({ state: 'funding_arkade' }), seen({ arkadeLockupFunded: true }))
     expect(action).toEqual({ do: 'await_claim' })
+  })
+
+  it('re-drives a refund whose spend never went out', () => {
+    const action = planEvmReceive(row({ state: 'refunding_arkade' }), seen({ arkadeLockupFunded: true }))
+    expect(action).toEqual({ do: 'refund_arkade' })
+  })
+
+  it('waits once the refund has spent the covenant', () => {
+    const action = planEvmReceive(row({ state: 'refunding_arkade' }), seen({ arkadeLockupFunded: false }))
+    expect(action).toEqual({ do: 'wait' })
   })
 })

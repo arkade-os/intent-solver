@@ -52,8 +52,11 @@
 (*   - claiming is NOT truly parked: the pre-switch rule re-fires from it  *)
 (*     off the persisted preimage (plan:64), so the claim retries until it *)
 (*     records or the timeout sticks it.                                   *)
-(*   - refunding_arkade IS parked: no preimage, no re-drive, no rescue     *)
-(*     except the pre-switch rule if a preimage ever appears.              *)
+(*   - refunding_arkade is parked only in the NARROW window the re-drive   *)
+(*     cannot see: the spend LANDED and the recording CAS was lost.  While *)
+(*     the covenant reads unspent the planner re-drives it (plan:139-147), *)
+(*     which is what closed F4; once it is spent there is nothing left to  *)
+(*     lose, only a row to finish.                                         *)
 (*   - funding_arkade with a crash before fundArkade IS parked: the sats   *)
 (*     never went out, the lockup never appears, the row waits forever.    *)
 (* Liveness is stated so those two count as outcomes - finding F1.         *)
@@ -75,11 +78,14 @@
 (*       as the height clock refusing to advance while a claim is in       *)
 (*       flight against a still-locked contract.  The mutation lets the    *)
 (*       client's refund win the race and NoNetLoss fails.                 *)
-(*  (B3) `ClaimRecordsReceipt`.  Shipped truth: the row records `claimed`  *)
-(*       when the claim broadcast RETURNS a txid - send-only, no receipt   *)
-(*       (orchestrator:252-255, broadcast.ts:91-95).  Green waits for the  *)
-(*       claim to be mined before writing the word; the mutation writes    *)
-(*       it at send time and NoSilentLoss fails.  Finding F2.              *)
+(*  (B3) `ClaimRecordsReceipt`.  SHIPPED, not an open assumption           *)
+(*       (evmReceivePlan.ts:96-105): `claimed` is written only for a claim *)
+(*       whose own receipt says it MINED.  The row used to record it when  *)
+(*       the broadcast RETURNED a txid - send-only, no receipt             *)
+(*       (broadcast.ts:91-95) - so the terminal word could stand over a    *)
+(*       claim that reverted, reporting the solver paid when the sats had  *)
+(*       gone out for nothing.  The mutation records at send time and      *)
+(*       NoSilentLoss fails.  Finding F2, fixed.                           *)
 (*  (B4) `FundLandsPromptly`.  fundArkade is one awaited call in the       *)
 (*       shell; RULE 2's 60-block margin is what makes "the fund landed    *)
 (*       quickly" safe to assume.  The mutation lets the accept land at    *)
@@ -108,13 +114,13 @@ CONSTANTS
     FundLandsPromptly,  \* (B4) MUTATION: the fundArkade accept lands before
                        \*      the height runs the client's timeout down
                        \*      (TRUE) - FALSE is a hung funding RPC
-    RefundSpendAtomic,  \* (B5) MUTATION: the refundArkade call either throws
-                       \*      visibly or lands - CAS and covenant spend in
-                       \*      one step (TRUE).  FALSE splits them, and a
-                       \*      crash between strands the row with the
-                       \*      covenant unspent (F4): the patient client
-                       \*      claims the sats past its own timeout and takes
-                       \*      its ERC20 back too.
+    RefundSpendAtomic,  \* (B5) CAS and covenant spend in ONE step (TRUE) or
+                       \*      split, with a crash window between them
+                       \*      (FALSE, shipped)
+    RefundRedrivenWhileUnspent, \* (B5) MUTATION: the planner re-drives a
+                       \*      refunding_arkade row whose covenant is still
+                       \*      unspent (TRUE, shipped) or parks it forever
+                       \*      (FALSE, the pre-fix planner; F4 in RESULTS)
     AtomicAdmission,   \* the reservation re-check at insertQuote
     BreakDeadlineOrder \* (R1) MUTATION: collapse the height/wall margin
 
@@ -258,8 +264,12 @@ Urgent(s) ==
     \* The refund SPEND in flight holds both clocks: the (R1) margin is the
     \* window [RefundLocktime, EvmTimeoutH*FastCad) in which the solver's
     \* refund must land, so the client may not run a clock past it.
+    \* With the re-drive shipped the row is drivable whether or not a worker
+    \* is still standing at sentRefund, so a crash there does not release the
+    \* clock either.
     \/ (st[s] = "refunding_arkade" /\ conf[s] = {}
-        /\ \E w \in Workers : At(w, s, "sentRefund"))
+        /\ (RefundRedrivenWhileUnspent
+            \/ \E w \in Workers : At(w, s, "sentRefund")))
     \* The pre-switch interrupt: P readable means claim or stick NOW.
     \* `claiming` stops being urgent once the claim is in flight (claimSent)
     \* or mined: the sweep has done its part, and whether the broadcast
@@ -519,14 +529,12 @@ RecordClaimed(w, s) ==
     /\ UNCHANGED << arkFund, evm, evmConfirmed, claimSent, fundSends >>
 
 \* refund_arkade: no preimage and the Arkade window has closed
-\* (plan:120-123).  The CAS, then the spend, then the recording CAS.  (B5):
-\* shipped, refundArkade is one awaited RPC that resolves to the accepted
-\* txid - Arkade acceptance is final - so green attempts the spend in the
-\* SAME step as the CAS (it either throws visibly or lands).  The mutation
-\* splits them, and a crash in between strands the row with the covenant
-\* unspent - F4.  The planner never re-drives refunding_arkade
-\* (plan:126-127); the pre-switch rule is its only rescue, and it fires
-\* exactly when a preimage exists to rescue with.
+\* (plan:137-138).  The CAS, then the spend, then the recording CAS - three
+\* steps in the shipped shell, and RefundSpendAtomic = FALSE is that shipped
+\* split.  What used to make the split cost money was that nothing re-drove
+\* refunding_arkade, so a crash between the CAS and the spend stranded the
+\* row with the covenant unspent (F4).  RedriveArkRefund below is the fix;
+\* this action is only the first attempt.
 RefundArkade(w, s) ==
     /\ Saw(w, s, "awaiting_claim")
     /\ loc[w].res = "clear"
@@ -566,6 +574,27 @@ SubmitArkRefund(w, s) ==
     /\ UNCHANGED << clock, st, serverUp, evmHeight >>
     /\ UNCHANGED << arkFund, evm, evmConfirmed, claimSent, fundSends >>
 
+\* (B5) THE RE-DRIVE, and what closes F4.  planEvmReceive returns
+\* refund_arkade from refunding_arkade whenever the lockup is still funded
+\* (evmReceivePlan.ts:139-147), so the window the split opens is closed by
+\* the NEXT SWEEP rather than by folding the spend into the CAS: the shell
+\* skips the CAS it is already past and re-attempts the spend.  `conf = {}`
+\* is the unspent covenant the shipped planner sees as `arkadeLockupFunded`,
+\* and `res = "clear"` keeps the pre-switch rule's precedence - a preimage
+\* sends the row to the claim instead, exactly as from every other state.
+RedriveArkRefund(w, s) ==
+    /\ RefundRedrivenWhileUnspent
+    /\ Saw(w, s, "refunding_arkade")
+    /\ loc[w].res = "clear"
+    /\ conf[s] = {}
+    /\ IF serverUp
+       THEN /\ SpendAccepted(s, "solverRefund")
+            /\ Advance(w, "sentRefund", "none")
+       ELSE /\ UNCHANGED conf
+            /\ Park(w)
+    /\ UNCHANGED << clock, st, serverUp >>
+    /\ UNCHANGED LrVars
+
 \* The recording CAS.  A crash before it leaves refunding_arkade parked
 \* with the outcome already final on the covenant.
 RecordRefunded(w, s) ==
@@ -598,7 +627,7 @@ DriveRow(w, s) ==
        InsertQuote(w, s)   \/ RefuseQuoted(w, s)
     \/ FundArkade(w, s)    \/ AwaitClaim(w, s)
     \/ ClaimEvm(w, s)      \/ StickLate(w, s)
-    \/ RefundArkade(w, s)
+    \/ RefundArkade(w, s)  \/ RedriveArkRefund(w, s)
 
 PushChain(w, s) ==
        ArkFundLands(w, s)
@@ -690,61 +719,81 @@ ERSpendKinds == { "clientClaim", "solverRefund" }
 (* THE GREEN RUN                                                           *)
 (*                                                                         *)
 (* EvmReceive.cfg: all assumptions at their safe settings.  GREEN:         *)
-(* 3,115,999 states generated, 427,805 distinct, depth 47, 1min 10s        *)
+(* 2,993,061 states generated, 410,742 distinct, depth 47, 1min 38s        *)
 (* (-workers 4).  All nine invariants, ForwardOnly, and Liveness.          *)
+(* Re-run for the F2 and F4 fixes.  It was 3,115,999/427,805 before: the   *)
+(* re-drive removes the stranded refunding_arkade states that used to be   *)
+(* reachable and left the row with nowhere to go.                          *)
 (*                                                                         *)
 (* FINDINGS                                                                *)
 (*                                                                         *)
-(* F1  THE PARKED STATES.  The planner maps refunding_arkade to wait and   *)
-(*     funding_arkade to "observed lockup or wait" (evmReceivePlan.ts:     *)
-(*     117-127): a crash before fundArkade, or anywhere in the refund      *)
-(*     drive, parks the row forever - NON_TERMINAL and holding cap.        *)
-(*     Liveness accepts the parking (EvmReceive_Parked.cfg shows the       *)
-(*     strict statement is false); the money invariants bound the cost.    *)
-(*     `claiming` is NOT parked: the pre-switch rule re-drives it off the  *)
-(*     persisted preimage.                                                 *)
-(* F2  (B3) THE SEND-TIME RECORD.  `claimed` is written when the claim     *)
-(*     broadcast returns a txid - send-only, no receipt                    *)
-(*     (evmOrchestrator.ts:252-255, broadcast.ts:91-95).  The terminal     *)
-(*     word can stand over a claim that never landed.                      *)
-(*     EvmReceive_NoReceipt.cfg: NoSilentLoss, depth 16.                   *)
+(* F1  THE PARKED STATES.  The planner maps funding_arkade to "observed    *)
+(*     lockup or wait" (evmReceivePlan.ts:131-132), so a crash before      *)
+(*     fundArkade parks the row forever - NON_TERMINAL and holding cap.    *)
+(*     refunding_arkade is no longer in that company except in the one     *)
+(*     window the re-drive cannot see (spend landed, recording CAS lost),  *)
+(*     which costs a row rather than money.  Liveness accepts both         *)
+(*     (EvmReceive_Parked.cfg shows the strict statement is false); the    *)
+(*     money invariants bound the cost.  `claiming` is NOT parked: the     *)
+(*     pre-switch rule re-drives it off the persisted preimage.            *)
+(* F2  (B3) THE SEND-TIME RECORD - FIXED.  `claimed` USED TO be written    *)
+(*     when the claim broadcast returned a txid - send-only, no receipt    *)
+(*     (broadcast.ts:91-95) - so the terminal word could stand over a      *)
+(*     claim that reverted while the solver's sats were already out.  The  *)
+(*     planner now reads the receipt (evmReceivePlan.ts:96-105) and sticks *)
+(*     on a revert, so EvmReceive_NoReceipt.cfg is a genuine mutation - it *)
+(*     deletes the shipped check - rather than a record of shipped         *)
+(*     behaviour.                                                          *)
 (* F3  (B4) THE LATE FUND.  RULE 2's 60-block margin budgets BOTH the      *)
 (*     fund landing and the claim landing; a fundArkade accept that lands  *)
 (*     only at the client's timeout height lets the client refund its      *)
 (*     ERC20 and claim the freshly-landed sats in one breath.              *)
 (*     EvmReceive_LateFund.cfg: NoNetLoss, depth 21.                       *)
-(* F4  (B5) THE STRANDED REFUND.  refunding_arkade is never re-driven, so  *)
-(*     a crash between the refund CAS and the refundArkade spend leaves    *)
-(*     the covenant unspent AND the row parked; the patient client waits   *)
-(*     for its own timeout, claims the sats, and takes its ERC20 back -    *)
-(*     the row sticks loudly (RULE 4) and the money is still gone.         *)
-(*     EvmReceive_RefundStrand.cfg: NoNetLoss, depth 26.                   *)
+(* F4  (B5) THE STRANDED REFUND - FIXED.  refunding_arkade USED TO be     *)
+(*     parked, so a crash between the refund CAS and the refundArkade      *)
+(*     spend left the covenant unspent AND the row unwatched; the patient  *)
+(*     client waited for its own timeout, claimed the sats, and took its   *)
+(*     ERC20 back - the row stuck loudly (RULE 4) and the money was still  *)
+(*     gone.  The planner now re-drives the refund while the lockup reads  *)
+(*     funded (evmReceivePlan.ts:139-147), so                              *)
+(*     EvmReceive_RefundStrand.cfg is a genuine mutation - it parks the    *)
+(*     state again - and EvmReceive_LostSpend.cfg is its control: the same *)
+(*     split CAS-then-spend, the shipped re-drive, green.                  *)
 (*                                                                         *)
 (* MUTATION CHECKS - RESULTS                                               *)
 (*                                                                         *)
 (*   EvmReceive_DoubleFund.cfg    FundCommitFirst = FALSE                  *)
-(*                                NoDoubleFund violated, depth 9           *)
-(*                                (3,223/725)                              *)
-(*   EvmReceive_NoReceipt.cfg     ClaimRecordsReceipt = FALSE (shipped)    *)
+(*                                NoDoubleFund violated, depth 10          *)
+(*                                (3,369/775)                              *)
+(*   EvmReceive_NoReceipt.cfg     ClaimRecordsReceipt = FALSE (mutation of *)
+(*                                a SHIPPED guard since the F2 fix)        *)
 (*                                NoSilentLoss violated, depth 16          *)
-(*                                (72,280/11,905)                          *)
+(*                                (78,840/12,934)                          *)
 (*   EvmReceive_ClaimRace.cfg     ClaimLandsPromptly = FALSE               *)
 (*                                NoNetLoss violated, depth 26             *)
-(*                                (762,788/117,273)                        *)
+(*                                (752,719/115,395).  STILL OPEN.          *)
 (*   EvmReceive_LateFund.cfg      FundLandsPromptly = FALSE                *)
 (*                                NoNetLoss violated, depth 21             *)
-(*                                (268,386/43,170)                         *)
-(*   EvmReceive_RefundStrand.cfg  RefundSpendAtomic = FALSE (shipped       *)
-(*                                split)  NoNetLoss violated, depth 26     *)
-(*                                (781,930/120,211)                        *)
+(*                                (269,565/43,305).  STILL OPEN.           *)
+(*   EvmReceive_RefundStrand.cfg  RefundRedrivenWhileUnspent = FALSE over  *)
+(*                                RefundSpendAtomic = FALSE (mutation of a *)
+(*                                SHIPPED guard since the F4 fix)          *)
+(*                                NoNetLoss violated, depth 26             *)
+(*                                (779,685/119,913)                        *)
+(*   EvmReceive_LostSpend.cfg     RefundRedrivenWhileUnspent = TRUE over   *)
+(*                                RefundSpendAtomic = FALSE - the F4       *)
+(*                                CONTROL.  GREEN: 3,686,017/501,266,      *)
+(*                                depth 48, Liveness included.  The re-    *)
+(*                                drive really does close the split's      *)
+(*                                crash window, and this is the artifact.  *)
 (*   EvmReceive_Overexposed.cfg   AtomicAdmission = FALSE, MaxExposed = 1  *)
 (*                                ExposureBounded violated, depth 7        *)
-(*                                (594/199); the green cfg is the control  *)
+(*                                (651/209); the green cfg is the control  *)
 (*   EvmReceive_BrokenMargin.cfg  BreakDeadlineOrder = TRUE,               *)
 (*                                RefundLocktime = 4: NoNetLoss violated,  *)
-(*                                depth 23 (373,787/60,078)                *)
+(*                                depth 22 (371,938/59,828)                *)
 (*   EvmReceive_Parked.cfg        LivenessStrict artifact: violated,       *)
-(*                                3,115,999/427,805, 2min 58s - F1 named   *)
+(*                                2,993,061/410,742, 4min 04s - F1 named   *)
 (*                                                                         *)
 (* KNOWN-VACUOUS IN THE GREEN CFG (coverage run, -coverage 1):             *)
 (*                                                                         *)

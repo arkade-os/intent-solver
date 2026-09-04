@@ -19,7 +19,7 @@ import {
   type EvmReceiveObservation,
 } from '@arkade-os/solver-core/core/evmReceivePlan.js'
 import type { EvmReceiveSwapRow, EvmReceiveSwapStore } from '../db/evmReceiveSwaps.js'
-import type { EvmCall, EvmHtlcBackend } from '@arkade-os/solver-core/ports/evm.js'
+import type { EvmCall, EvmHtlcBackend, EvmTransactionOutcome } from '@arkade-os/solver-core/ports/evm.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
@@ -168,6 +168,17 @@ export class EvmReceiveSwapService {
     return this.deps.now ?? nowSeconds
   }
 
+  /** Degraded as the send shell degrades its refund read: a node that cannot answer is not a failure. */
+  private async claimOutcome(row: EvmReceiveSwapRow): Promise<EvmTransactionOutcome> {
+    if (row.evmClaimTxid === null) return 'pending'
+    try {
+      return await this.deps.evm.transactionOutcome(row.evmClaimTxid)
+    } catch (error) {
+      this.deps.onTickError?.(row.id, error)
+      return 'pending'
+    }
+  }
+
   /**
    * One pass, for the reason the send shell gives: a planner shown facts from
    * two different moments could conclude something true of neither.
@@ -178,10 +189,11 @@ export class EvmReceiveSwapService {
    */
   private async observe(row: EvmReceiveSwapRow): Promise<EvmReceiveObservation> {
     const lock = this.deps.lockFor(row)
-    const [present, funded, height] = await Promise.all([
+    const [present, funded, height, claimOutcome] = await Promise.all([
       this.deps.evm.isLocked(lock),
       this.deps.arkadeLockupFunded(row),
       this.deps.blockHeight(),
+      this.claimOutcome(row),
     ])
     // Only worth asking once the lockup exists to be claimed FROM.
     const preimage = row.preimage ?? (funded ? await this.deps.arkadePreimage(row) : null)
@@ -212,6 +224,7 @@ export class EvmReceiveSwapService {
       evmLockConfirmations: depth.confirmations,
       evmLockAgeSeconds: depth.ageSeconds,
       arkadeLockupFunded: funded,
+      evmClaimOutcome: claimOutcome,
       preimage,
       nowSeconds: this.now(),
       evmBlockHeight: height,
@@ -260,12 +273,21 @@ export class EvmReceiveSwapService {
         const txid = await this.deps.broadcast(
           this.deps.evm.claimCall(preimage, this.deps.lockFor(await store.get(row.id))),
         )
-        await store.transition(row.id, 'claiming', 'claimed', { evm_claim_txid: txid })
+        // PATCHED, not transitioned: `claiming` means "awaiting outcome".
+        await store.patch(row.id, { evm_claim_txid: txid })
         return false
       }
 
+      case 'record_claim':
+        await store.transition(row.id, 'claiming', 'claimed')
+        return false
+
       case 'refund_arkade': {
-        await store.transition(row.id, row.state, 'refunding_arkade')
+        // Skipped when the row is already here: the re-drive is past this CAS,
+        // and repeating it would append a self-loop edge per tick.
+        if (row.state !== 'refunding_arkade') {
+          await store.transition(row.id, row.state, 'refunding_arkade')
+        }
         const txid = await this.deps.refundArkade(await store.get(row.id))
         await store.transition(row.id, 'refunding_arkade', 'refunded', { refund_ark_txid: txid })
         return false

@@ -22,8 +22,11 @@
  *    it is refused, never funded against at a stale rate — and an unlocked
  *    quote is refused at that deadline rather than at the refund locktime, so
  *    the row stops holding capacity against the house cap.
+ * 6. `claimed` means the ERC20 arrived, so only a mined claim earns it. The
+ *    sats are already out, so a row saying it over a reverted claim lies.
  */
 
+import type { EvmTransactionOutcome } from '../ports/evm.js'
 import type { EvmReceiveSwapState } from './evmSwapState.js'
 
 /**
@@ -39,6 +42,8 @@ export interface EvmReceivePlanRow {
   minConfirmations: number
   minAgeSeconds: number
   preimage: string | null
+  /** Set once the claim is broadcast; the only handle on its receipt. */
+  evmClaimTxid: string | null
 }
 
 /** How much of the client's timeout must remain before the solver commits sats. */
@@ -51,6 +56,8 @@ export interface EvmReceiveObservation {
   evmLockAgeSeconds: number
   /** Is the solver's Arkade lockup funded and visible? */
   arkadeLockupFunded: boolean
+  /** What became of the solver's own claim broadcast. `pending` until read. */
+  evmClaimOutcome: EvmTransactionOutcome
   /** The preimage, once the client's Arkade claim has revealed it. */
   preimage: string | null
   nowSeconds: number
@@ -65,6 +72,8 @@ export type EvmReceiveAction =
   | { do: 'await_claim' }
   /** Claim the client's ERC20 with the revealed preimage. This is the payment. */
   | { do: 'claim_evm'; preimage: string }
+  /** The claim is mined; the row may finally say the solver was paid. */
+  | { do: 'record_claim' }
   /** Take the solver's own sats back — the client never claimed. */
   | { do: 'refund_arkade' }
   | { do: 'refuse'; reason: string }
@@ -86,6 +95,14 @@ export const planEvmReceive = (row: EvmReceivePlanRow, seen: EvmReceiveObservati
       // RULE 4. The client's refund path is live. The sats are gone and the
       // tokens may be too; only a human can establish who got there first.
       return { do: 'stick', reason: 'preimage revealed but the client ERC20 timeout has passed' }
+    }
+    // RULE 6. Re-sending on the row alone burns a nonce per tick for one payment.
+    if (row.evmClaimTxid !== null) {
+      if (seen.evmClaimOutcome === 'success') return { do: 'record_claim' }
+      if (seen.evmClaimOutcome === 'reverted') {
+        return { do: 'stick', reason: 'the ERC20 claim transaction reverted; the solver has not been paid' }
+      }
+      return { do: 'wait' }
     }
     return { do: 'claim_evm', preimage }
   }
@@ -136,8 +153,13 @@ export const planEvmReceive = (row: EvmReceivePlanRow, seen: EvmReceiveObservati
       // so the solver takes its own sats back.
       return seen.nowSeconds >= row.refundLocktime ? { do: 'refund_arkade' } : { do: 'wait' }
 
-    case 'claiming':
     case 'refunding_arkade':
+      // RE-DRIVEN, not parked: the spend is a step after this CAS, and a crash
+      // between left the covenant unspent with nothing watching. A funded
+      // lockup HERE is that unspent covenant.
+      return seen.arkadeLockupFunded ? { do: 'refund_arkade' } : { do: 'wait' }
+
+    case 'claiming':
       return { do: 'wait' }
 
     default:
