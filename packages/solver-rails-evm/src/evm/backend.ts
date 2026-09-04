@@ -178,6 +178,19 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
       return Number(quantityOf((header as { timestamp?: unknown }).timestamp, 'eth_getBlockByNumber timestamp'))
     },
 
+    async transactionOutcome(txid) {
+      const receipt = await rpc('eth_getTransactionReceipt', [txid])
+      // No receipt is "not mined here yet", which a node also answers for a
+      // hash it has never seen. Either way nothing failed, so this must not
+      // read as a revert.
+      if (receipt === null || receipt === undefined) return 'pending'
+      // `quantityOf` rather than a comparison against '0x1': a receipt with no
+      // `status` (pre-Byzantium, or a node answering something else entirely)
+      // throws rather than being read as success.
+      const status = quantityOf((receipt as { status?: unknown }).status, 'eth_getTransactionReceipt status')
+      return status === 0n ? 'reverted' : 'success'
+    },
+
     async allowance(token, owner) {
       const data = encodeAllowance(owner, contractAddress)
       const word = bytesOfHex(await rpc('eth_call', [{ to: hexOf(token), data: hexOf(data) }, 'latest']), 'allowance()')

@@ -168,6 +168,43 @@ describe('findClaimPreimage', () => {
   })
 })
 
+describe('transactionOutcome', () => {
+  it('asks for the receipt of the hash it was given', async () => {
+    const { backend, calls } = backendWith({ eth_getTransactionReceipt: { status: '0x1' } })
+    await backend.transactionOutcome('0xabc')
+    expect(calls).toEqual([{ method: 'eth_getTransactionReceipt', params: ['0xabc'] }])
+  })
+
+  it('reads a zero status as reverted and a one status as success', async () => {
+    // The whole point of the read. `0x0` is a transaction that mined and did
+    // nothing, which for a lock means no lock exists — indistinguishable from
+    // pending by any other read this backend offers.
+    const reverted = backendWith({ eth_getTransactionReceipt: { status: '0x0' } })
+    await expect(reverted.backend.transactionOutcome('0xabc')).resolves.toBe('reverted')
+    const ok = backendWith({ eth_getTransactionReceipt: { status: '0x1' } })
+    await expect(ok.backend.transactionOutcome('0xabc')).resolves.toBe('success')
+  })
+
+  it('reads a missing receipt as pending, never as a revert', async () => {
+    // A node answers null both for a transaction still in the mempool and for a
+    // hash it has never seen. Neither is a failure, and treating either as one
+    // would abandon a swap on a lagging node.
+    for (const absent of [null, undefined]) {
+      const { backend } = backendWith({ eth_getTransactionReceipt: absent })
+      await expect(backend.transactionOutcome('0xabc')).resolves.toBe('pending')
+    }
+  })
+
+  it('refuses a receipt with no readable status rather than assuming success', async () => {
+    // Assuming success is the dangerous default: it restores exactly the
+    // blindness this read exists to remove, and does it silently.
+    for (const bad of [{}, { status: null }, { status: 1 }, { status: 'ok' }]) {
+      const { backend } = backendWith({ eth_getTransactionReceipt: bad })
+      await expect(backend.transactionOutcome('0xabc')).rejects.toThrow(/expected a 0x quantity/)
+    }
+  })
+})
+
 describe('the write half is built, never sent', () => {
   it('returns calldata addressed to the configured contract', () => {
     const { backend } = backendWith({})

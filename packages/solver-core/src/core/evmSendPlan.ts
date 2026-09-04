@@ -9,7 +9,7 @@
  * derived from a row plus what was observed, so every ordering rule that can
  * lose funds is a unit test with no fixtures at all.
  *
- * THE FOUR RULES THAT COST MONEY, and each is a test:
+ * THE RULES THAT COST MONEY, and each is a test:
  *
  * 1. Never lock the ERC20 before the Arkade lockup is funded. The solver's
  *    tokens would be committed against nothing.
@@ -26,6 +26,9 @@
  *    fixed rate decays further against the solver. And a quote that expired
  *    unfunded is refused at that deadline rather than at the refund locktime
  *    hours later: until it dies, the row holds capacity against the house cap.
+ * 6. A lock transaction that MINED AND FAILED created no lock, and no amount of
+ *    waiting will. Absent-and-reverted is a different fact from absent-and-
+ *    pending, and only the receipt carries it.
  */
 
 import type { EvmSendSwapState } from './evmSwapState.js'
@@ -53,6 +56,13 @@ export interface EvmSendObservation {
   arkadeLockupFunded: boolean
   /** Does the solver's ERC20 lock exist in the contract? */
   evmLockPresent: boolean
+  /**
+   * Is the lock transaction the row recorded MINED AND FAILED?
+   *
+   * False also means "not known to have failed" - a receipt still pending, or
+   * one the node refused to serve. @see EvmHtlcBackend.transactionOutcome
+   */
+  evmLockReverted: boolean
   /** Confirmations on the lock, and how long it has been buried. */
   evmLockConfirmations: number
   evmLockAgeSeconds: number
@@ -129,9 +139,16 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
 
     case 'locking_evm':
       // The lock call went out. Absent means it has not landed YET or it
-      // reverted - indistinguishable from here, and both are "keep waiting"
-      // until the refund timeout makes it a refund.
+      // reverted, and the receipt is the only thing that tells the two apart.
       if (!seen.evmLockPresent) {
+        // RULE 6. A mined revert created no lock, so waiting cannot make one
+        // appear: the row would hold capacity for the whole timeout and then
+        // refund a swap key the contract never held - a refund that reverts in
+        // turn, recorded as `refunded`. Terminal and named instead, so the
+        // cause is on the row rather than inferred from a silent timeout.
+        if (seen.evmLockReverted) {
+          return { do: 'stick', reason: 'the ERC20 lock transaction reverted; no lock was created' }
+        }
         return seen.evmBlockHeight >= row.evmTimeout ? { do: 'refund_evm' } : { do: 'wait' }
       }
       // Depth AND age, both required. @see evm/config.ts - on a rollup a lock

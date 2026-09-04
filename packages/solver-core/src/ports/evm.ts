@@ -38,6 +38,14 @@ export interface EvmCall {
 export type JsonRpc = (method: string, params: readonly unknown[]) => Promise<unknown>
 
 /**
+ * What became of a transaction the solver broadcast.
+ *
+ * `pending` is "no answer yet", and covers a node that has simply not seen the
+ * hash — never evidence that anything failed.
+ */
+export type EvmTransactionOutcome = 'pending' | 'success' | 'reverted'
+
+/**
  * The lock as the `ERC20Swap` contract keys it.
  *
  * The contract stores `swaps[keccak(preimageHash, amount, token, claim, refund,
@@ -105,6 +113,16 @@ export interface EvmHtlcBackend {
   isLockedAt(lock: Erc20SwapLock, block: bigint): Promise<boolean>
   /** A block's own timestamp, for the age half of the same policy. */
   blockTimestampAt(block: bigint): Promise<number>
+  /**
+   * What one of OUR OWN broadcasts did, by its transaction hash.
+   *
+   * The only read here that can tell a REVERTED money call from one that has
+   * not landed. Every other read asks the contract about a lock, and a revert
+   * leaves no lock — the same answer as pending, and as never sent. A caller
+   * that cannot tell them apart waits out the whole timeout on a swap that
+   * failed in its first block.
+   */
+  transactionOutcome(txid: string): Promise<EvmTransactionOutcome>
   /**
    * What this contract may currently move of `token` on `owner`'s behalf.
    *

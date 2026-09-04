@@ -1,5 +1,5 @@
 /**
- * The four ordering rules that can lose funds, one describe block each.
+ * The ordering rules that can lose funds, one describe block each.
  *
  * Pure inputs, no fixtures: that is the whole reason the decision was split out
  * of the service. Every case below is a scenario that costs real money if the
@@ -31,6 +31,7 @@ const row = (over: Partial<EvmSendSwapRow> = {}): EvmSendSwapRow =>
 const seen = (over: Partial<EvmSendObservation> = {}): EvmSendObservation => ({
   arkadeLockupFunded: false,
   evmLockPresent: false,
+  evmLockReverted: false,
   evmLockConfirmations: 0,
   evmLockAgeSeconds: 0,
   preimage: null,
@@ -155,13 +156,55 @@ describe('the confirmation policy is depth AND age', () => {
     expect(action).toEqual({ do: 'await_claim' })
   })
 
-  it('treats an absent lock as not-yet rather than reverted, until the timeout', () => {
-    // A revert and a pending call are indistinguishable from here. Both mean
-    // keep waiting; only the timeout turns it into a refund.
+  it('treats an absent lock as not-yet while nothing says otherwise, until the timeout', () => {
+    // Absent on its own is still "keep waiting"; only the timeout turns it into
+    // a refund. What separates this from rule 6 below is the receipt.
     expect(planEvmSend(row({ state: 'locking_evm' }), seen())).toEqual({ do: 'wait' })
     expect(planEvmSend(row({ state: 'locking_evm' }), seen({ evmBlockHeight: EVM_TIMEOUT }))).toEqual({
       do: 'refund_evm',
     })
+  })
+})
+
+describe('rule 6 - a mined revert created no lock', () => {
+  const reverted = { do: 'stick', reason: 'the ERC20 lock transaction reverted; no lock was created' }
+
+  it('sticks at once rather than waiting out the timeout', () => {
+    // The cost of the old answer: the row holds house capacity for the entire
+    // timeout on a swap that failed in its first block.
+    expect(planEvmSend(row({ state: 'locking_evm' }), seen({ evmLockReverted: true }))).toEqual(reverted)
+  })
+
+  it('does not refund a lock the contract never held', () => {
+    // THE EXPENSIVE ONE. At the timeout the old answer was `refund_evm`, and
+    // the shell records `refunded` on the send rather than on the outcome - so
+    // a refund that itself reverts leaves a terminal row claiming the ERC20
+    // came back.
+    const action = planEvmSend(
+      row({ state: 'locking_evm' }),
+      seen({ evmLockReverted: true, evmBlockHeight: EVM_TIMEOUT }),
+    )
+    expect(action).toEqual(reverted)
+  })
+
+  it('is not consulted while the lock is present', () => {
+    // A lock that exists settles the question whatever any receipt says; the
+    // depth policy owns it from here.
+    const action = planEvmSend(
+      row({ state: 'locking_evm' }),
+      seen({ evmLockPresent: true, evmLockReverted: true, evmLockConfirmations: 5, evmLockAgeSeconds: 720 }),
+    )
+    expect(action).toEqual({ do: 'await_claim' })
+  })
+
+  it('still yields to a revealed preimage', () => {
+    // RULE 4 outranks it, as it outranks everything: a preimage cannot exist
+    // without a lock, so seeing one means the revert reading is the wrong fact.
+    const action = planEvmSend(
+      row({ state: 'locking_evm' }),
+      seen({ evmLockReverted: true, preimage: 'cd'.repeat(32) }),
+    )
+    expect(action).toEqual({ do: 'claim_arkade', preimage: 'cd'.repeat(32) })
   })
 })
 
