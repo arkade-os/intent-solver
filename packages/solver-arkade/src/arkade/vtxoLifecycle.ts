@@ -333,10 +333,11 @@ export interface RenewVtxoDeps<V extends RenewableVtxo> {
   /**
    * The pool shape a renewal should carve its proceeds into.
    *
-   * Optional: absent means one output, which is exactly what this did before.
-   * A deployment that has not configured a target renews as it always has.
+   * Optional: absent means one output, unless the batch is past the ceiling.
    */
   poolTarget?: readonly PoolRung[]
+  /** Folded into `VtxoLifecycleReport.failures`, where the all-refused case throws (#166). */
+  warn?(message: string): void
   /** Wall clock, unix MILLISECONDS. Injected so a test can place the deadline. */
   nowMs(): number
 }
@@ -554,6 +555,12 @@ export const renewExpiringVtxos = async <V extends RenewableVtxo>(deps: RenewVtx
   // coins that make the cut rather than whichever the indexer listed first.
   const ordered = [...due].sort((a, b) => (batchExpiryMs(a) ?? Infinity) - (batchExpiryMs(b) ?? Infinity))
 
+  // WHAT THE BATCH AS A WHOLE MAY CARRY. The ceiling bounds each OUTPUT and the
+  // split emits several, so judging the running total against a single one capped
+  // every pass at one ceiling's worth (#27). Bounded, not dropped: `settle` pays
+  // the operator whatever the outputs do not claim.
+  const capacity = vtxoMaxAmount < 0n ? -1n : BigInt(MAX_RENEWAL_OUTPUTS) * (vtxoMaxAmount + outputFeeOn(vtxoMaxAmount))
+
   const inputs: V[] = []
   let gross = 0n
   let refusedByCeiling = 0
@@ -562,16 +569,16 @@ export const renewExpiringVtxos = async <V extends RenewableVtxo>(deps: RenewVtx
     const fee = BigInt(estimator.evalOffchainInput(offchainInputFeeParams(vtxo)).satoshis)
     // Renewing a coin worth less than its own fee destroys value outright.
     if (fee >= BigInt(vtxo.value)) continue
-    const net = gross + BigInt(vtxo.value) - fee
-    // Skip rather than stop: a smaller coin further down may still fit under
-    // the ceiling. Judged on the post-output-fee amount, which is what the
-    // server actually measures.
+    const net = BigInt(vtxo.value) - fee
+    // Judged ALONE: refused on every pass until something cuts it into pieces.
     if (vtxoMaxAmount >= 0n && net - outputFeeOn(net) > vtxoMaxAmount) {
       refusedByCeiling += 1
       continue
     }
+    // A real deferral, unlike the refusal above: the next pass starts empty.
+    if (capacity >= 0n && gross + net > capacity) continue
     inputs.push(vtxo)
-    gross = net
+    gross += net
   }
   if (refusedByCeiling > 0 && inputs.length === 0) {
     // `gross` never left zero, so each refusal was the coin judged ALONE and no
@@ -582,6 +589,14 @@ export const renewExpiringVtxos = async <V extends RenewableVtxo>(deps: RenewVtx
     )
   }
   if (inputs.length === 0) throw new Error('No VTXOs available to renew: every expiring coin is below its own fee')
+
+  // Said not thrown: the settlement below must still happen. Silent in #166 (#27).
+  if (refusedByCeiling > 0) {
+    deps.warn?.(
+      `${refusedByCeiling} expiring coin(s) exceed the operator's ${vtxoMaxAmount} sat per-output ceiling on their ` +
+        'own and were left out of this renewal; split the float so each piece lands under it',
+    )
+  }
 
   // SPLIT DURING THE SETTLEMENT, not after it. `settle` takes a list of outputs,
   // so the float can come back already in the shape that lets it fund several
@@ -598,6 +613,7 @@ export const renewExpiringVtxos = async <V extends RenewableVtxo>(deps: RenewVtx
     dust,
     outputFeeOn,
     maxOutputs: MAX_RENEWAL_OUTPUTS,
+    maxAmount: vtxoMaxAmount,
   })
   // An empty target, or too little to make even one rung, yields exactly one
   // piece — the behaviour this had before the split existed.

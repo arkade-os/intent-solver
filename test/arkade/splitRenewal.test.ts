@@ -29,8 +29,8 @@ const FEES = {
   awkward: (a: bigint) => (a < 100_000n ? 500n : a / 200n + 17n),
 } as const
 
-const split = (gross: bigint, outputFeeOn: (a: bigint) => bigint, maxOutputs = 8, target = TARGET) =>
-  splitRenewalOutputs({ gross, target, dust: DUST, outputFeeOn, maxOutputs })
+const split = (gross: bigint, outputFeeOn: (a: bigint) => bigint, maxOutputs = 8, target = TARGET, maxAmount = -1n) =>
+  splitRenewalOutputs({ gross, target, dust: DUST, outputFeeOn, maxOutputs, maxAmount })
 
 describe('the invariant: never allocate more than there was', () => {
   it.each(Object.entries(FEES))('holds for a %s fee, across sizes', (_name, fee) => {
@@ -63,6 +63,53 @@ describe('the invariant: never allocate more than there was', () => {
   it('emits nothing at all when there is nothing to divide', () => {
     expect(split(0n, FEES.flat)).toEqual([])
     expect(split(-1n, FEES.flat)).toEqual([])
+  })
+})
+
+describe('the invariant: no piece above the operator’s ceiling', () => {
+  const CEILING = 1_000_000n
+
+  it.each(Object.entries(FEES))('holds for a %s fee, across sizes and targets', (_name, fee) => {
+    // What renewal's own bound permits: `MAX_RENEWAL_OUTPUTS` ceilings' worth.
+    const capacity = 8n * (CEILING + fee(CEILING))
+    for (const target of [[], TARGET, [{ size: 2_000_000, want: 4 }], [{ size: 400, want: 7 }]]) {
+      for (const gross of [330n, 5_000n, 999_999n, 1_000_001n, 2_500_000n, 4_950_000n, capacity]) {
+        const pieces = split(gross, fee, 8, target, CEILING)
+        expect(pieces.length).toBeLessThanOrEqual(8)
+        for (const piece of pieces) {
+          expect(piece).toBeLessThanOrEqual(CEILING)
+          expect(piece).toBeGreaterThanOrEqual(DUST)
+        }
+        const spent = pieces.reduce((sum, p) => sum + p + fee(p), 0n)
+        expect(spent).toBeLessThanOrEqual(gross)
+        if (pieces.length > 0) expect(gross - spent).toBeLessThan(DUST + fee(DUST))
+      }
+    }
+  })
+
+  it('cuts a gross well past the ceiling into ceiling-sized pieces', () => {
+    expect(split(2_500_000n, FEES.zero, 8, [], CEILING)).toEqual([1_000_000n, 1_000_000n, 500_000n])
+  })
+
+  it('skips a configured rung the server would refuse outright', () => {
+    const pieces = split(5_000_000n, FEES.zero, 8, [{ size: 2_000_000, want: 2 }], CEILING)
+    expect(pieces.every((p) => p <= CEILING)).toBe(true)
+    expect(pieces.reduce((a, b) => a + b, 0n)).toBe(5_000_000n)
+  })
+
+  it('leaves the remainder the outputs it still needs rather than burning it', () => {
+    const pieces = split(8_000_000n, FEES.zero, 8, [{ size: 100_000, want: 7 }], CEILING)
+    expect(pieces.reduce((a, b) => a + b, 0n)).toBe(8_000_000n)
+    expect(pieces.every((p) => p <= CEILING)).toBe(true)
+  })
+
+  it('leaves the no-ceiling shape exactly as it was', () => {
+    expect(split(4_000_000n, FEES.zero, 8, [], -1n)).toEqual([4_000_000n])
+    expect(split(2_500_000n, FEES.zero, 8, [{ size: 1_000_000, want: 2 }], -1n)).toEqual([
+      1_000_000n,
+      1_000_000n,
+      500_000n,
+    ])
   })
 })
 

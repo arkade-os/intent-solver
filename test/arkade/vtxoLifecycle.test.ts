@@ -815,16 +815,78 @@ describe('renewExpiringVtxos', () => {
     expect(settled[0]!.output.amount).toBe(990_000n)
   })
 
-  it('skips a coin that would push the output past the per-output ceiling', async () => {
+  /** Judging the running total instead renewed two of these ten, pass after pass (#27). */
+  it('renews a whole float of half-ceiling coins in ONE pass', async () => {
+    const many = Array.from({ length: 10 }, (_, i) => coin(500_000, 10 * HOUR, (9 - i * 0.01) * HOUR))
+    const { deps: d, settled } = renewDeps(many, {
+      serverInfo: async () => ({ ...ONE_PERCENT, vtxoMaxAmount: 1_000_000n }),
+    })
+    await renewExpiringVtxos(d)
+    expect(settled[0]!.inputs).toHaveLength(10)
+    const amounts = settled[0]!.outputs.map((o) => o.amount)
+    expect(amounts.reduce((a, b) => a + b, 0n)).toBe(4_950_000n)
+    expect(amounts.every((a) => a <= 1_000_000n)).toBe(true)
+  })
+
+  it('takes a coin that pushes the batch past one ceiling', async () => {
     const small = coin(100_000, 10 * HOUR, 8.9 * HOUR)
     const { deps: d, settled } = renewDeps([DUE, small], {
       serverInfo: async () => ({ ...ONE_PERCENT, vtxoMaxAmount: 1_000_000n }),
     })
     await renewExpiringVtxos(d)
-    // The 1M coin nets 990_000; adding the 100k coin's 99_000 would exceed the
-    // ceiling, so it is skipped rather than ending the batch.
+    expect(settled[0]!.inputs).toEqual([DUE, small])
+    const amounts = settled[0]!.outputs.map((o) => o.amount)
+    expect(amounts.reduce((a, b) => a + b, 0n)).toBe(1_089_000n)
+    expect(amounts.every((a) => a <= 1_000_000n)).toBe(true)
+  })
+
+  it('defers coins the settlement has no compliant output left to hold', async () => {
+    const many = Array.from({ length: 12 }, (_, i) => coin(1_000_000, 10 * HOUR, (9 - i * 0.01) * HOUR))
+    const { deps: d, settled } = renewDeps(many, {
+      serverInfo: async () => ({ ...ONE_PERCENT, vtxoMaxAmount: 1_000_000n }),
+    })
+    await renewExpiringVtxos(d)
+    expect(settled[0]!.inputs).toEqual(many.slice(0, 8))
+    const amounts = settled[0]!.outputs.map((o) => o.amount)
+    expect(amounts.length).toBeLessThanOrEqual(8)
+    expect(amounts.every((a) => a <= 1_000_000n)).toBe(true)
+    expect(amounts.reduce((a, b) => a + b, 0n)).toBe(7_920_000n)
+  })
+
+  it('reports the coins the ceiling refused even though the pass settled', async () => {
+    const oversized = coin(2_000_000, 10 * HOUR, 9 * HOUR)
+    const warnings: string[] = []
+    const { deps: d, settled } = renewDeps([oversized, DUE], {
+      serverInfo: async () => ({ ...ONE_PERCENT, vtxoMaxAmount: 1_000_000n }),
+      warn: (message) => warnings.push(message),
+    })
+    expect(await renewExpiringVtxos(d)).toBe('settle-txid')
     expect(settled[0]!.inputs).toEqual([DUE])
-    expect(settled[0]!.output.amount).toBe(990_000n)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('1 expiring coin(s)')
+    expect(warnings[0]).toContain('1000000')
+    expect(warnings[0]).toContain('per-output ceiling')
+  })
+
+  it('says nothing when the ceiling refused no one', async () => {
+    const warnings: string[] = []
+    const { deps: d } = renewDeps([DUE], {
+      serverInfo: async () => ({ ...ONE_PERCENT, vtxoMaxAmount: 1_000_000n }),
+      warn: (message) => warnings.push(message),
+    })
+    await renewExpiringVtxos(d)
+    expect(warnings).toEqual([])
+  })
+
+  it('does not report coins it merely deferred for want of output room', async () => {
+    const many = Array.from({ length: 12 }, (_, i) => coin(1_000_000, 10 * HOUR, (9 - i * 0.01) * HOUR))
+    const warnings: string[] = []
+    const { deps: d } = renewDeps(many, {
+      serverInfo: async () => ({ ...ONE_PERCENT, vtxoMaxAmount: 1_000_000n }),
+      warn: (message) => warnings.push(message),
+    })
+    await renewExpiringVtxos(d)
+    expect(warnings).toEqual([])
   })
 
   /**

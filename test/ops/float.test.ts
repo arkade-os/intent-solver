@@ -12,6 +12,7 @@
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { hex } from '@scure/base'
+import { ArkAddress } from '@arkade-os/sdk'
 import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
 import * as floatOps from '@arkade-os/solver-app/ops/float.js'
 import type { LockupDeadline, VtxoLifecycleReport } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
@@ -131,13 +132,21 @@ const floatStores = {
   onchainReceiveStore: { findRecoverable: async () => [] },
 }
 
-const floatServices = (migrate: () => Promise<unknown>, vtxos: { txid: string; vout: number }[] = []): Services =>
+/** A real address, because a renewal decodes it to price its own output. */
+const FLOAT_ADDRESS = new ArkAddress(new Uint8Array(32).fill(2), new Uint8Array(32).fill(3), 'tark').encode()
+
+const floatServices = (
+  migrate: () => Promise<unknown>,
+  vtxos: { txid: string; vout: number }[] = [],
+  expiring: unknown[] = [],
+): Services =>
   ({
     arkade: {
       wallet: {
+        settle: async () => 'settle-txid',
         getVtxoManager: async () => ({
           migrateDeprecatedSignerVtxos: migrate,
-          getExpiringVtxos: async () => [],
+          getExpiringVtxos: async () => expiring,
           recoverVtxos: async () => null,
         }),
         getContractManager: async () => ({
@@ -147,7 +156,7 @@ const floatServices = (migrate: () => Promise<unknown>, vtxos: { txid: string; v
         // The recovery guard's ungated read: nothing recoverable in these cases.
         getVtxos: async () => [],
         arkProvider: { getInfo: async () => ({ fees: { intentFee: {} }, vtxoMaxAmount: 1_000_000n, dust: 330n }) },
-        getAddress: async () => 'ark1test',
+        getAddress: async () => FLOAT_ADDRESS,
       },
       reservations: createReservationLedger(),
       // The recovery guard asks whether a lockup's `client` key is ours before
@@ -241,6 +250,21 @@ describe('runFloatLifecycle — migration throttle and count', () => {
     const report = await runFloatLifecycle(floatServices(async () => sdkReport))
     expect(report.migrated).toBe(2)
     expect(report.failures).toEqual([])
+  })
+
+  it('puts a settled renewal’s ceiling refusals in failures', async () => {
+    // Off the real clock, not the migration one: renewal reads `Date.now()`.
+    const due = (value: number) => ({
+      value,
+      createdAt: new Date(Date.now() - 9 * 60 * 60 * 1000),
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    })
+    const report = await runFloatLifecycle(floatServices(async () => NO_DEPRECATED, [], [due(2_000_000), due(500_000)]))
+    expect(report.renewed).toBe('settle-txid')
+    const refusal = report.failures.filter((f) => f.includes('per-output ceiling'))
+    expect(refusal).toHaveLength(1)
+    expect(refusal[0]).toContain('renew:')
+    expect(refusal[0]).toContain('1 expiring coin(s)')
   })
 
   it('does not re-submit an identical intent on the very next pass', async () => {
