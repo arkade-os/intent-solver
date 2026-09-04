@@ -726,6 +726,24 @@ describe('a refund that was broadcast is not a refund that landed', () => {
     expect((await store.get('swap-1')).evmRefundTxid).toBeNull()
   })
 
+  it('reports a resend that lost the claim, so a double send leaves a trace', async () => {
+    const errors: unknown[] = []
+    const built = await dueForRefund(
+      { isLocked: vi.fn().mockResolvedValue(true), transactionOutcome: vi.fn().mockResolvedValue('pending') },
+      { onTickError: (_id, error) => void errors.push(error) },
+    )
+    const { store, service } = built
+    await store.transition('swap-1', 'awaiting_claim', 'refunding_evm')
+    // A second instance records its own txid while our broadcast is in flight.
+    built.deps.broadcast = vi.fn(async () => {
+      await store.claimRefundTxid('swap-1', 'other-instance')
+      return REFUND_TXID
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).evmRefundTxid, 'the loser overwrote the recorded txid').toBe('other-instance')
+    expect(errors, 'the lost claim left no trace of the second broadcast').toHaveLength(1)
+  })
+
   it('stops asking once the row has left refunding_evm', async () => {
     // The rescue path leaves a refund txid on a row no branch will read it for.
     const transactionOutcome = vi.fn().mockResolvedValue('reverted')

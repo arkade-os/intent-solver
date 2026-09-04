@@ -381,7 +381,10 @@ export class EvmSendSwapService {
         if (row.state !== 'refunding_evm') await store.transition(row.id, row.state, 'refunding_evm')
         const txid = await this.deps.broadcast(this.deps.evm.refundCall(this.deps.lockFor(row)))
         // CLAIMED, not patched: with no state CAS this column serialises us.
-        await store.claimRefundTxid(row.id, txid)
+        // Losing is the only trace of a double send - ours is out, unnamed.
+        if (!(await store.claimRefundTxid(row.id, txid))) {
+          this.deps.onTickError?.(row.id, new Error(`refund ${txid} broadcast after another instance recorded one`))
+        }
         // A receipt for a transaction sent this instant is guaranteed empty.
         return false
       }

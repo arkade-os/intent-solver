@@ -172,7 +172,7 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
       // live for rule 4's scan, where sticking would page on every such swap.
       // THAT SECOND HALF IS NO LONGER SOUND: it rested on one refund per row and
       // rule 8 can put two out, so the lock may be gone because our own sibling
-      // won — no preimage, and the row waits on evidence that cannot arrive.
+      // won — no preimage, and the row waits on evidence that cannot arrive (#36).
       if (seen.evmRefundOutcome === 'success') return { do: 'record_refund' }
       if (seen.evmRefundOutcome === 'reverted' && seen.evmLockPresent) {
         return { do: 'stick', reason: 'the ERC20 refund transaction reverted; the lock is still funded' }
