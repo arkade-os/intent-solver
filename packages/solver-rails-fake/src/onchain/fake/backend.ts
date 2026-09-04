@@ -9,13 +9,14 @@
 
 import { randomBytes } from 'node:crypto'
 import { hex } from '@scure/base'
-import { Address } from '@scure/btc-signer'
+import { Address, Transaction } from '@scure/btc-signer'
 import { ONCHAIN_NETWORKS, type OnchainNetworkProfile } from '@arkade-os/solver-rails/onchain/htlc.js'
 import type {
   FundedOnchainOutput,
   OnchainBalance,
   OnchainReceiveBackend,
   OnchainSendBackend,
+  OnchainTxOutcome,
 } from '@arkade-os/solver-core/ports/onchain.js'
 
 /** A realistic-length fake txid — 32 bytes, like a real one, not `randomUUID`'s 16. */
@@ -32,6 +33,7 @@ interface Output {
 
 export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBackend {
   private readonly outputs: Output[] = []
+  private readonly broadcasts = new Map<string, number | null>()
   private currentBlock = 0
   private readonly feeRateSatsPerVbyte: number
   private readonly fundingVout: number
@@ -100,8 +102,20 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
     return output?.spentByWitness ?? null
   }
 
-  async broadcastRaw(_txHex: string): Promise<{ txid: string }> {
-    return { txid: fakeTxid() }
+  /** The REAL txid: callers pre-commit their own, so a random one reads `unknown` forever. */
+  async broadcastRaw(txHex: string): Promise<{ txid: string }> {
+    const txid = Transaction.fromRaw(hex.decode(txHex), {
+      allowUnknownInputs: true,
+      allowUnknownOutputs: true,
+      allowLegacyWitnessUtxo: true,
+    }).id
+    this.broadcasts.set(txid, null)
+    return { txid }
+  }
+
+  async transactionOutcome(txid: string): Promise<OnchainTxOutcome> {
+    if (!this.broadcasts.has(txid)) return 'unknown'
+    return this.broadcasts.get(txid) === null ? 'mempool' : 'confirmed'
   }
 
   async estimateFeeRate(): Promise<number> {
@@ -162,7 +176,14 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
     for (const output of this.outputs) {
       if (output.minedAtBlock === null) output.minedAtBlock = this.currentBlock + 1
     }
+    for (const [txid, minedAt] of this.broadcasts) {
+      if (minedAt === null) this.broadcasts.set(txid, this.currentBlock + 1)
+    }
     this.currentBlock += n
+  }
+
+  dropFromMempool(txid: string): void {
+    if (!this.broadcasts.delete(txid)) throw new Error(`no broadcast ${txid} to drop`)
   }
 
   /** Record a claim/refund spend of `(txid, vout)`, with the given witness stack. */

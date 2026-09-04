@@ -160,6 +160,7 @@ describe('scheduled, inline (no queue binding)', () => {
       fund: unreachable,
       findOutputs: async () => [],
       findSpendWitness: async () => null,
+      transactionOutcome: unreachable,
       broadcastRaw: unreachable,
       estimateFeeRate: unreachable,
       getBalance: unreachable,

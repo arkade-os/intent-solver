@@ -240,10 +240,21 @@ describe('e2e onchain:BTC->arkade:BTC (receive)', () => {
       // The proof: P recovered from a real Arkade claim witness.
       expect(claimed.preimage).toBe(hex.encode(sealed.preimage))
 
-      // SOLVER: spend the client's onchain HTLC with the now-public P.
+      // SOLVER: spend the client's onchain HTLC with the now-public P. The row
+      // holds at `claimed` until that CONFIRMS (#204) — ask for the block.
+      const broadcast = await poll(
+        async () => {
+          const row = await service.tick(swap.id)
+          return row.onchainClaimTxid || TERMINAL.has(row.state) ? row : null
+        },
+        { attempts: 200, intervalMs: 3_000, whenExhausted: `swap ${swap.id} never broadcast its onchain claim` },
+      )
+      expect(broadcast.onchainClaimTxid).toBeTruthy()
+      await mineBlocks(1)
+
       const settled = await driveUntil(swap.id, new Set(['settled', ...TERMINAL]))
       expect(settled.state).toBe('settled')
-      expect(settled.onchainClaimTxid).toBeTruthy()
+      expect(settled.onchainClaimTxid).toBe(broadcast.onchainClaimTxid)
     },
     SWAP_TIMEOUT_MS,
   )

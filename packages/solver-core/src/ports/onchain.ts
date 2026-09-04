@@ -34,6 +34,9 @@ export interface FundedOnchainOutput {
   confirmations: number
 }
 
+/** `unknown` licenses a REBROADCAST, so a transport failure must THROW instead. */
+export type OnchainTxOutcome = 'unknown' | 'mempool' | 'confirmed'
+
 /** What the onchain wallet holds. Both figures are sats. */
 export interface OnchainBalance {
   confirmedSats: number
@@ -110,6 +113,9 @@ export interface OnchainBackend {
 
   /** Broadcast an already-signed raw transaction — used for the solver's own refund spend. */
   broadcastRaw(txHex: string): Promise<{ txid: string }>
+
+  /** Has a transaction we broadcast landed (#204)? By txid: an outpoint never says whose (#169). */
+  transactionOutcome(txid: string): Promise<OnchainTxOutcome>
 
   /** Current sats/vbyte fee estimate for a transaction the solver constructs itself. */
   estimateFeeRate(): Promise<number>

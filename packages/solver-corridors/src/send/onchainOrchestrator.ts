@@ -570,7 +570,6 @@ export class OnchainSendSwapService {
     // did, and the operator reads which from the error.
     const attempt = await this.pushOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)
     if (!attempt.broadcast) throw new Error(attempt.reason)
-    await store.patch(row.id, { onchain_refund_txid: attempt.txid })
     return attempt.txid
   }
 
@@ -829,6 +828,16 @@ export class OnchainSendSwapService {
       return false
     }
 
+    // OUR OWN EARLIER ATTEMPT, BY NAME (#169, #204): the pre-committed txid stops
+    // a refund that went out before a crash being written off as a foreign spend
+    // below. Before the claim read, because a CONFIRMED refund of this outpoint
+    // means no claim can exist; the reverse is not true.
+    if (row.onchainRefundTxid) {
+      const outcome = await onchain.transactionOutcome(row.onchainRefundTxid)
+      if (outcome === 'confirmed') return store.transition(row.id, 'refunding_onchain', 'refunded', {})
+      if (outcome === 'mempool') return false
+    }
+
     // The client can still land a valid claim right up to (and, within
     // HTLC_REFUND_MTP_MARGIN, briefly after) htlcLocktime matures. Re-check
     // before racing a refund broadcast against it: without this, a
@@ -848,12 +857,7 @@ export class OnchainSendSwapService {
       if (preimage && paymentHashOf(preimage) === row.paymentHash) {
         return store.transition(row.id, 'refunding_onchain', 'claiming', { preimage: hex.encode(preimage) })
       }
-      // Spent by something that isn't a recognizable claim — most likely our
-      // own refund from an earlier attempt that broadcast successfully but
-      // threw before the transition below recorded it. Same "needs a human"
-      // posture whenAwaitingClaim takes for the identical ambiguity: this
-      // code cannot tell "our own prior refund" apart from "something else
-      // entirely" from witness shape alone.
+      // Neither a matching claim nor the refund above: genuinely unrecognisable.
       await store.fail(row.id, 'refunding_onchain', 'onchain HTLC spent by something other than a matching claim')
       return false
     }
@@ -863,7 +867,7 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'refunding_onchain', attempt.reason)
       return false
     }
-    return store.transition(row.id, 'refunding_onchain', 'refunded', { onchain_refund_txid: attempt.txid })
+    return false
   }
 
   /**
@@ -948,7 +952,10 @@ export class OnchainSendSwapService {
 
     const unsigned = buildOnchainRefundTx({ ...sizingParams, payoutAmountSats })
     const signed = await signOnchainRefundTx(unsigned, signer)
-    const result = await onchain.broadcastRaw(hex.encode(signed.extract()))
-    return { broadcast: true, txid: result.txid }
+    // PRE-COMMITTED, here so both callers get it (#169). Holding the id of a
+    // broadcast that threw is the safe direction: `unknown`, then rebuild.
+    await this.deps.store.patch(row.id, { onchain_refund_txid: signed.id })
+    await onchain.broadcastRaw(hex.encode(signed.extract()))
+    return { broadcast: true, txid: signed.id }
   }
 }
