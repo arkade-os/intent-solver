@@ -171,7 +171,7 @@ describe('`claimed` means the ERC20 arrived', () => {
     })
   })
 
-  it('still sticks past the client timeout, whatever the receipt says', () => {
+  it('sticks past the client timeout while the claim is still unsettled', () => {
     const action = planEvmReceive(
       claiming({ evmClaimTxid: '0xtx' } as Partial<EvmReceiveSwapRow>),
       seen({ evmClaimOutcome: 'pending', evmBlockHeight: EVM_TIMEOUT }),
@@ -180,6 +180,20 @@ describe('`claimed` means the ERC20 arrived', () => {
       do: 'stick',
       reason: 'preimage revealed but the client ERC20 timeout has passed',
     })
+  })
+
+  it('records a claim that already mined even past the client timeout', () => {
+    const action = planEvmReceive(
+      claiming({ evmClaimTxid: '0xtx' } as Partial<EvmReceiveSwapRow>),
+      seen({ evmClaimOutcome: 'success', evmBlockHeight: EVM_TIMEOUT }),
+    )
+    expect(action).toEqual({ do: 'record_claim' })
+  })
+
+  it('will not record a success it has no txid for', () => {
+    // Unreachable through this shell; pinned because the planner is the edge authority a rewrite reproduces.
+    const action = planEvmReceive(claiming(), seen({ evmClaimOutcome: 'success' }))
+    expect(action).not.toEqual({ do: 'record_claim' })
   })
 })
 

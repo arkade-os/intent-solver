@@ -91,6 +91,10 @@ export const planEvmReceive = (row: EvmReceivePlanRow, seen: EvmReceiveObservati
   // gets paid — that outranks every other consideration including the Arkade
   // refund window, which is no longer relevant to the solver's own position.
   if (preimage !== null) {
+    // A MINED CLAIM OUTRANKS THE TIMEOUT: height cannot un-mine it, and the
+    // contract deletes the lock on claim, so the client's refund cannot have
+    // landed too. Sticking would file an incident over tokens the solver holds.
+    if (row.evmClaimTxid !== null && seen.evmClaimOutcome === 'success') return { do: 'record_claim' }
     if (seen.evmBlockHeight >= row.evmTimeout) {
       // RULE 4. The client's refund path is live. The sats are gone and the
       // tokens may be too; only a human can establish who got there first.
@@ -98,7 +102,6 @@ export const planEvmReceive = (row: EvmReceivePlanRow, seen: EvmReceiveObservati
     }
     // RULE 6. Re-sending on the row alone burns a nonce per tick for one payment.
     if (row.evmClaimTxid !== null) {
-      if (seen.evmClaimOutcome === 'success') return { do: 'record_claim' }
       if (seen.evmClaimOutcome === 'reverted') {
         return { do: 'stick', reason: 'the ERC20 claim transaction reverted; the solver has not been paid' }
       }

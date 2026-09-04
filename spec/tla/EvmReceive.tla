@@ -610,12 +610,18 @@ RecordRefunded(w, s) ==
 
 \* THE PRE-SWITCH RULE, late arm (RULE 4): P seen at or after the client's
 \* timeout height - the ERC20 may already be client-refunded, so the row
-\* is failed loudly.
+\* is failed loudly.  A claim that ALREADY MINED is excluded (plan:99):
+\* height cannot un-mine it, and the contract deletes the lock on claim, so
+\* the client's refund cannot have landed too.  Sticking there would file an
+\* incident over tokens the solver holds.  Reachable only because waiting for
+\* the receipt (B3) keeps the row in `claiming` long enough for the height to
+\* catch up - so the F2 fix is what made this arm need the exclusion.
 StickLate(w, s) ==
     /\ Saw(w, s, loc[w].seen)
     /\ loc[w].seen \in NonTerminal
     /\ loc[w].res = "revealed"
     /\ HeightUp
+    /\ evm[s] # "solverClaimed"
     /\ \/ CasWon(s, loc[w].seen, "stuck")
        \/ CasLost(s, loc[w].seen)
     /\ Park(w)
@@ -722,11 +728,12 @@ ERSpendKinds == { "clientClaim", "solverRefund" }
 (* THE GREEN RUN                                                           *)
 (*                                                                         *)
 (* EvmReceive.cfg: all assumptions at their safe settings.  GREEN:         *)
-(* 2,993,061 states generated, 410,742 distinct, depth 47, 1min 38s        *)
+(* 2,930,907 states generated, 402,480 distinct, depth 46, 1min 40s        *)
 (* (-workers 4).  All nine invariants, ForwardOnly, and Liveness.          *)
-(* Re-run for the F2 and F4 fixes.  It was 3,115,999/427,805 before: the   *)
-(* re-drive removes the stranded refunding_arkade states that used to be   *)
-(* reachable and left the row with nowhere to go.                          *)
+(* Re-run for F2, F4 and the mined-claim exclusion.  It was                *)
+(* 3,115,999/427,805 before that work: the re-drive removes the stranded   *)
+(* refunding_arkade states, and StickLate no longer reaches the ones where *)
+(* a mined claim was about to be filed as an incident.                     *)
 (*                                                                         *)
 (* FINDINGS                                                                *)
 (*                                                                         *)
@@ -773,8 +780,12 @@ ERSpendKinds == { "clientClaim", "solverRefund" }
 (*                                NoSilentLoss violated, depth 16          *)
 (*                                (78,840/12,934)                          *)
 (*   EvmReceive_ClaimRace.cfg     ClaimLandsPromptly = FALSE               *)
-(*                                NoNetLoss violated, depth 26             *)
-(*                                (752,719/115,395).  STILL OPEN.          *)
+(*                                NoNetLoss violated, depth 26.  STILL     *)
+(*                                OPEN - the mined-claim exclusion in      *)
+(*                                StickLate narrows this arm (a claim that *)
+(*                                LANDED no longer sticks) but does not    *)
+(*                                close the race it names, where the claim *)
+(*                                has not landed yet.                      *)
 (*   EvmReceive_LateFund.cfg      FundLandsPromptly = FALSE                *)
 (*                                NoNetLoss violated, depth 21             *)
 (*                                (269,565/43,305).  STILL OPEN.           *)
@@ -785,8 +796,8 @@ ERSpendKinds == { "clientClaim", "solverRefund" }
 (*                                (779,685/119,913)                        *)
 (*   EvmReceive_LostSpend.cfg     RefundRedrivenWhileUnspent = TRUE over   *)
 (*                                RefundSpendAtomic = FALSE - the F4       *)
-(*                                CONTROL.  GREEN: 3,686,017/501,266,      *)
-(*                                depth 48, Liveness included.  The re-    *)
+(*                                CONTROL.  GREEN: 3,615,831/491,756,      *)
+(*                                depth 47, Liveness included.  The re-    *)
 (*                                drive really does close the split's      *)
 (*                                crash window, and this is the artifact.  *)
 (*   EvmReceive_Overexposed.cfg   AtomicAdmission = FALSE, MaxExposed = 1  *)
@@ -796,7 +807,7 @@ ERSpendKinds == { "clientClaim", "solverRefund" }
 (*                                RefundLocktime = 4: NoNetLoss violated,  *)
 (*                                depth 22 (371,938/59,828)                *)
 (*   EvmReceive_Parked.cfg        LivenessStrict artifact: violated,       *)
-(*                                2,993,061/410,742, 4min 04s - F1 named   *)
+(*                                2,930,907/402,480, 4min 12s - F1 named   *)
 (*                                                                         *)
 (* KNOWN-VACUOUS IN THE GREEN CFG (coverage run, -coverage 1):             *)
 (*                                                                         *)
