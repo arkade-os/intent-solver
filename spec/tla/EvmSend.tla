@@ -49,7 +49,7 @@
 (*                                                                         *)
 (* The Arkade deadlines (validUntil, refundLocktime) compare against WALL  *)
 (* seconds; the ERC20 refund timeout compares against BLOCK HEIGHT.  The   *)
-(* only bridge is the quote-time conversion (evmOrchestrator.ts:397-406):  *)
+(* only bridge is the quote-time conversion (evmOrchestrator.ts:459):      *)
 (* evmTimeout is stored as a height via blocksForDuration, floored at the  *)
 (* SLOWEST cadence (blockTime.ts:103-107), so the timeout always arrives   *)
 (* no earlier in wall time than the naive estimate.  This module models    *)
@@ -100,9 +100,9 @@
 (*  (A3) `ClaimLands`.  claimArkade is modelled as needing only serverUp   *)
 (*       and an unspent covenant; the send corridor never re-reads the     *)
 (*       outcome because `claiming` maps to `wait` in the planner          *)
-(*       (evmSendPlan.ts:174-176).  See THE PARKED STATES below.           *)
+(*       (evmSendPlan.ts:176-178).  See THE PARKED STATES below.           *)
 (*  (A4) `RefundSeesClaim`.  SHIPPED, not an open assumption               *)
-(*       (evmSendPlan.ts:163-172): `refunded` is written only for a        *)
+(*       (evmSendPlan.ts:165-174): `refunded` is written only for a        *)
 (*       refund whose own receipt says it MINED.  The row used to record   *)
 (*       it at SEND time, so a client claim that won the block race left   *)
 (*       a terminal row saying `refunded` over tokens the client held -    *)
@@ -130,9 +130,9 @@
 (*       (evmOrchestrator.ts:247-248): the preimage scan opens on the      *)
 (*       ROW having entered locking_evm, not on the patched txid.  The     *)
 (*       txid patch is still a separate write after the lock broadcast     *)
-(*       (:355-356) and a crash between them still leaves evm_lock_txid    *)
+(*       (:357) and a crash between them still leaves evm_lock_txid        *)
 (*       null forever - it just no longer blinds the scan, which is the    *)
-(*       whole point of moving the gate.  The mutation restores the txid    *)
+(*       whole point of moving the gate.  The mutation restores the txid   *)
 (*       gate and NoNetLoss fails.  Finding F2, fixed.                     *)
 (*                                                                         *)
 (*       `TxidPatchAtomic` survives as the write ORDER, no longer as a     *)
@@ -182,12 +182,18 @@
 (*                                                                         *)
 (*  1. The CAS-before-broadcast order in lock_evm, and the pre-switch      *)
 (*     preimage rule's precedence over every state branch.                 *)
-(*  2. The evmLockTxid gate on the preimage scan (evmOrchestrator.ts:216): *)
-(*     the contract DELETES the lock flag on claim, so gating the scan on  *)
-(*     lock presence would hide exactly the claims that matter.  A crash   *)
-(*     between the lock broadcast and the txid patch blinds the scan -     *)
-(*     modelled here by PatchTxid being a separate step.                   *)
-(*  3. evm_timeout is a HEIGHT, never seconds (evmOrchestrator.ts:397-406).*)
+(*  2. The ROW-STATE gate on the preimage scan (evmOrchestrator.ts:249):   *)
+(*     the scan opens once the row has ENTERED locking_evm.  Both other    *)
+(*     gates are wrong and each loses money.  Gating on lock PRESENCE      *)
+(*     hides exactly the claims that matter, because the contract DELETES  *)
+(*     the lock flag on claim.  Gating on the patched evm_lock_txid reads  *)
+(*     one write too late: that patch lands AFTER the broadcast (:357), so *)
+(*     a crash between them blinds the scan forever - which was F2.  The   *)
+(*     locking_evm CAS PRECEDES the broadcast, so it is the earliest gate  *)
+(*     that still cannot see a claim before a lock could exist.            *)
+(*  3. evm_timeout is a HEIGHT, never seconds (evmOrchestrator.ts:459).    *)
+(*  4. The locking_evm timeout refund is NOT conditioned on the lock's     *)
+(*     presence (evmSendPlan.ts:141-155).  Conditioning it was F5.         *)
 (*                                                                         *)
 (* HOW THIS WAS CHECKED: see THE GREEN RUN and MUTATION CHECKS at the      *)
 (* bottom of the module.                                                   *)
@@ -211,8 +217,9 @@ CONSTANTS
                       \*      after the timeout height (TRUE) - FALSE is the
                       \*      shipped truth for a pending tx (F4 in RESULTS)
     TimeoutRefundCoversPresent, \* (A7) MUTATION: the locking_evm timeout refund
-                      \*      fires with the lock PRESENT too (TRUE, the fix),
-                      \*      not only with it absent (FALSE, shipped; F5)
+                      \*      fires with the lock PRESENT too (TRUE, shipped)
+                      \*      or only with it absent (FALSE, the pre-fix
+                      \*      stranded lock; F5 in RESULTS)
     RefundSeesClaim,  \* (A4) MUTATION: refund recording waits for the receipt
                       \*      (TRUE, shipped) or records at send time (FALSE)
     AtomicAdmission,  \* MUTATION: quote re-checks the cap at insert
@@ -440,16 +447,18 @@ GiveUp(w) ==
 \* strand the parked states (see THE PARKED STATES).
 Crash(w) == CrashCore(w) /\ UNCHANGED LsVars
 
-\* (A5) THE SCAN-GATE CRASH WINDOW.  The txid patch is a separate write
-\* after the lock broadcast (evmOrchestrator.ts:306-310); a crash between
-\* them leaves evm_lock_txid null forever, which blinds the gated preimage
-\* scan.  Green folds the patch into LockLands (TxidPatchAtomic = TRUE, the
-\* fix); the mutation keeps it a separate step and NoNetLoss fails when the
-\* blinded scan lets the client take both legs.
+\* (A5) THE WRITE ORDER, no longer a money assumption.  The txid patch is a
+\* separate write after the lock broadcast (evmOrchestrator.ts:357), so a
+\* crash between them leaves evm_lock_txid null forever.  That is still
+\* true of the shipped code; it stopped costing anything when the scan gate
+\* moved to the row's own state (ScanFollowsTheRow).  TxidPatchAtomic now
+\* models only WHEN the column is written - EvmSend_LostPatch.cfg runs the
+\* shipped split against the shipped gate and is green.  The scan gate
+\* itself is the mutation, and EvmSend_BlindScan.cfg is where it lives.
 \*
 \* quote(): the INSERT, cap-checked at read; AtomicAdmission = FALSE drops
 \* the re-check here, which is the admission race the reservation lease
-\* closes in the shipped code (evmOrchestrator.ts:435-451).
+\* closes in the shipped code (evmOrchestrator.ts:500-505).
 InsertQuote(w, s) ==
     /\ Saw(w, s, "none")
     /\ loc[w].res \in { "capOk", "capFull" }
@@ -515,8 +524,10 @@ LockLands(w, s) ==
     /\ UNCHANGED << clock, st, conf, serverUp, evmHeight >>
     /\ UNCHANGED << arkFund, evmConfirmed, refundSent >>
 
-\* The txid patch: the scan gate opens.  A crash before this step leaves
-\* lockTxid FALSE forever - the lock exists, the scan never runs.
+\* The txid patch.  A crash before this step leaves lockTxid FALSE forever -
+\* the lock exists and the column never names it.  It no longer gates the
+\* scan; see (A5) and the KNOWN-VACUOUS note, which records that this action
+\* is in fact unreachable in every cfg.
 PatchTxid(w, s) ==
     /\ ~TxidPatchAtomic
     /\ At(w, s, "sentLock")
@@ -547,13 +558,13 @@ RecordLock(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LsVars
 
-\* refund_evm.  From locking_evm the planner requires the lock ABSENT
-\* (:138-143); from awaiting_claim it is unconditional at the height
-\* timeout (:151-154) - which is the (A4) window.  (A7): the absence condition
-\* defeats the whole margin whenever the lock is present but never proven
-\* deep - the timeout exists to end the client's option, and the shipped
-\* branch structure withholds it exactly then.  The CAS, then the broadcast
-\* is a separate step, then the recording CAS.
+\* refund_evm.  From locking_evm (evmSendPlan.ts:141-155) and from
+\* awaiting_claim (:160-161) alike, the height timeout is now the whole
+\* condition - the two states agree.  (A7): requiring the lock ABSENT, as
+\* locking_evm used to, defeats the whole margin whenever the lock is
+\* present but never proven deep, because the timeout exists to end the
+\* client's option and that branch withheld it exactly then.  The CAS, then
+\* the broadcast is a separate step, then the recording CAS.
 SubmitEvmRefund(w, s) ==
     /\ \/ /\ Saw(w, s, "locking_evm")
           /\ loc[w].res = "clear"
@@ -588,7 +599,7 @@ RefundMines(s) ==
     /\ UNCHANGED << arkFund, evmConfirmed, lockTxid, lockSends, refundSent >>
 
 \* The recording CAS, and (A4) its receipt check.  RefundSeesClaim = TRUE
-\* is the SHIPPED planner (evmSendPlan.ts:163-172): `refunded` is written
+\* is the SHIPPED planner (evmSendPlan.ts:165-174): `refunded` is written
 \* only for a refund the receipt says MINED.  The single arm is the point
 \* - see (A4) for why "there was nothing to refund" is not a second one.
 \* RefundSeesClaim = FALSE drops the check and writes the word over any
@@ -787,7 +798,7 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*     read - a crash between the refund broadcast and the txid patch.     *)
 (*     Liveness accepts the parking (EvmSend_Parked.cfg shows the strict   *)
 (*     statement is false); the money invariants bound the cost.           *)
-(* F2  (A5) THE BLINDED SCAN - FIXED.  The scan USED TO be gated on       *)
+(* F2  (A5) THE BLINDED SCAN - FIXED.  The scan USED TO be gated on        *)
 (*     `evm_lock_txid`, patched one write AFTER the lock broadcast, so a   *)
 (*     crash between them left it shut forever over a lock that existed:   *)
 (*     the client claimed invisibly, the timeout refund took the row and   *)
@@ -801,7 +812,7 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*     that won the block race left a terminal row lying over the money,   *)
 (*     and terminal ended the preimage scan that was the swap's way out.   *)
 (*     The shipped planner now records only a MINED refund                 *)
-(*     (evmSendPlan.ts:163-172), so EvmSend_NoReceipt.cfg is a genuine     *)
+(*     (evmSendPlan.ts:165-174), so EvmSend_NoReceipt.cfg is a genuine     *)
 (*     mutation - it deletes the shipped check - rather than a record of   *)
 (*     shipped behaviour.                                                  *)
 (* F4  (A6) THE LATE LOCK - STILL OPEN, and the (A4) fix moved which       *)
@@ -812,7 +823,7 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*     so that witness is gone.  The expensive half is not: the lock       *)
 (*     lands, the client claims it and still refunds its sats.             *)
 (*     EvmSend_LateLock.cfg: NoNetLoss, depth 20.                          *)
-(* F5  (A7) THE STRANDED LOCK - FIXED.  The locking_evm timeout refund    *)
+(* F5  (A7) THE STRANDED LOCK - FIXED.  The locking_evm timeout refund     *)
 (*     USED TO require the lock ABSENT, so a lock present but never proven *)
 (*     deep (the depth probe's failed read is UNPROVEN, never absent -     *)
 (*     lockDepth.ts) withheld the very timeout that ends the client's      *)
