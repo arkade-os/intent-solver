@@ -377,7 +377,9 @@ export class EvmSendSwapService {
       }
 
       case 'refund_evm': {
-        await store.transition(row.id, row.state, 'refunding_evm')
+        // Already there on the resend path, and a self-transition would log a
+        // move that never happened. @see store.patch
+        if (row.state !== 'refunding_evm') await store.transition(row.id, row.state, 'refunding_evm')
         const txid = await this.deps.broadcast(this.deps.evm.refundCall(this.deps.lockFor(row)))
         // PATCHED, not transitioned: `refunding_evm` means "awaiting outcome",
         // and this txid is the only handle on the receipt that carries it.
