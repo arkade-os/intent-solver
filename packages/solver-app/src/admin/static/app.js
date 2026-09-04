@@ -1371,6 +1371,8 @@ const discoveryView = () => {
     h(
       'section.panel',
       h('h2', 'registry card'),
+      // Whatever the card did: an unnameable corridor otherwise reads as unserved.
+      (d.cardOmitted ?? []).map((note) => h('p.muted', note)),
       d.cardError
         ? h('p.muted', d.cardError)
         : h(

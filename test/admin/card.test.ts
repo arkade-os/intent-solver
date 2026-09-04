@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
@@ -541,5 +543,22 @@ describe('POST /api/actions/post-ad — audit', () => {
     await postAd(makeDeps({ nostrAdPublish: 'auto', audit }))
     expect(audit).toHaveLength(1)
     expect(audit[0]).toMatchObject({ action: 'post-ad', outcome: 'error' })
+  })
+})
+
+/** Read from source: `app.js` has no exports and there is no DOM here. */
+describe('the discovery screen', () => {
+  it('renders the omitted corridors, or the console shows less than the API knows', () => {
+    const source = readFileSync(
+      fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
+      'utf8',
+    )
+    const start = source.indexOf('const discoveryView = () => {')
+    const end = source.indexOf("h('h2', 'nostr ad')", start)
+    expect(start, 'discoveryView is gone from app.js').toBeGreaterThan(-1)
+    const panel = end === -1 ? source.slice(start) : source.slice(start, end)
+    expect(panel).toContain('d.cardOmitted')
+    // Outside the cardError ternary: true whether or not this card built.
+    expect(panel.indexOf('d.cardOmitted')).toBeLessThan(panel.indexOf('d.cardError'))
   })
 })
