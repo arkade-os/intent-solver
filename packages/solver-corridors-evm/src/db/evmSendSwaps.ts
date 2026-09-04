@@ -517,6 +517,15 @@ export class EvmSendSwapStore {
     ])
   }
 
+  /** First writer wins, true when that was us: the resend has no state CAS to ride. */
+  async claimRefundTxid(id: string, txid: string): Promise<boolean> {
+    const result = await this.driver.run(
+      'UPDATE send_evm_swap SET updated_at = ?, evm_refund_txid = ? WHERE id = ? AND evm_refund_txid IS NULL',
+      [this.now(), txid, id],
+    )
+    return (result?.changes ?? 0) > 0
+  }
+
   /** Terminal failure, with the reason on the row so an operator need not guess. */
   async fail(id: string, from: EvmSendSwapState, reason: string): Promise<void> {
     await this.transition(id, from, 'stuck', { failure_reason: reason })

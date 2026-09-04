@@ -160,4 +160,13 @@ describe('EvmSendSwapStore', () => {
     await store.patch('swap-2', { refund_outcome: 'external' })
     expect(await store.findRefundable()).toEqual([])
   })
+
+  it('records a refund txid only for the first claimant', async () => {
+    await store.insertQuote(quote())
+    await store.transition('swap-1', 'quoted', 'refunding_evm')
+
+    expect(await store.claimRefundTxid('swap-1', 'first')).toBe(true)
+    expect(await store.claimRefundTxid('swap-1', 'second')).toBe(false)
+    expect((await store.get('swap-1')).evmRefundTxid, 'the second writer overwrote the first').toBe('first')
+  })
 })

@@ -685,7 +685,6 @@ describe('a refund that was broadcast is not a refund that landed', () => {
   })
 
   it('re-sends a refund the row never recorded, so a late lock is still taken back', async () => {
-    // THE FINDING: nothing retried a refund the row never recorded.
     const transactionOutcome = vi.fn().mockResolvedValue('pending')
     const { store, service, deps } = await dueForRefund({
       isLocked: vi.fn().mockResolvedValue(true),
