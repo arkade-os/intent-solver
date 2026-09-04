@@ -156,6 +156,9 @@ export const claimReceived = async ({
   read = findLockups,
   claim = claimSwapScript,
 }) => {
+  if (emulatorPubkey === undefined && emulatorUrl === undefined) {
+    throw new Error('claimReceived needs an emulatorPubkey or an emulatorUrl, read from YOUR OWN endpoint')
+  }
   const emulatorKey = emulatorPubkey ?? (await fetchEmulatorPubkey(emulatorUrl))
   const paymentHash = hex.encode(sha256(preimage))
   const { candidates } = deriveReceiveLockup({
