@@ -75,11 +75,14 @@ jobs:
 
       - name: Start the regtest stack
         working-directory: arkade-regtest
+        timeout-minutes: 20
         run: node regtest.mjs start --profile "$E2E_PROFILES"
 
       # Generated HERE, never committed and never a repository secret: a regtest
-      # seed is still a credential, and a per-run wallet is hermetic besides.
+      # seed is still a credential. Bounded because `settle()` waits on a batch
+      # swap and has been seen to hang rather than fail, eating the job budget.
       - name: Provision a fresh Arkade wallet
+        timeout-minutes: 10
         run: |
           set -eu
           node --input-type=module -e '
@@ -102,6 +105,7 @@ jobs:
           node --experimental-eventsource --env-file="$E2E_ENV_FILE" scripts/regtest-settle.mjs
 
       - name: Mint an asset for the asset corridors
+        timeout-minutes: 10
         run: |
           set -eu
           node --experimental-eventsource --env-file="$E2E_ENV_FILE" scripts/regtest-mint-asset.mjs 1000000 ARFQ
