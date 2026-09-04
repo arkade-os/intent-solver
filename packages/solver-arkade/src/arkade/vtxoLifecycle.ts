@@ -556,6 +556,7 @@ export const renewExpiringVtxos = async <V extends RenewableVtxo>(deps: RenewVtx
 
   const inputs: V[] = []
   let gross = 0n
+  let refusedByCeiling = 0
   for (const vtxo of ordered) {
     if (inputs.length >= MAX_VTXOS_PER_SETTLEMENT) break
     const fee = BigInt(estimator.evalOffchainInput(offchainInputFeeParams(vtxo)).satoshis)
@@ -565,9 +566,20 @@ export const renewExpiringVtxos = async <V extends RenewableVtxo>(deps: RenewVtx
     // Skip rather than stop: a smaller coin further down may still fit under
     // the ceiling. Judged on the post-output-fee amount, which is what the
     // server actually measures.
-    if (vtxoMaxAmount >= 0n && net - outputFeeOn(net) > vtxoMaxAmount) continue
+    if (vtxoMaxAmount >= 0n && net - outputFeeOn(net) > vtxoMaxAmount) {
+      refusedByCeiling += 1
+      continue
+    }
     inputs.push(vtxo)
     gross = net
+  }
+  if (refusedByCeiling > 0 && inputs.length === 0) {
+    // `gross` never left zero, so each refusal was the coin judged ALONE and no
+    // later pass changes it. Worded to miss `BENIGN_RENEWAL` on purpose (#166).
+    throw new Error(
+      `${refusedByCeiling} expiring coin(s) exceed the operator's ${vtxoMaxAmount} sat per-output ceiling on their ` +
+        'own and can never be renewed whole; split the float so each piece lands under it',
+    )
   }
   if (inputs.length === 0) throw new Error('No VTXOs available to renew: every expiring coin is below its own fee')
 

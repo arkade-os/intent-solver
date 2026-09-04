@@ -51,8 +51,7 @@ export const poolPlan = async (services: Services): Promise<PoolPlan> => {
   // NEAR-EXPIRY IS DELIBERATELY NOT FILTERED, because a split is the only way past the
   // operator's per-output ceiling: `renewExpiringVtxos` judges each candidate with its
   // running total at zero, so a coin alone exceeding `vtxoMaxAmount` is skipped on
-  // every pass, and declines in wording `BENIGN_RENEWAL` matches — no failure reported
-  // while the coin marches to expiry. Splitting early otherwise costs one cycle.
+  // every pass and the lifecycle reports it (#166). Splitting early costs one cycle.
   //
   // AN ASSET-BEARING COIN IS NOT ORDINARY SATS INVENTORY, and counting it as such is
   // how a pool plans against float it cannot spend. The asset has to land somewhere

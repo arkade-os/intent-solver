@@ -842,21 +842,31 @@ describe('renewExpiringVtxos', () => {
     const { deps: d, settled } = renewDeps([oversized], {
       serverInfo: async () => ({ ...ONE_PERCENT, vtxoMaxAmount: 1_000_000n }),
     })
-    await expect(renewExpiringVtxos(d)).rejects.toThrow('No VTXOs available to renew')
+    await expect(renewExpiringVtxos(d)).rejects.toThrow(/per-output ceiling/)
     expect(settled).toEqual([])
   })
 
-  /**
-   * And it declines in wording `BENIGN_RENEWAL` matches, so the pass reports no
-   * failure at all. An operator watching `failures` reads a healthy float right
-   * up until the coin expires out from under it — which is the argument for
-   * splitting near-expiry coins rather than skipping them.
-   */
-  it('reports the unrenewable oversized coin as a quiet, failure-free pass', async () => {
+  it('reports the unrenewable oversized coin as a failure, naming the ceiling', async () => {
     const oversized = coin(2_000_000, 10 * HOUR, 9 * HOUR)
     const { deps: d } = renewDeps([oversized], {
       serverInfo: async () => ({ ...ONE_PERCENT, vtxoMaxAmount: 1_000_000n }),
     })
+    const report = await runVtxoLifecycle({
+      renewVtxos: () => renewExpiringVtxos(d),
+      recoverVtxos: async () => 'recover-txid',
+      recoverableVtxos: async () => [],
+      lockupDeadlines: async () => [],
+      nowSeconds: () => 0,
+    })
+    expect(report.renewed).toBeNull()
+    expect(report.failures).toHaveLength(1)
+    expect(report.failures[0]).toContain('per-output ceiling')
+    expect(report.failures[0]).toContain('1000000')
+  })
+
+  it('still reports a float that is only sub-fee dust as a quiet pass', async () => {
+    const tiny = coin(10, 10 * HOUR, 9 * HOUR)
+    const { deps: d } = renewDeps([tiny])
     const report = await runVtxoLifecycle({
       renewVtxos: () => renewExpiringVtxos(d),
       recoverVtxos: async () => 'recover-txid',
