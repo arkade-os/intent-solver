@@ -223,7 +223,7 @@ export const evaluateAssetFill = (args: {
   // Last, because it is the only one whose answer changes minute to minute, so
   // a refusal here is the one worth retrying. Read on the leg being PAID.
   const held = args.available.get(args.toAssetId) ?? 0n
-  if (held < args.toAmount) return { fill: false, reason: 'insufficient_inventory' }
+  if (held < 0n) return { fill: false, reason: 'insufficient_inventory' }
 
   return { fill: true }
 }
