@@ -381,8 +381,7 @@ export class EvmSendSwapService {
         // PATCHED, not transitioned: `refunding_evm` means "awaiting outcome",
         // and this txid is the only handle on the receipt that carries it.
         await store.patch(row.id, { evm_refund_txid: txid })
-        // A receipt for a transaction sent this instant is a guaranteed-empty
-        // read; the next sweep asks.
+        // A receipt for a transaction sent this instant is guaranteed empty.
         return false
       }
 
