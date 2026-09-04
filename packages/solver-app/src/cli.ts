@@ -898,6 +898,9 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       // is shared by all clients (fail-closed, never spoofable).
       clientKey: (c) => getConnInfo(c).remote.address ?? 'unknown',
       onRefusal: (context, detail) => log(`${context}:`, detail),
+      // Same sink, different word: `onRefusal` above is this host answering
+      // correctly, so a fault must not read as ordinary business.
+      onError: (context, error) => log(`${context} FAULT:`, error instanceof Error ? error.message : String(error)),
     })
     const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host, ...HONO_SERVE_OPTIONS })
     log(`listening on ${config.host}:${config.port}`)

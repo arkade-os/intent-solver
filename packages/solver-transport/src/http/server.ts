@@ -55,6 +55,8 @@ export interface HttpDeps {
   clientKey?: (c: Context) => string
   /** A request this host turned away, and why. See `RelayIngressDeps.onRefusal`. */
   onRefusal?: (context: string, detail: string) => void
+  /** A request that FAULTED. Separate from {@link onRefusal}, which is this host answering correctly. */
+  onError?: (context: string, error: unknown) => void
 }
 
 export const buildApp = (deps: HttpDeps): Hono => {
@@ -80,7 +82,17 @@ export const buildApp = (deps: HttpDeps): Hono => {
       // The RFQ family — the only family. Same payloads as the relay, byte for
       // byte; only the envelope (HTTP status codes) belongs to this transport.
       if ((body as { type?: unknown } | null)?.type === 'rfq_request') {
-        const outcome = await respondToRfqRequest(corridors, body, { requesterKey: deps.clientKey?.(c) })
+        let outcome
+        try {
+          outcome = await respondToRfqRequest(corridors, body, { requesterKey: deps.clientKey?.(c) })
+        } catch (error) {
+          // Matches the relay's catch. `pricing_unavailable` because the reason
+          // vocabulary is closed; 422 because that is where this path's other
+          // refusals live, and a client will not parse a 5xx body.
+          deps.onError?.('http quote', error)
+          const rfqId = (body as { rfq_id?: unknown }).rfq_id
+          return c.json(rfqRefusalPayload(typeof rfqId === 'string' ? rfqId : undefined, 'pricing_unavailable'), 422)
+        }
         if (outcome.kind !== 'quote' && outcome.detail) {
           deps.onRefusal?.('http refused', `${outcome.kind}: ${outcome.detail}`)
         }
@@ -99,7 +111,16 @@ export const buildApp = (deps: HttpDeps): Hono => {
   app.get('/v1/rfq/:rfqId', async (c) => {
     const rfqId = c.req.param('rfqId')
     if (!/^[0-9a-f]{64}$/.test(rfqId)) return c.json(rfqRefusalPayload(undefined, 'unsupported_payload'), 400)
-    const outcome = await respondToRfqStatus(readers, { v: 1, type: 'rfq_status_request', rfq_id: rfqId })
+    let outcome
+    try {
+      outcome = await respondToRfqStatus(readers, { v: 1, type: 'rfq_status_request', rfq_id: rfqId })
+    } catch (error) {
+      // 500, NOT the 404 below: a client polling its own swap would read that
+      // as proof it never existed and stop asking, about a swap that may be
+      // funded and live.
+      deps.onError?.('http status', error)
+      return c.json({ v: 1, type: 'error' }, 500)
+    }
     if (outcome.kind === 'unknown') return c.json({ v: 1, type: 'not_found' }, 404)
     return c.json(outcome.payload, outcome.kind === 'invalid' ? 400 : 200)
   })
