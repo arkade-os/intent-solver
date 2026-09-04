@@ -52,10 +52,12 @@ describe('the invariant: never allocate more than there was', () => {
     }
   })
 
-  it('never emits a piece below dust', () => {
+  it('never emits a piece below dust, at any ceiling', () => {
     for (const [, fee] of Object.entries(FEES)) {
       for (const gross of [329n, 330n, 331n, 1_000n, 12_345n, 3_000_000n]) {
-        for (const piece of split(gross, fee)) expect(piece).toBeGreaterThanOrEqual(DUST)
+        for (const maxAmount of [-1n, 0n, 329n, 330n, 1_000n, 1_000_000n]) {
+          for (const piece of split(gross, fee, 8, TARGET, maxAmount)) expect(piece).toBeGreaterThanOrEqual(DUST)
+        }
       }
     }
   })

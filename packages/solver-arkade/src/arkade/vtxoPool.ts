@@ -240,7 +240,8 @@ export const splitRenewalOutputs = (args: SplitRenewalArgs): bigint[] => {
     }
   }
 
-  while (maxAmount >= 0n && pieces.length < maxOutputs - 1 && fitWithin(remaining) > maxAmount) {
+  // `>= dust`, not `>= 0n`: a ceiling under dust admits no compliant output.
+  while (maxAmount >= dust && pieces.length < maxOutputs - 1 && fitWithin(remaining) > maxAmount) {
     pieces.push(maxAmount)
     remaining -= maxAmount + outputFeeOn(maxAmount)
   }
