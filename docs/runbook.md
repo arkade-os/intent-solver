@@ -487,8 +487,16 @@ un-redact.
 - **`claimed` with `claim_ark_txid: null`** = claim landed but a crash ate the
   txid (only recorded as success BEFORE the refund deadline, where nobody else
   could spend). Verify once by hand if you care about the txid.
-- **`settled` with `onchain_claim_txid: null` on onchain-receive** is the
-  RECOVERY path, not a missing write. The solver crashed after broadcasting its
+- **`claimed` carrying an `onchain_claim_txid`, or `refunding_onchain` carrying
+  an `onchain_refund_txid`, is a row WAITING FOR A BLOCK** and needs nothing.
+  The spend is broadcast and the row stays non-terminal until it confirms
+  (#204), which is what makes `settled`/`refunded` mean the money actually
+  moved. If one sits for many blocks, look the txid up: still in the mempool is
+  a fee-rate problem, and absent from the chain entirely means the broadcast
+  never stuck — the next sweep rebuilds it at today's rate on its own.
+- **`settled` with `onchain_claim_txid: null` on onchain-receive** is a LEGACY
+  recovery path, not a missing write, and only a row quoted before the txid was
+  pre-committed can show it. The solver crashed after broadcasting its
   L1 claim and before recording it; on the next tick it found the HTLC already
   spent, recognised its own preimage in the witness, and settled on that
   evidence. `findSpendWitness` returns the witness stack and never the spending
