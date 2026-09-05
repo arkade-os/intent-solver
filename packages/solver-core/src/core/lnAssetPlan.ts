@@ -41,26 +41,10 @@
 
 /** The receive leg's states — the BTC receive lifecycle, asset-denominated. */
 export type LnAssetReceiveState =
-  | 'quoted'
-  | 'armed'
-  | 'funded'
-  | 'claimed'
-  | 'settled'
-  | 'refunding'
-  | 'refunded'
-  | 'refused'
-  | 'stuck'
+  'quoted' | 'armed' | 'funded' | 'claimed' | 'settled' | 'refunding' | 'refunded' | 'refused' | 'stuck'
 
 /** The send leg's states — `db/swaps.ts`'s send lifecycle, asset-denominated. */
-export type LnAssetSendState =
-  | 'quoted'
-  | 'funded'
-  | 'paying'
-  | 'paid'
-  | 'claiming'
-  | 'claimed'
-  | 'refused'
-  | 'stuck'
+export type LnAssetSendState = 'quoted' | 'funded' | 'paying' | 'paid' | 'claiming' | 'claimed' | 'refused' | 'stuck'
 
 const RECEIVE_TERMINAL: readonly LnAssetReceiveState[] = ['settled', 'refunded', 'refused', 'stuck']
 const SEND_TERMINAL: readonly LnAssetSendState[] = ['claimed', 'refused', 'stuck']

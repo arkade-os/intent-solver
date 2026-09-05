@@ -123,8 +123,7 @@ export type LnAssetSendQuoteRefusal =
   | 'inventory_ceiling_reached'
 
 export type LnAssetSendQuoteOutcome =
-  | { accepted: true; swap: LnAssetSendSwapRow }
-  | { accepted: false; reason: LnAssetSendQuoteRefusal; detail?: string }
+  { accepted: true; swap: LnAssetSendSwapRow } | { accepted: false; reason: LnAssetSendQuoteRefusal; detail?: string }
 
 export interface LnAssetSendQuoteRequest {
   rfqId: string
@@ -406,11 +405,14 @@ export class LnAssetSendSwapService {
         // two compare-and-swaps, and only the second one guards the payment:
         // a crash between it and `payInvoice` leaves a row that says something
         // may be in flight, rather than one that still reads payable.
-        if (row.state === 'quoted' && !(await store.transition(row.id, 'quoted', 'funded', {
-          lockup_txid: outputs[0]?.txid ?? null,
-          lockup_vout: outputs[0]?.vout ?? null,
-          lockup_asset_held: seen.lockupHoldsQuotedAsset ? row.lockupAssetAmount.toString() : null,
-        }))) {
+        if (
+          row.state === 'quoted' &&
+          !(await store.transition(row.id, 'quoted', 'funded', {
+            lockup_txid: outputs[0]?.txid ?? null,
+            lockup_vout: outputs[0]?.vout ?? null,
+            lockup_asset_held: seen.lockupHoldsQuotedAsset ? row.lockupAssetAmount.toString() : null,
+          }))
+        ) {
           return false
         }
         if (row.state === 'quoted') return true
