@@ -1378,9 +1378,12 @@ internally anyway.
 pnpm test:e2e
 ```
 
-**These never run in CI.** `pnpm test` is `vitest run --exclude test/e2e`, so
-the unit suite is unaffected by anything here; `pnpm test:e2e` is the only way
-to run them, and it is meant to be typed deliberately by someone who has just
+**These never gate a merge.** `pnpm test` is `vitest run --exclude test/e2e`, so
+the unit suite is unaffected by anything here. CI runs them only on demand:
+`.github/workflows/e2e.yml` stands its own arkade-regtest stack up, provisions a
+throwaway Arkade wallet and runs a chosen subset, triggered by the `run-e2e`
+label on a PR, a `workflow_dispatch`, or the nightly schedule. Locally,
+`pnpm test:e2e` is meant to be typed deliberately by someone who has just
 brought a stack up.
 
 | File                           | Corridor                    | Needs                                        |
@@ -1559,6 +1562,25 @@ Three things worth knowing before a run:
 
   `regtest-settle.mjs` only settles — use `regtest-fund.mjs` when the wallet
   actually needs topping up.
+
+- **`regtest-settle.mjs` run straight after `regtest-fund.mjs` can hang.** The
+  fund settles and mines ONE block. If the commitment tx had not reached the
+  mempool by then it stays unconfirmed, and until it confirms the wallet's
+  boarding view keeps offering the input that settle already spent — so the next
+  `regtest-settle.mjs` counts it, calls `settle()` on an outpoint that no longer
+  exists, and waits forever instead of erroring. The tell is the balance it
+  prints: `boarding.confirmed: 5000000` beside `settled: 4950000` off a single
+  5000000 faucet is one deposit counted twice, not two deposits. Mine, then
+  settle:
+
+  ```bash
+  node ../arkade-regtest/regtest.mjs mine 2
+  ```
+
+  Observed twice in CI, where `AUTOMINE_INTERVAL=600` holds the window open for
+  ten minutes. NOT reproduced by hand against a local stack, and the
+  walkthroughs above use this exact ordering — so treat it as a hazard to
+  recognise from the symptom, not as a step that always bites.
 
 - **The Arkade wallet drifts unspendable.** vtxos age out of `available` into
   `recoverable`, which still reads as a healthy non-zero total. Settle it back —
