@@ -216,6 +216,18 @@ export class EvmSendSwapService {
     }
   }
 
+  /** Rule 8's proof, degraded as {@link refundOutcome} is - and that DIRECTION
+   * is the safety: an unproven `true` buries a lock the client claimed. */
+  private async refundLanded(row: EvmSendSwapRow): Promise<boolean> {
+    if (row.state !== 'refunding_evm') return false
+    try {
+      return await this.deps.evm.findRefund(this.deps.lockFor(row), 0n)
+    } catch (error) {
+      this.deps.onTickError?.(row.id, error)
+      return false
+    }
+  }
+
   /**
    * Everything the planner needs, gathered before any decision is taken.
    *
@@ -225,12 +237,13 @@ export class EvmSendSwapService {
    */
   private async observe(row: EvmSendSwapRow): Promise<EvmSendObservation> {
     const lock = this.deps.lockFor(row)
-    const [funded, present, height, lockReverted, refundOutcome] = await Promise.all([
+    const [funded, present, height, lockReverted, refundOutcome, refundLanded] = await Promise.all([
       this.deps.arkadeLockupFunded(row),
       this.deps.evm.isLocked(lock),
       this.deps.blockHeight(),
       this.lockReverted(row),
       this.refundOutcome(row),
+      this.refundLanded(row),
     ])
     // Scanned once WE HAVE LOCKED, not while the lock is still present.
     //
@@ -280,6 +293,7 @@ export class EvmSendSwapService {
       evmLockPresent: present,
       evmLockReverted: lockReverted,
       evmRefundOutcome: refundOutcome,
+      evmRefundLanded: refundLanded,
       // MEASURED, not assumed. Feeding the row's own thresholds back here made
       // the planner's `>= minConfirmations` check true the instant any block
       // carried the lock, whatever depth the operator configured — the policy

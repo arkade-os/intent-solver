@@ -384,10 +384,16 @@ describe('EVM ERC20Swap — against the deployed contract`s own bytecode', () =>
       await rpc('anvil_mine', ['0x10'])
 
       const before = await balanceOf(rpc, WETH, solver)
+      expect(await backend.findRefund(lock, tip)).toBe(false)
+
       const refunded = await sendFrom(rpc, SOLVER_KEY, SWAP_ADDRESS, encodeRefund(lock))
       expect(refunded.status).toBe('0x1')
       expect(await balanceOf(rpc, WETH, solver)).toBe(before + AMOUNT)
       expect(await backend.isLocked(lock)).toBe(false)
+
+      // THE ASSERTION NO UNIT TEST MAKES (#36): bytecode shows the event exists
+      // and indexes one field; only a real log shows the hash IS `topics[1]`.
+      expect(await backend.findRefund(lock, tip)).toBe(true)
     },
     180_000,
   )

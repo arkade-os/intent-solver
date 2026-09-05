@@ -88,6 +88,9 @@ export interface EvmHtlcBackend {
    * and this is how the solver learns the secret it needs for its own side.
    */
   findClaimPreimage(lock: Erc20SwapLock, fromBlock: bigint): Promise<Uint8Array | null>
+  /** A refund of THIS lock proven mined since `fromBlock`, whoever sent it -
+   * the row's txid need not be the winner. False is "not proven", not "no". */
+  findRefund(lock: Erc20SwapLock, fromBlock: bigint): Promise<boolean>
   /**
    * The same question as {@link EvmHtlcBackend.isLocked}, asked at a HISTORICAL
    * block.

@@ -30,6 +30,8 @@
  *    different fact from absent-and-pending; only the receipt carries it.
  * 7. `refunded` means the ERC20 came back, so only a mined refund earns it. A
  *    terminal row over a reverted refund lies, and ends the preimage scan.
+ * 8. Which refund MINED is not which one the row recorded, so `refunded` is
+ *    also earned by proving one landed - else the row holding the loser waits.
  */
 
 import type { EvmTransactionOutcome } from '../ports/evm.js'
@@ -62,6 +64,8 @@ export interface EvmSendObservation {
   evmLockReverted: boolean
   /** What became of the solver's own refund broadcast. `pending` until read. */
   evmRefundOutcome: EvmTransactionOutcome
+  /** A refund of this lock PROVEN mined. False is "not proven", not "no". */
+  evmRefundLanded: boolean
   /** Confirmations on the lock, and how long it has been buried. */
   evmLockConfirmations: number
   evmLockAgeSeconds: number
@@ -171,6 +175,9 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
       if (seen.evmRefundOutcome === 'reverted' && seen.evmLockPresent) {
         return { do: 'stick', reason: 'the ERC20 refund transaction reverted; the lock is still funded' }
       }
+      // RULE 8. Only converts the wait below; every exit above keys on the
+      // recorded txid, which can be the loser of a resend race.
+      if (seen.evmRefundLanded) return { do: 'record_refund' }
       return { do: 'wait' }
 
     case 'claiming':
