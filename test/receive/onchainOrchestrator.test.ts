@@ -3,7 +3,7 @@ import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
 import { sha256 } from '@noble/hashes/sha2.js'
-import { hex } from '@scure/base'
+import { base64, hex } from '@scure/base'
 import { SigHash } from '@scure/btc-signer'
 import { ArkAddress } from '@arkade-os/sdk'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
@@ -76,6 +76,8 @@ const clock = () => now
 
 interface ArkadeFake {
   arkade: OnchainReceiveArkadeOps
+  /** What each funding carried for covclaimd, in call order. */
+  fundStamps: ({ packet: Uint8Array; tapTree: Uint8Array } | undefined)[]
   lockups: Map<string, { txid: string; vout: number; value: number }[]>
   /**
    * Spend the lockup at `pkScriptHex`, revealing `preimage` if the spender was
@@ -99,8 +101,10 @@ const buildArkadeFake = (): ArkadeFake => {
   const everSeen = new Map<string, { txid: string; vout: number }[]>()
   const claimed = new Map<string, Uint8Array>()
   let fundCounter = 0
+  const fundStamps: ArkadeFake['fundStamps'] = []
   const state: ArkadeFake = {
     lockups,
+    fundStamps,
     spendLockup: (pkScriptHex, preimage) => {
       lockups.delete(pkScriptHex)
       if (preimage) claimed.set(pkScriptHex, preimage)
@@ -127,6 +131,7 @@ const buildArkadeFake = (): ArkadeFake => {
         return null
       },
       fund: async (params) => {
+        fundStamps.push(params.stamp)
         const txid = `arkade-fund-${fundCounter++}`
         // Keyed by pkScript (decoded from the address, same as production
         // `findLockups`/`findLockupOutpoints` both are), NOT by address —
@@ -372,6 +377,32 @@ describe('OnchainReceiveSwapService', () => {
         if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
         expect(outcome.swap.amountSats).toBe(50_000)
         expect(outcome.swap.payoutSats).toBe(49_450)
+      })
+
+      it('stamps a client packet into the funding and skips the reveal, as the lightning leg does', async () => {
+        const tlv = (type: number, value: number[]) => [type, (value.length >> 8) & 0xff, value.length & 0xff, ...value]
+        const clientPacket = Uint8Array.from([
+          ...tlv(
+            0x01,
+            Array.from({ length: 93 }, (_, i) => i & 0xff),
+          ),
+          ...tlv(0x03, [0x02, ...Array<number>(32).fill(0x11)]),
+        ])
+        const svc = withFee()
+        const outcome = await svc.quote(quoteRequest({ claimPacket: base64.encode(clientPacket) }))
+        if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+
+        deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+        deps.onchain.mineBlocks(1)
+        const row = await svc.tick(outcome.swap.id)
+
+        expect(row.state).toBe('awaiting_claim')
+        const stamp = deps.arkadeFake.fundStamps[0]
+        if (!stamp) throw new Error('expected a stamp')
+        expect(stamp.packet.subarray(0, clientPacket.length)).toEqual(clientPacket)
+        expect(stamp.packet[clientPacket.length]).toBe(0x02)
+        expect(stamp.tapTree.length).toBeGreaterThan(0)
+        expect(deps.covclaimdCalls).toHaveLength(0)
       })
 
       it('still watches for the full client HTLC, then funds the lockup with the payout', async () => {

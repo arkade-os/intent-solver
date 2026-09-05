@@ -28,6 +28,8 @@
  */
 
 import { hex, base64 } from '@scure/base'
+import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
+import { appendArkadeScript, claimPacketShape } from './claimPacket.js'
 import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { ArkAddress } from '@arkade-os/sdk'
@@ -439,6 +441,17 @@ export class OnchainReceiveSwapService {
     return rows
   }
 
+  /** Derived rather than stored: `claim_packet` never changes. @see receive/orchestrator.ts */
+  private claimPacketStamp(row: OnchainReceiveSwapRow): ClaimPacketStamp | undefined {
+    const shape = claimPacketShape(row.claimPacket)
+    if (shape.kind !== 'packet' || !shape.covclaimdPubKey) return undefined
+    const script = covenantScriptFromRow(receiveCovenantRowFor(row))
+    const arkadeScript = script.nonInteractiveClaimArkadeScript
+    if (!shape.needsArkadeScript) return { packet: shape.body, tapTree: script.encode() }
+    if (!arkadeScript) return undefined
+    return { packet: appendArkadeScript(shape.body, arkadeScript), tapTree: script.encode() }
+  }
+
   private async step(row: OnchainReceiveSwapRow): Promise<boolean> {
     switch (row.state) {
       case 'quoted':
@@ -617,7 +630,11 @@ export class OnchainReceiveSwapService {
 
     let txid: string
     try {
-      txid = await arkade.fund({ address: row.lockupAddress, amountSats: row.payoutSats })
+      txid = await arkade.fund({
+        address: row.lockupAddress,
+        amountSats: row.payoutSats,
+        stamp: this.claimPacketStamp(row),
+      })
     } catch (error) {
       // Hand the lease back on a throw: no money this service can see has
       // moved, and holding it would strand the row for every worker rather
@@ -667,7 +684,8 @@ export class OnchainReceiveSwapService {
     // failing fast here would turn a claim observed a moment late into a
     // stuck swap.
 
-    if (covclaimd) {
+    // Stamped fundings are already on the tx stream, for the covclaimd the client named.
+    if (covclaimd && !this.claimPacketStamp(row)) {
       const script = covenantScriptFromRow(receiveCovenantRowFor(row))
       if (!script.nonInteractiveClaimArkadeScript) {
         // Unreachable by construction: every row on this leg is quoted with a
