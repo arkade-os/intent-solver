@@ -56,6 +56,10 @@ describe('claimPacketShape', () => {
 
   it.each([
     ['a TLV body missing the ciphertext', base64.encode(tlv(0x02, ARKADE_SCRIPT))],
+    [
+      'a ciphertext that is not the sealed 93 bytes, even beside a valid pubkey',
+      base64.encode(concat(tlv(0x01, ARKADE_SCRIPT), tlv(0x03, PUBKEY))),
+    ],
     ['a truncated TLV header', base64.encode(Uint8Array.from([0x01, 0x00]))],
     ['a TLV length that overruns', base64.encode(Uint8Array.from([0x01, 0x00, 0x05, 0xaa]))],
     [

@@ -36,8 +36,8 @@ export const appendArkadeScript = (body: Uint8Array, arkadeScript: Uint8Array): 
   Uint8Array.from([...body, ...encodeTlv(TLV_ARKADE_SCRIPT, arkadeScript)])
 
 /** Transcribed from `DeserializeClaim`, including its tolerance of unknown and repeated types. */
-const parseTlv = (data: Uint8Array): { hasCiphertext: boolean; hasArkadeScript: boolean; pubKey?: Uint8Array } => {
-  let hasCiphertext = false
+const parseTlv = (data: Uint8Array): { ciphertextLength?: number; hasArkadeScript: boolean; pubKey?: Uint8Array } => {
+  let ciphertextLength: number | undefined
   let hasArkadeScript = false
   let pubKey: Uint8Array | undefined
   let offset = 0
@@ -49,7 +49,7 @@ const parseTlv = (data: Uint8Array): { hasCiphertext: boolean; hasArkadeScript: 
     if (offset + length > data.length) throw new Error(`TLV type 0x${type.toString(16)} overruns the buffer`)
     const value = data.subarray(offset, offset + length)
     offset += length
-    if (type === TLV_CIPHERTEXT) hasCiphertext = true
+    if (type === TLV_CIPHERTEXT) ciphertextLength = value.length
     else if (type === TLV_ARKADE_SCRIPT) hasArkadeScript = true
     else if (type === TLV_COVCLAIMD_PUBKEY) {
       if (value.length !== COMPRESSED_PUBKEY_LENGTH) {
@@ -58,7 +58,7 @@ const parseTlv = (data: Uint8Array): { hasCiphertext: boolean; hasArkadeScript: 
       pubKey = value
     }
   }
-  return { hasCiphertext, hasArkadeScript, pubKey }
+  return { ciphertextLength, hasArkadeScript, pubKey }
 }
 
 /** Never throws: anything not unambiguously a packet keeps the old reveal path. */
@@ -66,9 +66,9 @@ export const claimPacketShape = (b64: string): ClaimPacketShape => {
   try {
     const raw = base64.decode(b64)
     if (raw.length === LEGACY_CIPHERTEXT_LENGTH) return { kind: 'ciphertext' }
-    const { hasCiphertext, hasArkadeScript, pubKey } = parseTlv(raw)
-    // `0x01` is the only TLV a client must send: it is the one nobody else has.
-    if (!hasCiphertext) return { kind: 'ciphertext' }
+    const { ciphertextLength, hasArkadeScript, pubKey } = parseTlv(raw)
+    // Length is fixed by the sealing scheme; a wrong one fails to decrypt either way, so take the loud path.
+    if (ciphertextLength !== LEGACY_CIPHERTEXT_LENGTH) return { kind: 'ciphertext' }
     return {
       kind: 'packet',
       body: raw,
