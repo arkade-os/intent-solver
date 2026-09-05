@@ -129,9 +129,13 @@ export interface LnAssetMarket {
   pricePath: string
 }
 
+/**
+ * No `exact_out_unsupported`, unlike {@link AssetQuoteRefusal}: that one exists
+ * because the atomic corridor takes an `amountSide`, and these legs have none —
+ * an invoice fixes the sats side, so the direction IS the side.
+ */
 export type LnAssetQuoteRefusal =
   | 'unsupported_pair'
-  | 'exact_out_unsupported'
   | 'price_unavailable'
   | 'fee_consumes_swap'
   | 'amount_out_of_range'
