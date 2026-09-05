@@ -14,10 +14,7 @@
  * `EVM_TOKENS` does; the console prices them. Unset serves none, which is the
  * default and leaves the deployment as it was.
  */
-import {
-  assetRfqEnvStem,
-  type AssetRfqDirection,
-} from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import { assetRfqEnvStem, type AssetRfqDirection } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 

@@ -13,10 +13,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { offerScriptFrom } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
-import {
-  quotedOfferSettleFor,
-  type QuotedOfferIntent,
-} from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
+import { quotedOfferSettleFor, type QuotedOfferIntent } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import type { fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 
@@ -78,12 +75,12 @@ describe('quotedOfferSettleFor', () => {
   it('spends the outpoint the row recorded, at the value the chain reports', async () => {
     const { settle, fulfill } = settleWith([funded({ vout: 0, sats: 999n }), funded()])
     await settle(intent())
-    expect(fulfill).toHaveBeenCalledWith(
-      expect.anything(),
-      'http://emulator.test',
-      expect.anything(),
-      { txid: TXID, vout: 1, value: 20_000, assetAmount: undefined },
-    )
+    expect(fulfill).toHaveBeenCalledWith(expect.anything(), 'http://emulator.test', expect.anything(), {
+      txid: TXID,
+      vout: 1,
+      value: 20_000,
+      assetAmount: undefined,
+    })
   })
 
   it('hands `fulfill` an offer whose script is the DERIVED one', async () => {
@@ -94,7 +91,10 @@ describe('quotedOfferSettleFor', () => {
   })
 
   it('returns whatever txid the fill landed as', async () => {
-    const { settle } = settleWith([funded()], vi.fn(async () => 'c'.repeat(64)))
+    const { settle } = settleWith(
+      [funded()],
+      vi.fn(async () => 'c'.repeat(64)),
+    )
     expect(await settle(intent())).toBe('c'.repeat(64))
   })
 

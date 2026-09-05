@@ -111,7 +111,13 @@ describe('heldOnOutpoint', () => {
   })
 
   it('sums an asset across entries rather than taking the first', () => {
-    const held = { ...outpoint(), assets: [{ assetId: USD, amount: 4n }, { assetId: USD, amount: 6n }] }
+    const held = {
+      ...outpoint(),
+      assets: [
+        { assetId: USD, amount: 4n },
+        { assetId: USD, amount: 6n },
+      ],
+    }
     expect(heldOnOutpoint(held, USD)).toBe(10n)
   })
 

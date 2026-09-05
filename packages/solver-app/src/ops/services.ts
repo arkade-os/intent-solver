@@ -82,10 +82,7 @@ import { assertMarketsPriced, AssetOfferService } from './assetOffers.js'
 import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
-import {
-  AssetRfqSwapService,
-  type AssetRfqMarket,
-} from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import { assetRfqMarketsFrom } from './assetRfqMarkets.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
@@ -515,8 +512,7 @@ export const createServices = async (
           emulatorUrl: config.emulatorUrl,
           derivation: assetRfqDerivation,
         }),
-        onError: (id, error) =>
-          log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
+        onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
       })
     : null
 
