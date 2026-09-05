@@ -24,7 +24,7 @@
     "test:perf": "vitest run --config vitest.perf.config.ts"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.4.67",
+    "@arkade-os/sdk": "0.4.69",
     "@hono/node-server": "^2.1.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.0.0",
@@ -52,7 +52,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@arkade-os/swap": "0.0.10",
+    "@arkade-os/swap": "0.0.12",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^24.13.3",
     "@types/ws": "^8.18.1",
