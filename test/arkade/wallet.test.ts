@@ -40,6 +40,7 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
 // time) — dynamic import keeps that ordering explicit rather than relying on
 // hoisting semantics.
 const {
+  claimSwapScript,
   refundSwapScript,
   refundWithoutReceiverSwapScript,
   findClaimPreimage,
@@ -424,6 +425,100 @@ describe('refunding an asset-carrying lockup', () => {
     await expect(refundSwapScript(ctx(), 'http://emulator.test', receiveLegScript(), funded, DEST)).rejects.toThrow(
       /exactly one asset/,
     )
+  })
+
+  /**
+   * The CLAIM side of the same gap, and the one `arkade:<asset>->lightning:BTC`
+   * settles on: the solver pays the invoice and then claims the client's asset
+   * lockup. With no packet arkd answers `no asset packet` — and by then the
+   * sats have already left.
+   */
+  describe('claiming an asset-carrying lockup', () => {
+    const PREIMAGE = new Uint8Array(32).fill(7)
+
+    // Returns the txid `assertSubmittedArkTxid` demands, so the guard the claim
+    // path runs against a hostile server is exercised rather than stubbed away.
+    const claimSubmitTx = vi.fn(async (arkTxB64: string, checkpointsB64: string[]) => ({
+      arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
+      signedCheckpointTxs: checkpointsB64,
+    }))
+    const claimCtx = (): ArkadeContext =>
+      ({
+        identity: receiverIdentity,
+        wallet: {
+          serverUnrollScript,
+          arkProvider: { submitTx: claimSubmitTx, finalizeTx: vi.fn(async () => undefined) },
+        },
+      }) as unknown as ArkadeContext
+
+    /** The claim leaf needs the RECEIVER's key, so these are the send leg's roles. */
+    const sendLegScript = () =>
+      new CovenantSwapScript({
+        receiver: RECEIVER,
+        server: SERVER,
+        preimageHash: PREIMAGE_HASH,
+        refundLocktime: REFUND_LOCKTIME,
+        claimDelay: CLAIM_DELAY,
+        client: CLIENT,
+        clientRefundDelay: CLIENT_REFUND_DELAY,
+        refundWithoutServerDelay: REFUND_WITHOUT_SERVER_DELAY,
+        nonInteractiveParameters: {
+          emulatorPubkey: EMULATOR,
+          receiverPkScript: RECEIVER_PAYOUT,
+          senderPkScript: DEST,
+        },
+        asset: parseAssetId(ASSET_A),
+      })
+
+    const DEST_ADDRESS = baseScript().address('tark', SERVER).encode()
+
+    it('routes the whole carried amount to the claim destination', async () => {
+      claimSubmitTx.mockClear()
+      const funded: FundedOutput[] = [{ ...FUNDED[0]!, assets: [{ assetId: ASSET_A, amount: 500n }] }]
+      await claimSwapScript(claimCtx(), sendLegScript(), funded, PREIMAGE, DEST_ADDRESS)
+      const [arkTxB64] = claimSubmitTx.mock.calls[0] as [string, string[]]
+      expect(allocations(packetOn(arkTxB64))).toEqual([{ assetId: ASSET_A, vout: 0, amount: 500n }])
+    })
+
+    it('sums a lockup funded by more than one payment onto the single claim output', async () => {
+      claimSubmitTx.mockClear()
+      const funded: FundedOutput[] = [
+        { ...FUNDED[0]!, assets: [{ assetId: ASSET_A, amount: 500n }] },
+        { txid: FUNDING.id, vout: 1, value: 1_000, assets: [{ assetId: ASSET_A, amount: 250n }] },
+      ]
+      await claimSwapScript(claimCtx(), sendLegScript(), funded, PREIMAGE, DEST_ADDRESS)
+      const [arkTxB64] = claimSubmitTx.mock.calls[0] as [string, string[]]
+      expect(allocations(packetOn(arkTxB64))).toEqual([{ assetId: ASSET_A, vout: 0, amount: 750n }])
+    })
+
+    it('declares a stray asset alongside the denominating one', async () => {
+      claimSubmitTx.mockClear()
+      const funded: FundedOutput[] = [
+        {
+          ...FUNDED[0]!,
+          assets: [
+            { assetId: ASSET_A, amount: 500n },
+            { assetId: ASSET_B, amount: 7n },
+          ],
+        },
+      ]
+      await claimSwapScript(claimCtx(), sendLegScript(), funded, PREIMAGE, DEST_ADDRESS)
+      const [arkTxB64] = claimSubmitTx.mock.calls[0] as [string, string[]]
+      expect(allocations(packetOn(arkTxB64))).toEqual(
+        expect.arrayContaining([
+          { assetId: ASSET_A, vout: 0, amount: 500n },
+          { assetId: ASSET_B, vout: 0, amount: 7n },
+        ]),
+      )
+    })
+
+    /** The regression that matters most: every existing sats lockup is untouched. */
+    it('attaches no packet at all when the lockup carries no asset', async () => {
+      claimSubmitTx.mockClear()
+      await claimSwapScript(claimCtx(), sendLegScript(), FUNDED, PREIMAGE, DEST_ADDRESS)
+      const [arkTxB64] = claimSubmitTx.mock.calls[0] as [string, string[]]
+      expect(() => Extension.fromTx(Transaction.fromPSBT(base64.decode(arkTxB64)))).toThrow()
+    })
   })
 })
 

@@ -14,7 +14,7 @@
  */
 import { hex } from '@scure/base'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
-import { CovenantSwapScript } from './covenant.js'
+import { CovenantSwapScript, parseAssetId } from './covenant.js'
 /**
  * The structural subset of a swap row `covenantScriptFromRow`
  * (`src/send/arkadeOps.ts`) needs to rebuild the Arkade-side covenant
@@ -70,6 +70,17 @@ export interface CovenantScriptRow {
    * distinction ever mattered; today nothing asks it to.
    */
   nonInteractiveParameters: boolean | null
+  /**
+   * The Arkade asset this lockup is denominated in, canonical 68-hex, when it
+   * is denominated in one.
+   *
+   * SELECTS A SCRIPT SHAPE the way `nonInteractiveParameters` above does: the
+   * asset binds all three emulator-enforced leaves, so a row carrying one and
+   * omitting it here rebuilds a DIFFERENT `pkScript` and is refused by
+   * `assertScriptMatchesRow`. Optional because the sats corridors' rows have no
+   * such column, and absent must keep meaning exactly what it means today.
+   */
+  assetId?: string | null
 }
 
 /**
@@ -178,5 +189,8 @@ export const covenantScriptFromRow = (row: CovenantScriptRow): CovenantSwapScrip
       // funded against. See `NonInteractiveParameters.legacy`'s doc comment.
       ...(row.nonInteractiveParameters ? {} : { legacy: 'preTimelockedRefund' as const }),
     },
+    // CANONICAL order — `parseAssetId` returns the id unreversed and the SDK
+    // reverses it for `INSPECTOUTASSETLOOKUP` itself.
+    ...(row.assetId ? { asset: parseAssetId(row.assetId) } : {}),
   })
 }
