@@ -503,7 +503,8 @@ export const createServices = async (
         solverPubkey: hex.encode(await arkade.identity.xOnlyPublicKey()),
         quoteValiditySeconds: policy.assetQuoteValiditySeconds,
         deriveOffer: offerScriptFrom(assetRfqDerivation),
-        depositAt: async (offerPkScript) => largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript)),
+        depositAt: async (offerPkScript, depositLeg) =>
+          largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),
         // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
         balance: async () => offerInventoryFrom(await arkade.wallet.getBalance()),
         fetchPrice: createPriceFeed(),

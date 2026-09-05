@@ -937,7 +937,7 @@ describe('ASSET_MARKETS', () => {
     ])
   })
 
-  it('closes one direction from its own stem', () => {
+  it('ASSET_USDA_BUY_ENABLED=false closes sell_base — the client GIVES the base leg', () => {
     process.env.ASSET_MARKETS = `USDA:${USDA}`
     process.env.ASSET_USDA_BUY_ENABLED = 'false'
     expect(loadConfig().assetRfqTokens[0]!.enabled).toEqual({ sell_base: false, buy_base: true })

@@ -66,17 +66,6 @@ export const liveOfferOutpoints = async (
   return outpoints
 }
 
-/**
- * The outpoint a fill would spend: the largest by sats, or null when none is
- * funded.
- *
- * Largest rather than first, because identical terms compile to one address —
- * so an earlier negotiation's leftover dust can sit beside the deposit this one
- * is waiting for, and picking arbitrarily would report the swap as funded short.
- */
-export const largestOfferOutpoint = (outpoints: readonly OfferOutpoint[]): OfferOutpoint | null =>
-  outpoints.reduce<OfferOutpoint | null>((best, next) => (best === null || next.sats > best.sats ? next : best), null)
-
 /** How much of one leg an outpoint holds — sats when the leg is BTC. */
 export const heldOnOutpoint = (outpoint: OfferOutpoint, leg: string | null): bigint => {
   if (leg === null) return outpoint.sats
@@ -84,3 +73,29 @@ export const heldOnOutpoint = (outpoint: OfferOutpoint, leg: string | null): big
   for (const entry of outpoint.assets) if (entry.assetId === leg) held += entry.amount
   return held
 }
+
+/**
+ * The outpoint a fill would spend: the one holding most of the DEPOSIT LEG, or
+ * null when none is funded.
+ *
+ * Largest rather than first, because identical terms compile to one address —
+ * so an earlier negotiation's leftover can sit beside the deposit this one is
+ * waiting for, and picking arbitrarily would report the swap as funded short.
+ *
+ * BY THE LEG, NOT BY SATS. Ranking on sats is the right discriminant only when
+ * the deposit IS sats: an asset deposit rides a uniform dust carrier, so a stale
+ * carrier and the live one tie and the winner is whichever the indexer happened
+ * to return first. A stale one holding a nonzero but insufficient amount then
+ * passes the orchestrator's `> 0` funding check, is recorded on the row, and
+ * fails re-measurement at settle — a stuck row a human must clear, when the
+ * right outpoint was sitting beside it. Sats break the tie, so a BTC deposit
+ * ranks exactly as it did.
+ */
+export const largestOfferOutpoint = (outpoints: readonly OfferOutpoint[], leg: string | null): OfferOutpoint | null =>
+  outpoints.reduce<OfferOutpoint | null>((best, next) => {
+    if (best === null) return next
+    const a = heldOnOutpoint(next, leg)
+    const b = heldOnOutpoint(best, leg)
+    if (a !== b) return a > b ? next : best
+    return next.sats > best.sats ? next : best
+  }, null)

@@ -117,7 +117,7 @@ export interface AssetRfqDeps {
    */
   deriveOffer: (terms: OfferTerms) => { pkScript: string; address: string }
   /** What is funded at the offer's script, or null while nothing is. */
-  depositAt: (offerPkScript: string) => Promise<ObservedDeposit | null>
+  depositAt: (offerPkScript: string, depositLeg: AssetLeg | null) => Promise<ObservedDeposit | null>
   /** Spendable balance per asset id — `available`, never `total`. */
   balance: () => Promise<ReadonlyMap<AssetLeg, bigint>>
   fetchPrice: (feedUrl: string, pricePath: string) => Promise<Price>
@@ -329,7 +329,7 @@ export class AssetRfqSwapService {
       return
     }
 
-    const deposit = await this.deps.depositAt(row.offerPkScript)
+    const deposit = await this.deps.depositAt(row.offerPkScript, row.fromAssetId)
     if (!deposit || heldOf(deposit, row.fromAssetId) <= 0n) return
     await this.deps.store.transition(row.id, 'quoted', 'funded', {
       deposit_txid: deposit.txid,
@@ -342,7 +342,7 @@ export class AssetRfqSwapService {
    * spend it — § 9's action-time gate.
    */
   private async whenFunded(row: AssetRfqSwapRow): Promise<void> {
-    const deposit = await this.deps.depositAt(row.offerPkScript)
+    const deposit = await this.deps.depositAt(row.offerPkScript, row.fromAssetId)
     const decision = evaluateAssetFill({
       toAmount: row.toAmount,
       toAssetId: row.toAssetId,

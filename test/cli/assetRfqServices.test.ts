@@ -79,7 +79,14 @@ describe('the four Arkade seams', () => {
   })
 
   it('watches ONE outpoint, because a fill spends one input', () => {
-    expect(body()).toContain('largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript))')
+    expect(body()).toContain('largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript)')
+  })
+
+  it('ranks that outpoint by the DEPOSIT LEG, not by sats', () => {
+    // An asset deposit rides a uniform dust carrier, so ranking on sats ties a
+    // stale carrier against the live one and the indexer's order decides which
+    // is recorded — then settle re-measures it and the row sticks.
+    expect(body()).toContain('offerPkScript), depositLeg)')
   })
 
   it('wires the spend through the guarded settle port', () => {
