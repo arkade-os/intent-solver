@@ -50,9 +50,11 @@ describe('createServices — one admission control for every corridor', () => {
     // each read the same pre-commit total and both pass a cap only one fits
     // under — the #105 race, reopened for two corridors and invisible because
     // the number was hard-coded to the corridors that existed when it was written.
+    // SEVEN since the onchain asset receive leg. This number tracks reality on
+    // purpose — the paragraph above is what happened the last time it did not.
     const body = createServicesBody()
-    expect(body.match(/^\s*admission,$/gm) ?? []).toHaveLength(6)
-    expect(body.match(/^\s*totalCommitted,$/gm) ?? []).toHaveLength(6)
+    expect(body.match(/^\s*admission,$/gm) ?? []).toHaveLength(7)
+    expect(body.match(/^\s*totalCommitted,$/gm) ?? []).toHaveLength(7)
   })
 })
 

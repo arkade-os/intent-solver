@@ -21,6 +21,8 @@ import {
   type EvmCorridorPolicy,
   type EvmMarket,
 } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
+import { onchainAssetMarkets, parseOnchainAssetPairs } from '@arkade-os/solver-core/core/onchainAssetMarketConfig.js'
+import type { OnchainAssetMarket } from '@arkade-os/solver-core/core/onchainAssetReceive.js'
 import { isSwapNetwork, NETWORKS, type NetworkProfile, type SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { lightningRailNames } from './ops/rails.js'
 import { parseAssetMarkets, type AssetMarket } from './ops/assetOffers.js'
@@ -182,6 +184,13 @@ export interface Config {
    * their tokens and so cannot be compile-time keys — @see core/corridorPolicy.
    */
   evmCorridors: readonly EvmCorridorPolicy[]
+  /**
+   * The `onchain:BTC->arkade:<asset>` markets served, from `ONCHAIN_ASSET_MARKETS`.
+   *
+   * Empty is the corridor off, and is the default: no store is opened, no
+   * service is built, and every such pair refuses by name at the ingress.
+   */
+  onchainAssetMarkets: readonly OnchainAssetMarket[]
   /**
    * Where each served token's price comes from. Empty exactly when
    * {@link Config.evmCorridors} is.
@@ -910,6 +919,10 @@ export const loadConfig = (): Config => {
     // Reads the ALREADY-NARROWED house limits, so a per-token knob inherits a
     // bound an override may have tightened rather than the raw environment's.
     evmCorridors: evmCorridorPolicies(parseEvmTokens(process.env.EVM_TOKENS), limits, (name) => process.env[name]),
+    onchainAssetMarkets: onchainAssetMarkets(
+      parseOnchainAssetPairs(process.env.ONCHAIN_ASSET_MARKETS),
+      (name) => process.env[name],
+    ),
     // Loaded here rather than at first quote so a token whose price cannot be
     // resolved stops the deployment instead of advertising a pair it will then
     // refuse every request against.
