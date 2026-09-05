@@ -44,7 +44,8 @@ describe('parseAssetRfqTokens', () => {
   it('closes exactly the direction whose stem says so', () => {
     // The stems are the corridor's own, not restated here: a rename there must
     // change which variable an operator sets, not silently stop being read.
-    const read = (name: string) => (name === `${assetRfqEnvStem({ symbol: 'USDA' }, 'buy_base')}_ENABLED` ? 'false' : undefined)
+    const read = (name: string) =>
+      name === `${assetRfqEnvStem({ symbol: 'USDA' }, 'buy_base')}_ENABLED` ? 'false' : undefined
     expect(parseAssetRfqTokens(`USDA:${USDA}`, read)[0]!.enabled).toEqual({ sell_base: true, buy_base: false })
   })
 
@@ -76,7 +77,12 @@ describe('parseAssetRfqTokens', () => {
 })
 
 describe('assetRfqMarketsFrom', () => {
-  const token = (over = {}) => ({ symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true }, ...over })
+  const token = (over = {}) => ({
+    symbol: 'USDA',
+    assetId: USDA,
+    enabled: { sell_base: true, buy_base: true },
+    ...over,
+  })
 
   it('carries the console row through, market for market', () => {
     const [market] = assetRfqMarketsFrom([token()], [pricing()])
@@ -117,9 +123,7 @@ describe('assetRfqMarketsFrom', () => {
   })
 
   it('refuses a market with an asset on both legs, which no offer packet expresses', () => {
-    expect(() => assetRfqMarketsFrom([token()], [pricing({ base: OTHER, quote: USDA })])).toThrow(
-      /asset on both legs/,
-    )
+    expect(() => assetRfqMarketsFrom([token()], [pricing({ base: OTHER, quote: USDA })])).toThrow(/asset on both legs/)
   })
 
   it('refuses a served direction the console left unbounded', () => {
@@ -134,10 +138,7 @@ describe('assetRfqMarketsFrom', () => {
   it('closes a direction to zero rather than darkening the pair', () => {
     // `corridorSet.ts` argues the honest answer for a paused direction is to
     // register and refuse by amount: the pair IS served, at no size.
-    const [market] = assetRfqMarketsFrom(
-      [token({ enabled: { sell_base: false, buy_base: true } })],
-      [pricing()],
-    )
+    const [market] = assetRfqMarketsFrom([token({ enabled: { sell_base: false, buy_base: true } })], [pricing()])
     expect(market!.sellBase).toEqual({ min: 0n, max: 0n })
     expect(market!.buyBase).toEqual({ min: 2n, max: 10n ** 9n })
   })

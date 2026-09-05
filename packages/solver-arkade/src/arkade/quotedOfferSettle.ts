@@ -54,9 +54,7 @@ const termsOf = (intent: QuotedOfferIntent): QuotedOfferTerms => ({
   makerPublicKey: intent.makerPublicKey,
 })
 
-export const quotedOfferSettleFor = (
-  deps: QuotedOfferSettleDeps,
-): ((intent: QuotedOfferIntent) => Promise<string>) => {
+export const quotedOfferSettleFor = (deps: QuotedOfferSettleDeps): ((intent: QuotedOfferIntent) => Promise<string>) => {
   const outpointsAt = deps.outpointsAt ?? ((pkScript: string) => liveOfferOutpoints(deps.ctx, pkScript))
   const fulfill = deps.fulfill ?? fulfillOffer
   const derive = offerScriptFrom(deps.derivation)
