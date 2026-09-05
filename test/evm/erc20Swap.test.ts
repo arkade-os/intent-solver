@@ -354,7 +354,7 @@ describe('the Refund event, against the deployed runtime bytecode', () => {
   const logOpcodeAfter = (topic: Uint8Array): number | null => {
     const at = runtime.indexOf(Buffer.from(topic))
     if (at < 1 || runtime[at - 1] !== 0x7f) return null
-    for (let pc = at + 32; pc < runtime.length; ) {
+    for (let pc = at + 32; pc < runtime.length;) {
       const op = runtime[pc]!
       if (op >= 0xa0 && op <= 0xa4) return op
       pc += op >= 0x60 && op <= 0x7f ? 1 + (op - 0x5f) : 1
@@ -371,9 +371,7 @@ describe('the Refund event, against the deployed runtime bytecode', () => {
     // Lockup is the control that must NOT be LOG2, or the walker says LOG2 always.
     expect(logOpcodeAfter(refundEventTopic())).toBe(0xa2)
     expect(logOpcodeAfter(claimEventTopic())).toBe(0xa2)
-    const lockup = keccak_256(
-      new TextEncoder().encode('Lockup(bytes32,uint256,address,address,address,uint256)'),
-    )
+    const lockup = keccak_256(new TextEncoder().encode('Lockup(bytes32,uint256,address,address,address,uint256)'))
     expect(logOpcodeAfter(lockup)).toBe(0xa4)
   })
 
