@@ -19,10 +19,7 @@ import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDes
 import { diagnose, phaseOfStates, type AdminSwap } from '@arkade-os/solver-core/core/swapView.js'
 import type { CorridorRfqOutcome as RfqOutcome } from '@arkade-os/solver-core/core/corridor.js'
 import { extractRfqId, zodDetail } from '@arkade-os/solver-core/core/rfqProtocol.js'
-import {
-  onchainAssetReceivePairFor,
-  type OnchainAssetMarket,
-} from '@arkade-os/solver-core/core/onchainAssetReceive.js'
+import { onchainAssetReceivePairFor, type OnchainAssetMarket } from '@arkade-os/solver-core/core/onchainAssetReceive.js'
 import { rfqRefusalPayload } from '../wire/payloads.js'
 import {
   OnchainAssetReceiveRfqRequest,
@@ -36,10 +33,7 @@ import {
   type OnchainAssetReceiveState,
   type OnchainAssetReceiveSwapStore,
 } from '../db/onchainAssetReceiveSwaps.js'
-import {
-  assetReceiveCovenantRowFor,
-  type OnchainAssetReceiveSwapService,
-} from '../receive/onchainAssetOrchestrator.js'
+import { assetReceiveCovenantRowFor, type OnchainAssetReceiveSwapService } from '../receive/onchainAssetOrchestrator.js'
 
 /**
  * The env stem for one market.

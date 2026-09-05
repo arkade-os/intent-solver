@@ -85,9 +85,7 @@ export interface OnchainAssetMarket {
 
 export type OnchainAssetQuoteRefusal = AssetQuoteRefusal
 
-export type OnchainAssetPayout =
-  | { ok: true; payoutUnits: bigint }
-  | { ok: false; reason: OnchainAssetQuoteRefusal }
+export type OnchainAssetPayout = { ok: true; payoutUnits: bigint } | { ok: false; reason: OnchainAssetQuoteRefusal }
 
 /**
  * What the solver will pay out, in atomic units, for a give of `giveSats`.
