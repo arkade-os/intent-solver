@@ -980,7 +980,22 @@ export const loadConfig = (): Config => {
     emulatorUrl: required('EMULATOR_URL'),
     // Optional: the non-interactive claim daemon the receive legs reveal funded
     // lockups to (its Reveal API). Unset keeps the client-claims-itself default.
-    covclaimdUrl: process.env.COVCLAIMD_URL?.trim() || undefined,
+    covclaimdUrl: (() => {
+      const raw = process.env.COVCLAIMD_URL?.trim()
+      if (!raw) return undefined
+      let url: URL
+      try {
+        url = new URL(raw)
+      } catch {
+        throw new Error(`COVCLAIMD_URL must be an absolute URL, got "${raw}"`)
+      }
+      if (url.protocol === 'https:') return raw
+      const host = url.hostname.replace(/^\[|\]$/g, '')
+      const loopback = host === 'localhost' || host === '::1' || /^127\./.test(host)
+      // Mainnet-gated, not loopback-only: regtest stacks reach covclaimd over a container network.
+      if (loopback || !profile.isMainnet) return raw
+      throw new Error(`COVCLAIMD_URL must use https on mainnet, got "${url.protocol}//${url.host}"`)
+    })(),
     arkade: {
       mnemonic: required('ARK_MNEMONIC'),
       arkServerUrl: required('ARK_SERVER_URL'),
