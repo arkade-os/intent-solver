@@ -24,6 +24,11 @@ import {
   type QuotedOfferTerms,
 } from './offerTerms.js'
 
+const assertSafeSats = (sats: bigint): number => {
+  if (sats > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`deposit of ${sats} sats exceeds a safe integer`)
+  return Number(sats)
+}
+
 /** The negotiated row, structurally. `AssetRfqSwapRow` satisfies it. */
 export interface QuotedOfferIntent {
   offerPkScript: string
@@ -100,7 +105,11 @@ export const quotedOfferSettleFor = (deps: QuotedOfferSettleDeps): ((intent: Quo
       {
         txid: deposit.txid,
         vout: deposit.vout,
-        value: Number(deposit.sats),
+        // Narrowed because `OfferDepositOutpoint.value` is `number`. Safe while
+        // sats are: 21M BTC is 2.1e15, well inside 2^53. Guarded rather than
+        // trusted, because this is the path where the solver is the MAKER and a
+        // truncated value would describe an input that does not exist.
+        value: assertSafeSats(deposit.sats),
         // What vin 0 actually carries, not what was quoted: the packet declares
         // the input, and declaring an amount the input does not hold describes
         // an input that does not exist.

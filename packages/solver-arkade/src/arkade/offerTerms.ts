@@ -48,7 +48,15 @@ export interface OfferDerivation {
  * compressed form through compiles a DIFFERENT covenant, so the address would be
  * one no client ever derives and no deposit ever lands at.
  */
-export const xOnlyPubkey = (pubkey: Uint8Array): Uint8Array => pubkey.slice(-32)
+export const xOnlyPubkey = (pubkey: Uint8Array): Uint8Array => {
+  // Asserted, not assumed: `slice(-32)` of a 65-byte UNCOMPRESSED key silently
+  // takes the back half of Y and compiles a covenant no client derives. Every
+  // current caller passes 32 or 33, so this only ever catches a new one.
+  if (pubkey.length !== 32 && pubkey.length !== 33) {
+    throw new Error(`pubkey must be 32 bytes x-only or 33 compressed, got ${pubkey.length}`)
+  }
+  return pubkey.slice(-32)
+}
 
 /** The offer these terms describe, less the script they compile to. */
 export const offerFromTerms = (terms: QuotedOfferTerms, emulatorPubkey: Uint8Array): Omit<Offer, 'swapPkScript'> => ({

@@ -91,17 +91,43 @@ describe('liveOfferOutpoints', () => {
 })
 
 describe('largestOfferOutpoint', () => {
+  const USDA = '11'.repeat(34)
+  const carrying = (vout: number, amount: bigint) => outpoint({ vout, sats: 330n, assets: [{ assetId: USDA, amount }] })
+
   it('is null when nothing is funded, which is how a quote waits', () => {
-    expect(largestOfferOutpoint([])).toBeNull()
+    expect(largestOfferOutpoint([], null)).toBeNull()
   })
 
-  it('takes the largest rather than the first', () => {
+  it('takes the largest rather than the first, for a BTC deposit', () => {
     // Identical terms compile to one address, so an earlier negotiation's dust
     // can sit beside this deposit; taking the first would report it funded short.
     const dust = outpoint({ vout: 0, sats: 330n })
     const real = outpoint({ vout: 1, sats: 20_000n })
-    expect(largestOfferOutpoint([dust, real])).toBe(real)
-    expect(largestOfferOutpoint([real, dust])).toBe(real)
+    expect(largestOfferOutpoint([dust, real], null)).toBe(real)
+    expect(largestOfferOutpoint([real, dust], null)).toBe(real)
+  })
+
+  it('ranks an ASSET deposit by the asset, not by the carrier it rides', () => {
+    // Both carriers are dust, so sats tie and the indexer's order would decide.
+    // A stale carrier holding a nonzero-but-short amount passes the
+    // orchestrator's `> 0` funding check, is recorded on the row, and sticks it
+    // at settle — with the right outpoint sitting beside it the whole time.
+    const stale = carrying(0, 1n)
+    const live = carrying(1, 500n)
+    expect(largestOfferOutpoint([stale, live], USDA)).toBe(live)
+    expect(largestOfferOutpoint([live, stale], USDA)).toBe(live)
+  })
+
+  it('falls back to sats when the leg ties', () => {
+    const small = carrying(0, 500n)
+    const big = { ...carrying(1, 500n), sats: 20_000n }
+    expect(largestOfferOutpoint([small, big], USDA)).toBe(big)
+  })
+
+  it('ignores an outpoint carrying a different asset entirely', () => {
+    const other = outpoint({ vout: 0, sats: 20_000n, assets: [{ assetId: '22'.repeat(34), amount: 10n ** 9n }] })
+    const mine = carrying(1, 5n)
+    expect(largestOfferOutpoint([other, mine], USDA)).toBe(mine)
   })
 })
 
