@@ -72,6 +72,15 @@ export interface AssetEvmCorridorPolicy {
    * the rate has run away.
    */
   tokenLimits?: AtomicBounds
+  /**
+   * Aggregate exposure for this pair, in the ASSET's atomic units. Optional, and
+   * the only house-level bound this corridor has: with no sats on either leg it
+   * contributes nothing to `MAX_EXPOSED_SATS` and is invisible to it.
+   *
+   * Unset means the per-swap `assetLimits` are the only ceiling, so concurrent
+   * quotes are bounded by their count alone.
+   */
+  maxExposedUnits?: bigint
   /** Where the pair's price comes from, fetched per quote. */
   priceFeed: string
   /** RFC 6901 pointer into the response. Empty means derive it. */
@@ -136,18 +145,19 @@ export const parseAssetEvmMarkets = (
 export const assetEvmEnvStem = (asset: ArkadeAssetLeg, token: EvmToken): string =>
   `ASSET_EVM_${asset.ticker}_${token.symbol}`
 
+const atomicUnits = (name: string, read: (name: string) => string | undefined): bigint | undefined => {
+  const value = read(name)?.trim()
+  if (!value) return undefined
+  if (!/^[0-9]+$/.test(value)) throw new Error(`${name} must be a decimal integer of atomic units, got ${value}`)
+  return BigInt(value)
+}
+
 const atomicBounds = (
   stem: string,
   prefix: string,
   read: (name: string) => string | undefined,
 ): AtomicBounds | undefined => {
-  const units = (suffix: string): bigint | undefined => {
-    const name = `${stem}_${prefix}${suffix}`
-    const value = read(name)?.trim()
-    if (!value) return undefined
-    if (!/^[0-9]+$/.test(value)) throw new Error(`${name} must be a decimal integer of atomic units, got ${value}`)
-    return BigInt(value)
-  }
+  const units = (suffix: string): bigint | undefined => atomicUnits(`${stem}_${prefix}${suffix}`, read)
   const minUnits = units('MIN_UNITS')
   const maxUnits = units('MAX_UNITS')
   // BOTH OR NEITHER, for `evmCorridorConfig.ts`'s reason: a lone maximum leaves
@@ -181,6 +191,13 @@ export const assetEvmCorridorPolicies = (
       )
     }
     const tokenLimits = atomicBounds(stem, 'TOKEN_', read)
+    const maxExposedUnits = atomicUnits(`${stem}_MAX_EXPOSED_UNITS`, read)
+    if (maxExposedUnits !== undefined && maxExposedUnits < assetLimits.maxUnits) {
+      throw new Error(
+        `${stem}_MAX_EXPOSED_UNITS may not be below ${stem}_MAX_UNITS: the aggregate would refuse a swap the ` +
+          `per-swap bound admits, so the corridor would advertise a size it never fills`,
+      )
+    }
 
     const priceFeed = read(`${stem}_PRICE_FEED`)?.trim()
     if (!priceFeed) {
@@ -221,6 +238,7 @@ export const assetEvmCorridorPolicies = (
       token,
       assetLimits,
       ...(tokenLimits === undefined ? {} : { tokenLimits }),
+      ...(maxExposedUnits === undefined ? {} : { maxExposedUnits }),
       priceFeed,
       pricePath,
       // `flatSats` is structurally meaningless here — there is no sats leg to
