@@ -75,9 +75,9 @@ describe('assetEvmCorridorPolicies', () => {
     // Otherwise the corridor advertises a size the aggregate refuses to fill,
     // which reads to a client as an intermittent solver rather than a bound.
     const stem = STEM()
-    expect(() =>
-      assetEvmCorridorPolicies(market(), env({ [`${stem}_MAX_EXPOSED_UNITS`]: '999999' })),
-    ).toThrow(/MAX_EXPOSED_UNITS may not be below/)
+    expect(() => assetEvmCorridorPolicies(market(), env({ [`${stem}_MAX_EXPOSED_UNITS`]: '999999' }))).toThrow(
+      /MAX_EXPOSED_UNITS may not be below/,
+    )
   })
 
   it('leaves the aggregate ceiling absent when unset, rather than inventing one', () => {
