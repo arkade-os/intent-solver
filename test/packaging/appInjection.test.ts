@@ -103,6 +103,9 @@ const solverConfig = (): Config => {
     offerMarkets: [],
     offerMinFillAmount: 0n,
     offerMaxFillAmount: 0n,
+    // No asset named, so the atomic-class corridors are off and the window unread.
+    assetRfqTokens: [],
+    assetQuoteValiditySeconds: 30,
     lnReceiveAcceptUnilateralGap: false,
     maxExposedSats: 1_000_000,
     contractRetentionMs: 86_400_000,

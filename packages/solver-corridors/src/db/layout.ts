@@ -47,6 +47,8 @@ export interface DbLayout {
    */
   readonly evmSend: string
   readonly evmReceive: string
+  /** The atomic class's negotiations — ALWAYS `swapDbPath`, for the same reason. */
+  readonly assetRfq: string
 }
 
 /** Splice a suffix in before `.sqlite`, or append it when the path has no such extension. */
@@ -75,11 +77,11 @@ export const resolveDbLayout = (swapDbPath: string, exists: (path: string) => bo
   // too, so its presence says nothing about which layout wrote it. Only a
   // SUFFIXED file is evidence of the split layout.
   const split = [legacy.onchainSend, legacy.receive, legacy.onchainReceive, legacy.admin].some(exists)
-  // The EVM entries are outside `legacy` deliberately: they are the same path
-  // in both branches, so a suffixed EVM file is never named and never looked
-  // for. See {@link DbLayout.evmSend}.
-  const evm = { evmSend: swapDbPath, evmReceive: swapDbPath }
-  if (split) return { consolidated: false, ...legacy, ...evm }
+  // These are outside `legacy` deliberately: they are the same path in both
+  // branches, so a suffixed file is never named and never looked for for any of
+  // them. See {@link DbLayout.evmSend}.
+  const noLegacyFile = { evmSend: swapDbPath, evmReceive: swapDbPath, assetRfq: swapDbPath }
+  if (split) return { consolidated: false, ...legacy, ...noLegacyFile }
   return {
     consolidated: true,
     send: swapDbPath,
@@ -87,6 +89,6 @@ export const resolveDbLayout = (swapDbPath: string, exists: (path: string) => bo
     receive: swapDbPath,
     onchainReceive: swapDbPath,
     admin: swapDbPath,
-    ...evm,
+    ...noLegacyFile,
   }
 }
