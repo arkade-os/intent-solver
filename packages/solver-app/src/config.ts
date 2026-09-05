@@ -299,6 +299,10 @@ export interface Config {
   sendHintScidDenylist: ReadonlySet<string>
   /** Emulator service co-signing covenant refunds. */
   emulatorUrl: string
+  /** covclaimd base URL — wired when set, so receive legs hand funded lockups'
+   *  sealed claim packets to the claim daemon (offline clients). Unset = the
+   *  client claims its own lockup. */
+  covclaimdUrl?: string
   /**
    * Which BTC rail this deployment moves money on — the Lightning AND the
    * onchain leg, since both come out of one wallet (@see ops/rails.ts).
@@ -974,6 +978,28 @@ export const loadConfig = (): Config => {
     // deployment's money path at whichever service this repository happened to
     // name — a choice that belongs to whoever runs the solver.
     emulatorUrl: required('EMULATOR_URL'),
+    // Optional: the non-interactive claim daemon the receive legs reveal funded
+    // lockups to (its Reveal API). Unset keeps the client-claims-itself default.
+    covclaimdUrl: (() => {
+      const raw = process.env.COVCLAIMD_URL?.trim()
+      if (!raw) return undefined
+      let url: URL
+      try {
+        url = new URL(raw)
+      } catch {
+        throw new Error(`COVCLAIMD_URL must be an absolute URL, got "${raw}"`)
+      }
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new Error(`COVCLAIMD_URL must be http or https, got "${url.protocol}"`)
+      }
+      if (url.protocol === 'https:') return raw
+      const host = url.hostname.replace(/^\[|\]$/g, '')
+      // Every octet, not a `127.` prefix: that would read 127.evil.com as loopback.
+      const loopback = host === 'localhost' || host === '::1' || /^127(\.\d{1,3}){3}$/.test(host)
+      // Mainnet-gated, not loopback-only: regtest stacks reach covclaimd over a container network.
+      if (loopback || !profile.isMainnet) return raw
+      throw new Error(`COVCLAIMD_URL must use https on mainnet, got "${url.protocol}//${url.host}"`)
+    })(),
     arkade: {
       mnemonic: required('ARK_MNEMONIC'),
       arkServerUrl: required('ARK_SERVER_URL'),
