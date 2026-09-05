@@ -23,7 +23,7 @@ import {
   type OnchainAssetReceiveArkadeOps,
 } from '@arkade-os/solver-corridors/receive/onchainAssetOrchestrator.js'
 import { onchainAssetReceivePairFor } from '@arkade-os/solver-core/core/onchainAssetReceive.js'
-import { openAdmission } from '@arkade-os/solver-core/core/admissionStrategy.js'
+import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 
 const keyBytes = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 
@@ -85,7 +85,9 @@ const buildArkadeFake = (): ArkadeFake => {
   let fundCounter = 0
   const state: ArkadeFake = {
     funded: [],
-    balance: new Map([[ASSET, 10_000_000n]]),
+    // Comfortably over the 50_000_000 atomic the default quote pays out, so the
+    // float is not the thing under test here; the float tests set it explicitly.
+    balance: new Map([[ASSET, 10_000_000_000n]]),
     refundCalls: 0,
     spendLockup: (pkScriptHex, preimage) => {
       lockups.delete(pkScriptHex)
@@ -191,7 +193,7 @@ describe('OnchainAssetReceiveSwapService', () => {
       network: 'regtest',
       maxExposedSats: 10_000_000,
       totalCommitted: async () => 0,
-      admission: openAdmission(),
+      admission: new AdmissionControl(),
       signer,
       claimDestinationScript,
       now: clock,
@@ -200,8 +202,9 @@ describe('OnchainAssetReceiveSwapService', () => {
 
   it('quotes the asset payout the price implies, and persists it', async () => {
     const outcome = await quote()
-    expect(outcome.accepted).toBe(true)
-    if (!outcome.accepted) return
+    // Named rather than `.accepted).toBe(true)`: a refusal then says WHICH gate
+    // refused instead of "expected false to be true".
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason} ${outcome.detail ?? ''}`)
     expect(outcome.swap.payoutUnits).toBe(50_000_000n)
     expect(outcome.swap.payoutAssetId).toBe(ASSET)
     expect(outcome.swap.pair).toBe(PAIR)
@@ -238,7 +241,7 @@ describe('OnchainAssetReceiveSwapService', () => {
       network: 'regtest',
       maxExposedSats: 10_000_000,
       totalCommitted: async () => 0,
-      admission: openAdmission(),
+      admission: new AdmissionControl(),
       signer,
       claimDestinationScript,
       now: clock,
