@@ -1,7 +1,14 @@
 import { describe, it, expect } from 'vitest'
 import { hex } from '@scure/base'
 import { sha256 } from '@noble/hashes/sha2.js'
-import { claimEventTopic, swapKey, type Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
+import {
+  claimEventTopic,
+  encodeRefund,
+  encodeRefundFor,
+  refundEventTopic,
+  swapKey,
+  type Erc20SwapLock,
+} from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import { createEvmHtlcBackend, type JsonRpc } from '@arkade-os/solver-rails-evm/evm/backend.js'
 
 const CONTRACT = hex.decode('4444444444444444444444444444444444444444')
@@ -439,5 +446,115 @@ describe('lockCalls', () => {
       expect(selector(calls[calls.length - 1]!)).toBe('e64fafcc')
       expect(to(calls[calls.length - 1]!)).toBe(hex.encode(CONTRACT))
     }
+  })
+})
+
+/** Rule 8's proof (#36). @see REFUND_EVENT_SIGNATURE for why the log alone is not one. */
+describe('findRefund', () => {
+  const TXID = `0x${'ab'.repeat(32)}`
+  const OTHER = `0x${'cd'.repeat(32)}`
+  const SENDER = `0x${hex.encode(lock.refundAddress)}`
+
+  const scan = (logs: unknown, txs: Record<string, unknown> = {}) => {
+    const calls: { method: string; params: readonly unknown[] }[] = []
+    const rpc: JsonRpc = async (method, params) => {
+      calls.push({ method, params })
+      if (method === 'eth_getLogs') return logs
+      if (method === 'eth_getTransactionByHash') return txs[params[0] as string] ?? null
+      throw new Error(`unexpected RPC ${method}`)
+    }
+    return { backend: createEvmHtlcBackend({ contractAddress: CONTRACT, rpc }), calls }
+  }
+
+  const refundFor = `0x${hex.encode(encodeRefundFor(lock))}`
+  const refundSelf = `0x${hex.encode(encodeRefund(lock))}`
+  const toSwap = `0x${hex.encode(CONTRACT)}`
+
+  it('filters on the refund topic and the indexed preimageHash', async () => {
+    const { backend, calls } = scan([])
+    await backend.findRefund(lock, 256n)
+    const filter = calls[0]!.params[0] as { address: string; fromBlock: string; toBlock: string; topics: string[] }
+    expect(filter.address).toBe(toSwap)
+    expect(filter.fromBlock).toBe('0x100')
+    expect(filter.toBlock).toBe('latest')
+    expect(filter.topics[0]).toBe(`0x${hex.encode(refundEventTopic())}`)
+    expect(filter.topics[1]).toBe(`0x${hex.encode(lock.preimageHash)}`)
+  })
+
+  it('proves the refund from the six-argument overload, whoever sent it', async () => {
+    const { backend } = scan([{ transactionHash: TXID }], {
+      [TXID]: { to: toSwap, from: `0x${'99'.repeat(20)}`, input: refundFor },
+    })
+    await expect(backend.findRefund(lock, 0n)).resolves.toBe(true)
+  })
+
+  it('proves the refund from the five-argument overload sent by the refund address', async () => {
+    const { backend } = scan([{ transactionHash: TXID }], {
+      [TXID]: { to: toSwap, from: SENDER, input: refundSelf },
+    })
+    await expect(backend.findRefund(lock, 0n)).resolves.toBe(true)
+  })
+
+  it('refuses the five-argument overload from any other sender', async () => {
+    // THE forgery the shape allows: the same calldata from another sender
+    // names a DIFFERENT swap key - their own lock, refunded to them.
+    const { backend } = scan([{ transactionHash: TXID }], {
+      [TXID]: { to: toSwap, from: `0x${'99'.repeat(20)}`, input: refundSelf },
+    })
+    await expect(backend.findRefund(lock, 0n)).resolves.toBe(false)
+  })
+
+  it('refuses a refund of a different lock under the same hash', async () => {
+    const foreign = `0x${hex.encode(encodeRefundFor({ ...lock, amount: lock.amount + 1n }))}`
+    const { backend } = scan([{ transactionHash: TXID }], {
+      [TXID]: { to: toSwap, from: SENDER, input: foreign },
+    })
+    await expect(backend.findRefund(lock, 0n)).resolves.toBe(false)
+  })
+
+  it('refuses a transaction addressed to another contract', async () => {
+    const { backend } = scan([{ transactionHash: TXID }], {
+      [TXID]: { to: `0x${'77'.repeat(20)}`, from: SENDER, input: refundFor },
+    })
+    await expect(backend.findRefund(lock, 0n)).resolves.toBe(false)
+  })
+
+  it('reads the proving log past one that proves nothing', async () => {
+    const { backend } = scan([{ transactionHash: OTHER }, { transactionHash: TXID }], {
+      [OTHER]: { to: toSwap, from: `0x${'99'.repeat(20)}`, input: refundSelf },
+      [TXID]: { to: toSwap, from: SENDER, input: refundSelf },
+    })
+    await expect(backend.findRefund(lock, 0n)).resolves.toBe(true)
+  })
+
+  it('matches irrespective of the case a node returns hex in', async () => {
+    const { backend } = scan([{ transactionHash: TXID }], {
+      [TXID]: { to: toSwap.toUpperCase().replace('0X', '0x'), from: SENDER.toUpperCase().replace('0X', '0x'), input: refundSelf.toUpperCase().replace('0X', '0x') },
+    })
+    await expect(backend.findRefund(lock, 0n)).resolves.toBe(true)
+  })
+
+  it('skips entries a node returned malformed rather than believing them', async () => {
+    for (const entry of [{}, { transactionHash: 42 }, { transactionHash: TXID }]) {
+      const { backend } = scan([entry], { [OTHER]: { to: toSwap, from: SENDER, input: refundSelf } })
+      await expect(backend.findRefund(lock, 0n)).resolves.toBe(false)
+    }
+  })
+
+  it('refuses a transaction with no usable fields', async () => {
+    for (const tx of [{ to: toSwap, from: SENDER }, { to: 42, from: SENDER, input: refundSelf }, null]) {
+      const { backend } = scan([{ transactionHash: TXID }], { [TXID]: tx })
+      await expect(backend.findRefund(lock, 0n)).resolves.toBe(false)
+    }
+  })
+
+  it('is false when nothing has refunded', async () => {
+    await expect(scan([]).backend.findRefund(lock, 0n)).resolves.toBe(false)
+  })
+
+  it('refuses a non-array response rather than reading it as "no refund"', async () => {
+    // The orchestrator degrades a throw to "not proven"; false HERE would be
+    // the same result by accident rather than by decision.
+    await expect(scan({}).backend.findRefund(lock, 0n)).rejects.toThrow(/expected an array/)
   })
 })

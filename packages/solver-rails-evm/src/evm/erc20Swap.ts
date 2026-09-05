@@ -324,6 +324,21 @@ const CLAIM_EVENT_TOPIC = keccak_256(new TextEncoder().encode(CLAIM_EVENT_SIGNAT
 export const claimEventTopic = (): Uint8Array => Uint8Array.from(CLAIM_EVENT_TOPIC)
 
 /**
+ * The `Refund(bytes32 indexed preimageHash)` topic - a `LOG2` in the deployed
+ * bytecode, so one indexed field and no data (see tests).
+ *
+ * IT NAMES THE HASH, NEVER THE SWAP KEY, so it identifies no lock: minting a
+ * throwaway token under another's hash costs gas alone. A match is a pointer
+ * to a candidate transaction; `findRefund` does the binding.
+ */
+export const REFUND_EVENT_SIGNATURE = 'Refund(bytes32)'
+
+const REFUND_EVENT_TOPIC = keccak_256(new TextEncoder().encode(REFUND_EVENT_SIGNATURE))
+
+/** A COPY, for the reason {@link claimEventTopic} returns one. */
+export const refundEventTopic = (): Uint8Array => Uint8Array.from(REFUND_EVENT_TOPIC)
+
+/**
  * The preimage carried by a `Claim` log, checked against the hash we expect.
  *
  * `preimageHash` is indexed and so rides in `topics[1]`; `preimage` is not

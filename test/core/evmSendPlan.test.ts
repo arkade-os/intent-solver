@@ -33,6 +33,7 @@ const seen = (over: Partial<EvmSendObservation> = {}): EvmSendObservation => ({
   evmLockPresent: false,
   evmLockReverted: false,
   evmRefundOutcome: 'pending',
+  evmRefundLanded: false,
   evmLockConfirmations: 0,
   evmLockAgeSeconds: 0,
   preimage: null,
@@ -241,6 +242,48 @@ describe('rule 7 - `refunded` means the ERC20 came back', () => {
   it('yields to the preimage that revert revealed', () => {
     const action = planEvmSend(refunding, seen({ evmRefundOutcome: 'reverted', preimage: 'cd'.repeat(32) }))
     expect(action).toEqual({ do: 'claim_arkade', preimage: 'cd'.repeat(32) })
+  })
+})
+
+describe('rule 8 - a refund PROVEN landed is `refunded`, whichever txid the row holds', () => {
+  const refunding = row({ state: 'refunding_evm' })
+
+  it('records the refund when the row holds the losing txid', () => {
+    // THE FINDING (#36). The recorded refund lost, so its outcome is
+    // `reverted` or `pending` for ever - and all three exits key on it.
+    for (const evmRefundOutcome of ['reverted', 'pending'] as const) {
+      expect(planEvmSend(refunding, seen({ evmRefundOutcome, evmRefundLanded: true }))).toEqual({
+        do: 'record_refund',
+      })
+    }
+  })
+
+  it('waits while nothing is proven, so a scan that never succeeds spends nothing', () => {
+    for (const evmRefundOutcome of ['reverted', 'pending'] as const) {
+      expect(planEvmSend(refunding, seen({ evmRefundOutcome }))).toEqual({ do: 'wait' })
+    }
+  })
+
+  it('does not outrank the preimage', () => {
+    const action = planEvmSend(refunding, seen({ evmRefundLanded: true, preimage: 'cd'.repeat(32) }))
+    expect(action).toEqual({ do: 'claim_arkade', preimage: 'cd'.repeat(32) })
+  })
+
+  it('does not outrank the stick over a lock that is still funded', () => {
+    const action = planEvmSend(
+      refunding,
+      seen({ evmRefundOutcome: 'reverted', evmLockPresent: true, evmRefundLanded: true }),
+    )
+    expect(action).toEqual({
+      do: 'stick',
+      reason: 'the ERC20 refund transaction reverted; the lock is still funded',
+    })
+  })
+
+  it('decides nothing for any state but refunding_evm', () => {
+    for (const state of ['locking_evm', 'awaiting_claim'] as EvmSendSwapState[]) {
+      expect(planEvmSend(row({ state }), seen({ evmRefundLanded: true }))).toEqual({ do: 'wait' })
+    }
   })
 })
 
