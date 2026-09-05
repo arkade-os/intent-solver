@@ -878,6 +878,33 @@ describe('ReceiveSwapService.tick — reveal to covclaimd', () => {
     ])
   }
 
+  const clientPacket = (): Uint8Array => {
+    const tlv = (type: number, value: number[]) => [type, (value.length >> 8) & 0xff, value.length & 0xff, ...value]
+    return Uint8Array.from([
+      ...tlv(
+        0x01,
+        Array.from({ length: 93 }, (_, i) => i & 0xff),
+      ),
+      ...tlv(0x03, [0x02, ...Array<number>(32).fill(0x11)]),
+    ])
+  }
+
+  it('completes a client packet with the arkade script the covenant commits to', async () => {
+    const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(clientPacket()) }))
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+
+    const row = await service.tick(outcome.swap.id)
+
+    expect(row.state).toBe('funded')
+    const stamped = arkade.state.fundCalls[0]?.stamp?.packet
+    if (!stamped) throw new Error('expected a stamp')
+    // The client's bytes ride through untouched, with 0x02 appended after them.
+    expect(stamped.subarray(0, clientPacket().length)).toEqual(clientPacket())
+    expect(stamped[clientPacket().length]).toBe(0x02)
+    expect(covclaimd.state.revealCalls).toBe(0)
+  })
+
   it('stamps the packet into the funding instead of revealing, when the client sends one', async () => {
     const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(tlvClaimPacket()) }))
     if (!outcome.accepted) throw new Error('expected acceptance')

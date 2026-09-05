@@ -17,7 +17,23 @@ const COMPRESSED_PUBKEY_LENGTH = 33
 export const CLAIM_PACKET_TYPE = 0x04
 
 export type ClaimPacketShape =
-  { kind: 'ciphertext' } | { kind: 'packet'; body: Uint8Array; covclaimdPubKey?: Uint8Array }
+  | { kind: 'ciphertext' }
+  | {
+      kind: 'packet'
+      body: Uint8Array
+      covclaimdPubKey?: Uint8Array
+      needsArkadeScript: boolean
+    }
+
+const encodeTlv = (type: number, value: Uint8Array): Uint8Array =>
+  Uint8Array.from([type, (value.length >> 8) & 0xff, value.length & 0xff, ...value])
+
+/**
+ * The covenant commits to `taggedHash("ArkScriptHash", script)`, so its funder
+ * holds the only copy guaranteed to match. Appended: TLV order is not fixed.
+ */
+export const appendArkadeScript = (body: Uint8Array, arkadeScript: Uint8Array): Uint8Array =>
+  Uint8Array.from([...body, ...encodeTlv(TLV_ARKADE_SCRIPT, arkadeScript)])
 
 /** Transcribed from `DeserializeClaim`, including its tolerance of unknown and repeated types. */
 const parseTlv = (data: Uint8Array): { hasCiphertext: boolean; hasArkadeScript: boolean; pubKey?: Uint8Array } => {
@@ -51,8 +67,14 @@ export const claimPacketShape = (b64: string): ClaimPacketShape => {
     const raw = base64.decode(b64)
     if (raw.length === LEGACY_CIPHERTEXT_LENGTH) return { kind: 'ciphertext' }
     const { hasCiphertext, hasArkadeScript, pubKey } = parseTlv(raw)
-    if (!hasCiphertext || !hasArkadeScript) return { kind: 'ciphertext' }
-    return { kind: 'packet', body: raw, ...(pubKey ? { covclaimdPubKey: pubKey } : {}) }
+    // `0x01` is the only TLV a client must send: it is the one nobody else has.
+    if (!hasCiphertext) return { kind: 'ciphertext' }
+    return {
+      kind: 'packet',
+      body: raw,
+      needsArkadeScript: !hasArkadeScript,
+      ...(pubKey ? { covclaimdPubKey: pubKey } : {}),
+    }
   } catch {
     return { kind: 'ciphertext' }
   }

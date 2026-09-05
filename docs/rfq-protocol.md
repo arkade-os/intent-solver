@@ -1015,6 +1015,15 @@ The client is paid over Lightning and the sats land on Arkade
     covclaimd configured or reachable, and no prior agreement exists to get
     wrong.
 
+    A client sends `0x01` and `0x03` — the two only it has — and MAY omit
+    `0x02`, which the solver appends from the covenant it built. That is not a
+    convenience: the covenant commits to the arkade script as
+    `taggedHash("ArkScriptHash", script)`, so the funder is the only party whose
+    copy is guaranteed to match the commitment, and a client deriving its own
+    would add a way for the two to disagree and strand the claim. covclaimd
+    cannot derive it either — the commitment is a hash, and the script is the
+    only place the receiver's pkScript appears.
+
   The shapes cannot collide: the ciphertext TLV alone is 96 bytes with its
   header, so any packet carrying one exceeds the bare 93. A solver that does not
   recognise the second shape, or a value that is neither, takes the first path

@@ -56,7 +56,7 @@ import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilater
 import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
-import { claimPacketShape } from './claimPacket.js'
+import { appendArkadeScript, claimPacketShape } from './claimPacket.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
 import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
@@ -967,7 +967,12 @@ export class ReceiveSwapService {
   private claimPacketStamp(row: ReceiveSwapRow): ClaimPacketStamp | undefined {
     const shape = claimPacketShape(row.claimPacket)
     if (shape.kind !== 'packet') return undefined
-    return { packet: shape.body, tapTree: covenantScriptFromRow(receiveCovenantRowFor(row)).encode() }
+    const script = covenantScriptFromRow(receiveCovenantRowFor(row))
+    const arkadeScript = script.nonInteractiveClaimArkadeScript
+    if (!shape.needsArkadeScript) return { packet: shape.body, tapTree: script.encode() }
+    // No leaf to derive from: fall back to the reveal, whose guard reports it.
+    if (!arkadeScript) return undefined
+    return { packet: appendArkadeScript(shape.body, arkadeScript), tapTree: script.encode() }
   }
 
   /** Hand the sealed claim packet to covclaimd. Only called when one is configured. Idempotent to retry — see this file's own top comment. */

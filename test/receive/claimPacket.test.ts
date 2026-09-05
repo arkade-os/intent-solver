@@ -39,8 +39,22 @@ describe('claimPacketShape', () => {
     expect(shape.covclaimdPubKey).toBeUndefined()
   })
 
+  it('reads a ciphertext-and-pubkey body as a packet the solver must complete', () => {
+    const shape = claimPacketShape(base64.encode(concat(tlv(0x01, sealedCiphertext()), tlv(0x03, PUBKEY))))
+    expect(shape.kind).toBe('packet')
+    if (shape.kind !== 'packet') return
+    expect(shape.needsArkadeScript).toBe(true)
+    expect(shape.covclaimdPubKey).toEqual(PUBKEY)
+  })
+
+  it('marks a body that already carries 0x02 as needing nothing', () => {
+    const shape = claimPacketShape(base64.encode(fullPacket()))
+    expect(shape.kind).toBe('packet')
+    if (shape.kind !== 'packet') return
+    expect(shape.needsArkadeScript).toBe(false)
+  })
+
   it.each([
-    ['a TLV body missing the arkade script', base64.encode(tlv(0x01, sealedCiphertext()))],
     ['a TLV body missing the ciphertext', base64.encode(tlv(0x02, ARKADE_SCRIPT))],
     ['a truncated TLV header', base64.encode(Uint8Array.from([0x01, 0x00]))],
     ['a TLV length that overruns', base64.encode(Uint8Array.from([0x01, 0x00, 0x05, 0xaa]))],
