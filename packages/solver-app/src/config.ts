@@ -299,6 +299,10 @@ export interface Config {
   sendHintScidDenylist: ReadonlySet<string>
   /** Emulator service co-signing covenant refunds. */
   emulatorUrl: string
+  /** covclaimd base URL — wired when set, so receive legs hand funded lockups'
+   *  sealed claim packets to the claim daemon (offline clients). Unset = the
+   *  client claims its own lockup. */
+  covclaimdUrl?: string
   /**
    * Which BTC rail this deployment moves money on — the Lightning AND the
    * onchain leg, since both come out of one wallet (@see ops/rails.ts).
@@ -974,6 +978,9 @@ export const loadConfig = (): Config => {
     // deployment's money path at whichever service this repository happened to
     // name — a choice that belongs to whoever runs the solver.
     emulatorUrl: required('EMULATOR_URL'),
+    // Optional: the non-interactive claim daemon the receive legs reveal funded
+    // lockups to (its Reveal API). Unset keeps the client-claims-itself default.
+    covclaimdUrl: process.env.COVCLAIMD_URL?.trim() || undefined,
     arkade: {
       mnemonic: required('ARK_MNEMONIC'),
       arkServerUrl: required('ARK_SERVER_URL'),

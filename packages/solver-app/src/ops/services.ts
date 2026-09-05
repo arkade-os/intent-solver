@@ -73,6 +73,7 @@ import {
 import { applyOverrides } from '../admin/settings.js'
 import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
+import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
 import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
@@ -648,6 +649,10 @@ export const createServices = async (
   // Hoisted rather than built inline, because the EVM receive leg below needs
   // the SAME ops. Two calls would derive two identical objects from the same
   // context, which works and gives the corridors two places to drift apart.
+  // Wired when the deployment names a covclaimd (COVCLAIMD_URL). The receive legs
+  // reveal each funded lockup's sealed claim packet to it so offline clients get
+  // claimed; unset keeps the client-claims-its-own-lockup default.
+  const covclaimd = config.covclaimdUrl ? createCovclaimdClient(config.covclaimdUrl) : undefined
   const receiveOps = await receiveArkadeOpsFromContext(arkade, {
     url: config.emulatorUrl,
     pubkey: emulatorInfo.signerPubkey,
@@ -668,6 +673,7 @@ export const createServices = async (
         maxExposedSats: policy.maxExposedSats,
         totalCommitted,
         admission,
+        covclaimd,
         // The send store leaves this list on exactly the same condition, and
         // for the same reason, as `receiveStore` leaves the send corridor's:
         // with coupling on, a live send row on our hash is the coupled leg,
@@ -729,6 +735,7 @@ export const createServices = async (
         signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
         claimDestinationScript: onchainClaimDestinationScript!,
         peerStores: [store, onchainStore, receiveStore],
+        covclaimd,
       })
     : undefined
   if (onchainReceiveService) {
