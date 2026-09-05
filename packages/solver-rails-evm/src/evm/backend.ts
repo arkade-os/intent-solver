@@ -34,6 +34,7 @@ import {
   encodeRefund,
   encodeRefundFor,
   equalBytes,
+  refundEventTopic,
   swapKey,
   type Erc20SwapLock,
 } from './erc20Swap.js'
@@ -156,6 +157,43 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
         if (equalBytes(sha256(preimage), lock.preimageHash)) return preimage
       }
       return null
+    },
+
+    async findRefund(lock, fromBlock) {
+      const logs = await rpc('eth_getLogs', [
+        {
+          address: to,
+          fromBlock: `0x${fromBlock.toString(16)}`,
+          toBlock: 'latest',
+          topics: [hexOf(refundEventTopic()), hexOf(lock.preimageHash)],
+        },
+      ])
+      if (!Array.isArray(logs)) throw new Error('eth_getLogs: expected an array')
+      // The log carries only the hash, so unlike a Claim it cannot check
+      // itself; the CALLDATA that emitted it is the lock fields verbatim.
+      const refundFor = hexOf(encodeRefundFor(lock)).toLowerCase()
+      const refundSelf = hexOf(encodeRefund(lock)).toLowerCase()
+      const refundAddress = hexOf(lock.refundAddress).toLowerCase()
+      for (const entry of logs) {
+        const hash = (entry as { transactionHash?: unknown }).transactionHash
+        if (typeof hash !== 'string') continue
+        const tx = (await rpc('eth_getTransactionByHash', [hash])) as {
+          to?: unknown
+          from?: unknown
+          input?: unknown
+        } | null
+        if (tx === null || tx === undefined) continue
+        if (typeof tx.to !== 'string' || tx.to.toLowerCase() !== to.toLowerCase()) continue
+        if (typeof tx.input !== 'string') continue
+        const input = tx.input.toLowerCase()
+        // The 6-arg overload carries `refundAddress` so its calldata completes
+        // the key; the 5-arg takes `msg.sender`, so the SENDER is that word.
+        if (input === refundFor) return true
+        if (input === refundSelf && typeof tx.from === 'string' && tx.from.toLowerCase() === refundAddress) {
+          return true
+        }
+      }
+      return false
     },
 
     async isLockedAt(lock, block) {

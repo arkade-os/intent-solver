@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, it, expect } from 'vitest'
 import { hex } from '@scure/base'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -8,6 +10,7 @@ import {
   CLAIM_SIGNATURE,
   LOCK_PREPAY_SIGNATURE,
   LOCK_SIGNATURE,
+  REFUND_EVENT_SIGNATURE,
   REFUND_FOR_SIGNATURE,
   REFUND_SIGNATURE,
   claimEventTopic,
@@ -18,6 +21,7 @@ import {
   encodeRefund,
   encodeRefundFor,
   preimageFromClaimLog,
+  refundEventTopic,
   swapKey,
   type Erc20SwapLock,
 } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
@@ -331,5 +335,57 @@ describe(`prepay beneficiary`, () => {
     // And the refunder is NOT in the calldata at all — the contract takes
     // msg.sender for that, which is why lockPrepayCall insists the two agree.
     expect(hex.encode(encoded)).not.toContain('6b'.repeat(20))
+  })
+})
+
+/**
+ * THE PRECONDITION #36 rests on: the `REFUND_*` constants above are FUNCTION
+ * encodings, and a scan built on an EVENT that does not exist never fires.
+ */
+describe('the Refund event, against the deployed runtime bytecode', () => {
+  const runtime = Buffer.from(
+    readFileSync(fileURLToPath(new URL('../e2e/fixtures/erc20swap.runtime.hex', import.meta.url)), 'utf8')
+      .trim()
+      .replace(/^0x/, ''),
+    'hex',
+  )
+
+  /** First LOGn after a PUSH32 of `topic`, walking opcodes: a PUSH immediate is data. */
+  const logOpcodeAfter = (topic: Uint8Array): number | null => {
+    const at = runtime.indexOf(Buffer.from(topic))
+    if (at < 1 || runtime[at - 1] !== 0x7f) return null
+    for (let pc = at + 32; pc < runtime.length; ) {
+      const op = runtime[pc]!
+      if (op >= 0xa0 && op <= 0xa4) return op
+      pc += op >= 0x60 && op <= 0x7f ? 1 + (op - 0x5f) : 1
+    }
+    return null
+  }
+
+  it('is emitted by the deployed contract', () => {
+    expect(runtime.includes(Buffer.from(refundEventTopic()))).toBe(true)
+  })
+
+  it('carries exactly one indexed field, so the hash is topics[1] and there is no data', () => {
+    // LOG1 would put the hash in `data` and the filter would match nothing.
+    // Lockup is the control that must NOT be LOG2, or the walker says LOG2 always.
+    expect(logOpcodeAfter(refundEventTopic())).toBe(0xa2)
+    expect(logOpcodeAfter(claimEventTopic())).toBe(0xa2)
+    const lockup = keccak_256(
+      new TextEncoder().encode('Lockup(bytes32,uint256,address,address,address,uint256)'),
+    )
+    expect(logOpcodeAfter(lockup)).toBe(0xa4)
+  })
+
+  it('derives the topic from the signature rather than hardcoding it', () => {
+    expect(REFUND_EVENT_SIGNATURE).toBe('Refund(bytes32)')
+    expect(hex.encode(refundEventTopic())).toBe(hex.encode(keccak_256(new TextEncoder().encode('Refund(bytes32)'))))
+    expect(hex.encode(refundEventTopic())).not.toBe(hex.encode(claimEventTopic()))
+  })
+
+  it('hands out a copy, so a caller cannot poison every later match', () => {
+    const first = refundEventTopic()
+    first.fill(0)
+    expect(hex.encode(refundEventTopic())).not.toBe(hex.encode(first))
   })
 })
