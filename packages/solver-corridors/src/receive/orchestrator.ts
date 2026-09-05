@@ -53,8 +53,10 @@ import { RFQ_PAIR_RECEIVE } from '../wire/lightningReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
+import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
+import { claimPacketShape } from './claimPacket.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
 import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
@@ -880,7 +882,7 @@ export class ReceiveSwapService {
 
     // Nothing was funded before — create the exposure now. The txid this
     // returns is what the confirmation below keys off.
-    const fundTxid = await arkade.fund(row.lockupAddress, row.payoutSats)
+    const fundTxid = await arkade.fund(row.lockupAddress, row.payoutSats, this.claimPacketStamp(row))
     // Keyed to THIS row's own broadcast, and spend-aware for the same reason
     // adoption above is: a claim landing inside the poll window would empty the
     // spendable view and hide a funding that certainly happened. Matching on
@@ -961,10 +963,19 @@ export class ReceiveSwapService {
     return false
   }
 
+  /** Derived rather than stored: `claim_packet` never changes. */
+  private claimPacketStamp(row: ReceiveSwapRow): ClaimPacketStamp | undefined {
+    const shape = claimPacketShape(row.claimPacket)
+    if (shape.kind !== 'packet') return undefined
+    return { packet: shape.body, tapTree: covenantScriptFromRow(receiveCovenantRowFor(row)).encode() }
+  }
+
   /** Hand the sealed claim packet to covclaimd. Only called when one is configured. Idempotent to retry — see this file's own top comment. */
   private async revealToCovclaimd(row: ReceiveSwapRow): Promise<void> {
     const { store, covclaimd } = this.deps
     if (!covclaimd) return
+    // Stamped fundings are already on the tx stream, for whichever covclaimd the client named.
+    if (this.claimPacketStamp(row)) return
     const script = covenantScriptFromRow(receiveCovenantRowFor(row))
     if (!script.nonInteractiveClaimArkadeScript) {
       // Unreachable: every receive-leg row is quoted with the solver's own
