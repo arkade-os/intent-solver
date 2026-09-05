@@ -25,6 +25,7 @@ const row = (over: Partial<EvmSendSwapRow> = {}): EvmSendSwapRow =>
     minConfirmations: 5,
     minAgeSeconds: 720,
     preimage: null,
+    evmRefundTxid: '0xrefund',
     ...over,
   }) as EvmSendSwapRow
 
@@ -240,6 +241,39 @@ describe('rule 7 - `refunded` means the ERC20 came back', () => {
 
   it('yields to the preimage that revert revealed', () => {
     const action = planEvmSend(refunding, seen({ evmRefundOutcome: 'reverted', preimage: 'cd'.repeat(32) }))
+    expect(action).toEqual({ do: 'claim_arkade', preimage: 'cd'.repeat(32) })
+  })
+})
+
+describe('rule 8 - a refund that was never recorded was never sent', () => {
+  const stranded = row({ state: 'refunding_evm', evmRefundTxid: null })
+
+  it('sends a refund when none is on record and the lock is there to take back', () => {
+    const action = planEvmSend(stranded, seen({ evmLockPresent: true, evmBlockHeight: EVM_TIMEOUT }))
+    expect(action).toEqual({ do: 'refund_evm' })
+  })
+
+  it('waits below the timeout, where the resend would only revert', () => {
+    const action = planEvmSend(stranded, seen({ evmLockPresent: true, evmBlockHeight: EVM_TIMEOUT - 1 }))
+    expect(action).toEqual({ do: 'wait' })
+  })
+
+  it('leaves a recorded refund alone, however long it stays unmined', () => {
+    const recorded = row({ state: 'refunding_evm', evmRefundTxid: '0xrefund' })
+    const action = planEvmSend(recorded, seen({ evmLockPresent: true, evmBlockHeight: EVM_TIMEOUT }))
+    expect(action).toEqual({ do: 'wait' })
+  })
+
+  it('sends nothing when there is no lock to refund', () => {
+    const action = planEvmSend(stranded, seen({ evmLockPresent: false, evmBlockHeight: EVM_TIMEOUT }))
+    expect(action).toEqual({ do: 'wait' })
+  })
+
+  it('still yields to a revealed preimage', () => {
+    const action = planEvmSend(
+      stranded,
+      seen({ evmLockPresent: true, evmBlockHeight: EVM_TIMEOUT, preimage: 'cd'.repeat(32) }),
+    )
     expect(action).toEqual({ do: 'claim_arkade', preimage: 'cd'.repeat(32) })
   })
 })

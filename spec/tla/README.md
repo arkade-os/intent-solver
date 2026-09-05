@@ -16,7 +16,7 @@ survives a rewrite with more processes.
 | `LightningReceive.tla` | quoted → armed → funded → claimed → settled |
 | `OnchainSend.tla` | The L1 HTLC leg and its mempool race. Timing invariants are conditional on the `(A2) Urgent` assumption — read that note before trusting any timing pass. The send-time `refunded` record is FIXED (#204), so `OnchainSend_UnconfirmedRefund.cfg` mutates a guard the code really ships; `OnchainSend_MempoolRace.cfg` is kept as the residual RBF race, which the fix makes loud rather than silent. |
 | `OnchainReceive.tla` | The confirmation policy and the two-sided exposure. `settled` now records a CONFIRMATION rather than a broadcast (#204), so `Collected()` no longer counts an unopposed broadcast as collection and chain progress became a stated liveness assumption — read the fairness note. |
-| `EvmSend.tla` | The planner/shell split and the height-vs-wall margin. The timeout refund's present-lock hole (F5) is still a shipped-truth mutation — read the findings before trusting a pass. F3, the send-time `refunded` record, is FIXED, so `EvmSend_NoReceipt.cfg` now mutates a guard the code really ships. |
+| `EvmSend.tla` | The planner/shell split and the height-vs-wall margin. F2, F3, F5 and F6 are FIXED, so `EvmSend_BlindScan`, `EvmSend_NoReceipt`, `EvmSend_LockStrand` and `EvmSend_LostRefund` all mutate guards the code really ships. F4, the late lock, is the one still open — `LockLandsPromptly` is an assumption, not a guard, so read the findings before trusting a pass. |
 | `EvmReceive.tla` | The mirror corridor: the solver funds against a lock it does not control. The parked `refunding_arkade` with an unspent covenant (F4) is a double loss under a patient client. |
 
 Bugs the models prove in the shipped TypeScript are named F1... per module in
@@ -67,11 +67,11 @@ shipped — plus scenario and mutation cfgs:
   makes the paired violation a proof about the guard rather than about the
   constants around it.
 
-Every cfg header carries an `EXPECTED RESULT` line. The full set is 53 cfgs —
-15 green, 38 expected violations — and the green modules' checkpoint comments
-record the per-cfg results. After touching a module or any of its cfgs,
-re-run the module's full set and confirm every result still matches its
-header.
+Every mutation cfg carries an `EXPECTED RESULT` line; the per-module green
+cfgs say so in their first line instead. The full set is 58 cfgs — 21 green,
+37 expected violations — and the green modules' checkpoint comments record the
+per-cfg results. After touching a module or any of its cfgs, re-run the
+module's full set and confirm every result still matches its header.
 
 ## Reading the results
 

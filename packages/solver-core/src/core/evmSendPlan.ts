@@ -30,6 +30,7 @@
  *    different fact from absent-and-pending; only the receipt carries it.
  * 7. `refunded` means the ERC20 came back, so only a mined refund earns it. A
  *    terminal row over a reverted refund lies, and ends the preimage scan.
+ * 8. A refund that was never recorded was never sent, as far as this can tell.
  */
 
 import type { EvmTransactionOutcome } from '../ports/evm.js'
@@ -50,6 +51,8 @@ export interface EvmSendPlanRow {
   minConfirmations: number
   minAgeSeconds: number
   preimage: string | null
+  /** Null means no refund is on record, which is not the same as one unmined. */
+  evmRefundTxid: string | null
 }
 
 /** What the caller observed about the world, all of it optional to obtain. */
@@ -167,9 +170,16 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
       // took it and nothing here retries, so a human must. GONE: someone did,
       // and the usual someone is the client claiming — waiting keeps the row
       // live for rule 4's scan, where sticking would page on every such swap.
+      // THAT SECOND HALF IS NO LONGER SOUND: it rested on one refund per row and
+      // rule 8 can put two out, so the lock may be gone because our own sibling
+      // won — no preimage, and the row waits on evidence that cannot arrive (#36).
       if (seen.evmRefundOutcome === 'success') return { do: 'record_refund' }
       if (seen.evmRefundOutcome === 'reverted' && seen.evmLockPresent) {
         return { do: 'stick', reason: 'the ERC20 refund transaction reverted; the lock is still funded' }
+      }
+      // RULE 8. That `pending` is for want of a question, not a refund in flight.
+      if (row.evmRefundTxid === null && seen.evmLockPresent && seen.evmBlockHeight >= row.evmTimeout) {
+        return { do: 'refund_evm' }
       }
       return { do: 'wait' }
 

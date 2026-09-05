@@ -147,7 +147,16 @@
 (*       recorded `refunded` (terminal, unmonitored), putting the solver's *)
 (*       ERC20 out with the books closed.  Green assumes lock fate is      *)
 (*       settled before the timeout; the mutation lets it land late and    *)
-(*       NoSilentLoss fails.  Finding F4.                                  *)
+(*       NoNetLoss fails.  Finding F4, STILL OPEN - and see (A8), which    *)
+(*       shipped the half of it the code can actually close.               *)
+(*                                                                         *)
+(*       STILL AN ASSUMPTION AFTER THE (A8) FIX, deliberately.  Nothing    *)
+(*       the solver can do makes a broadcast transaction un-mineable       *)
+(*       except spending its nonce on a replacement, and that replacement  *)
+(*       races the original.  So this stays FALSE-in-reality and the       *)
+(*       module keeps saying so rather than asserting a guard the code     *)
+(*       does not make.  What (A8) removes is the reachable-under-green    *)
+(*       half; what is left needs the cancel.                              *)
 (*                                                                         *)
 (*  (A7) `TimeoutRefundCoversPresent`.  SHIPPED, not an open assumption    *)
 (*       (evmSendPlan.ts:141-155): the locking_evm timeout refund fires at *)
@@ -160,6 +169,29 @@
 (*       through the one branch that withheld the timeout.  The mutation   *)
 (*       restores the absence condition and NoNetLoss fails.  Finding F5,  *)
 (*       fixed.                                                            *)
+(*  (A8) `ResendUnrecordedRefund`.  SHIPPED, not an open assumption        *)
+(*       (evmSendPlan.ts:176-182): a `refunding_evm` row whose             *)
+(*       evm_refund_txid is NULL sends a refund, given a present lock past *)
+(*       its timeout.  Null is not "unmined" - it is "the send threw, or a *)
+(*       crash landed before the patch" (evmOrchestrator.ts:380-384), and  *)
+(*       refundOutcome() answers `pending` for it because there is nothing *)
+(*       to ask.  The row then waited on a receipt that would never exist  *)
+(*       while the lock sat claimable; the client took the ERC20 and its   *)
+(*       own sats at the wall locktime.  The mutation deletes the resend   *)
+(*       and NoNetLoss fails.  Finding F6, fixed.                          *)
+(*                                                                         *)
+(*       THE BROADCAST IS NOW A SEPARATE STEP from the CAS, which is what  *)
+(*       lets the module reach that state at all: it used to set           *)
+(*       refundSent with the CAS, so "row refunding, nothing in flight"    *)
+(*       did not exist and the green run could not see the loss.           *)
+(*                                                                         *)
+(*       ONE HALF IS DELIBERATELY NOT MODELLED.  `refundSent` here means   *)
+(*       RECORDED, so a broadcast that reached the mempool and lost its id *)
+(*       (a crash between :381 and :384) reads the same as one never sent. *)
+(*       The code resends there too and the second refund reverts against  *)
+(*       a lock the first already took - harmless, and the row waits as it *)
+(*       did before.  Modelling it would need a second boolean per swap to *)
+(*       state a case with no money in it.                                 *)
 (*                                                                         *)
 (* THE PARKED STATES                                                       *)
 (*                                                                         *)
@@ -194,6 +226,14 @@
 (*  3. evm_timeout is a HEIGHT, never seconds (evmOrchestrator.ts:459).    *)
 (*  4. The locking_evm timeout refund is NOT conditioned on the lock's     *)
 (*     presence (evmSendPlan.ts:141-155).  Conditioning it was F5.         *)
+(*  5. A NULL evm_refund_txid is not a pending refund.  From               *)
+(*     refunding_evm, a null txid over a present lock past its timeout     *)
+(*     SENDS one (evmSendPlan.ts:176-182); the recorded txid is what stops *)
+(*     it firing twice, so a rewrite that records the id BEFORE the        *)
+(*     broadcast reintroduces F6 in the window it was meant to close.      *)
+(*     The resend must also skip the state write - the row is already      *)
+(*     refunding_evm and a self-transition falsifies the event log         *)
+(*     (evmOrchestrator.ts:380-382).                                       *)
 (*                                                                         *)
 (* HOW THIS WAS CHECKED: see THE GREEN RUN and MUTATION CHECKS at the      *)
 (* bottom of the module.                                                   *)
@@ -222,6 +262,10 @@ CONSTANTS
                       \*      stranded lock; F5 in RESULTS)
     RefundSeesClaim,  \* (A4) MUTATION: refund recording waits for the receipt
                       \*      (TRUE, shipped) or records at send time (FALSE)
+    ResendUnrecordedRefund, \* (A8) MUTATION: a refunding_evm row with no refund
+                      \*      on record sends one over a present lock (TRUE,
+                      \*      shipped) or waits on a receipt that will never
+                      \*      exist (FALSE, the pre-fix strand; F6 in RESULTS)
     AtomicAdmission,  \* MUTATION: quote re-checks the cap at insert
     BreakDeadlineOrder \* (A2) MUTATION: collapse the height/wall margin
 
@@ -355,6 +399,12 @@ Urgent(s) ==
     \* advance the wall past a landing the sweep has already sent.  Same
     \* load-bearing discipline as OnchainSend's `claiming` disjunct.
     \/ (refundSent[s] /\ evm[s] = "locked")                    \* the refund mines now
+    \* (A8) and its mirror: a refunding_evm row with NOTHING in flight over a
+    \* present lock has a send outstanding, not a receipt.  Without this the
+    \* client walks the wall clock to its own locktime while the solver's
+    \* recovery is still un-sent - which is the F6 loss.
+    \/ (ResendUnrecordedRefund /\ st[s] = "refunding_evm" /\ ~refundSent[s]
+        /\ evm[s] = "locked" /\ HeightUp)                      \* send it now
     \* `claiming` with the claim still unconfirmed is covered by the
     \* pre-switch disjunct below; claiming with the claim CONFIRMED is one
     \* of the two accepted parked states (its push phase is SF-forced), so
@@ -439,6 +489,19 @@ GiveUp(w) ==
        \/ /\ loc[w].phase = "sentLock"
           /\ evm[loc[w].swap] = "none"
           /\ HeightUp
+       \* THE SHELL ALWAYS PARKS HERE.  `refund_evm` ends with return false
+       \* (evmOrchestrator.ts:388), so the tick loop exits and the recording
+       \* is a LATER tick's decision off a fresh read - RecordEvmRefund's own
+       \* comment says as much.  Holding the phase is the over-approximation;
+       \* parking is the shipped behaviour, so an unconditional arm would be
+       \* the faithful one.  This is deliberately NARROWER than that: only
+       \* the wedge, where the broadcast is out (refundSent) and the CLIENT
+       \* took the lock, so RecordEvmRefund (wants solverRefunded) and
+       \* RefundMines (wants locked) can both never fire again.  Green under
+       \* the narrow arm is the stronger statement, so the narrow arm ships.
+       \/ /\ loc[w].phase = "sentRefund"
+          /\ refundSent[loc[w].swap]
+          /\ evm[loc[w].swap] = "clientClaimed"
     /\ Park(w)
     /\ UNCHANGED << clock, st, conf, serverUp >>
     /\ UNCHANGED LsVars
@@ -575,16 +638,48 @@ SubmitEvmRefund(w, s) ==
           /\ HeightUp
     /\ \/ /\ CasWon(s, loc[w].seen, "refunding_evm")
           /\ Advance(w, "sentRefund", "none")
-          \* The broadcast rides with the CAS: once the row says
-          \* refunding_evm, the mempool has the tx.  It lands on its own
-          \* (RefundMines) - a crashed worker cannot un-broadcast it.
-          /\ refundSent' = [refundSent EXCEPT ![s] = TRUE]
        \/ /\ CasLost(s, loc[w].seen)
           /\ Park(w)
-          /\ UNCHANGED refundSent
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED << evmHeight, arkFund, evm, evmConfirmed, lockTxid,
+                    lockSends, refundSent >>
+
+\* (A8) THE BROADCAST, a SEPARATE step from the CAS.  The shell transitions
+\* the row, then sends, then patches the txid (evmOrchestrator.ts:380-384);
+\* a throw at the send or a crash before the patch leaves a row that says
+\* refunding_evm with nothing to ask about.  The phase is HELD rather than
+\* parked so RecordEvmRefund stays reachable - the PatchTxid trap.
+\*
+\* NO ~refundSent GUARD, deliberately.  It used to carry one, and that was
+\* the unsoundness this module objects to elsewhere: a guard stating a
+\* coordination no process can observe.  claimRefundTxid serialises the
+\* RECORD (db/evmSendSwaps.ts, the column CAS), never the SEND - two
+\* services past the null-txid check both broadcast.  So the action is
+\* enabled whenever a worker is at the phase, and `refundSent` is the
+\* first-writer-wins record rather than a mutex.
+BroadcastRefund(w, s) ==
+    /\ At(w, s, "sentRefund")
+    /\ refundSent' = [refundSent EXCEPT ![s] = TRUE]
+    /\ UNCHANGED loc
+    /\ UNCHANGED << clock, st, conf, serverUp >>
+    /\ UNCHANGED << evmHeight, arkFund, evm, evmConfirmed, lockTxid,
                     lockSends >>
+
+\* (A8) THE RESEND.  `refunding_evm` with no refund on record is not a row
+\* waiting on a receipt, it is a row with nothing in flight: the planner
+\* reads evm_refund_txid null and sends one (evmSendPlan.ts:176-182).  The
+\* guard is the lock's PRESENCE plus the timeout, so the resend only fires
+\* where it can succeed, and recording the txid is what bounds it to one.
+ResendEvmRefund(w, s) ==
+    /\ ResendUnrecordedRefund
+    /\ Saw(w, s, "refunding_evm")
+    /\ loc[w].res = "clear"
+    /\ ~refundSent[s]
+    /\ evm[s] = "locked"
+    /\ HeightUp
+    /\ Advance(w, "sentRefund", "none")
+    /\ UNCHANGED << clock, st, conf, serverUp >>
+    /\ UNCHANGED LsVars
 
 \* The miner lands the broadcast refund: the contract deletes the lock and
 \* returns the ERC20.  An ENVIRONMENT step - the mempool owes no worker
@@ -689,13 +784,14 @@ StickLate(w, s) ==
 DriveRow(w, s) ==
        InsertQuote(w, s)      \/ RefuseQuoted(w, s)
     \/ RecordLock(w, s)       \/ SubmitEvmRefund(w, s)
-    \/ SubmitEvmLock(w, s)
+    \/ SubmitEvmLock(w, s)    \/ ResendEvmRefund(w, s)
     \/ ClaimArkade(w, s)      \/ StickLate(w, s)
     \/ RecordClaimed(w, s)
 
 PushChain(w, s) ==
        LockLands(w, s) \/ PatchTxid(w, s)
     \/ SubmitArkClaim(w, s)
+    \/ BroadcastRefund(w, s)
     \/ RecordEvmRefund(w, s)
 
 Env(s) ==
@@ -785,8 +881,10 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (* THE GREEN RUN                                                           *)
 (*                                                                         *)
 (* EvmSend.cfg: all assumptions at their safe settings.  GREEN:            *)
-(* 12,719,321 states generated, 1,705,266 distinct, depth 46, 10min 42s    *)
-(* (-workers 4).  All nine invariants, ForwardOnly, and Liveness.          *)
+(* 22,039,291 states generated, 2,841,354 distinct, depth 48, 17min 01s    *)
+(* (-workers 4).  All nine invariants, ForwardOnly, and Liveness.  Bigger  *)
+(* than the 12,719,321/1,705,266/depth-46 run this line used to record     *)
+(* because (A8) split the refund broadcast out of its CAS.                 *)
 (*                                                                         *)
 (* FINDINGS                                                                *)
 (*                                                                         *)
@@ -815,14 +913,38 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*     (evmSendPlan.ts:165-174), so EvmSend_NoReceipt.cfg is a genuine     *)
 (*     mutation - it deletes the shipped check - rather than a record of   *)
 (*     shipped behaviour.                                                  *)
-(* F4  (A6) THE LATE LOCK - STILL OPEN, and the (A4) fix moved which       *)
-(*     invariant catches it.  A pending lock broadcast can land at any     *)
-(*     later height.  It used to land after a terminal `refunded` row had  *)
-(*     closed the books, which was a NoSilentLoss at depth 15; recording   *)
-(*     `refunded` on the strength of the broadcast is what (A4) stopped,   *)
-(*     so that witness is gone.  The expensive half is not: the lock       *)
-(*     lands, the client claims it and still refunds its sats.             *)
-(*     EvmSend_LateLock.cfg: NoNetLoss, depth 20.                          *)
+(* F4  (A6) THE LATE LOCK - STILL OPEN, and NARROWED rather than closed.   *)
+(*     A pending lock broadcast can land at any later height.  It used to  *)
+(*     land after a terminal `refunded` row had closed the books, which    *)
+(*     was a NoSilentLoss at depth 15; recording `refunded` on the         *)
+(*     strength of the broadcast is what (A4) stopped, so that witness is  *)
+(*     gone.  The expensive half is not: the lock lands, the client claims *)
+(*     it and still refunds its sats.  EvmSend_LateLock.cfg: NoNetLoss,    *)
+(*     depth 20.                                                           *)
+(*                                                                         *)
+(*     WHAT F6 TOOK OFF IT, AND WHAT IS LEFT.  The reachable-under-green   *)
+(*     half - a refund the row never got away, leaving the late lock with  *)
+(*     nobody coming for it - is (A8), fixed.  The residue needs the lock  *)
+(*     to land AND the client's claim to beat a refund that IS in flight:  *)
+(*     both transactions leave one solver EOA through one monotonic nonce  *)
+(*     source (broadcast.ts:69, nonce.ts:80-82), so the refund cannot mine *)
+(*     before the lock and ordinarily takes the tokens back the block      *)
+(*     after.  What defeats that is the nonce mark not surviving a restart *)
+(*     (nonce.ts:28-33): the refund can be issued at the LOCK's nonce and  *)
+(*     lose the replacement race, after which the lock lands with a dead   *)
+(*     refund behind it.  Closing THAT needs the solver to spend the       *)
+(*     lock's nonce on a deliberate replacement - a cancel that races the  *)
+(*     transaction it cancels - which is a mechanism, not a branch, and is *)
+(*     why (A6) is still an assumption.                                    *)
+(* F6  (A8) THE REFUND THAT NEVER WENT - FIXED.  A row CASed into          *)
+(*     refunding_evm whose broadcast then threw, or crashed before the     *)
+(*     txid patch, waited on a receipt for a transaction that did not      *)
+(*     exist: refundOutcome() answers `pending` for a null txid because    *)
+(*     there is nothing to ask, and `pending` reached no branch.  The lock *)
+(*     stayed present and claimable and the client took both legs.  The    *)
+(*     planner now sends one (evmSendPlan.ts:176-182), so                  *)
+(*     EvmSend_LostRefund.cfg is a genuine mutation of a shipped guard.    *)
+(*     Reachable with LockLandsPromptly = TRUE - it never needed F4.       *)
 (* F5  (A7) THE STRANDED LOCK - FIXED.  The locking_evm timeout refund     *)
 (*     USED TO require the lock ABSENT, so a lock present but never proven *)
 (*     deep (the depth probe's failed read is UNPROVEN, never absent -     *)
@@ -835,45 +957,68 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*                                                                         *)
 (* MUTATION CHECKS - RESULTS                                               *)
 (*                                                                         *)
-(* Re-run in full after the (A4) fix; every count below is from that run   *)
+(* WHAT THE HONEST BroadcastRefund GUARD COST, MEASURED.  Dropping the     *)
+(* unobservable ~refundSent guard moved the GENERATED count (21,298,987 -> *)
+(* 22,039,291) and left the DISTINCT count untouched at 2,841,354.  The    *)
+(* guard was inert for reachability: refundSent is a monotone latch, so a  *)
+(* second broadcast is a stuttering self-loop.  Honest now, and the same   *)
+(* state space - which is the finding, not a disappointment.               *)
+(*                                                                         *)
+(* AND THE LIMIT THAT LEAVES.  The model still cannot reach the row that   *)
+(* RECORDED THE LOSING refund and waits forever (issue #36): `refundSent`  *)
+(* is one boolean, so which transaction the row named is inexpressible and *)
+(* no invariant can see it.  Stating that rather than reading the green    *)
+(* run as a clean bill.  Expressing it wants a per-swap record of the      *)
+(* recorded transaction's identity, not another boolean.                   *)
+(*                                                                         *)
+(* Re-run in full after the (A8) fix; every count below is from that run   *)
 (* (-workers 4).  A mutation run stops at the FIRST violation, so its      *)
 (* counts and depth wobble by a step or so with the worker interleaving -  *)
 (* the invariant that falls is the stable fact, and the one to read.       *)
 (*                                                                         *)
 (*   EvmSend_DoubleLock.cfg    LockCommitFirst = FALSE                     *)
-(*                             NoDoubleLock violated, depth 9 (2,942/603)  *)
+(*                             NoDoubleLock violated, depth 9 (3,018/616)  *)
 (*   EvmSend_NoReceipt.cfg     RefundSeesClaim = FALSE (mutation of a      *)
 (*                             SHIPPED guard since the F3 fix)             *)
-(*                             NoSilentLoss violated, depth 15 (59,702/    *)
-(*                             11,141)                                     *)
+(*                             NoSilentLoss violated, depth 15 (58,538/    *)
+(*                             10,996)                                     *)
 (*   EvmSend_BlindScan.cfg     ScanFollowsTheRow = FALSE over              *)
 (*                             TxidPatchAtomic = FALSE (mutation of a      *)
 (*                             SHIPPED guard since the F2 fix)             *)
-(*                             NoNetLoss violated, depth 21 (442,860/      *)
-(*                             66,298)                                     *)
+(*                             NoNetLoss violated, depth 21 (486,705/      *)
+(*                             75,408)                                     *)
 (*   EvmSend_LostPatch.cfg     ScanFollowsTheRow = TRUE over               *)
 (*                             TxidPatchAtomic = FALSE - the F2 CONTROL.   *)
-(*                             GREEN: 12,719,321/1,705,266, depth 46,      *)
-(*                             12min 14s, Liveness included.  Read the     *)
+(*                             GREEN: 22,039,291/2,841,354, depth 48,      *)
+(*                             16min 45s, Liveness included.  Read the     *)
 (*                             KNOWN-VACUOUS note below before leaning on  *)
-(*                             it: it is green by isomorphism.             *)
+(*                             it: it is green by isomorphism, and the     *)
+(*                             counts being IDENTICAL to the main cfg's is *)
+(*                             that isomorphism showing.                   *)
 (*   EvmSend_LateLock.cfg      LockLandsPromptly = FALSE (shipped)         *)
-(*                             NoNetLoss violated, depth 21 (693,321/      *)
-(*                             113,905).  WAS NoSilentLoss at depth 15;    *)
+(*                             NoNetLoss violated, depth 20 (612,112/      *)
+(*                             102,322).  WAS NoSilentLoss at depth 15;    *)
 (*                             see F4 - the (A4) fix removed that witness  *)
-(*                             and left the double-take one.  STILL OPEN.  *)
+(*                             and left the double-take one.  STILL OPEN,  *)
+(*                             narrowed by (A8), and it does NOT go away   *)
+(*                             with it: the residue is a live lock racing  *)
+(*                             a refund that IS in flight.                 *)
+(*   EvmSend_LostRefund.cfg    ResendUnrecordedRefund = FALSE (mutation of *)
+(*                             a SHIPPED guard since the F6 fix)           *)
+(*                             NoNetLoss violated, depth 21 (611,608/      *)
+(*                             102,643)                                    *)
 (*   EvmSend_LockStrand.cfg    TimeoutRefundCoversPresent = FALSE          *)
 (*                             (mutation of a SHIPPED guard since the F5   *)
 (*                             fix)  NoNetLoss violated, depth 19          *)
-(*                             (284,778/49,031)                            *)
+(*                             (328,468/57,754)                            *)
 (*   EvmSend_Overexposed.cfg   AtomicAdmission = FALSE, MaxExposed = 1     *)
 (*                             ExposureBounded violated, depth 7           *)
-(*                             (1,096/285); the green cfg is the control   *)
+(*                             (1,180/300); the green cfg is the control   *)
 (*   EvmSend_BrokenMargin.cfg  BreakDeadlineOrder = TRUE,                  *)
 (*                             RefundLocktime = 2: NoNetLoss violated,     *)
-(*                             depth 13 (40,269/7,644)                     *)
+(*                             depth 14 (47,890/9,183)                     *)
 (*   EvmSend_Parked.cfg        LivenessStrict artifact: violated - F1      *)
-(*                             named                                       *)
+(*                             named (5,707,427/846,282, 5min 25s)         *)
 (*                                                                         *)
 (* KNOWN-VACUOUS IN THE GREEN CFG (coverage run, -coverage 1):             *)
 (*                                                                         *)
@@ -901,6 +1046,11 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*     liveness lasso sat until the arm was added.  WF(Crash) would force  *)
 (*     crashes, which is not the statement the model makes.                *)
 (*                                                                         *)
-(* Every other action fires in the green cfg.                              *)
+(* Every other action fires in the green cfg.  The (A8) actions were the   *)
+(* ones to check, because the GiveUp arm they needed could have made the   *)
+(* recording unreachable the way LockLands does to PatchTxid.  It did not: *)
+(* a full -coverage 1 green run (27min 51s, the same 21,513,363/2,841,354  *)
+(* at depth 48) reports BroadcastRefund 142,361:352,904, ResendEvmRefund   *)
+(* 22,411:31,696 and RecordEvmRefund 50,298:387,400.                       *)
 (***************************************************************************)
 =============================================================================
