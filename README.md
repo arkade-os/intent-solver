@@ -437,6 +437,23 @@ transaction stream, nothing decided and nothing spent.
 | `OFFER_MIN_FILL_AMOUNT` | **required once `OFFER_MARKETS` names a market**, with no default shipped: this is how much of the float one discovered offer may take, which is the deployment's answer rather than this repository's. A whole number in the WANT leg's own units — asset units, or sats when that leg is BTC — parsed as bigint, since an asset amount is 256-bit |
 | `OFFER_MAX_FILL_AMOUNT` | same rule, the upper bound. A max below the min throws at startup: it would refuse every offer, which is indistinguishable from a quiet market and would be diagnosed as one                                                                                                                                                                       |
 
+### Environment — Arkade asset RFQ (the quoted path), off unless `ASSET_MARKETS` is set
+
+The other way to reach an asset, and the mirror of the packet path above: there
+the solver takes an offer someone else published, here it quotes one itself. The
+solver is the MAKER, so the covenant is derived from the row it negotiated
+rather than read off a packet, and the quote binds for a window instead of
+standing open.
+
+A deployment that sets none of these behaves exactly as it did before they
+existed: no asset RFQ store is opened, no service is constructed, and every
+asset pair refuses by name at the ingress.
+
+| Var                              | Notes                                                                                                                                                                                                                                                                                                            |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ASSET_MARKETS`                  | the assets quoted against over RFQ, `SYMBOL:<assetId>` comma-separated. The symbol is what this market's other env stems are built from, for the reason `EVM_TOKENS` gives: a 68-hex asset id in a variable name is legal shell and unreadable. Unset serves none, which is the whole path off                     |
+| `ASSET_QUOTE_VALIDITY_SECONDS`   | how long an asset quote binds. Default 30, floor 5, ceiling 900. Short on purpose — every pair here is cross-asset by construction, so the solver is short the market for the whole window and the window IS the exposure. § 5 puts cross-asset windows "on the order of ~30 seconds"                              |
+
 ### Environment — `LN_BACKEND=lnd` only
 
 | Var                                  | Default         | Notes                                                                                                                                                                                                                                                                                                     |
