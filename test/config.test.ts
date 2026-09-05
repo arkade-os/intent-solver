@@ -234,6 +234,17 @@ describe('loadConfig — COVCLAIMD_URL', () => {
     process.env.COVCLAIMD_URL = 'not-a-url'
     expect(() => loadConfig()).toThrow(/COVCLAIMD_URL must be an absolute URL/)
   })
+
+  it('refuses a host that merely starts with 127. — it is a name, not the loopback range', () => {
+    process.env.SWAP_NETWORK = 'bitcoin'
+    process.env.COVCLAIMD_URL = 'http://127.evil.com'
+    expect(() => loadConfig()).toThrow(/COVCLAIMD_URL must use https on mainnet/)
+  })
+
+  it('refuses a scheme that is neither http nor https, on any network', () => {
+    process.env.COVCLAIMD_URL = 'ftp://covclaimd.example.com'
+    expect(() => loadConfig()).toThrow(/COVCLAIMD_URL must be http or https/)
+  })
 })
 
 /**

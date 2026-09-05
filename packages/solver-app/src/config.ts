@@ -989,9 +989,13 @@ export const loadConfig = (): Config => {
       } catch {
         throw new Error(`COVCLAIMD_URL must be an absolute URL, got "${raw}"`)
       }
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new Error(`COVCLAIMD_URL must be http or https, got "${url.protocol}"`)
+      }
       if (url.protocol === 'https:') return raw
       const host = url.hostname.replace(/^\[|\]$/g, '')
-      const loopback = host === 'localhost' || host === '::1' || /^127\./.test(host)
+      // Every octet, not a `127.` prefix: that would read 127.evil.com as loopback.
+      const loopback = host === 'localhost' || host === '::1' || /^127(\.\d{1,3}){3}$/.test(host)
       // Mainnet-gated, not loopback-only: regtest stacks reach covclaimd over a container network.
       if (loopback || !profile.isMainnet) return raw
       throw new Error(`COVCLAIMD_URL must use https on mainnet, got "${url.protocol}//${url.host}"`)
