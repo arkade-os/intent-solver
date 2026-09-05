@@ -889,6 +889,27 @@ describe('ReceiveSwapService.tick — reveal to covclaimd', () => {
     ])
   }
 
+  it('reveals rather than stamps a packet that names no covclaimd', async () => {
+    const tlv = (type: number, value: number[]) => [type, (value.length >> 8) & 0xff, value.length & 0xff, ...value]
+    const noPubkey = Uint8Array.from([
+      ...tlv(
+        0x01,
+        Array.from({ length: 93 }, (_, i) => i & 0xff),
+      ),
+      ...tlv(0x02, [0x51, 0x52]),
+    ])
+    const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(noPubkey) }))
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+
+    const row = await service.tick(outcome.swap.id)
+
+    expect(row.state).toBe('funded')
+    // Stamping it would hide the tx from every covclaimd's filter.
+    expect(arkade.state.fundCalls[0]?.stamp).toBeUndefined()
+    expect(covclaimd.state.revealCalls).toBe(1)
+  })
+
   it('completes a client packet with the arkade script the covenant commits to', async () => {
     const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(clientPacket()) }))
     if (!outcome.accepted) throw new Error('expected acceptance')

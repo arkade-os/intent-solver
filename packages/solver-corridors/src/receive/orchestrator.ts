@@ -967,6 +967,9 @@ export class ReceiveSwapService {
   private claimPacketStamp(row: ReceiveSwapRow): ClaimPacketStamp | undefined {
     const shape = claimPacketShape(row.claimPacket)
     if (shape.kind !== 'packet') return undefined
+    // Without `0x03` no covclaimd's filter selects the tx, so stamping would
+    // strand it AND turn off the reveal that could still have settled it.
+    if (!shape.covclaimdPubKey) return undefined
     const script = covenantScriptFromRow(receiveCovenantRowFor(row))
     const arkadeScript = script.nonInteractiveClaimArkadeScript
     if (!shape.needsArkadeScript) return { packet: shape.body, tapTree: script.encode() }
