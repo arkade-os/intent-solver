@@ -134,11 +134,7 @@ export interface LnAssetMarket {
  * because the atomic corridor takes an `amountSide`, and these legs have none —
  * an invoice fixes the sats side, so the direction IS the side.
  */
-export type LnAssetQuoteRefusal =
-  | 'unsupported_pair'
-  | 'price_unavailable'
-  | 'fee_consumes_swap'
-  | 'amount_out_of_range'
+export type LnAssetQuoteRefusal = 'unsupported_pair' | 'price_unavailable' | 'fee_consumes_swap' | 'amount_out_of_range'
 
 export type LnAssetReceiveQuote = { ok: true; giveSats: number; payoutAsset: bigint }
 export type LnAssetSendQuote = { ok: true; giveAsset: bigint; payoutSats: number }
@@ -151,8 +147,7 @@ const feedUnusable = (market: LnAssetMarket, feed: Price): boolean =>
   feed.mantissa <= 0n || market.feeBps < 0 || market.feeBps >= 10_000
 
 const outsideAssetLimits = (market: LnAssetMarket, units: bigint): boolean =>
-  market.assetLimits !== undefined &&
-  (units < market.assetLimits.minUnits || units > market.assetLimits.maxUnits)
+  market.assetLimits !== undefined && (units < market.assetLimits.minUnits || units > market.assetLimits.maxUnits)
 
 /**
  * How much ASSET the solver pays out for `giveSats` — the `receive` direction.

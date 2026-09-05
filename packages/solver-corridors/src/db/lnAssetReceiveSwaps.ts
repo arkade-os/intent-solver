@@ -391,10 +391,13 @@ export class LnAssetReceiveSwapStore {
     const columns = Object.keys(fields)
     assertColumns(columns, TRANSITION_COLUMNS, 'transition()')
     const assignments = ['state = ?', 'updated_at = ?', ...columns.map((c) => `${c} = ?`)].join(', ')
-    const result = await this.driver.run(
-      `UPDATE ln_asset_receive_swap SET ${assignments} WHERE id = ? AND state = ?`,
-      [to, this.now(), ...columns.map((c) => fields[c]), id, from],
-    )
+    const result = await this.driver.run(`UPDATE ln_asset_receive_swap SET ${assignments} WHERE id = ? AND state = ?`, [
+      to,
+      this.now(),
+      ...columns.map((c) => fields[c]),
+      id,
+      from,
+    ])
     if (result.changes === 1) await this.recordEvent(id, from, to, null)
     return result.changes === 1
   }

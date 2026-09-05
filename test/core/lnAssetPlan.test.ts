@@ -73,10 +73,7 @@ describe('planLnAssetReceive — the solver funds the asset', () => {
   })
 
   it('R2: refuses to fund when the funding gate declines, naming its reason', () => {
-    const action = planLnAssetReceive(
-      receiveRow(),
-      seenReceive({ funding: { fund: false, reason: 'htlc_not_armed' } }),
-    )
+    const action = planLnAssetReceive(receiveRow(), seenReceive({ funding: { fund: false, reason: 'htlc_not_armed' } }))
     expect(action).toEqual({ do: 'refuse', reason: 'refused to fund: htlc_not_armed' })
   })
 
@@ -107,9 +104,9 @@ describe('planLnAssetReceive — the solver funds the asset', () => {
 
   it('R6: refunds only once the deadline has opened', () => {
     expect(planLnAssetReceive(receiveRow({ state: 'funded' }), seenReceive())).toEqual({ do: 'wait' })
-    expect(
-      planLnAssetReceive(receiveRow({ state: 'funded' }), seenReceive({ refundDeadlineReached: true })),
-    ).toEqual({ do: 'refund_asset' })
+    expect(planLnAssetReceive(receiveRow({ state: 'funded' }), seenReceive({ refundDeadlineReached: true }))).toEqual({
+      do: 'refund_asset',
+    })
   })
 
   /**
@@ -134,9 +131,10 @@ describe('planLnAssetReceive — the solver funds the asset', () => {
    */
   it('R7: refuses an unarmed quote at the invoice deadline, not later', () => {
     expect(planLnAssetReceive(receiveRow({ state: 'quoted' }), seenReceive())).toEqual({ do: 'wait' })
-    expect(
-      planLnAssetReceive(receiveRow({ state: 'quoted' }), seenReceive({ nowSeconds: NOW + 3600 })),
-    ).toEqual({ do: 'refuse', reason: 'invoice expired before it was ever armed' })
+    expect(planLnAssetReceive(receiveRow({ state: 'quoted' }), seenReceive({ nowSeconds: NOW + 3600 }))).toEqual({
+      do: 'refuse',
+      reason: 'invoice expired before it was ever armed',
+    })
   })
 
   it('reports an empty lockup with no readable claim as needing a human', () => {
@@ -203,16 +201,10 @@ describe('planLnAssetSend — the client funds the asset, the solver pays sats',
    * The honest answer is a human, not a claim that may already have lost.
    */
   it('S3: never claims at or after the refund locktime', () => {
-    const at = planLnAssetSend(
-      sendRow({ state: 'paid', preimage: PREIMAGE }),
-      seenSend({ nowSeconds: NOW + 7200 }),
-    )
+    const at = planLnAssetSend(sendRow({ state: 'paid', preimage: PREIMAGE }), seenSend({ nowSeconds: NOW + 7200 }))
     expect(at).toEqual({ do: 'stick', reason: 'preimage revealed but the asset refund window has closed' })
 
-    const before = planLnAssetSend(
-      sendRow({ state: 'paid', preimage: PREIMAGE }),
-      seenSend({ nowSeconds: NOW + 7199 }),
-    )
+    const before = planLnAssetSend(sendRow({ state: 'paid', preimage: PREIMAGE }), seenSend({ nowSeconds: NOW + 7199 }))
     expect(before).toEqual({ do: 'claim_asset', preimage: PREIMAGE })
   })
 
@@ -222,10 +214,7 @@ describe('planLnAssetSend — the client funds the asset, the solver pays sats',
    * forbids re-pricing it silently and permits refusing it.
    */
   it('S4: refuses a lockup funded after the quote expired, rather than filling it', () => {
-    const action = planLnAssetSend(
-      sendRow(),
-      seenSend({ lockupHoldsQuotedAsset: true, nowSeconds: NOW + 91 }),
-    )
+    const action = planLnAssetSend(sendRow(), seenSend({ lockupHoldsQuotedAsset: true, nowSeconds: NOW + 91 }))
     expect(action).toEqual({ do: 'refuse', reason: 'asset lockup funded after the quote expired' })
   })
 
