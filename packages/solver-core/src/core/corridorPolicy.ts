@@ -67,6 +67,47 @@ export const evmCorridorFor = (token: string, direction: 'send' | 'receive'): Ev
   return direction === 'send' ? `arkade:BTC->ethereum:${token}` : `ethereum:${token}->arkade:BTC`
 }
 
+/**
+ * `arkade:<asset>->ethereum:<token>` — an Arkade ASSET funds the leg the four
+ * sats corridors fund with BTC.
+ *
+ * A third family, and deliberately NOT a member of {@link AnyCorridor}. As a
+ * TYPE it would subsume {@link EvmCorridor}'s send arm — `arkade:${string}`
+ * admits `arkade:BTC` and TypeScript cannot say "not BTC" — so widening
+ * `AnyCorridor` with it would silently cost every existing consumer the
+ * distinction it relies on. The two families are told apart at RUN TIME by the
+ * anchored guards below, and any dispatch must ask {@link isEvmCorridor} first.
+ *
+ * NO SATS ON EITHER LEG, which is what makes this corridor different in kind
+ * rather than in degree: it is invisible to the house `maxExposedSats` cap.
+ * @see AssetEvmSendSwapStore.committedSats and arkade-os/intent-solver#22.
+ */
+export type AssetEvmCorridor = `arkade:${string}->ethereum:${string}`
+
+/** The 68-hex serialized Arkade Asset ID of `docs/rfq-protocol.md` § 2. */
+const ARKADE_ASSET_ID = /^[0-9a-f]{68}$/
+
+const ASSET_EVM_CORRIDOR = /^arkade:([0-9a-f]{68})->ethereum:(0x[0-9a-f]{40})$/
+
+export const isAssetEvmCorridor = (value: string): value is AssetEvmCorridor => ASSET_EVM_CORRIDOR.test(value)
+
+/** The corridor an (asset, token) pair is served on. Send only — @see AssetEvmCorridor. */
+export const assetEvmCorridorFor = (assetId: string, token: string): AssetEvmCorridor => {
+  if (!ARKADE_ASSET_ID.test(assetId)) {
+    throw new Error(`Arkade asset id must be 68 LOWERCASE hex, got ${JSON.stringify(assetId)}`)
+  }
+  if (!EVM_TOKEN.test(token)) {
+    throw new Error(`EVM token must be 0x then 40 LOWERCASE hex, got ${JSON.stringify(token)}`)
+  }
+  return `arkade:${assetId}->ethereum:${token}`
+}
+
+/** The two legs a pair string names, or null when it names no asset-EVM corridor. */
+export const assetEvmLegsOf = (pair: string): { assetId: string; token: string } | null => {
+  const match = ASSET_EVM_CORRIDOR.exec(pair)
+  return match ? { assetId: match[1]!, token: match[2]! } : null
+}
+
 /** The ERC20 a corridor serves, or null when it is not an EVM corridor. */
 export const evmTokenOf = (corridor: AnyCorridor): string | null => {
   const send = /^arkade:BTC->ethereum:(0x[0-9a-f]{40})$/.exec(corridor)
