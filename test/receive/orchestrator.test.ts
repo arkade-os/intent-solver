@@ -889,15 +889,16 @@ describe('ReceiveSwapService.tick — reveal to covclaimd', () => {
     ])
   }
 
-  it('reveals rather than stamps a packet that names no covclaimd', async () => {
-    const tlv = (type: number, value: number[]) => [type, (value.length >> 8) & 0xff, value.length & 0xff, ...value]
-    const noPubkey = Uint8Array.from([
-      ...tlv(
-        0x01,
-        Array.from({ length: 93 }, (_, i) => i & 0xff),
-      ),
-      ...tlv(0x02, [0x51, 0x52]),
-    ])
+  const tlvBytes = (type: number, value: number[]) => [type, (value.length >> 8) & 0xff, value.length & 0xff, ...value]
+  const CIPHERTEXT_TLV = tlvBytes(
+    0x01,
+    Array.from({ length: 93 }, (_, i) => i & 0xff),
+  )
+
+  it.each([
+    ['carrying an arkade script', Uint8Array.from([...CIPHERTEXT_TLV, ...tlvBytes(0x02, [0x51, 0x52])])],
+    ['carrying nothing else', Uint8Array.from(CIPHERTEXT_TLV)],
+  ])('reveals rather than stamps a packet that names no covclaimd, %s', async (_name, noPubkey) => {
     const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(noPubkey) }))
     if (!outcome.accepted) throw new Error('expected acceptance')
     ln.armHold(paymentHash, now + 4 * 3600)
