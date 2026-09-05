@@ -11,6 +11,7 @@ import {
   heldOnOutpoint,
   largestOfferOutpoint,
   liveOfferOutpoints,
+  type OfferOutpoint,
 } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
@@ -28,7 +29,7 @@ const vtxo = (over: Record<string, unknown> = {}) => ({
 const ctxWith = (getVtxos: unknown): Pick<ArkadeContext, 'wallet'> =>
   ({ wallet: { indexerProvider: { getVtxos } } }) as unknown as Pick<ArkadeContext, 'wallet'>
 
-const outpoint = (over: Partial<{ txid: string; vout: number; sats: bigint }> = {}) => ({
+const outpoint = (over: Partial<OfferOutpoint> = {}): OfferOutpoint => ({
   txid: 'a'.repeat(64),
   vout: 0,
   sats: 5_000n,
