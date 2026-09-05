@@ -108,6 +108,24 @@ describe('receive reference client', () => {
     expect(run.claimed).toEqual([[output(PAYOUT_SATS)]])
   })
 
+  it('claims both when the solver funded the quoted amount twice', async () => {
+    const run = await runClaim([[output(PAYOUT_SATS), output(PAYOUT_SATS, 1)]])
+    await expect(run.promise).resolves.toMatchObject({ txid: 'claimtxid' })
+    expect(run.claimed).toEqual([[output(PAYOUT_SATS), output(PAYOUT_SATS, 1)]])
+  })
+
+  it('refuses without an emulator key of its own', async () => {
+    await expect(
+      claimReceived({
+        arkade,
+        quote: QUOTE,
+        preimage: PREIMAGE,
+        payoutAddress: PAYOUT_ADDRESS,
+        payoutPubkey: PAYOUT_PUBKEY,
+      }),
+    ).rejects.toThrow(/emulatorPubkey or an emulatorUrl/)
+  })
+
   it('refuses on the script before it ever reads the chain', async () => {
     const foreign = quoteFor(new ArkAddress(SERVER, key(4), 'tark').encode())
     const run = await runClaim([[output(PAYOUT_SATS)]], foreign)
