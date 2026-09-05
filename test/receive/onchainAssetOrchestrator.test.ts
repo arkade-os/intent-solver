@@ -79,7 +79,10 @@ interface ArkadeFake {
 }
 
 const buildArkadeFake = (): ArkadeFake => {
-  const lockups = new Map<string, { txid: string; vout: number; value: number; assets: { assetId: string; amount: bigint }[] }[]>()
+  const lockups = new Map<
+    string,
+    { txid: string; vout: number; value: number; assets: { assetId: string; amount: bigint }[] }[]
+  >()
   const everSeen = new Map<string, { txid: string; vout: number }[]>()
   const claimed = new Map<string, Uint8Array>()
   let fundCounter = 0
@@ -255,9 +258,9 @@ describe('OnchainAssetReceiveSwapService', () => {
     const withAsset = new CovenantSwapScript({
       receiver: hex.decode(clientPayoutPubkey),
       server: hex.decode(serverPubkey),
-      preimageHash: new Uint8Array(await import('@arkade-os/solver-core/core/preimage.js').then((m) =>
-        m.scriptHashFromPaymentHash(paymentHash),
-      )),
+      preimageHash: new Uint8Array(
+        await import('@arkade-os/solver-core/core/preimage.js').then((m) => m.scriptHashFromPaymentHash(paymentHash)),
+      ),
       refundLocktime: outcome.swap.refundLocktime,
       claimDelay: 512,
       client: hex.decode(providerPubkey),

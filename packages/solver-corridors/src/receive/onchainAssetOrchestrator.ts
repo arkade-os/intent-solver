@@ -63,10 +63,7 @@ import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { EMPTY_LOCKUP_GRACE } from './orchestrator.js'
 import type { CovclaimdClient } from './covclaimd.js'
 import type { OnchainReceiveArkadeOps } from './onchainArkadeOps.js'
-import type {
-  OnchainAssetReceiveSwapRow,
-  OnchainAssetReceiveSwapStore,
-} from '../db/onchainAssetReceiveSwaps.js'
+import type { OnchainAssetReceiveSwapRow, OnchainAssetReceiveSwapStore } from '../db/onchainAssetReceiveSwaps.js'
 
 /**
  * The Arkade capabilities this leg needs beyond the sats leg's.
@@ -76,8 +73,7 @@ import type {
  * omission. `assetBalance` is `available`, never `total` — a coin already
  * reserved for another lockup cannot fund this one.
  */
-export interface OnchainAssetReceiveArkadeOps
-  extends Omit<OnchainReceiveArkadeOps, 'fund'> {
+export interface OnchainAssetReceiveArkadeOps extends Omit<OnchainReceiveArkadeOps, 'fund'> {
   fundAsset(params: {
     address: string
     assetId: string
@@ -431,9 +427,7 @@ export class OnchainAssetReceiveSwapService {
 
     if (row.onchainClaimTxid) {
       observed.onchainClaimOutcome = (await onchain.transactionOutcome(row.onchainClaimTxid)) as
-        | 'confirmed'
-        | 'mempool'
-        | 'unknown'
+        'confirmed' | 'mempool' | 'unknown'
     }
     if (row.fundingTxid && row.fundingVout !== null && observed.onchainClaimOutcome === 'unknown') {
       const witness = await onchain.findSpendWitness({
@@ -449,8 +443,7 @@ export class OnchainAssetReceiveSwapService {
         const target = preimage ?? row.preimage
         const bytes = target ? hex.decode(target) : null
         const ours =
-          bytes !== null &&
-          witness.some((el) => el.length === bytes.length && el.every((b, i) => b === bytes[i]))
+          bytes !== null && witness.some((el) => el.length === bytes.length && el.every((b, i) => b === bytes[i]))
         observed.priorSpend = ours ? 'ours' : 'theirs'
       }
     }
@@ -665,7 +658,9 @@ export class OnchainAssetReceiveSwapService {
       outputScript: hex.decode(row.onchainPkScript),
     })
     if (priorSpend) {
-      return { refused: "onchain HTLC output is already spent — most likely the client's own refund past htlc_locktime" }
+      return {
+        refused: "onchain HTLC output is already spent — most likely the client's own refund past htlc_locktime",
+      }
     }
     const htlc = buildOnchainHtlc({
       network: ONCHAIN_NETWORKS[network],

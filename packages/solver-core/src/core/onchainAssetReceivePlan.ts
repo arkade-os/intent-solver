@@ -200,7 +200,9 @@ export const planOnchainAssetReceive = (
       // otherwise sit here forever instead of failing cleanly. Nothing of the
       // solver's is at risk in this state either way.
       if (!output) {
-        return gate.fund ? { do: 'wait' } : { do: 'refuse', reason: `confirmations not reached in time: ${gate.reason}` }
+        return gate.fund
+          ? { do: 'wait' }
+          : { do: 'refuse', reason: `confirmations not reached in time: ${gate.reason}` }
       }
       if (!gate.fund) return { do: 'refuse', reason: gate.reason }
       return { do: 'begin_funding' }

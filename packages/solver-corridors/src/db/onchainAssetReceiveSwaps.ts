@@ -310,16 +310,10 @@ const SHAPE: StoreShape<OnchainAssetReceiveSwapRow, OnchainAssetReceiveState> = 
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 
-export class OnchainAssetReceiveSwapStore extends BaseSwapStore<
-  OnchainAssetReceiveSwapRow,
-  OnchainAssetReceiveState
-> {
+export class OnchainAssetReceiveSwapStore extends BaseSwapStore<OnchainAssetReceiveSwapRow, OnchainAssetReceiveState> {
   protected readonly shape = SHAPE
 
-  static async open(
-    driver: SqlDriver | string,
-    now: () => number = nowSeconds,
-  ): Promise<OnchainAssetReceiveSwapStore> {
+  static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<OnchainAssetReceiveSwapStore> {
     const store = new OnchainAssetReceiveSwapStore(
       typeof driver === 'string' ? betterSqliteDriver(driver) : driver,
       now,
