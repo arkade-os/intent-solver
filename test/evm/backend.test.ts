@@ -529,7 +529,11 @@ describe('findRefund', () => {
 
   it('matches irrespective of the case a node returns hex in', async () => {
     const { backend } = scan([{ transactionHash: TXID }], {
-      [TXID]: { to: toSwap.toUpperCase().replace('0X', '0x'), from: SENDER.toUpperCase().replace('0X', '0x'), input: refundSelf.toUpperCase().replace('0X', '0x') },
+      [TXID]: {
+        to: toSwap.toUpperCase().replace('0X', '0x'),
+        from: SENDER.toUpperCase().replace('0X', '0x'),
+        input: refundSelf.toUpperCase().replace('0X', '0x'),
+      },
     })
     await expect(backend.findRefund(lock, 0n)).resolves.toBe(true)
   })
