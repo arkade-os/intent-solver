@@ -622,6 +622,18 @@ export const claimSwapScript = async (
     ctx.wallet.serverUnrollScript,
   )
 
+  // An asset-denominated lockup reaches its claimer only if the spend DECLARES
+  // the asset: `buildOffchainTx` outputs are `{script, amount}` — sats alone —
+  // and arkd refuses an undeclared asset input with `no asset packet`. NULL when
+  // no input carries one, so a sats lockup builds byte-identically to before.
+  //
+  // `aggregate`, because the claim leaf is a signature path with no covenant
+  // clause bounding an output to an input's index, and there is one output.
+  //
+  // BEFORE signing: the packet changes the output set the signature covers.
+  const assetPacket = refundAssetPacket(funded, 'aggregate')
+  if (assetPacket) attachEmulatorPackets(arkTx, [assetPacket])
+
   // No index list: every input spends the same claim leaf, so all are signed.
   const signedArkTx = await signer.sign(arkTx)
   const submitted = await ctx.wallet.arkProvider.submitTx(
