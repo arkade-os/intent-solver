@@ -18,6 +18,7 @@ import {
   type QuotedOfferIntent,
 } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
+import type { fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const derivation = { serverPubkey: xonly(2), emulatorPubkey: xonly(4), hrp: 'tark' }
@@ -57,14 +58,19 @@ const funded = (over: Partial<OfferOutpoint> = {}): OfferOutpoint => ({
   ...over,
 })
 
-const settleWith = (outpoints: OfferOutpoint[], fulfill = vi.fn(async () => 'fill'.padEnd(64, '0'))) => ({
+const settleWith = (
+  outpoints: OfferOutpoint[],
+  // Typed from the real function: an untyped `vi.fn` infers `[]` for its call
+  // tuple, so every argument assertion below silently checks nothing.
+  fulfill = vi.fn<typeof fulfillOffer>(async () => 'fill'.padEnd(64, '0')),
+) => ({
   fulfill,
   settle: quotedOfferSettleFor({
     ctx: {} as never,
     emulatorUrl: 'http://emulator.test',
     derivation,
     outpointsAt: async () => outpoints,
-    fulfill: fulfill as never,
+    fulfill,
   }),
 })
 
