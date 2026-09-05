@@ -1,6 +1,6 @@
 {
   "name": "@arkade-os/solver-db",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Part of the Arkade intent-solver: db primitives.",
   "license": "MIT",
   "repository": {
