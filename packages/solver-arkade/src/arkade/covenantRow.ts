@@ -14,7 +14,7 @@
  */
 import { hex } from '@scure/base'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
-import { CovenantSwapScript } from './covenant.js'
+import { CovenantSwapScript, parseAssetId } from './covenant.js'
 /**
  * The structural subset of a swap row `covenantScriptFromRow`
  * (`src/send/arkadeOps.ts`) needs to rebuild the Arkade-side covenant
@@ -53,6 +53,23 @@ export interface CovenantScriptRow {
   refundDelay: number
   /** Null for rows with no client-unilateral refund leaf — same gating as `clientRefundPubkey`. */
   receiverPkScript: string | null
+  /**
+   * The 68-hex Asset ID this lockup is denominated in; absent or null for sats.
+   *
+   * OPTIONAL so every existing corridor's row satisfies this shape unchanged,
+   * and absent means what it meant before: a BTC covenant.
+   *
+   * Load-bearing on an asset lockup. The asset is a parameter of the script, so
+   * rebuilding one WITHOUT it derives the BTC pkScript — a different address
+   * from the one that was funded. Silent at rebuild time and total at spend
+   * time: the lockup is then neither claimable nor refundable, because the only
+   * script that can spend it is the one nobody can reproduce.
+   *
+   * CANONICAL order, as the wire and the registry carry it. `VHTLC.ScriptV2`
+   * does the reversal `OP_INSPECTOUTASSETLOOKUP` wants; pre-reversed bytes fail
+   * the covenant as a bare `OP_VERIFY failed`.
+   */
+  assetId?: string | null
   /**
    * Which covenant-suite shape this row's lockup was funded with — see
    * `CovenantSwapParams.nonInteractiveParameters`'s `legacy` selector. `true` is the
@@ -168,6 +185,10 @@ export const covenantScriptFromRow = (row: CovenantScriptRow): CovenantSwapScrip
     client: hex.decode(row.clientRefundPubkey),
     clientRefundDelay: row.refundWithoutReceiverDelay,
     refundWithoutServerDelay: row.refundDelay,
+    // CANONICAL, never pre-reversed — @see CovenantScriptRow.assetId. Omitted
+    // entirely for a sats row, which is the BTC covenant every other corridor
+    // builds today.
+    ...(row.assetId ? { asset: parseAssetId(row.assetId) } : {}),
     nonInteractiveParameters: {
       emulatorPubkey: hex.decode(row.emulatorPubkey),
       receiverPkScript: hex.decode(row.receiverPkScript),
