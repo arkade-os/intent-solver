@@ -318,7 +318,10 @@ describe('CovenantSwapScript — nonInteractiveClaim leaf', () => {
 describe('CovenantSwapScript — timelocked non-interactive refund leaf', () => {
   it('carries the timelocked non-interactive refund leaf', () => {
     const script = new CovenantSwapScript(paramsV2())
-    expect(script.vhtlcOptions?.nonInteractiveRefund?.withoutReceiver).toBe(true)
+    // ts-sdk#818 inverted the spelling: absent `legacy` IS the nine-leaf suite.
+    // Asserted present first, or a dropped suite would satisfy the second line.
+    expect(script.vhtlcOptions?.nonInteractiveParameters).toBeDefined()
+    expect(script.vhtlcOptions?.nonInteractiveParameters?.legacy).toBeUndefined()
   })
 
   it('registers the flag, so the derived script matches the row', () => {
@@ -340,17 +343,12 @@ describe('CovenantSwapScript — timelocked non-interactive refund leaf', () => 
   })
 
   it('actually moves the address: the flag changes the pkScript relative to it being unset', () => {
-    // Confirmed, not hypothesized: against the currently-published SDK the
-    // two tests above both still pass, because it silently accepts and
-    // ignores the flag on both sides of the round trip. This is the one that
-    // proves the flag has a real effect on the derived taproot output rather
-    // than being a passthrough on an options object nothing reads — and it is
-    // the one that currently FAILS against the published SDK, which is the
-    // honest signal that this file depends on unmerged ts-sdk#812.
+    // Proves the leaf reaches the derived taproot output rather than being a
+    // passthrough on an options object nothing reads.
     const withFlag = new CovenantSwapScript(paramsV2())
     const withoutFlag = new VHTLC.ScriptV2({
       ...withFlag.vhtlcOptions,
-      nonInteractiveRefund: { ...withFlag.vhtlcOptions.nonInteractiveRefund!, withoutReceiver: false },
+      nonInteractiveParameters: { ...withFlag.vhtlcOptions.nonInteractiveParameters!, legacy: 'preTimelockedRefund' },
     })
     expect(hex.encode(withFlag.pkScript)).not.toBe(hex.encode(withoutFlag.pkScript))
   })
@@ -721,8 +719,7 @@ describe('CovenantSwapScript — a stored row rebuilds in the unit it was writte
         unilateralClaimDelay: delay(over.claimDelay),
         unilateralRefundDelay: delay(over.refundWithoutServerDelay),
         unilateralRefundWithoutReceiverDelay: delay(over.clientRefundDelay),
-        nonInteractiveClaim: { receiverPkScript: RECEIVER_PAYOUT, emulatorPubkey: EMULATOR },
-        nonInteractiveRefund: { senderPkScript: DEST, emulatorPubkey: EMULATOR, withoutReceiver: true },
+        nonInteractiveParameters: { receiverPkScript: RECEIVER_PAYOUT, senderPkScript: DEST, emulatorPubkey: EMULATOR },
       }).pkScript,
     )
   }

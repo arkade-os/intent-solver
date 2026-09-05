@@ -614,26 +614,9 @@ export class CovenantSwapScript {
         unilateralClaimDelay: delay(params.claimDelay),
         unilateralRefundDelay: delay(params.refundWithoutServerDelay!),
         unilateralRefundWithoutReceiverDelay: delay(params.clientRefundDelay!),
-        // The SDK spells the suite per leaf until its own `nonInteractiveParameters`
-        // group ships (arkade-os/ts-sdk#818); the mapping is exact — one key,
-        // one suite — and collapses to a passthrough then.
-        nonInteractiveClaim: { receiverPkScript: covenants.receiverPkScript, emulatorPubkey: covenants.emulatorPubkey },
-        nonInteractiveRefund: {
-          senderPkScript: covenants.senderPkScript,
-          emulatorPubkey: covenants.emulatorPubkey,
-          // The client may fund a lockup and vanish. Every OTHER refund tier
-          // needs either their signature or the receiver's; this is the only
-          // one that needs neither — server + emulator alone can push it to
-          // the client's pre-committed address once `refundLocktime` matures.
-          // Adds one tapleaf (a CLTV multisig over server + the SAME
-          // covenant-tweaked cosigner `nonInteractiveRefund` above already
-          // uses), so it changes `pkScript` — see the leaf-mapping table above.
-          //
-          // Absent only for a legacy rebuild: a caller rebuilding from a stored
-          // row must pass back the shape that row was actually funded with, or
-          // this script's pkScript stops matching the lockup on disk.
-          withoutReceiver: covenants.legacy !== 'preTimelockedRefund',
-        },
+        // ts-sdk#818 collapsed the per-leaf options into one group of this
+        // repo's own shape, so the passthrough that comment promised is literal.
+        nonInteractiveParameters: covenants,
         // CANONICAL order, the same name the SDK gives these bytes: it reverses
         // them for `INSPECTOUTASSETLOOKUP` itself, and pre-reversing here fails
         // the covenant as a bare `OP_VERIFY failed`.
