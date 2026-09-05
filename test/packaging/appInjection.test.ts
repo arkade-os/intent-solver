@@ -98,6 +98,7 @@ const solverConfig = (): Config => {
     },
     poolAutoMint: false,
     evmCorridors: [],
+    onchainAssetMarkets: [],
     evmMarkets: [],
     // No market, so the offer-packet path is off and its bounds are unread.
     offerMarkets: [],

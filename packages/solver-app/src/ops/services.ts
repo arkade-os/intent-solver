@@ -75,6 +75,9 @@ import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestr
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
 import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
+import { onchainAssetReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainAssetArkadeOps.js'
+import { OnchainAssetReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainAssetReceiveSwaps.js'
+import { OnchainAssetReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainAssetOrchestrator.js'
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import { poolPlan, mintPool, committedAcrossCorridors } from './pool.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
@@ -327,6 +330,11 @@ export const createServices = async (
   const servesEvm = config.evmCorridors.length > 0
   const evmSendStore = servesEvm ? await EvmSendSwapStore.open(swapFile) : null
   const evmReceiveStore = servesEvm ? await EvmReceiveSwapStore.open(swapFile) : null
+  // Conditional for the same reason: a deployment serving no asset should not
+  // grow tables for one. ONE store across every market — `payout_asset_id` is a
+  // column, exactly as `token_address` is on the EVM stores.
+  const servesOnchainAsset = config.onchainAssetMarkets.length > 0
+  const onchainAssetReceiveStore = servesOnchainAsset ? await OnchainAssetReceiveSwapStore.open(swapFile) : null
   // Opened unconditionally, even when the console is off: the audit log is
   // written by operator actions the CLI can run too, and a store that exists
   // only sometimes is a branch every caller would have to think about.
@@ -740,6 +748,39 @@ export const createServices = async (
     onchainReceiveService.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
   }
 
+  // The same leg with an asset payout. It reuses the sats leg's L1 side whole —
+  // the same rail, claim destination and signer — because only the Arkade side
+  // differs: what the solver funds the lockup WITH.
+  const onchainAssetReceiveService =
+    onchainAssetReceiveStore && onchainClaimDestinationScript
+      ? new OnchainAssetReceiveSwapService({
+          store: onchainAssetReceiveStore,
+          onchain: rail!.onchain,
+          arkade: await onchainAssetReceiveArkadeOpsFromContext(arkade, {
+            url: config.emulatorUrl,
+            pubkey: emulatorInfo.signerPubkey,
+          }),
+          markets: config.onchainAssetMarkets,
+          fetchPrice: createPriceFeed(),
+          limits: policy.corridorLimits['onchain:BTC->arkade:BTC'],
+          network: config.network,
+          maxExposedSats: policy.maxExposedSats,
+          totalCommitted,
+          admission,
+          signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
+          claimDestinationScript: onchainClaimDestinationScript,
+          now: nowSeconds,
+        })
+      : null
+  if (onchainAssetReceiveService) {
+    onchainAssetReceiveService.onTickError = (id, error) => {
+      const { line } = tickErrors.record(id, error)
+      if (line) log(`onchain asset receive tick ${id} failed:`, line)
+    }
+    onchainAssetReceiveService.onTickSuccess = (id) => tickErrors.clear(id)
+    onchainAssetReceiveService.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
+  }
+
   // The EVM corridors. BOTH LEGS OR NEITHER, unlike the four above: each of
   // those is switched off independently by `corridorEnabled`, whereas these two
   // share one chain, one contract, one signing key and — critically — one nonce
@@ -918,6 +959,9 @@ export const createServices = async (
     evmReceiveService,
     evmReceiveStore,
     evmCorridors: policy.evmCorridors,
+    onchainAssetReceiveService,
+    onchainAssetReceiveStore,
+    onchainAssetMarkets: config.onchainAssetMarkets,
   }
 
   return {

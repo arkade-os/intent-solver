@@ -38,6 +38,14 @@ import type { SendSwapService } from '@arkade-os/solver-corridors/send/orchestra
 import type { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import type { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
 import type { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
+import {
+  onchainAssetReceiveCorridor,
+  onchainAssetReceiveDescriptor,
+  onchainAssetReceiveReader,
+} from '@arkade-os/solver-corridors/corridors/onchainAssetReceive.js'
+import type { OnchainAssetReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainAssetOrchestrator.js'
+import type { OnchainAssetReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainAssetReceiveSwaps.js'
+import type { OnchainAssetMarket } from '@arkade-os/solver-core/core/onchainAssetReceive.js'
 import type { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
 import type { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import type { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
@@ -96,6 +104,15 @@ export interface FlatCorridorDeps {
   assetRfqService?: AssetRfqSwapService | null
   assetRfqStore?: AssetRfqSwapStore | null
   assetRfqMarkets?: readonly AssetRfqMarket[]
+  /**
+   * `onchain:BTC->arkade:<asset>`: one store and one service across every
+   * market, and a corridor per market. ONE direction — the mirror leg pays out
+   * sats over L1 rather than an asset on Arkade, so it is a different
+   * orchestrator rather than this one reversed.
+   */
+  onchainAssetReceiveService?: OnchainAssetReceiveSwapService | null
+  onchainAssetReceiveStore?: OnchainAssetReceiveSwapStore | null
+  onchainAssetMarkets?: readonly OnchainAssetMarket[]
 }
 
 /**
@@ -147,6 +164,18 @@ export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corr
       }
     }
   }
+  // No direction loop, unlike the atomic class: one market is one corridor here.
+  if (deps.onchainAssetReceiveService && deps.onchainAssetReceiveStore) {
+    for (const market of deps.onchainAssetMarkets ?? []) {
+      corridors.push(
+        onchainAssetReceiveCorridor(
+          onchainAssetReceiveDescriptor(market),
+          deps.onchainAssetReceiveService,
+          deps.onchainAssetReceiveStore,
+        ),
+      )
+    }
+  }
   // Consumer corridors go THROUGH createCorridorSet, so a pair or stem
   // colliding with a built-in is refused at composition rather than shadowing
   // it at dispatch. Last, so they never delay a built-in's status answer.
@@ -186,6 +215,13 @@ export const readerSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corrid
       for (const direction of ASSET_RFQ_DIRECTIONS) {
         readers.push(assetRfqReader(assetRfqDescriptor(market, direction), deps.assetRfqStore))
       }
+    }
+  }
+  // Store-only, on the same width argument: a market an operator switched off
+  // still owes answers about the lockups it funded before it was.
+  if (deps.onchainAssetReceiveStore) {
+    for (const market of deps.onchainAssetMarkets ?? []) {
+      readers.push(onchainAssetReceiveReader(onchainAssetReceiveDescriptor(market), deps.onchainAssetReceiveStore))
     }
   }
   // `Corridor` extends `CorridorReader`, so the same objects serve here. Omit

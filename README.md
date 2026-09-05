@@ -436,6 +436,30 @@ transaction stream, nothing decided and nothing spent.
 | `OFFER_MIN_FILL_AMOUNT` | **required once `OFFER_MARKETS` names a market**, with no default shipped: this is how much of the float one discovered offer may take, which is the deployment's answer rather than this repository's. A whole number in the WANT leg's own units — asset units, or sats when that leg is BTC — parsed as bigint, since an asset amount is 256-bit |
 | `OFFER_MAX_FILL_AMOUNT` | same rule, the upper bound. A max below the min throws at startup: it would refuse every offer, which is indistinguishable from a quiet market and would be diagnosed as one                                                                                                                                                                       |
 
+### Environment — `onchain:BTC->arkade:<asset>`, off unless `ONCHAIN_ASSET_MARKETS` is set
+
+The onchain receive leg with the payout re-denominated: the client pays sats on
+L1 and the solver pays an asset on Arkade. Exact-in only, so the give is the
+request — the sats bound and `MAX_EXPOSED_SATS` both deal in the give with no
+conversion, and the asset side is bounded per market in its own units.
+
+A deployment that sets none of these behaves exactly as it did before they
+existed: no asset table is opened, no service is constructed, and every
+`onchain:BTC->arkade:<asset>` pair is refused by name at the ingress.
+
+One corridor per market, so every knob below is per SYMBOL — a 68-hex asset id
+in a variable name is legal shell and unreadable, which is the reason
+`EVM_TOKENS` names its tokens the same way.
+
+| Var                                | Notes                                                                                                                                                                                                                                                        |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ONCHAIN_ASSET_MARKETS`            | the assets served, `SYMBOL:assetId:decimals` comma-separated. The asset id must be lowercase — hex is case-insensitive and an id is not, so a mixed-case one derives a key nothing else serves. A repeated symbol or asset throws. Unset serves none          |
+| `ONCHAIN_ASSET_<SYM>_PRICE_FEED`   | **required**, an absolute http(s) URL. Declared, never composed from an asset/BTC and a BTC/asset feed                                                                                                                                                        |
+| `ONCHAIN_ASSET_<SYM>_PRICE_PATH`   | RFC 6901 pointer into the response. Empty derives it                                                                                                                                                                                                         |
+| `ONCHAIN_ASSET_<SYM>_MIN_PAYOUT`   | **required**, atomic units. A second gate beside the corridor's sats limits, not a replacement: the sats bound constrains the give and the payout is derived from it through the price, so this is redundant exactly while the price is what you expect       |
+| `ONCHAIN_ASSET_<SYM>_MAX_PAYOUT`   | same rule, the upper bound. Set together with the minimum or not at all — a lone maximum leaves the floor at zero and quotes dust, a lone minimum leaves the ceiling open                                                                                     |
+| `ONCHAIN_ASSET_<SYM>_FEE_BPS`      | the solver's margin, taken out of the payout. Defaults to 0 rather than inventing one                                                                                                                                                                        |
+
 ### Environment — `LN_BACKEND=lnd` only
 
 | Var                                  | Default         | Notes                                                                                                                                                                                                                                                                                                     |
