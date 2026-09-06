@@ -218,7 +218,11 @@ export const resolveLnAssetSendQuote = (args: {
   // may shave, so the client's give is the only side left to carry the margin.
   const fee = (mid * BigInt(market.feeBps) + BPS - 1n) / BPS
   const giveAsset = mid + fee
-  if (giveAsset <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
+  // `amount_out_of_range`, NOT `fee_consumes_swap` as on the receive side: the
+  // fee is ADDED here, so both terms are non-negative and this can only fire
+  // when `mid` is zero — a payout too small to price at this asset's precision.
+  // Naming the fee would send a client to look at a margin that is not the cause.
+  if (giveAsset <= 0n) return { ok: false, reason: 'amount_out_of_range' }
   if (outsideAssetLimits(market, giveAsset)) return { ok: false, reason: 'amount_out_of_range' }
   return { ok: true, giveAsset, payoutSats }
 }

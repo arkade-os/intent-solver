@@ -101,7 +101,15 @@ export interface LnAssetSendDeps {
   maxExposedSats: number
   totalCommitted: () => Promise<number>
   admission: AdmissionStrategy
-  /** Sums this asset's inbound commitments elsewhere, for the ceiling. */
+  /**
+   * Sums this asset's inbound commitments elsewhere, for the ceiling.
+   *
+   * OPTIONAL, and omitting it weakens the ceiling to a settled-balance check:
+   * quotes already in flight then count as nothing, so N concurrent requests
+   * each read the same pre-commit total and every one passes a ceiling only one
+   * fits under. That is the #105 race, which is why the SATS side takes an
+   * `AdmissionStrategy` rather than reading a number.
+   */
   committedAssetUnits?: (assetId: string) => Promise<bigint>
   onError?: (id: string, error: unknown) => void
   now?: () => number
@@ -275,6 +283,9 @@ export class LnAssetSendSwapService {
         pkScript: covenant.pkScript,
         lockupAddress: covenant.lockupAddress,
         refundPkScript: request.refundPkScript,
+        // Pinned from the ops used to DERIVE the covenant just above, so the
+        // rebuild at claim time cannot drift if the solver address rotates.
+        solverReceiverPkScript: arkade.receiverPkScript,
         clientRefundPubkey: request.clientRefundPubkey,
         rfqId: request.rfqId,
       })
@@ -470,7 +481,9 @@ export const covenantRowFor = (row: LnAssetSendSwapRow): CovenantScriptRow => ({
   clientRefundPubkey: row.clientRefundPubkey,
   refundWithoutReceiverDelay: row.refundWithoutReceiverDelay,
   refundDelay: row.refundDelay,
-  receiverPkScript: row.refundPkScript,
+  // The SOLVER's payout, never the client's refund: the covenant commits to it,
+  // and a rebuild naming the refund script derives a lockup we cannot claim.
+  receiverPkScript: row.solverReceiverPkScript,
   nonInteractiveParameters: true,
   /** What makes the rebuilt script an ASSET covenant rather than a sats one. */
   assetId: row.assetId,

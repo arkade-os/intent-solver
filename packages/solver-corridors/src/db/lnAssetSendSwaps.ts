@@ -93,6 +93,12 @@ export interface LnAssetSendSwapRow {
   lockupAddress: string
   /** Where the CLIENT's own refund pays. */
   refundPkScript: string
+  /** The SOLVER's payout script, pinned at quote time.
+   *
+   * Persisted rather than read live in `covenantRowFor`: the covenant commits to
+   * it, so a solver address that rotates between quote and claim would rebuild a
+   * DIFFERENT script and the lockup would be unclaimable. */
+  solverReceiverPkScript: string
   clientRefundPubkey: string
 
   lockupTxid: string | null
@@ -145,6 +151,7 @@ const COLUMNS = `
   pk_script                   TEXT NOT NULL,
   lockup_address              TEXT NOT NULL,
   refund_pk_script            TEXT NOT NULL,
+  solver_receiver_pk_script   TEXT NOT NULL,
   client_refund_pubkey        TEXT NOT NULL,
   lockup_txid                 TEXT,
   lockup_vout                 INTEGER,
@@ -204,6 +211,7 @@ const toRow = (raw: Raw): LnAssetSendSwapRow => ({
   pkScript: String(raw.pk_script),
   lockupAddress: String(raw.lockup_address),
   refundPkScript: String(raw.refund_pk_script),
+  solverReceiverPkScript: String(raw.solver_receiver_pk_script),
   clientRefundPubkey: String(raw.client_refund_pubkey),
   lockupTxid: raw.lockup_txid === null ? null : String(raw.lockup_txid),
   lockupVout: raw.lockup_vout === null ? null : Number(raw.lockup_vout),
@@ -238,9 +246,9 @@ export class LnAssetSendSwapStore {
          id, state, created_at, updated_at, payment_hash, pair, invoice, invoice_expires_at, payout_sats,
          asset_id, asset_decimals, lockup_asset_amount, lockup_asset_held, lockup_deadline, refund_locktime,
          solver_pubkey, server_pubkey, claim_delay, refund_delay, refund_without_receiver_delay, emulator_pubkey,
-         pk_script, lockup_address, refund_pk_script, client_refund_pubkey, lockup_txid, lockup_vout,
+         pk_script, lockup_address, refund_pk_script, solver_receiver_pk_script, client_refund_pubkey, lockup_txid, lockup_vout,
          pay_attempted_at, payment_id, preimage, claim_ark_txid, failure_reason, rfq_id
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                  NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)`,
       [
         record.id,
@@ -265,6 +273,7 @@ export class LnAssetSendSwapStore {
         record.pkScript,
         record.lockupAddress,
         record.refundPkScript,
+        record.solverReceiverPkScript,
         record.clientRefundPubkey,
         record.rfqId,
       ],

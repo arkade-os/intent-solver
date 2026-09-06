@@ -76,6 +76,7 @@ const sendQuote = (over: Partial<LnAssetSendQuoteRecord> = {}): LnAssetSendQuote
   pkScript: '51'.repeat(17),
   lockupAddress: 'ark1qlockup',
   refundPkScript: '51'.repeat(17),
+  solverReceiverPkScript: '52'.repeat(17),
   clientRefundPubkey: 'cc'.repeat(32),
   rfqId: null,
   ...over,
