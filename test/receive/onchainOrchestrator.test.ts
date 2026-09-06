@@ -890,6 +890,45 @@ describe('OnchainReceiveSwapService', () => {
       expect(deps.covclaimdCalls).toHaveLength(1)
     })
 
+    it('keeps the fund lease when the stamp write fails, the money having moved', async () => {
+      const packet = base64.encode(Uint8Array.from([...CIPHERTEXT, ...PUBKEY]))
+      const outcome = await service.quote(quoteRequest({ claimPacket: packet }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      const brittle = new Proxy(store, {
+        get: (target, prop) => {
+          const value = Reflect.get(target, prop)
+          if (prop !== 'patch') return typeof value === 'function' ? value.bind(target) : value
+          return async (id: string, fields: Record<string, unknown>) => {
+            if ('stamped_at' in fields) throw new Error('stamp write failed')
+            return target.patch(id, fields as Parameters<typeof target.patch>[1])
+          }
+        },
+      })
+      const brittleService = new OnchainReceiveSwapService({
+        store: brittle,
+        onchain: deps.onchain,
+        arkade: deps.arkadeFake.arkade,
+        covclaimd: deps.covclaimd,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        claimDestinationScript,
+        now: clock,
+      })
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+
+      await expect(brittleService.tick(outcome.swap.id)).rejects.toThrow('stamp write failed')
+
+      const row = await store.get(outcome.swap.id)
+      expect(row.fundStartedAt).not.toBeNull()
+      expect(row.stampedAt).toBeNull()
+      expect(deps.arkadeFake.fundStamps).toHaveLength(1)
+    })
+
     it('reveals an adopted funding, whatever the packet shape claims', async () => {
       const packet = base64.encode(Uint8Array.from([...CIPHERTEXT, ...PUBKEY]))
       const outcome = await service.quote(quoteRequest({ claimPacket: packet }))

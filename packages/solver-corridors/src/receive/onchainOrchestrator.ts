@@ -634,8 +634,6 @@ export class OnchainReceiveSwapService {
     const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
     try {
       txid = await arkade.fund({ address: row.lockupAddress, amountSats: row.payoutSats, stamp })
-      // After the broadcast: a crash between leaves it unset and the next pass reveals, which is the safe direction.
-      if (stamp) await store.patch(row.id, { stamped_at: this.now() })
     } catch (error) {
       // Hand the lease back on a throw: no money this service can see has
       // moved, and holding it would strand the row for every worker rather
@@ -644,6 +642,10 @@ export class OnchainReceiveSwapService {
       await store.releaseFundLease(row.id)
       throw error
     }
+    // Outside that catch on purpose: money has moved by here, so handing the
+    // lease back would reopen the double-fund until the indexer shows the
+    // lockup adoption reads. A throw leaves stamped_at unset and the next pass reveals.
+    if (stamp) await store.patch(row.id, { stamped_at: this.now() })
     return store.transition(row.id, 'funding_arkade', 'awaiting_claim', { arkade_fund_txid: txid })
   }
 
