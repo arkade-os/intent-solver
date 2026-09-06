@@ -70,7 +70,13 @@ const TRANSITION_COLUMNS = new Set([
  * `stuck` above all, which is the reason that override exists — and has to
  * record the audit fact without a transition.
  */
-const PATCH_COLUMNS = new Set(['revealed_at', 'settle_attempted_at', 'arkade_lockup_value', 'refund_ark_txid'])
+const PATCH_COLUMNS = new Set([
+  'revealed_at',
+  'stamped_at',
+  'settle_attempted_at',
+  'arkade_lockup_value',
+  'refund_ark_txid',
+])
 
 export interface ReceiveSwapRow {
   id: string
@@ -140,6 +146,9 @@ export interface ReceiveSwapRow {
   arkadeLockupValue: number | null
   /** Set once `covclaimd.reveal()` has succeeded — a data fact, not a state, so a failed attempt retries without re-funding. */
   revealedAt: number | null
+  /** Set once THIS service funded a stamped lockup — `claim_packet` says what a
+   *  funding WOULD carry, only this says what an adopted one actually did. */
+  stampedAt: number | null
   /**
    * When `settleHold` was CALLED — pre-committed, BEFORE the call, so a
    * resumed process can tell "not yet attempted" apart from "already
@@ -196,6 +205,7 @@ const RECEIVE_SWAP_COLUMNS = `
   arkade_lockup_vout             INTEGER,
   arkade_lockup_value            INTEGER,
   revealed_at                    INTEGER,
+  stamped_at                     INTEGER,
   settle_attempted_at            INTEGER,
   preimage                      TEXT,
   refund_ark_txid                TEXT,
@@ -265,6 +275,7 @@ const toRow = (raw: Raw): ReceiveSwapRow => ({
   arkadeLockupValue:
     raw.arkade_lockup_value === null || raw.arkade_lockup_value === undefined ? null : Number(raw.arkade_lockup_value),
   revealedAt: raw.revealed_at === null || raw.revealed_at === undefined ? null : Number(raw.revealed_at),
+  stampedAt: raw.stamped_at === null || raw.stamped_at === undefined ? null : Number(raw.stamped_at),
   settleAttemptedAt:
     raw.settle_attempted_at === null || raw.settle_attempted_at === undefined ? null : Number(raw.settle_attempted_at),
   preimage: raw.preimage === null || raw.preimage === undefined ? null : String(raw.preimage),
@@ -370,6 +381,9 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
     const existing = new Set(columns.map((c) => c.name))
     if (!existing.has('payout_sats')) {
       await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN payout_sats INTEGER`)
+    }
+    if (!existing.has('stamped_at')) {
+      await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN stamped_at INTEGER`)
     }
     if (!existing.has('settle_attempted_at')) {
       await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN settle_attempted_at INTEGER`)

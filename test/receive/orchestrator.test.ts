@@ -927,6 +927,20 @@ describe('ReceiveSwapService.tick — reveal to covclaimd', () => {
     expect(covclaimd.state.revealCalls).toBe(0)
   })
 
+  it('reveals an adopted funding, whatever the packet shape claims', async () => {
+    const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(tlvClaimPacket()) }))
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    arkade.state.outputs = [{ txid: 'pre-upgrade-funding', vout: 0, value: 5_000 }]
+
+    const row = await service.tick(outcome.swap.id)
+
+    expect(row.state).toBe('funded')
+    expect(arkade.state.fundCalls).toHaveLength(0)
+    expect(row.stampedAt).toBeNull()
+    expect(covclaimd.state.revealCalls).toBe(1)
+  })
+
   it('stamps the packet into the funding instead of revealing, when the client sends one', async () => {
     const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(tlvClaimPacket()) }))
     if (!outcome.accepted) throw new Error('expected acceptance')

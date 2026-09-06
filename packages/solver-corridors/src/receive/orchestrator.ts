@@ -884,6 +884,8 @@ export class ReceiveSwapService {
     // returns is what the confirmation below keys off.
     const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
     const fundTxid = await arkade.fund(row.lockupAddress, row.payoutSats, stamp)
+    // After the broadcast: a crash between leaves it unset and the next pass reveals, which is the safe direction.
+    if (stamp) await store.patch(row.id, { stamped_at: this.now() })
     // Keyed to THIS row's own broadcast, and spend-aware for the same reason
     // adoption above is: a claim landing inside the poll window would empty the
     // spendable view and hide a funding that certainly happened. Matching on
@@ -986,9 +988,10 @@ export class ReceiveSwapService {
   private async revealToCovclaimd(row: ReceiveSwapRow): Promise<void> {
     const { store, covclaimd } = this.deps
     if (!covclaimd) return
+    // `stampedAt`, NOT the packet shape: an adopted output carries nothing the
+    // shape promises, and skipping the reveal on it strands the swap.
+    if (row.stampedAt !== null) return
     const script = covenantScriptFromRow(receiveCovenantRowFor(row))
-    // Stamped fundings are already on the tx stream, for whichever covclaimd the client named.
-    if (this.claimPacketStamp(row, script)) return
     if (!script.nonInteractiveClaimArkadeScript) {
       // Unreachable: every receive-leg row is quoted with the solver's own
       // key present, so the extended (eight-leaf) script — the one that
