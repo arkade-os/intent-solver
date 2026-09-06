@@ -78,6 +78,8 @@ interface ArkadeFake {
   arkade: OnchainReceiveArkadeOps
   /** What each funding carried for covclaimd, in call order. */
   fundStamps: ({ packet: Uint8Array; tapTree: Uint8Array } | undefined)[]
+  /** A lockup this service did not create — what adoption finds after a crash or an upgrade. */
+  seedLockup: (address: string, out: { txid: string; vout: number; value: number }) => void
   lockups: Map<string, { txid: string; vout: number; value: number }[]>
   /**
    * Spend the lockup at `pkScriptHex`, revealing `preimage` if the spender was
@@ -105,6 +107,11 @@ const buildArkadeFake = (): ArkadeFake => {
   const state: ArkadeFake = {
     lockups,
     fundStamps,
+    seedLockup: (address, out) => {
+      const key = hex.encode(ArkAddress.decode(address).pkScript)
+      lockups.set(key, [...(lockups.get(key) ?? []), out])
+      everSeen.set(key, [...(everSeen.get(key) ?? []), { txid: out.txid, vout: out.vout }])
+    },
     spendLockup: (pkScriptHex, preimage) => {
       lockups.delete(pkScriptHex)
       if (preimage) claimed.set(pkScriptHex, preimage)
@@ -880,6 +887,29 @@ describe('OnchainReceiveSwapService', () => {
 
       expect(row.state).toBe('awaiting_claim')
       expect(deps.arkadeFake.fundStamps[0]).toBeUndefined()
+      expect(deps.covclaimdCalls).toHaveLength(1)
+    })
+
+    it('reveals an adopted funding, whatever the packet shape claims', async () => {
+      const packet = base64.encode(Uint8Array.from([...CIPHERTEXT, ...PUBKEY]))
+      const outcome = await service.quote(quoteRequest({ claimPacket: packet }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      // A binary predating stamping funded this lockup, so nothing stamped it.
+      deps.arkadeFake.seedLockup(outcome.swap.lockupAddress, {
+        txid: 'pre-upgrade-funding',
+        vout: 0,
+        value: outcome.swap.payoutSats,
+      })
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+
+      const row = await service.tick(outcome.swap.id)
+
+      expect(row.state).toBe('awaiting_claim')
+      // Adoption records no txid, so a null here is what proves it adopted.
+      expect(row.arkadeFundTxid).toBeNull()
+      expect(deps.arkadeFake.fundStamps).toHaveLength(0)
+      expect(row.stampedAt).toBeNull()
       expect(deps.covclaimdCalls).toHaveLength(1)
     })
   })
