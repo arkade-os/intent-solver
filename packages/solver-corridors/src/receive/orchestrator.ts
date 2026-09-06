@@ -882,7 +882,8 @@ export class ReceiveSwapService {
 
     // Nothing was funded before — create the exposure now. The txid this
     // returns is what the confirmation below keys off.
-    const fundTxid = await arkade.fund(row.lockupAddress, row.payoutSats, this.claimPacketStamp(row))
+    const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
+    const fundTxid = await arkade.fund(row.lockupAddress, row.payoutSats, stamp)
     // Keyed to THIS row's own broadcast, and spend-aware for the same reason
     // adoption above is: a claim landing inside the poll window would empty the
     // spendable view and hide a funding that certainly happened. Matching on
@@ -963,14 +964,17 @@ export class ReceiveSwapService {
     return false
   }
 
-  /** Derived rather than stored: `claim_packet` never changes. */
-  private claimPacketStamp(row: ReceiveSwapRow): ClaimPacketStamp | undefined {
+  /** Derived rather than stored: `claim_packet` never changes. `script` is passed
+   *  in so the reveal path, which needs it either way, decodes it once. */
+  private claimPacketStamp(
+    row: ReceiveSwapRow,
+    script: ReturnType<typeof covenantScriptFromRow>,
+  ): ClaimPacketStamp | undefined {
     const shape = claimPacketShape(row.claimPacket)
     if (shape.kind !== 'packet') return undefined
     // Without `0x03` no covclaimd's filter selects the tx, so stamping would
     // strand it AND turn off the reveal that could still have settled it.
     if (!shape.covclaimdPubKey) return undefined
-    const script = covenantScriptFromRow(receiveCovenantRowFor(row))
     const arkadeScript = script.nonInteractiveClaimArkadeScript
     if (!shape.needsArkadeScript) return { packet: shape.body, tapTree: script.encode() }
     // No leaf to derive from: fall back to the reveal, whose guard reports it.
@@ -982,9 +986,9 @@ export class ReceiveSwapService {
   private async revealToCovclaimd(row: ReceiveSwapRow): Promise<void> {
     const { store, covclaimd } = this.deps
     if (!covclaimd) return
-    // Stamped fundings are already on the tx stream, for whichever covclaimd the client named.
-    if (this.claimPacketStamp(row)) return
     const script = covenantScriptFromRow(receiveCovenantRowFor(row))
+    // Stamped fundings are already on the tx stream, for whichever covclaimd the client named.
+    if (this.claimPacketStamp(row, script)) return
     if (!script.nonInteractiveClaimArkadeScript) {
       // Unreachable: every receive-leg row is quoted with the solver's own
       // key present, so the extended (eight-leaf) script — the one that
