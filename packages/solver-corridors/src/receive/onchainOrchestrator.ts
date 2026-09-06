@@ -442,10 +442,12 @@ export class OnchainReceiveSwapService {
   }
 
   /** Derived rather than stored: `claim_packet` never changes. @see receive/orchestrator.ts */
-  private claimPacketStamp(row: OnchainReceiveSwapRow): ClaimPacketStamp | undefined {
+  private claimPacketStamp(
+    row: OnchainReceiveSwapRow,
+    script: ReturnType<typeof covenantScriptFromRow>,
+  ): ClaimPacketStamp | undefined {
     const shape = claimPacketShape(row.claimPacket)
     if (shape.kind !== 'packet' || !shape.covclaimdPubKey) return undefined
-    const script = covenantScriptFromRow(receiveCovenantRowFor(row))
     const arkadeScript = script.nonInteractiveClaimArkadeScript
     if (!shape.needsArkadeScript) return { packet: shape.body, tapTree: script.encode() }
     if (!arkadeScript) return undefined
@@ -633,7 +635,7 @@ export class OnchainReceiveSwapService {
       txid = await arkade.fund({
         address: row.lockupAddress,
         amountSats: row.payoutSats,
-        stamp: this.claimPacketStamp(row),
+        stamp: this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row))),
       })
     } catch (error) {
       // Hand the lease back on a throw: no money this service can see has
@@ -684,9 +686,9 @@ export class OnchainReceiveSwapService {
     // failing fast here would turn a claim observed a moment late into a
     // stuck swap.
 
+    const script = covclaimd ? covenantScriptFromRow(receiveCovenantRowFor(row)) : undefined
     // Stamped fundings are already on the tx stream, for the covclaimd the client named.
-    if (covclaimd && !this.claimPacketStamp(row)) {
-      const script = covenantScriptFromRow(receiveCovenantRowFor(row))
+    if (covclaimd && script && !this.claimPacketStamp(row, script)) {
       if (!script.nonInteractiveClaimArkadeScript) {
         // Unreachable by construction: every row on this leg is quoted with a
         // client key present (`quote()` always builds the extended script),
