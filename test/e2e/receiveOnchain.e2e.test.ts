@@ -219,7 +219,9 @@ describe('e2e onchain:BTC->arkade:BTC (receive)', () => {
 
       const indexer = new RestIndexerProvider(process.env.ARK_SERVER_URL ?? 'http://localhost:7070')
       const { txs } = await indexer.getVirtualTxs([awaiting.arkadeFundTxid!])
-      const stamped = Extension.fromTx(Transaction.fromPSBT(base64.decode(txs[0]!))).getPacketByType(0x04)?.serialize()
+      const stamped = Extension.fromTx(Transaction.fromPSBT(base64.decode(txs[0]!)))
+        .getPacketByType(0x04)
+        ?.serialize()
       expect(stamped).toBeTruthy()
       expect(stamped!.length).toBeGreaterThan(base64.decode(clientPacket).length)
       expect(hex.encode(stamped!)).toContain(`030021${hex.encode(covclaimdPub)}`)
