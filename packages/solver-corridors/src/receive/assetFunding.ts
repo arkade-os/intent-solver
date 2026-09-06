@@ -90,21 +90,29 @@ export const selectAssetFunding = <T extends AssetFundingCandidate>(
   usable.sort((a, b) => (a.clears === b.clears ? byHeld(a.held, b.held) : a.clears ? -1 : 1))
 
   const inputs: T[] = []
+  // The payout output carries `carrierSats`; any asset left over rides a change
+  // output that must itself clear dust, or the SDK refuses to build the spend.
+  // Recomputed per coin, because taking one more can turn an exact payout into
+  // one with change and so raise the bar by a dust.
+  const satsNeededFor = (heldSoFar: bigint): number => carrierSats + (heldSoFar > units ? dustSats : 0)
+
   let held = 0n
   let sats = 0
   for (const entry of usable) {
     inputs.push(entry.candidate)
     held += entry.held
     sats += entry.candidate.value
-    if (held >= units) break
+    // BOTH, not just the asset: stopping at asset sufficiency alone strands a
+    // float of near-dust carriers that holds plenty of the asset and not enough
+    // sats to move it, while the coins that would have paid for the carrier were
+    // still on the table.
+    if (held >= units && sats >= satsNeededFor(held)) break
   }
   if (held < units) {
     return { ok: false, reason: `float holds ${held} of asset ${assetId}, short of the ${units} quoted` }
   }
 
-  // The payout output carries `carrierSats`; any asset left over rides a change
-  // output that must itself clear dust, or the SDK refuses to build the spend.
-  const needed = carrierSats + (held > units ? dustSats : 0)
+  const needed = satsNeededFor(held)
   if (sats < needed) {
     return {
       ok: false,

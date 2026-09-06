@@ -343,7 +343,20 @@ export const createServices = async (
   // The READER set: a corridor an operator switched off still has in-flight
   // swaps, and those are still exposure the cap must count.
   const totalCommitted = () =>
-    committedAcrossCorridors(readerSetFromDeps({ store, onchainStore, receiveStore, onchainReceiveStore }))
+    committedAcrossCorridors(
+      readerSetFromDeps({
+        store,
+        onchainStore,
+        receiveStore,
+        onchainReceiveStore,
+        // Counted like the four above, because its give IS sats: `amount_sats`
+        // is the BTC the client funds the HTLC with, which is what the payout
+        // was priced against. Omitting it lets the cap admit a swap it should
+        // refuse — the corridor would be exposure the house never counted.
+        onchainAssetReceiveStore,
+        onchainAssetMarkets: config.onchainAssetMarkets,
+      }),
+    )
   /**
    * ONE control for every corridor, deliberately. Each service would happily
    * make its own, and that still bounds a corridor against itself — but the

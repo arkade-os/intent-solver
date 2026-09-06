@@ -78,6 +78,20 @@ describe('selectAssetFunding', () => {
     expect(result.units).toBe(700n)
   })
 
+  it('keeps taking coins when the asset is covered but the sats are not', () => {
+    // A float of near-dust carriers: the first two hold the whole payout and
+    // cannot pay for the output that would move it. Stopping at asset
+    // sufficiency strands a float that could fund the lockup twice over.
+    const result = select([
+      coin({ txid: 'b'.repeat(64), units: 300n, value: 1 }),
+      coin({ txid: 'c'.repeat(64), units: 200n, value: 1 }),
+      coin({ txid: 'd'.repeat(64), units: 1n, value: 10_000 }),
+    ])
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.inputs).toHaveLength(3)
+  })
+
   it('refuses when the float is short, naming both numbers', () => {
     expect(select([coin({ units: 100n })])).toMatchObject({
       ok: false,
