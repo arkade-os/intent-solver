@@ -631,12 +631,11 @@ export class OnchainReceiveSwapService {
     if (!(await store.claimFundLease(row.id, 'funding_arkade'))) return false
 
     let txid: string
+    const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
     try {
-      txid = await arkade.fund({
-        address: row.lockupAddress,
-        amountSats: row.payoutSats,
-        stamp: this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row))),
-      })
+      txid = await arkade.fund({ address: row.lockupAddress, amountSats: row.payoutSats, stamp })
+      // After the broadcast: a crash between leaves it unset and the next pass reveals, which is the safe direction.
+      if (stamp) await store.patch(row.id, { stamped_at: this.now() })
     } catch (error) {
       // Hand the lease back on a throw: no money this service can see has
       // moved, and holding it would strand the row for every worker rather
@@ -686,9 +685,10 @@ export class OnchainReceiveSwapService {
     // failing fast here would turn a claim observed a moment late into a
     // stuck swap.
 
-    const script = covclaimd ? covenantScriptFromRow(receiveCovenantRowFor(row)) : undefined
-    // Stamped fundings are already on the tx stream, for the covclaimd the client named.
-    if (covclaimd && script && !this.claimPacketStamp(row, script)) {
+    // `stampedAt`, NOT the packet shape: an adopted output carries nothing the
+    // shape promises, and skipping the reveal on it strands the swap.
+    const script = covclaimd && row.stampedAt === null ? covenantScriptFromRow(receiveCovenantRowFor(row)) : undefined
+    if (covclaimd && script) {
       if (!script.nonInteractiveClaimArkadeScript) {
         // Unreachable by construction: every row on this leg is quoted with a
         // client key present (`quote()` always builds the extended script),
