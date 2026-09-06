@@ -379,32 +379,6 @@ describe('OnchainReceiveSwapService', () => {
         expect(outcome.swap.payoutSats).toBe(49_450)
       })
 
-      it('stamps a client packet into the funding and skips the reveal, as the lightning leg does', async () => {
-        const tlv = (type: number, value: number[]) => [type, (value.length >> 8) & 0xff, value.length & 0xff, ...value]
-        const clientPacket = Uint8Array.from([
-          ...tlv(
-            0x01,
-            Array.from({ length: 93 }, (_, i) => i & 0xff),
-          ),
-          ...tlv(0x03, [0x02, ...Array<number>(32).fill(0x11)]),
-        ])
-        const svc = withFee()
-        const outcome = await svc.quote(quoteRequest({ claimPacket: base64.encode(clientPacket) }))
-        if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
-
-        deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
-        deps.onchain.mineBlocks(1)
-        const row = await svc.tick(outcome.swap.id)
-
-        expect(row.state).toBe('awaiting_claim')
-        const stamp = deps.arkadeFake.fundStamps[0]
-        if (!stamp) throw new Error('expected a stamp')
-        expect(stamp.packet.subarray(0, clientPacket.length)).toEqual(clientPacket)
-        expect(stamp.packet[clientPacket.length]).toBe(0x02)
-        expect(stamp.tapTree.length).toBeGreaterThan(0)
-        expect(deps.covclaimdCalls).toHaveLength(0)
-      })
-
       it('still watches for the full client HTLC, then funds the lockup with the payout', async () => {
         const svc = withFee()
         const outcome = await svc.quote(quoteRequest())
@@ -867,6 +841,46 @@ describe('OnchainReceiveSwapService', () => {
       const row = await service.tick(awaitingClaim.id)
       expect(row.state).toBe('stuck')
       expect(row.failureReason).toMatch(/no matching claim/)
+    })
+  })
+
+  describe('claim packet stamping', () => {
+    const tlv = (type: number, value: number[]) => [type, (value.length >> 8) & 0xff, value.length & 0xff, ...value]
+    const CIPHERTEXT = tlv(
+      0x01,
+      Array.from({ length: 93 }, (_, i) => i & 0xff),
+    )
+    const PUBKEY = tlv(0x03, [0x02, ...Array<number>(32).fill(0x11)])
+
+    const fundWith = async (claimPacket: Uint8Array) => {
+      const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(claimPacket) }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+      return service.tick(outcome.swap.id)
+    }
+
+    it('stamps a client packet into the funding and skips the reveal, as the lightning leg does', async () => {
+      const clientPacket = Uint8Array.from([...CIPHERTEXT, ...PUBKEY])
+      const row = await fundWith(clientPacket)
+
+      expect(row.state).toBe('awaiting_claim')
+      const stamp = deps.arkadeFake.fundStamps[0]
+      if (!stamp) throw new Error('expected a stamp')
+      expect(stamp.packet.subarray(0, clientPacket.length)).toEqual(clientPacket)
+      expect(stamp.packet[clientPacket.length]).toBe(0x02)
+      expect(stamp.tapTree.length).toBeGreaterThan(0)
+      expect(deps.covclaimdCalls).toHaveLength(0)
+    })
+
+    // Without 0x03 no covclaimd's filter selects the tx, so stamping it would
+    // strand the swap having just skipped the one path that could settle it.
+    it('reveals rather than stamps a packet that names no covclaimd', async () => {
+      const row = await fundWith(Uint8Array.from([...CIPHERTEXT, ...tlv(0x02, [0x51, 0x52])]))
+
+      expect(row.state).toBe('awaiting_claim')
+      expect(deps.arkadeFake.fundStamps[0]).toBeUndefined()
+      expect(deps.covclaimdCalls).toHaveLength(1)
     })
   })
 
