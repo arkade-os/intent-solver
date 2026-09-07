@@ -510,6 +510,19 @@ describe('a refund that was broadcast is not a refund that landed', () => {
     expect((await store.get('swap-1')).state).toBe('refunded')
   })
 
+  it('records a refund proven on chain when the recorded txid never mines', async () => {
+    // Also pins the observation's wiring: every neighbour of `refundLanded` in that
+    // Promise.all is a boolean too, so a mis-ordered slot type-checks silently.
+    const { store, service } = await dueForRefund({
+      isLocked: vi.fn().mockResolvedValue(true),
+      transactionOutcome: vi.fn().mockResolvedValue('pending'),
+      findRefund: vi.fn().mockResolvedValue(true),
+    })
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('refunded')
+  })
+
   it('never says `refunded` when the client claimed the tokens instead', async () => {
     const transactionOutcome = vi.fn().mockResolvedValue('pending')
     const findClaimPreimage = vi.fn().mockResolvedValue(null)
