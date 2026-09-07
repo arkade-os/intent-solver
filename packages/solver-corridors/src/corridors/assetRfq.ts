@@ -151,8 +151,8 @@ export const assetRfqReader = (descriptor: CorridorDescriptor, store: AssetRfqSw
       .map((row) => ({ id: row.id, pkScript: row.offerPkScript })),
   committedSats: () => store.committedSats(),
   page: async (options) => {
-    const { rows, nextCursor } = await store.page(options)
-    return { swaps: rows.filter((row) => row.pair === descriptor.pair).map(projectAssetRfq), nextCursor }
+    const { rows, nextCursor } = await store.page({ ...options, pair: descriptor.pair })
+    return { swaps: rows.map(projectAssetRfq), nextCursor }
   },
   detail: async (id) => {
     try {

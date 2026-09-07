@@ -110,8 +110,8 @@ export const onchainAssetReceiveReader = (
   findRecoverable: async () => (await store.findRecoverable()).filter((row) => row.pair === descriptor.pair),
   committedSats: () => store.committedSats(),
   page: async (options) => {
-    const { rows, nextCursor } = await store.page(options)
-    return { swaps: rows.filter((row) => row.pair === descriptor.pair).map(projectOnchainAssetReceive), nextCursor }
+    const { rows, nextCursor } = await store.page({ ...options, pair: descriptor.pair })
+    return { swaps: rows.map(projectOnchainAssetReceive), nextCursor }
   },
   detail: async (id) => {
     try {
