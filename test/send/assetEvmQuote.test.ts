@@ -156,22 +156,22 @@ describe('the happy path', () => {
   })
 
   it('binds the asset id into the covenant, so two assets are two lockups', async () => {
-    // The script inspects the output's asset. An id that never reached it would
-    // build the BTC covenant and derive an address the row cannot reconstruct.
-    const { service } = await build({
-      markets: new Map([
-        [corridorOf(ASSET), market()],
-        [
-          corridorOf(OTHER_ASSET),
-          market({ corridor: corridorOf(OTHER_ASSET), asset: { ticker: 'USDB', assetId: OTHER_ASSET, decimals: 8 } }),
-        ],
-      ]),
-    })
-    const first = await service.quote(request())
-    const second = await service.quote(request({ assetId: OTHER_ASSET, paymentHash: 'bb'.repeat(32) }))
-    expect([first.accepted, second.accepted]).toEqual([true, true])
-    if (first.accepted && second.accepted) {
-      expect(first.swap.pkScript).not.toBe(second.swap.pkScript)
+    // TWO INSTANCES ON ONE PAYMENT HASH, so the asset id is the only input that
+    // differs. Varying the hash as well would move the pkScript whether or not
+    // the id ever reached the script — and an id that never reaches it builds
+    // the BTC covenant, whose address the funded row cannot reconstruct.
+    const only = (assetId: string, ticker: string) =>
+      build({
+        markets: new Map([
+          [corridorOf(assetId), market({ corridor: corridorOf(assetId), asset: { ticker, assetId, decimals: 8 } })],
+        ]),
+      })
+    const a = await (await only(ASSET, 'USDA')).service.quote(request())
+    const b = await (await only(OTHER_ASSET, 'USDB')).service.quote(request({ assetId: OTHER_ASSET }))
+    expect([a.accepted, b.accepted]).toEqual([true, true])
+    if (a.accepted && b.accepted) {
+      expect(a.swap.paymentHash).toBe(b.swap.paymentHash)
+      expect(a.swap.pkScript).not.toBe(b.swap.pkScript)
     }
   })
 })
