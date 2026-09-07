@@ -145,6 +145,9 @@ export interface ArkadeContext {
   identity: MnemonicIdentity
   /** Unilateral delays this server will accept, derived from its own minimum. */
   unilateralDelays: UnilateralDelays
+  /** As advertised, BEFORE `ARK_UNILATERAL_EXIT_DELAY`: a client compiles an
+   * offer's exit leaf from this, so that covenant follows the server. */
+  advertisedExitDelay: number
   /**
    * Which clock this deployment's covenant timelocks count on, INFERRED from the
    * server's own advertised exit delay rather than configured beside it.
@@ -324,6 +327,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     wallet,
     identity,
     unilateralDelays: deriveUnilateralDelays(config.unilateralExitDelayOverride ?? advertisedExitDelay),
+    advertisedExitDelay,
     timelockUnit: advertisedUnit,
     hrp: config.arkadeHrp,
     reservations: createReservationLedger(),

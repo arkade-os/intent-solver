@@ -86,7 +86,7 @@ import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.
 import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import { assetRfqMarketsFrom } from './assetRfqMarkets.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
-import { offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 
@@ -500,6 +500,8 @@ export const createServices = async (
     // 32 bytes, so the wrong spelling compiles an address no client derives.
     emulatorPubkey: xOnlyPubkey(hex.decode(emulatorInfo.signerPubkey)),
     hrp: arkade.hrp,
+    // Boot-captured beside the two keys above, all three from one `getInfo()`.
+    exitDelay: offerExitDelay(arkade.advertisedExitDelay),
   }
   const assetRfqService = assetRfqStore
     ? new AssetRfqSwapService({

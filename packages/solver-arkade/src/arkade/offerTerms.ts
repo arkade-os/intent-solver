@@ -10,7 +10,8 @@
  * would put the deposit at an address nobody is watching, which is why this is
  * one function rather than a shape each caller assembles.
  */
-import { asset } from '@arkade-os/sdk'
+import { asset, type RelativeTimelock } from '@arkade-os/sdk'
+import { relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
 import { offerVtxoScript, type Offer } from '@arkade-os/swap'
 import { hex } from '@scure/base'
 
@@ -39,6 +40,21 @@ export interface OfferDerivation {
   emulatorPubkey: Uint8Array
   /** bech32 prefix for this network's Arkade addresses. */
   hrp: string
+  /** The maker's solo exit leaf. @see offerExitDelay */
+  exitDelay: RelativeTimelock
+}
+
+/** The exit closure a client's `createOffer` defaults to, from swap 0.0.12 on.
+ * The ADVERTISED delay, never `ARK_UNILATERAL_EXIT_DELAY`, which a client cannot
+ * see. Agreement pinned by `offerAddressAgreement.test.ts`. */
+export const offerExitDelay = (advertisedExitDelay: number): RelativeTimelock => {
+  if (!Number.isInteger(advertisedExitDelay) || advertisedExitDelay <= 0) {
+    throw new Error(
+      `the Arkade Service advertises unilateralExitDelay=${advertisedExitDelay}, which no client can ` +
+        `build an offer exit closure from — offers cannot be quoted against it`,
+    )
+  }
+  return { type: relativeDelayFrom(advertisedExitDelay).unit, value: BigInt(advertisedExitDelay) }
 }
 
 /**
@@ -58,14 +74,19 @@ export const xOnlyPubkey = (pubkey: Uint8Array): Uint8Array => {
   return pubkey.slice(-32)
 }
 
-/** The offer these terms describe, less the script they compile to. */
-export const offerFromTerms = (terms: QuotedOfferTerms, emulatorPubkey: Uint8Array): Omit<Offer, 'swapPkScript'> => ({
+/** The offer these terms describe, less the script. `exitDelay` is required, not optional: omitted, the tree moves. */
+export const offerFromTerms = (
+  terms: QuotedOfferTerms,
+  emulatorPubkey: Uint8Array,
+  exitDelay: RelativeTimelock,
+): Omit<Offer, 'swapPkScript'> => ({
   wantAmount: terms.wantAmount,
   ...(terms.wantAssetId !== null ? { wantAsset: asset.AssetId.fromString(terms.wantAssetId) } : {}),
   ...(terms.offerAssetId !== null ? { offerAsset: asset.AssetId.fromString(terms.offerAssetId) } : {}),
   makerPkScript: hex.decode(terms.makerPkScript),
   makerPublicKey: hex.decode(terms.makerPublicKey),
   emulatorPubkey,
+  exitDelay,
 })
 
 /**
@@ -79,7 +100,7 @@ export const offerScriptFrom = (
 ): ((terms: QuotedOfferTerms) => { pkScript: string; address: string }) => {
   const emulatorPubkey = xOnlyPubkey(deps.emulatorPubkey)
   return (terms) => {
-    const script = offerVtxoScript(offerFromTerms(terms, emulatorPubkey), deps.serverPubkey)
+    const script = offerVtxoScript(offerFromTerms(terms, emulatorPubkey, deps.exitDelay), deps.serverPubkey)
     // Both from the SAME compiled script: the address is what the client is
     // told and the pkScript is what the deposit is recognised by, so two
     // compilations could disagree about one covenant.

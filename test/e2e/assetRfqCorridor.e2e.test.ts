@@ -6,10 +6,8 @@
  * TWO THINGS ARE SUPPLIED HERE, and only these two. The price feed is a local
  * HTTP server read by the shipped `createPriceFeed()`, so quoted arithmetic is
  * assertable. And the four Arkade seams are wired in this file because NOTHING
- * IN `packages/` WIRES THEM: `createServices` never builds an
- * `AssetRfqSwapService`, and no production `deriveOffer`/`depositAt`/`settle`
- * exists in the tree — a gap this test documents rather than papers over, and
- * that #23 tracks.
+ * IN `packages/` WIRES THEM here: this file stands the service up itself rather
+ * than booting `createServices`. The derivation is the shipped one, not a copy.
  * Service, corridor, store, `offerVtxoScript`, the deposit read, the float and
  * `fulfillOffer` are all the real ones against a real stack. This wallet is
  * both sides, and the client half goes through `@arkade-os/swap`'s own
@@ -24,13 +22,19 @@ import { randomBytes, randomInt } from 'node:crypto'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { ArkAddress, hasTerminalSpend, asset, Transaction } from '@arkade-os/sdk'
-import { createOffer, cancelOffer, offerVtxoScript, InMemoryAssetSwapRepository, type Offer } from '@arkade-os/swap'
+import { createOffer, cancelOffer, InMemoryAssetSwapRepository, type Offer } from '@arkade-os/swap'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { GiveUp, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { ASSET_CARRIER_SATS, fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import {
+  offerExitDelay,
+  offerFromTerms,
+  offerScriptFrom,
+  type OfferDerivation,
+} from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import {
   AssetRfqSwapService,
   type AssetRfqMarket,
@@ -129,24 +133,18 @@ const market = (over: Partial<AssetRfqMarket> = {}): AssetRfqMarket => ({
 
 const emulatorXOnly = (): Uint8Array => hex.decode(arkade.emulator.pubkey).slice(-32)
 
-/** The missing production derivation: quoted terms in, the covenant out. */
-const offerFrom = (terms: OfferTerms): Omit<Offer, 'swapPkScript'> => ({
-  wantAmount: terms.wantAmount,
-  ...(terms.wantAssetId !== null ? { wantAsset: asset.AssetId.fromString(terms.wantAssetId) } : {}),
-  ...(terms.offerAssetId !== null ? { offerAsset: asset.AssetId.fromString(terms.offerAssetId) } : {}),
-  makerPkScript: hex.decode(terms.makerPkScript),
-  makerPublicKey: hex.decode(terms.makerPublicKey),
+/** The SHIPPED derivation — the local copy it replaced let #39 diverge. */
+const derivation = (): OfferDerivation => ({
+  serverPubkey: arkade.ctx.wallet.arkServerPublicKey,
   emulatorPubkey: emulatorXOnly(),
+  hrp: arkade.profile.arkadeHrp,
+  exitDelay: offerExitDelay(arkade.ctx.advertisedExitDelay),
 })
 
-const deriveOffer = (terms: OfferTerms): { pkScript: string; address: string } => {
-  const serverPubkey = arkade.ctx.wallet.arkServerPublicKey
-  const script = offerVtxoScript(offerFrom(terms), serverPubkey)
-  return {
-    pkScript: hex.encode(script.pkScript),
-    address: script.address(arkade.profile.arkadeHrp, serverPubkey).encode(),
-  }
-}
+const offerFrom = (terms: OfferTerms): Omit<Offer, 'swapPkScript'> =>
+  offerFromTerms(terms, emulatorXOnly(), offerExitDelay(arkade.ctx.advertisedExitDelay))
+
+const deriveOffer = (terms: OfferTerms): { pkScript: string; address: string } => offerScriptFrom(derivation())(terms)
 
 const termsOf = (row: AssetRfqSwapRow): OfferTerms => ({
   wantAmount: row.toAmount,
