@@ -992,7 +992,11 @@ The client is paid over Lightning and the sats land on Arkade
   role on this leg, so the client can spend the collaborative claim leaf
   itself), and `claim_packet` — the preimage ECIES-sealed **to the covclaimd
   service, not to the solver**. The solver carries the packet blindly and
-  cannot decrypt it. Sealing (verified against the reference stack,
+  cannot decrypt it. `claim_packet` is **OPTIONAL**: a client with no covclaimd
+  configured omits it rather than sealing to a key nobody holds, and claims the
+  lockup itself with its `payout_pubkey`. An empty string is refused, so
+  omission is the only way to say absent; a solver holding no packet reveals
+  nothing to covclaimd. Sealing (verified against the reference stack,
   `docs/environment.md`): ephemeral secp256k1 key, ECDH, HKDF-SHA256 with
   info `covclaimd/preimage/v1` and the ephemeral public key as salt, AES-GCM
   with the same key as additional data; wire layout
@@ -1096,7 +1100,7 @@ funding output, waits `min_confirmations`, funds the Arkade lockup pinned to
 the client's payout script, and claims the onchain HTLC once `P` is public.
 
 - **request.profile**: `payment_hash` (`H`, client-chosen), `claim_packet`
-  (as § 7.1.2), `refund_pubkey` (the client's x-only key — the onchain HTLC's
+  (as § 7.1.2, and optional for the same reason), `refund_pubkey` (the client's x-only key — the onchain HTLC's
   refund role), `payout_address` and `payout_pubkey` (the client's Arkade
   destination and covenant `receiver` key — the same two the Lightning
   receive profile asks for, because both receive corridors carry the same

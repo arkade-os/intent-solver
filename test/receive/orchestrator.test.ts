@@ -967,6 +967,18 @@ describe('ReceiveSwapService.tick — reveal to covclaimd', () => {
     expect(covclaimd.state.lastParams).toMatchObject({ swapAddress: row.lockupAddress })
   })
 
+  it('does NOT reveal when the client sent no claim packet — there is nothing to open', async () => {
+    const outcome = await service.quote(quoteRequest({ claimPacket: null }))
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+
+    const row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('funded')
+    expect(covclaimd.state.revealCalls).toBe(0)
+    expect(covclaimd.state.lastParams).toBeUndefined()
+    expect(row.revealedAt).toBeNull()
+  })
+
   it('retries reveal on the next tick after a failure, without re-funding', async () => {
     covclaimd.state.shouldFail = true
     const outcome = await service.quote(quoteRequest())

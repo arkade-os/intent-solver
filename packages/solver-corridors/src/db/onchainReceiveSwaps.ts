@@ -181,7 +181,7 @@ export interface OnchainReceiveSwapRow {
   onchainAddress: string
   onchainPkScript: string
   /** `P` ECIES-sealed to covclaimd, base64, exactly as the client supplied it — carried blindly, never decrypted here. */
-  claimPacket: string
+  claimPacket: string | null
   fundingTxid: string | null
   /** The vout `fundingTxid` actually pays the onchain HTLC at — never assume 0, same reasoning as the send leg's identical field. */
   fundingVout: number | null
@@ -318,7 +318,11 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   clientOnchainRefundPubkey: String(raw.client_onchain_refund_pubkey),
   onchainAddress: String(raw.onchain_address),
   onchainPkScript: String(raw.onchain_pk_script),
-  claimPacket: String(raw.claim_packet),
+  // '' is the stored form of absence — see `receiveSwaps.ts`'s `toRow` for why.
+  claimPacket:
+    raw.claim_packet === null || raw.claim_packet === undefined || raw.claim_packet === ''
+      ? null
+      : String(raw.claim_packet),
   fundingTxid: raw.funding_txid === null ? null : String(raw.funding_txid),
   fundingVout: raw.funding_vout === null || raw.funding_vout === undefined ? null : Number(raw.funding_vout),
   arkadeFundTxid: raw.arkade_fund_txid === null ? null : String(raw.arkade_fund_txid),
@@ -365,7 +369,7 @@ export interface OnchainReceiveQuoteRecord {
   clientOnchainRefundPubkey: string
   onchainAddress: string
   onchainPkScript: string
-  claimPacket: string
+  claimPacket: string | null
   rfqId?: string
 }
 
@@ -546,7 +550,7 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
         quote.clientOnchainRefundPubkey,
         quote.onchainAddress,
         quote.onchainPkScript,
-        quote.claimPacket,
+        quote.claimPacket ?? '',
         quote.rfqId ?? null,
       ],
     )

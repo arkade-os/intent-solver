@@ -137,7 +137,7 @@ export interface OnchainReceiveQuoteRequest {
   /** exact-in (default): the fee comes out of the payout. exact-out: the give is solved up from the corridor's fee. */
   amountSide?: 'from' | 'to'
   /** `P` ECIES-sealed to covclaimd, base64 — carried blindly, never decrypted here. */
-  claimPacket: string
+  claimPacket: string | null
   /** The client's x-only pubkey for the onchain HTLC's refund leaf. Wire field `refund_pubkey`. */
   refundPubkey: string
   /** The client's Arkade payout address — where a claim must pay. Wire field `payout_address`. */
@@ -446,6 +446,7 @@ export class OnchainReceiveSwapService {
     row: OnchainReceiveSwapRow,
     script: ReturnType<typeof covenantScriptFromRow>,
   ): ClaimPacketStamp | undefined {
+    if (row.claimPacket === null) return undefined
     const shape = claimPacketShape(row.claimPacket)
     if (shape.kind !== 'packet' || !shape.covclaimdPubKey) return undefined
     const arkadeScript = script.nonInteractiveClaimArkadeScript
@@ -688,9 +689,11 @@ export class OnchainReceiveSwapService {
     // stuck swap.
 
     // `stampedAt`, NOT the packet shape: an adopted output carries nothing the
-    // shape promises, and skipping the reveal on it strands the swap.
-    const script = covclaimd && row.stampedAt === null ? covenantScriptFromRow(receiveCovenantRowFor(row)) : undefined
-    if (covclaimd && script) {
+    // shape promises, and skipping the reveal on it strands the swap. No packet
+    // is the same case as no covclaimd: the client claims it itself.
+    const packet = row.stampedAt === null ? row.claimPacket : null
+    const script = covclaimd && packet !== null ? covenantScriptFromRow(receiveCovenantRowFor(row)) : undefined
+    if (covclaimd && script && packet !== null) {
       if (!script.nonInteractiveClaimArkadeScript) {
         // Unreachable by construction: every row on this leg is quoted with a
         // client key present (`quote()` always builds the extended script),
@@ -700,7 +703,7 @@ export class OnchainReceiveSwapService {
       }
       await covclaimd.reveal({
         swapAddress: row.lockupAddress,
-        ciphertext: row.claimPacket,
+        ciphertext: packet,
         arkadeScript: base64.encode(script.nonInteractiveClaimArkadeScript),
         taptree: hex.encode(script.encode()),
       })

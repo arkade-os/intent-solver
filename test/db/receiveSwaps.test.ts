@@ -52,6 +52,21 @@ describe('ReceiveSwapStore', () => {
     expect(row.revealedAt).toBeNull()
   })
 
+  it('round-trips an ABSENT claim packet as null, never the string "null"', async () => {
+    const row = await store.insertQuote({ ...baseQuote, claimPacket: null })
+    expect(row.claimPacket).toBeNull()
+
+    const reread = await store.get(row.id)
+    expect(reread.claimPacket).toBeNull()
+    expect(reread.claimPacket).not.toBe('null')
+  })
+
+  it('round-trips a PRESENT claim packet unchanged', async () => {
+    const row = await store.insertQuote(baseQuote)
+    expect(row.claimPacket).toBe(baseQuote.claimPacket)
+    expect((await store.get(row.id)).claimPacket).toBe(baseQuote.claimPacket)
+  })
+
   it('round-trips nonInteractiveParameters through the real store, both ways', async () => {
     // The encode/decode path ('1'/null on the wire, boolean|null in the row)
     // is asserted by inspection in covenant.ts and arkadeOps.test.ts, but
@@ -313,5 +328,49 @@ describe('ReceiveSwapStore — migration', () => {
     // And the new column round-trips for rows quoted after the migration.
     await migrated.insertQuote(baseQuote)
     expect((await migrated.get('swap-1')).payoutSats).toBe(4_950)
+  })
+
+  it('reads a SQL NULL claim_packet as absent, not as the string "null"', async () => {
+    // A column that never was NOT NULL can hold one, and `String(null)` then
+    // fabricates a packet out of it.
+    const db = new Database(':memory:')
+    const driver: SqlDriver = {
+      exec: async (sql) => {
+        db.exec(sql)
+      },
+      run: async (sql, params = []) => ({ changes: db.prepare(sql).run(...(params as never[])).changes }),
+      get: async (sql, params = []) => db.prepare(sql).get(...(params as never[])) as never,
+      all: async (sql, params = []) => db.prepare(sql).all(...(params as never[])) as never,
+      transaction: async (fn) => fn(),
+      close: async () => {
+        db.close()
+      },
+    }
+    db.exec(`
+      CREATE TABLE receive_swap (
+        id TEXT PRIMARY KEY, state TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        payment_hash TEXT NOT NULL, amount_sats INTEGER NOT NULL, payout_sats INTEGER, invoice TEXT NOT NULL,
+        invoice_expires_at INTEGER NOT NULL, htlc_expires_at INTEGER, payout_address TEXT NOT NULL,
+        payout_pk_script TEXT NOT NULL, payout_pubkey TEXT NOT NULL, claim_packet TEXT,
+        refund_locktime INTEGER NOT NULL, solver_pubkey TEXT NOT NULL, server_pubkey TEXT NOT NULL,
+        claim_delay INTEGER NOT NULL, refund_delay INTEGER NOT NULL, refund_without_receiver_delay INTEGER NOT NULL,
+        emulator_pubkey TEXT NOT NULL, pk_script TEXT NOT NULL, lockup_address TEXT NOT NULL,
+        solver_refund_pk_script TEXT NOT NULL, non_interactive_parameters TEXT, arkade_lockup_txid TEXT,
+        arkade_lockup_vout INTEGER, arkade_lockup_value INTEGER, revealed_at INTEGER, settle_attempted_at INTEGER,
+        preimage TEXT, refund_ark_txid TEXT, failure_reason TEXT, rfq_id TEXT
+      );
+    `)
+    db.prepare(
+      `INSERT INTO receive_swap (
+        id, state, created_at, updated_at, payment_hash, amount_sats, invoice, invoice_expires_at,
+        payout_address, payout_pk_script, payout_pubkey, claim_packet,
+        refund_locktime, solver_pubkey, server_pubkey, claim_delay, refund_delay, refund_without_receiver_delay,
+        emulator_pubkey, pk_script, lockup_address, solver_refund_pk_script
+      ) VALUES ('null-packet-row', 'quoted', 1, 1, ?, 5000, 'lnbcrt50000n1...', 1000, 'tark1x', '11', '22', NULL, 1000, '33', '44', 1, 1, 1, '55', '66', 'tark1y', '77')`,
+    ).run('98'.repeat(32))
+
+    const store = await ReceiveSwapStore.open(driver, clock)
+    expect((await store.get('null-packet-row')).claimPacket).toBeNull()
+    await store.close()
   })
 })
