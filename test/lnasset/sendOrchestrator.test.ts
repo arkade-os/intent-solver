@@ -1,10 +1,6 @@
 /**
- * The `arkade:<asset>->lightning:BTC` orchestrator at its one irreversible act.
- *
- * Only the payment call is exercised here: it is the step where the backend can
- * commit against the payment hash before it answers, so what the row says after
- * a throw is the difference between a swap a human can resolve and one that
- * waits on a receipt no poll can fetch.
+ * The `arkade:<asset>->lightning:BTC` orchestrator at its one irreversible act:
+ * the step where the backend can commit against the hash before it answers.
  */
 
 import { describe, it, expect } from 'vitest'
@@ -110,11 +106,6 @@ describe('LnAssetSendSwapService — the payment call', () => {
     await store.close()
   })
 
-  /**
-   * The backend can commit against the hash before it answers, so a throw says
-   * the outcome is UNKNOWN. Left in `paying` with a null id, `observe` reports
-   * `in_flight` off `pay_attempted_at` alone and the planner waits forever.
-   */
   it('sticks a payment that threw with no id, rather than waiting on a receipt it cannot fetch', async () => {
     const { store, errors, service } = await harness(async () => {
       throw new Error('backend refused the call')

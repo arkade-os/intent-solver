@@ -450,11 +450,8 @@ export class LnAssetSendSwapService {
             ),
           })
         } catch (error) {
-          // STUCK, never `refused`: the backend can commit against the hash
-          // before it answers, so a throw here says the outcome is unknown, not
-          // that nothing left. Without this the row keeps its null payment_id,
-          // `observe` reports `in_flight` off `pay_attempted_at` alone, and the
-          // planner waits on a receipt no poll can ever fetch.
+          // STUCK, never `refused`: the backend can commit against the hash before
+          // it answers, and a null payment_id is a receipt no poll can ever fetch.
           this.deps.onError?.(row.id, error)
           await store.fail(row.id, 'paying', 'the payment call failed with no id to poll; its outcome is unknown')
           return false

@@ -144,7 +144,6 @@ describe('LnAssetReceiveSwapStore', () => {
     await store.close()
   })
 
-  /** One HTLC, and a stuck row is the one whose outcome against it is unknown. */
   it('keeps a stuck row holding its hash, and still sees it as live', async () => {
     const store = await receiveStore()
     await store.insertQuote(receiveQuote({ id: 'a' }))

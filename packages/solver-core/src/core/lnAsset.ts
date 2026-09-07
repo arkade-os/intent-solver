@@ -144,11 +144,7 @@ const BPS = 10_000n
 
 /**
  * Both bps guards, shared so the two directions cannot drift on what a usable
- * price is.
- *
- * The INTEGER halves are not redundant with the range ones: `BigInt(2.5)` and
- * `10n ** BigInt(-1)` throw, so a fractional bps or a negative precision would
- * leave this function by exception instead of as `price_unavailable`.
+ * price is. INTEGER as well as RANGE: `BigInt(2.5)` and `10n ** BigInt(-1)` throw.
  */
 const feedUnusable = (market: LnAssetMarket, feed: Price): boolean =>
   feed.mantissa <= 0n ||

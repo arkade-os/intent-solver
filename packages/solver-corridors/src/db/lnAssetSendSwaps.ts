@@ -169,16 +169,13 @@ CREATE INDEX IF NOT EXISTS idx_ln_asset_send_state ON ln_asset_send_swap(state);
 CREATE INDEX IF NOT EXISTS idx_ln_asset_send_hash ON ln_asset_send_swap(payment_hash);
 
 -- Two LIVE rows on one hash would pay one invoice twice, and not-refused is the
--- four BTC corridors' spelling of live: a stuck row is the one whose payment
--- outcome is UNKNOWN, so it is the last one a second row may sit beside.
+-- four BTC corridors' spelling of live: a stuck row's outcome is UNKNOWN.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ln_asset_send_live_hash
   ON ln_asset_send_swap(payment_hash)
   WHERE state != 'refused';
 
 -- UNIQUE where the four BTC corridors index without it: quote() reads
--- findByRfqId and inserts across two awaits, so the schema is what makes one
--- rfq_id name one negotiation. Partial because findByRfqId runs on every
--- inbound rfq_status_request, falling through every corridor's store.
+-- findByRfqId and inserts across two awaits, so the schema is the guarantee.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ln_asset_send_rfq_id
   ON ln_asset_send_swap(rfq_id) WHERE rfq_id IS NOT NULL;
 

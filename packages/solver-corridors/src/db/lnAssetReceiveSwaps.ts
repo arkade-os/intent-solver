@@ -173,8 +173,7 @@ CREATE INDEX IF NOT EXISTS idx_ln_asset_receive_hash ON ln_asset_receive_swap(pa
 
 -- A hold invoice is keyed BY PAYMENT HASH at the backend, so two LIVE rows on
 -- one hash would have two swaps settling from one HTLC. Not-refused is the four
--- BTC corridors' spelling of live, and the one that also covers stuck -- the
--- state whose HTLC outcome nobody knows yet.
+-- BTC corridors' spelling of live, and covers stuck.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ln_asset_receive_live_hash
   ON ln_asset_receive_swap(payment_hash)
   WHERE state != 'refused';
@@ -311,10 +310,7 @@ export class LnAssetReceiveSwapStore {
     return raw ? toRow(raw) : undefined
   }
 
-  /**
-   * The live row on a hash, for the cross-corridor duplicate check — the same
-   * `live` the unique index enforces, or the check passes and the insert throws.
-   */
+  /** The cross-corridor duplicate check, on the same `live` the unique index enforces. */
   async findLiveByPaymentHash(paymentHash: string): Promise<LnAssetReceiveSwapRow | null> {
     const raw = await this.driver.get<Raw>(
       `SELECT * FROM ln_asset_receive_swap WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
