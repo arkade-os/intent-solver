@@ -449,7 +449,7 @@ describe('lockCalls', () => {
   })
 })
 
-/** Rule 8's proof (#36). @see REFUND_EVENT_SIGNATURE for why the log alone is not one. */
+/** Rule 9's proof (#36). @see REFUND_EVENT_SIGNATURE for why the log alone is not one. */
 describe('findRefund', () => {
   const TXID = `0x${'ab'.repeat(32)}`
   const OTHER = `0x${'cd'.repeat(32)}`

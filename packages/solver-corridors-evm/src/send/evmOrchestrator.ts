@@ -216,7 +216,7 @@ export class EvmSendSwapService {
     }
   }
 
-  /** Rule 8's proof, degraded as {@link refundOutcome} is - and that DIRECTION
+  /** Rule 9's proof, degraded as {@link refundOutcome} is - and that DIRECTION
    * is the safety: an unproven `true` buries a lock the client claimed. */
   private async refundLanded(row: EvmSendSwapRow): Promise<boolean> {
     if (row.state !== 'refunding_evm') return false
