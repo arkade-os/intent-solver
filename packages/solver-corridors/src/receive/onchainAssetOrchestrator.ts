@@ -485,9 +485,7 @@ export class OnchainAssetReceiveSwapService {
         })
 
       case 'begin_funding':
-        // Re-recorded, because the claim spends what the row holds: a bumped
-        // funding of the quoted amount is a different outpoint from the one
-        // `await_confirmations` named.
+        // Re-recorded, because the claim spends the outpoint the row holds.
         return store.transition(row.id, 'awaiting_confirmations', 'funding_arkade', {
           funding_txid: action.txid,
           funding_vout: action.vout,

@@ -79,11 +79,6 @@ describe('rule 1 - never fund the asset lockup before min_confirmations', () => 
     expect(action).toEqual({ do: 'begin_funding', txid: 'ab'.repeat(32), vout: 0 })
   })
 
-  /**
-   * Depth alone is not the condition. Anyone can pay the HTLC address a second
-   * time, and confirmations on THAT output say nothing about the one the quote
-   * was made against.
-   */
   it('never funds against a confirmed output holding less than the quote', () => {
     const action = planOnchainAssetReceive(
       row({ state: 'awaiting_confirmations' }),
@@ -92,7 +87,6 @@ describe('rule 1 - never fund the asset lockup before min_confirmations', () => 
     expect(action).toEqual({ do: 'wait' })
   })
 
-  /** A fee bump is a different txid at the same amount, and is still the client funding. */
   it('takes a replacement of the quoted amount, and names it so the claim spends it', () => {
     const action = planOnchainAssetReceive(
       row({ state: 'awaiting_confirmations' }),

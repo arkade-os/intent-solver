@@ -310,9 +310,6 @@ describe('OnchainAssetReceiveSwapService', () => {
 
     it('adopts a lockup that is already funded rather than paying again', async () => {
       const swap = await fundAndConfirm()
-      // Seeded before the first tick and then forgotten, which is what a process
-      // that died between paying and recording comes back to: a lockup already
-      // funded, and a row that does not know it.
       await deps.arkadeFake.arkade.fundAsset({
         address: swap.lockupAddress,
         assetId: ASSET,

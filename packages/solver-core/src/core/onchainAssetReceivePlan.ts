@@ -196,16 +196,10 @@ export const planOnchainAssetReceive = (
     }
 
     case 'awaiting_confirmations': {
-      // THE AMOUNT IS PART OF THE CONDITION, not just the depth. Confirmations
-      // alone would accept any output at the address, so a second, underfunded
-      // payment to it — or a replacement that dropped the value — would open the
-      // float against an HTLC that no longer holds what was quoted.
+      // THE AMOUNT, not just the depth: anyone may pay this address a second time.
       const funded = seen.htlcOutputs.filter(
         (o) => o.valueSats === row.amountSats && o.confirmations >= row.minConfirmations,
       )
-      // The recorded one WHEN IT IS THERE, so a fee-bumped funding of the right
-      // amount still lands; `begin_funding` then carries whichever won, because
-      // the claim spends the outpoint the row holds.
       const output = funded.find((o) => o.txid === row.fundingTxid && o.vout === row.fundingVout) ?? funded[0]
       const gate = onchainAssetFundingGate(row, seen.nowSeconds)
       // RULE 1, and the gate is asked even while STILL waiting: a swap that can

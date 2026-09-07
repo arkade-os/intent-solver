@@ -863,9 +863,7 @@ export const createServices = async (
         onchainReceiveStore.committedSats(),
         evmSendStore.committedSats(),
         evmReceiveStore.committedSats(),
-        // SEVEN now. This list was complete until the asset receive store
-        // existed, so leaving it out here would let the EVM pair quote into
-        // headroom that corridor is already holding.
+        // Seventh: this list was complete until the asset receive store existed.
         onchainAssetReceiveStore?.committedSats() ?? 0,
       ])
       return totals.reduce((sum, value) => sum + value, 0)

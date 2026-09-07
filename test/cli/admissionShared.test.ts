@@ -57,12 +57,7 @@ describe('createServices — one admission control for every corridor', () => {
     expect(body.match(/^\s*totalCommitted,$/gm) ?? []).toHaveLength(7)
   })
 
-  /**
-   * Counting constructions is not enough: the EVM block declares a SECOND
-   * `totalCommitted` that shadows the outer one, so a store added to one and
-   * not the other leaves half the corridors quoting into headroom the other
-   * half already holds — and both spellings type-check.
-   */
+  // The EVM block declares a SECOND `totalCommitted`, and either spelling type-checks.
   it('reads the asset receive store in BOTH totalCommitted closures', () => {
     const body = createServicesBody()
     const starts = [...body.matchAll(/const totalCommitted\b/g)].map((m) => m.index ?? 0)
