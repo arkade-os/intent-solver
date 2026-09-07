@@ -458,12 +458,73 @@ const attentionPanel = (o) => {
   )
 }
 
+/**
+ * What a restart would interrupt, in the operator's own words.
+ *
+ * Composed from the overview the page already holds rather than from a second
+ * request: `armDialog`'s override banner is rendered at the moment of the click,
+ * and a figure fetched then could differ from the one on screen behind it.
+ */
+const inFlightLine = (o) =>
+  `${o.exposure.liveCount} swap(s) in flight, ${o.exposure.exposedCount} of them exposed, with ` +
+  `${sats(o.exposure.committedSats)} sat committed. ${o.attention?.stuckCount ?? 0} row(s) are already waiting ` +
+  'for you. Boot re-drives every non-terminal row, but a payment in flight right now stays undecided until its ' +
+  'next tick.'
+
+/**
+ * The restart control, and the staleness alert that is the reason to press it.
+ *
+ * The panel is always here because it is where the button lives; the ALERT half
+ * is not, for the reason `attentionPanel` returns null — a position that always
+ * carries a warning is one the eye learns to skip, and this is the position that
+ * has to be noticed.
+ *
+ * The confirmation goes through `armDialog`, so the friction is the same as every
+ * other armed action and the server checks the typed word independently. The
+ * in-flight line rides in as the OVERRIDE banner rather than the warning: the
+ * warning is static text from the API, and what is live right now is the part an
+ * operator must actually read before agreeing.
+ */
+const restartPanel = (o) => {
+  const r = o.restart
+  if (!r) return null
+  return h(
+    'section.panel',
+    h('h2', 'restart'),
+    r.pending
+      ? h(
+          'div',
+          h('p.notice', r.notice),
+          h(
+            'table',
+            h('thead', h('tr', h('th', 'item'), h('th', 'running'), h('th', 'stored'))),
+            h(
+              'tbody',
+              ...r.settings.map((knob) => h('tr', h('td', knob.key), h('td.faint', knob.loaded), h('td', knob.stored))),
+              ...r.markets.map((market) =>
+                h('tr', h('td', market.key), h('td.faint', 'market'), h('td', market.change)),
+              ),
+            ),
+          ),
+        )
+      : h('p.muted', 'Stored settings and markets match what this process loaded.'),
+    r.refusal
+      ? h('p.muted', r.refusal)
+      : actButton(
+          'button.act.armed',
+          { 'data-action': 'restart', onclick: () => armDialog('restart', {}, inFlightLine(o)) },
+          'restart solver',
+        ),
+  )
+}
+
 const overviewView = () => {
   const o = state.overview
   if (!o) return h('p.muted', 'loading…')
   return h(
     'div',
     attentionPanel(o),
+    restartPanel(o),
     h(
       'div.panels',
       ...o.corridors.map((c) =>

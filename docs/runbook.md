@@ -468,6 +468,49 @@ environment's range for that corridor rather than leaving it quoting nothing.
 Secrets are not shown. Not redacted — absent, so there is no field for a bug to
 un-redact.
 
+### What is waiting on a restart, and the button that takes one
+
+The overview names it. `createServices` takes two snapshots at startup — the
+resolved policy and the asset markets — and the console diffs the store against
+both, so a knob whose stored value differs from the running one is listed with
+BOTH numbers, and a market added, re-priced or paused since boot is listed with
+what happened to it. Nothing is shown when the two agree; a permanent badge is
+one an operator learns to skip.
+
+This is a diff, not a live-reload seam. Overrides are still resolved once at
+boot and nothing re-reads them, exactly as above.
+
+Beside the alert is **restart solver**. It is armed like the money-moving
+actions: the console shows what is in flight first — swaps live, swaps exposed,
+sats committed, rows already parked in `stuck` — and the operator types `RESTART`,
+which the server checks independently before anything is armed. The action lands
+in the audit log with those figures, so "who restarted a solver holding 50,151
+sats" is answerable later. Refusals are recorded too.
+
+**It refuses unless `ADMIN_RESTART_SUPERVISED=true`.** There is no in-process
+restart: Node cannot re-exec itself, so the only lever is exiting and letting
+whatever started the process start it again — and nothing inside the process can
+tell whether anything will.
+
+| shape                                        | comes back?             |
+| -------------------------------------------- | ----------------------- |
+| `docker compose up` (`restart: unless-stopped`) | yes                     |
+| `docker run` with no `--restart`             | **no**                  |
+| systemd unit with `Restart=always`           | yes                     |
+| `node dist/cli.js serve` in a shell           | **no**                  |
+
+Set the variable only for a row that says yes. Where it is unset the console
+renders that reason in place of the button, and a bare `POST /api/actions/restart`
+is refused with it too.
+
+What the button does is raise `SIGTERM` at this process, which is the shutdown
+`serve`, `relay` and `watch` already install: the sweep loop ends, the HTTP
+servers and every database close, and the command's own exit follows. A loop
+wedged on an unresponsive backend is ended outright 30 seconds later. Boot
+re-drives every non-terminal row (`findRecoverable`), so a restart is recoverable
+— but a payment in flight at the moment of exit stays undecided until its next
+tick, which is why the in-flight figures are put in front of the operator first.
+
 ## Operating notes
 
 - **`stuck` rows are the pager.** They mean "money may have left and needs a

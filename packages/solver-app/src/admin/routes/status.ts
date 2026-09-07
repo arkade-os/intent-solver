@@ -12,6 +12,7 @@ import type { Hono } from 'hono'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
 import { applyOverrides } from '../settings.js'
+import { DRIFT_NOTICE, marketDrift, settingsDrift } from '../drift.js'
 import { probeBackends } from '../probes.js'
 import { consoleBalance, type AssetDetailSource } from '../assets.js'
 import { poolPlan } from '../../ops/pool.js'
@@ -126,6 +127,11 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
     const effective = applyOverrides(services.config, await services.adminStore.getOverrides())
     const live = await liveSwaps(deps)
     const stuck = await stuckSwaps(deps)
+    // Against the BOOT snapshots, which is the whole point: `services.policy`
+    // and `services.assetMarkets` are what the services were constructed from,
+    // and `effective` above is what the store holds now. @see admin/drift.ts
+    const settings = settingsDrift(services.policy, effective)
+    const markets = marketDrift(services.assetMarkets, await services.adminStore.listMarkets())
 
     const committed = await Promise.all([
       services.store.committedSats(),
@@ -159,6 +165,22 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
         liveCount: live.filter((swap) => swap.corridor === corridor).length,
         exposedCount: live.filter((swap) => swap.corridor === corridor && swap.phase === 'exposed').length,
       })),
+      /**
+       * What a restart would apply, and whether one can be taken from here.
+       *
+       * `pending` is derived from the two lists rather than sent as a separate
+       * claim: a banner that can be true while naming nothing is one an operator
+       * learns to dismiss, and this way the alert and its contents cannot
+       * disagree.
+       */
+      restart: {
+        pending: settings.length + markets.length > 0,
+        settings,
+        markets,
+        notice: DRIFT_NOTICE,
+        /** Null when the console may restart this process. @see ops/restart.ts */
+        refusal: services.restart.refusal,
+      },
       exposure: {
         committedSats,
         capSats: effective.maxExposedSats,

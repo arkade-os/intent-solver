@@ -34,7 +34,7 @@ import { claimNow } from '../../ops/claims.js'
 import { planExitForSwap } from '../../ops/unilateralExit.js'
 import { requireLn } from '../../ops/rails.js'
 import { capabilityRefusal, fundSources, requireFundSource, summarise } from '../../ops/fundSources.js'
-import { mintPool, poolPlan } from '../../ops/pool.js'
+import { committedAcrossCorridors, mintPool, poolPlan } from '../../ops/pool.js'
 import { runFloatLifecycle } from '../../ops/float.js'
 import type { Services } from '../../ops/services.js'
 import type { AdminDeps } from '../server.js'
@@ -218,6 +218,26 @@ const requireCorridorName = (body: ActionBody): string => {
     throw new Error('corridor is required: a swap id is unique only within its own corridor’s store')
   }
   return corridor
+}
+
+/**
+ * What a restart would interrupt, across EVERY corridor rather than the four BTC
+ * pairs — the reader set, so an EVM pair's committed money is counted too.
+ *
+ * Best-effort by design: a sick store must not be what stops an operator
+ * restarting, since a sick store is one of the reasons to. The failure is
+ * recorded in place of the numbers rather than swallowed.
+ */
+const inFlightNow = async (services: Services): Promise<Record<string, unknown>> => {
+  try {
+    const [committedSats, live] = await Promise.all([
+      committedAcrossCorridors(services.readers),
+      Promise.all([...services.readers].map((corridor) => corridor.findRecoverable())),
+    ])
+    return { committedSats, liveCount: live.reduce((total, rows) => total + rows.length, 0) }
+  } catch (error) {
+    return { unreadable: messageOf(error) }
+  }
 }
 
 export const ACTIONS: Record<string, ActionDefinition> = {
@@ -795,6 +815,43 @@ export const ACTIONS: Record<string, ActionDefinition> = {
         throw capabilityRefusal(source, 'withdraw', 'it has no way to pay an arbitrary destination')
       }
       return source.withdraw({ address: requireAddress(body), amount: requireAmount(body) })
+    },
+  },
+
+  /**
+   * Stop this process so its supervisor starts it again.
+   *
+   * THE ONLY WAY A STORED SETTING OR MARKET REACHES A RUNNING SOLVER. Both are
+   * resolved once by `createServices` and nothing re-reads them, by settled
+   * decision — so the honest fix for that gap is to make the restart explicit
+   * rather than to grow a live policy seam. `admin/drift.ts` is the other half:
+   * it names which items are waiting on this.
+   *
+   * Armed, and the confirmation is a literal because there is no per-swap
+   * identifier to type. What it interrupts is read BEFORE the shutdown is armed
+   * and returned, so the audit row records the exposure this restart was taken
+   * with rather than whatever the numbers became afterwards.
+   *
+   * REFUSES BY DEFAULT — @see ops/restart.ts. Nothing inside the process can
+   * establish that anything will start it again, and a button that exits an
+   * unsupervised solver leaves it stopped.
+   */
+  restart: {
+    tier: 'armed',
+    confirmKind: 'literal:RESTART',
+    expectedConfirm: () => 'RESTART',
+    warning:
+      'STOPS THIS SOLVER. Nothing is quoted or driven until the process is back, and every swap in flight is ' +
+      'interrupted mid-step. Boot re-drives every non-terminal row, so this is recoverable and it is the only way ' +
+      'a stored setting or market takes effect — but a payment in flight at the moment of exit stays undecided ' +
+      'until its next tick, so check what is live first. It EXITS: something else has to start the process again.',
+    run: async (services) => {
+      // Before arming, and refused here as well as inside `arm()`: reading the
+      // stores takes time, and an unsupervised deployment must not spend it
+      // only to be refused.
+      if (services.restart.refusal !== null) throw new Error(services.restart.refusal)
+      const inFlight = await inFlightNow(services)
+      return { ...services.restart.arm(), inFlight }
     },
   },
 }

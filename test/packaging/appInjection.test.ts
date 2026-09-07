@@ -123,6 +123,7 @@ const solverConfig = (): Config => {
     host: '127.0.0.1',
     adminPort: null,
     adminHost: '127.0.0.1',
+    adminRestartSupervised: false,
     relayUrl: null,
     relayProtocol: 'nostr',
     openRfqMaxBidsPerMinute: 60,

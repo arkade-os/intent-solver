@@ -375,6 +375,18 @@ export interface Config {
    * anything that can reach this port can move money.
    */
   adminHost: string
+  /**
+   * The operator's assertion that something restarts this process when it exits.
+   *
+   * OFF BY DEFAULT, and the console's restart button refuses while it is,
+   * because nothing inside the process can establish the answer. A container
+   * started from `docker-compose.yml` has `restart: unless-stopped` and comes
+   * back; the same image under a bare `docker run` does not, and neither does
+   * the Shape 1 `node dist/cli.js serve` that docs/runbook.md only RECOMMENDS
+   * running under systemd. Exiting on the wrong one of those takes the solver
+   * down until a human notices, so the button is opt-in rather than guessed.
+   */
+  adminRestartSupervised: boolean
   /** Outbound relay URL for `relay` mode; null when not configured. */
   relayUrl: string | null
   /**
@@ -770,6 +782,21 @@ const poolAutoMintFromEnv = (): boolean => {
 }
 
 /**
+ * `ADMIN_RESTART_SUPERVISED`, strictly, for the reason `poolAutoMintFromEnv`
+ * states: an operator who typed the wrong word must not get the dangerous
+ * reading of it. Here the dangerous reading is a button that stops a money-mover
+ * nothing will start again.
+ */
+const adminRestartSupervisedFromEnv = (): boolean => {
+  const raw = process.env.ADMIN_RESTART_SUPERVISED?.trim()
+  if (!raw) return false
+  if (raw !== 'true' && raw !== 'false') {
+    throw new Error(`ADMIN_RESTART_SUPERVISED must be 'true' or 'false', got ${process.env.ADMIN_RESTART_SUPERVISED}`)
+  }
+  return raw === 'true'
+}
+
+/**
  * Route hints this deployment will not price, named by `short_channel_id`.
  *
  * The case it exists for: a Wallet of Satoshi invoice carries hints of `[40]`
@@ -975,6 +1002,7 @@ export const loadConfig = (): Config => {
     // A bad value still throws through intFromEnv rather than reading as "off".
     adminPort: process.env.ADMIN_PORT?.trim() ? intFromEnv('ADMIN_PORT', 8788, 1, 65535) : null,
     adminHost: process.env.ADMIN_HOST?.trim() || '127.0.0.1',
+    adminRestartSupervised: adminRestartSupervisedFromEnv(),
     /** Outbound relay URL for the `relay` command; unset = relay mode unavailable. */
     relayUrl: process.env.RELAY_URL?.trim() || null,
     // Defaults to the production dialect: a deployment pointed at a real

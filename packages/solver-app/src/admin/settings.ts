@@ -81,6 +81,32 @@ export const editableKeys = (): string[] => [
   ...GLOBAL_KEYS,
 ]
 
+/**
+ * What each editable key IS, on a given Config. One mapping, two readers.
+ *
+ * {@link describeSettings} renders it for the settings page and `admin/drift.ts`
+ * diffs it against the boot snapshot. Written once because a second copy would
+ * be a second answer to disagree with, and the one that disagreed would be the
+ * alert quietly failing to report a knob.
+ *
+ * Only the editable half: the read-only rows below come from the environment,
+ * which a restart cannot change and a console write cannot reach.
+ */
+export const editableKnobValues = (config: Config): Record<string, string | number | boolean> => {
+  const values: Record<string, string | number | boolean> = {}
+  for (const corridor of CORRIDORS) {
+    const stem = stemOf(corridor)
+    values[`${stem}_ENABLED`] = config.corridorEnabled[corridor]
+    values[`${stem}_FEE_BPS`] = config.corridorFees[corridor].bps
+    values[`${stem}_FEE_FLAT_SATS`] = config.corridorFees[corridor].flatSats
+    values[`${stem}_MIN_SATS`] = config.corridorLimits[corridor].minSats
+    values[`${stem}_MAX_SATS`] = config.corridorLimits[corridor].maxSats
+  }
+  values.MAX_EXPOSED_SATS = config.maxExposedSats
+  values.LOCKUP_TIMEOUT_SECONDS = config.lockupTimeoutSeconds
+  return values
+}
+
 const positiveInt = (key: string, raw: string): number => {
   const value = Number(raw)
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${key} must be a positive integer, got ${raw}`)
@@ -272,67 +298,33 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
  */
 export const describeSettings = (config: Config, overrides: Record<string, string>): KnobView[] => {
   const effective = applyOverrides(config, overrides)
+  const values = editableKnobValues(effective)
   const sourceOf = (key: string): KnobSource => (overrides[key] === undefined ? 'env' : 'override')
+  const knob = (key: string, editable = true): KnobView => ({
+    key,
+    value: values[key]!,
+    source: sourceOf(key),
+    editable,
+    restartRequired: true,
+  })
 
   const knobs: KnobView[] = []
   for (const corridor of CORRIDORS) {
     const stem = stemOf(corridor)
     knobs.push(
-      {
-        key: `${stem}_ENABLED`,
-        value: effective.corridorEnabled[corridor],
-        source: sourceOf(`${stem}_ENABLED`),
-        // Only ever narrowable to false; enabling needs a restart because no
-        // service object exists for an env-disabled corridor.
-        editable: config.corridorEnabled[corridor],
-        restartRequired: true,
-      },
-      {
-        key: `${stem}_FEE_BPS`,
-        value: effective.corridorFees[corridor].bps,
-        source: sourceOf(`${stem}_FEE_BPS`),
-        editable: true,
-        restartRequired: true,
-      },
-      {
-        key: `${stem}_FEE_FLAT_SATS`,
-        value: effective.corridorFees[corridor].flatSats,
-        source: sourceOf(`${stem}_FEE_FLAT_SATS`),
-        editable: true,
-        restartRequired: true,
-      },
-      {
-        key: `${stem}_MIN_SATS`,
-        value: effective.corridorLimits[corridor].minSats,
-        source: sourceOf(`${stem}_MIN_SATS`),
-        editable: true,
-        restartRequired: true,
-      },
-      {
-        key: `${stem}_MAX_SATS`,
-        value: effective.corridorLimits[corridor].maxSats,
-        source: sourceOf(`${stem}_MAX_SATS`),
-        editable: true,
-        restartRequired: true,
-      },
+      // Only ever narrowable to false; enabling needs a restart because no
+      // service object exists for an env-disabled corridor.
+      knob(`${stem}_ENABLED`, config.corridorEnabled[corridor]),
+      knob(`${stem}_FEE_BPS`),
+      knob(`${stem}_FEE_FLAT_SATS`),
+      knob(`${stem}_MIN_SATS`),
+      knob(`${stem}_MAX_SATS`),
     )
   }
 
   knobs.push(
-    {
-      key: 'MAX_EXPOSED_SATS',
-      value: effective.maxExposedSats,
-      source: sourceOf('MAX_EXPOSED_SATS'),
-      editable: true,
-      restartRequired: true,
-    },
-    {
-      key: 'LOCKUP_TIMEOUT_SECONDS',
-      value: effective.lockupTimeoutSeconds,
-      source: sourceOf('LOCKUP_TIMEOUT_SECONDS'),
-      editable: true,
-      restartRequired: true,
-    },
+    knob('MAX_EXPOSED_SATS'),
+    knob('LOCKUP_TIMEOUT_SECONDS'),
     // Read-only below: everything a restart would be needed for anyway, and
     // nothing carrying key material. Secrets are never surfaced at all — not
     // redacted, simply absent, so there is no field for a bug to un-redact.

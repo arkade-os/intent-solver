@@ -219,6 +219,23 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   `[1, 65535]` and a bad value throws rather than reading as "off", so a typo
   cannot silently darken the console an operator believes is up.
 
+- **Restart, and the alert that asks for one:** settings and asset markets are
+  resolved once by `createServices` and never re-read, so a stored change is not
+  one this process is quoting or filling against. The overview now diffs the
+  store against the boot snapshot and names each item that differs — the knob
+  with its running and stored values, the market with what happened to it —
+  instead of leaving that gap to a paragraph of prose. Beside it is a restart
+  button, armed like every other dangerous action: the operator types `RESTART`,
+  sees what is in flight first, and the action lands in the audit log.
+
+  It **refuses unless `ADMIN_RESTART_SUPERVISED` is `true`**. Nothing inside the
+  process can establish that anything will start it again — `docker-compose.yml`
+  sets `restart: unless-stopped`, the same image under a bare `docker run` has no
+  policy at all, and the single-process shape only _recommends_ a systemd unit —
+  so the assertion is the operator's to make. Set it only where a supervisor
+  restarts the process on exit. Where it is unset the console renders the reason
+  in place of the button.
+
 - **Funding sources:** every place this deployment keeps coins answers one
   interface (`packages/solver-app/src/ops/fundSources.ts`), so the console can
   read a balance, list the ways in, settle what has arrived and withdraw —

@@ -16,7 +16,15 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { loadConfig } from '@arkade-os/solver-app/config.js'
 
-const CONFIG_KEYS = ['ADMIN_PORT', 'ADMIN_HOST', 'LN_BACKEND', 'LN_MNEMONIC', 'PORT', 'HOST']
+const CONFIG_KEYS = [
+  'ADMIN_PORT',
+  'ADMIN_HOST',
+  'ADMIN_RESTART_SUPERVISED',
+  'LN_BACKEND',
+  'LN_MNEMONIC',
+  'PORT',
+  'HOST',
+]
 
 const BASE_ENV: Record<string, string> = {
   SWAP_NETWORK: 'regtest',
@@ -89,5 +97,33 @@ describe('the admin console binding', () => {
     const config = loadConfig()
     expect(config.port).toBe(8787)
     expect(config.host).toBe('127.0.0.1')
+  })
+})
+
+/**
+ * The console's restart button, and why it is a knob at all.
+ *
+ * Nothing inside the process can establish that anything will start it again:
+ * `docker-compose.yml` sets `restart: unless-stopped`, the same image under a
+ * bare `docker run` has no policy, and Shape 1 in the runbook only RECOMMENDS a
+ * systemd unit. So the operator declares it, and the dangerous reading of a typo
+ * is the one that must not happen.
+ */
+describe('the declared supervisor', () => {
+  it('is off when nothing says otherwise, so the button refuses by default', () => {
+    expect(loadConfig().adminRestartSupervised).toBe(false)
+  })
+
+  it('is on only for the exact word', () => {
+    process.env.ADMIN_RESTART_SUPERVISED = 'true'
+    expect(loadConfig().adminRestartSupervised).toBe(true)
+  })
+
+  it('refuses anything else rather than coercing it — Boolean("false") is true', () => {
+    for (const raw of ['false', 'yes', '1', 'TRUE']) {
+      process.env.ADMIN_RESTART_SUPERVISED = raw
+      if (raw === 'false') expect(loadConfig().adminRestartSupervised).toBe(false)
+      else expect(() => loadConfig()).toThrow(/ADMIN_RESTART_SUPERVISED/)
+    }
   })
 })

@@ -71,6 +71,7 @@ import {
   type AssetMarketPricingView,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { applyOverrides } from '../admin/settings.js'
+import { createProcessRestart, type ProcessRestart } from './restart.js'
 import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
@@ -252,6 +253,20 @@ export interface Services {
    * in-flight swaps listed and its negotiations answerable.
    */
   readers: CorridorReaderSet
+  /**
+   * Stopping this process so a supervisor starts it again — the only way a
+   * settings or market change reaches a running solver, since both are resolved
+   * once above and nothing re-reads them.
+   *
+   * On `Services` rather than on `AdminDeps` so the console's restart runs
+   * through the SAME armed-action boundary every other dangerous button does:
+   * `routes/actions.ts` checks the typed confirmation before `run` and writes the
+   * audit row after it, and a second implementation beside that would be a second
+   * place for the confirmation to be missing.
+   *
+   * @see ops/restart.ts for why it refuses by default.
+   */
+  restart: ProcessRestart
   /** Emulator signer key (compressed hex), fetched once at startup. */
   emulatorPubkey: string
   /** Provider x-only pubkey (hex) — the relay address clients send offers to. */
@@ -1034,6 +1049,7 @@ export const createServices = async (
     // `Services` for a re-derivation to find.
     readers: readerSetFromDeps(corridorDeps, opts?.corridors ?? []),
     tickErrors,
+    restart: createProcessRestart(config),
     emulatorPubkey: emulatorInfo.signerPubkey,
     providerPubkey: arkadeOps.providerPubkey,
     close: async () => {
