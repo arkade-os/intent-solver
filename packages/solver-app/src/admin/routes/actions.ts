@@ -34,7 +34,7 @@ import { claimNow } from '../../ops/claims.js'
 import { planExitForSwap } from '../../ops/unilateralExit.js'
 import { requireLn } from '../../ops/rails.js'
 import { capabilityRefusal, fundSources, requireFundSource, summarise } from '../../ops/fundSources.js'
-import { mintPool, poolPlan } from '../../ops/pool.js'
+import { committedAcrossCorridors, mintPool, poolPlan } from '../../ops/pool.js'
 import { runFloatLifecycle } from '../../ops/float.js'
 import { requestRestart } from '../../ops/restart.js'
 import type { Services } from '../../ops/services.js'
@@ -219,6 +219,30 @@ const requireCorridorName = (body: ActionBody): string => {
     throw new Error('corridor is required: a swap id is unique only within its own corridor’s store')
   }
   return corridor
+}
+
+/**
+ * What a restart would interrupt, across every corridor the READER SET holds.
+ * Best-effort: a sick store is a reason to restart, not a reason to stop.
+ *
+ * NOT named `liveCount`: `/api/overview` has one over the four base stores, the
+ * two differ wherever a token is served, and an audit number that silently
+ * disagrees with the panel read is worse than none.
+ */
+const inFlightNow = async (services: Services): Promise<Record<string, unknown>> => {
+  try {
+    const [committedSats, live] = await Promise.all([
+      committedAcrossCorridors(services.readers),
+      Promise.all([...services.readers].map((corridor) => corridor.findRecoverable())),
+    ])
+    return {
+      scope: 'every registered corridor',
+      committedSats,
+      recoverableCount: live.reduce((total, rows) => total + rows.length, 0),
+    }
+  } catch (error) {
+    return { unreadable: messageOf(error) }
+  }
 }
 
 export const ACTIONS: Record<string, ActionDefinition> = {
@@ -663,7 +687,11 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'Stops this process so a supervisor starts a new one, which is how a stored override or market edit takes ' +
       'effect. In-flight swaps are picked up again by recovery on boot. Requires ADMIN_RESTART_ENABLED=true AND a ' +
       'supervisor that restarts the solver — without one this stops it and nothing brings it back.',
-    run: async (services) => requestRestart({ enabled: services.config.adminRestartEnabled }),
+    // Before the shutdown is armed, so the audit row carries the real exposure.
+    run: async (services) => {
+      const inFlight = await inFlightNow(services)
+      return { ...requestRestart({ enabled: services.config.adminRestartEnabled }), inFlight }
+    },
   },
 
   /**

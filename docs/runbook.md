@@ -468,6 +468,33 @@ environment's range for that corridor rather than leaving it quoting nothing.
 Secrets are not shown. Not redacted — absent, so there is no field for a bug to
 un-redact.
 
+### What the restart banner names
+
+Two sources, not one. `createServices` takes both snapshots at startup and the
+console diffs the store against each:
+
+- **overrides** — `bootOverrides` against what `AdminStore` holds now, with each
+  knob's running and stored values (`LN_SEND_FEE_BPS 0 → 25`). A key whose
+  effective value did not move is dropped: an override equal to the
+  environment's own value changes nothing a restart would apply.
+- **asset markets** — `assetMarkets` against the `admin_market` rows, reported
+  as added, edited or no longer trading. A paused market reads as leaving,
+  because the next process will not trade it either.
+
+Markets are the half worth stating out loud: they are ROWS rather than
+overrides, so a diff of the override map cannot see one — and the markets tab is
+where the staleness matters most, since a market added since boot is not one this
+process is filling against.
+
+**restart solver** sits in that banner. Before the confirmation the console
+states what a restart would interrupt: swaps live, swaps exposed, sats committed
+across every corridor the registry serves (EVM pairs included, not just the four
+BTC ones), and rows already parked in `stuck`. Those figures are read before the
+shutdown is armed and land in the audit row, so the record says what the solver
+was carrying at the moment someone stopped it. A store that cannot be read is
+recorded as unreadable rather than blocking the restart — a sick store is one of
+the reasons to take one.
+
 ## Operating notes
 
 - **`stuck` rows are the pager.** They mean "money may have left and needs a

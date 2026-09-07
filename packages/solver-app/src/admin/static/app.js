@@ -1260,6 +1260,24 @@ const marketForm = () =>
     ),
   )
 
+// `nothing` gets the failure chip: the row says `trading`, the offer is
+// published, and nothing else in the console says the solver is not listening.
+const servedByCell = (paths) =>
+  h(
+    'td',
+    paths.length === 0
+      ? h(
+          'span.phase.phase-failed',
+          {
+            title:
+              'No path fills this market. OFFER_MARKETS drives the offer path and ASSET_MARKETS the RFQ ' +
+              'corridors; neither names this pair, so nothing is watching for it. Both are on the settings page.',
+          },
+          'nothing',
+        )
+      : h('span.muted', paths.join(' + ')),
+  )
+
 const marketsView = () => {
   const m = state.data.markets
   if (!m) return h('p.muted', 'loading…')
@@ -1285,6 +1303,7 @@ const marketsView = () => {
               h('th', 'tolerance'),
               h('th', 'fee'),
               h('th', 'state'),
+              h('th', 'served by'),
               h('th', ''),
             ),
           ),
@@ -1308,6 +1327,9 @@ const marketsView = () => {
                       ? h('span.muted', 'trading')
                       : h('span.phase.phase-exposed', 'pending restart'),
                 ),
+                // A SECOND axis, never folded into `state`: a market can read
+                // `trading` and be filled by nothing.
+                servedByCell(market.servedBy ?? []),
                 h(
                   'td',
                   h('button.act', { onclick: () => ((marketDraft = draftFrom(market)), render()) }, 'edit'),
@@ -2041,7 +2063,7 @@ const runAction = async (name, body) => {
  * running anything, so bypassing this dialog with a bare fetch gets refused.
  * The warning text comes from the API rather than being duplicated here.
  */
-const armDialog = async (name, body, override = null) => {
+const armDialog = async (name, body, override = null, overrideTitle = null) => {
   const catalogue = state.data.actions ?? (await api('/api/actions'))
   state.data.actions = catalogue
   const definition = catalogue.actions.find((a) => a.name === name)
@@ -2056,6 +2078,9 @@ const armDialog = async (name, body, override = null) => {
      * step that stops a reflex.
      */
     override,
+    // The gate's headline. `restart-solver` opens it with no read-payment
+    // behind it, where the default sentence would be false.
+    overrideTitle,
     overridden: false,
     warning: definition?.warning ?? null,
     // Parsed from the KIND, never matched against one action's name. The server
@@ -2097,7 +2122,7 @@ const confirmDialog = () => {
       d.override
         ? h(
             'div.banner',
-            h('p', h('b', 'This is not the action the last check supports.')),
+            h('p', h('b', d.overrideTitle ?? 'This is not the action the last check supports.')),
             h('p', d.override),
             h(
               'label.row',
@@ -2238,6 +2263,18 @@ const BODIES = {
   audit: auditView,
 }
 
+// From the figures on screen: one fetched at click time could differ.
+const inFlightLine = (o) =>
+  `${o.exposure.liveCount} swap(s) in flight, ${o.exposure.exposedCount} of them exposed, with ` +
+  `${sats(o.exposure.committedSats)} sat committed. ${o.attention?.stuckCount ?? 0} row(s) are already waiting ` +
+  'for you. Boot re-drives every non-terminal row, but a payment in flight right now stays undecided until its ' +
+  'next tick.'
+
+// `KNOB 0 → 25` — whether the change is worth interrupting swaps for. `.muted`
+// not `.faint`: these are the banner's substance, and --text-faint reads 4.02:1
+// on --exposed-bg, under the AA floor. See contrast.test.ts.
+const pendingItem = (item) => h('span.mono', item.key, h('span.muted', ` ${item.loaded} → ${item.stored}`))
+
 // On EVERY panel: an operator who changed a knob and moved on is by definition
 // not looking at Settings. Same reasoning as the status bar's stuck-row count.
 const restartBanner = () => {
@@ -2251,12 +2288,16 @@ const restartBanner = () => {
       'span',
       h('b', `${pending.length} change${pending.length === 1 ? '' : 's'} pending a restart`),
       h('span.faint', ' — this process is still quoting what it booted with: '),
-      h('span.mono', pending.join(', ')),
+      ...pending.flatMap((item, index) => (index === 0 ? [pendingItem(item)] : [', ', pendingItem(item)])),
     ),
     o.restartEnabled
       ? actButton(
           'button.act.armed',
-          { 'data-action': 'restart-solver', onclick: () => armDialog('restart-solver', {}) },
+          // As the OVERRIDE gate: the action's warning is static, this is not.
+          {
+            'data-action': 'restart-solver',
+            onclick: () => armDialog('restart-solver', {}, inFlightLine(o), 'This is what a restart interrupts.'),
+          },
           'restart solver',
         )
       : h(

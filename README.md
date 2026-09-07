@@ -230,6 +230,17 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   disabled with the reason rather than hiding it — an operator asking "why has
   my override not taken effect" needs to find that answer, not silence.
 
+  The banner beside it names **asset markets as well as overrides**, and gives
+  each item both of its values (`LN_SEND_FEE_BPS 0 → 25`, `market … not trading
+  → trading`). Markets are the case that most needs it: they are rows rather
+  than overrides, so a market added in the console is invisible to a diff of the
+  override map — while the markets tab's own notice says a market added since
+  boot is not one this process is filling against. Before the confirmation the
+  console states what a restart would interrupt — swaps live, swaps exposed,
+  sats committed across every corridor, rows already parked in `stuck` — and the
+  audit row records those figures, so "who restarted a solver holding 50,151
+  sats" is answerable later.
+
 - **Funding sources:** every place this deployment keeps coins answers one
   interface (`packages/solver-app/src/ops/fundSources.ts`), so the console can
   read a balance, list the ways in, settle what has arrived and withdraw —
