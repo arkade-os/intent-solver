@@ -131,9 +131,12 @@ describe('what must agree with the quoted terms reads policy, not env', () => {
     const body = cardCommand()
     // The resolver does not constrain what is fed to it, so pin the source too.
     expect(body).toContain('assetMarketPolicy(await cardAdminStore.listMarkets()).pricing')
-    expect(body).toContain('assetMarkets: assetCardMarkets(')
+    expect(body).toContain('assetCardMarkets(assetMarkets, {')
     expect(body).toContain('policy.offerMinFillAmount')
     expect(body).toContain('policy.offerMaxFillAmount')
     expect(body).toContain('unpublishableCorridors(')
+    expect(body).toContain('publishableAssetMarkets(')
+    expect(body).toContain('assetMarkets: publishable')
+    expect(body).toContain('...omitted,')
   })
 })

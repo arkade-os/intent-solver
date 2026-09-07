@@ -7,12 +7,14 @@ import {
   buildSolverCard,
   canonicalCardJson,
   cardDigest,
+  publishableAssetMarkets,
   signSolverCard,
   unpublishableCorridors,
   verifyCardSig,
   type AssetCardMarket,
   type SolverCardInputs,
 } from '@arkade-os/solver-core/core/registryCard.js'
+import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
 // BIP340 test vector 1 — the same key the registry's own fixtures sign with,
 // so a cross-repo canonicalization skew shows up as a verification failure
@@ -414,6 +416,83 @@ describe('assetCardMarkets', () => {
       pricePath: '/data/last',
       sellBase: { min: 1n, max: 2n },
       buyBase: { min: 3n, max: 4n },
+    })
+  })
+})
+
+describe('markets no card can carry', () => {
+  it('drops the market that cannot be stated and keeps the ones that can', () => {
+    const { publishable, omitted } = publishableAssetMarkets([
+      market({ quote: ASSET, sellBase: undefined, buyBase: undefined }),
+      market({ quote: OTHER_ASSET }),
+    ])
+    expect(publishable).toHaveLength(1)
+    expect(publishable[0]!.quote).toBe(OTHER_ASSET)
+    expect(omitted).toHaveLength(1)
+    expect(omitted[0]).toContain(ASSET)
+    expect(omitted[0]).toContain('OFFER_MIN_FILL_AMOUNT')
+    const card = buildSolverCard(inputs({ assetMarkets: publishable }))
+    expect(card.markets.map((m) => m.pair)).toEqual(['BTC/lightning:BTC', 'BTC/4d4d4d4d'])
+  })
+
+  it('says nothing when every market can be published', () => {
+    const { publishable, omitted } = publishableAssetMarkets([market()])
+    expect(publishable).toHaveLength(1)
+    expect(omitted).toEqual([])
+  })
+
+  it('carries the builder`s own reason, whatever refused the market', () => {
+    const { omitted } = publishableAssetMarkets([market({ feeBps: 10_001 })])
+    expect(omitted[0]).toContain('fee_bps')
+  })
+
+  it('keeps the first of a duplicated pair and reports the second', () => {
+    const { publishable, omitted } = publishableAssetMarkets([market({ feeBps: 30 }), market({ feeBps: 40 })])
+    expect(publishable).toHaveLength(1)
+    expect(publishable[0]!.feeBps).toBe(30)
+    expect(omitted[0]).toContain('twice')
+  })
+})
+
+describe('a bound with nothing to inherit', () => {
+  const view = (over: Partial<AssetMarketPricingView> = {}): AssetMarketPricingView => ({
+    base: null,
+    quote: ASSET,
+    baseDecimals: 8,
+    quoteDecimals: 6,
+    feedUrl: 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
+    pricePath: '/price',
+    toleranceBps: 10,
+    feeBps: 25,
+    ...over,
+  })
+
+  it('does not inherit a zeroed deployment-wide pair', () => {
+    const [resolved] = assetCardMarkets([view()], { min: 0n, max: 0n })
+    expect(resolved!.sellBase).toBeUndefined()
+    expect(resolved!.buyBase).toBeUndefined()
+  })
+
+  it('names the amounts to set rather than a side the operator never closed', () => {
+    const blank = assetCardMarkets([view()], { min: 0n, max: 0n })
+    expect(() => buildSolverCard(inputs({ assetMarkets: blank }))).toThrow(/OFFER_MIN_FILL_AMOUNT/)
+    expect(() => buildSolverCard(inputs({ assetMarkets: blank }))).toThrow(/min\/max amounts in the console/)
+    expect(() => buildSolverCard(inputs({ assetMarkets: blank }))).not.toThrow(/enables neither side/)
+  })
+
+  it('still says `enables neither side` when both sides were stated as zero', () => {
+    const closed = assetCardMarkets([view({ sellBase: { min: 0n, max: 0n }, buyBase: { min: 0n, max: 0n } })], {
+      min: 0n,
+      max: 0n,
+    })
+    expect(() => buildSolverCard(inputs({ assetMarkets: closed }))).toThrow(/enables neither side/)
+  })
+
+  it('leaves a real deployment-wide pair inheriting as it did', () => {
+    const [resolved] = assetCardMarkets([view()], { min: 5_000n, max: 900_000n })
+    expect(resolved).toMatchObject({
+      sellBase: { min: 5_000n, max: 900_000n },
+      buyBase: { min: 5_000n, max: 900_000n },
     })
   })
 })
