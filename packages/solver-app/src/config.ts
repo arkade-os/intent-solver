@@ -24,6 +24,7 @@ import {
 import { isSwapNetwork, NETWORKS, type NetworkProfile, type SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { lightningRailNames } from './ops/rails.js'
 import { parseAssetMarkets, type AssetMarket } from './ops/assetOffers.js'
+import { parseAssetRfqTokens, type AssetRfqToken } from './ops/assetRfqMarkets.js'
 import type { ArkadeWalletConfig } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 
@@ -217,6 +218,26 @@ export interface Config {
    */
   offerMinFillAmount: bigint
   offerMaxFillAmount: bigint
+  /**
+   * Assets this solver QUOTES against over RFQ (`ASSET_MARKETS`), each with the
+   * symbol its env stems are built from.
+   *
+   * Empty is the atomic-class corridors off, and is the default: no store is
+   * opened and every asset pair refuses by name. The other half of a market —
+   * its feed, precision, spread and payout bounds — is the console's market row;
+   * this names which of them are served and what to call them.
+   * @see ops/assetRfqMarkets.ts
+   */
+  assetRfqTokens: readonly AssetRfqToken[]
+  /**
+   * How long an asset quote binds, in seconds.
+   *
+   * Short by default because every pair this corridor serves is cross-asset by
+   * construction: the solver is short the market for the whole window, so the
+   * window is the exposure. § 5 puts cross-asset windows "on the order of ~30
+   * seconds".
+   */
+  assetQuoteValiditySeconds: number
   /**
    * Whether `lightning:BTC->arkade:BTC` may be served when the solver's own
    * solo recourse opens AFTER the incoming htlc's `E` — the #69 window.
@@ -921,6 +942,11 @@ export const loadConfig = (): Config => {
     offerMarkets,
     offerMinFillAmount,
     offerMaxFillAmount,
+    // Read here so a malformed list refuses at boot beside every other knob.
+    // What each named asset is WORTH still comes from the console's market rows,
+    // which `createServices` joins to these.
+    assetRfqTokens: parseAssetRfqTokens(process.env.ASSET_MARKETS, (name) => process.env[name]),
+    assetQuoteValiditySeconds: intFromEnv('ASSET_QUOTE_VALIDITY_SECONDS', 30, 5, 900),
     swapDbPath: swapDbPath(),
     poolAutoMint: poolAutoMintFromEnv(),
     lnReceiveAcceptUnilateralGap: lnReceiveAcceptUnilateralGapFromEnv(raw),

@@ -112,6 +112,13 @@ const CONFIG_KEYS = [
   'OFFER_MARKETS',
   'OFFER_MIN_FILL_AMOUNT',
   'OFFER_MAX_FILL_AMOUNT',
+  // Same reason again: a leaked `ASSET_MARKETS` gives every later test an
+  // atomic-class corridor it never asked for, and one that then demands a
+  // console market row those tests do not write.
+  'ASSET_MARKETS',
+  'ASSET_QUOTE_VALIDITY_SECONDS',
+  'ASSET_USDA_BUY_ENABLED',
+  'ASSET_USDA_SELL_ENABLED',
 ]
 
 /**
@@ -956,5 +963,58 @@ describe('OFFER_MARKETS', () => {
     process.env.OFFER_MIN_FILL_AMOUNT = '5000'
     process.env.OFFER_MAX_FILL_AMOUNT = '1000'
     expect(() => loadConfig()).toThrow(/OFFER_MAX_FILL_AMOUNT/)
+  })
+})
+
+/**
+ * The atomic class's switch: which assets this solver QUOTES on over RFQ, and
+ * under which env stems.
+ *
+ * Unlike `OFFER_MARKETS` this one only ever spends in answer to a request, and
+ * only against a covenant the client itself funded — but it is still a decision
+ * to trade a pair, so a malformed list refuses at boot rather than at the first
+ * quote.
+ */
+describe('ASSET_MARKETS', () => {
+  const USDA = '1a'.repeat(34)
+
+  it('names no asset when unset, which is the atomic-class corridors off', () => {
+    expect(loadConfig().assetRfqTokens).toEqual([])
+  })
+
+  it('parses SYMBOL:<asset id> with both directions open', () => {
+    process.env.ASSET_MARKETS = `USDA:${USDA}`
+    expect(loadConfig().assetRfqTokens).toEqual([
+      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } },
+    ])
+  })
+
+  it('ASSET_USDA_BUY_ENABLED=false closes sell_base — the client GIVES the base leg', () => {
+    process.env.ASSET_MARKETS = `USDA:${USDA}`
+    process.env.ASSET_USDA_BUY_ENABLED = 'false'
+    expect(loadConfig().assetRfqTokens[0]!.enabled).toEqual({ sell_base: false, buy_base: true })
+  })
+
+  it('refuses a malformed entry at boot rather than at the first quote', () => {
+    process.env.ASSET_MARKETS = USDA
+    expect(() => loadConfig()).toThrow(/ASSET_MARKETS/)
+  })
+
+  it('defaults the quote window to seconds, not minutes', () => {
+    // Every pair here is cross-asset by construction, so the window IS the
+    // exposure: the solver is short the market until the client funds.
+    expect(loadConfig().assetQuoteValiditySeconds).toBe(30)
+  })
+
+  it('takes an operator window inside the permitted range', () => {
+    process.env.ASSET_QUOTE_VALIDITY_SECONDS = '45'
+    expect(loadConfig().assetQuoteValiditySeconds).toBe(45)
+  })
+
+  it('refuses a window nobody could fund against, and one that binds for an hour', () => {
+    process.env.ASSET_QUOTE_VALIDITY_SECONDS = '1'
+    expect(() => loadConfig()).toThrow(/ASSET_QUOTE_VALIDITY_SECONDS/)
+    process.env.ASSET_QUOTE_VALIDITY_SECONDS = '901'
+    expect(() => loadConfig()).toThrow(/ASSET_QUOTE_VALIDITY_SECONDS/)
   })
 })
