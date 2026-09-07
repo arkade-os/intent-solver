@@ -440,10 +440,12 @@ transaction stream, nothing decided and nothing spent.
 ### Environment — Arkade asset RFQ (the quoted path), off unless `ASSET_MARKETS` is set
 
 The other way to reach an asset, and the mirror of the packet path above: there
-the solver takes an offer someone else published, here it quotes one itself. The
-solver is the MAKER, so the covenant is derived from the row it negotiated
-rather than read off a packet, and the quote binds for a window instead of
-standing open.
+a maker publishes a price and this solver decides, here a client asks and this
+solver names a binding one. **The solver is still the TAKER** — `docs/rfq-protocol.md`
+§ 7.2.1 keeps it so as a money constraint, not a convention: it never publishes
+an offer and never funds a covenant. What changes is who names the price, so
+the covenant is derived from the row it negotiated rather than read off a
+packet, and the quote binds for a window instead of standing open.
 
 A deployment that sets none of these behaves exactly as it did before they
 existed: no asset RFQ store is opened, no service is constructed, and every

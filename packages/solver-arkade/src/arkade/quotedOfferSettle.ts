@@ -107,8 +107,9 @@ export const quotedOfferSettleFor = (deps: QuotedOfferSettleDeps): ((intent: Quo
         vout: deposit.vout,
         // Narrowed because `OfferDepositOutpoint.value` is `number`. Safe while
         // sats are: 21M BTC is 2.1e15, well inside 2^53. Guarded rather than
-        // trusted, because this is the path where the solver is the MAKER and a
-        // truncated value would describe an input that does not exist.
+        // trusted, because this is the path where the solver COMPILES the packet
+        // from terms it named itself rather than reading one a maker published,
+        // and a truncated value would describe an input that does not exist.
         value: assertSafeSats(deposit.sats),
         // What vin 0 actually carries, not what was quoted: the packet declares
         // the input, and declaring an amount the input does not hold describes

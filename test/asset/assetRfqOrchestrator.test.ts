@@ -281,6 +281,31 @@ describe('tick — driving a negotiation', () => {
     expect(await store.get('swap-1')).toMatchObject({ state: 'funded', depositTxid: 'ff'.repeat(32), depositVout: 0 })
   })
 
+  /**
+   * The settle spends the RECORDED outpoint, so the decision has to be made
+   * about that one. Identical terms compile to one address, so a second, larger
+   * deposit lands beside the first — approved here, not spent there, and the
+   * settle's own re-measurement then sticks the row.
+   */
+  it('re-points the row at the outpoint it decided about before filling', async () => {
+    const spent: (string | null)[] = []
+    let live = deposit({ txid: 'aa'.repeat(32) })
+    const { service, store } = await harness({
+      depositAt: async () => live,
+      settle: async (row) => {
+        spent.push(row.depositTxid)
+        return 'fa'.repeat(32)
+      },
+    })
+    await service.quote(request())
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).depositTxid).toBe('aa'.repeat(32))
+    live = deposit({ txid: 'bb'.repeat(32), vout: 3, sats: 200_000_000n })
+    await service.tick('swap-1')
+    expect(spent).toEqual(['bb'.repeat(32)])
+    expect(await store.get('swap-1')).toMatchObject({ depositTxid: 'bb'.repeat(32), depositVout: 3 })
+  })
+
   it('fills a funded row and records the fill txid', async () => {
     const { service, store, settled } = await harness({ depositAt: async () => deposit() })
     await service.quote(request())

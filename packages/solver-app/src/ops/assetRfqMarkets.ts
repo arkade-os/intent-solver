@@ -39,7 +39,10 @@ const CLOSED = { min: 0n, max: 0n }
  * corridors.
  *
  * `read` supplies `<STEM>_ENABLED` per direction, defaulting to on — the same
- * default the four BTC corridors and every EVM token take.
+ * default the four BTC corridors and every EVM token take, and only the exact
+ * strings for the reason `corridorEnabledFromEnv` gives: this knob exists for
+ * the direction that is losing money, so a typo'd `FALSE` quietly meaning "on"
+ * leaves it quoting while an operator believes it dark.
  */
 export const parseAssetRfqTokens = (
   raw: string | undefined,
@@ -69,10 +72,15 @@ export const parseAssetRfqTokens = (
     seenSymbol.add(symbol)
     seenAsset.add(assetId)
     const enabled = Object.fromEntries(
-      DIRECTIONS.map((direction) => [
-        direction,
-        (read(`${assetRfqEnvStem({ symbol }, direction)}_ENABLED`)?.trim() ?? 'true') !== 'false',
-      ]),
+      DIRECTIONS.map((direction) => {
+        const name = `${assetRfqEnvStem({ symbol }, direction)}_ENABLED`
+        const raw = read(name)?.trim()
+        if (!raw) return [direction, true]
+        if (raw !== 'true' && raw !== 'false') {
+          throw new Error(`${name} must be 'true' or 'false', got ${JSON.stringify(raw)}`)
+        }
+        return [direction, raw === 'true']
+      }),
     ) as Record<AssetRfqDirection, boolean>
     return { symbol, assetId, enabled }
   })
