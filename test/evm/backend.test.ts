@@ -552,11 +552,6 @@ describe('findRefund', () => {
     }
   })
 
-  /**
-   * A node REJECTS a malformed hash rather than answering null, and that throw
-   * leaves the loop — so one bad entry ahead of a real refund would hide it and
-   * the row would keep waiting on a refund that had already landed.
-   */
   it('skips a hash the node would reject, and still finds the refund behind it', async () => {
     const rpc: JsonRpc = async (method, params) => {
       if (method === 'eth_getLogs') return [{ transactionHash: '0xdeadbeef' }, { transactionHash: TXID }]
