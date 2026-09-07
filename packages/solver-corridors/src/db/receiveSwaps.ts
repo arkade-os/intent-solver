@@ -111,7 +111,7 @@ export interface ReceiveSwapRow {
   /** The client's own x-only key — the covenant's `receiver` role on this leg (their interactive-claim fallback). */
   payoutPubkey: string
   /** The client's preimage, ECIES-sealed to covclaimd. Opaque here — forwarded verbatim, never decrypted. */
-  claimPacket: string
+  claimPacket: string | null
 
   /**
    * Absolute unix seconds, set at `quoted` (`now + MAX_REFUND_HORIZON`) and
@@ -253,7 +253,14 @@ const toRow = (raw: Raw): ReceiveSwapRow => ({
   payoutAddress: String(raw.payout_address),
   payoutPkScript: String(raw.payout_pk_script),
   payoutPubkey: String(raw.payout_pubkey),
-  claimPacket: String(raw.claim_packet),
+  // Absence is stored as '' rather than NULL: the column is NOT NULL in every
+  // deployed database, and SQLite cannot relax that without rebuilding a table
+  // of funded swaps. '' is unambiguous because the wire schema refuses an empty
+  // claim_packet. NULL reads as absent too, in case a column never was NOT NULL.
+  claimPacket:
+    raw.claim_packet === null || raw.claim_packet === undefined || raw.claim_packet === ''
+      ? null
+      : String(raw.claim_packet),
   refundLocktime: Number(raw.refund_locktime),
   solverPubkey: String(raw.solver_pubkey),
   serverPubkey: String(raw.server_pubkey),
@@ -295,7 +302,7 @@ export interface ReceiveQuoteRecord {
   payoutAddress: string
   payoutPkScript: string
   payoutPubkey: string
-  claimPacket: string
+  claimPacket: string | null
   refundLocktime: number
   solverPubkey: string
   serverPubkey: string
@@ -422,7 +429,7 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
         quote.payoutAddress,
         quote.payoutPkScript,
         quote.payoutPubkey,
-        quote.claimPacket,
+        quote.claimPacket ?? '',
         quote.refundLocktime,
         quote.solverPubkey,
         quote.serverPubkey,

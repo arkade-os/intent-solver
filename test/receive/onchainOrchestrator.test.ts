@@ -539,6 +539,25 @@ describe('OnchainReceiveSwapService', () => {
       deps.onchain.mineBlocks(1)
       expect((await solo.tick(swap.id)).state).toBe('settled')
     })
+
+    it('does NOT reveal when the client sent no claim packet, even with covclaimd configured', async () => {
+      const outcome = await service.quote(quoteRequest({ claimPacket: null }))
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      const swap = outcome.swap
+
+      deps.onchain.receiveExternal({ address: swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+
+      let row = await service.tick(swap.id)
+      expect(row.state).toBe('awaiting_claim')
+      expect(deps.covclaimdCalls).toHaveLength(0)
+
+      deps.arkadeFake.spendLockup(swap.pkScript, P)
+      row = await service.tick(swap.id)
+      expect(row.state).toBe('claimed')
+      deps.onchain.mineBlocks(1)
+      expect((await service.tick(swap.id)).state).toBe('settled')
+    })
   })
 
   describe('whenQuoted', () => {

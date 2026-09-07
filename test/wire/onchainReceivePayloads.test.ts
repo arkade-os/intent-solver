@@ -77,6 +77,19 @@ describe('RfqRequest for onchain:BTC->arkade:BTC', () => {
     expect(parsed.success).toBe(false)
   })
 
+  it('accepts a request that omits claim_packet — a client with no covclaimd claims for itself', () => {
+    const { claim_packet: _packet, ...withoutPacket } = validRequest.profile
+    expect(OnchainReceiveRfqRequest.safeParse({ ...validRequest, profile: withoutPacket }).success).toBe(true)
+  })
+
+  it('still rejects an EMPTY claim_packet, so omission is the only way to say absent', () => {
+    const parsed = OnchainReceiveRfqRequest.safeParse({
+      ...validRequest,
+      profile: { ...validRequest.profile, claim_packet: '' },
+    })
+    expect(parsed.success).toBe(false)
+  })
+
   it('rejects unknown profile fields (strict)', () => {
     const parsed = OnchainReceiveRfqRequest.safeParse({
       ...validRequest,

@@ -101,6 +101,17 @@ describe('LightningReceiveRfqRequest', () => {
     ).toBe(false)
   })
 
+  it('accepts a request that omits claim_packet — a client with no covclaimd claims for itself', () => {
+    const { claim_packet: _packet, ...withoutPacket } = valid.profile
+    expect(LightningReceiveRfqRequest.safeParse({ ...valid, profile: withoutPacket }).success).toBe(true)
+  })
+
+  it('still rejects an EMPTY claim_packet, so omission is the only way to say absent', () => {
+    expect(
+      LightningReceiveRfqRequest.safeParse({ ...valid, profile: { ...valid.profile, claim_packet: '' } }).success,
+    ).toBe(false)
+  })
+
   it('never carries the preimage — only a sealed claim_packet the solver cannot read', () => {
     // Documents the protocol invariant (docs/rfq-protocol.md §6, §7.1.2): the
     // schema has no field named or shaped like a raw 32-byte preimage.

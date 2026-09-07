@@ -266,7 +266,7 @@ export interface ReceiveQuoteRequest {
   /** The client's own x-only key — the covenant's `receiver` role on this leg. */
   payoutPubkey: string
   /** The client's preimage, ECIES-sealed to covclaimd. Opaque here. */
-  claimPacket: string
+  claimPacket: string | null
   rfqId?: string
 }
 
@@ -927,10 +927,11 @@ export class ReceiveSwapService {
       if (await this.refundDeadlineReached(row.refundLocktime)) {
         return store.transition(row.id, 'funded', 'refunding', {})
       }
-      // No covclaimd configured: nothing to reveal to, and nothing else to do
-      // but wait for the client's own claim. The `findClaimPreimage` branch
-      // below sees it exactly the same either way.
-      if (row.revealedAt === null && this.deps.covclaimd) await this.revealToCovclaimd(row)
+      // No covclaimd to reveal to, or no packet to reveal: nothing to do but
+      // wait for the client's own claim, which reads the same either way.
+      if (row.revealedAt === null && this.deps.covclaimd && row.claimPacket !== null) {
+        await this.revealToCovclaimd(row)
+      }
       return false
     }
 
@@ -972,6 +973,7 @@ export class ReceiveSwapService {
     row: ReceiveSwapRow,
     script: ReturnType<typeof covenantScriptFromRow>,
   ): ClaimPacketStamp | undefined {
+    if (row.claimPacket === null) return undefined
     const shape = claimPacketShape(row.claimPacket)
     if (shape.kind !== 'packet') return undefined
     // Without `0x03` no covclaimd's filter selects the tx, so stamping would
@@ -984,10 +986,10 @@ export class ReceiveSwapService {
     return { packet: appendArkadeScript(shape.body, arkadeScript), tapTree: script.encode() }
   }
 
-  /** Hand the sealed claim packet to covclaimd. Only called when one is configured. Idempotent to retry — see this file's own top comment. */
+  /** Hand the sealed claim packet to covclaimd. Only called when both a covclaimd and a packet exist. Idempotent to retry — see this file's own top comment. */
   private async revealToCovclaimd(row: ReceiveSwapRow): Promise<void> {
     const { store, covclaimd } = this.deps
-    if (!covclaimd) return
+    if (!covclaimd || row.claimPacket === null) return
     // `stampedAt`, NOT the packet shape: an adopted output carries nothing the
     // shape promises, and skipping the reveal on it strands the swap.
     if (row.stampedAt !== null) return
