@@ -9,10 +9,15 @@
 import { describe, it, expect } from 'vitest'
 import { hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { evmReceiveCovenantRowFor, evmSendCovenantRowFor } from '@arkade-os/solver-corridors-evm/evm/covenantRow.js'
+import {
+  assetEvmSendCovenantRowFor,
+  evmReceiveCovenantRowFor,
+  evmSendCovenantRowFor,
+} from '@arkade-os/solver-corridors-evm/evm/covenantRow.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import type { EvmSendSwapRow } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import type { EvmReceiveSwapRow } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
+import type { AssetEvmSendSwapRow } from '@arkade-os/solver-corridors-evm/db/assetEvmSendSwaps.js'
 
 const key = (fill: number): string => hex.encode(schnorr.getPublicKey(new Uint8Array(32).fill(fill)))
 const p2tr = (fill: number): string => '5120' + hex.encode(schnorr.getPublicKey(new Uint8Array(32).fill(fill)))
@@ -61,5 +66,32 @@ describe('the covenant receiver differs BETWEEN the two legs', () => {
     // emulator key, so this failing would mean the mapping dropped a field.
     expect(() => covenantScriptFromRow(evmSendCovenantRowFor(sendRow))).not.toThrow()
     expect(() => covenantScriptFromRow(evmReceiveCovenantRowFor(receiveRow))).not.toThrow()
+  })
+})
+
+describe('the asset send leg carries a DENOMINATION as well as the roles', () => {
+  const ASSET = '11'.repeat(32) + '0000'
+  const assetRow = { ...common, providerPubkey: SOLVER, assetId: ASSET } as unknown as AssetEvmSendSwapRow
+
+  it('keeps the solver as receiver, since the solver still claims', () => {
+    expect(assetEvmSendCovenantRowFor(assetRow).receiverPubkey).toBe(SOLVER)
+    expect(assetEvmSendCovenantRowFor(assetRow).assetId).toBe(ASSET)
+  })
+
+  it('derives a DIFFERENT pkScript from the same row without the asset', () => {
+    // The whole point of carrying the id: the asset is a parameter of the
+    // script, so a rebuild that omitted it lands on the BTC address instead —
+    // and `assertScriptMatchesRow` then refuses every claim and every refund of
+    // a lockup only the original script could ever spend.
+    const asset = covenantScriptFromRow(assetEvmSendCovenantRowFor(assetRow))
+    const sats = covenantScriptFromRow(evmSendCovenantRowFor(sendRow))
+    expect(hex.encode(asset.pkScript)).not.toBe(hex.encode(sats.pkScript))
+  })
+
+  it('moves the pkScript with the id, so two assets are two lockups', () => {
+    const other = { ...assetRow, assetId: '22'.repeat(32) + '0000' } as AssetEvmSendSwapRow
+    const first = covenantScriptFromRow(assetEvmSendCovenantRowFor(assetRow))
+    const second = covenantScriptFromRow(assetEvmSendCovenantRowFor(other))
+    expect(hex.encode(first.pkScript)).not.toBe(hex.encode(second.pkScript))
   })
 })
