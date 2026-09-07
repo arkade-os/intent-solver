@@ -20,6 +20,7 @@ import type { Services } from '@arkade-os/solver-app/ops/services.js'
 import { readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { EvmSendSwapStore, type EvmSendQuoteRecord } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
+import { EvmReceiveSwapStore, type EvmReceiveQuoteRecord } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { evmCorridorFor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { EvmCorridorPolicy } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
@@ -69,6 +70,9 @@ const evmQuote = (over: Partial<EvmSendQuoteRecord> = {}): EvmSendQuoteRecord =>
     rfqId: 'rfq-1',
     ...over,
   }) as EvmSendQuoteRecord
+
+const evmReceiveQuote = (over: Partial<EvmReceiveQuoteRecord> = {}): EvmReceiveQuoteRecord =>
+  ({ ...evmQuote(), payoutPubkey: '33'.repeat(32), rfqId: null, ...over }) as unknown as EvmReceiveQuoteRecord
 
 const zero = () => ({ committedSats: vi.fn().mockResolvedValue(0) })
 
@@ -324,6 +328,37 @@ describe('committedAcrossCorridors', () => {
     const satsFor = async (pair: string) => await [...set].find((r) => r.descriptor.pair === pair)!.committedSats()
     expect(await satsFor(`arkade:BTC->ethereum:${TOKEN_A}`)).toBe(50_000)
     expect(await satsFor(`arkade:BTC->ethereum:${TOKEN_B}`)).toBe(30_000)
+    expect(await committedAcrossCorridors(set)).toBe(80_000)
+    await store.close()
+  })
+
+  // The receive leg registers through its OWN branch and its own descriptor
+  // factory, so a send-only test would not see it wired to the wrong token.
+  it('counts one EVM receive store once, though two tokens register it twice', async () => {
+    const store = await EvmReceiveSwapStore.open(betterSqliteDriver(':memory:'), () => 1_800_000_000)
+    await store.insertQuote(evmReceiveQuote())
+    await store.insertQuote(
+      evmReceiveQuote({
+        id: 'swap-2',
+        paymentHash: 'bb'.repeat(32),
+        tokenAddress: TOKEN_B,
+        amountSats: 30_000,
+      }),
+    )
+
+    const set = readerSetFromDeps({
+      store: zero(),
+      onchainStore: zero(),
+      evmReceiveStore: store,
+      evmCorridors: [
+        { ...evmPolicy(TOKEN_A, 'USDC'), direction: 'receive' },
+        { ...evmPolicy(TOKEN_B, 'DAI'), direction: 'receive' },
+      ],
+    } as unknown as FlatCorridorDeps)
+
+    const satsFor = async (pair: string) => await [...set].find((r) => r.descriptor.pair === pair)!.committedSats()
+    expect(await satsFor(`ethereum:${TOKEN_A}->arkade:BTC`)).toBe(50_000)
+    expect(await satsFor(`ethereum:${TOKEN_B}->arkade:BTC`)).toBe(30_000)
     expect(await committedAcrossCorridors(set)).toBe(80_000)
     await store.close()
   })
