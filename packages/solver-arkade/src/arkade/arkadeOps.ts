@@ -47,6 +47,17 @@ export interface ArkadeOps {
   refund(row: CovenantScriptRow, outputs: FundedOutput[]): Promise<string>
 }
 
+/**
+ * Both halves or neither: covclaimd declines a taptree-less output at debug
+ * level, before reading the packet, and that reads as a swap that never settled.
+ */
+export interface ClaimPacketStamp {
+  /** covclaimd's three-TLV `ClaimPacket` body, as an Arkade extension packet. */
+  packet: Uint8Array
+  /** `VtxoScript.encode()` form, for `PSBT_OUT_TAP_TREE`. */
+  tapTree: Uint8Array
+}
+
 /** The Arkade operations the receive orchestrator needs, shaped for injection. */
 export interface ReceiveArkadeOps {
   /**
@@ -76,7 +87,7 @@ export interface ReceiveArkadeOps {
    */
   findLockupOutpoints(pkScriptHex: string): Promise<{ txid: string; vout: number; value: number; spent: boolean }[]>
   /** Pay `amountSats` from the solver's own Arkade balance to `address` — funds the lockup. @returns the Arkade txid. */
-  fund(address: string, amountSats: number): Promise<string>
+  fund(address: string, amountSats: number, stamp?: ClaimPacketStamp): Promise<string>
   /** Push the covenant refund of the script the row describes, back to the solver's own address. Needs no client keys. */
   refund(row: CovenantScriptRow, outputs: readonly FundedOutput[]): Promise<string>
   /** Read the preimage back out of whichever transaction claimed one of `outpoints`, verified against `paymentHashHex`. */

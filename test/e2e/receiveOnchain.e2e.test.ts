@@ -70,8 +70,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr, secp256k1 } from '@noble/curves/secp256k1.js'
-import { hex } from '@scure/base'
+import { base64, hex } from '@scure/base'
 import { Address, OutScript } from '@scure/btc-signer'
+import { Extension, RestIndexerProvider, Transaction } from '@arkade-os/sdk'
 import {
   OnchainReceiveSwapStore,
   type OnchainReceiveSwapRow,
@@ -145,7 +146,14 @@ describe('e2e onchain:BTC->arkade:BTC (receive)', () => {
       // an onchain refund key, and its Arkade payout address AND key. The
       // refund key is never spent: it is the client's own recourse past
       // `htlc_locktime`, hours away.
-      const sealed = newSealedPreimage(hex.encode(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true)))
+      // Stamped even with no covclaimd here: the packet's shape decides, not `deps.covclaimd`.
+      const covclaimdPub = secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true)
+      const sealed = newSealedPreimage(hex.encode(covclaimdPub))
+      const tlv = (type: number, value: Uint8Array) =>
+        Uint8Array.from([type, (value.length >> 8) & 0xff, value.length & 0xff, ...value])
+      const clientPacket = base64.encode(
+        Uint8Array.from([...tlv(0x01, base64.decode(sealed.packet)), ...tlv(0x03, covclaimdPub)]),
+      )
       const clientRefundPub = schnorr.getPublicKey(schnorr.utils.randomSecretKey())
       const payoutAddress = await arkade.ctx.wallet.getAddress()
       const payoutPubkey = hex.encode(await arkade.ctx.identity.xOnlyPublicKey())
@@ -153,7 +161,7 @@ describe('e2e onchain:BTC->arkade:BTC (receive)', () => {
       const outcome = await service.quote({
         paymentHash: sealed.paymentHash,
         amountSats: AMOUNT_SATS,
-        claimPacket: sealed.packet,
+        claimPacket: clientPacket,
         refundPubkey: hex.encode(clientRefundPub),
         payoutAddress,
         payoutPubkey,
@@ -208,6 +216,16 @@ describe('e2e onchain:BTC->arkade:BTC (receive)', () => {
       expect(awaiting.state).toBe('awaiting_claim')
       expect(awaiting.fundingTxid).toBe(funding.txid)
       expect(awaiting.arkadeFundTxid).toBeTruthy()
+
+      const indexer = new RestIndexerProvider(process.env.ARK_SERVER_URL ?? 'http://localhost:7070')
+      const { txs } = await indexer.getVirtualTxs([awaiting.arkadeFundTxid!])
+      expect(txs, `indexer returned no tx for ${awaiting.arkadeFundTxid}`).toHaveLength(1)
+      const stamped = Extension.fromTx(Transaction.fromPSBT(base64.decode(txs[0]!)))
+        .getPacketByType(0x04)
+        ?.serialize()
+      expect(stamped).toBeTruthy()
+      expect(stamped!.length).toBeGreaterThan(base64.decode(clientPacket).length)
+      expect(hex.encode(stamped!)).toContain(`030021${hex.encode(covclaimdPub)}`)
 
       // CLIENT: claim the Arkade lockup through the collaborative claim leaf.
       // This is what makes the corridor work without covclaimd, and it is only

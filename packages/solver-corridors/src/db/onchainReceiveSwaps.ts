@@ -100,7 +100,7 @@ const TRANSITION_COLUMNS = new Set([
  * finding F4 — runs against a `stuck` row with no outgoing edge and must record
  * the txid without a transition.
  */
-const PATCH_COLUMNS = new Set(['refund_outcome', 'arkade_refund_txid', 'onchain_claim_txid'])
+const PATCH_COLUMNS = new Set(['refund_outcome', 'arkade_refund_txid', 'onchain_claim_txid', 'stamped_at'])
 
 export interface OnchainReceiveSwapRow {
   id: string
@@ -216,6 +216,8 @@ export interface OnchainReceiveSwapRow {
    * an expiry would reinstate the double-fund it exists to prevent.
    */
   fundStartedAt: number | null
+  /** Set once THIS service funded a stamped lockup — @see receive/receiveSwaps.ts */
+  stampedAt: number | null
 }
 
 const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
@@ -256,7 +258,8 @@ const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
   refund_outcome                   TEXT,
   failure_reason                   TEXT,
   rfq_id                           TEXT,
-  fund_started_at                  INTEGER
+  fund_started_at                  INTEGER,
+  stamped_at                       INTEGER
 `
 
 const SCHEMA = `
@@ -327,6 +330,7 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
   rfqId: raw.rfq_id === null || raw.rfq_id === undefined ? null : String(raw.rfq_id),
   fundStartedAt: raw.fund_started_at === null || raw.fund_started_at === undefined ? null : Number(raw.fund_started_at),
+  stampedAt: raw.stamped_at === null || raw.stamped_at === undefined ? null : Number(raw.stamped_at),
 })
 
 export interface OnchainReceiveQuoteRecord {
@@ -429,6 +433,9 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
     const existing = new Set(columns.map((c) => c.name))
     if (!existing.has('payout_sats')) {
       await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN payout_sats INTEGER`)
+    }
+    if (!existing.has('stamped_at')) {
+      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN stamped_at INTEGER`)
     }
     if (!existing.has('fund_started_at')) {
       await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN fund_started_at INTEGER`)

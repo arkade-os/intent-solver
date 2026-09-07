@@ -38,6 +38,7 @@ const row: ReceiveSwapRow = {
   arkadeLockupVout: null,
   arkadeLockupValue: null,
   revealedAt: null,
+  stampedAt: null,
   settleAttemptedAt: null,
   preimage: null,
   refundArkTxid: null,

@@ -16,7 +16,9 @@
  */
 
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { selectLockupFunding } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
+import { CLAIM_PACKET_TYPE } from './claimPacket.js'
 import { MAX_REFUND_HORIZON } from '@arkade-os/solver-core/core/receive.js'
 import { log } from '@arkade-os/solver-core/util/poll.js'
 
@@ -29,7 +31,12 @@ import { log } from '@arkade-os/solver-core/util/poll.js'
  * this service may not renew, by which point the invoice is held and the client
  * is waiting. Refusing keeps the failure where it is cheap.
  */
-export const fundLockup = async (ctx: ArkadeContext, address: string, amountSats: number): Promise<string> => {
+export const fundLockup = async (
+  ctx: ArkadeContext,
+  address: string,
+  amountSats: number,
+  stamp?: ClaimPacketStamp,
+): Promise<string> => {
   // GATED read, not `getVtxos`. The SDK's own note on `getVtxos` is that
   // feeding it to `sendBitcoin({ selectedVtxos })` bypasses the
   // generic-spending gate — which here would mean funding one lockup out of
@@ -90,7 +97,16 @@ export const fundLockup = async (ctx: ArkadeContext, address: string, amountSats
     // selection does not know about" — so nothing about the expiry ordering or
     // the reservation is given up.
     return await ctx.wallet.send({
-      recipients: [{ address, amount: amountSats }],
+      recipients: [
+        {
+          address,
+          amount: amountSats,
+          // Both or neither — @see ClaimPacketStamp.
+          ...(stamp
+            ? { extensions: [{ type: CLAIM_PACKET_TYPE, payload: stamp.packet }], tapTree: stamp.tapTree }
+            : {}),
+        },
+      ],
       selectedVtxos: [...selection.inputs],
     })
   } finally {

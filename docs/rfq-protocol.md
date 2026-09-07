@@ -997,6 +997,39 @@ The client is paid over Lightning and the sats land on Arkade
   info `covclaimd/preimage/v1` and the ephemeral public key as salt, AES-GCM
   with the same key as additional data; wire layout
   `ephPub(33) || nonce(12) || ciphertext`.
+
+  `claim_packet` accepts **two shapes**, and the solver tells them apart by
+  length alone:
+
+  - the sealed ciphertext above, fixed at **93 bytes** decoded. The solver hands
+    it to covclaimd over the Reveal API, which requires the solver and the client
+    to have been pointed at the *same* covclaimd — an agreement nothing on this
+    wire expresses, and whose absence funds a lockup that is never claimed.
+  - covclaimd's serialised `ClaimPacket` body (`pkg/preimage/packet.go`): TLVs
+    `0x01` ciphertext, `0x02` arkade_script, `0x03` covclaimd_pub_key, each a
+    1-byte type, a 2-byte big-endian length, then the value. The solver stamps
+    this into the funding transaction as Arkade extension packet type `0x04`,
+    and publishes the lockup's tapleaf set on that output's `PSBT_OUT_TAP_TREE`.
+    covclaimd finds it on the arkd transaction stream; the `0x03` TLV names
+    which covclaimd, so **the client alone chooses**, the solver needs no
+    covclaimd configured or reachable, and no prior agreement exists to get
+    wrong.
+
+    A client sends `0x01` and `0x03` — the two only it has — and MAY omit
+    `0x02`, which the solver appends from the covenant it built. That is not a
+    convenience: the covenant commits to the arkade script as
+    `taggedHash("ArkScriptHash", script)`, so the funder is the only party whose
+    copy is guaranteed to match the commitment, and a client deriving its own
+    would add a way for the two to disagree and strand the claim. covclaimd
+    cannot derive it either — the commitment is a hash, and the script is the
+    only place the receiver's pkScript appears.
+
+  The shapes cannot collide: the ciphertext TLV alone is 96 bytes with its
+  header, so any packet carrying one exceeds the bare 93. A solver that does not
+  recognise the second shape, or a value that is neither, takes the first path
+  unchanged — this is additive in both directions. Senders SHOULD prefer the
+  packet shape; the `0x03` TLV is REQUIRED when sending it, because covclaimd's
+  extension filter selects on that TLV.
 - **quote.profile**: `payment_hash` (echo), the hold `invoice` on `H` (its
   expiry SHOULD equal `valid_until`), `lockup_address` (compare-only — the
   solver's derivation of the funding contract) and `solver_refund_pk_script`

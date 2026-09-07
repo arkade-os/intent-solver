@@ -47,6 +47,7 @@ const row: OnchainReceiveSwapRow = {
   failureReason: null,
   rfqId: null,
   fundStartedAt: null,
+  stampedAt: null,
 }
 
 describe('RfqRequest for onchain:BTC->arkade:BTC', () => {

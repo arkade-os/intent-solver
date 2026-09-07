@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
-import { hex } from '@scure/base'
+import { base64, hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
   EMPTY_LOCKUP_GRACE,
@@ -80,7 +80,7 @@ interface FakeArkadeState {
    * spendable world it meant to.
    */
   spentOutputs: FundedOutput[]
-  fundCalls: { address: string; amountSats: number }[]
+  fundCalls: { address: string; amountSats: number; stamp?: { packet: Uint8Array; tapTree: Uint8Array } }[]
   refundCalls: number
   claimPreimage: Uint8Array | null
   /**
@@ -120,8 +120,8 @@ const buildFakeArkade = (): { ops: ReceiveArkadeOps; state: FakeArkadeState } =>
       ...state.outputs.map((o) => ({ ...o, spent: false })),
       ...state.spentOutputs.map((o) => ({ ...o, spent: true })),
     ],
-    fund: async (address, amountSats) => {
-      state.fundCalls.push({ address, amountSats })
+    fund: async (address, amountSats, stamp) => {
+      state.fundCalls.push({ address, amountSats, ...(stamp ? { stamp } : {}) })
       // ONE txid for both the created output and the return value: the
       // orchestrator confirms its funding by matching the txid `fund()` handed
       // back against what the indexer reports, so a fake that invented two
@@ -865,6 +865,96 @@ describe('ReceiveSwapService.tick — crash recovery: no double-funding', () => 
 })
 
 describe('ReceiveSwapService.tick — reveal to covclaimd', () => {
+  /** covclaimd's three-TLV body: ciphertext, arkade script, and the covclaimd it is sealed to. */
+  const tlvClaimPacket = (): Uint8Array => {
+    const tlv = (type: number, value: number[]) => [type, (value.length >> 8) & 0xff, value.length & 0xff, ...value]
+    return Uint8Array.from([
+      ...tlv(
+        0x01,
+        Array.from({ length: 93 }, (_, i) => i & 0xff),
+      ),
+      ...tlv(0x02, [0x51, 0x52]),
+      ...tlv(0x03, [0x02, ...Array<number>(32).fill(0x11)]),
+    ])
+  }
+
+  const clientPacket = (): Uint8Array => {
+    const tlv = (type: number, value: number[]) => [type, (value.length >> 8) & 0xff, value.length & 0xff, ...value]
+    return Uint8Array.from([
+      ...tlv(
+        0x01,
+        Array.from({ length: 93 }, (_, i) => i & 0xff),
+      ),
+      ...tlv(0x03, [0x02, ...Array<number>(32).fill(0x11)]),
+    ])
+  }
+
+  const tlvBytes = (type: number, value: number[]) => [type, (value.length >> 8) & 0xff, value.length & 0xff, ...value]
+  const CIPHERTEXT_TLV = tlvBytes(
+    0x01,
+    Array.from({ length: 93 }, (_, i) => i & 0xff),
+  )
+
+  it.each([
+    ['carrying an arkade script', Uint8Array.from([...CIPHERTEXT_TLV, ...tlvBytes(0x02, [0x51, 0x52])])],
+    ['carrying nothing else', Uint8Array.from(CIPHERTEXT_TLV)],
+  ])('reveals rather than stamps a packet that names no covclaimd, %s', async (_name, noPubkey) => {
+    const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(noPubkey) }))
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+
+    const row = await service.tick(outcome.swap.id)
+
+    expect(row.state).toBe('funded')
+    // Stamping it would hide the tx from every covclaimd's filter.
+    expect(arkade.state.fundCalls[0]?.stamp).toBeUndefined()
+    expect(covclaimd.state.revealCalls).toBe(1)
+  })
+
+  it('completes a client packet with the arkade script the covenant commits to', async () => {
+    const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(clientPacket()) }))
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+
+    const row = await service.tick(outcome.swap.id)
+
+    expect(row.state).toBe('funded')
+    const stamped = arkade.state.fundCalls[0]?.stamp?.packet
+    if (!stamped) throw new Error('expected a stamp')
+    // The client's bytes ride through untouched, with 0x02 appended after them.
+    expect(stamped.subarray(0, clientPacket().length)).toEqual(clientPacket())
+    expect(stamped[clientPacket().length]).toBe(0x02)
+    expect(covclaimd.state.revealCalls).toBe(0)
+  })
+
+  it('reveals an adopted funding, whatever the packet shape claims', async () => {
+    const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(tlvClaimPacket()) }))
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    arkade.state.outputs = [{ txid: 'pre-upgrade-funding', vout: 0, value: 5_000 }]
+
+    const row = await service.tick(outcome.swap.id)
+
+    expect(row.state).toBe('funded')
+    expect(arkade.state.fundCalls).toHaveLength(0)
+    expect(row.stampedAt).toBeNull()
+    expect(covclaimd.state.revealCalls).toBe(1)
+  })
+
+  it('stamps the packet into the funding instead of revealing, when the client sends one', async () => {
+    const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(tlvClaimPacket()) }))
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+
+    const row = await service.tick(outcome.swap.id)
+
+    expect(row.state).toBe('funded')
+    const [call] = arkade.state.fundCalls
+    expect(call?.stamp?.packet).toEqual(tlvClaimPacket())
+    expect(call?.stamp?.tapTree.length).toBeGreaterThan(0)
+    expect(covclaimd.state.revealCalls).toBe(0)
+  })
+
   it('reveals once funded, with the script-derived arkadeScript and taptree', async () => {
     const outcome = await service.quote(quoteRequest())
     if (!outcome.accepted) throw new Error('expected acceptance')

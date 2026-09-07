@@ -22,6 +22,7 @@
 
 import { arkadeOpsFromContext, type EmulatorInfo } from '../send/arkadeOps.js'
 import { fundLockup } from './fundLockup.js'
+import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { findClaimPreimage, findLockupOutpoints, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { ArkadeOps } from '../send/orchestrator.js'
 
@@ -41,7 +42,7 @@ export interface OnchainReceiveArkadeOps extends Pick<
    * Arkade-side action that belongs to the receive leg alone; the send leg
    * never calls anything like this (the CLIENT funds that side there).
    */
-  fund(params: { address: string; amountSats: number }): Promise<string>
+  fund(params: { address: string; amountSats: number; stamp?: ClaimPacketStamp }): Promise<string>
 
   /**
    * Every outpoint this lockup script has ever held, spent ones included —
@@ -85,6 +86,6 @@ export const onchainReceiveArkadeOpsFromContext = async (
     // guarded. Regtest cannot tell the two apart (its batches are shorter than
     // the refund horizon, so the wrong pick and the right one are the same
     // coin), so the difference would only have surfaced on mainnet.
-    fund: async (params) => fundLockup(ctx, params.address, params.amountSats),
+    fund: async (params) => fundLockup(ctx, params.address, params.amountSats, params.stamp),
   }
 }
