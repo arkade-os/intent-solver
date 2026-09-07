@@ -195,6 +195,24 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   out-of-range Node installs with at most a warning and surfaces later from a
   running process. Set `engine-strict=true` to find out at install time instead.
 
+- **`pnpm format:check` on Windows** reports essentially every file (472 of
+  them at the time of writing) and none of it is about formatting. Git checks
+  out CRLF when `core.autocrlf=true`, `.prettierrc` sets no `endOfLine`, so
+  Prettier applies its `lf` default and flags the line endings. The signal is
+  there, just buried. Scope the check to what you changed and let it accept the
+  file's own endings:
+
+  ```
+  npx prettier --check --end-of-line auto $(git diff --name-only origin/main...HEAD -- '*.ts')
+  ```
+
+  That reproduces CI's verdict — verified in both directions, passing on a clean
+  file and failing on one CI rejected. Keep `--end-of-line auto` on the command
+  line: putting `endOfLine` in `.prettierrc` would fix it for you and stop CI
+  enforcing LF for everyone. The repo-wide alternative is a `.gitattributes`
+  with `* text=auto eol=lf`, which removes the need for any of this at the cost
+  of a one-time churn in existing Windows working trees.
+
 - **Regtest, end to end, no Lightning:** `docs/runbook.md` § "Replicating end to
   end on regtest" — arkd + emulator from
   [arkade-regtest](https://github.com/arklabsHQ/arkade-regtest),
