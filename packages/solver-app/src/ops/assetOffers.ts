@@ -125,7 +125,6 @@ export interface AssetOfferDeps {
   newId?: () => string
 }
 
-/** The bounds an offer was judged by, and which of the two sources set them. */
 interface AppliedBounds {
   readonly min: bigint
   readonly max: bigint
@@ -148,13 +147,7 @@ export class AssetOfferService {
     this.newId = deps.newId ?? (() => crypto.randomUUID())
   }
 
-  /**
-   * Markets are static; inventory is read fresh every decision.
-   *
-   * Bounds come from the offer's own DIRECTION when the market states them, so
-   * one market can be one-way (`max: 0n`) or asymmetric. Otherwise the
-   * deployment-wide pair applies.
-   */
+  /** Markets are static; inventory is read fresh every decision. */
   private async policy(bounds: AppliedBounds): Promise<OfferFillPolicy> {
     return {
       markets: this.deps.markets,
@@ -164,6 +157,8 @@ export class AssetOfferService {
     }
   }
 
+  // The offer's own DIRECTION when its market states bounds — so a market can be
+  // one-way (`max: 0n`) or asymmetric — otherwise the deployment-wide pair.
   private boundsIn(input: OfferFillInput): AppliedBounds {
     const market = this.boundsFor(input)
     return market === null

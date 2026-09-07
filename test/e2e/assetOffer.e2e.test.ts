@@ -438,7 +438,6 @@ describe('e2e arkade offers — what OFFER_MARKETS actually builds', () => {
   it(
     'builds NOTHING when OFFER_MARKETS is unset, however the market is configured',
     async () => {
-      // The console still shows the market; this is the axis beside it.
       const services = await boot(undefined)
       try {
         expect(services.policy.offerMarkets).toEqual([])
