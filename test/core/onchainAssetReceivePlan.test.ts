@@ -33,6 +33,8 @@ const row = (over: Partial<OnchainAssetReceivePlanRow> = {}): OnchainAssetReceiv
   refundLocktime: REFUND_LOCKTIME,
   refundWithoutReceiverDelay: 600,
   fundingDeadline: NOW + 900,
+  fundingTxid: 'ab'.repeat(32),
+  fundingVout: 0,
   preimage: null,
   onchainClaimTxid: null,
   ...over,
@@ -74,7 +76,39 @@ describe('rule 1 - never fund the asset lockup before min_confirmations', () => 
       row({ state: 'awaiting_confirmations', minConfirmations: 2 }),
       seen({ htlcOutputs: [output({ confirmations: 2 })] }),
     )
-    expect(action).toEqual({ do: 'begin_funding' })
+    expect(action).toEqual({ do: 'begin_funding', txid: 'ab'.repeat(32), vout: 0 })
+  })
+
+  /**
+   * Depth alone is not the condition. Anyone can pay the HTLC address a second
+   * time, and confirmations on THAT output say nothing about the one the quote
+   * was made against.
+   */
+  it('never funds against a confirmed output holding less than the quote', () => {
+    const action = planOnchainAssetReceive(
+      row({ state: 'awaiting_confirmations' }),
+      seen({ htlcOutputs: [output({ txid: 'cd'.repeat(32), vout: 1, valueSats: AMOUNT - 1, confirmations: 6 })] }),
+    )
+    expect(action).toEqual({ do: 'wait' })
+  })
+
+  /** A fee bump is a different txid at the same amount, and is still the client funding. */
+  it('takes a replacement of the quoted amount, and names it so the claim spends it', () => {
+    const action = planOnchainAssetReceive(
+      row({ state: 'awaiting_confirmations' }),
+      seen({ htlcOutputs: [output({ txid: 'ef'.repeat(32), vout: 3, confirmations: 3 })] }),
+    )
+    expect(action).toEqual({ do: 'begin_funding', txid: 'ef'.repeat(32), vout: 3 })
+  })
+
+  it('prefers the recorded outpoint when both are there', () => {
+    const action = planOnchainAssetReceive(
+      row({ state: 'awaiting_confirmations' }),
+      seen({
+        htlcOutputs: [output({ txid: 'ef'.repeat(32), vout: 3, confirmations: 3 }), output({ confirmations: 3 })],
+      }),
+    )
+    expect(action).toEqual({ do: 'begin_funding', txid: 'ab'.repeat(32), vout: 0 })
   })
 })
 

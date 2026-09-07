@@ -310,11 +310,19 @@ describe('OnchainAssetReceiveSwapService', () => {
 
     it('adopts a lockup that is already funded rather than paying again', async () => {
       const swap = await fundAndConfirm()
+      // Seeded before the first tick and then forgotten, which is what a process
+      // that died between paying and recording comes back to: a lockup already
+      // funded, and a row that does not know it.
+      await deps.arkadeFake.arkade.fundAsset({
+        address: swap.lockupAddress,
+        assetId: ASSET,
+        units: 50_000_000n,
+        carrierSats: 330,
+      })
+      deps.arkadeFake.funded.length = 0
       await service.tick(swap.id)
-      expect(deps.arkadeFake.funded).toHaveLength(1)
-      await store.transition(swap.id, 'awaiting_claim', 'refunding_arkade', {})
-      // Re-entering the funding state over an existing lockup must adopt it.
-      expect(deps.arkadeFake.funded).toHaveLength(1)
+      expect(deps.arkadeFake.funded).toHaveLength(0)
+      expect((await store.get(swap.id)).state).toBe('awaiting_claim')
     })
 
     it('records the claim txid BEFORE broadcasting it', async () => {

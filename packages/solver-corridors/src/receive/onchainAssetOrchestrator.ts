@@ -462,6 +462,8 @@ export class OnchainAssetReceiveSwapService {
         refundLocktime: row.refundLocktime,
         refundWithoutReceiverDelay: row.refundWithoutReceiverDelay,
         fundingDeadline: row.createdAt + DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT,
+        fundingTxid: row.fundingTxid,
+        fundingVout: row.fundingVout,
         preimage: row.preimage,
         onchainClaimTxid: row.onchainClaimTxid,
       },
@@ -483,7 +485,13 @@ export class OnchainAssetReceiveSwapService {
         })
 
       case 'begin_funding':
-        return store.transition(row.id, 'awaiting_confirmations', 'funding_arkade', {})
+        // Re-recorded, because the claim spends what the row holds: a bumped
+        // funding of the quoted amount is a different outpoint from the one
+        // `await_confirmations` named.
+        return store.transition(row.id, 'awaiting_confirmations', 'funding_arkade', {
+          funding_txid: action.txid,
+          funding_vout: action.vout,
+        })
 
       case 'adopt_lockup':
         return store.transition(row.id, 'funding_arkade', 'awaiting_claim', {})

@@ -56,6 +56,19 @@ describe('createServices — one admission control for every corridor', () => {
     expect(body.match(/^\s*admission,$/gm) ?? []).toHaveLength(7)
     expect(body.match(/^\s*totalCommitted,$/gm) ?? []).toHaveLength(7)
   })
+
+  /**
+   * Counting constructions is not enough: the EVM block declares a SECOND
+   * `totalCommitted` that shadows the outer one, so a store added to one and
+   * not the other leaves half the corridors quoting into headroom the other
+   * half already holds — and both spellings type-check.
+   */
+  it('reads the asset receive store in BOTH totalCommitted closures', () => {
+    const body = createServicesBody()
+    const starts = [...body.matchAll(/const totalCommitted\b/g)].map((m) => m.index ?? 0)
+    expect(starts).toHaveLength(2)
+    for (const at of starts) expect(body.slice(at, at + 700)).toContain('onchainAssetReceiveStore')
+  })
 })
 
 describe('createServices — stores follow the resolved layout', () => {

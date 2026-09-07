@@ -64,6 +64,9 @@ export interface OnchainAssetReceivePlanRow {
   refundWithoutReceiverDelay: number
   /** How long a quote stays fundable by the client before it is abandoned. */
   fundingDeadline: number
+  /** The output `await_confirmations` named, once one has been recorded. */
+  fundingTxid: string | null
+  fundingVout: number | null
   preimage: string | null
   /** The solver's own L1 claim broadcast, once one has been recorded. */
   onchainClaimTxid: string | null
@@ -108,8 +111,8 @@ export type OnchainAssetReceiveAction =
   | { do: 'adopt_lockup' }
   /** The client's funding output is confirmed enough to act on. */
   | { do: 'await_confirmations'; txid: string; vout: number }
-  /** Hand off to funding: every gate passed. */
-  | { do: 'begin_funding' }
+  /** Hand off to funding: every gate passed. Names the output that passed them. */
+  | { do: 'begin_funding'; txid: string; vout: number }
   /** Pay the asset into the lockup — the first action that commits the float. */
   | { do: 'fund_arkade' }
   /** `P` is public; take the L1 HTLC with it. */
@@ -193,7 +196,17 @@ export const planOnchainAssetReceive = (
     }
 
     case 'awaiting_confirmations': {
-      const output = seen.htlcOutputs.find((o) => o.confirmations >= row.minConfirmations)
+      // THE AMOUNT IS PART OF THE CONDITION, not just the depth. Confirmations
+      // alone would accept any output at the address, so a second, underfunded
+      // payment to it — or a replacement that dropped the value — would open the
+      // float against an HTLC that no longer holds what was quoted.
+      const funded = seen.htlcOutputs.filter(
+        (o) => o.valueSats === row.amountSats && o.confirmations >= row.minConfirmations,
+      )
+      // The recorded one WHEN IT IS THERE, so a fee-bumped funding of the right
+      // amount still lands; `begin_funding` then carries whichever won, because
+      // the claim spends the outpoint the row holds.
+      const output = funded.find((o) => o.txid === row.fundingTxid && o.vout === row.fundingVout) ?? funded[0]
       const gate = onchainAssetFundingGate(row, seen.nowSeconds)
       // RULE 1, and the gate is asked even while STILL waiting: a swap that can
       // never reach its confirmations before its own refund deadline would
@@ -205,7 +218,7 @@ export const planOnchainAssetReceive = (
           : { do: 'refuse', reason: `confirmations not reached in time: ${gate.reason}` }
       }
       if (!gate.fund) return { do: 'refuse', reason: gate.reason }
-      return { do: 'begin_funding' }
+      return { do: 'begin_funding', txid: output.txid, vout: output.vout }
     }
 
     case 'funding_arkade': {
