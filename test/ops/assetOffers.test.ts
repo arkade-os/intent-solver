@@ -358,16 +358,15 @@ describe('refusals an operator can read', () => {
     expect(seen).toEqual([])
   })
 
-  // Fragments short enough that re-wrapping `services.ts` cannot read as unwired.
+  // ONE coupled fragment, not substrings that could match apart; `\s*` survives a re-wrap.
   it('is WIRED to the log on the shipped daemon', () => {
-    expect(servicesSource).toContain('onRefused:')
-    expect(servicesSource).toContain('refused: ${reason}')
+    expect(servicesSource).toMatch(/onRefused:\s*\([^)]*\)\s*=>\s*log\(`offer \$\{\w+\} refused: \$\{\w+\}/)
   })
 
   it('serves offers only when OFFER_MARKETS names a market', () => {
     // The second silence, driven for real in test/e2e/assetOffer.e2e.test.ts.
-    expect(servicesSource).toContain('policy.offerMarkets.length > 0')
-    expect(servicesSource).toContain('servesOffers ? await OfferFillStore.open')
+    expect(servicesSource).toMatch(/servesOffers\s*=\s*policy\.offerMarkets\.length > 0/)
+    expect(servicesSource).toMatch(/servesOffers\s*\?\s*await OfferFillStore\.open/)
   })
 })
 
