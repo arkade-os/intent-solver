@@ -81,6 +81,7 @@ const makeDeps = (
     adPublisher?: AdPublisher
     assetMarkets?: unknown[]
     evmCorridors?: { corridor: string; enabled: boolean }[]
+    offerFill?: { min: bigint; max: bigint }
     /** Collects the audit rows the route writes, so they can be asserted. */
     audit?: Record<string, unknown>[]
   } = {},
@@ -109,8 +110,8 @@ const makeDeps = (
           'lightning:BTC->arkade:BTC': { bps: 10, flatSats: 0 },
         },
         evmCorridors: over.evmCorridors ?? [],
-        offerMinFillAmount: 5_000n,
-        offerMaxFillAmount: 900_000n,
+        offerMinFillAmount: over.offerFill?.min ?? 5_000n,
+        offerMaxFillAmount: over.offerFill?.max ?? 900_000n,
       },
       assetMarkets: over.assetMarkets ?? [],
       providerPubkey: PUBKEY,
@@ -133,6 +134,7 @@ const makeDeps = (
   }) as never
 
 const ASSET = `${'9c'.repeat(32)}0001`
+const GUCCI = `f394dcbf${'e9'.repeat(30)}`
 
 interface CardBody {
   card: SolverCard | null
@@ -231,6 +233,43 @@ describe('GET /api/card', () => {
     expect(asset.max_base_amount).toBe('900000')
     // The signature must cover the added market, not a card built before it.
     expect(verifyCardSig(body.card!)).toBe(true)
+  })
+
+  /**
+   * The mutinynet report: four corridors served, one asset market saved with
+   * every bound blank, and no OFFER_MARKETS — so the card used to die whole.
+   */
+  it('publishes the four BTC corridors when one asset market cannot be published', async () => {
+    const { status, body } = await getCard(
+      makeDeps({
+        offerFill: { min: 0n, max: 0n },
+        assetMarkets: [
+          {
+            base: null,
+            quote: GUCCI,
+            baseDecimals: 8,
+            quoteDecimals: 6,
+            feedUrl: 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
+            pricePath: '/price',
+            toleranceBps: 10,
+            feeBps: 5,
+          },
+        ],
+      }),
+    )
+    expect(status).toBe(200)
+    expect(body.cardError).toBeNull()
+    expect(body.card).not.toBeNull()
+    expect(body.card!.markets.map((m) => m.pair)).toEqual(['BTC/lightning:BTC', 'BTC/onchain:BTC'])
+    for (const market of body.card!.markets) {
+      expect([market.min_base_amount, market.max_base_amount]).toEqual(['1000', '50000'])
+      expect([market.min_quote_amount, market.max_quote_amount]).toEqual(['1000', '50000'])
+    }
+    expect(verifyCardSig(body.card!)).toBe(true)
+    expect(body.cardOmitted).toHaveLength(1)
+    expect(body.cardOmitted[0]).toContain(GUCCI)
+    expect(body.cardOmitted[0]).toContain('OFFER_MIN_FILL_AMOUNT')
+    expect(JSON.stringify(body.card)).not.toContain(GUCCI)
   })
 
   it('reports a served ERC20 corridor the card cannot name', async () => {

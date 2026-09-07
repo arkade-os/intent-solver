@@ -992,11 +992,48 @@ The client is paid over Lightning and the sats land on Arkade
   role on this leg, so the client can spend the collaborative claim leaf
   itself), and `claim_packet` — the preimage ECIES-sealed **to the covclaimd
   service, not to the solver**. The solver carries the packet blindly and
-  cannot decrypt it. Sealing (verified against the reference stack,
+  cannot decrypt it. `claim_packet` is **OPTIONAL**: a client with no covclaimd
+  configured omits it rather than sealing to a key nobody holds, and claims the
+  lockup itself with its `payout_pubkey`. An empty string is refused, so
+  omission is the only way to say absent; a solver holding no packet reveals
+  nothing to covclaimd. Sealing (verified against the reference stack,
   `docs/environment.md`): ephemeral secp256k1 key, ECDH, HKDF-SHA256 with
   info `covclaimd/preimage/v1` and the ephemeral public key as salt, AES-GCM
   with the same key as additional data; wire layout
   `ephPub(33) || nonce(12) || ciphertext`.
+
+  `claim_packet` accepts **two shapes**, and the solver tells them apart by
+  length alone:
+
+  - the sealed ciphertext above, fixed at **93 bytes** decoded. The solver hands
+    it to covclaimd over the Reveal API, which requires the solver and the client
+    to have been pointed at the *same* covclaimd — an agreement nothing on this
+    wire expresses, and whose absence funds a lockup that is never claimed.
+  - covclaimd's serialised `ClaimPacket` body (`pkg/preimage/packet.go`): TLVs
+    `0x01` ciphertext, `0x02` arkade_script, `0x03` covclaimd_pub_key, each a
+    1-byte type, a 2-byte big-endian length, then the value. The solver stamps
+    this into the funding transaction as Arkade extension packet type `0x04`,
+    and publishes the lockup's tapleaf set on that output's `PSBT_OUT_TAP_TREE`.
+    covclaimd finds it on the arkd transaction stream; the `0x03` TLV names
+    which covclaimd, so **the client alone chooses**, the solver needs no
+    covclaimd configured or reachable, and no prior agreement exists to get
+    wrong.
+
+    A client sends `0x01` and `0x03` — the two only it has — and MAY omit
+    `0x02`, which the solver appends from the covenant it built. That is not a
+    convenience: the covenant commits to the arkade script as
+    `taggedHash("ArkScriptHash", script)`, so the funder is the only party whose
+    copy is guaranteed to match the commitment, and a client deriving its own
+    would add a way for the two to disagree and strand the claim. covclaimd
+    cannot derive it either — the commitment is a hash, and the script is the
+    only place the receiver's pkScript appears.
+
+  The shapes cannot collide: the ciphertext TLV alone is 96 bytes with its
+  header, so any packet carrying one exceeds the bare 93. A solver that does not
+  recognise the second shape, or a value that is neither, takes the first path
+  unchanged — this is additive in both directions. Senders SHOULD prefer the
+  packet shape; the `0x03` TLV is REQUIRED when sending it, because covclaimd's
+  extension filter selects on that TLV.
 - **quote.profile**: `payment_hash` (echo), the hold `invoice` on `H` (its
   expiry SHOULD equal `valid_until`), `lockup_address` (compare-only — the
   solver's derivation of the funding contract) and `solver_refund_pk_script`
@@ -1063,7 +1100,7 @@ funding output, waits `min_confirmations`, funds the Arkade lockup pinned to
 the client's payout script, and claims the onchain HTLC once `P` is public.
 
 - **request.profile**: `payment_hash` (`H`, client-chosen), `claim_packet`
-  (as § 7.1.2), `refund_pubkey` (the client's x-only key — the onchain HTLC's
+  (as § 7.1.2, and optional for the same reason), `refund_pubkey` (the client's x-only key — the onchain HTLC's
   refund role), `payout_address` and `payout_pubkey` (the client's Arkade
   destination and covenant `receiver` key — the same two the Lightning
   receive profile asks for, because both receive corridors carry the same

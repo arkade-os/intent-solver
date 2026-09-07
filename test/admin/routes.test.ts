@@ -64,6 +64,7 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
     ...stores,
     readers: readerSetFromDeps(stores as unknown as FlatCorridorDeps),
     adminStore: { getOverrides: vi.fn().mockResolvedValue({}) },
+    bootOverrides: {},
     ln: { getBalance: vi.fn().mockResolvedValue({ availableSats: 500_000, incomingSats: 0 }) },
     arkade: {
       reservations: { reserved: () => new Set<string>() },

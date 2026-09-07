@@ -36,7 +36,7 @@ import { diagnose, phaseOfStates } from '@arkade-os/solver-core/core/swapView.js
 import type { AdminSwap } from '@arkade-os/solver-core/core/swapView.js'
 import type { EvmCorridorPolicy, EvmToken } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
 import { evmEnvStem } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
-import { evmCorridorFor } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { evmCorridorFor, evmTokenOf } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import {
   EVM_RECEIVE_EXPOSED,
   EVM_RECEIVE_NON_TERMINAL,
@@ -134,7 +134,7 @@ const evmReceiveDescriptorForStatesOnly = {
 interface EvmReadableStore<Row extends { id: string; pkScript: string }> {
   findLive(): Promise<Row[]>
   findByRfqId(rfqId: string): Promise<Row | null>
-  committedSats(): Promise<number>
+  committedSats(tokenAddress?: string): Promise<number>
   page(options: PageOptions): Promise<{ rows: Row[]; nextCursor: string | null }>
   get(id: string): Promise<Row>
   history(id: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>
@@ -158,7 +158,9 @@ const evmReaderFor = <Row extends { id: string; pkScript: string }>(
   // route answering for a swap it cannot describe.
   statusFor: async () => null,
   findRecoverable: async () => (await store.findLive()).map((row) => ({ id: row.id, pkScript: row.pkScript })),
-  committedSats: () => store.committedSats(),
+  // Narrowed to this corridor's OWN token: one store per direction serves every token, and
+  // `committedAcrossCorridors` sums once per reader — unnarrowed counts the table once per `EVM_TOKENS` entry.
+  committedSats: () => store.committedSats(evmTokenOf(descriptor.pair) ?? undefined),
   page: async (options) => {
     const { rows, nextCursor } = await store.page(options)
     return { swaps: rows.map(project), nextCursor }

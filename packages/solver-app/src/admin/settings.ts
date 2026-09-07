@@ -37,6 +37,12 @@ export interface KnobView {
   restartRequired?: boolean
 }
 
+// Overrides that moved since boot. NOT `Object.keys(stored)`: a restart APPLIES
+// an override rather than removing it, so that set never empties and a banner
+// driven off it would latch on permanently and stop being read.
+export const pendingRestartKeys = (boot: Record<string, string>, stored: Record<string, string>): string[] =>
+  [...new Set([...Object.keys(boot), ...Object.keys(stored)])].filter((key) => boot[key] !== stored[key]).sort()
+
 /**
  * The floor `config.ts` puts under `LOCKUP_TIMEOUT_SECONDS`, restated here for
  * the same reason the fee bounds are: a mismatch would let the console set what

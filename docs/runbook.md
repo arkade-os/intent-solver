@@ -1567,11 +1567,13 @@ Three things worth knowing before a run:
   fund settles and mines ONE block. If the commitment tx had not reached the
   mempool by then it stays unconfirmed, and until it confirms the wallet's
   boarding view keeps offering the input that settle already spent — so the next
-  `regtest-settle.mjs` counts it, calls `settle()` on an outpoint that no longer
-  exists, and waits forever instead of erroring. The tell is the balance it
-  prints: `boarding.confirmed: 5000000` beside `settled: 4950000` off a single
-  5000000 faucet is one deposit counted twice, not two deposits. Mine, then
-  settle:
+  `regtest-settle.mjs` counts it and calls `settle()` on an outpoint that no
+  longer exists. That call does not come back, so it is bounded: after
+  `REGTEST_SETTLE_TIMEOUT_MS` (default 120000) the script gives up and prints
+  `settle skipped:` followed by the double count it found. The tell is the
+  balance it prints: `boarding.confirmed: 5000000` beside `settled: 4950000` off
+  a single 5000000 faucet is one deposit counted twice, not two deposits — and
+  the sats are safe, they are the ones already in `settled`. Mine, then settle:
 
   ```bash
   node ../arkade-regtest/regtest.mjs mine 2

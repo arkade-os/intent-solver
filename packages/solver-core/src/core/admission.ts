@@ -31,17 +31,34 @@ export class AdmissionControl implements AdmissionStrategy {
   private reserved = 0
 
   /**
-   * Serialises read-modify-write on `reserved`. A promise chain rather than a lock
+   * The same claim, per non-sats cap dimension. Apart from `reserved` rather than
+   * summed into it: different units against a different ceiling, so one shared
+   * total would let a token claim consume the sats cap.
+   */
+  private reservedUnits = new Map<string, bigint>()
+
+  /**
+   * Serialises read-modify-write on both counters. A promise chain rather than a lock
    * library: the critical section is one `await` on SQLite.
    */
   private tail: Promise<unknown> = Promise.resolve()
+
+  private serialise<T>(job: () => Promise<T>): Promise<T> {
+    // `then(job, job)` so one caller's rejection never wedges the queue for the next.
+    const result = this.tail.then(job, job)
+    this.tail = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
+  }
 
   /**
    * Claim `sats` if the cap allows, counting both what is durable and what other
    * in-flight quotes have claimed. Null means the caller refuses `provider_at_capacity`.
    */
   async reserve(sats: number, committedSats: () => Promise<number>, capSats: number): Promise<Reservation | null> {
-    const run = async (): Promise<Reservation | null> => {
+    return this.serialise(async (): Promise<Reservation | null> => {
       // Unreachable from the corridors, but guarded because the failure is silent and
       // asymmetric: `release()` subtracts whatever was added, so a NEGATIVE claim hands
       // out headroom that does not exist and every later quote sees a grown cap.
@@ -57,14 +74,40 @@ export class AdmissionControl implements AdmissionStrategy {
           this.reserved -= sats
         },
       }
-    }
-    // `then(run, run)` so one caller's rejection never wedges the queue for the next.
-    const result = this.tail.then(run, run)
-    this.tail = result.then(
-      () => undefined,
-      () => undefined,
-    )
-    return result
+    })
+  }
+
+  /**
+   * {@link reserve} for a quantity no `number` holds exactly: one whole ERC-20 token
+   * is 10^18 atomic units, ~111x `Number.MAX_SAFE_INTEGER`, and rounding an exposure
+   * cap admits past what the operator set. `dimension` names the ceiling claimed
+   * against — one asset, one market — so a claim in one never bounds another.
+   */
+  async reserveUnits(
+    dimension: string,
+    units: bigint,
+    committedUnits: () => Promise<bigint>,
+    capUnits: bigint,
+  ): Promise<Reservation | null> {
+    return this.serialise(async (): Promise<Reservation | null> => {
+      if (!(units > 0n)) throw new RangeError(`reserveUnits() needs a positive size, got ${units}`)
+      const committed = await committedUnits()
+      const held = this.reservedUnits.get(dimension) ?? 0n
+      if (committed + held + units > capUnits) return null
+      this.reservedUnits.set(dimension, held + units)
+      let released = false
+      return {
+        release: () => {
+          if (released) return
+          released = true
+          const next = (this.reservedUnits.get(dimension) ?? 0n) - units
+          // Dropped at zero, not left at 0n: dimensions are caller-supplied, and a
+          // map that only ever grows is a leak keyed by whatever it was handed.
+          if (next === 0n) this.reservedUnits.delete(dimension)
+          else this.reservedUnits.set(dimension, next)
+        },
+      }
+    })
   }
 
   /** In-flight sats. For assertions and diagnostics; not part of admission. */
@@ -82,5 +125,10 @@ export class AdmissionControl implements AdmissionStrategy {
 
   get outstandingSats(): number {
     return this.reserved
+  }
+
+  /** In-flight units in `dimension`. For assertions and diagnostics; not part of admission. */
+  outstandingUnits(dimension: string): bigint {
+    return this.reservedUnits.get(dimension) ?? 0n
   }
 }

@@ -104,6 +104,9 @@ const solverConfig = (): Config => {
     offerMarkets: [],
     offerMinFillAmount: 0n,
     offerMaxFillAmount: 0n,
+    // No asset named, so the atomic-class corridors are off and the window unread.
+    assetRfqTokens: [],
+    assetQuoteValiditySeconds: 30,
     lnReceiveAcceptUnilateralGap: false,
     maxExposedSats: 1_000_000,
     contractRetentionMs: 86_400_000,
@@ -121,6 +124,7 @@ const solverConfig = (): Config => {
     host: '127.0.0.1',
     adminPort: null,
     adminHost: '127.0.0.1',
+    adminRestartEnabled: false,
     relayUrl: null,
     relayProtocol: 'nostr',
     openRfqMaxBidsPerMinute: 60,
