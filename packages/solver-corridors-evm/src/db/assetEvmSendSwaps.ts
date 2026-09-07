@@ -206,6 +206,12 @@ export type AssetEvmSendQuoteRecord = Omit<
   | 'nonInteractiveParameters'
 > & { nonInteractiveParameters: boolean }
 
+/**
+ * What a state change may write. The PRICED columns are absent deliberately:
+ * `asset_units`, `payout_units` and `evm_amount` are fixed at quote time, so
+ * writing one later is a repricing of a swap the client may already have
+ * funded, not a state update. Adding them here looks like completing the list.
+ */
 const TRANSITION_COLUMNS: ReadonlySet<string> = new Set([
   'evm_lock_txid',
   'evm_refund_txid',
