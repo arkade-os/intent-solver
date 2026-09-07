@@ -2238,6 +2238,16 @@ const BODIES = {
   audit: auditView,
 }
 
+// From the figures on screen: one fetched at click time could differ.
+const inFlightLine = (o) =>
+  `${o.exposure.liveCount} swap(s) in flight, ${o.exposure.exposedCount} of them exposed, with ` +
+  `${sats(o.exposure.committedSats)} sat committed. ${o.attention?.stuckCount ?? 0} row(s) are already waiting ` +
+  'for you. Boot re-drives every non-terminal row, but a payment in flight right now stays undecided until its ' +
+  'next tick.'
+
+/** `KNOB 0 → 25` — whether the change is worth interrupting swaps for. */
+const pendingItem = (item) => h('span.mono', item.key, h('span.faint', ` ${item.loaded} → ${item.stored}`))
+
 // On EVERY panel: an operator who changed a knob and moved on is by definition
 // not looking at Settings. Same reasoning as the status bar's stuck-row count.
 const restartBanner = () => {
@@ -2251,12 +2261,13 @@ const restartBanner = () => {
       'span',
       h('b', `${pending.length} change${pending.length === 1 ? '' : 's'} pending a restart`),
       h('span.faint', ' — this process is still quoting what it booted with: '),
-      h('span.mono', pending.join(', ')),
+      ...pending.flatMap((item, index) => (index === 0 ? [pendingItem(item)] : [', ', pendingItem(item)])),
     ),
     o.restartEnabled
       ? actButton(
           'button.act.armed',
-          { 'data-action': 'restart-solver', onclick: () => armDialog('restart-solver', {}) },
+          // As the OVERRIDE gate: the action's warning is static, this is not.
+          { 'data-action': 'restart-solver', onclick: () => armDialog('restart-solver', {}, inFlightLine(o)) },
           'restart solver',
         )
       : h(

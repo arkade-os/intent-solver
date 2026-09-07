@@ -29,41 +29,45 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
     onchainReceiveStore: store(),
     ...over,
   }
+  const config = {
+    network: 'regtest',
+    lnBackend: 'fake',
+    emulatorUrl: 'http://emulator.test',
+    arkade: { arkServerUrl: 'http://ark.test' },
+    maxExposedSats: 300_000,
+    // The global outer bound each corridor is narrowed from. Present on the
+    // real Config, so a double without it reads `undefined.maxSats` and 500s
+    // the moment any route consults it.
+    limits: { minSats: 1_000, maxSats: 100_000 },
+    corridorEnabled: {
+      'arkade:BTC->lightning:BTC': true,
+      'lightning:BTC->arkade:BTC': true,
+      'arkade:BTC->onchain:BTC': true,
+      'onchain:BTC->arkade:BTC': true,
+    },
+    corridorFees: {
+      'arkade:BTC->lightning:BTC': { bps: 0, flatSats: 0 },
+      'lightning:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
+      'arkade:BTC->onchain:BTC': { bps: 0, flatSats: 0 },
+      'onchain:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
+    },
+    corridorLimits: {
+      'arkade:BTC->lightning:BTC': { minSats: 1_000, maxSats: 100_000 },
+      'lightning:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
+      'arkade:BTC->onchain:BTC': { minSats: 1_000, maxSats: 100_000 },
+      'onchain:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
+    },
+  }
   return {
     // What the process is currently failing on, beside what needs a human.
     tickErrors: { failing: [] },
-    config: {
-      network: 'regtest',
-      lnBackend: 'fake',
-      emulatorUrl: 'http://emulator.test',
-      arkade: { arkServerUrl: 'http://ark.test' },
-      maxExposedSats: 300_000,
-      // The global outer bound each corridor is narrowed from. Present on the
-      // real Config, so a double without it reads `undefined.maxSats` and 500s
-      // the moment any route consults it.
-      limits: { minSats: 1_000, maxSats: 100_000 },
-      corridorEnabled: {
-        'arkade:BTC->lightning:BTC': true,
-        'lightning:BTC->arkade:BTC': true,
-        'arkade:BTC->onchain:BTC': true,
-        'onchain:BTC->arkade:BTC': true,
-      },
-      corridorFees: {
-        'arkade:BTC->lightning:BTC': { bps: 0, flatSats: 0 },
-        'lightning:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
-        'arkade:BTC->onchain:BTC': { bps: 0, flatSats: 0 },
-        'onchain:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
-      },
-      corridorLimits: {
-        'arkade:BTC->lightning:BTC': { minSats: 1_000, maxSats: 100_000 },
-        'lightning:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
-        'arkade:BTC->onchain:BTC': { minSats: 1_000, maxSats: 100_000 },
-        'onchain:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
-      },
-    },
+    config,
+    // Boot snapshots, equal to the store so the quiet case is the default.
+    policy: config,
+    assetMarkets: [],
     ...stores,
     readers: readerSetFromDeps(stores as unknown as FlatCorridorDeps),
-    adminStore: { getOverrides: vi.fn().mockResolvedValue({}) },
+    adminStore: { getOverrides: vi.fn().mockResolvedValue({}), listMarkets: vi.fn().mockResolvedValue([]) },
     bootOverrides: {},
     ln: { getBalance: vi.fn().mockResolvedValue({ availableSats: 500_000, incomingSats: 0 }) },
     arkade: {
