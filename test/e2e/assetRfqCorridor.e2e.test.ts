@@ -141,8 +141,10 @@ const derivation = (): OfferDerivation => ({
   exitDelay: offerExitDelay(arkade.ctx.advertisedExitDelay),
 })
 
-const offerFrom = (terms: OfferTerms): Omit<Offer, 'swapPkScript'> =>
-  offerFromTerms(terms, emulatorXOnly(), offerExitDelay(arkade.ctx.advertisedExitDelay))
+const offerFrom = (terms: OfferTerms): Omit<Offer, 'swapPkScript'> => {
+  const { emulatorPubkey, exitDelay } = derivation()
+  return offerFromTerms(terms, emulatorPubkey, exitDelay)
+}
 
 const deriveOffer = (terms: OfferTerms): { pkScript: string; address: string } => offerScriptFrom(derivation())(terms)
 
