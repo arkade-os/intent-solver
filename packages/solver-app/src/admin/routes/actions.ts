@@ -222,9 +222,12 @@ const requireCorridorName = (body: ActionBody): string => {
 }
 
 /**
- * What a restart would interrupt, across every corridor the READER SET holds — an
- * EVM pair's committed money counts too. Best-effort: a sick store is a reason to
- * restart, not a reason the button stops working.
+ * What a restart would interrupt, across every corridor the READER SET holds.
+ * Best-effort: a sick store is a reason to restart, not a reason to stop.
+ *
+ * NOT named `liveCount`: `/api/overview` has one over the four base stores, the
+ * two differ wherever a token is served, and an audit number that silently
+ * disagrees with the panel read is worse than none.
  */
 const inFlightNow = async (services: Services): Promise<Record<string, unknown>> => {
   try {
@@ -232,7 +235,11 @@ const inFlightNow = async (services: Services): Promise<Record<string, unknown>>
       committedAcrossCorridors(services.readers),
       Promise.all([...services.readers].map((corridor) => corridor.findRecoverable())),
     ])
-    return { committedSats, liveCount: live.reduce((total, rows) => total + rows.length, 0) }
+    return {
+      scope: 'every registered corridor',
+      committedSats,
+      recoverableCount: live.reduce((total, rows) => total + rows.length, 0),
+    }
   } catch (error) {
     return { unreadable: messageOf(error) }
   }

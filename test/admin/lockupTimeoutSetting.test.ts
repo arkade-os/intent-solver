@@ -46,6 +46,10 @@ const config = (over: Partial<Config> = {}): Config =>
     relayProtocol: 'nostr',
     openRfqMaxBidsPerMinute: 10,
     sendHintScidDenylist: new Set<string>(),
+    // The two variables deciding whether a configured market is filled by
+    // anything; the read-only block renders both. @see admin/servedBy.ts
+    offerMarkets: [],
+    assetRfqTokens: [],
     ...over,
   }) as unknown as Config
 

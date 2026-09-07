@@ -1,10 +1,6 @@
-/**
- * Each stored change the restart banner names, with what it moves from and to.
- *
- * `pendingRestartKeys` diffs the override MAP and an asset market is a row, so an
- * operator who added a market got silence. A diff against the boot snapshots
- * `Services` already holds; not a live-reload seam.
- */
+// Each stored change the restart banner names, with what it moves from and to.
+// `pendingRestartKeys` diffs the override MAP and a market is a row, so one
+// added in the console got silence. A diff against boot snapshots, not a seam.
 
 import type { Config } from '../config.js'
 import { editableKnobValues } from './settings.js'
@@ -18,7 +14,7 @@ import type { AssetMarketRow } from './db.js'
 
 export interface RestartItem {
   key: string
-  /** What this process runs on; `stored` is what the next one will. */
+  /** What this process runs on; `stored` is the next one. */
   loaded: string
   stored: string
 }
@@ -28,10 +24,7 @@ const ABSENT = 'not trading'
 const BOOTED = 'as booted'
 const EDITED = 'edited'
 
-/**
- * The values behind the keys `pendingRestartKeys` found — that key set, not a
- * second derivation. A key whose EFFECTIVE value did not move is dropped.
- */
+/** That key set, not a second derivation. A key whose value did not move drops. */
 export const settingsDrift = (loaded: Config, stored: Config, keys: readonly string[]): RestartItem[] => {
   const was = editableKnobValues(loaded)
   const now = editableKnobValues(stored)
@@ -56,11 +49,9 @@ const fingerprint = (market: AssetMarketPricingView | AssetMarketConfig): string
     bound(market.buyBase),
   ])
 
-/**
- * Markets added, dropped or re-priced since boot. The stored ROWS and each row's
- * own `marketKey`, not `assetMarketPolicy(rows).pricing` — that throws on a row
- * gone bad, and this runs on a page that must render when something is wrong.
- */
+// Markets added, dropped or re-priced since boot. The stored ROWS and each
+// row's own `marketKey`, not `assetMarketPolicy(rows).pricing` — that throws on
+// a bad row, and this runs on a page that must render when something is wrong.
 export const marketDrift = (
   loaded: readonly AssetMarketPricingView[],
   stored: readonly AssetMarketRow[],

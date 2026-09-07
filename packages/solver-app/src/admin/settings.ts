@@ -24,6 +24,7 @@ import type { Config } from '../config.js'
 import { CORRIDORS, FREE, type Corridor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
+import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
 export type KnobSource = 'env' | 'override'
 
@@ -87,11 +88,7 @@ export const editableKeys = (): string[] => [
   ...GLOBAL_KEYS,
 ]
 
-/**
- * What each editable key IS, on a given Config. One mapping, two readers:
- * {@link describeSettings} renders it and `admin/drift.ts` diffs it across the
- * boot and stored policies. A second copy would be one that disagreed.
- */
+/** One mapping, two readers: {@link describeSettings} and `admin/drift.ts`. */
 export const editableKnobValues = (config: Config): Record<string, string | number | boolean> => {
   const values: Record<string, string | number | boolean> = {}
   for (const corridor of CORRIDORS) {
@@ -363,6 +360,23 @@ export const describeSettings = (config: Config, overrides: Record<string, strin
     {
       key: 'LN_SEND_HINT_SCID_DENYLIST',
       value: Array.from(config.sendHintScidDenylist).join(', ') || '(empty)',
+      source: 'env',
+      editable: false,
+    },
+    // Whether a configured market is filled by ANYTHING, and the only place an
+    // operator can see it. Read-only like its neighbours: `createServices` reads
+    // these once and builds or omits a whole path, so an edit box would promise
+    // a seam that does not exist. @see admin/servedBy.ts
+    {
+      key: 'OFFER_MARKETS',
+      value: config.offerMarkets.map((market) => assetMarketKey(market.a, market.b)).join(', ') || '(empty)',
+      source: 'env',
+      editable: false,
+    },
+    // As the environment spells it, so it can be pasted back.
+    {
+      key: 'ASSET_MARKETS',
+      value: config.assetRfqTokens.map((token) => `${token.symbol}:${token.assetId}`).join(', ') || '(empty)',
       source: 'env',
       editable: false,
     },

@@ -155,7 +155,6 @@ describe('settingsDrift — the values behind the keys', () => {
   })
 
   it('drops a key whose effective value did not move', () => {
-    // `pendingRestartKeys` reports one equal to the env's own value; `25 -> 25`.
     expect(settingsDrift(config(), config(), pendingRestartKeys({}, { LN_SEND_FEE_BPS: '0' }))).toEqual([])
   })
 })
@@ -244,8 +243,7 @@ const restart = (body: unknown, svc: ReturnType<typeof actionServices> = actionS
 
 describe('POST /api/actions/restart-solver — what it interrupts', () => {
   // These drive `run`, which reaches `requestRestart`'s real defaults and
-  // SIGTERMs the vitest worker 250ms later — the run dies as
-  // ERR_IPC_CHANNEL_CLOSED with no failing test to point at.
+  // SIGTERMs the vitest worker 250ms later, killing the run with no failing test.
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['setTimeout'] })
     vi.spyOn(process, 'kill').mockImplementation(() => true)
@@ -266,8 +264,18 @@ describe('POST /api/actions/restart-solver — what it interrupts', () => {
     const svc = actionServices()
     expect((await restart({ confirm: 'RESTART' }, svc)).status).toBe(200)
     const { detail } = svc.adminStore.recordAction.mock.calls[0]![0] as { detail: string }
-    // "who restarted a solver holding 50,151 sats" has to be answerable later.
-    expect(JSON.parse(detail)).toMatchObject({ inFlight: { committedSats: 50_151, liveCount: 2 } })
+    expect(JSON.parse(detail)).toMatchObject({ inFlight: { committedSats: 50_151, recoverableCount: 2 } })
+  })
+
+  it('names its own scope, so the audit row cannot be read as the overview panel', async () => {
+    // `/api/overview` has a `liveCount` over the four base stores; this spans
+    // the registry, so it must not answer to the same name.
+    const svc = actionServices()
+    await restart({ confirm: 'RESTART' }, svc)
+    const { detail } = svc.adminStore.recordAction.mock.calls[0]![0] as { detail: string }
+    const inFlight = (JSON.parse(detail) as { inFlight: Record<string, unknown> }).inFlight
+    expect(inFlight).toMatchObject({ scope: 'every registered corridor' })
+    expect(inFlight).not.toHaveProperty('liveCount')
   })
 
   it('counts every corridor the registry serves, not the four BTC pairs', async () => {
@@ -276,7 +284,7 @@ describe('POST /api/actions/restart-solver — what it interrupts', () => {
     await restart({ confirm: 'RESTART' }, svc)
     expect(evm.committedSats).toHaveBeenCalled()
     const { detail } = svc.adminStore.recordAction.mock.calls[0]![0] as { detail: string }
-    expect(JSON.parse(detail)).toMatchObject({ inFlight: { committedSats: 10, liveCount: 1 } })
+    expect(JSON.parse(detail)).toMatchObject({ inFlight: { committedSats: 10, recoverableCount: 1 } })
   })
 
   it('still restarts when a store cannot be read, reporting that instead of the numbers', async () => {
@@ -324,16 +332,19 @@ describe('the console renders it', () => {
     const item = appSource.slice(appSource.indexOf('const pendingItem'), appSource.indexOf('// On EVERY panel'))
     expect(item).toContain('item.loaded')
     expect(item).toContain('item.stored')
-    // `join(', ')` on objects would render "[object Object]" everywhere.
     expect(banner()).not.toContain("pending.join(', ')")
   })
 
   it('does not render the values in a colour that fails AA on the amber banner', () => {
-    // `--text-faint` reads 4.02:1 on `--exposed-bg`. The connective prose the
-    // banner shipped with uses it; the VALUES must not, they are the substance.
     const item = appSource.slice(appSource.indexOf('const pendingItem'), appSource.indexOf('// On EVERY panel'))
     expect(item).not.toContain('span.faint')
     expect(item).toContain('span.muted')
+  })
+
+  it('gives the gate a heading of its own, not the read-payment sentence', () => {
+    // The default heading names a read-payment check that never runs here.
+    expect(banner()).toContain('This is what a restart interrupts.')
+    expect(appSource).toContain("d.overrideTitle ?? 'This is not the action the last check supports.'")
   })
 
   it('still renders above every panel, not only the overview', () => {
@@ -342,7 +353,7 @@ describe('the console renders it', () => {
   })
 
   it('puts what is in flight in front of the operator before they confirm', () => {
-    expect(banner()).toContain("armDialog('restart-solver', {}, inFlightLine(o))")
+    expect(banner()).toContain("armDialog('restart-solver', {}, inFlightLine(o),")
     const line = appSource.slice(appSource.indexOf('const inFlightLine'), appSource.indexOf('const pendingItem'))
     expect(line).toContain('o.exposure.committedSats')
     expect(line).toContain('o.exposure.exposedCount')
