@@ -576,7 +576,11 @@ export class OnchainAssetReceiveSwapService {
     if (row.state !== 'claimed') {
       // `P` reaches the row before anything is spent against it, and the loop
       // re-reads: the broadcast below happens on the next pass, from `claimed`.
-      return store.transition(row.id, row.state as 'awaiting_claim', 'claimed', { preimage: preimageHex })
+      // BOTH states the planner emits `claim_onchain` from. Naming only the
+      // first made `LEGAL_EDGES`' second edge into `claimed` read as dead.
+      return store.transition(row.id, row.state as 'awaiting_claim' | 'refunding_arkade', 'claimed', {
+        preimage: preimageHex,
+      })
     }
 
     const htlc = buildOnchainHtlc({

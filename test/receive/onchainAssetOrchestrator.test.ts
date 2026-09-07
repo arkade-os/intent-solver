@@ -358,6 +358,19 @@ describe('OnchainAssetReceiveSwapService', () => {
       expect((await store.get(swap.id)).state).toBe('settled')
     })
 
+    it('claims from refunding_arkade too, the second edge into claimed', async () => {
+      // A refund already under way loses to a preimage: rule 5 is first, so
+      // `refunding_arkade -> claimed` is a live edge and not an unreachable one.
+      const swap = await fundAndConfirm()
+      await service.tick(swap.id)
+      await store.transition(swap.id, 'awaiting_claim', 'refunding_arkade', {})
+      deps.arkadeFake.spendLockup(swap.pkScript, P)
+      await service.tick(swap.id)
+      const row = await store.get(swap.id)
+      expect(row.state).toBe('claimed')
+      expect(row.preimage).toBe(hex.encode(P))
+    })
+
     it('carries P onto the row before it spends against it', async () => {
       const swap = await fundAndConfirm()
       await service.tick(swap.id)
