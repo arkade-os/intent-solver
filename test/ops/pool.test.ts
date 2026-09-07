@@ -18,6 +18,9 @@ import { mintPool, poolPlan, committedAcrossCorridors } from '@arkade-os/solver-
 import { usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 import type { Services } from '@arkade-os/solver-app/ops/services.js'
 import { readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
+import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+
+const ASSET_A = `${'aa'.repeat(32)}0100`
 
 const zero = () => ({ committedSats: vi.fn().mockResolvedValue(0) })
 
@@ -208,6 +211,42 @@ describe('committedAcrossCorridors', () => {
 
   it('is zero for a solver serving nothing', async () => {
     expect(await committedAcrossCorridors(createCorridorReaderSet([]))).toBe(0)
+  })
+
+  // One market registers a reader per DIRECTION, so two readers share one table.
+  it('counts one store once, though a market registers it twice', async () => {
+    const store = await AssetRfqSwapStore.open(':memory:', () => 1_000)
+    await store.insertQuote({
+      id: 'swap-1',
+      rfqId: 'a'.repeat(64),
+      pair: `arkade:${ASSET_A}->arkade:BTC`,
+      fromAssetId: ASSET_A,
+      fromAmount: 100_000_000n,
+      toAssetId: null,
+      toAmount: 99_500_000n,
+      makerPkScript: `5120${'c'.repeat(64)}`,
+      makerPublicKey: 'b'.repeat(64),
+      offerPkScript: `5120${'d'.repeat(64)}`,
+      offerAddress: 'ark1qoffer',
+      solverPubkey: 'e'.repeat(64),
+      validUntil: 2_000,
+    })
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'filling')
+
+    const set = readerSetFromDeps({
+      store: zero(),
+      onchainStore: zero(),
+      assetRfqStore: store,
+      assetRfqMarkets: [{ symbol: 'USDA', base: ASSET_A, quote: null }],
+    } as unknown as FlatCorridorDeps)
+
+    // Per reader too: a sum is blind to a reader narrowed to the WRONG pair.
+    const satsFor = async (pair: string) => await [...set].find((r) => r.descriptor.pair === pair)!.committedSats()
+    expect(await satsFor(`arkade:${ASSET_A}->arkade:BTC`)).toBe(99_500_000)
+    expect(await satsFor(`arkade:BTC->arkade:${ASSET_A}`)).toBe(0)
+    expect(await committedAcrossCorridors(set)).toBe(99_500_000)
+    await store.close()
   })
 })
 
