@@ -1,0 +1,12 @@
+# LF in the repository, whatever the checkout does.
+#
+# Without this, a Windows clone with `core.autocrlf=true` checks out CRLF,
+# `.prettierrc` sets no `endOfLine`, and Prettier's `lf` default then flags the
+# line endings of every file it looks at — 472 of them, none about formatting.
+# The gate reads as broken and gets ignored, which is how a genuinely unwrapped
+# line reaches CI.
+#
+# `text=auto` leaves git to detect text from binary, so images and archives are
+# untouched. Fixing it here rather than with `endOfLine` in `.prettierrc` keeps
+# CI enforcing LF for everyone instead of silencing the check per contributor.
+* text=auto eol=lf
