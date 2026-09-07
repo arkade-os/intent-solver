@@ -43,6 +43,7 @@ import { log } from '@arkade-os/solver-core/util/poll.js'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import { claimIdentity } from './claimIdentity.js'
 import type { CovenantSwapScript } from './covenant.js'
+import { vtxoPages } from './indexerPaging.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
 
 /** The two views any spend below needs; CovenantSwapScript satisfies it (as would any VtxoScript wrapper). */
@@ -352,9 +353,7 @@ export interface FundedAsset {
  * and a gate that reads only `vtxos[0]` refuses a fully funded swap — or worse,
  * claims part of the money and strands the rest at the script. The same goes
  * for PAGES: the indexer paginates, and a truncated first page undercounts the
- * lockup the exact-amount gate compares against, so every page is walked. An
- * empty page is the hard stop that keeps a misbehaving server from spinning the
- * loop; `page.total` alone is trusted only as far as results keep arriving.
+ * lockup the exact-amount gate compares against, so every page is walked.
  *
  * This read is the AUTHORITY on whether a lockup exists, and the failsafe that
  * finds one no matter what else fails — a poll cannot silently die and leave a
@@ -366,15 +365,7 @@ export interface FundedAsset {
  */
 export const findLockups = async (ctx: ArkadeContext, pkScriptHex: string): Promise<FundedOutput[]> => {
   const outputs: FundedOutput[] = []
-  let pageIndex = 0
-  for (;;) {
-    const { vtxos, page } = await ctx.wallet.indexerProvider.getVtxos({
-      scripts: [pkScriptHex],
-      spendableOnly: true,
-      pageIndex,
-      pageSize: 500,
-    })
-    const batch = vtxos ?? []
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex], spendableOnly: true })) {
     for (const vtxo of batch) {
       // 256-bit, and the indexer reports it as a STRING: never a `number`.
       const assets = ((vtxo as { assets?: { assetId: string; amount: bigint | string }[] }).assets ?? [])
@@ -387,8 +378,6 @@ export const findLockups = async (ctx: ArkadeContext, pkScriptHex: string): Prom
         ...(assets.length > 0 ? { assets } : {}),
       })
     }
-    if (batch.length === 0 || !page || page.current + 1 >= page.total) break
-    pageIndex = page.current + 1
   }
   return outputs
 }
@@ -516,28 +505,17 @@ export const totalValue = (outputs: readonly FundedOutput[]): number =>
  * cannot read a spent output back as unspent.
  *
  * Paged the same way {@link findLockups} is, and for the same reason now that
- * values are compared here: a truncated first page would undercount the
- * lockup, and an empty page is the hard stop that keeps a misbehaving server
- * from spinning the loop.
+ * values are compared here: a truncated first page would undercount the lockup.
  */
 export const findLockupOutpoints = async (
   ctx: Pick<ArkadeContext, 'wallet'>,
   pkScriptHex: string,
 ): Promise<{ txid: string; vout: number; value: number; spent: boolean }[]> => {
   const outpoints: { txid: string; vout: number; value: number; spent: boolean }[] = []
-  let pageIndex = 0
-  for (;;) {
-    const { vtxos, page } = await ctx.wallet.indexerProvider.getVtxos({
-      scripts: [pkScriptHex],
-      pageIndex,
-      pageSize: 500,
-    })
-    const batch = vtxos ?? []
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
     for (const vtxo of batch) {
       outpoints.push({ txid: vtxo.txid, vout: vtxo.vout, value: Number(vtxo.value), spent: hasTerminalSpend(vtxo) })
     }
-    if (batch.length === 0 || !page || page.current + 1 >= page.total) break
-    pageIndex = page.current + 1
   }
   return outpoints
 }

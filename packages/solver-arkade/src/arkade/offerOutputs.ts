@@ -27,6 +27,7 @@
  */
 import { hasTerminalSpend } from '@arkade-os/sdk'
 import type { ArkadeContext } from './wallet.js'
+import { vtxoPages } from './indexerPaging.js'
 import type { OfferOutputView } from './offerDeposit.js'
 
 /**
@@ -38,22 +39,14 @@ import type { OfferOutputView } from './offerDeposit.js'
  *
  * Paged exactly as `findLockupOutpoints` is, and for the same reason — a
  * truncated first page undercounts the deposit, and `offer_unfunded` is what a
- * caller would see instead of an error. The empty-page stop is the hard bound
- * that keeps a misbehaving server from spinning the loop.
+ * caller would see instead of an error.
  */
 export const offerOutputsAt = async (
   ctx: Pick<ArkadeContext, 'wallet'>,
   pkScriptHex: string,
 ): Promise<OfferOutputView[]> => {
   const outputs: OfferOutputView[] = []
-  let pageIndex = 0
-  for (;;) {
-    const { vtxos, page } = await ctx.wallet.indexerProvider.getVtxos({
-      scripts: [pkScriptHex],
-      pageIndex,
-      pageSize: 500,
-    })
-    const batch = vtxos ?? []
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
     for (const vtxo of batch) {
       outputs.push({
         script: vtxo.script,
@@ -73,8 +66,6 @@ export const offerOutputsAt = async (
         ...(vtxo.assets ? { assets: vtxo.assets } : {}),
       })
     }
-    if (batch.length === 0 || !page || page.current + 1 >= page.total) break
-    pageIndex = page.current + 1
   }
   return outputs
 }
