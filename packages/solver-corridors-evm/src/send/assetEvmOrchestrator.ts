@@ -283,6 +283,9 @@ export class AssetEvmSendSwapService {
     // THE OPERATOR DECLARED THIS PAIR OR IT IS NOT SERVED. No fallback composes
     // a rate from the asset's BTC market and the token's — @see
     // assetEvmCorridorConfig.ts.
+    // Interpolated rather than `assetEvmCorridorFor`: that validator THROWS on a
+    // malformed leg, and these are client-supplied strings. A map miss refusing
+    // `unsupported_pair` is the better answer at an ingress than an exception.
     const corridor = `arkade:${request.assetId}->ethereum:${request.tokenAddress.toLowerCase()}`
     const served = this.deps.markets.get(corridor)
     if (served === undefined || !served.enabled) return { accepted: false, reason: 'unsupported_pair' }
@@ -308,10 +311,11 @@ export class AssetEvmSendSwapService {
 
     // THE AGGREGATE BOUND, in the asset's own units, because the house
     // `maxExposedSats` cannot see this corridor at all. Read-then-check rather
-    // than a reservation: `AdmissionControl` serialises a SATS figure, and
-    // there is no sats figure here to hand it. The residual race admits at most
-    // the quotes in flight at one instant, which is the exposure a per-swap
-    // ceiling already bounds — stated rather than left to be discovered.
+    // than a reservation: `AdmissionControl.reserveUnits` would close the race,
+    // but this service is not constructed in `createServices` yet, so its deps
+    // carry no `admission` to hand it — both belong in the wiring PR, and until
+    // then the exposure here is zero. The residual race admits at most the
+    // quotes in flight at one instant, which a per-swap ceiling already bounds.
     if (served.maxExposedUnits !== undefined) {
       const committed = (await store.committedAssetUnits()).get(request.assetId) ?? 0n
       if (committed + request.assetUnits > served.maxExposedUnits) {
