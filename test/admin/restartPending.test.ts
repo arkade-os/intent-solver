@@ -328,6 +328,14 @@ describe('the console renders it', () => {
     expect(banner()).not.toContain("pending.join(', ')")
   })
 
+  it('does not render the values in a colour that fails AA on the amber banner', () => {
+    // `--text-faint` reads 4.02:1 on `--exposed-bg`. The connective prose the
+    // banner shipped with uses it; the VALUES must not, they are the substance.
+    const item = appSource.slice(appSource.indexOf('const pendingItem'), appSource.indexOf('// On EVERY panel'))
+    expect(item).not.toContain('span.faint')
+    expect(item).toContain('span.muted')
+  })
+
   it('still renders above every panel, not only the overview', () => {
     expect(appSource).toContain('const pendingBanner = restartBanner()')
     expect(appSource).toContain('root.appendChild(pendingBanner)')

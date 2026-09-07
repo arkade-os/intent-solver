@@ -2245,8 +2245,10 @@ const inFlightLine = (o) =>
   'for you. Boot re-drives every non-terminal row, but a payment in flight right now stays undecided until its ' +
   'next tick.'
 
-/** `KNOB 0 → 25` — whether the change is worth interrupting swaps for. */
-const pendingItem = (item) => h('span.mono', item.key, h('span.faint', ` ${item.loaded} → ${item.stored}`))
+// `KNOB 0 → 25` — whether the change is worth interrupting swaps for. `.muted`
+// not `.faint`: these are the banner's substance, and --text-faint reads 4.02:1
+// on --exposed-bg, under the AA floor. See contrast.test.ts.
+const pendingItem = (item) => h('span.mono', item.key, h('span.muted', ` ${item.loaded} → ${item.stored}`))
 
 // On EVERY panel: an operator who changed a knob and moved on is by definition
 // not looking at Settings. Same reasoning as the status bar's stuck-row count.

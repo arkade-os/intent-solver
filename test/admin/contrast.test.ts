@@ -74,6 +74,11 @@ const PAIRS: readonly (readonly [fg: string, bg: string, where: string])[] = [
   ['failed', 'failed-bg', 'the failed chip'],
   ['exposed', 'ground', 'exposed text'],
   ['exposed', 'exposed-bg', 'the exposed chip'],
+  // The restart banner is --exposed-bg. `text` is its headline and `text-dim`
+  // the pending items, which are its substance rather than decoration —
+  // --text-faint reads 4.02:1 there and is deliberately not used for them.
+  ['text', 'exposed-bg', 'the restart banner'],
+  ['text-dim', 'exposed-bg', 'the values in the restart banner'],
   ['focus', 'ground', 'focus ring against the page'],
 ]
 
