@@ -9,8 +9,10 @@ import type { Hono } from 'hono'
 import {
   assetCardMarkets,
   buildSolverCard,
+  publishableAssetMarkets,
   signSolverCard,
   unpublishableCorridors,
+  type AssetCardMarket,
   type SolverCard,
 } from '@arkade-os/solver-core/core/registryCard.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
@@ -38,7 +40,7 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
  * that would LIE about the deployment it names, and the route reports the
  * reason instead of publishing it.
  */
-const deploymentCard = async (services: Services): Promise<SolverCard> => {
+const deploymentCard = async (services: Services, assetMarkets: readonly AssetCardMarket[]): Promise<SolverCard> => {
   const { config, policy } = services
   const name = process.env.SOLVER_NAME?.trim()
   // Guarded here rather than left to `buildSolverCard`: an absent variable
@@ -81,11 +83,7 @@ const deploymentCard = async (services: Services): Promise<SolverCard> => {
       discoveryPubkey: services.providerPubkey,
       relays,
       corridors: served,
-      // Already the ENABLED markets: `assetMarketPolicy` drops a paused pair.
-      assetMarkets: assetCardMarkets(services.assetMarkets, {
-        min: policy.offerMinFillAmount,
-        max: policy.offerMaxFillAmount,
-      }),
+      assetMarkets,
     }),
     (digest) => services.arkade.identity.signMessage(digest, 'schnorr'),
   )
@@ -93,13 +91,21 @@ const deploymentCard = async (services: Services): Promise<SolverCard> => {
 
 export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/card', async (c) => {
+    // Outside the try: an unadvertisable market is still reported when the card
+    // fails for another reason. ENABLED already — `assetMarketPolicy` drops a pause.
+    const { publishable, omitted } = publishableAssetMarkets(
+      assetCardMarkets(deps.services.assetMarkets, {
+        min: deps.services.policy.offerMinFillAmount,
+        max: deps.services.policy.offerMaxFillAmount,
+      }),
+    )
     // An unbuildable card degrades to a reported reason, never a 500: the ad
     // half of this answer is still worth showing, and a console that goes dark
     // because SOLVER_NAME is unset is the failure the console exists to end.
     let card: SolverCard | null = null
     let cardError: string | null = null
     try {
-      card = await deploymentCard(deps.services)
+      card = await deploymentCard(deps.services, publishable)
     } catch (error) {
       cardError = messageOf(error)
     }
@@ -122,9 +128,12 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
       // `error`, which on this port means "the request failed".
       cardError,
       // Reported even when the card failed: it describes the deployment, not the card.
-      cardOmitted: unpublishableCorridors(
-        deps.services.policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
-      ),
+      cardOmitted: [
+        ...unpublishableCorridors(
+          deps.services.policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
+        ),
+        ...omitted,
+      ],
       ad,
       adError,
       publish: publishStateOf(deps),
