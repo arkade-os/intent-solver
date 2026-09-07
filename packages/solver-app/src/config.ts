@@ -375,6 +375,8 @@ export interface Config {
    * anything that can reach this port can move money.
    */
   adminHost: string
+  /** Off unless set: a supervisor is what restarts, so without one this only stops. */
+  adminRestartEnabled: boolean
   /** Outbound relay URL for `relay` mode; null when not configured. */
   relayUrl: string | null
   /**
@@ -975,6 +977,7 @@ export const loadConfig = (): Config => {
     // A bad value still throws through intFromEnv rather than reading as "off".
     adminPort: process.env.ADMIN_PORT?.trim() ? intFromEnv('ADMIN_PORT', 8788, 1, 65535) : null,
     adminHost: process.env.ADMIN_HOST?.trim() || '127.0.0.1',
+    adminRestartEnabled: process.env.ADMIN_RESTART_ENABLED?.trim() === 'true',
     /** Outbound relay URL for the `relay` command; unset = relay mode unavailable. */
     relayUrl: process.env.RELAY_URL?.trim() || null,
     // Defaults to the production dialect: a deployment pointed at a real

@@ -43,7 +43,16 @@ const cardCommand = (): string => {
 describe('createServices resolves stored overrides', () => {
   it('reads the override store and layers it onto the environment', () => {
     const body = createServices()
-    expect(body).toContain('applyOverrides(config, await adminStore.getOverrides())')
+    expect(body).toContain('await adminStore.getOverrides()')
+    expect(body).toContain('applyOverrides(config, bootOverrides)')
+  })
+
+  // One read, not two: a second races a concurrent PATCH.
+  it('keeps the resolved overrides verbatim, from the same read the policy used', () => {
+    const body = createServices()
+    expect(body).toContain('const bootOverrides = await adminStore.getOverrides()')
+    expect(body).toMatch(/\bbootOverrides,\s/)
+    expect(body.match(/adminStore\.getOverrides\(\)/g)).toHaveLength(1)
   })
 
   it('resolves the policy BEFORE constructing any service', () => {

@@ -219,6 +219,17 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   `[1, 65535]` and a bad value throws rather than reading as "off", so a typo
   cannot silently darken the console an operator believes is up.
 
+  `ADMIN_RESTART_ENABLED` lets the console restart the solver, which is how a
+  stored override or a market edit takes effect. Off unless set to `true`, and
+  deliberately so twice over: the process can only stop itself, so without a
+  supervisor that starts it again — `docker-compose.yml` sets
+  `restart: unless-stopped`, systemd needs `Restart=always` — "restart" means
+  "stop"; and on a port with no authentication of its own, a default-on
+  off-switch is reachable by anything the proxy admits. The action is armed
+  regardless, so it still takes typing `RESTART`, and the console renders it
+  disabled with the reason rather than hiding it — an operator asking "why has
+  my override not taken effect" needs to find that answer, not silence.
+
 - **Funding sources:** every place this deployment keeps coins answers one
   interface (`packages/solver-app/src/ops/fundSources.ts`), so the console can
   read a balance, list the ways in, settle what has arrived and withdraw —

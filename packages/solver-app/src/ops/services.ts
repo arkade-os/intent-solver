@@ -110,6 +110,9 @@ export interface Services {
    * terms the corridor then refuses.
    */
   policy: Config
+  /** What {@link Services.policy} was resolved from, so `pendingRestartKeys` can
+   * tell an override already in force from one still waiting. */
+  bootOverrides: Record<string, string>
   /**
    * The Arkade asset markets this process trades, resolved once at startup from
    * the console's stored rows.
@@ -391,7 +394,8 @@ export const createServices = async (
    * same range `config.ts` validates — so this can lower the amount at risk
    * but never raise it above what the deployment already permitted.
    */
-  const policy = applyOverrides(config, await adminStore.getOverrides())
+  const bootOverrides = await adminStore.getOverrides()
+  const policy = applyOverrides(config, bootOverrides)
   /**
    * The asset markets, read once from the same store and validated HERE.
    *
@@ -1002,6 +1006,7 @@ export const createServices = async (
   return {
     config,
     policy,
+    bootOverrides,
     assetMarkets: assetMarkets.pricing,
     assetMarketPairs: assetMarkets.pairs,
     store,
