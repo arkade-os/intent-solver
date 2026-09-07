@@ -236,7 +236,8 @@ export class AssetEvmSendSwapService {
       }
 
       case 'refund_evm': {
-        await store.transition(row.id, row.state, 'refunding_evm')
+        // Already there on the resend path; a self-transition would log a lie.
+        if (row.state !== 'refunding_evm') await store.transition(row.id, row.state, 'refunding_evm')
         const txid = await this.deps.broadcast(this.deps.evm.refundCall(this.deps.lockFor(row)))
         // GUARDED, not a bare patch. A row that already names a refund keeps
         // that name: overwriting it would leave the row waiting on the receipt
