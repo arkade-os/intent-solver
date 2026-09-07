@@ -188,7 +188,11 @@ export const covenantScriptFromRow = (row: CovenantScriptRow): CovenantSwapScrip
     // CANONICAL, never pre-reversed — @see CovenantScriptRow.assetId. Omitted
     // entirely for a sats row, which is the BTC covenant every other corridor
     // builds today.
-    ...(row.assetId ? { asset: parseAssetId(row.assetId) } : {}),
+    //
+    // `!= null` rather than truthiness: an EMPTY id is a broken asset row, not a
+    // sats one, and reading it as absent would build the BTC script and derive
+    // an address the lockup was never funded at. `parseAssetId` names it instead.
+    ...(row.assetId != null ? { asset: parseAssetId(row.assetId) } : {}),
     nonInteractiveParameters: {
       emulatorPubkey: hex.decode(row.emulatorPubkey),
       receiverPkScript: hex.decode(row.receiverPkScript),

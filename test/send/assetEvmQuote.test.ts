@@ -20,8 +20,9 @@ import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 
 const NOW = 1_800_000_000
 const key = (fill: number) => hex.encode(schnorr.getPublicKey(new Uint8Array(32).fill(fill)))
-const ASSET = '11'.repeat(32) + '0000'
-const OTHER_ASSET = '22'.repeat(32) + '0000'
+/** Hex LETTERS on purpose, so an uppercase spelling is a different string. */
+const ASSET = 'ab'.repeat(32) + '0000'
+const OTHER_ASSET = 'cd'.repeat(32) + '0000'
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
 /** 169 x 512s — just over 24h, and BIP68-encodable, so the covenant accepts it. */
 const DELAY = 169 * 512
@@ -195,6 +196,28 @@ describe('the operator declares the pair, or it is not served', () => {
     const { service } = await build()
     const outcome = await service.quote(request({ tokenAddress: TOKEN.toUpperCase().replace('0X', '0x') }))
     expect(outcome.accepted).toBe(true)
+  })
+
+  it.each([
+    ['far too long', 'ff'.repeat(400)],
+    ['too short', 'ff'],
+    ['empty', ''],
+    ['not hex', 'zz'.repeat(34)],
+    ['UPPERCASE spelling of a served id', ASSET.toUpperCase()],
+  ])('refuses a %s asset id by NAME, never by throwing', async (_why, assetId) => {
+    // The map lookup is what rejects these, so the ids never reach a parser.
+    // Pinned because the alternative — validating first — turns a client's typo
+    // into an exception on a public entry point.
+    //
+    // The uppercase case is NOT an oversight beside the token address, which is
+    // lowercased: an EVM address carries its checksum in case, while an asset id
+    // is lowercase BY SPEC, so accepting a second spelling would map two keys to
+    // one market — what `marketKey.ts` exists to prevent.
+    const { service } = await build()
+    await expect(service.quote(request({ assetId }))).resolves.toEqual({
+      accepted: false,
+      reason: 'unsupported_pair',
+    })
   })
 })
 

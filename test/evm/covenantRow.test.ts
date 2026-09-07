@@ -94,4 +94,13 @@ describe('the asset send leg carries a DENOMINATION as well as the roles', () =>
     const second = covenantScriptFromRow(assetEvmSendCovenantRowFor(other))
     expect(hex.encode(first.pkScript)).not.toBe(hex.encode(second.pkScript))
   })
+
+  it('names an EMPTY id rather than reading it as a sats row', () => {
+    // The dangerous direction: an empty id read as absent builds the BTC script
+    // and derives an address the lockup was never funded at. Unreachable while
+    // the column is NOT NULL and the market ids are validated, but this shape is
+    // shared with every corridor and the failure is silent.
+    const broken = { ...assetRow, assetId: '' } as AssetEvmSendSwapRow
+    expect(() => covenantScriptFromRow(assetEvmSendCovenantRowFor(broken))).toThrow(/68 lowercase hex/)
+  })
 })
