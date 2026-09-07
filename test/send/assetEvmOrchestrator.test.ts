@@ -558,6 +558,21 @@ describe('a refund that was broadcast is not a refund that landed', () => {
     ).toHaveLength(0)
   })
 
+  it('does not read a receipt it has no txid for', async () => {
+    // The other half of that crash window. A receipt asked for a null txid
+    // could answer `success` and close the books on a refund never sent — the
+    // row would read `refunded` with the solver's tokens still in the contract.
+    const transactionOutcome = vi.fn().mockResolvedValue('success')
+    const { store, service } = await dueForRefund({
+      isLocked: vi.fn().mockResolvedValue(true),
+      transactionOutcome,
+    })
+    await store.transition('swap-1', 'awaiting_claim', 'refunding_evm')
+    await service.tick('swap-1')
+    expect(transactionOutcome).not.toHaveBeenCalled()
+    expect((await store.get('swap-1')).state).toBe('refunding_evm')
+  })
+
   it('sends nothing when the lock is gone, so a claimed swap is not chased', async () => {
     const { store, service, deps } = await dueForRefund({
       isLocked: vi.fn().mockResolvedValue(false),
