@@ -69,6 +69,7 @@ const build = async (over: Partial<AssetEvmSendServiceDeps> = {}) => {
     evm: {
       isLocked: vi.fn().mockResolvedValue(false),
       findClaimPreimage: vi.fn().mockResolvedValue(null),
+      findRefund: vi.fn().mockResolvedValue(false),
       isLockedAt: vi.fn().mockResolvedValue(true),
       blockTimestampAt: vi.fn().mockResolvedValue(0),
       transactionOutcome: vi.fn().mockResolvedValue('pending'),
@@ -455,6 +456,7 @@ describe('a refund that was broadcast is not a refund that landed', () => {
         isLockedAt: vi.fn().mockResolvedValue(true),
         blockTimestampAt: vi.fn().mockResolvedValue(0),
         findClaimPreimage: vi.fn().mockResolvedValue(null),
+        findRefund: vi.fn().mockResolvedValue(false),
         refundCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
         ...evm,
       } as never,

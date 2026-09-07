@@ -219,6 +219,17 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   `[1, 65535]` and a bad value throws rather than reading as "off", so a typo
   cannot silently darken the console an operator believes is up.
 
+  `ADMIN_RESTART_ENABLED` lets the console restart the solver, which is how a
+  stored override or a market edit takes effect. Off unless set to `true`, and
+  deliberately so twice over: the process can only stop itself, so without a
+  supervisor that starts it again — `docker-compose.yml` sets
+  `restart: unless-stopped`, systemd needs `Restart=always` — "restart" means
+  "stop"; and on a port with no authentication of its own, a default-on
+  off-switch is reachable by anything the proxy admits. The action is armed
+  regardless, so it still takes typing `RESTART`, and the console renders it
+  disabled with the reason rather than hiding it — an operator asking "why has
+  my override not taken effect" needs to find that answer, not silence.
+
 - **Funding sources:** every place this deployment keeps coins answers one
   interface (`packages/solver-app/src/ops/fundSources.ts`), so the console can
   read a balance, list the ways in, settle what has arrived and withdraw —
@@ -436,6 +447,25 @@ transaction stream, nothing decided and nothing spent.
 | `OFFER_MARKETS`         | the markets taken, `A/B` pairs comma-separated, where `BTC` is the sats leg and anything else is a 68-hex asset id: `BTC/<assetId>,<assetIdA>/<assetIdB>`. Unordered — one entry serves both directions. Unset serves none, which is the whole path off. An entry naming one thing twice, or not shaped `A/B`, throws                              |
 | `OFFER_MIN_FILL_AMOUNT` | **required once `OFFER_MARKETS` names a market**, with no default shipped: this is how much of the float one discovered offer may take, which is the deployment's answer rather than this repository's. A whole number in the WANT leg's own units — asset units, or sats when that leg is BTC — parsed as bigint, since an asset amount is 256-bit |
 | `OFFER_MAX_FILL_AMOUNT` | same rule, the upper bound. A max below the min throws at startup: it would refuse every offer, which is indistinguishable from a quiet market and would be diagnosed as one                                                                                                                                                                       |
+
+### Environment — Arkade asset RFQ (the quoted path), off unless `ASSET_MARKETS` is set
+
+The other way to reach an asset, and the mirror of the packet path above: there
+a maker publishes a price and this solver decides, here a client asks and this
+solver names a binding one. **The solver is still the TAKER** — `docs/rfq-protocol.md`
+§ 7.2.1 keeps it so as a money constraint, not a convention: it never publishes
+an offer and never funds a covenant. What changes is who names the price, so
+the covenant is derived from the row it negotiated rather than read off a
+packet, and the quote binds for a window instead of standing open.
+
+A deployment that sets none of these behaves exactly as it did before they
+existed: no asset RFQ store is opened, no service is constructed, and every
+asset pair refuses by name at the ingress.
+
+| Var                              | Notes                                                                                                                                                                                                                                                                                                            |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ASSET_MARKETS`                  | the assets quoted against over RFQ, `SYMBOL:<assetId>` comma-separated. The symbol is what this market's other env stems are built from, for the reason `EVM_TOKENS` gives: a 68-hex asset id in a variable name is legal shell and unreadable. Unset serves none, which is the whole path off                     |
+| `ASSET_QUOTE_VALIDITY_SECONDS`   | how long an asset quote binds. Default 30, floor 5, ceiling 900. Short on purpose — every pair here is cross-asset by construction, so the solver is short the market for the whole window and the window IS the exposure. § 5 puts cross-asset windows "on the order of ~30 seconds"                              |
 
 ### Environment — `LN_BACKEND=lnd` only
 

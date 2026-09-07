@@ -36,6 +36,7 @@ import { requireLn } from '../../ops/rails.js'
 import { capabilityRefusal, fundSources, requireFundSource, summarise } from '../../ops/fundSources.js'
 import { mintPool, poolPlan } from '../../ops/pool.js'
 import { runFloatLifecycle } from '../../ops/float.js'
+import { requestRestart } from '../../ops/restart.js'
 import type { Services } from '../../ops/services.js'
 import type { AdminDeps } from '../server.js'
 import { clampLimit } from '@arkade-os/solver-core/core/page.js'
@@ -649,6 +650,20 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'Spends: splits the float into smaller pieces in one Arkade transaction. Refused while any corridor has a ' +
       'non-terminal swap, because coin reservations are process-local and a concurrent provider could be holding them.',
     run: (services, body) => mintPool(services, { force: body.force === true }),
+  },
+
+  // Armed though it moves no money: it stops the process driving the ones that
+  // do. Listed even when disabled, so "why has my override not taken effect"
+  // meets an answer rather than a missing button.
+  'restart-solver': {
+    tier: 'armed',
+    confirmKind: 'literal:RESTART',
+    expectedConfirm: () => 'RESTART',
+    warning:
+      'Stops this process so a supervisor starts a new one, which is how a stored override or market edit takes ' +
+      'effect. In-flight swaps are picked up again by recovery on boot. Requires ADMIN_RESTART_ENABLED=true AND a ' +
+      'supervisor that restarts the solver — without one this stops it and nothing brings it back.',
+    run: async (services) => requestRestart({ enabled: services.config.adminRestartEnabled }),
   },
 
   /**

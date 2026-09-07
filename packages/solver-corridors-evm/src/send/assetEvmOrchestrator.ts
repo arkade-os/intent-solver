@@ -140,15 +140,27 @@ export class AssetEvmSendSwapService {
     }
   }
 
+  /** Rule 9's proof, degraded as {@link refundOutcome} is. @see EvmSendSwapService.refundLanded */
+  private async refundLanded(row: AssetEvmSendSwapRow): Promise<boolean> {
+    if (row.state !== 'refunding_evm') return false
+    try {
+      return await this.deps.evm.findRefund(this.deps.lockFor(row), 0n)
+    } catch (error) {
+      this.deps.onTickError?.(row.id, error)
+      return false
+    }
+  }
+
   /** Everything the planner needs, read in ONE pass. @see EvmSendSwapService.observe */
   private async observe(row: AssetEvmSendSwapRow): Promise<EvmSendObservation> {
     const lock = this.deps.lockFor(row)
-    const [funded, present, height, lockReverted, refundOutcome] = await Promise.all([
+    const [funded, present, height, lockReverted, refundOutcome, refundLanded] = await Promise.all([
       this.deps.arkadeLockupFunded(row),
       this.deps.evm.isLocked(lock),
       this.deps.blockHeight(),
       this.lockReverted(row),
       this.refundOutcome(row),
+      this.refundLanded(row),
     ])
     // Gated on the ROW having entered `locking_evm`, never on the lock still
     // being present: the contract deletes its flag on claim, so presence goes
@@ -173,6 +185,7 @@ export class AssetEvmSendSwapService {
       evmLockPresent: present,
       evmLockReverted: lockReverted,
       evmRefundOutcome: refundOutcome,
+      evmRefundLanded: refundLanded,
       evmLockConfirmations: depth.confirmations,
       evmLockAgeSeconds: depth.ageSeconds,
       preimage,

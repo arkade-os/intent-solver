@@ -10,6 +10,7 @@ import { EvmSendSwapStore, type EvmSendQuoteRecord } from '@arkade-os/solver-cor
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+const TOKEN_B = '0x6b175474e89094c44da98b954eedeac495271d0f'
 let store: EvmSendSwapStore
 let now = 1_800_000_000
 
@@ -103,6 +104,17 @@ describe('EvmSendSwapStore', () => {
     expect(await store.committedSats()).toBe(50_000)
     await store.transition('swap-1', 'refunding_evm', 'refunded')
     expect(await store.committedSats()).toBe(0)
+  })
+
+  it('counts a single token when asked for one', async () => {
+    await store.insertQuote(quote())
+    await store.insertQuote(
+      quote({ id: 'swap-2', rfqId: 'rfq-2', paymentHash: 'bb'.repeat(32), tokenAddress: TOKEN_B, amountSats: 30_000 }),
+    )
+
+    expect(await store.committedSats(TOKEN)).toBe(50_000)
+    expect(await store.committedSats(TOKEN_B)).toBe(30_000)
+    expect(await store.committedSats()).toBe(80_000)
   })
 
   it('will not let two ticks advance the same row', async () => {

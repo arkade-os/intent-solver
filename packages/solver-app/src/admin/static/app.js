@@ -2238,6 +2238,39 @@ const BODIES = {
   audit: auditView,
 }
 
+// On EVERY panel: an operator who changed a knob and moved on is by definition
+// not looking at Settings. Same reasoning as the status bar's stuck-row count.
+const restartBanner = () => {
+  const o = state.overview
+  const pending = o?.pendingRestart ?? []
+  if (pending.length === 0) return null
+  return h(
+    'div.restart-banner',
+    { role: 'status' },
+    h(
+      'span',
+      h('b', `${pending.length} change${pending.length === 1 ? '' : 's'} pending a restart`),
+      h('span.faint', ' — this process is still quoting what it booted with: '),
+      h('span.mono', pending.join(', ')),
+    ),
+    o.restartEnabled
+      ? actButton(
+          'button.act.armed',
+          { 'data-action': 'restart-solver', onclick: () => armDialog('restart-solver', {}) },
+          'restart solver',
+        )
+      : h(
+          'span.muted',
+          {
+            title:
+              'Set ADMIN_RESTART_ENABLED=true, and only where a supervisor restarts the process. ' +
+              'Without one this stops the solver and nothing brings it back.',
+          },
+          'restart disabled',
+        ),
+  )
+}
+
 const render = () => {
   const root = document.getElementById('root')
   // `render` rebuilds the whole tree, so the detail modal that comes back is a
@@ -2263,6 +2296,8 @@ const render = () => {
   clear(root)
   root.appendChild(statusBar())
   root.appendChild(nav())
+  const pendingBanner = restartBanner()
+  if (pendingBanner) root.appendChild(pendingBanner)
   const main = h('main')
   if (state.banner) main.appendChild(h('p.banner', state.banner))
   // An action's result, inline. This used to be window.alert(), which blocks

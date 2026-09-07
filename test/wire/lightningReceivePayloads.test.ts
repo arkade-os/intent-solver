@@ -38,6 +38,7 @@ const row: ReceiveSwapRow = {
   arkadeLockupVout: null,
   arkadeLockupValue: null,
   revealedAt: null,
+  stampedAt: null,
   settleAttemptedAt: null,
   preimage: null,
   refundArkTxid: null,
@@ -97,6 +98,17 @@ describe('LightningReceiveRfqRequest', () => {
     expect(
       LightningReceiveRfqRequest.safeParse({ ...valid, profile: { ...valid.profile, payout_pubkey: 'zz'.repeat(32) } })
         .success,
+    ).toBe(false)
+  })
+
+  it('accepts a request that omits claim_packet — a client with no covclaimd claims for itself', () => {
+    const { claim_packet: _packet, ...withoutPacket } = valid.profile
+    expect(LightningReceiveRfqRequest.safeParse({ ...valid, profile: withoutPacket }).success).toBe(true)
+  })
+
+  it('still rejects an EMPTY claim_packet, so omission is the only way to say absent', () => {
+    expect(
+      LightningReceiveRfqRequest.safeParse({ ...valid, profile: { ...valid.profile, claim_packet: '' } }).success,
     ).toBe(false)
   })
 

@@ -1771,8 +1771,11 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     }
     const { MnemonicIdentity } = await import('@arkade-os/sdk')
     const identity = MnemonicIdentity.fromMnemonic(config.arkade.mnemonic, { isMainnet: config.arkade.isMainnet })
-    const { assetCardMarkets, buildSolverCard, signSolverCard, unpublishableCorridors } =
+    const { assetCardMarkets, buildSolverCard, publishableAssetMarkets, signSolverCard, unpublishableCorridors } =
       await import('@arkade-os/solver-core/core/registryCard.js')
+    const { publishable, omitted } = publishableAssetMarkets(
+      assetCardMarkets(assetMarkets, { min: policy.offerMinFillAmount, max: policy.offerMaxFillAmount }),
+    )
     const card = await signSolverCard(
       buildSolverCard({
         name,
@@ -1797,10 +1800,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
             { limits: policy.corridorLimits[corridor], fee: policy.corridorFees[corridor] },
           ]),
         ),
-        assetMarkets: assetCardMarkets(assetMarkets, {
-          min: policy.offerMinFillAmount,
-          max: policy.offerMaxFillAmount,
-        }),
+        assetMarkets: publishable,
       }),
       (digest) => identity.signMessage(digest, 'schnorr'),
     )
@@ -1809,9 +1809,12 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     console.log(JSON.stringify(card, null, 2))
     console.error(`registry path: solvers/${config.network}/${name}.json`)
     // Stderr, beside the path: stdout is piped into the registry checkout.
-    for (const note of unpublishableCorridors(
-      policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
-    )) {
+    for (const note of [
+      ...unpublishableCorridors(
+        policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
+      ),
+      ...omitted,
+    ]) {
       console.error(note)
     }
   },

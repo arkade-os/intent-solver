@@ -11,7 +11,7 @@
 import type { Hono } from 'hono'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
-import { applyOverrides } from '../settings.js'
+import { applyOverrides, pendingRestartKeys } from '../settings.js'
 import { probeBackends } from '../probes.js'
 import { consoleBalance, type AssetDetailSource } from '../assets.js'
 import { poolPlan } from '../../ops/pool.js'
@@ -123,7 +123,8 @@ const liveSwaps = async (deps: AdminDeps): Promise<AdminSwap[]> => {
 export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/overview', async (c) => {
     const { services } = deps
-    const effective = applyOverrides(services.config, await services.adminStore.getOverrides())
+    const overrides = await services.adminStore.getOverrides()
+    const effective = applyOverrides(services.config, overrides)
     const live = await liveSwaps(deps)
     const stuck = await stuckSwaps(deps)
 
@@ -150,6 +151,9 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       // copy that will eventually point a mainnet swap at a signet explorer.
       explorers: NETWORKS[services.config.network].explorers,
       uptimeSeconds: Math.max(0, (deps.now?.() ?? Math.floor(Date.now() / 1000)) - deps.startedAt),
+      /** Here rather than on /api/settings so the console can badge every panel. */
+      pendingRestart: pendingRestartKeys(services.bootOverrides, overrides),
+      restartEnabled: services.config.adminRestartEnabled,
       providerPubkey: services.providerPubkey,
       corridors: CORRIDORS.map((corridor) => ({
         corridor,

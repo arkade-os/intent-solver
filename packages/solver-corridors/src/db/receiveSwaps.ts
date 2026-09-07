@@ -70,7 +70,13 @@ const TRANSITION_COLUMNS = new Set([
  * `stuck` above all, which is the reason that override exists — and has to
  * record the audit fact without a transition.
  */
-const PATCH_COLUMNS = new Set(['revealed_at', 'settle_attempted_at', 'arkade_lockup_value', 'refund_ark_txid'])
+const PATCH_COLUMNS = new Set([
+  'revealed_at',
+  'stamped_at',
+  'settle_attempted_at',
+  'arkade_lockup_value',
+  'refund_ark_txid',
+])
 
 export interface ReceiveSwapRow {
   id: string
@@ -105,7 +111,7 @@ export interface ReceiveSwapRow {
   /** The client's own x-only key — the covenant's `receiver` role on this leg (their interactive-claim fallback). */
   payoutPubkey: string
   /** The client's preimage, ECIES-sealed to covclaimd. Opaque here — forwarded verbatim, never decrypted. */
-  claimPacket: string
+  claimPacket: string | null
 
   /**
    * Absolute unix seconds, set at `quoted` (`now + MAX_REFUND_HORIZON`) and
@@ -140,6 +146,9 @@ export interface ReceiveSwapRow {
   arkadeLockupValue: number | null
   /** Set once `covclaimd.reveal()` has succeeded — a data fact, not a state, so a failed attempt retries without re-funding. */
   revealedAt: number | null
+  /** Set once THIS service funded a stamped lockup — `claim_packet` says what a
+   *  funding WOULD carry, only this says what an adopted one actually did. */
+  stampedAt: number | null
   /**
    * When `settleHold` was CALLED — pre-committed, BEFORE the call, so a
    * resumed process can tell "not yet attempted" apart from "already
@@ -196,6 +205,7 @@ const RECEIVE_SWAP_COLUMNS = `
   arkade_lockup_vout             INTEGER,
   arkade_lockup_value            INTEGER,
   revealed_at                    INTEGER,
+  stamped_at                     INTEGER,
   settle_attempted_at            INTEGER,
   preimage                      TEXT,
   refund_ark_txid                TEXT,
@@ -243,7 +253,14 @@ const toRow = (raw: Raw): ReceiveSwapRow => ({
   payoutAddress: String(raw.payout_address),
   payoutPkScript: String(raw.payout_pk_script),
   payoutPubkey: String(raw.payout_pubkey),
-  claimPacket: String(raw.claim_packet),
+  // Absence is stored as '' rather than NULL: the column is NOT NULL in every
+  // deployed database, and SQLite cannot relax that without rebuilding a table
+  // of funded swaps. '' is unambiguous because the wire schema refuses an empty
+  // claim_packet. NULL reads as absent too, in case a column never was NOT NULL.
+  claimPacket:
+    raw.claim_packet === null || raw.claim_packet === undefined || raw.claim_packet === ''
+      ? null
+      : String(raw.claim_packet),
   refundLocktime: Number(raw.refund_locktime),
   solverPubkey: String(raw.solver_pubkey),
   serverPubkey: String(raw.server_pubkey),
@@ -265,6 +282,7 @@ const toRow = (raw: Raw): ReceiveSwapRow => ({
   arkadeLockupValue:
     raw.arkade_lockup_value === null || raw.arkade_lockup_value === undefined ? null : Number(raw.arkade_lockup_value),
   revealedAt: raw.revealed_at === null || raw.revealed_at === undefined ? null : Number(raw.revealed_at),
+  stampedAt: raw.stamped_at === null || raw.stamped_at === undefined ? null : Number(raw.stamped_at),
   settleAttemptedAt:
     raw.settle_attempted_at === null || raw.settle_attempted_at === undefined ? null : Number(raw.settle_attempted_at),
   preimage: raw.preimage === null || raw.preimage === undefined ? null : String(raw.preimage),
@@ -284,7 +302,7 @@ export interface ReceiveQuoteRecord {
   payoutAddress: string
   payoutPkScript: string
   payoutPubkey: string
-  claimPacket: string
+  claimPacket: string | null
   refundLocktime: number
   solverPubkey: string
   serverPubkey: string
@@ -371,6 +389,9 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
     if (!existing.has('payout_sats')) {
       await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN payout_sats INTEGER`)
     }
+    if (!existing.has('stamped_at')) {
+      await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN stamped_at INTEGER`)
+    }
     if (!existing.has('settle_attempted_at')) {
       await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN settle_attempted_at INTEGER`)
     }
@@ -408,7 +429,7 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
         quote.payoutAddress,
         quote.payoutPkScript,
         quote.payoutPubkey,
-        quote.claimPacket,
+        quote.claimPacket ?? '',
         quote.refundLocktime,
         quote.solverPubkey,
         quote.serverPubkey,

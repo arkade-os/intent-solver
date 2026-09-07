@@ -326,10 +326,15 @@ export class AssetRfqSwapStore {
    * which is worse than reporting nothing. Asset exposure is visible on the row
    * itself; this figure is the one the float dashboard reads, and it is a sats
    * figure by contract.
+   *
+   * One table backs every market, so a corridor asks for its own `pair` and a
+   * caller summing whole STORES omits it. Both callers exist.
    */
-  async committedSats(): Promise<number> {
+  async committedSats(pair?: string): Promise<number> {
     const raws = await this.driver.all<Raw>(
-      `SELECT to_amount FROM asset_rfq_swap WHERE state = 'filling' AND to_asset_id IS NULL`,
+      `SELECT to_amount FROM asset_rfq_swap WHERE state = 'filling' AND to_asset_id IS NULL` +
+        (pair === undefined ? '' : ' AND pair = ?'),
+      pair === undefined ? [] : [pair],
     )
     return raws.reduce((total, raw) => total + Number(String(raw.to_amount)), 0)
   }

@@ -69,7 +69,7 @@ export const receiveArkadeOpsFromContext = async (
     // NOT `wallet.send`: that lets the SDK choose inputs, and it chooses
     // soonest-batch-expiry first — the one coin a lockup must not inherit from.
     // @see lockupFunding.ts for why, and reservations.ts for the other half.
-    fund: (address, amountSats) => fundLockup(ctx, address, amountSats),
+    fund: (address, amountSats, stamp) => fundLockup(ctx, address, amountSats, stamp),
     refund: async (row, outputs) => {
       const script = covenantScriptFromRow(row)
       assertScriptMatchesRow(script, row)

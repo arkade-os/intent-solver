@@ -108,8 +108,9 @@ export const assetEvmLegsOf = (pair: string): { assetId: string; token: string }
   return match ? { assetId: match[1]!, token: match[2]! } : null
 }
 
-/** The ERC20 a corridor serves, or null when it is not an EVM corridor. */
-export const evmTokenOf = (corridor: AnyCorridor): string | null => {
+/** The ERC20 a corridor serves, or null when it is not an EVM corridor. A plain string for the same
+ * reason {@link evmDirectionOf} takes one: deciding whether the pair IS an EVM corridor is the job. */
+export const evmTokenOf = (corridor: string): string | null => {
   const send = /^arkade:BTC->ethereum:(0x[0-9a-f]{40})$/.exec(corridor)
   if (send) return send[1] ?? null
   const receive = /^ethereum:(0x[0-9a-f]{40})->arkade:BTC$/.exec(corridor)
