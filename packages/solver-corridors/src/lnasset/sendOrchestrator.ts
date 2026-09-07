@@ -430,23 +430,35 @@ export class LnAssetSendSwapService {
 
         if (!(await store.transition(row.id, 'funded', 'paying', { pay_attempted_at: this.now() }))) return false
         const cltv = this.cltvOf(row)
-        const result = await ln.payInvoice({
-          invoice: row.invoice,
-          maxFeeSats: this.deps.maxRoutingFeeSats,
-          // Stable per swap, so a retried call cannot pay twice.
-          idempotencyKey: row.id,
-          maxCltvBlocks: payableCltvBlocks(
-            {
-              minFinalCltvBlocks: cltv.minFinalCltvBlocks,
-              worstRouteHintCltvBlocks: cltv.worstRouteHintCltvBlocks,
-              bestRouteHintCltvBlocks: cltv.bestRouteHintCltvBlocks,
-              routeCltvBudgetBlocks: ln.routeCltvBudgetBlocks,
-              enforcesRouteCltv: ln.enforcesRouteCltv,
-            },
-            row.refundLocktime,
-            this.now(),
-          ),
-        })
+        let result: { id: string }
+        try {
+          result = await ln.payInvoice({
+            invoice: row.invoice,
+            maxFeeSats: this.deps.maxRoutingFeeSats,
+            // Stable per swap, so a retried call cannot pay twice.
+            idempotencyKey: row.id,
+            maxCltvBlocks: payableCltvBlocks(
+              {
+                minFinalCltvBlocks: cltv.minFinalCltvBlocks,
+                worstRouteHintCltvBlocks: cltv.worstRouteHintCltvBlocks,
+                bestRouteHintCltvBlocks: cltv.bestRouteHintCltvBlocks,
+                routeCltvBudgetBlocks: ln.routeCltvBudgetBlocks,
+                enforcesRouteCltv: ln.enforcesRouteCltv,
+              },
+              row.refundLocktime,
+              this.now(),
+            ),
+          })
+        } catch (error) {
+          // STUCK, never `refused`: the backend can commit against the hash
+          // before it answers, so a throw here says the outcome is unknown, not
+          // that nothing left. Without this the row keeps its null payment_id,
+          // `observe` reports `in_flight` off `pay_attempted_at` alone, and the
+          // planner waits on a receipt no poll can ever fetch.
+          this.deps.onError?.(row.id, error)
+          await store.fail(row.id, 'paying', 'the payment call failed with no id to poll; its outcome is unknown')
+          return false
+        }
         await store.patch(row.id, { payment_id: result.id })
         return true
       }

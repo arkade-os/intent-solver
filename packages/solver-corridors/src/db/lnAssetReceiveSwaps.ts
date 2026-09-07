@@ -172,10 +172,16 @@ CREATE INDEX IF NOT EXISTS idx_ln_asset_receive_state ON ln_asset_receive_swap(s
 CREATE INDEX IF NOT EXISTS idx_ln_asset_receive_hash ON ln_asset_receive_swap(payment_hash);
 
 -- A hold invoice is keyed BY PAYMENT HASH at the backend, so two LIVE rows on
--- one hash would have two swaps settling from one HTLC.
+-- one hash would have two swaps settling from one HTLC. Not-refused is the four
+-- BTC corridors' spelling of live, and the one that also covers stuck -- the
+-- state whose HTLC outcome nobody knows yet.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ln_asset_receive_live_hash
   ON ln_asset_receive_swap(payment_hash)
-  WHERE state IN ('quoted', 'armed', 'funded', 'claimed', 'refunding');
+  WHERE state != 'refused';
+
+-- UNIQUE, for the reason the send store's is. @see lnAssetSendSwaps.ts
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ln_asset_receive_rfq_id
+  ON ln_asset_receive_swap(rfq_id) WHERE rfq_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS ln_asset_receive_swap_event (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -305,12 +311,14 @@ export class LnAssetReceiveSwapStore {
     return raw ? toRow(raw) : undefined
   }
 
-  /** The live row on a hash, for the cross-corridor duplicate check. */
+  /**
+   * The live row on a hash, for the cross-corridor duplicate check — the same
+   * `live` the unique index enforces, or the check passes and the insert throws.
+   */
   async findLiveByPaymentHash(paymentHash: string): Promise<LnAssetReceiveSwapRow | null> {
-    const placeholders = NON_TERMINAL.map(() => '?').join(', ')
     const raw = await this.driver.get<Raw>(
-      `SELECT * FROM ln_asset_receive_swap WHERE payment_hash = ? AND state IN (${placeholders})`,
-      [paymentHash, ...NON_TERMINAL],
+      `SELECT * FROM ln_asset_receive_swap WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
+      [paymentHash],
     )
     return raw ? toRow(raw) : null
   }

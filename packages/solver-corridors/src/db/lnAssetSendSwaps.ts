@@ -168,10 +168,19 @@ CREATE TABLE IF NOT EXISTS ln_asset_send_swap (${COLUMNS});
 CREATE INDEX IF NOT EXISTS idx_ln_asset_send_state ON ln_asset_send_swap(state);
 CREATE INDEX IF NOT EXISTS idx_ln_asset_send_hash ON ln_asset_send_swap(payment_hash);
 
--- Two LIVE rows on one hash would pay one invoice twice.
+-- Two LIVE rows on one hash would pay one invoice twice, and not-refused is the
+-- four BTC corridors' spelling of live: a stuck row is the one whose payment
+-- outcome is UNKNOWN, so it is the last one a second row may sit beside.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ln_asset_send_live_hash
   ON ln_asset_send_swap(payment_hash)
-  WHERE state IN ('quoted', 'funded', 'paying', 'paid', 'claiming');
+  WHERE state != 'refused';
+
+-- UNIQUE where the four BTC corridors index without it: quote() reads
+-- findByRfqId and inserts across two awaits, so the schema is what makes one
+-- rfq_id name one negotiation. Partial because findByRfqId runs on every
+-- inbound rfq_status_request, falling through every corridor's store.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ln_asset_send_rfq_id
+  ON ln_asset_send_swap(rfq_id) WHERE rfq_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS ln_asset_send_swap_event (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -298,11 +307,11 @@ export class LnAssetSendSwapStore {
     return raw ? toRow(raw) : undefined
   }
 
+  /** The same `live` the unique index enforces, or the check would pass and the insert throw. */
   async findLiveByPaymentHash(paymentHash: string): Promise<LnAssetSendSwapRow | null> {
-    const placeholders = NON_TERMINAL.map(() => '?').join(', ')
     const raw = await this.driver.get<Raw>(
-      `SELECT * FROM ln_asset_send_swap WHERE payment_hash = ? AND state IN (${placeholders})`,
-      [paymentHash, ...NON_TERMINAL],
+      `SELECT * FROM ln_asset_send_swap WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
+      [paymentHash],
     )
     return raw ? toRow(raw) : null
   }

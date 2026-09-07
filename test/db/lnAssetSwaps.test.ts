@@ -144,6 +144,30 @@ describe('LnAssetReceiveSwapStore', () => {
     await store.close()
   })
 
+  /** One HTLC, and a stuck row is the one whose outcome against it is unknown. */
+  it('keeps a stuck row holding its hash, and still sees it as live', async () => {
+    const store = await receiveStore()
+    await store.insertQuote(receiveQuote({ id: 'a' }))
+    await store.transition('a', 'quoted', 'armed', {})
+    await store.transition('a', 'armed', 'funded', {})
+    await store.fail('a', 'funded', 'the payout never landed')
+    expect((await store.findById('a'))?.state).toBe('stuck')
+    await expect(store.insertQuote(receiveQuote({ id: 'b' }))).rejects.toThrow(/UNIQUE/i)
+    expect((await store.findLiveByPaymentHash(hash(1)))?.id).toBe('a')
+    await store.close()
+  })
+
+  it('lets one rfq_id name one negotiation', async () => {
+    const store = await receiveStore()
+    await store.insertQuote(receiveQuote({ id: 'a', rfqId: 'r'.repeat(64) }))
+    await expect(
+      store.insertQuote(receiveQuote({ id: 'b', paymentHash: hash(2), rfqId: 'r'.repeat(64) })),
+    ).rejects.toThrow(/UNIQUE/i)
+    await store.insertQuote(receiveQuote({ id: 'c', paymentHash: hash(3) }))
+    await store.insertQuote(receiveQuote({ id: 'd', paymentHash: hash(4) }))
+    await store.close()
+  })
+
   /** `refunding -> claimed` is what stops a completed swap being recorded as a refund. */
   it('admits a late claim out of refunding, and refuses a walk backwards', async () => {
     const store = await receiveStore()
@@ -269,6 +293,30 @@ describe('LnAssetSendSwapStore', () => {
     const store = await sendStore()
     await store.insertQuote(sendQuote({ id: 'a' }))
     await expect(store.insertQuote(sendQuote({ id: 'b' }))).rejects.toThrow(/UNIQUE/i)
+    await store.close()
+  })
+
+  /** A `stuck` row is the one whose payment outcome nobody knows — the last one a second may sit beside. */
+  it('keeps a stuck row holding its hash, and still sees it as live', async () => {
+    const store = await sendStore()
+    await store.insertQuote(sendQuote({ id: 'a' }))
+    await store.transition('a', 'quoted', 'funded', {})
+    await store.transition('a', 'funded', 'paying', {})
+    await store.fail('a', 'paying', 'no id to poll')
+    expect((await store.findById('a'))?.state).toBe('stuck')
+    await expect(store.insertQuote(sendQuote({ id: 'b' }))).rejects.toThrow(/UNIQUE/i)
+    expect((await store.findLiveByPaymentHash(hash(1)))?.id).toBe('a')
+    await store.close()
+  })
+
+  it('lets one rfq_id name one negotiation, and leaves an unnamed one alone', async () => {
+    const store = await sendStore()
+    await store.insertQuote(sendQuote({ id: 'a', rfqId: 'r'.repeat(64) }))
+    await expect(
+      store.insertQuote(sendQuote({ id: 'b', paymentHash: hash(2), rfqId: 'r'.repeat(64) })),
+    ).rejects.toThrow(/UNIQUE/i)
+    await store.insertQuote(sendQuote({ id: 'c', paymentHash: hash(3) }))
+    await store.insertQuote(sendQuote({ id: 'd', paymentHash: hash(4) }))
     await store.close()
   })
 })

@@ -160,6 +160,20 @@ describe('resolveLnAssetReceiveQuote — the client pays sats, the solver delive
       reason: 'price_unavailable',
     })
   })
+
+  /** `BigInt(2.5)` and `10n ** BigInt(-1)` throw, so these leave by exception if the guard misses them. */
+  it('refuses a fractional spread or a nonsense precision rather than throwing out of the quote', () => {
+    for (const bad of [{ feeBps: 2.5 }, { decimals: 6.5 }, { decimals: -1 }]) {
+      expect(resolveLnAssetReceiveQuote({ giveSats: 1000, market: { ...MARKET, ...bad }, feed: PRICE })).toEqual({
+        ok: false,
+        reason: 'price_unavailable',
+      })
+      expect(resolveLnAssetSendQuote({ payoutSats: 1000, market: { ...MARKET, ...bad }, feed: PRICE })).toEqual({
+        ok: false,
+        reason: 'price_unavailable',
+      })
+    }
+  })
 })
 
 describe('resolveLnAssetSendQuote — the client locks the asset, the solver pays the invoice', () => {

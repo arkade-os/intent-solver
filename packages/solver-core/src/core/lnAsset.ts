@@ -142,9 +142,21 @@ export type LnAssetQuoteRefused = { ok: false; reason: LnAssetQuoteRefusal }
 
 const BPS = 10_000n
 
-/** Both bps guards, shared so the two directions cannot drift on what a usable price is. */
+/**
+ * Both bps guards, shared so the two directions cannot drift on what a usable
+ * price is.
+ *
+ * The INTEGER halves are not redundant with the range ones: `BigInt(2.5)` and
+ * `10n ** BigInt(-1)` throw, so a fractional bps or a negative precision would
+ * leave this function by exception instead of as `price_unavailable`.
+ */
 const feedUnusable = (market: LnAssetMarket, feed: Price): boolean =>
-  feed.mantissa <= 0n || market.feeBps < 0 || market.feeBps >= 10_000
+  feed.mantissa <= 0n ||
+  !Number.isInteger(market.feeBps) ||
+  market.feeBps < 0 ||
+  market.feeBps >= 10_000 ||
+  !Number.isInteger(market.decimals) ||
+  market.decimals < 0
 
 const outsideAssetLimits = (market: LnAssetMarket, units: bigint): boolean =>
   market.assetLimits !== undefined && (units < market.assetLimits.minUnits || units > market.assetLimits.maxUnits)
