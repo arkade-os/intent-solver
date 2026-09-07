@@ -250,7 +250,6 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
           quoteDecimals: 0,
           feedUrl,
           pricePath: '/price',
-          // As permissive as the gate allows, isolating BOUNDS from pricing.
           toleranceBps: 9_999,
           feeBps: 0,
           sellBase,

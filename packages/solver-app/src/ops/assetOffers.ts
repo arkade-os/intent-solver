@@ -133,9 +133,15 @@ interface AppliedBounds {
 
 const legName = (id: string | null): string => id ?? 'BTC'
 
-const refusalDetail = (input: OfferFillInput, bounds: AppliedBounds): string =>
-  `wants ${input.wantAmount} ${legName(input.wantAssetId)} for ${input.offerAmount} ${legName(input.offerAssetId)}; ` +
-  `${bounds.source} bounds ${bounds.min}..${bounds.max}`
+const amountsOf = (input: OfferFillInput): string =>
+  `wants ${input.wantAmount} ${legName(input.wantAssetId)} for ${input.offerAmount} ${legName(input.offerAssetId)}`
+
+// The bounds clause ONLY where a bound refused. Elsewhere it sends the operator
+// to re-check config that was never the problem.
+const refusalDetail = (input: OfferFillInput, reason: OfferFillRefusal, bounds: AppliedBounds): string =>
+  reason === 'amount_out_of_range'
+    ? `${amountsOf(input)}; ${bounds.source} bounds ${bounds.min}..${bounds.max}`
+    : amountsOf(input)
 
 /** The decision, plus the row id when the intent was recorded. */
 export type ConsiderOutcome = OfferFillDecision & { id?: string }
@@ -244,13 +250,13 @@ export class AssetOfferService {
     const input = offerFillInputFrom(offer, offerDepositFrom(pkScript, outputs))
     const bounds = this.boundsIn(input)
     const decision = evaluateOfferFill(input, await this.policy(bounds))
-    if (!decision.fill) return this.refuse(outpoint, decision.reason, refusalDetail(input, bounds))
+    if (!decision.fill) return this.refuse(outpoint, decision.reason, refusalDetail(input, decision.reason, bounds))
 
     // Price last among the refusals, and before anything is recorded: it is the
     // only gate that needs a network read, so the cheap structural refusals
     // above answer without one.
     const priced = await this.withinTolerance(input)
-    if (!priced) return this.refuse(outpoint, 'price_out_of_tolerance', refusalDetail(input, bounds))
+    if (!priced) return this.refuse(outpoint, 'price_out_of_tolerance', amountsOf(input))
 
     const row = await this.deps.store.insertIntent({
       id: this.newId(),

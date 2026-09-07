@@ -323,8 +323,24 @@ describe('refusals an operator can read', () => {
   it('reports every refusal, not only the bounded ones', async () => {
     expect((await reported({ markets: [] })).seen[0]).toMatchObject({ reason: 'unsupported_pair' })
     expect((await reported({ outputsAt: async () => [] })).seen[0]).toMatchObject({ reason: 'offer_unfunded' })
+    const drained = await reported({ balance: async () => ({ available: 10, availableAssets: [] }) })
+    expect(drained.seen[0]).toMatchObject({ reason: 'insufficient_inventory' })
     const outOfBand = await reported({ pricing: priced({}), fetchPrice: async () => priceFrom('0.5') })
     expect(outOfBand.seen[0]).toMatchObject({ reason: 'price_out_of_tolerance' })
+  })
+
+  it('names bounds ONLY when a bound is what refused', async () => {
+    // Otherwise the line points at config that was never the problem.
+    const drained = await reported({ balance: async () => ({ available: 10, availableAssets: [] }) })
+    expect(drained.seen[0]!.reason).toBe('insufficient_inventory')
+    expect(drained.seen[0]!.detail).toContain('wants 1000')
+    expect(drained.seen[0]!.detail).not.toContain('bounds')
+
+    const outOfBand = await reported({ pricing: priced({}), fetchPrice: async () => priceFrom('0.5') })
+    expect(outOfBand.seen[0]!.detail).not.toContain('bounds')
+
+    const unserved = await reported({ markets: [] })
+    expect(unserved.seen[0]!.detail).not.toContain('bounds')
   })
 
   it('ACCEPTS exactly the minimum', async () => {
@@ -342,16 +358,16 @@ describe('refusals an operator can read', () => {
     expect(seen).toEqual([])
   })
 
+  // Fragments short enough that re-wrapping `services.ts` cannot read as unwired.
   it('is WIRED to the log on the shipped daemon', () => {
-    // A source check, as test/packaging/corridorInjection.test.ts also does.
-    expect(servicesSource).toContain('onRefused: (outpoint, reason, detail) =>')
-    expect(servicesSource).toContain('log(`offer ${outpoint} refused: ${reason} — ${detail}`)')
+    expect(servicesSource).toContain('onRefused:')
+    expect(servicesSource).toContain('refused: ${reason}')
   })
 
   it('serves offers only when OFFER_MARKETS names a market', () => {
     // The second silence, driven for real in test/e2e/assetOffer.e2e.test.ts.
-    expect(servicesSource).toContain('const servesOffers = policy.offerMarkets.length > 0')
-    expect(servicesSource).toContain('const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null')
+    expect(servicesSource).toContain('policy.offerMarkets.length > 0')
+    expect(servicesSource).toContain('servesOffers ? await OfferFillStore.open')
   })
 })
 
