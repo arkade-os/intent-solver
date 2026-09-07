@@ -12,6 +12,9 @@
 // Used before `pnpm test:e2e`: unsettled (preconfirmed) funds make the
 // per-fork startup balance check racy.
 //
+// `REGTEST_SETTLE_TIMEOUT_MS` bounds the settle (default 120000) — raise it for
+// a stack whose batch swaps are genuinely slower than that.
+//
 // `recoverable` counts as unusable too, and is the reason this script exists in
 // the first place. A wallet whose batch expired sits at `available: 0` with the
 // whole balance in `recoverable`, which fails every corridor's funding
@@ -27,6 +30,7 @@
 // `scripts/` and not in the service.
 import { loadConfig } from '../packages/solver-app/dist/config.js'
 import { createArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { settleTimeoutMessage, settleTimeoutMs, settleWithin, unsettledSats } from './settle-plan.mjs'
 
 const config = loadConfig()
 const arkade = await createArkadeContext(config.arkade)
@@ -52,12 +56,16 @@ console.log('balance before:', JSON.stringify(before, (_k, v) => asNumber(v)))
 // boarding confirmed, `available` unchanged, and the fund script re-run for
 // nothing. `confirmed` rather than `total` because `unconfirmed` is not yet
 // eligible, so counting it would only call `settle()` to no effect.
-const unsettled =
-  asNumber(before.preconfirmed ?? 0) + asNumber(before.recoverable ?? 0) + asNumber(before.boarding?.confirmed ?? 0)
+const unsettled = unsettledSats(before)
+
+// Bounded: until a previous settle's commitment transaction confirms, the
+// boarding view still offers the input it spent, and settling that outpoint
+// hangs (#37). The settle still RUNS; only the wait is bounded.
+const timeoutMs = settleTimeoutMs(process.env.REGTEST_SETTLE_TIMEOUT_MS)
 
 if (unsettled > 0) {
   try {
-    const txid = await arkade.wallet.settle()
+    const txid = await settleWithin(() => arkade.wallet.settle(), timeoutMs, settleTimeoutMessage(before, timeoutMs))
     console.log('settled, txid', txid)
   } catch (error) {
     console.log('settle skipped:', error?.message ?? String(error))
