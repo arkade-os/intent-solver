@@ -927,6 +927,13 @@ describe('OnchainReceiveSwapService', () => {
       expect(row.fundStartedAt).not.toBeNull()
       expect(row.stampedAt).toBeNull()
       expect(deps.arkadeFake.fundStamps).toHaveLength(1)
+
+      // Adoption runs before the lease is asked for, so holding it strands nothing.
+      const recovered = await service.tick(outcome.swap.id)
+      expect(recovered.state).toBe('awaiting_claim')
+      expect(recovered.stampedAt).toBeNull()
+      expect(deps.arkadeFake.fundStamps).toHaveLength(1)
+      expect(deps.covclaimdCalls).toHaveLength(1)
     })
 
     it('reveals an adopted funding, whatever the packet shape claims', async () => {
