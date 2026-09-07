@@ -176,7 +176,10 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
       const refundAddress = hexOf(lock.refundAddress).toLowerCase()
       for (const entry of logs) {
         const hash = (entry as { transactionHash?: unknown }).transactionHash
-        if (typeof hash !== 'string') continue
+        // SHAPED, not merely typed: a malformed hash is rejected by the node, and
+        // that throw leaves the loop entirely — so one bad entry would hide a
+        // real refund further down the same page.
+        if (typeof hash !== 'string' || !/^0x[0-9a-f]{64}$/i.test(hash)) continue
         const tx = (await rpc('eth_getTransactionByHash', [hash])) as {
           to?: unknown
           from?: unknown

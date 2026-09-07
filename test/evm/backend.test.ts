@@ -552,6 +552,23 @@ describe('findRefund', () => {
     }
   })
 
+  /**
+   * A node REJECTS a malformed hash rather than answering null, and that throw
+   * leaves the loop — so one bad entry ahead of a real refund would hide it and
+   * the row would keep waiting on a refund that had already landed.
+   */
+  it('skips a hash the node would reject, and still finds the refund behind it', async () => {
+    const rpc: JsonRpc = async (method, params) => {
+      if (method === 'eth_getLogs') return [{ transactionHash: '0xdeadbeef' }, { transactionHash: TXID }]
+      if (method !== 'eth_getTransactionByHash') throw new Error(`unexpected RPC ${method}`)
+      const hash = params[0] as string
+      if (!/^0x[0-9a-f]{64}$/i.test(hash)) throw new Error('invalid argument 0: hex string has length 8, want 64')
+      return { to: toSwap, from: SENDER, input: refundSelf }
+    }
+    const backend = createEvmHtlcBackend({ contractAddress: CONTRACT, rpc })
+    await expect(backend.findRefund(lock, 0n)).resolves.toBe(true)
+  })
+
   it('is false when nothing has refunded', async () => {
     await expect(scan([]).backend.findRefund(lock, 0n)).resolves.toBe(false)
   })
