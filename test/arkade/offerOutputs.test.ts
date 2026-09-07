@@ -29,7 +29,7 @@ describe('offerOutputsAt', () => {
   it('asks the indexer for that script and maps what it returns', async () => {
     const getVtxos = vi.fn(async () => ({
       vtxos: [vtxo({ assets: [{ assetId: USD, amount: 900n }] })],
-      page: { current: 0, total: 1 },
+      page: { current: 1, next: 1, total: 1 },
     }))
     const outputs = await offerOutputsAt(ctxWith(getVtxos), SCRIPT)
 
@@ -42,8 +42,8 @@ describe('offerOutputsAt', () => {
   it('reads every page, so a large deposit is not undercounted', async () => {
     const getVtxos = vi
       .fn()
-      .mockResolvedValueOnce({ vtxos: [vtxo({ value: 60_000 })], page: { current: 0, total: 2 } })
-      .mockResolvedValueOnce({ vtxos: [vtxo({ value: 40_000, vout: 1 })], page: { current: 1, total: 2 } })
+      .mockResolvedValueOnce({ vtxos: [vtxo({ value: 60_000 })], page: { current: 1, next: 2, total: 2 } })
+      .mockResolvedValueOnce({ vtxos: [vtxo({ value: 40_000, vout: 1 })], page: { current: 2, next: 2, total: 2 } })
     const outputs = await offerOutputsAt(ctxWith(getVtxos), SCRIPT)
     expect(outputs.map((o) => o.value)).toEqual([60_000, 40_000])
     expect(getVtxos).toHaveBeenCalledTimes(2)
@@ -55,7 +55,7 @@ describe('offerOutputsAt', () => {
     // through would let a filled offer be decided against its own dead deposit.
     const getVtxos = vi.fn(async () => ({
       vtxos: [vtxo({ isSpent: false, spentBy: 'b'.repeat(64) })],
-      page: { current: 0, total: 1 },
+      page: { current: 1, next: 1, total: 1 },
     }))
     const outputs = await offerOutputsAt(ctxWith(getVtxos), SCRIPT)
     expect(outputs[0]!.isSpent).toBe(true)
@@ -64,7 +64,7 @@ describe('offerOutputsAt', () => {
   it('keeps a swept output flagged', async () => {
     const getVtxos = vi.fn(async () => ({
       vtxos: [vtxo({ isSwept: true })],
-      page: { current: 0, total: 1 },
+      page: { current: 1, next: 1, total: 1 },
     }))
     expect((await offerOutputsAt(ctxWith(getVtxos), SCRIPT))[0]!.isSwept).toBe(true)
   })
