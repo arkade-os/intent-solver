@@ -339,16 +339,16 @@ describe('the aggregate ceiling, in the asset`s own units', () => {
     expect(committed).not.toHaveBeenCalled()
   })
 
-  it('admits BOTH of two concurrent quotes the ceiling fits only one of', async () => {
-    // THE STATED RESIDUAL RACE, pinned rather than assumed: neither row is
-    // durable when the other reads the total. The overshoot is N x the per-swap
-    // ceiling for N quotes in flight, not the ceiling itself.
+  it('admits EVERY concurrent quote, however far past the ceiling they take it', async () => {
+    // THE STATED RESIDUAL RACE, pinned rather than assumed. Deterministic, not
+    // timing-dependent: every quote reads the total before any of their rows
+    // land, so the overshoot is N x the per-swap bound and not the ceiling — the
+    // code's own "at most the quotes in flight at one instant" holds for the
+    // COUNT, and bounds the exposure only if that count is bounded.
     const { store, service } = await capped()
-    const [first, second] = await Promise.all([
-      service.quote(request({ paymentHash: 'a1'.repeat(32) })),
-      service.quote(request({ paymentHash: 'b2'.repeat(32) })),
-    ])
-    expect([first.accepted, second.accepted]).toEqual([true, true])
-    expect((await store.committedAssetUnits()).get(ASSET)).toBe(2_000_000n)
+    const hashes = ['a1', 'b2', 'c3', 'd4', 'e5']
+    const outcomes = await Promise.all(hashes.map((h) => service.quote(request({ paymentHash: h.repeat(32) }))))
+    expect(outcomes.map((o) => o.accepted)).toEqual(hashes.map(() => true))
+    expect((await store.committedAssetUnits()).get(ASSET)).toBe(5_000_000n)
   })
 })
