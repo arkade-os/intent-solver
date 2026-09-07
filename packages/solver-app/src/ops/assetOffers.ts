@@ -28,6 +28,7 @@ import {
   type OfferFillDecision,
   type OfferFillInput,
   type OfferFillPolicy,
+  type OfferFillRefusal,
 } from '@arkade-os/solver-core/core/assetOffer.js'
 import { offerDirectionOn, offerWithinTolerance } from '@arkade-os/solver-core/core/assetOfferPrice.js'
 import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
@@ -113,8 +114,29 @@ export interface AssetOfferDeps {
    */
   settle?: (row: OfferFillRow) => Promise<string>
   onError?: (id: string, error: unknown) => void
+  /**
+   * Every offer this service DECLINES. `onError` reports a throw; a refusal is
+   * not one, and used to leave no trace at all — `consider` returned the reason
+   * and `consumeOfferTxs` discarded it. `detail` names the bounds in force and
+   * WHICH source set them, since a market row silently overrides the
+   * deployment-wide pair and the reason alone cannot say which refused.
+   */
+  onRefused?: (outpoint: string, reason: OfferFillRefusal, detail: string) => void
   newId?: () => string
 }
+
+/** The bounds an offer was judged by, and which of the two sources set them. */
+interface AppliedBounds {
+  readonly min: bigint
+  readonly max: bigint
+  readonly source: 'market' | 'deployment'
+}
+
+const legName = (id: string | null): string => id ?? 'BTC'
+
+const refusalDetail = (input: OfferFillInput, bounds: AppliedBounds): string =>
+  `wants ${input.wantAmount} ${legName(input.wantAssetId)} for ${input.offerAmount} ${legName(input.offerAssetId)}; ` +
+  `${bounds.source} bounds ${bounds.min}..${bounds.max}`
 
 /** The decision, plus the row id when the intent was recorded. */
 export type ConsiderOutcome = OfferFillDecision & { id?: string }
@@ -133,17 +155,27 @@ export class AssetOfferService {
    * one market can be one-way (`max: 0n`) or asymmetric. Otherwise the
    * deployment-wide pair applies.
    */
-  private async policy(input: OfferFillInput): Promise<OfferFillPolicy> {
-    const bounds = this.boundsFor(input) ?? {
-      min: this.deps.minFillAmount,
-      max: this.deps.maxFillAmount,
-    }
+  private async policy(bounds: AppliedBounds): Promise<OfferFillPolicy> {
     return {
       markets: this.deps.markets,
       available: offerInventoryFrom(await this.deps.balance()),
       minFillAmount: bounds.min,
       maxFillAmount: bounds.max,
     }
+  }
+
+  private boundsIn(input: OfferFillInput): AppliedBounds {
+    const market = this.boundsFor(input)
+    return market === null
+      ? { min: this.deps.minFillAmount, max: this.deps.maxFillAmount, source: 'deployment' }
+      : { min: market.min, max: market.max, source: 'market' }
+  }
+
+  // A log line and not a stored row: `consumeOfferTxs` reads a PUBLIC relay, so
+  // a row per refusal would let anyone grow the operator's database.
+  private refuse(outpoint: string, reason: OfferFillRefusal, detail: string): ConsiderOutcome {
+    this.deps.onRefused?.(outpoint, reason, detail)
+    return { fill: false, reason }
   }
 
   /** The bounds this offer's direction states, when its market states any. */
@@ -197,6 +229,7 @@ export class AssetOfferService {
    * an offer can advertise a deposit it does not hold.
    */
   async consider({ offer, txid, vout }: DiscoveredOffer): Promise<ConsiderOutcome> {
+    const outpoint = `${txid}:${vout}`
     // Idempotent on the outpoint: rediscovering a funded offer must not open a
     // second intent against the same deposit.
     const existing = await this.deps.store.findLiveByOutpoint(txid, vout)
@@ -206,7 +239,7 @@ export class AssetOfferService {
     // packet. An offer whose script does not compile to the terms it states can
     // oblige a filler to something it never priced (Swap Protocol V1 § 5.1).
     if (this.deps.serverPubkey && !offerIsConsistent(offer, this.deps.serverPubkey)) {
-      return { fill: false, reason: 'offer_inconsistent' }
+      return this.refuse(outpoint, 'offer_inconsistent', 'its script does not encode the terms the packet states')
     }
 
     // Hex, because that is the spelling the deposit adapter compares against
@@ -214,14 +247,15 @@ export class AssetOfferService {
     const pkScript = hex.encode(offer.swapPkScript)
     const outputs = await this.deps.outputsAt(pkScript)
     const input = offerFillInputFrom(offer, offerDepositFrom(pkScript, outputs))
-    const decision = evaluateOfferFill(input, await this.policy(input))
-    if (!decision.fill) return decision
+    const bounds = this.boundsIn(input)
+    const decision = evaluateOfferFill(input, await this.policy(bounds))
+    if (!decision.fill) return this.refuse(outpoint, decision.reason, refusalDetail(input, bounds))
 
     // Price last among the refusals, and before anything is recorded: it is the
     // only gate that needs a network read, so the cheap structural refusals
     // above answer without one.
     const priced = await this.withinTolerance(input)
-    if (!priced) return { fill: false, reason: 'price_out_of_tolerance' }
+    if (!priced) return this.refuse(outpoint, 'price_out_of_tolerance', refusalDetail(input, bounds))
 
     const row = await this.deps.store.insertIntent({
       id: this.newId(),
