@@ -281,12 +281,6 @@ describe('tick — driving a negotiation', () => {
     expect(await store.get('swap-1')).toMatchObject({ state: 'funded', depositTxid: 'ff'.repeat(32), depositVout: 0 })
   })
 
-  /**
-   * The settle spends the RECORDED outpoint, so the decision has to be made
-   * about that one. Identical terms compile to one address, so a second, larger
-   * deposit lands beside the first — approved here, not spent there, and the
-   * settle's own re-measurement then sticks the row.
-   */
   it('re-points the row at the outpoint it decided about before filling', async () => {
     const spent: (string | null)[] = []
     let live = deposit({ txid: 'aa'.repeat(32) })

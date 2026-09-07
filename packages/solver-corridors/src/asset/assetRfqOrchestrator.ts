@@ -363,12 +363,7 @@ export class AssetRfqSwapService {
     // Intent BEFORE the irreversible step. A crash between this CAS and the
     // submission leaves a row that says something may be in flight, rather than
     // one that still reads fillable and would be submitted twice.
-    //
-    // It carries the outpoint the decision was made ABOUT, because the settle
-    // spends the RECORDED one: identical terms compile to one address, so a
-    // later, larger deposit can land beside the one this row was moved to
-    // `funded` on — approved here and not spent there, which the settle's own
-    // re-measurement then refuses as a stuck row.
+    // Carrying the outpoint the decision was made ABOUT: the settle spends the RECORDED one.
     const seen = deposit ? { deposit_txid: deposit.txid, deposit_vout: deposit.vout } : undefined
     if (!(await this.deps.store.transition(row.id, 'funded', 'filling', seen))) return
     try {

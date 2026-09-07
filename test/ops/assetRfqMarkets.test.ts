@@ -49,8 +49,6 @@ describe('parseAssetRfqTokens', () => {
     expect(parseAssetRfqTokens(`USDA:${USDA}`, read)[0]!.enabled).toEqual({ sell_base: true, buy_base: false })
   })
 
-  // A knob that fails OPEN on a typo leaves a direction quoting that its
-  // operator believes is dark, and this one is reached for when it is losing.
   it('refuses a direction flag that is neither true nor false', () => {
     const stem = `${assetRfqEnvStem({ symbol: 'USDA' }, 'buy_base')}_ENABLED`
     for (const bad of ['flase', 'FALSE', '0', 'no']) {

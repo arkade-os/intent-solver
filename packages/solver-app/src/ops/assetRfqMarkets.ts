@@ -38,11 +38,8 @@ const CLOSED = { min: 0n, max: 0n }
  * `SYMBOL:<asset id>`, comma separated. Empty or unset means no asset RFQ
  * corridors.
  *
- * `read` supplies `<STEM>_ENABLED` per direction, defaulting to on — the same
- * default the four BTC corridors and every EVM token take, and only the exact
- * strings for the reason `corridorEnabledFromEnv` gives: this knob exists for
- * the direction that is losing money, so a typo'd `FALSE` quietly meaning "on"
- * leaves it quoting while an operator believes it dark.
+ * `read` supplies `<STEM>_ENABLED` per direction, defaulting to on, and takes
+ * only the exact strings for the reason `corridorEnabledFromEnv` gives.
  */
 export const parseAssetRfqTokens = (
   raw: string | undefined,
