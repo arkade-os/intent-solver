@@ -458,6 +458,65 @@ const attentionPanel = (o) => {
   )
 }
 
+// A market as a corridor-style card. `served by` sits where a corridor has
+// `serving` and is NOT the same question: a market can read `trading` while
+// nothing fills it, which is why the card exists. Bounds print as BASE UNITS
+// with `decimals` a label, never scaled, as the balances card does.
+const marketBounds = (bounds, decimals) =>
+  bounds === null
+    ? h('span.muted', 'unset')
+    : h(
+        'span',
+        `${bounds.min} – ${bounds.max}`,
+        typeof decimals === 'number' && decimals > 0 ? h('span.faint', ` (${decimals}dp)`) : null,
+      )
+
+const marketState = (market) =>
+  !market.enabled
+    ? h('span.muted', 'disabled')
+    : market.active
+      ? h('span.muted', 'trading')
+      : h('span.phase.phase-exposed', 'pending restart')
+
+const marketCard = (market) =>
+  h(
+    'section.panel',
+    h('h2', `market ${legLabel(market.base)} / ${legLabel(market.quote)}`),
+    h(
+      'dl.kv',
+      h('dt', 'served by'),
+      h(
+        'dd',
+        market.servedBy.length === 0
+          ? h(
+              'span.phase.phase-failed',
+              {
+                title:
+                  'No path fills this market. OFFER_MARKETS drives the offer path and ASSET_MARKETS the RFQ ' +
+                  'corridors; neither names this pair. Both are on the settings page.',
+              },
+              'nothing',
+            )
+          : h('span.muted', market.servedBy.join(' + ')),
+      ),
+      h('dt', 'state'),
+      h('dd', marketState(market)),
+      h('dt', 'sell base'),
+      h('dd', marketBounds(market.sellBase, market.baseDecimals)),
+      h('dt', 'buy base'),
+      h('dd', marketBounds(market.buyBase, market.baseDecimals)),
+      h('dt', 'fee'),
+      h('dd', `${market.feeBps} bps, ${market.toleranceBps} bps band`),
+    ),
+  )
+
+// Its own grid: the one above is a fixed six and markets are 0..N, so appending
+// them would push the exposure figure below the fold.
+const marketsPanel = (o) => {
+  const markets = o.markets ?? []
+  return markets.length === 0 ? null : h('div.panels', ...markets.map(marketCard))
+}
+
 const overviewView = () => {
   const o = state.overview
   if (!o) return h('p.muted', 'loading…')
@@ -516,6 +575,7 @@ const overviewView = () => {
         ),
       ),
     ),
+    marketsPanel(o),
   )
 }
 
