@@ -203,9 +203,9 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   file's own endings:
 
   ```sh
-  git diff --name-only --diff-filter=ACMR origin/main...HEAD -- test packages \
-    | grep -E '\.(ts|js|json|css|html)$' \
-    | xargs -r npx prettier --check --end-of-line auto
+  changed=$(git diff --name-only --diff-filter=ACMR origin/main...HEAD -- test packages \
+    | grep -E '\.(ts|js|json|css|html)$')
+  if [ -n "$changed" ]; then npx prettier --check --end-of-line auto $changed; fi
   ```
 
   That reproduces CI's verdict — verified in both directions, passing on a clean
@@ -218,7 +218,12 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   changed `.gitignore` in the diff would break the command rather than be
   skipped. `--diff-filter=ACMR` is there for the same reason — without it a
   branch that deletes a file hands Prettier a path that is no longer on disk,
-  and the run fails on the deletion rather than on any formatting.
+  and the run fails on the deletion rather than on any formatting. The `-n`
+  guard covers the other end: on a branch that touched nothing under those two
+  directories, Prettier with no file arguments prints `No parser and no file
+  path given`. It exits 0, so that is noise rather than a false failure — but
+  it is noise that reads like a broken command. Write it as `if`/`then` and not
+  `&&`, or the empty case exits 1 on the test itself.
 
   Keep `--end-of-line auto` on the command line: putting `endOfLine` in
   `.prettierrc` would fix it for you and stop CI enforcing LF for everyone. The
