@@ -6,6 +6,7 @@ import {
   settleTimeoutMs,
   settleWithin,
   DEFAULT_SETTLE_TIMEOUT_MS,
+  MAX_SETTLE_TIMEOUT_MS,
 } from '../../scripts/settle-plan.mjs'
 
 /**
@@ -74,6 +75,14 @@ describe('scripts/settle-plan.mjs', () => {
       expect(message).toContain('120s')
       expect(message).not.toContain('commitment')
     })
+
+    // A genuine deposit into a wallet that already held float has these very fields.
+    it('offers the double count as a possibility, not a fact', () => {
+      const message = settleTimeoutMessage(hung, 120_000)
+      expect(message).toContain('MAY be one deposit counted twice')
+      expect(message).toContain('genuine second deposit')
+      expect(message).not.toContain('Nothing was lost')
+    })
   })
 
   describe('the deadline itself', () => {
@@ -91,7 +100,7 @@ describe('scripts/settle-plan.mjs', () => {
       )
     })
 
-    it.each([[undefined], [''], ['not-a-number'], ['0'], ['-1']])(
+    it.each([[undefined], [''], ['not-a-number'], ['0'], ['-1'], ['120000.5'], ['2147483648'], ['1e21']])(
       'falls back to the default deadline for %p',
       (raw) => {
         expect(settleTimeoutMs(raw)).toBe(DEFAULT_SETTLE_TIMEOUT_MS)
@@ -100,6 +109,11 @@ describe('scripts/settle-plan.mjs', () => {
 
     it('takes an override from the environment for a slower stack', () => {
       expect(settleTimeoutMs('600000')).toBe(600_000)
+    })
+
+    it('keeps the largest delay setTimeout honours, and refuses the one past it', () => {
+      expect(settleTimeoutMs(String(MAX_SETTLE_TIMEOUT_MS))).toBe(MAX_SETTLE_TIMEOUT_MS)
+      expect(settleTimeoutMs(String(MAX_SETTLE_TIMEOUT_MS + 1))).toBe(DEFAULT_SETTLE_TIMEOUT_MS)
     })
   })
 })

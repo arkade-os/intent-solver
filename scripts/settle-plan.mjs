@@ -20,18 +20,22 @@ export const settleTimeoutMessage = (balance, ms) => {
   const boarding = asNumber(balance?.boarding?.confirmed ?? 0)
   const settled = asNumber(balance?.settled ?? 0)
   return (
-    `${gaveUp}. boarding.confirmed ${boarding} sits beside settled ${settled}, which is one deposit counted ` +
-    'twice: a previous settle already spent that boarding input and its commitment transaction has not ' +
-    'confirmed yet, so the input cannot be settled again. Mine a block and re-run. Nothing was lost — the ' +
-    'sats are the ones already in `settled`.'
+    `${gaveUp}. boarding.confirmed ${boarding} sits beside settled ${settled}, which MAY be one deposit ` +
+    'counted twice: if a previous settle already spent that boarding input, its commitment transaction has ' +
+    'not confirmed yet and the input cannot be settled again — the sats are the ones already in `settled`. ' +
+    'If it is instead a genuine second deposit, it is simply still unboarded. Either way: mine a block and ' +
+    're-run.'
   )
 }
 
 export const DEFAULT_SETTLE_TIMEOUT_MS = 120_000
 
+/** Past this, `setTimeout` wraps to a 1ms delay, inverting a longer override into no wait at all. */
+export const MAX_SETTLE_TIMEOUT_MS = 2_147_483_647
+
 export const settleTimeoutMs = (raw) => {
   const ms = Number(raw)
-  return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_SETTLE_TIMEOUT_MS
+  return Number.isSafeInteger(ms) && ms > 0 && ms <= MAX_SETTLE_TIMEOUT_MS ? ms : DEFAULT_SETTLE_TIMEOUT_MS
 }
 
 /** Run `start()`, rejecting with `message` if it has not resolved after `ms`. */
