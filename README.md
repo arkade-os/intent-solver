@@ -195,42 +195,6 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   out-of-range Node installs with at most a warning and surfaces later from a
   running process. Set `engine-strict=true` to find out at install time instead.
 
-- **`pnpm format:check` on Windows** reports essentially every file (472 of
-  them at the time of writing) and none of it is about formatting. Git checks
-  out CRLF when `core.autocrlf=true`, `.prettierrc` sets no `endOfLine`, so
-  Prettier applies its `lf` default and flags the line endings. The signal is
-  there, just buried. Scope the check to what you changed and let it accept the
-  file's own endings:
-
-  ```sh
-  changed=$(git diff --name-only --diff-filter=ACMR origin/main...HEAD -- test packages \
-    | grep -E '\.(ts|js|json|css|html)$')
-  if [ -n "$changed" ]; then npx prettier --check --end-of-line auto $changed; fi
-  ```
-
-  That reproduces CI's verdict — verified in both directions, passing on a clean
-  file and failing on one CI rejected. The two filters are what keep it honest:
-  `test packages` is the scope `format:check` itself uses, and the extension
-  list is every kind of file Prettier picks up there (444 `.ts`, 24 `.json`, and
-  one each of `.css`, `.html`, `.js`), so a `package.json` change is not waved
-  through. Narrower is not safer — it just fails in CI instead. The list also
-  cannot be dropped: Prettier exits 2 on a file it has no parser for, so a
-  changed `.gitignore` in the diff would break the command rather than be
-  skipped. `--diff-filter=ACMR` is there for the same reason — without it a
-  branch that deletes a file hands Prettier a path that is no longer on disk,
-  and the run fails on the deletion rather than on any formatting. The `-n`
-  guard covers the other end: on a branch that touched nothing under those two
-  directories, Prettier with no file arguments prints `No parser and no file
-  path given`. It exits 0, so that is noise rather than a false failure — but
-  it is noise that reads like a broken command. Write it as `if`/`then` and not
-  `&&`, or the empty case exits 1 on the test itself.
-
-  Keep `--end-of-line auto` on the command line: putting `endOfLine` in
-  `.prettierrc` would fix it for you and stop CI enforcing LF for everyone. The
-  repo-wide alternative is a `.gitattributes` with `* text=auto eol=lf`, which
-  removes the need for any of this at the cost of a one-time churn in existing
-  Windows working trees.
-
 - **Regtest, end to end, no Lightning:** `docs/runbook.md` § "Replicating end to
   end on regtest" — arkd + emulator from
   [arkade-regtest](https://github.com/arklabsHQ/arkade-regtest),
