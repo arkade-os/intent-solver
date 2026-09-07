@@ -202,16 +202,29 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   there, just buried. Scope the check to what you changed and let it accept the
   file's own endings:
 
-  ```
-  npx prettier --check --end-of-line auto $(git diff --name-only origin/main...HEAD -- '*.ts')
+  ```sh
+  git diff --name-only --diff-filter=ACMR origin/main...HEAD -- test packages \
+    | grep -E '\.(ts|js|json|css|html)$' \
+    | xargs -r npx prettier --check --end-of-line auto
   ```
 
   That reproduces CI's verdict — verified in both directions, passing on a clean
-  file and failing on one CI rejected. Keep `--end-of-line auto` on the command
-  line: putting `endOfLine` in `.prettierrc` would fix it for you and stop CI
-  enforcing LF for everyone. The repo-wide alternative is a `.gitattributes`
-  with `* text=auto eol=lf`, which removes the need for any of this at the cost
-  of a one-time churn in existing Windows working trees.
+  file and failing on one CI rejected. The two filters are what keep it honest:
+  `test packages` is the scope `format:check` itself uses, and the extension
+  list is every kind of file Prettier picks up there (444 `.ts`, 24 `.json`, and
+  one each of `.css`, `.html`, `.js`), so a `package.json` change is not waved
+  through. Narrower is not safer — it just fails in CI instead. The list also
+  cannot be dropped: Prettier exits 2 on a file it has no parser for, so a
+  changed `.gitignore` in the diff would break the command rather than be
+  skipped. `--diff-filter=ACMR` is there for the same reason — without it a
+  branch that deletes a file hands Prettier a path that is no longer on disk,
+  and the run fails on the deletion rather than on any formatting.
+
+  Keep `--end-of-line auto` on the command line: putting `endOfLine` in
+  `.prettierrc` would fix it for you and stop CI enforcing LF for everyone. The
+  repo-wide alternative is a `.gitattributes` with `* text=auto eol=lf`, which
+  removes the need for any of this at the cost of a one-time churn in existing
+  Windows working trees.
 
 - **Regtest, end to end, no Lightning:** `docs/runbook.md` § "Replicating end to
   end on regtest" — arkd + emulator from
