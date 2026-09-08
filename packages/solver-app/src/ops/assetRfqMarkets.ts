@@ -14,6 +14,7 @@
  * `EVM_TOKENS` does; the console prices them. Unset serves none, which is the
  * default and leaves the deployment as it was.
  */
+import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
 import { assetRfqEnvStem, type AssetRfqDirection } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
@@ -39,7 +40,7 @@ const CLOSED = { min: 0n, max: 0n }
  * corridors.
  *
  * `read` supplies `<STEM>_ENABLED` per direction, defaulting to on, and takes
- * only the exact strings for the reason `corridorEnabledFromEnv` gives.
+ * only the exact strings for the reason `corridorEnabledFrom` gives.
  */
 export const parseAssetRfqTokens = (
   raw: string | undefined,
@@ -71,12 +72,7 @@ export const parseAssetRfqTokens = (
     const enabled = Object.fromEntries(
       DIRECTIONS.map((direction) => {
         const name = `${assetRfqEnvStem({ symbol }, direction)}_ENABLED`
-        const raw = read(name)?.trim()
-        if (!raw) return [direction, true]
-        if (raw !== 'true' && raw !== 'false') {
-          throw new Error(`${name} must be 'true' or 'false', got ${JSON.stringify(raw)}`)
-        }
-        return [direction, raw === 'true']
+        return [direction, corridorEnabledFrom(name, read(name))]
       }),
     ) as Record<AssetRfqDirection, boolean>
     return { symbol, assetId, enabled }

@@ -12,6 +12,7 @@ import { base64 } from '@scure/base'
 import { narrow, resolveLimits, type Limits } from '@arkade-os/solver-core/core/limits.js'
 import { DEFAULT_LOCKUP_TIMEOUT, MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { MAX_BIP68_BLOCKS, MAX_BIP68_SECONDS, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
+import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
 import { FREE, type Corridor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { ALL_DESCRIPTORS } from '@arkade-os/solver-corridors/corridors/index.js'
 import {
@@ -653,24 +654,10 @@ const corridorNetworkFeesFromEnv = (): Record<Corridor, NetworkFeeBounds | null>
   return Object.fromEntries(entries) as Record<Corridor, NetworkFeeBounds | null>
 }
 
-/**
- * Which corridors this deployment quotes, from `<STEM>_ENABLED`.
- *
- * All four on by default, so a deployment that sets nothing serves what it
- * always served. Only the exact strings `true` and `false` are accepted: a
- * typo'd `FALSE`, `0` or `no` silently meaning "on" would leave a corridor
- * quoting that an operator believes is dark, and this knob exists precisely
- * for the case where that corridor loses money on every swap.
- */
 const corridorEnabledFromEnv = (): Record<Corridor, boolean> => {
   const entries = ALL_DESCRIPTORS.map(({ pair, envStem }) => {
     const name = `${envStem}_ENABLED`
-    const raw = process.env[name]?.trim()
-    if (!raw) return [pair, true] as const
-    if (raw !== 'true' && raw !== 'false') {
-      throw new Error(`${name} must be 'true' or 'false', got ${process.env[name]}`)
-    }
-    return [pair, raw === 'true'] as const
+    return [pair, corridorEnabledFrom(name, process.env[name])] as const
   })
   return Object.fromEntries(entries) as Record<Corridor, boolean>
 }
