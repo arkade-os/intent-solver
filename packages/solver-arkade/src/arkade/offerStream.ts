@@ -80,11 +80,16 @@ export interface OfferTx {
 
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms)
-    signal?.addEventListener('abort', () => {
+    // Removed on BOTH exits: `signal` outlives this wait by the whole process,
+    // so a listener left behind on each reconnect grows without bound.
+    let timer: ReturnType<typeof setTimeout>
+    const done = (): void => {
       clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
       resolve()
-    })
+    }
+    timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done)
   })
 
 /**
@@ -111,12 +116,14 @@ export async function* streamOfferTxs(deps: OfferStreamDeps): AsyncGenerator<Off
 
     try {
       const chunks = transport(url, grpcFrame(encodeSubscriptionRequest(expressions)), attempt.signal)
-      backoff = minMs
 
       // `ArrayBufferLike`, because `readFrames` hands back a subarray view and
       // a narrower annotation rejects it.
       let buffer: Uint8Array<ArrayBufferLike> = new Uint8Array(0)
       for await (const chunk of chunks) {
+        // Reset on DELIVERY, never on the call: `transport` is an async
+        // generator, so invoking it has connected to nothing yet.
+        backoff = minMs
         clearTimeout(watchdog)
         watchdog = setTimeout(() => attempt.abort(), staleMs)
 
