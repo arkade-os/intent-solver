@@ -30,6 +30,7 @@ import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
 import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import type { ReceiveArkadeOps } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
+import { FundNotSubmittedError } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import type { CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
@@ -906,16 +907,16 @@ describe('ReceiveSwapService.tick — concurrent workers: no double-funding', ()
     expect(row.fundStartedAt).not.toBeNull()
   })
 
-  it('hands the lease back when fund() throws, and funds on the next tick', async () => {
+  it('hands the lease back when fund() proves it submitted nothing, and funds on the next tick', async () => {
     const outcome = await service.quote(quoteRequest())
     if (!outcome.accepted) throw new Error('expected acceptance')
     ln.armHold(paymentHash, now + 4 * 3600)
     const originalFund = arkade.ops.fund
     arkade.ops.fund = async () => {
-      throw new Error('wallet unreachable')
+      throw new FundNotSubmittedError('refusing to fund lockup of 5000 sats: insufficient spendable float')
     }
 
-    await expect(service.tick(outcome.swap.id)).rejects.toThrow('wallet unreachable')
+    await expect(service.tick(outcome.swap.id)).rejects.toThrow('insufficient spendable float')
     const stranded = await store.get(outcome.swap.id)
     expect(stranded.state).toBe('armed')
     expect(stranded.fundStartedAt).toBeNull()
@@ -923,6 +924,32 @@ describe('ReceiveSwapService.tick — concurrent workers: no double-funding', ()
     arkade.ops.fund = originalFund
     const row = await service.tick(outcome.swap.id)
     expect(row.state).toBe('funded')
+    expect(arkade.state.fundCalls).toHaveLength(1)
+  })
+
+  it('keeps the lease when fund() fails ambiguously, and does not re-fund while the indexer lags', async () => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    const landed: FundedOutput[] = []
+    arkade.ops.fund = async (address, amountSats) => {
+      arkade.state.fundCalls.push({ address, amountSats })
+      landed.push({ txid: 'accepted-but-unanswered', vout: 0, value: amountSats })
+      throw new Error('ark server response lost')
+    }
+
+    await expect(service.tick(outcome.swap.id)).rejects.toThrow('ark server response lost')
+    const held = await store.get(outcome.swap.id)
+    expect(held.state).toBe('armed')
+    expect(held.fundStartedAt).not.toBeNull()
+
+    await service.tick(outcome.swap.id)
+    expect(arkade.state.fundCalls).toHaveLength(1)
+
+    arkade.state.outputs = landed
+    const row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('funded')
+    expect(row.arkadeLockupTxid).toBe('accepted-but-unanswered')
     expect(arkade.state.fundCalls).toHaveLength(1)
   })
 })

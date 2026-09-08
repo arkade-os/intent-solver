@@ -58,6 +58,7 @@ import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { appendArkadeScript, claimPacketShape } from './claimPacket.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
+import { FundNotSubmittedError } from './fundLockup.js'
 import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveSwapRow, ReceiveSwapStore } from '../db/receiveSwaps.js'
@@ -892,8 +893,8 @@ export class ReceiveSwapService {
     try {
       fundTxid = await arkade.fund(row.lockupAddress, row.payoutSats, stamp)
     } catch (error) {
-      // The one case where nothing has moved; everything below keeps the lease.
-      await store.releaseFundLease(row.id)
+      // Retained on an ambiguous failure: stuck for a human, on purpose.
+      if (error instanceof FundNotSubmittedError) await store.releaseFundLease(row.id)
       throw error
     }
     // After the broadcast: a crash between leaves it unset and the next pass reveals, which is the safe direction.

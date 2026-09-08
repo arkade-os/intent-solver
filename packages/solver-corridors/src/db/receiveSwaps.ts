@@ -419,7 +419,7 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
     return result.changes === 1
   }
 
-  /** Called only when `fund()` THREW, never as an expiry. @see OnchainReceiveSwapStore.releaseFundLease */
+  /** Only for a `FundNotSubmittedError`. @see OnchainReceiveSwapStore.releaseFundLease */
   async releaseFundLease(id: string): Promise<void> {
     await this.driver.run(`UPDATE receive_swap SET fund_started_at = NULL WHERE id = ?`, [id])
   }
