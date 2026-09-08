@@ -4,7 +4,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
-import { SendSwapService, type ArkadeOps } from '@arkade-os/solver-corridors/send/orchestrator.js'
+import {
+  SendSwapService,
+  type ArkadeOps,
+  type CoupledReceiveRow,
+  type SendServiceDeps,
+} from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { forgeInvoiceWithPreimage } from '@arkade-os/solver-rails-fake/ln/fake/bolt11.js'
 import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
@@ -74,7 +79,7 @@ const fakeArkade = () =>
     refund: async () => 'refund-txid',
   }) as unknown as ArkadeOps
 
-const serviceWith = (approvalGate?: ApprovalCheck) =>
+const serviceWith = (approvalGate?: ApprovalCheck, coupling?: SendServiceDeps['coupling']) =>
   new SendSwapService({
     store,
     ln: fakeLn() as never,
@@ -85,6 +90,7 @@ const serviceWith = (approvalGate?: ApprovalCheck) =>
     totalCommitted: () => store.committedSats(),
     admission: new AdmissionControl(),
     approvalGate,
+    coupling,
     now: () => clock,
   })
 
@@ -178,5 +184,37 @@ describe('the approval gate on arkade:BTC->lightning:BTC', () => {
     await service.tick(id)
     expect(asked).toEqual([])
     expect(payCalls).toHaveLength(1)
+  })
+
+  // The collect path pays nobody — it reads a preimage off the coupled receive
+  // leg's own lockup — so it returns before the gate by construction. Pinned
+  // because a refactor moving that early return below the gate would hold a
+  // swap that never spends, and nothing else would notice.
+  it('does NOT gate the collect path for a coupled receive', async () => {
+    // Null through `quote` on purpose: the quote-time coupling gate is not what
+    // is under test, and refusing there never reaches `whenFunded`.
+    let coupled: CoupledReceiveRow | null = null
+    const service = serviceWith(
+      recording(() => holds),
+      {
+        receiveStore: { findLiveByPaymentHash: async () => coupled },
+        findLockupOutpoints: async () => [{ txid: 'a'.repeat(64), vout: 0 }],
+        findClaimPreimage: async () => FORGED.preimage,
+      },
+    )
+    const id = await fundedSwap(service)
+    await store.transition(id, 'quoted', 'funded', {})
+    coupled = {
+      state: 'funded',
+      invoice: FORGED.invoice,
+      refundLocktime: 1_800_000_000,
+      pkScript: 'aa'.repeat(34),
+      htlcExpiresAt: null,
+    }
+    asked.length = 0
+
+    expect((await service.tick(id)).state).toBe('claimed')
+    expect(asked).toEqual([])
+    expect(payCalls).toHaveLength(0)
   })
 })
