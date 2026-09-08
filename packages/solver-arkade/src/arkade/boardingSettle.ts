@@ -64,8 +64,10 @@ export const planBoardingSettle = <U extends BoardingUtxo>(args: BoardingSettleA
   let gross = 0n
   for (const utxo of settleable) {
     const fee = estimator.evalOnchainInput({ amount: BigInt(utxo.value) })
-    // Boarding a coin worth less than its own fee destroys value outright.
-    if (fee.value >= BigInt(utxo.value)) continue
+    // Judged on the CEILED figure, which is what the deduction below spends:
+    // `value` is a raw float, so guarding on it admits a coin whose fee rounds
+    // up to its whole worth and which therefore contributes nothing.
+    if (BigInt(fee.satoshis) >= BigInt(utxo.value)) continue
     inputs.push(utxo)
     gross += BigInt(utxo.value) - BigInt(fee.satoshis)
   }
