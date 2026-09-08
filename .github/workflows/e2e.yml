@@ -112,8 +112,12 @@ jobs:
       E2E_FILES: ${{ join(matrix.files, ' ') }}
       E2E_PROFILES: ${{ matrix.profiles }}
     steps:
+      # Through `env`, never `${{ }}` in the script: these strings name
+      # containers in backticks, which bash would run as commands.
       - name: Why this group is its own leg
-        run: echo "${{ matrix.why }}"
+        env:
+          WHY: ${{ matrix.why }}
+        run: echo "$WHY"
 
       - uses: actions/checkout@v4
         with:
