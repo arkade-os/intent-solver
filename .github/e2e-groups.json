@@ -1,0 +1,92 @@
+[
+  {
+    "name": "asset",
+    "why": "The only group that mints an asset. An asset coin in the shared float changes what every later sats-only spend can select, so nothing that measures the sats float runs beside it.",
+    "profiles": "emulator",
+    "files": ["assetRfqCorridor.e2e.test.ts", "assetOffer.e2e.test.ts", "assetLockup.e2e.test.ts"],
+    "mintAsset": true,
+    "lnd": false,
+    "covclaimd": false,
+    "evmChain": false,
+    "blockTypedArkd": false
+  },
+  {
+    "name": "lifecycle",
+    "why": "Reads the wallet's own float, so it needs one with no minted asset in it, and a server still charging its intent fees: vtxoLifecycle's headline assertion is the ABSENCE of INTENT_INSUFFICIENT_FEE, which a fee-free arkd makes vacuous. blockTimelocks rides along because it wants the same emulator-only stack, and asserts the block-typed exit delay it needs rather than assuming it.",
+    "profiles": "emulator",
+    "files": ["vtxoLifecycle.e2e.test.ts", "blockTimelocks.e2e.test.ts"],
+    "mintAsset": false,
+    "lnd": false,
+    "covclaimd": false,
+    "evmChain": false,
+    "blockTypedArkd": true
+  },
+  {
+    "name": "send-lightning",
+    "why": "Needs the boltz profile: the counterparty is the base `lnd`, the solver's own node is `boltz-lnd`, and setupBoltz() is the only thing that funds that node and opens the channel between them.",
+    "profiles": "boltz",
+    "files": ["sendLightning.e2e.test.ts", "sendLightningEdges.e2e.test.ts"],
+    "mintAsset": false,
+    "lnd": true,
+    "covclaimd": false,
+    "evmChain": false,
+    "blockTypedArkd": false
+  },
+  {
+    "name": "receive-lightning",
+    "why": "The one group that also needs covclaimd: covclaimdClaim proves the daemon claims a lockup nobody in the test ever claims, and receiveLightningEdges has a reveal test that requires it. Separate from send-lightning because covclaimd watches arkd's tx stream and sweeps preimage-gated lockups, which the send legs do not want happening under them.",
+    "profiles": "covclaimd,boltz",
+    "files": ["receiveLightning.e2e.test.ts", "receiveLightningEdges.e2e.test.ts", "covclaimdClaim.e2e.test.ts"],
+    "mintAsset": false,
+    "lnd": true,
+    "covclaimd": true,
+    "evmChain": false,
+    "blockTypedArkd": false
+  },
+  {
+    "name": "onchain",
+    "why": "Same stack as send-lightning; split for run time and for attribution, since these five files confirm real transactions and are the slowest set here.",
+    "profiles": "boltz",
+    "files": [
+      "sendOnchain.e2e.test.ts",
+      "sendOnchainEdges.e2e.test.ts",
+      "receiveOnchain.e2e.test.ts",
+      "receiveOnchainEdges.e2e.test.ts",
+      "lndMempoolSpend.e2e.test.ts"
+    ],
+    "mintAsset": false,
+    "lnd": true,
+    "covclaimd": false,
+    "evmChain": false,
+    "blockTypedArkd": false
+  },
+  {
+    "name": "self-payment",
+    "why": "Same stack as send-lightning; split for run time and for attribution.",
+    "profiles": "boltz",
+    "files": ["selfPayment.e2e.test.ts", "selfPaymentEdges.e2e.test.ts"],
+    "mintAsset": false,
+    "lnd": true,
+    "covclaimd": false,
+    "evmChain": false,
+    "blockTypedArkd": false
+  },
+  {
+    "name": "evm",
+    "why": "Needs two stacks at once: arkade-regtest for the Arkade leg and `scripts/e2e-stack.mjs` for anvil plus the flat price feed on :8088. priceFeed rides along because it is the only other file that reads that feed.",
+    "profiles": "emulator",
+    "files": [
+      "evmBroadcast.e2e.test.ts",
+      "evmErc20Swap.e2e.test.ts",
+      "evmQuote.e2e.test.ts",
+      "evmSendSwap.e2e.test.ts",
+      "evmReceiveSwap.e2e.test.ts",
+      "priceFeed.e2e.test.ts"
+    ],
+    "mintAsset": false,
+    "lnd": false,
+    "covclaimd": false,
+    "evmChain": true,
+    "blockTypedArkd": false
+  }
+]
