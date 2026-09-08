@@ -79,7 +79,7 @@ export const regtestDir = (): string => {
  */
 export const mineBlocks = async (count = 1): Promise<number | null> => {
   const { chainTip } = await import('./preflight.js')
-  const before = await chainTip()
+  const before = await readTipWithin(chainTip, Date.now() + INDEX_LAG_TIMEOUT_MS, (tip) => tip !== null)
   await run(process.execPath, ['regtest.mjs', 'mine', String(count)], {
     cwd: regtestDir(),
     timeout: MINE_TIMEOUT_MS,
@@ -89,10 +89,24 @@ export const mineBlocks = async (count = 1): Promise<number | null> => {
   // 105 and fail a deadline assertion on the indexer's lag rather than on the
   // miner. Bounded, and it cannot hide a dead miner: the tip is returned either
   // way, so a caller asserting the chain moved still fails.
-  const want = before === null ? null : before + count
-  const deadline = Date.now() + INDEX_LAG_TIMEOUT_MS
+  //
+  // `before === null` means Esplora was unreadable even before the mine, so
+  // there is no target to wait for — wait for a readable tip instead, rather
+  // than returning the first null and skipping the wait entirely.
+  const enough =
+    before === null
+      ? (tip: number | null) => tip !== null
+      : (tip: number | null) => tip !== null && tip >= before + count
+  return readTipWithin(chainTip, Date.now() + INDEX_LAG_TIMEOUT_MS, enough)
+}
+
+const readTipWithin = async (
+  chainTip: () => Promise<number | null>,
+  deadline: number,
+  enough: (tip: number | null) => boolean,
+): Promise<number | null> => {
   let tip = await chainTip()
-  while (want !== null && (tip === null || tip < want) && Date.now() < deadline) {
+  while (!enough(tip) && Date.now() < deadline) {
     await new Promise((settle) => setTimeout(settle, INDEX_POLL_MS))
     tip = await chainTip()
   }

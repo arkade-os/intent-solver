@@ -76,18 +76,40 @@ jobs:
         run: |
           set -eu
           if [ -n "$FILES" ]; then
+            # `arkdTimelocks`, not a boolean: the delays step and the assertion
+            # both read it, and a missing key would leave the assertion wanting
+            # >= 512 from a stack started on the block-typed defaults.
             matrix=$(jq -nc --arg f "$FILES" --arg p "$PROFILES" '
               [{ name: "dispatch", files: ($f | split(" ")),
                  profiles: (if $p == "" then "emulator" else $p end),
                  why: "ad-hoc dispatch",
                  mintAsset: false, lnd: false, covclaimd: false,
-                 evmChain: false, blockTypedArkd: false }]')
+                 evmChain: false, arkdTimelocks: "seconds" }]')
           else
-            matrix=$(jq -c --arg only "$ONLY" '
-              if $only == "" then . else map(select(.name as $n | $only | split(",") | index($n))) end
+            # Split and trim in the shell, not in jq: a group name is `[a-z0-9-]`
+            # (test/ci/e2eGroups.test.ts asserts it), so dropping whitespace is
+            # exact, and it keeps a regex escape out of a string that crosses
+            # YAML, the shell and jq.
+            # `[:blank:]`, not `[:space:]`: the latter also eats the newlines the
+            # first `tr` just made, joining every name into one.
+            want=$(printf '%s' "$ONLY" | tr ',' '\n' | tr -d '[:blank:]' | grep -v '^$' | jq -Rsc 'split("\n") | map(select(. != ""))')
+            # EVERY requested name must exist, not just one of them: `asset,typo`
+            # matches a group, so a length check alone would run one leg and
+            # report the coverage the dispatch asked for and never got.
+            unknown=$(jq -r --argjson want "$want" '
+              ([.[].name]) as $known | [$want[] | select(. as $n | $known | index($n) | not)] | join(", ")
+            ' .github/e2e-groups.json)
+            if [ -n "$unknown" ]; then
+              echo "unknown group(s): ${unknown}"
+              echo "known groups:"
+              jq -r '.[].name' .github/e2e-groups.json
+              exit 1
+            fi
+            matrix=$(jq -c --argjson want "$want" '
+              if ($want | length) == 0 then . else map(select(.name as $n | $want | index($n))) end
             ' .github/e2e-groups.json)
           fi
-          # A name that matches nothing must not read as "everything passed".
+          # Belt and braces: an empty matrix must not read as "everything passed".
           if [ "$(echo "$matrix" | jq 'length')" -eq 0 ]; then
             echo "no group matched. Known groups:"
             jq -r '.[].name' .github/e2e-groups.json
@@ -301,6 +323,7 @@ jobs:
       # Both reporters: `verbose` for the log, `json` for the guard below, which
       # is the only thing that can see a skip or a file that never ran.
       - name: E2E suite
+        id: suite
         timeout-minutes: 60
         run: |
           set -eu
@@ -308,10 +331,12 @@ jobs:
           pnpm test:e2e --reporter=verbose --reporter=json \
             --outputFile="$RUNNER_TEMP/e2e-report.json" "${e2e_files[@]}"
 
-      # `always()`: on a red suite this still prints the per-file timings, which
-      # is most of what a failing corridor run gets read for.
+      # Runs on a RED suite, because the per-file timings are most of what a
+      # failing corridor run gets read for — but not on a SKIPPED one, where a
+      # setup step already failed and there is no report to read. Auditing then
+      # would replace the real cause with a missing-file error.
       - name: Every file ran, and nothing skipped
-        if: always()
+        if: always() && steps.suite.outcome != 'skipped'
         run: |
           set -eu
           read -ra e2e_files <<< "$E2E_FILES"
