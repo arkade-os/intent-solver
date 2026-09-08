@@ -24,15 +24,10 @@ export interface BoardingUtxo {
 }
 
 /** Why a pass settled nothing. Each is ordinary, none a failure. */
-export type BoardingSettleSkip =
-  | 'nothing-boarded'
-  | 'nothing-settleable'
-  | 'below-its-own-fee'
-  | 'below-dust'
+export type BoardingSettleSkip = 'nothing-boarded' | 'nothing-settleable' | 'below-its-own-fee' | 'below-dust'
 
 export type BoardingSettlePlan<U> =
-  | { settle: false; reason: BoardingSettleSkip }
-  | { settle: true; inputs: U[]; outputs: bigint[] }
+  { settle: false; reason: BoardingSettleSkip } | { settle: true; inputs: U[]; outputs: bigint[] }
 
 export interface BoardingSettleArgs<U extends BoardingUtxo> {
   /** Everything at the boarding address — `IWallet.getBoardingUtxos`. */
@@ -54,15 +49,11 @@ export interface BoardingSettleArgs<U extends BoardingUtxo> {
  * `runPeriodicSettle` boarding leg — an ONCHAIN input program per input, an
  * offchain output program per piece — since the server evaluates the same ones.
  */
-export const planBoardingSettle = <U extends BoardingUtxo>(
-  args: BoardingSettleArgs<U>,
-): BoardingSettlePlan<U> => {
+export const planBoardingSettle = <U extends BoardingUtxo>(args: BoardingSettleArgs<U>): BoardingSettlePlan<U> => {
   const { boarding, expired, intentFee, vtxoMaxAmount, dust, address, target } = args
   if (boarding.length === 0) return { settle: false, reason: 'nothing-boarded' }
 
-  const settleable = boarding.filter(
-    (utxo) => utxo.status.confirmed && !expired.has(`${utxo.txid}:${utxo.vout}`),
-  )
+  const settleable = boarding.filter((utxo) => utxo.status.confirmed && !expired.has(`${utxo.txid}:${utxo.vout}`))
   if (settleable.length === 0) return { settle: false, reason: 'nothing-settleable' }
 
   const estimator = new Estimator(intentFee)

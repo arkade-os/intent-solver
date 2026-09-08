@@ -350,7 +350,6 @@ export interface RenewVtxoDeps<V extends RenewableVtxo> {
  */
 const MAX_VTXOS_PER_SETTLEMENT = 50
 
-
 /**
  * How long before batch expiry a coin becomes worth renewing, matching the
  * SDK's `DEFAULT_RENEWAL_CONFIG.thresholdMs`.

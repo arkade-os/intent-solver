@@ -18,10 +18,7 @@ const utxo = (value: number, txid = `b-${value}`, confirmed = true): BoardingUtx
   status: { confirmed },
 })
 
-const plan = (
-  boarding: BoardingUtxo[],
-  overrides: Partial<Parameters<typeof planBoardingSettle>[0]> = {},
-) =>
+const plan = (boarding: BoardingUtxo[], overrides: Partial<Parameters<typeof planBoardingSettle>[0]> = {}) =>
   planBoardingSettle({
     boarding,
     expired: new Set<string>(),
