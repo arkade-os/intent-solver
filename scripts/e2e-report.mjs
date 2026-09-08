@@ -7,24 +7,27 @@
 // seconds inside a two-minute bring-up is not credible as coverage.
 
 import { readFileSync } from 'node:fs'
-import { basename } from 'node:path'
 import { pathToFileURL } from 'node:url'
+
+// Not `path.basename`: on Linux that does not split a Windows path, so a report
+// produced on one platform and audited on another silently keeps the whole path.
+const fileName = (path) => (path ?? '').split(/[\\/]/).pop() ?? ''
 
 /** Every test in the report, flattened, with the file it came from. */
 export const allTests = (report) =>
   (report.testResults ?? []).flatMap((file) =>
-    (file.assertionResults ?? []).map((test) => ({ file: basename(file.name ?? ''), ...test })),
+    (file.assertionResults ?? []).map((test) => ({ file: fileName(file.name), ...test })),
   )
 
 /** The basenames vitest actually ran, in report order. */
-export const filesRun = (report) => (report.testResults ?? []).map((file) => basename(file.name ?? ''))
+export const filesRun = (report) => (report.testResults ?? []).map((file) => fileName(file.name))
 
 export const skipped = (report) => allTests(report).filter((test) => test.status === 'skipped')
 
 export const durations = (report) =>
   (report.testResults ?? [])
     .map((file) => ({
-      file: basename(file.name ?? ''),
+      file: fileName(file.name),
       ms: Math.max(0, (file.endTime ?? 0) - (file.startTime ?? 0)),
       tests: (file.assertionResults ?? []).length,
       status: file.status ?? 'unknown',
@@ -48,7 +51,7 @@ export const formatDurations = (rows) => {
  */
 export const problems = (report, expectedFiles) => {
   const found = new Set(filesRun(report))
-  const expected = new Set(expectedFiles.map((name) => basename(name)))
+  const expected = new Set(expectedFiles.map(fileName))
   const out = []
 
   const missing = [...expected].filter((name) => !found.has(name))

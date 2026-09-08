@@ -8,45 +8,45 @@
     "lnd": false,
     "covclaimd": false,
     "evmChain": false,
-    "blockTypedArkd": false
+    "arkdTimelocks": "seconds"
   },
   {
     "name": "lifecycle",
-    "why": "Reads the wallet's own float, so it needs one with no minted asset in it, and a server still charging its intent fees: vtxoLifecycle's headline assertion is the ABSENCE of INTENT_INSUFFICIENT_FEE, which a fee-free arkd makes vacuous. blockTimelocks rides along because it wants the same emulator-only stack, and asserts the block-typed exit delay it needs rather than assuming it.",
+    "why": "The only group on a BLOCK-typed arkd, which is what blockTimelocks exists to cover and what the compose defaults happen to give. vtxoLifecycle rides along: it reads the wallet's own float, so it wants one with no minted asset in it and a server still charging its intent fees, since its headline assertion is the ABSENCE of INTENT_INSUFFICIENT_FEE.",
     "profiles": "emulator",
     "files": ["vtxoLifecycle.e2e.test.ts", "blockTimelocks.e2e.test.ts"],
     "mintAsset": false,
     "lnd": false,
     "covclaimd": false,
     "evmChain": false,
-    "blockTypedArkd": true
+    "arkdTimelocks": "blocks"
   },
   {
     "name": "send-lightning",
-    "why": "Needs the boltz profile: the counterparty is the base `lnd`, the solver's own node is `boltz-lnd`, and setupBoltz() is the only thing that funds that node and opens the channel between them.",
-    "profiles": "boltz",
+    "why": "Needs the boltz profile: the counterparty is the base `lnd`, the solver's own node is `boltz-lnd`, and setupBoltz() is the only thing that funds that node and opens the channel between them. Seconds-typed, like every corridor group: the receive orchestrator refuses to write a block-height refund deadline without a chainTip provider, and these tests wire none.",
+    "profiles": "emulator,boltz",
     "files": ["sendLightning.e2e.test.ts", "sendLightningEdges.e2e.test.ts"],
     "mintAsset": false,
     "lnd": true,
     "covclaimd": false,
     "evmChain": false,
-    "blockTypedArkd": false
+    "arkdTimelocks": "seconds"
   },
   {
     "name": "receive-lightning",
     "why": "The one group that also needs covclaimd: covclaimdClaim proves the daemon claims a lockup nobody in the test ever claims, and receiveLightningEdges has a reveal test that requires it. Separate from send-lightning because covclaimd watches arkd's tx stream and sweeps preimage-gated lockups, which the send legs do not want happening under them.",
-    "profiles": "covclaimd,boltz",
+    "profiles": "emulator,covclaimd,boltz",
     "files": ["receiveLightning.e2e.test.ts", "receiveLightningEdges.e2e.test.ts", "covclaimdClaim.e2e.test.ts"],
     "mintAsset": false,
     "lnd": true,
     "covclaimd": true,
     "evmChain": false,
-    "blockTypedArkd": false
+    "arkdTimelocks": "seconds"
   },
   {
     "name": "onchain",
     "why": "Same stack as send-lightning; split for run time and for attribution, since these five files confirm real transactions and are the slowest set here.",
-    "profiles": "boltz",
+    "profiles": "emulator,boltz",
     "files": [
       "sendOnchain.e2e.test.ts",
       "sendOnchainEdges.e2e.test.ts",
@@ -58,18 +58,18 @@
     "lnd": true,
     "covclaimd": false,
     "evmChain": false,
-    "blockTypedArkd": false
+    "arkdTimelocks": "seconds"
   },
   {
     "name": "self-payment",
     "why": "Same stack as send-lightning; split for run time and for attribution.",
-    "profiles": "boltz",
+    "profiles": "emulator,boltz",
     "files": ["selfPayment.e2e.test.ts", "selfPaymentEdges.e2e.test.ts"],
     "mintAsset": false,
     "lnd": true,
     "covclaimd": false,
     "evmChain": false,
-    "blockTypedArkd": false
+    "arkdTimelocks": "seconds"
   },
   {
     "name": "evm",
@@ -87,6 +87,6 @@
     "lnd": false,
     "covclaimd": false,
     "evmChain": true,
-    "blockTypedArkd": false
+    "arkdTimelocks": "seconds"
   }
 ]

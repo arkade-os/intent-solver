@@ -151,16 +151,35 @@ jobs:
         timeout-minutes: 20
         run: pnpm build
 
+      # Two env groups, and neither is optional.
+      #
       # COVCLAIMD_IMAGE is passed rather than left to the compose default:
       # `regtest.mjs` DROPS the container outright when the variable is empty,
       # so an unset one silently produces a stack with no daemon in it and a
       # covclaimd test that fails for a reason it does not name.
+      #
+      # The ARKD_* delays are the runbook's documented deployment ("a bare
+      # `node regtest.mjs start` produces a stack this service cannot use at
+      # all"). Below 512 they are BLOCK counts, and the receive orchestrator
+      # then refuses to write a refund deadline without a chainTip provider,
+      # which none of these tests wire. Only the `lifecycle` group wants that
+      # mode — blockTimelocks is the file that covers it — so it alone is left
+      # on the compose defaults. Empty here means "compose's own default",
+      # because every one of them is interpolated with `:-`.
       - name: Start the regtest stack
         working-directory: arkade-regtest
         timeout-minutes: 25
         env:
           COVCLAIMD_IMAGE: ${{ matrix.covclaimd && 'ghcr.io/arkade-os/covclaimd:v0.0.1-rc.4' || '' }}
-        run: node regtest.mjs start --profile "$E2E_PROFILES"
+          SECONDS_TYPED: ${{ matrix.arkdTimelocks == 'seconds' }}
+        run: |
+          set -eu
+          if [ "$SECONDS_TYPED" = "true" ]; then
+            export ARKD_VTXO_TREE_EXPIRY=6144 ARKD_UNILATERAL_EXIT_DELAY=512 \
+                   ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 ARKD_BOARDING_EXIT_DELAY=2048 \
+                   ARKD_CHECKPOINT_EXIT_DELAY=1536
+          fi
+          node regtest.mjs start --profile "$E2E_PROFILES"
 
       # Nothing here zeroes arkd's intent fees, and nothing may: what
       # `vtxoLifecycle` asserts is the ABSENCE of INTENT_INSUFFICIENT_FEE from a
@@ -168,17 +187,17 @@ jobs:
       - name: What this arkd advertises
         run: curl -sf http://localhost:7070/v1/info | jq '{unilateralExitDelay, vtxoTreeExpiry, boardingExitDelay}'
 
-      # Below 512 a relative timelock counts BLOCKS; at or above it, seconds
-      # (packages/solver-core/src/core/timelocks.ts). Against a seconds-typed
-      # server two of blockTimelocks' three tests `return` early and the third
-      # only warns — a leg that goes green having asserted nothing.
-      - name: This arkd is block-typed, as blockTimelocks needs
-        if: matrix.blockTypedArkd
+      # Asserted in BOTH directions, because each mode has a file that goes
+      # quietly useless in the other: under seconds, two of blockTimelocks'
+      # three tests `return` early and the third only warns.
+      - name: This arkd counts ${{ matrix.arkdTimelocks }}, as this group needs
+        env:
+          WANT: ${{ matrix.arkdTimelocks }}
         run: |
           set -eu
           delay=$(curl -sf http://localhost:7070/v1/info | jq -r '.unilateralExitDelay')
-          echo "unilateralExitDelay=${delay}"
-          test "$delay" -lt 512
+          echo "unilateralExitDelay=${delay}, group wants ${WANT}"
+          if [ "$WANT" = "blocks" ]; then test "$delay" -lt 512; else test "$delay" -ge 512; fi
 
       # `boltz-lnd` is the SOLVER's node. The base `lnd` is the counterparty, and
       # the tests drive it with `docker exec lncli`, so it needs nothing here.

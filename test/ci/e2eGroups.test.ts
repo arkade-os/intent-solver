@@ -23,7 +23,7 @@ interface Group {
   lnd: boolean
   covclaimd: boolean
   evmChain: boolean
-  blockTypedArkd: boolean
+  arkdTimelocks: 'seconds' | 'blocks'
 }
 
 const groups: Group[] = JSON.parse(readFileSync(GROUPS_PATH, 'utf8'))
@@ -54,12 +54,21 @@ describe('.github/e2e-groups.json', () => {
   })
 
   it('declares every stack flag the workflow branches on', () => {
-    const flags = ['mintAsset', 'lnd', 'covclaimd', 'evmChain', 'blockTypedArkd'] as const
+    const flags = ['mintAsset', 'lnd', 'covclaimd', 'evmChain'] as const
     for (const group of groups) {
       // On EVERY group: an absent key reads as `null` in a matrix `if:`, which
       // is falsy and silent — the same shape as a flag someone forgot to set.
       for (const flag of flags) expect(typeof group[flag], `${group.name}.${flag}`).toBe('boolean')
+      // Not a boolean, because the assert runs in both directions: each mode
+      // has a file the other makes vacuous.
+      expect(['seconds', 'blocks'], `${group.name}.arkdTimelocks`).toContain(group.arkdTimelocks)
     }
+  })
+
+  it('runs blockTimelocks, and only blockTimelocks, on a block-typed arkd', () => {
+    const blockTyped = groups.filter((group) => group.arkdTimelocks === 'blocks')
+    expect(blockTyped.flatMap((group) => group.files)).toContain('blockTimelocks.e2e.test.ts')
+    expect(blockTyped.length, 'a second block-typed group buys a stack for nothing').toBe(1)
   })
 
   it('asks for covclaimd wherever a file needs it', () => {
