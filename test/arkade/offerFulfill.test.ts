@@ -39,12 +39,21 @@ const ctx = (over: Record<string, unknown> = {}): ArkadeContext =>
     wallet: {
       arkServerPublicKey: SERVER,
       getVtxos: async () => [],
+      getSpendableVtxos: async () => [],
       getAddress: async () => 'tark1nobody',
       ...over,
     },
   }) as unknown as ArkadeContext
 
 const deposit = { txid: 'a'.repeat(64), vout: 0, value: 900 }
+
+const coin = { txid: 'b'.repeat(64), vout: 0, value: 100_000 }
+
+const refusalOf = async (promise: Promise<unknown>): Promise<string> =>
+  promise.then(
+    () => '',
+    (error: unknown) => (error instanceof Error ? error.message : String(error)),
+  )
 
 describe('fulfillOffer refuses before it spends', () => {
   it('aborts on an offer whose script does not match its terms (§ 5.1)', async () => {
@@ -78,6 +87,21 @@ describe('fulfillOffer refuses before it spends', () => {
     await expect(
       fulfillOffer(ctx(), 'http://emulator.test', offerWith({ swapPkScript: honest }), deposit),
     ).rejects.toThrow(/no spendable coins/)
+  })
+
+  it('will not fund a fill out of a coin the spending gate withholds', async () => {
+    const withheld = ctx({ getVtxos: async () => [coin], getSpendableVtxos: async () => [] })
+    await expect(
+      fulfillOffer(withheld, 'http://emulator.test', offerWith({ swapPkScript: honest }), deposit),
+    ).rejects.toThrow(/no spendable coins/)
+  })
+
+  it('and takes that same coin once the gate reports it spendable', async () => {
+    const offered = ctx({ getVtxos: async () => [], getSpendableVtxos: async () => [coin] })
+    const message = await refusalOf(
+      fulfillOffer(offered, 'http://emulator.test', offerWith({ swapPkScript: honest }), deposit),
+    )
+    expect(message).not.toMatch(/no spendable coins/)
   })
 })
 
