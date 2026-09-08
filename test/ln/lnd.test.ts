@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { forgeInvoiceWithPreimage } from '@arkade-os/solver-rails-fake/ln/fake/bolt11.js'
 import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
 
@@ -6,13 +6,15 @@ import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
 // a gRPC client the adapter constructs internally, so the only way to assert
 // what it SENDS is to module-mock the vendor -- the same pattern
 // test/onchain/lnd.test.ts already uses on this package.
-const { payViaPaymentRequest, getWalletInfo, getInvoice, getRoutingFeeEstimate, createInvoice } = vi.hoisted(() => ({
-  payViaPaymentRequest: vi.fn(),
-  getWalletInfo: vi.fn(),
-  getInvoice: vi.fn(),
-  getRoutingFeeEstimate: vi.fn(),
-  createInvoice: vi.fn(),
-}))
+const { payViaPaymentRequest, getWalletInfo, getInvoice, getRoutingFeeEstimate, createInvoice, settleHodlInvoice } =
+  vi.hoisted(() => ({
+    payViaPaymentRequest: vi.fn(),
+    getWalletInfo: vi.fn(),
+    getInvoice: vi.fn(),
+    getRoutingFeeEstimate: vi.fn(),
+    createInvoice: vi.fn(),
+    settleHodlInvoice: vi.fn(),
+  }))
 vi.mock('lightning', async (importOriginal) => {
   const actual = await importOriginal<typeof import('lightning')>()
   return {
@@ -23,6 +25,7 @@ vi.mock('lightning', async (importOriginal) => {
     getInvoice,
     getRoutingFeeEstimate,
     createInvoice,
+    settleHodlInvoice,
   }
 })
 
@@ -42,6 +45,7 @@ const {
   MIN_ROUTE_FEE_PROBE_MS,
   LndLightningBackendAdapter,
 } = await import('@arkade-os/solver-rails-lnd/ln/lnd/adapter.js')
+const { LND_READ_TIMEOUT_MS, LndReadTimeoutError } = await import('@arkade-os/solver-rails-lnd/deadline.js')
 
 describe('rejectionReason', () => {
   // The `lightning` package rejects promises with [code, reason, details?]
@@ -607,5 +611,99 @@ describe('LndLightningBackendAdapter.estimateSendFee', () => {
   it('mints no handle, because nothing here is prepared to be spent against', async () => {
     getRoutingFeeEstimate.mockResolvedValue({ fee_mtokens: '10500', timeout: 144 })
     await expect(estimate()).resolves.not.toHaveProperty('feeHandle')
+  })
+})
+
+describe('LndLightningBackendAdapter read deadlines', () => {
+  const forged = forgeInvoiceWithPreimage({
+    network: 'bcrt',
+    amountSats: 1000,
+    timestamp: 1_800_000_000,
+    expirySeconds: 3600,
+    minFinalCltvBlocks: 40,
+  })
+
+  const adapter = () => LndLightningBackendAdapter.create({ socket: 's', cert: 'c', macaroon: 'm' })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.useFakeTimers()
+    getWalletInfo.mockResolvedValue({ current_block_height: 840_000 })
+    payViaPaymentRequest.mockResolvedValue({ id: 'deadbeef', secret: 'cafe' })
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  // Awaited INSIDE payInvoice, before the pay: a hang here holds the send leg
+  // without sending and without erroring.
+  it('refuses to pay when the pre-flight height read never answers, having sent nothing', async () => {
+    const lnd = await adapter()
+    getWalletInfo.mockImplementation(() => new Promise(() => {}))
+
+    const outcome = lnd.payInvoice({ invoice: forged.invoice, maxFeeSats: 10, idempotencyKey: 'k', maxCltvBlocks: 472 })
+    const settled = outcome.then(
+      (result) => result,
+      (error) => error,
+    )
+    await vi.advanceTimersByTimeAsync(LND_READ_TIMEOUT_MS)
+
+    expect(await Promise.race([settled, Promise.resolve('still-pending')])).toBeInstanceOf(LndReadTimeoutError)
+    expect(payViaPaymentRequest).not.toHaveBeenCalled()
+  })
+
+  it('abandons an invoice read that never answers rather than polling against a wedged node', async () => {
+    const lnd = await adapter()
+    getInvoice.mockImplementation(() => new Promise(() => {}))
+
+    const settled = lnd.getHoldState('a'.repeat(64)).then(
+      (state) => state,
+      (error) => error,
+    )
+    await vi.advanceTimersByTimeAsync(LND_READ_TIMEOUT_MS)
+
+    const result = await Promise.race([settled, Promise.resolve('still-pending')])
+    expect(result).toBeInstanceOf(LndReadTimeoutError)
+    expect(result).toMatchObject({ call: 'getInvoice' })
+  })
+
+  it('does not report a timed-out probe as "no estimate"', async () => {
+    const lnd = await adapter()
+    getRoutingFeeEstimate.mockImplementation(() => new Promise(() => {}))
+
+    const settled = lnd.estimateSendFee({ invoice: forged.invoice, timeoutMs: 5_000 }).then(
+      (estimate) => estimate,
+      (error) => error,
+    )
+    await vi.advanceTimersByTimeAsync(LND_READ_TIMEOUT_MS + 5_000)
+
+    expect(await Promise.race([settled, Promise.resolve('still-pending')])).toBeInstanceOf(LndReadTimeoutError)
+  })
+
+  it('never cuts a routing probe short of the budget its caller asked for', async () => {
+    const lnd = await adapter()
+    getRoutingFeeEstimate.mockImplementation(() => new Promise(() => {}))
+
+    const settled = lnd.estimateSendFee({ invoice: forged.invoice, timeoutMs: 120_000 }).then(
+      (estimate) => estimate,
+      (error) => error,
+    )
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    expect(await Promise.race([settled, Promise.resolve('still-pending')])).toBe('still-pending')
+  })
+
+  // Pins the asymmetry rather than biting a defect: passes before and after.
+  it('leaves the hold settle unbounded, because an aborted submit has an unknown outcome', async () => {
+    const lnd = await adapter()
+    settleHodlInvoice.mockImplementation(() => new Promise(() => {}))
+
+    const settled = lnd.settleHold('b'.repeat(64)).then(
+      () => 'settled',
+      () => 'rejected',
+    )
+    await vi.advanceTimersByTimeAsync(LND_READ_TIMEOUT_MS * 10)
+
+    expect(await Promise.race([settled, Promise.resolve('still-pending')])).toBe('still-pending')
   })
 })

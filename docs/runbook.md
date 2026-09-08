@@ -497,6 +497,30 @@ the reasons to take one.
 
 ## Operating notes
 
+- **Set OS-level TCP keepalive on the LND host.** The `lightning` package
+  hardcodes its gRPC channel options and exposes no passthrough, so
+  `grpc.keepalive_time_ms` is never set and grpc-js sends no HTTP/2 pings at
+  all. A half-open connection to LND is therefore only noticed when the OS
+  keepalive fires — on Linux defaults `tcp_keepalive_time` 7200s plus 9 probes
+  at 75s, roughly **2h11m** before the socket errors and the call settles.
+
+  The solver's LND **reads** carry their own 30s deadline
+  (`packages/solver-rails-lnd/src/deadline.ts`), so they recover without this.
+  The **writes** deliberately do not — aborting a submit does not mean it
+  failed, it means the outcome is unknown — so this is the only mitigation that
+  covers `payViaPaymentRequest`, `settleHodlInvoice`, `sendToChainAddress` and
+  `broadcastChainTransaction`. It needs no code change:
+
+  ```sh
+  # /etc/sysctl.d/99-lnd-keepalive.conf, then: sysctl --system
+  net.ipv4.tcp_keepalive_time = 60
+  net.ipv4.tcp_keepalive_intvl = 15
+  net.ipv4.tcp_keepalive_probes = 4
+  ```
+
+  Host-wide, so set them on the host running the solver. They only bound a
+  socket whose peer has stopped answering — they do not make an aborted write's
+  outcome knowable, and a slow LND is still a slow LND.
 - **`stuck` rows are the pager.** They mean "money may have left and needs a
   human": payment terminally failed after exposure, a claim failing past the
   refund deadline, or an empty script at/after the deadline (possible client
