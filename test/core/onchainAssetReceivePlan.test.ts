@@ -298,9 +298,9 @@ describe('the deadline backstop after funding', () => {
     expect(action).toEqual({ do: 'refund_arkade' })
   })
 
-  it('leaves an emptied lockup to the caller grace rather than deciding it here', () => {
+  it('dispatches an emptied lockup so the caller grace can run at all', () => {
     expect(planOnchainAssetReceive(row({ state: 'refunding_arkade' }), seen({ lockupEmpty: true }))).toEqual({
-      do: 'wait',
+      do: 'refund_arkade',
     })
   })
 })

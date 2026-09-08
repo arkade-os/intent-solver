@@ -22,6 +22,7 @@ import {
   OnchainAssetReceiveSwapService,
   type OnchainAssetReceiveArkadeOps,
 } from '@arkade-os/solver-corridors/receive/onchainAssetOrchestrator.js'
+import { EMPTY_LOCKUP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { onchainAssetReceivePairFor } from '@arkade-os/solver-core/core/onchainAssetReceive.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 
@@ -369,6 +370,29 @@ describe('OnchainAssetReceiveSwapService', () => {
       const row = await store.get(swap.id)
       expect(row.state).toBe('claimed')
       expect(row.preimage).toBe(hex.encode(P))
+    })
+
+    it('escalates an emptied refunding_arkade row once the grace is spent', async () => {
+      // A refund that broadcast and died before recording the transition.
+      const swap = await fundAndConfirm()
+      await service.tick(swap.id)
+      await store.transition(swap.id, 'awaiting_claim', 'refunding_arkade', {})
+      deps.arkadeFake.spendLockup(swap.pkScript, null)
+      now += EMPTY_LOCKUP_GRACE + 1
+      await service.tick(swap.id)
+      const row = await store.get(swap.id)
+      expect(row.state).toBe('stuck')
+      expect(row.failureReason).toContain('needs review')
+    })
+
+    it('holds an emptied refunding_arkade row inside the grace', async () => {
+      const swap = await fundAndConfirm()
+      await service.tick(swap.id)
+      await store.transition(swap.id, 'awaiting_claim', 'refunding_arkade', {})
+      deps.arkadeFake.spendLockup(swap.pkScript, null)
+      now += EMPTY_LOCKUP_GRACE - 1
+      await service.tick(swap.id)
+      expect((await store.get(swap.id)).state).toBe('refunding_arkade')
     })
 
     it('carries P onto the row before it spends against it', async () => {

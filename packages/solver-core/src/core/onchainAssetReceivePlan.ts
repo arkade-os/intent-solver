@@ -246,8 +246,9 @@ export const planOnchainAssetReceive = (
     case 'refunding_arkade':
       // An empty lockup with no preimage is ambiguous — our own earlier refund,
       // or a claim not yet readable. The caller gives that read lag a bounded
-      // grace before this becomes terminal; from here it is simply not decidable.
-      return seen.lockupEmpty ? { do: 'wait' } : { do: 'refund_arkade' }
+      // grace before this becomes terminal, and only this action reaches it:
+      // `wait` on an empty lockup swept an exposed row forever instead.
+      return { do: 'refund_arkade' }
 
     default:
       return { do: 'wait' }
