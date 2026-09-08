@@ -48,7 +48,8 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { Transaction, SigHash, p2tr } from '@scure/btc-signer'
-import { loadConfig, swapDbPath, type Config } from './config.js'
+import { loadConfig, sentryOptionsFromEnv, swapDbPath, type Config } from './config.js'
+import { createErrorReporter, type ErrorReporter } from './ops/sentry.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
 import { findLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -902,7 +903,10 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       onRefusal: (context, detail) => log(`${context}:`, detail),
       // Same sink, different word: `onRefusal` above is this host answering
       // correctly, so a fault must not read as ordinary business.
-      onError: (context, error) => log(`${context} FAULT:`, error instanceof Error ? error.message : String(error)),
+      onError: (context, error) => {
+        log(`${context} FAULT:`, error instanceof Error ? error.message : String(error))
+        reporter?.report(context, error)
+      },
     })
     const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host, ...HONO_SERVE_OPTIONS })
     log(`listening on ${config.host}:${config.port}`)
@@ -959,8 +963,10 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       },
       codec,
     })
-    const onError = (context: string, error: unknown): void =>
+    const onError = (context: string, error: unknown): void => {
       log(`${context}:`, error instanceof Error ? error.message : String(error))
+      reporter?.report(context, error)
+    }
     // A refusal is an ANSWER, not a fault, so it never reaches `onError` — and
     // for a long time that meant a turned-away request left no trace at all.
     const onRefusal = (context: string, detail: string): void => log(`${context}:`, detail)
@@ -1896,7 +1902,29 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
   },
 }
 
+/** Null unless `SENTRY_DSN` is set; every call site is optional-chained. */
+let reporter: ErrorReporter | null = null
+
+/**
+ * Handling these events REPLACES Node's own handler, so this has to end in the
+ * non-zero exit Node would have produced: a money-mover that survives its own
+ * panic and keeps ticking is worse than one that restarts.
+ */
+const panic = async (context: string, error: unknown): Promise<void> => {
+  console.error(`${context}:`, error instanceof Error ? (error.stack ?? error.message) : String(error))
+  reporter?.report(context, error)
+  await reporter?.flush()
+  process.exit(1)
+}
+
 const main = async (): Promise<void> => {
+  // Before the command resolves: a panic while reading the environment is one
+  // worth reporting, and `loadConfig` has not run yet.
+  reporter = createErrorReporter(sentryOptionsFromEnv())
+  if (reporter) {
+    process.on('uncaughtException', (error) => void panic('uncaught exception', error))
+    process.on('unhandledRejection', (reason) => void panic('unhandled rejection', reason))
+  }
   const [, , command, ...args] = process.argv
   const handler = command ? commands[command] : undefined
   if (!handler) {
@@ -1909,7 +1937,9 @@ const main = async (): Promise<void> => {
 
 main()
   .then(() => process.exit(process.exitCode ?? 0))
-  .catch((error) => {
+  .catch(async (error) => {
     console.error('failed:', error instanceof Error ? error.message : String(error))
+    reporter?.report('cli', error)
+    await reporter?.flush()
     process.exit(1)
   })

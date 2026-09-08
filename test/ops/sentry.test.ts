@@ -1,0 +1,326 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { wordlist } from '@scure/bip39/wordlists/english.js'
+import { sentryOptionsFromEnv } from '@arkade-os/solver-app/config.js'
+import {
+  buildEvent,
+  createErrorReporter,
+  envelopeFor,
+  framesFrom,
+  parseSentryDsn,
+  scrubText,
+} from '@arkade-os/solver-app/ops/sentry.js'
+
+/** A real BIP39 test vector. */
+const MNEMONIC = 'legal winner thank year wave sausage worth useful legal winner thank yellow'
+
+/** Shaped like the real `Config`, mnemonic nested as it is in `config.arkade`. */
+const configShaped = {
+  network: 'mainnet',
+  arkade: { mnemonic: MNEMONIC, isMainnet: true, serverUrl: 'https://arkd.example' },
+  lnd: { socket: '127.0.0.1:10009', macaroon: 'AgEDbG5kAvgBAwoQ' + 'a'.repeat(120) },
+}
+
+const DSN = 'https://abc123def456@o1234.ingest.sentry.io/7654321'
+
+const capturing = () => {
+  const bodies: string[] = []
+  const headers: Record<string, string>[] = []
+  const urls: string[] = []
+  return {
+    bodies,
+    headers,
+    urls,
+    send: async (url: string, init: { headers: Record<string, string>; body: string }) => {
+      urls.push(url)
+      headers.push(init.headers)
+      bodies.push(init.body)
+    },
+  }
+}
+
+describe('parseSentryDsn', () => {
+  it('derives the envelope endpoint and keeps the public key', () => {
+    expect(parseSentryDsn(DSN)).toEqual({
+      endpoint: 'https://o1234.ingest.sentry.io/api/7654321/envelope/',
+      publicKey: 'abc123def456',
+    })
+  })
+
+  it('honours a path prefix, for a self-hosted Sentry behind a subdirectory', () => {
+    expect(parseSentryDsn('https://key@sentry.example.com/on/prem/42').endpoint).toBe(
+      'https://sentry.example.com/on/prem/api/42/envelope/',
+    )
+  })
+
+  it('discards the deprecated secret half rather than echoing it back', () => {
+    expect(parseSentryDsn('https://public:supersecret@host/9').publicKey).toBe('public')
+  })
+
+  it.each([
+    ['not-a-url', 'SENTRY_DSN is not a URL'],
+    ['ftp://key@host/1', 'SENTRY_DSN must be http(s)'],
+    ['https://host/1', 'SENTRY_DSN has no public key'],
+    ['https://key@host/notanumber', 'SENTRY_DSN has no numeric project id'],
+  ])('refuses %s rather than reporting nowhere', (raw, message) => {
+    expect(() => parseSentryDsn(raw)).toThrow(message)
+  })
+})
+
+describe('scrubText', () => {
+  it('redacts a bare mnemonic', () => {
+    expect(scrubText(`seed restored: ${MNEMONIC}`)).not.toContain('sausage')
+  })
+
+  it('redacts a mnemonic behind a key, which is how a serialised config carries it', () => {
+    const scrubbed = scrubText(JSON.stringify(configShaped))
+    expect(scrubbed).not.toContain('sausage')
+    expect(scrubbed).not.toContain(MNEMONIC)
+  })
+
+  it.each([15, 18, 21, 24])('redacts a %i-word mnemonic too', (words) => {
+    const phrase = Array.from({ length: words }, (_, i) => wordlist[i * 37]).join(' ')
+    expect(scrubText(`recovered ${phrase} ok`)).toContain('<redacted>')
+  })
+
+  it('redacts a mnemonic buried mid-sentence, not just one standing alone', () => {
+    expect(scrubText(`the operator pasted ${MNEMONIC} into the issue`)).not.toContain('sausage')
+  })
+
+  it.each([
+    'could not find the swap row for the given payment hash because the record was missing',
+    'the lightning backend refused to pay the invoice because the route was not found today',
+    'unable to settle the batch since the server rejected our forfeit signature for this vtxo',
+  ])('leaves an ordinary sentence alone: %s', (message) => {
+    expect(scrubText(message)).toBe(message)
+  })
+
+  it('keeps a payment hash, which is the only correlation key an operator has', () => {
+    const hash = 'a'.repeat(64)
+    expect(scrubText(`swap ${hash} failed`)).toContain(hash)
+  })
+
+  it('redacts credentials embedded in an RPC or relay URL', () => {
+    expect(scrubText('dial wss://alice:hunter2@relay.example/ws failed')).toBe(
+      'dial wss://<redacted>@relay.example/ws failed',
+    )
+  })
+
+  it('redacts a macaroon-scale blob but not a hash-scale one', () => {
+    expect(scrubText(`macaroon ${'b'.repeat(200)}`)).not.toContain('b'.repeat(100))
+  })
+
+  it('caps the text, because SDK errors carry serialised request bodies', () => {
+    expect(scrubText('exception '.repeat(5_000))).toHaveLength(1024)
+  })
+})
+
+describe('framesFrom', () => {
+  const framesOfARealError = (): ReturnType<typeof framesFrom> => {
+    const inner = (): never => {
+      throw new Error('boom')
+    }
+    try {
+      inner()
+    } catch (error) {
+      return framesFrom((error as Error).stack)
+    }
+    throw new Error('unreachable')
+  }
+
+  it('carries a location and nothing that could hold state', () => {
+    const frames = framesOfARealError()
+    expect(frames.length).toBeGreaterThan(0)
+    for (const frame of frames) {
+      expect(frame).not.toHaveProperty('vars')
+      expect(frame).not.toHaveProperty('context_line')
+      expect(frame).not.toHaveProperty('pre_context')
+      expect(frame).not.toHaveProperty('post_context')
+      expect(frame).not.toHaveProperty('abs_path')
+    }
+  })
+
+  it('reduces a filename to its repo-relative tail, never the operator home directory', () => {
+    const frames = framesFrom('Error: x\n    at fn (/home/alice/srv/packages/solver-app/src/cli.ts:10:5)')
+    expect(frames[0]?.filename).toBe('packages/solver-app/src/cli.ts')
+  })
+
+  it('marks node_modules as not in_app', () => {
+    const frames = framesFrom('Error: x\n    at q (/srv/node_modules/lib/index.js:1:1)')
+    expect(frames[0]?.in_app).toBe(false)
+  })
+})
+
+describe('the reporter', () => {
+  it('is null when no DSN is configured, which is the whole off switch', () => {
+    expect(createErrorReporter(null)).toBeNull()
+  })
+
+  it('sends nothing anywhere when unconfigured', () => {
+    const reporter = createErrorReporter(null)
+    expect(() => reporter?.report('ctx', new Error('boom'))).not.toThrow()
+  })
+
+  const reporterWith = (capture: ReturnType<typeof capturing>) =>
+    createErrorReporter({ dsn: parseSentryDsn(DSN), environment: 'mainnet', send: capture.send })
+
+  it('never puts a mnemonic on the wire, however the error carries one', async () => {
+    const capture = capturing()
+    const reporter = reporterWith(capture)!
+
+    // The three ways a config object reaches an error.
+    reporter.report('load', new Error(`config invalid: ${JSON.stringify(configShaped)}`))
+    reporter.report('boot', Object.assign(new Error('wallet failed'), { config: configShaped }))
+    reporter.report('start', new Error('arkade unreachable', { cause: configShaped }))
+    await reporter.flush()
+
+    expect(capture.bodies).toHaveLength(3)
+    for (const body of capture.bodies) {
+      expect(body).not.toContain(MNEMONIC)
+      expect(body).not.toContain('sausage')
+      expect(body).not.toContain('AgEDbG5kAvgBAwoQ')
+    }
+    // Absence alone would also pass for a reporter that sent an empty body.
+    expect(capture.bodies[1]).toContain('wallet failed')
+    expect(capture.bodies[2]).toContain('arkade unreachable')
+  })
+
+  it('posts an allowlisted body: no env, no modules, no hostname, no breadcrumbs', async () => {
+    const capture = capturing()
+    const reporter = reporterWith(capture)!
+    reporter.report('ctx', new Error('boom'))
+    await reporter.flush()
+
+    const event = JSON.parse(capture.bodies[0]!.split('\n')[2]!) as Record<string, unknown>
+    expect(Object.keys(event).sort()).toEqual([
+      'environment',
+      'event_id',
+      'exception',
+      'level',
+      'logger',
+      'platform',
+      'timestamp',
+    ])
+  })
+
+  it('authenticates in the header, so the captured body carries no credential', async () => {
+    const capture = capturing()
+    const reporter = reporterWith(capture)!
+    reporter.report('ctx', new Error('boom'))
+    await reporter.flush()
+
+    expect(capture.urls[0]).toBe('https://o1234.ingest.sentry.io/api/7654321/envelope/')
+    expect(capture.headers[0]?.['x-sentry-auth']).toContain('sentry_key=abc123def456')
+    expect(capture.bodies[0]).not.toContain('abc123def456')
+  })
+
+  it('survives a reporting backend that is down', async () => {
+    const reporter = createErrorReporter({
+      dsn: parseSentryDsn(DSN),
+      environment: 'mainnet',
+      send: async () => {
+        throw new Error('sentry unreachable')
+      },
+    })!
+    reporter.report('ctx', new Error('boom'))
+    await expect(reporter.flush()).resolves.toBeUndefined()
+  })
+
+  it('collapses a repeat, so a 250ms tick loop cannot flood the project', async () => {
+    const capture = capturing()
+    let clock = 1_000_000
+    const reporter = createErrorReporter({
+      dsn: parseSentryDsn(DSN),
+      environment: 'mainnet',
+      send: capture.send,
+      now: () => clock,
+    })!
+    for (let i = 0; i < 50; i++) {
+      reporter.report('tick', new Error('backend unreachable'))
+      clock += 250
+    }
+    await reporter.flush()
+    expect(capture.bodies).toHaveLength(1)
+  })
+
+  it('caps distinct faults per minute too', async () => {
+    const capture = capturing()
+    let clock = 1_000_000
+    const reporter = createErrorReporter({
+      dsn: parseSentryDsn(DSN),
+      environment: 'mainnet',
+      send: capture.send,
+      now: () => clock,
+    })!
+    for (let i = 0; i < 50; i++) {
+      reporter.report('tick', new Error(`distinct fault ${i}`))
+      clock += 100
+    }
+    await reporter.flush()
+    expect(capture.bodies).toHaveLength(10)
+  })
+})
+
+describe('sentryOptionsFromEnv', () => {
+  const KEYS = ['SENTRY_DSN', 'SENTRY_ENVIRONMENT', 'SENTRY_RELEASE', 'SWAP_NETWORK'] as const
+  let saved: Record<string, string | undefined>
+
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]))
+    for (const key of KEYS) delete process.env[key]
+  })
+  afterEach(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+
+  it('is null when SENTRY_DSN is unset, and null again when it is blank', () => {
+    expect(sentryOptionsFromEnv()).toBeNull()
+    process.env.SENTRY_DSN = '   '
+    expect(sentryOptionsFromEnv()).toBeNull()
+  })
+
+  it('falls back to the swap network for the environment tag', () => {
+    process.env.SENTRY_DSN = DSN
+    process.env.SWAP_NETWORK = 'regtest'
+    expect(sentryOptionsFromEnv()).toMatchObject({ environment: 'regtest', release: undefined })
+  })
+
+  it('prefers an explicit environment and carries a release', () => {
+    process.env.SENTRY_DSN = DSN
+    process.env.SWAP_NETWORK = 'regtest'
+    process.env.SENTRY_ENVIRONMENT = 'staging'
+    process.env.SENTRY_RELEASE = 'v1.2.3'
+    expect(sentryOptionsFromEnv()).toMatchObject({ environment: 'staging', release: 'v1.2.3' })
+  })
+
+  it('throws on a malformed DSN rather than silently reporting nowhere', () => {
+    process.env.SENTRY_DSN = 'https://no-project-id@example.com'
+    expect(() => sentryOptionsFromEnv()).toThrow('SENTRY_DSN')
+  })
+})
+
+describe('the envelope', () => {
+  it('is three newline-delimited lines Sentry can ingest', () => {
+    const event = buildEvent('ctx', new Error('boom'), {
+      environment: 'regtest',
+      eventId: 'f'.repeat(32),
+      timestamp: 1_700_000_000,
+    })
+    const [header, item, payload] = envelopeFor(event).split('\n')
+    expect(JSON.parse(header!)).toMatchObject({ event_id: 'f'.repeat(32) })
+    expect(JSON.parse(item!)).toMatchObject({ type: 'event', content_type: 'application/json' })
+    expect(JSON.parse(item!).length).toBe(Buffer.byteLength(payload!))
+  })
+
+  it('reports a thrown non-Error without inventing a stack', () => {
+    const event = buildEvent('ctx', 'plain string failure', {
+      environment: 'regtest',
+      eventId: 'a'.repeat(32),
+      timestamp: 1,
+    })
+    expect(event.exception.values[0].value).toBe('plain string failure')
+    expect(event.exception.values[0].stacktrace.frames).toEqual([])
+  })
+})
