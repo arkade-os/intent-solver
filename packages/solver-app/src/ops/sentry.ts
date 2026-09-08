@@ -61,16 +61,19 @@ const REDACTED = '<redacted>'
 
 const BIP39 = new Set(wordlist)
 const BIP39_MIN_WORDS = 12
-const WORD = /[a-z]+/g
+const WORD = /[A-Za-z]+/g
+/** A whitespace-only rule read a JSON array or CSV line as twelve one-word runs. */
+const PHRASE_GAP = /^[\s,"'\[\]]+$/
 
 /**
  * Consecutive words that are all IN the BIP39 list — membership, not word shape.
- * A shape rule ("twelve lowercase words of 3-8 letters") eats ordinary messages:
- * `could not find the swap row for the given payment hash…` is sixteen of those.
- * Measured on real solver messages the longest membership streak is two, against
- * twelve for the shortest mnemonic, so the threshold sits in a wide gap.
+ * A shape rule ("twelve lowercase words of 3-8 letters") eats ordinary messages.
+ * Re-measured over this repo's 125k lines under THIS rule: the longest streak in
+ * non-mnemonic prose is eight, against twelve for the shortest mnemonic, and
+ * every line reaching twelve is a real mnemonic in a fixture. Widening the gap
+ * below narrows that margin — re-measure if it widens again.
  *
- * Any whitespace separates, and separators are preserved rather than normalised.
+ * Case-insensitive; separators are preserved rather than normalised.
  */
 const redactMnemonics = (text: string): string => {
   type Token = { word: string; start: number; end: number }
@@ -91,12 +94,12 @@ const redactMnemonics = (text: string): string => {
     run = []
   }
   for (const token of words) {
-    if (!BIP39.has(token.word)) {
+    if (!BIP39.has(token.word.toLowerCase())) {
       flush()
       continue
     }
     const previous = run[run.length - 1]
-    if (previous && !/^\s+$/.test(text.slice(previous.end, token.start))) flush()
+    if (previous && !PHRASE_GAP.test(text.slice(previous.end, token.start))) flush()
     run.push(token)
   }
   flush()

@@ -117,8 +117,46 @@ describe('scrubText', () => {
     expect(scrubText(`recovered ${MNEMONIC.split(' ').join(gap)} ok`)).not.toContain('sausage')
   })
 
+  it.each([
+    ['a JSON array', JSON.stringify(MNEMONIC.split(' '))],
+    ['a CSV line', MNEMONIC.split(' ').join(', ')],
+    [
+      'individually quoted words',
+      MNEMONIC.split(' ')
+        .map((w) => `"${w}"`)
+        .join(' '),
+    ],
+    [
+      'quoted words across lines',
+      MNEMONIC.split(' ')
+        .map((w) => `"${w}"`)
+        .join(',\n'),
+    ],
+  ])('redacts a mnemonic written as %s', (_name, text) => {
+    expect(scrubText(text)).not.toContain('sausage')
+  })
+
+  it.each([
+    ['upper case', MNEMONIC.toUpperCase()],
+    ['title case', MNEMONIC.replace(/\b[a-z]/g, (c) => c.toUpperCase())],
+  ])('redacts a mnemonic in %s', (_name, text) => {
+    expect(scrubText(text).toLowerCase()).not.toContain('sausage')
+  })
+
   it('preserves an ordinary message rather than normalising its whitespace', () => {
     const message = 'line one\n\tindented\n  spaced'
+    expect(scrubText(message)).toBe(message)
+  })
+
+  it('leaves a comma-separated ordinary sentence alone', () => {
+    const message = 'could not settle, the server rejected our signature, and the batch was dropped'
+    expect(scrubText(message)).toBe(message)
+  })
+
+  // The worst real case in this repo: an eight-word BIP39 streak, four short of
+  // the threshold. It is the whole margin, so it is pinned rather than described.
+  it('leaves the longest BIP39 streak in this repo alone', () => {
+    const message = 'estimate`). Anything that can answer "what will this one cost me" fits here.'
     expect(scrubText(message)).toBe(message)
   })
 
