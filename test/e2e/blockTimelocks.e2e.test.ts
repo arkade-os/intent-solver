@@ -99,8 +99,11 @@ describe('block-typed timelocks against a live arkd', () => {
     const refundLocktime = absoluteLocktimeIn(now + 2 * 60 * 60, 'blocks', { now, tipHeight: tipHeight! })
     expect(refundLocktime).toBeGreaterThan(tipHeight!)
 
-    const info = await arkade.ctx.wallet.arkProvider.getInfo()
-    const serverKey = hex.decode(info.signerPubkey)
+    // The wallet's normalised key, as `assetLockup.e2e.test.ts` uses. arkd
+    // advertises `signerPubkey` COMPRESSED, and decoding it raw hands
+    // `VHTLC.ScriptV2` 33 bytes where it validates 32: "Invalid public key
+    // length (server)". Every shipped caller narrows it first.
+    const serverKey = arkade.ctx.wallet.arkServerPublicKey
     const own = await arkade.ctx.identity.xOnlyPublicKey()
 
     const script = new CovenantSwapScript({

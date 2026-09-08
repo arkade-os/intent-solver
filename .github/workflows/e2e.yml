@@ -209,6 +209,21 @@ jobs:
           docker cp boltz-lnd:/root/.lnd/tls.cert ./boltz-lnd-tls.cert
           docker cp boltz-lnd:/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon ./boltz-lnd-admin.macaroon
 
+      # setupBoltz() funds this node and then spends nearly all of it opening
+      # the channel, so what it leaves ON CHAIN is whatever the channel did not
+      # take. lndMempoolSpend needs 200k sats of it to make a real unconfirmed
+      # spend, and CI failed with InsufficientBalanceToSendToChainAddress.
+      # `--confirm` mines the block, so the balance is spendable when the suite
+      # starts rather than one automine interval later.
+      - name: Give the solver node an on-chain float
+        if: matrix.lnd
+        timeout-minutes: 10
+        run: |
+          set -eu
+          address=$(docker exec boltz-lnd lncli --network=regtest newaddress p2wkh | jq -r '.address')
+          node arkade-regtest/regtest.mjs faucet "$address" 0.05 --confirm
+          docker exec boltz-lnd lncli --network=regtest walletbalance
+
       # Generated HERE, never committed and never a repository secret: a regtest
       # seed is still a credential. No settle after the fund: it ends settled.
       - name: Provision a fresh Arkade wallet

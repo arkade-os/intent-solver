@@ -32,6 +32,10 @@ const run = promisify(execFile)
 /** How long a single `regtest.mjs mine` may take. Generous — it shells out to bitcoin-cli in a container. */
 const MINE_TIMEOUT_MS = 120_000
 
+/** How long Esplora may lag bitcoind before a mined block is visible, and how often to re-ask. */
+const INDEX_LAG_TIMEOUT_MS = 30_000
+const INDEX_POLL_MS = 500
+
 /**
  * Locate the arkade-regtest checkout.
  *
@@ -74,10 +78,23 @@ export const regtestDir = (): string => {
  * can assert the chain actually moved rather than trusting the CLI's exit code.
  */
 export const mineBlocks = async (count = 1): Promise<number | null> => {
+  const { chainTip } = await import('./preflight.js')
+  const before = await chainTip()
   await run(process.execPath, ['regtest.mjs', 'mine', String(count)], {
     cwd: regtestDir(),
     timeout: MINE_TIMEOUT_MS,
   })
-  const { chainTip } = await import('./preflight.js')
-  return chainTip()
+  // Esplora indexes BEHIND bitcoind, so a tip read straight after the mine can
+  // still be the one from before it — CI saw `mineBlocks(4)` return an unmoved
+  // 105 and fail a deadline assertion on the indexer's lag rather than on the
+  // miner. Bounded, and it cannot hide a dead miner: the tip is returned either
+  // way, so a caller asserting the chain moved still fails.
+  const want = before === null ? null : before + count
+  const deadline = Date.now() + INDEX_LAG_TIMEOUT_MS
+  let tip = await chainTip()
+  while (want !== null && (tip === null || tip < want) && Date.now() < deadline) {
+    await new Promise((settle) => setTimeout(settle, INDEX_POLL_MS))
+    tip = await chainTip()
+  }
+  return tip
 }
