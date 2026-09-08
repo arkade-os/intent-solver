@@ -93,7 +93,7 @@ export const lncli = async <T>(container: string, args: readonly string[]): Prom
         "The e2e Lightning legs drive arkade-regtest's SECOND LND node as the real counterparty.",
         `Check it is up:  docker exec ${container} lncli --network=regtest getinfo`,
         'Override the container name with E2E_LN_COUNTERPARTY_CONTAINER / E2E_LN_SOLVER_CONTAINER,',
-        'exported into the environment — the e2e env file is read too late to set them.',
+        'set either in the shell or in the e2e env file.',
       ].join('\n'),
     )
   }
