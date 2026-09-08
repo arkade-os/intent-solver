@@ -172,7 +172,7 @@ export const respondToOnchainAssetReceiveRfqRequest = async (
     pair: request.pair,
     paymentHash: request.profile.payment_hash,
     amountSats: request.amount,
-    claimPacket: request.profile.claim_packet,
+    claimPacket: request.profile.claim_packet ?? null,
     refundPubkey: request.profile.refund_pubkey,
     payoutAddress: request.profile.payout_address,
     payoutPubkey: request.profile.payout_pubkey,

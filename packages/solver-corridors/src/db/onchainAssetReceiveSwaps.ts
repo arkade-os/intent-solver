@@ -120,7 +120,7 @@ export interface OnchainAssetReceiveSwapRow {
   clientOnchainRefundPubkey: string
   onchainAddress: string
   onchainPkScript: string
-  claimPacket: string
+  claimPacket: string | null
   fundingTxid: string | null
   fundingVout: number | null
   arkadeFundTxid: string | null
@@ -237,7 +237,12 @@ const toRow = (raw: Raw): OnchainAssetReceiveSwapRow => ({
   clientOnchainRefundPubkey: String(raw.client_onchain_refund_pubkey),
   onchainAddress: String(raw.onchain_address),
   onchainPkScript: String(raw.onchain_pk_script),
-  claimPacket: String(raw.claim_packet),
+  // '' is absent, not empty: the wire keeps `.min(1)`, so a client can never send
+  // one. Lets the column stay NOT NULL and needs no migration. @see #60.
+  claimPacket:
+    raw.claim_packet === null || raw.claim_packet === undefined || raw.claim_packet === ''
+      ? null
+      : String(raw.claim_packet),
   fundingTxid: raw.funding_txid === null ? null : String(raw.funding_txid),
   fundingVout: raw.funding_vout === null || raw.funding_vout === undefined ? null : Number(raw.funding_vout),
   arkadeFundTxid: raw.arkade_fund_txid === null ? null : String(raw.arkade_fund_txid),
@@ -278,7 +283,7 @@ export interface OnchainAssetReceiveQuoteRecord {
   clientOnchainRefundPubkey: string
   onchainAddress: string
   onchainPkScript: string
-  claimPacket: string
+  claimPacket: string | null
   rfqId?: string
 }
 
@@ -414,7 +419,7 @@ export class OnchainAssetReceiveSwapStore extends BaseSwapStore<OnchainAssetRece
         quote.clientOnchainRefundPubkey,
         quote.onchainAddress,
         quote.onchainPkScript,
-        quote.claimPacket,
+        quote.claimPacket ?? '',
         quote.rfqId ?? null,
       ],
     )

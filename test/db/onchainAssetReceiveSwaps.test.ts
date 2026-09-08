@@ -105,6 +105,13 @@ describe('OnchainAssetReceiveSwapStore', () => {
     expect(await store.committedSats()).toBe(50_000)
   })
 
+  it('round-trips an absent claim packet as null, through a NOT NULL column', async () => {
+    // '' is how absence is stored so the column needs no migration; the wire keeps
+    // `.min(1)`, so a client can never send one and '' has exactly one meaning.
+    await store.insertQuote({ ...baseQuote, claimPacket: null })
+    expect((await store.get('swap-1')).claimPacket).toBeNull()
+  })
+
   it('counts one market when asked for one, and the whole table when not', async () => {
     // One table backs every market, so a per-market reader that omits its pair
     // counts these once each per market — dividing the cap by the market count.

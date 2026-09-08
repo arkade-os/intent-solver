@@ -125,7 +125,7 @@ export type OnchainAssetQuoteOutcome =
 export interface OnchainAssetReceiveQuoteRequest {
   paymentHash: string
   amountSats: number
-  claimPacket: string
+  claimPacket: string | null
   refundPubkey: string
   payoutAddress: string
   payoutPubkey: string
@@ -521,7 +521,7 @@ export class OnchainAssetReceiveSwapService {
 
   private async askCovclaimd(row: OnchainAssetReceiveSwapRow): Promise<void> {
     const { covclaimd } = this.deps
-    if (!covclaimd) return
+    if (!covclaimd || row.claimPacket === null) return
     const script = covenantScriptFromRow(assetReceiveCovenantRowFor(row))
     if (!script.nonInteractiveClaimArkadeScript) return
     await covclaimd.reveal({

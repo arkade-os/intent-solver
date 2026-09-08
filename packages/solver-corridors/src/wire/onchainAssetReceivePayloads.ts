@@ -55,7 +55,7 @@ export const OnchainAssetReceiveRfqRequest = z
       .object({
         payment_hash: HEX32,
         /** `P` ECIES-sealed to covclaimd, base64 — carried blindly, never decrypted here. */
-        claim_packet: z.string().min(1).max(4096),
+        claim_packet: z.string().min(1).max(4096).optional(),
         /** The client's onchain HTLC refund pubkey. */
         refund_pubkey: XONLY_HEX,
         /** The client's Arkade payout address — where any claim must pay. */
