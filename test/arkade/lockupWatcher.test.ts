@@ -18,6 +18,7 @@ class FakeContracts implements ContractSource {
   watchCalls: string[] = []
   unwatchCalls: string[] = []
   failNextWatch: Error | null = null
+  failNextUnwatch: Error | null = null
   private gate: Promise<void> | null = null
   private openGate: (() => void) | null = null
 
@@ -41,6 +42,11 @@ class FakeContracts implements ContractSource {
 
   async unwatchScript(script: string): Promise<void> {
     this.unwatchCalls.push(script)
+    const failure = this.failNextUnwatch
+    if (failure) {
+      this.failNextUnwatch = null
+      throw failure
+    }
   }
 
   hold(): void {
@@ -195,6 +201,21 @@ describe('LockupWatcher — asking is watching', () => {
     watcher.sync(['aa'])
     await watcher.reconcile()
     expect(contracts.watchCalls).toEqual(['aa', 'aa'])
+  })
+
+  it('reports a failed unwatch and retries it, rather than leaking the watch', async () => {
+    // Forgetting the script here would leave the source watching it for the life
+    // of the process — the exact leak `unwatchScript` was added to close.
+    const { contracts, onError, watcher } = build()
+    watcher.sync(['aa'])
+    await watcher.reconcile()
+    contracts.failNextUnwatch = new Error('manager unavailable')
+    watcher.sync([])
+    await watcher.reconcile()
+    expect(onError).toHaveBeenCalled()
+    watcher.sync([])
+    await watcher.reconcile()
+    expect(contracts.unwatchCalls).toEqual(['aa', 'aa'])
   })
 
   it('reports a failed watch and retries it on the next sweep', async () => {

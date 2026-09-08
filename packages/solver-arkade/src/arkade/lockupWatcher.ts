@@ -118,9 +118,11 @@ export class LockupWatcher {
     }
     for (const script of [...this.asked]) {
       if (wanted.has(script)) continue
-      this.asked.delete(script)
       try {
         await this.deps.contracts.unwatchScript(script)
+        // Dropped only on success, for the same reason: while an unwatch keeps
+        // failing the source really is still watching, so the set stays honest.
+        this.asked.delete(script)
       } catch (error) {
         this.deps.onError?.(error)
       }
