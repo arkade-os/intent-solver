@@ -73,6 +73,50 @@ describe('createEsploraClient', () => {
     await client.broadcast('deadbeef')
   })
 
+  it('carries an abort signal on every read', async () => {
+    const seen: (AbortSignal | null | undefined)[] = []
+    globalThis.fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen.push(init?.signal)
+      return new Response('[]', { status: 200 })
+    }) as unknown as typeof fetch
+
+    const client = createEsploraClient('https://esplora.example/api')
+    await client.getText('/blocks/tip/height')
+    await client.getJson('/tx/aa/outspend/0')
+    await client.getJsonOrNull('/tx/aa')
+    await client.getAddressTxs('bcrt1pexample')
+
+    expect(seen).toHaveLength(4)
+    for (const signal of seen) expect(signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('abandons a read that never answers, rather than waiting on it forever', async () => {
+    // An indexer that accepts the connection and then goes quiet.
+    globalThis.fetch = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal!.reason))
+        }),
+    ) as unknown as typeof fetch
+
+    const client = createEsploraClient('https://esplora.example/api', undefined, 20)
+    await expect(client.getText('/blocks/tip/height')).rejects.toThrow(/timeout/i)
+    await expect(client.getJson('/tx/aa/outspend/0')).rejects.toThrow(/timeout/i)
+    await expect(client.getJsonOrNull('/tx/aa')).rejects.toThrow(/timeout/i)
+    await expect(client.getAddressTxs('bcrt1pexample')).rejects.toThrow(/timeout/i)
+  })
+
+  it('leaves broadcast unbounded, because an abandoned submit has an UNKNOWN outcome', async () => {
+    let signal: AbortSignal | null | undefined = null
+    globalThis.fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      signal = init?.signal
+      return new Response('abc123txid', { status: 200 })
+    }) as unknown as typeof fetch
+
+    await createEsploraClient('https://esplora.example/api').broadcast('deadbeef')
+    expect(signal).toBeUndefined()
+  })
+
   it('carries the credentials on getJson/getText too, not just the named endpoints', async () => {
     // Callers reach the other endpoints through these, so if they dropped the
     // auth header half a deployment's requests would 401 on regtest — which is
