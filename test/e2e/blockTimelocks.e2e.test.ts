@@ -137,38 +137,46 @@ describe('block-typed timelocks against a live arkd', () => {
     expect(script.pkScript).toHaveLength(34)
   })
 
-  it('matures a block-typed deadline by MINING, with the wall clock unmoved', async () => {
-    if (relativeDelayFrom(advertisedExitDelay).unit !== 'blocks') return
-    const before = await chainTip()
-    expect(before).not.toBeNull()
+  it(
+    'matures a block-typed deadline by MINING, with the wall clock unmoved',
+    async () => {
+      if (relativeDelayFrom(advertisedExitDelay).unit !== 'blocks') return
+      const before = await chainTip()
+      expect(before).not.toBeNull()
 
-    const now = Math.floor(Date.now() / 1000)
-    // A deadline three blocks out. Nothing about the clock will move it.
-    const deadline = before! + 3
-    expect(absoluteLocktimeReached(deadline, { now, tipHeight: before! })).toBe(false)
+      const now = Math.floor(Date.now() / 1000)
+      // A deadline three blocks out. Nothing about the clock will move it.
+      const deadline = before! + 3
+      expect(absoluteLocktimeReached(deadline, { now, tipHeight: before! })).toBe(false)
 
-    const after = await mineBlocks(4)
-    expect(after).not.toBeNull()
-    expect(after!).toBeGreaterThanOrEqual(deadline)
+      const after = await mineBlocks(4)
+      expect(after).not.toBeNull()
+      expect(after!).toBeGreaterThanOrEqual(deadline)
 
-    // Same `now` deliberately — the clock is held still to prove the deadline
-    // moved because BLOCKS arrived, which is the property regtest cannot get
-    // from a seconds-typed timelock at any amount of mining.
-    expect(absoluteLocktimeReached(deadline, { now, tipHeight: after! })).toBe(true)
+      // Same `now` deliberately — the clock is held still to prove the deadline
+      // moved because BLOCKS arrived, which is the property regtest cannot get
+      // from a seconds-typed timelock at any amount of mining.
+      expect(absoluteLocktimeReached(deadline, { now, tipHeight: after! })).toBe(true)
 
-    // And the seconds projection tracks it, for the duration questions that
-    // still have to be answered in seconds.
-    expect(absoluteLocktimeSeconds(deadline, { now, tipHeight: after! })).toBeLessThanOrEqual(now)
-  }, MINING_TIMEOUT_MS)
+      // And the seconds projection tracks it, for the duration questions that
+      // still have to be answered in seconds.
+      expect(absoluteLocktimeSeconds(deadline, { now, tipHeight: after! })).toBeLessThanOrEqual(now)
+    },
+    MINING_TIMEOUT_MS,
+  )
 
-  it('does not mature a SECONDS deadline by mining, which is why block mode exists', async () => {
-    const now = Math.floor(Date.now() / 1000)
-    const secondsDeadline = now + 60 * 60
-    const after = await mineBlocks(6)
-    expect(after).not.toBeNull()
-    // Six blocks, and the seconds-typed deadline has not moved an inch.
-    expect(absoluteLocktimeReached(secondsDeadline, { now, tipHeight: after! })).toBe(false)
-    expect(absoluteLocktimeSeconds(secondsDeadline, { now, tipHeight: after! })).toBe(secondsDeadline)
-    expect(NOMINAL_BLOCK_SECONDS).toBe(600)
-  }, MINING_TIMEOUT_MS)
+  it(
+    'does not mature a SECONDS deadline by mining, which is why block mode exists',
+    async () => {
+      const now = Math.floor(Date.now() / 1000)
+      const secondsDeadline = now + 60 * 60
+      const after = await mineBlocks(6)
+      expect(after).not.toBeNull()
+      // Six blocks, and the seconds-typed deadline has not moved an inch.
+      expect(absoluteLocktimeReached(secondsDeadline, { now, tipHeight: after! })).toBe(false)
+      expect(absoluteLocktimeSeconds(secondsDeadline, { now, tipHeight: after! })).toBe(secondsDeadline)
+      expect(NOMINAL_BLOCK_SECONDS).toBe(600)
+    },
+    MINING_TIMEOUT_MS,
+  )
 })
