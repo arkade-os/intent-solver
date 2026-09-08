@@ -121,6 +121,17 @@ describe('planBoardingSettle', () => {
     expect(plan([])).toEqual({ settle: false, reason: 'nothing-boarded' })
   })
 
+  // FeeAmount.value is a raw float and .satoshis is Math.ceil(value). Guarding on
+  // one and deducting the other admits a coin that contributes nothing.
+  it('drops an input whose ceiled fee leaves it nothing to contribute', () => {
+    // 249.75 ceils to 250, so the 250 coin nets exactly nothing.
+    const result = plan([utxo(2_000_000), utxo(250)], { intentFee: { onchainInput: 'amount * 0.999' } })
+
+    expect(result.settle).toBe(true)
+    if (!result.settle) return
+    expect(result.inputs.map((i) => i.txid)).toEqual(['b-2000000'])
+  })
+
   it('refuses when every input is below its own fee', () => {
     const result = plan([utxo(1_500)], { intentFee: { onchainInput: '2000.0' } })
 

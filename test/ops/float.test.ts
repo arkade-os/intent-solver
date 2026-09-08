@@ -148,6 +148,8 @@ const floatServices = (
       wallet: {
         settle: boarding.settle ?? (async () => 'settle-txid'),
         getBoardingUtxos: async () => boarding.boarded ?? [],
+        // Read by resplitFloat after a renewal; empty means the float needs no reshaping.
+        getSpendableVtxos: async () => [],
         getVtxoManager: async () => ({
           migrateDeprecatedSignerVtxos: migrate,
           getExpiringVtxos: async () => expiring,
@@ -434,6 +436,30 @@ describe('runFloatLifecycle boards confirmed sats', () => {
 
     expect(report.boarded).toBeNull()
     expect(settle).not.toHaveBeenCalled()
+  })
+
+  // Disjoint input sets — L1 boarding UTXOs versus VTXOs — so both legs settle in
+  // one pass without contending for a coin.
+  it('boards and renews in the same pass, each with its own settlement', async () => {
+    const settle = vi.fn(async (_params: SettleParams) => 'txid')
+    const due = {
+      txid: 'expiring',
+      vout: 0,
+      value: 200_000,
+      createdAt: new Date(Date.now() - 9 * 60 * 60 * 1000),
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    }
+    const report = await runFloatLifecycle(
+      floatServices(async () => NO_DEPRECATED, [], [due], { boarded: [boarded(200_000)], settle }),
+    )
+
+    expect(report.boarded).toBe('txid')
+    expect(report.renewed).toBe('txid')
+    expect(report.failures).toEqual([])
+    expect(settle).toHaveBeenCalledTimes(2)
+    const [first, second] = settle.mock.calls.map((c) => c[0].inputs.map((i) => i.txid))
+    expect(first).toEqual(['b-200000'])
+    expect(second).toEqual(['expiring'])
   })
 
   it('reports nothing and settles nothing when nothing is boarded', async () => {
