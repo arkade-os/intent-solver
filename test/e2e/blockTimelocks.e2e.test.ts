@@ -49,6 +49,13 @@ import { openArkade, SETUP_TIMEOUT_MS, type E2eArkade } from './support/stack.js
 
 const p2tr = (xonly: Uint8Array): Uint8Array => Uint8Array.from([0x51, 0x20, ...xonly])
 
+/**
+ * Shelling out to the miner and then waiting for Esplora to index the result
+ * does not fit vitest's 5s default, which is what these two tests were failing
+ * on once `mineBlocks` stopped returning a tip that predated the mine.
+ */
+const MINING_TIMEOUT_MS = 3 * 60_000
+
 describe('block-typed timelocks against a live arkd', () => {
   let arkade: E2eArkade
   let advertisedExitDelay: number
@@ -152,7 +159,7 @@ describe('block-typed timelocks against a live arkd', () => {
     // And the seconds projection tracks it, for the duration questions that
     // still have to be answered in seconds.
     expect(absoluteLocktimeSeconds(deadline, { now, tipHeight: after! })).toBeLessThanOrEqual(now)
-  })
+  }, MINING_TIMEOUT_MS)
 
   it('does not mature a SECONDS deadline by mining, which is why block mode exists', async () => {
     const now = Math.floor(Date.now() / 1000)
@@ -163,5 +170,5 @@ describe('block-typed timelocks against a live arkd', () => {
     expect(absoluteLocktimeReached(secondsDeadline, { now, tipHeight: after! })).toBe(false)
     expect(absoluteLocktimeSeconds(secondsDeadline, { now, tipHeight: after! })).toBe(secondsDeadline)
     expect(NOMINAL_BLOCK_SECONDS).toBe(600)
-  })
+  }, MINING_TIMEOUT_MS)
 })
