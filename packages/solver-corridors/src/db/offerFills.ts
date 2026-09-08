@@ -37,7 +37,12 @@ import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
-export type OfferFillState = 'fillable' | 'filling' | 'filled' | 'lost' | 'refused' | 'stuck'
+// The list is the source and the union derives from it, so a caller validating a
+// state filter cannot drift from the lifecycle. `LEGAL_EDGES` keys off the union
+// and stops compiling if the two ever separate.
+export const OFFER_FILL_STATES = ['fillable', 'filling', 'filled', 'lost', 'refused', 'stuck'] as const
+
+export type OfferFillState = (typeof OFFER_FILL_STATES)[number]
 
 export const NON_TERMINAL: readonly OfferFillState[] = ['fillable', 'filling']
 
