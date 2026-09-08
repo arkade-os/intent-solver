@@ -53,8 +53,12 @@ const p2tr = (xonly: Uint8Array): Uint8Array => Uint8Array.from([0x51, 0x20, ...
  * Shelling out to the miner and then waiting for Esplora to index the result
  * does not fit vitest's 5s default, which is what these two tests were failing
  * on once `mineBlocks` stopped returning a tip that predated the mine.
+ *
+ * Strictly ABOVE the helper's own worst case (30s pre-poll + 120s mine + 30s
+ * post-poll = 180s): at exactly 180s the test dies while `mineBlocks` is still
+ * running, and "Test timed out" hides the helper's own error.
  */
-const MINING_TIMEOUT_MS = 3 * 60_000
+const MINING_TIMEOUT_MS = 5 * 60_000
 
 describe('block-typed timelocks against a live arkd', () => {
   let arkade: E2eArkade
