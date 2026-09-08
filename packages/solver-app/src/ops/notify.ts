@@ -19,7 +19,6 @@ export interface NotifyStats {
 export interface Notifier {
   post(text: string): void
   stats(): NotifyStats
-  /** Resolves when the queue is empty. For tests and for shutdown. */
   flush(): Promise<void>
 }
 

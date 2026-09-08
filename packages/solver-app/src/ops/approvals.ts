@@ -1,9 +1,7 @@
 /**
- * Threshold, record and notify in ONE factory, so "held it" and "someone was
- * told" cannot drift apart — `assetOffers.ts`'s `onRefused` shape.
- * SEND LEGS ONLY: on a receive leg the client has already committed, and once a
- * Lightning HTLC is armed the port cannot release it early at all
- * (`ports/lightning.ts`: "the only two outcomes remain settle, or wait for E").
+ * Threshold, record and notify in ONE factory. SEND LEGS ONLY: on a receive leg
+ * the client has already committed, and once a Lightning HTLC is armed the port
+ * cannot release it early ("the only two outcomes remain settle, or wait for E").
  */
 
 import { evaluateApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'

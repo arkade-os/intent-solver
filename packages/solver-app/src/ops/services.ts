@@ -277,6 +277,12 @@ export interface Services {
    * in-flight swaps listed and its negotiations answerable.
    */
   readers: CorridorReaderSet
+  /**
+   * Refresh the balance business events report. ABSENT with no sink configured,
+   * sparing an unconfigured deployment the ~951ms wallet read. The daemon drives
+   * it; nothing on the money path does. @see ops/businessEvents.ts
+   */
+  sampleBalances?: () => Promise<void>
   /** Emulator signer key (compressed hex), fetched once at startup. */
   emulatorPubkey: string
   /** Provider x-only pubkey (hex) — the relay address clients send offers to. */
@@ -388,18 +394,23 @@ export const createServices = async (
 
   // Empty sinks make `post` a no-op, so a deployment that configures nothing
   // gets today's behaviour exactly: no timer, no network call, no failure.
+  const notifySinks = sinksFrom(config.notify, globalThis.fetch as never)
   const notifier = createNotifier({
-    sinks: sinksFrom(config.notify, globalThis.fetch as never),
+    sinks: notifySinks,
     onDeliveryFailed: (sinkName, error) =>
       log(`notification to ${sinkName} failed:`, error instanceof Error ? error.message : String(error)),
   })
 
+  // Assigned at the end of construction; the sampler only reads it at sample
+  // time. The full set is what stops committed under-reporting on a token deployment.
+  let allReaders: CorridorReaderSet | null = null
+
   // Sampled on a timer, never on the event path: `getBalance()` awaits the same
   // unfiltered `contractSnapshot()` as `getSpendableVtxos()` (~951ms measured)
-  // and races a `getBoardingUtxos()`. `totalCommitted` is the cheap SQLite half.
+  // and races a `getBoardingUtxos()`. The committed half is cheap SQLite.
   const balances = createBalanceSampler({
     readAvailableSats: async () => (await arkade.wallet.getBalance()).available,
-    readCommittedSats: totalCommitted,
+    readCommittedSats: async () => (allReaders === null ? totalCommitted() : committedAcrossCorridors(allReaders)),
     now: nowSeconds,
     onError: (error) => log('balance sample failed:', error instanceof Error ? error.message : String(error)),
   })
@@ -422,7 +433,6 @@ export const createServices = async (
       thresholdSats: policy.approvalThresholdSats,
       corridor,
       store: adminStore,
-      // Log and message from ONE handler — `assetOffers.ts`'s `onRefused` shape.
       onHeld: (request) => {
         log(`swap ${request.swapId} on ${request.corridor} held for approval: ${request.amountSats} sats`)
         notifier.post(
@@ -433,8 +443,7 @@ export const createServices = async (
       },
     })
 
-  // Each store announces against its OWN descriptor: `claimed` is delivery on
-  // the send legs and merely in flight on the receive ones.
+  // Against each store's OWN descriptor, never a shared word list.
   announceOutcomes(store, LN_SEND.pair, LN_SEND.states)
   announceOutcomes(onchainStore, ONCHAIN_SEND.pair, ONCHAIN_SEND.states)
   announceOutcomes(receiveStore, LN_RECEIVE.pair, LN_RECEIVE.states)
@@ -543,9 +552,8 @@ export const createServices = async (
   // required them to meet.
   if (servesOffers) assertMarketsPriced(policy.offerMarkets, assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
-  // NOT a corridor, so there is no descriptor to read: an offer fill has no
-  // HTLC, deadline or refund, which is why that store has no exposed set at
-  // all. `lost` — someone else took the offer — falls to `failed`.
+  // NOT a corridor, so no descriptor: an offer fill has no HTLC, deadline or
+  // refund, hence no exposed set. `lost` — someone else took it — is `failed`.
   if (offerStore) {
     announceOutcomes(offerStore, 'arkade offer fill', {
       live: OFFER_FILL_NON_TERMINAL,
@@ -604,8 +612,7 @@ export const createServices = async (
    */
   const assetRfqMarkets = assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)
   const assetRfqStore = assetRfqMarkets.length > 0 ? await AssetRfqSwapStore.open(swapFile) : null
-  // One store serves every asset pair, so the label names the LEG rather than a
-  // pair this site cannot know per row — the same call the EVM stores make.
+  // One store serves every asset pair, so the label names the LEG.
   if (assetRfqStore) {
     announceOutcomes(assetRfqStore, 'arkade asset RFQ', {
       live: ASSET_RFQ_NON_TERMINAL,
@@ -1128,6 +1135,9 @@ export const createServices = async (
     assetRfqMarkets,
   }
 
+  // Before the sampler can run, so committed covers every registered corridor.
+  allReaders = readerSetFromDeps(corridorDeps, opts?.corridors ?? [])
+
   return {
     config,
     policy,
@@ -1163,7 +1173,10 @@ export const createServices = async (
     corridors: corridorSetFromDeps(corridorDeps, opts?.corridors ?? []),
     // Built here, not per call site: a consumer's corridor has no store on
     // `Services` for a re-derivation to find.
-    readers: readerSetFromDeps(corridorDeps, opts?.corridors ?? []),
+    readers: allReaders,
+    // ABSENT with no sink configured, which is what spares an unconfigured
+    // deployment the ~951ms wallet read.
+    sampleBalances: notifySinks.length > 0 ? () => balances.sample() : undefined,
     tickErrors,
     emulatorPubkey: emulatorInfo.signerPubkey,
     providerPubkey: arkadeOps.providerPubkey,

@@ -52,9 +52,8 @@ const intFromEnv = (name: string, fallback: number, min: number, max = Infinity)
 }
 
 /**
- * An integer knob whose ABSENCE is meaningful. `intFromEnv`'s numeric fallback is
- * wrong wherever zero is itself valid: the approval threshold's zero means "gate
- * every swap", the loudest possible misreading of an unset variable.
+ * An integer knob whose ABSENCE is meaningful. `intFromEnv`'s fallback is wrong
+ * wherever zero is itself valid: the approval threshold's zero gates everything.
  */
 const optionalIntFromEnv = (name: string, min: number): number | null => {
   const raw = process.env[name]?.trim()
@@ -300,7 +299,7 @@ export interface Config {
   /**
    * All null is the default: no sink, no network call. SECRETS — a Slack webhook
    * URL is the credential entire, so these are env-only and never in
-   * `admin/settings.ts`'s exposed list, a log, or an error body.
+   * `admin/settings.ts`'s exposed list, a log or an error body.
    */
   notify: {
     telegramBotToken: string | null

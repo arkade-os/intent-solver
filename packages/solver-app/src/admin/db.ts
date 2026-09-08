@@ -76,12 +76,8 @@ CREATE TABLE IF NOT EXISTS admin_market (
   updated_at      INTEGER NOT NULL
 );
 
--- One row per swap the approval gate has held.
---
--- HERE rather than a column on each swap table: that is why the gate needs no
--- migration on the money path. Losing this file loses a pending approval, which
--- the gate re-requests next tick; losing a swap database loses funds.
---
+-- One row per swap the approval gate has held. HERE rather than a column on
+-- each swap table: that is why the gate needs no migration on the money path.
 -- A NULL approved_at is the pending state, which the gate reads directly.
 CREATE TABLE IF NOT EXISTS admin_swap_approval (
   swap_id      TEXT PRIMARY KEY,
@@ -91,12 +87,9 @@ CREATE TABLE IF NOT EXISTS admin_swap_approval (
   approved_at  INTEGER
 );
 
--- Scalar notifier state that must survive a restart -- today the last balance
--- announced. In memory it would reset every deploy and the first event after one
--- would compare against nothing: the misleading "+0%" the percentage avoids.
---
--- Not a row in admin_override: getOverrides() hands settings.ts a Record it
--- layers onto Config, so an unrelated key would be offered to that layering.
+-- Scalar notifier state that must survive a restart. In memory the first event
+-- after every deploy would compare against nothing. Not a row in admin_override:
+-- getOverrides() hands settings.ts a Record it layers onto Config.
 CREATE TABLE IF NOT EXISTS admin_notify_state (
   key        TEXT PRIMARY KEY,
   value      TEXT NOT NULL,

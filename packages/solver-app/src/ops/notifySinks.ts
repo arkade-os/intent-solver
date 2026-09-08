@@ -8,10 +8,16 @@ import type { NotifySink } from './notify.js'
 
 type FetchLike = (url: string, init: RequestInit) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>
 
+// Node's `fetch` has NO default timeout. Without this a hung request never
+// settles: the drain stops and every later message is dropped for a queue that
+// never empties — neither the bounded queue nor the bounded retries are reached.
+export const REQUEST_TIMEOUT_MS = 10_000
+
 const jsonPost = (body: unknown): RequestInit => ({
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify(body),
+  signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 })
 
 // The upstream cause is DROPPED, not chained: a transport error routinely
@@ -44,7 +50,6 @@ export const slackSink = (webhookUrl: string, fetchImpl: FetchLike): NotifySink 
   send: (text) => send('slack', fetchImpl, webhookUrl, { text }),
 })
 
-/** The credentials, exactly as {@link Config.notify} holds them. */
 export interface NotifyCredentials {
   telegramBotToken: string | null
   telegramChatId: string | null
@@ -53,8 +58,7 @@ export interface NotifyCredentials {
 
 /**
  * Empty when nothing is configured. Telegram needs BOTH halves — a token that
- * cannot address a message would read as a delivery failure, not a misconfig.
- * Credentials stay in the closures, never on the returned objects.
+ * cannot address a message reads as a delivery failure, not a misconfig.
  */
 export const sinksFrom = (credentials: NotifyCredentials, fetchImpl: FetchLike): NotifySink[] => {
   const sinks: NotifySink[] = []

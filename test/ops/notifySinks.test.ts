@@ -83,3 +83,23 @@ describe('slackSink', () => {
     expect(slackSink(WEBHOOK, okFetch()).name).toBe('slack')
   })
 })
+
+// A hung request would wedge the drain and drop every later message.
+describe('request deadline', () => {
+  it('bounds every request with an abort signal', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '' })
+    await telegramSink(TOKEN, '-1', fetchImpl).send('x')
+    await slackSink(WEBHOOK, fetchImpl).send('x')
+    for (const [, init] of fetchImpl.mock.calls) {
+      expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal)
+    }
+  })
+
+  it('reports an aborted request without leaking the endpoint', async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new Error(`TimeoutError dialling ${WEBHOOK}`))
+    const error = (await slackSink(WEBHOOK, fetchImpl)
+      .send('x')
+      .catch((e: unknown) => e)) as Error
+    expect(error.message).not.toContain('xoxbSuperSecretPath')
+  })
+})

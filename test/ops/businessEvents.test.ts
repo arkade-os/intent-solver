@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { createBalanceSampler, createSwapOutcomeReporter } from '@arkade-os/solver-app/ops/businessEvents.js'
 
 const LN_SEND = {
@@ -33,12 +35,27 @@ const reporter = (over: Record<string, unknown> = {}) => {
   return { report, posted }
 }
 
+// The reporter defers through `queueMicrotask`, so an EMPTY assertion must drain
+// first: `vi.waitFor` on an already-true assertion returns at t=0 and proves nothing.
+const settle = async (): Promise<void> => {
+  for (let i = 0; i < 5; i++) await Promise.resolve()
+}
+
 describe('createSwapOutcomeReporter', () => {
   it('says NOTHING about a transition that is still in flight', async () => {
     const { report, posted } = reporter()
     report({ id: 'swap-1', from: 'quoted', to: 'funded' })
     report({ id: 'swap-1', from: 'funded', to: 'paying' })
-    await vi.waitFor(() => expect(posted).toEqual([]))
+    await settle()
+    expect(posted).toEqual([])
+  })
+
+  // Proves the drain above is real: the same shape WITH a terminal state posts.
+  it('and the same assertion catches a post that should not have happened', async () => {
+    const { report, posted } = reporter()
+    report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
+    await settle()
+    expect(posted).toHaveLength(1)
   })
 
   it('announces a fulfilled swap with the corridor and the id', async () => {
@@ -167,5 +184,24 @@ describe('createBalanceSampler', () => {
     fail = true
     await expect(s.sample()).resolves.toBeUndefined()
     expect(s.current()).toMatchObject({ availableSats: 900 })
+  })
+})
+
+// A sampler nobody drives reports `unread` forever, and that is invisible at run
+// time. It shipped that way in review here, as did the asset stores' wiring.
+describe('the balance sampler is DRIVEN on the shipped daemon', () => {
+  const read = (relative: string) => readFileSync(fileURLToPath(new URL(relative, import.meta.url)), 'utf8')
+  const servicesSource = read('../../packages/solver-app/src/ops/services.ts')
+  const cliSource = read('../../packages/solver-app/src/cli.ts')
+
+  it('services exposes sampleBalances only when a sink is configured', () => {
+    expect(servicesSource).toMatch(
+      /sampleBalances: notifySinks\.length > 0 \? \(\) => balances\.sample\(\) : undefined/,
+    )
+  })
+
+  it('the watch loop calls it on its own cadence', () => {
+    expect(cliSource).toMatch(/services\.sampleBalances && Date\.now\(\) - lastBalanceSample > BALANCE_SAMPLE_MS/)
+    expect(cliSource).toMatch(/await services\.sampleBalances\(\)/)
   })
 })

@@ -1,7 +1,7 @@
 /**
  * Business-event arithmetic — no transport, no I/O. Fulfilment comes from the
- * corridor's OWN `states.delivered`: `claimed` is delivery on the send legs and
- * merely in flight on the receive ones.
+ * corridor's OWN `states.delivered`: `claimed` is delivery on the send legs,
+ * in flight on the receive ones.
  */
 
 import { phaseOfStates } from './swapView.js'
@@ -21,10 +21,7 @@ export const outcomeOfTransition = (states: CorridorStates, from: string, to: st
   return phase === 'done' ? 'fulfilled' : 'failed'
 }
 
-/**
- * `n/a` covers the two cases with no honest percentage: no previous reading, and
- * a previous reading of zero. Unchanged is `+0.00%` — a real measurement.
- */
+/** `n/a` where there is no honest percentage: no previous reading, or a zero one. */
 export const percentChange = (previous: number | null, current: number): string => {
   if (previous === null || previous === 0) return 'n/a'
   const delta = ((current - previous) / previous) * 100
@@ -38,8 +35,7 @@ export type TransitionHook = (event: { id: string; from: string | null; to: stri
 /**
  * In CORE because three stores carry their own `transition` and
  * `solver-corridors-evm` does not depend on `solver-corridors`. The catch is
- * load-bearing: the transition has COMMITTED, so a throw would reject a call
- * whose row moved.
+ * load-bearing: the transition has COMMITTED, so a throw would reject it.
  */
 export const announceTransition = (
   hook: TransitionHook | undefined,
