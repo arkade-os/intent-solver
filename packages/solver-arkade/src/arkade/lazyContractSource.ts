@@ -1,9 +1,11 @@
-import type { ContractEvent, ContractSource, ContractWatchFilter } from './lockupWatcher.js'
+import type { ContractEvent, ContractSource } from './lockupWatcher.js'
 
-/** The manager as this file uses it — the same slice {@link ContractSource} exposes. */
+/** The manager as this file uses it. The watch pair is optional because the SDK
+ * declares it so, for an object literal a required member would break. */
 export interface ContractManagerLike {
   onContractEvent(callback: (event: ContractEvent) => void): () => void
-  getContracts(filter?: { watch?: ContractWatchFilter[] }): Promise<{ script: string }[]>
+  watchScript?(script: string, options?: { label?: string }): Promise<void>
+  unwatchScript?(script: string): Promise<void>
 }
 
 export interface LazyContractSourceDeps {
@@ -86,7 +88,15 @@ export const lazyContractSource = (deps: LazyContractSourceDeps): ContractSource
         detach?.()
       }
     },
-    getContracts: async (filter?: { watch?: ContractWatchFilter[] }): Promise<{ script: string }[]> =>
-      (await deps.getContractManager()).getContracts(filter),
+    watchScript: async (script: string): Promise<void> => {
+      const manager = await deps.getContractManager()
+      // Refused, not skipped: watching less than asked, quietly, is the failure.
+      if (!manager.watchScript) throw new Error('contract manager cannot watch scripts (needs @arkade-os/sdk 0.4.71)')
+      await manager.watchScript(script, { label: 'lockup' })
+    },
+    unwatchScript: async (script: string): Promise<void> => {
+      const manager = await deps.getContractManager()
+      await manager.unwatchScript?.(script)
+    },
   }
 }
