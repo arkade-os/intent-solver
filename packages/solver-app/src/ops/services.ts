@@ -476,6 +476,8 @@ export const createServices = async (
         // emulator meet; every guard on it lives in `arkade/offerSettle.ts`.
         settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
         onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
+        // Refusals are NOT errors, so they never reached `onError` above.
+        onRefused: (outpoint, reason, detail) => log(`offer ${outpoint} refused: ${reason} — ${detail}`),
       })
     : null
 

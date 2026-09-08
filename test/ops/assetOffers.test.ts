@@ -6,6 +6,8 @@
  * outpoint, and submitting without first marking the row in flight.
  */
 import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
   AssetOfferService,
   assertMarketsPriced,
@@ -23,6 +25,11 @@ import { base64, hex } from '@scure/base'
 const USDT = '11'.repeat(34)
 const SCRIPT = new Uint8Array(34).fill(0xab)
 const SCRIPT_HEX = 'ab'.repeat(34)
+
+const servicesSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/ops/services.ts', import.meta.url)),
+  'utf8',
+)
 
 /** A maker depositing USDT and wanting sats. */
 const offer = (over: Partial<Offer> = {}): Offer =>
@@ -255,6 +262,111 @@ describe('per-direction bounds', () => {
       fetchPrice,
     })
     expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+  })
+})
+
+describe('refusals an operator can read', () => {
+  // Every refusal below is CORRECT; what is pinned is that it leaves a trace.
+  const priced = (over: Record<string, unknown>) => [
+    {
+      base: USDT,
+      quote: null,
+      baseDecimals: 0,
+      quoteDecimals: 0,
+      feedUrl: 'https://feed.test/p',
+      pricePath: '/price',
+      toleranceBps: 9_999,
+      feeBps: 0,
+      ...over,
+    },
+  ]
+  const fetchPrice = async () => priceFrom('1')
+
+  const reported = async (over: Partial<AssetOfferDeps> = {}) => {
+    const seen: { outpoint: string; reason: string; detail: string }[] = []
+    const { service } = await build({
+      ...over,
+      onRefused: (outpoint, reason, detail) => void seen.push({ outpoint, reason, detail }),
+    })
+    return { outcome: await service.consider(found), seen }
+  }
+
+  it('names the offer, the bound and which bound it was', async () => {
+    const { outcome, seen } = await reported({
+      pricing: priced({ sellBase: { min: 5_000n, max: 10_000n } }),
+      fetchPrice,
+    })
+    expect(outcome).toEqual({ fill: false, reason: 'amount_out_of_range' })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.outpoint).toBe(`${found.txid}:${found.vout}`)
+    expect(seen[0]!.reason).toBe('amount_out_of_range')
+    expect(seen[0]!.detail).toContain('1000')
+    expect(seen[0]!.detail).toContain('5000..10000')
+  })
+
+  it('names the bound for an offer over the maximum too', async () => {
+    const { outcome, seen } = await reported({ pricing: priced({ sellBase: { min: 1n, max: 100n } }), fetchPrice })
+    expect(outcome).toEqual({ fill: false, reason: 'amount_out_of_range' })
+    expect(seen[0]!.detail).toContain('1..100')
+  })
+
+  it('says WHICH bound is in force — the market row, not the deployment pair', async () => {
+    // A market row that states bounds silently overrides OFFER_MIN/MAX_FILL_AMOUNT.
+    const onMarket = await reported({ pricing: priced({ sellBase: { min: 5_000n, max: 10_000n } }), fetchPrice })
+    expect(onMarket.seen[0]!.detail).toContain('market bounds')
+
+    const onDeployment = await reported({ minFillAmount: 5_000n })
+    expect(onDeployment.outcome).toEqual({ fill: false, reason: 'amount_out_of_range' })
+    expect(onDeployment.seen[0]!.detail).toContain('deployment bounds 5000..100000')
+  })
+
+  it('reports every refusal, not only the bounded ones', async () => {
+    expect((await reported({ markets: [] })).seen[0]).toMatchObject({ reason: 'unsupported_pair' })
+    expect((await reported({ outputsAt: async () => [] })).seen[0]).toMatchObject({ reason: 'offer_unfunded' })
+    const drained = await reported({ balance: async () => ({ available: 10, availableAssets: [] }) })
+    expect(drained.seen[0]).toMatchObject({ reason: 'insufficient_inventory' })
+    const outOfBand = await reported({ pricing: priced({}), fetchPrice: async () => priceFrom('0.5') })
+    expect(outOfBand.seen[0]).toMatchObject({ reason: 'price_out_of_tolerance' })
+  })
+
+  it('names bounds ONLY when a bound is what refused', async () => {
+    // Otherwise the line points at config that was never the problem.
+    const drained = await reported({ balance: async () => ({ available: 10, availableAssets: [] }) })
+    expect(drained.seen[0]!.reason).toBe('insufficient_inventory')
+    expect(drained.seen[0]!.detail).toContain('wants 1000')
+    expect(drained.seen[0]!.detail).not.toContain('bounds')
+
+    const outOfBand = await reported({ pricing: priced({}), fetchPrice: async () => priceFrom('0.5') })
+    expect(outOfBand.seen[0]!.detail).not.toContain('bounds')
+
+    const unserved = await reported({ markets: [] })
+    expect(unserved.seen[0]!.detail).not.toContain('bounds')
+  })
+
+  it('ACCEPTS exactly the minimum', async () => {
+    const { outcome, seen } = await reported({
+      pricing: priced({ sellBase: { min: 1_000n, max: 5_000n } }),
+      fetchPrice,
+    })
+    expect(outcome).toEqual({ fill: true, id: 'fill-1' })
+    expect(seen).toEqual([])
+  })
+
+  it('ACCEPTS exactly the maximum', async () => {
+    const { outcome, seen } = await reported({ pricing: priced({ sellBase: { min: 100n, max: 1_000n } }), fetchPrice })
+    expect(outcome).toEqual({ fill: true, id: 'fill-1' })
+    expect(seen).toEqual([])
+  })
+
+  // ONE coupled fragment, not substrings that could match apart; `\s*` survives a re-wrap.
+  it('is WIRED to the log on the shipped daemon', () => {
+    expect(servicesSource).toMatch(/onRefused:\s*\([^)]*\)\s*=>\s*log\(`offer \$\{\w+\} refused: \$\{\w+\}/)
+  })
+
+  it('serves offers only when OFFER_MARKETS names a market', () => {
+    // The second silence, driven for real in test/e2e/assetOffer.e2e.test.ts.
+    expect(servicesSource).toMatch(/servesOffers\s*=\s*policy\.offerMarkets\.length > 0/)
+    expect(servicesSource).toMatch(/servesOffers\s*\?\s*await OfferFillStore\.open/)
   })
 })
 
