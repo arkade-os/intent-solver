@@ -37,7 +37,10 @@ import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
-export type OfferFillState = 'fillable' | 'filling' | 'filled' | 'lost' | 'refused' | 'stuck'
+// List first, union derived: `LEGAL_EDGES` stops compiling if the two separate.
+export const OFFER_FILL_STATES = ['fillable', 'filling', 'filled', 'lost', 'refused', 'stuck'] as const
+
+export type OfferFillState = (typeof OFFER_FILL_STATES)[number]
 
 export const NON_TERMINAL: readonly OfferFillState[] = ['fillable', 'filling']
 

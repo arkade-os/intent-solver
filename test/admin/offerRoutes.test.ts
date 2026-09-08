@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'vitest'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { createOfferRefusalTail } from '@arkade-os/solver-app/admin/offerRefusals.js'
-import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
+import { OfferFillStore, OFFER_FILL_STATES } from '@arkade-os/solver-corridors/db/offerFills.js'
 
 const USDT = 'aa'.repeat(34)
 
@@ -143,6 +143,20 @@ describe('GET /api/offers: paging', () => {
     const { app } = await build()
     const response = await app.fetch(new Request('http://admin/api/offers?limit=-3'))
     expect(response.status).toBe(400)
+  })
+
+  it('refuses an unknown state rather than answering 200 with an empty list', async () => {
+    const { app } = await build()
+    const response = await app.fetch(new Request('http://admin/api/offers?state=fileld'))
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ error: 'unknown_state', state: 'fileld' })
+  })
+
+  it('accepts every state the lifecycle actually has', async () => {
+    const { app } = await build()
+    for (const state of OFFER_FILL_STATES) {
+      expect((await app.fetch(new Request(`http://admin/api/offers?state=${state}`))).status).toBe(200)
+    }
   })
 
   it('filters to one state when asked', async () => {
