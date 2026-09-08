@@ -11,7 +11,7 @@
 
 import type { Hono } from 'hono'
 
-import type { OfferFillRow } from '@arkade-os/solver-corridors/db/offerFills.js'
+import { OFFER_FILL_STATES, type OfferFillRow, type OfferFillState } from '@arkade-os/solver-corridors/db/offerFills.js'
 import type { PageOptions } from '@arkade-os/solver-core/core/page.js'
 import type { AdminDeps } from '../server.js'
 
@@ -37,8 +37,13 @@ const offerJson = (row: OfferFillRow) => ({
 export const registerOfferRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/offers', async (c) => {
     const query = c.req.query()
+    // 400 rather than a filter that matches nothing: an empty view must mean one thing.
+    const state = query.state
+    if (state !== undefined && !OFFER_FILL_STATES.includes(state as OfferFillState)) {
+      return c.json({ error: 'unknown_state', state, known: OFFER_FILL_STATES }, 400)
+    }
     const options: PageOptions = {
-      states: query.state ? [query.state] : undefined,
+      states: state ? [state] : undefined,
       limit: query.limit === undefined ? undefined : Number(query.limit),
       cursor: query.cursor ?? null,
     }
