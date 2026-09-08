@@ -173,6 +173,84 @@ describe('the settings page shows what decides whether a market is filled', () =
   })
 })
 
+const swapStore = () => ({
+  findRecoverable: vi.fn().mockResolvedValue([]),
+  findByStates: vi.fn().mockResolvedValue([]),
+  countByStates: vi.fn().mockResolvedValue(0),
+  committedSats: vi.fn().mockResolvedValue(0),
+})
+
+const overview = async (policy: Record<string, unknown>, rows: unknown[] = [market()]) => {
+  const app = buildAdminApp({
+    services: {
+      config: settingsConfig(),
+      policy: { ...(settingsConfig() as Record<string, unknown>), offerMarkets: [], assetRfqTokens: [], ...policy },
+      bootOverrides: {},
+      assetMarkets: [],
+      tickErrors: { failing: [] },
+      providerPubkey: 'aa'.repeat(32),
+      store: swapStore(),
+      receiveStore: swapStore(),
+      onchainStore: swapStore(),
+      onchainReceiveStore: swapStore(),
+      adminStore: {
+        getOverrides: vi.fn().mockResolvedValue({}),
+        listMarkets: vi.fn().mockResolvedValue(rows),
+      },
+      ln: { getBalance: vi.fn().mockResolvedValue({ availableSats: 1, incomingSats: 0 }) },
+      arkade: { wallet: { getBalance: vi.fn().mockResolvedValue({ total: 1 }) } },
+    } as never,
+    startedAt: 1,
+    mode: 'relay',
+  })
+  const response = await app.fetch(new Request('http://admin/api/overview'))
+  expect(response.status).toBe(200)
+  return (await response.json()) as {
+    markets: {
+      key: string
+      enabled: boolean
+      active: boolean
+      servedBy: string[]
+      sellBase: { min: string; max: string } | null
+      buyBase: { min: string; max: string } | null
+    }[]
+  }
+}
+
+describe('GET /api/overview — markets', () => {
+  it('carries the configured markets, which the page showed nowhere', async () => {
+    const body = await overview({})
+    expect(body.markets).toHaveLength(1)
+    expect(body.markets[0]).toMatchObject({ key: KEY, enabled: true })
+  })
+
+  it('reports a market that nothing fills — the state the page could not show', async () => {
+    expect((await overview({})).markets[0]?.servedBy).toEqual([])
+  })
+
+  it('reports the paths that do fill it', async () => {
+    const body = await overview({ offerMarkets: [{ a: null, b: USDT }], assetRfqTokens: [token(USDT)] })
+    expect(body.markets[0]?.servedBy).toEqual(['offer', 'rfq'])
+  })
+
+  it('keeps the market’s own state a separate field from served-by', async () => {
+    const body = await overview({ offerMarkets: [{ a: null, b: USDT }] }, [market({ enabled: false })])
+    expect(body.markets[0]).toMatchObject({ enabled: false, servedBy: ['offer'] })
+  })
+
+  it('is empty rather than absent when no market is configured', async () => {
+    expect((await overview({}, [])).markets).toEqual([])
+  })
+
+  it('sends bounds as decimal STRINGS, which is what survives JSON', async () => {
+    // Bigints: `c.json` throws on one and a number loses precision past 2^53.
+    const bounded = market({ sellBase: { min: 1n, max: 2n ** 70n }, buyBase: null })
+    const body = await overview({}, [bounded])
+    expect(body.markets[0]?.sellBase).toEqual({ min: '1', max: String(2n ** 70n) })
+    expect(body.markets[0]?.buyBase).toBeNull()
+  })
+})
+
 describe('the console renders served-by', () => {
   const appSource = readFileSync(
     fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
@@ -188,6 +266,33 @@ describe('the console renders served-by', () => {
     expect(view()).toContain("h('th', 'served by')")
     expect(view()).toContain('servedByCell(market.servedBy ?? [])')
     expect(view()).toContain("h('span.phase.phase-exposed', 'pending restart')")
+  })
+
+  it('puts the markets on the overview, in its own grid', () => {
+    expect(appSource).toContain('marketsPanel(o)')
+    const panel = appSource.slice(appSource.indexOf('const marketsPanel'), appSource.indexOf('const overviewView'))
+    expect(panel).toContain("h('div.panels'")
+    expect(panel).toContain('markets.map(marketCard)')
+  })
+
+  it('renders a market nothing fills as a failure on the overview card too', () => {
+    const card = appSource.slice(appSource.indexOf('const marketCard'), appSource.indexOf('const marketsPanel'))
+    expect(card).toContain("'span.phase.phase-failed'")
+    expect(card).toContain('market.servedBy.length === 0')
+  })
+
+  it('keeps `served by` off the corridor cards’ `serving` label', () => {
+    const card = appSource.slice(appSource.indexOf('const marketCard'), appSource.indexOf('const marketsPanel'))
+    expect(card).toContain("h('dt', 'served by')")
+    expect(card).toContain("h('dt', 'state')")
+    expect(card).not.toContain("h('dt', 'serving')")
+  })
+
+  it('prints bounds as base units with decimals as a label, never scaled', () => {
+    const bounds = appSource.slice(appSource.indexOf('const marketBounds'), appSource.indexOf('const marketState'))
+    expect(bounds).toContain('bounds.min')
+    expect(bounds).toContain('dp)')
+    expect(bounds).not.toMatch(/10\s*\*\*|Math\.pow/)
   })
 
   it('marks "nothing" distinctly, on the failure chip', () => {

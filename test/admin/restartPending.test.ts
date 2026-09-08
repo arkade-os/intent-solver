@@ -41,6 +41,8 @@ const baseConfig = {
     'onchain:BTC->arkade:BTC': true,
   },
   adminRestartEnabled: true,
+  offerMarkets: [],
+  assetRfqTokens: [],
 }
 
 const config = (over: Record<string, unknown> = {}) => ({ ...structuredClone(baseConfig), ...over }) as never
