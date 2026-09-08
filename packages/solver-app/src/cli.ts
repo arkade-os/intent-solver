@@ -251,15 +251,6 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       }
     },
     onError: (error) => log('lockup watcher:', error instanceof Error ? error.message : String(error)),
-    // A lockup whose script is not a registered contract can never reach this
-    // stream. The sweep registers what it adopts, on the same pass, and the
-    // watcher only reports a script still uncovered on the read AFTER that —
-    // so this line means a registration that failed or silently skipped the
-    // row, not one still in flight. Those swaps fall back to the sweep, which
-    // is correct but slower, and an operator should hear it rather than infer
-    // it from a latency graph.
-    onUnwatched: (scripts) =>
-      log(`lockup watcher: ${scripts.length} lockup(s) are not registered contracts, sweep-only:`, scripts.join(', ')),
   })
   watcher.start()
 
@@ -322,12 +313,9 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
     const adopted = [...next.keys()].filter((script) => !swapByScript.has(script))
     swapByScript = next
     watcher.sync([...swapByScript.keys()])
-    // Registration is what puts a lockup on the contract stream at all, and it
-    // used to run only on the five-minute lifecycle cadence — so a swap quoted
-    // just after one pass spent up to five minutes on the watched list without
-    // being watchable, getting none of the fast path it had just been added to.
-    // It runs here too now, the moment a script is adopted; the cadenced pass
-    // stays the reconciliation that also retires what the sweep has dropped.
+    // Not for watching any more — `watcher.sync` above does that. It runs for
+    // what a contract row is still needed for: `armContractForExit` throws
+    // without one, and the recovery sweep reads the contract snapshot.
     //
     // Not awaited, for the reason the whole watcher is not awaited: this
     // reaches `getContractManager()`, and the money path does not wait on the
