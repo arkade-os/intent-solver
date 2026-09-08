@@ -864,6 +864,69 @@ describe('ReceiveSwapService.tick — crash recovery: no double-funding', () => 
   })
 })
 
+// Issue #92. Two SERVICE INSTANCES on one store, because that is the only way to
+// reach it: `tick()`'s per-process `inFlight` set makes a second tick on the SAME
+// instance return before `whenArmed`.
+describe('ReceiveSwapService.tick — concurrent workers: no double-funding', () => {
+  it('two workers on one store fund the lockup ONCE, not twice', async () => {
+    const second = new ReceiveSwapService({
+      acceptUnilateralGap: false,
+      store,
+      ln,
+      arkade: arkade.ops,
+      covclaimd: covclaimd.client,
+      limits: LIMITS,
+      maxExposedSats: 1_000_000,
+      totalCommitted: () => store.committedSats(),
+      admission: new AdmissionControl(),
+      now: clock,
+    })
+    // The shared fake REPLACES outputs on every fund; two real spends leave two.
+    const originalFund = arkade.ops.fund
+    arkade.ops.fund = async (address, amountSats, stamp) => {
+      const before = arkade.state.outputs
+      const txid = await originalFund(address, amountSats, stamp)
+      arkade.state.outputs = [...before, ...arkade.state.outputs]
+      return txid
+    }
+    const e = now + 4 * 3600
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, e)
+
+    // Load-bearing: racing from `quoted` proves nothing, that transition's own
+    // compare-and-swap having serialised the two long before `whenArmed`.
+    await store.transition(outcome.swap.id, 'quoted', 'armed', { htlc_expires_at: e })
+
+    await Promise.all([service.tick(outcome.swap.id), second.tick(outcome.swap.id)])
+
+    expect(arkade.state.fundCalls).toHaveLength(1)
+    const row = await store.get(outcome.swap.id)
+    expect(row.state).toBe('funded')
+    expect(row.fundStartedAt).not.toBeNull()
+  })
+
+  it('hands the lease back when fund() throws, and funds on the next tick', async () => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    const originalFund = arkade.ops.fund
+    arkade.ops.fund = async () => {
+      throw new Error('wallet unreachable')
+    }
+
+    await expect(service.tick(outcome.swap.id)).rejects.toThrow('wallet unreachable')
+    const stranded = await store.get(outcome.swap.id)
+    expect(stranded.state).toBe('armed')
+    expect(stranded.fundStartedAt).toBeNull()
+
+    arkade.ops.fund = originalFund
+    const row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('funded')
+    expect(arkade.state.fundCalls).toHaveLength(1)
+  })
+})
+
 describe('ReceiveSwapService.tick — reveal to covclaimd', () => {
   /** covclaimd's three-TLV body: ciphertext, arkade script, and the covclaimd it is sealed to. */
   const tlvClaimPacket = (): Uint8Array => {

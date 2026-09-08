@@ -880,10 +880,22 @@ export class ReceiveSwapService {
       }
     }
 
+    // The adoption read above closes the CRASH case; only the lease closes the
+    // CONCURRENT one, where two workers both read an empty script and both spend.
+    // Losing means another worker holds this swap, so yield the tick, don't fail.
+    if (!(await store.claimFundLease(row.id, 'armed'))) return false
+
     // Nothing was funded before — create the exposure now. The txid this
     // returns is what the confirmation below keys off.
+    let fundTxid: string
     const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
-    const fundTxid = await arkade.fund(row.lockupAddress, row.payoutSats, stamp)
+    try {
+      fundTxid = await arkade.fund(row.lockupAddress, row.payoutSats, stamp)
+    } catch (error) {
+      // The one case where nothing has moved; everything below keeps the lease.
+      await store.releaseFundLease(row.id)
+      throw error
+    }
     // After the broadcast: a crash between leaves it unset and the next pass reveals, which is the safe direction.
     if (stamp) await store.patch(row.id, { stamped_at: this.now() })
     // Keyed to THIS row's own broadcast, and spend-aware for the same reason
