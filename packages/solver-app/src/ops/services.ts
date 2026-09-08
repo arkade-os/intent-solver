@@ -94,11 +94,15 @@ import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive
 import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import { poolPlan, mintPool, committedAcrossCorridors } from './pool.js'
-import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
+import { OfferFillStore, NON_TERMINAL as OFFER_FILL_NON_TERMINAL } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { assertMarketsPriced, AssetOfferService } from './assetOffers.js'
 import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
-import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import {
+  AssetRfqSwapStore,
+  NON_TERMINAL as ASSET_RFQ_NON_TERMINAL,
+  EXPOSED as ASSET_RFQ_EXPOSED,
+} from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import { assetRfqMarketsFrom } from './assetRfqMarkets.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
@@ -539,6 +543,16 @@ export const createServices = async (
   // required them to meet.
   if (servesOffers) assertMarketsPriced(policy.offerMarkets, assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
+  // NOT a corridor, so there is no descriptor to read: an offer fill has no
+  // HTLC, deadline or refund, which is why that store has no exposed set at
+  // all. `lost` — someone else took the offer — falls to `failed`.
+  if (offerStore) {
+    announceOutcomes(offerStore, 'arkade offer fill', {
+      live: OFFER_FILL_NON_TERMINAL,
+      exposed: [],
+      delivered: ['filled'],
+    })
+  }
   const offerRefusals = createOfferRefusalTail()
   const assetOffers = offerStore
     ? new AssetOfferService({
@@ -590,6 +604,15 @@ export const createServices = async (
    */
   const assetRfqMarkets = assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)
   const assetRfqStore = assetRfqMarkets.length > 0 ? await AssetRfqSwapStore.open(swapFile) : null
+  // One store serves every asset pair, so the label names the LEG rather than a
+  // pair this site cannot know per row — the same call the EVM stores make.
+  if (assetRfqStore) {
+    announceOutcomes(assetRfqStore, 'arkade asset RFQ', {
+      live: ASSET_RFQ_NON_TERMINAL,
+      exposed: ASSET_RFQ_EXPOSED,
+      delivered: ['filled'],
+    })
+  }
   const assetRfqDerivation = {
     serverPubkey: arkade.wallet.arkServerPublicKey,
     // X-ONLY. The emulator advertises a compressed key and the covenant takes
