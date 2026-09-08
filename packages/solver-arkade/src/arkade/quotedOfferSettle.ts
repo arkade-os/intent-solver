@@ -101,7 +101,10 @@ export const quotedOfferSettleFor = (deps: QuotedOfferSettleDeps): ((intent: Quo
     return fulfill(
       deps.ctx,
       deps.emulatorUrl,
-      { ...offerFromTerms(termsOf(intent), emulatorPubkey), swapPkScript: hex.decode(derived.pkScript) },
+      {
+        ...offerFromTerms(termsOf(intent), emulatorPubkey, deps.derivation.exitDelay),
+        swapPkScript: hex.decode(derived.pkScript),
+      },
       {
         txid: deposit.txid,
         vout: deposit.vout,

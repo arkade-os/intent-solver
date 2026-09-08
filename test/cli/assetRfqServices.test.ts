@@ -72,6 +72,11 @@ describe('the four Arkade seams', () => {
     expect(body()).toContain('emulatorPubkey: xOnlyPubkey(hex.decode(emulatorInfo.signerPubkey))')
   })
 
+  it('takes the exit closure from the ADVERTISED delay, never the local override', () => {
+    expect(body()).toContain('exitDelay: offerExitDelay(arkade.advertisedExitDelay)')
+    expect(body()).not.toContain('offerExitDelay(arkade.unilateralDelays')
+  })
+
   it('reads AVAILABLE inventory, never the total', () => {
     // A wallet whose batch expired reports millions and can spend nothing;
     // quoting off `total` accepts every swap and fails every fill.
