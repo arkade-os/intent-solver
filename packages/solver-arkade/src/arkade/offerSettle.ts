@@ -29,6 +29,7 @@ import type { ArkadeContext } from './wallet.js'
 import { offerFromFundingTx } from './offerPacket.js'
 import { offerFillInputFrom } from './offerFill.js'
 import { fulfillOffer } from './offerFulfill.js'
+import { heldOnOutpoint, liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
 
 /**
  * The recorded intent, structurally.
@@ -58,6 +59,8 @@ export interface OfferSettleDeps {
    * rather than deciding against a second.
    */
   fetchTx?: (txid: string) => Promise<string | null>
+  /** Live outputs at the offer's script: liveness for both legs, amount for the asset one. */
+  outpointsAt?: (pkScript: string) => Promise<OfferOutpoint[]>
   /** Injected so the guards are testable without an Arkade Service. */
   fulfill?: typeof fulfillOffer
 }
@@ -78,6 +81,7 @@ const indexerTxSource =
  */
 export const offerSettleFor = (deps: OfferSettleDeps): ((intent: OfferFillIntent) => Promise<string>) => {
   const fetchTx = deps.fetchTx ?? indexerTxSource(deps.ctx)
+  const outpointsAt = deps.outpointsAt ?? ((pkScript: string) => liveOfferOutpoints(deps.ctx, pkScript))
   const fulfill = deps.fulfill ?? fulfillOffer
 
   return async (intent) => {
@@ -124,18 +128,19 @@ export const offerSettleFor = (deps: OfferSettleDeps): ((intent: OfferFillIntent
       )
     }
 
+    // BOTH LEGS, because the funding transaction outlives the spend: on its own
+    // it reads a cancelled or already-filled deposit as still fundable.
+    const live = await outpointsAt(intent.offerPkScript)
+    const deposit = live.find((o) => o.txid === intent.offerTxid && o.vout === intent.offerVout)
+    if (!deposit) {
+      throw new Error(`${intent.offerTxid}:${intent.offerVout} is no longer live at ${intent.offerPkScript}`)
+    }
+
     // A ROW CAN BE PRICED AGAINST MORE THAN THE OUTPOINT HOLDS.
     // `offerDepositFrom` sums every live output at the offer's script, and
     // identical offers derive an identical address — so two deposits at one
     // script are summed into a decision that only ever spends one of them. The
     // fill still pays `wantAmount` in full, so the shortfall is ours.
-    //
-    // Only the SATS side is checked, because only the sats side is observable
-    // from the funding transaction: an output's asset amounts live in the asset
-    // packet, keyed to receivers positionally, not on the output. An asset
-    // deposit that over-counts is caught one layer down instead, where arkd
-    // refuses a packet declaring more than its inputs carry — a refusal, which
-    // leaves the row `stuck`, rather than a loss.
     if (terms.offerAssetId === null && terms.offerAmount < intent.offerAmount) {
       throw new Error(
         `${intent.offerTxid}:${found.vout} holds ${terms.offerAmount} sats, ` +
@@ -143,15 +148,23 @@ export const offerSettleFor = (deps: OfferSettleDeps): ((intent: OfferFillIntent
       )
     }
 
+    // The asset leg, which the tx cannot show: amounts ride in the packet's receivers.
+    let assetAmount: bigint | undefined
+    if (terms.offerAssetId !== null) {
+      assetAmount = heldOnOutpoint(deposit, terms.offerAssetId)
+      if (assetAmount < intent.offerAmount) {
+        throw new Error(
+          `${intent.offerTxid}:${intent.offerVout} holds ${assetAmount} of the deposit leg, ` +
+            `but the intent was priced against ${intent.offerAmount}`,
+        )
+      }
+    }
+
     return fulfill(deps.ctx, deps.emulatorUrl, found.offer, {
       txid: found.txid,
       vout: found.vout,
       value: found.value,
-      // OBSERVED at decision time and carried on the row. Omitted for a BTC
-      // deposit: `assetAmount` is what vin 0 is declared to hold, and declaring
-      // an asset a sats deposit does not carry describes an input that does not
-      // exist.
-      assetAmount: intent.offerAssetId === null ? undefined : intent.offerAmount,
+      assetAmount,
     })
   }
 }
