@@ -360,7 +360,14 @@ describe('refusals an operator can read', () => {
 
   // ONE coupled fragment, not substrings that could match apart; `\s*` survives a re-wrap.
   it('is WIRED to the log on the shipped daemon', () => {
-    expect(servicesSource).toMatch(/onRefused:\s*\([^)]*\)\s*=>\s*log\(`offer \$\{\w+\} refused: \$\{\w+\}/)
+    expect(servicesSource).toMatch(/onRefused:\s*\([^)]*\)\s*=>\s*\{\s*log\(`offer \$\{\w+\} refused: \$\{\w+\}/)
+  })
+
+  // Coupled to the SAME handler: a tail fed from elsewhere is not these refusals.
+  it('is WIRED to the console tail too, from that same handler', () => {
+    expect(servicesSource).toMatch(
+      /onRefused:\s*\([^)]*\)\s*=>\s*\{[\s\S]{0,200}?offerRefusals\.record\(\{\s*at:[^}]*outpoint,\s*reason,\s*detail/,
+    )
   })
 
   it('serves offers only when OFFER_MARKETS names a market', () => {
