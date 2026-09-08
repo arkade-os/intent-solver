@@ -1,7 +1,6 @@
 import type { ContractEvent, ContractSource } from './lockupWatcher.js'
 
-/** The manager as this file uses it. The watch pair is optional because the SDK
- * declares it so, for an object literal a required member would break. */
+/** The manager as this file uses it; the watch pair is optional as the SDK declares it. */
 export interface ContractManagerLike {
   onContractEvent(callback: (event: ContractEvent) => void): () => void
   watchScript?(script: string, options?: { label?: string }): Promise<void>

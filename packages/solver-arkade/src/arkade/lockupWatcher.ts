@@ -6,10 +6,8 @@
  * pays on every swap for nothing. This turns the SDK's contract stream into the
  * fast path.
  *
- * **Watching is asking.** `watchScript` (SDK 0.4.71, arkade-os/ts-sdk#857) puts
- * a foreign script on the subscription and the 20s failsafe poll with no contract
- * row. Contracts are still registered for unilateral exit and recovery, which do
- * need a row; that is simply no longer what makes a lockup visible.
+ * Scripts reach the stream via `watchScript` (SDK 0.4.71, arkade-os/ts-sdk#857),
+ * so watching is implied by asking and nothing reconciles the two.
  *
  * **This is deliberately not a source of truth.** An event names scripts and
  * nothing more; the caller reacts by ticking the matching swap, which re-reads
@@ -27,9 +25,6 @@
  * `connection_reset` carries no script, and that is the whole reason it is
  * handled separately: it means the stream was down, so an arrival during the
  * gap was never delivered.
- *
- * `vtxos` and `contract` are absent rather than `unknown`, so believing an
- * event fails to compile rather than merely breaching a rule.
  */
 export type ContractEvent =
   | { type: 'vtxo_received'; contractScript: string; timestamp: number }
@@ -40,9 +35,8 @@ export type ContractEvent =
 export interface ContractSource {
   /** Subscribe to contract events. Returns an unsubscribe function. */
   onContractEvent(callback: (event: ContractEvent) => void): () => void
-  /** Put a script on the subscription and the failsafe poll. Idempotent. */
   watchScript(script: string): Promise<void>
-  /** Take it off both, so a swap the sweep has dropped stops costing anything. */
+  /** Take it off both. The set is re-derived each sweep, so this is reversible. */
   unwatchScript(script: string): Promise<void>
 }
 
@@ -50,7 +44,6 @@ export interface LockupWatcherDeps {
   contracts: ContractSource
   /** Called with the scripts an event named. Never awaited; may throw. */
   onScripts: (scripts: string[]) => void
-  /** Stream and watch-call failures, for the host's log. */
   onError?: (error: unknown) => void
 }
 
@@ -92,8 +85,7 @@ export class LockupWatcher {
    * would put `watchScript()` — and behind it `getContractManager()`, which is
    * `create` -> `initialize` -> an indexer reconciliation with no timeout — on
    * the sweep's critical path, in the same loop as the hot tick. That is the
-   * exact veto `arkade/lazyContractSource.ts` exists to avoid. A script not yet
-   * watched is a swap on sweep latency, which is where it started.
+   * exact veto `arkade/lazyContractSource.ts` exists to avoid.
    */
   sync(scripts: readonly string[]): void {
     this.watched = [...new Set(scripts)].sort()
@@ -101,11 +93,8 @@ export class LockupWatcher {
   }
 
   /**
-   * Bring the source's watched set in line with this one; never rejects.
-   *
-   * At most one pass is outstanding, so a wedged manager costs one pending
-   * promise, not one per sweep. What a skipped pass would have done the next
-   * one does: the sets converge, they are never applied as a delta.
+   * Bring the source's watched set in line with this one; never rejects. At most
+   * one pass runs at a time; the sets converge, they are never applied as a delta.
    */
   reconcile(): Promise<void> {
     if (this.reconciling) return this.reconciling
@@ -129,7 +118,6 @@ export class LockupWatcher {
     }
     for (const script of [...this.asked]) {
       if (wanted.has(script)) continue
-      // Dropped first: a failed unwatch costs a wasted poll, not a stuck set.
       this.asked.delete(script)
       try {
         await this.deps.contracts.unwatchScript(script)

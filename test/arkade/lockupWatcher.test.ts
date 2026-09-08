@@ -1,8 +1,7 @@
 /**
  * Funding detection over the SDK's contract stream.
  *
- * The coverage-gap suite this file used to carry is gone with the gap: watching
- * a lockup no longer depends on a separate pass having registered it.
+ * The coverage-gap suite this file carried is gone with the gap itself.
  */
 
 import { describe, it, expect, vi } from 'vitest'
@@ -44,7 +43,6 @@ class FakeContracts implements ContractSource {
     this.unwatchCalls.push(script)
   }
 
-  /** Hold every watch call open — a manager answering nothing. */
   hold(): void {
     this.gate = new Promise((resolve) => {
       this.openGate = resolve
@@ -65,11 +63,10 @@ class FakeContracts implements ContractSource {
 /** The two event members that name a script; spreading the union does not narrow. */
 type ScriptEvent = Extract<ContractEvent, { contractScript: string }>
 
-/** Built with the SDK's extra fields, so what the watcher declines to read is exercised. */
+/** Carries the SDK's extra fields, so what the watcher declines to read is exercised. */
 const event = (type: ScriptEvent['type'], contractScript: string, vtxos: unknown[] = []): ScriptEvent =>
   ({ type, contractScript, vtxos, contract: { script: contractScript }, timestamp: 1 }) as ScriptEvent
 
-/** A watch-only arrival: the #857 shape, carrying no `contract` at all. */
 const watchOnly = (contractScript: string, vtxos: unknown[] = []): ScriptEvent =>
   ({ type: 'vtxo_received', contractScript, vtxos, timestamp: 1 }) as ScriptEvent
 
@@ -189,7 +186,7 @@ describe('LockupWatcher — asking is watching', () => {
     expect(contracts.unwatchCalls).toEqual(['bb'])
   })
 
-  it('re-asks for a script that comes back after being dropped', async () => {
+  it('re-watches a swap that returns to the live set, as stuck -> claiming does', async () => {
     const { contracts, watcher } = build()
     watcher.sync(['aa'])
     await watcher.reconcile()
@@ -216,7 +213,6 @@ describe('LockupWatcher — asking is watching', () => {
     contracts.hold()
     watcher.start()
     watcher.sync(['aa'])
-    // Nothing was awaited, and the stream is live while the watch call hangs.
     contracts.emit(received('aa'))
     expect(onScripts).toHaveBeenCalledWith(['aa'])
     contracts.release()
