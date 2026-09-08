@@ -128,6 +128,7 @@ const solverConfig = (): Config => {
     relayProtocol: 'nostr',
     openRfqMaxBidsPerMinute: 60,
     relayHealthPath: '/healthz',
+    sentry: null,
     nostrAdPublish: 'off',
   }
 }
