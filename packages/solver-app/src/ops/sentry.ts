@@ -67,9 +67,9 @@ const MNEMONIC_LENGTHS = [12, 15, 18, 21, 24]
 const WORD = /[A-Za-z]+/g
 /**
  * A whitespace-only rule read a JSON array or CSV line as twelve one-word runs;
- * the backslash covers a payload serialised twice, whose gap is `\",\"`. NOT
- * widened further — admitting letters or digits would chain any two BIP39 words
- * in a document, so one word per prefixed log LINE is not caught.
+ * the backslash covers a payload serialised twice, whose gap is `\",\"`. It stays
+ * narrow because it redacts on membership ALONE; anything wider has to earn it
+ * with the checksum below, and one word per prefixed log LINE neither one catches.
  */
 const PHRASE_GAP = /^[\s,"'\[\]\\]+$/
 /** List markers, bullets, pipes — the gap the CHECKSUMMED pass may also cross. It
