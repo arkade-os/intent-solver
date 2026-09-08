@@ -71,6 +71,7 @@ import {
   type AssetMarketPricingView,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { applyOverrides } from '../admin/settings.js'
+import { createOfferRefusalTail, type OfferRefusalRecorder } from '../admin/offerRefusals.js'
 import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
@@ -179,6 +180,8 @@ export interface Services {
    */
   offerStore: OfferFillStore | null
   assetOffers: AssetOfferService | null
+  /** Offers DECLINED. NOT nullable beside the two above: a refusal is not a row. */
+  offerRefusals: OfferRefusalRecorder
   /**
    * The atomic class reached over RFQ, or NULL when `ASSET_MARKETS` names no
    * asset (the default).
@@ -451,6 +454,7 @@ export const createServices = async (
   // required them to meet.
   if (servesOffers) assertMarketsPriced(policy.offerMarkets, assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
+  const offerRefusals = createOfferRefusalTail()
   const assetOffers = offerStore
     ? new AssetOfferService({
         store: offerStore,
@@ -476,8 +480,13 @@ export const createServices = async (
         // emulator meet; every guard on it lives in `arkade/offerSettle.ts`.
         settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
         onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
-        // Refusals are NOT errors, so they never reached `onError` above.
-        onRefused: (outpoint, reason, detail) => log(`offer ${outpoint} refused: ${reason} — ${detail}`),
+        // Refusals are NOT errors, so they never reached `onError` above. The log
+        // line alone is invisible to an operator in a browser, so the console's
+        // tail is fed from the same handler.
+        onRefused: (outpoint, reason, detail) => {
+          log(`offer ${outpoint} refused: ${reason} — ${detail}`)
+          offerRefusals.record({ at: nowSeconds(), outpoint, reason, detail })
+        },
       })
     : null
 
@@ -1023,6 +1032,7 @@ export const createServices = async (
     evmReceiveService,
     offerStore,
     assetOffers,
+    offerRefusals,
     assetRfqStore,
     assetRfqService,
     assetRfqMarkets,

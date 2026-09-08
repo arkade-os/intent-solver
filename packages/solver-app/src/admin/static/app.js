@@ -283,6 +283,7 @@ const state = {
 const VIEWS = [
   ['overview', 'overview'],
   ['swaps', 'swaps'],
+  ['offers', 'offers'],
   ['quotes', 'quotes'],
   ['wallet', 'wallet'],
   ['backends', 'backends'],
@@ -726,6 +727,83 @@ const quotesView = () => {
                 h('td.num', sats(bid.amountSats)),
                 h('td.num', String(bid.feeBps)),
                 h('td.muted', ago(bid.at)),
+              ),
+            ),
+          ),
+        ),
+  )
+}
+
+/** An offer's leg, in the spelling the packet and the store use: null is BTC. */
+const offerLeg = (assetId, amount) =>
+  h(
+    'span',
+    amount,
+    ' ',
+    assetId === null ? h('span.muted', 'BTC') : h('span.faint', { title: assetId }, shortId(assetId)),
+  )
+
+/** Fills and refusals. Not under swaps; the reason is in `admin/routes/offers.ts`. */
+const offersView = () => {
+  const d = state.data.offers
+  if (!d) return h('p.muted', 'loading…')
+  return h(
+    'div',
+    h('h2.sans', 'offer fills'),
+    d.serving
+      ? null
+      : h('p.notice', 'This deployment serves no offer market — OFFER_MARKETS is unset, so no offer is considered.'),
+    d.offers.length === 0
+      ? h('p.muted', d.serving ? 'no offer has been recorded yet' : 'nothing to show while no market is served')
+      : h(
+          'table',
+          h(
+            'thead',
+            h(
+              'tr',
+              h('th', 'state'),
+              h('th', 'outpoint'),
+              h('th', 'holds'),
+              h('th', 'pays'),
+              h('th', 'fill txid'),
+              h('th', 'age'),
+            ),
+          ),
+          h(
+            'tbody',
+            d.offers.map((offer) =>
+              h(
+                'tr',
+                h('td', offer.state),
+                h('td.faint', { title: offer.outpoint }, shortId(offer.outpoint)),
+                h('td', offerLeg(offer.offerAssetId, offer.offerAmount)),
+                h('td', offerLeg(offer.wantAssetId, offer.wantAmount)),
+                h('td.faint', { title: offer.fillTxid ?? '' }, shortId(offer.fillTxid)),
+                h('td.muted', ago(offer.createdAt)),
+              ),
+            ),
+          ),
+        ),
+    h('h2.sans', 'recent refusals'),
+    h(
+      'p.notice',
+      `Offers this solver declined. Held in memory only and cleared on restart (keeps the last ${d.refusals.capacity}) — ` +
+        'a refusal is not stored, because offers arrive from a public relay.',
+    ),
+    d.refusals.entries.length === 0
+      ? h('p.muted', 'no offer has been refused since this process started')
+      : h(
+          'table',
+          h('thead', h('tr', h('th', 'reason'), h('th', 'outpoint'), h('th', 'detail'), h('th', 'age'))),
+          h(
+            'tbody',
+            d.refusals.entries.map((refusal) =>
+              h(
+                'tr',
+                h('td', refusal.reason),
+                h('td.faint', { title: refusal.outpoint }, shortId(refusal.outpoint)),
+                h('td.muted', refusal.detail),
+                h('td.muted', ago(refusal.at)),
               ),
             ),
           ),
@@ -2272,6 +2350,7 @@ const ENDPOINTS = {
     if (state.filters.q.trim().length >= MIN_SEARCH) params.set('q', state.filters.q.trim())
     return `/api/swaps?${params}`
   },
+  offers: () => '/api/offers',
   quotes: () => '/api/quotes',
   wallet: () => '/api/wallet',
   backends: () => '/api/backends',
@@ -2313,6 +2392,7 @@ const go = (view) => {
 const BODIES = {
   overview: overviewView,
   swaps: swapsView,
+  offers: offersView,
   quotes: quotesView,
   wallet: walletView,
   backends: backendsView,
