@@ -11,7 +11,7 @@
  * one function rather than a shape each caller assembles.
  */
 import { asset, type RelativeTimelock } from '@arkade-os/sdk'
-import { relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
+import { isEncodableRelativeDelay, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
 import { offerVtxoScript, type Offer } from '@arkade-os/swap'
 import { hex } from '@scure/base'
 
@@ -54,7 +54,15 @@ export const offerExitDelay = (advertisedExitDelay: number): RelativeTimelock =>
         `build an offer exit closure from — offers cannot be quoted against it`,
     )
   }
-  return { type: relativeDelayFrom(advertisedExitDelay).unit, value: BigInt(advertisedExitDelay) }
+  const { unit } = relativeDelayFrom(advertisedExitDelay)
+  // Named here; unguarded it is a bare `bip68` TypeError at the first quote.
+  if (unit === 'seconds' && !isEncodableRelativeDelay(advertisedExitDelay)) {
+    throw new Error(
+      `the Arkade Service advertises unilateralExitDelay=${advertisedExitDelay}s, which BIP68 cannot ` +
+        `encode: a seconds-typed exit closure must be a whole multiple of 512`,
+    )
+  }
+  return { type: unit, value: BigInt(advertisedExitDelay) }
 }
 
 /**

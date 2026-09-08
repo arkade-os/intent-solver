@@ -124,4 +124,11 @@ describe('offerExitDelay', () => {
     expect(() => offerExitDelay(-1)).toThrow(/no client can build/)
     expect(() => offerExitDelay(1.5)).toThrow(/unilateralExitDelay=1.5/)
   })
+
+  it('refuses a seconds delay BIP68 cannot encode, rather than leaving it to quote time', async () => {
+    // BOTH sides throw, so no deposit is misdirected — legibility, not agreement.
+    expect(() => offerExitDelay(605_000)).toThrow(/must be a whole multiple of 512/)
+    await expect(clientOffer(605_000)).rejects.toThrow(/multiple of 512/)
+    expect(() => offerExitDelay(511)).not.toThrow()
+  })
 })
