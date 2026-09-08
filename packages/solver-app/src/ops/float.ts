@@ -41,6 +41,7 @@ import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reserva
 import { poolTarget } from '@arkade-os/solver-arkade/arkade/vtxoPool.js'
 import { poolPlan, resplitFloat } from './pool.js'
 import { summariseSignerMigration } from '@arkade-os/solver-arkade/arkade/signerMigration.js'
+import { planBoardingSettle } from '@arkade-os/solver-arkade/arkade/boardingSettle.js'
 import type { Services } from './services.js'
 
 /**
@@ -195,12 +196,21 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
     }
   }
 
+  // Ours for the migration's reason, and first so a deposit arriving mid-cadence
+  // is float by the end of the same pass. @see arkade/boardingSettle.ts
+  const boarding = { txid: null as string | null, failures: [] as string[] }
+  try {
+    boarding.txid = await settleBoardedSats(services)
+  } catch (error) {
+    boarding.failures.push(`boarding settle failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
   const renewalWarnings: string[] = []
 
   const report = await runVtxoLifecycle({
-    // Not `vtxoManager.renewVtxos()`: that asks for an output equal to the gross
-    // input sum, so the intent it registers pays a zero fee and any operator
-    // charging one rejects it outright. @see renewExpiringVtxos
+    // Not `vtxoManager.renewVtxos()`, and no longer for the fee: 0.4.70 prices
+    // that correctly. It selects its own inputs and takes no exclusion, so it
+    // cannot honour the reservation ledger read below. @see renewExpiringVtxos
     renewVtxos: () =>
       renewExpiringVtxos({
         warn: (message) => renewalWarnings.push(`renew: ${message}`),
@@ -241,9 +251,42 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
   // tell apart before.
   return {
     ...report,
+    boarded: boarding.txid,
     migrated: migration.migrated,
-    failures: [...migration.failures, ...report.failures, ...renewalWarnings],
+    failures: [...migration.failures, ...boarding.failures, ...report.failures, ...renewalWarnings],
   }
+}
+
+/**
+ * Settle confirmed, unexpired boarding inputs into the float. The expired set
+ * comes from the SDK rather than being re-derived: that judgement needs the exit
+ * timelock and, in block mode, a chain tip.
+ */
+const settleBoardedSats = async (services: Services): Promise<string | null> => {
+  const wallet = services.arkade.wallet
+  const utxos = await wallet.getBoardingUtxos()
+  if (utxos.length === 0) return null
+
+  const vtxoManager = await wallet.getVtxoManager()
+  const expired = await vtxoManager.getExpiredBoardingUtxos()
+  const info = await wallet.arkProvider.getInfo()
+  const address = await wallet.getAddress()
+
+  const plan = planBoardingSettle({
+    boarding: utxos,
+    expired: new Set(expired.map((utxo) => `${utxo.txid}:${utxo.vout}`)),
+    intentFee: info.fees.intentFee,
+    vtxoMaxAmount: info.vtxoMaxAmount,
+    dust: info.dust,
+    address,
+    target: poolTarget(services.config.limits.maxSats, services.config.maxExposedSats),
+  })
+  if (!plan.settle) return null
+
+  return wallet.settle({
+    inputs: plan.inputs,
+    outputs: plan.outputs.map((amount) => ({ address, amount })),
+  })
 }
 
 /** Why an automatic mint did not spend, when it declined to. */

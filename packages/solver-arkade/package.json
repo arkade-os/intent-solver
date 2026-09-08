@@ -26,9 +26,9 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.4.69",
+    "@arkade-os/sdk": "0.4.70",
     "@arkade-os/solver-core": "workspace:*",
-    "@arkade-os/swap": "0.0.12",
+    "@arkade-os/swap": "0.0.13",
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
     "better-sqlite3": "^12.11.1"

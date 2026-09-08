@@ -70,7 +70,7 @@ import {
   type IntentFeeConfig,
   type OffchainInput,
 } from '@arkade-os/sdk'
-import { splitRenewalOutputs, type PoolRung } from './vtxoPool.js'
+import { splitRenewalOutputs, MAX_SPLIT_OUTPUTS, type PoolRung } from './vtxoPool.js'
 import { hex } from '@scure/base'
 import type { CovenantSwapScript } from './covenant.js'
 import { assertCovenantScriptRow, type CovenantScriptRow } from './covenantRow.js'
@@ -350,27 +350,6 @@ export interface RenewVtxoDeps<V extends RenewableVtxo> {
  */
 const MAX_VTXOS_PER_SETTLEMENT = 50
 
-/**
- * Outputs one renewal may create.
- *
- * The same figure `mintPool` uses for a split transaction, and for the same
- * reason: a float shredded into hundreds of pieces costs a fee per piece to
- * renew forever after. Eight covers the pool target's rungs while leaving the
- * shape legible.
- *
- * WHAT THE SERVER ACTUALLY BOUNDS is transaction WEIGHT, not an output count -
- * arkd's `/v1/info` publishes `maxTxWeight` (40000 on the regtest build) and no
- * max-outputs field at all, so there is nothing to read this constant off. A
- * taproot output is ~43 vbytes, so eight of them is ~1400 weight units against
- * that 40000: roughly three percent, and the inputs dominate long before the
- * outputs do.
- *
- * So this is a SHAPE bound, not a protocol one, and it is safe by a wide margin
- * rather than by a check. If it ever grows materially - or if a settlement
- * starts carrying many more inputs - the figure that matters is `maxTxWeight`
- * and it should be estimated rather than assumed. Raised by review on #126.
- */
-const MAX_RENEWAL_OUTPUTS = 8
 
 /**
  * How long before batch expiry a coin becomes worth renewing, matching the
@@ -495,45 +474,15 @@ const offchainInputFeeParams = (vtxo: RenewableVtxo): OffchainInput => {
 /**
  * Renew the solver's expiring float, paying the operator's intent fee.
  *
- * **Why this exists instead of `IVtxoManager.renewVtxos`.** That method sums its
- * selected inputs and asks for an output of exactly that sum, so the fee an intent
- * implies (`inputs - outputs`) is always zero. Against any operator charging a
- * non-zero intent fee the server rejects the whole intent —
- * `INTENT_INSUFFICIENT_FEE (31): got 0 min expected N` — and the float is never
- * renewed. `runPeriodicSettle` and no-argument `Wallet.settle()` price their outputs
- * properly; only `renewVtxos` and `recoverVtxos` were left gross, and `renewVtxos`
- * takes no fee argument a caller could correct it through. The pricing below is the
- * same arithmetic those working paths use. See `docs/runbook.md`.
+ * **Why this exists instead of `IVtxoManager.renewVtxos`.** NOT the fee any more
+ * — that defect is fixed upstream in `@arkade-os/sdk@0.4.70`, `recoverVtxos`
+ * too. Two things still keep it, and switching gives up each silently:
  *
- * `recoverVtxos` has the identical defect and is NOT fixed here — see
- * {@link runVtxoLifecycle}'s guard for why that sweep is the dangerous one to
- * reimplement blind.
- *
- * **This settles outside the SDK's `renewalInProgress` mutex, and the SDK's own
- * renewal really is running alongside it.** `createArkadeContext` passes neither
- * `settlementConfig` nor `renewalConfig`, and the SDK reads that absence as its
- * DEFAULT (`vtxoThreshold` 3 days, `pollIntervalMs` 60s), not as "off"; only an
- * explicit `settlementConfig: false` disables it. `Wallet.create` then awaits
- * `getVtxoManager()`, so `initializeSubscription` runs on every wallet this service
- * builds, installing two renewal paths we never call: a `vtxo_received` subscription
- * into `renewVtxos()`, and a 60-second poll into `runPeriodicSettle`. Both hold
- * `renewalInProgress` across the window they settle in; this function cannot, because
- * the field is private.
- *
- * `test/e2e/vtxoLifecycle.e2e.test.ts` prints it on every run, from a pass this
- * module never asked for:
- *
- *   Error renewing VTXOs: INTENT_INSUFFICIENT_FEE (31): got 0 min expected 2582
- *       at _VtxoManager.renewVtxos (vtxo-manager.ts:1453)
- *
- * The cost is bounded, which is why it is documented rather than worked around: the
- * two paths can select overlapping inputs, but the server decides, so the loser is
- * refused with `VTXO_ALREADY_SPENT`, `VTXO_ALREADY_REGISTERED` or a duplicated-input
- * error and the coins it wanted have been renewed by the winner. Nothing
- * double-spends; the visible symptom is an entry in `report.failures`. The clean fix
- * — `settlementConfig: false` where the wallet is built — is a wallet-wide behaviour
- * change (it also turns off boarding sweep and deprecated-signer migration) and so is
- * an operator's call.
+ *  - THE RESERVATION FILTER. `expiringVtxos` arrives already filtered against
+ *    the ledger; funding and renewal are two spenders of one float and arkd
+ *    kills whichever loses. `renewVtxos` selects for itself, unexcludable.
+ *  - THE TREADMILL CAP. {@link renewalThresholdMs} is per coin; one flat
+ *    `thresholdSeconds` re-settles a short-expiry float until fees eat it.
  *
  * Throws rather than returning a status, so {@link runVtxoLifecycle}'s classification
  * keeps working unchanged: the two "nothing to do" outcomes reuse the SDK's own
@@ -559,7 +508,7 @@ export const renewExpiringVtxos = async <V extends RenewableVtxo>(deps: RenewVtx
   // split emits several, so judging the running total against a single one capped
   // every pass at one ceiling's worth (#27). Bounded, not dropped: `settle` pays
   // the operator whatever the outputs do not claim.
-  const capacity = vtxoMaxAmount < 0n ? -1n : BigInt(MAX_RENEWAL_OUTPUTS) * (vtxoMaxAmount + outputFeeOn(vtxoMaxAmount))
+  const capacity = vtxoMaxAmount < 0n ? -1n : BigInt(MAX_SPLIT_OUTPUTS) * (vtxoMaxAmount + outputFeeOn(vtxoMaxAmount))
 
   const inputs: V[] = []
   let gross = 0n
@@ -612,7 +561,7 @@ export const renewExpiringVtxos = async <V extends RenewableVtxo>(deps: RenewVtx
     target: deps.poolTarget ?? [],
     dust,
     outputFeeOn,
-    maxOutputs: MAX_RENEWAL_OUTPUTS,
+    maxOutputs: MAX_SPLIT_OUTPUTS,
     maxAmount: vtxoMaxAmount,
   })
   // An empty target, or too little to make even one rung, yields exactly one
@@ -635,15 +584,11 @@ export interface VtxoLifecycleDeps {
   /**
    * `IVtxoManager.recoverVtxos`, narrowed. Resolves to a settlement txid.
    *
-   * Carries the same zero-fee defect {@link renewExpiringVtxos} exists to work
-   * around, so against a fee-charging operator this fails with
-   * `INTENT_INSUFFICIENT_FEE` for exactly the same reason. Deliberately left
-   * calling the SDK anyway: recovery's input selection is a subdust-sensitive
-   * read this module cannot reproduce from the public surface, and it feeds the
-   * untimelocked all-or-nothing sweep the guard below exists to hold back.
-   * Replacing that with app code no live test has ever exercised would trade a
-   * loud, contained failure for a silent, dangerous one. It surfaces in
-   * `failures` until the SDK prices it.
+   * Left calling the SDK, and now correctly so: it prices its own intent fee
+   * from `@arkade-os/sdk@0.4.70`, and its subdust-sensitive input selection
+   * cannot be reproduced from the public surface. It feeds the all-or-nothing
+   * sweep the guard below holds back, where app code no test has exercised would
+   * trade a loud, contained failure for a silent, dangerous one.
    */
   /**
    * Re-shape the float after a renewal consolidated it. Resolves to a
@@ -673,6 +618,11 @@ export interface VtxoLifecycleDeps {
 }
 
 export interface VtxoLifecycleReport {
+  /**
+   * Settlement txid that turned boarded L1 sats into float. Always null here —
+   * `runFloatLifecycle` owns that step. @see arkade/boardingSettle.ts
+   */
+  boarded: string | null
   /** Settlement txid, or null when nothing needed renewing. */
   renewed: string | null
   /** Split txid, or null when the float needed no re-shaping after renewal. */
@@ -796,7 +746,7 @@ export const runVtxoLifecycle = async (deps: VtxoLifecycleDeps): Promise<VtxoLif
   try {
     const recoverable = await deps.recoverableVtxos()
     if (recoverable.length === 0) {
-      return { renewed, resplit, recovered, recoverySkipped, migrated: 0, failures }
+      return { boarded: null, renewed, resplit, recovered, recoverySkipped, migrated: 0, failures }
     }
 
     const deadlines = await deps.lockupDeadlines()
@@ -836,7 +786,7 @@ export const runVtxoLifecycle = async (deps: VtxoLifecycleDeps): Promise<VtxoLif
         .map((vtxo) => `${vtxo.txid}:${vtxo.vout} at ${vtxo.script} (${blocked.get(vtxo.script)})`)
         .join(', ')
       recoverySkipped = `${blocking.length} recoverable lockup output(s) not safe to sweep at ${now}: ${detail}`
-      return { renewed, resplit, recovered, recoverySkipped, migrated: 0, failures }
+      return { boarded: null, renewed, resplit, recovered, recoverySkipped, migrated: 0, failures }
     }
 
     recovered = await deps.recoverVtxos()
@@ -844,7 +794,7 @@ export const runVtxoLifecycle = async (deps: VtxoLifecycleDeps): Promise<VtxoLif
     failures.push(`recover: ${messageOf(error)}`)
   }
 
-  return { renewed, resplit, recovered, recoverySkipped, migrated: 0, failures }
+  return { boarded: null, renewed, resplit, recovered, recoverySkipped, migrated: 0, failures }
 }
 
 /**

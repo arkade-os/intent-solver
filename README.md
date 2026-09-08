@@ -922,12 +922,11 @@ Three more stack requirements, all covered in the runbook:
   covclaimd from the stack when it is unset. No error; the container is not there
 - **the operator's intent-fee policy affects renewal.** arkade-regtest
   configures `ARK_OFFCHAIN_INPUT_FEE="amount * 0.01"`, so every settlement
-  costs 1% of each input. The SDK's own `IVtxoManager.renewVtxos` implies a
-  zero fee and arkd rejects the intent outright with
-  `INTENT_INSUFFICIENT_FEE`, so `renewExpiringVtxos` replaces it and prices the
-  output the way `Wallet.settle()` does. This is **operator policy, not a
-  regtest quirk** — any mainnet operator charging a non-zero intent fee breaks
-  `renewVtxos` the same way. See `docs/runbook.md` § "Operating notes"
+  costs 1% of each input. This is **operator policy, not a regtest quirk**. The
+  SDK once implied a zero fee here and had arkd reject the intent with
+  `INTENT_INSUFFICIENT_FEE`; that is fixed in `@arkade-os/sdk@0.4.70`.
+  `renewExpiringVtxos` still prices renewal itself, for the reservation filter
+  and the treadmill cap. See `docs/runbook.md` § "Operating notes"
 
 ## Client-facing vocabulary
 
