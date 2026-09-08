@@ -223,6 +223,15 @@ describe('offerSettleFor — it refuses before it spends', () => {
     expect(fulfill).not.toHaveBeenCalled()
   })
 
+  it('when a SATS deposit has already been spent', async () => {
+    const sats = offer({ offerAsset: undefined, wantAsset: asset.AssetId.fromString(USD) })
+    const satsRaw = fundingTx(sats)
+    const { settle, fulfill } = build(satsRaw, { outpointsAt: async () => [] })
+    const spent = intentFor(sats, satsRaw, { offerAmount: BigInt(DEPOSIT_SATS) })
+    await expect(settle(spent)).rejects.toThrow(/no longer live/)
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
   it('declares the asset amount vin 0 actually carries, not the one that was quoted', async () => {
     const { settle, fulfill } = build(raw, { outpointsAt: async () => liveUsd(raw, 1_200n) })
     await settle(intentFor(published, raw))

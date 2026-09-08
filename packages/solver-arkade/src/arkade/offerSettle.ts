@@ -59,7 +59,7 @@ export interface OfferSettleDeps {
    * rather than deciding against a second.
    */
   fetchTx?: (txid: string) => Promise<string | null>
-  /** Live outputs at the offer's script, for the asset leg's re-measure. */
+  /** Live outputs at the offer's script: liveness for both legs, amount for the asset one. */
   outpointsAt?: (pkScript: string) => Promise<OfferOutpoint[]>
   /** Injected so the guards are testable without an Arkade Service. */
   fulfill?: typeof fulfillOffer
@@ -128,6 +128,14 @@ export const offerSettleFor = (deps: OfferSettleDeps): ((intent: OfferFillIntent
       )
     }
 
+    // BOTH LEGS, because the funding transaction outlives the spend: on its own
+    // it reads a cancelled or already-filled deposit as still fundable.
+    const live = await outpointsAt(intent.offerPkScript)
+    const deposit = live.find((o) => o.txid === intent.offerTxid && o.vout === intent.offerVout)
+    if (!deposit) {
+      throw new Error(`${intent.offerTxid}:${intent.offerVout} is no longer live at ${intent.offerPkScript}`)
+    }
+
     // A ROW CAN BE PRICED AGAINST MORE THAN THE OUTPOINT HOLDS.
     // `offerDepositFrom` sums every live output at the offer's script, and
     // identical offers derive an identical address — so two deposits at one
@@ -140,15 +148,9 @@ export const offerSettleFor = (deps: OfferSettleDeps): ((intent: OfferFillIntent
       )
     }
 
-    // The same guard on the asset leg, re-measured against the indexer because
-    // asset amounts ride in the packet's receivers, not on the output the tx shows.
+    // The asset leg, which the tx cannot show: amounts ride in the packet's receivers.
     let assetAmount: bigint | undefined
     if (terms.offerAssetId !== null) {
-      const live = await outpointsAt(intent.offerPkScript)
-      const deposit = live.find((o) => o.txid === intent.offerTxid && o.vout === intent.offerVout)
-      if (!deposit) {
-        throw new Error(`${intent.offerTxid}:${intent.offerVout} is no longer live at ${intent.offerPkScript}`)
-      }
       assetAmount = heldOnOutpoint(deposit, terms.offerAssetId)
       if (assetAmount < intent.offerAmount) {
         throw new Error(
