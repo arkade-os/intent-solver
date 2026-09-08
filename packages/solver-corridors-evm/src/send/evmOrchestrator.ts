@@ -27,6 +27,7 @@ import { provenDepth } from '@arkade-os/solver-rails-evm/evm/lockDepth.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
+import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { payoutSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { EvmMarket, EvmToken } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
 import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
@@ -61,6 +62,8 @@ export interface EvmSendServiceDeps {
    * than the one the contract will pull from.
    */
   solverEvmAddress: Uint8Array
+  /** The large-swap approval gate. Absent means no gate. @see core/approvalGate.ts */
+  approvalGate?: ApprovalCheck
 
   // ---- quote-time only ------------------------------------------------------
   // Everything below is read when a quote is admitted and never again: the row
@@ -331,6 +334,10 @@ export class EvmSendSwapService {
         return false
 
       case 'lock_evm': {
+        // Before the transition, so a held swap never enters the exposed state.
+        // `planEvmSend` refuses past the quote deadline, so a hold nobody
+        // answers still terminates there — the BTC legs' fail-closed ordering.
+        if (!(await askApproval(this.deps.approvalGate, row.id, row.amountSats))) return false
         // The row enters the EXPOSED state BEFORE the call goes out. A crash
         // between the two must not leave a lock nobody knows about: better to
         // re-observe a row that claims to be locking and find no lock, than to

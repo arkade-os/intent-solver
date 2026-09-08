@@ -47,6 +47,7 @@ import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { MINUTE } from '@arkade-os/solver-core/core/timelocks.js'
+import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 
 export type { ArkadeOps as OnchainArkadeOps } from './orchestrator.js'
 
@@ -88,6 +89,8 @@ export interface OnchainSendServiceDeps {
    * closes.
    */
   peerStores?: readonly { findLiveByPaymentHash(paymentHash: string): Promise<unknown> }[]
+  /** The large-swap approval gate. Absent means no gate. @see core/approvalGate.ts */
+  approvalGate?: ApprovalCheck
   now?: () => number
 }
 
@@ -657,6 +660,10 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'funded', decision.reason)
       return false
     }
+    // After the funding decision, before the compare-and-swap that precedes the
+    // broadcast — the same ordering the Lightning send leg uses, and for the
+    // same reason: a held swap must still reach its own deadline and refuse.
+    if (!(await askApproval(this.deps.approvalGate, row.id, row.amountSats))) return false
     const won = await store.transition(row.id, 'funded', 'funding_onchain', {})
     if (!won) return false
     return this.submitFunding(await store.get(row.id))

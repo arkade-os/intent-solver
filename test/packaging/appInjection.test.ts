@@ -108,6 +108,9 @@ const solverConfig = (): Config => {
     assetQuoteValiditySeconds: 30,
     lnReceiveAcceptUnilateralGap: false,
     maxExposedSats: 1_000_000,
+    // Off, which is the default an operator who configures nothing gets.
+    approvalThresholdSats: null,
+    notify: { telegramBotToken: null, telegramChatId: null, slackWebhookUrl: null },
     contractRetentionMs: 86_400_000,
     sweepConcurrency: 4,
     lockupTimeoutSeconds: 3600,

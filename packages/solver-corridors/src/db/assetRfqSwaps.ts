@@ -38,6 +38,7 @@
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
 
 export type AssetRfqSwapState = 'quoted' | 'funded' | 'filling' | 'filled' | 'refused' | 'stuck'
 
@@ -382,9 +383,15 @@ export class AssetRfqSwapStore {
       id,
       from,
     ])
-    if (result.changes === 1) await this.recordEvent(id, from, to, null)
+    if (result.changes === 1) {
+      await this.recordEvent(id, from, to, null)
+      announceTransition(this.onTransition, id, from, to)
+    }
     return result.changes === 1
   }
+
+  /** @see BaseSwapStore.onTransition — this store carries its own `transition`. */
+  onTransition?: TransitionHook
 
   /**
    * Terminal failure with a reason a human will read.

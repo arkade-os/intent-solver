@@ -36,6 +36,7 @@ import {
   type SendAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/send.js'
 import { maxRoutingFeeSats, type Limits } from '@arkade-os/solver-core/core/limits.js'
+import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { FREE, giveSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import {
@@ -206,6 +207,14 @@ export interface SendServiceDeps {
    * never asks.
    */
   chainTip?: ChainTipProvider
+  /**
+   * The large-swap approval gate. Absent means no gate.
+   *
+   * Deliberately NOT asked on the coupled collect path — that takes money we are
+   * already owed, and holding it would strand our own recovery — nor on any
+   * claim or refund, which move money toward the solver.
+   */
+  approvalGate?: ApprovalCheck
   now?: () => number
 }
 
@@ -977,6 +986,12 @@ export class SendSwapService {
       await store.fail(row.id, 'funded', `refused to pay: ${decision.reason}`)
       return false
     }
+
+    // AFTER the payment decision, BEFORE the compare-and-swap. That order is the
+    // fail-closed guarantee: a held swap whose invoice lapses meets
+    // `decision.pay === false` on a later tick and is REFUSED to the refund
+    // sweep, rather than waiting on a human who may never answer.
+    if (!(await askApproval(this.deps.approvalGate, row.id, row.amountSats))) return false
 
     // Commit intent before the irreversible call. The idempotency key is
     // derived from the payment hash, so even a retry from a different process

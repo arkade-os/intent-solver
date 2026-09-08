@@ -33,6 +33,7 @@ import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-db/driver.
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { EVM_RECEIVE_NON_TERMINAL, type EvmReceiveSwapState } from '@arkade-os/solver-core/core/evmSwapState.js'
+import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
 
 export interface EvmReceiveSwapRow {
   id: string
@@ -423,7 +424,11 @@ export class EvmReceiveSwapStore {
       'INSERT INTO receive_evm_swap_event (swap_id, at, from_state, to_state) VALUES (?, ?, ?, ?)',
       [id, at, from, to],
     )
+    announceTransition(this.onTransition, id, from, to)
   }
+
+  /** @see BaseSwapStore.onTransition — this store carries its own `transition`. */
+  onTransition?: TransitionHook
 
   /** Set fields without moving the row - see the send store on why this is separate. */
   async patch(id: string, fields: Record<string, unknown>): Promise<void> {

@@ -15,6 +15,7 @@ import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { FakeOnchainBackend } from '@arkade-os/solver-rails-fake/onchain/fake/backend.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
+import { APPROVAL_REFUSAL, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 
 const keyBytes = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 
@@ -1384,5 +1385,82 @@ describe('OnchainSendSwapService', () => {
     // filtered or thrown: the refund they belong to already succeeded, and the
     // operator's log is what turns a stuck one into something a human sees.
     await expect(settling.settleRefundDeposits()).resolves.toEqual(settlements)
+  })
+
+  // `findOutputs` on the HTLC address is what proves whether sats left.
+  describe('the approval gate', () => {
+    const gated = (approvalGate: ApprovalCheck) =>
+      new OnchainSendSwapService({
+        store: deps.store,
+        onchain: deps.onchain,
+        arkade: deps.arkade,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => deps.store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        refundDestinationScript,
+        approvalGate,
+        now: clock,
+      })
+
+    const fundedRow = async (svc: OnchainSendSwapService) => {
+      const outcome = await svc.quote({
+        paymentHash,
+        amountSats: 50_000,
+        payoutPubkey,
+        refundAddress: REFUND_ADDRESS,
+        clientRefundPubkey,
+      })
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+      return outcome.swap
+    }
+
+    it('DOES NOT broadcast the HTLC while the gate holds', async () => {
+      const svc = gated(async () => ({ proceed: false, reason: APPROVAL_REFUSAL }))
+      const swap = await fundedRow(svc)
+      const row = await svc.tick(swap.id)
+      expect(row.state).toBe('funded')
+      expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(0)
+    })
+
+    it('broadcasts once the gate proceeds', async () => {
+      const svc = gated(async () => ({ proceed: true }))
+      const swap = await fundedRow(svc)
+      const row = await svc.tick(swap.id)
+      expect(row.state).toBe('awaiting_claim')
+      expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(1)
+    })
+
+    it('asks about the client lockup amount and the row id', async () => {
+      const asked: { swapId: string; amountSats: number }[] = []
+      const svc = gated(async (swap) => {
+        asked.push(swap)
+        return { proceed: false, reason: APPROVAL_REFUSAL }
+      })
+      const swap = await fundedRow(svc)
+      await svc.tick(swap.id)
+      expect(asked).toEqual([{ swapId: swap.id, amountSats: 50_000 }])
+    })
+
+    // `recoverFunding` drives a row whose broadcast may have gone out, so gating
+    // it would strand a crashed funding behind a human.
+    it('does NOT gate the recovery path for a row already in funding_onchain', async () => {
+      const asked: { swapId: string; amountSats: number }[] = []
+      const svc = gated(async (swap) => {
+        asked.push(swap)
+        return { proceed: false, reason: APPROVAL_REFUSAL }
+      })
+      const swap = await fundedRow(svc)
+      await deps.store.transition(swap.id, 'quoted', 'funded', {})
+      await deps.store.transition(swap.id, 'funded', 'funding_onchain', {})
+      asked.length = 0
+      await svc.tick(swap.id)
+      expect(asked).toEqual([])
+      const row = await deps.store.get(swap.id)
+      expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(1)
+    })
   })
 })

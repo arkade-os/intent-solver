@@ -86,6 +86,7 @@ const CONFIG_KEYS = [
   'EVM_SEND_USDC_MIN_SATS',
   'EVM_SEND_USDC_FEE_BPS',
   'EVM_RECEIVE_USDC_ENABLED',
+  'APPROVAL_THRESHOLD_SATS',
   'LN_BACKEND',
   // Listed for the same reason `EVM_TOKENS` is: a leaked `LN_SEND_ENABLED=false`
   // would silently exempt every later test from needing a rail at all.
@@ -1016,5 +1017,38 @@ describe('ASSET_MARKETS', () => {
     expect(() => loadConfig()).toThrow(/ASSET_QUOTE_VALIDITY_SECONDS/)
     process.env.ASSET_QUOTE_VALIDITY_SECONDS = '901'
     expect(() => loadConfig()).toThrow(/ASSET_QUOTE_VALIDITY_SECONDS/)
+  })
+})
+
+// Beside `LN_BACKEND` for the same reason: unset must not resolve to a working
+// value. Here `Number('') === 0` would be a threshold of ZERO, gating everything.
+describe('APPROVAL_THRESHOLD_SATS', () => {
+  it('is NULL when unset, so a deployment that configures nothing has no gate', () => {
+    expect(loadConfig().approvalThresholdSats).toBeNull()
+  })
+
+  it('is null when set but blank, rather than becoming a zero threshold', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '   '
+    expect(loadConfig().approvalThresholdSats).toBeNull()
+  })
+
+  it('reads a configured threshold', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '1000000'
+    expect(loadConfig().approvalThresholdSats).toBe(1_000_000)
+  })
+
+  it('accepts an explicit zero, which gates everything', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '0'
+    expect(loadConfig().approvalThresholdSats).toBe(0)
+  })
+
+  it('refuses a negative threshold', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '-1'
+    expect(() => loadConfig()).toThrow(/APPROVAL_THRESHOLD_SATS/)
+  })
+
+  it('refuses a non-integer rather than truncating it', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '1.5'
+    expect(() => loadConfig()).toThrow(/APPROVAL_THRESHOLD_SATS/)
   })
 })

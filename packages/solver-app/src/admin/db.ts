@@ -75,7 +75,48 @@ CREATE TABLE IF NOT EXISTS admin_market (
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
+
+-- One row per swap the approval gate has held.
+--
+-- HERE rather than a column on each swap table: that is why the gate needs no
+-- migration on the money path. Losing this file loses a pending approval, which
+-- the gate re-requests next tick; losing a swap database loses funds.
+--
+-- A NULL approved_at is the pending state, which the gate reads directly.
+CREATE TABLE IF NOT EXISTS admin_swap_approval (
+  swap_id      TEXT PRIMARY KEY,
+  corridor     TEXT NOT NULL,
+  amount_sats  INTEGER NOT NULL,
+  requested_at INTEGER NOT NULL,
+  approved_at  INTEGER
+);
+
+-- Scalar notifier state that must survive a restart -- today the last balance
+-- announced. In memory it would reset every deploy and the first event after one
+-- would compare against nothing: the misleading "+0%" the percentage avoids.
+--
+-- Not a row in admin_override: getOverrides() hands settings.ts a Record it
+-- layers onto Config, so an unrelated key would be offered to that layering.
+CREATE TABLE IF NOT EXISTS admin_notify_state (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `
+
+/** The one key {@link AdminStore.getLastAnnouncedBalance} uses. */
+const LAST_BALANCE_KEY = 'last_announced_balance_sats'
+
+/** A swap the gate is holding. */
+export interface SwapApprovalRequest {
+  swapId: string
+  corridor: string
+  amountSats: number
+}
+
+export interface SwapApprovalRow extends SwapApprovalRequest {
+  requestedAt: number
+}
 
 export interface AuditEntry {
   action: string
@@ -274,6 +315,73 @@ export class AdminStore {
       'INSERT INTO admin_action (at, action, target, params, outcome, detail) VALUES (?, ?, ?, ?, ?, ?)',
       [this.now(), entry.action, entry.target, entry.params, entry.outcome, entry.detail],
     )
+  }
+
+  /**
+   * Idempotent; answers whether the row was NEW, which is what stops the
+   * notifier firing once per tick. `DO NOTHING` so a re-record cannot move
+   * `requested_at` — its age is the operator's remaining window.
+   */
+  async recordApprovalRequest(request: SwapApprovalRequest): Promise<boolean> {
+    const result = await this.driver.run(
+      'INSERT INTO admin_swap_approval (swap_id, corridor, amount_sats, requested_at, approved_at) ' +
+        'VALUES (?, ?, ?, ?, NULL) ON CONFLICT(swap_id) DO NOTHING',
+      [request.swapId, request.corridor, request.amountSats, this.now()],
+    )
+    return result.changes === 1
+  }
+
+  /**
+   * False when there was nothing to approve: an operator cannot pre-authorise an
+   * id the gate never held, which is the one way this table could wave a swap
+   * through before anyone saw it.
+   */
+  async approveSwap(swapId: string): Promise<boolean> {
+    const result = await this.driver.run('UPDATE admin_swap_approval SET approved_at = ? WHERE swap_id = ?', [
+      this.now(),
+      swapId,
+    ])
+    return result.changes === 1
+  }
+
+  /** THROWS on a sick database rather than answering false — the caller turns that into a HOLD. */
+  async isSwapApproved(swapId: string): Promise<boolean> {
+    const row = await this.driver.get<{ approved_at: number | null }>(
+      'SELECT approved_at FROM admin_swap_approval WHERE swap_id = ?',
+      [swapId],
+    )
+    return row !== undefined && row !== null && row.approved_at !== null
+  }
+
+  /** Null and zero differ: never-announced has no percentage, an emptied float has a real -100%. */
+  async getLastAnnouncedBalance(): Promise<number | null> {
+    const row = await this.driver.get<{ value: string }>('SELECT value FROM admin_notify_state WHERE key = ?', [
+      LAST_BALANCE_KEY,
+    ])
+    if (row === undefined || row === null) return null
+    const value = Number(row.value)
+    return Number.isFinite(value) ? value : null
+  }
+
+  async setLastAnnouncedBalance(sats: number): Promise<void> {
+    await this.driver.run(
+      'INSERT INTO admin_notify_state (key, value, updated_at) VALUES (?, ?, ?) ' +
+        'ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+      [LAST_BALANCE_KEY, String(sats), this.now()],
+    )
+  }
+
+  /** What is waiting on a human, oldest first — the order they should be answered in. */
+  async listPendingApprovals(): Promise<SwapApprovalRow[]> {
+    const rows = await this.driver.all<Record<string, string | number | null>>(
+      'SELECT * FROM admin_swap_approval WHERE approved_at IS NULL ORDER BY requested_at, swap_id',
+    )
+    return rows.map((row) => ({
+      swapId: String(row.swap_id),
+      corridor: String(row.corridor),
+      amountSats: Number(row.amount_sats),
+      requestedAt: Number(row.requested_at),
+    }))
   }
 
   /**

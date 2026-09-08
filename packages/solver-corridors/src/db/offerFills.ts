@@ -36,6 +36,7 @@
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
 
 // List first, union derived: `LEGAL_EDGES` stops compiling if the two separate.
 export const OFFER_FILL_STATES = ['fillable', 'filling', 'filled', 'lost', 'refused', 'stuck'] as const
@@ -319,9 +320,15 @@ export class OfferFillStore {
       id,
       from,
     ])
-    if (result.changes === 1) await this.recordEvent(id, from, to, null)
+    if (result.changes === 1) {
+      await this.recordEvent(id, from, to, null)
+      announceTransition(this.onTransition, id, from, to)
+    }
     return result.changes === 1
   }
+
+  /** @see BaseSwapStore.onTransition — this store carries its own `transition`. */
+  onTransition?: TransitionHook
 
   /**
    * Terminal failure with a reason a human will read.

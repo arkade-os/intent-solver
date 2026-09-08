@@ -65,6 +65,21 @@ import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchain
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { OnchainReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 import { AdminStore } from '../admin/db.js'
+import { createNotifier } from './notify.js'
+import { sinksFrom } from './notifySinks.js'
+import { createBalanceSampler, createSwapOutcomeReporter } from './businessEvents.js'
+import { approvalGateFor } from './approvals.js'
+import { formatSats, type CorridorStates, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
+import { LN_SEND } from '@arkade-os/solver-corridors/corridors/lnSend.js'
+import { LN_RECEIVE } from '@arkade-os/solver-corridors/corridors/lnReceive.js'
+import { ONCHAIN_SEND } from '@arkade-os/solver-corridors/corridors/onchainSend.js'
+import { ONCHAIN_RECEIVE } from '@arkade-os/solver-corridors/corridors/onchainReceive.js'
+import {
+  EVM_SEND_NON_TERMINAL,
+  EVM_SEND_EXPOSED,
+  EVM_RECEIVE_NON_TERMINAL,
+  EVM_RECEIVE_EXPOSED,
+} from '@arkade-os/solver-core/core/evmSwapState.js'
 import {
   assetMarketPolicy,
   type AssetMarketPair,
@@ -366,6 +381,76 @@ export const createServices = async (
   // swaps, and those are still exposure the cap must count.
   const totalCommitted = () =>
     committedAcrossCorridors(readerSetFromDeps({ store, onchainStore, receiveStore, onchainReceiveStore }))
+
+  // Empty sinks make `post` a no-op, so a deployment that configures nothing
+  // gets today's behaviour exactly: no timer, no network call, no failure.
+  const notifier = createNotifier({
+    sinks: sinksFrom(config.notify, globalThis.fetch as never),
+    onDeliveryFailed: (sinkName, error) =>
+      log(`notification to ${sinkName} failed:`, error instanceof Error ? error.message : String(error)),
+  })
+
+  // Sampled on a timer, never on the event path: `getBalance()` awaits the same
+  // unfiltered `contractSnapshot()` as `getSpendableVtxos()` (~951ms measured)
+  // and races a `getBoardingUtxos()`. `totalCommitted` is the cheap SQLite half.
+  const balances = createBalanceSampler({
+    readAvailableSats: async () => (await arkade.wallet.getBalance()).available,
+    readCommittedSats: totalCommitted,
+    now: nowSeconds,
+    onError: (error) => log('balance sample failed:', error instanceof Error ? error.message : String(error)),
+  })
+
+  const announceOutcomes = (target: { onTransition?: TransitionHook }, corridor: string, states: CorridorStates) => {
+    target.onTransition = createSwapOutcomeReporter({
+      corridor,
+      states,
+      balances,
+      store: adminStore,
+      post: (text) => notifier.post(text),
+      now: nowSeconds,
+      onError: (error) => log('business event failed:', error instanceof Error ? error.message : String(error)),
+    })
+  }
+
+  /** One send leg's gate, or nothing. Send legs only — @see ops/approvals.ts */
+  const gateFor = (corridor: string) =>
+    approvalGateFor({
+      thresholdSats: policy.approvalThresholdSats,
+      corridor,
+      store: adminStore,
+      // Log and message from ONE handler — `assetOffers.ts`'s `onRefused` shape.
+      onHeld: (request) => {
+        log(`swap ${request.swapId} on ${request.corridor} held for approval: ${request.amountSats} sats`)
+        notifier.post(
+          `APPROVAL NEEDED — ${request.corridor} — ${request.swapId} — ${formatSats(request.amountSats)} sats.\n` +
+            'The solver will NOT pay until this is approved in the console (approve-swap), and will refuse it ' +
+            'automatically if the swap’s own deadline passes first.',
+        )
+      },
+    })
+
+  // Each store announces against its OWN descriptor: `claimed` is delivery on
+  // the send legs and merely in flight on the receive ones.
+  announceOutcomes(store, LN_SEND.pair, LN_SEND.states)
+  announceOutcomes(onchainStore, ONCHAIN_SEND.pair, ONCHAIN_SEND.states)
+  announceOutcomes(receiveStore, LN_RECEIVE.pair, LN_RECEIVE.states)
+  announceOutcomes(onchainReceiveStore, ONCHAIN_RECEIVE.pair, ONCHAIN_RECEIVE.states)
+  // Both EVM stores serve every token, so the label names the LEG.
+  if (evmSendStore) {
+    announceOutcomes(evmSendStore, 'arkade:BTC->ethereum', {
+      live: EVM_SEND_NON_TERMINAL,
+      exposed: EVM_SEND_EXPOSED,
+      delivered: ['claimed'],
+    })
+  }
+  if (evmReceiveStore) {
+    announceOutcomes(evmReceiveStore, 'ethereum->arkade:BTC', {
+      live: EVM_RECEIVE_NON_TERMINAL,
+      exposed: EVM_RECEIVE_EXPOSED,
+      delivered: ['claimed'],
+    })
+  }
+
   /**
    * ONE control for every corridor, deliberately. Each service would happily
    * make its own, and that still bounds a corridor against itself — but the
@@ -623,6 +708,7 @@ export const createServices = async (
         sweepConcurrency: config.sweepConcurrency,
         lockupTimeout: config.lockupTimeoutSeconds,
         sendHintScidDenylist: config.sendHintScidDenylist,
+        approvalGate: gateFor('arkade:BTC->lightning:BTC'),
         // Every other corridor's store, so a hash that is live anywhere is
         // spoken for here too.
         //
@@ -707,6 +793,7 @@ export const createServices = async (
         admission,
         signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
         refundDestinationScript: onchainRefundDestinationScript!,
+        approvalGate: gateFor('arkade:BTC->onchain:BTC'),
         peerStores: [store, receiveStore, onchainReceiveStore],
       })
     : undefined
@@ -926,6 +1013,8 @@ export const createServices = async (
       // The account the broadcaster signs from, so the allowance read below
       // describes the same account the contract will pull from.
       solverEvmAddress: addressFromPrivateKey(evmChain.privateKey),
+      // ONE gate for every token: `token_address` is a column, not a store.
+      approvalGate: gateFor('arkade:BTC->ethereum'),
       maxExposedSats: policy.maxExposedSats,
       totalCommitted,
       // The SAME control the other four corridors hold. A private one would
