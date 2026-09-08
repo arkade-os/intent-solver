@@ -69,8 +69,12 @@ describe('the image healthcheck', () => {
 describe('the serve-mode override an operator copies out of the compose file', () => {
   // `serve` never writes the heartbeat, so the image default can only fail there.
   it('probes a route and port the app really serves', () => {
-    // The probe line, not the block: a ports comment below also carries 8787.
-    const probe = compose.split('\n').find((line) => line.includes('/healthz')) ?? ''
+    // Scoped to the stanza's `test:` line. Not YAML-parsed: the whole stanza is
+    // commented out, so a YAML reader finds nothing here at all.
+    const lines = compose.split('\n')
+    const stanza = lines.findIndex((line) => /^\s*#?\s*healthcheck:\s*$/.test(line))
+    expect(stanza).toBeGreaterThan(-1)
+    const probe = lines.slice(stanza + 1, stanza + 4).find((line) => /^\s*#?\s*test:/.test(line)) ?? ''
     expect(probe).toContain('/healthz')
     expect(probe).toContain('8787')
     expect(read('packages/solver-transport/src/http/server.ts')).toContain("app.get('/healthz'")

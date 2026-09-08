@@ -1939,7 +1939,9 @@ main()
   .then(() => process.exit(process.exitCode ?? 0))
   .catch(async (error) => {
     console.error('failed:', error instanceof Error ? error.message : String(error))
-    reporter?.report('cli', error)
+    // A GiveUp names a usage mistake or a disabled corridor — an ANSWER, not a
+    // fault, and the rule `onRefusal` already follows.
+    if (!(error instanceof GiveUp)) reporter?.report('cli', error)
     await reporter?.flush()
     process.exit(1)
   })

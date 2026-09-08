@@ -1,12 +1,11 @@
 /**
  * Crash reporting to Sentry, built as an ALLOWLIST rather than a filter.
  *
- * This process holds a mnemonic. The rule `cli.ts` and `admin/server.ts` state —
- * errors travel as messages, never as objects, because config objects carry
- * mnemonics — is why this hand-builds the event field by field rather than hand
- * an error to an SDK, whose Node defaults capture console breadcrumbs, outbound
- * request URLs, source context and module lists. The scrubber is the last line,
- * not the only one.
+ * This process holds a mnemonic, and the rule `cli.ts` and `admin/server.ts`
+ * state — errors travel as messages, never as objects, because config objects
+ * carry mnemonics — is why this hand-builds the event rather than hand an error
+ * to an SDK whose Node defaults capture console breadcrumbs, outbound request
+ * URLs, source context and module lists. The scrubber is the last line only.
  */
 
 import { randomBytes } from 'node:crypto'
@@ -25,9 +24,16 @@ export interface SentryOptions {
   now?: () => number
 }
 
+/** Every octet, not a `127.` prefix: that would read 127.evil.com as loopback. */
+const isLoopback = (hostname: string): boolean => {
+  const host = hostname.replace(/^\[|\]$/g, '')
+  return host === 'localhost' || host === '::1' || /^127(\.\d{1,3}){3}$/.test(host)
+}
+
 /**
- * `{PROTOCOL}://{PUBLIC_KEY}@{HOST}{PATH}/{PROJECT_ID}`. The deprecated
- * `:{SECRET_KEY}` half is accepted and DISCARDED rather than echoed back.
+ * `{PROTOCOL}://{PUBLIC_KEY}@{HOST}{PATH}/{PROJECT_ID}`; the deprecated
+ * `:{SECRET_KEY}` half is DISCARDED. Plaintext is refused off-loopback, as
+ * `COVCLAIMD_URL` does: it would put the auth key on the wire.
  */
 export const parseSentryDsn = (raw: string): SentryDsn => {
   let url: URL
@@ -37,6 +43,9 @@ export const parseSentryDsn = (raw: string): SentryDsn => {
     throw new Error('SENTRY_DSN is not a URL')
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('SENTRY_DSN must be http(s)')
+  if (url.protocol === 'http:' && !isLoopback(url.hostname)) {
+    throw new Error(`SENTRY_DSN must use https off loopback, got "${url.protocol}//${url.host}"`)
+  }
   if (!url.username) throw new Error('SENTRY_DSN has no public key')
   const segments = url.pathname.split('/').filter(Boolean)
   const projectId = segments.pop()
@@ -52,7 +61,7 @@ const REDACTED = '<redacted>'
 
 const BIP39 = new Set(wordlist)
 const BIP39_MIN_WORDS = 12
-const LOWERCASE_RUN = /[a-z]+(?: [a-z]+)*/g
+const WORD = /[a-z]+/g
 
 /**
  * Consecutive words that are all IN the BIP39 list — membership, not word shape.
@@ -60,48 +69,62 @@ const LOWERCASE_RUN = /[a-z]+(?: [a-z]+)*/g
  * `could not find the swap row for the given payment hash…` is sixteen of those.
  * Measured on real solver messages the longest membership streak is two, against
  * twelve for the shortest mnemonic, so the threshold sits in a wide gap.
+ *
+ * Any whitespace separates, and separators are preserved rather than normalised.
  */
-const redactMnemonics = (text: string): string =>
-  text.replace(LOWERCASE_RUN, (run) => {
-    const out: string[] = []
-    let streak: string[] = []
-    const flush = (): void => {
-      out.push(...(streak.length >= BIP39_MIN_WORDS ? [REDACTED] : streak))
-      streak = []
+const redactMnemonics = (text: string): string => {
+  type Token = { word: string; start: number; end: number }
+  const words: Token[] = []
+  for (let m = WORD.exec(text); m; m = WORD.exec(text)) {
+    words.push({ word: m[0], start: m.index, end: m.index + m[0].length })
+  }
+  const out: string[] = []
+  let cursor = 0
+  let run: Token[] = []
+  const flush = (): void => {
+    const first = run[0]
+    const last = run[run.length - 1]
+    if (first && last && run.length >= BIP39_MIN_WORDS) {
+      out.push(text.slice(cursor, first.start), REDACTED)
+      cursor = last.end
     }
-    for (const word of run.split(' ')) {
-      if (BIP39.has(word)) streak.push(word)
-      else {
-        flush()
-        out.push(word)
-      }
+    run = []
+  }
+  for (const token of words) {
+    if (!BIP39.has(token.word)) {
+      flush()
+      continue
     }
-    flush()
-    return out.join(' ')
-  })
+    const previous = run[run.length - 1]
+    if (previous && !/^\s+$/.test(text.slice(previous.end, token.start))) flush()
+    run.push(token)
+  }
+  flush()
+  out.push(text.slice(cursor))
+  return out.join('')
+}
+
 /** `key: "value"` and `key=value` for anything whose name says it is a secret. */
 const SECRET_KEY = 'mnemonic|seed|macaroon|passphrase|password|secret|private_?key|priv_?key|api_?key|token|auth'
 const QUOTED_SECRET = new RegExp(`("?(?:${SECRET_KEY})"?\\s*[:=]\\s*)"[^"]*"`, 'gi')
 const BARE_SECRET = new RegExp(`("?(?:${SECRET_KEY})"?\\s*[:=]\\s*)[^\\s,;}\\]]+`, 'gi')
 /** `scheme://user:pass@host` — an RPC or relay URL with its credentials inline. */
 const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/gi
-/**
- * Certificate, macaroon and xprv scale. 80 rather than 64 deliberately: a
- * payment hash is 64 hex and is the operator's only correlation key.
- */
+/** Cert/macaroon/xprv scale. 80 not 64: a payment hash is the correlation key. */
 const LONG_BLOB = /[A-Za-z0-9+/=_-]{80,}/g
 
 /** @see DISPLAY_CHARS in tickErrors.ts — the discriminating part is the start. */
 const MAX_TEXT = 1024
 
+// Mnemonics FIRST, load-bearing: `BARE_SECRET` stops at whitespace, so on
+// `mnemonic=<12 words>` it ate one word and left 11 — under the threshold.
 export const scrubText = (text: string): string =>
-  redactMnemonics(
-    text
-      .replace(URL_CREDENTIALS, `$1${REDACTED}@`)
-      .replace(QUOTED_SECRET, `$1"${REDACTED}"`)
-      .replace(BARE_SECRET, `$1${REDACTED}`)
-      .replace(LONG_BLOB, REDACTED),
-  ).slice(0, MAX_TEXT)
+  redactMnemonics(text)
+    .replace(URL_CREDENTIALS, `$1${REDACTED}@`)
+    .replace(QUOTED_SECRET, `$1"${REDACTED}"`)
+    .replace(BARE_SECRET, `$1${REDACTED}`)
+    .replace(LONG_BLOB, REDACTED)
+    .slice(0, MAX_TEXT)
 
 export interface SentryFrame {
   filename: string
@@ -114,9 +137,9 @@ export interface SentryFrame {
 const FRAME = /^\s*at\s+(?:(.+?)\s+\()?(.+?):(\d+):(\d+)\)?\s*$/
 
 /**
- * Frames carry a LOCATION and nothing else. Sentry's frame schema also has
- * `vars`, `context_line`, `pre_context`, `post_context` and `abs_path` — locals,
- * source text and the operator's home directory — and this never emits them.
+ * Frames carry a LOCATION and nothing else. Sentry's schema also has `vars`,
+ * `context_line`, `pre_context`, `post_context` and `abs_path` — locals, source
+ * and the operator's home directory — and this never emits them.
  */
 export const framesFrom = (stack: string | undefined): SentryFrame[] => {
   if (!stack) return []
@@ -159,6 +182,15 @@ export interface SentryEvent {
   exception: { values: [{ type: string; value: string; stacktrace: { frames: SentryFrame[] } }] }
 }
 
+/** Throwing here would throw inside the panic handler reporting the first fault. */
+const textOf = (value: unknown): string => {
+  try {
+    return String(value)
+  } catch {
+    return '<unprintable>'
+  }
+}
+
 export const buildEvent = (
   context: string,
   error: unknown,
@@ -176,8 +208,8 @@ export const buildEvent = (
     exception: {
       values: [
         {
-          type: scrubText(isError ? error.name : typeof error),
-          value: scrubText(isError ? error.message : String(error)),
+          type: scrubText(isError ? textOf(error.name) : typeof error),
+          value: scrubText(isError ? textOf(error.message) : textOf(error)),
           stacktrace: { frames: framesFrom(isError ? error.stack : undefined) },
         },
       ],
@@ -215,6 +247,8 @@ export const createErrorReporter = (options: SentryOptions | null): ErrorReporte
       windowStartedAt = at
       sentInWindow = 0
     }
+    // Each key holds a scrubbed message; without this the map grows unbounded.
+    for (const [key, seen] of lastSeen) if (at - seen >= DEDUPE_MS) lastSeen.delete(key)
     if (sentInWindow >= MAX_PER_MINUTE) return false
     const seen = lastSeen.get(signature)
     if (seen !== undefined && at - seen < DEDUPE_MS) return false

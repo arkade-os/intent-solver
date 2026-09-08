@@ -61,9 +61,18 @@ describe('parseSentryDsn', () => {
     ['ftp://key@host/1', 'SENTRY_DSN must be http(s)'],
     ['https://host/1', 'SENTRY_DSN has no public key'],
     ['https://key@host/notanumber', 'SENTRY_DSN has no numeric project id'],
+    ['http://key@sentry.example.com/1', 'must use https off loopback'],
+    ['http://key@127.evil.com/1', 'must use https off loopback'],
   ])('refuses %s rather than reporting nowhere', (raw, message) => {
     expect(() => parseSentryDsn(raw)).toThrow(message)
   })
+
+  it.each(['http://key@127.0.0.1:9911/42', 'http://key@localhost/42', 'http://key@[::1]:9000/42'])(
+    'allows plaintext to loopback: %s',
+    (raw) => {
+      expect(parseSentryDsn(raw).publicKey).toBe('key')
+    },
+  )
 })
 
 describe('scrubText', () => {
@@ -91,6 +100,25 @@ describe('scrubText', () => {
     'the lightning backend refused to pay the invoice because the route was not found today',
     'unable to settle the batch since the server rejected our forfeit signature for this vtxo',
   ])('leaves an ordinary sentence alone: %s', (message) => {
+    expect(scrubText(message)).toBe(message)
+  })
+
+  // The keyed rule used to eat one word, leaving 11 — under the threshold.
+  it.each(['mnemonic=', 'seed: ', 'passphrase="'])('redacts a mnemonic behind %s', (prefix) => {
+    expect(scrubText(`${prefix}${MNEMONIC}`)).not.toContain('sausage')
+  })
+
+  it.each([
+    ['newlines', '\n'],
+    ['tabs', '\t'],
+    ['repeated spaces', '   '],
+    ['CRLF', '\r\n'],
+  ])('redacts a mnemonic separated by %s', (_name, gap) => {
+    expect(scrubText(`recovered ${MNEMONIC.split(' ').join(gap)} ok`)).not.toContain('sausage')
+  })
+
+  it('preserves an ordinary message rather than normalising its whitespace', () => {
+    const message = 'line one\n\tindented\n  spaced'
     expect(scrubText(message)).toBe(message)
   })
 
@@ -225,6 +253,22 @@ describe('the reporter', () => {
     await expect(reporter.flush()).resolves.toBeUndefined()
   })
 
+  it('reports a fault again once the dedupe window has passed', async () => {
+    const capture = capturing()
+    let clock = 1_000_000
+    const reporter = createErrorReporter({
+      dsn: parseSentryDsn(DSN),
+      environment: 'mainnet',
+      send: capture.send,
+      now: () => clock,
+    })!
+    reporter.report('tick', new Error('backend unreachable'))
+    clock += 60_001
+    reporter.report('tick', new Error('backend unreachable'))
+    await reporter.flush()
+    expect(capture.bodies).toHaveLength(2)
+  })
+
   it('collapses a repeat, so a 250ms tick loop cannot flood the project', async () => {
     const capture = capturing()
     let clock = 1_000_000
@@ -312,6 +356,21 @@ describe('the envelope', () => {
     expect(JSON.parse(header!)).toMatchObject({ event_id: 'f'.repeat(32) })
     expect(JSON.parse(item!)).toMatchObject({ type: 'event', content_type: 'application/json' })
     expect(JSON.parse(item!).length).toBe(Buffer.byteLength(payload!))
+  })
+
+  it.each([
+    ['a null-prototype object', Object.create(null)],
+    [
+      'a value whose toString throws',
+      {
+        toString: () => {
+          throw new Error('nope')
+        },
+      },
+    ],
+  ])('converts %s instead of throwing inside the panic handler', (_name, value) => {
+    const event = buildEvent('ctx', value, { environment: 'e', eventId: 'a'.repeat(32), timestamp: 1 })
+    expect(event.exception.values[0].value).toBe('<unprintable>')
   })
 
   it('reports a thrown non-Error without inventing a stack', () => {
