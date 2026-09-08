@@ -330,6 +330,58 @@ describe('ReceiveSwapStore — migration', () => {
     expect((await migrated.get('swap-1')).payoutSats).toBe(4_950)
   })
 
+  // The risk this migration carries: it runs at open against a table of LIVE swaps.
+  it('adds fund_started_at to a table predating it, leaving an in-flight row live and unleased', async () => {
+    const db = new Database(':memory:')
+    const driver: SqlDriver = {
+      exec: async (sql) => {
+        db.exec(sql)
+      },
+      run: async (sql, params = []) => ({ changes: db.prepare(sql).run(...(params as never[])).changes }),
+      get: async (sql, params = []) => db.prepare(sql).get(...(params as never[])) as never,
+      all: async (sql, params = []) => db.prepare(sql).all(...(params as never[])) as never,
+      transaction: async (fn) => fn(),
+      close: async () => {
+        db.close()
+      },
+    }
+    db.exec(`
+      CREATE TABLE receive_swap (
+        id TEXT PRIMARY KEY, state TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        payment_hash TEXT NOT NULL, amount_sats INTEGER NOT NULL, payout_sats INTEGER NOT NULL,
+        invoice TEXT NOT NULL, invoice_expires_at INTEGER NOT NULL, htlc_expires_at INTEGER,
+        payout_address TEXT NOT NULL, payout_pk_script TEXT NOT NULL, payout_pubkey TEXT NOT NULL,
+        claim_packet TEXT NOT NULL, refund_locktime INTEGER NOT NULL, solver_pubkey TEXT NOT NULL,
+        server_pubkey TEXT NOT NULL, claim_delay INTEGER NOT NULL, refund_delay INTEGER NOT NULL,
+        refund_without_receiver_delay INTEGER NOT NULL, emulator_pubkey TEXT NOT NULL, pk_script TEXT NOT NULL,
+        lockup_address TEXT NOT NULL, solver_refund_pk_script TEXT NOT NULL, non_interactive_parameters TEXT,
+        arkade_lockup_txid TEXT, arkade_lockup_vout INTEGER, arkade_lockup_value INTEGER, revealed_at INTEGER,
+        stamped_at INTEGER, settle_attempted_at INTEGER, preimage TEXT, refund_ark_txid TEXT,
+        failure_reason TEXT, rfq_id TEXT
+      );
+    `)
+    db.prepare(
+      `INSERT INTO receive_swap (
+        id, state, created_at, updated_at, payment_hash, amount_sats, payout_sats, invoice, invoice_expires_at,
+        htlc_expires_at, payout_address, payout_pk_script, payout_pubkey, claim_packet,
+        refund_locktime, solver_pubkey, server_pubkey, claim_delay, refund_delay, refund_without_receiver_delay,
+        emulator_pubkey, pk_script, lockup_address, solver_refund_pk_script
+      ) VALUES ('in-flight-row', 'armed', 1, 1, ?, 5000, 4950, 'lnbcrt50000n1...', 1000, 2000, 'tark1x', '11', '22', 'cA==', 1000, '33', '44', 1, 1, 1, '55', '66', 'tark1y', '77')`,
+    ).run('97'.repeat(32))
+
+    const migrated = await ReceiveSwapStore.open(driver, clock)
+    const row = await migrated.get('in-flight-row')
+    expect(row.state).toBe('armed')
+    expect(row.payoutSats).toBe(4_950)
+    expect(row.htlcExpiresAt).toBe(2_000)
+    expect(row.fundStartedAt).toBeNull()
+
+    expect(await migrated.claimFundLease('in-flight-row', 'armed')).toBe(true)
+    expect(await migrated.claimFundLease('in-flight-row', 'armed')).toBe(false)
+    expect((await migrated.get('in-flight-row')).fundStartedAt).toBe(now)
+    await migrated.close()
+  })
+
   it('reads a SQL NULL claim_packet as absent, not as the string "null"', async () => {
     // A column that never was NOT NULL can hold one, and `String(null)` then
     // fabricates a packet out of it.
