@@ -9,9 +9,11 @@ import { hex } from '@scure/base'
 // drive its events directly, the same way wallet.test.ts module-mocks
 // @arkade-os/sdk's RestEmulatorProvider for the same reason (constructed
 // internally, not injected).
-const { subscribeToChainSpend, createChainAddress } = vi.hoisted(() => ({
+const { subscribeToChainSpend, createChainAddress, sendToChainAddress, getChainTransactions } = vi.hoisted(() => ({
   subscribeToChainSpend: vi.fn(),
   createChainAddress: vi.fn(),
+  sendToChainAddress: vi.fn(),
+  getChainTransactions: vi.fn(),
 }))
 vi.mock('lightning', async (importOriginal) => {
   const actual = await importOriginal<typeof import('lightning')>()
@@ -23,6 +25,8 @@ vi.mock('lightning', async (importOriginal) => {
     getWalletInfo: vi.fn(async () => ({ current_block_height: 102 })),
     subscribeToChainSpend,
     createChainAddress,
+    sendToChainAddress,
+    getChainTransactions,
   }
 })
 
@@ -95,6 +99,64 @@ describe('LndOnchainAdapter.findOutputs', () => {
   it('refuses to guess when no Esplora URL is configured, rather than under-reporting', async () => {
     const adapter = await LndOnchainAdapter.create({ socket: 's', cert: 'c', macaroon: 'm' })
     await expect(adapter.findOutputs({ address })).rejects.toThrow(/Esplora URL/)
+  })
+})
+
+describe('LndOnchainAdapter.fund', () => {
+  const htlc = 'bcrt1qhtlc'
+  const config = { socket: 's', cert: 'c', macaroon: 'm' }
+  const key = () => p2wpkh(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true)).script
+
+  const rawTx = (amounts: number[], withAddresslessOutputFirst: boolean): string => {
+    const tx = new Transaction({ allowUnknownOutputs: true, allowUnknownInputs: true })
+    tx.addInput({ txid: 'ff'.repeat(32), index: 0, sequence: 0xfffffffd })
+    if (withAddresslessOutputFirst) tx.addOutput({ script: new Uint8Array([0x6a, 0x03, 1, 2, 3]), amount: 0n })
+    for (const amount of amounts) tx.addOutput({ script: key(), amount: BigInt(amount) })
+    return hex.encode(tx.toBytes(true, false))
+  }
+
+  beforeEach(() => {
+    sendToChainAddress.mockReset()
+    getChainTransactions.mockReset()
+    sendToChainAddress.mockResolvedValue({ id: 'fundtx' })
+  })
+
+  it('locates the vout by address when every output has one', async () => {
+    getChainTransactions.mockResolvedValue({
+      transactions: [
+        { id: 'fundtx', output_addresses: ['bcrt1qchange', htlc], transaction: rawTx([99_000, 50_000], false) },
+      ],
+    })
+    const adapter = await LndOnchainAdapter.create(config)
+    await expect(adapter.fund({ address: htlc, amountSats: 50_000, idempotencyKey: 'k' })).resolves.toEqual({
+      txid: 'fundtx',
+      vout: 1,
+    })
+  })
+
+  it('refuses a vout the raw transaction does not confirm, rather than returning a shifted one', async () => {
+    // The HTLC is really vout 2; `indexOf` answers 1, the change. A wrong
+    // outpoint aims the claim and refund watch at an output the swap never owned.
+    getChainTransactions.mockResolvedValue({
+      transactions: [
+        { id: 'fundtx', output_addresses: ['bcrt1qchange', htlc], transaction: rawTx([99_000, 50_000], true) },
+      ],
+    })
+    const adapter = await LndOnchainAdapter.create(config)
+    await expect(adapter.fund({ address: htlc, amountSats: 50_000, idempotencyKey: 'k' })).rejects.toThrow(
+      /does not pay 50000 sats|cannot be confirmed/i,
+    )
+  })
+
+  it('still answers when LND supplies no raw transaction to check against', async () => {
+    getChainTransactions.mockResolvedValue({
+      transactions: [{ id: 'fundtx', output_addresses: ['bcrt1qchange', htlc] }],
+    })
+    const adapter = await LndOnchainAdapter.create(config)
+    await expect(adapter.fund({ address: htlc, amountSats: 50_000, idempotencyKey: 'k' })).resolves.toEqual({
+      txid: 'fundtx',
+      vout: 1,
+    })
   })
 })
 

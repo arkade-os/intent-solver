@@ -29,6 +29,7 @@
     "@arkade-os/solver-core": "workspace:*",
     "@arkade-os/solver-rails-esplora": "workspace:*",
     "@scure/base": "^2.0.0",
+    "@scure/btc-signer": "^2.0.1",
     "lightning": "^12.2.3"
   }
 }
