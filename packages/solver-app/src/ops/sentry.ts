@@ -62,18 +62,21 @@ const REDACTED = '<redacted>'
 const BIP39 = new Set(wordlist)
 const BIP39_MIN_WORDS = 12
 const WORD = /[A-Za-z]+/g
-/** A whitespace-only rule read a JSON array or CSV line as twelve one-word runs. */
-const PHRASE_GAP = /^[\s,"'\[\]]+$/
+/**
+ * A whitespace-only rule read a JSON array or CSV line as twelve one-word runs;
+ * the backslash covers a payload serialised twice, whose gap is `\",\"`. NOT
+ * widened further — admitting letters or digits would chain any two BIP39 words
+ * in a document, so one word per prefixed log LINE is not caught.
+ */
+const PHRASE_GAP = /^[\s,"'\[\]\\]+$/
 
 /**
  * Consecutive words that are all IN the BIP39 list — membership, not word shape.
  * A shape rule ("twelve lowercase words of 3-8 letters") eats ordinary messages.
  * Re-measured over this repo's 125k lines under THIS rule: the longest streak in
  * non-mnemonic prose is eight, against twelve for the shortest mnemonic, and
- * every line reaching twelve is a real mnemonic in a fixture. Widening the gap
- * below narrows that margin — re-measure if it widens again.
- *
- * Case-insensitive; separators are preserved rather than normalised.
+ * every line reaching twelve is a real mnemonic in a fixture; re-measure if the
+ * gap widens again. Case-insensitive; separators are preserved, not normalised.
  */
 const redactMnemonics = (text: string): string => {
   type Token = { word: string; start: number; end: number }

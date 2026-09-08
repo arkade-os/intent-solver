@@ -10,7 +10,6 @@ import {
   scrubText,
 } from '@arkade-os/solver-app/ops/sentry.js'
 
-/** A real BIP39 test vector. */
 const MNEMONIC = 'legal winner thank year wave sausage worth useful legal winner thank yellow'
 
 /** Shaped like the real `Config`, mnemonic nested as it is in `config.arkade`. */
@@ -143,6 +142,12 @@ describe('scrubText', () => {
     expect(scrubText(text).toLowerCase()).not.toContain('sausage')
   })
 
+  it.each([
+    ['an object', JSON.stringify(JSON.stringify({ mnemonic: MNEMONIC }))],
+    ['an array', JSON.stringify(JSON.stringify(MNEMONIC.split(' ')))],
+  ])('redacts a mnemonic inside %s serialised twice', (_name, text) => {
+    expect(scrubText(text)).not.toContain('sausage')
+  })
   it('preserves an ordinary message rather than normalising its whitespace', () => {
     const message = 'line one\n\tindented\n  spaced'
     expect(scrubText(message)).toBe(message)
@@ -153,8 +158,7 @@ describe('scrubText', () => {
     expect(scrubText(message)).toBe(message)
   })
 
-  // The worst real case in this repo: an eight-word BIP39 streak, four short of
-  // the threshold. It is the whole margin, so it is pinned rather than described.
+  // The repo's worst real case: an eight-word streak, four short of the threshold.
   it('leaves the longest BIP39 streak in this repo alone', () => {
     const message = 'estimate`). Anything that can answer "what will this one cost me" fits here.'
     expect(scrubText(message)).toBe(message)
