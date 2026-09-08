@@ -105,6 +105,25 @@ describe('OnchainAssetReceiveSwapStore', () => {
     expect(await store.committedSats()).toBe(50_000)
   })
 
+  it('counts one market when asked for one, and the whole table when not', async () => {
+    // One table backs every market, so a per-market reader that omits its pair
+    // counts these once each per market — dividing the cap by the market count.
+    const other = 'cd'.repeat(32) + '0100'
+    await store.insertQuote(baseQuote)
+    await store.insertQuote({
+      ...baseQuote,
+      id: 'swap-2',
+      paymentHash: 'bc'.repeat(32),
+      pair: `onchain:BTC->arkade:${other}`,
+      payoutAssetId: other,
+      amountSats: 30_000,
+    })
+
+    expect(await store.committedSats(PAIR)).toBe(50_000)
+    expect(await store.committedSats(`onchain:BTC->arkade:${other}`)).toBe(30_000)
+    expect(await store.committedSats()).toBe(80_000)
+  })
+
   describe('the fund lease', () => {
     beforeEach(async () => {
       await store.insertQuote(baseQuote)

@@ -12,7 +12,8 @@
  * reason: a market is runtime configuration, so a table per market would mean a
  * migration every time an operator adds one.
  *
- * `committedSats` IS INHERITED, deliberately. The base sums `amount_sats` over
+ * `committedSats` KEEPS THE BASE'S COLUMN, deliberately, and overrides it only to
+ * add the `pair` filter every other reader here applies. The base sums `amount_sats` over
  * the non-terminal states, and on this leg `amount_sats` is the BTC the client
  * funds the HTLC with — a real sats figure, and the natural proxy for what the
  * solver stands to lose, since the asset it pays out was priced against exactly
@@ -320,6 +321,26 @@ export class OnchainAssetReceiveSwapStore extends BaseSwapStore<OnchainAssetRece
     )
     await store.driver.exec(SCHEMA)
     return store
+  }
+
+  /**
+   * The inherited sum, narrowed to one market.
+   *
+   * The COLUMN stays the base's `amount_sats` for the reason this file's header
+   * gives. What the base cannot know is that one table backs every asset market,
+   * so a per-market reader must pass its `pair` — otherwise every reader sums the
+   * whole table and `committedAcrossCorridors` counts the same swaps once per
+   * configured market, dividing the exposure cap by their number. Omitted by a
+   * caller summing whole stores, which wants exactly the unfiltered total.
+   */
+  override async committedSats(pair?: string): Promise<number> {
+    if (pair === undefined) return super.committedSats()
+    const placeholders = NON_TERMINAL.map(() => '?').join(',')
+    const row = await this.driver.get<{ total: number }>(
+      `SELECT COALESCE(SUM(amount_sats), 0) AS total FROM receive_onchain_asset_swap WHERE state IN (${placeholders}) AND pair = ?`,
+      [...NON_TERMINAL, pair],
+    )
+    return Number(row?.total ?? 0)
   }
 
   /**

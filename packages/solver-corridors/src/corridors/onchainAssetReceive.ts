@@ -108,7 +108,7 @@ export const onchainAssetReceiveReader = (
     return row && row.pair === descriptor.pair ? onchainAssetReceiveRfqStatusPayload(row, rfqId) : null
   },
   findRecoverable: async () => (await store.findRecoverable()).filter((row) => row.pair === descriptor.pair),
-  committedSats: () => store.committedSats(),
+  committedSats: () => store.committedSats(descriptor.pair),
   page: async (options) => {
     const { rows, nextCursor } = await store.page({ ...options, pair: descriptor.pair })
     return { swaps: rows.map(projectOnchainAssetReceive), nextCursor }

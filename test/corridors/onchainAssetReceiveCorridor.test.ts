@@ -66,6 +66,16 @@ describe('onchainAssetReceiveReader', () => {
     await store.insertQuote(quote('usda-2', USDA.pair, ASSET_A))
   })
 
+  it('reports only its own market as committed sats', async () => {
+    // Two readers over one table. Unscoped, each returns the whole table and
+    // `committedAcrossCorridors` counts every swap once per configured market.
+    const usda = await onchainAssetReceiveReader(USDA, store).committedSats()
+    const eura = await onchainAssetReceiveReader(EURA, store).committedSats()
+    expect(usda).toBe(await store.committedSats(USDA.pair))
+    expect(eura).toBe(await store.committedSats(EURA.pair))
+    expect(usda + eura, 'the parts must sum to the whole, not double it').toBe(await store.committedSats())
+  })
+
   it('pages its own market and no other', async () => {
     const usda = await onchainAssetReceiveReader(USDA, store).page({})
     const eura = await onchainAssetReceiveReader(EURA, store).page({})
