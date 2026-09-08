@@ -95,6 +95,9 @@ export class LockupWatcher {
   /**
    * Bring the source's watched set in line with this one; never rejects. At most
    * one pass runs at a time; the sets converge, they are never applied as a delta.
+   *
+   * @internal Public as a test seam. Waiting on a pass contradicts the
+   * fire-and-forget contract {@link sync} exists to keep.
    */
   reconcile(): Promise<void> {
     if (this.reconciling) return this.reconciling

@@ -13,8 +13,9 @@ export interface LazyContractSourceDeps {
    *
    * That is deliberate: it is the call that reconciles, so re-calling it is
    * what a retry has to do. The SDK clears its in-flight promise when
-   * initialization throws (checked against 0.4.66), so a later call re-runs
-   * initialization instead of handing back the failure it already produced.
+   * initialization throws (checked against 0.4.71), so a later call re-runs
+   * initialization instead of handing back the failure it already produced. On
+   * success it caches, so watching N scripts costs one init and N-1 field reads.
    */
   getContractManager: () => Promise<ContractManagerLike>
   /** A failed attach, with how long until the next attempt. */
@@ -95,6 +96,8 @@ export const lazyContractSource = (deps: LazyContractSourceDeps): ContractSource
     },
     unwatchScript: async (script: string): Promise<void> => {
       const manager = await deps.getContractManager()
+      // `?.` and not the guard above, deliberately: a missed unwatch over-watches,
+      // a missed watch misses fundings. Only the second is worth an error.
       await manager.unwatchScript?.(script)
     },
   }
