@@ -286,8 +286,8 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     // INTENT_INSUFFICIENT_FEE against a pass this repo never asked for.
     //
     // WHAT IT COSTS, checked rather than assumed:
-    //   - boarding sweep: nothing. This service never boards; the only Arkade
-    //     boarding addresses named anywhere in `src/` are ones we avoid.
+    //   - boarding settle: real, so it MOVED rather than went away. `ops/float.ts`
+    //     now settles boarded sats. @see arkade/boardingSettle.ts
     //   - deprecated-signer migration: real, so it MOVED rather than went away.
     //     `ops/float.ts` now runs `migrateDeprecatedSignerVtxos()` on the
     //     lifecycle pass. @see arkade/signerMigration.ts

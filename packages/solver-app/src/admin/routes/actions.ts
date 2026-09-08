@@ -641,9 +641,10 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     tier: 'armed',
     confirmKind: 'literal:FLOAT',
     warning:
-      'Settles: renews VTXOs near expiry and recovers any the server has swept, in one pass. Recovery is held back ' +
-      'when a live lockup is still short of its refund deadline, because that would fail the whole settlement and ' +
-      'take unrelated coins with it — the response says so as `recoverySkipped`.',
+      'Settles: boards any confirmed sats at the boarding address, renews VTXOs near expiry, and recovers any the ' +
+      'server has swept, in one pass. Recovery is held back when a live lockup is still short of its refund ' +
+      'deadline, because that would fail the whole settlement and take unrelated coins with it — the response says ' +
+      'so as `recoverySkipped`.',
     expectedConfirm: () => 'FLOAT',
     // `runFloatLifecycle` never throws - the report was built for a watch loop
     // that must not die - so this route would answer HTTP 200 `{ok: true}` even
@@ -660,7 +661,7 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       return {
         ...report,
         ok: report.failures.length === 0,
-        settled: report.renewed !== null || report.recovered !== null,
+        settled: report.boarded !== null || report.renewed !== null || report.recovered !== null,
       }
     },
   },

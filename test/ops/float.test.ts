@@ -135,18 +135,23 @@ const floatStores = {
 /** A real address, because a renewal decodes it to price its own output. */
 const FLOAT_ADDRESS = new ArkAddress(new Uint8Array(32).fill(2), new Uint8Array(32).fill(3), 'tark').encode()
 
+type SettleParams = { inputs: { txid: string; vout: number }[]; outputs: { address: string; amount: bigint }[] }
+
 const floatServices = (
   migrate: () => Promise<unknown>,
   vtxos: { txid: string; vout: number }[] = [],
   expiring: unknown[] = [],
+  boarding: { boarded?: unknown[]; expired?: unknown[]; settle?: (params: SettleParams) => Promise<string> } = {},
 ): Services =>
   ({
     arkade: {
       wallet: {
-        settle: async () => 'settle-txid',
+        settle: boarding.settle ?? (async () => 'settle-txid'),
+        getBoardingUtxos: async () => boarding.boarded ?? [],
         getVtxoManager: async () => ({
           migrateDeprecatedSignerVtxos: migrate,
           getExpiringVtxos: async () => expiring,
+          getExpiredBoardingUtxos: async () => boarding.expired ?? [],
           recoverVtxos: async () => null,
         }),
         getContractManager: async () => ({
@@ -357,6 +362,104 @@ describe('runFloatLifecycle — migration throttle and count', () => {
 })
 
 /**
+ * The reservation filter on renewal — why this pass cannot simply call
+ * `IVtxoManager.renewVtxos`, which selects for itself and takes no exclusion.
+ */
+describe('runFloatLifecycle keeps renewal off reserved coins', () => {
+  const due = (txid: string, value: number) => ({
+    txid,
+    vout: 0,
+    value,
+    createdAt: new Date(Date.now() - 9 * 60 * 60 * 1000),
+    expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+  })
+
+  it('leaves out a coin an in-flight funding has pinned', async () => {
+    const settle = vi.fn(async (_params: SettleParams) => 'settle-txid')
+    const services = floatServices(async () => NO_DEPRECATED, [], [due('pinned', 200_000), due('free', 200_000)], {
+      settle,
+    })
+    services.arkade.reservations.reserve([{ txid: 'pinned', vout: 0 }])
+
+    const report = await runFloatLifecycle(services)
+
+    expect(report.renewed).toBe('settle-txid')
+    const inputs = settle.mock.calls.at(-1)?.[0].inputs ?? []
+    expect(inputs.map((i) => i.txid)).toEqual(['free'])
+  })
+})
+
+/** Boarding: the half `settlementConfig: false` silently took away. */
+describe('runFloatLifecycle boards confirmed sats', () => {
+  const boarded = (value: number, txid = `b-${value}`, confirmed = true) => ({
+    txid,
+    vout: 0,
+    value,
+    status: { confirmed },
+  })
+
+  const passWith = async (boarding: Parameters<typeof floatServices>[3]) => {
+    const settle = vi.fn(async (_params: SettleParams) => 'boarding-txid')
+    const report = await runFloatLifecycle(floatServices(async () => NO_DEPRECATED, [], [], { ...boarding, settle }))
+    return { report, settle }
+  }
+
+  it('settles them into the float and reports the txid', async () => {
+    const { report, settle } = await passWith({ boarded: [boarded(200_000)] })
+
+    expect(report.boarded).toBe('boarding-txid')
+    expect(report.failures).toEqual([])
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(settle.mock.calls[0]?.[0]).toMatchObject({ inputs: [{ txid: 'b-200000', vout: 0 }] })
+  })
+
+  it('lands them in the pool’s shape, not on one coin', async () => {
+    const { settle } = await passWith({ boarded: [boarded(400_000)] })
+
+    const outputs = settle.mock.calls[0]?.[0].outputs ?? []
+    expect(outputs.length).toBeGreaterThan(1)
+    expect(outputs.every((o) => o.address === FLOAT_ADDRESS)).toBe(true)
+  })
+
+  it('leaves an expired input to the sweep rather than settling it', async () => {
+    const expired = boarded(200_000, 'gone')
+    const { report, settle } = await passWith({ boarded: [expired], expired: [expired] })
+
+    expect(report.boarded).toBeNull()
+    expect(settle).not.toHaveBeenCalled()
+  })
+
+  it('leaves an unconfirmed input alone', async () => {
+    const { report, settle } = await passWith({ boarded: [boarded(200_000, 'pending', false)] })
+
+    expect(report.boarded).toBeNull()
+    expect(settle).not.toHaveBeenCalled()
+  })
+
+  it('reports nothing and settles nothing when nothing is boarded', async () => {
+    const { report, settle } = await passWith({})
+
+    expect(report.boarded).toBeNull()
+    expect(report.failures).toEqual([])
+    expect(settle).not.toHaveBeenCalled()
+  })
+
+  // A float in trouble needs renewal and recovery most.
+  it('records a refusal as a failure and still runs the rest of the pass', async () => {
+    const settle = vi.fn(async (_params: SettleParams): Promise<string> => {
+      throw new Error('arkd said no')
+    })
+    const report = await runFloatLifecycle(
+      floatServices(async () => NO_DEPRECATED, [], [], { boarded: [boarded(200_000)], settle }),
+    )
+
+    expect(report.boarded).toBeNull()
+    expect(report.failures.join(' ')).toContain('arkd said no')
+    expect(report.recoverySkipped).toBeNull()
+  })
+})
+
+/**
  * The `float-lifecycle` action's own verdict.
  *
  * `runFloatLifecycle` never throws — the report was built for a watch loop that
@@ -373,6 +476,7 @@ describe('the float-lifecycle action reports what actually happened', () => {
 
   const runWith = async (report: Partial<VtxoLifecycleReport>): Promise<Record<string, unknown>> => {
     const full: VtxoLifecycleReport = {
+      boarded: null,
       renewed: null,
       resplit: null,
       recovered: null,

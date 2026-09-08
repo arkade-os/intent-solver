@@ -515,6 +515,7 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
           log('pool auto-mint failed:', error instanceof Error ? error.message : String(error))
         }
         if (report.migrated) log('vtxos migrated off deprecated signers', report.migrated)
+        if (report.boarded) log('boarded sats settled into float', report.boarded)
         if (report.renewed) log('vtxos renewed', report.renewed)
         if (report.resplit) log('float re-split after renewal', report.resplit)
         if (report.recovered) log('vtxos recovered', report.recovered)

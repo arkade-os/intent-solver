@@ -1650,17 +1650,16 @@ recoverable: 235696`, settled back to `available: 233338` (the 2358-sat
 
 - **arkade-regtest's miner can be up but not mining.** Only `receiveOnchain`
   cares, and it names the miner rather than just timing out.
-- **Renewal pays an intent fee, and the SDK's own `renewVtxos` does not.**
-  arkade-regtest configures `ARK_OFFCHAIN_INPUT_FEE="amount * 0.01"` by default
-  (`.env.defaults`), so every settlement costs 1% of each input. The SDK's
-  `IVtxoManager.renewVtxos` asks for an output equal to the gross input sum, so
-  the fee it implies is zero and arkd rejects the intent outright with
-  `INTENT_INSUFFICIENT_FEE (31): got 0 min expected N` — the float is never
-  renewed. `packages/solver-arkade/src/arkade/vtxoLifecycle.ts`'s `renewExpiringVtxos` replaces it and
-  prices the output the way `Wallet.settle()` already does. This is operator
-  policy, not a regtest quirk: any mainnet operator charging a non-zero intent
-  fee breaks `renewVtxos` the same way. `IVtxoManager.recoverVtxos` still has
-  the defect — see that module's header.
+- **Renewal pays an intent fee.** arkade-regtest configures
+  `ARK_OFFCHAIN_INPUT_FEE="amount * 0.01"` by default (`.env.defaults`), so every
+  settlement costs 1% of each input, and this is operator policy rather than a
+  regtest quirk. The SDK used to imply a zero fee here and have arkd reject the
+  intent with `INTENT_INSUFFICIENT_FEE (31): got 0 min expected N`; that is fixed
+  in `@arkade-os/sdk@0.4.70`, for `renewVtxos` and `recoverVtxos` both.
+  `packages/solver-arkade/src/arkade/vtxoLifecycle.ts`'s `renewExpiringVtxos`
+  still prices renewal itself, now for two other reasons — the reservation filter
+  and the per-coin treadmill cap, neither of which `renewVtxos` can express. See
+  that module's header.
 
 ## Load test (`test/perf`)
 
