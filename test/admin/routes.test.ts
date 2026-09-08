@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { buildAdminApp, type AdminDeps } from '@arkade-os/solver-app/admin/server.js'
 import { readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
+import { PageRequestError } from '@arkade-os/solver-core/core/page.js'
 
 const emptyPage = { rows: [], nextCursor: null }
 
@@ -124,10 +125,20 @@ describe('GET /api/swaps', () => {
   })
 
   it('turns a bad limit into 400, not an internal error', async () => {
-    const failing = store({ page: vi.fn().mockRejectedValue(new Error('page limit must be a positive integer')) })
+    // Typed: every real store pages through `clampLimit`, so a bare Error doubles nothing.
+    const failing = store({
+      page: vi.fn().mockRejectedValue(new PageRequestError('page limit must be a positive integer')),
+    })
     const response = await get('/api/swaps?limit=-1', { store: failing })
     expect(response.status).toBe(400)
     expect(await response.json()).toMatchObject({ error: 'bad_request' })
+  })
+
+  it('leaves a store fault as a 500, so a broken database is not read as a bad request', async () => {
+    const failing = store({ page: vi.fn().mockRejectedValue(new Error('SQLITE_IOERR: disk I/O error')) })
+    const response = await get('/api/swaps?limit=10', { store: failing })
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ error: 'internal' })
   })
 
   it('sorts newest first across corridors', async () => {

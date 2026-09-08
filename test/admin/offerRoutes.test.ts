@@ -169,3 +169,24 @@ describe('GET /api/offers: paging', () => {
     expect(body.offers.map((offer) => offer.id)).toEqual(['fill-1'])
   })
 })
+
+describe('GET /api/offers: a store fault is not the caller’s fault', () => {
+  const broken = async () => {
+    const { app, offerStore } = await build()
+    offerStore!.page = () => Promise.reject(new Error('SQLITE_IOERR: disk I/O error'))
+    return app
+  }
+
+  it('answers 500, not 400, when the store itself fails', async () => {
+    const response = await (await broken()).fetch(new Request('http://admin/api/offers'))
+    expect(response.status).toBe(500)
+  })
+
+  it('names the fault rather than reporting it as a malformed request', async () => {
+    const response = await (await broken()).fetch(new Request('http://admin/api/offers'))
+    expect(await response.json()).toMatchObject({
+      error: 'internal',
+      message: expect.stringContaining('SQLITE_IOERR'),
+    })
+  })
+})

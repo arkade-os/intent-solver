@@ -14,7 +14,7 @@ import type { Hono } from 'hono'
 import { type AdminPhase } from '../projection.js'
 import type { CorridorSwapView } from '@arkade-os/solver-core/core/corridor.js'
 import type { AdminDeps } from '../server.js'
-import type { PageOptions } from '@arkade-os/solver-core/core/page.js'
+import { PageRequestError, type PageOptions } from '@arkade-os/solver-core/core/page.js'
 
 const PHASES: readonly AdminPhase[] = ['open', 'exposed', 'done', 'failed']
 
@@ -109,8 +109,9 @@ export const registerSwapRoutes = (app: Hono, deps: AdminDeps): void => {
     } catch (error) {
       // A malformed limit or cursor reaches us as a thrown validation error
       // from `src/core/page.ts`. That is the caller's mistake, so 400 rather
-      // than letting onError render it as an internal fault.
-      return c.json({ error: 'bad_request', message: error instanceof Error ? error.message : String(error) }, 400)
+      // than the 500 onError renders for a store fault.
+      if (!(error instanceof PageRequestError)) throw error
+      return c.json({ error: 'bad_request', message: error.message }, 400)
     }
 
     const swaps = pages

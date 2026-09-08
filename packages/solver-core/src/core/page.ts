@@ -106,6 +106,12 @@ export interface Cursor {
   rowid: number
 }
 
+/** A page request the CALLER got wrong, as opposed to anything the store hit while
+ *  answering it: without a type, a driver fault was the same 400 as a typo'd cursor. */
+export class PageRequestError extends Error {
+  override readonly name = 'PageRequestError'
+}
+
 export const encodeCursor = (cursor: Cursor): string => `${cursor.createdAt}.${cursor.rowid}`
 
 export const decodeCursor = (raw: string | null | undefined): Cursor | null => {
@@ -114,7 +120,7 @@ export const decodeCursor = (raw: string | null | undefined): Cursor | null => {
   const createdAt = Number(parts[0])
   const rowid = Number(parts[1])
   if (parts.length !== 2 || !Number.isInteger(createdAt) || !Number.isInteger(rowid)) {
-    throw new Error(`malformed page cursor: ${raw}`)
+    throw new PageRequestError(`malformed page cursor: ${raw}`)
   }
   return { createdAt, rowid }
 }
@@ -127,7 +133,7 @@ export const decodeCursor = (raw: string | null | undefined): Cursor | null => {
 export const clampLimit = (limit: number | undefined): number => {
   if (limit === undefined) return DEFAULT_PAGE_LIMIT
   if (!Number.isInteger(limit) || limit <= 0) {
-    throw new Error(`page limit must be a positive integer, got ${limit}`)
+    throw new PageRequestError(`page limit must be a positive integer, got ${limit}`)
   }
   return Math.min(limit, MAX_PAGE_LIMIT)
 }
@@ -163,7 +169,7 @@ export const pageQuery = (table: string, options: PageOptions): { sql: string; p
   if (options.search) {
     const term = options.search.term.trim()
     if (term.length < MIN_SEARCH_LENGTH) {
-      throw new Error(`search term must be at least ${MIN_SEARCH_LENGTH} characters`)
+      throw new PageRequestError(`search term must be at least ${MIN_SEARCH_LENGTH} characters`)
     }
     assertSearchable(options.search.columns)
     // Bracketed as one clause. Without the outer parentheses this ORs against
