@@ -495,13 +495,8 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
   /**
    * Give the lease back when the payment provably did not happen.
    *
-   * Called only when `fund()` THREW. Without it a failure that moved no money
-   * strands the row for every worker, not just the one that failed.
-   *
-   * Not "the lease expired": a throw is not proof nothing was sent, so this
-   * re-opens the ambiguity the adoption check above already owns and resolves
-   * by reading the script. What the lease adds is narrower and is the actual
-   * defect — two workers cannot both be inside `fund()` at once.
+   * Called only for a `FundNotSubmittedError`, never on a bare throw and never
+   * as an expiry: an ambiguous failure joins the crash case above and stays stuck.
    */
   async releaseFundLease(id: string): Promise<void> {
     await this.driver.run(`UPDATE receive_onchain_swap SET fund_started_at = NULL WHERE id = ?`, [id])

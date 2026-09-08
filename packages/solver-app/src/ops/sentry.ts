@@ -9,6 +9,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
+import { sha256 } from '@noble/hashes/sha2.js'
 import { wordlist } from '@scure/bip39/wordlists/english.js'
 
 export interface SentryDsn {
@@ -60,40 +61,28 @@ export const parseSentryDsn = (raw: string): SentryDsn => {
 const REDACTED = '<redacted>'
 
 const BIP39 = new Set(wordlist)
+const BIP39_INDEX = new Map(wordlist.map((word, index) => [word, index]))
 const BIP39_MIN_WORDS = 12
+const MNEMONIC_LENGTHS = [12, 15, 18, 21, 24]
 const WORD = /[A-Za-z]+/g
 /**
  * A whitespace-only rule read a JSON array or CSV line as twelve one-word runs;
- * the backslash covers a payload serialised twice, whose gap is `\",\"`. NOT
- * widened further — admitting letters or digits would chain any two BIP39 words
- * in a document, so one word per prefixed log LINE is not caught.
+ * the backslash covers a payload serialised twice, whose gap is `\",\"`. It stays
+ * narrow because it redacts on membership ALONE; anything wider has to earn it
+ * with the checksum below, and one word per prefixed log LINE neither one catches.
  */
 const PHRASE_GAP = /^[\s,"'\[\]\\]+$/
+/** List markers, bullets, pipes — the gap the CHECKSUMMED pass may also cross. It
+ * cannot cross a word regardless, so 16 only bounds what a false positive swallows. */
+const CHECKED_GAP = /^[^A-Za-z]{1,16}$/
 
-/**
- * Consecutive words that are all IN the BIP39 list — membership, not word shape.
- * A shape rule ("twelve lowercase words of 3-8 letters") eats ordinary messages.
- * Re-measured over this repo's 125k lines under THIS rule: the longest streak in
- * non-mnemonic prose is eight, against twelve for the shortest mnemonic, and
- * every line reaching twelve is a real mnemonic in a fixture; re-measure if the
- * gap widens again. Case-insensitive; separators are preserved, not normalised.
- */
-const redactMnemonics = (text: string): string => {
-  type Token = { word: string; start: number; end: number }
-  const words: Token[] = []
-  for (let m = WORD.exec(text); m; m = WORD.exec(text)) {
-    words.push({ word: m[0], start: m.index, end: m.index + m[0].length })
-  }
-  const out: string[] = []
-  let cursor = 0
+type Token = { word: string; start: number; end: number }
+
+const runsOf = (words: Token[], text: string, gap: RegExp): Token[][] => {
+  const runs: Token[][] = []
   let run: Token[] = []
   const flush = (): void => {
-    const first = run[0]
-    const last = run[run.length - 1]
-    if (first && last && run.length >= BIP39_MIN_WORDS) {
-      out.push(text.slice(cursor, first.start), REDACTED)
-      cursor = last.end
-    }
+    if (run.length > 0) runs.push(run)
     run = []
   }
   for (const token of words) {
@@ -102,12 +91,82 @@ const redactMnemonics = (text: string): string => {
       continue
     }
     const previous = run[run.length - 1]
-    if (previous && !PHRASE_GAP.test(text.slice(previous.end, token.start))) flush()
+    if (previous && !gap.test(text.slice(previous.end, token.start))) flush()
     run.push(token)
   }
   flush()
-  out.push(text.slice(cursor))
+  return runs
+}
+
+/** 11 bits per word: `32N/3` entropy bits, then `N/3` checksum bits off SHA-256.
+ * A test pins this to `validateMnemonic`, far too slow at ~3.7k/s to slide with. */
+const checksumHolds = (words: string[]): boolean => {
+  const bits: number[] = []
+  for (const word of words) {
+    const index = BIP39_INDEX.get(word)
+    if (index === undefined) return false
+    for (let bit = 10; bit >= 0; bit--) bits.push((index >>> bit) & 1)
+  }
+  const entropyBits = (words.length * 32) / 3
+  const entropy = new Uint8Array(entropyBits / 8)
+  for (let i = 0; i < entropyBits; i++) if (bits[i]) entropy[i >> 3]! |= 1 << (7 - (i % 8))
+  const digest = sha256(entropy)
+  for (let i = 0; i < words.length / 3; i++) {
+    if (((digest[i >> 3]! >>> (7 - (i % 8))) & 1) !== bits[entropyBits + i]) return false
+  }
+  return true
+}
+
+const replaceSpans = (text: string, spans: Array<[number, number]>): string => {
+  if (spans.length === 0) return text
+  spans.sort((a, b) => a[0] - b[0] || a[1] - b[1])
+  const out: string[] = []
+  let cursor = 0
+  let [start, end] = spans[0]!
+  for (const [from, to] of spans.slice(1)) {
+    if (from <= end) {
+      end = Math.max(end, to)
+      continue
+    }
+    out.push(text.slice(cursor, start), REDACTED)
+    cursor = end
+    start = from
+    end = to
+  }
+  out.push(text.slice(cursor, start), REDACTED, text.slice(end))
   return out.join('')
+}
+
+/**
+ * Consecutive words that are all IN the BIP39 list — membership, not word shape.
+ * A shape rule ("twelve lowercase words of 3-8 letters") eats ordinary messages.
+ * Re-measured over this repo's 150k lines: the longest NON-mnemonic streak is
+ * NINE, in SQL DDL. The checksum only ever ADDS a span, so a truncated, mistyped
+ * or transposed phrase — still brute-forceable — is redacted exactly as before.
+ */
+const redactMnemonics = (text: string): string => {
+  const words: Token[] = []
+  for (let m = WORD.exec(text); m; m = WORD.exec(text)) {
+    words.push({ word: m[0], start: m.index, end: m.index + m[0].length })
+  }
+  const strict: Array<[number, number]> = []
+  for (const run of runsOf(words, text, PHRASE_GAP)) {
+    if (run.length >= BIP39_MIN_WORDS) strict.push([run[0]!.start, run[run.length - 1]!.end])
+  }
+  const spans = [...strict]
+  for (const run of runsOf(words, text, CHECKED_GAP)) {
+    const lowered = run.map((token) => token.word.toLowerCase())
+    for (const length of MNEMONIC_LENGTHS) {
+      for (let i = 0; i + length <= run.length; i++) {
+        const from = run[i]!.start
+        const to = run[i + length - 1]!.end
+        // Hashing inside a span already redacted cannot widen anything.
+        if (strict.some(([at, until]) => at <= from && to <= until)) continue
+        if (checksumHolds(lowered.slice(i, i + length))) spans.push([from, to])
+      }
+    }
+  }
+  return replaceSpans(text, spans)
 }
 
 /** `key: "value"` and `key=value` for anything whose name says it is a secret. */

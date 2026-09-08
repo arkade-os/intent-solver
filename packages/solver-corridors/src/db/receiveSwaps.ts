@@ -141,6 +141,9 @@ export interface ReceiveSwapRow {
    */
   nonInteractiveParameters: boolean | null
 
+  /** When a worker won the exclusive right to fund this lockup. @see ReceiveSwapStore.claimFundLease */
+  fundStartedAt: number | null
+
   arkadeLockupTxid: string | null
   arkadeLockupVout: number | null
   arkadeLockupValue: number | null
@@ -210,7 +213,8 @@ const RECEIVE_SWAP_COLUMNS = `
   preimage                      TEXT,
   refund_ark_txid                TEXT,
   failure_reason                TEXT,
-  rfq_id                        TEXT
+  rfq_id                        TEXT,
+  fund_started_at               INTEGER
 `
 
 const SCHEMA = `
@@ -275,6 +279,7 @@ const toRow = (raw: Raw): ReceiveSwapRow => ({
     raw.non_interactive_parameters === null || raw.non_interactive_parameters === undefined
       ? null
       : raw.non_interactive_parameters === '1',
+  fundStartedAt: raw.fund_started_at === null || raw.fund_started_at === undefined ? null : Number(raw.fund_started_at),
   arkadeLockupTxid:
     raw.arkade_lockup_txid === null || raw.arkade_lockup_txid === undefined ? null : String(raw.arkade_lockup_txid),
   arkadeLockupVout:
@@ -398,6 +403,25 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
     if (!existing.has('non_interactive_parameters')) {
       await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN non_interactive_parameters TEXT`)
     }
+    if (!existing.has('fund_started_at')) {
+      await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN fund_started_at INTEGER`)
+    }
+  }
+
+  /** Twin of `OnchainReceiveSwapStore.claimFundLease` — see it for the argument, and
+   *  for the two limits kept here: no TTL, and a crash mid-fund is left stuck. */
+  async claimFundLease(id: string, from: ReceiveSwapState): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE receive_swap SET fund_started_at = ?, updated_at = ?
+       WHERE id = ? AND state = ? AND fund_started_at IS NULL`,
+      [this.now(), this.now(), id, from],
+    )
+    return result.changes === 1
+  }
+
+  /** Only for a `FundNotSubmittedError`. @see OnchainReceiveSwapStore.releaseFundLease */
+  async releaseFundLease(id: string): Promise<void> {
+    await this.driver.run(`UPDATE receive_swap SET fund_started_at = NULL WHERE id = ?`, [id])
   }
 
   /**
