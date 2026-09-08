@@ -12,7 +12,7 @@
 import type { Hono } from 'hono'
 
 import { OFFER_FILL_STATES, type OfferFillRow, type OfferFillState } from '@arkade-os/solver-corridors/db/offerFills.js'
-import type { PageOptions } from '@arkade-os/solver-core/core/page.js'
+import { PageRequestError, type PageOptions } from '@arkade-os/solver-core/core/page.js'
 import type { AdminDeps } from '../server.js'
 
 /** Amounts leave as decimal STRINGS: `JSON.stringify` throws on a bigint. */
@@ -57,7 +57,8 @@ export const registerOfferRoutes = (app: Hono, deps: AdminDeps): void => {
         page = await store.page(options)
       } catch (error) {
         // A malformed limit or cursor is the caller's mistake, so 400 not 500.
-        return c.json({ error: 'bad_request', message: error instanceof Error ? error.message : String(error) }, 400)
+        if (!(error instanceof PageRequestError)) throw error
+        return c.json({ error: 'bad_request', message: error.message }, 400)
       }
     }
 
