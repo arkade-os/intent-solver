@@ -1,10 +1,11 @@
 /**
- * The covclaimd the docs tell an operator to start must be one that can claim.
+ * Every covclaimd this repo names — the two documented bring-ups and the e2e
+ * group that CI actually runs — must be one that can claim.
  *
  * `rc.4` cannot: it omits the `PrevArkTx` the emulator has required since
  * `v0.0.7`, and fails silently enough that a receive swap just stops. The
  * mechanism and the two log lines that name it are in `docs/runbook.md`
- * § covclaimd; this only holds the floor, because the tag is written twice.
+ * § covclaimd; this only holds the floor, in the three places it is written.
  */
 
 import { describe, it, expect } from 'vitest'
@@ -27,15 +28,37 @@ const BRINGUP = /^node regtest\.mjs start\b/gm
 const countIn = (pattern: RegExp) => (file: string) =>
   [...readFileSync(join(root, file), 'utf8').matchAll(pattern)].length
 
-const pins = (): { file: string; tag: string; version: number[] }[] =>
+const TAG = /^ghcr\.io\/arkade-os\/covclaimd:v(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/
+
+const parse = (m: RegExpMatchArray): number[] => [
+  ...m.slice(1, 4).map(Number),
+  m[4] === undefined ? Infinity : Number(m[4]),
+]
+
+const docPins = (): { file: string; tag: string; version: number[] }[] =>
   DOCS.flatMap((file) => {
     const text = readFileSync(join(root, file), 'utf8')
     return [...text.matchAll(PIN)].map((m) => ({
       file,
       tag: m[0].split('=')[1] as string,
-      version: [...m.slice(1, 4).map(Number), m[4] === undefined ? Infinity : Number(m[4])],
+      version: parse(m),
     }))
   })
+
+/** The tag CI runs. An empty string is a group that wants no covclaimd at all. */
+const groupPins = (): { file: string; tag: string; version: number[] }[] => {
+  const file = '.github/e2e-groups.json'
+  const groups = JSON.parse(readFileSync(join(root, file), 'utf8')) as { covclaimdImage: string }[]
+  return groups
+    .filter((group) => group.covclaimdImage !== '')
+    .map((group) => {
+      const m = TAG.exec(group.covclaimdImage)
+      if (!m) throw new Error(`${file}: unparseable covclaimdImage ${group.covclaimdImage}`)
+      return { file, tag: group.covclaimdImage, version: parse(m) }
+    })
+}
+
+const pins = () => [...docPins(), ...groupPins()]
 
 const belowFloor = (version: number[]): boolean => {
   for (const [i, part] of version.entries()) {
@@ -44,7 +67,7 @@ const belowFloor = (version: number[]): boolean => {
   return false
 }
 
-describe('the documented covclaimd image', () => {
+describe('every covclaimd image this repo names', () => {
   // Counted against the bring-ups, not merely `> 0`: one command losing its pin
   // leaves the other to carry the version assertion, which then passes while the
   // stack it documents comes up with no covclaimd in it at all.
@@ -52,6 +75,13 @@ describe('the documented covclaimd image', () => {
     const bringups = DOCS.map(countIn(BRINGUP)).reduce((a, b) => a + b, 0)
     expect(bringups).toBeGreaterThan(0)
     expect(DOCS.map(countIn(PIN)).reduce((a, b) => a + b, 0)).toBe(bringups)
+  })
+
+  // The group file is the pin that actually gates the nightly, and it is the one
+  // that went stale. `e2eGroups.test.ts` only asks whether a group names an
+  // image, never which.
+  it('is pinned by the e2e group that runs the daemon', () => {
+    expect(groupPins().length).toBeGreaterThan(0)
   })
 
   it('is never below the version that attaches PrevArkTx', () => {
