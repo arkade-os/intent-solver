@@ -611,21 +611,6 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
   )
 
   it(
-    'PROBE: answers not-ours for an invoice another node minted',
-    async () => {
-      const { paymentHash } = await counterpartyInvoice(AMOUNT_SATS)
-      let probed: unknown
-      try {
-        probed = await ln.getOwnInvoiceState(paymentHash)
-      } catch (error) {
-        probed = `THREW ${JSON.stringify(error, Object.getOwnPropertyNames(Object(error)))} :: ${String(error)}`
-      }
-      expect(probed).toBeNull()
-    },
-    SWAP_TIMEOUT_MS,
-  )
-
-  it(
     'does not write a still-funded lockup off as externally refunded on one stale read',
     async () => {
       const overfunded = AMOUNT_SATS + OVERFUND_BY
