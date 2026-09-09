@@ -92,7 +92,8 @@ export interface EvmChainConfig {
   /**
    * Blocks per `eth_getLogs` request, defaulted to the 10k cap Alchemy and
    * Infura publish. Settable: some cap at 2k, and a rejected scan reads as
-   * an unclaimed lock rather than as an error.
+   * an unclaimed lock rather than as an error. ABOVE the endpoint's cap is
+   * therefore silent and recreates that; below it only costs round trips.
    */
   logScanRange: number
 }
