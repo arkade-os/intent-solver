@@ -1440,6 +1440,21 @@ describe('OnchainReceiveSwapService', () => {
       expect(deps.arkadeFake.lockups.get(row.pkScript) ?? []).toHaveLength(0)
     })
 
+    it('re-checks the ADOPTED output, not whatever else has since arrived', async () => {
+      // A second payment must not vouch for the first. The row's outpoint is
+      // already what the claim will spend, so a gate that re-scans could pass
+      // on a healthy output while the solver funds against an unsweepable one.
+      const svc = withFee()
+      const row = await adopt(svc, 47_000)
+      deps.onchain.receiveExternal({ address: row.onchainAddress, amountSats: 55_000 })
+      deps.onchain.estimateFeeRate = async () => 10_000
+
+      const after = await fund(svc, row.id)
+
+      expect(after.state).toBe('refused')
+      expect(deps.arkadeFake.fundStamps).toHaveLength(0)
+    })
+
     it('still funds the exact quoted amount however high the fee rate goes', async () => {
       const svc = withFee()
       const outcome = await svc.quote(quoteRequest({ minFromSats: 40_000, maxFromSats: 60_000 }))
