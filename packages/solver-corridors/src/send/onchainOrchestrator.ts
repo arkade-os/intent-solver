@@ -392,6 +392,18 @@ export class OnchainSendSwapService {
     }
   }
 
+  /**
+   * The smallest payout this corridor would fund — the floor under a float that
+   * can serve at all. Answered here because a second derivation in a caller
+   * would drift from what admission actually accepts.
+   */
+  minimumPayoutSats(): number {
+    return Math.max(
+      ONCHAIN_DUST_SATS,
+      this.pricing.payoutFor({ pair: RFQ_PAIR_ONCHAIN_SEND, giveSats: this.deps.limits.minSats }),
+    )
+  }
+
   async tick(id: string): Promise<OnchainSendSwapRow> {
     const { store } = this.deps
     if (this.inFlight.has(id)) return store.get(id)

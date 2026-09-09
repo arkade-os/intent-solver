@@ -8,9 +8,11 @@ import { OnchainSendSwapService, HTLC_REFUND_MTP_MARGIN } from '@arkade-os/solve
 import {
   ARKADE_CLAIM_WINDOW_SECONDS,
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
+  ONCHAIN_DUST_SATS,
   ONCHAIN_CLAIM_MARGIN_SECONDS,
   ONCHAIN_SECONDS_PER_BLOCK,
 } from '@arkade-os/solver-core/core/onchainSend.js'
+import type { Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import {
   OnchainSendSwapStore,
   type OnchainSendSwapState,
@@ -1583,6 +1585,38 @@ describe('OnchainSendSwapService', () => {
       clientRefundPubkey,
     })
     expect(second).toEqual({ accepted: false, reason: 'duplicate_swap' })
+  })
+
+  describe('minimumPayoutSats()', () => {
+    const serviceCharging = (fee: Fee, minSats: number) =>
+      new OnchainSendSwapService({
+        store: deps.store,
+        onchain: deps.onchain,
+        arkade: deps.arkade,
+        limits: { minSats, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => deps.store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        refundDestinationScript,
+        fee,
+        now: clock,
+      })
+
+    it('is what the smallest admissible give pays out after this corridor’s fee', () => {
+      expect(serviceCharging({ bps: 100, flatSats: 50 }, 10_000).minimumPayoutSats()).toBe(9_850)
+    })
+
+    it('tracks the configured minimum, not a constant', () => {
+      const free = { bps: 0, flatSats: 0 }
+      expect(serviceCharging(free, 20_000).minimumPayoutSats()).toBe(20_000)
+      expect(serviceCharging(free, 5_000).minimumPayoutSats()).toBe(5_000)
+    })
+
+    it('never reports a floor below the dust a payout must clear', () => {
+      expect(serviceCharging({ bps: 0, flatSats: 900 }, 1_000).minimumPayoutSats()).toBe(ONCHAIN_DUST_SATS)
+    })
   })
 
   it('settleRefundDeposits() is empty on a backend whose receive address needs no settling', async () => {
