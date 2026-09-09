@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { entropyToMnemonic, validateMnemonic } from '@scure/bip39'
 import { wordlist } from '@scure/bip39/wordlists/english.js'
 import { sentryOptionsFromEnv } from '@arkade-os/solver-app/config.js'
 import {
@@ -11,6 +12,10 @@ import {
 } from '@arkade-os/solver-app/ops/sentry.js'
 
 const MNEMONIC = 'legal winner thank year wave sausage worth useful legal winner thank yellow'
+const LONG_MNEMONIC = entropyToMnemonic(
+  Uint8Array.from({ length: 32 }, (_, i) => (i * 37 + 11) & 0xff),
+  wordlist,
+)
 
 /** Shaped like the real `Config`, mnemonic nested as it is in `config.arkade`. */
 const configShaped = {
@@ -158,10 +163,22 @@ describe('scrubText', () => {
     expect(scrubText(message)).toBe(message)
   })
 
-  // The repo's worst real case: an eight-word streak, four short of the threshold.
-  it('leaves the longest BIP39 streak in this repo alone', () => {
-    const message = 'estimate`). Anything that can answer "what will this one cost me" fits here.'
+  it.each([
+    ['prose', 'estimate`). Anything that can answer "what will this one cost me" fits here.'],
+    ['SQL DDL', '  market_key      TEXT PRIMARY KEY,\n  base            TEXT,\n  quote           TEXT,'],
+  ])('leaves the longest BIP39 streak in this repo alone: %s', (_name, message) => {
     expect(scrubText(message)).toBe(message)
+  })
+
+  it.each([
+    ['a numbered list', (w: string[]) => w.map((word, i) => `${i + 1}. ${word}`).join('\n')],
+    ['a bulleted list', (w: string[]) => w.map((word) => `- ${word}`).join('\n')],
+    ['semicolons', (w: string[]) => w.join('; ')],
+    ['pipes', (w: string[]) => w.join(' | ')],
+    ['inline indices', (w: string[]) => w.map((word, i) => `${i + 1}) ${word}`).join(' ')],
+  ])('redacts a checksummed mnemonic written as %s, which the strict run rule refuses', (_name, shape) => {
+    expect(scrubText(shape(MNEMONIC.split(' ')))).not.toContain('sausage')
+    expect(scrubText(shape(LONG_MNEMONIC.split(' ')))).not.toContain(LONG_MNEMONIC.split(' ')[13])
   })
 
   it('keeps a payment hash, which is the only correlation key an operator has', () => {
@@ -181,6 +198,43 @@ describe('scrubText', () => {
 
   it('caps the text, because SDK errors carry serialised request bodies', () => {
     expect(scrubText('exception '.repeat(5_000))).toHaveLength(1024)
+  })
+})
+
+describe('the BIP39 checksum widens redaction and never gates it', () => {
+  const swapped = (words: string[], a: number, b: number): string[] => {
+    const out = [...words]
+    ;[out[a], out[b]] = [out[b]!, out[a]!]
+    return out
+  }
+
+  // Runs of twelve-plus whose checksum does NOT hold, all still brute-forceable.
+  it.each([
+    ['a run of twelve list words that is no mnemonic', Array.from({ length: 12 }, () => 'abandon')],
+    ['a phrase cut by a length cap', LONG_MNEMONIC.split(' ').slice(0, 12)],
+    ['a phrase with two words transposed', swapped(MNEMONIC.split(' '), 3, 4)],
+    ['a phrase with its last word mistyped as another list word', [...MNEMONIC.split(' ').slice(0, 11), 'zebra']],
+    ['a phrase reassembled with a stray list word', [...MNEMONIC.split(' '), 'true']],
+  ])('still redacts %s', (_name, words) => {
+    expect(validateMnemonic(words.join(' '), wordlist)).toBe(false)
+    const scrubbed = scrubText(`restored ${words.join(' ')} ok`)
+    expect(scrubbed).toContain('<redacted>')
+    for (const word of words) expect(scrubbed).not.toContain(word)
+  })
+
+  it('agrees with @scure/bip39 about which twelve-word runs carry a valid checksum', () => {
+    const gapTheStrictRuleRefuses = '; '
+    let valid = 0
+    let invalid = 0
+    for (let i = 0; i < 400; i++) {
+      const words = Array.from({ length: 12 }, (_, k) => wordlist[(i * 977 + k * 613) % 2048]!)
+      const holds = validateMnemonic(words.join(' '), wordlist)
+      expect(scrubText(words.join(gapTheStrictRuleRefuses)).includes('<redacted>')).toBe(holds)
+      if (holds) valid += 1
+      else invalid += 1
+    }
+    expect(valid).toBeGreaterThan(0)
+    expect(invalid).toBeGreaterThan(0)
   })
 })
 

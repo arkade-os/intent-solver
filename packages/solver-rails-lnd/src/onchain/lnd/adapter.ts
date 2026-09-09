@@ -14,17 +14,18 @@ import {
   authenticatedLndGrpc,
   broadcastChainTransaction,
   createChainAddress,
-  getChainBalance,
-  getChainFeeRate,
-  getChainTransactions,
-  getPendingChainBalance,
-  getWalletInfo,
+  getChainBalance as lndGetChainBalance,
+  getChainFeeRate as lndGetChainFeeRate,
+  getChainTransactions as lndGetChainTransactions,
+  getPendingChainBalance as lndGetPendingChainBalance,
+  getWalletInfo as lndGetWalletInfo,
   sendToChainAddress,
   subscribeToChainSpend,
   type AuthenticatedLnd,
 } from 'lightning'
 import { hex } from '@scure/base'
 import { Transaction } from '@scure/btc-signer'
+import { deadlined } from '../../deadline.js'
 import { toFundedOutputs, txOutcomeVia, witnessFromRawTx } from '@arkade-os/solver-rails-esplora/esplora.js'
 import {
   createEsploraClient,
@@ -39,6 +40,13 @@ import type {
   OnchainSendBackend,
   OnchainTxOutcome,
 } from '@arkade-os/solver-core/ports/onchain.js'
+
+// The reads, bounded. Every call site below is left as it was. @see ../../deadline.ts.
+const getChainBalance = deadlined('getChainBalance', lndGetChainBalance)
+const getChainFeeRate = deadlined('getChainFeeRate', lndGetChainFeeRate)
+const getChainTransactions = deadlined('getChainTransactions', lndGetChainTransactions)
+const getPendingChainBalance = deadlined('getPendingChainBalance', lndGetPendingChainBalance)
+const getWalletInfo = deadlined('getWalletInfo', lndGetWalletInfo)
 
 interface LndChainTx {
   id: string

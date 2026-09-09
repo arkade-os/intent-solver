@@ -51,11 +51,17 @@ const run = promisify(execFile)
  */
 const LNCLI_TIMEOUT_MS = 30_000
 
-/** The counterparty container: the node the SERVICE DOES NOT USE. */
-export const COUNTERPARTY_CONTAINER = process.env.E2E_LN_COUNTERPARTY_CONTAINER ?? 'lnd'
+/**
+ * The counterparty container: the node the SERVICE DOES NOT USE.
+ *
+ * Functions, not consts: `stack.ts` imports this module before `loadE2eEnv()`
+ * runs, so a const would freeze to the default and the env file could never
+ * set either override.
+ */
+export const counterpartyContainer = (): string => process.env.E2E_LN_COUNTERPARTY_CONTAINER ?? 'lnd'
 
 /** The solver's own container, for reads the shipped adapter cannot express. */
-export const SOLVER_CONTAINER = process.env.E2E_LN_SOLVER_CONTAINER ?? 'boltz-lnd'
+export const solverContainer = (): string => process.env.E2E_LN_SOLVER_CONTAINER ?? 'boltz-lnd'
 
 const dockerArgs = (container: string, args: readonly string[]): string[] => [
   'exec',
@@ -86,7 +92,8 @@ export const lncli = async <T>(container: string, args: readonly string[]): Prom
         '',
         "The e2e Lightning legs drive arkade-regtest's SECOND LND node as the real counterparty.",
         `Check it is up:  docker exec ${container} lncli --network=regtest getinfo`,
-        'Override the container name with E2E_LN_COUNTERPARTY_CONTAINER / E2E_LN_SOLVER_CONTAINER.',
+        'Override the container name with E2E_LN_COUNTERPARTY_CONTAINER / E2E_LN_SOLVER_CONTAINER,',
+        'set either in the shell or in the e2e env file.',
       ].join('\n'),
     )
   }
@@ -138,7 +145,7 @@ export const counterpartyInvoice = async (
   amountSats: number,
   expirySeconds = DEFAULT_INVOICE_EXPIRY,
 ): Promise<CounterpartyInvoice> => {
-  const added = await lncli<AddInvoiceResponse>(COUNTERPARTY_CONTAINER, [
+  const added = await lncli<AddInvoiceResponse>(counterpartyContainer(), [
     'addinvoice',
     '--amt',
     String(amountSats),
@@ -170,7 +177,7 @@ export const counterpartyInvoice = async (
  *    opposite of what is wanted here.
  */
 export const cancelCounterpartyInvoice = async (paymentHash: string): Promise<void> => {
-  await lncli(COUNTERPARTY_CONTAINER, ['cancelinvoice', paymentHash])
+  await lncli(counterpartyContainer(), ['cancelinvoice', paymentHash])
 }
 
 /** LND's own view of an invoice, as `lookupinvoice` reports it. */
@@ -194,7 +201,7 @@ export interface LndInvoiceView {
 
 /** Read back an invoice the counterparty issued — how the send leg proves it got paid. */
 export const counterpartyInvoiceState = (paymentHash: string): Promise<LndInvoiceView> =>
-  lncli<LndInvoiceView>(COUNTERPARTY_CONTAINER, ['lookupinvoice', paymentHash])
+  lncli<LndInvoiceView>(counterpartyContainer(), ['lookupinvoice', paymentHash])
 
 // -- payments the counterparty MAKES (the receive leg's payer) --
 
@@ -221,7 +228,7 @@ export interface CounterpartyPayment {
 export const payFromCounterparty = (invoice: string, timeoutSeconds = 600): CounterpartyPayment => {
   const child: ChildProcess = spawn(
     'docker',
-    dockerArgs(COUNTERPARTY_CONTAINER, ['payinvoice', '--force', '--timeout', `${timeoutSeconds}s`, invoice]),
+    dockerArgs(counterpartyContainer(), ['payinvoice', '--force', '--timeout', `${timeoutSeconds}s`, invoice]),
     { stdio: 'ignore', detached: false },
   )
   // A test that finishes while the HTLC is still held must not keep vitest's
@@ -267,7 +274,7 @@ const PAYMENT_SEARCH_WINDOW = 200
  * the sats moved to the solver.
  */
 export const counterpartyPayment = async (paymentHash: string): Promise<CounterpartyPaymentView | null> => {
-  const listed = await lncli<{ payments: CounterpartyPaymentView[] }>(COUNTERPARTY_CONTAINER, [
+  const listed = await lncli<{ payments: CounterpartyPaymentView[] }>(counterpartyContainer(), [
     'listpayments',
     '--include_incomplete',
     '--max_payments',
@@ -294,7 +301,7 @@ export const counterpartyPayment = async (paymentHash: string): Promise<Counterp
  *    it (see `holdSettleDeadline` in `stack.ts`).
  */
 export const solverInvoice = (paymentHash: string): Promise<LndInvoiceView> =>
-  lncli<LndInvoiceView>(SOLVER_CONTAINER, ['lookupinvoice', paymentHash])
+  lncli<LndInvoiceView>(solverContainer(), ['lookupinvoice', paymentHash])
 
 /**
  * Mint an ORDINARY invoice on the solver's own node — the issue-#41 repro.
@@ -311,7 +318,7 @@ export const solverMintedInvoice = async (
   amountSats: number,
   expirySeconds = DEFAULT_INVOICE_EXPIRY,
 ): Promise<CounterpartyInvoice> => {
-  const added = await lncli<AddInvoiceResponse>(SOLVER_CONTAINER, [
+  const added = await lncli<AddInvoiceResponse>(solverContainer(), [
     'addinvoice',
     '--amt',
     String(amountSats),
@@ -338,7 +345,7 @@ export const solverMintedInvoice = async (
  * service's own flows; a test simulating the network is a different caller.
  */
 export const cancelSolverHold = async (paymentHash: string): Promise<void> => {
-  await lncli(SOLVER_CONTAINER, ['cancelinvoice', paymentHash])
+  await lncli(solverContainer(), ['cancelinvoice', paymentHash])
 }
 
 /** Chain height as a Lightning node sees it — for turning a CLTV height into a deadline. */

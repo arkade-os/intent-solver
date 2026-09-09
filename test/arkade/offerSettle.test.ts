@@ -23,6 +23,7 @@ import { encodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap'
 import { Transaction } from '@scure/btc-signer'
 import { base64, hex } from '@scure/base'
 import { offerSettleFor, type OfferFillIntent } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
+import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const USD = '41bcbb06921a0e9f6fe4f1b003b878cbb43d9ca3f6d14cab7940090458765a390000'
@@ -70,12 +71,18 @@ const intentFor = (published: Offer, raw: string, over: Partial<OfferFillIntent>
   ...over,
 })
 
+/** The offer's own outpoint, live at its script, carrying `amount` of USD. */
+const liveUsd = (raw: string, amount: bigint): OfferOutpoint[] => [
+  { txid: txidOf(raw), vout: 0, sats: BigInt(DEPOSIT_SATS), assets: [{ assetId: USD, amount }] },
+]
+
 const build = (raw: string | null, over: Partial<Parameters<typeof offerSettleFor>[0]> = {}) => {
   const fulfill = vi.fn(async () => 'f'.repeat(64))
   const settle = offerSettleFor({
     ctx,
     emulatorUrl: 'http://emulator.test',
     fetchTx: async () => raw,
+    outpointsAt: async () => (raw === null ? [] : liveUsd(raw, 900n)),
     fulfill,
     ...over,
   })
@@ -202,5 +209,33 @@ describe('offerSettleFor — it refuses before it spends', () => {
     const { settle, fulfill } = build(satsRaw)
     await settle(intentFor(sats, satsRaw, { offerAmount: BigInt(DEPOSIT_SATS) - 1n }))
     expect(fulfill).toHaveBeenCalledTimes(1)
+  })
+
+  it('when an ASSET deposit holds less at the outpoint than the intent was priced against', async () => {
+    const { settle, fulfill } = build(raw, { outpointsAt: async () => liveUsd(raw, 400n) })
+    await expect(settle(intentFor(published, raw))).rejects.toThrow(/holds 400 of the deposit leg/)
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
+  it('when the recorded outpoint is no longer live at the offer script', async () => {
+    const { settle, fulfill } = build(raw, { outpointsAt: async () => [] })
+    await expect(settle(intentFor(published, raw))).rejects.toThrow(/no longer live/)
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
+  it('when a SATS deposit has already been spent', async () => {
+    const sats = offer({ offerAsset: undefined, wantAsset: asset.AssetId.fromString(USD) })
+    const satsRaw = fundingTx(sats)
+    const { settle, fulfill } = build(satsRaw, { outpointsAt: async () => [] })
+    const spent = intentFor(sats, satsRaw, { offerAmount: BigInt(DEPOSIT_SATS) })
+    await expect(settle(spent)).rejects.toThrow(/no longer live/)
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
+  it('declares the asset amount vin 0 actually carries, not the one that was quoted', async () => {
+    const { settle, fulfill } = build(raw, { outpointsAt: async () => liveUsd(raw, 1_200n) })
+    await settle(intentFor(published, raw))
+    const deposit = (fulfill.mock.calls[0]! as unknown as unknown[])[3] as Record<string, unknown>
+    expect(deposit.assetAmount).toBe(1_200n)
   })
 })

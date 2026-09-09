@@ -229,10 +229,23 @@ export const respondToRfqStatus = async (readers: CorridorReaderSet, payload: un
     }
   }
   const rfqId = parsed.data.rfq_id
+  // A throw ends the fall-through exactly as the refusal `statusFor`'s contract forbids does:
+  // the first store's driver fault would hide a live swap in the fourth. Stepped over, not obeyed.
+  let fault: unknown
+  let faulted = false
   for (const corridor of readers) {
-    const status = await corridor.statusFor(rfqId)
+    let status: Record<string, unknown> | null
+    try {
+      status = await corridor.statusFor(rfqId)
+    } catch (error) {
+      if (!faulted) fault = error
+      faulted = true
+      continue
+    }
     if (status) return { kind: 'status', payload: status }
   }
+  // `unknown` is "no negotiation with this rfq_id" — a store that could not be read has not said that.
+  if (faulted) throw fault
   return {
     kind: 'unknown',
     payload: rfqRefusalPayload(rfqId, 'unsupported_payload'),

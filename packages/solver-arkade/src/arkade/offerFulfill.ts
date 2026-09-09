@@ -86,7 +86,9 @@ export const fulfillOffer = async (
   // Our own coins fund the maker payment; the deposit itself comes back to us.
   const wantedAssetId = offer.wantAsset?.toString()
   const depositAssetId = offer.offerAsset?.toString()
-  const spendable = (await ctx.wallet.getVtxos()) as ExtendedVirtualCoin[]
+  // GATED, as `fundLockup` reads it: `getVtxos` carries the escrowed and locked buckets
+  // `offerInventory.ts` keeps out of the float this fill was admitted against.
+  const spendable = (await ctx.wallet.getSpendableVtxos()) as ExtendedVirtualCoin[]
 
   // What output[0] must carry in SATS. An asset-wanting maker is paid through
   // the asset packet, so its BTC leg is only the dust carrier (§ 4.1).

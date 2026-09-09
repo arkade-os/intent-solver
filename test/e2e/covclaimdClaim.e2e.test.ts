@@ -28,7 +28,11 @@
  * reads `P` off is covclaimd's. Re-run that control if this test ever starts
  * passing for suspicious reasons.
  *
- * Requires the `covclaimd` profile to be up and reachable at COVCLAIMD_URL.
+ * Requires the `covclaimd` profile to be up and reachable at COVCLAIMD_URL, at
+ * `v0.0.1-rc.5` or above. Below that the daemon omits the `PrevArkTx` field the
+ * emulator has required since `v0.0.7`, retries the rejected claim forever, and
+ * the only symptom here is the poll below giving up at 300s. The reason lives
+ * in `docker logs emulator` and `docker logs covclaimd`, nowhere else.
  * Run: `pnpm test:e2e covclaimdClaim`
  */
 
@@ -93,6 +97,8 @@ const awaitHeld = (paymentHash: string) =>
     { attempts: 60, intervalMs: 1000, whenExhausted: `htlc for ${paymentHash} never reached ACCEPTED` },
   )
 
+// Red in CI against covclaimd v0.0.1-rc.4: the daemon accepts the reveal and
+// arkd then rejects its claim with `code = Internal`. Tracked in #103.
 describe('e2e covclaimd claims the receive lockup non-interactively', () => {
   beforeAll(async () => {
     await requireStack('covclaimd claim', ['arkd', 'emulator', 'lnd', 'ln-counterparty'])
