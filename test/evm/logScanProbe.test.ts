@@ -50,11 +50,31 @@ describe('the probe asks a real question', () => {
 
 describe('a range rejection is fatal; anything else is not', () => {
   it('names every published phrasing as a range rejection', async () => {
+    // Guarded, because the loop below iterates the very data under test and
+    // would pass vacuously against an empty set.
+    expect(LOG_RANGE_REJECTIONS.length).toBeGreaterThan(0)
     for (const phrase of LOG_RANGE_REJECTIONS) {
       const { result } = run(() => {
         throw new Error(`eth_getLogs: JSON-RPC error -32602 ${phrase}`)
       })
       await expect(result, phrase).resolves.toMatchObject({ kind: 'range_rejected' })
+    }
+  })
+
+  it('classifies real provider wordings, stated here rather than read from the set', async () => {
+    // Independent of LOG_RANGE_REJECTIONS on purpose: a test fed from the data
+    // it checks cannot notice the data being wrong.
+    const wordings = [
+      'eth_getLogs: JSON-RPC error -32602 You can make eth_getLogs requests with up to a 10K block range',
+      'eth_getLogs: JSON-RPC error -32005 query exceeds max block range 100000',
+      'eth_getLogs: JSON-RPC error -32000 block range is too large, max is 2000',
+      'eth_getLogs: JSON-RPC error -32602 eth_getLogs is limited to 10000 blocks',
+    ]
+    for (const wording of wordings) {
+      const { result } = run(() => {
+        throw new Error(wording)
+      })
+      await expect(result, wording).resolves.toMatchObject({ kind: 'range_rejected' })
     }
   })
 
