@@ -102,7 +102,19 @@ export const probeBackends = async (services: Services, relay?: RelayProbeTarget
       // its onchain sends are paid out of that pool — so an operator reading
       // both rows and adding them would believe they hold twice what they do.
       const shared = balance.sharedWithLightning ? ' (one pool, shared with lightning)' : ''
-      return `${balance.confirmedSats} sat confirmed, ${balance.unconfirmedSats} sat unconfirmed, ${rate} sat/vB${shared}`
+      const detail = `${balance.confirmedSats} sat confirmed, ${balance.unconfirmedSats} sat unconfirmed, ${rate} sat/vB${shared}`
+      // The comment above is the standard the balance alone did not meet: a
+      // REACHABLE wallet under this corridor's smallest payout answered green.
+      // Undefined floor means the corridor is off. Confirmed sats only, the
+      // standard `railWithdraw` already holds a withdrawal to.
+      const floor = services.onchainService?.minimumPayoutSats()
+      if (floor !== undefined && balance.confirmedSats < floor) {
+        throw new Error(
+          `${detail} — under the ${floor} sat smallest payout arkade:BTC->onchain:BTC would quote, ` +
+            'so this corridor is answering quotes it cannot fund',
+        )
+      }
+      return detail
     }),
   ]
 
