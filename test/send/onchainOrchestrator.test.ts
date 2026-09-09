@@ -5,7 +5,12 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import { SigHash } from '@scure/btc-signer'
 import { OnchainSendSwapService, HTLC_REFUND_MTP_MARGIN } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
-import { ARKADE_CLAIM_WINDOW_SECONDS, DEFAULT_ONCHAIN_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/onchainSend.js'
+import {
+  ARKADE_CLAIM_WINDOW_SECONDS,
+  DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
+  ONCHAIN_CLAIM_MARGIN_SECONDS,
+  ONCHAIN_SECONDS_PER_BLOCK,
+} from '@arkade-os/solver-core/core/onchainSend.js'
 import {
   OnchainSendSwapStore,
   type OnchainSendSwapState,
@@ -552,6 +557,159 @@ describe('OnchainSendSwapService', () => {
 
     expect(funded).toHaveLength(1)
     expect((await deps.store.get(outcome.swap.id)).state).toBe('awaiting_claim')
+  })
+
+  /** Mutinynet: 82 minutes in `funding_onchain`, `funding_txid` null, every tick's fund failing. */
+  describe('a fund that keeps failing', () => {
+    const claimWindow = (row: OnchainSendSwapRow) =>
+      row.minConfirmations * ONCHAIN_SECONDS_PER_BLOCK + ONCHAIN_CLAIM_MARGIN_SECONDS
+
+    const stalled = async () => {
+      const outcome = await service.quote({
+        paymentHash,
+        amountSats: 50_000,
+        payoutPubkey,
+        refundAddress: REFUND_ADDRESS,
+        clientRefundPubkey,
+      })
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+      await deps.store.transition(outcome.swap.id, 'quoted', 'funded', {})
+      await deps.store.transition(outcome.swap.id, 'funded', 'funding_onchain', {})
+      const fundForReal = deps.onchain.fund.bind(deps.onchain)
+      const attempts: string[] = []
+      deps.onchain.fund = async (params) => {
+        attempts.push(params.address)
+        throw new Error('insufficient funds: 0 sat available')
+      }
+      return { row: await deps.store.get(outcome.swap.id), attempts, fundForReal }
+    }
+
+    it('retries while the client could still claim what would be funded', async () => {
+      const { row, attempts } = await stalled()
+      now = row.htlcLocktime - claimWindow(row) - 1
+      await expect(service.tick(row.id)).rejects.toThrow('insufficient funds')
+      expect(attempts).toHaveLength(1)
+      expect((await deps.store.get(row.id)).state).toBe('funding_onchain')
+    })
+
+    it('stops attempting once the L1 claim window is gone, and parks the row', async () => {
+      const { row, attempts } = await stalled()
+      now = row.htlcLocktime - claimWindow(row)
+      const parked = await service.tick(row.id)
+      expect(attempts).toHaveLength(0)
+      expect(parked.state).toBe('stuck')
+      expect(parked.failureReason).toContain(String(row.htlcLocktime))
+      expect(now).toBeLessThan(row.htlcLocktime)
+    })
+
+    it('leaves the arkade lockup untouched and records no outcome against it', async () => {
+      const { row } = await stalled()
+      now = row.htlcLocktime - claimWindow(row)
+      const parked = await service.tick(row.id)
+      expect(parked.refundOutcome).toBeNull()
+      expect(parked.refundArkTxid).toBeNull()
+      expect(parked.claimArkTxid).toBeNull()
+      expect(parked.fundingTxid).toBeNull()
+      expect(parked.failureReason).toContain(String(row.refundLocktime))
+      expect(deps.outputs.get(row.pkScript)).toHaveLength(1)
+    })
+
+    it('stays parked instead of being re-driven by the next sweep', async () => {
+      const { row, attempts } = await stalled()
+      now = row.htlcLocktime - claimWindow(row)
+      await service.tick(row.id)
+      expect((await deps.store.findRecoverable()).map((r) => r.id)).not.toContain(row.id)
+      expect(await service.tickAll()).toEqual([])
+      expect(attempts).toHaveLength(0)
+    })
+
+    /**
+     * The deadline runs AFTER the fund lease. Parking a row a second worker is
+     * inside `fund()` on would lose that worker's compare-and-swap, leaving the
+     * sats out with no `funding_txid` — the outpoint `reclaimOnchainHtlc` needs.
+     * Two instances because `tick()`'s `inFlight` set hides this within one.
+     */
+    it('does not park a row another worker is already funding, deadline or not', async () => {
+      const second = new OnchainSendSwapService({
+        store: deps.store,
+        onchain: deps.onchain,
+        arkade: deps.arkade,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => deps.store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        refundDestinationScript,
+        now: clock,
+      })
+      const outcome = await service.quote({
+        paymentHash,
+        amountSats: 50_000,
+        payoutPubkey,
+        refundAddress: REFUND_ADDRESS,
+        clientRefundPubkey,
+      })
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+      await deps.store.transition(outcome.swap.id, 'quoted', 'funded', {})
+      await deps.store.transition(outcome.swap.id, 'funded', 'funding_onchain', {})
+      const row = await deps.store.get(outcome.swap.id)
+
+      let entered!: () => void
+      let release!: () => void
+      const inFund = new Promise<void>((resolve) => (entered = resolve))
+      const held = new Promise<void>((resolve) => (release = resolve))
+      const originalFund = deps.onchain.fund.bind(deps.onchain)
+      deps.onchain.fund = async (params) => {
+        entered()
+        await held
+        return originalFund(params)
+      }
+
+      const first = service.tick(row.id)
+      await inFund
+      // The deadline matures while the other worker is still in flight.
+      now = row.htlcLocktime - claimWindow(row)
+
+      await second.tick(row.id)
+      expect((await deps.store.get(row.id)).state).toBe('funding_onchain')
+
+      release()
+      await first
+      const settled = await deps.store.get(row.id)
+      expect(settled.state).toBe('awaiting_claim')
+      expect(settled.fundingTxid).toBeTruthy()
+    })
+
+    /**
+     * The deadline runs AFTER the recovery read. Parking a funding that really
+     * went out would lose the outpoint `reclaimOnchainHtlc` needs.
+     */
+    it('adopts a funding that DID go out rather than parking it, deadline or not', async () => {
+      const { row, attempts, fundForReal } = await stalled()
+      const paid = await fundForReal({
+        address: row.onchainAddress,
+        amountSats: row.payoutSats,
+        idempotencyKey: `onchain-swap-${row.id}`,
+      })
+      now = row.htlcLocktime - claimWindow(row)
+      const adopted = await service.tick(row.id)
+      expect(adopted.state).toBe('awaiting_claim')
+      expect(adopted.fundingTxid).toBe(paid.txid)
+      expect(attempts).toHaveLength(0)
+    })
+
+    it('leaves a row that already recorded its funding alone past the deadline', async () => {
+      const { row } = await stalled()
+      await deps.driver.run('UPDATE send_onchain_swap SET funding_txid = ?, funding_vout = 0 WHERE id = ?', [
+        'already-funded',
+        row.id,
+      ])
+      now = row.htlcLocktime - claimWindow(row)
+      expect((await service.tick(row.id)).state).toBe('awaiting_claim')
+    })
   })
 
   it('does not mistake a third party payment to the HTLC address for its own funding', async () => {

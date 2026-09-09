@@ -666,7 +666,7 @@ export class OnchainSendSwapService {
 
   private async whenFunded(row: OnchainSendSwapRow): Promise<boolean> {
     const { store } = this.deps
-    const decision = evaluateOnchainSendFunding({ refundLocktime: row.refundLocktime, now: this.now() })
+    const decision = this.fundingDecision(row)
     if (!decision.fund) {
       await store.fail(row.id, 'funded', decision.reason)
       return false
@@ -674,6 +674,15 @@ export class OnchainSendSwapService {
     const won = await store.transition(row.id, 'funded', 'funding_onchain', {})
     if (!won) return false
     return this.submitFunding(await store.get(row.id))
+  }
+
+  private fundingDecision(row: OnchainSendSwapRow) {
+    return evaluateOnchainSendFunding({
+      refundLocktime: row.refundLocktime,
+      htlcLocktime: row.htlcLocktime,
+      minConfirmations: row.minConfirmations,
+      now: this.now(),
+    })
   }
 
   private async whenFundingOnchain(row: OnchainSendSwapRow): Promise<boolean> {
@@ -725,6 +734,17 @@ export class OnchainSendSwapService {
     //
     // Losing is not a failure: another worker holds this swap, so yield.
     if (!(await store.claimFundLease(row.id, 'funding_onchain'))) return false
+
+    // Asked AGAIN here, not only on the `funded` edge that got the row this far:
+    // nothing else bounds a `fund()` that keeps throwing. AFTER the lease and
+    // after `recoverFunding`'s read, both deliberately — a check before either
+    // would let one worker park a row another is inside `fund()` on, or park a
+    // funding that really went out, losing the outpoint `reclaimOnchainHtlc` needs.
+    const decision = this.fundingDecision(row)
+    if (!decision.fund) {
+      await store.fail(row.id, 'funding_onchain', decision.reason)
+      return false
+    }
 
     let result
     try {
