@@ -83,7 +83,7 @@ jobs:
               [{ name: "dispatch", files: ($f | split(" ")),
                  profiles: (if $p == "" then "emulator" else $p end),
                  why: "ad-hoc dispatch",
-                 mintAsset: false, lnd: false, covclaimd: false,
+                 mintAsset: false, lnd: false, covclaimdImage: "",
                  evmChain: false, arkdTimelocks: "seconds" }]')
           else
             # Split and trim in the shell, not in jq: a group name is `[a-z0-9-]`
@@ -178,7 +178,9 @@ jobs:
       # COVCLAIMD_IMAGE is passed rather than left to the compose default:
       # `regtest.mjs` DROPS the container outright when the variable is empty,
       # so an unset one silently produces a stack with no daemon in it and a
-      # covclaimd test that fails for a reason it does not name.
+      # covclaimd test that fails for a reason it does not name. The TAG lives
+      # in the group file next to the group that wants it, so a version bump is
+      # one edit and not a flag here with a tag there.
       #
       # The ARKD_* delays are the runbook's documented deployment ("a bare
       # `node regtest.mjs start` produces a stack this service cannot use at
@@ -192,7 +194,7 @@ jobs:
         working-directory: arkade-regtest
         timeout-minutes: 25
         env:
-          COVCLAIMD_IMAGE: ${{ matrix.covclaimd && 'ghcr.io/arkade-os/covclaimd:v0.0.1-rc.4' || '' }}
+          COVCLAIMD_IMAGE: ${{ matrix.covclaimdImage }}
           SECONDS_TYPED: ${{ matrix.arkdTimelocks == 'seconds' }}
         run: |
           set -eu

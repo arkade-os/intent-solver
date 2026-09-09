@@ -76,6 +76,8 @@ export const regtestDir = (): string => {
  *
  * @returns the chain tip height afterwards, read back from Esplora so a caller
  * can assert the chain actually moved rather than trusting the CLI's exit code.
+ * `null` when Esplora could not supply a baseline to compare against — the
+ * blocks are still mined, they just cannot be verified from here.
  */
 export const mineBlocks = async (count = 1): Promise<number | null> => {
   const { chainTip } = await import('./preflight.js')
@@ -90,14 +92,11 @@ export const mineBlocks = async (count = 1): Promise<number | null> => {
   // miner. Bounded, and it cannot hide a dead miner: the tip is returned either
   // way, so a caller asserting the chain moved still fails.
   //
-  // `before === null` means Esplora was unreadable even before the mine, so
-  // there is no target to wait for — wait for a readable tip instead, rather
-  // than returning the first null and skipping the wait entirely.
-  const enough =
-    before === null
-      ? (tip: number | null) => tip !== null
-      : (tip: number | null) => tip !== null && tip >= before + count
-  return readTipWithin(chainTip, Date.now() + INDEX_LAG_TIMEOUT_MS, enough)
+  // A null baseline is NOT a blip — it means Esplora stayed unreadable for the
+  // whole poll above. Returning a height then would be a number no reader can
+  // trust, since a lagging index can serve the pre-mine one; `null` says so.
+  if (before === null) return null
+  return readTipWithin(chainTip, Date.now() + INDEX_LAG_TIMEOUT_MS, (tip) => tip !== null && tip >= before + count)
 }
 
 const readTipWithin = async (

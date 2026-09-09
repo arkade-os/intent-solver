@@ -21,7 +21,7 @@ interface Group {
   files: string[]
   mintAsset: boolean
   lnd: boolean
-  covclaimd: boolean
+  covclaimdImage: string
   evmChain: boolean
   arkdTimelocks: 'seconds' | 'blocks'
 }
@@ -54,14 +54,16 @@ describe('.github/e2e-groups.json', () => {
   })
 
   it('declares every stack flag the workflow branches on', () => {
-    const flags = ['mintAsset', 'lnd', 'covclaimd', 'evmChain'] as const
+    const flags = ['mintAsset', 'lnd', 'evmChain'] as const
     for (const group of groups) {
       // On EVERY group: an absent key reads as `null` in a matrix `if:`, which
       // is falsy and silent — the same shape as a flag someone forgot to set.
       for (const flag of flags) expect(typeof group[flag], `${group.name}.${flag}`).toBe('boolean')
-      // Not a boolean, because the assert runs in both directions: each mode
-      // has a file the other makes vacuous.
+      // Neither is a boolean. The timelock assert runs in both directions,
+      // since each mode has a file the other makes vacuous; the image carries
+      // its own tag so a covclaimd bump is one edit rather than two files.
       expect(['seconds', 'blocks'], `${group.name}.arkdTimelocks`).toContain(group.arkdTimelocks)
+      expect(typeof group.covclaimdImage, `${group.name}.covclaimdImage`).toBe('string')
     }
   })
 
@@ -73,12 +75,13 @@ describe('.github/e2e-groups.json', () => {
 
   it('asks for covclaimd wherever a file needs it', () => {
     // Not a bare word match: four other files discuss covclaimd in prose —
-    // receiveLightning's header exists to say it runs WITHOUT the daemon.
+    // receiveLightning's header exists to say it runs WITHOUT the daemon. The
+    // quotes are either kind, so a `requireStack(["covclaimd"])` still counts.
     const needsDaemon = (file: string) =>
-      /createCovclaimdClient|covclaimdUrl|'covclaimd'/.test(readFileSync(join(E2E_DIR, file), 'utf8'))
+      /createCovclaimdClient|covclaimdUrl|["']covclaimd["']/.test(readFileSync(join(E2E_DIR, file), 'utf8'))
     for (const group of groups) {
       if (group.files.some(needsDaemon)) {
-        expect(group.covclaimd, `${group.name} runs a file that reaches for covclaimd`).toBe(true)
+        expect(group.covclaimdImage, `${group.name} runs a file that reaches for covclaimd`).not.toBe('')
         expect(group.profiles, `${group.name} must bring the covclaimd profile up`).toContain('covclaimd')
       }
     }

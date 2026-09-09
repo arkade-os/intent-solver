@@ -6,7 +6,7 @@
     "files": ["assetRfqCorridor.e2e.test.ts", "assetOffer.e2e.test.ts", "assetLockup.e2e.test.ts"],
     "mintAsset": true,
     "lnd": false,
-    "covclaimd": false,
+    "covclaimdImage": "",
     "evmChain": false,
     "arkdTimelocks": "seconds"
   },
@@ -17,7 +17,7 @@
     "files": ["vtxoLifecycle.e2e.test.ts", "blockTimelocks.e2e.test.ts"],
     "mintAsset": false,
     "lnd": false,
-    "covclaimd": false,
+    "covclaimdImage": "",
     "evmChain": false,
     "arkdTimelocks": "blocks"
   },
@@ -28,7 +28,7 @@
     "files": ["sendLightning.e2e.test.ts", "sendLightningEdges.e2e.test.ts"],
     "mintAsset": false,
     "lnd": true,
-    "covclaimd": false,
+    "covclaimdImage": "",
     "evmChain": false,
     "arkdTimelocks": "seconds"
   },
@@ -39,7 +39,7 @@
     "files": ["receiveLightning.e2e.test.ts", "receiveLightningEdges.e2e.test.ts", "covclaimdClaim.e2e.test.ts"],
     "mintAsset": false,
     "lnd": true,
-    "covclaimd": true,
+    "covclaimdImage": "ghcr.io/arkade-os/covclaimd:v0.0.1-rc.4",
     "evmChain": false,
     "arkdTimelocks": "seconds"
   },
@@ -56,7 +56,7 @@
     ],
     "mintAsset": false,
     "lnd": true,
-    "covclaimd": false,
+    "covclaimdImage": "",
     "evmChain": false,
     "arkdTimelocks": "seconds"
   },
@@ -67,7 +67,7 @@
     "files": ["selfPayment.e2e.test.ts", "selfPaymentEdges.e2e.test.ts"],
     "mintAsset": false,
     "lnd": true,
-    "covclaimd": false,
+    "covclaimdImage": "",
     "evmChain": false,
     "arkdTimelocks": "seconds"
   },
@@ -85,7 +85,7 @@
     ],
     "mintAsset": false,
     "lnd": false,
-    "covclaimd": false,
+    "covclaimdImage": "",
     "evmChain": true,
     "arkdTimelocks": "seconds"
   }
