@@ -52,7 +52,6 @@ const makeDeps = (over: { nostrAdPublish?: AdPublishMode; adPublisher?: AdPublis
         arkade: { arkServerUrl: 'http://ark' },
         emulatorUrl: 'http://emu',
         relayUrl: 'wss://relay.example',
-        network: 'mutinynet',
         limits: { minSats: 1_000, maxSats: 50_000 },
         corridorLimits: allCorridors({ minSats: 1_000, maxSats: 50_000 }),
         corridorFees: allCorridors({ bps: 0, flatSats: 0 }),

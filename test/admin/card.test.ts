@@ -91,7 +91,6 @@ const makeDeps = (
       config: {
         relayUrl: over.relayUrl === undefined ? 'wss://relay.example' : over.relayUrl,
         limits: { minSats: 1_000, maxSats: 50_000 },
-        network: 'mutinynet',
         // What the OPERATOR configured, which is the only source for the
         // reported mode — see the `publish` tests below.
         nostrAdPublish: over.nostrAdPublish ?? 'off',
@@ -136,10 +135,6 @@ const makeDeps = (
 
 const ASSET = `${'9c'.repeat(32)}0001`
 const GUCCI = `f394dcbf${'e9'.repeat(30)}`
-
-const BOLT11_BTC = 'bolt11:mutinynet/slip44:1'
-const ONCHAIN_BTC = 'bitcoin:mutinynet/slip44:1'
-const quoteId = (m: Record<string, unknown>): unknown => (m.quote_asset as Record<string, unknown>).id
 
 interface CardBody {
   card: SolverCard | null
@@ -226,8 +221,9 @@ describe('GET /api/card', () => {
       }),
     )
     expect(body.cardError).toBeNull()
-    const asset = body.card!.markets.find((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)!
+    const asset = body.card!.markets.find((m) => m.pair !== 'BTC/lightning:BTC' && m.pair !== 'BTC/onchain:BTC')!
     expect(asset).toMatchObject({
+      pair: 'BTC/9c9c9c9c',
       fee_bps: 25,
       price_decimals: 2,
       min_quote_amount: '1000000',
@@ -264,7 +260,7 @@ describe('GET /api/card', () => {
     expect(status).toBe(200)
     expect(body.cardError).toBeNull()
     expect(body.card).not.toBeNull()
-    expect(body.card!.markets.map(quoteId)).toEqual([BOLT11_BTC, ONCHAIN_BTC])
+    expect(body.card!.markets.map((m) => m.pair)).toEqual(['BTC/lightning:BTC', 'BTC/onchain:BTC'])
     for (const market of body.card!.markets) {
       expect([market.min_base_amount, market.max_base_amount]).toEqual(['1000', '50000'])
       expect([market.min_quote_amount, market.max_quote_amount]).toEqual(['1000', '50000'])
@@ -336,13 +332,13 @@ describe('GET /api/card', () => {
     const { body } = await getCard(makeDeps({ lnSendEnabled: false }))
     expect(body.cardError).toBeNull()
     const markets = body.card!.markets as Record<string, unknown>[]
-    const lightning = markets.find((m) => quoteId(m) === BOLT11_BTC)!
+    const lightning = markets.find((m) => m.pair === 'BTC/lightning:BTC')!
     // The arkade-SENDING direction is off, so the quote side is disabled...
     expect(lightning).toMatchObject({ min_quote_amount: '0', max_quote_amount: '0' })
     // ...while the receiving direction it still serves keeps its bounds.
     expect(lightning).toMatchObject({ min_base_amount: '1000', max_base_amount: '50000' })
     // And the onchain market it also serves is now listed at all.
-    expect(markets.map(quoteId)).toContain(ONCHAIN_BTC)
+    expect(markets.map((m) => m.pair)).toContain('BTC/onchain:BTC')
   })
 
   it('still refuses when the deployment serves nothing at all', async () => {
