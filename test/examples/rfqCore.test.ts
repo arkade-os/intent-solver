@@ -381,6 +381,25 @@ describe('rfq-core over HTTP against the real service', () => {
     )
   })
 
+  it('ignores a unit outside the closed set', () => {
+    const refusal = {
+      type: 'rfq_refusal',
+      rfq_id: 'ab'.repeat(32),
+      reason: 'unsupported_payload',
+      error_code: 'invoice_amount_mismatch',
+      actual: 2200,
+      expected: 2100,
+      unit: 'widgets',
+    }
+    expect(() => expectQuote(refusal, refusal.rfq_id)).toThrow(/2200, expected 2100/)
+    expect(() => expectQuote(refusal, refusal.rfq_id)).not.toThrow(/widgets/)
+    try {
+      expectQuote(refusal, refusal.rfq_id)
+    } catch (error) {
+      expect(error).toMatchObject({ errorCode: 'invoice_amount_mismatch', unit: undefined })
+    }
+  })
+
   it('refuses to fund past valid_until or under the headroom gate', async () => {
     const quote = await requestQuote(transport(), {
       invoice: INVOICE,

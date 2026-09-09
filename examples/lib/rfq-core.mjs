@@ -41,11 +41,12 @@ export const RFQ_REFUSAL_ERROR_CODES = [
 ]
 
 const REFUSAL_ERROR_CODES = new Set(RFQ_REFUSAL_ERROR_CODES)
+const REFUSAL_UNITS = new Set(['blocks', 'characters', 'sats'])
 
 const refusalMessage = (reason, detail) => {
   if (!REFUSAL_ERROR_CODES.has(detail.errorCode)) return `solver refused: ${reason}`
   const where = typeof detail.field === 'string' ? ` at ${detail.field}` : ''
-  const unit = typeof detail.unit === 'string' ? ` ${detail.unit}` : ''
+  const unit = REFUSAL_UNITS.has(detail.unit) ? ` ${detail.unit}` : ''
   if (Number.isFinite(detail.actual) && Number.isFinite(detail.limit)) {
     return `solver refused: ${reason} (${detail.errorCode}${where}: ${detail.actual}${unit}, limit ${detail.limit})`
   }
@@ -68,7 +69,7 @@ export class SwapRefusal extends Error {
     this.actual = known && Number.isFinite(detail.actual) ? detail.actual : undefined
     this.expected = known && Number.isFinite(detail.expected) ? detail.expected : undefined
     this.limit = known && Number.isFinite(detail.limit) ? detail.limit : undefined
-    this.unit = known && typeof detail.unit === 'string' ? detail.unit : undefined
+    this.unit = known && REFUSAL_UNITS.has(detail.unit) ? detail.unit : undefined
   }
 }
 

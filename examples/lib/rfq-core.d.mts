@@ -17,7 +17,7 @@ export declare class SwapRefusal extends Error {
   actual: number | undefined
   expected: number | undefined
   limit: number | undefined
-  unit: string | undefined
+  unit: 'blocks' | 'characters' | 'sats' | undefined
   constructor(
     reason: string,
     rfqId?: string,

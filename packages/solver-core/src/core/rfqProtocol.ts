@@ -169,16 +169,31 @@ export type RfqRefusalErrorCode = (typeof RFQ_REFUSAL_ERROR_CODE_VALUES)[number]
 export const isRfqRefusalErrorCode = (value: string): value is RfqRefusalErrorCode =>
   (RFQ_REFUSAL_ERROR_CODE_VALUES as readonly string[]).includes(value)
 
+export const RFQ_REFUSAL_UNIT_VALUES = ['blocks', 'characters', 'sats'] as const
+export type RfqRefusalUnit = (typeof RFQ_REFUSAL_UNIT_VALUES)[number]
+
+export const isRfqRefusalUnit = (value: string): value is RfqRefusalUnit =>
+  (RFQ_REFUSAL_UNIT_VALUES as readonly string[]).includes(value)
+
 export interface RfqRefusalError {
   error_code: RfqRefusalErrorCode
   field?: string
   actual?: number
   expected?: number
   limit?: number
-  unit?: 'blocks' | 'characters' | 'sats'
+  unit?: RfqRefusalUnit
 }
 
-const CLIENT_SAFE_ERRORS: Partial<Record<string, RfqRefusalError>> = {
+type ClientSafeErrorReason =
+  | 'cltv_too_large'
+  | 'exact_out_unsupported'
+  | 'invalid_evm_amount'
+  | 'invalid_payout_address'
+  | 'invalid_refund_address'
+  | 'wrong_network'
+  | 'zero_amount_invoice'
+
+const CLIENT_SAFE_ERRORS = {
   cltv_too_large: { error_code: 'invoice_cltv_too_large', field: 'profile.invoice' },
   exact_out_unsupported: { error_code: 'exact_out_unsupported', field: 'amount_side' },
   invalid_evm_amount: { error_code: 'invalid_amount', field: 'amount' },
@@ -186,7 +201,10 @@ const CLIENT_SAFE_ERRORS: Partial<Record<string, RfqRefusalError>> = {
   invalid_refund_address: { error_code: 'invalid_refund_address', field: 'profile.refund_address' },
   wrong_network: { error_code: 'invoice_wrong_network', field: 'profile.invoice' },
   zero_amount_invoice: { error_code: 'invoice_missing_amount', field: 'profile.invoice' },
-}
+} satisfies Record<ClientSafeErrorReason, RfqRefusalError>
+
+const clientSafeErrorFor = (reason: string): RfqRefusalError | undefined =>
+  Object.hasOwn(CLIENT_SAFE_ERRORS, reason) ? CLIENT_SAFE_ERRORS[reason as ClientSafeErrorReason] : undefined
 
 /**
  * Legacy/internal reason → the closed RFQ set. Everything the quote path can
@@ -201,7 +219,7 @@ const CLIENT_SAFE_ERRORS: Partial<Record<string, RfqRefusalError>> = {
  * which is why this is exported.
  */
 export const RFQ_REFUSAL_REASONS: Record<string, RfqRefusalReason> = {
-  wrong_network: 'unsupported_pair',
+  wrong_network: 'unsupported_payload',
   zero_amount_invoice: 'unsupported_payload',
   invalid_refund_address: 'unsupported_payload',
   // The receive legs' mirror of `invalid_refund_address`: an address WE cannot
@@ -296,7 +314,7 @@ export const toRfqReason = (reason: string): RfqRefusalReason => RFQ_REFUSAL_REA
 export const rfqRefusalPayload = (
   rfqId: string | undefined,
   reason: string,
-  error: RfqRefusalError | undefined = CLIENT_SAFE_ERRORS[reason],
+  error: RfqRefusalError | undefined = clientSafeErrorFor(reason),
 ): Record<string, unknown> => ({
   v: 1,
   type: 'rfq_refusal',

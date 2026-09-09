@@ -54,6 +54,14 @@ describe('client-safe refusal details', () => {
     for (const code of RFQ_REFUSAL_ERROR_CODE_VALUES) expect(isRfqRefusalErrorCode(code)).toBe(true)
     expect(isRfqRefusalErrorCode('backend_exception')).toBe(false)
   })
+
+  it('treats a wrong-network invoice as a payload fault while retaining its diagnostic', () => {
+    expect(rfqRefusalPayload(OPEN_ID, 'wrong_network')).toMatchObject({
+      reason: 'unsupported_payload',
+      error_code: 'invoice_wrong_network',
+      field: 'profile.invoice',
+    })
+  })
 })
 
 /**

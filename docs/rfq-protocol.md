@@ -1693,7 +1693,7 @@ reason as a generic decline (no retry semantics inferred).
 
 | reason                | meaning                                                                                                                                                                                                      |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `unsupported_pair`    | pair not served (includes wrong network for the asset)                                                                                                                                                       |
+| `unsupported_pair`    | pair not served (including asset/network combinations the solver does not offer)                                                                                                                             |
 | `unsupported_payload` | malformed request, unknown fields, or a profile input the solver cannot serve (e.g. a zero-amount invoice, an undecodable refund address)                                                                    |
 | `amount_out_of_range` | outside the solver's min/max for the pair                                                                                                                                                                    |
 | `exposure_cap`        | solver at aggregate capacity right now                                                                                                                                                                       |
@@ -1754,7 +1754,7 @@ The reference implementation's internal refusal names map onto the closed set
 
 | internal                     | RFQ v1                |
 | ---------------------------- | --------------------- |
-| `wrong_network`              | `unsupported_pair`    |
+| `wrong_network`              | `unsupported_payload` |
 | `zero_amount_invoice`        | `unsupported_payload` |
 | `invalid_refund_address`     | `unsupported_payload` |
 | `invalid_payout_address`     | `unsupported_payload` |
