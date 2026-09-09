@@ -174,8 +174,10 @@ export interface ReceiveServiceDeps {
    * can, holding the covenant's `receiver` key (`receiveCovenantRowFor` maps
    * `receiverPubkey: row.payoutPubkey`).
    *
-   * It CAN claim this covenant as of `covclaimd:v0.0.1-rc.4`, proven on regtest by
-   * `test/e2e/covclaimdClaim.e2e.test.ts`.
+   * It CAN claim this covenant as of `covclaimd:v0.0.1-rc.5`, proven on regtest by
+   * `test/e2e/covclaimdClaim.e2e.test.ts`. NOT rc.4: that build predates the
+   * emulator's mandatory `PrevArkTx`, so its claim is refused and retried
+   * forever — `docs/runbook.md` § covclaimd carries the floor and the symptom.
    *
    * Still optional for deployment reasons rather than capability: `whenFunded` does not
    * care who spent the lockup — it recovers `P` from whatever witness it finds — so

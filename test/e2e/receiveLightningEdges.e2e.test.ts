@@ -300,8 +300,9 @@ describe('e2e lightning:BTC->arkade:BTC (receive) — funding gates, races and r
       // `ark-lib` predated the ScriptV2 covenant redesign and could not spend
       // this script. It was written as a tripwire, with the instruction that
       // if it ever failed covclaimd had started working and the test should
-      // become a claim path rather than be relaxed. `v0.0.1-rc.4` claims this
-      // covenant, so this is that rewrite.
+      // become a claim path rather than be relaxed. `v0.0.1-rc.5` claims this
+      // covenant, so this is that rewrite. rc.4 does NOT, against a `v0.0.7`
+      // emulator: it omits `PrevArkTx` and this hangs — see the runbook.
       //
       // NO CLIENT ACTION FROM HERE. That is the whole proposition of handing
       // over a sealed packet: the client may go offline the moment it is

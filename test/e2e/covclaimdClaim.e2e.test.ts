@@ -28,7 +28,11 @@
  * reads `P` off is covclaimd's. Re-run that control if this test ever starts
  * passing for suspicious reasons.
  *
- * Requires the `covclaimd` profile to be up and reachable at COVCLAIMD_URL.
+ * Requires the `covclaimd` profile to be up and reachable at COVCLAIMD_URL, at
+ * `v0.0.1-rc.5` or above. Below that the daemon omits the `PrevArkTx` field the
+ * emulator has required since `v0.0.7`, retries the rejected claim forever, and
+ * the only symptom here is the poll below giving up at 300s. The reason lives
+ * in `docker logs emulator` and `docker logs covclaimd`, nowhere else.
  * Run: `pnpm test:e2e covclaimdClaim`
  */
 
