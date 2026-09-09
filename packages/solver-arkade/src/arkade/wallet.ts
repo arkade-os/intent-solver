@@ -551,13 +551,20 @@ export const findLockupOutpoints = async (
  * about is lag, not proof, and callers only reach this for a row that already
  * recorded a funded lockup.
  */
-export const lockupProvablySpent = async (
+export const lockupProvablySpent = async (ctx: Pick<ArkadeContext, 'wallet'>, pkScriptHex: string): Promise<boolean> =>
+  (await lockupSpendEvidence(ctx, pkScriptHex)) === 'spent'
+
+/** The same read {@link lockupProvablySpent} makes, keeping the answer its boolean folds away: `unknown` — no output at all — is permanent, where `unspent` is a view that may still catch up. */
+export type LockupSpendEvidence = 'unknown' | 'unspent' | 'spent'
+
+export const lockupSpendEvidence = async (
   ctx: Pick<ArkadeContext, 'wallet'>,
   pkScriptHex: string,
-): Promise<boolean> => {
+): Promise<LockupSpendEvidence> => {
   const { vtxos } = await ctx.wallet.indexerProvider.getVtxos({ scripts: [pkScriptHex] })
   const all = vtxos ?? []
-  return all.length > 0 && all.every((vtxo) => hasTerminalSpend(vtxo))
+  if (all.length === 0) return 'unknown'
+  return all.every((vtxo) => hasTerminalSpend(vtxo)) ? 'spent' : 'unspent'
 }
 
 /**

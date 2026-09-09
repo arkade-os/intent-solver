@@ -46,6 +46,7 @@ const {
   findLockups,
   findLockupOutpoints,
   lockupProvablySpent,
+  lockupSpendEvidence,
 } = await import('@arkade-os/solver-arkade/arkade/wallet.js')
 
 const key = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
@@ -771,5 +772,27 @@ describe('lockupProvablySpent', () => {
     const ctx = { wallet: { indexerProvider: { getVtxos } } as unknown as ArkadeContext['wallet'] } as ArkadeContext
     await lockupProvablySpent(ctx, SCRIPT)
     expect(getVtxos).toHaveBeenCalledWith({ scripts: [SCRIPT] })
+  })
+
+  // The two answers the boolean folds into `false`; only one is worth waiting on.
+  describe('lockupSpendEvidence', () => {
+    it('separates a script with no known output from one whose output is unspent', async () => {
+      await expect(lockupSpendEvidence(ctxReturning([]), SCRIPT)).resolves.toBe('unknown')
+      await expect(lockupSpendEvidence(ctxReturning([vtxo({ isSpent: false })]), SCRIPT)).resolves.toBe('unspent')
+    })
+
+    it('calls a swept-but-unspent lockup unspent, never spent', async () => {
+      const ctx = ctxReturning([vtxo({ isSwept: true })])
+      await expect(lockupSpendEvidence(ctx, SCRIPT)).resolves.toBe('unspent')
+    })
+
+    it('is spent only when every known output is terminally spent', async () => {
+      await expect(lockupSpendEvidence(ctxReturning([vtxo({ isSpent: true })]), SCRIPT)).resolves.toBe('spent')
+      const partial = ctxReturning([
+        { ...vtxo({ isSpent: true, spentBy: 'c'.repeat(64) }), vout: 0 },
+        { ...vtxo({ isSpent: false }), vout: 1 },
+      ])
+      await expect(lockupSpendEvidence(partial, SCRIPT)).resolves.toBe('unspent')
+    })
   })
 })

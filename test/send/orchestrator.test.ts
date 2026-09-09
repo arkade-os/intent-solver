@@ -209,6 +209,7 @@ const fakeArkade = (): FakeArkade => {
     receivePreimage: null,
     findLockups: async () => arkade.lockups,
     lockupProvablySpent: async () => arkade.lockupsSpent,
+    lockupSpendEvidence: async () => (arkade.lockupsSpent ? ('spent' as const) : ('unspent' as const)),
     claim: async (row, outputs, preimage) => {
       arkade.claimCalls.push({ rowId: row.id, outputs, preimage })
       return 'claim-txid'
