@@ -50,6 +50,7 @@ import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { buildOnchainClaimTx, estimateClaimTxVsize, signOnchainClaimTx } from '@arkade-os/solver-rails/onchain/claim.js'
+import { onchainClaimSizing, onchainReceiveFundedAmounts } from './onchainFundedAmounts.js'
 import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
 import type { OnchainReceiveBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import type { OnchainReceiveArkadeOps } from './onchainArkadeOps.js'
@@ -590,9 +591,13 @@ export class OnchainReceiveSwapService {
   private async whenFundingArkade(row: OnchainReceiveSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
     // The lockup carries the PAYOUT — the client's HTLC amount minus this
-    // corridor's fee, persisted at quote time — never the full `amountSats`.
+    // corridor's fee — never the full `amountSats`. Through the helper so the
+    // adoption threshold and the payment below can never be sized against
+    // different numbers: a lockup paid at the amended amount would otherwise
+    // read as under-funded here on the next pass and be paid a second time.
+    const { arkadePayoutSats } = onchainReceiveFundedAmounts(row)
     const existing = await arkade.findLockups(row.pkScript)
-    const alreadyFunded = existing.reduce((sum, o) => sum + o.value, 0) >= row.payoutSats
+    const alreadyFunded = existing.reduce((sum, o) => sum + o.value, 0) >= arkadePayoutSats
     if (alreadyFunded) {
       return store.transition(row.id, 'funding_arkade', 'awaiting_claim', {})
     }
@@ -635,7 +640,7 @@ export class OnchainReceiveSwapService {
     let txid: string
     const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
     try {
-      txid = await arkade.fund({ address: row.lockupAddress, amountSats: row.payoutSats, stamp })
+      txid = await arkade.fund({ address: row.lockupAddress, amountSats: arkadePayoutSats, stamp })
     } catch (error) {
       // Retained on an ambiguous failure: stuck for a human, on purpose.
       if (error instanceof FundNotSubmittedError) await store.releaseFundLease(row.id)
@@ -815,17 +820,15 @@ export class OnchainReceiveSwapService {
 
     const feeRate = await onchain.estimateFeeRate()
     const preimage = hex.decode(row.preimage)
-    const sizingParams = {
+    const sizing = onchainClaimSizing(row, {
       htlc,
       preimage,
       fundingTxid: row.fundingTxid,
       fundingVout: row.fundingVout,
-      fundingValueSats: row.amountSats,
       destinationScript: claimDestinationScript,
-      payoutAmountSats: BigInt(row.amountSats),
-    }
-    const fee = BigInt(Math.ceil(estimateClaimTxVsize(sizingParams) * feeRate))
-    const payoutAmountSats = BigInt(row.amountSats) - fee
+    })
+    const fee = BigInt(Math.ceil(estimateClaimTxVsize(sizing.params) * feeRate))
+    const payoutAmountSats = sizing.payoutAfterFee(fee)
     if (payoutAmountSats < BigInt(ONCHAIN_DUST_SATS)) {
       // Below dust is as unbroadcastable as negative — refuse rather than
       // build a non-standard transaction no relay policy will forward. Same
@@ -836,12 +839,12 @@ export class OnchainReceiveSwapService {
       await store.fail(
         row.id,
         'claimed',
-        `claim fee ${fee} at ${feeRate} sat/vB leaves ${payoutAmountSats} sats from a ${row.amountSats} sat HTLC — below the ${ONCHAIN_DUST_SATS} sat dust limit`,
+        `claim fee ${fee} at ${feeRate} sat/vB leaves ${payoutAmountSats} sats from a ${sizing.fundingValueSats} sat HTLC — below the ${ONCHAIN_DUST_SATS} sat dust limit`,
       )
       return false
     }
 
-    const unsigned = buildOnchainClaimTx({ ...sizingParams, payoutAmountSats })
+    const unsigned = buildOnchainClaimTx({ ...sizing.params, payoutAmountSats })
     const signed = await signOnchainClaimTx(unsigned, signer, preimage)
     // Recorded BEFORE the broadcast, so a resumed process has a key to ask about.
     await store.patch(row.id, { onchain_claim_txid: signed.id })
@@ -913,25 +916,23 @@ export class OnchainReceiveSwapService {
     }
     const feeRate = await onchain.estimateFeeRate()
     const preimage = hex.decode(row.preimage)
-    const sizingParams = {
+    const sizing = onchainClaimSizing(row, {
       htlc,
       preimage,
       fundingTxid: row.fundingTxid,
       fundingVout: row.fundingVout,
-      fundingValueSats: row.amountSats,
       destinationScript: claimDestinationScript,
-      payoutAmountSats: BigInt(row.amountSats),
-    }
-    const fee = BigInt(Math.ceil(estimateClaimTxVsize(sizingParams) * feeRate))
-    const payoutAmountSats = BigInt(row.amountSats) - fee
+    })
+    const fee = BigInt(Math.ceil(estimateClaimTxVsize(sizing.params) * feeRate))
+    const payoutAmountSats = sizing.payoutAfterFee(fee)
     if (payoutAmountSats < BigInt(ONCHAIN_DUST_SATS)) {
       return {
         refused:
           `still uneconomic: fee ${fee} at ${feeRate} sat/vB leaves ${payoutAmountSats} sats ` +
-          `from a ${row.amountSats} sat HTLC, under the ${ONCHAIN_DUST_SATS} sat dust limit`,
+          `from a ${sizing.fundingValueSats} sat HTLC, under the ${ONCHAIN_DUST_SATS} sat dust limit`,
       }
     }
-    const unsigned = buildOnchainClaimTx({ ...sizingParams, payoutAmountSats })
+    const unsigned = buildOnchainClaimTx({ ...sizing.params, payoutAmountSats })
     const signed = await signOnchainClaimTx(unsigned, signer, preimage)
     // Recorded BEFORE the broadcast, so a resumed process has a key to ask about.
     await store.patch(row.id, { onchain_claim_txid: signed.id })

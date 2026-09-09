@@ -4,7 +4,7 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { base64, hex } from '@scure/base'
-import { SigHash } from '@scure/btc-signer'
+import { SigHash, Transaction } from '@scure/btc-signer'
 import { ArkAddress } from '@arkade-os/sdk'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { EMPTY_LOCKUP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
@@ -1192,6 +1192,114 @@ describe('OnchainReceiveSwapService', () => {
 
         expect(await service.claimNow(claimed.id)).toEqual({ txid: sent })
       })
+    })
+  })
+
+  describe('a row whose output holds something other than the quote', () => {
+    // 100bps + 50 flat on 50_000: quoted give 50_000, quoted payout 49_450 —
+    // a 550 sat absolute fee, which is what has to survive a re-size.
+    const withFee = () =>
+      new OnchainReceiveSwapService({
+        store,
+        onchain: deps.onchain,
+        arkade: deps.arkadeFake.arkade,
+        covclaimd: deps.covclaimd,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        claimDestinationScript,
+        now: clock,
+        fee: { bps: 100, flatSats: 50 },
+      })
+
+    /** The adoption edge a tolerance band will drive, written by hand — `whenQuoted` is unchanged and still demands exact equality. */
+    const adopt = async (svc: OnchainReceiveSwapService, fundedValueSats: number) => {
+      const outcome = await svc.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      const swap = outcome.swap
+      deps.onchain.receiveExternal({ address: swap.onchainAddress, amountSats: fundedValueSats })
+      deps.onchain.mineBlocks(1)
+      const output = (await deps.onchain.findOutputs({ address: swap.onchainAddress }))[0]!
+      await store.transition(swap.id, 'quoted', 'awaiting_confirmations', {
+        funding_txid: output.txid,
+        funding_vout: output.vout,
+        funded_value_sats: fundedValueSats,
+        funded_payout_sats: swap.payoutSats + (fundedValueSats - swap.amountSats),
+      })
+      return store.get(swap.id)
+    }
+
+    it('pays the Arkade lockup the amended payout, so the overfund reaches the CLIENT', async () => {
+      const svc = withFee()
+      const row = await adopt(svc, 55_000)
+      expect(row.amountSats).toBe(50_000)
+      expect(row.payoutSats).toBe(49_450)
+
+      expect((await svc.tick(row.id)).state).toBe('awaiting_claim')
+      const lockup = deps.arkadeFake.lockups.get(row.pkScript)![0]!
+      expect(lockup.value).toBe(54_450)
+      // The whole point, as one number: the solver's take is the absolute fee
+      // it quoted, whatever turned up. Reading `payoutSats` here instead would
+      // hand it 5_550.
+      expect(55_000 - lockup.value).toBe(50_000 - row.payoutSats)
+    })
+
+    it('sizes the L1 claim on the funded value, so nothing is left behind for miners', async () => {
+      const svc = withFee()
+      const row = await adopt(svc, 55_000)
+      await svc.tick(row.id)
+      deps.arkadeFake.spendLockup(row.pkScript, P)
+      await store.transition(row.id, 'awaiting_claim', 'claimed', { preimage: hex.encode(P) })
+
+      const broadcastRaw = deps.onchain.broadcastRaw.bind(deps.onchain)
+      let raw: string | undefined
+      deps.onchain.broadcastRaw = async (txHex) => {
+        raw = txHex
+        return broadcastRaw(txHex)
+      }
+      await svc.tick(row.id)
+      deps.onchain.broadcastRaw = broadcastRaw
+
+      const claimTx = Transaction.fromRaw(hex.decode(raw!), { allowUnknownOutputs: true, allowUnknownInputs: true })
+      const paid = claimTx.getOutput(0).amount!
+      // Sized on 50_000 this can never exceed 50_000, whatever the fee rate.
+      expect(paid).toBeGreaterThan(50_000n)
+      const l1Fee = 55_000n - paid
+      expect(l1Fee).toBeGreaterThan(0n)
+      expect(l1Fee).toBeLessThan(2_000n)
+      expect(hex.encode(claimTx.getOutput(0).script!)).toBe(hex.encode(claimDestinationScript))
+    })
+
+    it('follows an UNDERfund down as readily as an overfund up', async () => {
+      const svc = withFee()
+      const row = await adopt(svc, 47_000)
+      expect((await svc.tick(row.id)).state).toBe('awaiting_claim')
+      const lockup = deps.arkadeFake.lockups.get(row.pkScript)![0]!
+      expect(lockup.value).toBe(46_450)
+      expect(47_000 - lockup.value).toBe(550)
+    })
+
+    it('adopts a lockup already paid at the amended amount instead of paying twice', async () => {
+      const svc = withFee()
+      const row = await adopt(svc, 55_000)
+      // A crash between broadcast and the transition recording it: the lockup
+      // is out there at 54_450. Sized against `payoutSats` the resume check
+      // reads 54_450 >= 49_450 and adopts anyway, so this only bites for an
+      // UNDERfund — where 46_450 >= 49_450 is false and the solver pays again.
+      deps.arkadeFake.seedLockup(row.lockupAddress, { txid: 'external-fund', vout: 0, value: 54_450 })
+      expect((await svc.tick(row.id)).state).toBe('awaiting_claim')
+      expect(deps.arkadeFake.lockups.get(row.pkScript)!.length).toBe(1)
+    })
+
+    it('does not pay an underfunded lockup a second time on resume', async () => {
+      const svc = withFee()
+      const row = await adopt(svc, 47_000)
+      deps.arkadeFake.seedLockup(row.lockupAddress, { txid: 'external-fund', vout: 0, value: 46_450 })
+      expect((await svc.tick(row.id)).state).toBe('awaiting_claim')
+      expect(deps.arkadeFake.lockups.get(row.pkScript)!.length).toBe(1)
     })
   })
 })
