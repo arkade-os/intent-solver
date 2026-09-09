@@ -143,6 +143,15 @@ const refusalDetail = (input: OfferFillInput, reason: OfferFillRefusal, bounds: 
     ? `${amountsOf(input)}; ${bounds.source} bounds ${bounds.min}..${bounds.max}`
     : amountsOf(input)
 
+// What `consider` actually priced. Never re-derived from the chain: that would
+// re-ask what the offer IS, the substitution `arkade/offerSettle.ts` guards.
+const termsOf = (row: OfferFillRow): OfferFillInput => ({
+  wantAssetId: row.wantAssetId,
+  wantAmount: row.wantAmount,
+  offerAssetId: row.offerAssetId,
+  offerAmount: row.offerAmount,
+})
+
 /** The decision, plus the row id when the intent was recorded. */
 export type ConsiderOutcome = OfferFillDecision & { id?: string }
 
@@ -198,8 +207,10 @@ export class AssetOfferService {
    * True when no pricing is configured at all — a deployment that has not
    * opted into price gating is unchanged. But a market that IS priced and
    * cannot be read refuses: an unreadable feed must not become a free fill.
+   * A feed failure is reported under `id`, which defaults because `consider`
+   * has no row yet; `tickAll` has one and passes it.
    */
-  private async withinTolerance(input: OfferFillInput): Promise<boolean> {
+  private async withinTolerance(input: OfferFillInput, id = 'price'): Promise<boolean> {
     const pricing = this.deps.pricing
     if (!pricing || pricing.length === 0) return true
 
@@ -218,7 +229,7 @@ export class AssetOfferService {
         feed,
       })
     } catch (error) {
-      this.deps.onError?.('price', error)
+      this.deps.onError?.(id, error)
       return false
     }
   }
@@ -308,12 +319,22 @@ export class AssetOfferService {
    * leaves a row that says something may be in flight rather than one that
    * still reads fillable. `transition` is compare-and-swap, so two ticks racing
    * one row cannot both submit.
+   *
+   * Price admission is re-run first; this loop reaches a row arbitrarily late.
    */
   async tickAll(): Promise<number> {
     if (!this.deps.settle) return 0
     let filled = 0
     for (const row of await this.deps.store.listNonTerminal()) {
       if (row.state !== 'fillable') continue
+      // BEFORE the CAS: `fillable` has an edge to `refused` and `filling` has
+      // none, which is also the honest shape — nothing is submitted yet.
+      const terms = termsOf(row)
+      if (!(await this.withinTolerance(terms, row.id))) {
+        this.deps.onRefused?.(`${row.offerTxid}:${row.offerVout}`, 'price_out_of_tolerance', amountsOf(terms))
+        await this.deps.store.fail(row.id, 'fillable', `price_out_of_tolerance; ${amountsOf(terms)}`)
+        continue
+      }
       if (!(await this.deps.store.transition(row.id, 'fillable', 'filling'))) continue
       try {
         const txid = await this.deps.settle(row)

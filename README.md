@@ -392,6 +392,9 @@ that is the only knob that touches an amount at risk at all.
 | `RELAY_HEALTH_PATH`                           | `.data/relay-health` (`/data/relay-health` in the image) | `relay` touches this mtime every 10s while the socket is up; the image's `HEALTHCHECK` reads exactly this path                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `NOSTR_AD_PUBLISH`                            | `off`                                                    | whether this solver advertises itself on Nostr (kind 38859, `docs/rfq-protocol.md` § 3). `manual` publishes only when asked; `auto` also republishes on change or heartbeat. Under `off` the console's **post now** action is REFUSED, not merely unused — a policy an action can override is advisory. Any other value throws                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `COVCLAIMD_URL`                               | none                                                     | base URL of the non-interactive claim daemon. Unset = receive legs claim nothing on a client's behalf (the client claims its own lockup); set = funded lockups are revealed to it so an offline client still gets paid. **On `bitcoin` this must be `https://`** unless the host is loopback, and `loadConfig` throws otherwise: suppressing the reveal strands an offline client's lockup until refund |
+| `SENTRY_DSN`                                  | none                                                     | crash reporting. **Unset (the default) builds no reporter and sends no packet.** Set it and a process-level panic, an unhandled rejection and an ingress FAULT are reported — a refusal never is. Only the exception type, a scrubbed message and a file/line stack leave the box: no config, no env, no locals, no source, no breadcrumbs. A malformed DSN throws at startup rather than reporting nowhere |
+| `SENTRY_ENVIRONMENT`                          | `SWAP_NETWORK`                                           | the environment tag on reported events                                                                                                                                                                                                                                                                                                                                                                 |
+| `SENTRY_RELEASE`                              | none                                                     | optional release tag, for grouping events by deployed version                                                                                                                                                                                                                                                                                                                                          |
 
 `PORT`, `OPEN_RFQ_MAX_BIDS_PER_MIN` and `LOCKUP_TIMEOUT_SECONDS` go through `intFromEnv`, which treats an
 empty or whitespace value as unset rather than as `Number('') === 0`. The three
@@ -921,8 +924,10 @@ Three more stack requirements, all covered in the runbook:
   stack's defaults to block counts; `deriveUnilateralDelays` hard-rejects
   anything below 512 as a block count, so the service dies at wallet
   construction — before any swap runs
-- **`COVCLAIMD_IMAGE` must be set explicitly** — `regtest.mjs` silently drops
-  covclaimd from the stack when it is unset. No error; the container is not there
+- **`COVCLAIMD_IMAGE` must be set explicitly, and at `v0.0.1-rc.5` or above** —
+  `regtest.mjs` silently drops covclaimd from the stack when it is unset (no
+  error; the container is not there), and the compose default is `rc.4`, which
+  cannot claim against the emulator that same stack ships
 - **the operator's intent-fee policy affects renewal.** arkade-regtest
   configures `ARK_OFFCHAIN_INPUT_FEE="amount * 0.01"`, so every settlement
   costs 1% of each input. This is **operator policy, not a regtest quirk**. The
@@ -967,11 +972,14 @@ Two more, current as of the receive corridors going live:
   The cause is now known and fixed upstream: `rc.1` matched the v1 preimage
   condition against our `ScriptV2` taptree, so its claim closure never matched.
   `v0.0.1-rc.3` carries the v2 form (and a separate taptree-binding fix from
-  `rc.2`), and the runbook's stack commands pin `rc.4`.
+  `rc.2`), and the runbook's stack commands pin `rc.5` — a floor, because
+  emulator `v0.0.7` made the `PrevArkTx` PSBT field mandatory and `rc.4` is the
+  last build that omits it. `docs/runbook.md` § covclaimd has the symptom, which
+  is silent on the wire and visible only in the two container logs.
 
   **The live claim has now been watched**, which was the standing precondition
   here: `test/e2e/covclaimdClaim.e2e.test.ts` claims a real lockup against a
-  running `rc.4`, and `receiveLightningEdges.e2e.test.ts` drives a whole receive
+  running `rc.5`, and `receiveLightningEdges.e2e.test.ts` drives a whole receive
   swap to `settled` on covclaimd's own claim with the client never acting. What
   keeps this unwired is therefore the wiring work itself, no longer doubt about
   the daemon. See `docs/runbook.md` § covclaimd.

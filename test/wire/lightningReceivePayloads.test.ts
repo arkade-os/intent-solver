@@ -34,6 +34,7 @@ const row: ReceiveSwapRow = {
   lockupAddress: 'tark1lockupexample',
   solverRefundPkScript: '77'.repeat(34),
   nonInteractiveParameters: null,
+  fundStartedAt: null,
   arkadeLockupTxid: null,
   arkadeLockupVout: null,
   arkadeLockupValue: null,

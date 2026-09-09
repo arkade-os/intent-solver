@@ -48,7 +48,8 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { Transaction, SigHash, p2tr } from '@scure/btc-signer'
-import { loadConfig, swapDbPath, type Config } from './config.js'
+import { loadConfig, sentryOptionsFromEnv, swapDbPath, type Config } from './config.js'
+import { createErrorReporter, type ErrorReporter } from './ops/sentry.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
 import { findLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -253,15 +254,6 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       }
     },
     onError: (error) => log('lockup watcher:', error instanceof Error ? error.message : String(error)),
-    // A lockup whose script is not a registered contract can never reach this
-    // stream. The sweep registers what it adopts, on the same pass, and the
-    // watcher only reports a script still uncovered on the read AFTER that —
-    // so this line means a registration that failed or silently skipped the
-    // row, not one still in flight. Those swaps fall back to the sweep, which
-    // is correct but slower, and an operator should hear it rather than infer
-    // it from a latency graph.
-    onUnwatched: (scripts) =>
-      log(`lockup watcher: ${scripts.length} lockup(s) are not registered contracts, sweep-only:`, scripts.join(', ')),
   })
   watcher.start()
 
@@ -324,12 +316,9 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
     const adopted = [...next.keys()].filter((script) => !swapByScript.has(script))
     swapByScript = next
     watcher.sync([...swapByScript.keys()])
-    // Registration is what puts a lockup on the contract stream at all, and it
-    // used to run only on the five-minute lifecycle cadence — so a swap quoted
-    // just after one pass spent up to five minutes on the watched list without
-    // being watchable, getting none of the fast path it had just been added to.
-    // It runs here too now, the moment a script is adopted; the cadenced pass
-    // stays the reconciliation that also retires what the sweep has dropped.
+    // Not for watching any more — `watcher.sync` above does that. It runs for
+    // what a contract row is still needed for: `armContractForExit` throws
+    // without one, and the recovery sweep reads the contract snapshot.
     //
     // Not awaited, for the reason the whole watcher is not awaited: this
     // reaches `getContractManager()`, and the money path does not wait on the
@@ -912,7 +901,10 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       onRefusal: (context, detail) => log(`${context}:`, detail),
       // Same sink, different word: `onRefusal` above is this host answering
       // correctly, so a fault must not read as ordinary business.
-      onError: (context, error) => log(`${context} FAULT:`, error instanceof Error ? error.message : String(error)),
+      onError: (context, error) => {
+        log(`${context} FAULT:`, error instanceof Error ? error.message : String(error))
+        reporter?.report(context, error)
+      },
     })
     const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host, ...HONO_SERVE_OPTIONS })
     log(`listening on ${config.host}:${config.port}`)
@@ -969,8 +961,10 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       },
       codec,
     })
-    const onError = (context: string, error: unknown): void =>
+    const onError = (context: string, error: unknown): void => {
       log(`${context}:`, error instanceof Error ? error.message : String(error))
+      reporter?.report(context, error)
+    }
     // A refusal is an ANSWER, not a fault, so it never reaches `onError` — and
     // for a long time that meant a turned-away request left no trace at all.
     const onRefusal = (context: string, detail: string): void => log(`${context}:`, detail)
@@ -1906,7 +1900,29 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
   },
 }
 
+/** Null unless `SENTRY_DSN` is set; every call site is optional-chained. */
+let reporter: ErrorReporter | null = null
+
+/**
+ * Handling these events REPLACES Node's own handler, so this has to end in the
+ * non-zero exit Node would have produced: a money-mover that survives its own
+ * panic and keeps ticking is worse than one that restarts.
+ */
+const panic = async (context: string, error: unknown): Promise<void> => {
+  console.error(`${context}:`, error instanceof Error ? (error.stack ?? error.message) : String(error))
+  reporter?.report(context, error)
+  await reporter?.flush()
+  process.exit(1)
+}
+
 const main = async (): Promise<void> => {
+  // Before the command resolves: a panic while reading the environment is one
+  // worth reporting, and `loadConfig` has not run yet.
+  reporter = createErrorReporter(sentryOptionsFromEnv())
+  if (reporter) {
+    process.on('uncaughtException', (error) => void panic('uncaught exception', error))
+    process.on('unhandledRejection', (reason) => void panic('unhandled rejection', reason))
+  }
   const [, , command, ...args] = process.argv
   const handler = command ? commands[command] : undefined
   if (!handler) {
@@ -1919,7 +1935,11 @@ const main = async (): Promise<void> => {
 
 main()
   .then(() => process.exit(process.exitCode ?? 0))
-  .catch((error) => {
+  .catch(async (error) => {
     console.error('failed:', error instanceof Error ? error.message : String(error))
+    // A GiveUp names a usage mistake or a disabled corridor — an ANSWER, not a
+    // fault, and the rule `onRefusal` already follows.
+    if (!(error instanceof GiveUp)) reporter?.report('cli', error)
+    await reporter?.flush()
     process.exit(1)
   })

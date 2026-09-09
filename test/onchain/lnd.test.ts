@@ -9,10 +9,14 @@ import { hex } from '@scure/base'
 // drive its events directly, the same way wallet.test.ts module-mocks
 // @arkade-os/sdk's RestEmulatorProvider for the same reason (constructed
 // internally, not injected).
-const { subscribeToChainSpend, createChainAddress } = vi.hoisted(() => ({
-  subscribeToChainSpend: vi.fn(),
-  createChainAddress: vi.fn(),
-}))
+const { subscribeToChainSpend, createChainAddress, getChainFeeRate, sendToChainAddress, getChainTransactions } =
+  vi.hoisted(() => ({
+    subscribeToChainSpend: vi.fn(),
+    createChainAddress: vi.fn(),
+    getChainFeeRate: vi.fn(),
+    sendToChainAddress: vi.fn(),
+    getChainTransactions: vi.fn(),
+  }))
 vi.mock('lightning', async (importOriginal) => {
   const actual = await importOriginal<typeof import('lightning')>()
   return {
@@ -23,10 +27,15 @@ vi.mock('lightning', async (importOriginal) => {
     getWalletInfo: vi.fn(async () => ({ current_block_height: 102 })),
     subscribeToChainSpend,
     createChainAddress,
+    getChainFeeRate,
+    sendToChainAddress,
+    getChainTransactions,
   }
 })
 
 const { LndOnchainAdapter } = await import('@arkade-os/solver-rails-lnd/onchain/lnd/adapter.js')
+const { LND_READ_TIMEOUT_MS, LndReadTimeoutError } = await import('@arkade-os/solver-rails-lnd/deadline.js')
+const { onchainFeeRateSampler } = await import('@arkade-os/solver-app/ops/onchainPricing.js')
 
 describe('LndOnchainAdapter.findOutputs', () => {
   const address = 'bcrt1pexample'
@@ -95,6 +104,64 @@ describe('LndOnchainAdapter.findOutputs', () => {
   it('refuses to guess when no Esplora URL is configured, rather than under-reporting', async () => {
     const adapter = await LndOnchainAdapter.create({ socket: 's', cert: 'c', macaroon: 'm' })
     await expect(adapter.findOutputs({ address })).rejects.toThrow(/Esplora URL/)
+  })
+})
+
+describe('LndOnchainAdapter.fund', () => {
+  const htlc = 'bcrt1qhtlc'
+  const config = { socket: 's', cert: 'c', macaroon: 'm' }
+  const key = () => p2wpkh(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true)).script
+
+  const rawTx = (amounts: number[], withAddresslessOutputFirst: boolean): string => {
+    const tx = new Transaction({ allowUnknownOutputs: true, allowUnknownInputs: true })
+    tx.addInput({ txid: 'ff'.repeat(32), index: 0, sequence: 0xfffffffd })
+    if (withAddresslessOutputFirst) tx.addOutput({ script: new Uint8Array([0x6a, 0x03, 1, 2, 3]), amount: 0n })
+    for (const amount of amounts) tx.addOutput({ script: key(), amount: BigInt(amount) })
+    return hex.encode(tx.toBytes(true, false))
+  }
+
+  beforeEach(() => {
+    sendToChainAddress.mockReset()
+    getChainTransactions.mockReset()
+    sendToChainAddress.mockResolvedValue({ id: 'fundtx' })
+  })
+
+  it('locates the vout by address when every output has one', async () => {
+    getChainTransactions.mockResolvedValue({
+      transactions: [
+        { id: 'fundtx', output_addresses: ['bcrt1qchange', htlc], transaction: rawTx([99_000, 50_000], false) },
+      ],
+    })
+    const adapter = await LndOnchainAdapter.create(config)
+    await expect(adapter.fund({ address: htlc, amountSats: 50_000, idempotencyKey: 'k' })).resolves.toEqual({
+      txid: 'fundtx',
+      vout: 1,
+    })
+  })
+
+  it('refuses a vout the raw transaction does not confirm, rather than returning a shifted one', async () => {
+    // The HTLC is really vout 2; `indexOf` answers 1, the change. A wrong
+    // outpoint aims the claim and refund watch at an output the swap never owned.
+    getChainTransactions.mockResolvedValue({
+      transactions: [
+        { id: 'fundtx', output_addresses: ['bcrt1qchange', htlc], transaction: rawTx([99_000, 50_000], true) },
+      ],
+    })
+    const adapter = await LndOnchainAdapter.create(config)
+    await expect(adapter.fund({ address: htlc, amountSats: 50_000, idempotencyKey: 'k' })).rejects.toThrow(
+      /does not pay 50000 sats|cannot be confirmed/i,
+    )
+  })
+
+  it('still answers when LND supplies no raw transaction to check against', async () => {
+    getChainTransactions.mockResolvedValue({
+      transactions: [{ id: 'fundtx', output_addresses: ['bcrt1qchange', htlc] }],
+    })
+    const adapter = await LndOnchainAdapter.create(config)
+    await expect(adapter.fund({ address: htlc, amountSats: 50_000, idempotencyKey: 'k' })).resolves.toEqual({
+      txid: 'fundtx',
+      vout: 1,
+    })
   })
 })
 
@@ -336,5 +403,84 @@ describe('the findSpendWitness contract, across adapters', () => {
     const fn = esplora.slice(start, end === -1 ? undefined : end)
     const code = fn.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
     expect(code).not.toContain('confirmed')
+  })
+})
+
+describe('LndOnchainAdapter read deadlines', () => {
+  const config = { socket: 'x', cert: 'y', macaroon: 'z' }
+
+  const NO_BOUNDS = {
+    'arkade:BTC->lightning:BTC': null,
+    'lightning:BTC->arkade:BTC': null,
+    'arkade:BTC->onchain:BTC': null,
+    'onchain:BTC->arkade:BTC': null,
+  } as const
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    getChainFeeRate.mockReset()
+    sendToChainAddress.mockReset()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('abandons a chain fee read that never answers, as an error that names itself', async () => {
+    getChainFeeRate.mockImplementation(() => new Promise(() => {}))
+    const adapter = await LndOnchainAdapter.create(config)
+
+    const outcome = adapter.estimateFeeRate().then(
+      (rate) => rate,
+      (error) => error,
+    )
+    await vi.advanceTimersByTimeAsync(LND_READ_TIMEOUT_MS)
+
+    const settled = await Promise.race([outcome, Promise.resolve('still-pending')])
+    expect(settled).toBeInstanceOf(LndReadTimeoutError)
+    expect(settled).toMatchObject({ call: 'getChainFeeRate' })
+  })
+
+  // The damage is PERMANENCE: `freshly` clears `inFlight` in a `.finally()`
+  // that never runs if the fetch never settles, so one hung read stops the
+  // sampler refreshing for the life of the process. Same shape as #86.
+  it('recovers the fee-rate sampler from a read that never answers, instead of wedging it forever', async () => {
+    let calls = 0
+    getChainFeeRate.mockImplementation(() => {
+      calls += 1
+      return calls === 1 ? new Promise(() => {}) : Promise.resolve({ tokens_per_vbyte: 12 })
+    })
+    const adapter = await LndOnchainAdapter.create(config)
+    let clock = 0
+    const sampler = onchainFeeRateSampler({
+      bounds: { ...NO_BOUNDS, 'onchain:BTC->arkade:BTC': { capSats: 1_000, minSats: 0 } },
+      estimateFeeRate: () => adapter.estimateFeeRate(),
+      refreshAfterMs: 1_000,
+      staleAfterMs: 10_000,
+      now: () => clock,
+    })
+    expect(sampler).not.toBeNull()
+
+    sampler?.()
+    await vi.advanceTimersByTimeAsync(LND_READ_TIMEOUT_MS)
+    clock += 2_000
+    // Reaches the backend a second time only if the first fetch released `inFlight`.
+    sampler?.()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(calls).toBe(2)
+    expect(sampler?.()).toBe(12)
+  })
+
+  it('leaves the funding submit unbounded, because an aborted send has an unknown outcome', async () => {
+    sendToChainAddress.mockImplementation(() => new Promise(() => {}))
+    const adapter = await LndOnchainAdapter.create(config)
+
+    const outcome = adapter.fund({ address: 'bcrt1qdest', amountSats: 1_000, idempotencyKey: 'k' }).then(
+      () => 'settled',
+      () => 'rejected',
+    )
+    await vi.advanceTimersByTimeAsync(LND_READ_TIMEOUT_MS * 10)
+
+    expect(await Promise.race([outcome, Promise.resolve('still-pending')])).toBe('still-pending')
   })
 })

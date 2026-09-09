@@ -59,6 +59,7 @@ const arkade: ArkadeOps = {
   hrp: 'ark',
   findLockups: async () => lockups,
   lockupProvablySpent: async () => false,
+  lockupSpendEvidence: async () => 'unspent' as const,
   claim: async () => 'claim-txid',
   refund: async (row) => {
     refundCalls.push(row.id)

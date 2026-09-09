@@ -18,7 +18,7 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.4.70",
+    "@arkade-os/sdk": "0.4.71",
     "@arkade-os/solver-arkade": "workspace:*",
     "@arkade-os/solver-core": "workspace:*",
     "@arkade-os/solver-corridors": "workspace:*",
@@ -34,10 +34,11 @@
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
+    "@scure/bip39": "^2.2.0",
     "@scure/btc-signer": "^2.0.1",
     "hono": "^4.13.0"
   },
   "devDependencies": {
-    "@arkade-os/swap": "0.0.13"
+    "@arkade-os/swap": "0.0.14"
   }
 }

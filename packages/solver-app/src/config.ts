@@ -28,6 +28,10 @@ import { parseAssetMarkets, type AssetMarket } from './ops/assetOffers.js'
 import { parseAssetRfqTokens, type AssetRfqToken } from './ops/assetRfqMarkets.js'
 import type { ArkadeWalletConfig } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
+import { parseSentryDsn, type SentryOptions } from './ops/sentry.js'
+
+/** The network a deployment that sets nothing runs as. */
+const DEFAULT_NETWORK = 'regtest'
 
 const required = (name: string): string => {
   const value = process.env[name]
@@ -426,6 +430,8 @@ export interface Config {
    * HEALTHCHECK reads exactly this path.
    */
   relayHealthPath: string
+  /** Crash reporting, or null when `SENTRY_DSN` is unset. @see sentryOptionsFromEnv */
+  sentry: SentryOptions | null
   /**
    * Whether this solver advertises itself on Nostr (kind 38859).
    *
@@ -502,6 +508,25 @@ export const swapDbPath = (): string => process.env.SWAP_DB_PATH?.trim() || join
  * directory.
  */
 export const arkDbPath = (): string => process.env.ARK_DB_PATH?.trim() || join(dbDir(), 'ark.sqlite')
+
+/**
+ * Crash reporting, or null when `SENTRY_DSN` is unset.
+ *
+ * Exported standalone for the reason {@link swapDbPath} is: `cli.ts` installs
+ * the process handlers before {@link loadConfig} runs. A malformed DSN throws
+ * rather than disabling itself — silent non-reporting is found during incidents.
+ */
+export const sentryOptionsFromEnv = (): SentryOptions | null => {
+  const dsn = process.env.SENTRY_DSN?.trim()
+  if (!dsn) return null
+  return {
+    dsn: parseSentryDsn(dsn),
+    // Shared with loadConfig below, so a default deployment's events are not
+    // filed under an environment the solver is not running as.
+    environment: process.env.SENTRY_ENVIRONMENT?.trim() || process.env.SWAP_NETWORK?.trim() || DEFAULT_NETWORK,
+    release: process.env.SENTRY_RELEASE?.trim() || undefined,
+  }
+}
 
 /** The fake backend's preimage map — regtest's database, in every sense. */
 const fakeLnStatePath = (): string => process.env.FAKE_LN_STATE_PATH?.trim() || join(dbDir(), 'fake-ln.json')
@@ -855,7 +880,7 @@ const sendHintScidDenylistFromEnv = (): ReadonlySet<string> => {
 }
 
 export const loadConfig = (): Config => {
-  const raw = process.env.SWAP_NETWORK ?? 'regtest'
+  const raw = process.env.SWAP_NETWORK ?? DEFAULT_NETWORK
   if (!isSwapNetwork(raw)) {
     throw new Error(`SWAP_NETWORK must be one of ${Object.keys(NETWORKS).join(', ')}, got ${raw}`)
   }
@@ -1018,6 +1043,7 @@ export const loadConfig = (): Config => {
     // block supplies the container path, so /data lives in one place — beside
     // the VOLUME that declares it — rather than baked into an app default.
     relayHealthPath: process.env.RELAY_HEALTH_PATH?.trim() || '.data/relay-health',
+    sentry: sentryOptionsFromEnv(),
     /** `off` (default) | `manual` | `auto`. See docs/rfq-protocol.md § 3. */
     nostrAdPublish: ((): AdPublishMode => {
       const raw = (process.env.NOSTR_AD_PUBLISH ?? 'off').trim().toLowerCase()
