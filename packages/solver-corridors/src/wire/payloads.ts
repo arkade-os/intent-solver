@@ -35,12 +35,16 @@ export {
   RfqOpen,
   rfqBidPayload,
   RFQ_REFUSAL_REASON_VALUES,
+  RFQ_REFUSAL_ERROR_CODE_VALUES,
+  isRfqRefusalErrorCode,
   isRfqRefusalReason,
   RFQ_REFUSAL_REASONS,
   toRfqReason,
   rfqRefusalPayload,
   type RfqOpenPayload,
   type RfqRefusalReason,
+  type RfqRefusalError,
+  type RfqRefusalErrorCode,
 } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import { RFQ_ID, RFQ_PAIR, AMOUNT_SIDE, RFQ_AMOUNT } from '@arkade-os/solver-core/core/rfqProtocol.js'
 

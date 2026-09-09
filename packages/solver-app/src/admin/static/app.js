@@ -285,6 +285,7 @@ const VIEWS = [
   ['swaps', 'swaps'],
   ['offers', 'offers'],
   ['quotes', 'quotes'],
+  ['refusals', 'request refusals'],
   ['wallet', 'wallet'],
   ['backends', 'backends'],
   ['diagnostics', 'diagnostics'],
@@ -804,6 +805,38 @@ const offersView = () => {
                 h('td.faint', { title: refusal.outpoint }, shortId(refusal.outpoint)),
                 h('td.muted', refusal.detail),
                 h('td.muted', ago(refusal.at)),
+              ),
+            ),
+          ),
+        ),
+  )
+}
+
+const refusalsView = () => {
+  const d = state.data.refusals
+  if (!d) return h('p.muted', 'loading…')
+  return h(
+    'div',
+    h('h2.sans', 'request refusals'),
+    h('p.notice', `The latest ${d.capacity} RFQ refusals, newest first. Cleared when this solver restarts.`),
+    h('button.act', { onclick: () => load('refusals') }, 'refresh'),
+    d.entries.length === 0
+      ? h('p.muted', 'no request refusals recorded since this process started')
+      : h(
+          'table.rfq-refusals',
+          h('thead', h('tr', h('th', 'time'), h('th', 'request'), h('th', 'reason and detail'))),
+          h(
+            'tbody',
+            d.entries.map((refusal) =>
+              h(
+                'tr',
+                h('td.muted', new Date(refusal.at * 1000).toISOString()),
+                h(
+                  'td',
+                  h('div', `${refusal.transport} / ${refusal.requestType}`),
+                  h('details', h('summary', shortId(refusal.rfqId)), h('code', refusal.rfqId ?? 'no valid request ID')),
+                ),
+                h('td', h('div', refusal.reason), h('p.muted', refusal.detail)),
               ),
             ),
           ),
@@ -2351,6 +2384,7 @@ const ENDPOINTS = {
     return `/api/swaps?${params}`
   },
   offers: () => '/api/offers',
+  refusals: () => '/api/rfq-refusals',
   quotes: () => '/api/quotes',
   wallet: () => '/api/wallet',
   backends: () => '/api/backends',
@@ -2393,6 +2427,7 @@ const BODIES = {
   overview: overviewView,
   swaps: swapsView,
   offers: offersView,
+  refusals: refusalsView,
   quotes: quotesView,
   wallet: walletView,
   backends: backendsView,

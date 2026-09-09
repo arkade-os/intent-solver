@@ -91,8 +91,11 @@ export interface EvmChainConfig {
   quoteValiditySeconds: number
   /**
    * Blocks per `eth_getLogs` request, defaulted to the 10k cap Alchemy and
-   * Infura publish. Settable: some cap at 2k, and a rejected scan reads as
-   * an unclaimed lock rather than as an error.
+   * Infura publish. Settable: some cap at 2k, and a rejected scan reads as an
+   * unclaimed lock rather than as an error. Above the endpoint's cap is
+   * therefore silent, and shows only once a scan is long enough to use the
+   * full span — a page is `min(this, tip - floor + 1)`, so recent swaps fit
+   * whatever you set. Below only costs round trips.
    */
   logScanRange: number
 }

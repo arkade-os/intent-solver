@@ -105,6 +105,9 @@ const CONFIG_KEYS = [
   'FAKE_LN_STATE_PATH',
   'POOL_AUTO_MINT',
   'CONTRACT_RETENTION_DAYS',
+  // Listed for the same reason the rest are: a leaked bad value makes every
+  // later `loadConfig()` in the file throw.
+  'ONCHAIN_RECEIVE_MAX_BAND_SATS',
   'LN_SEND_HINT_SCID_DENYLIST',
   // Listed for the same reason `EVM_TOKENS` is: a leaked `OFFER_MARKETS` would
   // give every later test in the run an offer path it never asked for, and one
@@ -614,6 +617,36 @@ describe('CONTRACT_RETENTION_DAYS', () => {
     // ever ruled out, this test is where that decision gets recorded.
     process.env.CONTRACT_RETENTION_DAYS = '0.5'
     expect(loadConfig().contractRetentionMs).toBe(0.5 * 86_400_000)
+  })
+})
+
+describe('ONCHAIN_RECEIVE_MAX_BAND_SATS', () => {
+  it('defaults to the range that corridor already serves, so nothing new is offered or withheld', () => {
+    const config = loadConfig()
+    const limits = config.corridorLimits['onchain:BTC->arkade:BTC']
+    expect(config.onchainReceiveMaxBandSats).toBe(limits.maxSats - limits.minSats)
+  })
+
+  it('narrows how far a funded amount may drift from its quote', () => {
+    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '5000'
+    expect(loadConfig().onchainReceiveMaxBandSats).toBe(5_000)
+  })
+
+  it('accepts zero, which is exactly the strict equality shipped today', () => {
+    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '0'
+    expect(loadConfig().onchainReceiveMaxBandSats).toBe(0)
+  })
+
+  it('may only ever narrow, never widen past the corridor range', () => {
+    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '999999999999'
+    const config = loadConfig()
+    const limits = config.corridorLimits['onchain:BTC->arkade:BTC']
+    expect(config.onchainReceiveMaxBandSats).toBe(limits.maxSats - limits.minSats)
+  })
+
+  it.each(['-1', 'abc', '1.5', 'Infinity'])('rejects %s', (raw) => {
+    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = raw
+    expect(() => loadConfig()).toThrow(/ONCHAIN_RECEIVE_MAX_BAND_SATS must be a non-negative integer/)
   })
 })
 

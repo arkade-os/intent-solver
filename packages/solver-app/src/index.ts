@@ -70,13 +70,21 @@ export {
   rfqStateFromRow,
   toRfqReason,
   type RfqRefusalReason,
+  type RfqRefusalError,
+  type RfqRefusalErrorCode,
   type RfqState,
 } from '@arkade-os/solver-corridors/wire/payloads.js'
 /**
  * What a corridor's own `quote` needs to refuse a payload it cannot parse:
  * the rfq_id off an unparseable request, and a readable schema detail.
  */
-export { extractRfqId, zodDetail, isRfqRefusalReason } from '@arkade-os/solver-core/core/rfqProtocol.js'
+export {
+  extractRfqId,
+  zodDetail,
+  isRfqRefusalReason,
+  isRfqRefusalErrorCode,
+  RFQ_REFUSAL_ERROR_CODE_VALUES,
+} from '@arkade-os/solver-core/core/rfqProtocol.js'
 /** The SHARED exposure cap. A corridor that builds its own is uncapped against the rest. */
 export { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 export {

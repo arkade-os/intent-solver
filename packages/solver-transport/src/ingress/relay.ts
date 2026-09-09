@@ -30,6 +30,7 @@ import type { RelayConnection, RelayEvent, RelaySubscription } from '../relay/co
 import { eventId } from '../relay/connection.js'
 import { RfqOpen, rfqBidPayload, rfqRefusalPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import { respondToRfqRequest, respondToRfqStatus } from './rfq.js'
+import { reportRfqRefusal, type RfqRefusalObserver } from './refusals.js'
 import type { CorridorReaderSet, CorridorSet } from '@arkade-os/solver-core/core/corridor.js'
 import type { SwapIngress } from './port.js'
 
@@ -68,7 +69,7 @@ export interface RelayIngressDeps {
    * own payload. Diagnostic only: whether to answer, and with what, is decided
    * long before this is called.
    */
-  onRefusal?: (context: string, detail: string) => void
+  onRefusal?: RfqRefusalObserver
   now?: () => number
 }
 
@@ -255,14 +256,13 @@ export class RelayIngress implements SwapIngress {
           }
           return
         }
-        if (outcome.kind !== 'quote' && outcome.detail) {
-          this.deps.onRefusal?.('relay refused', `${outcome.kind}: ${outcome.detail}`)
-        }
+        reportRfqRefusal(this.deps.onRefusal, 'relay', 'rfq_request', outcome)
         await this.reply(event.author, outcome.payload)
         return
       }
       if (type === 'rfq_status_request') {
         const outcome = await respondToRfqStatus(this.readers, event.payload)
+        reportRfqRefusal(this.deps.onRefusal, 'relay', 'rfq_status_request', outcome)
         await this.reply(event.author, outcome.payload)
         return
       }
