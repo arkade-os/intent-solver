@@ -791,10 +791,13 @@ So a deployment that has been running with `EVM_SEND_USDC_ENABLED=FALSE` was
 quoting and filling that corridor for as long as the value has been set. The boot
 refusal is the first time anything said so — it is not merely a typo to fix.
 
-1. **Find out what it served** before touching the value. Filter that corridor in
-   the admin console for quotes and fills covering the period the variable has
-   been set; `cli status <id>` reads any one row in full. Rows exist if it was
-   live, and the float moved on terms nobody chose.
+1. **Find out what it served** before touching the value. The admin console's
+   swap list filters by corridor and reads the wider reader set — every EVM
+   corridor with a store is readable, enabled or not — so the rows are there and
+   timestamped, and anything dated after the variable was set is what the
+   corridor quoted and filled while you believed it dark. `cli status <id>` is
+   not the tool here: it opens the Lightning-send store directly and knows
+   nothing about an EVM row.
 2. **Then set the value you actually want** — but `false` is not a no-op on a
    corridor that has rows. It closes the corridor from that boot onward and does
    nothing about what was already filled, and the sweep stops driving it: the
