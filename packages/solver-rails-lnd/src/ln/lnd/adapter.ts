@@ -11,15 +11,16 @@ import {
   cancelHodlInvoice,
   createHodlInvoice,
   createInvoice as lndCreateInvoice,
-  getChannelBalance,
-  getInvoice,
+  getChannelBalance as lndGetChannelBalance,
+  getInvoice as lndGetInvoice,
   getPayment as lndGetPayment,
-  getRoutingFeeEstimate,
-  getWalletInfo,
+  getRoutingFeeEstimate as lndGetRoutingFeeEstimate,
+  getWalletInfo as lndGetWalletInfo,
   payViaPaymentRequest,
   settleHodlInvoice,
   type AuthenticatedLnd,
 } from 'lightning'
+import { deadlined, LND_READ_TIMEOUT_MS } from '../../deadline.js'
 import { htlcDeadlineFromHeight } from '@arkade-os/solver-core/core/receive.js'
 import { ROUTE_CLTV_BUDGET_BLOCKS } from '@arkade-os/solver-core/core/send.js'
 import { expiresAtOf, paymentHashOf } from '@arkade-os/solver-core/invoice/decode.js'
@@ -39,6 +40,13 @@ import type {
   PaymentStatus,
   SendFeeEstimate,
 } from '@arkade-os/solver-core/ports/lightning.js'
+
+// The reads, bounded. Every call site below is left as it was; `getPayment` is
+// not here because it is `payInvoice`'s reconcile path. @see ../../deadline.ts.
+const getChannelBalance = deadlined('getChannelBalance', lndGetChannelBalance)
+const getInvoice = deadlined('getInvoice', lndGetInvoice)
+const getRoutingFeeEstimate = deadlined('getRoutingFeeEstimate', lndGetRoutingFeeEstimate)
+const getWalletInfo = deadlined('getWalletInfo', lndGetWalletInfo)
 
 /**
  * Payment-outcome reasons `payViaPaymentRequest` (from the `lightning`
@@ -432,11 +440,13 @@ export class LndLightningBackendAdapter implements LightningBackend {
    */
   async estimateSendFee(params: EstimateSendFeeParams): Promise<SendFeeEstimate | null> {
     try {
-      const estimate = await getRoutingFeeEstimate({
-        lnd: this.lnd,
-        request: params.invoice,
-        timeout: probeTimeoutMs(params.timeoutMs),
-      })
+      const probeMs = probeTimeoutMs(params.timeoutMs)
+      const estimate = await getRoutingFeeEstimate(
+        { lnd: this.lnd, request: params.invoice, timeout: probeMs },
+        // ABOVE the caller's own budget: LND documents that probing can outlast
+        // the timeout it was given, so a deadline at it would cut a live probe.
+        probeMs + LND_READ_TIMEOUT_MS,
+      )
       // No `feeHandle`. LND reserves nothing: this probe and the later
       // `payViaPaymentRequest` are unconnected calls, and minting a token would claim a
       // link between them that does not exist.
