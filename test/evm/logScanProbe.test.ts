@@ -43,15 +43,13 @@ describe('the probe asks a real question', () => {
   })
 
   it('cannot ask the full question on a chain shorter than the range', async () => {
-    // Reported rather than claimed: 40 blocks exist, so 5_000 went untested.
     await expect(run(() => [], 5_000, '0x27').result).resolves.toEqual({ kind: 'ok', blocks: 40n })
   })
 })
 
 describe('a range rejection is fatal; anything else is not', () => {
   it('names every published phrasing as a range rejection', async () => {
-    // Guarded, because the loop below iterates the very data under test and
-    // would pass vacuously against an empty set.
+    // The loop iterates the data under test; empty would pass vacuously.
     expect(LOG_RANGE_REJECTIONS.length).toBeGreaterThan(0)
     for (const phrase of LOG_RANGE_REJECTIONS) {
       const { result } = run(() => {
@@ -62,8 +60,8 @@ describe('a range rejection is fatal; anything else is not', () => {
   })
 
   it('classifies real provider wordings, stated here rather than read from the set', async () => {
-    // Independent of LOG_RANGE_REJECTIONS on purpose: a test fed from the data
-    // it checks cannot notice the data being wrong.
+    // Independent of the set: a test fed by the data it checks cannot notice
+    // the data being wrong.
     const wordings = [
       'eth_getLogs: JSON-RPC error -32602 You can make eth_getLogs requests with up to a 10K block range',
       'eth_getLogs: JSON-RPC error -32005 query exceeds max block range 100000',
@@ -86,8 +84,6 @@ describe('a range rejection is fatal; anything else is not', () => {
   })
 
   it('treats a transport failure as inconclusive rather than as a verdict', async () => {
-    // Refusing to boot on a node that blinked trades an invisible bug for an
-    // outage — the asymmetry the split exists for.
     for (const blip of ['fetch failed', 'HTTP 503 Service Unavailable', 'The operation was aborted', 'ECONNREFUSED']) {
       const { result } = run(() => {
         throw new Error(blip)
@@ -97,7 +93,6 @@ describe('a range rejection is fatal; anything else is not', () => {
   })
 
   it('does not read a rate limit as a range rejection', async () => {
-    // Same `-32005` some providers use for range, and a retry DOES fix it.
     const { result } = run(() => {
       throw new Error('eth_getLogs: JSON-RPC error -32005 request rate limit exceeded')
     })
@@ -105,7 +100,6 @@ describe('a range rejection is fatal; anything else is not', () => {
   })
 
   it('does not read a result-count cap as a range rejection', async () => {
-    // A different cap, and unreachable from a filter that matches nothing.
     const { result } = run(() => {
       throw new Error('eth_getLogs: query returned more than 10000 results')
     })
