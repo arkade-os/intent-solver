@@ -49,7 +49,7 @@ the API on Workers if you want Workers at all.
 | `OPEN_RFQ_MAX_BIDS_PER_MIN`          | no (`30`)                                                    | open-RFQ bidding rate cap (`relay` mode); `0` disables bidding                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `ARK_UNILATERAL_EXIT_DELAY`          | no (believe the server)                                      | seconds, or BLOCKS if this deployment's arkd is block-typed (below 512 is a block count — see "Block-typed timelocks"). Must match the server's own unit or boot refuses it. Overrides the unilateral exit delay arkd advertises, for a server that enforces a shorter minimum than it announces. Sets the CSV timelocks in every covenant — too LOW writes a script rejected at SPEND, with money already in it. See "The recourse window on mainnet"                                                                                  |
 | `LN_RECEIVE_ACCEPT_UNILATERAL_GAP`   | no (`false`)                                                 | `true`/`false` exactly. Serves `lightning:BTC->arkade:BTC` when the solver's solo recourse opens after the htlc's `E` — **required for the corridor to run on mainnet at all**, see "The recourse window on mainnet" below. Accepts a bounded loss; `bitcoin` additionally requires `LN_RECEIVE_MAX_SATS` to be set explicitly                                                                                                                                                                                                         |
-| `<CORRIDOR>_ENABLED`                 | no (`true`)                                                  | `false` darkens that corridor (`LN_SEND`, `LN_RECEIVE`, `ONCHAIN_SEND`, `ONCHAIN_RECEIVE`): never constructed, and its pair is refused `unsupported_pair` at the ingress. Rows already on disk stay readable and refundable                                                                                                                                                                                                                                                                                                            |
+| `<CORRIDOR>_ENABLED`                 | no (`true`)                                                  | `false` darkens that corridor (`LN_SEND`, `LN_RECEIVE`, `ONCHAIN_SEND`, `ONCHAIN_RECEIVE`): never constructed, and its pair is refused `unsupported_pair` at the ingress. Rows already on disk stay readable and refundable. **Exactly `true` or `false`** — unset is on, any other spelling refuses to boot; see "When the solver refuses to boot on an _ENABLED value"                                                                                                                                                               |
 | `PAYEE_MNEMONIC`                     | test-only                                                    | payee wallet for `invoice` self-tests, which mint from a wallet of their own                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
 ## Shape 1 — single Node process
@@ -752,6 +752,52 @@ cli test-refund 500                # covenant refund path, matures immediately
 
 All three were last proven on mainnet 2026-08-04: funding `831e51ce…`, claim
 `0937f4a7…`, covenant refund `99935874…`.
+
+### When the solver refuses to boot on an `_ENABLED` value
+
+```
+EVM_SEND_USDC_ENABLED must be 'true' or 'false', got "FALSE"
+```
+
+`<STEM>_ENABLED` takes the exact lowercase `true` or `false` and nothing else.
+Unset — including empty or whitespace — means **on**, so a deployment that sets
+none of them serves what it always served. Every other spelling refuses to boot
+rather than being coerced to a boolean, and that is the design: a value silently
+meaning "on" leaves a corridor quoting that its operator believes is dark, and
+this knob exists for the corridor that loses money on every swap.
+
+The stems that reach this parse, and there are no others:
+
+| stem                                                       | where the name comes from                                                                                                         |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `LN_SEND`, `LN_RECEIVE`, `ONCHAIN_SEND`, `ONCHAIN_RECEIVE` | fixed — the four BTC corridors                                                                                                    |
+| `EVM_SEND_<SYMBOL>`, `EVM_RECEIVE_<SYMBOL>`                | one pair per token listed in `EVM_TOKENS`, `<SYMBOL>` exactly as spelled there (already uppercase) — e.g. `EVM_SEND_USDC_ENABLED` |
+| `ASSET_<SYMBOL>_BUY`, `ASSET_<SYMBOL>_SELL`                | one pair per market listed in `ASSET_MARKETS`, `<SYMBOL>` uppercased — e.g. `ASSET_USDA_BUY_ENABLED`                              |
+
+`ADMIN_RESTART_ENABLED` is **not** one of them. It reads `=== 'true'`, so every
+other value — a typo included — leaves it off, which is the safe direction for a
+knob that only grants a privilege.
+
+#### On an EVM stem, that corridor was ON — read it before you correct it
+
+Until #64 the per-token flag parsed as "anything that is not the exact string
+`false`", so `FALSE`, `0`, `no` and a plain `flase` all read as **enabled**. The
+four BTC corridors and the asset RFQ directions were strict already and never had
+this window; only `EVM_SEND_<SYMBOL>_ENABLED` and `EVM_RECEIVE_<SYMBOL>_ENABLED`
+did.
+
+So a deployment that has been running with `EVM_SEND_USDC_ENABLED=FALSE` was
+quoting and filling that corridor for as long as the value has been set. The boot
+refusal is the first time anything said so — it is not merely a typo to fix.
+
+1. **Find out what it served** before touching the value. Filter that corridor in
+   the admin console for quotes and fills covering the period the variable has
+   been set; `cli status <id>` reads any one row in full. Rows exist if it was
+   live, and the float moved on terms nobody chose.
+2. **Then set the value you actually want.** Lowercasing it to `false` closes the
+   corridor from that boot onward and nothing else — it does not unwind what was
+   already filled, and it does not abandon rows still in flight (the sweep drives
+   every non-terminal row to completion or refund regardless).
 
 ### When a send is refused `cltv_too_large`
 
