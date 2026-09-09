@@ -287,6 +287,9 @@ const railWithdraw = async (
   // not be. `randomUUID` is what every swap id in this tree is minted from.
   const idempotencyKey = `admin-withdraw-${randomUUID()}`
   const { txid, vout } = await onchain.fund({ address, amountSats, idempotencyKey })
+  // Left the wallet the send corridor admits against, with no row to count it:
+  // the one case a stale float is wrong in the PERMISSIVE direction.
+  services.onchainFloat?.invalidate()
   return { reference: txid, address, amount: String(amountSats), detail: { vout, idempotencyKey } }
 }
 

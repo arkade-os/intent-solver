@@ -1587,6 +1587,89 @@ describe('OnchainSendSwapService', () => {
     expect(second).toEqual({ accepted: false, reason: 'duplicate_swap' })
   })
 
+  describe('admission against the onchain float', () => {
+    const withFloat = (sats: number | null, fundingFeeSats = 200) =>
+      new OnchainSendSwapService({
+        store: deps.store,
+        onchain: deps.onchain,
+        arkade: deps.arkade,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => deps.store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        refundDestinationScript,
+        float: { read: () => (sats === null ? null : { sats, ageMs: 0 }), fundingFeeSats: () => fundingFeeSats },
+        now: clock,
+      })
+
+    const ask = (service: OnchainSendSwapService) =>
+      service.quote({
+        paymentHash,
+        amountSats: 50_000,
+        payoutPubkey,
+        refundAddress: REFUND_ADDRESS,
+        clientRefundPubkey,
+      })
+
+    it('quotes when the wallet covers the payout and the broadcast', async () => {
+      expect(await ask(withFloat(50_200))).toMatchObject({ accepted: true })
+    })
+
+    it('refuses a wallet holding exactly the payout and nothing for the fee', async () => {
+      expect(await ask(withFloat(50_000))).toEqual({ accepted: false, reason: 'insufficient_float' })
+    })
+
+    it('refuses one sat short of the requirement', async () => {
+      expect(await ask(withFloat(50_199))).toEqual({ accepted: false, reason: 'insufficient_float' })
+    })
+
+    it('names the float rather than the cap', async () => {
+      const outcome = await ask(withFloat(0))
+      expect(outcome).toMatchObject({ accepted: false, reason: 'insufficient_float' })
+    })
+
+    it('counts payouts already owed by rows that have not funded yet', async () => {
+      const service = withFloat(100_000)
+      expect(await ask(service)).toMatchObject({ accepted: true })
+      const second = await service.quote({
+        paymentHash: otherPaymentHash,
+        amountSats: 50_000,
+        payoutPubkey,
+        refundAddress: REFUND_ADDRESS,
+        clientRefundPubkey,
+      })
+      expect(second).toEqual({ accepted: false, reason: 'insufficient_float' })
+    })
+
+    it('refuses while the reading is unavailable, including after invalidation', async () => {
+      expect(await ask(withFloat(null))).toEqual({ accepted: false, reason: 'insufficient_float' })
+    })
+
+    it('leaves a deployment that wires no float exactly as it was', async () => {
+      expect(await ask(service)).toMatchObject({ accepted: true })
+    })
+
+    it('still refuses on the exposure cap when THAT is what bound', async () => {
+      const capped = new OnchainSendSwapService({
+        store: deps.store,
+        onchain: deps.onchain,
+        arkade: deps.arkade,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000,
+        totalCommitted: () => deps.store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        refundDestinationScript,
+        float: { read: () => ({ sats: 10_000_000, ageMs: 0 }), fundingFeeSats: () => 200 },
+        now: clock,
+      })
+      expect(await ask(capped)).toEqual({ accepted: false, reason: 'provider_at_capacity' })
+    })
+  })
+
   describe('minimumPayoutSats()', () => {
     const serviceCharging = (fee: Fee, minSats: number) =>
       new OnchainSendSwapService({

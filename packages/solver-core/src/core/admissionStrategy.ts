@@ -34,6 +34,22 @@ export interface AdmissionRequest {
    */
   capSats: number
   committedSats: () => Promise<number>
+  /**
+   * A SECOND ceiling: sats the corridor must HOLD, measured not configured. On
+   * the request rather than claimed separately so ONE critical section decides
+   * both — two reservations per quote multiply the release paths.
+   */
+  float?: FloatRequirement
+  /** Which ceiling refused. Uncalled leaves the caller reporting the cap, as before. */
+  onRefused?: (ceiling: 'exposure' | 'float') => void
+}
+
+export interface FloatRequirement {
+  /** Payout PLUS the fee to broadcast it: a wallet holding exactly the payout cannot fund. */
+  requiredSats: number
+  /** Null only when none has ever landed. A stale reading is still evidence; an absent one is not. */
+  available: { sats: number; ageMs: number } | null
+  owedSats: () => Promise<number>
 }
 
 export interface AdmissionStrategy {

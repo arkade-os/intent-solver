@@ -397,3 +397,97 @@ describe('AdmissionStrategy', () => {
     expect(released).toEqual(['arkade:BTC->lightning:BTC'])
   })
 })
+
+describe('AdmissionControl — the float ceiling', () => {
+  const req = (over: Record<string, unknown> = {}) => ({
+    pair: 'arkade:BTC->onchain:BTC',
+    giveSats: 10_000,
+    capSats: 1_000_000,
+    committedSats: async () => 0,
+    ...over,
+  })
+  const float = (over: Record<string, unknown> = {}) => ({
+    requiredSats: 10_000,
+    available: { sats: 25_000, ageMs: 0 },
+    owedSats: async () => 0,
+    ...over,
+  })
+
+  it('admits when the wallet covers what the quote needs', async () => {
+    expect(await new AdmissionControl().admit(req({ float: float() }))).not.toBeNull()
+  })
+
+  it('refuses when it does not, and names the float rather than the cap', async () => {
+    const ceilings: string[] = []
+    const control = new AdmissionControl()
+    const got = await control.admit(
+      req({ float: float({ available: { sats: 9_999, ageMs: 0 } }), onRefused: (c: string) => ceilings.push(c) }),
+    )
+    expect(got).toBeNull()
+    expect(ceilings).toEqual(['float'])
+    expect(control.outstandingSats).toBe(0)
+    expect(control.outstandingFloatSats).toBe(0)
+  })
+
+  it('counts payouts already owed by rows that have not funded', async () => {
+    const got = await new AdmissionControl().admit(
+      req({ float: float({ available: { sats: 15_000, ageMs: 0 }, owedSats: async () => 6_000 }) }),
+    )
+    expect(got).toBeNull()
+  })
+
+  it('admits only one of two concurrent quotes the wallet cannot both cover', async () => {
+    const control = new AdmissionControl()
+    const one = float({ available: { sats: 15_000, ageMs: 0 } })
+    const [a, b] = await Promise.all([control.admit(req({ float: one })), control.admit(req({ float: one }))])
+    expect([a, b].filter((r) => r !== null)).toHaveLength(1)
+  })
+
+  it('gives the float claim back on release, so a dead quote frees the wallet', async () => {
+    const control = new AdmissionControl()
+    const taken = await control.admit(req({ float: float() }))
+    expect(control.outstandingFloatSats).toBe(10_000)
+    taken?.release()
+    expect(control.outstandingFloatSats).toBe(0)
+    taken?.release()
+    expect(control.outstandingFloatSats).toBe(0)
+  })
+
+  it('still admits against a STALE reading — it is evidence, not noise', async () => {
+    const got = await new AdmissionControl().admit(
+      req({ float: float({ available: { sats: 25_000, ageMs: 6 * 60 * 60 * 1000 } }) }),
+    )
+    expect(got).not.toBeNull()
+  })
+
+  it('refuses on a stale reading that is short, rather than treating age as permission', async () => {
+    const got = await new AdmissionControl().admit(
+      req({ float: float({ available: { sats: 100, ageMs: 6 * 60 * 60 * 1000 } }) }),
+    )
+    expect(got).toBeNull()
+  })
+
+  it('refuses while no float reading is available, including after invalidation', async () => {
+    const ceilings: string[] = []
+    const got = await new AdmissionControl().admit(
+      req({ float: float({ available: null }), onRefused: (ceiling: string) => ceilings.push(ceiling) }),
+    )
+    expect(got).toBeNull()
+    expect(ceilings).toEqual(['float'])
+  })
+
+  it('leaves a request carrying no float exactly as it was', async () => {
+    const control = new AdmissionControl()
+    expect(await control.admit(req())).not.toBeNull()
+    expect(control.outstandingFloatSats).toBe(0)
+  })
+
+  it('names the CAP when that is what refused, not the float', async () => {
+    const ceilings: string[] = []
+    const got = await new AdmissionControl().admit(
+      req({ capSats: 1, float: float(), onRefused: (c: string) => ceilings.push(c) }),
+    )
+    expect(got).toBeNull()
+    expect(ceilings).toEqual(['exposure'])
+  })
+})

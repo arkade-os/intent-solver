@@ -1,3 +1,4 @@
+import { RFQ_REFUSAL_REASONS } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import { describe, it, expect } from 'vitest'
 import {
   explainFailure,
@@ -108,5 +109,20 @@ describe('STATE_NOTES', () => {
     for (const state of ['stuck', 'refused'] as const) {
       expect(STATE_NOTES[state], state).toBeDefined()
     }
+  })
+})
+
+describe('insufficient_float', () => {
+  it('reaches the client as exposure_cap, like the asset legs’ inventory refusal', () => {
+    expect(RFQ_REFUSAL_REASONS.insufficient_float).toBe('exposure_cap')
+    expect(RFQ_REFUSAL_REASONS.insufficient_float).toBe(RFQ_REFUSAL_REASONS.insufficient_inventory)
+  })
+
+  it('does not repeat provider_at_capacity’s advice, which points at the wrong thing', () => {
+    const float = REFUSAL_EXPLANATIONS.insufficient_float
+    const cap = REFUSAL_EXPLANATIONS.provider_at_capacity
+    expect(float.whatToDo).not.toBe(cap.whatToDo)
+    expect(cap.whatToDo).toMatch(/backlog/i)
+    expect(float.whatToDo).toMatch(/deposit/i)
   })
 })
