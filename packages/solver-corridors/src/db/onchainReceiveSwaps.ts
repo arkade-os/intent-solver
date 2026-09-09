@@ -84,6 +84,11 @@ const TRANSITION_COLUMNS = new Set([
   'onchain_claim_txid',
   'arkade_refund_txid',
   'failure_reason',
+  // Written on the SAME edge as funding_txid/funding_vout: what the output
+  // holds is learned in the same read that finds the output, so recording it
+  // anywhere else would let the two disagree.
+  'funded_value_sats',
+  'funded_payout_sats',
 ])
 /**
  * `arkade_refund_txid` is deliberately in BOTH sets — same reason
@@ -218,6 +223,25 @@ export interface OnchainReceiveSwapRow {
   fundStartedAt: number | null
   /** Set once THIS service funded a stamped lockup — @see receive/receiveSwaps.ts */
   stampedAt: number | null
+  /**
+   * What the client's onchain HTLC output ACTUALLY holds, when that differs
+   * from the quoted {@link amountSats}.
+   *
+   * NULL is not a default: it is the fact that this swap was never amended, and
+   * it is what every row funded under strict equality says. Resolving it — and
+   * deriving the claim's sizing from it — is `onchainClaimSizing`'s job, not a
+   * fallback each reader repeats.
+   */
+  fundedValueSats: number | null
+  /**
+   * The Arkade-side payout re-derived against {@link fundedValueSats},
+   * preserving the absolute fee this corridor quoted:
+   * `payoutSats + (funded - amountSats)`.
+   *
+   * Persisted rather than recomputed for the reason {@link payoutSats} is: the
+   * arithmetic that priced a funded swap has to stay a fact on the row.
+   */
+  fundedPayoutSats: number | null
 }
 
 const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
@@ -259,7 +283,9 @@ const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
   failure_reason                   TEXT,
   rfq_id                           TEXT,
   fund_started_at                  INTEGER,
-  stamped_at                       INTEGER
+  stamped_at                       INTEGER,
+  funded_value_sats                INTEGER,
+  funded_payout_sats               INTEGER
 `
 
 const SCHEMA = `
@@ -335,6 +361,13 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   rfqId: raw.rfq_id === null || raw.rfq_id === undefined ? null : String(raw.rfq_id),
   fundStartedAt: raw.fund_started_at === null || raw.fund_started_at === undefined ? null : Number(raw.fund_started_at),
   stampedAt: raw.stamped_at === null || raw.stamped_at === undefined ? null : Number(raw.stamped_at),
+  // Null stays null. Unlike `payout_sats` above, a missing value here is not a
+  // legacy row to be read charitably — it is "never amended", and collapsing it
+  // into `amount_sats` at this layer would lose the one bit that says so.
+  fundedValueSats:
+    raw.funded_value_sats === null || raw.funded_value_sats === undefined ? null : Number(raw.funded_value_sats),
+  fundedPayoutSats:
+    raw.funded_payout_sats === null || raw.funded_payout_sats === undefined ? null : Number(raw.funded_payout_sats),
 })
 
 export interface OnchainReceiveQuoteRecord {
@@ -446,6 +479,12 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
     }
     if (!existing.has('non_interactive_parameters')) {
       await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN non_interactive_parameters TEXT`)
+    }
+    if (!existing.has('funded_value_sats')) {
+      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN funded_value_sats INTEGER`)
+    }
+    if (!existing.has('funded_payout_sats')) {
+      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN funded_payout_sats INTEGER`)
     }
   }
 
