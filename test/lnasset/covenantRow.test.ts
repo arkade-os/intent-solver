@@ -9,27 +9,33 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { hex } from '@scure/base'
+import { schnorr } from '@noble/curves/secp256k1.js'
 import { covenantRowFor } from '@arkade-os/solver-corridors/lnasset/sendOrchestrator.js'
+import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import type { LnAssetSendSwapRow } from '@arkade-os/solver-corridors/db/lnAssetSendSwaps.js'
 
-const CLIENT_REFUND = '51' + 'aa'.repeat(33)
-const SOLVER_RECEIVER = '51' + 'bb'.repeat(33)
+const key = (fill: number): string => hex.encode(schnorr.getPublicKey(new Uint8Array(32).fill(fill)))
+const p2tr = (fill: number): string => '5120' + hex.encode(schnorr.getPublicKey(new Uint8Array(32).fill(fill)))
+
+const CLIENT_REFUND = p2tr(5)
+const SOLVER_RECEIVER = p2tr(8)
 
 const row = (over: Partial<LnAssetSendSwapRow> = {}): LnAssetSendSwapRow =>
   ({
     id: 's1',
-    solverPubkey: 'dd'.repeat(32),
-    serverPubkey: 'ee'.repeat(32),
+    solverPubkey: key(1),
+    serverPubkey: key(3),
     paymentHash: 'ff'.repeat(32),
     refundLocktime: 1_800_000_000,
     claimDelay: 512,
     refundDelay: 1024,
     refundWithoutReceiverDelay: 2048,
-    emulatorPubkey: 'cc'.repeat(32),
+    emulatorPubkey: key(4),
     refundPkScript: CLIENT_REFUND,
     solverReceiverPkScript: SOLVER_RECEIVER,
-    pkScript: '51' + '11'.repeat(33),
-    clientRefundPubkey: 'ab'.repeat(32),
+    pkScript: p2tr(6),
+    clientRefundPubkey: key(7),
     assetId: '11'.repeat(34),
     ...over,
   }) as LnAssetSendSwapRow
@@ -53,8 +59,18 @@ describe('covenantRowFor', () => {
   })
 
   it('takes the two scripts from different columns, so one cannot stand for both', () => {
-    const mapped = covenantRowFor(row({ solverReceiverPkScript: '51' + '99'.repeat(33) }))
-    expect(mapped.receiverPkScript).toBe('51' + '99'.repeat(33))
+    const mapped = covenantRowFor(row({ solverReceiverPkScript: p2tr(9) }))
+    expect(mapped.receiverPkScript).toBe(p2tr(9))
     expect(mapped.refundPkScript).toBe(CLIENT_REFUND)
+  })
+})
+
+describe('an EMPTY asset id is a broken row, not a sats one', () => {
+  it('builds the asset covenant from an otherwise identical row', () => {
+    expect(() => covenantScriptFromRow(covenantRowFor(row()))).not.toThrow()
+  })
+
+  it('names the empty id rather than silently deriving the sats pkScript', () => {
+    expect(() => covenantScriptFromRow(covenantRowFor(row({ assetId: '' })))).toThrow(/68 lowercase hex/)
   })
 })

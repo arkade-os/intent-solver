@@ -191,6 +191,6 @@ export const covenantScriptFromRow = (row: CovenantScriptRow): CovenantSwapScrip
     },
     // CANONICAL order — `parseAssetId` returns the id unreversed and the SDK
     // reverses it for `INSPECTOUTASSETLOOKUP` itself.
-    ...(row.assetId ? { asset: parseAssetId(row.assetId) } : {}),
+    ...(row.assetId != null ? { asset: parseAssetId(row.assetId) } : {}),
   })
 }
