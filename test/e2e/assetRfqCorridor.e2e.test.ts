@@ -401,7 +401,12 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
         swapAddress: mine.address,
       })
       expect(cancelTxid).toMatch(/^[0-9a-f]{64}$/)
-      expect(await depositAt(hex.encode(mine.swapPkScript))).toBeNull()
+      // Polled like the appearance above: one read asserts indexer speed, not the cancel.
+      await poll(async () => ((await depositAt(hex.encode(mine.swapPkScript))) === null ? true : null), {
+        attempts: 20,
+        intervalMs: 2000,
+        whenExhausted: 'the cancelled deposit never left the offer script',
+      })
       await store.close()
     },
     SWAP_TIMEOUT_MS,
