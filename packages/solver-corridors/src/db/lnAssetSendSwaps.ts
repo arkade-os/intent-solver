@@ -335,12 +335,15 @@ export class LnAssetSendSwapStore {
    * NON_TERMINAL, not exposed-only: a swap the solver has QUOTED is capacity it
    * may have to honour, and counting only the exposed states would let unlimited
    * concurrent quotes slip past the cap and all be paid at once.
+   *
+   * One table backs every market, so a corridor asks for its own `pair`.
    */
-  async committedSats(): Promise<number> {
+  async committedSats(pair?: string): Promise<number> {
     const placeholders = NON_TERMINAL.map(() => '?').join(', ')
     const raw = await this.driver.get<Raw>(
-      `SELECT COALESCE(SUM(payout_sats), 0) AS total FROM ln_asset_send_swap WHERE state IN (${placeholders})`,
-      [...NON_TERMINAL],
+      `SELECT COALESCE(SUM(payout_sats), 0) AS total FROM ln_asset_send_swap WHERE state IN (${placeholders})` +
+        (pair === undefined ? '' : ' AND pair = ?'),
+      pair === undefined ? [...NON_TERMINAL] : [...NON_TERMINAL, pair],
     )
     return Number(raw?.total ?? 0)
   }

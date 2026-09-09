@@ -236,6 +236,24 @@ describe('LnAssetSendSwapStore', () => {
     await store.close()
   })
 
+  it('counts the sats committed per pair, since one table backs every market', async () => {
+    const store = await sendStore()
+    await store.insertQuote(sendQuote({ id: 'a', paymentHash: hash(1), payoutSats: 1_000 }))
+    await store.insertQuote(
+      sendQuote({
+        id: 'b',
+        paymentHash: hash(2),
+        pair: `arkade:${OTHER}->lightning:BTC`,
+        assetId: OTHER,
+        payoutSats: 2_000,
+      }),
+    )
+    expect(await store.committedSats(`arkade:${ASSET}->lightning:BTC`)).toBe(1_000)
+    expect(await store.committedSats(`arkade:${OTHER}->lightning:BTC`)).toBe(2_000)
+    expect(await store.committedSats()).toBe(3_000)
+    await store.close()
+  })
+
   /**
    * No edge back to `funded` from `paying`: once a payment is submitted its
    * outcome is either known or unknown, and "unknown" is `stuck` — never a
