@@ -267,6 +267,23 @@ export interface Services {
 }
 
 /**
+ * An endpoint's HOST, for saying which one answered without saying how.
+ *
+ * RPC urls routinely carry the API key in the path or query
+ * (`.../v2/<key>`), so printing one into a log or a crash message hands the
+ * credential to whatever aggregator collects them. The host names the provider,
+ * which is all an operator needs to act. An unparseable url yields no fragment
+ * of itself rather than falling back to the raw string.
+ */
+export const endpointHost = (raw: string): string => {
+  try {
+    return new URL(raw).host
+  } catch {
+    return '(unparseable url)'
+  }
+}
+
+/**
  * Open the BTC rail `config.lnBackend` names — BOTH legs, from one place.
  *
  * ONE switch, where there used to be two mirrored ones: a Lightning selector
@@ -283,23 +300,6 @@ export interface Services {
  * the registry, so the only way to get here is a consumer registering AFTER the
  * config was loaded. Named as that, rather than as an unknown backend.
  */
-/**
- * An endpoint's HOST, for saying which one answered without saying how.
- *
- * RPC urls routinely carry the API key in the path or query
- * (`.../v2/<key>`), so printing one into a log or a crash message hands the
- * credential to whatever aggregator collects them. The host names the provider,
- * which is all an operator needs to act. An unparseable url yields no fragment
- * of itself rather than falling back to the raw string.
- */
-const endpointHost = (raw: string): string => {
-  try {
-    return new URL(raw).host
-  } catch {
-    return '(unparseable url)'
-  }
-}
-
 const createRail = async (config: Config): Promise<LightningRail> => {
   if (config.lnBackend === 'fake') {
     return {
