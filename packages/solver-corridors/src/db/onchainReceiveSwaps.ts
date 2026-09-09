@@ -456,6 +456,29 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
   }
 
   /**
+   * The base sums `amount_sats`, which on THIS corridor is the quote rather
+   * than the exposure.
+   *
+   * A row funded above its quote is one the solver will pay a larger lockup
+   * for and collect a larger HTLC on, so counting it at the quoted number
+   * under-reports against `MAX_EXPOSED_SATS` — and under-reporting a cap is
+   * how it stops being one. `COALESCE` because NULL is the unamended majority.
+   *
+   * Overridden here rather than fixed in the base: the other three stores have
+   * no such column, and pushing this into `BaseSwapStore` would make their
+   * totals depend on a column only this table has.
+   */
+  override async committedSats(): Promise<number> {
+    const placeholders = this.shape.live.map(() => '?').join(',')
+    const row = await this.driver.get<{ total: number }>(
+      `SELECT COALESCE(SUM(COALESCE(funded_value_sats, amount_sats)), 0) AS total
+       FROM ${this.shape.table} WHERE state IN (${placeholders})`,
+      [...this.shape.live],
+    )
+    return Number(row?.total ?? 0)
+  }
+
+  /**
    * Additive migration for databases created before a column existed — same
    * rule and same technique `SwapStore.migrate()` (src/db/swaps.ts) uses:
    * `CREATE TABLE IF NOT EXISTS` never alters an existing table. Added

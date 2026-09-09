@@ -233,6 +233,40 @@ describe('OnchainReceiveSwapStore', () => {
   })
 })
 
+describe('OnchainReceiveSwapStore — committedSats', () => {
+  const live = async (id: string, amountSats: number, funded?: number) => {
+    const row = await store.insertQuote({ ...baseQuote, id, paymentHash: id.padStart(64, '0'), amountSats })
+    await store.transition(row.id, 'quoted', 'awaiting_confirmations', {
+      funding_txid: 'ab'.repeat(32),
+      funding_vout: 0,
+      ...(funded === undefined ? {} : { funded_value_sats: funded }),
+    })
+  }
+
+  it('counts the quoted amount while nothing has amended the row', async () => {
+    await live('swap-a', 50_000)
+    await live('swap-b', 30_000)
+    expect(await store.committedSats()).toBe(80_000)
+  })
+
+  it('counts what an amended row actually holds, so the exposure cap is not under-reported', async () => {
+    await live('swap-a', 50_000, 61_000)
+    await live('swap-b', 30_000)
+    expect(await store.committedSats()).toBe(91_000)
+  })
+
+  it('follows an amended row down as well as up', async () => {
+    await live('swap-a', 50_000, 41_000)
+    expect(await store.committedSats()).toBe(41_000)
+  })
+
+  it('still counts only live rows', async () => {
+    await live('swap-a', 50_000, 61_000)
+    await store.fail('swap-a', 'awaiting_confirmations', 'lockup timeout')
+    expect(await store.committedSats()).toBe(0)
+  })
+})
+
 describe('OnchainReceiveSwapStore — migration', () => {
   it('adds payout_sats to a table predating it, reading pre-fee rows as amount-minus-nothing', async () => {
     const db = new Database(':memory:')
