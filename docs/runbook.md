@@ -49,7 +49,7 @@ the API on Workers if you want Workers at all.
 | `OPEN_RFQ_MAX_BIDS_PER_MIN`          | no (`30`)                                                    | open-RFQ bidding rate cap (`relay` mode); `0` disables bidding                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `ARK_UNILATERAL_EXIT_DELAY`          | no (believe the server)                                      | seconds, or BLOCKS if this deployment's arkd is block-typed (below 512 is a block count — see "Block-typed timelocks"). Must match the server's own unit or boot refuses it. Overrides the unilateral exit delay arkd advertises, for a server that enforces a shorter minimum than it announces. Sets the CSV timelocks in every covenant — too LOW writes a script rejected at SPEND, with money already in it. See "The recourse window on mainnet"                                                                                  |
 | `LN_RECEIVE_ACCEPT_UNILATERAL_GAP`   | no (`false`)                                                 | `true`/`false` exactly. Serves `lightning:BTC->arkade:BTC` when the solver's solo recourse opens after the htlc's `E` — **required for the corridor to run on mainnet at all**, see "The recourse window on mainnet" below. Accepts a bounded loss; `bitcoin` additionally requires `LN_RECEIVE_MAX_SATS` to be set explicitly                                                                                                                                                                                                         |
-| `<CORRIDOR>_ENABLED`                 | no (`true`)                                                  | `false` darkens that corridor (`LN_SEND`, `LN_RECEIVE`, `ONCHAIN_SEND`, `ONCHAIN_RECEIVE`): never constructed, and its pair is refused `unsupported_pair` at the ingress. Rows already on disk stay readable and refundable. **Exactly `true` or `false`** — unset is on, any other spelling refuses to boot; see "When the solver refuses to boot on an _ENABLED value"                                                                                                                                                               |
+| `<CORRIDOR>_ENABLED`                 | no (`true`)                                                  | `false` darkens that corridor (`LN_SEND`, `LN_RECEIVE`, `ONCHAIN_SEND`, `ONCHAIN_RECEIVE`): never constructed, and its pair is refused `unsupported_pair` at the ingress. Rows already on disk stay readable and refundable. **Exactly `true` or `false` once trimmed** — unset, empty or whitespace is on, anything else refuses to boot; see "When the solver refuses to boot on an _ENABLED value"                                                                                                                                  |
 | `PAYEE_MNEMONIC`                     | test-only                                                    | payee wallet for `invoice` self-tests, which mint from a wallet of their own                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
 ## Shape 1 — single Node process
@@ -759,12 +759,13 @@ All three were last proven on mainnet 2026-08-04: funding `831e51ce…`, claim
 EVM_SEND_USDC_ENABLED must be 'true' or 'false', got "FALSE"
 ```
 
-`<STEM>_ENABLED` takes the exact lowercase `true` or `false` and nothing else.
-Unset — including empty or whitespace — means **on**, so a deployment that sets
-none of them serves what it always served. Every other spelling refuses to boot
-rather than being coerced to a boolean, and that is the design: a value silently
-meaning "on" leaves a corridor quoting that its operator believes is dark, and
-this knob exists for the corridor that loses money on every swap.
+The value is trimmed first, and what remains must be exactly lowercase `true` or
+`false` — so ` false ` is fine, and `FALSE` is not. Nothing remaining is **on**:
+unset, empty and whitespace-only all mean enabled, so a deployment that sets none
+of them serves what it always served. Any other spelling refuses to boot rather
+than being coerced to a boolean, and that is the design: a value silently meaning
+"on" leaves a corridor quoting that its operator believes is dark, and this knob
+exists for the corridor that loses money on every swap.
 
 The stems that reach this parse, and there are no others:
 
