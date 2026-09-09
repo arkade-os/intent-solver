@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url'
 /**
  * A `test/e2e/*.e2e.test.ts` in no group runs nowhere and leaves every leg of
  * `e2e.yml` green. Under `test/` rather than `test/e2e/` so it needs no stack
- * and runs inside `ci.yml`, which is a merge gate; e2e is opt-in and stays so.
+ * and runs inside `ci.yml`, catching an unassigned file without standing a
+ * multi-container stack up to do it.
  */
 
 // fileURLToPath, not .pathname: on Windows the latter keeps a leading `/`

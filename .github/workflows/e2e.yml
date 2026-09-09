@@ -1,8 +1,15 @@
 name: E2E
 
-# Opt-in, never a merge gate: this boots a multi-container regtest stack and
-# moves regtest money, so it will go red for reasons no diff owns. Label a PR
-# `run-e2e` to exercise it there; dispatch or the nightly cover main.
+# Runs on every PR, and again on the push that merges it. This boots a
+# multi-container regtest stack and moves regtest money, so it will still go red
+# for reasons no diff owns — that is the price of exercising the corridors at
+# all, and the alternative it replaces was exercising them almost never.
+#
+# RUNNING ON A PR IS NOT THE SAME AS BLOCKING IT. Whether a red leg can stop a
+# merge is a branch-protection setting on the repository, not something this
+# file decides — nothing here marks itself required. The `main` run reports on a
+# merge that has already landed, and exists so a broken corridor is named in
+# minutes rather than up to a day later by the nightly below.
 #
 # WHAT RUNS lives in `.github/e2e-groups.json`, not here: one matrix leg per
 # GROUP, a group being the corridors that can share one stack configuration.
@@ -13,7 +20,8 @@ name: E2E
 #
 # A new `test/e2e/*.e2e.test.ts` that names no group would simply run nowhere
 # and leave every leg green. `test/ci/e2eGroups.test.ts` fails on that, and it
-# runs inside `ci.yml` — a real merge gate — precisely so this one need not be.
+# runs inside `ci.yml`, so an unassigned file is caught by the unit suite rather
+# than by a stack this expensive.
 on:
   workflow_dispatch:
     inputs:
@@ -34,7 +42,11 @@ on:
         required: false
         default: ''
   pull_request:
-    types: [labeled, synchronize, reopened]
+  # `inputs.*` is populated on `workflow_dispatch` alone, so `pull_request`,
+  # `push` and `schedule` all reach the plan step with every input empty — which
+  # resolves to EVERY group, and is why none of them needs its own branch there.
+  push:
+    branches: [main]
   schedule:
     - cron: '17 3 * * *'
 
@@ -55,7 +67,6 @@ jobs:
   # Reading the group file is its own job so the matrix can be data. A dispatch
   # may narrow it by name, or bypass it entirely with a raw file filter.
   plan:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-e2e')
     runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
