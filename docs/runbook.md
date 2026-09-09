@@ -794,10 +794,16 @@ refusal is the first time anything said so — it is not merely a typo to fix.
    the admin console for quotes and fills covering the period the variable has
    been set; `cli status <id>` reads any one row in full. Rows exist if it was
    live, and the float moved on terms nobody chose.
-2. **Then set the value you actually want.** Lowercasing it to `false` closes the
-   corridor from that boot onward and nothing else — it does not unwind what was
-   already filled, and it does not abandon rows still in flight (the sweep drives
-   every non-terminal row to completion or refund regardless).
+2. **Then set the value you actually want** — but `false` is not a no-op on a
+   corridor that has rows. It closes the corridor from that boot onward and does
+   nothing about what was already filled, and the sweep stops driving it: the
+   loop ticks `Services.corridors`, which is exactly the ENABLED set, so
+   non-terminal rows are no longer carried to completion or refund on their own.
+   They stay listed and answerable — the reader set is deliberately wider by the
+   corridors an operator switched off — and `refund`, `onchain-refund-now` and
+   `reclaim-l1-htlc` still unwind them, since those build their services with
+   `allCorridors`. **Drain the corridor before darkening it**, or plan to unwind
+   what is left by hand.
 
 ### When a send is refused `cltv_too_large`
 
