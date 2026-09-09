@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { FREE } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
+import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import {
   assetCardMarkets,
@@ -24,8 +25,13 @@ const PUBKEY = 'dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659
 
 const sign = (digest: Uint8Array): Promise<Uint8Array> => Promise.resolve(schnorr.sign(digest, SECRET))
 
+const ARKADE_BTC = 'arkade:mutinynet/slip44:1'
+const BOLT11_BTC = 'bolt11:mutinynet/slip44:1'
+const ONCHAIN_BTC = 'bitcoin:mutinynet/slip44:1'
+
 const inputs = (over: Partial<SolverCardInputs> = {}): SolverCardInputs => ({
   name: 'test-solver',
+  network: 'mutinynet',
   discoveryPubkey: PUBKEY,
   relays: ['wss://relay.example.com'],
   corridors: {
@@ -33,6 +39,9 @@ const inputs = (over: Partial<SolverCardInputs> = {}): SolverCardInputs => ({
   },
   ...over,
 })
+
+const quoteIds = (card: { markets: Array<Record<string, unknown>> }): unknown[] =>
+  card.markets.map((m) => (m.quote_asset as Record<string, unknown>).id)
 
 describe('buildSolverCard', () => {
   it('publishes rendezvous under the v0 transport map, never the retired top-level relays', () => {
@@ -48,13 +57,13 @@ describe('buildSolverCard', () => {
 
   it('emits the send-leg corridor market: quote side enabled, base side disabled', () => {
     const card = buildSolverCard(inputs())
-    expect(card.version).toBe(0)
     expect(card.markets).toHaveLength(1)
     const market = card.markets[0]!
-    expect(market.pair).toBe('BTC/lightning:BTC')
-    expect(market.quote_corridor).toBe('lightning')
-    // Base corridor stays the unmarked arkade default.
-    expect('base_corridor' in market).toBe(false)
+    expect(market.base_asset).toEqual({ id: ARKADE_BTC, name: 'Bitcoin', ticker: 'BTC', decimals: 8 })
+    expect(market.quote_asset).toEqual({ id: BOLT11_BTC, name: 'Bitcoin', ticker: 'BTC', decimals: 8 })
+    for (const retired of ['pair', 'base_corridor', 'quote_corridor']) {
+      expect(retired in market).toBe(false)
+    }
     // Same-asset market: the registry REJECTS feed fields, not just ignores them.
     expect('price_feed' in market).toBe(false)
     expect('price_feed_schema' in market).toBe(false)
@@ -82,6 +91,45 @@ describe('buildSolverCard', () => {
     expect(() => buildSolverCard(inputs({ name: '' }))).toThrow(/name/)
   })
 
+  it('pairs slip44:0 with mainnet and slip44:1 with every testnet', () => {
+    const corridors = {
+      'arkade:BTC->lightning:BTC': { limits: { minSats: 1000, maxSats: 50_000 }, fee: FREE },
+      'arkade:BTC->onchain:BTC': { limits: { minSats: 1000, maxSats: 50_000 }, fee: FREE },
+    }
+    const mainnet = buildSolverCard(inputs({ network: 'bitcoin', corridors }))
+    expect(quoteIds(mainnet)).toEqual(['bolt11:bitcoin/slip44:0', 'bitcoin:bitcoin/slip44:0'])
+    expect((mainnet.markets[0]!.base_asset as Record<string, unknown>).id).toBe('arkade:bitcoin/slip44:0')
+    for (const network of ['signet', 'mutinynet', 'regtest'] as const) {
+      const card = buildSolverCard(inputs({ network, corridors }))
+      expect(quoteIds(card)).toEqual([`bolt11:${network}/slip44:1`, `bitcoin:${network}/slip44:1`])
+    }
+  })
+
+  it('names the card`s own network in every id, and refuses one it cannot', () => {
+    const card = buildSolverCard(inputs({ network: 'regtest', assetMarkets: [market()] }))
+    for (const m of card.markets) {
+      for (const side of ['base_asset', 'quote_asset'] as const) {
+        expect((m[side] as Record<string, unknown>).id).toContain(':regtest/')
+      }
+    }
+    expect(() => buildSolverCard(inputs({ network: 'mainnet' as never }))).toThrow(/known Arkade network/)
+  })
+
+  it('puts the arkade leg on the base side, which the registry requires', () => {
+    const card = buildSolverCard(
+      inputs({
+        corridors: {
+          'arkade:BTC->lightning:BTC': { limits: { minSats: 1000, maxSats: 50_000 }, fee: FREE },
+          'arkade:BTC->onchain:BTC': { limits: { minSats: 1000, maxSats: 50_000 }, fee: FREE },
+        },
+      }),
+    )
+    for (const m of card.markets) {
+      expect((m.base_asset as Record<string, unknown>).id).toBe(ARKADE_BTC)
+      expect((m.quote_asset as Record<string, unknown>).id).not.toBe(ARKADE_BTC)
+    }
+  })
+
   it('does not publish an emulator pubkey — that is a property of the network, not of a solver', () => {
     // The co-signer key is the same for everyone on a network, so the SDK
     // pins it per network and a per-solver copy could only ever disagree with
@@ -94,20 +142,19 @@ describe('buildSolverCard', () => {
     expect(canonicalCardJson(card)).not.toContain('emulator_pubkey')
   })
 
-  it('publishes a byte-identical card for a Lightning-send-only deployment', () => {
-    // COMPATIBILITY. That configuration is what the card hardcoded before this
-    // change, so an operator who has already filed a card must not be asked to
-    // re-file an equivalent one. If this drifts, every published card churns.
+  it('maps a Lightning-send-only deployment onto the quote side alone', () => {
+    // Deliberately NOT byte-compatible with a card filed before CAIP-19 ids:
+    // every card signed under the old shape has to be re-issued. Pinned here is
+    // the bounds mapping, which the id change must not disturb.
     const card = buildSolverCard(inputs())
     expect(card.markets).toHaveLength(1)
     expect(card.markets[0]).toMatchObject({
-      pair: 'BTC/lightning:BTC',
-      quote_corridor: 'lightning',
       min_base_amount: '0',
       max_base_amount: '0',
       min_quote_amount: '1000',
       max_quote_amount: '50000',
     })
+    expect(quoteIds(card)).toEqual([BOLT11_BTC])
   })
 
   it('advertises the onchain market when that is what is served', () => {
@@ -121,11 +168,10 @@ describe('buildSolverCard', () => {
     )
     expect(card.markets).toHaveLength(1)
     expect(card.markets[0]).toMatchObject({
-      pair: 'BTC/onchain:BTC',
-      quote_corridor: 'onchain',
       min_quote_amount: '20000',
       max_quote_amount: '400000',
     })
+    expect(quoteIds(card)).toEqual([ONCHAIN_BTC])
   })
 
   it('carries each direction`s own bounds on its own side', () => {
@@ -157,7 +203,7 @@ describe('buildSolverCard', () => {
         },
       }),
     )
-    expect(card.markets.map((m) => m.pair)).toEqual(['BTC/lightning:BTC', 'BTC/onchain:BTC'])
+    expect(quoteIds(card)).toEqual([BOLT11_BTC, ONCHAIN_BTC])
     // The onchain market is served one way only, so its quote side is disabled
     // rather than the market being dropped.
     expect(card.markets[1]).toMatchObject({ min_base_amount: '5000', min_quote_amount: '0', max_quote_amount: '0' })
@@ -178,9 +224,10 @@ describe('buildSolverCard', () => {
       }),
     )
     const [lightning, onchain] = card.markets
-    expect(lightning).toMatchObject({ pair: 'BTC/lightning:BTC', fee_bps: 10 })
+    expect(quoteIds(card)).toEqual([BOLT11_BTC, ONCHAIN_BTC])
+    expect(lightning).toMatchObject({ fee_bps: 10 })
     expect(lightning).not.toHaveProperty('fee_flat')
-    expect(onchain).toMatchObject({ pair: 'BTC/onchain:BTC', fee_bps: 25, fee_flat: '900' })
+    expect(onchain).toMatchObject({ fee_bps: 25, fee_flat: '900' })
   })
 
   it('takes the higher of a market`s two directions, since one entry stands for both', () => {
@@ -301,12 +348,17 @@ describe('asset markets on the card', () => {
     // The bug: served, not expressible in the corridor record, so unadvertised.
     const card = buildSolverCard(inputs({ assetMarkets: [market()] }))
     expect(card.markets).toHaveLength(2)
-    const asset = card.markets.find((m) => m.pair !== 'BTC/lightning:BTC')!
-    expect(asset.pair).toBe('BTC/9c9c9c9c')
-    expect(asset.base_asset).toEqual({ id: 'btc', name: 'Bitcoin', ticker: 'BTC', decimals: 8 })
-    expect(asset.quote_asset).toEqual({ id: ASSET, name: 'Arkade asset 9c9c9c9c', ticker: '9c9c9c9c', decimals: 6 })
+    const asset = card.markets[1]!
+    expect(asset.base_asset).toEqual({ id: ARKADE_BTC, name: 'Bitcoin', ticker: 'BTC', decimals: 8 })
+    expect(asset.quote_asset).toEqual({
+      id: `arkade:mutinynet/asset:${ASSET}`,
+      name: 'Arkade asset 9c9c9c9c',
+      ticker: '9c9c9c9c',
+      decimals: 6,
+    })
     expect('base_corridor' in asset).toBe(false)
     expect('quote_corridor' in asset).toBe(false)
+    expect('pair' in asset).toBe(false)
     expect(asset.fee_bps).toBe(30)
   })
 
@@ -336,7 +388,7 @@ describe('asset markets on the card', () => {
   it('is a whole card on its own, with no BTC corridor served', () => {
     const card = buildSolverCard(inputs({ corridors: {}, assetMarkets: [market()] }))
     expect(card.markets).toHaveLength(1)
-    expect(card.markets[0]!.pair).toBe('BTC/9c9c9c9c')
+    expect(quoteIds(card)).toEqual([`arkade:mutinynet/asset:${ASSET}`])
   })
 
   it('refuses a market whose price_decimals the schema cannot hold', () => {
@@ -422,32 +474,35 @@ describe('assetCardMarkets', () => {
 
 describe('markets no card can carry', () => {
   it('drops the market that cannot be stated and keeps the ones that can', () => {
-    const { publishable, omitted } = publishableAssetMarkets([
-      market({ quote: ASSET, sellBase: undefined, buyBase: undefined }),
-      market({ quote: OTHER_ASSET }),
-    ])
+    const { publishable, omitted } = publishableAssetMarkets(
+      [market({ quote: ASSET, sellBase: undefined, buyBase: undefined }), market({ quote: OTHER_ASSET })],
+      'mutinynet',
+    )
     expect(publishable).toHaveLength(1)
     expect(publishable[0]!.quote).toBe(OTHER_ASSET)
     expect(omitted).toHaveLength(1)
     expect(omitted[0]).toContain(ASSET)
     expect(omitted[0]).toContain('OFFER_MIN_FILL_AMOUNT')
     const card = buildSolverCard(inputs({ assetMarkets: publishable }))
-    expect(card.markets.map((m) => m.pair)).toEqual(['BTC/lightning:BTC', 'BTC/4d4d4d4d'])
+    expect(quoteIds(card)).toEqual([BOLT11_BTC, `arkade:mutinynet/asset:${OTHER_ASSET}`])
   })
 
   it('says nothing when every market can be published', () => {
-    const { publishable, omitted } = publishableAssetMarkets([market()])
+    const { publishable, omitted } = publishableAssetMarkets([market()], 'mutinynet')
     expect(publishable).toHaveLength(1)
     expect(omitted).toEqual([])
   })
 
   it('carries the builder`s own reason, whatever refused the market', () => {
-    const { omitted } = publishableAssetMarkets([market({ feeBps: 10_001 })])
+    const { omitted } = publishableAssetMarkets([market({ feeBps: 10_001 })], 'mutinynet')
     expect(omitted[0]).toContain('fee_bps')
   })
 
   it('keeps the first of a duplicated pair and reports the second', () => {
-    const { publishable, omitted } = publishableAssetMarkets([market({ feeBps: 30 }), market({ feeBps: 40 })])
+    const { publishable, omitted } = publishableAssetMarkets(
+      [market({ feeBps: 30 }), market({ feeBps: 40 })],
+      'mutinynet',
+    )
     expect(publishable).toHaveLength(1)
     expect(publishable[0]!.feeBps).toBe(30)
     expect(omitted[0]).toContain('twice')
@@ -525,6 +580,27 @@ describe('canonical form and signature', () => {
     // …and the sig itself is excluded from the signed bytes, so re-signing is
     // possible without a fixpoint: digests with and without sig are equal.
     expect(bytesToHex(cardDigest(card))).toBe(bytesToHex(cardDigest({ ...card, sig: undefined })))
+  })
+
+  it('signs the CAIP-19 bytes, and one perturbed byte of them fails to verify', async () => {
+    // Asserted over the canonicalization itself rather than by swapping a
+    // field, so a canonicalize() that silently dropped a key could not pass.
+    const card = await signSolverCard(buildSolverCard(inputs({ assetMarkets: [market()] })), sign)
+    const canonical = canonicalCardJson(card)
+    expect(canonical).toContain(ARKADE_BTC)
+    expect(canonical).toContain(`arkade:mutinynet/asset:${ASSET}`)
+    expect(canonical).not.toContain('"pair"')
+    expect(canonical).not.toContain('quote_corridor')
+
+    const sig = hexToBytes(card.sig!)
+    const pubkey = hexToBytes(card.discovery_pubkey)
+    const bytes = new TextEncoder().encode(canonical)
+    expect(schnorr.verify(sig, sha256(bytes), pubkey)).toBe(true)
+    for (const at of [0, Math.floor(bytes.length / 2), bytes.length - 1]) {
+      const perturbed = Uint8Array.from(bytes)
+      perturbed[at]! ^= 0x01
+      expect(schnorr.verify(sig, sha256(perturbed), pubkey), `byte ${at}`).toBe(false)
+    }
   })
 
   it('refuses to emit a card whose pubkey does not match the signing key', async () => {

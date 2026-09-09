@@ -78,6 +78,7 @@ const deploymentCard = async (services: Services, assetMarkets: readonly AssetCa
   return signSolverCard(
     buildSolverCard({
       name,
+      network: config.network,
       // The wallet identity — the same x-only key makers already address RFQs
       // to, which is what makes the card's rendezvous data self-attesting.
       discoveryPubkey: services.providerPubkey,
@@ -98,6 +99,7 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
         min: deps.services.policy.offerMinFillAmount,
         max: deps.services.policy.offerMaxFillAmount,
       }),
+      deps.services.config.network,
     )
     // An unbuildable card degrades to a reported reason, never a 500: the ad
     // half of this answer is still worth showing, and a console that goes dark
