@@ -223,12 +223,37 @@ export class EvmSendSwapService {
    * is the safety: an unproven `true` buries a lock the client claimed. */
   private async refundLanded(row: EvmSendSwapRow): Promise<boolean> {
     if (row.state !== 'refunding_evm') return false
+    const lock = this.deps.lockFor(row)
     try {
-      return await this.deps.evm.findRefund(this.deps.lockFor(row), 0n)
+      // FROM THE TIMELOCK: the contract reverts `SwapNotTimedOut` below it (@see
+      // refundSweep.ts), so no Refund precedes it in ANY chain - no margin, unlike
+      // below. `evm_timeout` also keys the lock and is write-once (not a
+      // TRANSITION_COLUMN), so floor and lock identity cannot drift apart.
+      return await this.deps.evm.findRefund(lock, lock.timelock)
     } catch (error) {
       this.deps.onTickError?.(row.id, error)
       return false
     }
+  }
+
+  /**
+   * FROM THE LOCK, never back from the tip: a claim cannot precede the lock it
+   * spends, so this holds however old the row gets, where a lookback window
+   * stops covering the stuck rows the scan exists for. Genesis when no txid
+   * resolves - that patch lands after the broadcast (#243).
+   *
+   * The margin is ASYMMETRIC in its error direction - too large costs scan time,
+   * too small misses a claim in silence - so it wants a defensible upper bound.
+   * Consensus orders Claim after lock within one chain view, leaving only the
+   * skew between two RPC calls a load-balanced provider may serve from different
+   * views; `minConfirmations` is the operator's declaration of settled depth.
+   */
+  private async claimScanFloor(row: EvmSendSwapRow): Promise<bigint> {
+    if (row.evmLockTxid === null) return 0n
+    const mined = await this.deps.evm.transactionBlock(row.evmLockTxid)
+    if (mined === null) return 0n
+    const margin = BigInt(row.minConfirmations)
+    return mined > margin ? mined - margin : 0n
   }
 
   /**
@@ -263,16 +288,9 @@ export class EvmSendSwapService {
     // that patch lands AFTER it, so a crash between blinded the scan (#243).
     let preimage = row.preimage
     if (preimage === null && (EVM_SEND_EXPOSED as readonly string[]).includes(row.state)) {
-      // Reported and survived, as `provenDepth` treats its failed reads below.
-      // The scan asks genesis-to-latest and many providers cap an `eth_getLogs`
-      // range, so this THROWS every tick against one of those. Propagating
-      // leaves `observe` before the planner runs, so the row never reaches
-      // `refund_evm` and the lock stays put past its timeout.
-      //
-      // Degrading to "not found yet" is safe: the preimage gates the CLAIM, so
-      // a scan that never succeeds spends nothing.
+      // Reported and survived, as `provenDepth` treats its failed reads.
       try {
-        const found = await this.deps.evm.findClaimPreimage(lock, 0n)
+        const found = await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row))
         preimage = found === null ? null : Buffer.from(found).toString('hex')
       } catch (error) {
         this.deps.onTickError?.(row.id, error)

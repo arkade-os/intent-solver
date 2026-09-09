@@ -142,16 +142,22 @@ const bar = (deltaSeconds: number, slowestSeconds: number, width = 30): string =
 import { createServices } from './ops/services.js'
 
 /**
- * The watch loop's three cadences, fastest first.
+ * The watch loop's four cadences, fastest first.
  *
  * They differ because what each one waits on differs by orders of magnitude. A
  * preimage lands in well under a second, so `HOT_TICK_MS` paces the states where
- * the provider has already paid and is exposed until it claims. A client's
- * funding is a human action minutes wide, so the full sweep stays cheap. Refund
- * deadlines are hours away and mature against the chain tip rather than wall
- * clock, so sweeping them faster only produces rejected pushes.
+ * the provider has already paid and is exposed until it claims. A wallet funds
+ * milliseconds after `accept`, so `WATCH_SYNC_MS` puts a new swap's script on the
+ * subscription before the arrival rather than a sweep behind it.
+ *
+ * The full sweep no longer paces funding, and stays at 3s for what is left: it
+ * alone advances a row waiting on a DEADLINE (@see core/corridor.ts `tickAll`),
+ * it is the EVM legs' only driver, and it must stay inside the SDK's failsafe
+ * poll. Refund deadlines mature against the chain tip rather than wall clock, so
+ * sweeping them faster only produces rejected pushes.
  */
 const HOT_TICK_MS = 250
+const WATCH_SYNC_MS = 500
 const FULL_SWEEP_MS = 3000
 const REFUND_SWEEP_MS = 60_000
 
@@ -330,8 +336,8 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       )
     }
   }
-  // Deliberately NOT awaited before the loop: the first sweep does it, one hot
-  // tick in. Subscribing is a network call with no timeout, and the watcher is
+  // Deliberately NOT awaited before the loop: the first watch sync does it, one
+  // hot tick in. Subscribing is a network call with no timeout, and the watcher is
   // explicitly best-effort — letting a wedged indexer delay the first tick of
   // the money path would give the fast path veto over the correct one.
 
@@ -402,6 +408,7 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
   let lastRefundSweep = 0
   let lastVtxoLifecycle = 0
   let lastBalanceSample = 0
+  let lastWatchSync = 0
   while (running) {
     await sleep(HOT_TICK_MS)
     // Money already in flight, checked on its own cadence: waiting for the full
@@ -438,8 +445,11 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       } catch (error) {
         log('offer fill sweep failed:', error instanceof Error ? error.message : String(error))
       }
-      // After the sweep, so a swap it just retired is dropped and one it just
-      // adopted is watched from here on.
+    }
+    // After the sweep, so a swap it just retired is dropped before this reads.
+    // Cheap enough to run often: local reads, and `watchScript` is asked once.
+    if (Date.now() - lastWatchSync >= WATCH_SYNC_MS) {
+      lastWatchSync = Date.now()
       await resyncWatchedScripts()
     }
     if (Date.now() - lastRefundSweep > REFUND_SWEEP_MS) {
@@ -1780,10 +1790,12 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       await import('@arkade-os/solver-core/core/registryCard.js')
     const { publishable, omitted } = publishableAssetMarkets(
       assetCardMarkets(assetMarkets, { min: policy.offerMinFillAmount, max: policy.offerMaxFillAmount }),
+      config.network,
     )
     const card = await signSolverCard(
       buildSolverCard({
         name,
+        network: config.network,
         discoveryPubkey: hex.encode(await identity.xOnlyPublicKey()),
         relays,
         // What this deployment actually serves, so discovery cannot describe a

@@ -16,7 +16,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { corridorSetFromDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
+import { corridorSetFromDeps, readerSetFromDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 import { createServicesBody, servicesSource } from '../support/createServicesBody.js'
 import { evmCorridorFor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { EvmCorridorPolicy } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
@@ -182,5 +182,41 @@ describe('both legs are actually driven', () => {
     })
     expect(corridors.get(SEND_PAIR)).toBeUndefined()
     expect(corridors.get(RECEIVE_PAIR)).toBeUndefined()
+  })
+
+  it('stops ticking a darkened leg while the enabled one beside it keeps going', async () => {
+    const sendTick = vi.fn().mockResolvedValue([])
+    const receiveTick = vi.fn().mockResolvedValue([])
+    const deps = {
+      store: {} as never,
+      onchainStore: {} as never,
+      evmSendService: { tickAll: sendTick } as never,
+      evmSendStore: {} as never,
+      evmReceiveService: { tickAll: receiveTick } as never,
+      evmReceiveStore: {} as never,
+      evmCorridors: [policy('send'), policy('receive', false)],
+    }
+    const corridors = corridorSetFromDeps(deps)
+    for (const corridor of corridors) await corridor.tickAll()
+    expect(sendTick).toHaveBeenCalledTimes(1)
+    expect(receiveTick).not.toHaveBeenCalled()
+    // Readable but not driven — the pair the console still answers for is
+    // exactly the one nothing is advancing.
+    expect(readerSetFromDeps(deps).get(RECEIVE_PAIR)).toBeDefined()
+  })
+
+  it('leaves a darkened receive row no unattended refund, because that leg declares none', () => {
+    const corridors = corridorSetFromDeps({
+      store: {} as never,
+      onchainStore: {} as never,
+      evmSendService: { tickAll: async () => [], refundSweep: async () => [] } as never,
+      evmSendStore: {} as never,
+      evmReceiveService: { tickAll: async () => [] } as never,
+      evmReceiveStore: {} as never,
+      evmCorridors: [policy('send'), policy('receive')],
+    })
+    // So once the receive tick stops, nothing refunds its lockup at all.
+    expect(corridors.get(SEND_PAIR)?.refundSweep).toBeTypeOf('function')
+    expect(corridors.get(RECEIVE_PAIR)?.refundSweep).toBeUndefined()
   })
 })

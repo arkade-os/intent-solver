@@ -86,11 +86,18 @@ export interface EvmHtlcBackend {
    *
    * The cross-leg mechanism on a send corridor: the client claims the tokens
    * and this is how the solver learns the secret it needs for its own side.
+   *
+   * `fromBlock` MUST NOT be later than the lock's own block.
    */
   findClaimPreimage(lock: Erc20SwapLock, fromBlock: bigint): Promise<Uint8Array | null>
   /** A refund of THIS lock proven mined since `fromBlock`, whoever sent it -
    * the row's txid need not be the winner. False is "not proven", not "no". */
   findRefund(lock: Erc20SwapLock, fromBlock: bigint): Promise<boolean>
+  /**
+   * The height a transaction was mined at - the floor `findClaimPreimage` is
+   * asked from, where null is "no floor is proven".
+   */
+  transactionBlock(txid: string): Promise<bigint | null>
   /**
    * The same question as {@link EvmHtlcBackend.isLocked}, asked at a HISTORICAL
    * block.
@@ -230,4 +237,6 @@ export interface EvmHtlcBackendDeps {
   /** The `ERC20Swap` deployment, 20 bytes. Configuration, never a constant. */
   contractAddress: Uint8Array
   rpc: JsonRpc
+  /** Blocks per `eth_getLogs` request; over a provider's cap it is REJECTED. */
+  logScanRange?: number
 }

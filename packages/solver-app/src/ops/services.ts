@@ -995,7 +995,11 @@ export const createServices = async (
   let evmReceiveService: EvmReceiveSwapService | null = null
   if (evmChain !== null && evmSendStore !== null && evmReceiveStore !== null) {
     const rpc = createJsonRpc({ url: evmChain.rpcUrl })
-    const evm = createEvmHtlcBackend({ contractAddress: evmChain.contractAddress, rpc })
+    const evm = createEvmHtlcBackend({
+      contractAddress: evmChain.contractAddress,
+      rpc,
+      logScanRange: evmChain.logScanRange,
+    })
     // Number, not bigint, because that is what both orchestrators' deps take.
     // Safe for as long as block heights stay under 2^53 — nine orders of
     // magnitude away on every chain this could serve.
