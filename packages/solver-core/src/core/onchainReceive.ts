@@ -151,3 +151,152 @@ export const evaluateOnchainReceiveFunding = (params: {
   }
   return { fund: true }
 }
+
+/**
+ * The client's declared tolerance for what it will actually send.
+ *
+ * Consent BEFORE funding, which is the whole point: an exchange withdrawal
+ * deducts its own fee, and the client is offline by the time anyone finds out.
+ * Absent from the request, both bounds are the quoted amount and every decision
+ * below collapses to today's strict equality.
+ */
+export interface OnchainReceiveBand {
+  minFromSats: number
+  maxFromSats: number
+}
+
+/**
+ * How wide a band the operator will underwrite, before `limits` are applied.
+ *
+ * Defaults to the whole servable range, which is "no narrowing beyond what
+ * `limits` already imposes" — derived rather than picked, and the knob can only
+ * ever reduce it, the same layering `narrow()` applies to the amounts
+ * themselves. An operator who wants to offer flexibility only in the small
+ * lowers it without touching `MAX_SWAP_SATS`.
+ */
+export const defaultMaxBandWidthSats = (limits: Limits): number => limits.maxSats - limits.minSats
+
+/** Narrow a client's requested band to what the operator underwrites. Never widens. */
+export const clampOnchainReceiveBand = (
+  band: OnchainReceiveBand,
+  quote: OnchainReceiveQuoteAmounts,
+  maxWidthSats: number,
+): OnchainReceiveBand => {
+  if (band.maxFromSats - band.minFromSats <= maxWidthSats) return band
+  // Narrowed around the QUOTE rather than around either end: the client asked
+  // to be quoted here, so this is the half of their band most likely to be
+  // used, and clamping to one end would silently move the swap they asked for.
+  const half = Math.floor(maxWidthSats / 2)
+  return {
+    minFromSats: Math.max(band.minFromSats, quote.amountSats - half),
+    maxFromSats: Math.min(band.maxFromSats, quote.amountSats + (maxWidthSats - half)),
+  }
+}
+
+/** The quote's own numbers. Their difference is the absolute fee a re-size preserves. */
+export interface OnchainReceiveQuoteAmounts {
+  amountSats: number
+  payoutSats: number
+}
+
+export interface OnchainReceiveFillOutput {
+  txid: string
+  vout: number
+  valueSats: number
+  confirmations: number
+}
+
+export interface OnchainReceiveFillParams {
+  outputs: readonly OnchainReceiveFillOutput[]
+  quote: OnchainReceiveQuoteAmounts
+  band: OnchainReceiveBand
+  limits: Limits
+  /** What sweeping the HTLC is expected to cost at today's fee rate. */
+  claimFeeSats: number
+}
+
+export type OnchainReceiveFill =
+  | { fill: 'adopt'; output: OnchainReceiveFillOutput; fundedValueSats: number; fundedPayoutSats: number }
+  | { fill: 'refuse'; reason: string }
+  | { fill: 'wait' }
+
+/** R1: the solver keeps the absolute fee it quoted and the client takes the whole difference. */
+export const onchainReceiveFundedPayout = (quote: OnchainReceiveQuoteAmounts, fundedValueSats: number): number =>
+  quote.payoutSats + (fundedValueSats - quote.amountSats)
+
+/**
+ * The smallest give this swap can still be settled at.
+ *
+ * Four bounds at once: the client's own floor, the operator's, a give whose
+ * derived payout is still a spendable lockup output rather than dust, and a
+ * give worth more than it costs the solver to sweep.
+ *
+ * THE QUOTED AMOUNT IS ALWAYS INSIDE THE WINDOW, which is what keeps a client
+ * who declared no band on exactly today's path. The first three bounds are all
+ * at or below the quote already — acceptance checked the operator's floor, and
+ * the quote-time dust refusal checked the payout — but the sweep bound is not
+ * checked anywhere at quote time. Letting it rise above the quote would newly
+ * refuse, at `quoted`, a swap that today is adopted and then fails at claim
+ * time with a dust reason naming the fee rate. Whether that trade is worth
+ * making is a separate question from this one.
+ */
+export const onchainReceiveFillFloor = (params: Omit<OnchainReceiveFillParams, 'outputs'>): number =>
+  Math.min(
+    params.quote.amountSats,
+    Math.max(
+      params.band.minFromSats,
+      params.limits.minSats,
+      params.quote.amountSats - params.quote.payoutSats + ONCHAIN_DUST_SATS,
+      ONCHAIN_DUST_SATS + params.claimFeeSats,
+    ),
+  )
+
+/** Symmetrically: the band may not lift the ceiling past the operator's cap, and may not push it below the quote. */
+export const onchainReceiveFillCeiling = (params: Omit<OnchainReceiveFillParams, 'outputs'>): number =>
+  Math.max(params.quote.amountSats, Math.min(params.band.maxFromSats, params.limits.maxSats))
+
+/**
+ * Which of the outputs at the client's HTLC address — if any — settles this swap.
+ *
+ * ONE output funds one swap. Summing several was considered and rejected
+ * (issue #99): `onchain/claim.ts` spends a single input, so a swap adopted
+ * against a sum could never be swept in one transaction, and the second
+ * payment would have to be recognised before the first was adopted — which is
+ * precisely the window in which the client is already offline.
+ *
+ * A second payment landing AFTER adoption is therefore the client's own to
+ * reclaim, behind the CLTV refund leaf their HTLC already carries. That is
+ * unchanged from today and needs no code.
+ *
+ * The three answers are today's three, under a band instead of an equality.
+ * `wait` because an unconfirmed output is not yet anything — it can be
+ * fee-bumped, or replaced. `refuse` only once an out-of-range output has
+ * confirmed and so can never become an in-range one; nothing of the solver's is
+ * at risk at this point, so refusing early buys the client the time to start
+ * reclaiming rather than saving the solver anything.
+ */
+export const evaluateOnchainReceiveFill = (params: OnchainReceiveFillParams): OnchainReceiveFill => {
+  const floor = onchainReceiveFillFloor(params)
+  const ceiling = onchainReceiveFillCeiling(params)
+
+  const match = params.outputs.find((o) => o.valueSats >= floor && o.valueSats <= ceiling)
+  if (match) {
+    return {
+      fill: 'adopt',
+      output: match,
+      fundedValueSats: match.valueSats,
+      fundedPayoutSats: onchainReceiveFundedPayout(params.quote, match.valueSats),
+    }
+  }
+
+  const confirmed = params.outputs.find((o) => o.confirmations > 0)
+  if (confirmed) {
+    return {
+      fill: 'refuse',
+      reason:
+        `funding mismatch: ${confirmed.txid}:${confirmed.vout} holds ${confirmed.valueSats} sats, ` +
+        (floor === ceiling ? `quote is for ${floor}` : `quote accepts ${floor} to ${ceiling}`),
+    }
+  }
+  return { fill: 'wait' }
+}
