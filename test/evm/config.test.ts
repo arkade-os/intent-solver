@@ -160,4 +160,13 @@ describe('loadEvmChainConfig — signing and fees', () => {
     expect(() => loadEvmChainConfig(env({ EVM_MAX_FEE_PER_GAS_CEILING: '0' }))).toThrow(/positive/)
     expect(() => loadEvmChainConfig(env({ EVM_GAS_LIMIT: 'lots' }))).toThrow(/decimal integer/)
   })
+
+  it('defaults the log scan range to the cap the big providers publish', () => {
+    expect(loadEvmChainConfig(env())!.logScanRange).toBe(10_000)
+    expect(loadEvmChainConfig(env({ EVM_LOG_SCAN_RANGE: '2000' }))!.logScanRange).toBe(2_000)
+  })
+
+  it('refuses a scan range of zero, which would page forever', () => {
+    expect(() => loadEvmChainConfig(env({ EVM_LOG_SCAN_RANGE: '0' }))).toThrow(/EVM_LOG_SCAN_RANGE/)
+  })
 })

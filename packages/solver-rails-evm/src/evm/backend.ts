@@ -87,11 +87,17 @@ const quantityOf = (value: unknown, label: string): bigint => {
   return BigInt(value)
 }
 
+const DEFAULT_LOG_SCAN_RANGE = 10_000
+
 export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend => {
-  const { contractAddress, rpc } = deps
+  const { contractAddress, rpc, logScanRange = DEFAULT_LOG_SCAN_RANGE } = deps
   if (contractAddress.length !== 20) {
     throw new Error(`contractAddress must be 20 bytes, got ${contractAddress.length}`)
   }
+  if (!Number.isInteger(logScanRange) || logScanRange < 1) {
+    throw new Error(`logScanRange must be a positive integer, got ${logScanRange}`)
+  }
+  const span = BigInt(logScanRange)
   const to = hexOf(contractAddress)
   const swapsSelector = keccak_256(new TextEncoder().encode(SWAPS_SELECTOR_SIGNATURE)).subarray(0, 4)
   const call = (data: Uint8Array): EvmCall => ({ to: Uint8Array.from(contractAddress), data })
@@ -102,6 +108,39 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
     to: Uint8Array.from(token),
     data: encodeApprove(contractAddress, amount),
   })
+
+  /**
+   * Every log this swap matches in `[fromBlock, tip]`, a page at a time. ONLY
+   * THE TIP ENDS THE LOOP, never an empty page: an unread stretch drops a Claim
+   * exactly as a too-late floor would.
+   */
+  const scanLogs = async <T>(
+    topic: Uint8Array,
+    lock: Erc20SwapLock,
+    fromBlock: bigint,
+    take: (log: unknown) => Promise<T | null>,
+  ): Promise<T | null> => {
+    const tip = quantityOf(await rpc('eth_blockNumber', []), 'eth_blockNumber')
+    for (let from = fromBlock; from <= tip; from += span) {
+      const until = from + span - 1n
+      const logs = await rpc('eth_getLogs', [
+        {
+          address: to,
+          fromBlock: `0x${from.toString(16)}`,
+          toBlock: `0x${(until > tip ? tip : until).toString(16)}`,
+          // Filtered on the INDEXED preimageHash, so the node returns only logs
+          // for this swap rather than every claim on the contract.
+          topics: [hexOf(topic), hexOf(lock.preimageHash)],
+        },
+      ])
+      if (!Array.isArray(logs)) throw new Error('eth_getLogs: expected an array')
+      for (const entry of logs) {
+        const found = await take(entry)
+        if (found !== null) return found
+      }
+    }
+    return null
+  }
 
   return {
     async currentBlock() {
@@ -123,18 +162,7 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
     },
 
     async findClaimPreimage(lock, fromBlock) {
-      // Filtered on the INDEXED preimageHash, so the node returns only logs
-      // for this swap rather than every claim on the contract.
-      const logs = await rpc('eth_getLogs', [
-        {
-          address: to,
-          fromBlock: `0x${fromBlock.toString(16)}`,
-          toBlock: 'latest',
-          topics: [hexOf(claimEventTopic()), hexOf(lock.preimageHash)],
-        },
-      ])
-      if (!Array.isArray(logs)) throw new Error('eth_getLogs: expected an array')
-      for (const entry of logs) {
+      return scanLogs(claimEventTopic(), lock, fromBlock, async (entry) => {
         const log = entry as { data?: unknown }
         // NO CHECK ON `topics` HERE, and that is not an oversight. An earlier
         // cut confirmed `topics` was an array and then never read it, which
@@ -149,43 +177,33 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
         // log actually carrying the preimage. One bad record from a node must
         // not be able to hide a real claim.
         const preimage = tryBytesOfHex(log.data)
-        if (!preimage || preimage.length !== 32) continue
+        if (!preimage || preimage.length !== 32) return null
         // THE CHECK THAT MATTERS. A node's filter is a convenience, not a
         // guarantee: the log is untrusted input and the topic it was matched
         // on is attacker-chosen in the case that counts. Only a preimage that
         // hashes to the one WE locked against may leave this function.
-        if (equalBytes(sha256(preimage), lock.preimageHash)) return preimage
-      }
-      return null
+        return equalBytes(sha256(preimage), lock.preimageHash) ? preimage : null
+      })
     },
 
     async findRefund(lock, fromBlock) {
-      const logs = await rpc('eth_getLogs', [
-        {
-          address: to,
-          fromBlock: `0x${fromBlock.toString(16)}`,
-          toBlock: 'latest',
-          topics: [hexOf(refundEventTopic()), hexOf(lock.preimageHash)],
-        },
-      ])
-      if (!Array.isArray(logs)) throw new Error('eth_getLogs: expected an array')
       // The log carries only the hash, so unlike a Claim it cannot check
       // itself; the CALLDATA that emitted it is the lock fields verbatim.
       const refundFor = hexOf(encodeRefundFor(lock)).toLowerCase()
       const refundSelf = hexOf(encodeRefund(lock)).toLowerCase()
       const refundAddress = hexOf(lock.refundAddress).toLowerCase()
-      for (const entry of logs) {
+      const found = await scanLogs(refundEventTopic(), lock, fromBlock, async (entry) => {
         const hash = (entry as { transactionHash?: unknown }).transactionHash
         // Shaped, not just typed: the node REJECTS a malformed hash, and the throw leaves the loop.
-        if (typeof hash !== 'string' || !/^0x[0-9a-f]{64}$/i.test(hash)) continue
+        if (typeof hash !== 'string' || !/^0x[0-9a-f]{64}$/i.test(hash)) return null
         const tx = (await rpc('eth_getTransactionByHash', [hash])) as {
           to?: unknown
           from?: unknown
           input?: unknown
         } | null
-        if (tx === null || tx === undefined) continue
-        if (typeof tx.to !== 'string' || tx.to.toLowerCase() !== to.toLowerCase()) continue
-        if (typeof tx.input !== 'string') continue
+        if (tx === null || tx === undefined) return null
+        if (typeof tx.to !== 'string' || tx.to.toLowerCase() !== to.toLowerCase()) return null
+        if (typeof tx.input !== 'string') return null
         const input = tx.input.toLowerCase()
         // The 6-arg overload carries `refundAddress` so its calldata completes
         // the key; the 5-arg takes `msg.sender`, so the SENDER is that word.
@@ -193,8 +211,9 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
         if (input === refundSelf && typeof tx.from === 'string' && tx.from.toLowerCase() === refundAddress) {
           return true
         }
-      }
-      return false
+        return null
+      })
+      return found === true
     },
 
     async isLockedAt(lock, block) {
@@ -228,6 +247,12 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
       if (status === 0n) return 'reverted'
       if (status === 1n) return 'success'
       throw new Error(`eth_getTransactionReceipt status: expected 0x0 or 0x1, got ${status}`)
+    },
+
+    async transactionBlock(txid) {
+      const receipt = await rpc('eth_getTransactionReceipt', [txid])
+      if (receipt === null || receipt === undefined) return null
+      return quantityOf((receipt as { blockNumber?: unknown }).blockNumber, 'eth_getTransactionReceipt blockNumber')
     },
 
     async allowance(token, owner) {

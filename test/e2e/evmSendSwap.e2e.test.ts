@@ -70,11 +70,12 @@ const AMOUNT_SATS = 100_000
 /**
  * FRESH PER RUN, and not for tidiness.
  *
- * `findClaimPreimage` scans from block 0 and matches on the payment hash, which
- * is `sha256(preimage)`. A fixed preimage against a long-lived anvil therefore
- * finds the PREVIOUS run's Claim event — so the row reaches `claimed` before
- * this run's client has claimed anything, and the test passes having proven
- * nothing about this swap.
+ * `findClaimPreimage` matches on the payment hash, which is `sha256(preimage)`.
+ * A fixed preimage against a long-lived anvil can therefore find the PREVIOUS
+ * run's Claim event — so the row reaches `claimed` before this run's client has
+ * claimed anything, and the test passes having proven nothing about this swap.
+ * The scan floor now starts at the lock's own block, which narrows that window
+ * rather than closing it: a rerun inside the reorg margin still collides.
  */
 const PREIMAGE = hex.encode(crypto.getRandomValues(new Uint8Array(32)))
 

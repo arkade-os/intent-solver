@@ -57,30 +57,37 @@ const quote = (): EvmSendQuoteRecord => ({
 const APPROVE_CALL = { to: new Uint8Array(20), data: Uint8Array.of(0x09, 0x5e, 0xa7, 0xb3) }
 const LOCK_CALL = { to: new Uint8Array(20), data: Uint8Array.of(0xcd, 0x41, 0x30, 0x44) }
 
+const LOCK_BLOCK = 19_000_000n
+const TIMELOCK = 21_000_000n
+
 const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
   const store = await EvmSendSwapStore.open(betterSqliteDriver(':memory:'), () => NOW)
   await store.insertQuote(quote())
+  // An `evm` override MERGES onto this: a method missing from a replacement
+  // throws a TypeError the orchestrator swallows.
+  const evm = {
+    isLocked: vi.fn().mockResolvedValue(false),
+    findClaimPreimage: vi.fn().mockResolvedValue(null),
+
+    isLockedAt: vi.fn().mockResolvedValue(true),
+    blockTimestampAt: vi.fn().mockResolvedValue(0),
+    transactionOutcome: vi.fn().mockResolvedValue('pending'),
+    transactionBlock: vi.fn().mockResolvedValue(LOCK_BLOCK),
+    allowance: vi.fn().mockResolvedValue(0n),
+    lockCalls: vi.fn().mockReturnValue([APPROVE_CALL, LOCK_CALL]),
+    approveCall: vi.fn(),
+    lockCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
+    refundCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
+    claimCall: vi.fn(),
+    lockPrepayCall: vi.fn(),
+    ...(over.evm ?? {}),
+  } as unknown as EvmSendServiceDeps['evm']
   const deps: EvmSendServiceDeps = {
     store,
-    evm: {
-      isLocked: vi.fn().mockResolvedValue(false),
-      findClaimPreimage: vi.fn().mockResolvedValue(null),
-
-      isLockedAt: vi.fn().mockResolvedValue(true),
-      blockTimestampAt: vi.fn().mockResolvedValue(0),
-      transactionOutcome: vi.fn().mockResolvedValue('pending'),
-      allowance: vi.fn().mockResolvedValue(0n),
-      lockCalls: vi.fn().mockReturnValue([APPROVE_CALL, LOCK_CALL]),
-      approveCall: vi.fn(),
-      lockCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
-      refundCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
-      claimCall: vi.fn(),
-      lockPrepayCall: vi.fn(),
-    } as unknown as EvmSendServiceDeps['evm'],
     broadcast: vi.fn().mockResolvedValue('0xtx'),
     arkadeLockupFunded: vi.fn().mockResolvedValue(true),
     claimArkade: vi.fn().mockResolvedValue('ark-txid'),
-    lockFor: vi.fn().mockReturnValue({}) as unknown as EvmSendServiceDeps['lockFor'],
+    lockFor: vi.fn().mockReturnValue({ timelock: TIMELOCK }) as unknown as EvmSendServiceDeps['lockFor'],
     blockHeight: vi.fn().mockResolvedValue(20_000_000),
     // Quote-time deps. Every test in this file drives `tick`, which reads none
     // of them — they are here so the fixture satisfies the type, and are
@@ -114,6 +121,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
     },
     now: () => NOW,
     ...over,
+    evm,
   }
   return { store, deps, service: new EvmSendSwapService(deps) }
 }
@@ -335,6 +343,99 @@ describe('a preimage scan the node refuses must not strand the solver’s tokens
     // Silent degradation would make a provider misconfiguration look like a slow
     // swap; a stall needs a cause an operator can read.
     expect(errors, 'the scan failure never reached the operator log').toHaveLength(1)
+  })
+})
+
+/**
+ * Both scans used to start at block 0, which hosted providers reject. Too LATE
+ * returns "no claim" for a claim that happened, losing the solver its own leg.
+ */
+describe('the scan floor comes from the lock, never from the chain tip', () => {
+  const exposed = async (over: Partial<EvmSendServiceDeps> = {}) => {
+    const built = await build(over)
+    await built.store.transition('swap-1', 'quoted', 'funded')
+    await built.store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xlock' })
+    await built.store.transition('swap-1', 'locking_evm', 'awaiting_claim')
+    return built
+  }
+
+  it('scans for the claim from the lock`s own block, backed off by the row`s reorg depth', async () => {
+    const findClaimPreimage = vi.fn().mockResolvedValue(null)
+    const transactionBlock = vi.fn().mockResolvedValue(LOCK_BLOCK)
+    const { service } = await exposed({
+      evm: { isLocked: vi.fn().mockResolvedValue(true), findClaimPreimage, transactionBlock } as never,
+    })
+    await service.tick('swap-1')
+    expect(transactionBlock).toHaveBeenCalledWith('0xlock')
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), LOCK_BLOCK - BigInt(quote().minConfirmations))
+  })
+
+  it('does not move the floor when the chain advances', async () => {
+    // The assertion that stops a lookback window being reintroduced.
+    const floors: bigint[] = []
+    const findClaimPreimage = vi.fn().mockImplementation(async (_lock: unknown, from: bigint) => {
+      floors.push(from)
+      return null
+    })
+    for (const height of [20_000_000, 20_900_000]) {
+      const { service } = await exposed({
+        evm: {
+          isLocked: vi.fn().mockResolvedValue(true),
+          findClaimPreimage,
+          transactionBlock: vi.fn().mockResolvedValue(LOCK_BLOCK),
+        } as never,
+        blockHeight: vi.fn().mockResolvedValue(height),
+      })
+      await service.tick('swap-1')
+    }
+    expect(floors).toEqual([LOCK_BLOCK - 1n, LOCK_BLOCK - 1n])
+  })
+
+  it('scans for the refund from the lock`s timelock, which no refund can precede', async () => {
+    const findRefund = vi.fn().mockResolvedValue(false)
+    const { store, service } = await exposed({
+      evm: { isLocked: vi.fn().mockResolvedValue(true), findRefund } as never,
+    })
+    await store.transition('swap-1', 'awaiting_claim', 'refunding_evm')
+    await service.tick('swap-1')
+    expect(findRefund).toHaveBeenCalledWith(expect.anything(), TIMELOCK)
+  })
+
+  it('falls back to genesis rather than skipping a row whose txid patch was lost', async () => {
+    const findClaimPreimage = vi.fn().mockResolvedValue(null)
+    const { store, service } = await build({
+      evm: { isLocked: vi.fn().mockResolvedValue(true), findClaimPreimage } as never,
+    })
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'locking_evm')
+    await service.tick('swap-1')
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n)
+  })
+
+  it('falls back to genesis when the lock txid resolves to no receipt', async () => {
+    const findClaimPreimage = vi.fn().mockResolvedValue(null)
+    const { service } = await exposed({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(true),
+        findClaimPreimage,
+        transactionBlock: vi.fn().mockResolvedValue(null),
+      } as never,
+    })
+    await service.tick('swap-1')
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n)
+  })
+
+  it('clamps at genesis on a chain shallower than the margin', async () => {
+    const findClaimPreimage = vi.fn().mockResolvedValue(null)
+    const { service } = await exposed({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(true),
+        findClaimPreimage,
+        transactionBlock: vi.fn().mockResolvedValue(1n),
+      } as never,
+    })
+    await service.tick('swap-1')
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n)
   })
 })
 
