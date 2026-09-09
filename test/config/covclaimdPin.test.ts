@@ -19,6 +19,11 @@ const DOCS = ['README.md', 'docs/runbook.md']
 const FLOOR = [0, 0, 1, 5]
 
 const PIN = /COVCLAIMD_IMAGE=ghcr\.io\/arkade-os\/covclaimd:v(\d+)\.(\d+)\.(\d+)-rc\.(\d+)/g
+/** A runnable bring-up, not the prose that discusses one: start of line, no `#`. */
+const BRINGUP = /^node regtest\.mjs start\b/gm
+
+const countIn = (pattern: RegExp) => (file: string) =>
+  [...readFileSync(join(root, file), 'utf8').matchAll(pattern)].length
 
 const pins = (): { file: string; tag: string; version: number[] }[] =>
   DOCS.flatMap((file) => {
@@ -38,10 +43,13 @@ const belowFloor = (version: number[]): boolean => {
 }
 
 describe('the documented covclaimd image', () => {
-  // Without this the assertion below ranges over an empty list, and a renamed
-  // variable reads as "every pin is fine" while pinning nothing.
-  it('is pinned by the docs at all', () => {
-    expect(pins().length).toBeGreaterThan(0)
+  // Counted against the bring-ups, not merely `> 0`: one command losing its pin
+  // leaves the other to carry the version assertion, which then passes while the
+  // stack it documents comes up with no covclaimd in it at all.
+  it('is pinned on every documented bring-up', () => {
+    const bringups = DOCS.map(countIn(BRINGUP)).reduce((a, b) => a + b, 0)
+    expect(bringups).toBeGreaterThan(0)
+    expect(DOCS.map(countIn(PIN)).reduce((a, b) => a + b, 0)).toBe(bringups)
   })
 
   it('is never below the version that attaches PrevArkTx', () => {
