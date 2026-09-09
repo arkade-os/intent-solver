@@ -185,6 +185,14 @@ const marketFrom = (raw: MarketRaw): AssetMarketRow => ({
 export const adminDbPath = (swapDbPath: string): string =>
   swapDbPath.endsWith('.sqlite') ? swapDbPath.replace(/\.sqlite$/, '-admin.sqlite') : `${swapDbPath}-admin`
 
+/** DROPPED, not altered: `amount_sats` is NOT NULL, so ADD COLUMN still fails every insert. */
+const dropLegacyApprovals = async (driver: SqlDriver): Promise<void> => {
+  const columns = await driver.all<{ name: string }>("SELECT name FROM pragma_table_info('admin_swap_approval')")
+  if (columns.some((column) => column.name === 'amount_sats')) {
+    await driver.exec('DROP TABLE admin_swap_approval')
+  }
+}
+
 export class AdminStore {
   private constructor(
     private readonly driver: SqlDriver,
@@ -193,6 +201,7 @@ export class AdminStore {
 
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<AdminStore> {
     const store = new AdminStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
+    await dropLegacyApprovals(store.driver)
     await store.driver.exec(SCHEMA)
     return store
   }

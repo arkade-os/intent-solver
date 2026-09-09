@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
+import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 
 let now = 1_000_000
 const clock = () => now
@@ -79,5 +80,42 @@ describe('swap approvals', () => {
     await store.approveSwap('a')
     expect(await store.isSwapApproved('a')).toBe(true)
     expect(await store.isSwapApproved('b')).toBe(false)
+  })
+})
+
+// CREATE TABLE IF NOT EXISTS does not reshape a table left by an older branch.
+describe('an approval table left over from the pre-release shape', () => {
+  it('is replaced, so the gate can still record what it holds', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    await driver.exec(
+      'CREATE TABLE admin_swap_approval (swap_id TEXT PRIMARY KEY, corridor TEXT NOT NULL, ' +
+        'amount_sats INTEGER NOT NULL, requested_at INTEGER NOT NULL, approved_at INTEGER)',
+    )
+    await driver.run(
+      'INSERT INTO admin_swap_approval (swap_id, corridor, amount_sats, requested_at, approved_at) ' +
+        "VALUES ('old-1', 'arkade:BTC->lightning:BTC', 5, 1, NULL)",
+    )
+
+    const migrated = await AdminStore.open(driver, clock)
+    expect(
+      await migrated.recordApprovalRequest({
+        swapId: 'swap-1',
+        corridor: 'arkade asset RFQ',
+        assetId: 'a'.repeat(68),
+        amount: 2n ** 70n,
+      }),
+    ).toBe(true)
+    expect(await migrated.listPendingApprovals()).toMatchObject([{ swapId: 'swap-1', amount: 2n ** 70n }])
+    await migrated.close()
+  })
+
+  it('leaves a correctly-shaped table and its rows alone', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    const first = await AdminStore.open(driver, clock)
+    await first.recordApprovalRequest({ swapId: 'keep-me', corridor: 'arkade asset RFQ', assetId: null, amount: 7n })
+
+    const reopened = await AdminStore.open(driver, clock)
+    expect(await reopened.listPendingApprovals()).toMatchObject([{ swapId: 'keep-me', amount: 7n }])
+    await reopened.close()
   })
 })

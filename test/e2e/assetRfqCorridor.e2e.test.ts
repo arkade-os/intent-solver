@@ -543,6 +543,9 @@ describe('e2e arkade asset RFQ — the approval gate', () => {
       const pending = await poll(
         async () => {
           await corridor.tickAll()
+          // GiveUp, not a plain throw: `poll` retries one and would hide this.
+          const state = (await store.get(id)).state
+          if (state !== 'funded') throw new GiveUp(`${id} reached ${state} instead of being held`)
           const rows = await admin.listPendingApprovals()
           return rows.length > 0 ? rows : null
         },
