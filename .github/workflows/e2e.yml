@@ -50,6 +50,14 @@ on:
   schedule:
     - cron: '17 3 * * *'
 
+# Explicit, because this now runs PR-authored code on every PR rather than only
+# on a label a maintainer applied: `pnpm install` runs lifecycle scripts and the
+# suite is the diff under test. Nothing here writes through the token — no
+# artifact upload, no `gh`, no secrets — so `contents: read` is the whole need,
+# and it stops the repository default from deciding otherwise.
+permissions:
+  contents: read
+
 concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: true
