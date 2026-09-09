@@ -1195,9 +1195,11 @@ hard way. The numbers below are the smallest legal values, not arbitrary ones.
   brings the stack up perfectly happily and only fails once funds are actually
   settled. Non-regtest equivalent: `DEFAULT_MIN_BATCH_EXPIRY_SECONDS = 86400`
   (line 2335).
-- **`COVCLAIMD_IMAGE` must be set explicitly.** `regtest.mjs` silently drops
-  covclaimd from the stack when it is unset — no error, the container simply is
-  not there.
+- **`COVCLAIMD_IMAGE` must be set explicitly, and at `v0.0.1-rc.5` or above.**
+  `regtest.mjs` silently drops covclaimd from the stack when it is unset — no
+  error, the container simply is not there. Setting it is not enough on its own:
+  compose still defaults to `rc.4`, which cannot claim against the `v0.0.7`
+  emulator the same stack brings up. See § covclaimd for why.
 
 Three more things that cost time if forgotten:
 
@@ -1246,7 +1248,7 @@ git clone https://github.com/arklabsHQ/arkade-regtest && cd arkade-regtest
 ARKD_VTXO_TREE_EXPIRY=6144 ARKD_UNILATERAL_EXIT_DELAY=512 \
 ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 ARKD_BOARDING_EXIT_DELAY=2048 \
 ARKD_CHECKPOINT_EXIT_DELAY=1536 \
-COVCLAIMD_IMAGE=ghcr.io/arkade-os/covclaimd:v0.0.1-rc.4 \
+COVCLAIMD_IMAGE=ghcr.io/arkade-os/covclaimd:v0.0.1-rc.5 \
 node regtest.mjs start --clean
 
 # 2. this repo
@@ -1302,7 +1304,7 @@ git clone https://github.com/arklabsHQ/arkade-regtest && cd arkade-regtest
 ARKD_VTXO_TREE_EXPIRY=6144 ARKD_UNILATERAL_EXIT_DELAY=512 \
 ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 ARKD_BOARDING_EXIT_DELAY=2048 \
 ARKD_CHECKPOINT_EXIT_DELAY=1536 \
-COVCLAIMD_IMAGE=ghcr.io/arkade-os/covclaimd:v0.0.1-rc.4 \
+COVCLAIMD_IMAGE=ghcr.io/arkade-os/covclaimd:v0.0.1-rc.5 \
 node regtest.mjs start --clean
 
 # 2. extract boltz-lnd's TLS cert and macaroon
@@ -1423,7 +1425,7 @@ brought a stack up.
 No covclaimd is required by any of them: on both receive corridors the CLIENT
 claims the Arkade lockup itself, through the covenant's collaborative claim
 leaf. covclaimd stays supported and optional (`ReceiveServiceDeps.covclaimd`); it
-CAN claim this covenant as of `v0.0.1-rc.4`, which `covclaimdClaim.e2e.test.ts`
+CAN claim this covenant as of `v0.0.1-rc.5`, which `covclaimdClaim.e2e.test.ts`
 covers separately — see "covclaimd" below.
 
 - **Environment** comes from `E2E_ENV_FILE` (default `.env.regtest.lnd`, the
@@ -1519,12 +1521,30 @@ the CLIENT claims its own lockup through the collaborative claim leaf). Rows
 quoted before the leaf shipped keep the eight-leaf shape and stay claimable, so
 it is only newly funded lockups that move out of covclaimd's reach.
 
-**What has now been shown (regtest, 2026-08-12).** `v0.0.1-rc.4` claims a
+**What has now been shown (regtest, 2026-09-09).** `v0.0.1-rc.5` claims a
 solver-built lockup end to end, with the client offline. That is
 `test/e2e/covclaimdClaim.e2e.test.ts`: the solver funds, reveals, and then
 nobody in the test claims — the preimage never leaves the test process — and the
 lockup is spent anyway, with the solver recovering `P` off that witness and
 settling a real held HTLC with it.
+
+**`rc.5` is a floor, not a preference — `rc.4` cannot claim here at all.**
+Emulator `v0.0.7` made the `PrevArkTx` PSBT field mandatory on every ark-tx
+input (`prevOutFetcherForArkTx` walks all of them and errors on the first
+missing one; `v0.0.6` only walked the fields that were present). rc.4's claim
+carries none, and `arkade-regtest`'s `.env.defaults` pins the emulator at
+`v0.0.7`, so the pairing its compose default gives you — emulator `v0.0.7` plus
+covclaimd `rc.4` — can never settle. covclaimd `rc.5` attaches the field.
+
+Nothing about that reaches the caller. The emulator logs `failed to process
+transaction: failed to create prevout fetcher: missing prevout tx for input 0`
+and returns a bare internal status; covclaimd logs `reveal claim failed, keeping
+registration for retry ... rpc error: code = Internal desc = internal error` and
+retries forever. The solver sees only a lockup nobody spends, so the swap sits
+in `funded` until whatever is watching it gives up. **Diagnose this pair from
+`docker logs emulator` and `docker logs covclaimd`, never from the status code.**
+A/B on one stack, changing only the image: rc.4 timed out at 302s, rc.5 passed
+in 3.8s.
 
 Attributing the claim to covclaimd needed a control, because **the daemon logs
 nothing for request handling** — even a rejected `POST /v1/reveal` leaves no

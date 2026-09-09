@@ -921,8 +921,10 @@ Three more stack requirements, all covered in the runbook:
   stack's defaults to block counts; `deriveUnilateralDelays` hard-rejects
   anything below 512 as a block count, so the service dies at wallet
   construction — before any swap runs
-- **`COVCLAIMD_IMAGE` must be set explicitly** — `regtest.mjs` silently drops
-  covclaimd from the stack when it is unset. No error; the container is not there
+- **`COVCLAIMD_IMAGE` must be set explicitly, and at `v0.0.1-rc.5` or above** —
+  `regtest.mjs` silently drops covclaimd from the stack when it is unset (no
+  error; the container is not there), and the compose default is `rc.4`, which
+  cannot claim against the emulator that same stack ships
 - **the operator's intent-fee policy affects renewal.** arkade-regtest
   configures `ARK_OFFCHAIN_INPUT_FEE="amount * 0.01"`, so every settlement
   costs 1% of each input. This is **operator policy, not a regtest quirk**. The
@@ -967,11 +969,14 @@ Two more, current as of the receive corridors going live:
   The cause is now known and fixed upstream: `rc.1` matched the v1 preimage
   condition against our `ScriptV2` taptree, so its claim closure never matched.
   `v0.0.1-rc.3` carries the v2 form (and a separate taptree-binding fix from
-  `rc.2`), and the runbook's stack commands pin `rc.4`.
+  `rc.2`), and the runbook's stack commands pin `rc.5` — a floor, because
+  emulator `v0.0.7` made the `PrevArkTx` PSBT field mandatory and `rc.4` is the
+  last build that omits it. `docs/runbook.md` § covclaimd has the symptom, which
+  is silent on the wire and visible only in the two container logs.
 
   **The live claim has now been watched**, which was the standing precondition
   here: `test/e2e/covclaimdClaim.e2e.test.ts` claims a real lockup against a
-  running `rc.4`, and `receiveLightningEdges.e2e.test.ts` drives a whole receive
+  running `rc.5`, and `receiveLightningEdges.e2e.test.ts` drives a whole receive
   swap to `settled` on covclaimd's own claim with the client never acting. What
   keeps this unwired is therefore the wiring work itself, no longer doubt about
   the daemon. See `docs/runbook.md` § covclaimd.
