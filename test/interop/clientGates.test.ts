@@ -286,6 +286,7 @@ describe('the shipped client and this solver stop funding an onchain SEND at the
         htlcLocktime: quoted.htlcLocktime,
         minConfirmations: quoted.minConfirmations,
         lockupAddress: LOCKUP_ADDRESS,
+        // Shape-only, like the cast below: no gate under test reads an address.
         onchainAddress: 'bcrt1qexamplehtlcaddressforgatetests',
         receiverPkScript: null,
       } as unknown as OnchainSendSwapRow,

@@ -625,6 +625,65 @@ describe('OnchainSendSwapService', () => {
     })
 
     /**
+     * The deadline runs AFTER the fund lease. Parking a row a second worker is
+     * inside `fund()` on would lose that worker's compare-and-swap, leaving the
+     * sats out with no `funding_txid` — the outpoint `reclaimOnchainHtlc` needs.
+     * Two instances because `tick()`'s `inFlight` set hides this within one.
+     */
+    it('does not park a row another worker is already funding, deadline or not', async () => {
+      const second = new OnchainSendSwapService({
+        store: deps.store,
+        onchain: deps.onchain,
+        arkade: deps.arkade,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => deps.store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        refundDestinationScript,
+        now: clock,
+      })
+      const outcome = await service.quote({
+        paymentHash,
+        amountSats: 50_000,
+        payoutPubkey,
+        refundAddress: REFUND_ADDRESS,
+        clientRefundPubkey,
+      })
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+      await deps.store.transition(outcome.swap.id, 'quoted', 'funded', {})
+      await deps.store.transition(outcome.swap.id, 'funded', 'funding_onchain', {})
+      const row = await deps.store.get(outcome.swap.id)
+
+      let entered!: () => void
+      let release!: () => void
+      const inFund = new Promise<void>((resolve) => (entered = resolve))
+      const held = new Promise<void>((resolve) => (release = resolve))
+      const originalFund = deps.onchain.fund.bind(deps.onchain)
+      deps.onchain.fund = async (params) => {
+        entered()
+        await held
+        return originalFund(params)
+      }
+
+      const first = service.tick(row.id)
+      await inFund
+      // The deadline matures while the other worker is still in flight.
+      now = row.htlcLocktime - claimWindow(row)
+
+      await second.tick(row.id)
+      expect((await deps.store.get(row.id)).state).toBe('funding_onchain')
+
+      release()
+      await first
+      const settled = await deps.store.get(row.id)
+      expect(settled.state).toBe('awaiting_claim')
+      expect(settled.fundingTxid).toBeTruthy()
+    })
+
+    /**
      * The deadline runs AFTER the recovery read. Parking a funding that really
      * went out would lose the outpoint `reclaimOnchainHtlc` needs.
      */
