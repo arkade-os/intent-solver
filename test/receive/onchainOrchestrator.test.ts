@@ -1213,6 +1213,33 @@ describe('OnchainReceiveSwapService', () => {
         ...(maxBandWidthSats === undefined ? {} : { maxBandWidthSats }),
       })
 
+    it('asks no fee rate at all for a row quoted without a band', async () => {
+      // The claim-fee floor cannot change a decision on such a row, and
+      // `whenQuoted` made no such call before this change. Counting it is the
+      // only way "no behaviour change" covers the I/O and not just the states.
+      let calls = 0
+      const estimate = deps.onchain.estimateFeeRate.bind(deps.onchain)
+      deps.onchain.estimateFeeRate = async () => {
+        calls += 1
+        return estimate()
+      }
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      await service.tick(outcome.swap.id)
+      expect(calls).toBe(0)
+
+      // …and does ask once the row carries a band, which is when it matters.
+      const svc = withBandWidth()
+      const banded = await svc.quote(
+        quoteRequest({ paymentHash: 'bc'.repeat(32), minFromSats: 45_000, maxFromSats: 55_000 }),
+      )
+      if (!banded.accepted) throw new Error(`refused: ${banded.reason}`)
+      deps.onchain.receiveExternal({ address: banded.swap.onchainAddress, amountSats: 50_000 })
+      await svc.tick(banded.swap.id)
+      expect(calls).toBeGreaterThan(0)
+    })
+
     it('leaves both bounds null when the request names no band', async () => {
       const outcome = await service.quote(quoteRequest())
       if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
