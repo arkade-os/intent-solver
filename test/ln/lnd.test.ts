@@ -236,9 +236,17 @@ describe('isInvoiceNotFound', () => {
     expect(isInvoiceNotFound(err)).toBe(true)
   })
 
+  it('recognises the empty-invoice-database answer a node that only pays gives', () => {
+    const err = [503, 'UnexpectedLookupInvoiceErr', { err: { code: 2, details: 'there are no existing invoices' } }]
+    expect(isInvoiceNotFound(err)).toBe(true)
+  })
+
   it('does not read a transport failure as not-found — the safe direction matters here', () => {
     expect(isInvoiceNotFound([503, 'UnexpectedLookupInvoiceErr', { err: { code: 14 } }])).toBe(false)
     expect(isInvoiceNotFound([503, 'UnexpectedServiceError', { err: { code: 5 } }])).toBe(false)
+    expect(
+      isInvoiceNotFound([503, 'UnexpectedServiceError', { err: { details: 'there are no existing invoices' } }]),
+    ).toBe(false)
     expect(isInvoiceNotFound(new Error('network error'))).toBe(false)
   })
 })
@@ -270,6 +278,16 @@ describe('LndLightningBackendAdapter.getOwnInvoiceState', () => {
       503,
       'UnexpectedLookupInvoiceErr',
       { err: { code: 5, details: 'unable to locate invoice' } },
+    ])
+    const adapter = await LndLightningBackendAdapter.create({ socket: 's', cert: 'c', macaroon: 'm' })
+    await expect(adapter.getOwnInvoiceState('ab'.repeat(32))).resolves.toBeNull()
+  })
+
+  it('answers null on a node with no invoices at all, not just no matching one', async () => {
+    getInvoice.mockRejectedValue([
+      503,
+      'UnexpectedLookupInvoiceErr',
+      { err: { code: 2, details: 'there are no existing invoices' } },
     ])
     const adapter = await LndLightningBackendAdapter.create({ socket: 's', cert: 'c', macaroon: 'm' })
     await expect(adapter.getOwnInvoiceState('ab'.repeat(32))).resolves.toBeNull()

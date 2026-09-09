@@ -237,11 +237,22 @@ export const toGetPaymentRejection = (id: string, error: unknown): PaymentResult
  * failure as `[503, 'UnexpectedLookupInvoiceErr', {err}]`, so the raw gRPC
  * status (code 5 / "unable to locate invoice") has to be read out of the
  * third tuple element.
+ *
+ * LND has TWO ways of saying it and only one is NOT_FOUND: against an EMPTY
+ * invoice bucket it answers ErrNoInvoicesCreated, "there are no existing
+ * invoices", which does not arrive as NOT_FOUND. A node that only ever pays
+ * gives that answer to every probe, so the probe threw instead of answering
+ * "not ours" (#102). Matched on the message and NOT on a status: the one it
+ * carries instead was never measured, so constraining on a guess re-breaks it.
  */
 export const isInvoiceNotFound = (error: unknown): boolean => {
   if (!Array.isArray(error) || error[1] !== 'UnexpectedLookupInvoiceErr') return false
   const inner = (error[2] as { err?: { code?: number; details?: string } } | undefined)?.err
-  return inner?.code === 5 || (typeof inner?.details === 'string' && /unable to locate invoice/i.test(inner.details))
+  return (
+    inner?.code === 5 ||
+    (typeof inner?.details === 'string' &&
+      /unable to locate invoice|there are no existing invoices/i.test(inner.details))
+  )
 }
 
 /**
