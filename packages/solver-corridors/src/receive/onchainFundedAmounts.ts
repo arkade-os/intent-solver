@@ -6,14 +6,26 @@
  * Source those two from different numbers — the chain for one, the quote for
  * the other — and the whole of any overfund lands in the solver's own wallet.
  * Neither entry point takes an amount parameter, so there is nowhere to pass
- * the quoted number to. `fundedValueSats` is NULL on every row today.
+ * the quoted number to.
  */
 
 import type { ClaimTxParams } from '@arkade-os/solver-rails/onchain/claim.js'
+import type { OnchainReceiveBand } from '@arkade-os/solver-core/core/onchainReceive.js'
 import type { OnchainReceiveSwapRow } from '../db/onchainReceiveSwaps.js'
 
 /** Narrower than the row, so a caller cannot smuggle another number in. */
 export type FundedAmountRow = Pick<OnchainReceiveSwapRow, 'amountSats' | 'payoutSats' | 'fundedValueSats'>
+
+/** One reader, so both ways a row can lack a band collapse to strict equality. */
+export const bandOf = (
+  row: Pick<OnchainReceiveSwapRow, 'amountSats' | 'minFromSats' | 'maxFromSats'>,
+): OnchainReceiveBand => ({
+  minFromSats: row.minFromSats ?? row.amountSats,
+  maxFromSats: row.maxFromSats ?? row.amountSats,
+})
+
+export const hasBand = (row: Pick<OnchainReceiveSwapRow, 'minFromSats' | 'maxFromSats'>): boolean =>
+  row.minFromSats !== null && row.maxFromSats !== null
 
 export interface OnchainReceiveFundedAmounts {
   /** The claim input's `witnessUtxo.amount`. */

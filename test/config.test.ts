@@ -108,6 +108,7 @@ const CONFIG_KEYS = [
   // Listed for the same reason the rest are: a leaked bad value makes every
   // later `loadConfig()` in the file throw.
   'ONCHAIN_RECEIVE_MAX_BAND_SATS',
+  'ONCHAIN_RECEIVE_BAND_BELOW_SHARE',
   'LN_SEND_HINT_SCID_DENYLIST',
   // Listed for the same reason `EVM_TOKENS` is: a leaked `OFFER_MARKETS` would
   // give every later test in the run an offer path it never asked for, and one
@@ -617,6 +618,22 @@ describe('CONTRACT_RETENTION_DAYS', () => {
     // ever ruled out, this test is where that decision gets recorded.
     process.env.CONTRACT_RETENTION_DAYS = '0.5'
     expect(loadConfig().contractRetentionMs).toBe(0.5 * 86_400_000)
+  })
+})
+
+describe('ONCHAIN_RECEIVE_BAND_BELOW_SHARE', () => {
+  it('defaults to the whole retained width below the quote', () => {
+    expect(loadConfig().onchainReceiveBandBelowShare).toBe(1)
+  })
+
+  it.each(['0', '0.5', '1'])('accepts %s', (raw) => {
+    process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE = raw
+    expect(loadConfig().onchainReceiveBandBelowShare).toBe(Number(raw))
+  })
+
+  it.each(['-0.1', '1.1', 'abc', 'Infinity'])('rejects %s rather than clamping silently', (raw) => {
+    process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE = raw
+    expect(() => loadConfig()).toThrow(/ONCHAIN_RECEIVE_BAND_BELOW_SHARE must be a number between 0 and 1/)
   })
 })
 

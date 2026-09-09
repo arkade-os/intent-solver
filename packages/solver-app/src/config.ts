@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { base64 } from '@scure/base'
 import { narrow, resolveLimits, type Limits } from '@arkade-os/solver-core/core/limits.js'
-import { defaultMaxBandWidthSats } from '@arkade-os/solver-core/core/onchainReceive.js'
+import { defaultMaxBandWidthSats, DEFAULT_BAND_BELOW_SHARE } from '@arkade-os/solver-core/core/onchainReceive.js'
 import { DEFAULT_LOCKUP_TIMEOUT, MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { MAX_BIP68_BLOCKS, MAX_BIP68_SECONDS, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
@@ -139,6 +139,8 @@ export interface Config {
    * may be, and an operator may want the first tight and the second wide.
    */
   onchainReceiveMaxBandSats: number
+  /** From `ONCHAIN_RECEIVE_BAND_BELOW_SHARE`. Only reachable when `ONCHAIN_RECEIVE_MAX_BAND_SATS` binds. */
+  onchainReceiveBandBelowShare: number
   /**
    * The bounds a corridor prices its own EXECUTION COST inside, or null to keep
    * charging {@link Config.corridorFees}' flat and nothing else.
@@ -577,6 +579,19 @@ const corridorLimitsFromEnv = (base: Limits): Record<Corridor, Limits> => {
   return Object.fromEntries(entries) as Record<Corridor, Limits>
 }
 
+/** Defaults to all of it below the quote, the side that cannot cost the operator. A policy default, not a correctness property. */
+const onchainReceiveBandBelowShareFromEnv = (): number => {
+  const raw = process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE?.trim()
+  if (!raw) return DEFAULT_BAND_BELOW_SHARE
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error(
+      `ONCHAIN_RECEIVE_BAND_BELOW_SHARE must be a number between 0 and 1, got ${process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE}`,
+    )
+  }
+  return value
+}
+
 /** Absent, the whole range that corridor already serves. Same one-way rule as every amount knob here: it may only reduce. */
 const onchainReceiveMaxBandSatsFromEnv = (onchainReceiveLimits: Limits): number => {
   const fallback = defaultMaxBandWidthSats(onchainReceiveLimits)
@@ -967,6 +982,7 @@ export const loadConfig = (): Config => {
     corridorLimits,
     corridorFees: corridorFeesFromEnv(),
     onchainReceiveMaxBandSats: onchainReceiveMaxBandSatsFromEnv(corridorLimits['onchain:BTC->arkade:BTC']),
+    onchainReceiveBandBelowShare: onchainReceiveBandBelowShareFromEnv(),
     corridorNetworkFees: corridorNetworkFeesFromEnv(),
     onchainFeeRateRefreshMs,
     onchainFeeRateStaleMs,

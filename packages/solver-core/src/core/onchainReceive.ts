@@ -161,18 +161,22 @@ export interface OnchainReceiveBand {
 /** No narrowing beyond what `limits` already impose — the same layering `narrow()` applies to the amounts. */
 export const defaultMaxBandWidthSats = (limits: Limits): number => limits.maxSats - limits.minSats
 
+/** 1 keeps the whole clamped width below the quote. A policy DEFAULT, not a correctness property. */
+export const DEFAULT_BAND_BELOW_SHARE = 1
+
 /** Narrow a client's requested band to what the operator underwrites. Never widens. */
 export const clampOnchainReceiveBand = (
   band: OnchainReceiveBand,
   quotedAmountSats: number,
   maxWidthSats: number,
+  belowShare: number = DEFAULT_BAND_BELOW_SHARE,
 ): OnchainReceiveBand => {
   if (band.maxFromSats - band.minFromSats <= maxWidthSats) return band
-  // Around the QUOTE: clamping to an end would move the swap out of its band.
-  const half = Math.floor(maxWidthSats / 2)
+  const share = Number.isFinite(belowShare) ? Math.min(1, Math.max(0, belowShare)) : DEFAULT_BAND_BELOW_SHARE
+  const below = Math.round(maxWidthSats * share)
   return {
-    minFromSats: Math.max(band.minFromSats, quotedAmountSats - half),
-    maxFromSats: Math.min(band.maxFromSats, quotedAmountSats + (maxWidthSats - half)),
+    minFromSats: Math.max(band.minFromSats, quotedAmountSats - below),
+    maxFromSats: Math.min(band.maxFromSats, quotedAmountSats + (maxWidthSats - below)),
   }
 }
 
