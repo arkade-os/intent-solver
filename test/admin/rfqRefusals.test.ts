@@ -69,7 +69,17 @@ describe('RFQ refusal diagnostics', () => {
       await deliver({ id: 'event', author: 'client', createdAtMs: 1234, payload: request })
       await ingress.stop()
     }
-    expect(reply).toEqual({ v: 1, type: 'rfq_refusal', rfq_id: RFQ_ID, reason: 'unsupported_payload' })
+    expect(reply).toEqual({
+      v: 1,
+      type: 'rfq_refusal',
+      rfq_id: RFQ_ID,
+      reason: 'unsupported_payload',
+      error_code: 'invoice_cltv_too_large',
+      field: 'profile.invoice',
+      actual: 624,
+      limit: 288,
+      unit: 'blocks',
+    })
     expect(deps.quote).not.toHaveBeenCalled()
     const response = await deps.admin.request('/api/rfq-refusals')
     expect(response.status).toBe(200)

@@ -291,9 +291,10 @@ Relay status refusals appear here too; HTTP status lookups returning a normal
 
 The latest 200 entries are held in memory and cleared on restart. Details are
 capped at 1024 characters; raw request bodies, invoices, refund addresses and
-client keys are not retained by the recorder. The public refusal payload stays
-unchanged. This endpoint uses the same access boundary as the rest of the admin
-console.
+client keys are not retained by the recorder. The public refusal's `reason`
+stays unchanged; selected input failures add the client-safe structured fields
+defined by RFQ protocol § 10. This endpoint uses the same access boundary as the
+rest of the admin console.
 
 ### Access and deployment
 

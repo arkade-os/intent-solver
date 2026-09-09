@@ -1702,6 +1702,52 @@ reason as a generic decline (no retry semantics inferred).
 | `pricing_unavailable` | the solver cannot price this swap — no market data, or the corridor's configured fee leaves nothing servable at this size (the fee consumes the amount, or the payout would be under the onchain dust floor) |
 | `rate_limited`        | the requester has opened too many quotes recently — back off and retry later                                                                                                                                 |
 
+A refusal MAY add client-safe diagnostic fields without changing `reason`:
+
+```json
+{
+  "v": 1,
+  "type": "rfq_refusal",
+  "rfq_id": "9f2c…a1",
+  "reason": "unsupported_payload",
+  "error_code": "invoice_cltv_too_large",
+  "field": "profile.invoice",
+  "actual": 624,
+  "limit": 288,
+  "unit": "blocks"
+}
+```
+
+`error_code` is OPTIONAL and comes from the closed set below. Clients that do
+not recognise it MUST fall back to `reason`; response tolerance (§ 1) requires
+older clients to ignore every added field. `field` is an OPTIONAL dotted request
+path. `actual`, `expected` and `limit` are OPTIONAL integers whose meaning is
+fixed by the code; `unit`, when present, is `blocks`, `characters` or `sats`.
+
+| `error_code`                    | client action                                                                 |
+| ------------------------------- | ----------------------------------------------------------------------------- |
+| `amount_side_unsupported`       | use the amount side required by this profile                                  |
+| `exact_out_unsupported`         | request exact-in terms for this pair                                          |
+| `invalid_amount`                | correct the amount's encoding or value                                        |
+| `invalid_payout_address`        | provide a payout address valid for the requested corridor                     |
+| `invalid_refund_address`        | provide a refund address valid for the requested corridor                     |
+| `invoice_amount_mismatch`       | make `amount` equal the BOLT11 amount, or omit the restatement                 |
+| `invoice_cltv_too_large`        | use another solver or an invoice whose CLTV is within `limit`                 |
+| `invoice_malformed`             | replace the BOLT11                                                             |
+| `invoice_missing_amount`        | provide an amount-bearing BOLT11                                               |
+| `invoice_missing_network`       | provide a BOLT11 that names a network                                          |
+| `invoice_missing_payment_hash`  | provide a BOLT11 containing a payment hash                                     |
+| `invoice_missing_timestamp`     | provide a BOLT11 containing a timestamp                                        |
+| `invoice_mixed_case`            | use one Bech32 case consistently                                               |
+| `invoice_sub_satoshi_amount`    | use an invoice whose amount is a whole number of sats                         |
+| `invoice_too_long`              | use an invoice no longer than `limit` characters                              |
+| `invoice_wrong_network`         | use an invoice for the pair's network                                          |
+
+Solvers MUST NOT return free-form diagnostic text, raw request values, backend
+errors, inventory levels or pricing configuration in a refusal. Those belong in
+operator diagnostics. The structured fields above describe only the requester's
+own input and stable public validation bounds.
+
 The reference implementation's internal refusal names map onto the closed set
 (`toRfqReason`, `packages/solver-corridors/src/wire/payloads.ts` — anything unrecognised degrades to
 `unsupported_payload` rather than leaking a non-spec string):

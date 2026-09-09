@@ -20,7 +20,8 @@
 import { ArkAddress } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { lockupDeadlineFor } from '@arkade-os/solver-core/core/send.js'
-import { decodeInvoice, InvalidInvoice } from '@arkade-os/solver-core/invoice/decode.js'
+import { decodeInvoice, InvalidInvoice, type InvoiceRejection } from '@arkade-os/solver-core/invoice/decode.js'
+import type { RfqRefusalError, RfqRefusalErrorCode } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import type { CorridorRfqOutcome as RfqOutcome } from '@arkade-os/solver-core/core/corridor.js'
 import type { SendSwapService } from '../send/orchestrator.js'
 import type { OnchainSendSwapService } from '../send/onchainOrchestrator.js'
@@ -40,6 +41,24 @@ import type { SwapStore } from '../db/swaps.js'
 import type { OnchainSendSwapStore } from '../db/onchainSwaps.js'
 import { RFQ_PAIR_SEND, RfqRequest, rfqQuotePayload, rfqRefusalPayload } from '../wire/payloads.js'
 import { RFQ_PAIR_ONCHAIN_SEND, OnchainRfqRequest, onchainRfqQuotePayload } from '../wire/onchainPayloads.js'
+
+const INVOICE_ERROR_CODES: Record<InvoiceRejection, RfqRefusalErrorCode> = {
+  too_long: 'invoice_too_long',
+  mixed_case: 'invoice_mixed_case',
+  malformed: 'invoice_malformed',
+  missing_payment_hash: 'invoice_missing_payment_hash',
+  missing_amount: 'invoice_missing_amount',
+  sub_satoshi_amount: 'invoice_sub_satoshi_amount',
+  missing_network: 'invoice_missing_network',
+  missing_timestamp: 'invoice_missing_timestamp',
+  cltv_too_large: 'invoice_cltv_too_large',
+}
+
+const invoiceRfqError = (error: InvalidInvoice): RfqRefusalError => ({
+  error_code: INVOICE_ERROR_CODES[error.reason],
+  field: 'profile.invoice',
+  ...error.context,
+})
 
 // Corridor-neutral refusal helpers live with the RFQ vocabulary in core; the
 // transport reaches them through this module, so the re-export stays.
@@ -154,7 +173,10 @@ export const respondToLightningRfqRequest = async (
   if (request.amount_side !== 'to') {
     return {
       kind: 'invalid',
-      payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload'),
+      payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload', {
+        error_code: 'amount_side_unsupported',
+        field: 'amount_side',
+      }),
       detail: `amount_side is '${request.amount_side}', must be 'to' — a client bolt11 forces exact-out`,
     }
   }
@@ -175,7 +197,7 @@ export const respondToLightningRfqRequest = async (
     if (error instanceof InvalidInvoice) {
       return {
         kind: 'invalid',
-        payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload'),
+        payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload', invoiceRfqError(error)),
         detail: `profile.invoice did not decode: ${error.message}`,
       }
     }
@@ -184,7 +206,13 @@ export const respondToLightningRfqRequest = async (
   if (request.amount !== undefined && request.amount !== decoded.amountSats) {
     return {
       kind: 'invalid',
-      payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload'),
+      payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload', {
+        error_code: 'invoice_amount_mismatch',
+        field: 'amount',
+        actual: request.amount,
+        expected: decoded.amountSats,
+        unit: 'sats',
+      }),
       detail: `amount ${request.amount} does not match the invoice's ${decoded.amountSats} sats`,
     }
   }
@@ -212,7 +240,7 @@ export const respondToLightningRfqRequest = async (
     if (error instanceof InvalidInvoice) {
       return {
         kind: 'invalid',
-        payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload'),
+        payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload', invoiceRfqError(error)),
         detail: `quote rejected the invoice: ${error.message}`,
       }
     }

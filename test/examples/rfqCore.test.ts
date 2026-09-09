@@ -27,10 +27,13 @@ import {
 } from '@arkade-os/solver-transport/relay/connection.js'
 import { forgeInvoice } from '@arkade-os/solver-rails-fake/ln/fake/bolt11.js'
 import { ROUTE_CLTV_BUDGET_BLOCKS } from '@arkade-os/solver-core/core/send.js'
+import { RFQ_REFUSAL_ERROR_CODE_VALUES } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import {
   AddressMismatch,
+  RFQ_REFUSAL_ERROR_CODES,
   SwapRefusal,
   assertFundable,
+  expectQuote,
   httpTransport,
   newRfqId,
   pollStatus,
@@ -293,6 +296,12 @@ describe('rfq-core.d.mts', () => {
   })
 })
 
+describe('client-visible refusal details', () => {
+  it('keeps the reference client error-code set in sync with the protocol', () => {
+    expect(RFQ_REFUSAL_ERROR_CODES).toEqual(RFQ_REFUSAL_ERROR_CODE_VALUES)
+  })
+})
+
 describe('rfq-core over HTTP against the real service', () => {
   it('runs the taker flow: quote → derive → verify → gates', async () => {
     const rfqId = newRfqId()
@@ -341,6 +350,35 @@ describe('rfq-core over HTTP against the real service', () => {
         clientRefundPubkey: CLIENT_REFUND_PUBKEY,
       }),
     ).rejects.toMatchObject({ reason: 'amount_out_of_range' })
+  })
+
+  it('surfaces a recognised diagnostic but ignores an unknown one', () => {
+    const refusal = {
+      v: 1,
+      type: 'rfq_refusal',
+      rfq_id: 'ab'.repeat(32),
+      reason: 'unsupported_payload',
+      error_code: 'invoice_cltv_too_large',
+      field: 'profile.invoice',
+      actual: 624,
+      limit: 288,
+      unit: 'blocks',
+    }
+    expect(() => expectQuote(refusal, refusal.rfq_id)).toThrow(/624 blocks, limit 288/)
+    try {
+      expectQuote(refusal, refusal.rfq_id)
+    } catch (error) {
+      expect(error).toMatchObject({
+        errorCode: 'invoice_cltv_too_large',
+        field: 'profile.invoice',
+        actual: 624,
+        limit: 288,
+        unit: 'blocks',
+      })
+    }
+    expect(() => expectQuote({ ...refusal, error_code: 'backend_exception' }, refusal.rfq_id)).toThrow(
+      'solver refused: unsupported_payload',
+    )
   })
 
   it('refuses to fund past valid_until or under the headroom gate', async () => {
