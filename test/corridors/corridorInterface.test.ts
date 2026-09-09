@@ -124,6 +124,48 @@ describe('the wire contract, enforced on a corridor’s way out', () => {
     expect(outcome.payload).toMatchObject({ reason: 'exposure_cap' })
   })
 
+  it('strips an error code outside the closed set without changing a valid reason', async () => {
+    const outcome = await ask(
+      rogue({
+        reason: 'exposure_cap',
+        error_code: 'backend_exception',
+        field: 'internal.inventory',
+        actual: 12.5,
+        limit: 20,
+        unit: 'widgets',
+      }),
+    )
+    expect(outcome.payload).toMatchObject({ reason: 'exposure_cap' })
+    expect(outcome.payload).not.toHaveProperty('error_code')
+    expect(outcome.payload).not.toHaveProperty('field')
+    expect(outcome.payload).not.toHaveProperty('actual')
+    expect(outcome.payload).not.toHaveProperty('limit')
+    expect(outcome.payload).not.toHaveProperty('unit')
+  })
+
+  it('strips malformed fields from a recognised diagnostic', async () => {
+    const outcome = await ask(
+      rogue({
+        reason: 'unsupported_payload',
+        error_code: 'invoice_amount_mismatch',
+        field: 42,
+        actual: 12.5,
+        expected: 12,
+        limit: Number.POSITIVE_INFINITY,
+        unit: 'widgets',
+      }),
+    )
+    expect(outcome.payload).toMatchObject({
+      reason: 'unsupported_payload',
+      error_code: 'invoice_amount_mismatch',
+      expected: 12,
+    })
+    expect(outcome.payload).not.toHaveProperty('field')
+    expect(outcome.payload).not.toHaveProperty('actual')
+    expect(outcome.payload).not.toHaveProperty('limit')
+    expect(outcome.payload).not.toHaveProperty('unit')
+  })
+
   it('refuses an oversized payload rather than relaying it', async () => {
     const outcome = await ask(rogue({ reason: 'exposure_cap', filler: 'x'.repeat(9_000) }))
     expect(outcome.payload).toMatchObject({ reason: 'unsupported_payload' })

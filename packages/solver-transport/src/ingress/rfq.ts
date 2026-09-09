@@ -16,7 +16,9 @@ import type { CorridorReaderSet, CorridorRfqOutcome, CorridorSet } from '@arkade
 import {
   RfqStatusRequest,
   rfqRefusalPayload,
+  isRfqRefusalErrorCode,
   isRfqRefusalReason,
+  isRfqRefusalUnit,
   extractRfqId,
   zodDetail,
 } from '@arkade-os/solver-core/core/rfqProtocol.js'
@@ -95,7 +97,8 @@ const enforceWireContract = (pair: string, rfqId: string | undefined, outcome: C
   if (outcome.kind !== 'quote' && outcome.kind !== 'refused' && outcome.kind !== 'invalid') {
     return reject(`unknown outcome kind ${JSON.stringify(outcome.kind)}`)
   }
-  const reason = (outcome.payload as { reason?: unknown }).reason
+  let payload = outcome.payload
+  const reason = (payload as { reason?: unknown }).reason
   // ABSENCE IS REJECTED AS FIRMLY AS A NON-MEMBER. The earlier check only fired
   // when a reason was PRESENT, so a corridor returning
   // `{ kind: 'refused', payload: { v: 1, type: 'rfq_refusal' } }` — no `reason`
@@ -115,7 +118,23 @@ const enforceWireContract = (pair: string, rfqId: string | undefined, outcome: C
   if (reason !== undefined && !(typeof reason === 'string' && isRfqRefusalReason(reason))) {
     return reject(`refusal reason ${JSON.stringify(reason)} is not in the closed set`)
   }
-  const encoded = JSON.stringify(outcome.payload)
+  if (outcome.kind !== 'quote') {
+    const { error_code: errorCode, field, actual, expected, limit, unit, ...base } = payload
+    if (!(typeof errorCode === 'string' && isRfqRefusalErrorCode(errorCode))) {
+      payload = base
+    } else {
+      payload = {
+        ...base,
+        error_code: errorCode,
+        ...(typeof field === 'string' ? { field } : {}),
+        ...(Number.isSafeInteger(actual) ? { actual } : {}),
+        ...(Number.isSafeInteger(expected) ? { expected } : {}),
+        ...(Number.isSafeInteger(limit) ? { limit } : {}),
+        ...(typeof unit === 'string' && isRfqRefusalUnit(unit) ? { unit } : {}),
+      }
+    }
+  }
+  const encoded = JSON.stringify(payload)
   // byteLength, not .length: the cap is a WIRE budget, and `String.length`
   // counts UTF-16 code units. Any non-ASCII character the corridor puts in a
   // detail field is two or three bytes on the wire and one unit here, so the
@@ -126,7 +145,7 @@ const enforceWireContract = (pair: string, rfqId: string | undefined, outcome: C
   if (bytes > MAX_CORRIDOR_PAYLOAD_BYTES) {
     return reject(`payload is ${bytes} bytes, over the ${MAX_CORRIDOR_PAYLOAD_BYTES} cap`)
   }
-  return outcome as RfqOutcome
+  return (payload === outcome.payload ? outcome : { ...outcome, payload }) as RfqOutcome
 }
 
 /** Handle one `rfq_request`, dispatched to the corridor that serves its `pair`. */

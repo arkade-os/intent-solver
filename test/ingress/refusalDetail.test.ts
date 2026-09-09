@@ -83,6 +83,14 @@ describe('a refusal says which check fired', () => {
     const outcome = await refuse(request({ amount: 999_999 }))
     expect(outcome.detail).toContain('999999')
     expect(outcome.detail).toContain('2100')
+    expect(outcome.payload).toMatchObject({
+      reason: 'unsupported_payload',
+      error_code: 'invoice_amount_mismatch',
+      field: 'amount',
+      actual: 999_999,
+      expected: 2100,
+      unit: 'sats',
+    })
   })
 
   it('calls an unserved pair a pair fault, not a payload one', async () => {

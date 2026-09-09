@@ -77,6 +77,7 @@ import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchain
 import { AdminStore } from './admin/db.js'
 import { applyOverrides } from './admin/settings.js'
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
+import { recordRfqRefusals } from './admin/rfqRefusals.js'
 import type { Services } from './ops/services.js'
 import { refundNow, onchainRefundNow, reclaimL1Htlc } from './ops/refunds.js'
 import { planExitForSwap } from './ops/unilateralExit.js'
@@ -898,7 +899,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       // becomes the proxy's address for everyone — deploy direct, or the quota
       // is shared by all clients (fail-closed, never spoofable).
       clientKey: (c) => getConnInfo(c).remote.address ?? 'unknown',
-      onRefusal: (context, detail) => log(`${context}:`, detail),
+      onRefusal: recordRfqRefusals(services.rfqRefusals, log),
       // Same sink, different word: `onRefusal` above is this host answering
       // correctly, so a fault must not read as ordinary business.
       onError: (context, error) => {
@@ -967,7 +968,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     }
     // A refusal is an ANSWER, not a fault, so it never reaches `onError` — and
     // for a long time that meant a turned-away request left no trace at all.
-    const onRefusal = (context: string, detail: string): void => log(`${context}:`, detail)
+    const onRefusal = recordRfqRefusals(services.rfqRefusals, log)
     // Only the ENABLED corridors reach the ingress; the rest refuse their pair
     // by name. The services still exist and the sweep still drives them, so
     // switching a corridor off stops new quotes without stranding a swap that
