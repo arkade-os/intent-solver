@@ -1,5 +1,5 @@
 /**
- * The solver's own solver-registry card: the v0 corridor card advertising the
+ * The solver's own solver-registry card: the corridor card advertising the
  * send leg (deposit Arkade BTC, receive Lightning BTC), generated from the
  * SAME config the service runs with so the published listing can never drift
  * from what the deployment actually enforces.
@@ -19,17 +19,19 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { ASSET_ID_HEX_LENGTH, ASSETS } from './marketKey.js'
+import { isSwapNetwork } from './networks.js'
 import { defaultPricePath } from './priceFeed.js'
 import type { AssetMarketPricingView } from './assetMarketConfig.js'
 import type { Corridor, Fee } from './corridorPolicy.js'
 import type { Limits } from './limits.js'
+import type { SwapNetwork } from './networks.js'
 
 /** Mirrors the registry card schema's `name` rule (must equal the filename). */
 const NAME = /^[a-z0-9-]+$/
 /** Mirrors the registry schemas' relay item rule and bound. */
 const RELAY = /^wss:\/\/[^\s]+$/
 const MAX_RELAYS = 8
-/** § 2's identity rule for an Arkade asset id, which the schema's `asset.id` also admits. */
+/** § 2's identity rule for a configured asset leg — the INPUT, not the emitted id. */
 const ASSET_ID = new RegExp(`^[0-9a-f]{${ASSET_ID_HEX_LENGTH}}$`)
 /** The registry's ceiling on an asset's `decimals` AND on `price_decimals`. */
 const MAX_DECIMALS = 18
@@ -37,13 +39,30 @@ const MAX_DECIMALS = 18
  * spec makes labels decoration — clients group and price by `id`. */
 const LABEL_CHARS = 8
 
-// From the shared § 2 vocabulary, so the card's ids cannot drift from the
-// market key the relay subscription is derived with.
-const BTC_ASSET = { id: ASSETS.BTC!.id, name: ASSETS.BTC!.name, ticker: 'BTC', decimals: ASSETS.BTC!.decimals }
+// CAIP-19 ids, mirroring solver-registry's `discovery-client/src/validate.ts`
+// and `schema/card.schema.json` (`feat/evm-corridor-markets`, #23).
+const ARKADE = 'arkade'
+const CHAIN_NAMESPACE = { arkade: ARKADE, lightning: 'bolt11', onchain: 'bitcoin' } as const
+type ChainNamespace = (typeof CHAIN_NAMESPACE)[keyof typeof CHAIN_NAMESPACE]
+
+// BTC-only rails, so the coin type is fixed by the network rather than open the
+// way eip155's is: an open `slip44:<n>` would admit `arkade:bitcoin/slip44:60`.
+const btcSlip44Ref = (network: SwapNetwork): string =>
+  network === 'bitcoin' ? 'bitcoin/slip44:0' : `${network}/slip44:1`
+
+const btcAsset = (namespace: ChainNamespace, network: SwapNetwork): Record<string, unknown> => ({
+  id: `${namespace}:${btcSlip44Ref(network)}`,
+  name: ASSETS.BTC!.name,
+  ticker: 'BTC',
+  decimals: ASSETS.BTC!.decimals,
+})
 
 export interface SolverCardInputs {
   /** Registry listing name; becomes `solvers/<network>/<name>.json`. */
   name: string
+  /** The network every asset id names, which must be the directory the card is
+   * filed under — a CAIP-19 id can now contradict its own path. */
+  network: SwapNetwork
   /** x-only hex pubkey makers address RFQs to — the wallet identity. */
   discoveryPubkey: string
   /** Relay URLs the service actually listens on (outbound subscriptions). */
@@ -98,6 +117,11 @@ export interface SolverCardTransports {
 }
 
 export interface SolverCard {
+  /** Stays 0 though the ids are now CAIP-19: the registry bumps on CORRIDOR,
+   * not encoding — `cardVersionErrors` wants 1 only for a rail postdating 0
+   * (today `eip155`), which `unpublishableCorridors` is why we never emit, and
+   * declaring it anyway would shut out v0 consumers, which reject such a card
+   * whole. Bump it, and this type, when an `eip155:` id is first emitted. */
   version: 0
   name: string
   discovery_pubkey: string
@@ -118,32 +142,30 @@ export interface SolverCard {
  */
 const MARKETS = [
   {
-    quoteCorridor: 'lightning',
-    pair: 'BTC/lightning:BTC',
+    quoteNamespace: CHAIN_NAMESPACE.lightning,
     /** Maker receives on the quote side. */
     quoteFrom: 'arkade:BTC->lightning:BTC',
     /** Maker receives on the base (arkade) side. */
     baseFrom: 'lightning:BTC->arkade:BTC',
   },
   {
-    quoteCorridor: 'onchain',
-    pair: 'BTC/onchain:BTC',
+    quoteNamespace: CHAIN_NAMESPACE.onchain,
     quoteFrom: 'arkade:BTC->onchain:BTC',
     baseFrom: 'onchain:BTC->arkade:BTC',
   },
-] as const satisfies readonly { quoteCorridor: string; pair: string; quoteFrom: Corridor; baseFrom: Corridor }[]
+] as const satisfies readonly { quoteNamespace: ChainNamespace; quoteFrom: Corridor; baseFrom: Corridor }[]
 
-const cardAsset = (leg: string | null, decimals: number): Record<string, unknown> => {
+const cardAsset = (leg: string | null, decimals: number, network: SwapNetwork): Record<string, unknown> => {
   if (!Number.isInteger(decimals) || decimals < 0 || decimals > MAX_DECIMALS) {
     throw new Error(`an asset leg's decimals must be an integer in 0..${MAX_DECIMALS} to publish, got ${decimals}`)
   }
   if (leg === null) {
     // Bounds are atomic units of the declared precision: a BTC leg that is not
     // in sats publishes bounds an order of magnitude off.
-    if (decimals !== BTC_ASSET.decimals) {
-      throw new Error(`the BTC leg is ${BTC_ASSET.decimals} decimals (sats), got ${decimals}`)
+    if (decimals !== ASSETS.BTC!.decimals) {
+      throw new Error(`the BTC leg is ${ASSETS.BTC!.decimals} decimals (sats), got ${decimals}`)
     }
-    return { ...BTC_ASSET }
+    return btcAsset(ARKADE, network)
   }
   if (!ASSET_ID.test(leg)) {
     throw new Error(
@@ -152,7 +174,7 @@ const cardAsset = (leg: string | null, decimals: number): Record<string, unknown
     )
   }
   const label = leg.slice(0, LABEL_CHARS)
-  return { id: leg, name: `Arkade asset ${label}`, ticker: label, decimals }
+  return { id: `${ARKADE}:${network}/asset:${leg}`, name: `Arkade asset ${label}`, ticker: label, decimals }
 }
 
 /** A side's bounds. Absent or zeroed is the schema's disabled `"0"`/`"0"`. */
@@ -166,12 +188,16 @@ const cardAmounts = (label: string, bound?: { min: bigint; max: bigint } | null)
 /** Order-free, so one pair cannot be published twice with its legs swapped. */
 const legPairKey = (market: AssetCardMarket): string => [market.base ?? 'btc', market.quote ?? 'btc'].sort().join('/')
 
-const assetMarketEntry = (market: AssetCardMarket, seen: Set<string>): Record<string, unknown> => {
+const assetMarketEntry = (
+  market: AssetCardMarket,
+  seen: Set<string>,
+  network: SwapNetwork,
+): Record<string, unknown> => {
   if (market.base === market.quote) {
     throw new Error(`an asset market names ${market.base ?? 'BTC'} on both legs; the two legs must differ`)
   }
-  const baseAsset = cardAsset(market.base, market.baseDecimals)
-  const quoteAsset = cardAsset(market.quote, market.quoteDecimals)
+  const baseAsset = cardAsset(market.base, market.baseDecimals, network)
+  const quoteAsset = cardAsset(market.quote, market.quoteDecimals, network)
   // Refused at `assetRfq.ts` for want of a covenant, so naming one is a lie.
   if (market.base !== null && market.quote !== null) {
     throw new Error(`an asset market where neither leg is BTC cannot be served, so it is not advertised`)
@@ -216,7 +242,6 @@ const assetMarketEntry = (market: AssetCardMarket, seen: Set<string>): Record<st
     throw new Error(`${pair} enables neither side, and the registry requires at least one`)
   }
   return {
-    pair,
     base_asset: baseAsset,
     quote_asset: quoteAsset,
     fee_bps: market.feeBps,
@@ -230,9 +255,12 @@ const assetMarketEntry = (market: AssetCardMarket, seen: Set<string>): Record<st
   }
 }
 
-const assetMarketEntries = (markets: readonly AssetCardMarket[]): Array<Record<string, unknown>> => {
+const assetMarketEntries = (
+  markets: readonly AssetCardMarket[],
+  network: SwapNetwork,
+): Array<Record<string, unknown>> => {
   const seen = new Set<string>()
-  return markets.map((market) => assetMarketEntry(market, seen))
+  return markets.map((market) => assetMarketEntry(market, seen, network))
 }
 
 /**
@@ -272,13 +300,14 @@ const marketLegs = (market: AssetCardMarket): string => `${market.base ?? 'BTC'}
  */
 export const publishableAssetMarkets = (
   markets: readonly AssetCardMarket[],
+  network: SwapNetwork,
 ): { publishable: AssetCardMarket[]; omitted: string[] } => {
   const publishable: AssetCardMarket[] = []
   const omitted: string[] = []
   const seen = new Set<string>()
   for (const market of markets) {
     try {
-      assetMarketEntry(market, seen)
+      assetMarketEntry(market, seen, network)
       publishable.push(market)
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
@@ -321,6 +350,10 @@ export const buildSolverCard = (inputs: SolverCardInputs): SolverCard => {
   if (!/^[0-9a-f]{64}$/.test(inputs.discoveryPubkey)) {
     throw new Error('discovery pubkey must be 64 lowercase hex chars (x-only)')
   }
+  // An unrecognised network is not one bad field but a whole card of malformed ids.
+  if (!isSwapNetwork(inputs.network)) {
+    throw new Error(`card network must be a known Arkade network, got ${JSON.stringify(inputs.network)}`)
+  }
   const relays = [...new Set(inputs.relays)]
   if (relays.length === 0) {
     throw new Error('a corridor card needs at least one wss:// relay — set RELAY_URL (or SOLVER_CARD_RELAYS)')
@@ -355,7 +388,7 @@ export const buildSolverCard = (inputs: SolverCardInputs): SolverCard => {
       throw new Error(`${corridor} limits.minSats (${limits.minSats}) must be <= maxSats (${limits.maxSats})`)
     }
   }
-  const assetMarkets = assetMarketEntries(inputs.assetMarkets ?? [])
+  const assetMarkets = assetMarketEntries(inputs.assetMarkets ?? [], inputs.network)
   const markets = MARKETS.flatMap((market) => {
     const base = inputs.corridors[market.baseFrom]
     const quote = inputs.corridors[market.quoteFrom]
@@ -370,10 +403,8 @@ export const buildSolverCard = (inputs: SolverCardInputs): SolverCard => {
     const feeFlat = Math.max(...fees.map((fee) => fee.flatSats))
     return [
       {
-        pair: market.pair,
-        base_asset: { ...BTC_ASSET },
-        quote_asset: { ...BTC_ASSET },
-        quote_corridor: market.quoteCorridor,
+        base_asset: btcAsset(ARKADE, inputs.network),
+        quote_asset: btcAsset(market.quoteNamespace, inputs.network),
         fee_bps: feeBps,
         // Optional in the registry schema, absent meaning none — so a
         // deployment charging no flat fee publishes a card byte-identical to

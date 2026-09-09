@@ -1770,10 +1770,12 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       await import('@arkade-os/solver-core/core/registryCard.js')
     const { publishable, omitted } = publishableAssetMarkets(
       assetCardMarkets(assetMarkets, { min: policy.offerMinFillAmount, max: policy.offerMaxFillAmount }),
+      config.network,
     )
     const card = await signSolverCard(
       buildSolverCard({
         name,
+        network: config.network,
         discoveryPubkey: hex.encode(await identity.xOnlyPublicKey()),
         relays,
         // What this deployment actually serves, so discovery cannot describe a
