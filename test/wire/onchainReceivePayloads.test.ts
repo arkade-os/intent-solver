@@ -55,11 +55,9 @@ const row: OnchainReceiveSwapRow = {
 }
 
 describe('the wire a client that declared no band still sees', () => {
-  // Recorded by running 249ead5's own `onchainReceivePayloads.ts` against this
-  // exact row in the same process, then pasting what it serialised. Key order
-  // included: this is the bytes, not the shape. `toMatchObject` elsewhere in
-  // this file passes happily when a key is ADDED, which is the one thing the
-  // tolerance band could break for an existing client.
+  // Recorded by running 249ead5's own payload builders over this exact row in
+  // the same process. Key order included — `toMatchObject`, used elsewhere in
+  // this file, passes happily when a key is ADDED.
   const QUOTE_249EAD5 =
     '{"v":1,"type":"rfq_quote","rfq_id":"rfq-1","pair":"onchain:BTC->arkade:BTC","from_amount":50000,' +
     '"to_amount":49450,"solver_pubkey":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",' +

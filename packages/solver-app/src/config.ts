@@ -133,14 +133,10 @@ export interface Config {
    */
   corridorFees: Record<Corridor, Fee>
   /**
-   * How wide a tolerance band `onchain:BTC->arkade:BTC` will underwrite, from
-   * `ONCHAIN_RECEIVE_MAX_BAND_SATS`. Defaults to the range that corridor
-   * already serves, so an operator who sets nothing offers exactly the
-   * flexibility a client asks for within limits it had already accepted.
-   *
-   * Separate from `corridorLimits` on purpose: capping how far a funded amount
-   * may drift from its quote is a different risk from capping the amount, and
-   * an operator may want the first tight while the second stays wide.
+   * How far a funded `onchain:BTC->arkade:BTC` amount may sit from its quote,
+   * from `ONCHAIN_RECEIVE_MAX_BAND_SATS`. Separate from `corridorLimits` on
+   * purpose: how far an amount may DRIFT is a different risk from how large it
+   * may be, and an operator may want the first tight and the second wide.
    */
   onchainReceiveMaxBandSats: number
   /**
@@ -581,13 +577,7 @@ const corridorLimitsFromEnv = (base: Limits): Record<Corridor, Limits> => {
   return Object.fromEntries(entries) as Record<Corridor, Limits>
 }
 
-/**
- * The ceiling on how far a funded amount may sit from its quote, in sats.
- *
- * Derived rather than picked: absent the knob it is the whole range that
- * corridor already serves, i.e. no narrowing beyond what `limits` impose. Same
- * one-way rule as every amount knob here — it may only reduce.
- */
+/** Absent, the whole range that corridor already serves. Same one-way rule as every amount knob here: it may only reduce. */
 const onchainReceiveMaxBandSatsFromEnv = (onchainReceiveLimits: Limits): number => {
   const fallback = defaultMaxBandWidthSats(onchainReceiveLimits)
   const raw = process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS?.trim()

@@ -347,8 +347,7 @@ describe('OnchainReceiveSwapStore — migration', () => {
   it('adds the funded_* columns to a table predating them, leaving existing rows byte-identical', async () => {
     const db = new Database(':memory:')
     const driver = driverOver(db)
-    // The shape immediately BEFORE the tolerance band: everything the current
-    // schema has except funded_value_sats and funded_payout_sats.
+    // The shape immediately BEFORE the tolerance band.
     db.exec(`
       CREATE TABLE receive_onchain_swap (
         id TEXT PRIMARY KEY, state TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,

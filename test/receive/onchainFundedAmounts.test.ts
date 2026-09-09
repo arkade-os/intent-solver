@@ -59,8 +59,8 @@ describe('onchainReceiveFundedAmounts', () => {
 describe('onchainClaimSizing', () => {
   it('commits the claim signature to what the output HELD, via witnessUtxo', () => {
     const sizing = onchainClaimSizing({ ...quoted, fundedValueSats: 55_000 }, spend)
-    // The field the BIP341 sighash commits to. Wrong here and the signature is
-    // invalid — the claim is unbroadcastable, not merely mispriced.
+    // What the BIP341 sighash commits to: wrong here and the claim is
+    // unbroadcastable, not merely mispriced.
     const tx = buildOnchainClaimTx(sizing.params)
     expect(tx.getInput(0).witnessUtxo?.amount).toBe(55_000n)
     expect(tx.getInput(0).witnessUtxo?.amount).not.toBe(50_000n)

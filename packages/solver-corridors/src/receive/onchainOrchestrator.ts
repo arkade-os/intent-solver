@@ -87,12 +87,7 @@ export interface OnchainReceiveServiceDeps {
    */
   covclaimd?: Pick<CovclaimdClient, 'reveal'> | null
   limits: Limits
-  /**
-   * How wide a tolerance band this operator will underwrite, independently of
-   * `limits.maxSats`. Defaults to the range `limits` already serves, so an
-   * operator that sets nothing offers exactly the flexibility a client asks
-   * for, bounded only by the amounts it was already willing to swap.
-   */
+  /** How wide a band this operator underwrites, independently of `limits.maxSats`. Defaults to the range `limits` already serves. */
   maxBandWidthSats?: number
   network: SwapNetwork
   maxExposedSats: number
@@ -162,12 +157,7 @@ export interface OnchainReceiveQuoteRequest {
   payoutPubkey: string
   minConfirmations?: number
   rfqId?: string
-  /**
-   * The client's declared tolerance for what it will actually send, in the
-   * same units and on the same side as `amountSats` under `amountSide: 'from'`.
-   * Both or neither. Absent is strict equality — today's behaviour, and the
-   * fail-safe.
-   */
+  /** Both or neither, on the same side as `amountSats` under `amountSide: 'from'`. Absent is strict equality. */
   minFromSats?: number
   maxFromSats?: number
 }
@@ -251,13 +241,7 @@ export class OnchainReceiveSwapService {
    */
   shouldSkipTick?: (id: string) => boolean
 
-  /**
-   * The band this quote will be bound to, or `null` for none.
-   *
-   * `out_of_range` when the client's own band excludes the give being quoted.
-   * Everything else is narrowing: `clampOnchainReceiveBand` against the
-   * operator's width, and the fill evaluator against `limits` and dust.
-   */
+  /** `out_of_range` when the client's own band excludes the give being quoted; everything else is narrowing. */
   private bandFor(
     request: OnchainReceiveQuoteRequest,
     giveSats: number,
@@ -326,11 +310,7 @@ export class OnchainReceiveSwapService {
       return { accepted: false, reason: 'payout_below_dust' }
     }
 
-    // The band the quote will be BOUND to, narrowed to what this operator
-    // underwrites. A band that does not contain the amount being quoted is
-    // incoherent rather than merely wide — the client would be consenting to a
-    // range that excludes what it just asked for — so it is refused by the same
-    // name any other unservable amount is.
+    // A band excluding the amount being quoted is incoherent, not merely wide.
     const band = this.bandFor(request, giveSats)
     if (band === 'out_of_range') return { accepted: false, reason: 'amount_out_of_range' }
 
@@ -635,11 +615,10 @@ export class OnchainReceiveSwapService {
    */
   private async whenFundingArkade(row: OnchainReceiveSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
-    // The lockup carries the PAYOUT — the client's HTLC amount minus this
-    // corridor's fee — never the full `amountSats`. Through the helper so the
-    // adoption threshold and the payment below can never be sized against
-    // different numbers: a lockup paid at the amended amount would otherwise
-    // read as under-funded here on the next pass and be paid a second time.
+    // The lockup carries the PAYOUT, never the full `amountSats`. Through the
+    // helper so this threshold and the payment below cannot disagree: a lockup
+    // paid at the amended amount would otherwise read as under-funded on the
+    // next pass and be paid twice.
     const { arkadePayoutSats } = onchainReceiveFundedAmounts(row)
     const existing = await arkade.findLockups(row.pkScript)
     const alreadyFunded = existing.reduce((sum, o) => sum + o.value, 0) >= arkadePayoutSats

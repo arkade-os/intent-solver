@@ -1227,12 +1227,10 @@ describe('OnchainReceiveSwapService', () => {
       expect(outcome.swap.maxFromSats).toBe(51_000)
     })
 
-    it('narrows a band wider than the operator underwrites', async () => {
+    it('narrows a band wider than the operator underwrites, still around the quote', async () => {
       const outcome = await withBandWidth(1_000).quote(quoteRequest({ minFromSats: 10_000, maxFromSats: 90_000 }))
       if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
       expect(outcome.swap.maxFromSats! - outcome.swap.minFromSats!).toBe(1_000)
-      // Still contains what was quoted, so the swap the client asked for stays
-      // fundable however hard the operator narrows.
       expect(outcome.swap.minFromSats!).toBeLessThanOrEqual(50_000)
       expect(outcome.swap.maxFromSats!).toBeGreaterThanOrEqual(50_000)
     })
@@ -1249,9 +1247,7 @@ describe('OnchainReceiveSwapService', () => {
       expect(outcome.swap.maxFromSats).toBe(1_000_000)
     })
 
-    it('still funds only on exact equality until the adoption change lands', async () => {
-      // Steps 1-5 carry the band; nothing reads it at funding time yet, which
-      // is what makes all of this landable ahead of the adoption change.
+    it('still funds only on exact equality: nothing reads the band at funding time yet', async () => {
       const svc = withBandWidth()
       const outcome = await svc.quote(quoteRequest({ minFromSats: 45_000, maxFromSats: 55_000 }))
       if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
@@ -1264,8 +1260,8 @@ describe('OnchainReceiveSwapService', () => {
   })
 
   describe('a row whose output holds something other than the quote', () => {
-    // 100bps + 50 flat on 50_000: quoted give 50_000, quoted payout 49_450 —
-    // a 550 sat absolute fee, which is what has to survive a re-size.
+    // 100bps + 50 flat on 50_000: a 550 sat absolute fee, which is what has to
+    // survive a re-size.
     const withFee = () =>
       new OnchainReceiveSwapService({
         store,
@@ -1309,9 +1305,8 @@ describe('OnchainReceiveSwapService', () => {
       expect((await svc.tick(row.id)).state).toBe('awaiting_claim')
       const lockup = deps.arkadeFake.lockups.get(row.pkScript)![0]!
       expect(lockup.value).toBe(54_450)
-      // The whole point, as one number: the solver's take is the absolute fee
-      // it quoted, whatever turned up. Reading `payoutSats` here instead would
-      // hand it 5_550.
+      // The solver's take is the fee it quoted, whatever turned up. Reading
+      // `payoutSats` here instead would hand it 5_550.
       expect(55_000 - lockup.value).toBe(50_000 - row.payoutSats)
     })
 
@@ -1353,10 +1348,8 @@ describe('OnchainReceiveSwapService', () => {
     it('adopts a lockup already paid at the amended amount instead of paying twice', async () => {
       const svc = withFee()
       const row = await adopt(svc, 55_000)
-      // A crash between broadcast and the transition recording it: the lockup
-      // is out there at 54_450. Sized against `payoutSats` the resume check
-      // reads 54_450 >= 49_450 and adopts anyway, so this only bites for an
-      // UNDERfund — where 46_450 >= 49_450 is false and the solver pays again.
+      // A crash between broadcast and the transition recording it. Sized against
+      // `payoutSats` this still adopts, so the bug only bites on an UNDERfund.
       deps.arkadeFake.seedLockup(row.lockupAddress, { txid: 'external-fund', vout: 0, value: 54_450 })
       expect((await svc.tick(row.id)).state).toBe('awaiting_claim')
       expect(deps.arkadeFake.lockups.get(row.pkScript)!.length).toBe(1)

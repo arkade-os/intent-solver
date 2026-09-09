@@ -50,17 +50,14 @@ describe('a client that declared no band', () => {
     if (result.fill === 'refuse') expect(result.reason).toContain('quote is for 50000')
   })
 
-  it('gives back the refusal string this corridor already emits, verbatim', () => {
-    // Pinned against `whenQuoted`'s own template so the band cannot quietly
-    // change what an operator reads on a mismatched row.
+  it("gives back whenQuoted's own refusal string, verbatim", () => {
     const result = evaluateOnchainReceiveFill(params({ outputs: [output(49_999, 1)] }))
     if (result.fill !== 'refuse') throw new Error('expected a refusal')
     expect(result.reason).toBe(`funding mismatch: ${'ab'.repeat(32)}:0 holds 49999 sats, quote is for 50000`)
   })
 
   it('keeps the quoted amount adoptable even when the claim fee alone exceeds it', () => {
-    // Today such a swap is adopted and then fails at claim time naming the fee
-    // rate. Refusing it here instead would be a new behaviour, not this change.
+    // Refusing it here instead would be new behaviour, not this change.
     const p = params({ outputs: [output(50_000)], claimFeeSats: 80_000 })
     expect(onchainReceiveFillFloor(p)).toBe(50_000)
     expect(evaluateOnchainReceiveFill(p).fill).toBe('adopt')

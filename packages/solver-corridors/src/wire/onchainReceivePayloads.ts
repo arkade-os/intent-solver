@@ -68,13 +68,9 @@ export const OnchainReceiveRfqRequest = z
     amount_side: z.enum(['from', 'to']),
     amount: WIRE_AMOUNT,
     /**
-     * The client's tolerance for what it will ACTUALLY send, declared here so
-     * consent happens before funding — the client may go offline the moment it
-     * broadcasts, which is the entire case for this on an exchange withdrawal
-     * that deducts its own fee.
-     *
-     * Optional, and absent means strict equality on `amount`, unchanged. Both
-     * or neither; one alone is `unsupported_payload`.
+     * Declared at quote time so consent happens BEFORE funding: the client may
+     * go offline the moment it broadcasts. Absent means strict equality on
+     * `amount`. Both or neither; one alone is `unsupported_payload`.
      */
     min_from_amount: WIRE_AMOUNT.optional(),
     max_from_amount: WIRE_AMOUNT.optional(),
@@ -114,13 +110,8 @@ export const onchainReceiveRfqQuotePayload = (
   // with — the persisted payout, amount minus this corridor's fee.
   from_amount: row.amountSats,
   to_amount: row.payoutSats,
-  // BINDING, and echoed only when the client asked for one. A quote for a
-  // client that named no band is byte-for-byte the one this corridor already
-  // returned — which is the whole of the compatibility story, and what
-  // `onchainReceivePayloads.test.ts` pins against a recorded shape.
-  //
-  // Already narrowed to what this operator underwrites, so what comes back may
-  // be tighter than what was asked for; it is what the solver will honour.
+  // BINDING, echoed only when asked for, and narrowed to what this operator
+  // underwrites — so it may come back tighter than requested.
   ...(row.minFromSats === null || row.maxFromSats === null
     ? {}
     : { min_from_amount: row.minFromSats, max_from_amount: row.maxFromSats }),
@@ -205,9 +196,7 @@ export const onchainReceiveRfqStatusPayload = (row: OnchainReceiveSwapRow, rfqId
       settle_txid: row.onchainClaimTxid,
       refund_txid: row.arkadeRefundTxid,
       failure_reason: row.failureReason,
-      // What the swap was actually re-sized to, once an output was adopted at
-      // something other than the quote. Absent on every unamended swap, so a
-      // client that named no band sees the status shape it always saw.
+      // Absent on every unamended swap.
       ...(row.fundedValueSats === null || row.fundedPayoutSats === null
         ? {}
         : { funded_from_amount: row.fundedValueSats, funded_to_amount: row.fundedPayoutSats }),

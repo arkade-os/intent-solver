@@ -84,9 +84,7 @@ const TRANSITION_COLUMNS = new Set([
   'onchain_claim_txid',
   'arkade_refund_txid',
   'failure_reason',
-  // Written on the SAME edge as funding_txid/funding_vout: what the output
-  // holds is learned in the same read that finds the output, so recording it
-  // anywhere else would let the two disagree.
+  // Same edge as funding_txid/funding_vout: learned in the read that finds it.
   'funded_value_sats',
   'funded_payout_sats',
 ])
@@ -223,34 +221,15 @@ export interface OnchainReceiveSwapRow {
   fundStartedAt: number | null
   /** Set once THIS service funded a stamped lockup — @see receive/receiveSwaps.ts */
   stampedAt: number | null
-  /**
-   * What the client's onchain HTLC output ACTUALLY holds, when that differs
-   * from the quoted {@link amountSats}.
-   *
-   * NULL is not a default: it is the fact that this swap was never amended, and
-   * it is what every row funded under strict equality says. Resolving it — and
-   * deriving the claim's sizing from it — is `onchainClaimSizing`'s job, not a
-   * fallback each reader repeats.
-   */
+  /** What the output ACTUALLY holds. NULL is not a default — it is the fact that this swap was never amended. */
   fundedValueSats: number | null
-  /**
-   * The Arkade-side payout re-derived against {@link fundedValueSats},
-   * preserving the absolute fee this corridor quoted:
-   * `payoutSats + (funded - amountSats)`.
-   *
-   * Persisted rather than recomputed for the reason {@link payoutSats} is: the
-   * arithmetic that priced a funded swap has to stay a fact on the row.
-   */
+  /** {@link payoutSats} re-derived against {@link fundedValueSats}. Persisted for the reason {@link payoutSats} is. */
   fundedPayoutSats: number | null
   /**
-   * The tolerance band the client declared and the quote echoed back, already
-   * narrowed to what this operator underwrites.
-   *
-   * Both NULL together, and that is the fail-safe: absent, the funding rule is
-   * strict equality on {@link amountSats}, exactly as this corridor shipped.
-   * Persisted because the quote is BINDING and is rebuilt from the row on every
-   * `rfq_status_request` — a band living only in the request could not be
-   * honoured after a restart, which is precisely when the client is offline.
+   * The band the quote is bound to, narrowed to what this operator underwrites.
+   * Both NULL together, and absent is strict equality. Persisted because the
+   * quote is rebuilt from the row on every `rfq_status_request`, so a band held
+   * only in the request could not survive a restart.
    */
   minFromSats: number | null
   maxFromSats: number | null
@@ -375,9 +354,7 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   rfqId: raw.rfq_id === null || raw.rfq_id === undefined ? null : String(raw.rfq_id),
   fundStartedAt: raw.fund_started_at === null || raw.fund_started_at === undefined ? null : Number(raw.fund_started_at),
   stampedAt: raw.stamped_at === null || raw.stamped_at === undefined ? null : Number(raw.stamped_at),
-  // Null stays null. Unlike `payout_sats` above, a missing value here is not a
-  // legacy row to be read charitably — it is "never amended", and collapsing it
-  // into `amount_sats` at this layer would lose the one bit that says so.
+  // Unlike `payout_sats`, missing here means "never amended".
   fundedValueSats:
     raw.funded_value_sats === null || raw.funded_value_sats === undefined ? null : Number(raw.funded_value_sats),
   fundedPayoutSats:
@@ -475,17 +452,9 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
   }
 
   /**
-   * The base sums `amount_sats`, which on THIS corridor is the quote rather
-   * than the exposure.
-   *
-   * A row funded above its quote is one the solver will pay a larger lockup
-   * for and collect a larger HTLC on, so counting it at the quoted number
-   * under-reports against `MAX_EXPOSED_SATS` — and under-reporting a cap is
-   * how it stops being one. `COALESCE` because NULL is the unamended majority.
-   *
-   * Overridden here rather than fixed in the base: the other three stores have
-   * no such column, and pushing this into `BaseSwapStore` would make their
-   * totals depend on a column only this table has.
+   * The base sums `amount_sats`, which here is the quote rather than the
+   * exposure: a row funded above it under-reports against `MAX_EXPOSED_SATS`.
+   * Overridden rather than fixed in the base, whose other tables lack the column.
    */
   override async committedSats(): Promise<number> {
     const placeholders = this.shape.live.map(() => '?').join(',')
