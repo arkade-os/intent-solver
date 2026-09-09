@@ -54,6 +54,15 @@ describe('OnchainReceiveSwapStore', () => {
     expect(row.fundingTxid).toBeNull()
   })
 
+  it('round-trips an ABSENT claim packet as null, never the string "null"', async () => {
+    const row = await store.insertQuote({ ...baseQuote, claimPacket: null })
+    expect(row.claimPacket).toBeNull()
+
+    const reread = await store.get(row.id)
+    expect(reread.claimPacket).toBeNull()
+    expect(reread.claimPacket).not.toBe('null')
+  })
+
   it('round-trips nonInteractiveParameters through the real store, both ways', async () => {
     // The encode/decode path ('1'/null on the wire, boolean|null in the row)
     // is asserted by inspection in covenant.ts and arkadeOps.test.ts, but

@@ -16,9 +16,25 @@
  */
 
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { selectLockupFunding } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
+import { CLAIM_PACKET_TYPE } from './claimPacket.js'
 import { MAX_REFUND_HORIZON } from '@arkade-os/solver-core/core/receive.js'
 import { log } from '@arkade-os/solver-core/util/poll.js'
+
+/**
+ * A funding failure that provably submitted nothing. The boundary is
+ * `ctx.wallet.send()`, which throws UNWRAPPED because a lost response cannot be
+ * told from a rejection — so a lease-holding caller that releases on an
+ * ambiguous failure lets a second worker fund the same lockup, while the first
+ * funding is still invisible to the indexer.
+ */
+export class FundNotSubmittedError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = 'FundNotSubmittedError'
+  }
+}
 
 /**
  * Fund a lockup of `amountSats` at `address` from coins that will outlive the
@@ -29,7 +45,66 @@ import { log } from '@arkade-os/solver-core/util/poll.js'
  * this service may not renew, by which point the invoice is held and the client
  * is waiting. Refusing keeps the failure where it is cheap.
  */
-export const fundLockup = async (ctx: ArkadeContext, address: string, amountSats: number): Promise<string> => {
+export const fundLockup = async (
+  ctx: ArkadeContext,
+  address: string,
+  amountSats: number,
+  stamp?: ClaimPacketStamp,
+): Promise<string> => {
+  let inputs: Awaited<ReturnType<typeof ctx.wallet.getSpendableVtxos>>
+  let release: () => void
+  try {
+    inputs = await selectFundingInputs(ctx, amountSats)
+    release = ctx.reservations.reserve(inputs)
+  } catch (error) {
+    throw error instanceof FundNotSubmittedError
+      ? error
+      : new FundNotSubmittedError(`failed to select coins to fund a lockup of ${amountSats} sats`, { cause: error })
+  }
+  try {
+    // `send`, not `sendBitcoin`, and that single swap is the whole fix.
+    //
+    // `sendBitcoin` builds a plain sats transfer with no asset packet, so arkd
+    // refuses the spend of an asset-bearing coin outright:
+    // ASSET_VALIDATION_FAILED (33). `send` builds the packet and routes the
+    // asset change ITSELF — measured on a live regtest stack, not assumed:
+    // spending a coin holding 8,370,456 sats and 500 units, with NO asset
+    // recipient named, produced the requested output plus a change output
+    // carrying all 500 units. The asset rides the sats change, which exists
+    // anyway.
+    //
+    // An earlier cut summed the carried assets and named ourselves as a second
+    // recipient. That was redundant, and worse than redundant: it forced the
+    // asset onto its own 330-sat output, fragmenting the holding a little more
+    // on every funding, where the SDK would have left it on the change.
+    //
+    // It keeps `selectedVtxos`, whose own SDK doc names this exact case — "when
+    // a contract must be funded from coins outliving its timelock, which generic
+    // selection does not know about" — so nothing about the expiry ordering or
+    // the reservation is given up.
+    return await ctx.wallet.send({
+      recipients: [
+        {
+          address,
+          amount: amountSats,
+          // Both or neither — @see ClaimPacketStamp.
+          ...(stamp
+            ? { extensions: [{ type: CLAIM_PACKET_TYPE, payload: stamp.packet }], tapTree: stamp.tapTree }
+            : {}),
+        },
+      ],
+      selectedVtxos: [...inputs],
+    })
+  } finally {
+    // Released whether the send landed or threw: a pin outliving its operation
+    // shrinks the spendable float with nothing left to free it. If the send
+    // DID land, the coins are spent and the next read will not offer them.
+    release()
+  }
+}
+
+/** The read-select-refuse half, which runs entirely before any funding request exists. */
+const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number) => {
   // GATED read, not `getVtxos`. The SDK's own note on `getVtxos` is that
   // feeding it to `sendBitcoin({ selectedVtxos })` bypasses the
   // generic-spending gate — which here would mean funding one lockup out of
@@ -55,7 +130,7 @@ export const fundLockup = async (ctx: ArkadeContext, address: string, amountSats
     dustSats: Number(dust),
   })
   if (!selection.ok) {
-    throw new Error(`refusing to fund lockup of ${amountSats} sats: ${selection.reason}`)
+    throw new FundNotSubmittedError(`refusing to fund lockup of ${amountSats} sats: ${selection.reason}`)
   }
   if (!selection.clearedHorizon) {
     // Not fatal — see selectLockupFunding on why this is a preference — but
@@ -67,36 +142,5 @@ export const fundLockup = async (ctx: ArkadeContext, address: string, amountSats
       'float needs renewing, or this network batches shorter than the horizon',
     )
   }
-  const release = ctx.reservations.reserve(selection.inputs)
-  try {
-    // `send`, not `sendBitcoin`, and that single swap is the whole fix.
-    //
-    // `sendBitcoin` builds a plain sats transfer with no asset packet, so arkd
-    // refuses the spend of an asset-bearing coin outright:
-    // ASSET_VALIDATION_FAILED (33). `send` builds the packet and routes the
-    // asset change ITSELF — measured on a live regtest stack, not assumed:
-    // spending a coin holding 8,370,456 sats and 500 units, with NO asset
-    // recipient named, produced the requested output plus a change output
-    // carrying all 500 units. The asset rides the sats change, which exists
-    // anyway.
-    //
-    // An earlier cut summed the carried assets and named ourselves as a second
-    // recipient. That was redundant, and worse than redundant: it forced the
-    // asset onto its own 330-sat output, fragmenting the holding a little more
-    // on every funding, where the SDK would have left it on the change.
-    //
-    // It keeps `selectedVtxos`, whose own SDK doc names this exact case — "when
-    // a contract must be funded from coins outliving its timelock, which generic
-    // selection does not know about" — so nothing about the expiry ordering or
-    // the reservation is given up.
-    return await ctx.wallet.send({
-      recipients: [{ address, amount: amountSats }],
-      selectedVtxos: [...selection.inputs],
-    })
-  } finally {
-    // Released whether the send landed or threw: a pin outliving its operation
-    // shrinks the spendable float with nothing left to free it. If the send
-    // DID land, the coins are spent and the next read will not offer them.
-    release()
-  }
+  return [...selection.inputs]
 }

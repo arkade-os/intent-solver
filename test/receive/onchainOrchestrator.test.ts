@@ -3,7 +3,7 @@ import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
 import { sha256 } from '@noble/hashes/sha2.js'
-import { hex } from '@scure/base'
+import { base64, hex } from '@scure/base'
 import { SigHash } from '@scure/btc-signer'
 import { ArkAddress } from '@arkade-os/sdk'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
@@ -18,6 +18,7 @@ import { FakeOnchainBackend } from '@arkade-os/solver-rails-fake/onchain/fake/ba
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
 import type { OnchainReceiveArkadeOps } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
+import { FundNotSubmittedError } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import type { CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 
 const keyBytes = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
@@ -76,6 +77,10 @@ const clock = () => now
 
 interface ArkadeFake {
   arkade: OnchainReceiveArkadeOps
+  /** What each funding carried for covclaimd, in call order. */
+  fundStamps: ({ packet: Uint8Array; tapTree: Uint8Array } | undefined)[]
+  /** A lockup this service did not create — what adoption finds after a crash or an upgrade. */
+  seedLockup: (address: string, out: { txid: string; vout: number; value: number }) => void
   lockups: Map<string, { txid: string; vout: number; value: number }[]>
   /**
    * Spend the lockup at `pkScriptHex`, revealing `preimage` if the spender was
@@ -99,8 +104,15 @@ const buildArkadeFake = (): ArkadeFake => {
   const everSeen = new Map<string, { txid: string; vout: number }[]>()
   const claimed = new Map<string, Uint8Array>()
   let fundCounter = 0
+  const fundStamps: ArkadeFake['fundStamps'] = []
   const state: ArkadeFake = {
     lockups,
+    fundStamps,
+    seedLockup: (address, out) => {
+      const key = hex.encode(ArkAddress.decode(address).pkScript)
+      lockups.set(key, [...(lockups.get(key) ?? []), out])
+      everSeen.set(key, [...(everSeen.get(key) ?? []), { txid: out.txid, vout: out.vout }])
+    },
     spendLockup: (pkScriptHex, preimage) => {
       lockups.delete(pkScriptHex)
       if (preimage) claimed.set(pkScriptHex, preimage)
@@ -127,6 +139,7 @@ const buildArkadeFake = (): ArkadeFake => {
         return null
       },
       fund: async (params) => {
+        fundStamps.push(params.stamp)
         const txid = `arkade-fund-${fundCounter++}`
         // Keyed by pkScript (decoded from the address, same as production
         // `findLockups`/`findLockupOutpoints` both are), NOT by address —
@@ -527,6 +540,25 @@ describe('OnchainReceiveSwapService', () => {
       deps.onchain.mineBlocks(1)
       expect((await solo.tick(swap.id)).state).toBe('settled')
     })
+
+    it('does NOT reveal when the client sent no claim packet, even with covclaimd configured', async () => {
+      const outcome = await service.quote(quoteRequest({ claimPacket: null }))
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      const swap = outcome.swap
+
+      deps.onchain.receiveExternal({ address: swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+
+      let row = await service.tick(swap.id)
+      expect(row.state).toBe('awaiting_claim')
+      expect(deps.covclaimdCalls).toHaveLength(0)
+
+      deps.arkadeFake.spendLockup(swap.pkScript, P)
+      row = await service.tick(swap.id)
+      expect(row.state).toBe('claimed')
+      deps.onchain.mineBlocks(1)
+      expect((await service.tick(swap.id)).state).toBe('settled')
+    })
   })
 
   describe('whenQuoted', () => {
@@ -755,6 +787,49 @@ describe('OnchainReceiveSwapService', () => {
       expect(row.state).toBe('awaiting_claim')
       expect(funded).toHaveLength(1) // still just the one broadcast
     })
+
+    it('keeps the lease when fund() fails ambiguously, and does not re-fund while the indexer lags', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      const swap = outcome.swap
+      deps.onchain.receiveExternal({ address: swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+      await store.transition(swap.id, 'quoted', 'awaiting_confirmations', {})
+      await store.transition(swap.id, 'awaiting_confirmations', 'funding_arkade', {})
+
+      const attempts: string[] = []
+      deps.arkadeFake.arkade.fund = async (params) => {
+        attempts.push(params.address)
+        throw new Error('ark server response lost')
+      }
+
+      await expect(service.tick(swap.id)).rejects.toThrow('ark server response lost')
+      expect((await store.get(swap.id)).fundStartedAt).not.toBeNull()
+
+      await service.tick(swap.id)
+      expect(attempts).toHaveLength(1)
+    })
+
+    it('hands the lease back when fund() proves it submitted nothing', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      const swap = outcome.swap
+      deps.onchain.receiveExternal({ address: swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+      await store.transition(swap.id, 'quoted', 'awaiting_confirmations', {})
+      await store.transition(swap.id, 'awaiting_confirmations', 'funding_arkade', {})
+
+      const originalFund = deps.arkadeFake.arkade.fund.bind(deps.arkadeFake.arkade)
+      deps.arkadeFake.arkade.fund = async () => {
+        throw new FundNotSubmittedError('refusing to fund lockup of 49450 sats: insufficient spendable float')
+      }
+
+      await expect(service.tick(swap.id)).rejects.toThrow('insufficient spendable float')
+      expect((await store.get(swap.id)).fundStartedAt).toBeNull()
+
+      deps.arkadeFake.arkade.fund = originalFund
+      expect((await service.tick(swap.id)).state).toBe('awaiting_claim')
+    })
   })
 
   describe('the arkade-refund failure path', () => {
@@ -836,6 +911,115 @@ describe('OnchainReceiveSwapService', () => {
       const row = await service.tick(awaitingClaim.id)
       expect(row.state).toBe('stuck')
       expect(row.failureReason).toMatch(/no matching claim/)
+    })
+  })
+
+  describe('claim packet stamping', () => {
+    const tlv = (type: number, value: number[]) => [type, (value.length >> 8) & 0xff, value.length & 0xff, ...value]
+    const CIPHERTEXT = tlv(
+      0x01,
+      Array.from({ length: 93 }, (_, i) => i & 0xff),
+    )
+    const PUBKEY = tlv(0x03, [0x02, ...Array<number>(32).fill(0x11)])
+
+    const fundWith = async (claimPacket: Uint8Array) => {
+      const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(claimPacket) }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+      return service.tick(outcome.swap.id)
+    }
+
+    it('stamps a client packet into the funding and skips the reveal, as the lightning leg does', async () => {
+      const clientPacket = Uint8Array.from([...CIPHERTEXT, ...PUBKEY])
+      const row = await fundWith(clientPacket)
+
+      expect(row.state).toBe('awaiting_claim')
+      const stamp = deps.arkadeFake.fundStamps[0]
+      if (!stamp) throw new Error('expected a stamp')
+      expect(stamp.packet.subarray(0, clientPacket.length)).toEqual(clientPacket)
+      expect(stamp.packet[clientPacket.length]).toBe(0x02)
+      expect(stamp.tapTree.length).toBeGreaterThan(0)
+      expect(deps.covclaimdCalls).toHaveLength(0)
+    })
+
+    // Without 0x03 no covclaimd's filter selects the tx, so stamping it would
+    // strand the swap having just skipped the one path that could settle it.
+    it('reveals rather than stamps a packet that names no covclaimd', async () => {
+      const row = await fundWith(Uint8Array.from([...CIPHERTEXT, ...tlv(0x02, [0x51, 0x52])]))
+
+      expect(row.state).toBe('awaiting_claim')
+      expect(deps.arkadeFake.fundStamps[0]).toBeUndefined()
+      expect(deps.covclaimdCalls).toHaveLength(1)
+    })
+
+    it('keeps the fund lease when the stamp write fails, the money having moved', async () => {
+      const packet = base64.encode(Uint8Array.from([...CIPHERTEXT, ...PUBKEY]))
+      const outcome = await service.quote(quoteRequest({ claimPacket: packet }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      const brittle = new Proxy(store, {
+        get: (target, prop) => {
+          const value = Reflect.get(target, prop)
+          if (prop !== 'patch') return typeof value === 'function' ? value.bind(target) : value
+          return async (id: string, fields: Record<string, unknown>) => {
+            if ('stamped_at' in fields) throw new Error('stamp write failed')
+            return target.patch(id, fields as Parameters<typeof target.patch>[1])
+          }
+        },
+      })
+      const brittleService = new OnchainReceiveSwapService({
+        store: brittle,
+        onchain: deps.onchain,
+        arkade: deps.arkadeFake.arkade,
+        covclaimd: deps.covclaimd,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        claimDestinationScript,
+        now: clock,
+      })
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+
+      await expect(brittleService.tick(outcome.swap.id)).rejects.toThrow('stamp write failed')
+
+      const row = await store.get(outcome.swap.id)
+      expect(row.fundStartedAt).not.toBeNull()
+      expect(row.stampedAt).toBeNull()
+      expect(deps.arkadeFake.fundStamps).toHaveLength(1)
+
+      // Adoption runs before the lease is asked for, so holding it strands nothing.
+      const recovered = await service.tick(outcome.swap.id)
+      expect(recovered.state).toBe('awaiting_claim')
+      expect(recovered.stampedAt).toBeNull()
+      expect(deps.arkadeFake.fundStamps).toHaveLength(1)
+      expect(deps.covclaimdCalls).toHaveLength(1)
+    })
+
+    it('reveals an adopted funding, whatever the packet shape claims', async () => {
+      const packet = base64.encode(Uint8Array.from([...CIPHERTEXT, ...PUBKEY]))
+      const outcome = await service.quote(quoteRequest({ claimPacket: packet }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      // A binary predating stamping funded this lockup, so nothing stamped it.
+      deps.arkadeFake.seedLockup(outcome.swap.lockupAddress, {
+        txid: 'pre-upgrade-funding',
+        vout: 0,
+        value: outcome.swap.payoutSats,
+      })
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+
+      const row = await service.tick(outcome.swap.id)
+
+      expect(row.state).toBe('awaiting_claim')
+      // Adoption records no txid, so a null here is what proves it adopted.
+      expect(row.arkadeFundTxid).toBeNull()
+      expect(deps.arkadeFake.fundStamps).toHaveLength(0)
+      expect(row.stampedAt).toBeNull()
+      expect(deps.covclaimdCalls).toHaveLength(1)
     })
   })
 

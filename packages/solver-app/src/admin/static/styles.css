@@ -431,6 +431,26 @@ button.act:disabled {
   font-family: var(--sans);
 }
 
+/* Amber, not red: config waiting to be applied is not a fault. */
+.restart-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  border: 1px solid var(--exposed);
+  background: var(--exposed-bg);
+  color: var(--text);
+  padding: 0.5rem 0.75rem;
+  margin: 0 0 0.75rem;
+  font-family: var(--sans);
+}
+
+.restart-banner .mono {
+  font-family: var(--mono);
+  color: var(--text-dim);
+}
+
 .muted {
   color: var(--text-dim);
 }

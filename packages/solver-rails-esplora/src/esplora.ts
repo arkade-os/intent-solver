@@ -59,11 +59,20 @@ interface RawEsploraTx {
   vin: { txid: string; vout: number }[]
 }
 
-export const createEsploraClient = (baseUrl: string, auth?: EsploraAuth): EsploraClient => {
+/** How long one READ may take before it is abandoned, ms. `fetch` imposes none of its own. */
+export const READ_TIMEOUT_MS = 30_000
+
+export const createEsploraClient = (
+  baseUrl: string,
+  auth?: EsploraAuth,
+  readTimeoutMs = READ_TIMEOUT_MS,
+): EsploraClient => {
   const headers = auth ? { Authorization: `Basic ${btoa(`${auth.username}:${auth.password}`)}` } : undefined
+  // Fresh per request: the clock starts when the signal is made, so a shared one would abort everything after it.
+  const deadline = (): AbortSignal => AbortSignal.timeout(readTimeoutMs)
 
   const get = async (path: string): Promise<Response> => {
-    const response = await fetch(`${baseUrl}${path}`, { headers })
+    const response = await fetch(`${baseUrl}${path}`, { headers, signal: deadline() })
     if (!response.ok) throw new Error(`esplora GET ${path} failed (${response.status}): ${await response.text()}`)
     return response
   }
@@ -74,7 +83,7 @@ export const createEsploraClient = (baseUrl: string, auth?: EsploraAuth): Esplor
     },
 
     async getJsonOrNull(path) {
-      const response = await fetch(`${baseUrl}${path}`, { headers })
+      const response = await fetch(`${baseUrl}${path}`, { headers, signal: deadline() })
       if (response.status === 404) return null
       if (!response.ok) throw new Error(`esplora GET ${path} failed (${response.status}): ${await response.text()}`)
       return response.json()
@@ -84,6 +93,8 @@ export const createEsploraClient = (baseUrl: string, auth?: EsploraAuth): Esplor
       return (await get(path)).text()
     },
 
+    // UNBOUNDED, unlike every read above: abandoning a read learns nothing either way, while
+    // abandoning a submit makes the outcome UNKNOWN and there is no reconcile path here.
     async broadcast(txHex) {
       const response = await fetch(`${baseUrl}/tx`, { method: 'POST', body: txHex, headers })
       const body = await response.text()

@@ -14,6 +14,7 @@ let store: EvmReceiveSwapStore
 
 const SOLVER_EVM = '0x' + '11'.repeat(20)
 const CLIENT_EVM = '0x' + '22'.repeat(20)
+const TOKEN_B = '0x' + '88'.repeat(20)
 
 /** Above 2^63, so an INTEGER column would silently mangle it. */
 const BIG_AMOUNT = '98765432109876543210987'
@@ -151,5 +152,20 @@ describe('EvmReceiveSwapStore', () => {
     expect(await store.committedSats()).toBe(50_000)
     await store.transition('swap-1', 'refunding_arkade', 'refunded')
     expect(await store.committedSats()).toBe(0)
+  })
+
+  it('counts a single token when asked for one', async () => {
+    await store.insertQuote(quote)
+    await store.insertQuote({
+      ...quote,
+      id: 'swap-2',
+      paymentHash: 'bb'.repeat(32),
+      tokenAddress: TOKEN_B,
+      amountSats: 30_000,
+    })
+
+    expect(await store.committedSats(quote.tokenAddress)).toBe(50_000)
+    expect(await store.committedSats(TOKEN_B)).toBe(30_000)
+    expect(await store.committedSats()).toBe(80_000)
   })
 })

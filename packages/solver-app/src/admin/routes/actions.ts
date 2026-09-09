@@ -34,8 +34,9 @@ import { claimNow } from '../../ops/claims.js'
 import { planExitForSwap } from '../../ops/unilateralExit.js'
 import { requireLn } from '../../ops/rails.js'
 import { capabilityRefusal, fundSources, requireFundSource, summarise } from '../../ops/fundSources.js'
-import { mintPool, poolPlan } from '../../ops/pool.js'
+import { committedAcrossCorridors, mintPool, poolPlan } from '../../ops/pool.js'
 import { runFloatLifecycle } from '../../ops/float.js'
+import { requestRestart } from '../../ops/restart.js'
 import type { Services } from '../../ops/services.js'
 import type { AdminDeps } from '../server.js'
 import { clampLimit } from '@arkade-os/solver-core/core/page.js'
@@ -218,6 +219,30 @@ const requireCorridorName = (body: ActionBody): string => {
     throw new Error('corridor is required: a swap id is unique only within its own corridor’s store')
   }
   return corridor
+}
+
+/**
+ * What a restart would interrupt, across every corridor the READER SET holds.
+ * Best-effort: a sick store is a reason to restart, not a reason to stop.
+ *
+ * NOT named `liveCount`: `/api/overview` has one over the four base stores, the
+ * two differ wherever a token is served, and an audit number that silently
+ * disagrees with the panel read is worse than none.
+ */
+const inFlightNow = async (services: Services): Promise<Record<string, unknown>> => {
+  try {
+    const [committedSats, live] = await Promise.all([
+      committedAcrossCorridors(services.readers),
+      Promise.all([...services.readers].map((corridor) => corridor.findRecoverable())),
+    ])
+    return {
+      scope: 'every registered corridor',
+      committedSats,
+      recoverableCount: live.reduce((total, rows) => total + rows.length, 0),
+    }
+  } catch (error) {
+    return { unreadable: messageOf(error) }
+  }
 }
 
 export const ACTIONS: Record<string, ActionDefinition> = {
@@ -616,9 +641,10 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     tier: 'armed',
     confirmKind: 'literal:FLOAT',
     warning:
-      'Settles: renews VTXOs near expiry and recovers any the server has swept, in one pass. Recovery is held back ' +
-      'when a live lockup is still short of its refund deadline, because that would fail the whole settlement and ' +
-      'take unrelated coins with it — the response says so as `recoverySkipped`.',
+      'Settles: boards any confirmed sats at the boarding address, renews VTXOs near expiry, and recovers any the ' +
+      'server has swept, in one pass. Recovery is held back when a live lockup is still short of its refund ' +
+      'deadline, because that would fail the whole settlement and take unrelated coins with it — the response says ' +
+      'so as `recoverySkipped`.',
     expectedConfirm: () => 'FLOAT',
     // `runFloatLifecycle` never throws - the report was built for a watch loop
     // that must not die - so this route would answer HTTP 200 `{ok: true}` even
@@ -635,7 +661,7 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       return {
         ...report,
         ok: report.failures.length === 0,
-        settled: report.renewed !== null || report.recovered !== null,
+        settled: report.boarded !== null || report.renewed !== null || report.recovered !== null,
       }
     },
   },
@@ -649,6 +675,24 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'Spends: splits the float into smaller pieces in one Arkade transaction. Refused while any corridor has a ' +
       'non-terminal swap, because coin reservations are process-local and a concurrent provider could be holding them.',
     run: (services, body) => mintPool(services, { force: body.force === true }),
+  },
+
+  // Armed though it moves no money: it stops the process driving the ones that
+  // do. Listed even when disabled, so "why has my override not taken effect"
+  // meets an answer rather than a missing button.
+  'restart-solver': {
+    tier: 'armed',
+    confirmKind: 'literal:RESTART',
+    expectedConfirm: () => 'RESTART',
+    warning:
+      'Stops this process so a supervisor starts a new one, which is how a stored override or market edit takes ' +
+      'effect. In-flight swaps are picked up again by recovery on boot. Requires ADMIN_RESTART_ENABLED=true AND a ' +
+      'supervisor that restarts the solver — without one this stops it and nothing brings it back.',
+    // Before the shutdown is armed, so the audit row carries the real exposure.
+    run: async (services) => {
+      const inFlight = await inFlightNow(services)
+      return { ...requestRestart({ enabled: services.config.adminRestartEnabled }), inFlight }
+    },
   },
 
   /**

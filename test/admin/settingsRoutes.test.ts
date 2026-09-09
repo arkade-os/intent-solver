@@ -33,6 +33,10 @@ const baseConfig = {
   },
   // Rendered in the read-only block, which iterates it.
   sendHintScidDenylist: new Set<string>(),
+  // The two variables deciding whether a configured market is filled by
+  // anything; the read-only block renders both. @see admin/servedBy.ts
+  offerMarkets: [],
+  assetRfqTokens: [],
 }
 
 const build = (overrides: Record<string, string> = {}) => {

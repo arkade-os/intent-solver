@@ -399,12 +399,17 @@ export class EvmSendSwapStore {
    * the exposed states would let unlimited concurrent quotes slip past the cap
    * and all be paid at once — the invariant `src/db/swaps.ts` states on its
    * own committedSats, and the one the #38 TLA+ admission guard asserts.
+   * One table backs every token, so a corridor asks for its own `token_address` and a
+   * caller summing whole STORES omits it. Both callers exist.
    */
-  async committedSats(): Promise<number> {
+  async committedSats(tokenAddress?: string): Promise<number> {
     const placeholders = EVM_SEND_NON_TERMINAL.map(() => '?').join(', ')
     const rows = (await this.driver.all(
-      'SELECT COALESCE(SUM(amount_sats), 0) AS total FROM send_evm_swap WHERE state IN (' + placeholders + ')',
-      [...EVM_SEND_NON_TERMINAL],
+      'SELECT COALESCE(SUM(amount_sats), 0) AS total FROM send_evm_swap WHERE state IN (' +
+        placeholders +
+        ')' +
+        (tokenAddress === undefined ? '' : ' AND token_address = ?'),
+      tokenAddress === undefined ? [...EVM_SEND_NON_TERMINAL] : [...EVM_SEND_NON_TERMINAL, tokenAddress],
     )) as Raw[]
     return Number(rows[0]?.total ?? 0)
   }

@@ -15,6 +15,7 @@ import { describe, it, expect } from 'vitest'
 import { AssetRfqSwapStore, type AssetRfqQuoteRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
+const ASSET_B = `${'bb'.repeat(32)}0100`
 const PK_SCRIPT = `5120${'c'.repeat(64)}`
 const OFFER_SCRIPT = `5120${'d'.repeat(64)}`
 
@@ -36,6 +37,23 @@ const quote = (over: Partial<AssetRfqQuoteRecord> = {}): AssetRfqQuoteRecord => 
 })
 
 const open = () => AssetRfqSwapStore.open(':memory:', () => 1_000)
+
+/** A row mid-fill on a sats payout — the only shape `committedSats` counts. */
+const fillingSats = async (store: AssetRfqSwapStore, id: string, pair: string, from: string, sats: bigint) => {
+  await store.insertQuote(
+    quote({
+      id,
+      pair,
+      rfqId: id.padEnd(64, '0'),
+      fromAssetId: from,
+      toAssetId: null,
+      toAmount: sats,
+      offerPkScript: `5120${id.padEnd(64, 'd')}`,
+    }),
+  )
+  await store.transition(id, 'quoted', 'funded')
+  await store.transition(id, 'funded', 'filling')
+}
 
 describe('insertQuote', () => {
   it('records the terms as quoted, before anything is funded', async () => {
@@ -231,6 +249,17 @@ describe('committedSats — exposure the float dashboard reads', () => {
     await store.transition('swap-1', 'quoted', 'funded')
     await store.transition('swap-1', 'funded', 'filling')
     expect(await store.committedSats()).toBe(99_500_000)
+    await store.close()
+  })
+
+  it('counts a single pair when asked for one', async () => {
+    const store = await open()
+    await fillingSats(store, 'swap-1', `arkade:${ASSET_A}->arkade:BTC`, ASSET_A, 99_500_000n)
+    await fillingSats(store, 'swap-2', `arkade:${ASSET_B}->arkade:BTC`, ASSET_B, 40_000_000n)
+
+    expect(await store.committedSats(`arkade:${ASSET_A}->arkade:BTC`)).toBe(99_500_000)
+    expect(await store.committedSats(`arkade:${ASSET_B}->arkade:BTC`)).toBe(40_000_000)
+    expect(await store.committedSats()).toBe(139_500_000)
     await store.close()
   })
 })

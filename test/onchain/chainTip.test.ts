@@ -6,9 +6,15 @@
  * could report — so the interesting assertions here are about SHARING a reading, not
  * about saving a request.
  */
-import { describe, expect, it, vi } from 'vitest'
-import type { EsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createEsploraClient, type EsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
 import { esploraChainTip, staticChainTip, TIP_CACHE_MS } from '@arkade-os/solver-rails/onchain/chainTip.js'
+
+const originalFetch = globalThis.fetch
+
+afterEach(() => {
+  globalThis.fetch = originalFetch
+})
 
 /** Only `getText` is ever reached; the rest of the port is unimplemented on purpose. */
 const client = (getText: (path: string) => Promise<string>): EsploraClient => ({ getText }) as unknown as EsploraClient
@@ -58,6 +64,24 @@ describe('esploraChainTip', () => {
     const tip = esploraChainTip(client(getText))
     await expect(tip.height()).rejects.toThrow()
     answer = '812'
+    expect(await tip.height()).toBe(812)
+  })
+
+  it('recovers from a read that never answers, instead of wedging on it forever', async () => {
+    // The in-flight reading is SHARED and cleared only when it settles, so one that never does is a
+    // dead promise every later caller joins. Composed with the real client, as `ops/services.ts` is.
+    let quiet = true
+    globalThis.fetch = vi.fn((_url: string, init?: RequestInit) =>
+      quiet
+        ? new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal!.reason))
+          })
+        : Promise.resolve(new Response('812', { status: 200 })),
+    ) as unknown as typeof fetch
+
+    const tip = esploraChainTip(createEsploraClient('https://esplora.example/api', undefined, 20))
+    await expect(tip.height()).rejects.toThrow(/timeout/i)
+    quiet = false
     expect(await tip.height()).toBe(812)
   })
 

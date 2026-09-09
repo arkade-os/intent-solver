@@ -219,6 +219,28 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   `[1, 65535]` and a bad value throws rather than reading as "off", so a typo
   cannot silently darken the console an operator believes is up.
 
+  `ADMIN_RESTART_ENABLED` lets the console restart the solver, which is how a
+  stored override or a market edit takes effect. Off unless set to `true`, and
+  deliberately so twice over: the process can only stop itself, so without a
+  supervisor that starts it again — `docker-compose.yml` sets
+  `restart: unless-stopped`, systemd needs `Restart=always` — "restart" means
+  "stop"; and on a port with no authentication of its own, a default-on
+  off-switch is reachable by anything the proxy admits. The action is armed
+  regardless, so it still takes typing `RESTART`, and the console renders it
+  disabled with the reason rather than hiding it — an operator asking "why has
+  my override not taken effect" needs to find that answer, not silence.
+
+  The banner beside it names **asset markets as well as overrides**, and gives
+  each item both of its values (`LN_SEND_FEE_BPS 0 → 25`, `market … not trading
+  → trading`). Markets are the case that most needs it: they are rows rather
+  than overrides, so a market added in the console is invisible to a diff of the
+  override map — while the markets tab's own notice says a market added since
+  boot is not one this process is filling against. Before the confirmation the
+  console states what a restart would interrupt — swaps live, swaps exposed,
+  sats committed across every corridor, rows already parked in `stuck` — and the
+  audit row records those figures, so "who restarted a solver holding 50,151
+  sats" is answerable later.
+
 - **Funding sources:** every place this deployment keeps coins answers one
   interface (`packages/solver-app/src/ops/fundSources.ts`), so the console can
   read a balance, list the ways in, settle what has arrived and withdraw —
@@ -367,6 +389,9 @@ that is the only knob that touches an amount at risk at all.
 | `RELAY_HEALTH_PATH`                           | `.data/relay-health` (`/data/relay-health` in the image) | `relay` touches this mtime every 10s while the socket is up; the image's `HEALTHCHECK` reads exactly this path                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `NOSTR_AD_PUBLISH`                            | `off`                                                    | whether this solver advertises itself on Nostr (kind 38859, `docs/rfq-protocol.md` § 3). `manual` publishes only when asked; `auto` also republishes on change or heartbeat. Under `off` the console's **post now** action is REFUSED, not merely unused — a policy an action can override is advisory. Any other value throws                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `COVCLAIMD_URL`                               | none                                                     | base URL of the non-interactive claim daemon. Unset = receive legs claim nothing on a client's behalf (the client claims its own lockup); set = funded lockups are revealed to it so an offline client still gets paid. **On `bitcoin` this must be `https://`** unless the host is loopback, and `loadConfig` throws otherwise: suppressing the reveal strands an offline client's lockup until refund |
+| `SENTRY_DSN`                                  | none                                                     | crash reporting. **Unset (the default) builds no reporter and sends no packet.** Set it and a process-level panic, an unhandled rejection and an ingress FAULT are reported — a refusal never is. Only the exception type, a scrubbed message and a file/line stack leave the box: no config, no env, no locals, no source, no breadcrumbs. A malformed DSN throws at startup rather than reporting nowhere |
+| `SENTRY_ENVIRONMENT`                          | `SWAP_NETWORK`                                           | the environment tag on reported events                                                                                                                                                                                                                                                                                                                                                                 |
+| `SENTRY_RELEASE`                              | none                                                     | optional release tag, for grouping events by deployed version                                                                                                                                                                                                                                                                                                                                          |
 
 `PORT`, `OPEN_RFQ_MAX_BIDS_PER_MIN` and `LOCKUP_TIMEOUT_SECONDS` go through `intFromEnv`, which treats an
 empty or whitespace value as unset rather than as `Number('') === 0`. The three
@@ -436,6 +461,25 @@ transaction stream, nothing decided and nothing spent.
 | `OFFER_MARKETS`         | the markets taken, `A/B` pairs comma-separated, where `BTC` is the sats leg and anything else is a 68-hex asset id: `BTC/<assetId>,<assetIdA>/<assetIdB>`. Unordered — one entry serves both directions. Unset serves none, which is the whole path off. An entry naming one thing twice, or not shaped `A/B`, throws                              |
 | `OFFER_MIN_FILL_AMOUNT` | **required once `OFFER_MARKETS` names a market**, with no default shipped: this is how much of the float one discovered offer may take, which is the deployment's answer rather than this repository's. A whole number in the WANT leg's own units — asset units, or sats when that leg is BTC — parsed as bigint, since an asset amount is 256-bit |
 | `OFFER_MAX_FILL_AMOUNT` | same rule, the upper bound. A max below the min throws at startup: it would refuse every offer, which is indistinguishable from a quiet market and would be diagnosed as one                                                                                                                                                                       |
+
+### Environment — Arkade asset RFQ (the quoted path), off unless `ASSET_MARKETS` is set
+
+The other way to reach an asset, and the mirror of the packet path above: there
+a maker publishes a price and this solver decides, here a client asks and this
+solver names a binding one. **The solver is still the TAKER** — `docs/rfq-protocol.md`
+§ 7.2.1 keeps it so as a money constraint, not a convention: it never publishes
+an offer and never funds a covenant. What changes is who names the price, so
+the covenant is derived from the row it negotiated rather than read off a
+packet, and the quote binds for a window instead of standing open.
+
+A deployment that sets none of these behaves exactly as it did before they
+existed: no asset RFQ store is opened, no service is constructed, and every
+asset pair refuses by name at the ingress.
+
+| Var                              | Notes                                                                                                                                                                                                                                                                                                            |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ASSET_MARKETS`                  | the assets quoted against over RFQ, `SYMBOL:<assetId>` comma-separated. The symbol is what this market's other env stems are built from, for the reason `EVM_TOKENS` gives: a 68-hex asset id in a variable name is legal shell and unreadable. Unset serves none, which is the whole path off                     |
+| `ASSET_QUOTE_VALIDITY_SECONDS`   | how long an asset quote binds. Default 30, floor 5, ceiling 900. Short on purpose — every pair here is cross-asset by construction, so the solver is short the market for the whole window and the window IS the exposure. § 5 puts cross-asset windows "on the order of ~30 seconds"                              |
 
 ### Environment — `LN_BACKEND=lnd` only
 
@@ -877,16 +921,17 @@ Three more stack requirements, all covered in the runbook:
   stack's defaults to block counts; `deriveUnilateralDelays` hard-rejects
   anything below 512 as a block count, so the service dies at wallet
   construction — before any swap runs
-- **`COVCLAIMD_IMAGE` must be set explicitly** — `regtest.mjs` silently drops
-  covclaimd from the stack when it is unset. No error; the container is not there
+- **`COVCLAIMD_IMAGE` must be set explicitly, and at `v0.0.1-rc.5` or above** —
+  `regtest.mjs` silently drops covclaimd from the stack when it is unset (no
+  error; the container is not there), and the compose default is `rc.4`, which
+  cannot claim against the emulator that same stack ships
 - **the operator's intent-fee policy affects renewal.** arkade-regtest
   configures `ARK_OFFCHAIN_INPUT_FEE="amount * 0.01"`, so every settlement
-  costs 1% of each input. The SDK's own `IVtxoManager.renewVtxos` implies a
-  zero fee and arkd rejects the intent outright with
-  `INTENT_INSUFFICIENT_FEE`, so `renewExpiringVtxos` replaces it and prices the
-  output the way `Wallet.settle()` does. This is **operator policy, not a
-  regtest quirk** — any mainnet operator charging a non-zero intent fee breaks
-  `renewVtxos` the same way. See `docs/runbook.md` § "Operating notes"
+  costs 1% of each input. This is **operator policy, not a regtest quirk**. The
+  SDK once implied a zero fee here and had arkd reject the intent with
+  `INTENT_INSUFFICIENT_FEE`; that is fixed in `@arkade-os/sdk@0.4.70`.
+  `renewExpiringVtxos` still prices renewal itself, for the reservation filter
+  and the treadmill cap. See `docs/runbook.md` § "Operating notes"
 
 ## Client-facing vocabulary
 
@@ -924,11 +969,14 @@ Two more, current as of the receive corridors going live:
   The cause is now known and fixed upstream: `rc.1` matched the v1 preimage
   condition against our `ScriptV2` taptree, so its claim closure never matched.
   `v0.0.1-rc.3` carries the v2 form (and a separate taptree-binding fix from
-  `rc.2`), and the runbook's stack commands pin `rc.4`.
+  `rc.2`), and the runbook's stack commands pin `rc.5` — a floor, because
+  emulator `v0.0.7` made the `PrevArkTx` PSBT field mandatory and `rc.4` is the
+  last build that omits it. `docs/runbook.md` § covclaimd has the symptom, which
+  is silent on the wire and visible only in the two container logs.
 
   **The live claim has now been watched**, which was the standing precondition
   here: `test/e2e/covclaimdClaim.e2e.test.ts` claims a real lockup against a
-  running `rc.4`, and `receiveLightningEdges.e2e.test.ts` drives a whole receive
+  running `rc.5`, and `receiveLightningEdges.e2e.test.ts` drives a whole receive
   swap to `settled` on covclaimd's own claim with the client never acting. What
   keeps this unwired is therefore the wiring work itself, no longer doubt about
   the daemon. See `docs/runbook.md` § covclaimd.

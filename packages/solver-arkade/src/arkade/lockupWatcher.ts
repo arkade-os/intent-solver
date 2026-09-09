@@ -6,38 +6,8 @@
  * pays on every swap for nothing. This turns the SDK's contract stream into the
  * fast path.
  *
- * **It used to hold its own subscription.** The note here said the SDK's
- * `ContractWatcher` could not work for a swap lockup, because its failsafe poll
- * diffs the wallet repository and that repository stays empty for a script this
- * wallet does not own. True on 2026-08-07; false on 2026-08-08, when
- * `registerLiveLockups` began registering every live lockup as a contract, and
- * never revisited. Checked against SDK 0.4.66:
- *
- * - `ContractManager.createContract` calls `fetchContractVxosFromIndexer`, so
- *   registering a lockup hydrates the repository from the indexer.
- * - It then calls `watcher.addContract`, and `getContractManager()` reaches
- *   `create` -> `initialize` -> `watcher.startWatching`.
- *
- * So the SDK's watcher was already running in this process, and the hand-rolled
- * stream here was a SECOND subscription over the same scripts — two connections,
- * two reconnect regimes, and 213 lines of subscribe/backoff to maintain against
- * one upstream copy. This now consumes `onContractEvent` instead.
- *
- * **The one thing that got worse, so it is reported rather than hidden.**
- * This stream can only ever mention a script the manager already holds a
- * contract for, and registering one is a separate, fallible pass
- * (`registerLiveLockups` in `cli.ts`) rather than something watching implies.
- * The old subscription took whatever scripts it was given.
- * {@link LockupWatcher.sync} therefore compares what it was asked to watch
- * against what the manager actually holds and reports the difference — silently
- * watching less than asked is the only way this migration could cost a swap its
- * fast path, and an operator should hear about it rather than infer it from a
- * latency graph.
- *
- * The gap used to have one named cause: the base three-leaf program, which
- * `lockupContractRegistration` refused to register because no handler could
- * re-derive it. That program is gone. What is left is a registration that has
- * not run yet, or one that failed.
+ * Scripts reach the stream via `watchScript` (SDK 0.4.71, arkade-os/ts-sdk#857),
+ * so watching is implied by asking and nothing reconciles the two.
  *
  * **This is deliberately not a source of truth.** An event names scripts and
  * nothing more; the caller reacts by ticking the matching swap, which re-reads
@@ -57,58 +27,32 @@
  * gap was never delivered.
  */
 export type ContractEvent =
-  | { type: 'vtxo_received'; contractScript: string; vtxos: unknown[]; contract: unknown; timestamp: number }
-  | { type: 'vtxo_spent'; contractScript: string; vtxos: unknown[]; contract: unknown; timestamp: number }
+  | { type: 'vtxo_received'; contractScript: string; timestamp: number }
+  | { type: 'vtxo_spent'; contractScript: string; timestamp: number }
   | { type: 'connection_reset'; timestamp: number }
-
-/** The `watch` values a coverage read can ask for. Mirrors the SDK's `ContractWatchState`. */
-export type ContractWatchFilter = 'watched' | 'retained'
 
 /** The slice of the SDK's `ContractManager` this needs, narrowed for injection. */
 export interface ContractSource {
   /** Subscribe to contract events. Returns an unsubscribe function. */
   onContractEvent(callback: (event: ContractEvent) => void): () => void
-  /**
-   * The contracts the manager holds, for the coverage check in `sync`. The
-   * filter narrows the read to contracts still ON the stream — a row disabled
-   * to `watch: 'retained'` is out of the subscription and the failsafe poll,
-   * and a coverage check that cannot see that reports the two states this
-   * alarm most needs to distinguish as identical.
-   */
-  getContracts(filter?: { watch?: ContractWatchFilter[] }): Promise<{ script: string }[]>
+  watchScript(script: string): Promise<void>
+  /** Take it off both. The set is re-derived each sweep, so this is reversible. */
+  unwatchScript(script: string): Promise<void>
 }
 
 export interface LockupWatcherDeps {
   contracts: ContractSource
   /** Called with the scripts an event named. Never awaited; may throw. */
   onScripts: (scripts: string[]) => void
-  /** Stream and coverage-read failures, for the host's log. */
   onError?: (error: unknown) => void
-  /**
-   * Watched scripts the manager has no contract for, so they can never arrive
-   * on this stream. Reported once per script; see
-   * {@link LockupWatcher.checkCoverage}.
-   */
-  onUnwatched?: (scripts: string[]) => void
 }
 
 export class LockupWatcher {
   private watched: string[] = []
   private unsubscribe?: () => void
-  /** Scripts already reported as uncovered, so a per-sweep `sync` cannot spam. */
-  private readonly reportedUnwatched = new Set<string>()
-  /** The coverage read in flight, if any. @see {@link LockupWatcher.checkCoverage} */
-  private coverage?: Promise<void>
-  /**
-   * Scripts the LAST completed read found uncovered.
-   *
-   * A single sighting is not evidence. The sweep adopts a lockup and registers
-   * it as a contract on the same pass, so a read can easily land in the gap
-   * between the two and see a script that is about to be covered. Reporting
-   * that would print a warning for every swap this service ever quotes, which
-   * is how a log stops being read.
-   */
-  private seenUncovered = new Set<string>()
+  /** Scripts the source confirmed it watches. Only a SUCCESSFUL call lands here. */
+  private readonly asked = new Set<string>()
+  private reconciling?: Promise<void>
 
   constructor(private readonly deps: LockupWatcherDeps) {}
 
@@ -125,8 +69,7 @@ export class LockupWatcher {
   }
 
   /**
-   * Record which scripts a swap is waiting on, and check the manager can see
-   * them.
+   * Record which scripts a swap is waiting on, and put them on the stream.
    *
    * Called from the sweep with every live swap's script, so the watched set
    * follows the swap table without anything having to notify this class when a
@@ -138,70 +81,54 @@ export class LockupWatcher {
    *
    * **There is nothing here to await, and that is the point.** The watched set
    * is assigned synchronously, because that is the half the money path needs;
-   * the coverage check is fired off and left to land on its own. Awaiting it
-   * would put `getContracts()` — and behind it `getContractManager()`, which is
+   * the watch calls are fired off and left to land on their own. Awaiting them
+   * would put `watchScript()` — and behind it `getContractManager()`, which is
    * `create` -> `initialize` -> an indexer reconciliation with no timeout — on
    * the sweep's critical path, in the same loop as the hot tick. That is the
-   * exact veto `arkade/lazyContractSource.ts` exists to avoid, and a diagnostic
-   * has no business being the thing that reintroduces it.
-   *
-   * @see {@link LockupWatcher.checkCoverage} to await the check deliberately.
+   * exact veto `arkade/lazyContractSource.ts` exists to avoid.
    */
   sync(scripts: readonly string[]): void {
     this.watched = [...new Set(scripts)].sort()
-    void this.checkCoverage()
+    void this.reconcile()
   }
 
   /**
-   * Compare the watched set against the contracts the manager holds, and report
-   * the ones it cannot see. Resolves when that read lands; never rejects.
+   * Bring the source's watched set in line with this one; never rejects. At most
+   * one pass runs at a time; the sets converge, they are never applied as a delta.
    *
-   * At most one read is ever outstanding: a call made while one is in flight
-   * joins it rather than starting a second. A manager that has stopped
-   * answering therefore costs one pending promise for as long as it stays
-   * wedged, not one more per three-second sweep.
-   *
-   * The comparison reads `watched` when the answer ARRIVES, not when the read
-   * was started, so a slow answer is judged against the set that is current by
-   * the time it lands rather than one the sweep has already replaced.
-   *
-   * Public because {@link sync} deliberately does not await it: this is the
-   * seam for a caller — or a test — that wants the diagnostic on purpose.
+   * @internal Public as a test seam. Waiting on a pass contradicts the
+   * fire-and-forget contract {@link sync} exists to keep.
    */
-  checkCoverage(): Promise<void> {
-    if (this.coverage) return this.coverage
-    this.coverage = this.readCoverage().finally(() => {
-      this.coverage = undefined
+  reconcile(): Promise<void> {
+    if (this.reconciling) return this.reconciling
+    this.reconciling = this.applyWatched().finally(() => {
+      this.reconciling = undefined
     })
-    return this.coverage
+    return this.reconciling
   }
 
-  private async readCoverage(): Promise<void> {
-    try {
-      // Watched rows only: a contract retired to `watch: 'retained'` really is
-      // out of the subscription and the failsafe poll, and the unfiltered read
-      // still answered it as covered — silent by construction in exactly the
-      // state this alarm exists to name. Rows predating the field match
-      // 'watched' (SDK ContractFilter), so nothing old falls out of view.
-      const known = new Set((await this.deps.contracts.getContracts({ watch: ['watched'] })).map((c) => c.script))
-      const uncovered = this.watched.filter((s) => !known.has(s))
-      // Two consecutive reads, so a lockup that is merely mid-registration is
-      // not announced as one that will never arrive. @see seenUncovered
-      const missing = uncovered.filter((s) => this.seenUncovered.has(s) && !this.reportedUnwatched.has(s))
-      this.seenUncovered = new Set(uncovered)
-      if (missing.length > 0) {
-        for (const script of missing) this.reportedUnwatched.add(script)
-        this.deps.onUnwatched?.(missing)
+  private async applyWatched(): Promise<void> {
+    const wanted = new Set(this.watched)
+    for (const script of wanted) {
+      if (this.asked.has(script)) continue
+      try {
+        await this.deps.contracts.watchScript(script)
+        // Only on success, so a failed call is retried rather than remembered.
+        this.asked.add(script)
+      } catch (error) {
+        this.deps.onError?.(error)
       }
-      // Forget scripts that are no longer watched, so a swap re-quoted at the
-      // same script reports again rather than being suppressed forever.
-      for (const script of this.reportedUnwatched) {
-        if (!this.watched.includes(script)) this.reportedUnwatched.delete(script)
+    }
+    for (const script of [...this.asked]) {
+      if (wanted.has(script)) continue
+      try {
+        await this.deps.contracts.unwatchScript(script)
+        // Dropped only on success, for the same reason: while an unwatch keeps
+        // failing the source really is still watching, so the set stays honest.
+        this.asked.delete(script)
+      } catch (error) {
+        this.deps.onError?.(error)
       }
-    } catch (error) {
-      // Diagnostics only: a manager that cannot answer must not stop events
-      // being delivered, and the sweep is the failsafe either way.
-      this.deps.onError?.(error)
     }
   }
 

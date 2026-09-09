@@ -140,6 +140,23 @@ describe('rfq status dispatch — all four corridors', () => {
     expect(outcome.kind).toBe('unknown')
   })
 
+  it('does not let one broken store hide a live swap in the corridor after it', async () => {
+    const broken = { findByRfqId: async () => throwing() } as never
+    const outcome = await respondToRfqStatus(
+      readers({ store: broken, onchainStore: holding(onchainSendRow) }),
+      request(),
+    )
+    expect(outcome.kind).toBe('status')
+    expect(outcome.payload).toMatchObject({ profile: { htlc_address: 'bcrt1qsend' } })
+  })
+
+  it('still refuses to call a broken store unknown when nothing answered', async () => {
+    const broken = { findByRfqId: async () => throwing() } as never
+    await expect(respondToRfqStatus(readers({ store: broken }), request())).rejects.toThrow(
+      /no store should be reached/,
+    )
+  })
+
   it('rejects a malformed request before touching any corridor', async () => {
     const boom = { findByRfqId: async () => throwing() } as never
     const outcome = await respondToRfqStatus(

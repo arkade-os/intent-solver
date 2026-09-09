@@ -41,7 +41,7 @@ import { LndLightningBackendAdapter } from '@arkade-os/solver-rails-lnd/ln/lnd/a
 import { createCovclaimdClient, type CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import type { EmulatorInfo } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
-import { nodeBlockHeight, solverInvoice, SOLVER_CONTAINER } from './counterparty.js'
+import { nodeBlockHeight, solverInvoice, solverContainer } from './counterparty.js'
 import { covclaimdUrl, esploraUrl, loadE2eEnv } from './preflight.js'
 
 /**
@@ -255,7 +255,7 @@ export const holdSettleDeadline = async (paymentHash: string): Promise<number> =
   const invoice = await solverInvoice(paymentHash)
   const held = invoice.htlcs.find((htlc) => htlc.state === 'ACCEPTED')
   if (!held) throw new Error(`no accepted HTLC on the solver's hold invoice for ${paymentHash}`)
-  const height = await nodeBlockHeight(SOLVER_CONTAINER)
+  const height = await nodeBlockHeight(solverContainer())
   // Blocks to seconds at the repo's own constant, the same conversion
   // `htlcLocktimeFor` (src/core/onchainReceive.ts) makes for the sibling corridor.
   return nowSeconds() + (held.expiry_height - height) * ONCHAIN_SECONDS_PER_BLOCK

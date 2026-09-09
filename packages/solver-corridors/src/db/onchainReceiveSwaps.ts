@@ -100,7 +100,7 @@ const TRANSITION_COLUMNS = new Set([
  * finding F4 — runs against a `stuck` row with no outgoing edge and must record
  * the txid without a transition.
  */
-const PATCH_COLUMNS = new Set(['refund_outcome', 'arkade_refund_txid', 'onchain_claim_txid'])
+const PATCH_COLUMNS = new Set(['refund_outcome', 'arkade_refund_txid', 'onchain_claim_txid', 'stamped_at'])
 
 export interface OnchainReceiveSwapRow {
   id: string
@@ -181,7 +181,7 @@ export interface OnchainReceiveSwapRow {
   onchainAddress: string
   onchainPkScript: string
   /** `P` ECIES-sealed to covclaimd, base64, exactly as the client supplied it — carried blindly, never decrypted here. */
-  claimPacket: string
+  claimPacket: string | null
   fundingTxid: string | null
   /** The vout `fundingTxid` actually pays the onchain HTLC at — never assume 0, same reasoning as the send leg's identical field. */
   fundingVout: number | null
@@ -216,6 +216,8 @@ export interface OnchainReceiveSwapRow {
    * an expiry would reinstate the double-fund it exists to prevent.
    */
   fundStartedAt: number | null
+  /** Set once THIS service funded a stamped lockup — @see receive/receiveSwaps.ts */
+  stampedAt: number | null
 }
 
 const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
@@ -256,7 +258,8 @@ const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
   refund_outcome                   TEXT,
   failure_reason                   TEXT,
   rfq_id                           TEXT,
-  fund_started_at                  INTEGER
+  fund_started_at                  INTEGER,
+  stamped_at                       INTEGER
 `
 
 const SCHEMA = `
@@ -315,7 +318,11 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   clientOnchainRefundPubkey: String(raw.client_onchain_refund_pubkey),
   onchainAddress: String(raw.onchain_address),
   onchainPkScript: String(raw.onchain_pk_script),
-  claimPacket: String(raw.claim_packet),
+  // '' is the stored form of absence — see `receiveSwaps.ts`'s `toRow` for why.
+  claimPacket:
+    raw.claim_packet === null || raw.claim_packet === undefined || raw.claim_packet === ''
+      ? null
+      : String(raw.claim_packet),
   fundingTxid: raw.funding_txid === null ? null : String(raw.funding_txid),
   fundingVout: raw.funding_vout === null || raw.funding_vout === undefined ? null : Number(raw.funding_vout),
   arkadeFundTxid: raw.arkade_fund_txid === null ? null : String(raw.arkade_fund_txid),
@@ -327,6 +334,7 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
   rfqId: raw.rfq_id === null || raw.rfq_id === undefined ? null : String(raw.rfq_id),
   fundStartedAt: raw.fund_started_at === null || raw.fund_started_at === undefined ? null : Number(raw.fund_started_at),
+  stampedAt: raw.stamped_at === null || raw.stamped_at === undefined ? null : Number(raw.stamped_at),
 })
 
 export interface OnchainReceiveQuoteRecord {
@@ -361,7 +369,7 @@ export interface OnchainReceiveQuoteRecord {
   clientOnchainRefundPubkey: string
   onchainAddress: string
   onchainPkScript: string
-  claimPacket: string
+  claimPacket: string | null
   rfqId?: string
 }
 
@@ -430,6 +438,9 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
     if (!existing.has('payout_sats')) {
       await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN payout_sats INTEGER`)
     }
+    if (!existing.has('stamped_at')) {
+      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN stamped_at INTEGER`)
+    }
     if (!existing.has('fund_started_at')) {
       await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN fund_started_at INTEGER`)
     }
@@ -484,13 +495,8 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
   /**
    * Give the lease back when the payment provably did not happen.
    *
-   * Called only when `fund()` THREW. Without it a failure that moved no money
-   * strands the row for every worker, not just the one that failed.
-   *
-   * Not "the lease expired": a throw is not proof nothing was sent, so this
-   * re-opens the ambiguity the adoption check above already owns and resolves
-   * by reading the script. What the lease adds is narrower and is the actual
-   * defect — two workers cannot both be inside `fund()` at once.
+   * Called only for a `FundNotSubmittedError`, never on a bare throw and never
+   * as an expiry: an ambiguous failure joins the crash case above and stays stuck.
    */
   async releaseFundLease(id: string): Promise<void> {
     await this.driver.run(`UPDATE receive_onchain_swap SET fund_started_at = NULL WHERE id = ?`, [id])
@@ -539,7 +545,7 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
         quote.clientOnchainRefundPubkey,
         quote.onchainAddress,
         quote.onchainPkScript,
-        quote.claimPacket,
+        quote.claimPacket ?? '',
         quote.rfqId ?? null,
       ],
     )

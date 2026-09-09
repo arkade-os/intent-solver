@@ -53,9 +53,12 @@ import { RFQ_PAIR_RECEIVE } from '../wire/lightningReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
+import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
+import { appendArkadeScript, claimPacketShape } from './claimPacket.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
+import { FundNotSubmittedError } from './fundLockup.js'
 import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveSwapRow, ReceiveSwapStore } from '../db/receiveSwaps.js'
@@ -171,8 +174,10 @@ export interface ReceiveServiceDeps {
    * can, holding the covenant's `receiver` key (`receiveCovenantRowFor` maps
    * `receiverPubkey: row.payoutPubkey`).
    *
-   * It CAN claim this covenant as of `covclaimd:v0.0.1-rc.4`, proven on regtest by
-   * `test/e2e/covclaimdClaim.e2e.test.ts`.
+   * It CAN claim this covenant as of `covclaimd:v0.0.1-rc.5`, proven on regtest by
+   * `test/e2e/covclaimdClaim.e2e.test.ts`. NOT rc.4: that build predates the
+   * emulator's mandatory `PrevArkTx`, so its claim is refused and retried
+   * forever — `docs/runbook.md` § covclaimd carries the floor and the symptom.
    *
    * Still optional for deployment reasons rather than capability: `whenFunded` does not
    * care who spent the lockup — it recovers `P` from whatever witness it finds — so
@@ -264,7 +269,7 @@ export interface ReceiveQuoteRequest {
   /** The client's own x-only key — the covenant's `receiver` role on this leg. */
   payoutPubkey: string
   /** The client's preimage, ECIES-sealed to covclaimd. Opaque here. */
-  claimPacket: string
+  claimPacket: string | null
   rfqId?: string
 }
 
@@ -878,9 +883,24 @@ export class ReceiveSwapService {
       }
     }
 
+    // The adoption read above closes the CRASH case; only the lease closes the
+    // CONCURRENT one, where two workers both read an empty script and both spend.
+    // Losing means another worker holds this swap, so yield the tick, don't fail.
+    if (!(await store.claimFundLease(row.id, 'armed'))) return false
+
     // Nothing was funded before — create the exposure now. The txid this
     // returns is what the confirmation below keys off.
-    const fundTxid = await arkade.fund(row.lockupAddress, row.payoutSats)
+    let fundTxid: string
+    const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
+    try {
+      fundTxid = await arkade.fund(row.lockupAddress, row.payoutSats, stamp)
+    } catch (error) {
+      // Retained on an ambiguous failure: stuck for a human, on purpose.
+      if (error instanceof FundNotSubmittedError) await store.releaseFundLease(row.id)
+      throw error
+    }
+    // After the broadcast: a crash between leaves it unset and the next pass reveals, which is the safe direction.
+    if (stamp) await store.patch(row.id, { stamped_at: this.now() })
     // Keyed to THIS row's own broadcast, and spend-aware for the same reason
     // adoption above is: a claim landing inside the poll window would empty the
     // spendable view and hide a funding that certainly happened. Matching on
@@ -922,10 +942,11 @@ export class ReceiveSwapService {
       if (await this.refundDeadlineReached(row.refundLocktime)) {
         return store.transition(row.id, 'funded', 'refunding', {})
       }
-      // No covclaimd configured: nothing to reveal to, and nothing else to do
-      // but wait for the client's own claim. The `findClaimPreimage` branch
-      // below sees it exactly the same either way.
-      if (row.revealedAt === null && this.deps.covclaimd) await this.revealToCovclaimd(row)
+      // No covclaimd to reveal to, or no packet to reveal: nothing to do but
+      // wait for the client's own claim, which reads the same either way.
+      if (row.revealedAt === null && this.deps.covclaimd && row.claimPacket !== null) {
+        await this.revealToCovclaimd(row)
+      }
       return false
     }
 
@@ -961,10 +982,32 @@ export class ReceiveSwapService {
     return false
   }
 
-  /** Hand the sealed claim packet to covclaimd. Only called when one is configured. Idempotent to retry — see this file's own top comment. */
+  /** Derived rather than stored: `claim_packet` never changes. `script` is passed
+   *  in so the reveal path, which needs it either way, decodes it once. */
+  private claimPacketStamp(
+    row: ReceiveSwapRow,
+    script: ReturnType<typeof covenantScriptFromRow>,
+  ): ClaimPacketStamp | undefined {
+    if (row.claimPacket === null) return undefined
+    const shape = claimPacketShape(row.claimPacket)
+    if (shape.kind !== 'packet') return undefined
+    // Without `0x03` no covclaimd's filter selects the tx, so stamping would
+    // strand it AND turn off the reveal that could still have settled it.
+    if (!shape.covclaimdPubKey) return undefined
+    const arkadeScript = script.nonInteractiveClaimArkadeScript
+    if (!shape.needsArkadeScript) return { packet: shape.body, tapTree: script.encode() }
+    // No leaf to derive from: fall back to the reveal, whose guard reports it.
+    if (!arkadeScript) return undefined
+    return { packet: appendArkadeScript(shape.body, arkadeScript), tapTree: script.encode() }
+  }
+
+  /** Hand the sealed claim packet to covclaimd. Only called when both a covclaimd and a packet exist. Idempotent to retry — see this file's own top comment. */
   private async revealToCovclaimd(row: ReceiveSwapRow): Promise<void> {
     const { store, covclaimd } = this.deps
-    if (!covclaimd) return
+    if (!covclaimd || row.claimPacket === null) return
+    // `stampedAt`, NOT the packet shape: an adopted output carries nothing the
+    // shape promises, and skipping the reveal on it strands the swap.
+    if (row.stampedAt !== null) return
     const script = covenantScriptFromRow(receiveCovenantRowFor(row))
     if (!script.nonInteractiveClaimArkadeScript) {
       // Unreachable: every receive-leg row is quoted with the solver's own

@@ -67,11 +67,13 @@ pnpm format:check      # prettier over test + packages
 Run all four. `build` passing while `typecheck` fails, and the reverse, have both
 happened here.
 
-## e2e does not run by default
+## e2e does not run in the unit suite
 
 `package.json`'s `test` script is `vitest run --exclude e2e`, and `ci.yml` runs
-`pnpm test`. The e2e suite has its own workflow, label-gated on `run-e2e`, and it
-provisions the regtest Arkade stack **only** — there is no EVM chain in it, so
+`pnpm test`. The e2e suite has its own workflow, which runs on every PR and on
+each push to `main` — running there is not the same as blocking a merge, which is
+a branch-protection setting rather than anything that workflow states. Its
+`emulator` groups provision the regtest Arkade stack **only** — no EVM chain, so
 `evmErc20Swap.e2e.test.ts` self-skips and the job goes green having asserted
 nothing.
 

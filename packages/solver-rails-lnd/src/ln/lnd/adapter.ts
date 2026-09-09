@@ -11,15 +11,16 @@ import {
   cancelHodlInvoice,
   createHodlInvoice,
   createInvoice as lndCreateInvoice,
-  getChannelBalance,
-  getInvoice,
+  getChannelBalance as lndGetChannelBalance,
+  getInvoice as lndGetInvoice,
   getPayment as lndGetPayment,
-  getRoutingFeeEstimate,
-  getWalletInfo,
+  getRoutingFeeEstimate as lndGetRoutingFeeEstimate,
+  getWalletInfo as lndGetWalletInfo,
   payViaPaymentRequest,
   settleHodlInvoice,
   type AuthenticatedLnd,
 } from 'lightning'
+import { deadlined, LND_READ_TIMEOUT_MS } from '../../deadline.js'
 import { htlcDeadlineFromHeight } from '@arkade-os/solver-core/core/receive.js'
 import { ROUTE_CLTV_BUDGET_BLOCKS } from '@arkade-os/solver-core/core/send.js'
 import { expiresAtOf, paymentHashOf } from '@arkade-os/solver-core/invoice/decode.js'
@@ -39,6 +40,13 @@ import type {
   PaymentStatus,
   SendFeeEstimate,
 } from '@arkade-os/solver-core/ports/lightning.js'
+
+// The reads, bounded. Every call site below is left as it was; `getPayment` is
+// not here because it is `payInvoice`'s reconcile path. @see ../../deadline.ts.
+const getChannelBalance = deadlined('getChannelBalance', lndGetChannelBalance)
+const getInvoice = deadlined('getInvoice', lndGetInvoice)
+const getRoutingFeeEstimate = deadlined('getRoutingFeeEstimate', lndGetRoutingFeeEstimate)
+const getWalletInfo = deadlined('getWalletInfo', lndGetWalletInfo)
 
 /**
  * Payment-outcome reasons `payViaPaymentRequest` (from the `lightning`
@@ -229,11 +237,22 @@ export const toGetPaymentRejection = (id: string, error: unknown): PaymentResult
  * failure as `[503, 'UnexpectedLookupInvoiceErr', {err}]`, so the raw gRPC
  * status (code 5 / "unable to locate invoice") has to be read out of the
  * third tuple element.
+ *
+ * LND has TWO ways of saying it and only one is NOT_FOUND: against an EMPTY
+ * invoice bucket it answers ErrNoInvoicesCreated, "there are no existing
+ * invoices", which does not arrive as NOT_FOUND. A node that only ever pays
+ * gives that answer to every probe, so the probe threw instead of answering
+ * "not ours" (#102). Matched on the message and NOT on a status: the one it
+ * carries instead was never measured, so constraining on a guess re-breaks it.
  */
 export const isInvoiceNotFound = (error: unknown): boolean => {
   if (!Array.isArray(error) || error[1] !== 'UnexpectedLookupInvoiceErr') return false
   const inner = (error[2] as { err?: { code?: number; details?: string } } | undefined)?.err
-  return inner?.code === 5 || (typeof inner?.details === 'string' && /unable to locate invoice/i.test(inner.details))
+  return (
+    inner?.code === 5 ||
+    (typeof inner?.details === 'string' &&
+      /unable to locate invoice|there are no existing invoices/i.test(inner.details))
+  )
 }
 
 /**
@@ -432,11 +451,13 @@ export class LndLightningBackendAdapter implements LightningBackend {
    */
   async estimateSendFee(params: EstimateSendFeeParams): Promise<SendFeeEstimate | null> {
     try {
-      const estimate = await getRoutingFeeEstimate({
-        lnd: this.lnd,
-        request: params.invoice,
-        timeout: probeTimeoutMs(params.timeoutMs),
-      })
+      const probeMs = probeTimeoutMs(params.timeoutMs)
+      const estimate = await getRoutingFeeEstimate(
+        { lnd: this.lnd, request: params.invoice, timeout: probeMs },
+        // ABOVE the caller's own budget: LND documents that probing can outlast
+        // the timeout it was given, so a deadline at it would cut a live probe.
+        probeMs + LND_READ_TIMEOUT_MS,
+      )
       // No `feeHandle`. LND reserves nothing: this probe and the later
       // `payViaPaymentRequest` are unconnected calls, and minting a token would claim a
       // link between them that does not exist.

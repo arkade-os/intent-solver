@@ -70,8 +70,8 @@ export const OnchainReceiveRfqRequest = z
     profile: z
       .object({
         payment_hash: HEX32,
-        /** `P` ECIES-sealed to covclaimd, base64 — see `receive/covclaimd.ts`'s `RevealParams.ciphertext`. Carried blindly; never decrypted here. */
-        claim_packet: z.string().min(1).max(4096),
+        /** `P` ECIES-sealed to covclaimd, base64 — carried blindly, never decrypted here. Optional for the reason `LightningReceiveRfqRequest` documents. */
+        claim_packet: z.string().min(1).max(4096).optional(),
         /** The client's onchain HTLC refund pubkey (role-reversed from send's `payout_pubkey`). */
         refund_pubkey: XONLY_HEX,
         /** The client's Arkade payout address — where any claim must pay. */

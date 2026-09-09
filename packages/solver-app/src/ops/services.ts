@@ -71,6 +71,7 @@ import {
   type AssetMarketPricingView,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { applyOverrides } from '../admin/settings.js'
+import { createOfferRefusalTail, type OfferRefusalRecorder } from '../admin/offerRefusals.js'
 import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
@@ -82,6 +83,13 @@ import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { assertMarketsPriced, AssetOfferService } from './assetOffers.js'
 import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
+import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import { assetRfqMarketsFrom } from './assetRfqMarkets.js'
+import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
+import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
+import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 
 export interface Services {
   /**
@@ -103,6 +111,9 @@ export interface Services {
    * terms the corridor then refuses.
    */
   policy: Config
+  /** What {@link Services.policy} was resolved from, so `pendingRestartKeys` can
+   * tell an override already in force from one still waiting. */
+  bootOverrides: Record<string, string>
   /**
    * The Arkade asset markets this process trades, resolved once at startup from
    * the console's stored rows.
@@ -169,6 +180,25 @@ export interface Services {
    */
   offerStore: OfferFillStore | null
   assetOffers: AssetOfferService | null
+  /** Offers DECLINED. NOT nullable beside the two above: a refusal is not a row. */
+  offerRefusals: OfferRefusalRecorder
+  /**
+   * The atomic class reached over RFQ, or NULL when `ASSET_MARKETS` names no
+   * asset (the default).
+   *
+   * A CORRIDOR, unlike {@link Services.assetOffers} above, and the same
+   * settlement: there the maker names the price and this solver decides, here
+   * the client asks and this solver names it. Only the second is a negotiation,
+   * so only the second has an `rfq_id`, a `valid_until` and rows a registry can
+   * dispatch by pair. @see corridors/assetRfq.ts
+   *
+   * ONE store and ONE service for every market, with a corridor per market per
+   * DIRECTION — the shape the EVM family already has, and for the same reason:
+   * the pair carries the asset id, so the registry key is per market.
+   */
+  assetRfqStore: AssetRfqSwapStore | null
+  assetRfqService: AssetRfqSwapService | null
+  assetRfqMarkets: readonly AssetRfqMarket[]
   /**
    * Settings overrides and the action audit log, in their own database. Open
    * whether or not the console is running: operator actions are auditable from
@@ -367,7 +397,8 @@ export const createServices = async (
    * same range `config.ts` validates — so this can lower the amount at risk
    * but never raise it above what the deployment already permitted.
    */
-  const policy = applyOverrides(config, await adminStore.getOverrides())
+  const bootOverrides = await adminStore.getOverrides()
+  const policy = applyOverrides(config, bootOverrides)
   /**
    * The asset markets, read once from the same store and validated HERE.
    *
@@ -423,6 +454,7 @@ export const createServices = async (
   // required them to meet.
   if (servesOffers) assertMarketsPriced(policy.offerMarkets, assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
+  const offerRefusals = createOfferRefusalTail()
   const assetOffers = offerStore
     ? new AssetOfferService({
         store: offerStore,
@@ -448,6 +480,58 @@ export const createServices = async (
         // emulator meet; every guard on it lives in `arkade/offerSettle.ts`.
         settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
         onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
+        // Refusals are NOT errors, so they never reached `onError` above. The log
+        // line alone is invisible to an operator in a browser, so the console's
+        // tail is fed from the same handler.
+        onRefused: (outpoint, reason, detail) => {
+          log(`offer ${outpoint} refused: ${reason} — ${detail}`)
+          offerRefusals.record({ at: nowSeconds(), outpoint, reason, detail })
+        },
+      })
+    : null
+
+  /**
+   * The atomic class over RFQ. Off unless `ASSET_MARKETS` names an asset, and in
+   * the swap file for the reason the EVM tables are: no previous release, so no
+   * legacy split file to preserve.
+   *
+   * The join THROWS on an asset the console does not price or bound, so a
+   * deployment that cannot honour what it advertises does not come up — the same
+   * call `assertMarketsPriced` makes above.
+   *
+   * The four Arkade seams are wired here because this is where the wallet, the
+   * emulator key and the network prefix meet. Every guard on the spend lives in
+   * `arkade/quotedOfferSettle.ts`.
+   */
+  const assetRfqMarkets = assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)
+  const assetRfqStore = assetRfqMarkets.length > 0 ? await AssetRfqSwapStore.open(swapFile) : null
+  const assetRfqDerivation = {
+    serverPubkey: arkade.wallet.arkServerPublicKey,
+    // X-ONLY. The emulator advertises a compressed key and the covenant takes
+    // 32 bytes, so the wrong spelling compiles an address no client derives.
+    emulatorPubkey: xOnlyPubkey(hex.decode(emulatorInfo.signerPubkey)),
+    hrp: arkade.hrp,
+    // Boot-captured beside the two keys above, all three from one `getInfo()`.
+    exitDelay: offerExitDelay(arkade.advertisedExitDelay),
+  }
+  const assetRfqService = assetRfqStore
+    ? new AssetRfqSwapService({
+        store: assetRfqStore,
+        markets: assetRfqMarkets,
+        solverPubkey: hex.encode(await arkade.identity.xOnlyPublicKey()),
+        quoteValiditySeconds: policy.assetQuoteValiditySeconds,
+        deriveOffer: offerScriptFrom(assetRfqDerivation),
+        depositAt: async (offerPkScript, depositLeg) =>
+          largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),
+        // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
+        balance: async () => offerInventoryFrom(await arkade.wallet.getBalance()),
+        fetchPrice: createPriceFeed(),
+        settle: quotedOfferSettleFor({
+          ctx: arkade,
+          emulatorUrl: config.emulatorUrl,
+          derivation: assetRfqDerivation,
+        }),
+        onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
       })
     : null
 
@@ -925,11 +1009,17 @@ export const createServices = async (
     evmReceiveService,
     evmReceiveStore,
     evmCorridors: policy.evmCorridors,
+    // The atomic class registers per market per DIRECTION, on the same rule:
+    // both the service and the store, or the pair refuses by name.
+    assetRfqService,
+    assetRfqStore,
+    assetRfqMarkets,
   }
 
   return {
     config,
     policy,
+    bootOverrides,
     assetMarkets: assetMarkets.pricing,
     assetMarketPairs: assetMarkets.pairs,
     store,
@@ -942,6 +1032,10 @@ export const createServices = async (
     evmReceiveService,
     offerStore,
     assetOffers,
+    offerRefusals,
+    assetRfqStore,
+    assetRfqService,
+    assetRfqMarkets,
     adminStore,
     arkade,
     ln: rail?.ln ?? null,
@@ -973,6 +1067,7 @@ export const createServices = async (
         ['receiveStore', () => receiveStore.close()],
         ['onchainReceiveStore', () => onchainReceiveStore.close()],
         ['offerStore', () => offerStore?.close()],
+        ['assetRfqStore', () => assetRfqStore?.close()],
         ['adminStore', () => adminStore.close()],
         ['arkade', () => arkade.close()],
         ['ln', () => rail?.ln.close?.()],

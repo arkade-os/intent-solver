@@ -28,6 +28,8 @@
  */
 
 import { hex, base64 } from '@scure/base'
+import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
+import { appendArkadeScript, claimPacketShape } from './claimPacket.js'
 import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { ArkAddress } from '@arkade-os/sdk'
@@ -51,6 +53,7 @@ import { buildOnchainClaimTx, estimateClaimTxVsize, signOnchainClaimTx } from '@
 import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
 import type { OnchainReceiveBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import type { OnchainReceiveArkadeOps } from './onchainArkadeOps.js'
+import { FundNotSubmittedError } from './fundLockup.js'
 import { EMPTY_LOCKUP_GRACE, REFUND_CENSORSHIP_GRACE } from './orchestrator.js'
 import type { OnchainReceiveSwapRow, OnchainReceiveSwapStore } from '../db/onchainReceiveSwaps.js'
 import type { CovclaimdClient } from './covclaimd.js'
@@ -135,7 +138,7 @@ export interface OnchainReceiveQuoteRequest {
   /** exact-in (default): the fee comes out of the payout. exact-out: the give is solved up from the corridor's fee. */
   amountSide?: 'from' | 'to'
   /** `P` ECIES-sealed to covclaimd, base64 — carried blindly, never decrypted here. */
-  claimPacket: string
+  claimPacket: string | null
   /** The client's x-only pubkey for the onchain HTLC's refund leaf. Wire field `refund_pubkey`. */
   refundPubkey: string
   /** The client's Arkade payout address — where a claim must pay. Wire field `payout_address`. */
@@ -439,6 +442,20 @@ export class OnchainReceiveSwapService {
     return rows
   }
 
+  /** Derived rather than stored: `claim_packet` never changes. @see receive/orchestrator.ts */
+  private claimPacketStamp(
+    row: OnchainReceiveSwapRow,
+    script: ReturnType<typeof covenantScriptFromRow>,
+  ): ClaimPacketStamp | undefined {
+    if (row.claimPacket === null) return undefined
+    const shape = claimPacketShape(row.claimPacket)
+    if (shape.kind !== 'packet' || !shape.covclaimdPubKey) return undefined
+    const arkadeScript = script.nonInteractiveClaimArkadeScript
+    if (!shape.needsArkadeScript) return { packet: shape.body, tapTree: script.encode() }
+    if (!arkadeScript) return undefined
+    return { packet: appendArkadeScript(shape.body, arkadeScript), tapTree: script.encode() }
+  }
+
   private async step(row: OnchainReceiveSwapRow): Promise<boolean> {
     switch (row.state) {
       case 'quoted':
@@ -616,16 +633,18 @@ export class OnchainReceiveSwapService {
     if (!(await store.claimFundLease(row.id, 'funding_arkade'))) return false
 
     let txid: string
+    const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
     try {
-      txid = await arkade.fund({ address: row.lockupAddress, amountSats: row.payoutSats })
+      txid = await arkade.fund({ address: row.lockupAddress, amountSats: row.payoutSats, stamp })
     } catch (error) {
-      // Hand the lease back on a throw: no money this service can see has
-      // moved, and holding it would strand the row for every worker rather
-      // than just this one. The adoption check above already owns the
-      // ambiguity a throw leaves, and resolves it by reading the script.
-      await store.releaseFundLease(row.id)
+      // Retained on an ambiguous failure: stuck for a human, on purpose.
+      if (error instanceof FundNotSubmittedError) await store.releaseFundLease(row.id)
       throw error
     }
+    // Outside that catch on purpose: money has moved by here, so handing the
+    // lease back would reopen the double-fund until the indexer shows the
+    // lockup adoption reads. A throw leaves stamped_at unset and the next pass reveals.
+    if (stamp) await store.patch(row.id, { stamped_at: this.now() })
     return store.transition(row.id, 'funding_arkade', 'awaiting_claim', { arkade_fund_txid: txid })
   }
 
@@ -667,8 +686,12 @@ export class OnchainReceiveSwapService {
     // failing fast here would turn a claim observed a moment late into a
     // stuck swap.
 
-    if (covclaimd) {
-      const script = covenantScriptFromRow(receiveCovenantRowFor(row))
+    // `stampedAt`, NOT the packet shape: an adopted output carries nothing the
+    // shape promises, and skipping the reveal on it strands the swap. No packet
+    // is the same case as no covclaimd: the client claims it itself.
+    const packet = row.stampedAt === null ? row.claimPacket : null
+    const script = covclaimd && packet !== null ? covenantScriptFromRow(receiveCovenantRowFor(row)) : undefined
+    if (covclaimd && script && packet !== null) {
       if (!script.nonInteractiveClaimArkadeScript) {
         // Unreachable by construction: every row on this leg is quoted with a
         // client key present (`quote()` always builds the extended script),
@@ -678,7 +701,7 @@ export class OnchainReceiveSwapService {
       }
       await covclaimd.reveal({
         swapAddress: row.lockupAddress,
-        ciphertext: row.claimPacket,
+        ciphertext: packet,
         arkadeScript: base64.encode(script.nonInteractiveClaimArkadeScript),
         taptree: hex.encode(script.encode()),
       })

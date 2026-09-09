@@ -149,7 +149,8 @@ export const assetRfqReader = (descriptor: CorridorDescriptor, store: AssetRfqSw
       // The script worth watching is the CLIENT's offer deposit — the only
       // contract in this corridor that holds money.
       .map((row) => ({ id: row.id, pkScript: row.offerPkScript })),
-  committedSats: () => store.committedSats(),
+  // Narrowed like every other read here: one store backs every market.
+  committedSats: () => store.committedSats(descriptor.pair),
   page: async (options) => {
     const { rows, nextCursor } = await store.page(options)
     return { swaps: rows.filter((row) => row.pair === descriptor.pair).map(projectAssetRfq), nextCursor }

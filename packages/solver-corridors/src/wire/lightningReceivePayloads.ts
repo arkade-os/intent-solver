@@ -60,6 +60,10 @@ const XONLY_HEX = z
  * (`ephPub(33) || nonce(12) || ciphertext`, base64 — docs/rfq-protocol.md
  * §7.1.2) — opaque to this schema and to the solver; it is validated only by
  * shape (a bounded base64-ish string), never decoded here.
+ *
+ * OPTIONAL: a client with no covclaimd has nothing to seal to, and omits it
+ * rather than sealing to a key nobody holds — it claims the lockup itself with
+ * its `receiver` key. `.min(1)` keeps `""` refused, so omission means absent.
  */
 export const LightningReceiveRfqRequest = z
   .object({
@@ -77,7 +81,7 @@ export const LightningReceiveRfqRequest = z
         payment_hash: HEX32,
         payout_address: z.string().min(1).max(200),
         payout_pubkey: XONLY_HEX,
-        claim_packet: z.string().min(1).max(2048),
+        claim_packet: z.string().min(1).max(2048).optional(),
       })
       .strict(),
   })

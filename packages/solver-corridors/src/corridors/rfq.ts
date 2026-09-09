@@ -73,7 +73,7 @@ export const respondToLightningReceiveRfqRequest = async (
     amountSide: request.amount_side,
     payoutAddress: request.profile.payout_address,
     payoutPubkey: request.profile.payout_pubkey,
-    claimPacket: request.profile.claim_packet,
+    claimPacket: request.profile.claim_packet ?? null,
     rfqId: request.rfq_id,
   })
   if (outcome.accepted) {
@@ -111,7 +111,7 @@ export const respondToOnchainReceiveRfqRequest = async (
     paymentHash: request.profile.payment_hash,
     amountSats: request.amount,
     amountSide: request.amount_side,
-    claimPacket: request.profile.claim_packet,
+    claimPacket: request.profile.claim_packet ?? null,
     refundPubkey: request.profile.refund_pubkey,
     payoutAddress: request.profile.payout_address,
     payoutPubkey: request.profile.payout_pubkey,

@@ -166,63 +166,73 @@ const cardAmounts = (label: string, bound?: { min: bigint; max: bigint } | null)
 /** Order-free, so one pair cannot be published twice with its legs swapped. */
 const legPairKey = (market: AssetCardMarket): string => [market.base ?? 'btc', market.quote ?? 'btc'].sort().join('/')
 
-const assetMarketEntries = (markets: readonly AssetCardMarket[]): Array<Record<string, unknown>> => {
-  const seen = new Set<string>()
-  return markets.map((market) => {
-    if (market.base === market.quote) {
-      throw new Error(`an asset market names ${market.base ?? 'BTC'} on both legs; the two legs must differ`)
-    }
-    const baseAsset = cardAsset(market.base, market.baseDecimals)
-    const quoteAsset = cardAsset(market.quote, market.quoteDecimals)
-    // Refused at `assetRfq.ts` for want of a covenant, so naming one is a lie.
-    if (market.base !== null && market.quote !== null) {
-      throw new Error(`an asset market where neither leg is BTC cannot be served, so it is not advertised`)
-    }
-    // The CONFIGURED leg order, base then quote, is what the card publishes —
-    // while `marketKeyForPair` sorts its two arkade legs, so the two disagree
-    // for an asset id sorting before `btc`. Pre-existing; reachability is
-    // unaffected, because a directed RFQ goes to `discovery_pubkey`.
-    const pair = `${baseAsset.ticker}/${quoteAsset.ticker}`
-    const key = legPairKey(market)
-    if (seen.has(key)) throw new Error(`${pair} is configured twice; one pair may publish only one price`)
-    seen.add(key)
+const assetMarketEntry = (market: AssetCardMarket, seen: Set<string>): Record<string, unknown> => {
+  if (market.base === market.quote) {
+    throw new Error(`an asset market names ${market.base ?? 'BTC'} on both legs; the two legs must differ`)
+  }
+  const baseAsset = cardAsset(market.base, market.baseDecimals)
+  const quoteAsset = cardAsset(market.quote, market.quoteDecimals)
+  // Refused at `assetRfq.ts` for want of a covenant, so naming one is a lie.
+  if (market.base !== null && market.quote !== null) {
+    throw new Error(`an asset market where neither leg is BTC cannot be served, so it is not advertised`)
+  }
+  // The CONFIGURED leg order, base then quote, is what the card publishes —
+  // while `marketKeyForPair` sorts its two arkade legs, so the two disagree
+  // for an asset id sorting before `btc`. Pre-existing; reachability is
+  // unaffected, because a directed RFQ goes to `discovery_pubkey`.
+  const pair = `${baseAsset.ticker}/${quoteAsset.ticker}`
+  const key = legPairKey(market)
+  if (seen.has(key)) throw new Error(`${pair} is configured twice; one pair may publish only one price`)
+  seen.add(key)
 
-    if (!Number.isInteger(market.feeBps) || market.feeBps < 0 || market.feeBps > 10000) {
-      throw new Error(`${pair} fee_bps must be an integer in [0, 10000], got ${market.feeBps}`)
-    }
-    if (!market.feedUrl.trim()) {
-      throw new Error(`${pair} carries different assets, so it must publish a price_feed`)
-    }
-    if (!market.pricePath) {
-      throw new Error(`${pair} price_path must be resolved before publishing; "" reads as the whole feed document`)
-    }
-    // Feed is quote-DISPLAY per base-DISPLAY; the registry wants atomic per atomic.
-    const priceDecimals = market.baseDecimals - market.quoteDecimals
-    if (priceDecimals < 0 || priceDecimals > MAX_DECIMALS) {
+  if (!Number.isInteger(market.feeBps) || market.feeBps < 0 || market.feeBps > 10000) {
+    throw new Error(`${pair} fee_bps must be an integer in [0, 10000], got ${market.feeBps}`)
+  }
+  if (!market.feedUrl.trim()) {
+    throw new Error(`${pair} carries different assets, so it must publish a price_feed`)
+  }
+  if (!market.pricePath) {
+    throw new Error(`${pair} price_path must be resolved before publishing; "" reads as the whole feed document`)
+  }
+  // Feed is quote-DISPLAY per base-DISPLAY; the registry wants atomic per atomic.
+  const priceDecimals = market.baseDecimals - market.quoteDecimals
+  if (priceDecimals < 0 || priceDecimals > MAX_DECIMALS) {
+    throw new Error(
+      `${pair} needs price_decimals ${priceDecimals}, outside the registry's 0..${MAX_DECIMALS}: a feed ` +
+        `quoting a finer asset per a coarser one cannot be published until arkade-os/solver-registry#26 lands`,
+    )
+  }
+  const base = cardAmounts(`${pair} buyBase`, market.buyBase)
+  const quote = cardAmounts(`${pair} sellBase`, market.sellBase)
+  if (base.max === '0' && quote.max === '0') {
+    // Never stated is a different fault from deliberately closed.
+    if (market.buyBase === undefined && market.sellBase === undefined) {
       throw new Error(
-        `${pair} needs price_decimals ${priceDecimals}, outside the registry's 0..${MAX_DECIMALS}: a feed ` +
-          `quoting a finer asset per a coarser one cannot be published until arkade-os/solver-registry#26 lands`,
+        `${pair} states no bounds of its own and there is no deployment-wide pair to inherit: give the ` +
+          `market its own min/max amounts in the console, or set OFFER_MIN_FILL_AMOUNT and ` +
+          `OFFER_MAX_FILL_AMOUNT, which are only read when OFFER_MARKETS names a market`,
       )
     }
-    const base = cardAmounts(`${pair} buyBase`, market.buyBase)
-    const quote = cardAmounts(`${pair} sellBase`, market.sellBase)
-    if (base.max === '0' && quote.max === '0') {
-      throw new Error(`${pair} enables neither side, and the registry requires at least one`)
-    }
-    return {
-      pair,
-      base_asset: baseAsset,
-      quote_asset: quoteAsset,
-      fee_bps: market.feeBps,
-      price_feed: market.feedUrl,
-      price_feed_schema: { type: 'json', price_path: market.pricePath },
-      price_decimals: priceDecimals,
-      min_base_amount: base.min,
-      max_base_amount: base.max,
-      min_quote_amount: quote.min,
-      max_quote_amount: quote.max,
-    }
-  })
+    throw new Error(`${pair} enables neither side, and the registry requires at least one`)
+  }
+  return {
+    pair,
+    base_asset: baseAsset,
+    quote_asset: quoteAsset,
+    fee_bps: market.feeBps,
+    price_feed: market.feedUrl,
+    price_feed_schema: { type: 'json', price_path: market.pricePath },
+    price_decimals: priceDecimals,
+    min_base_amount: base.min,
+    max_base_amount: base.max,
+    min_quote_amount: quote.min,
+    max_quote_amount: quote.max,
+  }
+}
+
+const assetMarketEntries = (markets: readonly AssetCardMarket[]): Array<Record<string, unknown>> => {
+  const seen = new Set<string>()
+  return markets.map((market) => assetMarketEntry(market, seen))
 }
 
 /**
@@ -232,8 +242,11 @@ const assetMarketEntries = (markets: readonly AssetCardMarket[]): Array<Record<s
 export const assetCardMarkets = (
   markets: readonly AssetMarketPricingView[],
   inherited: { min: bigint; max: bigint },
-): AssetCardMarket[] =>
-  markets.map((market) => ({
+): AssetCardMarket[] => {
+  // A zeroed pair is UNSET, not a bound: `config.ts` leaves both at 0n when
+  // OFFER_MARKETS names nothing — "zeroes here are unread, not permissive".
+  const fallback = inherited.max === 0n ? undefined : inherited
+  return markets.map((market) => ({
     base: market.base,
     quote: market.quote,
     baseDecimals: market.baseDecimals,
@@ -243,10 +256,37 @@ export const assetCardMarkets = (
     // refuses an empty path its feed url cannot supply one for.
     pricePath: market.pricePath || (defaultPricePath(market.feedUrl) ?? ''),
     feeBps: market.feeBps,
-    // `undefined` inherits the deployment-wide pair — NOT an unserved direction.
-    sellBase: market.sellBase ?? inherited,
-    buyBase: market.buyBase ?? inherited,
+    // Blank inherits where it can and otherwise stays blank; neither is unserved.
+    sellBase: market.sellBase ?? fallback,
+    buyBase: market.buyBase ?? fallback,
   }))
+}
+
+/** Full legs, not the 8-char ticker slice, which two markets can share. */
+const marketLegs = (market: AssetCardMarket): string => `${market.base ?? 'BTC'}/${market.quote ?? 'BTC'}`
+
+/**
+ * The asset markets a card can carry, and a named reason for every one it
+ * cannot — `unpublishableCorridors`' contract, for the reason its docblock
+ * gives. Built on trial rather than on a second copy of the rules.
+ */
+export const publishableAssetMarkets = (
+  markets: readonly AssetCardMarket[],
+): { publishable: AssetCardMarket[]; omitted: string[] } => {
+  const publishable: AssetCardMarket[] = []
+  const omitted: string[] = []
+  const seen = new Set<string>()
+  for (const market of markets) {
+    try {
+      assetMarketEntry(market, seen)
+      publishable.push(market)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      omitted.push(`${marketLegs(market)} is served but cannot be advertised, so the card omits it: ${reason}`)
+    }
+  }
+  return { publishable, omitted }
+}
 
 /**
  * Served corridors no card can name, so an unadvertisable market is legible as

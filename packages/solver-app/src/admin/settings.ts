@@ -24,6 +24,7 @@ import type { Config } from '../config.js'
 import { CORRIDORS, FREE, type Corridor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
+import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
 export type KnobSource = 'env' | 'override'
 
@@ -36,6 +37,12 @@ export interface KnobView {
   /** Set when a knob is editable but the change cannot take effect until restart. */
   restartRequired?: boolean
 }
+
+// Overrides that moved since boot. NOT `Object.keys(stored)`: a restart APPLIES
+// an override rather than removing it, so that set never empties and a banner
+// driven off it would latch on permanently and stop being read.
+export const pendingRestartKeys = (boot: Record<string, string>, stored: Record<string, string>): string[] =>
+  [...new Set([...Object.keys(boot), ...Object.keys(stored)])].filter((key) => boot[key] !== stored[key]).sort()
 
 /**
  * The floor `config.ts` puts under `LOCKUP_TIMEOUT_SECONDS`, restated here for
@@ -80,6 +87,22 @@ export const editableKeys = (): string[] => [
   ...CORRIDORS.flatMap((corridor) => CORRIDOR_SUFFIXES.map((suffix) => `${stemOf(corridor)}_${suffix}`)),
   ...GLOBAL_KEYS,
 ]
+
+/** One mapping, two readers: {@link describeSettings} and `admin/drift.ts`. */
+export const editableKnobValues = (config: Config): Record<string, string | number | boolean> => {
+  const values: Record<string, string | number | boolean> = {}
+  for (const corridor of CORRIDORS) {
+    const stem = stemOf(corridor)
+    values[`${stem}_ENABLED`] = config.corridorEnabled[corridor]
+    values[`${stem}_FEE_BPS`] = config.corridorFees[corridor].bps
+    values[`${stem}_FEE_FLAT_SATS`] = config.corridorFees[corridor].flatSats
+    values[`${stem}_MIN_SATS`] = config.corridorLimits[corridor].minSats
+    values[`${stem}_MAX_SATS`] = config.corridorLimits[corridor].maxSats
+  }
+  values.MAX_EXPOSED_SATS = config.maxExposedSats
+  values.LOCKUP_TIMEOUT_SECONDS = config.lockupTimeoutSeconds
+  return values
+}
 
 const positiveInt = (key: string, raw: string): number => {
   const value = Number(raw)
@@ -272,67 +295,33 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
  */
 export const describeSettings = (config: Config, overrides: Record<string, string>): KnobView[] => {
   const effective = applyOverrides(config, overrides)
+  const values = editableKnobValues(effective)
   const sourceOf = (key: string): KnobSource => (overrides[key] === undefined ? 'env' : 'override')
+  const knob = (key: string, editable = true): KnobView => ({
+    key,
+    value: values[key]!,
+    source: sourceOf(key),
+    editable,
+    restartRequired: true,
+  })
 
   const knobs: KnobView[] = []
   for (const corridor of CORRIDORS) {
     const stem = stemOf(corridor)
     knobs.push(
-      {
-        key: `${stem}_ENABLED`,
-        value: effective.corridorEnabled[corridor],
-        source: sourceOf(`${stem}_ENABLED`),
-        // Only ever narrowable to false; enabling needs a restart because no
-        // service object exists for an env-disabled corridor.
-        editable: config.corridorEnabled[corridor],
-        restartRequired: true,
-      },
-      {
-        key: `${stem}_FEE_BPS`,
-        value: effective.corridorFees[corridor].bps,
-        source: sourceOf(`${stem}_FEE_BPS`),
-        editable: true,
-        restartRequired: true,
-      },
-      {
-        key: `${stem}_FEE_FLAT_SATS`,
-        value: effective.corridorFees[corridor].flatSats,
-        source: sourceOf(`${stem}_FEE_FLAT_SATS`),
-        editable: true,
-        restartRequired: true,
-      },
-      {
-        key: `${stem}_MIN_SATS`,
-        value: effective.corridorLimits[corridor].minSats,
-        source: sourceOf(`${stem}_MIN_SATS`),
-        editable: true,
-        restartRequired: true,
-      },
-      {
-        key: `${stem}_MAX_SATS`,
-        value: effective.corridorLimits[corridor].maxSats,
-        source: sourceOf(`${stem}_MAX_SATS`),
-        editable: true,
-        restartRequired: true,
-      },
+      // Only ever narrowable to false; enabling needs a restart because no
+      // service object exists for an env-disabled corridor.
+      knob(`${stem}_ENABLED`, config.corridorEnabled[corridor]),
+      knob(`${stem}_FEE_BPS`),
+      knob(`${stem}_FEE_FLAT_SATS`),
+      knob(`${stem}_MIN_SATS`),
+      knob(`${stem}_MAX_SATS`),
     )
   }
 
   knobs.push(
-    {
-      key: 'MAX_EXPOSED_SATS',
-      value: effective.maxExposedSats,
-      source: sourceOf('MAX_EXPOSED_SATS'),
-      editable: true,
-      restartRequired: true,
-    },
-    {
-      key: 'LOCKUP_TIMEOUT_SECONDS',
-      value: effective.lockupTimeoutSeconds,
-      source: sourceOf('LOCKUP_TIMEOUT_SECONDS'),
-      editable: true,
-      restartRequired: true,
-    },
+    knob('MAX_EXPOSED_SATS'),
+    knob('LOCKUP_TIMEOUT_SECONDS'),
     // Read-only below: everything a restart would be needed for anyway, and
     // nothing carrying key material. Secrets are never surfaced at all — not
     // redacted, simply absent, so there is no field for a bug to un-redact.
@@ -371,6 +360,23 @@ export const describeSettings = (config: Config, overrides: Record<string, strin
     {
       key: 'LN_SEND_HINT_SCID_DENYLIST',
       value: Array.from(config.sendHintScidDenylist).join(', ') || '(empty)',
+      source: 'env',
+      editable: false,
+    },
+    // Whether a configured market is filled by ANYTHING, and the only place an
+    // operator can see it. Read-only like its neighbours: `createServices` reads
+    // these once and builds or omits a whole path, so an edit box would promise
+    // a seam that does not exist. @see admin/servedBy.ts
+    {
+      key: 'OFFER_MARKETS',
+      value: config.offerMarkets.map((market) => assetMarketKey(market.a, market.b)).join(', ') || '(empty)',
+      source: 'env',
+      editable: false,
+    },
+    // As the environment spells it, so it can be pasted back.
+    {
+      key: 'ASSET_MARKETS',
+      value: config.assetRfqTokens.map((token) => `${token.symbol}:${token.assetId}`).join(', ') || '(empty)',
       source: 'env',
       editable: false,
     },
