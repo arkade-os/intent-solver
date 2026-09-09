@@ -232,8 +232,10 @@ export const toGetPaymentRejection = (id: string, error: unknown): PaymentResult
  *
  * LND has TWO ways of saying it and only one is NOT_FOUND: against an EMPTY
  * invoice bucket it answers ErrNoInvoicesCreated, "there are no existing
- * invoices", under gRPC Unknown. A node that only ever pays gives that answer
- * to every probe, so the probe threw rather than answering "not ours" (#102).
+ * invoices", which does not arrive as NOT_FOUND. A node that only ever pays
+ * gives that answer to every probe, so the probe threw instead of answering
+ * "not ours" (#102). Matched on the message and NOT on a status: the one it
+ * carries instead was never measured, so constraining on a guess re-breaks it.
  */
 export const isInvoiceNotFound = (error: unknown): boolean => {
   if (!Array.isArray(error) || error[1] !== 'UnexpectedLookupInvoiceErr') return false
