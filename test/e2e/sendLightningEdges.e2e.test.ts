@@ -288,7 +288,11 @@ describe('e2e arkade:BTC->lightning:BTC (send) — refusals, refunds and recover
       // payments are for the EXACT quoted amount, so neither is wrong on its
       // own — it is the sum at the script that decides, which is why
       // `whenQuoted` totals the outputs rather than looking for one match.
+      // Load-bearing wait: back to back, the second send selects against a view
+      // the first has not moved yet — a byte-identical rebuild arkd rejects as
+      // `duplicated offchain tx`, or an already-spent outpoint, VTXO_NOT_FOUND (#104).
       await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: AMOUNT_SATS })
+      await awaitFunding(swap.pkScript, AMOUNT_SATS)
       await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: AMOUNT_SATS })
 
       const doubled = AMOUNT_SATS * 2
