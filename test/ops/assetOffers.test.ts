@@ -5,7 +5,7 @@
  * deposit from the packet instead of the chain, opening two intents against one
  * outpoint, and submitting without first marking the row in flight.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
@@ -415,6 +415,131 @@ describe('tickAll', () => {
     await service.consider(found)
     expect(await service.tickAll()).toBe(0)
     expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+  })
+})
+
+/**
+ * `consider` admits a price; `tickAll` spends at it on a worker loop and at
+ * startup recovery, arbitrary wall time later. Nothing between them re-asks.
+ */
+describe('tickAll re-runs price admission', () => {
+  // 900 USDT-units against 1000 sats wanted, so 1.12 admits and 0.5 is far out.
+  const pricing = [
+    {
+      base: USDT,
+      quote: null,
+      baseDecimals: 0,
+      quoteDecimals: 0,
+      feedUrl: 'https://feed.test/p',
+      pricePath: '/price',
+      toleranceBps: 100,
+      feeBps: 0,
+    },
+  ]
+
+  let duringPriceRead: (() => Promise<void>) | null = null
+  beforeEach(() => void (duringPriceRead = null))
+
+  const admitted = async (over: Partial<AssetOfferDeps> = {}) => {
+    let price = '1.12'
+    const settle = vi.fn(async () => '0xfill')
+    const refused: { outpoint: string; reason: string; detail: string }[] = []
+    const errors: unknown[] = []
+    const built = await build({
+      pricing,
+      fetchPrice: async () => {
+        await duringPriceRead?.()
+        return priceFrom(price)
+      },
+      settle,
+      onRefused: (outpoint, reason, detail) => void refused.push({ outpoint, reason, detail }),
+      onError: (_id, error) => void errors.push(error),
+      ...over,
+    })
+    expect(await built.service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+    return { ...built, settle, refused, errors, moveFeed: (to: string) => void (price = to) }
+  }
+
+  it('does not spend at a price the feed has left since admission', async () => {
+    const { store, service, settle, moveFeed } = await admitted()
+    moveFeed('0.5')
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect((await store.findById('fill-1'))!.fillTxid).toBeNull()
+  })
+
+  it('records that as REFUSED, never stuck — nothing was submitted', async () => {
+    const { store, service, moveFeed } = await admitted()
+    moveFeed('0.5')
+    await service.tickAll()
+    const row = await store.findById('fill-1')
+    expect(row!.state).toBe('refused')
+    expect(row!.fillTxid).toBeNull()
+    expect(row!.failureReason).toMatch(/price_out_of_tolerance/)
+  })
+
+  it('reports it against the offer`s outpoint, like every other refusal', async () => {
+    const { service, refused, moveFeed } = await admitted()
+    moveFeed('0.5')
+    await service.tickAll()
+    expect(refused).toHaveLength(1)
+    expect(refused[0]).toMatchObject({ outpoint: `${found.txid}:${found.vout}`, reason: 'price_out_of_tolerance' })
+    expect(refused[0]!.detail).toContain('1000')
+  })
+
+  it('re-prices the terms the ROW records, not a fresh read of the deposit', async () => {
+    const outputsAt = vi.fn(async () => [{ script: SCRIPT_HEX, value: 500, assets: [{ assetId: USDT, amount: 900n }] }])
+    const { service, settle } = await admitted({ outputsAt })
+    outputsAt.mockClear()
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(outputsAt).not.toHaveBeenCalled()
+  })
+
+  it('still fills when the price has not moved', async () => {
+    const { store, service, settle, refused } = await admitted()
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(refused).toEqual([])
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled', fillTxid: '0xfill' })
+  })
+
+  it('leaves a deployment with no price gating exactly as it was', async () => {
+    const settle = vi.fn(async () => '0xfill')
+    const { store, service } = await build({ settle })
+    await service.consider(found)
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled' })
+  })
+
+  it('FAILS CLOSED when the feed cannot be read at tick time', async () => {
+    const { store, service, settle, errors, moveFeed } = await admitted()
+    moveFeed('unreadable')
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'refused' })
+    expect(errors).toHaveLength(1)
+  })
+
+  it('leaves a stuck row stuck', async () => {
+    const { store, service, settle } = await admitted()
+    await store.transition('fill-1', 'fillable', 'filling')
+    await store.fail('fill-1', 'filling', 'relay refused')
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck', failureReason: 'relay refused' })
+  })
+
+  it('cannot unwind a row another tick already has in flight', async () => {
+    // A second tick can win the CAS inside the price read's await; the refusal
+    // is compare-and-swap on `fillable` too, so it no-ops rather than unwinding.
+    const { store, service, settle, moveFeed } = await admitted()
+    moveFeed('0.5')
+    duringPriceRead = async () => void (await store.transition('fill-1', 'fillable', 'filling'))
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filling' })
   })
 })
 

@@ -143,6 +143,15 @@ const refusalDetail = (input: OfferFillInput, reason: OfferFillRefusal, bounds: 
     ? `${amountsOf(input)}; ${bounds.source} bounds ${bounds.min}..${bounds.max}`
     : amountsOf(input)
 
+// What `consider` actually priced. Never re-derived from the chain: that would
+// re-ask what the offer IS, the substitution `arkade/offerSettle.ts` guards.
+const termsOf = (row: OfferFillRow): OfferFillInput => ({
+  wantAssetId: row.wantAssetId,
+  wantAmount: row.wantAmount,
+  offerAssetId: row.offerAssetId,
+  offerAmount: row.offerAmount,
+})
+
 /** The decision, plus the row id when the intent was recorded. */
 export type ConsiderOutcome = OfferFillDecision & { id?: string }
 
@@ -308,12 +317,23 @@ export class AssetOfferService {
    * leaves a row that says something may be in flight rather than one that
    * still reads fillable. `transition` is compare-and-swap, so two ticks racing
    * one row cannot both submit.
+   *
+   * Price admission is re-run first: `consider` priced the row at discovery and
+   * this loop reaches it arbitrarily later.
    */
   async tickAll(): Promise<number> {
     if (!this.deps.settle) return 0
     let filled = 0
     for (const row of await this.deps.store.listNonTerminal()) {
       if (row.state !== 'fillable') continue
+      // BEFORE the CAS: `fillable` has an edge to `refused` and `filling` has
+      // none, which is also the honest shape — nothing is submitted yet.
+      const terms = termsOf(row)
+      if (!(await this.withinTolerance(terms))) {
+        this.deps.onRefused?.(`${row.offerTxid}:${row.offerVout}`, 'price_out_of_tolerance', amountsOf(terms))
+        await this.deps.store.fail(row.id, 'fillable', `price_out_of_tolerance; ${amountsOf(terms)}`)
+        continue
+      }
       if (!(await this.deps.store.transition(row.id, 'fillable', 'filling'))) continue
       try {
         const txid = await this.deps.settle(row)
