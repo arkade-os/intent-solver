@@ -32,6 +32,10 @@ const run = promisify(execFile)
 /** How long a single `regtest.mjs mine` may take. Generous — it shells out to bitcoin-cli in a container. */
 const MINE_TIMEOUT_MS = 120_000
 
+/** How long Esplora may lag bitcoind before a mined block is visible, and how often to re-ask. */
+const INDEX_LAG_TIMEOUT_MS = 30_000
+const INDEX_POLL_MS = 500
+
 /**
  * Locate the arkade-regtest checkout.
  *
@@ -72,12 +76,38 @@ export const regtestDir = (): string => {
  *
  * @returns the chain tip height afterwards, read back from Esplora so a caller
  * can assert the chain actually moved rather than trusting the CLI's exit code.
+ * `null` when Esplora could not supply a baseline to compare against — the
+ * blocks are still mined, they just cannot be verified from here.
  */
 export const mineBlocks = async (count = 1): Promise<number | null> => {
+  const { chainTip } = await import('./preflight.js')
+  const before = await readTipWithin(chainTip, Date.now() + INDEX_LAG_TIMEOUT_MS, (tip) => tip !== null)
   await run(process.execPath, ['regtest.mjs', 'mine', String(count)], {
     cwd: regtestDir(),
     timeout: MINE_TIMEOUT_MS,
   })
-  const { chainTip } = await import('./preflight.js')
-  return chainTip()
+  // Esplora indexes BEHIND bitcoind, so a tip read straight after the mine can
+  // still be the one from before it — CI saw `mineBlocks(4)` return an unmoved
+  // 105 and fail a deadline assertion on the indexer's lag rather than on the
+  // miner. Bounded, and it cannot hide a dead miner: the tip is returned either
+  // way, so a caller asserting the chain moved still fails.
+  //
+  // A null baseline is NOT a blip — it means Esplora stayed unreadable for the
+  // whole poll above. Returning a height then would be a number no reader can
+  // trust, since a lagging index can serve the pre-mine one; `null` says so.
+  if (before === null) return null
+  return readTipWithin(chainTip, Date.now() + INDEX_LAG_TIMEOUT_MS, (tip) => tip !== null && tip >= before + count)
+}
+
+const readTipWithin = async (
+  chainTip: () => Promise<number | null>,
+  deadline: number,
+  enough: (tip: number | null) => boolean,
+): Promise<number | null> => {
+  let tip = await chainTip()
+  while (!enough(tip) && Date.now() < deadline) {
+    await new Promise((settle) => setTimeout(settle, INDEX_POLL_MS))
+    tip = await chainTip()
+  }
+  return tip
 }

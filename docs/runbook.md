@@ -1408,10 +1408,22 @@ pnpm test:e2e
 **These never gate a merge.** `pnpm test` is `vitest run --exclude test/e2e`, so
 the unit suite is unaffected by anything here. CI runs them only on demand:
 `.github/workflows/e2e.yml` stands its own arkade-regtest stack up, provisions a
-throwaway Arkade wallet and runs a chosen subset, triggered by the `run-e2e`
-label on a PR, a `workflow_dispatch`, or the nightly schedule. Locally,
-`pnpm test:e2e` is meant to be typed deliberately by someone who has just
-brought a stack up.
+throwaway Arkade wallet and runs every file, triggered by the `run-e2e` label on
+a PR, a `workflow_dispatch`, or the nightly schedule. Locally, `pnpm test:e2e` is
+meant to be typed deliberately by someone who has just brought a stack up.
+
+**One job per GROUP**, listed in `.github/e2e-groups.json`. A group is the set of
+corridors that can share one stack configuration, and the splits are forced by
+that stack rather than chosen for speed: only the `asset` group mints an asset,
+because an asset coin changes what every later sats-only selection can spend;
+only `receive-lightning` runs covclaimd, which would otherwise sweep lockups a
+send test meant to claim itself; the Lightning and onchain legs need `boltz`,
+whose setup is the only thing that funds `boltz-lnd` and opens its channel.
+`test/ci/e2eGroups.test.ts` — inside the unit suite, which IS a merge gate —
+fails if any `test/e2e/*.e2e.test.ts` is in no group or in two, so a new corridor
+cannot quietly run nowhere. After each leg, `scripts/e2e-report.mjs` prints the
+per-file durations and fails on a skipped test or a file that never ran: vitest
+exits 0 for both.
 
 | File                           | Corridor                    | Needs                                        |
 | ------------------------------ | --------------------------- | -------------------------------------------- |

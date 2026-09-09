@@ -93,6 +93,8 @@ const awaitHeld = (paymentHash: string) =>
     { attempts: 60, intervalMs: 1000, whenExhausted: `htlc for ${paymentHash} never reached ACCEPTED` },
   )
 
+// Red in CI against covclaimd v0.0.1-rc.4: the daemon accepts the reveal and
+// arkd then rejects its claim with `code = Internal`. Tracked in #103.
 describe('e2e covclaimd claims the receive lockup non-interactively', () => {
   beforeAll(async () => {
     await requireStack('covclaimd claim', ['arkd', 'emulator', 'lnd', 'ln-counterparty'])
