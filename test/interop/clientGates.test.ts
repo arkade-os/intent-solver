@@ -39,6 +39,7 @@ import { assertReceivable, assertFundable } from '@arkade-os/swap'
 import type { RfqQuote } from '@arkade-os/swap'
 import { lightningReceiveRfqQuotePayload } from '@arkade-os/solver-corridors/wire/lightningReceivePayloads.js'
 import { rfqQuotePayload } from '@arkade-os/solver-corridors/wire/payloads.js'
+import { onchainRfqQuotePayload } from '@arkade-os/solver-corridors/wire/onchainPayloads.js'
 import { DEFAULT_HOLD_INVOICE_WINDOW } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { MAX_REFUND_HORIZON } from '@arkade-os/solver-core/core/receive.js'
 import {
@@ -48,8 +49,16 @@ import {
   UNENFORCED_ROUTE_CLTV_BUDGET_BLOCKS,
   MIN_INVOICE_WINDOW,
 } from '@arkade-os/solver-core/core/send.js'
+import {
+  evaluateOnchainSendAcceptance,
+  evaluateOnchainSendFunding,
+  MIN_ONCHAIN_FUND_WINDOW,
+  ONCHAIN_CLAIM_MARGIN_SECONDS,
+  ONCHAIN_SECONDS_PER_BLOCK,
+} from '@arkade-os/solver-core/core/onchainSend.js'
 import type { ReceiveSwapRow } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import type { SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
+import type { OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
 
 /** A fixed clock, so a deadline is a number rather than a race. */
 const NOW = 1_800_000_000
@@ -250,5 +259,69 @@ describe('the shipped client accepts our lightning SEND quote', () => {
     it('never reaches a client at all on a rail that cannot cap the route', () => {
       expect(badAlternate(false)).toMatchObject({ accept: false, reason: 'cltv_too_large' })
     })
+  })
+})
+
+/** `assertFundable` has TWO deadline gates on this leg, and the solver mirrored one. */
+describe('the shipped client and this solver stop funding an onchain SEND at the same instant', () => {
+  const quoted = evaluateOnchainSendAcceptance({
+    amountSats: 50_000,
+    limits: { minSats: 1_000, maxSats: 1_000_000 },
+    unilateralClaimDelay: 512,
+    now: NOW,
+  })
+  if (!quoted.accept) throw new Error('expected an accepted onchain send quote')
+
+  // `valid_until` out at `htlc_locktime`: the quote clock refuses earlier and for
+  // another reason, and the boundary under test is the L1 claim window's.
+  const sendQuote = (): RfqQuote =>
+    onchainRfqQuotePayload(
+      {
+        amountSats: 50_000,
+        payoutSats: 49_000,
+        providerPubkey: SOLVER_PUBKEY,
+        refundLocktime: quoted.refundLocktime,
+        paymentHash: PAYMENT_HASH,
+        htlcPubkey: SOLVER_PUBKEY,
+        htlcLocktime: quoted.htlcLocktime,
+        minConfirmations: quoted.minConfirmations,
+        lockupAddress: LOCKUP_ADDRESS,
+        onchainAddress: 'bcrt1qexamplehtlcaddressforgatetests',
+        receiverPkScript: null,
+      } as unknown as OnchainSendSwapRow,
+      quoted.htlcLocktime,
+      'rfq-onchain-send',
+    ) as unknown as RfqQuote
+
+  const clientAccepts = (now: number) =>
+    assertFundable({
+      quote: sendQuote(),
+      now,
+      onchain: { htlcLocktime: quoted.htlcLocktime, minConfirmations: quoted.minConfirmations, direction: 'send' },
+    })
+
+  const solverFunds = (now: number) =>
+    evaluateOnchainSendFunding({
+      refundLocktime: quoted.refundLocktime,
+      htlcLocktime: quoted.htlcLocktime,
+      minConfirmations: quoted.minConfirmations,
+      now,
+    }).fund
+
+  const lastFundable =
+    quoted.htlcLocktime - (quoted.minConfirmations * ONCHAIN_SECONDS_PER_BLOCK + ONCHAIN_CLAIM_MARGIN_SECONDS) - 1
+
+  it('both still fund at the last fundable instant', () => {
+    expect(() => clientAccepts(lastFundable)).not.toThrow()
+    expect(solverFunds(lastFundable)).toBe(true)
+  })
+
+  it('both refuse one second later', () => {
+    expect(() => clientAccepts(lastFundable + 1)).toThrow(/claim window/i)
+    expect(solverFunds(lastFundable + 1)).toBe(false)
+  })
+
+  it('is a bound the refund window could never have supplied', () => {
+    expect(quoted.refundLocktime - MIN_ONCHAIN_FUND_WINDOW).toBeGreaterThan(quoted.htlcLocktime)
   })
 })
