@@ -23,6 +23,11 @@ const lock: Erc20SwapLock = {
   timelock: 12_345n,
 }
 
+const TIP = 9_000n
+const TIP_HEX = `0x${TIP.toString(16)}`
+
+type LogFilter = { address: string; fromBlock: string; toBlock: string; topics: string[] }
+
 /** Records what was asked, and answers from a script. */
 const rpcOf = (answers: Record<string, unknown>) => {
   const calls: { method: string; params: readonly unknown[] }[] = []
@@ -34,10 +39,13 @@ const rpcOf = (answers: Record<string, unknown>) => {
   return { rpc, calls }
 }
 
-const backendWith = (answers: Record<string, unknown>) => {
-  const { rpc, calls } = rpcOf(answers)
-  return { backend: createEvmHtlcBackend({ contractAddress: CONTRACT, rpc }), calls }
+const backendWith = (answers: Record<string, unknown>, logScanRange?: number) => {
+  const { rpc, calls } = rpcOf({ eth_blockNumber: TIP_HEX, ...answers })
+  return { backend: createEvmHtlcBackend({ contractAddress: CONTRACT, rpc, logScanRange }), calls }
 }
+
+const filtersOf = (calls: { method: string; params: readonly unknown[] }[]): LogFilter[] =>
+  calls.filter((call) => call.method === 'eth_getLogs').map((call) => call.params[0] as LogFilter)
 
 const word = (last: string) => `0x${'00'.repeat(32 - last.length / 2)}${last}`
 
@@ -100,7 +108,7 @@ describe('findClaimPreimage', () => {
   it('filters on the indexed preimageHash so the node returns only this swap', async () => {
     const { backend, calls } = backendWith({ eth_getLogs: [] })
     await backend.findClaimPreimage(lock, 100n)
-    const filter = calls[0]!.params[0] as { address: string; fromBlock: string; topics: string[] }
+    const filter = filtersOf(calls)[0]!
     expect(filter.address).toBe(`0x${hex.encode(CONTRACT)}`)
     expect(filter.fromBlock).toBe('0x64')
     expect(filter.topics[0]).toBe(`0x${hex.encode(claimEventTopic())}`)
@@ -207,6 +215,27 @@ describe('transactionOutcome', () => {
     // `0x2` decodes fine; EIP-658 gives no third value.
     const { backend } = backendWith({ eth_getTransactionReceipt: { status: '0x2' } })
     await expect(backend.transactionOutcome('0xabc')).rejects.toThrow(/expected 0x0 or 0x1/)
+  })
+})
+
+describe('transactionBlock', () => {
+  it('reads the height the transaction was mined at', async () => {
+    const { backend } = backendWith({ eth_getTransactionReceipt: { blockNumber: '0x1a', status: '0x1' } })
+    await expect(backend.transactionBlock('0xabc')).resolves.toBe(26n)
+  })
+
+  it('is null when there is no receipt, so no caller can read a height into it', async () => {
+    for (const absent of [null, undefined]) {
+      const { backend } = backendWith({ eth_getTransactionReceipt: absent })
+      await expect(backend.transactionBlock('0xabc')).resolves.toBeNull()
+    }
+  })
+
+  it('refuses a receipt carrying no readable height', async () => {
+    for (const bad of [{}, { blockNumber: null }, { blockNumber: 26 }]) {
+      const { backend } = backendWith({ eth_getTransactionReceipt: bad })
+      await expect(backend.transactionBlock('0xabc')).rejects.toThrow(/expected a 0x quantity/)
+    }
   })
 })
 
@@ -459,6 +488,7 @@ describe('findRefund', () => {
     const calls: { method: string; params: readonly unknown[] }[] = []
     const rpc: JsonRpc = async (method, params) => {
       calls.push({ method, params })
+      if (method === 'eth_blockNumber') return TIP_HEX
       if (method === 'eth_getLogs') return logs
       if (method === 'eth_getTransactionByHash') return txs[params[0] as string] ?? null
       throw new Error(`unexpected RPC ${method}`)
@@ -473,10 +503,10 @@ describe('findRefund', () => {
   it('filters on the refund topic and the indexed preimageHash', async () => {
     const { backend, calls } = scan([])
     await backend.findRefund(lock, 256n)
-    const filter = calls[0]!.params[0] as { address: string; fromBlock: string; toBlock: string; topics: string[] }
+    const filter = filtersOf(calls)[0]!
     expect(filter.address).toBe(toSwap)
     expect(filter.fromBlock).toBe('0x100')
-    expect(filter.toBlock).toBe('latest')
+    expect(filter.toBlock).toBe(TIP_HEX)
     expect(filter.topics[0]).toBe(`0x${hex.encode(refundEventTopic())}`)
     expect(filter.topics[1]).toBe(`0x${hex.encode(lock.preimageHash)}`)
   })
@@ -554,6 +584,7 @@ describe('findRefund', () => {
 
   it('skips a hash the node would reject, and still finds the refund behind it', async () => {
     const rpc: JsonRpc = async (method, params) => {
+      if (method === 'eth_blockNumber') return TIP_HEX
       if (method === 'eth_getLogs') return [{ transactionHash: '0xdeadbeef' }, { transactionHash: TXID }]
       if (method !== 'eth_getTransactionByHash') throw new Error(`unexpected RPC ${method}`)
       const hash = params[0] as string
@@ -572,5 +603,54 @@ describe('findRefund', () => {
     // The orchestrator degrades a throw to "not proven"; false HERE would be
     // the same result by accident rather than by decision.
     await expect(scan({}).backend.findRefund(lock, 0n)).rejects.toThrow(/expected an array/)
+  })
+})
+
+describe('the scan is paged, and pages all the way to the tip', () => {
+  const claimLog = (data: string) => ({ topics: [hex.encode(claimEventTopic()), 'irrelevant'], data })
+
+  it('never asks for more blocks in one request than the provider allows', async () => {
+    const { backend, calls } = backendWith({ eth_getLogs: [] }, 1_000)
+    await backend.findClaimPreimage(lock, 5_000n)
+    const filters = filtersOf(calls)
+    expect(filters.length).toBeGreaterThan(1)
+    for (const filter of filters) {
+      expect(BigInt(filter.toBlock) - BigInt(filter.fromBlock) + 1n).toBeLessThanOrEqual(1_000n)
+    }
+  })
+
+  it('finds a claim in the last page rather than stopping at the first empty one', async () => {
+    // The silent miss in its paging costume: an empty page is not the end.
+    let pages = 0
+    const rpc: JsonRpc = async (method) => {
+      if (method === 'eth_blockNumber') return TIP_HEX
+      if (method !== 'eth_getLogs') throw new Error(`unexpected RPC ${method}`)
+      pages += 1
+      return pages < 10 ? [] : [claimLog(`0x${hex.encode(PREIMAGE)}`)]
+    }
+    const backend = createEvmHtlcBackend({ contractAddress: CONTRACT, rpc, logScanRange: 1_000 })
+    await expect(backend.findClaimPreimage(lock, 0n)).resolves.toEqual(PREIMAGE)
+    expect(pages, 'the range between the floor and the tip was not fully read').toBe(10)
+  })
+
+  it('reads up to the tip and no further', async () => {
+    const { backend, calls } = backendWith({ eth_getLogs: [] }, 4_000)
+    await backend.findClaimPreimage(lock, 0n)
+    expect(BigInt(filtersOf(calls).at(-1)!.toBlock)).toBe(TIP)
+  })
+
+  it('asks nothing at all when the floor is past the tip', async () => {
+    const { backend, calls } = backendWith({ eth_getLogs: [] })
+    await expect(backend.findRefund(lock, TIP + 1n)).resolves.toBe(false)
+    expect(filtersOf(calls)).toHaveLength(0)
+  })
+
+  it('refuses a scan range that would not advance', () => {
+    const { rpc } = rpcOf({})
+    for (const bad of [0, -1, 1.5]) {
+      expect(() => createEvmHtlcBackend({ contractAddress: CONTRACT, rpc, logScanRange: bad })).toThrow(
+        /positive integer/,
+      )
+    }
   })
 })

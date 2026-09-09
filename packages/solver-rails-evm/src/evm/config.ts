@@ -89,6 +89,12 @@ export interface EvmChainConfig {
    * vol the embedded option is ~20 bps of notional before any spread.
    */
   quoteValiditySeconds: number
+  /**
+   * Blocks per `eth_getLogs` request, defaulted to the 10k cap Alchemy and
+   * Infura publish. Settable: some cap at 2k, and a rejected scan reads as an
+   * unclaimed lock.
+   */
+  logScanRange: number
 }
 
 const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/
@@ -226,5 +232,6 @@ export const loadEvmChainConfig = (env: NodeJS.ProcessEnv = process.env): EvmCha
     maxFeeCeilingPerGas: bigintFrom(env, 'EVM_MAX_FEE_PER_GAS_CEILING'),
     headroomSeconds: numberFrom(env, 'EVM_FEE_HEADROOM_SECONDS', Number.MIN_VALUE),
     quoteValiditySeconds: intFromOptional(env, 'EVM_QUOTE_VALIDITY_SECONDS', 60, 10, 900),
+    logScanRange: intFromOptional(env, 'EVM_LOG_SCAN_RANGE', 10_000, 1, 10_000_000),
   }
 }
