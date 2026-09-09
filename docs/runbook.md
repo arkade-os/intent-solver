@@ -808,8 +808,11 @@ refusal is the first time anything said so — it is not merely a typo to fix.
    them, because those build their services with `allCorridors`. For an EVM row
    that command is `refund`, which sweeps `evmSendService` alongside the
    Lightning and onchain send corridors; `onchain-refund-now` and
-   `reclaim-l1-htlc` are BTC-corridor tools and will not help here. **Drain the
-   corridor before darkening it**, or plan to unwind what is left by hand.
+   `reclaim-l1-htlc` are BTC-corridor tools and will not help here. The RECEIVE
+   leg has no unattended refund at all — it declares no `refundSweep` on purpose,
+   because its own lockup is refunded by a `refund_arkade` step inside `tick`,
+   and the tick is what darkening stops. **Drain the corridor before darkening
+   it**, or plan to unwind what is left by hand.
 
 ### When a send is refused `cltv_too_large`
 
