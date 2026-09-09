@@ -1206,6 +1206,9 @@ describe('tick: failure and recovery', () => {
       // those is wrong, and refunding the lockup on the strength of the losing
       // one would pay the client twice. A human reads it instead.
       expect(arkade.refundCalls).toHaveLength(0)
+      expect(row.failureReason).toBe(
+        'lightning payment failed terminally; refund withheld — our own node may still collect against this hash',
+      )
     })
 
     it('stays stuck when the probe cannot be asked — the verdict alone was never enough', async () => {
