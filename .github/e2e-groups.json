@@ -23,9 +23,9 @@
   },
   {
     "name": "send-lightning",
-    "why": "Needs the boltz profile: the counterparty is the base `lnd`, the solver's own node is `boltz-lnd`, and setupBoltz() is the only thing that funds that node and opens the channel between them. Seconds-typed, like every corridor group: the receive orchestrator refuses to write a block-height refund deadline without a chainTip provider, and these tests wire none.",
+    "why": "Needs the boltz profile: the counterparty is the base `lnd`, the solver's own node is `boltz-lnd`, and setupBoltz() is the only thing that funds that node and opens the channel between them. Seconds-typed, like every corridor group: the receive orchestrator refuses to write a block-height refund deadline without a chainTip provider, and these tests wire none. sendLightningApproval rides here because it is the same stack and the same corridor: it sets the approval threshold on its OWN service rather than in the shared env, so no other group's swaps are gated.",
     "profiles": "emulator,boltz",
-    "files": ["sendLightning.e2e.test.ts", "sendLightningEdges.e2e.test.ts"],
+    "files": ["sendLightning.e2e.test.ts", "sendLightningEdges.e2e.test.ts", "sendLightningApproval.e2e.test.ts"],
     "mintAsset": false,
     "lnd": true,
     "covclaimdImage": "",

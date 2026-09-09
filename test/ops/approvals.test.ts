@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
 import { APPROVAL_REFUSAL } from '@arkade-os/solver-core/core/approvalGate.js'
 import type { SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
@@ -106,4 +108,21 @@ describe('approvalGateFor', () => {
       reason: APPROVAL_REFUSAL,
     })
   })
+})
+
+// A gate the daemon never passes is invisible at run time and silent in review —
+// the same failure both asset stores shipped with for `announceOutcomes`. The e2e
+// leg builds its own service, so nothing else can see this one go missing.
+describe('every send leg is HANDED a gate on the shipped daemon', () => {
+  const servicesSource = readFileSync(
+    fileURLToPath(new URL('../../packages/solver-app/src/ops/services.ts', import.meta.url)),
+    'utf8',
+  )
+
+  it.each([['arkade:BTC->lightning:BTC'], ['arkade:BTC->onchain:BTC'], ['arkade:BTC->ethereum']])(
+    '%s is gated',
+    (corridor) => {
+      expect(servicesSource).toContain(`approvalGate: gateFor('${corridor}')`)
+    },
+  )
 })
