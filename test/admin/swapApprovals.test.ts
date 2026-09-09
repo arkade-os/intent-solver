@@ -118,4 +118,19 @@ describe('an approval table left over from the pre-release shape', () => {
     expect(await reopened.listPendingApprovals()).toMatchObject([{ swapId: 'keep-me', amount: 7n }])
     await reopened.close()
   })
+
+  // `d1Driver` is a SqlDriver too, and this runs at boot.
+  it('opens anyway when the driver cannot answer the pragma', async () => {
+    const inner = betterSqliteDriver(':memory:')
+    const blind: typeof inner = {
+      ...inner,
+      all: async (sql: string, params?: unknown[]) => {
+        if (sql.includes('pragma_table_info')) throw new Error('not supported on this driver')
+        return inner.all(sql, params)
+      },
+    }
+    const store = await AdminStore.open(blind, clock)
+    expect(await store.listPendingApprovals()).toEqual([])
+    await store.close()
+  })
 })

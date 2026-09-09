@@ -187,7 +187,14 @@ export const adminDbPath = (swapDbPath: string): string =>
 
 /** DROPPED, not altered: `amount_sats` is NOT NULL, so ADD COLUMN still fails every insert. */
 const dropLegacyApprovals = async (driver: SqlDriver): Promise<void> => {
-  const columns = await driver.all<{ name: string }>("SELECT name FROM pragma_table_info('admin_swap_approval')")
+  let columns: { name: string }[]
+  try {
+    columns = await driver.all<{ name: string }>("SELECT name FROM pragma_table_info('admin_swap_approval')")
+  } catch {
+    // A driver that cannot answer the pragma leaves the table alone rather than
+    // failing the boot: `d1Driver` is a SqlDriver too, and this runs at startup.
+    return
+  }
   if (columns.some((column) => column.name === 'amount_sats')) {
     await driver.exec('DROP TABLE admin_swap_approval')
   }
