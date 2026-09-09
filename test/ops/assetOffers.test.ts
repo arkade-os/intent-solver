@@ -5,7 +5,9 @@
  * deposit from the packet instead of the chain, opening two intents against one
  * outpoint, and submitting without first marking the row in flight.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
   AssetOfferService,
   assertMarketsPriced,
@@ -23,6 +25,11 @@ import { base64, hex } from '@scure/base'
 const USDT = '11'.repeat(34)
 const SCRIPT = new Uint8Array(34).fill(0xab)
 const SCRIPT_HEX = 'ab'.repeat(34)
+
+const servicesSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/ops/services.ts', import.meta.url)),
+  'utf8',
+)
 
 /** A maker depositing USDT and wanting sats. */
 const offer = (over: Partial<Offer> = {}): Offer =>
@@ -258,6 +265,118 @@ describe('per-direction bounds', () => {
   })
 })
 
+describe('refusals an operator can read', () => {
+  // Every refusal below is CORRECT; what is pinned is that it leaves a trace.
+  const priced = (over: Record<string, unknown>) => [
+    {
+      base: USDT,
+      quote: null,
+      baseDecimals: 0,
+      quoteDecimals: 0,
+      feedUrl: 'https://feed.test/p',
+      pricePath: '/price',
+      toleranceBps: 9_999,
+      feeBps: 0,
+      ...over,
+    },
+  ]
+  const fetchPrice = async () => priceFrom('1')
+
+  const reported = async (over: Partial<AssetOfferDeps> = {}) => {
+    const seen: { outpoint: string; reason: string; detail: string }[] = []
+    const { service } = await build({
+      ...over,
+      onRefused: (outpoint, reason, detail) => void seen.push({ outpoint, reason, detail }),
+    })
+    return { outcome: await service.consider(found), seen }
+  }
+
+  it('names the offer, the bound and which bound it was', async () => {
+    const { outcome, seen } = await reported({
+      pricing: priced({ sellBase: { min: 5_000n, max: 10_000n } }),
+      fetchPrice,
+    })
+    expect(outcome).toEqual({ fill: false, reason: 'amount_out_of_range' })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.outpoint).toBe(`${found.txid}:${found.vout}`)
+    expect(seen[0]!.reason).toBe('amount_out_of_range')
+    expect(seen[0]!.detail).toContain('1000')
+    expect(seen[0]!.detail).toContain('5000..10000')
+  })
+
+  it('names the bound for an offer over the maximum too', async () => {
+    const { outcome, seen } = await reported({ pricing: priced({ sellBase: { min: 1n, max: 100n } }), fetchPrice })
+    expect(outcome).toEqual({ fill: false, reason: 'amount_out_of_range' })
+    expect(seen[0]!.detail).toContain('1..100')
+  })
+
+  it('says WHICH bound is in force — the market row, not the deployment pair', async () => {
+    // A market row that states bounds silently overrides OFFER_MIN/MAX_FILL_AMOUNT.
+    const onMarket = await reported({ pricing: priced({ sellBase: { min: 5_000n, max: 10_000n } }), fetchPrice })
+    expect(onMarket.seen[0]!.detail).toContain('market bounds')
+
+    const onDeployment = await reported({ minFillAmount: 5_000n })
+    expect(onDeployment.outcome).toEqual({ fill: false, reason: 'amount_out_of_range' })
+    expect(onDeployment.seen[0]!.detail).toContain('deployment bounds 5000..100000')
+  })
+
+  it('reports every refusal, not only the bounded ones', async () => {
+    expect((await reported({ markets: [] })).seen[0]).toMatchObject({ reason: 'unsupported_pair' })
+    expect((await reported({ outputsAt: async () => [] })).seen[0]).toMatchObject({ reason: 'offer_unfunded' })
+    const drained = await reported({ balance: async () => ({ available: 10, availableAssets: [] }) })
+    expect(drained.seen[0]).toMatchObject({ reason: 'insufficient_inventory' })
+    const outOfBand = await reported({ pricing: priced({}), fetchPrice: async () => priceFrom('0.5') })
+    expect(outOfBand.seen[0]).toMatchObject({ reason: 'price_out_of_tolerance' })
+  })
+
+  it('names bounds ONLY when a bound is what refused', async () => {
+    // Otherwise the line points at config that was never the problem.
+    const drained = await reported({ balance: async () => ({ available: 10, availableAssets: [] }) })
+    expect(drained.seen[0]!.reason).toBe('insufficient_inventory')
+    expect(drained.seen[0]!.detail).toContain('wants 1000')
+    expect(drained.seen[0]!.detail).not.toContain('bounds')
+
+    const outOfBand = await reported({ pricing: priced({}), fetchPrice: async () => priceFrom('0.5') })
+    expect(outOfBand.seen[0]!.detail).not.toContain('bounds')
+
+    const unserved = await reported({ markets: [] })
+    expect(unserved.seen[0]!.detail).not.toContain('bounds')
+  })
+
+  it('ACCEPTS exactly the minimum', async () => {
+    const { outcome, seen } = await reported({
+      pricing: priced({ sellBase: { min: 1_000n, max: 5_000n } }),
+      fetchPrice,
+    })
+    expect(outcome).toEqual({ fill: true, id: 'fill-1' })
+    expect(seen).toEqual([])
+  })
+
+  it('ACCEPTS exactly the maximum', async () => {
+    const { outcome, seen } = await reported({ pricing: priced({ sellBase: { min: 100n, max: 1_000n } }), fetchPrice })
+    expect(outcome).toEqual({ fill: true, id: 'fill-1' })
+    expect(seen).toEqual([])
+  })
+
+  // ONE coupled fragment, not substrings that could match apart; `\s*` survives a re-wrap.
+  it('is WIRED to the log on the shipped daemon', () => {
+    expect(servicesSource).toMatch(/onRefused:\s*\([^)]*\)\s*=>\s*\{\s*log\(`offer \$\{\w+\} refused: \$\{\w+\}/)
+  })
+
+  // Coupled to the SAME handler: a tail fed from elsewhere is not these refusals.
+  it('is WIRED to the console tail too, from that same handler', () => {
+    expect(servicesSource).toMatch(
+      /onRefused:\s*\([^)]*\)\s*=>\s*\{[\s\S]{0,200}?offerRefusals\.record\(\{\s*at:[^}]*outpoint,\s*reason,\s*detail/,
+    )
+  })
+
+  it('serves offers only when OFFER_MARKETS names a market', () => {
+    // The second silence, driven for real in test/e2e/assetOffer.e2e.test.ts.
+    expect(servicesSource).toMatch(/servesOffers\s*=\s*policy\.offerMarkets\.length > 0/)
+    expect(servicesSource).toMatch(/servesOffers\s*\?\s*await OfferFillStore\.open/)
+  })
+})
+
 describe('tickAll', () => {
   it('marks the row in flight BEFORE submitting', async () => {
     // A crash mid-submission must leave a row that says something may be out,
@@ -296,6 +415,130 @@ describe('tickAll', () => {
     await service.consider(found)
     expect(await service.tickAll()).toBe(0)
     expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+  })
+})
+
+// `consider` admits a price; `tickAll` spends at it on a worker loop and at
+// startup recovery, arbitrary wall time later. Nothing between them re-asks.
+describe('tickAll re-runs price admission', () => {
+  // 900 USDT-units against 1000 sats wanted, so 1.12 admits and 0.5 is far out.
+  const pricing = [
+    {
+      base: USDT,
+      quote: null,
+      baseDecimals: 0,
+      quoteDecimals: 0,
+      feedUrl: 'https://feed.test/p',
+      pricePath: '/price',
+      toleranceBps: 100,
+      feeBps: 0,
+    },
+  ]
+
+  let duringPriceRead: (() => Promise<void>) | null = null
+  beforeEach(() => void (duringPriceRead = null))
+
+  const admitted = async (over: Partial<AssetOfferDeps> = {}) => {
+    let price = '1.12'
+    const settle = vi.fn(async () => '0xfill')
+    const refused: { outpoint: string; reason: string; detail: string }[] = []
+    const errors: { id: string; error: unknown }[] = []
+    const built = await build({
+      pricing,
+      fetchPrice: async () => {
+        await duringPriceRead?.()
+        return priceFrom(price)
+      },
+      settle,
+      onRefused: (outpoint, reason, detail) => void refused.push({ outpoint, reason, detail }),
+      onError: (id, error) => void errors.push({ id, error }),
+      ...over,
+    })
+    expect(await built.service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+    return { ...built, settle, refused, errors, moveFeed: (to: string) => void (price = to) }
+  }
+
+  it('does not spend at a price the feed has left since admission', async () => {
+    const { store, service, settle, moveFeed } = await admitted()
+    moveFeed('0.5')
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect((await store.findById('fill-1'))!.fillTxid).toBeNull()
+  })
+
+  it('records that as REFUSED, never stuck — nothing was submitted', async () => {
+    const { store, service, moveFeed } = await admitted()
+    moveFeed('0.5')
+    await service.tickAll()
+    const row = await store.findById('fill-1')
+    expect(row!.state).toBe('refused')
+    expect(row!.fillTxid).toBeNull()
+    expect(row!.failureReason).toMatch(/price_out_of_tolerance/)
+  })
+
+  it('reports it against the offer`s outpoint, like every other refusal', async () => {
+    const { service, refused, moveFeed } = await admitted()
+    moveFeed('0.5')
+    await service.tickAll()
+    expect(refused).toHaveLength(1)
+    expect(refused[0]).toMatchObject({ outpoint: `${found.txid}:${found.vout}`, reason: 'price_out_of_tolerance' })
+    expect(refused[0]!.detail).toContain('1000')
+  })
+
+  it('re-prices the terms the ROW records, not a fresh read of the deposit', async () => {
+    const outputsAt = vi.fn(async () => [{ script: SCRIPT_HEX, value: 500, assets: [{ assetId: USDT, amount: 900n }] }])
+    const { service, settle } = await admitted({ outputsAt })
+    outputsAt.mockClear()
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(outputsAt).not.toHaveBeenCalled()
+  })
+
+  it('still fills when the price has not moved', async () => {
+    const { store, service, settle, refused } = await admitted()
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(refused).toEqual([])
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled', fillTxid: '0xfill' })
+  })
+
+  it('leaves a deployment with no price gating exactly as it was', async () => {
+    const settle = vi.fn(async () => '0xfill')
+    const { store, service } = await build({ settle })
+    await service.consider(found)
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled' })
+  })
+
+  it('FAILS CLOSED when the feed cannot be read at tick time', async () => {
+    const { store, service, settle, errors, moveFeed } = await admitted()
+    moveFeed('unreadable')
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'refused' })
+    // The ROW's id, not the `price` sentinel: an operator joins log to row on it.
+    expect(errors).toEqual([{ id: 'fill-1', error: expect.any(Error) }])
+  })
+
+  it('leaves a stuck row stuck', async () => {
+    const { store, service, settle } = await admitted()
+    await store.transition('fill-1', 'fillable', 'filling')
+    await store.fail('fill-1', 'filling', 'relay refused')
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck', failureReason: 'relay refused' })
+  })
+
+  it('cannot unwind a row another tick already has in flight', async () => {
+    // A second tick can win the CAS inside the price read's await; the refusal
+    // is compare-and-swap on `fillable` too, so it no-ops rather than unwinding.
+    const { store, service, settle, moveFeed } = await admitted()
+    moveFeed('0.5')
+    duringPriceRead = async () => void (await store.transition('fill-1', 'fillable', 'filling'))
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filling' })
   })
 })
 

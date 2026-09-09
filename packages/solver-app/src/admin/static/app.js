@@ -283,6 +283,7 @@ const state = {
 const VIEWS = [
   ['overview', 'overview'],
   ['swaps', 'swaps'],
+  ['offers', 'offers'],
   ['quotes', 'quotes'],
   ['wallet', 'wallet'],
   ['backends', 'backends'],
@@ -458,6 +459,65 @@ const attentionPanel = (o) => {
   )
 }
 
+// A market as a corridor-style card. `served by` sits where a corridor has
+// `serving` and is NOT the same question: a market can read `trading` while
+// nothing fills it, which is why the card exists. Bounds print as BASE UNITS
+// with `decimals` a label, never scaled, as the balances card does.
+const marketBounds = (bounds, decimals) =>
+  bounds === null
+    ? h('span.muted', 'unset')
+    : h(
+        'span',
+        `${bounds.min} – ${bounds.max}`,
+        typeof decimals === 'number' && decimals > 0 ? h('span.faint', ` (${decimals}dp)`) : null,
+      )
+
+const marketState = (market) =>
+  !market.enabled
+    ? h('span.muted', 'disabled')
+    : market.active
+      ? h('span.muted', 'trading')
+      : h('span.phase.phase-exposed', 'pending restart')
+
+const marketCard = (market) =>
+  h(
+    'section.panel',
+    h('h2', `market ${legLabel(market.base)} / ${legLabel(market.quote)}`),
+    h(
+      'dl.kv',
+      h('dt', 'served by'),
+      h(
+        'dd',
+        market.servedBy.length === 0
+          ? h(
+              'span.phase.phase-failed',
+              {
+                title:
+                  'No path fills this market. OFFER_MARKETS drives the offer path and ASSET_MARKETS the RFQ ' +
+                  'corridors; neither names this pair. Both are on the settings page.',
+              },
+              'nothing',
+            )
+          : h('span.muted', market.servedBy.join(' + ')),
+      ),
+      h('dt', 'state'),
+      h('dd', marketState(market)),
+      h('dt', 'sell base'),
+      h('dd', marketBounds(market.sellBase, market.baseDecimals)),
+      h('dt', 'buy base'),
+      h('dd', marketBounds(market.buyBase, market.baseDecimals)),
+      h('dt', 'fee'),
+      h('dd', `${market.feeBps} bps, ${market.toleranceBps} bps band`),
+    ),
+  )
+
+// Its own grid: the one above is a fixed six and markets are 0..N, so appending
+// them would push the exposure figure below the fold.
+const marketsPanel = (o) => {
+  const markets = o.markets ?? []
+  return markets.length === 0 ? null : h('div.panels', ...markets.map(marketCard))
+}
+
 const overviewView = () => {
   const o = state.overview
   if (!o) return h('p.muted', 'loading…')
@@ -516,6 +576,7 @@ const overviewView = () => {
         ),
       ),
     ),
+    marketsPanel(o),
   )
 }
 
@@ -666,6 +727,83 @@ const quotesView = () => {
                 h('td.num', sats(bid.amountSats)),
                 h('td.num', String(bid.feeBps)),
                 h('td.muted', ago(bid.at)),
+              ),
+            ),
+          ),
+        ),
+  )
+}
+
+/** An offer's leg, in the spelling the packet and the store use: null is BTC. */
+const offerLeg = (assetId, amount) =>
+  h(
+    'span',
+    amount,
+    ' ',
+    assetId === null ? h('span.muted', 'BTC') : h('span.faint', { title: assetId }, shortId(assetId)),
+  )
+
+/** Fills and refusals. Not under swaps; the reason is in `admin/routes/offers.ts`. */
+const offersView = () => {
+  const d = state.data.offers
+  if (!d) return h('p.muted', 'loading…')
+  return h(
+    'div',
+    h('h2.sans', 'offer fills'),
+    d.serving
+      ? null
+      : h('p.notice', 'This deployment serves no offer market — OFFER_MARKETS is unset, so no offer is considered.'),
+    d.offers.length === 0
+      ? h('p.muted', d.serving ? 'no offer has been recorded yet' : 'nothing to show while no market is served')
+      : h(
+          'table',
+          h(
+            'thead',
+            h(
+              'tr',
+              h('th', 'state'),
+              h('th', 'outpoint'),
+              h('th', 'holds'),
+              h('th', 'pays'),
+              h('th', 'fill txid'),
+              h('th', 'age'),
+            ),
+          ),
+          h(
+            'tbody',
+            d.offers.map((offer) =>
+              h(
+                'tr',
+                h('td', offer.state),
+                h('td.faint', { title: offer.outpoint }, shortId(offer.outpoint)),
+                h('td', offerLeg(offer.offerAssetId, offer.offerAmount)),
+                h('td', offerLeg(offer.wantAssetId, offer.wantAmount)),
+                h('td.faint', { title: offer.fillTxid ?? '' }, shortId(offer.fillTxid)),
+                h('td.muted', ago(offer.createdAt)),
+              ),
+            ),
+          ),
+        ),
+    h('h2.sans', 'recent refusals'),
+    h(
+      'p.notice',
+      `Offers this solver declined. Held in memory only and cleared on restart (keeps the last ${d.refusals.capacity}) — ` +
+        'a refusal is not stored, because offers arrive from a public relay.',
+    ),
+    d.refusals.entries.length === 0
+      ? h('p.muted', 'no offer has been refused since this process started')
+      : h(
+          'table',
+          h('thead', h('tr', h('th', 'reason'), h('th', 'outpoint'), h('th', 'detail'), h('th', 'age'))),
+          h(
+            'tbody',
+            d.refusals.entries.map((refusal) =>
+              h(
+                'tr',
+                h('td', refusal.reason),
+                h('td.faint', { title: refusal.outpoint }, shortId(refusal.outpoint)),
+                h('td.muted', refusal.detail),
+                h('td.muted', ago(refusal.at)),
               ),
             ),
           ),
@@ -1260,6 +1398,24 @@ const marketForm = () =>
     ),
   )
 
+// `nothing` gets the failure chip: the row says `trading`, the offer is
+// published, and nothing else in the console says the solver is not listening.
+const servedByCell = (paths) =>
+  h(
+    'td',
+    paths.length === 0
+      ? h(
+          'span.phase.phase-failed',
+          {
+            title:
+              'No path fills this market. OFFER_MARKETS drives the offer path and ASSET_MARKETS the RFQ ' +
+              'corridors; neither names this pair, so nothing is watching for it. Both are on the settings page.',
+          },
+          'nothing',
+        )
+      : h('span.muted', paths.join(' + ')),
+  )
+
 const marketsView = () => {
   const m = state.data.markets
   if (!m) return h('p.muted', 'loading…')
@@ -1285,6 +1441,7 @@ const marketsView = () => {
               h('th', 'tolerance'),
               h('th', 'fee'),
               h('th', 'state'),
+              h('th', 'served by'),
               h('th', ''),
             ),
           ),
@@ -1308,6 +1465,9 @@ const marketsView = () => {
                       ? h('span.muted', 'trading')
                       : h('span.phase.phase-exposed', 'pending restart'),
                 ),
+                // A SECOND axis, never folded into `state`: a market can read
+                // `trading` and be filled by nothing.
+                servedByCell(market.servedBy ?? []),
                 h(
                   'td',
                   h('button.act', { onclick: () => ((marketDraft = draftFrom(market)), render()) }, 'edit'),
@@ -2041,7 +2201,7 @@ const runAction = async (name, body) => {
  * running anything, so bypassing this dialog with a bare fetch gets refused.
  * The warning text comes from the API rather than being duplicated here.
  */
-const armDialog = async (name, body, override = null) => {
+const armDialog = async (name, body, override = null, overrideTitle = null) => {
   const catalogue = state.data.actions ?? (await api('/api/actions'))
   state.data.actions = catalogue
   const definition = catalogue.actions.find((a) => a.name === name)
@@ -2056,6 +2216,9 @@ const armDialog = async (name, body, override = null) => {
      * step that stops a reflex.
      */
     override,
+    // The gate's headline. `restart-solver` opens it with no read-payment
+    // behind it, where the default sentence would be false.
+    overrideTitle,
     overridden: false,
     warning: definition?.warning ?? null,
     // Parsed from the KIND, never matched against one action's name. The server
@@ -2097,7 +2260,7 @@ const confirmDialog = () => {
       d.override
         ? h(
             'div.banner',
-            h('p', h('b', 'This is not the action the last check supports.')),
+            h('p', h('b', d.overrideTitle ?? 'This is not the action the last check supports.')),
             h('p', d.override),
             h(
               'label.row',
@@ -2187,6 +2350,7 @@ const ENDPOINTS = {
     if (state.filters.q.trim().length >= MIN_SEARCH) params.set('q', state.filters.q.trim())
     return `/api/swaps?${params}`
   },
+  offers: () => '/api/offers',
   quotes: () => '/api/quotes',
   wallet: () => '/api/wallet',
   backends: () => '/api/backends',
@@ -2228,6 +2392,7 @@ const go = (view) => {
 const BODIES = {
   overview: overviewView,
   swaps: swapsView,
+  offers: offersView,
   quotes: quotesView,
   wallet: walletView,
   backends: backendsView,
@@ -2237,6 +2402,18 @@ const BODIES = {
   markets: marketsView,
   audit: auditView,
 }
+
+// From the figures on screen: one fetched at click time could differ.
+const inFlightLine = (o) =>
+  `${o.exposure.liveCount} swap(s) in flight, ${o.exposure.exposedCount} of them exposed, with ` +
+  `${sats(o.exposure.committedSats)} sat committed. ${o.attention?.stuckCount ?? 0} row(s) are already waiting ` +
+  'for you. Boot re-drives every non-terminal row, but a payment in flight right now stays undecided until its ' +
+  'next tick.'
+
+// `KNOB 0 → 25` — whether the change is worth interrupting swaps for. `.muted`
+// not `.faint`: these are the banner's substance, and --text-faint reads 4.02:1
+// on --exposed-bg, under the AA floor. See contrast.test.ts.
+const pendingItem = (item) => h('span.mono', item.key, h('span.muted', ` ${item.loaded} → ${item.stored}`))
 
 // On EVERY panel: an operator who changed a knob and moved on is by definition
 // not looking at Settings. Same reasoning as the status bar's stuck-row count.
@@ -2251,12 +2428,16 @@ const restartBanner = () => {
       'span',
       h('b', `${pending.length} change${pending.length === 1 ? '' : 's'} pending a restart`),
       h('span.faint', ' — this process is still quoting what it booted with: '),
-      h('span.mono', pending.join(', ')),
+      ...pending.flatMap((item, index) => (index === 0 ? [pendingItem(item)] : [', ', pendingItem(item)])),
     ),
     o.restartEnabled
       ? actButton(
           'button.act.armed',
-          { 'data-action': 'restart-solver', onclick: () => armDialog('restart-solver', {}) },
+          // As the OVERRIDE gate: the action's warning is static, this is not.
+          {
+            'data-action': 'restart-solver',
+            onclick: () => armDialog('restart-solver', {}, inFlightLine(o), 'This is what a restart interrupts.'),
+          },
           'restart solver',
         )
       : h(

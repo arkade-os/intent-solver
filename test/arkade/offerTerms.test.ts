@@ -16,6 +16,7 @@ import { asset } from '@arkade-os/sdk'
 import { offerVtxoScript } from '@arkade-os/swap'
 import { hex } from '@scure/base'
 import {
+  offerExitDelay,
   offerFromTerms,
   offerScriptFrom,
   xOnlyPubkey,
@@ -29,7 +30,8 @@ const EMULATOR = xonly(4)
 const USDA = '11'.repeat(34)
 const MAKER_SCRIPT = '5120' + 'cc'.repeat(32)
 
-const derivation = { serverPubkey: SERVER, emulatorPubkey: EMULATOR, hrp: 'tark' }
+const EXIT = offerExitDelay(605_184)
+const derivation = { serverPubkey: SERVER, emulatorPubkey: EMULATOR, hrp: 'tark', exitDelay: EXIT }
 
 const terms = (over: Partial<QuotedOfferTerms> = {}): QuotedOfferTerms => ({
   wantAmount: 1_000n,
@@ -51,6 +53,7 @@ describe('offerScriptFrom', () => {
         makerPkScript: hex.decode(MAKER_SCRIPT),
         makerPublicKey: MAKER_KEY,
         emulatorPubkey: EMULATOR,
+        exitDelay: EXIT,
       },
       SERVER,
     )
@@ -85,9 +88,16 @@ describe('offerScriptFrom', () => {
   })
 
   it('omits the asset field for a BTC leg rather than naming an id', () => {
-    const built = offerFromTerms(terms({ wantAssetId: null, offerAssetId: USDA }), EMULATOR)
+    const built = offerFromTerms(terms({ wantAssetId: null, offerAssetId: USDA }), EMULATOR, EXIT)
     expect(built.wantAsset).toBeUndefined()
     expect(built.offerAsset?.toString()).toBe(USDA)
+  })
+
+  it('is bound to the exit delay, so a server that moved it is a different covenant', () => {
+    // @see offerAddressAgreement.test.ts — the 0.0.12 regression in one line.
+    expect(offerScriptFrom({ ...derivation, exitDelay: offerExitDelay(604_672) })(terms()).pkScript).not.toBe(
+      derive(terms()).pkScript,
+    )
   })
 
   it('follows the hrp it is given, so a testnet address never reads as mainnet', () => {

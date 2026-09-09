@@ -6,6 +6,7 @@
  * commit that added this for the observed txid.
  */
 import { describe, it, expect, vi } from 'vitest'
+import { getEventListeners } from 'node:events'
 import { streamOfferTxs, OFFER_PACKET_FILTER, type GrpcTransport } from '@arkade-os/solver-arkade/arkade/offerStream.js'
 import { grpcFrame } from '@arkade-os/solver-arkade/arkade/grpcWire.js'
 
@@ -37,6 +38,48 @@ const collect = async (gen: AsyncGenerator<{ txid: string; tx: string }>, n: num
 }
 
 const url = 'http://arkd.test'
+
+const MIN_MS = 10
+
+/**
+ * A stream whose every attempt fails, unless `override` supplies one that does
+ * not. Driven on fake timers, so the reconnect waits are exact rather than raced.
+ */
+const driveFailing = (
+  override?: (call: number, args: Parameters<GrpcTransport>) => ReturnType<GrpcTransport> | null,
+) => {
+  let calls = 0
+  const transport: GrpcTransport = (...args) => {
+    calls += 1
+    return (
+      override?.(calls, args) ??
+      (async function* () {
+        throw new Error('arkd subscription failed: 503')
+      })()
+    )
+  }
+  const controller = new AbortController()
+  const drained = (async () => {
+    for await (const item of streamOfferTxs({
+      arkdUrl: url,
+      transport,
+      signal: controller.signal,
+      reconnectMinMs: MIN_MS,
+      reconnectMaxMs: 10_000,
+      onError: () => {},
+    }))
+      void item
+  })()
+  return {
+    attempts: () => calls,
+    signal: controller.signal,
+    stop: async () => {
+      controller.abort()
+      await vi.advanceTimersByTimeAsync(MIN_MS)
+      await drained
+    },
+  }
+}
 
 describe('streamOfferTxs', () => {
   it('asks arkd for offer packets by default', async () => {
@@ -105,6 +148,54 @@ describe('streamOfferTxs', () => {
     )
     expect(got).toEqual([{ txid: 'ok', tx: 'tx-ok' }])
     expect(String(errors[0])).toContain('503')
+  })
+
+  it('LENGTHENS the wait between failed reconnects, rather than hammering arkd', async () => {
+    vi.useFakeTimers()
+    try {
+      const { attempts, stop } = driveFailing()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(attempts()).toBe(1)
+      await vi.advanceTimersByTimeAsync(MIN_MS)
+      expect(attempts()).toBe(2)
+      // The second wait has to exceed the first, so another `MIN_MS` buys nothing.
+      await vi.advanceTimersByTimeAsync(MIN_MS)
+      expect(attempts()).toBe(2)
+      await stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('and drops back to the shortest wait once a stream has delivered', async () => {
+    vi.useFakeTimers()
+    try {
+      const { attempts, stop } = driveFailing((call, args) =>
+        call === 2 ? yielding([eventFrame('a', 'tx-a')])(...args) : null,
+      )
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(MIN_MS)
+      expect(attempts()).toBe(2)
+      await vi.advanceTimersByTimeAsync(MIN_MS)
+      expect(attempts()).toBe(3)
+      await stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('frees each wait, instead of piling an abort listener up per reconnect', async () => {
+    vi.useFakeTimers()
+    try {
+      const { attempts, signal, stop } = driveFailing()
+      await vi.advanceTimersByTimeAsync(0)
+      for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(MIN_MS * 2 ** i)
+      expect(attempts()).toBeGreaterThan(4)
+      expect(getEventListeners(signal, 'abort').length).toBeLessThanOrEqual(2)
+      await stop()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('stops when the caller aborts', async () => {

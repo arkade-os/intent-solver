@@ -310,6 +310,18 @@ type SelfPaymentVerdict =
    */
   | 'unknown'
 
+/**
+ * Why a terminally-failed row is being handed to a human, in the row's own words.
+ * Three cases wanting three different actions, all of which used to write the one
+ * sentence a genuinely un-refunded row writes. Ordered by urgency: withheld is
+ * money still in play, unlanded is a client still short, unasked is neither.
+ */
+const stuckBecause = (refunded: boolean, verdict: SelfPaymentVerdict): string => {
+  if (verdict === 'withhold') return 'refund withheld — our own node may still collect against this hash'
+  if (!refunded) return 'the refund did not land — see refund_attempt'
+  return 'client refunded, but the self-payment probe could not be asked'
+}
+
 export class SendSwapService {
   private readonly now: () => number
   private readonly quoteLimiter: RateLimiter
@@ -1186,10 +1198,13 @@ export class SendSwapService {
    * verdict therefore means terminal, and a terminal payment cannot later
    * settle. The refund is safe and the row is finished.
    *
-   * The two cases that DO still need a human keep `stuck`:
+   * The cases that DO still need a human keep `stuck`, and {@link stuckBecause}
+   * writes which one onto the row:
    *   - the refund did not land (`refunded` false) — the client is not whole;
    *   - the self-payment probe withheld it — our own node may still collect,
-   *     which is the one live double-collect risk and is decided before here.
+   *     which is the one live double-collect risk and is decided before here;
+   *   - the probe could not be asked at all, so the refund landed but the
+   *     double-collect question was never answered.
    *
    * The reason is recorded either way, so nothing goes silent, and
    * `rfqStateFromRow` reports `refunded` to the client from either state.
@@ -1198,10 +1213,15 @@ export class SendSwapService {
    * `refund_outcome IS NULL`, so a row arriving here already refunded is never
    * picked up and refunded twice.
    */
-  private async settleTerminalFailure(row: SendSwapRow, from: 'paying' | 'paid', finished: boolean): Promise<void> {
+  private async settleTerminalFailure(
+    row: SendSwapRow,
+    from: 'paying' | 'paid',
+    refunded: boolean,
+    verdict: SelfPaymentVerdict,
+  ): Promise<void> {
     const { store } = this.deps
-    if (!finished) {
-      await store.fail(row.id, from, 'lightning payment failed terminally')
+    if (!(refunded && verdict === 'not-ours')) {
+      await store.fail(row.id, from, `lightning payment failed terminally; ${stuckBecause(refunded, verdict)}`)
       return
     }
     await store.transition(row.id, from, 'refused', {
@@ -1328,7 +1348,7 @@ export class SendSwapService {
       // holding against this same invoice, and refunding into that would pay
       // the client twice.
       const refunded = verdict !== 'withhold' && (await this.refundAfterTerminalFailure(row))
-      await this.settleTerminalFailure(row, 'paying', refunded && verdict === 'not-ours')
+      await this.settleTerminalFailure(row, 'paying', refunded, verdict)
       return false
     }
     if (!(await store.transition(row.id, 'paying', 'paid', { payment_id: result.id }))) return false
@@ -1524,7 +1544,7 @@ export class SendSwapService {
       // path: `failed` says nothing about an htlc our own node is holding
       // against this same invoice, and refunding into that would pay twice.
       const refunded = verdict !== 'withhold' && (await this.refundAfterTerminalFailure(row))
-      await this.settleTerminalFailure(row, from, refunded && verdict === 'not-ours')
+      await this.settleTerminalFailure(row, from, refunded, verdict)
       return false
     }
     if (from === 'paying' && !(await store.transition(row.id, 'paying', 'paid', {}))) return false

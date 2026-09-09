@@ -23,7 +23,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { pageQuery, MIN_SEARCH_LENGTH } from '@arkade-os/solver-core/core/page.js'
+import { pageQuery, MIN_SEARCH_LENGTH, PageRequestError } from '@arkade-os/solver-core/core/page.js'
 
 const search = (term: string, columns = ['id', 'payment_hash']) => pageQuery('send_swap', { search: { term, columns } })
 
@@ -96,6 +96,10 @@ describe('pageQuery — searching', () => {
     // scan presented as an answer.
     expect(() => search('ab')).toThrow(/at least/i)
     expect(() => search('   a   ')).toThrow(/at least/i)
+  })
+
+  it('refuses it as the caller’s mistake, which is what makes /api/swaps?q=ab a 400', () => {
+    expect(() => search('ab')).toThrow(PageRequestError)
   })
 
   it('refuses an empty column list rather than matching nothing silently', () => {

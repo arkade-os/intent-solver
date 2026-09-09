@@ -41,6 +41,10 @@ const config = {
   // Rendered in the read-only block, which iterates it — an absent set throws
   // rather than showing empty.
   sendHintScidDenylist: new Set<string>(),
+  // The two variables deciding whether a configured market is filled by
+  // anything; the read-only block renders both. @see admin/servedBy.ts
+  offerMarkets: [],
+  assetRfqTokens: [],
 } as unknown as Config
 
 describe('the editable key set', () => {

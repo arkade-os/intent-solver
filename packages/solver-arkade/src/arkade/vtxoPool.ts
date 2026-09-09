@@ -160,6 +160,28 @@ export const planPool = (args: {
 }
 
 /**
+ * Outputs one split settlement may create — a renewal's, or a boarding's.
+ *
+ * The same figure `mintPool` uses for a split transaction, and for the same
+ * reason: a float shredded into hundreds of pieces costs a fee per piece to
+ * renew forever after. Eight covers the pool target's rungs while leaving the
+ * shape legible.
+ *
+ * WHAT THE SERVER ACTUALLY BOUNDS is transaction WEIGHT, not an output count -
+ * arkd's `/v1/info` publishes `maxTxWeight` (40000 on the regtest build) and no
+ * max-outputs field at all, so there is nothing to read this constant off. A
+ * taproot output is ~43 vbytes, so eight of them is ~1400 weight units against
+ * that 40000: roughly three percent, and the inputs dominate long before the
+ * outputs do.
+ *
+ * So this is a SHAPE bound, not a protocol one, and it is safe by a wide margin
+ * rather than by a check. If it ever grows materially - or if a settlement
+ * starts carrying many more inputs - the figure that matters is `maxTxWeight`
+ * and it should be estimated rather than assumed. Raised by review on #126.
+ */
+export const MAX_SPLIT_OUTPUTS = 8
+
+/**
  * Carve one renewal's proceeds into the pool's target shape.
  *
  * WHY THIS EXISTS RATHER THAN A SECOND TRANSACTION. A renewal settles the float

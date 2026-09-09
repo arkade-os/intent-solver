@@ -134,6 +134,21 @@ const paymentHashOf = (preimage: Uint8Array): string => hex.encode(sha256(preima
 const preimageFromClaimWitness = (witness: Uint8Array[]): Uint8Array | null => witness[1] ?? null
 
 /**
+ * Why {@link OnchainSendSwapService.pushRefund} could not act on an empty
+ * lockup. Wording only — neither branch records an outcome. The `unspent` bound
+ * runs from `refundLocktime`, the only clock that starts when the retries do.
+ */
+const unrefundableReason = (evidence: 'unknown' | 'unspent', row: OnchainSendSwapRow, now: number): string => {
+  if (evidence === 'unknown') {
+    return 'the unfiltered view reports no output at this lockup script, so no spend is provable and nothing is there to give back — retrying cannot change that, and it needs a human'
+  }
+  const stale = now - row.refundLocktime
+  return stale > DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
+    ? `the spendable view is empty; the unfiltered view still reports an unspent output, ${stale}s past the refund locktime — too long to be one view catching up, and it needs a human`
+    : 'the spendable view is empty; the unfiltered view still reports an unspent output — the spendable view is behind, so this retries'
+}
+
+/**
  * One attempt at the solver's own onchain HTLC refund — see
  * {@link OnchainSendSwapService.pushOnchainHtlcRefund}.
  *
@@ -450,10 +465,9 @@ export class OnchainSendSwapService {
       // the row next pass, while an operator running {@link refundNow} is told
       // why, instead of being handed a `null` that reads as "already refunded"
       // — the very mistake this guard exists to stop making to a client.
-      if (!(await arkade.lockupProvablySpent(row.pkScript))) {
-        throw new Error(
-          `swap ${row.id}: lockup reads empty but no spend is provable yet — indexer lag, not an external refund`,
-        )
+      const evidence = await arkade.lockupSpendEvidence(row.pkScript)
+      if (evidence !== 'spent') {
+        throw new Error(`swap ${row.id}: ${unrefundableReason(evidence, row, this.now())}`)
       }
       await store.patch(row.id, { refund_outcome: 'external' })
       return null

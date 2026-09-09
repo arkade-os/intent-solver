@@ -10,7 +10,7 @@
  */
 
 import type { UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
-import type { FundedOutput } from './wallet.js'
+import type { FundedOutput, LockupSpendEvidence } from './wallet.js'
 import type { CovenantScriptRow } from './covenantRow.js'
 
 /** The Arkade operations the send-side orchestrators need, shaped for injection. */
@@ -41,6 +41,8 @@ export interface ArkadeOps {
    * that has not caught up.
    */
   lockupProvablySpent(pkScriptHex: string): Promise<boolean>
+  /** The same read, separating the permanent "no output at all" from the lag {@link lockupProvablySpent} folds it in with. */
+  lockupSpendEvidence(pkScriptHex: string): Promise<LockupSpendEvidence>
   /** Spend the claim leaf of the script the row describes, revealing the preimage. */
   claim(row: CovenantScriptRow, outputs: FundedOutput[], preimageHex: string): Promise<string>
   /** Push the covenant refund of the script the row describes. Needs no keys of ours. */

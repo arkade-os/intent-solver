@@ -53,6 +53,7 @@ import { buildOnchainClaimTx, estimateClaimTxVsize, signOnchainClaimTx } from '@
 import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
 import type { OnchainReceiveBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import type { OnchainReceiveArkadeOps } from './onchainArkadeOps.js'
+import { FundNotSubmittedError } from './fundLockup.js'
 import { EMPTY_LOCKUP_GRACE, REFUND_CENSORSHIP_GRACE } from './orchestrator.js'
 import type { OnchainReceiveSwapRow, OnchainReceiveSwapStore } from '../db/onchainReceiveSwaps.js'
 import type { CovclaimdClient } from './covclaimd.js'
@@ -636,11 +637,8 @@ export class OnchainReceiveSwapService {
     try {
       txid = await arkade.fund({ address: row.lockupAddress, amountSats: row.payoutSats, stamp })
     } catch (error) {
-      // Hand the lease back on a throw: no money this service can see has
-      // moved, and holding it would strand the row for every worker rather
-      // than just this one. The adoption check above already owns the
-      // ambiguity a throw leaves, and resolves it by reading the script.
-      await store.releaseFundLease(row.id)
+      // Retained on an ambiguous failure: stuck for a human, on purpose.
+      if (error instanceof FundNotSubmittedError) await store.releaseFundLease(row.id)
       throw error
     }
     // Outside that catch on purpose: money has moved by here, so handing the

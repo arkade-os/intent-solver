@@ -209,6 +209,7 @@ const fakeArkade = (): FakeArkade => {
     receivePreimage: null,
     findLockups: async () => arkade.lockups,
     lockupProvablySpent: async () => arkade.lockupsSpent,
+    lockupSpendEvidence: async () => (arkade.lockupsSpent ? ('spent' as const) : ('unspent' as const)),
     claim: async (row, outputs, preimage) => {
       arkade.claimCalls.push({ rowId: row.id, outputs, preimage })
       return 'claim-txid'
@@ -1187,6 +1188,9 @@ describe('tick: failure and recovery', () => {
 
       const row = await service.tick(swap.id)
       expect(row.state).toBe('stuck')
+      expect(row.failureReason).toBe(
+        'lightning payment failed terminally; refund withheld — our own node may still collect against this hash',
+      )
       expect(arkade.refundCalls).toHaveLength(0)
     })
 
@@ -1222,6 +1226,10 @@ describe('tick: failure and recovery', () => {
       // settled cases above, there is no positive evidence to withhold on, and
       // the payer-side proof stands on its own.
       expect(arkade.refundCalls).toHaveLength(1)
+      // The case #102 spent four CI reproductions failing to name.
+      expect(row.failureReason).toBe(
+        'lightning payment failed terminally; client refunded, but the self-payment probe could not be asked',
+      )
     })
   })
 
@@ -1351,6 +1359,7 @@ describe('tick: failure and recovery', () => {
     const row = await service.tick(swap.id)
     expect(row.state).toBe('stuck')
     expect(row.refundOutcome).toBeNull()
+    expect(row.failureReason).toBe('lightning payment failed terminally; the refund did not land — see refund_attempt')
     expect(arkade.refundCalls).toHaveLength(0)
   })
 

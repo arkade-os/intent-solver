@@ -16,7 +16,8 @@ import type { ContractEvent } from '@arkade-os/solver-arkade/arkade/lockupWatche
 class FakeManager implements ContractManagerLike {
   listeners: ((event: ContractEvent) => void)[] = []
   unsubscribes = 0
-  contracts: { script: string }[] = []
+  watchCalls: { script: string; label?: string }[] = []
+  unwatchCalls: string[] = []
 
   onContractEvent(callback: (event: ContractEvent) => void): () => void {
     this.listeners.push(callback)
@@ -26,8 +27,12 @@ class FakeManager implements ContractManagerLike {
     }
   }
 
-  async getContracts(): Promise<{ script: string }[]> {
-    return this.contracts
+  async watchScript(script: string, options?: { label?: string }): Promise<void> {
+    this.watchCalls.push({ script, label: options?.label })
+  }
+
+  async unwatchScript(script: string): Promise<void> {
+    this.unwatchCalls.push(script)
   }
 
   emit(event: ContractEvent): void {
@@ -35,13 +40,14 @@ class FakeManager implements ContractManagerLike {
   }
 }
 
-const arrival = (contractScript: string): ContractEvent => ({
-  type: 'vtxo_received',
-  contractScript,
-  vtxos: [],
-  contract: { script: contractScript },
-  timestamp: 1,
-})
+const arrival = (contractScript: string): ContractEvent =>
+  ({
+    type: 'vtxo_received',
+    contractScript,
+    vtxos: [],
+    contract: { script: contractScript },
+    timestamp: 1,
+  }) as ContractEvent
 
 /**
  * A source whose manager fails `failures` times before it can be had.
@@ -172,24 +178,52 @@ describe('lazyContractSource — letting go', () => {
   })
 })
 
-describe('lazyContractSource — the coverage read', () => {
+describe('lazyContractSource — the watch call', () => {
   it('asks the manager every time, so a late-arriving one is still used', async () => {
     const { manager, source } = build(0)
-    manager.contracts = [{ script: 'aa' }]
-    expect(await source.getContracts()).toEqual([{ script: 'aa' }])
-    manager.contracts = [{ script: 'aa' }, { script: 'bb' }]
-    expect(await source.getContracts()).toEqual([{ script: 'aa' }, { script: 'bb' }])
+    await source.watchScript('aa')
+    await source.watchScript('bb')
+    expect(manager.watchCalls.map((c) => c.script)).toEqual(['aa', 'bb'])
   })
 
-  it('rejects rather than retrying, because its caller already treats it as diagnostics', async () => {
-    // `LockupWatcher.checkCoverage` catches this and reports it. Retrying here
-    // would hold that read open across sweeps for a diagnostic.
+  it('labels what it watches, so an operator reading the SDK can tell whose it is', async () => {
+    const { manager, source } = build(0)
+    await source.watchScript('aa')
+    expect(manager.watchCalls[0]?.label).toBe('lockup')
+  })
+
+  it('passes an unwatch through', async () => {
+    const { manager, source } = build(0)
+    await source.unwatchScript('aa')
+    expect(manager.unwatchCalls).toEqual(['aa'])
+  })
+
+  it('rejects rather than retrying, because its caller retries on the next sweep', async () => {
     const source = lazyContractSource({
       getContractManager: async () => {
         throw new Error('repository closed')
       },
       onError: () => {},
     })
-    await expect(source.getContracts()).rejects.toThrow('repository closed')
+    await expect(source.watchScript('aa')).rejects.toThrow('repository closed')
+  })
+
+  it('refuses loudly when the manager is too old to watch scripts', async () => {
+    const { onContractEvent } = new FakeManager()
+    const source = lazyContractSource({
+      getContractManager: async () => ({ onContractEvent }) as ContractManagerLike,
+      onError: () => {},
+    })
+    await expect(source.watchScript('aa')).rejects.toThrow('0.4.71')
+  })
+
+  it('treats a manager too old to UNwatch as nothing to undo', async () => {
+    // Asymmetric on purpose: a missing unwatch cannot lose a funding.
+    const { onContractEvent } = new FakeManager()
+    const source = lazyContractSource({
+      getContractManager: async () => ({ onContractEvent }) as ContractManagerLike,
+      onError: () => {},
+    })
+    await expect(source.unwatchScript('aa')).resolves.toBeUndefined()
   })
 })

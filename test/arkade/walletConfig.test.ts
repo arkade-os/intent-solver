@@ -33,6 +33,16 @@ describe('createArkadeContext', () => {
   })
 
   /**
+   * The other half it takes away, and the one that cost an operator a deposit:
+   * the poll disabled above is the ONLY caller of `runPeriodicSettle`, so
+   * without a replacement, boarded sats stay on L1 silently.
+   */
+  it('still boards confirmed sats itself, having taken that over too', () => {
+    expect(floatSource).toContain('planBoardingSettle(')
+    expect(floatSource).toContain('getBoardingUtxos()')
+  })
+
+  /**
    * Source-asserted for the same reason as the two above: `onchainProvider` is
    * consumed inside `Wallet.create` and no public API reads it back.
    *

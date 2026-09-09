@@ -468,8 +468,59 @@ environment's range for that corridor rather than leaving it quoting nothing.
 Secrets are not shown. Not redacted — absent, so there is no field for a bug to
 un-redact.
 
+### What the restart banner names
+
+Two sources, not one. `createServices` takes both snapshots at startup and the
+console diffs the store against each:
+
+- **overrides** — `bootOverrides` against what `AdminStore` holds now, with each
+  knob's running and stored values (`LN_SEND_FEE_BPS 0 → 25`). A key whose
+  effective value did not move is dropped: an override equal to the
+  environment's own value changes nothing a restart would apply.
+- **asset markets** — `assetMarkets` against the `admin_market` rows, reported
+  as added, edited or no longer trading. A paused market reads as leaving,
+  because the next process will not trade it either.
+
+Markets are the half worth stating out loud: they are ROWS rather than
+overrides, so a diff of the override map cannot see one — and the markets tab is
+where the staleness matters most, since a market added since boot is not one this
+process is filling against.
+
+**restart solver** sits in that banner. Before the confirmation the console
+states what a restart would interrupt: swaps live, swaps exposed, sats committed
+across every corridor the registry serves (EVM pairs included, not just the four
+BTC ones), and rows already parked in `stuck`. Those figures are read before the
+shutdown is armed and land in the audit row, so the record says what the solver
+was carrying at the moment someone stopped it. A store that cannot be read is
+recorded as unreadable rather than blocking the restart — a sick store is one of
+the reasons to take one.
+
 ## Operating notes
 
+- **Set OS-level TCP keepalive on the LND host.** The `lightning` package
+  hardcodes its gRPC channel options and exposes no passthrough, so
+  `grpc.keepalive_time_ms` is never set and grpc-js sends no HTTP/2 pings at
+  all. A half-open connection to LND is therefore only noticed when the OS
+  keepalive fires — on Linux defaults `tcp_keepalive_time` 7200s plus 9 probes
+  at 75s, roughly **2h11m** before the socket errors and the call settles.
+
+  The solver's LND **reads** carry their own 30s deadline
+  (`packages/solver-rails-lnd/src/deadline.ts`), so they recover without this.
+  The **writes** deliberately do not — aborting a submit does not mean it
+  failed, it means the outcome is unknown — so this is the only mitigation that
+  covers `payViaPaymentRequest`, `settleHodlInvoice`, `sendToChainAddress` and
+  `broadcastChainTransaction`. It needs no code change:
+
+  ```sh
+  # /etc/sysctl.d/99-lnd-keepalive.conf, then: sysctl --system
+  net.ipv4.tcp_keepalive_time = 60
+  net.ipv4.tcp_keepalive_intvl = 15
+  net.ipv4.tcp_keepalive_probes = 4
+  ```
+
+  Host-wide, so set them on the host running the solver. They only bound a
+  socket whose peer has stopped answering — they do not make an aborted write's
+  outcome knowable, and a slow LND is still a slow LND.
 - **`stuck` rows are the pager.** They mean "money may have left and needs a
   human": payment terminally failed after exposure, a claim failing past the
   refund deadline, or an empty script at/after the deadline (possible client
@@ -1168,9 +1219,11 @@ hard way. The numbers below are the smallest legal values, not arbitrary ones.
   brings the stack up perfectly happily and only fails once funds are actually
   settled. Non-regtest equivalent: `DEFAULT_MIN_BATCH_EXPIRY_SECONDS = 86400`
   (line 2335).
-- **`COVCLAIMD_IMAGE` must be set explicitly.** `regtest.mjs` silently drops
-  covclaimd from the stack when it is unset — no error, the container simply is
-  not there.
+- **`COVCLAIMD_IMAGE` must be set explicitly, and at `v0.0.1-rc.5` or above.**
+  `regtest.mjs` silently drops covclaimd from the stack when it is unset — no
+  error, the container simply is not there. Setting it is not enough on its own:
+  compose still defaults to `rc.4`, which cannot claim against the `v0.0.7`
+  emulator the same stack brings up. See § covclaimd for why.
 
 Three more things that cost time if forgotten:
 
@@ -1219,7 +1272,7 @@ git clone https://github.com/arklabsHQ/arkade-regtest && cd arkade-regtest
 ARKD_VTXO_TREE_EXPIRY=6144 ARKD_UNILATERAL_EXIT_DELAY=512 \
 ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 ARKD_BOARDING_EXIT_DELAY=2048 \
 ARKD_CHECKPOINT_EXIT_DELAY=1536 \
-COVCLAIMD_IMAGE=ghcr.io/arkade-os/covclaimd:v0.0.1-rc.4 \
+COVCLAIMD_IMAGE=ghcr.io/arkade-os/covclaimd:v0.0.1-rc.5 \
 node regtest.mjs start --clean
 
 # 2. this repo
@@ -1275,7 +1328,7 @@ git clone https://github.com/arklabsHQ/arkade-regtest && cd arkade-regtest
 ARKD_VTXO_TREE_EXPIRY=6144 ARKD_UNILATERAL_EXIT_DELAY=512 \
 ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 ARKD_BOARDING_EXIT_DELAY=2048 \
 ARKD_CHECKPOINT_EXIT_DELAY=1536 \
-COVCLAIMD_IMAGE=ghcr.io/arkade-os/covclaimd:v0.0.1-rc.4 \
+COVCLAIMD_IMAGE=ghcr.io/arkade-os/covclaimd:v0.0.1-rc.5 \
 node regtest.mjs start --clean
 
 # 2. extract boltz-lnd's TLS cert and macaroon
@@ -1378,13 +1431,27 @@ internally anyway.
 pnpm test:e2e
 ```
 
-**These never gate a merge.** `pnpm test` is `vitest run --exclude test/e2e`, so
-the unit suite is unaffected by anything here. CI runs them only on demand:
-`.github/workflows/e2e.yml` stands its own arkade-regtest stack up, provisions a
-throwaway Arkade wallet and runs a chosen subset, triggered by the `run-e2e`
-label on a PR, a `workflow_dispatch`, or the nightly schedule. Locally,
-`pnpm test:e2e` is meant to be typed deliberately by someone who has just
-brought a stack up.
+`pnpm test` is `vitest run --exclude test/e2e`, so the unit suite is unaffected
+by anything here. `.github/workflows/e2e.yml` stands its own arkade-regtest stack
+up, provisions a throwaway Arkade wallet and runs every file — on every PR, on
+each push to `main`, on a `workflow_dispatch`, and on the nightly schedule.
+**Running is not blocking**: whether a red leg can stop a merge is a
+branch-protection setting on the repository, not something the workflow decides.
+Locally, `pnpm test:e2e` is meant to be typed deliberately by someone who has
+just brought a stack up.
+
+**One job per GROUP**, listed in `.github/e2e-groups.json`. A group is the set of
+corridors that can share one stack configuration, and the splits are forced by
+that stack rather than chosen for speed: only the `asset` group mints an asset,
+because an asset coin changes what every later sats-only selection can spend;
+only `receive-lightning` runs covclaimd, which would otherwise sweep lockups a
+send test meant to claim itself; the Lightning and onchain legs need `boltz`,
+whose setup is the only thing that funds `boltz-lnd` and opens its channel.
+`test/ci/e2eGroups.test.ts` — inside the unit suite, which IS a merge gate —
+fails if any `test/e2e/*.e2e.test.ts` is in no group or in two, so a new corridor
+cannot quietly run nowhere. After each leg, `scripts/e2e-report.mjs` prints the
+per-file durations and fails on a skipped test or a file that never ran: vitest
+exits 0 for both.
 
 | File                           | Corridor                    | Needs                                        |
 | ------------------------------ | --------------------------- | -------------------------------------------- |
@@ -1396,7 +1463,7 @@ brought a stack up.
 No covclaimd is required by any of them: on both receive corridors the CLIENT
 claims the Arkade lockup itself, through the covenant's collaborative claim
 leaf. covclaimd stays supported and optional (`ReceiveServiceDeps.covclaimd`); it
-CAN claim this covenant as of `v0.0.1-rc.4`, which `covclaimdClaim.e2e.test.ts`
+CAN claim this covenant as of `v0.0.1-rc.5`, which `covclaimdClaim.e2e.test.ts`
 covers separately — see "covclaimd" below.
 
 - **Environment** comes from `E2E_ENV_FILE` (default `.env.regtest.lnd`, the
@@ -1492,12 +1559,30 @@ the CLIENT claims its own lockup through the collaborative claim leaf). Rows
 quoted before the leaf shipped keep the eight-leaf shape and stay claimable, so
 it is only newly funded lockups that move out of covclaimd's reach.
 
-**What has now been shown (regtest, 2026-08-12).** `v0.0.1-rc.4` claims a
+**What has now been shown (regtest, 2026-09-09).** `v0.0.1-rc.5` claims a
 solver-built lockup end to end, with the client offline. That is
 `test/e2e/covclaimdClaim.e2e.test.ts`: the solver funds, reveals, and then
 nobody in the test claims — the preimage never leaves the test process — and the
 lockup is spent anyway, with the solver recovering `P` off that witness and
 settling a real held HTLC with it.
+
+**`rc.5` is a floor, not a preference — `rc.4` cannot claim here at all.**
+Emulator `v0.0.7` made the `PrevArkTx` PSBT field mandatory on every ark-tx
+input (`prevOutFetcherForArkTx` walks all of them and errors on the first
+missing one; `v0.0.6` only walked the fields that were present). rc.4's claim
+carries none, and `arkade-regtest`'s `.env.defaults` pins the emulator at
+`v0.0.7`, so the pairing its compose default gives you — emulator `v0.0.7` plus
+covclaimd `rc.4` — can never settle. covclaimd `rc.5` attaches the field.
+
+Nothing about that reaches the caller. The emulator logs `failed to process
+transaction: failed to create prevout fetcher: missing prevout tx for input 0`
+and returns a bare internal status; covclaimd logs `reveal claim failed, keeping
+registration for retry ... rpc error: code = Internal desc = internal error` and
+retries forever. The solver sees only a lockup nobody spends, so the swap sits
+in `funded` until whatever is watching it gives up. **Diagnose this pair from
+`docker logs emulator` and `docker logs covclaimd`, never from the status code.**
+A/B on one stack, changing only the image: rc.4 timed out at 302s, rc.5 passed
+in 3.8s.
 
 Attributing the claim to covclaimd needed a control, because **the daemon logs
 nothing for request handling** — even a rejected `POST /v1/reveal` leaves no
@@ -1623,17 +1708,16 @@ recoverable: 235696`, settled back to `available: 233338` (the 2358-sat
 
 - **arkade-regtest's miner can be up but not mining.** Only `receiveOnchain`
   cares, and it names the miner rather than just timing out.
-- **Renewal pays an intent fee, and the SDK's own `renewVtxos` does not.**
-  arkade-regtest configures `ARK_OFFCHAIN_INPUT_FEE="amount * 0.01"` by default
-  (`.env.defaults`), so every settlement costs 1% of each input. The SDK's
-  `IVtxoManager.renewVtxos` asks for an output equal to the gross input sum, so
-  the fee it implies is zero and arkd rejects the intent outright with
-  `INTENT_INSUFFICIENT_FEE (31): got 0 min expected N` — the float is never
-  renewed. `packages/solver-arkade/src/arkade/vtxoLifecycle.ts`'s `renewExpiringVtxos` replaces it and
-  prices the output the way `Wallet.settle()` already does. This is operator
-  policy, not a regtest quirk: any mainnet operator charging a non-zero intent
-  fee breaks `renewVtxos` the same way. `IVtxoManager.recoverVtxos` still has
-  the defect — see that module's header.
+- **Renewal pays an intent fee.** arkade-regtest configures
+  `ARK_OFFCHAIN_INPUT_FEE="amount * 0.01"` by default (`.env.defaults`), so every
+  settlement costs 1% of each input, and this is operator policy rather than a
+  regtest quirk. The SDK used to imply a zero fee here and have arkd reject the
+  intent with `INTENT_INSUFFICIENT_FEE (31): got 0 min expected N`; that is fixed
+  in `@arkade-os/sdk@0.4.70`, for `renewVtxos` and `recoverVtxos` both.
+  `packages/solver-arkade/src/arkade/vtxoLifecycle.ts`'s `renewExpiringVtxos`
+  still prices renewal itself, now for two other reasons — the reservation filter
+  and the per-coin treadmill cap, neither of which `renewVtxos` can express. See
+  that module's header.
 
 ## Load test (`test/perf`)
 
