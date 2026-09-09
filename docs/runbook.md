@@ -768,11 +768,11 @@ this knob exists for the corridor that loses money on every swap.
 
 The stems that reach this parse, and there are no others:
 
-| stem                                                       | where the name comes from                                                                                                         |
-| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `LN_SEND`, `LN_RECEIVE`, `ONCHAIN_SEND`, `ONCHAIN_RECEIVE` | fixed — the four BTC corridors                                                                                                    |
-| `EVM_SEND_<SYMBOL>`, `EVM_RECEIVE_<SYMBOL>`                | one pair per token listed in `EVM_TOKENS`, `<SYMBOL>` exactly as spelled there (already uppercase) — e.g. `EVM_SEND_USDC_ENABLED` |
-| `ASSET_<SYMBOL>_BUY`, `ASSET_<SYMBOL>_SELL`                | one pair per market listed in `ASSET_MARKETS`, `<SYMBOL>` uppercased — e.g. `ASSET_USDA_BUY_ENABLED`                              |
+| stem                                                       | where the name comes from                                                                                                                   |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LN_SEND`, `LN_RECEIVE`, `ONCHAIN_SEND`, `ONCHAIN_RECEIVE` | fixed — the four BTC corridors                                                                                                              |
+| `EVM_SEND_<SYMBOL>`, `EVM_RECEIVE_<SYMBOL>`                | one pair per token listed in `EVM_TOKENS`, `<SYMBOL>` exactly as spelled there (already uppercase) — e.g. `EVM_SEND_USDC_ENABLED`           |
+| `ASSET_<SYMBOL>_BUY`, `ASSET_<SYMBOL>_SELL`                | one pair per market listed in `ASSET_MARKETS`, `<SYMBOL>` exactly as spelled there (also already uppercase) — e.g. `ASSET_USDA_BUY_ENABLED` |
 
 `ADMIN_RESTART_ENABLED` is **not** one of them. It reads `=== 'true'`, so every
 other value — a typo included — leaves it off, which is the safe direction for a
