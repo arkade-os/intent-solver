@@ -220,3 +220,41 @@ describe('both legs are actually driven', () => {
     expect(corridors.get(RECEIVE_PAIR)?.refundSweep).toBeUndefined()
   })
 })
+
+describe('the rpc url never reaches a log or an error', () => {
+  // An rpc url routinely carries the API key in its path (`.../v2/<key>`), so
+  // one interpolation hands the credential to every log aggregator downstream.
+  // Raised by arkana on #127, where the scan-range probe introduced the first
+  // two such call sites in this module.
+  it('interpolates the host, never the url itself', () => {
+    const body = createServicesBody()
+    expect(body).toContain('endpointHost(evmChain.rpcUrl)')
+    expect(body).not.toContain('${evmChain.rpcUrl}')
+  })
+
+  it('passes the url only where a client is constructed from it', () => {
+    const uses = createServicesBody()
+      .split(/\r?\n/)
+      .filter((line) => line.includes('evmChain.rpcUrl'))
+    expect(uses).toHaveLength(3)
+    expect(uses.filter((line) => line.includes('createJsonRpc'))).toHaveLength(1)
+    expect(uses.filter((line) => line.includes('endpointHost'))).toHaveLength(2)
+  })
+})
+
+describe('endpointHost keeps the provider and drops the secret', () => {
+  it('yields the host alone for the shapes providers actually use', () => {
+    const host = (raw: string): string => {
+      try {
+        return new URL(raw).host
+      } catch {
+        return '(unparseable url)'
+      }
+    }
+    expect(host('https://eth-mainnet.g.alchemy.com/v2/SECRETKEY')).toBe('eth-mainnet.g.alchemy.com')
+    expect(host('https://mainnet.infura.io/v3/SECRETKEY')).toBe('mainnet.infura.io')
+    expect(host('https://rpc.ankr.com/eth/SECRETKEY?apikey=ALSOSECRET')).toBe('rpc.ankr.com')
+    // Never a fragment of the original, which would defeat the point.
+    expect(host('not a url at all')).toBe('(unparseable url)')
+  })
+})

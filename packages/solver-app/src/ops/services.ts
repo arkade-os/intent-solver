@@ -283,6 +283,23 @@ export interface Services {
  * the registry, so the only way to get here is a consumer registering AFTER the
  * config was loaded. Named as that, rather than as an unknown backend.
  */
+/**
+ * An endpoint's HOST, for saying which one answered without saying how.
+ *
+ * RPC urls routinely carry the API key in the path or query
+ * (`.../v2/<key>`), so printing one into a log or a crash message hands the
+ * credential to whatever aggregator collects them. The host names the provider,
+ * which is all an operator needs to act. An unparseable url yields no fragment
+ * of itself rather than falling back to the raw string.
+ */
+const endpointHost = (raw: string): string => {
+  try {
+    return new URL(raw).host
+  } catch {
+    return '(unparseable url)'
+  }
+}
+
 const createRail = async (config: Config): Promise<LightningRail> => {
   if (config.lnBackend === 'fake') {
     return {
@@ -868,13 +885,17 @@ export const createServices = async (
     })
     if (probe.kind === 'range_rejected') {
       throw new Error(
-        `EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} is wider than ${evmChain.rpcUrl} allows: ${probe.message}. ` +
-          'Lower it to the endpoint’s cap; too low only costs round trips, too high loses claims silently.',
+        `EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} is wider than ${endpointHost(evmChain.rpcUrl)} allows: ` +
+          `${probe.message}. Lower it to the endpoint's cap; too low only costs round trips, ` +
+          'too high loses claims silently.',
       )
     }
     if (probe.kind === 'inconclusive') {
       // NOT fatal: a node that blinked is not evidence about the setting.
-      log(`evm: could not verify EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} against ${evmChain.rpcUrl}`, probe.message)
+      log(
+        `evm: could not verify EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} against ${endpointHost(evmChain.rpcUrl)}`,
+        probe.message,
+      )
     } else if (probe.blocks < BigInt(evmChain.logScanRange)) {
       log(`evm: EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} unproven — the chain is only ${probe.blocks} blocks long`)
     }
