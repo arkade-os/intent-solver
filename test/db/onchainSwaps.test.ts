@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
-import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import {
+  OnchainSendSwapStore,
+  OWES_PAYOUT,
+  NON_TERMINAL,
+  EXPOSED,
+} from '@arkade-os/solver-corridors/db/onchainSwaps.js'
 import type { SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
 
 let now = 1_000_000
@@ -229,6 +234,8 @@ describe('OnchainSendSwapStore — migration', () => {
     // Quoted before fees existed: it charged nothing, so the payout WAS the
     // amount — the honest reading of a missing payout_sats, not a default.
     expect(row.payoutSats).toBe(50_000)
+    // A bare SUM(payout_sats) would skip this row and under-count what is owed.
+    expect(await migrated.owedPayoutSats()).toBe(50_000)
 
     // And the table now genuinely has the new columns: a fresh row exercising
     // all four migrated columns round-trips correctly.
@@ -246,5 +253,45 @@ describe('OnchainSendSwapStore — migration', () => {
     const twice = await OnchainSendSwapStore.open(driverOver(db), clock)
     expect((await twice.get('swap-1')).id).toBe('swap-1')
     await twice.close()
+  })
+})
+
+describe('owedPayoutSats()', () => {
+  const at = async (id: string, state: 'funded' | 'funding_onchain' | 'awaiting_claim', payoutSats: number) => {
+    await store.insertQuote({ ...baseQuote, id, paymentHash: id.padStart(64, '0'), payoutSats })
+    await store.transition(id, 'quoted', 'funded', {})
+    if (state === 'funded') return
+    await store.transition(id, 'funded', 'funding_onchain', {})
+    if (state === 'funding_onchain') return
+    await store.transition(id, 'funding_onchain', 'awaiting_claim', { funding_txid: 'tx', funding_vout: 0 })
+  }
+
+  it('sums the payouts of rows that have not funded yet', async () => {
+    await store.insertQuote({ ...baseQuote, id: 'q', paymentHash: 'q'.padStart(64, '0'), payoutSats: 1_000 })
+    await at('f', 'funded', 2_000)
+    await at('o', 'funding_onchain', 4_000)
+    expect(await store.owedPayoutSats()).toBe(7_000)
+  })
+
+  it('stops counting a row the moment it funds', async () => {
+    await at('a', 'awaiting_claim', 9_000)
+    expect(await store.owedPayoutSats()).toBe(0)
+  })
+
+  it('is zero with nothing owed, rather than null', async () => {
+    expect(await store.owedPayoutSats()).toBe(0)
+  })
+
+  it('counts the payout, not what the client locked', async () => {
+    await store.insertQuote({ ...baseQuote, id: 'p', paymentHash: 'p'.padStart(64, '0'), payoutSats: 1_234 })
+    expect(await store.owedPayoutSats()).toBe(1_234)
+    expect(await store.committedSats()).toBe(50_000)
+  })
+
+  // Pinned: a live state that does not owe has already spent.
+  it('splits the live states at the funding boundary', () => {
+    expect(NON_TERMINAL.filter((state) => !OWES_PAYOUT.includes(state))).toEqual(
+      EXPOSED.filter((state) => state !== 'funding_onchain'),
+    )
   })
 })

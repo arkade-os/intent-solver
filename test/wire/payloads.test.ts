@@ -44,6 +44,7 @@ const QUOTE_REFUSALS = [
   'coupled_invoice_mismatch',
   'duplicate_swap',
   'fee_consumes_swap',
+  'insufficient_float',
   'invalid_payout_address',
   'invalid_refund_address',
   'invoice_expired',

@@ -26,9 +26,23 @@ export interface Reservation {
   release(): void
 }
 
+const releasing = (undo: readonly (() => void)[]): Reservation => {
+  let released = false
+  return {
+    release: () => {
+      if (released) return
+      released = true
+      for (const one of undo) one()
+    },
+  }
+}
+
 export class AdmissionControl implements AdmissionStrategy {
   /** Sats claimed by quotes that have passed the cap check but not yet landed. */
   private reserved = 0
+
+  /** The same against the WALLET, apart from `reserved` because it is a different ceiling. */
+  private reservedFloat = 0
 
   /**
    * The same claim, per non-sats cap dimension. Apart from `reserved` rather than
@@ -63,18 +77,29 @@ export class AdmissionControl implements AdmissionStrategy {
       // asymmetric: `release()` subtracts whatever was added, so a NEGATIVE claim hands
       // out headroom that does not exist and every later quote sees a grown cap.
       if (!(sats > 0)) throw new RangeError(`reserve() needs a positive size, got ${sats}`)
-      const committed = await committedSats()
-      if (committed + this.reserved + sats > capSats) return null
-      this.reserved += sats
-      let released = false
-      return {
-        release: () => {
-          if (released) return
-          released = true
-          this.reserved -= sats
-        },
-      }
+      const claimed = this.claimExposure(sats, capSats, await committedSats())
+      return claimed === null ? null : releasing([claimed])
     })
+  }
+
+  /**
+   * The exposure half, for a caller already holding {@link serialise}. Split so
+   * {@link admit} decides BOTH ceilings in one critical section.
+   */
+  private claimExposure(sats: number, capSats: number, committed: number): (() => void) | null {
+    if (committed + this.reserved + sats > capSats) return null
+    this.reserved += sats
+    return () => {
+      this.reserved -= sats
+    }
+  }
+
+  private claimFloat(required: number, availableSats: number, owed: number): (() => void) | null {
+    if (owed + this.reservedFloat + required > availableSats) return null
+    this.reservedFloat += required
+    return () => {
+      this.reservedFloat -= required
+    }
   }
 
   /**
@@ -120,11 +145,34 @@ export class AdmissionControl implements AdmissionStrategy {
    * involved at all.
    */
   async admit(request: AdmissionRequest): Promise<Reservation | null> {
-    return this.reserve(request.giveSats, request.committedSats, request.capSats)
+    return this.serialise(async (): Promise<Reservation | null> => {
+      if (!(request.giveSats > 0)) throw new RangeError(`admit() needs a positive size, got ${request.giveSats}`)
+      const exposure = this.claimExposure(request.giveSats, request.capSats, await request.committedSats())
+      if (exposure === null) {
+        request.onRefused?.('exposure')
+        return null
+      }
+      const float = request.float
+      if (float === undefined) return releasing([exposure])
+      // Never read is the ONE case with nothing to compare against; a stale
+      // reading is not that case.
+      if (float.available === null) return releasing([exposure])
+      const claimed = this.claimFloat(float.requiredSats, float.available.sats, await float.owedSats())
+      if (claimed === null) {
+        exposure()
+        request.onRefused?.('float')
+        return null
+      }
+      return releasing([exposure, claimed])
+    })
   }
 
   get outstandingSats(): number {
     return this.reserved
+  }
+
+  get outstandingFloatSats(): number {
+    return this.reservedFloat
   }
 
   /** In-flight units in `dimension`. For assertions and diagnostics; not part of admission. */

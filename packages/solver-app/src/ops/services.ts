@@ -26,6 +26,7 @@ import { corridorSetFromDeps, readerSetFromDeps } from './corridorSet.js'
 import { loadConfig, swapDbPath, type Config } from '../config.js'
 import type { PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { onchainCorridorPricing, onchainFeeRateSampler } from './onchainPricing.js'
+import { onchainFloatSampler, type FloatSampler } from './floatSampler.js'
 import { claimSpendVsize, fundingTxVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 import { esploraChainTip } from '@arkade-os/solver-rails/onchain/chainTip.js'
 import { createEsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
@@ -240,6 +241,8 @@ export interface Services {
    */
   service?: SendSwapService
   onchainService?: OnchainSendSwapService
+  /** Exposed so `railWithdraw` can drop it: that spend leaves no row to count. */
+  onchainFloat?: FloatSampler
   receiveService?: ReceiveSwapService
   onchainReceiveService?: OnchainReceiveSwapService
   /**
@@ -583,6 +586,22 @@ export const createServices = async (
           staleAfterMs: config.onchainFeeRateStaleMs,
         })
 
+  // Cadence borrowed from the fee rate's knobs: same backend, same "not per
+  // quote" question. @see ops/floatSampler.ts
+  const onchainFloat =
+    rail === null
+      ? undefined
+      : onchainFloatSampler({
+          getBalance: () => rail.onchain.getBalance(),
+          refreshAfterMs: config.onchainFeeRateRefreshMs,
+          staleAfterMs: config.onchainFeeRateStaleMs,
+          onStale: (ageMs) => log(`onchain float: admitting against a reading ${Math.round(ageMs / 1000)}s old`),
+          onSharedPool: () =>
+            log(
+              'onchain float: this backend reports ONE pool shared with lightning, so the float gate is ADVISORY here — lightning spends it through paths that leave no swap row',
+            ),
+        })
+
   /** This corridor's pricing, or undefined to leave it exactly as it was. @see ops/onchainPricing.ts */
   const onchainPricingFor = (corridor: Corridor, vsize: number): PricingStrategy | undefined =>
     onchainCorridorPricing({
@@ -708,6 +727,22 @@ export const createServices = async (
         signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
         refundDestinationScript: onchainRefundDestinationScript!,
         peerStores: [store, receiveStore, onchainReceiveStore],
+        float: onchainFloat && {
+          read: () => onchainFloat.read(),
+          // Unreadable rate falls back to the same flat `networkFeePricing` bills,
+          // so the gate requires exactly what the quote charged.
+          fundingFeeSats: () => {
+            const rate = onchainFeeRate?.()
+            return rate === null || rate === undefined
+              ? policy.corridorFees['arkade:BTC->onchain:BTC'].flatSats
+              : Math.ceil(
+                  fundingTxVsize({
+                    network: ONCHAIN_NETWORKS[config.network],
+                    changeScript: onchainRefundDestinationScript!,
+                  }) * rate,
+                )
+          },
+        },
       })
     : undefined
   if (onchainService) {
@@ -1001,6 +1036,7 @@ export const createServices = async (
     service,
     store,
     onchainService,
+    onchainFloat,
     onchainStore,
     receiveService,
     receiveStore,
