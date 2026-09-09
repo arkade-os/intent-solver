@@ -1431,12 +1431,14 @@ internally anyway.
 pnpm test:e2e
 ```
 
-**These never gate a merge.** `pnpm test` is `vitest run --exclude test/e2e`, so
-the unit suite is unaffected by anything here. CI runs them only on demand:
-`.github/workflows/e2e.yml` stands its own arkade-regtest stack up, provisions a
-throwaway Arkade wallet and runs every file, triggered by the `run-e2e` label on
-a PR, a `workflow_dispatch`, or the nightly schedule. Locally, `pnpm test:e2e` is
-meant to be typed deliberately by someone who has just brought a stack up.
+`pnpm test` is `vitest run --exclude test/e2e`, so the unit suite is unaffected
+by anything here. `.github/workflows/e2e.yml` stands its own arkade-regtest stack
+up, provisions a throwaway Arkade wallet and runs every file — on every PR, on
+each push to `main`, on a `workflow_dispatch`, and on the nightly schedule.
+**Running is not blocking**: whether a red leg can stop a merge is a
+branch-protection setting on the repository, not something the workflow decides.
+Locally, `pnpm test:e2e` is meant to be typed deliberately by someone who has
+just brought a stack up.
 
 **One job per GROUP**, listed in `.github/e2e-groups.json`. A group is the set of
 corridors that can share one stack configuration, and the splits are forced by
