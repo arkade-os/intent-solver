@@ -279,6 +279,24 @@ for edge/TLS/rate-limiting.
 
 ## The admin console
 
+### Request refusals
+
+The **request refusals** tab (`#refusals`, data at `GET /api/rfq-refusals`)
+shows RFQs rejected before a swap exists, including schema and invoice checks.
+For example, a wallet may receive `unsupported_payload` while the console shows
+`cltv_too_large (final delta 624 > 288)`. Entries include the transport, request
+type, valid RFQ ID, UTC time and diagnostic detail. Use **refresh** after a retry.
+Relay status refusals appear here too; HTTP status lookups returning a normal
+404 are not treated as refusals.
+
+The latest 200 entries are held in memory and cleared on restart. Details are
+capped at 1024 characters; raw request bodies, invoices, refund addresses and
+client keys are not retained by the recorder. The public refusal payload stays
+unchanged. This endpoint uses the same access boundary as the rest of the admin
+console.
+
+### Access and deployment
+
 An operator console — swaps, quotes, settings, wallet, backend status, audit —
 on **its own port**, served from inside the running provider.
 
