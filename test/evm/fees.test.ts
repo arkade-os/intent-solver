@@ -51,6 +51,15 @@ describe('worstCaseBaseFee', () => {
     expect(() => worstCaseBaseFee(GWEI, -1)).toThrow(/non-negative integer/)
     expect(() => worstCaseBaseFee(GWEI, 1.5)).toThrow(/non-negative integer/)
   })
+
+  it('stops compounding once it is past a ceiling the caller will clamp to anyway', () => {
+    const ceiling = 100n * GWEI
+    expect(worstCaseBaseFee(GWEI, 200, ceiling)).toBe(worstCaseBaseFee(GWEI, 100_000, ceiling))
+  })
+
+  it('is unaffected by the bound when the window never reaches it', () => {
+    expect(worstCaseBaseFee(GWEI, 10, 1_000_000n * GWEI)).toBe(worstCaseBaseFee(GWEI, 10))
+  })
 })
 
 describe('priceTransaction', () => {
@@ -94,6 +103,12 @@ describe('priceTransaction', () => {
   it('always leaves room for the tip on top of the base fee', () => {
     const priced = priceTransaction({ ...base, blocksOfHeadroom: 5 })
     expect(priced.maxFeePerGas).toBeGreaterThan(worstCaseBaseFee(10n * GWEI, 5))
+  })
+
+  it('answers a window far past the ceiling identically to a short one that also passed it', () => {
+    expect(priceTransaction({ ...base, blocksOfHeadroom: 100_000 })).toEqual(
+      priceTransaction({ ...base, blocksOfHeadroom: 200 }),
+    )
   })
 
   it('refuses nonsense inputs', () => {

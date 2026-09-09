@@ -12,13 +12,18 @@
 import { describe, it, expect, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
-import { offerScriptFrom } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { offerExitDelay, offerScriptFrom } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { quotedOfferSettleFor, type QuotedOfferIntent } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import type { fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
-const derivation = { serverPubkey: xonly(2), emulatorPubkey: xonly(4), hrp: 'tark' }
+const derivation = {
+  serverPubkey: xonly(2),
+  emulatorPubkey: xonly(4),
+  hrp: 'tark',
+  exitDelay: offerExitDelay(605_184),
+}
 const USDA = '11'.repeat(34)
 const MAKER_SCRIPT = '5120' + 'cc'.repeat(32)
 const MAKER_KEY = hex.encode(xonly(3))

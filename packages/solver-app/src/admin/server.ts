@@ -20,6 +20,7 @@ import type { Services } from '../ops/services.js'
 import type { RelayProbeTarget } from './probes.js'
 import type { BidRecorder } from './bids.js'
 import { registerSwapRoutes } from './routes/swaps.js'
+import { registerOfferRoutes } from './routes/offers.js'
 import { registerStatusRoutes } from './routes/status.js'
 import { registerDiagnosticsRoutes } from './routes/diagnostics.js'
 import { registerSettingsRoutes } from './routes/settings.js'
@@ -83,6 +84,8 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   registerStatusRoutes(app, deps)
   registerDiagnosticsRoutes(app, deps)
   registerSwapRoutes(app, deps)
+  // Beside the swaps route, not inside it. @see routes/offers.ts
+  registerOfferRoutes(app, deps)
   registerSettingsRoutes(app, deps)
   registerMarketRoutes(app, deps)
   // BEFORE the actions route, and it must stay there: that route claims

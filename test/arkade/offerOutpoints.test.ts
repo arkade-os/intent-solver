@@ -41,7 +41,7 @@ describe('liveOfferOutpoints', () => {
   it('asks the indexer for that script and carries the outpoint through', async () => {
     const getVtxos = vi.fn(async () => ({
       vtxos: [vtxo({ vout: 2, assets: [{ assetId: USD, amount: 900n }] })],
-      page: { current: 0, total: 1 },
+      page: { current: 1, next: 1, total: 1 },
     }))
     const live = await liveOfferOutpoints(ctxWith(getVtxos), SCRIPT)
 
@@ -54,7 +54,7 @@ describe('liveOfferOutpoints', () => {
     const big = '115792089237316195423570985008687907853269984665640564039457584007913129639935'
     const getVtxos = vi.fn(async () => ({
       vtxos: [vtxo({ assets: [{ assetId: USD, amount: big }] })],
-      page: { current: 0, total: 1 },
+      page: { current: 1, next: 1, total: 1 },
     }))
     expect((await liveOfferOutpoints(ctxWith(getVtxos), SCRIPT))[0]!.assets[0]!.amount).toBe(BigInt(big))
   })
@@ -64,21 +64,21 @@ describe('liveOfferOutpoints', () => {
     // Kept, this outpoint would be handed to `fulfill` as the deposit to spend.
     const getVtxos = vi.fn(async () => ({
       vtxos: [vtxo({ isSpent: false, spentBy: 'b'.repeat(64) })],
-      page: { current: 0, total: 1 },
+      page: { current: 1, next: 1, total: 1 },
     }))
     expect(await liveOfferOutpoints(ctxWith(getVtxos), SCRIPT)).toEqual([])
   })
 
   it('drops a swept output', async () => {
-    const getVtxos = vi.fn(async () => ({ vtxos: [vtxo({ isSwept: true })], page: { current: 0, total: 1 } }))
+    const getVtxos = vi.fn(async () => ({ vtxos: [vtxo({ isSwept: true })], page: { current: 1, next: 1, total: 1 } }))
     expect(await liveOfferOutpoints(ctxWith(getVtxos), SCRIPT)).toEqual([])
   })
 
   it('reads every page, so the funded outpoint is not missed on page two', async () => {
     const getVtxos = vi
       .fn()
-      .mockResolvedValueOnce({ vtxos: [vtxo({ value: 300 })], page: { current: 0, total: 2 } })
-      .mockResolvedValueOnce({ vtxos: [vtxo({ value: 40_000, vout: 1 })], page: { current: 1, total: 2 } })
+      .mockResolvedValueOnce({ vtxos: [vtxo({ value: 300 })], page: { current: 1, next: 2, total: 2 } })
+      .mockResolvedValueOnce({ vtxos: [vtxo({ value: 40_000, vout: 1 })], page: { current: 2, next: 2, total: 2 } })
     const live = await liveOfferOutpoints(ctxWith(getVtxos), SCRIPT)
     expect(live.map((o) => o.sats)).toEqual([300n, 40_000n])
     expect(getVtxos).toHaveBeenCalledTimes(2)

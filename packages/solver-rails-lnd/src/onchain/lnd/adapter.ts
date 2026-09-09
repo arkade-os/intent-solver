@@ -14,16 +14,18 @@ import {
   authenticatedLndGrpc,
   broadcastChainTransaction,
   createChainAddress,
-  getChainBalance,
-  getChainFeeRate,
-  getChainTransactions,
-  getPendingChainBalance,
-  getWalletInfo,
+  getChainBalance as lndGetChainBalance,
+  getChainFeeRate as lndGetChainFeeRate,
+  getChainTransactions as lndGetChainTransactions,
+  getPendingChainBalance as lndGetPendingChainBalance,
+  getWalletInfo as lndGetWalletInfo,
   sendToChainAddress,
   subscribeToChainSpend,
   type AuthenticatedLnd,
 } from 'lightning'
 import { hex } from '@scure/base'
+import { Transaction } from '@scure/btc-signer'
+import { deadlined } from '../../deadline.js'
 import { toFundedOutputs, txOutcomeVia, witnessFromRawTx } from '@arkade-os/solver-rails-esplora/esplora.js'
 import {
   createEsploraClient,
@@ -39,11 +41,36 @@ import type {
   OnchainTxOutcome,
 } from '@arkade-os/solver-core/ports/onchain.js'
 
+// The reads, bounded. Every call site below is left as it was. @see ../../deadline.ts.
+const getChainBalance = deadlined('getChainBalance', lndGetChainBalance)
+const getChainFeeRate = deadlined('getChainFeeRate', lndGetChainFeeRate)
+const getChainTransactions = deadlined('getChainTransactions', lndGetChainTransactions)
+const getPendingChainBalance = deadlined('getPendingChainBalance', lndGetPendingChainBalance)
+const getWalletInfo = deadlined('getWalletInfo', lndGetWalletInfo)
+
 interface LndChainTx {
   id: string
   confirmation_count?: number
   output_addresses: string[]
   tokens: number
+  /** `raw_tx_hex`, when LND supplied one. */
+  transaction?: string
+}
+
+/**
+ * `output_addresses` is LND's `dest_addresses`, deprecated in its own proto for `output_details` — whose
+ * `OutputDetail` carries an explicit `output_index`, redundant if a list position were one. It lists
+ * ADDRESSES, so an output with none (`SCRIPT_TYPE_NULLDATA`, `NON_STANDARD`) shifts every later index.
+ */
+const assertFundingVout = (raw: string | undefined, vout: number, amountSats: number, txid: string): void => {
+  if (raw === undefined) return
+  const parsed = Transaction.fromRaw(hex.decode(raw), { allowUnknownInputs: true, allowUnknownOutputs: true })
+  const amount = vout < parsed.outputsLength ? parsed.getOutput(vout).amount : undefined
+  if (amount === BigInt(amountSats)) return
+  throw new Error(
+    `funding tx ${txid} output ${vout} does not pay ${amountSats} sats (${amount ?? 'no such output'}) — ` +
+      "LND's address list does not line up with the transaction, so the vout cannot be confirmed",
+  )
 }
 
 export interface AdapterConfig {
@@ -106,6 +133,7 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
     const tx = (transactions as unknown as LndChainTx[]).find((t) => t.id === result.id)
     const vout = tx?.output_addresses.indexOf(params.address) ?? -1
     if (vout === -1) throw new Error(`funding tx ${result.id} does not pay ${params.address} — cannot locate its vout`)
+    assertFundingVout(tx?.transaction, vout, params.amountSats, result.id)
     return { txid: result.id, vout }
   }
 

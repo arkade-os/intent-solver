@@ -71,6 +71,7 @@ import {
   type AssetMarketPricingView,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { applyOverrides } from '../admin/settings.js'
+import { createOfferRefusalTail, type OfferRefusalRecorder } from '../admin/offerRefusals.js'
 import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
@@ -86,7 +87,7 @@ import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.
 import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import { assetRfqMarketsFrom } from './assetRfqMarkets.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
-import { offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 
@@ -179,6 +180,8 @@ export interface Services {
    */
   offerStore: OfferFillStore | null
   assetOffers: AssetOfferService | null
+  /** Offers DECLINED. NOT nullable beside the two above: a refusal is not a row. */
+  offerRefusals: OfferRefusalRecorder
   /**
    * The atomic class reached over RFQ, or NULL when `ASSET_MARKETS` names no
    * asset (the default).
@@ -451,6 +454,7 @@ export const createServices = async (
   // required them to meet.
   if (servesOffers) assertMarketsPriced(policy.offerMarkets, assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
+  const offerRefusals = createOfferRefusalTail()
   const assetOffers = offerStore
     ? new AssetOfferService({
         store: offerStore,
@@ -476,6 +480,13 @@ export const createServices = async (
         // emulator meet; every guard on it lives in `arkade/offerSettle.ts`.
         settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
         onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
+        // Refusals are NOT errors, so they never reached `onError` above. The log
+        // line alone is invisible to an operator in a browser, so the console's
+        // tail is fed from the same handler.
+        onRefused: (outpoint, reason, detail) => {
+          log(`offer ${outpoint} refused: ${reason} — ${detail}`)
+          offerRefusals.record({ at: nowSeconds(), outpoint, reason, detail })
+        },
       })
     : null
 
@@ -500,6 +511,8 @@ export const createServices = async (
     // 32 bytes, so the wrong spelling compiles an address no client derives.
     emulatorPubkey: xOnlyPubkey(hex.decode(emulatorInfo.signerPubkey)),
     hrp: arkade.hrp,
+    // Boot-captured beside the two keys above, all three from one `getInfo()`.
+    exitDelay: offerExitDelay(arkade.advertisedExitDelay),
   }
   const assetRfqService = assetRfqStore
     ? new AssetRfqSwapService({
@@ -1019,6 +1032,7 @@ export const createServices = async (
     evmReceiveService,
     offerStore,
     assetOffers,
+    offerRefusals,
     assetRfqStore,
     assetRfqService,
     assetRfqMarkets,

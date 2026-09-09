@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { buildAdminApp, type AdminDeps } from '@arkade-os/solver-app/admin/server.js'
 import { readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
+import { PageRequestError } from '@arkade-os/solver-core/core/page.js'
 
 const emptyPage = { rows: [], nextCursor: null }
 
@@ -29,41 +30,45 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
     onchainReceiveStore: store(),
     ...over,
   }
+  const config = {
+    network: 'regtest',
+    lnBackend: 'fake',
+    emulatorUrl: 'http://emulator.test',
+    arkade: { arkServerUrl: 'http://ark.test' },
+    maxExposedSats: 300_000,
+    // The global outer bound each corridor is narrowed from. Present on the
+    // real Config, so a double without it reads `undefined.maxSats` and 500s
+    // the moment any route consults it.
+    limits: { minSats: 1_000, maxSats: 100_000 },
+    corridorEnabled: {
+      'arkade:BTC->lightning:BTC': true,
+      'lightning:BTC->arkade:BTC': true,
+      'arkade:BTC->onchain:BTC': true,
+      'onchain:BTC->arkade:BTC': true,
+    },
+    corridorFees: {
+      'arkade:BTC->lightning:BTC': { bps: 0, flatSats: 0 },
+      'lightning:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
+      'arkade:BTC->onchain:BTC': { bps: 0, flatSats: 0 },
+      'onchain:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
+    },
+    corridorLimits: {
+      'arkade:BTC->lightning:BTC': { minSats: 1_000, maxSats: 100_000 },
+      'lightning:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
+      'arkade:BTC->onchain:BTC': { minSats: 1_000, maxSats: 100_000 },
+      'onchain:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
+    },
+  }
   return {
     // What the process is currently failing on, beside what needs a human.
     tickErrors: { failing: [] },
-    config: {
-      network: 'regtest',
-      lnBackend: 'fake',
-      emulatorUrl: 'http://emulator.test',
-      arkade: { arkServerUrl: 'http://ark.test' },
-      maxExposedSats: 300_000,
-      // The global outer bound each corridor is narrowed from. Present on the
-      // real Config, so a double without it reads `undefined.maxSats` and 500s
-      // the moment any route consults it.
-      limits: { minSats: 1_000, maxSats: 100_000 },
-      corridorEnabled: {
-        'arkade:BTC->lightning:BTC': true,
-        'lightning:BTC->arkade:BTC': true,
-        'arkade:BTC->onchain:BTC': true,
-        'onchain:BTC->arkade:BTC': true,
-      },
-      corridorFees: {
-        'arkade:BTC->lightning:BTC': { bps: 0, flatSats: 0 },
-        'lightning:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
-        'arkade:BTC->onchain:BTC': { bps: 0, flatSats: 0 },
-        'onchain:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
-      },
-      corridorLimits: {
-        'arkade:BTC->lightning:BTC': { minSats: 1_000, maxSats: 100_000 },
-        'lightning:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
-        'arkade:BTC->onchain:BTC': { minSats: 1_000, maxSats: 100_000 },
-        'onchain:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
-      },
-    },
+    config,
+    // Boot snapshots, equal to the store so the quiet case is the default.
+    policy: config,
+    assetMarkets: [],
     ...stores,
     readers: readerSetFromDeps(stores as unknown as FlatCorridorDeps),
-    adminStore: { getOverrides: vi.fn().mockResolvedValue({}) },
+    adminStore: { getOverrides: vi.fn().mockResolvedValue({}), listMarkets: vi.fn().mockResolvedValue([]) },
     bootOverrides: {},
     ln: { getBalance: vi.fn().mockResolvedValue({ availableSats: 500_000, incomingSats: 0 }) },
     arkade: {
@@ -120,10 +125,20 @@ describe('GET /api/swaps', () => {
   })
 
   it('turns a bad limit into 400, not an internal error', async () => {
-    const failing = store({ page: vi.fn().mockRejectedValue(new Error('page limit must be a positive integer')) })
+    // Typed: every real store pages through `clampLimit`, so a bare Error doubles nothing.
+    const failing = store({
+      page: vi.fn().mockRejectedValue(new PageRequestError('page limit must be a positive integer')),
+    })
     const response = await get('/api/swaps?limit=-1', { store: failing })
     expect(response.status).toBe(400)
     expect(await response.json()).toMatchObject({ error: 'bad_request' })
+  })
+
+  it('leaves a store fault as a 500, so a broken database is not read as a bad request', async () => {
+    const failing = store({ page: vi.fn().mockRejectedValue(new Error('SQLITE_IOERR: disk I/O error')) })
+    const response = await get('/api/swaps?limit=10', { store: failing })
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ error: 'internal' })
   })
 
   it('sorts newest first across corridors', async () => {

@@ -49,6 +49,17 @@ import { openArkade, SETUP_TIMEOUT_MS, type E2eArkade } from './support/stack.js
 
 const p2tr = (xonly: Uint8Array): Uint8Array => Uint8Array.from([0x51, 0x20, ...xonly])
 
+/**
+ * Shelling out to the miner and then waiting for Esplora to index the result
+ * does not fit vitest's 5s default, which is what these two tests were failing
+ * on once `mineBlocks` stopped returning a tip that predated the mine.
+ *
+ * Strictly ABOVE the helper's own worst case (30s pre-poll + 120s mine + 30s
+ * post-poll = 180s): at exactly 180s the test dies while `mineBlocks` is still
+ * running, and "Test timed out" hides the helper's own error.
+ */
+const MINING_TIMEOUT_MS = 5 * 60_000
+
 describe('block-typed timelocks against a live arkd', () => {
   let arkade: E2eArkade
   let advertisedExitDelay: number
@@ -99,8 +110,11 @@ describe('block-typed timelocks against a live arkd', () => {
     const refundLocktime = absoluteLocktimeIn(now + 2 * 60 * 60, 'blocks', { now, tipHeight: tipHeight! })
     expect(refundLocktime).toBeGreaterThan(tipHeight!)
 
-    const info = await arkade.ctx.wallet.arkProvider.getInfo()
-    const serverKey = hex.decode(info.signerPubkey)
+    // The wallet's normalised key, as `assetLockup.e2e.test.ts` uses. arkd
+    // advertises `signerPubkey` COMPRESSED, and decoding it raw hands
+    // `VHTLC.ScriptV2` 33 bytes where it validates 32: "Invalid public key
+    // length (server)". Every shipped caller narrows it first.
+    const serverKey = arkade.ctx.wallet.arkServerPublicKey
     const own = await arkade.ctx.identity.xOnlyPublicKey()
 
     const script = new CovenantSwapScript({
@@ -127,38 +141,46 @@ describe('block-typed timelocks against a live arkd', () => {
     expect(script.pkScript).toHaveLength(34)
   })
 
-  it('matures a block-typed deadline by MINING, with the wall clock unmoved', async () => {
-    if (relativeDelayFrom(advertisedExitDelay).unit !== 'blocks') return
-    const before = await chainTip()
-    expect(before).not.toBeNull()
+  it(
+    'matures a block-typed deadline by MINING, with the wall clock unmoved',
+    async () => {
+      if (relativeDelayFrom(advertisedExitDelay).unit !== 'blocks') return
+      const before = await chainTip()
+      expect(before).not.toBeNull()
 
-    const now = Math.floor(Date.now() / 1000)
-    // A deadline three blocks out. Nothing about the clock will move it.
-    const deadline = before! + 3
-    expect(absoluteLocktimeReached(deadline, { now, tipHeight: before! })).toBe(false)
+      const now = Math.floor(Date.now() / 1000)
+      // A deadline three blocks out. Nothing about the clock will move it.
+      const deadline = before! + 3
+      expect(absoluteLocktimeReached(deadline, { now, tipHeight: before! })).toBe(false)
 
-    const after = await mineBlocks(4)
-    expect(after).not.toBeNull()
-    expect(after!).toBeGreaterThanOrEqual(deadline)
+      const after = await mineBlocks(4)
+      expect(after).not.toBeNull()
+      expect(after!).toBeGreaterThanOrEqual(deadline)
 
-    // Same `now` deliberately — the clock is held still to prove the deadline
-    // moved because BLOCKS arrived, which is the property regtest cannot get
-    // from a seconds-typed timelock at any amount of mining.
-    expect(absoluteLocktimeReached(deadline, { now, tipHeight: after! })).toBe(true)
+      // Same `now` deliberately — the clock is held still to prove the deadline
+      // moved because BLOCKS arrived, which is the property regtest cannot get
+      // from a seconds-typed timelock at any amount of mining.
+      expect(absoluteLocktimeReached(deadline, { now, tipHeight: after! })).toBe(true)
 
-    // And the seconds projection tracks it, for the duration questions that
-    // still have to be answered in seconds.
-    expect(absoluteLocktimeSeconds(deadline, { now, tipHeight: after! })).toBeLessThanOrEqual(now)
-  })
+      // And the seconds projection tracks it, for the duration questions that
+      // still have to be answered in seconds.
+      expect(absoluteLocktimeSeconds(deadline, { now, tipHeight: after! })).toBeLessThanOrEqual(now)
+    },
+    MINING_TIMEOUT_MS,
+  )
 
-  it('does not mature a SECONDS deadline by mining, which is why block mode exists', async () => {
-    const now = Math.floor(Date.now() / 1000)
-    const secondsDeadline = now + 60 * 60
-    const after = await mineBlocks(6)
-    expect(after).not.toBeNull()
-    // Six blocks, and the seconds-typed deadline has not moved an inch.
-    expect(absoluteLocktimeReached(secondsDeadline, { now, tipHeight: after! })).toBe(false)
-    expect(absoluteLocktimeSeconds(secondsDeadline, { now, tipHeight: after! })).toBe(secondsDeadline)
-    expect(NOMINAL_BLOCK_SECONDS).toBe(600)
-  })
+  it(
+    'does not mature a SECONDS deadline by mining, which is why block mode exists',
+    async () => {
+      const now = Math.floor(Date.now() / 1000)
+      const secondsDeadline = now + 60 * 60
+      const after = await mineBlocks(6)
+      expect(after).not.toBeNull()
+      // Six blocks, and the seconds-typed deadline has not moved an inch.
+      expect(absoluteLocktimeReached(secondsDeadline, { now, tipHeight: after! })).toBe(false)
+      expect(absoluteLocktimeSeconds(secondsDeadline, { now, tipHeight: after! })).toBe(secondsDeadline)
+      expect(NOMINAL_BLOCK_SECONDS).toBe(600)
+    },
+    MINING_TIMEOUT_MS,
+  )
 })

@@ -132,6 +132,32 @@ describe('evmCorridorPolicies', () => {
     expect(policies[1]!.enabled).toBe(true)
   })
 
+  it.each(['FALSE', 'False', '0', '1', 'no', 'off', 'yes', 'flase'])(
+    'refuses EVM_SEND_USDC_ENABLED=%s rather than reading it as on',
+    (raw) => {
+      const call = () => evmCorridorPolicies(tokens, BASE, env({ EVM_SEND_USDC_ENABLED: raw }))
+      expect(call).toThrow(/EVM_SEND_USDC_ENABLED must be 'true' or 'false'/)
+      expect(call).toThrow(JSON.stringify(raw))
+    },
+  )
+
+  it('names the direction that is wrong, not the other one', () => {
+    expect(() => evmCorridorPolicies(tokens, BASE, env({ EVM_RECEIVE_USDC_ENABLED: 'no' }))).toThrow(
+      /EVM_RECEIVE_USDC_ENABLED must be 'true' or 'false'/,
+    )
+  })
+
+  it.each([undefined, '', '   '])('reads %j as unset, so the direction stays open', (raw) => {
+    expect(
+      evmCorridorPolicies(tokens, BASE, env(raw === undefined ? {} : { EVM_SEND_USDC_ENABLED: raw }))[0]!.enabled,
+    ).toBe(true)
+  })
+
+  it('trims before comparing, so a padded value is not a typo', () => {
+    expect(evmCorridorPolicies(tokens, BASE, env({ EVM_SEND_USDC_ENABLED: ' false ' }))[0]!.enabled).toBe(false)
+    expect(evmCorridorPolicies(tokens, BASE, env({ EVM_SEND_USDC_ENABLED: ' true ' }))[0]!.enabled).toBe(true)
+  })
+
   it('refuses nonsense rather than defaulting past it', () => {
     expect(() => evmCorridorPolicies(tokens, BASE, env({ EVM_SEND_USDC_MAX_SATS: 'lots' }))).toThrow(/positive integer/)
     expect(() => evmCorridorPolicies(tokens, BASE, env({ EVM_SEND_USDC_FEE_BPS: '20000' }))).toThrow(

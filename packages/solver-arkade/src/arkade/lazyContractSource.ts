@@ -1,9 +1,10 @@
-import type { ContractEvent, ContractSource, ContractWatchFilter } from './lockupWatcher.js'
+import type { ContractEvent, ContractSource } from './lockupWatcher.js'
 
-/** The manager as this file uses it — the same slice {@link ContractSource} exposes. */
+/** The manager as this file uses it; the watch pair is optional as the SDK declares it. */
 export interface ContractManagerLike {
   onContractEvent(callback: (event: ContractEvent) => void): () => void
-  getContracts(filter?: { watch?: ContractWatchFilter[] }): Promise<{ script: string }[]>
+  watchScript?(script: string, options?: { label?: string }): Promise<void>
+  unwatchScript?(script: string): Promise<void>
 }
 
 export interface LazyContractSourceDeps {
@@ -12,8 +13,9 @@ export interface LazyContractSourceDeps {
    *
    * That is deliberate: it is the call that reconciles, so re-calling it is
    * what a retry has to do. The SDK clears its in-flight promise when
-   * initialization throws (checked against 0.4.66), so a later call re-runs
-   * initialization instead of handing back the failure it already produced.
+   * initialization throws (checked against 0.4.71), so a later call re-runs
+   * initialization instead of handing back the failure it already produced. On
+   * success it caches, so watching N scripts costs one init and N-1 field reads.
    */
   getContractManager: () => Promise<ContractManagerLike>
   /** A failed attach, with how long until the next attempt. */
@@ -86,7 +88,17 @@ export const lazyContractSource = (deps: LazyContractSourceDeps): ContractSource
         detach?.()
       }
     },
-    getContracts: async (filter?: { watch?: ContractWatchFilter[] }): Promise<{ script: string }[]> =>
-      (await deps.getContractManager()).getContracts(filter),
+    watchScript: async (script: string): Promise<void> => {
+      const manager = await deps.getContractManager()
+      // Refused, not skipped: watching less than asked, quietly, is the failure.
+      if (!manager.watchScript) throw new Error('contract manager cannot watch scripts (needs @arkade-os/sdk 0.4.71)')
+      await manager.watchScript(script, { label: 'lockup' })
+    },
+    unwatchScript: async (script: string): Promise<void> => {
+      const manager = await deps.getContractManager()
+      // `?.` and not the guard above, deliberately: a missed unwatch over-watches,
+      // a missed watch misses fundings. Only the second is worth an error.
+      await manager.unwatchScript?.(script)
+    },
   }
 }

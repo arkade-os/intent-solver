@@ -85,12 +85,14 @@ export interface FeeInputs {
  * accident: `ceil(parent * 9 / 8)` overshoots the protocol wherever `parent` is
  * not a multiple of 8 — 15 would give 17 where the chain can only reach 16 —
  * and compounds that error every block of the window.
+ * `stopAbove` bounds the WORK, never the result: past a ceiling the caller clamps to, more iterations cannot move it.
  */
-export const worstCaseBaseFee = (baseFeePerGas: bigint, blocks: number): bigint => {
+export const worstCaseBaseFee = (baseFeePerGas: bigint, blocks: number, stopAbove?: bigint): bigint => {
   if (baseFeePerGas < 0n) throw new Error(`baseFeePerGas must not be negative, got ${baseFeePerGas}`)
   if (!Number.isInteger(blocks) || blocks < 0) throw new Error(`blocks must be a non-negative integer, got ${blocks}`)
   let fee = baseFeePerGas
   for (let i = 0; i < blocks; i++) {
+    if (stopAbove !== undefined && fee > stopAbove) return fee
     const rise = fee / MAX_RISE_DENOMINATOR
     fee += rise > MIN_RISE ? rise : MIN_RISE
   }
@@ -113,7 +115,8 @@ export const priceTransaction = (inputs: FeeInputs): PricedFee => {
   if (tipPerGas < 0n) throw new Error(`tipPerGas must not be negative, got ${tipPerGas}`)
   if (maxFeeCeilingPerGas <= 0n) throw new Error(`maxFeeCeilingPerGas must be positive, got ${maxFeeCeilingPerGas}`)
 
-  const wanted = worstCaseBaseFee(baseFeePerGas, blocksOfHeadroom) + tipPerGas
+  // The ceiling doubles as the compounding bound; the answer is identical either way.
+  const wanted = worstCaseBaseFee(baseFeePerGas, blocksOfHeadroom, maxFeeCeilingPerGas) + tipPerGas
   const capped = wanted > maxFeeCeilingPerGas
   const maxFeePerGas = capped ? maxFeeCeilingPerGas : wanted
 

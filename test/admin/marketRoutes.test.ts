@@ -38,7 +38,13 @@ const build = async (opts: { active?: { base: string | null; quote: string | nul
     if (opts.feedFails) throw new Error('HTTP 503 Service Unavailable')
     return priceFrom('100000')
   })
-  const services = { config: {}, adminStore, assetMarkets: opts.active ?? [] } as never
+  // `policy` carries the boot lists the served-by column is derived from.
+  const services = {
+    config: {},
+    policy: { offerMarkets: [], assetRfqTokens: [] },
+    adminStore,
+    assetMarkets: opts.active ?? [],
+  } as never
   const app = buildAdminApp({ services, startedAt: 1, mode: 'relay', fetchPrice })
   return { app, adminStore, fetchPrice }
 }

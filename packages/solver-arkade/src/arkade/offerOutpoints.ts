@@ -17,6 +17,7 @@
  */
 import { hasTerminalSpend } from '@arkade-os/sdk'
 import type { ArkadeContext } from './wallet.js'
+import { vtxoPages } from './indexerPaging.js'
 
 /** One live output at an offer's script. Satisfies the corridor's `ObservedDeposit`. */
 export interface OfferOutpoint {
@@ -39,14 +40,7 @@ export const liveOfferOutpoints = async (
   pkScriptHex: string,
 ): Promise<OfferOutpoint[]> => {
   const outpoints: OfferOutpoint[] = []
-  let pageIndex = 0
-  for (;;) {
-    const { vtxos, page } = await ctx.wallet.indexerProvider.getVtxos({
-      scripts: [pkScriptHex],
-      pageIndex,
-      pageSize: 500,
-    })
-    const batch = vtxos ?? []
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
     for (const vtxo of batch) {
       if (hasTerminalSpend(vtxo) || vtxo.isSwept === true) continue
       const carried = (vtxo as { assets?: { assetId: string; amount: bigint | string }[] }).assets ?? []
@@ -60,8 +54,6 @@ export const liveOfferOutpoints = async (
         assets: carried.map((entry) => ({ assetId: entry.assetId, amount: BigInt(entry.amount) })),
       })
     }
-    if (batch.length === 0 || !page || page.current + 1 >= page.total) break
-    pageIndex = page.current + 1
   }
   return outpoints
 }

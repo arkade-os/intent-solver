@@ -18,6 +18,7 @@ import { FakeOnchainBackend } from '@arkade-os/solver-rails-fake/onchain/fake/ba
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
 import type { OnchainReceiveArkadeOps } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
+import { FundNotSubmittedError } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import type { CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 
 const keyBytes = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
@@ -785,6 +786,49 @@ describe('OnchainReceiveSwapService', () => {
       const row = await service.tick(swap.id)
       expect(row.state).toBe('awaiting_claim')
       expect(funded).toHaveLength(1) // still just the one broadcast
+    })
+
+    it('keeps the lease when fund() fails ambiguously, and does not re-fund while the indexer lags', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      const swap = outcome.swap
+      deps.onchain.receiveExternal({ address: swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+      await store.transition(swap.id, 'quoted', 'awaiting_confirmations', {})
+      await store.transition(swap.id, 'awaiting_confirmations', 'funding_arkade', {})
+
+      const attempts: string[] = []
+      deps.arkadeFake.arkade.fund = async (params) => {
+        attempts.push(params.address)
+        throw new Error('ark server response lost')
+      }
+
+      await expect(service.tick(swap.id)).rejects.toThrow('ark server response lost')
+      expect((await store.get(swap.id)).fundStartedAt).not.toBeNull()
+
+      await service.tick(swap.id)
+      expect(attempts).toHaveLength(1)
+    })
+
+    it('hands the lease back when fund() proves it submitted nothing', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      const swap = outcome.swap
+      deps.onchain.receiveExternal({ address: swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+      await store.transition(swap.id, 'quoted', 'awaiting_confirmations', {})
+      await store.transition(swap.id, 'awaiting_confirmations', 'funding_arkade', {})
+
+      const originalFund = deps.arkadeFake.arkade.fund.bind(deps.arkadeFake.arkade)
+      deps.arkadeFake.arkade.fund = async () => {
+        throw new FundNotSubmittedError('refusing to fund lockup of 49450 sats: insufficient spendable float')
+      }
+
+      await expect(service.tick(swap.id)).rejects.toThrow('insufficient spendable float')
+      expect((await store.get(swap.id)).fundStartedAt).toBeNull()
+
+      deps.arkadeFake.arkade.fund = originalFund
+      expect((await service.tick(swap.id)).state).toBe('awaiting_claim')
     })
   })
 

@@ -12,6 +12,10 @@ import type { Hono } from 'hono'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
 import { applyOverrides, pendingRestartKeys } from '../settings.js'
+import { marketDrift, settingsDrift } from '../drift.js'
+import { servedBy } from '../servedBy.js'
+import { assetMarketKey, type AssetMarketBounds } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import type { AssetMarketRow } from '../db.js'
 import { probeBackends } from '../probes.js'
 import { consoleBalance, type AssetDetailSource } from '../assets.js'
 import { poolPlan } from '../../ops/pool.js'
@@ -76,6 +80,33 @@ const attempt = async <T>(
  */
 const STUCK_PER_CORRIDOR = 25
 
+// Base units as strings, `decimals` a label rather than applied — the rule the
+// balances on this page already follow.
+const boundsJson = (bounds: AssetMarketBounds | null) =>
+  bounds === null ? null : { min: String(bounds.min), max: String(bounds.max) }
+
+// The configured markets, on the page that showed four BTC corridors and no
+// market at all. No `live`/`exposed`: `exposed` exists on neither asset path (an
+// offer fill has no HTLC, deadline or refund), and `live` means different things
+// on each — a `fillable` offer is someone else's, an RFQ row is ours.
+const marketCards = (rows: readonly AssetMarketRow[], services: AdminDeps['services']) => {
+  const active = new Set(services.assetMarkets.map((market) => assetMarketKey(market.base, market.quote)))
+  return rows.map((row) => ({
+    key: row.marketKey,
+    base: row.base,
+    quote: row.quote,
+    baseDecimals: row.baseDecimals,
+    quoteDecimals: row.quoteDecimals,
+    feeBps: row.feeBps,
+    toleranceBps: row.toleranceBps,
+    enabled: row.enabled,
+    active: active.has(row.marketKey),
+    servedBy: servedBy(row, services.policy),
+    sellBase: boundsJson(row.sellBase),
+    buyBase: boundsJson(row.buyBase),
+  }))
+}
+
 const stuckSwaps = async (deps: AdminDeps): Promise<{ rows: AdminSwap[]; total: number }> => {
   const { services } = deps
   // Newest first: `created_at` ascending buries the most recently parked rows —
@@ -125,6 +156,7 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
     const { services } = deps
     const overrides = await services.adminStore.getOverrides()
     const effective = applyOverrides(services.config, overrides)
+    const storedMarkets = await services.adminStore.listMarkets()
     const live = await liveSwaps(deps)
     const stuck = await stuckSwaps(deps)
 
@@ -151,10 +183,14 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       // copy that will eventually point a mainnet swap at a signet explorer.
       explorers: NETWORKS[services.config.network].explorers,
       uptimeSeconds: Math.max(0, (deps.now?.() ?? Math.floor(Date.now() / 1000)) - deps.startedAt),
-      /** Here rather than on /api/settings so the console can badge every panel. */
-      pendingRestart: pendingRestartKeys(services.bootOverrides, overrides),
+      /** Overrides AND markets: both are resolved once at boot. @see admin/drift.ts */
+      pendingRestart: [
+        ...settingsDrift(services.policy, effective, pendingRestartKeys(services.bootOverrides, overrides)),
+        ...marketDrift(services.assetMarkets, storedMarkets),
+      ],
       restartEnabled: services.config.adminRestartEnabled,
       providerPubkey: services.providerPubkey,
+      markets: marketCards(storedMarkets, services),
       corridors: CORRIDORS.map((corridor) => ({
         corridor,
         enabled: effective.corridorEnabled[corridor],

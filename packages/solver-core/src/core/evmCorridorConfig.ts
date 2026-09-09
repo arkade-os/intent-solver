@@ -17,6 +17,7 @@
  * other leg's units differ per token.
  */
 
+import { corridorEnabledFrom } from './corridorEnabled.js'
 import { evmCorridorFor, type EvmCorridor } from './corridorPolicy.js'
 import type { Fee } from './corridorPolicy.js'
 import type { Limits } from './limits.js'
@@ -193,6 +194,7 @@ export const evmCorridorPolicies = (
         throw new Error(stem + '_MIN_UNITS may not exceed ' + stem + '_MAX_UNITS')
       }
 
+      const enabledName = stem + '_ENABLED'
       return {
         corridor: evmCorridorFor(token.address, direction),
         token,
@@ -202,7 +204,7 @@ export const evmCorridorPolicies = (
         fee: { bps: component('FEE_BPS', 10_000), flatSats: component('FEE_FLAT_SATS', 1_000_000) },
         // Enabled unless explicitly switched off, matching the four BTC
         // corridors: listing a token IS the opt-in.
-        enabled: (read(stem + '_ENABLED')?.trim() ?? 'true') !== 'false',
+        enabled: corridorEnabledFrom(enabledName, read(enabledName)),
       }
     }),
   )
