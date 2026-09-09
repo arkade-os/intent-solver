@@ -264,6 +264,10 @@ export const RFQ_REFUSAL_REASONS: Record<string, RfqRefusalReason> = {
   // internally only so the logs say which coupling gate refused.
   coupled_invoice_mismatch: 'quote_conflict',
   provider_at_capacity: 'exposure_cap',
+  // The float, not the cap. Same wire code for the reason `insufficient_inventory`
+  // takes it: the corridor would quote this again once the wallet is funded.
+  // Distinct internally because the two send an operator to different places.
+  insufficient_float: 'exposure_cap',
   unsupported_pair: 'unsupported_pair',
   quote_conflict: 'quote_conflict',
   pricing_unavailable: 'pricing_unavailable',

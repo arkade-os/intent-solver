@@ -52,6 +52,11 @@ export const EXPOSED: readonly OnchainSendSwapState[] = [
   'refunding_onchain',
 ]
 
+// States whose payout the float has yet to cover. The split is the funding
+// boundary: past it the payout is already broadcast, and counting it twice
+// would reserve the same sats twice.
+export const OWES_PAYOUT: readonly OnchainSendSwapState[] = ['quoted', 'funded', 'funding_onchain']
+
 const LEGAL_EDGES: Record<OnchainSendSwapState, readonly OnchainSendSwapState[]> = {
   quoted: ['funded', 'refused'],
   funded: ['funding_onchain', 'refused'],
@@ -411,6 +416,20 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
         await this.driver.exec(`ALTER TABLE send_onchain_swap ADD COLUMN ${column} ${type}`)
       }
     }
+  }
+
+  /**
+   * Not `committedSats`, which sums `amount_sats` — the client's lockup, never
+   * the solver's to spend — over every live state. COALESCE mirrors `toRow`.
+   */
+  async owedPayoutSats(): Promise<number> {
+    const placeholders = OWES_PAYOUT.map(() => '?').join(',')
+    const row = await this.driver.get<{ total: number }>(
+      `SELECT COALESCE(SUM(COALESCE(payout_sats, amount_sats)), 0) AS total
+         FROM send_onchain_swap WHERE state IN (${placeholders})`,
+      [...OWES_PAYOUT],
+    )
+    return Number(row?.total ?? 0)
   }
 
   /**

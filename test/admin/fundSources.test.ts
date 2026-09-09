@@ -360,6 +360,20 @@ describe('the lightning rail source', () => {
     expect(byLabel['onchain confirmed']!.amount).toBe('1000000')
   })
 
+  it('drops the float reading after a withdrawal, which leaves no row to count', async () => {
+    const invalidate = vi.fn()
+    const services = fakeServices({ onchainFloat: { read: () => ({ sats: 1_000_000, ageMs: 0 }), invalidate } })
+    await railFundSource(services)!.withdraw!({ address: REGTEST_ADDRESS, amount: '1000' })
+    expect(invalidate).toHaveBeenCalledTimes(1)
+  })
+
+  it('withdraws unchanged on a deployment running no onchain corridor', async () => {
+    const services = fakeServices()
+    await expect(
+      railFundSource(services)!.withdraw!({ address: REGTEST_ADDRESS, amount: '1000' }),
+    ).resolves.toMatchObject({ amount: '1000' })
+  })
+
   it('warns about a shared pool only when the backend says so', async () => {
     // Three cases because ABSENT and explicit FALSE are different facts that
     // must produce the same silence: the flag is optional on the port, so

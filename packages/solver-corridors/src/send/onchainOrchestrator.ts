@@ -15,7 +15,7 @@
  */
 
 import { hex } from '@scure/base'
-import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
+import type { AdmissionStrategy, FloatRequirement } from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { RFQ_PAIR_ONCHAIN_SEND } from '../wire/onchainPayloads.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { ArkAddress } from '@arkade-os/sdk'
@@ -70,6 +70,11 @@ export interface OnchainSendServiceDeps {
    * only its own concurrency, which is the narrower half of the problem.
    */
   admission: AdmissionStrategy
+  /** The wallet this corridor pays from. Absent leaves admission at the cap alone. */
+  float?: {
+    read(): { sats: number; ageMs: number } | null
+    fundingFeeSats(): number
+  }
   /** Signs the solver's own onchain refund spend — matches `ArkadeContext.identity`'s shape exactly. */
   signer: OnchainSigner
   /** Where the solver's own refunded onchain sats go. A P2TR pkScript the solver controls. */
@@ -97,6 +102,7 @@ export type QuoteRefusal =
   | 'payout_below_dust'
   | 'duplicate_swap'
   | 'provider_at_capacity'
+  | 'insufficient_float'
   | 'invalid_refund_address'
 
 export type QuoteOutcome =
@@ -294,14 +300,19 @@ export class OnchainSendSwapService {
     // visible to `totalCommitted()`, and until it lands a concurrent quote
     // would read the same headroom and take it too (#105). Held until the
     // insert succeeds, and handed back on every path that does not insert.
+    const refusal: { ceiling?: 'exposure' | 'float' } = {}
     const reservation = await this.admission.admit({
       pair: RFQ_PAIR_ONCHAIN_SEND,
       giveSats: giveSats,
       capSats: this.deps.maxExposedSats,
       committedSats: this.deps.totalCommitted,
+      float: this.floatRequirement(payoutSats),
+      onRefused: (ceiling) => {
+        refusal.ceiling = ceiling
+      },
     })
     if (reservation === null) {
-      return { accepted: false, reason: 'provider_at_capacity' }
+      return { accepted: false, reason: refusal.ceiling === 'float' ? 'insufficient_float' : 'provider_at_capacity' }
     }
     try {
       const serverKey = hex.decode(arkade.serverPubkey)
@@ -390,6 +401,30 @@ export class OnchainSendSwapService {
       // same sats twice; on failure nothing was committed at all.
       reservation.release()
     }
+  }
+
+  // Payout PLUS the broadcast fee: the payout alone would admit a swap that
+  // then fails inside `fund()`, the same defect one layer up.
+  private floatRequirement(payoutSats: number): FloatRequirement | undefined {
+    const float = this.deps.float
+    if (!float) return undefined
+    return {
+      requiredSats: payoutSats + float.fundingFeeSats(),
+      available: float.read(),
+      owedSats: () => this.deps.store.owedPayoutSats(),
+    }
+  }
+
+  /**
+   * The smallest payout this corridor would fund — the floor under a float that
+   * can serve at all. Answered here because a second derivation in a caller
+   * would drift from what admission actually accepts.
+   */
+  minimumPayoutSats(): number {
+    return Math.max(
+      ONCHAIN_DUST_SATS,
+      this.pricing.payoutFor({ pair: RFQ_PAIR_ONCHAIN_SEND, giveSats: this.deps.limits.minSats }),
+    )
   }
 
   async tick(id: string): Promise<OnchainSendSwapRow> {

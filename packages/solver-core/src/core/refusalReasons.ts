@@ -41,6 +41,7 @@ export interface RefusalExplanation {
 type OrchestratorRefusal =
   | 'duplicate_swap'
   | 'provider_at_capacity'
+  | 'insufficient_float'
   | 'invalid_refund_address'
   | 'invalid_payout_address'
   | 'rate_limited'
@@ -146,6 +147,12 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
       'Another live swap already holds this payment hash, in this corridor or a peer one. Two lockups and one payment means whichever client loses the race is claimed with no refund.',
     whatToDo:
       'Nothing. Check the other row if the client insists they only asked once — a live RECEIVE swap on the same hash is us being asked to pay our own hold invoice.',
+  },
+  insufficient_float: {
+    meaning:
+      "The onchain wallet does not hold enough CONFIRMED sats to fund this swap's HTLC and pay to broadcast it, counting payouts already owed by swaps that have not funded yet.",
+    whatToDo:
+      "Deposit into the rail. Unlike `provider_at_capacity` there is no cap to relax and no backlog to clear: the corridor keeps refusing until the wallet is funded. The console's onchain probe reports the balance beside the floor.",
   },
   provider_at_capacity: {
     meaning: 'Serving this swap would push total exposure across live swaps past MAX_EXPOSED_SATS.',
