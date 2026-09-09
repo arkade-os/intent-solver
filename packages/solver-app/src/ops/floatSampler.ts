@@ -40,15 +40,21 @@ export const onchainFloatSampler = (input: {
   let inFlight = false
   let announced = false
   let sharedAnnounced = false
+  let generation = 0
 
   const start = (): void => {
     // One at a time, or a burst of quotes past the refresh age each start their
     // own fetch — the amplification a synchronous read exists to prevent.
     if (inFlight) return
     inFlight = true
+    // A read that started before `invalidate()` lands after it and would restore
+    // the pre-withdrawal balance dated fresh — which the null check cannot catch,
+    // the reading no longer being null.
+    const startedAt = generation
     void input
       .getBalance()
       .then((balance) => {
+        if (startedAt !== generation) return
         held = balance.confirmedSats
         heldAt = now()
         announced = false
@@ -78,6 +84,7 @@ export const onchainFloatSampler = (input: {
       return { sats: held, ageMs: age }
     },
     invalidate: () => {
+      generation += 1
       held = null
       announced = false
     },

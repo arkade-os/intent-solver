@@ -105,6 +105,26 @@ describe('onchainFloatSampler', () => {
     expect(s.it.read()).toBeNull()
   })
 
+  it('ignores a balance read that started BEFORE the invalidation', async () => {
+    let release!: (v: { confirmedSats: number }) => void
+    const s = sampler({ getBalance: () => new Promise((resolve) => (release = resolve)) })
+    s.it.read()
+    s.it.invalidate()
+    release({ confirmedSats: 50_000 })
+    await settle()
+    // Accepting it restores the PRE-withdrawal balance, dated fresh — which the
+    // null check cannot catch, because the reading is no longer null.
+    expect(s.it.read()).toBeNull()
+  })
+
+  it('recovers once a read that started after the invalidation lands', async () => {
+    const s = await primed()
+    s.it.invalidate()
+    s.it.read()
+    await settle()
+    expect(s.it.read()?.sats).toBe(50_000)
+  })
+
   it('announces a pool shared with lightning once, where the gate is only advisory', async () => {
     const s = sampler()
     s.set({ confirmedSats: 50_000, sharedWithLightning: true })
