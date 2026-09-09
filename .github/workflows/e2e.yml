@@ -3,6 +3,17 @@ name: E2E
 # Opt-in, never a merge gate: this boots a multi-container regtest stack and
 # moves regtest money, so it will go red for reasons no diff owns. Label a PR
 # `run-e2e` to exercise it there; dispatch or the nightly cover main.
+#
+# WHAT RUNS lives in `.github/e2e-groups.json`, not here: one matrix leg per
+# GROUP, a group being the corridors that can share one stack configuration.
+# The split is forced by the stack, not chosen for parallelism — an asset in the
+# wallet changes what a sats corridor can spend, covclaimd sweeps lockups out
+# from under a test that wanted to claim them itself, and the Lightning legs
+# need a funded `boltz-lnd` with a channel that only the `boltz` profile opens.
+#
+# A new `test/e2e/*.e2e.test.ts` that names no group would simply run nowhere
+# and leave every leg green. `test/ci/e2eGroups.test.ts` fails on that, and it
+# runs inside `ci.yml` — a real merge gate — precisely so this one need not be.
 on:
   workflow_dispatch:
     inputs:
@@ -10,12 +21,16 @@ on:
         description: 'Ref of this repo to test (blank = the dispatch ref)'
         required: false
         default: ''
+      groups:
+        description: 'Comma-separated group names from .github/e2e-groups.json (blank = all)'
+        required: false
+        default: ''
       files:
-        description: 'vitest filename filter, space separated'
+        description: 'Ad-hoc vitest filename filter, space separated. Overrides `groups`.'
         required: false
         default: ''
       profiles:
-        description: 'arkade-regtest profiles to bring up'
+        description: 'arkade-regtest profiles for the ad-hoc run'
         required: false
         default: ''
   pull_request:
@@ -29,19 +44,103 @@ concurrency:
 
 env:
   E2E_ENV_FILE: .env.ci-e2e
-  E2E_FILES: ${{ inputs.files || 'assetRfqCorridor assetOffer assetLockup' }}
-  E2E_PROFILES: ${{ inputs.profiles || 'emulator' }}
   # Pinned, not `master`: this job is a control on THIS repo's corridors, so the
   # stack under them has to hold still. arkade-regtest's own CI watches its drift.
+  # Bumping it means re-reading that ref's profile list AND its container names —
+  # both have been renamed across refs, and `test/e2e/support/counterparty.ts`
+  # takes them from E2E_LN_COUNTERPARTY_CONTAINER / E2E_LN_SOLVER_CONTAINER.
   REGTEST_REF: 6b0a60ca3f7ac48823fce7864034722262f348c7
 
 jobs:
-  e2e:
+  # Reading the group file is its own job so the matrix can be data. A dispatch
+  # may narrow it by name, or bypass it entirely with a raw file filter.
+  plan:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-e2e')
     runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
-    # On the host, not in a container: the suite needs the stack's localhost ports.
-    timeout-minutes: 60
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.groups.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      # Inputs reach jq through `env`, never through `${{ }}` inside the script:
+      # a dispatch string is attacker-controlled text, not shell.
+      - id: groups
+        name: Resolve the group matrix
+        env:
+          ONLY: ${{ inputs.groups }}
+          FILES: ${{ inputs.files }}
+          PROFILES: ${{ inputs.profiles }}
+        run: |
+          set -eu
+          if [ -n "$FILES" ]; then
+            # `arkdTimelocks`, not a boolean: the delays step and the assertion
+            # both read it, and a missing key would leave the assertion wanting
+            # >= 512 from a stack started on the block-typed defaults.
+            matrix=$(jq -nc --arg f "$FILES" --arg p "$PROFILES" '
+              [{ name: "dispatch", files: ($f | split(" ")),
+                 profiles: (if $p == "" then "emulator" else $p end),
+                 why: "ad-hoc dispatch",
+                 mintAsset: false, lnd: false, covclaimdImage: "",
+                 evmChain: false, arkdTimelocks: "seconds" }]')
+          else
+            # Split and trim in the shell, not in jq: a group name is `[a-z0-9-]`
+            # (test/ci/e2eGroups.test.ts asserts it), so dropping whitespace is
+            # exact, and it keeps a regex escape out of a string that crosses
+            # YAML, the shell and jq.
+            # `[:blank:]`, not `[:space:]`: the latter also eats the newlines the
+            # first `tr` just made, joining every name into one.
+            want=$(printf '%s' "$ONLY" | tr ',' '\n' | tr -d '[:blank:]' | grep -v '^$' | jq -Rsc 'split("\n") | map(select(. != ""))')
+            # EVERY requested name must exist, not just one of them: `asset,typo`
+            # matches a group, so a length check alone would run one leg and
+            # report the coverage the dispatch asked for and never got.
+            unknown=$(jq -r --argjson want "$want" '
+              ([.[].name]) as $known | [$want[] | select(. as $n | $known | index($n) | not)] | join(", ")
+            ' .github/e2e-groups.json)
+            if [ -n "$unknown" ]; then
+              echo "unknown group(s): ${unknown}"
+              echo "known groups:"
+              jq -r '.[].name' .github/e2e-groups.json
+              exit 1
+            fi
+            matrix=$(jq -c --argjson want "$want" '
+              if ($want | length) == 0 then . else map(select(.name as $n | $want | index($n))) end
+            ' .github/e2e-groups.json)
+          fi
+          # Belt and braces: an empty matrix must not read as "everything passed".
+          if [ "$(echo "$matrix" | jq 'length')" -eq 0 ]; then
+            echo "no group matched. Known groups:"
+            jq -r '.[].name' .github/e2e-groups.json
+            exit 1
+          fi
+          echo "$matrix" | jq -r '.[] | "\(.name): \(.files | length) file(s) on profiles \(.profiles)"'
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    needs: plan
+    name: ${{ matrix.name }}
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    # On the host, not in a container: the suite needs the stack's localhost ports.
+    timeout-minutes: 90
+    strategy:
+      # One corridor's stack failing says nothing about another's, and being told
+      # which is the whole point of the split.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      E2E_FILES: ${{ join(matrix.files, ' ') }}
+      E2E_PROFILES: ${{ matrix.profiles }}
+    steps:
+      # Through `env`, never `${{ }}` in the script: these strings name
+      # containers in backticks, which bash would run as commands.
+      - name: Why this group is its own leg
+        env:
+          WHY: ${{ matrix.why }}
+        run: echo "$WHY"
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
@@ -60,6 +159,7 @@ jobs:
 
       # Retried for the reason ci.yml's build job gives at length.
       - name: Install
+        timeout-minutes: 20
         run: |
           set -eu
           for attempt in 1 2 3; do
@@ -70,30 +170,110 @@ jobs:
           exit 1
 
       - name: Build
+        timeout-minutes: 20
         run: pnpm build
 
+      # Two env groups, and neither is optional.
+      #
+      # COVCLAIMD_IMAGE is passed rather than left to the compose default:
+      # `regtest.mjs` DROPS the container outright when the variable is empty,
+      # so an unset one silently produces a stack with no daemon in it and a
+      # covclaimd test that fails for a reason it does not name. The TAG lives
+      # in the group file next to the group that wants it, so a version bump is
+      # one edit and not a flag here with a tag there.
+      #
+      # The ARKD_* delays are the runbook's documented deployment ("a bare
+      # `node regtest.mjs start` produces a stack this service cannot use at
+      # all"). Below 512 they are BLOCK counts, and the receive orchestrator
+      # then refuses to write a refund deadline without a chainTip provider,
+      # which none of these tests wire. Only the `lifecycle` group wants that
+      # mode — blockTimelocks is the file that covers it — so it alone is left
+      # on the compose defaults. Empty here means "compose's own default",
+      # because every one of them is interpolated with `:-`.
       - name: Start the regtest stack
         working-directory: arkade-regtest
-        timeout-minutes: 20
-        run: node regtest.mjs start --profile "$E2E_PROFILES"
+        timeout-minutes: 25
+        env:
+          COVCLAIMD_IMAGE: ${{ matrix.covclaimdImage }}
+          SECONDS_TYPED: ${{ matrix.arkdTimelocks == 'seconds' }}
+        run: |
+          set -eu
+          if [ "$SECONDS_TYPED" = "true" ]; then
+            export ARKD_VTXO_TREE_EXPIRY=6144 ARKD_UNILATERAL_EXIT_DELAY=512 \
+                   ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 ARKD_BOARDING_EXIT_DELAY=2048 \
+                   ARKD_CHECKPOINT_EXIT_DELAY=1536
+          fi
+          node regtest.mjs start --profile "$E2E_PROFILES"
+
+      # Nothing here zeroes arkd's intent fees, and nothing may: what
+      # `vtxoLifecycle` asserts is the ABSENCE of INTENT_INSUFFICIENT_FEE from a
+      # renewal pass, which is a claim about a server that charges one.
+      - name: What this arkd advertises
+        run: curl -sf http://localhost:7070/v1/info | jq '{unilateralExitDelay, vtxoTreeExpiry, boardingExitDelay}'
+
+      # Asserted in BOTH directions, because each mode has a file that goes
+      # quietly useless in the other: under seconds, two of blockTimelocks'
+      # three tests `return` early and the third only warns.
+      - name: This arkd counts ${{ matrix.arkdTimelocks }}, as this group needs
+        env:
+          WANT: ${{ matrix.arkdTimelocks }}
+        run: |
+          set -eu
+          delay=$(curl -sf http://localhost:7070/v1/info | jq -r '.unilateralExitDelay')
+          echo "unilateralExitDelay=${delay}, group wants ${WANT}"
+          if [ "$WANT" = "blocks" ]; then test "$delay" -lt 512; else test "$delay" -ge 512; fi
+
+      # `boltz-lnd` is the SOLVER's node. The base `lnd` is the counterparty, and
+      # the tests drive it with `docker exec lncli`, so it needs nothing here.
+      - name: Extract the solver node's LND credentials
+        if: matrix.lnd
+        timeout-minutes: 5
+        run: |
+          set -eu
+          docker cp boltz-lnd:/root/.lnd/tls.cert ./boltz-lnd-tls.cert
+          docker cp boltz-lnd:/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon ./boltz-lnd-admin.macaroon
+
+      # setupBoltz() funds this node and then spends nearly all of it opening
+      # the channel, so what it leaves ON CHAIN is whatever the channel did not
+      # take. lndMempoolSpend needs 200k sats of it to make a real unconfirmed
+      # spend, and CI failed with InsufficientBalanceToSendToChainAddress.
+      # `--confirm` mines the block, so the balance is spendable when the suite
+      # starts rather than one automine interval later.
+      - name: Give the solver node an on-chain float
+        if: matrix.lnd
+        timeout-minutes: 10
+        run: |
+          set -eu
+          address=$(docker exec boltz-lnd lncli --network=regtest newaddress p2wkh | jq -r '.address')
+          node arkade-regtest/regtest.mjs faucet "$address" 0.05 --confirm
+          docker exec boltz-lnd lncli --network=regtest walletbalance
 
       # Generated HERE, never committed and never a repository secret: a regtest
       # seed is still a credential. No settle after the fund: it ends settled.
       - name: Provision a fresh Arkade wallet
-        timeout-minutes: 10
+        timeout-minutes: 15
+        env:
+          LN_BACKEND: ${{ matrix.lnd && 'lnd' || 'fake' }}
+          WITH_LND: ${{ matrix.lnd }}
         run: |
           set -eu
           node --input-type=module -e '
             import { writeFileSync } from "node:fs"
             import { generateMnemonic } from "@scure/bip39"
             import { wordlist } from "@scure/bip39/wordlists/english.js"
+            const lnd = process.env.WITH_LND === "true"
+              ? ["LND_SOCKET=localhost:10010",
+                 "LND_CERT_PATH=./boltz-lnd-tls.cert",
+                 "LND_MACAROON_PATH=./boltz-lnd-admin.macaroon"]
+              : []
             writeFileSync(process.env.E2E_ENV_FILE, [
               "SWAP_NETWORK=regtest",
-              "LN_BACKEND=fake",
+              `LN_BACKEND=${process.env.LN_BACKEND}`,
               `ARK_MNEMONIC="${generateMnemonic(wordlist, 128)}"`,
               "ARK_SERVER_URL=http://localhost:7070",
               "EMULATOR_URL=http://localhost:7073",
               "ESPLORA_URL=http://localhost:3000/api",
+              ...lnd,
               "ARK_DB_PATH=.data/ark-ci.sqlite",
               "SWAP_DB_PATH=.data/swaps-ci.sqlite",
               "",
@@ -103,33 +283,82 @@ jobs:
 
       # Mine first: until the fund's commitment confirms, the boarding view still
       # offers the input it spent, a settle sweeps that and hangs. Automine is 600s.
+      #
+      # Only the asset group runs this. An asset coin in the wallet changes what
+      # every later sats-only selection can spend, so the sats corridors get a
+      # float that has never held one.
       - name: Mint an asset for the asset corridors
-        timeout-minutes: 10
+        if: matrix.mintAsset
+        timeout-minutes: 15
         run: |
           set -eu
           node arkade-regtest/regtest.mjs mine 2
           node --experimental-eventsource --env-file="$E2E_ENV_FILE" scripts/regtest-mint-asset.mjs 1000000 ARFQ
           node --experimental-eventsource --env-file="$E2E_ENV_FILE" scripts/regtest-settle.mjs
 
+      # The second stack the EVM corridors need. Backgrounded because the script
+      # holds the feed in-process and is written for the foreground; the poll,
+      # not the `&`, is what proves it came up. Its feed body is byte-identical
+      # to the `solver` profile's nginx fixture, so this costs one container
+      # rather than that profile's whole solverd + solver-init chain.
+      - name: Start anvil and the price feed
+        if: matrix.evmChain
+        timeout-minutes: 10
+        run: |
+          set -eu
+          nohup node scripts/e2e-stack.mjs > "$RUNNER_TEMP/e2e-stack.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -sf -X POST -H 'content-type: application/json' \
+                  -d '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+                  http://localhost:8545 > /dev/null \
+               && curl -sf http://localhost:8088/btc-asset > /dev/null; then
+              echo "anvil and the feed are up"
+              exit 0
+            fi
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/e2e-stack.log"
+          exit 1
+
       # No `--`: pnpm forwards it verbatim and vitest ignores what follows.
       # Array, not `$E2E_FILES`: a dispatch input is split, never interpreted.
+      # Both reporters: `verbose` for the log, `json` for the guard below, which
+      # is the only thing that can see a skip or a file that never ran.
       - name: E2E suite
+        id: suite
+        timeout-minutes: 60
         run: |
           set -eu
           read -ra e2e_files <<< "$E2E_FILES"
-          pnpm test:e2e --reporter=verbose "${e2e_files[@]}"
+          pnpm test:e2e --reporter=verbose --reporter=json \
+            --outputFile="$RUNNER_TEMP/e2e-report.json" "${e2e_files[@]}"
+
+      # Runs on a RED suite, because the per-file timings are most of what a
+      # failing corridor run gets read for — but not on a SKIPPED one, where a
+      # setup step already failed and there is no report to read. Auditing then
+      # would replace the real cause with a missing-file error.
+      - name: Every file ran, and nothing skipped
+        if: always() && steps.suite.outcome != 'skipped'
+        run: |
+          set -eu
+          read -ra e2e_files <<< "$E2E_FILES"
+          node scripts/e2e-report.mjs "$RUNNER_TEMP/e2e-report.json" "${e2e_files[@]}"
 
       - name: Dump diagnostics on failure
         if: failure()
-        working-directory: arkade-regtest
         run: |
-          docker compose -f docker/compose.base.yml -f docker/compose.ark.yml ps || true
-          for c in bitcoin bitcoin-miner fulcrum mempool_api mempool_web nbxplorer arkd-wallet arkd emulator; do
+          docker ps -a --format 'table {{.Names}}\t{{.Status}}' || true
+          for c in bitcoin bitcoin-miner fulcrum mempool_api mempool_web nbxplorer \
+                   arkd-wallet arkd emulator covclaimd boltz boltz-lnd boltz-fulmine \
+                   lnd pricefeed lsw-anvil; do
             echo "===== logs: $c ====="
             docker logs --tail 80 "$c" 2>&1 || true
           done
+          echo "===== anvil + feed ====="
+          cat "$RUNNER_TEMP/e2e-stack.log" 2>/dev/null || true
 
       - name: Cleanup
         if: always()
-        working-directory: arkade-regtest
-        run: node regtest.mjs clean
+        run: |
+          node arkade-regtest/regtest.mjs clean || true
+          docker rm -f lsw-anvil > /dev/null 2>&1 || true

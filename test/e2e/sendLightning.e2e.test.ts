@@ -381,8 +381,18 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       // `refused`, not `stuck`: #182 — a terminal payment failure whose refund
       // has LANDED is finished business, and `stuck` is reserved for rows a
       // human must read. The reason records the failure either way.
-      expect(row.state).toBe('refused')
-      expect(row.failureReason).toBe('lightning payment failed terminally; client refunded')
+      // One object, not four: asserting `state` first hid which branch (#102).
+      expect({
+        state: row.state,
+        failureReason: row.failureReason,
+        refundOutcome: row.refundOutcome,
+        refundAttempt: row.refundAttempt,
+      }).toEqual({
+        state: 'refused',
+        failureReason: 'lightning payment failed terminally; client refunded',
+        refundOutcome: 'pushed',
+        refundAttempt: 'pushed',
+      })
 
       // THE SAFETY PROPERTY: the solver did NOT claim. A payment that failed
       // must never be followed by a claim of the client's lockup — that is the
@@ -415,7 +425,6 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       // `stuck` is reserved for rows where the refund did NOT land or the
       // self-payment probe withheld it. `refund_outcome` tells the client they
       // were refunded; the state tells the operator there is nothing to do.
-      expect(row.refundOutcome).toBe('pushed')
       expect(row.refundArkTxid).toBeTruthy()
       // Waited for rather than read once: `refund` returns when arkd ACCEPTS
       // the spend, and the indexer `findLockups` reads is a moment behind it.
@@ -474,14 +483,22 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       // since `failed` reads identically for a payment that was attempted and
       // died.
       expect(row.paymentEvidence).toBe('no_record')
-      // `refused`, not `stuck`: the refund has landed (asserted below), and
-      // #182 reserves `stuck` for rows a human must read.
-      expect(row.state).toBe('refused')
-      expect(row.failureReason).toBe('lightning payment failed terminally; client refunded')
+      // `refused`, not `stuck`: #182 reserves `stuck` for rows a human must
+      // read. Grouped as above, and for the same reason.
+      expect({
+        state: row.state,
+        failureReason: row.failureReason,
+        refundOutcome: row.refundOutcome,
+        refundAttempt: row.refundAttempt,
+      }).toEqual({
+        state: 'refused',
+        failureReason: 'lightning payment failed terminally; client refunded',
+        refundOutcome: 'pushed',
+        refundAttempt: 'pushed',
+      })
 
       // THE FIX: the client is made whole from the polled path too, through the
       // same covenant leaf, co-signed by a real emulator and a real arkd.
-      expect(row.refundOutcome).toBe('pushed')
       expect(row.refundArkTxid).toBeTruthy()
       await awaitDrained(swap.pkScript)
       expect((await arkadeOps.findLockups(swap.pkScript)).reduce((sum, o) => sum + o.value, 0)).toBe(0)
