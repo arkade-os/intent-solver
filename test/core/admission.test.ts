@@ -467,8 +467,13 @@ describe('AdmissionControl — the float ceiling', () => {
     expect(got).toBeNull()
   })
 
-  it('admits when no reading has EVER landed, exactly as it did before a float existed', async () => {
-    expect(await new AdmissionControl().admit(req({ float: float({ available: null }) }))).not.toBeNull()
+    it('refuses while no float reading is available, including after invalidation', async () => {
+      const ceilings: string[] = []
+      const got = await new AdmissionControl().admit(
+        req({ float: float({ available: null }), onRefused: (ceiling: string) => ceilings.push(ceiling) }),
+      )
+      expect(got).toBeNull()
+      expect(ceilings).toEqual(['float'])
   })
 
   it('leaves a request carrying no float exactly as it was', async () => {

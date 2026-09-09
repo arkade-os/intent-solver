@@ -154,9 +154,13 @@ export class AdmissionControl implements AdmissionStrategy {
       }
       const float = request.float
       if (float === undefined) return releasing([exposure])
-      // Never read is the ONE case with nothing to compare against; a stale
-      // reading is not that case.
-      if (float.available === null) return releasing([exposure])
+      // Missing includes the window after a withdrawal invalidates the held
+      // balance. Treating it as unlimited could quote against already-spent sats.
+      if (float.available === null) {
+        exposure()
+        request.onRefused?.('float')
+        return null
+      }
       const claimed = this.claimFloat(float.requiredSats, float.available.sats, await float.owedSats())
       if (claimed === null) {
         exposure()
