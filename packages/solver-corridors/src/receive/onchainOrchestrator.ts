@@ -38,6 +38,9 @@ import {
   ONCHAIN_DUST_SATS,
   evaluateOnchainReceiveAcceptance,
   evaluateOnchainReceiveFunding,
+  evaluateOnchainReceiveFill,
+  clampOnchainReceiveBand,
+  defaultMaxBandWidthSats,
   type OnchainReceiveAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/onchainReceive.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
@@ -50,6 +53,8 @@ import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { buildOnchainClaimTx, estimateClaimTxVsize, signOnchainClaimTx } from '@arkade-os/solver-rails/onchain/claim.js'
+import { onchainClaimSizing, onchainReceiveFundedAmounts, bandOf, hasBand } from './onchainFundedAmounts.js'
+import { claimSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
 import type { OnchainReceiveBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import type { OnchainReceiveArkadeOps } from './onchainArkadeOps.js'
@@ -84,6 +89,9 @@ export interface OnchainReceiveServiceDeps {
    */
   covclaimd?: Pick<CovclaimdClient, 'reveal'> | null
   limits: Limits
+  /** How wide a band this operator underwrites, independently of `limits.maxSats`. Defaults to the range `limits` already serves. */
+  maxBandWidthSats?: number
+  bandBelowShare?: number
   network: SwapNetwork
   maxExposedSats: number
   /** Sum of committed sats across every corridor, not just this notebook. */
@@ -152,6 +160,9 @@ export interface OnchainReceiveQuoteRequest {
   payoutPubkey: string
   minConfirmations?: number
   rfqId?: string
+  /** Both or neither, on the same side as `amountSats` under `amountSide: 'from'`. Absent is strict equality. */
+  minFromSats?: number
+  maxFromSats?: number
 }
 
 /** `sha256(P)`, hex — same wire-form comparison `row.paymentHash` already uses. */
@@ -207,6 +218,7 @@ export class OnchainReceiveSwapService {
   private readonly pricing: PricingStrategy
 
   private readonly admission: AdmissionStrategy
+  private claimVsize?: number
 
   constructor(private readonly deps: OnchainReceiveServiceDeps) {
     this.admission = deps.admission
@@ -232,6 +244,30 @@ export class OnchainReceiveSwapService {
    * @see packages/solver-app/src/ops/tickErrors.ts
    */
   shouldSkipTick?: (id: string) => boolean
+
+  /** `out_of_range` when the client's own band excludes the give being quoted; everything else is narrowing. */
+  private bandFor(
+    request: OnchainReceiveQuoteRequest,
+    giveSats: number,
+  ): { minFromSats: number; maxFromSats: number } | null | 'out_of_range' {
+    const { minFromSats, maxFromSats } = request
+    if (minFromSats === undefined || maxFromSats === undefined) return null
+    if (minFromSats > giveSats || maxFromSats < giveSats) return 'out_of_range'
+    const width = this.deps.maxBandWidthSats ?? defaultMaxBandWidthSats(this.deps.limits)
+    return clampOnchainReceiveBand({ minFromSats, maxFromSats }, giveSats, width, this.deps.bandBelowShare)
+  }
+
+  /** ZERO, and no backend call, without a band: the floor is clamped to the quote, so it cannot change any decision. */
+  private async claimFeeSatsFor(row: OnchainReceiveSwapRow): Promise<number> {
+    if (!hasBand(row)) return 0
+    const vsize =
+      this.claimVsize ??
+      (this.claimVsize = claimSpendVsize({
+        network: ONCHAIN_NETWORKS[this.deps.network],
+        destinationScript: this.deps.claimDestinationScript,
+      }))
+    return Math.ceil(vsize * (await this.deps.onchain.estimateFeeRate()))
+  }
 
   async quote(request: OnchainReceiveQuoteRequest): Promise<QuoteOutcome> {
     const { store, arkade, limits, network } = this.deps
@@ -289,6 +325,10 @@ export class OnchainReceiveSwapService {
     if (payoutSats < ONCHAIN_DUST_SATS) {
       return { accepted: false, reason: 'payout_below_dust' }
     }
+
+    // A band excluding the amount being quoted is incoherent, not merely wide.
+    const band = this.bandFor(request, giveSats)
+    if (band === 'out_of_range') return { accepted: false, reason: 'amount_out_of_range' }
 
     if (await store.findLiveByPaymentHash(request.paymentHash)) {
       return { accepted: false, reason: 'duplicate_swap' }
@@ -385,6 +425,8 @@ export class OnchainReceiveSwapService {
           onchainPkScript: hex.encode(onchainHtlc.pkScript),
           claimPacket: request.claimPacket,
           rfqId: request.rfqId,
+          minFromSats: band?.minFromSats,
+          maxFromSats: band?.maxFromSats,
         })
         return { accepted: true, swap, lockupDeadline: this.now() + DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT }
       } catch (error) {
@@ -492,37 +534,34 @@ export class OnchainReceiveSwapService {
   private async whenQuoted(row: OnchainReceiveSwapRow): Promise<boolean> {
     const { store, onchain } = this.deps
     const outputs = await onchain.findOutputs({ address: row.onchainAddress })
-    const match = outputs.find((o) => o.valueSats === row.amountSats)
     const timedOut = this.now() >= row.createdAt + DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT
 
-    if (match) {
+    const fill = evaluateOnchainReceiveFill({
+      outputs,
+      quote: { amountSats: row.amountSats, payoutSats: row.payoutSats },
+      band: bandOf(row),
+      limits: this.deps.limits,
+      claimFeeSats: await this.claimFeeSatsFor(row),
+    })
+
+    if (fill.fill === 'adopt') {
       return store.transition(row.id, 'quoted', 'awaiting_confirmations', {
-        funding_txid: match.txid,
-        funding_vout: match.vout,
+        funding_txid: fill.output.txid,
+        funding_vout: fill.output.vout,
+        funded_value_sats: fill.fundedValueSats,
+        funded_payout_sats: fill.fundedPayoutSats,
       })
     }
 
-    // Funded, but for the wrong amount, and CONFIRMED so it cannot become the
-    // right one. Refuse now instead of sitting on it until the lockup timeout.
-    //
-    // Confirmed is the whole condition. An unconfirmed mismatch is not yet
-    // anything: it can be replaced by fee-bump, or be the first of two sends
-    // the client is still making. A confirmed one can be neither — and a second
-    // output cannot rescue it either, because the exact-match rule above wants
-    // ONE output and `onchain/claim.ts` spends one input.
+    // Funded outside the window, and CONFIRMED so it cannot come back inside.
+    // Refuse now instead of sitting on it until the lockup timeout.
     //
     // Nothing of the solver's is at risk here (`quoted` is not in EXPOSED), so
     // this buys the client time rather than saving the solver money: their sats
     // sit in their own HTLC behind their own CLTV, and the sooner they know
-    // this swap is dead the sooner they can start reclaiming. Waiting for the
-    // timeout told them the same thing, later, for no reason.
-    const confirmedMismatch = outputs.find((o) => o.confirmations > 0)
-    if (confirmedMismatch) {
-      await store.fail(
-        row.id,
-        'quoted',
-        `funding mismatch: ${confirmedMismatch.txid}:${confirmedMismatch.vout} holds ${confirmedMismatch.valueSats} sats, quote is for ${row.amountSats}`,
-      )
+    // this swap is dead the sooner they can start reclaiming.
+    if (fill.fill === 'refuse') {
+      await store.fail(row.id, 'quoted', fill.reason)
       return false
     }
 
@@ -572,6 +611,26 @@ export class OnchainReceiveSwapService {
       await store.fail(row.id, 'awaiting_confirmations', decision.reason)
       return false
     }
+
+    // #107's shape. HERE and not in `whenFundingArkade`, whose EXPOSED state
+    // would park an unspent swap in `stuck`; against the ADOPTED output alone,
+    // since a fresh scan could pick a different one than the claim will spend.
+    const refill = evaluateOnchainReceiveFill({
+      outputs: output ? [output] : [],
+      quote: { amountSats: row.amountSats, payoutSats: row.payoutSats },
+      band: bandOf(row),
+      limits: this.deps.limits,
+      claimFeeSats: await this.claimFeeSatsFor(row),
+    })
+    if (refill.fill !== 'adopt') {
+      await store.fail(
+        row.id,
+        'awaiting_confirmations',
+        refill.fill === 'refuse' ? refill.reason : 'funding output no longer fillable',
+      )
+      return false
+    }
+
     return store.transition(row.id, 'awaiting_confirmations', 'funding_arkade', {})
   }
 
@@ -589,10 +648,13 @@ export class OnchainReceiveSwapService {
    */
   private async whenFundingArkade(row: OnchainReceiveSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
-    // The lockup carries the PAYOUT — the client's HTLC amount minus this
-    // corridor's fee, persisted at quote time — never the full `amountSats`.
+    // The lockup carries the PAYOUT, never the full `amountSats`. Through the
+    // helper so this threshold and the payment below cannot disagree: a lockup
+    // paid at the amended amount would otherwise read as under-funded on the
+    // next pass and be paid twice.
+    const { arkadePayoutSats } = onchainReceiveFundedAmounts(row)
     const existing = await arkade.findLockups(row.pkScript)
-    const alreadyFunded = existing.reduce((sum, o) => sum + o.value, 0) >= row.payoutSats
+    const alreadyFunded = existing.reduce((sum, o) => sum + o.value, 0) >= arkadePayoutSats
     if (alreadyFunded) {
       return store.transition(row.id, 'funding_arkade', 'awaiting_claim', {})
     }
@@ -635,7 +697,7 @@ export class OnchainReceiveSwapService {
     let txid: string
     const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
     try {
-      txid = await arkade.fund({ address: row.lockupAddress, amountSats: row.payoutSats, stamp })
+      txid = await arkade.fund({ address: row.lockupAddress, amountSats: arkadePayoutSats, stamp })
     } catch (error) {
       // Retained on an ambiguous failure: stuck for a human, on purpose.
       if (error instanceof FundNotSubmittedError) await store.releaseFundLease(row.id)
@@ -815,17 +877,15 @@ export class OnchainReceiveSwapService {
 
     const feeRate = await onchain.estimateFeeRate()
     const preimage = hex.decode(row.preimage)
-    const sizingParams = {
+    const sizing = onchainClaimSizing(row, {
       htlc,
       preimage,
       fundingTxid: row.fundingTxid,
       fundingVout: row.fundingVout,
-      fundingValueSats: row.amountSats,
       destinationScript: claimDestinationScript,
-      payoutAmountSats: BigInt(row.amountSats),
-    }
-    const fee = BigInt(Math.ceil(estimateClaimTxVsize(sizingParams) * feeRate))
-    const payoutAmountSats = BigInt(row.amountSats) - fee
+    })
+    const fee = BigInt(Math.ceil(estimateClaimTxVsize(sizing.params) * feeRate))
+    const payoutAmountSats = sizing.payoutAfterFee(fee)
     if (payoutAmountSats < BigInt(ONCHAIN_DUST_SATS)) {
       // Below dust is as unbroadcastable as negative — refuse rather than
       // build a non-standard transaction no relay policy will forward. Same
@@ -836,12 +896,12 @@ export class OnchainReceiveSwapService {
       await store.fail(
         row.id,
         'claimed',
-        `claim fee ${fee} at ${feeRate} sat/vB leaves ${payoutAmountSats} sats from a ${row.amountSats} sat HTLC — below the ${ONCHAIN_DUST_SATS} sat dust limit`,
+        `claim fee ${fee} at ${feeRate} sat/vB leaves ${payoutAmountSats} sats from a ${sizing.fundingValueSats} sat HTLC — below the ${ONCHAIN_DUST_SATS} sat dust limit`,
       )
       return false
     }
 
-    const unsigned = buildOnchainClaimTx({ ...sizingParams, payoutAmountSats })
+    const unsigned = buildOnchainClaimTx({ ...sizing.params, payoutAmountSats })
     const signed = await signOnchainClaimTx(unsigned, signer, preimage)
     // Recorded BEFORE the broadcast, so a resumed process has a key to ask about.
     await store.patch(row.id, { onchain_claim_txid: signed.id })
@@ -913,25 +973,23 @@ export class OnchainReceiveSwapService {
     }
     const feeRate = await onchain.estimateFeeRate()
     const preimage = hex.decode(row.preimage)
-    const sizingParams = {
+    const sizing = onchainClaimSizing(row, {
       htlc,
       preimage,
       fundingTxid: row.fundingTxid,
       fundingVout: row.fundingVout,
-      fundingValueSats: row.amountSats,
       destinationScript: claimDestinationScript,
-      payoutAmountSats: BigInt(row.amountSats),
-    }
-    const fee = BigInt(Math.ceil(estimateClaimTxVsize(sizingParams) * feeRate))
-    const payoutAmountSats = BigInt(row.amountSats) - fee
+    })
+    const fee = BigInt(Math.ceil(estimateClaimTxVsize(sizing.params) * feeRate))
+    const payoutAmountSats = sizing.payoutAfterFee(fee)
     if (payoutAmountSats < BigInt(ONCHAIN_DUST_SATS)) {
       return {
         refused:
           `still uneconomic: fee ${fee} at ${feeRate} sat/vB leaves ${payoutAmountSats} sats ` +
-          `from a ${row.amountSats} sat HTLC, under the ${ONCHAIN_DUST_SATS} sat dust limit`,
+          `from a ${sizing.fundingValueSats} sat HTLC, under the ${ONCHAIN_DUST_SATS} sat dust limit`,
       }
     }
-    const unsigned = buildOnchainClaimTx({ ...sizingParams, payoutAmountSats })
+    const unsigned = buildOnchainClaimTx({ ...sizing.params, payoutAmountSats })
     const signed = await signOnchainClaimTx(unsigned, signer, preimage)
     // Recorded BEFORE the broadcast, so a resumed process has a key to ask about.
     await store.patch(row.id, { onchain_claim_txid: signed.id })

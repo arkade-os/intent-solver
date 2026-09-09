@@ -282,18 +282,20 @@ export type InvoiceRejection =
   | 'missing_timestamp'
   | 'cltv_too_large'
 
+export interface InvoiceRejectionContext {
+  actual: number
+  limit: number
+  unit: 'blocks' | 'characters'
+}
+
 export class InvalidInvoice extends Error {
   constructor(
     readonly reason: InvoiceRejection,
     /**
      * The numbers behind the reason, for the operator's log.
      *
-     * Deliberately NOT part of {@link reason}, which is a closed enum the wire
-     * mapping and `src/core/refusalReasons.ts` both switch on. This rides in
-     * the message instead, and every catch site puts the message in a log
-     * `detail` while answering the client from the enum — so a bound and the
-     * value that broke it never reach a client, and adding one here cannot
-     * change what any client is told.
+     * Kept separate from {@link context}: this free-form text is for operators,
+     * while the bounded numeric context is safe to return to the requester.
      *
      * Worth having because a reason alone can be ambiguous about WHICH check
      * fired: two separate ceilings raise `cltv_too_large`, and telling them
@@ -301,6 +303,7 @@ export class InvalidInvoice extends Error {
      * bound is too tight for ordinary invoices".
      */
     detail?: string,
+    readonly context?: InvoiceRejectionContext,
   ) {
     super(detail ? `invoice rejected: ${reason} (${detail})` : `invoice rejected: ${reason}`)
     this.name = 'InvalidInvoice'
@@ -344,7 +347,13 @@ const NO_DENIED_SCIDS: ReadonlySet<string> = new Set()
  * them is the stale-second-copy failure this decode is pure to avoid.
  */
 export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DENIED_SCIDS): DecodedInvoice => {
-  if (raw.length > MAX_INVOICE_LENGTH) throw new InvalidInvoice('too_long')
+  if (raw.length > MAX_INVOICE_LENGTH) {
+    throw new InvalidInvoice('too_long', undefined, {
+      actual: raw.length,
+      limit: MAX_INVOICE_LENGTH,
+      unit: 'characters',
+    })
+  }
 
   // BOLT11 is case-insensitive but must not be mixed; bech32 checksums are
   // defined over a single case.
@@ -401,7 +410,11 @@ export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DE
   // through `r` fields without touching `c` at all. If either goes, this is the
   // one that goes.
   if (minFinalCltvBlocks > MAX_CLIENT_FINAL_CLTV_BLOCKS) {
-    throw new InvalidInvoice('cltv_too_large', `final delta ${minFinalCltvBlocks} > ${MAX_CLIENT_FINAL_CLTV_BLOCKS}`)
+    throw new InvalidInvoice('cltv_too_large', `final delta ${minFinalCltvBlocks} > ${MAX_CLIENT_FINAL_CLTV_BLOCKS}`, {
+      actual: minFinalCltvBlocks,
+      limit: MAX_CLIENT_FINAL_CLTV_BLOCKS,
+      unit: 'blocks',
+    })
   }
 
   // Every `r` field, not just the first: each is one alternative hint, and the
@@ -469,6 +482,11 @@ export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DE
       'cltv_too_large',
       `final delta ${minFinalCltvBlocks} + best route hint ${bestRouteHintCltvBlocks} = ` +
         `${minFinalCltvBlocks + bestRouteHintCltvBlocks} > ${MAX_CLIENT_CLTV_BLOCKS} (best-hint floor)`,
+      {
+        actual: minFinalCltvBlocks + bestRouteHintCltvBlocks,
+        limit: MAX_CLIENT_CLTV_BLOCKS,
+        unit: 'blocks',
+      },
     )
   }
 

@@ -4,7 +4,7 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { base64, hex } from '@scure/base'
-import { SigHash } from '@scure/btc-signer'
+import { SigHash, Transaction } from '@scure/btc-signer'
 import { ArkAddress } from '@arkade-os/sdk'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { EMPTY_LOCKUP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
@@ -1192,6 +1192,277 @@ describe('OnchainReceiveSwapService', () => {
 
         expect(await service.claimNow(claimed.id)).toEqual({ txid: sent })
       })
+    })
+  })
+
+  describe('the tolerance band at quote time', () => {
+    const withBandWidth = (maxBandWidthSats?: number) =>
+      new OnchainReceiveSwapService({
+        store,
+        onchain: deps.onchain,
+        arkade: deps.arkadeFake.arkade,
+        covclaimd: deps.covclaimd,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        claimDestinationScript,
+        now: clock,
+        ...(maxBandWidthSats === undefined ? {} : { maxBandWidthSats }),
+      })
+
+    it('asks no fee rate at all for a row quoted without a band', async () => {
+      // The claim-fee floor cannot change a decision on such a row, and
+      // `whenQuoted` made no such call before this change. Counting it is the
+      // only way "no behaviour change" covers the I/O and not just the states.
+      let calls = 0
+      const estimate = deps.onchain.estimateFeeRate.bind(deps.onchain)
+      deps.onchain.estimateFeeRate = async () => {
+        calls += 1
+        return estimate()
+      }
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      await service.tick(outcome.swap.id)
+      expect(calls).toBe(0)
+
+      // …and does ask once the row carries a band, which is when it matters.
+      const svc = withBandWidth()
+      const banded = await svc.quote(
+        quoteRequest({ paymentHash: 'bc'.repeat(32), minFromSats: 45_000, maxFromSats: 55_000 }),
+      )
+      if (!banded.accepted) throw new Error(`refused: ${banded.reason}`)
+      deps.onchain.receiveExternal({ address: banded.swap.onchainAddress, amountSats: 50_000 })
+      await svc.tick(banded.swap.id)
+      expect(calls).toBeGreaterThan(0)
+    })
+
+    it('leaves both bounds null when the request names no band', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      expect(outcome.swap.minFromSats).toBeNull()
+      expect(outcome.swap.maxFromSats).toBeNull()
+    })
+
+    it('binds the quote to the band it was asked for', async () => {
+      const outcome = await withBandWidth().quote(quoteRequest({ minFromSats: 49_000, maxFromSats: 51_000 }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      expect(outcome.swap.minFromSats).toBe(49_000)
+      expect(outcome.swap.maxFromSats).toBe(51_000)
+    })
+
+    it('narrows a band wider than the operator underwrites, still around the quote', async () => {
+      const outcome = await withBandWidth(1_000).quote(quoteRequest({ minFromSats: 10_000, maxFromSats: 90_000 }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      expect(outcome.swap.maxFromSats! - outcome.swap.minFromSats!).toBe(1_000)
+      expect(outcome.swap.minFromSats!).toBeLessThanOrEqual(50_000)
+      expect(outcome.swap.maxFromSats!).toBeGreaterThanOrEqual(50_000)
+    })
+
+    it('refuses a band that does not contain the amount being quoted', async () => {
+      const outcome = await withBandWidth().quote(quoteRequest({ minFromSats: 60_000, maxFromSats: 70_000 }))
+      expect(outcome).toEqual({ accepted: false, reason: 'amount_out_of_range' })
+    })
+
+    it('offers the whole servable range when the operator sets no cap', async () => {
+      const outcome = await withBandWidth().quote(quoteRequest({ minFromSats: 1_000, maxFromSats: 1_000_000 }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      expect(outcome.swap.minFromSats).toBe(1_000)
+      expect(outcome.swap.maxFromSats).toBe(1_000_000)
+    })
+
+    it('adopts an in-band amount and records what actually landed', async () => {
+      const svc = withBandWidth()
+      const outcome = await svc.quote(quoteRequest({ minFromSats: 45_000, maxFromSats: 55_000 }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 48_000 })
+      deps.onchain.mineBlocks(1)
+      const row = await svc.tick(outcome.swap.id)
+      expect(row.state).toBe('awaiting_claim')
+      expect(row.fundedValueSats).toBe(48_000)
+      expect(row.fundedPayoutSats).toBe(48_000)
+    })
+
+    it('still refuses an out-of-band amount, band or no band', async () => {
+      const svc = withBandWidth()
+      const outcome = await svc.quote(quoteRequest({ minFromSats: 45_000, maxFromSats: 55_000 }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 44_999 })
+      deps.onchain.mineBlocks(1)
+      const row = await svc.tick(outcome.swap.id)
+      expect(row.state).toBe('refused')
+      expect(row.failureReason).toContain('quote accepts 45000 to 55000')
+    })
+
+    it('leaves a swap quoted without a band on exact equality, unchanged', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 48_000 })
+      deps.onchain.mineBlocks(1)
+      const row = await service.tick(outcome.swap.id)
+      expect(row.state).toBe('refused')
+      expect(row.failureReason).toContain('quote is for 50000')
+    })
+
+    it('records nothing on the funded columns when the amount matched the quote', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+      const row = await service.tick(outcome.swap.id)
+      expect(row.state).toBe('awaiting_claim')
+      expect(row.fundedValueSats).toBe(50_000)
+    })
+  })
+
+  describe('a row whose output holds something other than the quote', () => {
+    // 100bps + 50 flat on 50_000: a 550 sat absolute fee, which is what has to
+    // survive a re-size.
+    const withFee = () =>
+      new OnchainReceiveSwapService({
+        store,
+        onchain: deps.onchain,
+        arkade: deps.arkadeFake.arkade,
+        covclaimd: deps.covclaimd,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        claimDestinationScript,
+        now: clock,
+        fee: { bps: 100, flatSats: 50 },
+      })
+
+    /** Adopt in-band but leave it UNCONFIRMED, so the row parks before any of the solver's money moves. */
+    const adopt = async (svc: OnchainReceiveSwapService, fundedValueSats: number) => {
+      const outcome = await svc.quote(quoteRequest({ minFromSats: 40_000, maxFromSats: 60_000 }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      const swap = outcome.swap
+      deps.onchain.receiveExternal({ address: swap.onchainAddress, amountSats: fundedValueSats })
+      const adopted = await svc.tick(swap.id)
+      expect(adopted.state).toBe('awaiting_confirmations')
+      expect(adopted.fundedValueSats).toBe(fundedValueSats)
+      return adopted
+    }
+
+    const fund = async (svc: OnchainReceiveSwapService, id: string) => {
+      deps.onchain.mineBlocks(1)
+      return svc.tick(id)
+    }
+
+    it('pays the Arkade lockup the amended payout, so the overfund reaches the CLIENT', async () => {
+      const svc = withFee()
+      const row = await adopt(svc, 55_000)
+      expect(row.amountSats).toBe(50_000)
+      expect(row.payoutSats).toBe(49_450)
+
+      expect((await fund(svc, row.id)).state).toBe('awaiting_claim')
+      const lockup = deps.arkadeFake.lockups.get(row.pkScript)![0]!
+      expect(lockup.value).toBe(54_450)
+      // The solver's take is the fee it quoted, whatever turned up. Reading
+      // `payoutSats` here instead would hand it 5_550.
+      expect(55_000 - lockup.value).toBe(50_000 - row.payoutSats)
+    })
+
+    it('sizes the L1 claim on the funded value, so nothing is left behind for miners', async () => {
+      const svc = withFee()
+      const row = await adopt(svc, 55_000)
+      await fund(svc, row.id)
+      deps.arkadeFake.spendLockup(row.pkScript, P)
+      await store.transition(row.id, 'awaiting_claim', 'claimed', { preimage: hex.encode(P) })
+
+      const broadcastRaw = deps.onchain.broadcastRaw.bind(deps.onchain)
+      let raw: string | undefined
+      deps.onchain.broadcastRaw = async (txHex) => {
+        raw = txHex
+        return broadcastRaw(txHex)
+      }
+      await svc.tick(row.id)
+      deps.onchain.broadcastRaw = broadcastRaw
+
+      const claimTx = Transaction.fromRaw(hex.decode(raw!), { allowUnknownOutputs: true, allowUnknownInputs: true })
+      const paid = claimTx.getOutput(0).amount!
+      // Sized on 50_000 this can never exceed 50_000, whatever the fee rate.
+      expect(paid).toBeGreaterThan(50_000n)
+      const l1Fee = 55_000n - paid
+      expect(l1Fee).toBeGreaterThan(0n)
+      expect(l1Fee).toBeLessThan(2_000n)
+      expect(hex.encode(claimTx.getOutput(0).script!)).toBe(hex.encode(claimDestinationScript))
+    })
+
+    it('follows an UNDERfund down as readily as an overfund up', async () => {
+      const svc = withFee()
+      const row = await adopt(svc, 47_000)
+      expect((await fund(svc, row.id)).state).toBe('awaiting_claim')
+      const lockup = deps.arkadeFake.lockups.get(row.pkScript)![0]!
+      expect(lockup.value).toBe(46_450)
+      expect(47_000 - lockup.value).toBe(550)
+    })
+
+    it('adopts a lockup already paid at the amended amount instead of paying twice', async () => {
+      const svc = withFee()
+      const row = await adopt(svc, 55_000)
+      // A crash between broadcast and the transition recording it. Sized against
+      // `payoutSats` this still adopts, so the bug only bites on an UNDERfund.
+      deps.arkadeFake.seedLockup(row.lockupAddress, { txid: 'external-fund', vout: 0, value: 54_450 })
+      expect((await fund(svc, row.id)).state).toBe('awaiting_claim')
+      expect(deps.arkadeFake.lockups.get(row.pkScript)!.length).toBe(1)
+    })
+
+    it('does not pay an underfunded lockup a second time on resume', async () => {
+      const svc = withFee()
+      const row = await adopt(svc, 47_000)
+      // Sized against the quoted 49_450, `46_450 >= 49_450` is false and the
+      // solver pays the whole payout again. An overfund hides it.
+      deps.arkadeFake.seedLockup(row.lockupAddress, { txid: 'external-fund', vout: 0, value: 46_450 })
+      expect((await fund(svc, row.id)).state).toBe('awaiting_claim')
+      expect(deps.arkadeFake.lockups.get(row.pkScript)!.length).toBe(1)
+      expect(deps.arkadeFake.lockups.get(row.pkScript)![0]!.value).toBe(46_450)
+      // The one that would have cost real money: no second `fund` call at all.
+      expect(deps.arkadeFake.fundStamps).toHaveLength(0)
+    })
+
+    it('refuses rather than funds when the fee rate has left the amount unsweepable since adoption', async () => {
+      const svc = withFee()
+      const row = await adopt(svc, 47_000)
+      deps.onchain.estimateFeeRate = async () => 10_000
+
+      const after = await fund(svc, row.id)
+
+      // REFUSED, never stuck: the re-check runs on the state with a clean edge.
+      expect(after.state).toBe('refused')
+      expect(deps.arkadeFake.fundStamps).toHaveLength(0)
+      expect(deps.arkadeFake.lockups.get(row.pkScript) ?? []).toHaveLength(0)
+    })
+
+    it('re-checks the ADOPTED output, not whatever else has since arrived', async () => {
+      // A second payment must not vouch for the first. The row's outpoint is
+      // already what the claim will spend, so a gate that re-scans could pass
+      // on a healthy output while the solver funds against an unsweepable one.
+      const svc = withFee()
+      const row = await adopt(svc, 47_000)
+      deps.onchain.receiveExternal({ address: row.onchainAddress, amountSats: 55_000 })
+      deps.onchain.estimateFeeRate = async () => 10_000
+
+      const after = await fund(svc, row.id)
+
+      expect(after.state).toBe('refused')
+      expect(deps.arkadeFake.fundStamps).toHaveLength(0)
+    })
+
+    it('still funds the exact quoted amount however high the fee rate goes', async () => {
+      const svc = withFee()
+      const outcome = await svc.quote(quoteRequest({ minFromSats: 40_000, maxFromSats: 60_000 }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.estimateFeeRate = async () => 10_000
+      deps.onchain.mineBlocks(1)
+      expect((await svc.tick(outcome.swap.id)).state).toBe('awaiting_claim')
     })
   })
 })

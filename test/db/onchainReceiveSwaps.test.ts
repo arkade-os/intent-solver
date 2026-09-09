@@ -6,6 +6,19 @@ import type { SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
 let now = 1_000_000
 const clock = () => now
 
+const driverOver = (db: Database.Database): SqlDriver => ({
+  exec: async (sql) => {
+    db.exec(sql)
+  },
+  run: async (sql, params = []) => ({ changes: db.prepare(sql).run(...(params as never[])).changes }),
+  get: async (sql, params = []) => db.prepare(sql).get(...(params as never[])) as never,
+  all: async (sql, params = []) => db.prepare(sql).all(...(params as never[])) as never,
+  transaction: async (fn) => fn(),
+  close: async () => {
+    db.close()
+  },
+})
+
 let store: OnchainReceiveSwapStore
 
 const baseQuote = {
@@ -220,6 +233,40 @@ describe('OnchainReceiveSwapStore', () => {
   })
 })
 
+describe('OnchainReceiveSwapStore — committedSats', () => {
+  const live = async (id: string, amountSats: number, funded?: number) => {
+    const row = await store.insertQuote({ ...baseQuote, id, paymentHash: id.padStart(64, '0'), amountSats })
+    await store.transition(row.id, 'quoted', 'awaiting_confirmations', {
+      funding_txid: 'ab'.repeat(32),
+      funding_vout: 0,
+      ...(funded === undefined ? {} : { funded_value_sats: funded }),
+    })
+  }
+
+  it('counts the quoted amount while nothing has amended the row', async () => {
+    await live('swap-a', 50_000)
+    await live('swap-b', 30_000)
+    expect(await store.committedSats()).toBe(80_000)
+  })
+
+  it('counts what an amended row actually holds, so the exposure cap is not under-reported', async () => {
+    await live('swap-a', 50_000, 61_000)
+    await live('swap-b', 30_000)
+    expect(await store.committedSats()).toBe(91_000)
+  })
+
+  it('follows an amended row down as well as up', async () => {
+    await live('swap-a', 50_000, 41_000)
+    expect(await store.committedSats()).toBe(41_000)
+  })
+
+  it('still counts only live rows', async () => {
+    await live('swap-a', 50_000, 61_000)
+    await store.fail('swap-a', 'awaiting_confirmations', 'lockup timeout')
+    expect(await store.committedSats()).toBe(0)
+  })
+})
+
 describe('OnchainReceiveSwapStore — migration', () => {
   it('adds payout_sats to a table predating it, reading pre-fee rows as amount-minus-nothing', async () => {
     const db = new Database(':memory:')
@@ -295,5 +342,89 @@ describe('OnchainReceiveSwapStore — migration', () => {
     // And the new column round-trips for rows quoted after the migration.
     await migrated.insertQuote(baseQuote)
     expect((await migrated.get('swap-1')).payoutSats).toBe(49_500)
+  })
+
+  it('adds the funded_* columns to a table predating them, leaving existing rows byte-identical', async () => {
+    const db = new Database(':memory:')
+    const driver = driverOver(db)
+    // The shape immediately BEFORE the tolerance band.
+    db.exec(`
+      CREATE TABLE receive_onchain_swap (
+        id TEXT PRIMARY KEY, state TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        payment_hash TEXT NOT NULL, amount_sats INTEGER NOT NULL, payout_sats INTEGER NOT NULL,
+        htlc_locktime INTEGER NOT NULL, refund_locktime INTEGER NOT NULL, min_confirmations INTEGER NOT NULL,
+        provider_pubkey TEXT NOT NULL, client_payout_pubkey TEXT NOT NULL, server_pubkey TEXT NOT NULL,
+        claim_delay INTEGER NOT NULL, refund_delay INTEGER NOT NULL, refund_without_receiver_delay INTEGER NOT NULL,
+        emulator_pubkey TEXT NOT NULL, pk_script TEXT NOT NULL, lockup_address TEXT NOT NULL,
+        refund_pk_script TEXT NOT NULL, client_payout_pk_script TEXT NOT NULL, non_interactive_parameters TEXT,
+        htlc_pubkey TEXT NOT NULL, client_onchain_refund_pubkey TEXT NOT NULL,
+        onchain_address TEXT NOT NULL, onchain_pk_script TEXT NOT NULL, claim_packet TEXT NOT NULL,
+        funding_txid TEXT, funding_vout INTEGER, arkade_fund_txid TEXT, preimage TEXT,
+        arkade_claim_txid TEXT, onchain_claim_txid TEXT, arkade_refund_txid TEXT,
+        refund_outcome TEXT, failure_reason TEXT, rfq_id TEXT, fund_started_at INTEGER, stamped_at INTEGER
+      );
+    `)
+    db.prepare(
+      `INSERT INTO receive_onchain_swap (
+        id, state, created_at, updated_at, payment_hash, amount_sats, payout_sats,
+        htlc_locktime, refund_locktime, min_confirmations,
+        provider_pubkey, client_payout_pubkey, server_pubkey, claim_delay, refund_delay, refund_without_receiver_delay, emulator_pubkey,
+        pk_script, lockup_address, refund_pk_script, client_payout_pk_script,
+        htlc_pubkey, client_onchain_refund_pubkey, onchain_address, onchain_pk_script, claim_packet
+      ) VALUES ('pre-band-row', 'awaiting_confirmations', 7, 9, ?, 50000, 49500, 11, 13, 2, 'bb', 'dd', 'cc', 1, 2, 3, 'ff', 'dd', 'tark1x', 'ee', '77', '22', '11', 'bcrt1x', '33', 'cA==')`,
+    ).run('99'.repeat(32))
+    const before = db.prepare(`SELECT * FROM receive_onchain_swap WHERE id = 'pre-band-row'`).get()
+
+    const migrated = await OnchainReceiveSwapStore.open(driver, clock)
+
+    const columns = db
+      .prepare(`PRAGMA table_info(receive_onchain_swap)`)
+      .all()
+      .map((c) => (c as { name: string }).name)
+    expect(columns).toContain('funded_value_sats')
+    expect(columns).toContain('funded_payout_sats')
+    expect(columns).toContain('min_from_sats')
+    expect(columns).toContain('max_from_sats')
+
+    const row = await migrated.get('pre-band-row')
+    // Never amended, and the row says so rather than echoing the quote.
+    expect(row.fundedValueSats).toBeNull()
+    expect(row.fundedPayoutSats).toBeNull()
+    // No band either: strict equality, which is what this row was quoted under.
+    expect(row.minFromSats).toBeNull()
+    expect(row.maxFromSats).toBeNull()
+    expect(row.amountSats).toBe(50_000)
+    expect(row.payoutSats).toBe(49_500)
+    const added = {
+      funded_value_sats: undefined,
+      funded_payout_sats: undefined,
+      min_from_sats: undefined,
+      max_from_sats: undefined,
+    }
+    const after = db.prepare(`SELECT * FROM receive_onchain_swap WHERE id = 'pre-band-row'`).get() as Record<
+      string,
+      unknown
+    >
+    expect({ ...after, ...added }).toEqual({ ...(before as Record<string, unknown>), ...added })
+    for (const column of Object.keys(added)) expect(after[column]).toBeNull()
+  })
+
+  it('round-trips both funded_* columns through the transition edge that writes them', async () => {
+    const row = await store.insertQuote(baseQuote)
+    expect(row.fundedValueSats).toBeNull()
+
+    await store.transition(row.id, 'quoted', 'awaiting_confirmations', {
+      funding_txid: 'ab'.repeat(32),
+      funding_vout: 1,
+      funded_value_sats: 49_000,
+      funded_payout_sats: 48_500,
+    })
+
+    const reread = await store.get(row.id)
+    expect(reread.fundedValueSats).toBe(49_000)
+    expect(reread.fundedPayoutSats).toBe(48_500)
+    // The quote itself is untouched by an amendment.
+    expect(reread.amountSats).toBe(50_000)
+    expect(reread.payoutSats).toBe(49_500)
   })
 })

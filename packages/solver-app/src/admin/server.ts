@@ -86,6 +86,7 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   registerSwapRoutes(app, deps)
   // Beside the swaps route, not inside it. @see routes/offers.ts
   registerOfferRoutes(app, deps)
+  app.get('/api/rfq-refusals', (c) => c.json(deps.services.rfqRefusals.recent()))
   registerSettingsRoutes(app, deps)
   registerMarketRoutes(app, deps)
   // BEFORE the actions route, and it must stay there: that route claims

@@ -229,7 +229,7 @@ describe('RelayIngress', () => {
     expect((await store.findByPaymentHash(PAYMENT_HASH))!.rfqId).toBe(RFQ_ID)
   })
 
-  it('publishes a refusal for an undecodable invoice, with the closed reason', async () => {
+  it('publishes a refusal for an undecodable invoice with client-safe detail', async () => {
     await relay.sendRequest(
       CLIENT,
       rfqRequest({
@@ -237,7 +237,14 @@ describe('RelayIngress', () => {
       }),
     )
     const reply = relay.repliesTo(CLIENT)[0]!.payload as Record<string, unknown>
-    expect(reply).toEqual({ v: 1, type: 'rfq_refusal', rfq_id: RFQ_ID, reason: 'unsupported_payload' })
+    expect(reply).toEqual({
+      v: 1,
+      type: 'rfq_refusal',
+      rfq_id: RFQ_ID,
+      reason: 'unsupported_payload',
+      error_code: 'invoice_malformed',
+      field: 'profile.invoice',
+    })
   })
 
   it('REFUSES rather than going silent when the backend throws mid-quote', async () => {

@@ -475,9 +475,8 @@ describe('the two CLTV ceilings are not the same bound', () => {
  * LSP-backed wallet produces and an argument that the bound is too tight for
  * real invoices.
  *
- * The closed reason is unchanged either way. The numbers ride in the message,
- * which every catch site puts in a log `detail` while answering the client from
- * the enum — so no bound and no value can reach a client.
+ * The closed reason is unchanged either way. The message stays operator-only;
+ * the numeric context can also give the requester a stable, bounded diagnosis.
  */
 describe('cltv_too_large says WHICH ceiling and by how much', () => {
   const forge = (minFinalCltvBlocks: number, routeHints: readonly (readonly number[])[] = []): string =>
@@ -505,17 +504,23 @@ describe('cltv_too_large says WHICH ceiling and by how much', () => {
   })
 
   it('names the final delta and its bound when the `c` field alone is too big', () => {
-    const { message } = rejectionOf(forge(MAX_CLIENT_FINAL_CLTV_BLOCKS + 1))
+    const { message, context } = rejectionOf(forge(MAX_CLIENT_FINAL_CLTV_BLOCKS + 1))
     expect(message).toContain(`final delta ${MAX_CLIENT_FINAL_CLTV_BLOCKS + 1}`)
     expect(message).toContain(String(MAX_CLIENT_FINAL_CLTV_BLOCKS))
+    expect(context).toEqual({
+      actual: MAX_CLIENT_FINAL_CLTV_BLOCKS + 1,
+      limit: MAX_CLIENT_FINAL_CLTV_BLOCKS,
+      unit: 'blocks',
+    })
   })
 
   it('shows the sum when a route hint is what pushes it over', () => {
-    const { message } = rejectionOf(forge(18, [[MAX_CLIENT_CLTV_BLOCKS]]))
+    const { message, context } = rejectionOf(forge(18, [[MAX_CLIENT_CLTV_BLOCKS]]))
     expect(message).toContain('route hint')
     expect(message).toContain(String(MAX_CLIENT_CLTV_BLOCKS))
     // The operator needs the total, not just the parts, to see the margin.
     expect(message).toContain(String(18 + MAX_CLIENT_CLTV_BLOCKS))
+    expect(context).toEqual({ actual: 18 + MAX_CLIENT_CLTV_BLOCKS, limit: MAX_CLIENT_CLTV_BLOCKS, unit: 'blocks' })
   })
 
   it('tells the two apart, which is the whole reason this exists', () => {

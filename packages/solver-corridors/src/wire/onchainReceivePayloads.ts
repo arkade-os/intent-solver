@@ -67,6 +67,13 @@ export const OnchainReceiveRfqRequest = z
     pair: z.string().min(1).max(MAX_PAIR_LENGTH),
     amount_side: z.enum(['from', 'to']),
     amount: WIRE_AMOUNT,
+    /**
+     * Declared at quote time so consent happens BEFORE funding: the client may
+     * go offline the moment it broadcasts. Absent means strict equality on
+     * `amount`. Both or neither; one alone is `unsupported_payload`.
+     */
+    min_from_amount: WIRE_AMOUNT.optional(),
+    max_from_amount: WIRE_AMOUNT.optional(),
     profile: z
       .object({
         payment_hash: HEX32,
@@ -82,6 +89,12 @@ export const OnchainReceiveRfqRequest = z
       .strict(),
   })
   .strict()
+  .refine((r) => (r.min_from_amount === undefined) === (r.max_from_amount === undefined), {
+    message: 'min_from_amount and max_from_amount must be given together',
+  })
+  .refine((r) => r.min_from_amount === undefined || r.min_from_amount <= r.max_from_amount!, {
+    message: 'min_from_amount must not exceed max_from_amount',
+  })
 
 export const onchainReceiveRfqQuotePayload = (
   row: OnchainReceiveSwapRow,
@@ -97,6 +110,11 @@ export const onchainReceiveRfqQuotePayload = (
   // with — the persisted payout, amount minus this corridor's fee.
   from_amount: row.amountSats,
   to_amount: row.payoutSats,
+  // BINDING, echoed only when asked for, and narrowed to what this operator
+  // underwrites — so it may come back tighter than requested.
+  ...(row.minFromSats === null || row.maxFromSats === null
+    ? {}
+    : { min_from_amount: row.minFromSats, max_from_amount: row.maxFromSats }),
   solver_pubkey: row.providerPubkey,
   valid_until: validUntil,
   // The SOLVER's own Arkade refund deadline on this leg — see
@@ -178,6 +196,10 @@ export const onchainReceiveRfqStatusPayload = (row: OnchainReceiveSwapRow, rfqId
       settle_txid: row.onchainClaimTxid,
       refund_txid: row.arkadeRefundTxid,
       failure_reason: row.failureReason,
+      // Absent on every unamended swap.
+      ...(row.fundedValueSats === null || row.fundedPayoutSats === null
+        ? {}
+        : { funded_from_amount: row.fundedValueSats, funded_to_amount: row.fundedPayoutSats }),
       // Preimages are receipts, emitted only once settlement itself
       // published them — rfq-protocol.md §6. `claimed` already has `P` on
       // disk (it is how the row got there) but the swap is NOT done yet

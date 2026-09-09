@@ -13,6 +13,9 @@ import {
   rfqBidPayload,
   RFQ_PAIR_SEND,
   RFQ_REFUSAL_REASONS,
+  RFQ_REFUSAL_ERROR_CODE_VALUES,
+  isRfqRefusalErrorCode,
+  rfqRefusalPayload,
   toRfqReason,
 } from '@arkade-os/solver-corridors/wire/payloads.js'
 import type { QuoteRefusal as SendQuoteRefusal } from '@arkade-os/solver-corridors/send/orchestrator.js'
@@ -21,6 +24,45 @@ import type { QuoteRefusal as OnchainSendQuoteRefusal } from '@arkade-os/solver-
 import type { QuoteRefusal as OnchainReceiveQuoteRefusal } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 
 const OPEN_ID = 'b'.repeat(64)
+
+describe('client-safe refusal details', () => {
+  it('adds a stable code for a safe internal failure while retaining the coarse reason', () => {
+    expect(rfqRefusalPayload(OPEN_ID, 'invalid_refund_address')).toEqual({
+      v: 1,
+      type: 'rfq_refusal',
+      rfq_id: OPEN_ID,
+      reason: 'unsupported_payload',
+      error_code: 'invalid_refund_address',
+      field: 'profile.refund_address',
+    })
+  })
+
+  it('carries structured numeric context without free-form text', () => {
+    expect(
+      rfqRefusalPayload(OPEN_ID, 'unsupported_payload', {
+        error_code: 'invoice_cltv_too_large',
+        field: 'profile.invoice',
+        actual: 624,
+        limit: 288,
+        unit: 'blocks',
+      }),
+    ).toMatchObject({ error_code: 'invoice_cltv_too_large', actual: 624, limit: 288, unit: 'blocks' })
+  })
+
+  it('keeps error codes closed and recognises every advertised member', () => {
+    expect(new Set(RFQ_REFUSAL_ERROR_CODE_VALUES).size).toBe(RFQ_REFUSAL_ERROR_CODE_VALUES.length)
+    for (const code of RFQ_REFUSAL_ERROR_CODE_VALUES) expect(isRfqRefusalErrorCode(code)).toBe(true)
+    expect(isRfqRefusalErrorCode('backend_exception')).toBe(false)
+  })
+
+  it('treats a wrong-network invoice as a payload fault while retaining its diagnostic', () => {
+    expect(rfqRefusalPayload(OPEN_ID, 'wrong_network')).toMatchObject({
+      reason: 'unsupported_payload',
+      error_code: 'invoice_wrong_network',
+      field: 'profile.invoice',
+    })
+  })
+})
 
 /**
  * Every refusal a corridor's `quote()` can hand the ingress, listed once.
@@ -162,12 +204,7 @@ describe('toRfqReason', () => {
     expect(toRfqReason('invalid_refund_address')).toBe('unsupported_payload')
   })
 
-  it('says nothing new to a client about an invoice this rail cannot contain', () => {
-    // The refusal moved from `decodeInvoice` (where it reached clients as
-    // `unsupported_payload` through the `InvalidInvoice` catch in
-    // `ingress/rfq.ts`) onto the acceptance path. Nothing about the request
-    // changed, the closed set has no better token, and growing that set is a
-    // ts-sdk change — so the bytes a client sees must be identical.
+  it('retains the coarse reason for an invoice this rail cannot contain', () => {
     expect(toRfqReason('cltv_too_large')).toBe('unsupported_payload')
   })
 

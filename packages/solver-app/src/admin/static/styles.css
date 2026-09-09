@@ -202,6 +202,17 @@ tbody tr:hover {
   background: var(--raised);
 }
 
+.rfq-refusals {
+  table-layout: fixed;
+}
+
+.rfq-refusals td,
+.rfq-refusals th {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+}
+
 tbody tr.clickable {
   cursor: pointer;
 }
