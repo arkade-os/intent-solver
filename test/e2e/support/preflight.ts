@@ -153,10 +153,11 @@ const probeTcp = (dependency: Dependency, hostPort: string): Promise<ProbeResult
  * this line in the report.
  */
 const probeCounterparty = async (): Promise<ProbeResult> => {
-  const { COUNTERPARTY_CONTAINER, nodeBlockHeight } = await import('./counterparty.js')
-  const target = `docker exec ${COUNTERPARTY_CONTAINER} lncli`
+  const { counterpartyContainer, nodeBlockHeight } = await import('./counterparty.js')
+  const container = counterpartyContainer()
+  const target = `docker exec ${container} lncli`
   try {
-    await nodeBlockHeight(COUNTERPARTY_CONTAINER)
+    await nodeBlockHeight(container)
     return { dependency: 'ln-counterparty', target, reachable: true }
   } catch (error) {
     const detail = error instanceof Error ? error.message.split('\n')[0] : String(error)
