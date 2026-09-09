@@ -16,7 +16,12 @@ import { fileURLToPath } from 'node:url'
 
 const cliSource = readFileSync(fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)), 'utf8')
 
-/** The cadence guard the adoption call actually sits under: the nearest one above it. */
+/**
+ * The cadence guard the adoption call sits under: the nearest one above it.
+ *
+ * Relies on the cadence blocks being siblings — the last guard before the call
+ * is the enclosing one only while no other opens between that header and it.
+ */
 const guardOverAdoption = (): string => {
   const call = cliSource.indexOf('await resyncWatchedScripts()')
   if (call === -1) throw new Error('the watch loop no longer resyncs the watched scripts at all')

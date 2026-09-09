@@ -445,9 +445,17 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
     }
     // After the sweep, so a swap it just retired is dropped before this reads.
     // Cheap enough to run often: local reads, and `watchScript` is asked once.
+    //
+    // Caught, unlike the corridor sweep above: the watcher is best-effort by
+    // contract, so a store that throws here must degrade to the sweep rather
+    // than end the loop every corridor depends on.
     if (Date.now() - lastWatchSync >= WATCH_SYNC_MS) {
       lastWatchSync = Date.now()
-      await resyncWatchedScripts()
+      try {
+        await resyncWatchedScripts()
+      } catch (error) {
+        log('watched-script sync failed:', error instanceof Error ? error.message : String(error))
+      }
     }
     if (Date.now() - lastRefundSweep > REFUND_SWEEP_MS) {
       lastRefundSweep = Date.now()
