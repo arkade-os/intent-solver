@@ -140,12 +140,12 @@ const preimageFromClaimWitness = (witness: Uint8Array[]): Uint8Array | null => w
  */
 const unrefundableReason = (evidence: 'unknown' | 'unspent', row: OnchainSendSwapRow, now: number): string => {
   if (evidence === 'unknown') {
-    return 'the indexer reports no output at this lockup script, so no spend is provable and nothing is there to give back — retrying cannot change that, and it needs a human'
+    return 'the unfiltered view reports no output at this lockup script, so no spend is provable and nothing is there to give back — retrying cannot change that, and it needs a human'
   }
   const stale = now - row.refundLocktime
   return stale > DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
-    ? `lockup reads empty against an output the indexer still calls unspent, ${stale}s past its refund locktime — too long to be a view catching up, and it needs a human`
-    : 'lockup reads empty while the indexer still reports an unspent output — the spendable view is behind, so this retries'
+    ? `the spendable view is empty; the unfiltered view still reports an unspent output, ${stale}s past the refund locktime — too long to be one view catching up, and it needs a human`
+    : 'the spendable view is empty; the unfiltered view still reports an unspent output — the spendable view is behind, so this retries'
 }
 
 /**

@@ -1311,7 +1311,7 @@ describe('OnchainSendSwapService', () => {
     expect(await deps.store.findRefundable(now)).toHaveLength(1)
 
     expect(String(errors[0])).not.toMatch(/indexer lag/)
-    expect(String(errors[0])).toMatch(/no output at this lockup script/)
+    expect(String(errors[0])).toMatch(/unfiltered view reports no output at this lockup script/)
   })
 
   it('refundSweep() stops calling a stale read temporary once it outlasts the lockup timeout', async () => {
@@ -1341,6 +1341,11 @@ describe('OnchainSendSwapService', () => {
     now = row.refundLocktime + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT + 1
     expect(await service.refundSweep()).toEqual([])
     expect(String(errors[1])).toMatch(/needs a human/)
+
+    for (const error of errors) {
+      expect(String(error)).toMatch(/spendable view is empty/)
+      expect(String(error)).toMatch(/unfiltered view still reports an unspent output/)
+    }
 
     // The escalation is in the words, not in a verdict about where money went.
     expect((await deps.store.get(row.id)).refundOutcome).toBeNull()

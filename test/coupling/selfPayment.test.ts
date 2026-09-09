@@ -174,6 +174,8 @@ const sendOps = (): ArkadeOps => ({
   hrp: HRP,
   findLockups: async (pkScript) => chain.outputs.get(pkScript) ?? [],
   lockupProvablySpent: async (pkScript) => (chain.outputs.get(pkScript) ?? []).length === 0,
+  // Compliance, not authority: nothing here dispatches this. Empty means spent
+  // only because `spend()` deletes from the map — production answers 'unknown'.
   lockupSpendEvidence: async (pkScript) => ((chain.outputs.get(pkScript) ?? []).length === 0 ? 'spent' : 'unspent'),
   claim: async (row, _outputs, preimage) => {
     chain.claimCalls.push({ rowId: row.id, preimage })
