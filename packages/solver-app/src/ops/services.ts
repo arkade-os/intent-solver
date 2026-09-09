@@ -860,9 +860,7 @@ export const createServices = async (
       rpc,
       logScanRange: evmChain.logScanRange,
     })
-    // Asked once, here, because an oversized range is rejected per scan and the
-    // send corridor reads a rejected scan as "not claimed yet" — and it hides
-    // until a scan is long enough to use the full span. @see logScanProbe.ts
+    // @see logScanProbe.ts on why this is asked at boot, and on the split.
     const probe = await probeLogScanRange({
       rpc,
       contractAddress: evmChain.contractAddress,
@@ -875,11 +873,9 @@ export const createServices = async (
       )
     }
     if (probe.kind === 'inconclusive') {
-      // NOT fatal: a node that blinked is not evidence about the setting, and
-      // refusing to boot on it trades an invisible bug for an outage.
+      // NOT fatal: a node that blinked is not evidence about the setting.
       log(`evm: could not verify EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} against ${evmChain.rpcUrl}`, probe.message)
     } else if (probe.blocks < BigInt(evmChain.logScanRange)) {
-      // A chain shorter than the range cannot be asked the real question.
       log(`evm: EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} unproven — the chain is only ${probe.blocks} blocks long`)
     }
     // Number, not bigint, because that is what both orchestrators' deps take.
