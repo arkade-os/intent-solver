@@ -5,7 +5,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import { SigHash } from '@scure/btc-signer'
 import { OnchainSendSwapService, HTLC_REFUND_MTP_MARGIN } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
-import { ARKADE_CLAIM_WINDOW_SECONDS } from '@arkade-os/solver-core/core/onchainSend.js'
+import { ARKADE_CLAIM_WINDOW_SECONDS, DEFAULT_ONCHAIN_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/onchainSend.js'
 import {
   OnchainSendSwapStore,
   type OnchainSendSwapState,
@@ -92,6 +92,8 @@ const buildDeps = async (fundingVout = 0) => {
   // spendable view has not caught up" is the whole point of the second read,
   // and a fake that derived one from the other could not express the gap.
   const spent = new Set<string>()
+  // `outputs` goes empty both for a script that never held anything and for a lagging view; this separates them.
+  const known = new Map<string, { txid: string; vout: number; value: number }[]>()
   const arkade = {
     providerPubkey,
     serverPubkey,
@@ -101,10 +103,15 @@ const buildDeps = async (fundingVout = 0) => {
     hrp: 'tark',
     findLockups: async (pkScriptHex: string) => outputs.get(pkScriptHex) ?? [],
     lockupProvablySpent: async (pkScriptHex: string) => spent.has(pkScriptHex),
+    lockupSpendEvidence: async (pkScriptHex: string) => {
+      if (spent.has(pkScriptHex)) return 'spent' as const
+      if ((known.get(pkScriptHex) ?? outputs.get(pkScriptHex) ?? []).length > 0) return 'unspent' as const
+      return 'unknown' as const
+    },
     claim: async () => 'claim-ark-txid',
     refund: async () => 'refund-ark-txid',
   }
-  return { store, driver, onchain, arkade, outputs, spent }
+  return { store, driver, onchain, arkade, outputs, spent, known }
 }
 
 describe('OnchainSendSwapService', () => {
@@ -1260,6 +1267,7 @@ describe('OnchainSendSwapService', () => {
     // ONE STALE READ: the `spendableOnly` view answers empty while the sats are
     // still at the script, so `deps.spent` stays empty and no spend is provable.
     deps.outputs.set(row.pkScript, [])
+    deps.known.set(row.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 60_000 }])
     now = row.refundLocktime + 1
 
     const errors: string[] = []
@@ -1277,6 +1285,66 @@ describe('OnchainSendSwapService', () => {
     deps.outputs.set(row.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 60_000 }])
     expect(await service.refundSweep()).toEqual([row.id])
     expect((await deps.store.get(row.id)).refundOutcome).toBe('pushed')
+  })
+
+  // The production shape: a quote nobody funded, swept for the process's life.
+  it('refundSweep() does not blame indexer lag for a script the indexer has no output for', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    now += DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
+    const row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toBe('lockup timeout')
+
+    now = row.refundLocktime + 1
+    const errors: unknown[] = []
+    service.onTickError = (_id, error) => errors.push(error)
+    expect(await service.refundSweep()).toEqual([])
+
+    expect((await deps.store.get(row.id)).refundOutcome).toBeNull()
+    expect(await deps.store.findRefundable(now)).toHaveLength(1)
+
+    expect(String(errors[0])).not.toMatch(/indexer lag/)
+    expect(String(errors[0])).toMatch(/no output at this lockup script/)
+  })
+
+  it('refundSweep() stops calling a stale read temporary once it outlasts the lockup timeout', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 60_000 }])
+    const row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('refused')
+
+    // Genuine lag: spendable reads empty, the indexer still reports an output.
+    deps.outputs.set(row.pkScript, [])
+    deps.known.set(row.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 60_000 }])
+
+    const errors: unknown[] = []
+    service.onTickError = (_id, error) => errors.push(error)
+
+    now = row.refundLocktime + 1
+    expect(await service.refundSweep()).toEqual([])
+    expect(String(errors[0])).toMatch(/behind/)
+
+    now = row.refundLocktime + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT + 1
+    expect(await service.refundSweep()).toEqual([])
+    expect(String(errors[1])).toMatch(/needs a human/)
+
+    // The escalation is in the words, not in a verdict about where money went.
+    expect((await deps.store.get(row.id)).refundOutcome).toBeNull()
+    expect(await deps.store.findRefundable(now)).toHaveLength(1)
   })
 
   it('does not time out the onchain HTLC before htlcLocktime', async () => {

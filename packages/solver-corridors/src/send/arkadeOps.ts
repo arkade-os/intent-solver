@@ -17,6 +17,7 @@ import {
   claimSwapScript,
   findLockups,
   lockupProvablySpent,
+  lockupSpendEvidence,
   refundSwapScript,
   type ArkadeContext,
 } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -55,6 +56,7 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
     hrp: ctx.hrp,
     findLockups: (pkScriptHex) => findLockups(ctx, pkScriptHex),
     lockupProvablySpent: (pkScriptHex) => lockupProvablySpent(ctx, pkScriptHex),
+    lockupSpendEvidence: (pkScriptHex) => lockupSpendEvidence(ctx, pkScriptHex),
     claim: async (row, outputs, preimageHex) => {
       // assertScriptMatchesRow proves the row is self-consistent; this proves
       // the LIVE key can spend it. A rotated mnemonic would otherwise surface

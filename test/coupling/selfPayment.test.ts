@@ -174,6 +174,7 @@ const sendOps = (): ArkadeOps => ({
   hrp: HRP,
   findLockups: async (pkScript) => chain.outputs.get(pkScript) ?? [],
   lockupProvablySpent: async (pkScript) => (chain.outputs.get(pkScript) ?? []).length === 0,
+  lockupSpendEvidence: async (pkScript) => ((chain.outputs.get(pkScript) ?? []).length === 0 ? 'spent' : 'unspent'),
   claim: async (row, _outputs, preimage) => {
     chain.claimCalls.push({ rowId: row.id, preimage })
     spend(row.pkScript)
