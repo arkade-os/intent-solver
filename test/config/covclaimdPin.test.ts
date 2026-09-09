@@ -18,7 +18,9 @@ const DOCS = ['README.md', 'docs/runbook.md']
 /** Lowest covclaimd that attaches `PrevArkTx`, as `[major, minor, patch, rc]`. */
 const FLOOR = [0, 0, 1, 5]
 
-const PIN = /COVCLAIMD_IMAGE=ghcr\.io\/arkade-os\/covclaimd:v(\d+)\.(\d+)\.(\d+)-rc\.(\d+)/g
+// The `-rc.N` is optional so a first stable tag reads as the release it is,
+// rather than as no pin at all: absent, it sorts above every rc of that patch.
+const PIN = /COVCLAIMD_IMAGE=ghcr\.io\/arkade-os\/covclaimd:v(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?/g
 /** A runnable bring-up, not the prose that discusses one: start of line, no `#`. */
 const BRINGUP = /^node regtest\.mjs start\b/gm
 
@@ -31,7 +33,7 @@ const pins = (): { file: string; tag: string; version: number[] }[] =>
     return [...text.matchAll(PIN)].map((m) => ({
       file,
       tag: m[0].split('=')[1] as string,
-      version: m.slice(1, 5).map(Number),
+      version: [...m.slice(1, 4).map(Number), m[4] === undefined ? Infinity : Number(m[4])],
     }))
   })
 
