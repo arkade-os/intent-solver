@@ -39,7 +39,7 @@
     "files": ["receiveLightning.e2e.test.ts", "receiveLightningEdges.e2e.test.ts", "covclaimdClaim.e2e.test.ts"],
     "mintAsset": false,
     "lnd": true,
-    "covclaimdImage": "ghcr.io/arkade-os/covclaimd:v0.0.1-rc.4",
+    "covclaimdImage": "ghcr.io/arkade-os/covclaimd:v0.0.1-rc.5",
     "evmChain": false,
     "arkdTimelocks": "seconds"
   },
