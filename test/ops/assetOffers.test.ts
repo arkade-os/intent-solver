@@ -418,10 +418,8 @@ describe('tickAll', () => {
   })
 })
 
-/**
- * `consider` admits a price; `tickAll` spends at it on a worker loop and at
- * startup recovery, arbitrary wall time later. Nothing between them re-asks.
- */
+// `consider` admits a price; `tickAll` spends at it on a worker loop and at
+// startup recovery, arbitrary wall time later. Nothing between them re-asks.
 describe('tickAll re-runs price admission', () => {
   // 900 USDT-units against 1000 sats wanted, so 1.12 admits and 0.5 is far out.
   const pricing = [
@@ -444,7 +442,7 @@ describe('tickAll re-runs price admission', () => {
     let price = '1.12'
     const settle = vi.fn(async () => '0xfill')
     const refused: { outpoint: string; reason: string; detail: string }[] = []
-    const errors: unknown[] = []
+    const errors: { id: string; error: unknown }[] = []
     const built = await build({
       pricing,
       fetchPrice: async () => {
@@ -453,7 +451,7 @@ describe('tickAll re-runs price admission', () => {
       },
       settle,
       onRefused: (outpoint, reason, detail) => void refused.push({ outpoint, reason, detail }),
-      onError: (_id, error) => void errors.push(error),
+      onError: (id, error) => void errors.push({ id, error }),
       ...over,
     })
     expect(await built.service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
@@ -519,7 +517,8 @@ describe('tickAll re-runs price admission', () => {
     expect(await service.tickAll()).toBe(0)
     expect(settle).not.toHaveBeenCalled()
     expect(await store.findById('fill-1')).toMatchObject({ state: 'refused' })
-    expect(errors).toHaveLength(1)
+    // The ROW's id, not the `price` sentinel: an operator joins log to row on it.
+    expect(errors).toEqual([{ id: 'fill-1', error: expect.any(Error) }])
   })
 
   it('leaves a stuck row stuck', async () => {
