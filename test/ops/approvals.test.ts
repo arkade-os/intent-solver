@@ -23,9 +23,18 @@ const fakeStore = (over: Partial<Record<'approved' | 'throws', unknown>> = {}) =
   }
 }
 
-const gate = (thresholdSats: number | null, store = fakeStore(), held: SwapApprovalRequest[] = []) => ({
+const sats = (swapId: string, amount: number) => ({ swapId, assetId: null, amount: BigInt(amount) })
+const units = (swapId: string, assetId: string, amount: bigint) => ({ swapId, assetId, amount })
+
+const gate = (
+  thresholdSats: number | null,
+  store = fakeStore(),
+  held: SwapApprovalRequest[] = [],
+  assetThresholds?: ReadonlyMap<string, bigint>,
+) => ({
   check: approvalGateFor({
     thresholdSats,
+    assetThresholds,
     corridor: 'arkade:BTC->lightning:BTC',
     store,
     onHeld: (request) => held.push(request),
@@ -34,34 +43,69 @@ const gate = (thresholdSats: number | null, store = fakeStore(), held: SwapAppro
   held,
 })
 
+const USDA = 'a'.repeat(68)
+const OTHER = 'b'.repeat(68)
+
 describe('approvalGateFor', () => {
   it('is UNDEFINED with no threshold, so the corridor is handed no gate at all', () => {
     expect(gate(null).check).toBeUndefined()
+    expect(gate(null, fakeStore(), [], new Map()).check).toBeUndefined()
+  })
+
+  it('is built from an ASSET threshold alone, with no sats threshold at all', async () => {
+    const { check, store } = gate(null, fakeStore(), [], new Map([[USDA, 1_000n]]))
+    expect(check).toBeDefined()
+    expect(await check!(units('swap-1', USDA, 1_000n))).toEqual({ proceed: false, reason: APPROVAL_REFUSAL })
+    expect(store.requests).toEqual([
+      { swapId: 'swap-1', corridor: 'arkade:BTC->lightning:BTC', assetId: USDA, amount: 1_000n },
+    ])
+  })
+
+  it('holds at an asset threshold a double could not represent', async () => {
+    const big = 2n ** 70n
+    const { check } = gate(null, fakeStore(), [], new Map([[USDA, big]]))
+    expect(await check!(units('swap-1', USDA, big - 1n))).toEqual({ proceed: true })
+    expect(await check!(units('swap-1', USDA, big))).toEqual({ proceed: false, reason: APPROVAL_REFUSAL })
+  })
+
+  it('proceeds for an asset with no threshold of its own, leaving no row', async () => {
+    const { check, store } = gate(null, fakeStore(), [], new Map([[USDA, 1n]]))
+    expect(await check!(units('swap-1', OTHER, 10n ** 30n))).toEqual({ proceed: true })
+    expect(store.requests).toEqual([])
+  })
+
+  // Two units, two thresholds: neither may answer for the other.
+  it('does not let an asset amount trip the SATS threshold, or the reverse', async () => {
+    const { check } = gate(100_000, fakeStore(), [], new Map([[USDA, 10n ** 12n]]))
+    expect(await check!(units('swap-1', USDA, 200_000n))).toEqual({ proceed: true })
+    expect(await check!(sats('swap-1', 200_000))).toEqual({ proceed: false, reason: APPROVAL_REFUSAL })
   })
 
   it('proceeds under the threshold WITHOUT touching the store', async () => {
     const { check, store } = gate(100_000)
-    expect(await check!({ swapId: 'swap-1', amountSats: 99_999 })).toEqual({ proceed: true })
+    expect(await check!(sats('swap-1', 99_999))).toEqual({ proceed: true })
     expect(store.requests).toEqual([])
   })
 
   it('holds at or above the threshold and records the request', async () => {
     const { check, store } = gate(100_000)
-    expect(await check!({ swapId: 'swap-1', amountSats: 100_000 })).toEqual({
+    expect(await check!(sats('swap-1', 100_000))).toEqual({
       proceed: false,
       reason: APPROVAL_REFUSAL,
     })
-    expect(store.requests).toEqual([{ swapId: 'swap-1', corridor: 'arkade:BTC->lightning:BTC', amountSats: 100_000 }])
+    expect(store.requests).toEqual([
+      { swapId: 'swap-1', corridor: 'arkade:BTC->lightning:BTC', assetId: null, amount: 100_000n },
+    ])
   })
 
   it('proceeds once the store says approved', async () => {
     const { check } = gate(100_000, fakeStore({ approved: true }))
-    expect(await check!({ swapId: 'swap-1', amountSats: 500_000 })).toEqual({ proceed: true })
+    expect(await check!(sats('swap-1', 500_000))).toEqual({ proceed: true })
   })
 
   it('FAILS CLOSED when the store throws, and never rejects', async () => {
     const { check } = gate(100_000, fakeStore({ throws: true }))
-    await expect(check!({ swapId: 'swap-1', amountSats: 500_000 })).resolves.toEqual({
+    await expect(check!(sats('swap-1', 500_000))).resolves.toEqual({
       proceed: false,
       reason: APPROVAL_REFUSAL,
     })
@@ -69,9 +113,9 @@ describe('approvalGateFor', () => {
 
   it('notifies ONCE per swap however many ticks ask', async () => {
     const { check, held } = gate(100_000)
-    await check!({ swapId: 'swap-1', amountSats: 500_000 })
-    await check!({ swapId: 'swap-1', amountSats: 500_000 })
-    await check!({ swapId: 'swap-2', amountSats: 500_000 })
+    await check!(sats('swap-1', 500_000))
+    await check!(sats('swap-1', 500_000))
+    await check!(sats('swap-2', 500_000))
     expect(held.map((h) => h.swapId)).toEqual(['swap-1', 'swap-2'])
   })
 
@@ -85,7 +129,7 @@ describe('approvalGateFor', () => {
         throw new Error('telegram is down')
       },
     })
-    await expect(check!({ swapId: 'swap-1', amountSats: 500_000 })).resolves.toEqual({
+    await expect(check!(sats('swap-1', 500_000))).resolves.toEqual({
       proceed: false,
       reason: APPROVAL_REFUSAL,
     })
@@ -103,7 +147,7 @@ describe('approvalGateFor', () => {
         },
       },
     })
-    await expect(check!({ swapId: 'swap-1', amountSats: 500_000 })).resolves.toEqual({
+    await expect(check!(sats('swap-1', 500_000))).resolves.toEqual({
       proceed: false,
       reason: APPROVAL_REFUSAL,
     })
@@ -119,10 +163,21 @@ describe('every send leg is HANDED a gate on the shipped daemon', () => {
     'utf8',
   )
 
-  it.each([['arkade:BTC->lightning:BTC'], ['arkade:BTC->onchain:BTC'], ['arkade:BTC->ethereum']])(
-    '%s is gated',
-    (corridor) => {
-      expect(servicesSource).toContain(`approvalGate: gateFor('${corridor}')`)
-    },
-  )
+  it.each([
+    ['arkade:BTC->lightning:BTC'],
+    ['arkade:BTC->onchain:BTC'],
+    ['arkade:BTC->ethereum'],
+    ['arkade offer fill'],
+    ['arkade asset RFQ'],
+  ])('%s is gated', (corridor) => {
+    expect(servicesSource).toContain(`approvalGate: gateFor('${corridor}')`)
+  })
+
+  it('keeps the derivation for the asset receive leg next to the factory', () => {
+    const approvalsSource = readFileSync(
+      fileURLToPath(new URL('../../packages/solver-app/src/ops/approvals.ts', import.meta.url)),
+      'utf8',
+    )
+    expect(approvalsSource).toContain('onchain:BTC->arkade:<asset>')
+  })
 })

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { evaluateApproval, APPROVAL_REFUSAL } from '@arkade-os/solver-core/core/approvalGate.js'
 
-const at = (amountSats: number, thresholdSats: number | null, approval: 'approved' | 'none' | 'unreadable') =>
-  evaluateApproval({ amountSats, thresholdSats, approval })
+const at = (amount: number | bigint, threshold: number | bigint | null, approval: 'approved' | 'none' | 'unreadable') =>
+  evaluateApproval({ amount: BigInt(amount), threshold: threshold === null ? null : BigInt(threshold), approval })
 
 describe('evaluateApproval', () => {
   it('proceeds when no threshold is configured, whatever the amount', () => {
@@ -38,5 +38,11 @@ describe('evaluateApproval', () => {
 
   it('refuses a negative threshold rather than treating it as off', () => {
     expect(() => at(1, -1, 'none')).toThrow(/negative/i)
+  })
+
+  it('separates asset quantities a double cannot tell apart', () => {
+    const threshold = 2n ** 64n
+    expect(at(threshold - 1n, threshold, 'none')).toEqual({ proceed: true })
+    expect(at(threshold, threshold, 'none')).toEqual({ proceed: false, reason: APPROVAL_REFUSAL })
   })
 })

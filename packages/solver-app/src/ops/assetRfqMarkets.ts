@@ -25,15 +25,37 @@ export interface AssetRfqToken {
   /** Canonical 68-hex Arkade asset id — the identity, and what reaches the wire. */
   assetId: string
   enabled: Readonly<Record<AssetRfqDirection, boolean>>
+  /** `ASSET_<SYMBOL>_APPROVAL_THRESHOLD`, ATOMIC units; null carries no gate. */
+  approvalThresholdUnits: bigint | null
 }
 
 const SYMBOL = /^[A-Z][A-Z0-9]{0,11}$/
 const ASSET_ID = /^[0-9a-f]{68}$/
+const WHOLE = /^[0-9]+$/
+
+/** At BOOT, never a runtime `unreadable`. No sign is admitted; `0` gates every swap. */
+const approvalThresholdFrom = (symbol: string, raw: string | undefined): bigint | null => {
+  const trimmed = raw?.trim()
+  if (!trimmed) return null
+  if (!WHOLE.test(trimmed)) {
+    throw new Error(
+      `ASSET_${symbol}_APPROVAL_THRESHOLD must be a whole number of the asset's atomic units, got ${JSON.stringify(raw)}`,
+    )
+  }
+  return BigInt(trimmed)
+}
 
 const DIRECTIONS: readonly AssetRfqDirection[] = ['sell_base', 'buy_base']
 
 /** A direction an operator closed: registered, and refusing every amount. */
 const CLOSED = { min: 0n, max: 0n }
+
+/**
+ * Payable assets carrying no approval threshold. Boot logs these: one corridor
+ * pays several assets through one gate, so adding an asset leaves it ungated.
+ */
+export const ungatedAssetSymbols = (tokens: readonly AssetRfqToken[]): readonly string[] =>
+  tokens.filter((token) => token.approvalThresholdUnits === null).map((token) => token.symbol)
 
 /**
  * `SYMBOL:<asset id>`, comma separated. Empty or unset means no asset RFQ
@@ -75,7 +97,8 @@ export const parseAssetRfqTokens = (
         return [direction, corridorEnabledFrom(name, read(name))]
       }),
     ) as Record<AssetRfqDirection, boolean>
-    return { symbol, assetId, enabled }
+    const thresholdName = `ASSET_${symbol}_APPROVAL_THRESHOLD`
+    return { symbol, assetId, enabled, approvalThresholdUnits: approvalThresholdFrom(symbol, read(thresholdName)) }
   })
 }
 

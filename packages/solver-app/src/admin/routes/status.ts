@@ -225,7 +225,12 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
         // move until a human acts. Self-limiting, unlike `stuck` — but an
         // operator who never looks still loses the swap. `requestedAt` is the
         // remaining window.
-        pendingApprovals: await services.adminStore.listPendingApprovals(),
+        // Projected for the reason `balances` gives below: `c.json` throws on a
+        // bigint, taking down the very page the approval is granted from.
+        pendingApprovals: (await services.adminStore.listPendingApprovals()).map((row) => ({
+          ...row,
+          amount: row.amount.toString(),
+        })),
         // The true total, not the length of the capped list below.
         stuckCount: stuck.total,
         stuck: stuck.rows.map((row) => ({

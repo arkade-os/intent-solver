@@ -64,7 +64,7 @@ import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.j
 import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { OnchainReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
-import { AdminStore } from '../admin/db.js'
+import { AdminStore, type SwapApprovalRequest } from '../admin/db.js'
 import { createNotifier } from './notify.js'
 import { sinksFrom } from './notifySinks.js'
 import { createBalanceSampler, createSwapOutcomeReporter } from './businessEvents.js'
@@ -104,7 +104,7 @@ import {
   EXPOSED as ASSET_RFQ_EXPOSED,
 } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import { assetRfqMarketsFrom } from './assetRfqMarkets.js'
+import { assetRfqMarketsFrom, ungatedAssetSymbols } from './assetRfqMarkets.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
@@ -427,22 +427,6 @@ export const createServices = async (
     })
   }
 
-  /** One send leg's gate, or nothing. Send legs only — @see ops/approvals.ts */
-  const gateFor = (corridor: string) =>
-    approvalGateFor({
-      thresholdSats: policy.approvalThresholdSats,
-      corridor,
-      store: adminStore,
-      onHeld: (request) => {
-        log(`swap ${request.swapId} on ${request.corridor} held for approval: ${request.amountSats} sats`)
-        notifier.post(
-          `APPROVAL NEEDED — ${request.corridor} — ${request.swapId} — ${formatSats(request.amountSats)} sats.\n` +
-            'The solver will NOT pay until this is approved in the console (approve-swap), and will refuse it ' +
-            'automatically if the swap’s own deadline passes first.',
-        )
-      },
-    })
-
   // Against each store's OWN descriptor, never a shared word list.
   announceOutcomes(store, LN_SEND.pair, LN_SEND.states)
   announceOutcomes(onchainStore, ONCHAIN_SEND.pair, ONCHAIN_SEND.states)
@@ -497,6 +481,44 @@ export const createServices = async (
    */
   const bootOverrides = await adminStore.getOverrides()
   const policy = applyOverrides(config, bootOverrides)
+
+  const assetThresholds = new Map<string, bigint>(
+    policy.assetRfqTokens.flatMap((token) =>
+      token.approvalThresholdUnits === null ? [] : [[token.assetId, token.approvalThresholdUnits] as const],
+    ),
+  )
+  const assetSymbols = new Map(policy.assetRfqTokens.map((token) => [token.assetId, token.symbol]))
+
+  // Logged, not refused: gating only some assets is legitimate, but a silently
+  // ungated one is the belief gap this gate exists to close.
+  if (policy.approvalThresholdSats !== null || assetThresholds.size > 0) {
+    const ungated = ungatedAssetSymbols(policy.assetRfqTokens)
+    if (ungated.length > 0) {
+      log(`approval gate: no ASSET_<SYMBOL>_APPROVAL_THRESHOLD for ${ungated.join(', ')} — payouts in them are ungated`)
+    }
+  }
+
+  const heldAmount = (request: SwapApprovalRequest): string =>
+    request.assetId === null
+      ? `${formatSats(Number(request.amount))} sats`
+      : `${request.amount} ${assetSymbols.get(request.assetId) ?? request.assetId} units`
+
+  /** One send leg's gate, or nothing. Send legs only — @see ops/approvals.ts */
+  const gateFor = (corridor: string) =>
+    approvalGateFor({
+      thresholdSats: policy.approvalThresholdSats,
+      assetThresholds,
+      corridor,
+      store: adminStore,
+      onHeld: (request) => {
+        log(`swap ${request.swapId} on ${request.corridor} held for approval: ${heldAmount(request)}`)
+        notifier.post(
+          `APPROVAL NEEDED — ${request.corridor} — ${request.swapId} — ${heldAmount(request)}.\n` +
+            'The solver will NOT pay until this is approved in the console (approve-swap), and will refuse it ' +
+            'automatically if the swap’s own deadline passes first.',
+        )
+      },
+    })
   /**
    * The asset markets, read once from the same store and validated HERE.
    *
@@ -586,6 +608,7 @@ export const createServices = async (
         // THE SPEND. Wired here because this is where the wallet and the
         // emulator meet; every guard on it lives in `arkade/offerSettle.ts`.
         settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
+        approvalGate: gateFor('arkade offer fill'),
         onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
         // Refusals are NOT errors, so they never reached `onError` above. The log
         // line alone is invisible to an operator in a browser, so the console's
@@ -646,6 +669,7 @@ export const createServices = async (
           emulatorUrl: config.emulatorUrl,
           derivation: assetRfqDerivation,
         }),
+        approvalGate: gateFor('arkade asset RFQ'),
         onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
       })
     : null

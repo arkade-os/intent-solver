@@ -120,6 +120,7 @@ const CONFIG_KEYS = [
   'ASSET_QUOTE_VALIDITY_SECONDS',
   'ASSET_USDA_BUY_ENABLED',
   'ASSET_USDA_SELL_ENABLED',
+  'ASSET_USDA_APPROVAL_THRESHOLD',
 ]
 
 /**
@@ -986,8 +987,14 @@ describe('ASSET_MARKETS', () => {
   it('parses SYMBOL:<asset id> with both directions open', () => {
     process.env.ASSET_MARKETS = `USDA:${USDA}`
     expect(loadConfig().assetRfqTokens).toEqual([
-      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } },
+      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true }, approvalThresholdUnits: null },
     ])
+  })
+
+  it('reads ASSET_USDA_APPROVAL_THRESHOLD off the environment', () => {
+    process.env.ASSET_MARKETS = `USDA:${USDA}`
+    process.env.ASSET_USDA_APPROVAL_THRESHOLD = '250000'
+    expect(loadConfig().assetRfqTokens[0]!.approvalThresholdUnits).toBe(250_000n)
   })
 
   it('ASSET_USDA_BUY_ENABLED=false closes sell_base — the client GIVES the base leg', () => {

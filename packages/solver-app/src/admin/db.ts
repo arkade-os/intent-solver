@@ -79,10 +79,13 @@ CREATE TABLE IF NOT EXISTS admin_market (
 -- One row per swap the approval gate has held. HERE rather than a column on
 -- each swap table: that is why the gate needs no migration on the money path.
 -- A NULL approved_at is the pending state, which the gate reads directly.
+-- amount is TEXT and asset_id NULL-for-BTC for the reason assetRfqSwaps.ts
+-- gives: an asset's atomic units outrun SQLite's signed 64-bit INTEGER.
 CREATE TABLE IF NOT EXISTS admin_swap_approval (
   swap_id      TEXT PRIMARY KEY,
   corridor     TEXT NOT NULL,
-  amount_sats  INTEGER NOT NULL,
+  asset_id     TEXT,
+  amount       TEXT NOT NULL,
   requested_at INTEGER NOT NULL,
   approved_at  INTEGER
 );
@@ -100,11 +103,12 @@ CREATE TABLE IF NOT EXISTS admin_notify_state (
 /** The one key {@link AdminStore.getLastAnnouncedBalance} uses. */
 const LAST_BALANCE_KEY = 'last_announced_balance_sats'
 
-/** A swap the gate is holding. */
+/** A swap the gate is holding. `assetId` null is BTC and `amount` is sats. */
 export interface SwapApprovalRequest {
   swapId: string
   corridor: string
-  amountSats: number
+  assetId: string | null
+  amount: bigint
 }
 
 export interface SwapApprovalRow extends SwapApprovalRequest {
@@ -317,9 +321,9 @@ export class AdminStore {
    */
   async recordApprovalRequest(request: SwapApprovalRequest): Promise<boolean> {
     const result = await this.driver.run(
-      'INSERT INTO admin_swap_approval (swap_id, corridor, amount_sats, requested_at, approved_at) ' +
-        'VALUES (?, ?, ?, ?, NULL) ON CONFLICT(swap_id) DO NOTHING',
-      [request.swapId, request.corridor, request.amountSats, this.now()],
+      'INSERT INTO admin_swap_approval (swap_id, corridor, asset_id, amount, requested_at, approved_at) ' +
+        'VALUES (?, ?, ?, ?, ?, NULL) ON CONFLICT(swap_id) DO NOTHING',
+      [request.swapId, request.corridor, request.assetId, request.amount.toString(), this.now()],
     )
     return result.changes === 1
   }
@@ -372,7 +376,8 @@ export class AdminStore {
     return rows.map((row) => ({
       swapId: String(row.swap_id),
       corridor: String(row.corridor),
-      amountSats: Number(row.amount_sats),
+      assetId: row.asset_id === null || row.asset_id === undefined ? null : String(row.asset_id),
+      amount: BigInt(String(row.amount)),
       requestedAt: Number(row.requested_at),
     }))
   }

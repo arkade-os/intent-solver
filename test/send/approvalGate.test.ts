@@ -50,7 +50,7 @@ const REFUND_ADDRESS = new CovenantSwapScript({
 let clock: number
 let store: SwapStore
 let payCalls: PayInvoiceParams[]
-let asked: { swapId: string; amountSats: number }[]
+let asked: { swapId: string; assetId: string | null; amount: bigint }[]
 
 const fakeLn = () => ({
   payInvoice: async (params: PayInvoiceParams): Promise<PaymentResult> => {
@@ -145,7 +145,7 @@ describe('the approval gate on arkade:BTC->lightning:BTC', () => {
     const service = serviceWith(recording(() => holds))
     const id = await fundedSwap(service)
     await service.tick(id)
-    expect(asked).toEqual([{ swapId: id, amountSats: AMOUNT }])
+    expect(asked).toEqual([{ swapId: id, assetId: null, amount: BigInt(AMOUNT) }])
   })
 
   // The gate sits AFTER the payment decision, so a lapsed hold refuses rather

@@ -1508,20 +1508,20 @@ describe('OnchainSendSwapService', () => {
     })
 
     it('asks about the client lockup amount and the row id', async () => {
-      const asked: { swapId: string; amountSats: number }[] = []
+      const asked: { swapId: string; assetId: string | null; amount: bigint }[] = []
       const svc = gated(async (swap) => {
         asked.push(swap)
         return { proceed: false, reason: APPROVAL_REFUSAL }
       })
       const swap = await fundedRow(svc)
       await svc.tick(swap.id)
-      expect(asked).toEqual([{ swapId: swap.id, amountSats: 50_000 }])
+      expect(asked).toEqual([{ swapId: swap.id, assetId: null, amount: 50_000n }])
     })
 
     // `recoverFunding` drives a row whose broadcast may have gone out, so gating
     // it would strand a crashed funding behind a human.
     it('does NOT gate the recovery path for a row already in funding_onchain', async () => {
-      const asked: { swapId: string; amountSats: number }[] = []
+      const asked: { swapId: string; assetId: string | null; amount: bigint }[] = []
       const svc = gated(async (swap) => {
         asked.push(swap)
         return { proceed: false, reason: APPROVAL_REFUSAL }

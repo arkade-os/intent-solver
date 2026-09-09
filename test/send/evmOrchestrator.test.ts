@@ -141,7 +141,7 @@ describe('the approval gate on arkade:BTC->ethereum', () => {
   })
 
   it('asks about the Arkade-side amount and the row id', async () => {
-    const asked: { swapId: string; amountSats: number }[] = []
+    const asked: { swapId: string; assetId: string | null; amount: bigint }[] = []
     const { service } = await build({
       approvalGate: async (swap) => {
         asked.push(swap)
@@ -149,7 +149,7 @@ describe('the approval gate on arkade:BTC->ethereum', () => {
       },
     })
     await service.tick('swap-1')
-    expect(asked).toEqual([{ swapId: 'swap-1', amountSats: 50_000 }])
+    expect(asked).toEqual([{ swapId: 'swap-1', assetId: null, amount: 50_000n }])
   })
 
   // `planEvmSend` returns `lock_evm` from TWO states. The tests above enter from

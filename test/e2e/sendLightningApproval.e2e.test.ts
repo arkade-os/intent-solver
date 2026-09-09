@@ -156,8 +156,11 @@ describe('e2e arkade:BTC->lightning:BTC approval gate', () => {
       const { swap, paymentHash } = await quoteAndFund(stack.service, AMOUNT_SATS)
       const pending = await driveUntilHeld(stack, swap.id)
 
-      const expected = [{ swapId: swap.id, corridor: LN_SEND.pair, amountSats: AMOUNT_SATS }]
-      expect(pending.map(({ swapId, corridor, amountSats }) => ({ swapId, corridor, amountSats }))).toEqual(expected)
+      // `assetId: null` asserted, not ignored: an asset row must not pass here.
+      const expected = [{ swapId: swap.id, corridor: LN_SEND.pair, assetId: null, amount: BigInt(AMOUNT_SATS) }]
+      expect(pending.map(({ swapId, corridor, assetId, amount }) => ({ swapId, corridor, assetId, amount }))).toEqual(
+        expected,
+      )
       expect(stack.held).toEqual(expected)
 
       // Numeric, not a substring — a partial payment must not read as zero.

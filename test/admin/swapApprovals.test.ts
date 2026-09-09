@@ -14,8 +14,8 @@ afterEach(async () => {
   await store.close()
 })
 
-const request = (id = 'swap-1') =>
-  store.recordApprovalRequest({ swapId: id, corridor: 'arkade:BTC->lightning:BTC', amountSats: 500_000 })
+const request = (id = 'swap-1', assetId: string | null = null, amount = 500_000n) =>
+  store.recordApprovalRequest({ swapId: id, corridor: 'arkade:BTC->lightning:BTC', assetId, amount })
 
 describe('swap approvals', () => {
   it('an unknown swap is not approved', async () => {
@@ -26,8 +26,21 @@ describe('swap approvals', () => {
     await request()
     expect(await store.isSwapApproved('swap-1')).toBe(false)
     expect(await store.listPendingApprovals()).toMatchObject([
-      { swapId: 'swap-1', corridor: 'arkade:BTC->lightning:BTC', amountSats: 500_000, requestedAt: 1_000_000 },
+      {
+        swapId: 'swap-1',
+        corridor: 'arkade:BTC->lightning:BTC',
+        assetId: null,
+        amount: 500_000n,
+        requestedAt: 1_000_000,
+      },
     ])
+  })
+
+  it('round-trips an asset quantity a double would have rounded', async () => {
+    const assetId = 'a'.repeat(68)
+    const amount = 2n ** 70n + 1n
+    await request('swap-asset', assetId, amount)
+    expect(await store.listPendingApprovals()).toMatchObject([{ swapId: 'swap-asset', assetId, amount }])
   })
 
   it('approving flips the answer and clears it from pending', async () => {

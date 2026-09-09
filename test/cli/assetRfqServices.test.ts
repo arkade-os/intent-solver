@@ -141,7 +141,12 @@ describe('a configured market really does become a served corridor', () => {
     sellBase: { min: 1n, max: 10n ** 12n },
     buyBase: { min: 1n, max: 10n ** 12n },
   }
-  const token = { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } }
+  const token = {
+    symbol: 'USDA',
+    assetId: USDA,
+    enabled: { sell_base: true, buy_base: true },
+    approvalThresholdUnits: null,
+  }
   const deps = async () => ({
     store: null as never,
     onchainStore: null as never,
