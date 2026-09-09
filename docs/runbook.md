@@ -804,10 +804,12 @@ refusal is the first time anything said so — it is not merely a typo to fix.
    loop ticks `Services.corridors`, which is exactly the ENABLED set, so
    non-terminal rows are no longer carried to completion or refund on their own.
    They stay listed and answerable — the reader set is deliberately wider by the
-   corridors an operator switched off — and `refund`, `onchain-refund-now` and
-   `reclaim-l1-htlc` still unwind them, since those build their services with
-   `allCorridors`. **Drain the corridor before darkening it**, or plan to unwind
-   what is left by hand.
+   corridors an operator switched off — and the one-shot commands still reach
+   them, because those build their services with `allCorridors`. For an EVM row
+   that command is `refund`, which sweeps `evmSendService` alongside the
+   Lightning and onchain send corridors; `onchain-refund-now` and
+   `reclaim-l1-htlc` are BTC-corridor tools and will not help here. **Drain the
+   corridor before darkening it**, or plan to unwind what is left by hand.
 
 ### When a send is refused `cltv_too_large`
 
