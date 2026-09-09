@@ -116,6 +116,8 @@ export const respondToOnchainReceiveRfqRequest = async (
     payoutAddress: request.profile.payout_address,
     payoutPubkey: request.profile.payout_pubkey,
     rfqId: request.rfq_id,
+    minFromSats: request.min_from_amount,
+    maxFromSats: request.max_from_amount,
   })
   if (outcome.accepted) {
     return {

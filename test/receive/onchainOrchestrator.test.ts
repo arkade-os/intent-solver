@@ -1195,6 +1195,74 @@ describe('OnchainReceiveSwapService', () => {
     })
   })
 
+  describe('the tolerance band at quote time', () => {
+    const withBandWidth = (maxBandWidthSats?: number) =>
+      new OnchainReceiveSwapService({
+        store,
+        onchain: deps.onchain,
+        arkade: deps.arkadeFake.arkade,
+        covclaimd: deps.covclaimd,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        claimDestinationScript,
+        now: clock,
+        ...(maxBandWidthSats === undefined ? {} : { maxBandWidthSats }),
+      })
+
+    it('leaves both bounds null when the request names no band', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      expect(outcome.swap.minFromSats).toBeNull()
+      expect(outcome.swap.maxFromSats).toBeNull()
+    })
+
+    it('binds the quote to the band it was asked for', async () => {
+      const outcome = await withBandWidth().quote(quoteRequest({ minFromSats: 49_000, maxFromSats: 51_000 }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      expect(outcome.swap.minFromSats).toBe(49_000)
+      expect(outcome.swap.maxFromSats).toBe(51_000)
+    })
+
+    it('narrows a band wider than the operator underwrites', async () => {
+      const outcome = await withBandWidth(1_000).quote(quoteRequest({ minFromSats: 10_000, maxFromSats: 90_000 }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      expect(outcome.swap.maxFromSats! - outcome.swap.minFromSats!).toBe(1_000)
+      // Still contains what was quoted, so the swap the client asked for stays
+      // fundable however hard the operator narrows.
+      expect(outcome.swap.minFromSats!).toBeLessThanOrEqual(50_000)
+      expect(outcome.swap.maxFromSats!).toBeGreaterThanOrEqual(50_000)
+    })
+
+    it('refuses a band that does not contain the amount being quoted', async () => {
+      const outcome = await withBandWidth().quote(quoteRequest({ minFromSats: 60_000, maxFromSats: 70_000 }))
+      expect(outcome).toEqual({ accepted: false, reason: 'amount_out_of_range' })
+    })
+
+    it('offers the whole servable range when the operator sets no cap', async () => {
+      const outcome = await withBandWidth().quote(quoteRequest({ minFromSats: 1_000, maxFromSats: 1_000_000 }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      expect(outcome.swap.minFromSats).toBe(1_000)
+      expect(outcome.swap.maxFromSats).toBe(1_000_000)
+    })
+
+    it('still funds only on exact equality until the adoption change lands', async () => {
+      // Steps 1-5 carry the band; nothing reads it at funding time yet, which
+      // is what makes all of this landable ahead of the adoption change.
+      const svc = withBandWidth()
+      const outcome = await svc.quote(quoteRequest({ minFromSats: 45_000, maxFromSats: 55_000 }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 48_000 })
+      deps.onchain.mineBlocks(1)
+      const row = await svc.tick(outcome.swap.id)
+      expect(row.state).toBe('refused')
+      expect(row.failureReason).toContain('quote is for 50000')
+    })
+  })
+
   describe('a row whose output holds something other than the quote', () => {
     // 100bps + 50 flat on 50_000: quoted give 50_000, quoted payout 49_450 —
     // a 550 sat absolute fee, which is what has to survive a re-size.

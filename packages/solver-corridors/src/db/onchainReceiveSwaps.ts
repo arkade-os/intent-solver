@@ -242,6 +242,18 @@ export interface OnchainReceiveSwapRow {
    * arithmetic that priced a funded swap has to stay a fact on the row.
    */
   fundedPayoutSats: number | null
+  /**
+   * The tolerance band the client declared and the quote echoed back, already
+   * narrowed to what this operator underwrites.
+   *
+   * Both NULL together, and that is the fail-safe: absent, the funding rule is
+   * strict equality on {@link amountSats}, exactly as this corridor shipped.
+   * Persisted because the quote is BINDING and is rebuilt from the row on every
+   * `rfq_status_request` — a band living only in the request could not be
+   * honoured after a restart, which is precisely when the client is offline.
+   */
+  minFromSats: number | null
+  maxFromSats: number | null
 }
 
 const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
@@ -285,7 +297,9 @@ const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
   fund_started_at                  INTEGER,
   stamped_at                       INTEGER,
   funded_value_sats                INTEGER,
-  funded_payout_sats               INTEGER
+  funded_payout_sats               INTEGER,
+  min_from_sats                    INTEGER,
+  max_from_sats                    INTEGER
 `
 
 const SCHEMA = `
@@ -368,6 +382,8 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
     raw.funded_value_sats === null || raw.funded_value_sats === undefined ? null : Number(raw.funded_value_sats),
   fundedPayoutSats:
     raw.funded_payout_sats === null || raw.funded_payout_sats === undefined ? null : Number(raw.funded_payout_sats),
+  minFromSats: raw.min_from_sats === null || raw.min_from_sats === undefined ? null : Number(raw.min_from_sats),
+  maxFromSats: raw.max_from_sats === null || raw.max_from_sats === undefined ? null : Number(raw.max_from_sats),
 })
 
 export interface OnchainReceiveQuoteRecord {
@@ -404,6 +420,9 @@ export interface OnchainReceiveQuoteRecord {
   onchainPkScript: string
   claimPacket: string | null
   rfqId?: string
+  /** @see OnchainReceiveSwapRow.minFromSats — both or neither, and absent is strict equality. */
+  minFromSats?: number
+  maxFromSats?: number
 }
 
 /**
@@ -509,6 +528,12 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
     if (!existing.has('funded_payout_sats')) {
       await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN funded_payout_sats INTEGER`)
     }
+    if (!existing.has('min_from_sats')) {
+      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN min_from_sats INTEGER`)
+    }
+    if (!existing.has('max_from_sats')) {
+      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN max_from_sats INTEGER`)
+    }
   }
 
   /**
@@ -579,8 +604,9 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
         pk_script, lockup_address, refund_pk_script, client_payout_pk_script,
         non_interactive_parameters,
         htlc_pubkey, client_onchain_refund_pubkey,
-        onchain_address, onchain_pk_script, claim_packet, rfq_id
-      ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        onchain_address, onchain_pk_script, claim_packet, rfq_id,
+        min_from_sats, max_from_sats
+      ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         quote.id,
         at,
@@ -609,6 +635,8 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
         quote.onchainPkScript,
         quote.claimPacket ?? '',
         quote.rfqId ?? null,
+        quote.minFromSats ?? null,
+        quote.maxFromSats ?? null,
       ],
     )
     await this.recordEvent(quote.id, null, 'quoted', null)

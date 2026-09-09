@@ -38,6 +38,8 @@ import {
   ONCHAIN_DUST_SATS,
   evaluateOnchainReceiveAcceptance,
   evaluateOnchainReceiveFunding,
+  clampOnchainReceiveBand,
+  defaultMaxBandWidthSats,
   type OnchainReceiveAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/onchainReceive.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
@@ -85,6 +87,13 @@ export interface OnchainReceiveServiceDeps {
    */
   covclaimd?: Pick<CovclaimdClient, 'reveal'> | null
   limits: Limits
+  /**
+   * How wide a tolerance band this operator will underwrite, independently of
+   * `limits.maxSats`. Defaults to the range `limits` already serves, so an
+   * operator that sets nothing offers exactly the flexibility a client asks
+   * for, bounded only by the amounts it was already willing to swap.
+   */
+  maxBandWidthSats?: number
   network: SwapNetwork
   maxExposedSats: number
   /** Sum of committed sats across every corridor, not just this notebook. */
@@ -153,6 +162,14 @@ export interface OnchainReceiveQuoteRequest {
   payoutPubkey: string
   minConfirmations?: number
   rfqId?: string
+  /**
+   * The client's declared tolerance for what it will actually send, in the
+   * same units and on the same side as `amountSats` under `amountSide: 'from'`.
+   * Both or neither. Absent is strict equality — today's behaviour, and the
+   * fail-safe.
+   */
+  minFromSats?: number
+  maxFromSats?: number
 }
 
 /** `sha256(P)`, hex — same wire-form comparison `row.paymentHash` already uses. */
@@ -234,6 +251,24 @@ export class OnchainReceiveSwapService {
    */
   shouldSkipTick?: (id: string) => boolean
 
+  /**
+   * The band this quote will be bound to, or `null` for none.
+   *
+   * `out_of_range` when the client's own band excludes the give being quoted.
+   * Everything else is narrowing: `clampOnchainReceiveBand` against the
+   * operator's width, and the fill evaluator against `limits` and dust.
+   */
+  private bandFor(
+    request: OnchainReceiveQuoteRequest,
+    giveSats: number,
+  ): { minFromSats: number; maxFromSats: number } | null | 'out_of_range' {
+    const { minFromSats, maxFromSats } = request
+    if (minFromSats === undefined || maxFromSats === undefined) return null
+    if (minFromSats > giveSats || maxFromSats < giveSats) return 'out_of_range'
+    const width = this.deps.maxBandWidthSats ?? defaultMaxBandWidthSats(this.deps.limits)
+    return clampOnchainReceiveBand({ minFromSats, maxFromSats }, giveSats, width)
+  }
+
   async quote(request: OnchainReceiveQuoteRequest): Promise<QuoteOutcome> {
     const { store, arkade, limits, network } = this.deps
 
@@ -290,6 +325,14 @@ export class OnchainReceiveSwapService {
     if (payoutSats < ONCHAIN_DUST_SATS) {
       return { accepted: false, reason: 'payout_below_dust' }
     }
+
+    // The band the quote will be BOUND to, narrowed to what this operator
+    // underwrites. A band that does not contain the amount being quoted is
+    // incoherent rather than merely wide — the client would be consenting to a
+    // range that excludes what it just asked for — so it is refused by the same
+    // name any other unservable amount is.
+    const band = this.bandFor(request, giveSats)
+    if (band === 'out_of_range') return { accepted: false, reason: 'amount_out_of_range' }
 
     if (await store.findLiveByPaymentHash(request.paymentHash)) {
       return { accepted: false, reason: 'duplicate_swap' }
@@ -386,6 +429,8 @@ export class OnchainReceiveSwapService {
           onchainPkScript: hex.encode(onchainHtlc.pkScript),
           claimPacket: request.claimPacket,
           rfqId: request.rfqId,
+          minFromSats: band?.minFromSats,
+          maxFromSats: band?.maxFromSats,
         })
         return { accepted: true, swap, lockupDeadline: this.now() + DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT }
       } catch (error) {

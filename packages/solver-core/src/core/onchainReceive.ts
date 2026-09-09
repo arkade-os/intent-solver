@@ -179,7 +179,7 @@ export const defaultMaxBandWidthSats = (limits: Limits): number => limits.maxSat
 /** Narrow a client's requested band to what the operator underwrites. Never widens. */
 export const clampOnchainReceiveBand = (
   band: OnchainReceiveBand,
-  quote: OnchainReceiveQuoteAmounts,
+  quotedAmountSats: number,
   maxWidthSats: number,
 ): OnchainReceiveBand => {
   if (band.maxFromSats - band.minFromSats <= maxWidthSats) return band
@@ -188,8 +188,8 @@ export const clampOnchainReceiveBand = (
   // used, and clamping to one end would silently move the swap they asked for.
   const half = Math.floor(maxWidthSats / 2)
   return {
-    minFromSats: Math.max(band.minFromSats, quote.amountSats - half),
-    maxFromSats: Math.min(band.maxFromSats, quote.amountSats + (maxWidthSats - half)),
+    minFromSats: Math.max(band.minFromSats, quotedAmountSats - half),
+    maxFromSats: Math.min(band.maxFromSats, quotedAmountSats + (maxWidthSats - half)),
   }
 }
 

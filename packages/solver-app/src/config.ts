@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { base64 } from '@scure/base'
 import { narrow, resolveLimits, type Limits } from '@arkade-os/solver-core/core/limits.js'
+import { defaultMaxBandWidthSats } from '@arkade-os/solver-core/core/onchainReceive.js'
 import { DEFAULT_LOCKUP_TIMEOUT, MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { MAX_BIP68_BLOCKS, MAX_BIP68_SECONDS, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
@@ -131,6 +132,17 @@ export interface Config {
    * solver charged before this existed.
    */
   corridorFees: Record<Corridor, Fee>
+  /**
+   * How wide a tolerance band `onchain:BTC->arkade:BTC` will underwrite, from
+   * `ONCHAIN_RECEIVE_MAX_BAND_SATS`. Defaults to the range that corridor
+   * already serves, so an operator who sets nothing offers exactly the
+   * flexibility a client asks for within limits it had already accepted.
+   *
+   * Separate from `corridorLimits` on purpose: capping how far a funded amount
+   * may drift from its quote is a different risk from capping the amount, and
+   * an operator may want the first tight while the second stays wide.
+   */
+  onchainReceiveMaxBandSats: number
   /**
    * The bounds a corridor prices its own EXECUTION COST inside, or null to keep
    * charging {@link Config.corridorFees}' flat and nothing else.
@@ -570,6 +582,26 @@ const corridorLimitsFromEnv = (base: Limits): Record<Corridor, Limits> => {
 }
 
 /**
+ * The ceiling on how far a funded amount may sit from its quote, in sats.
+ *
+ * Derived rather than picked: absent the knob it is the whole range that
+ * corridor already serves, i.e. no narrowing beyond what `limits` impose. Same
+ * one-way rule as every amount knob here — it may only reduce.
+ */
+const onchainReceiveMaxBandSatsFromEnv = (onchainReceiveLimits: Limits): number => {
+  const fallback = defaultMaxBandWidthSats(onchainReceiveLimits)
+  const raw = process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS?.trim()
+  if (!raw) return fallback
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(
+      `ONCHAIN_RECEIVE_MAX_BAND_SATS must be a non-negative integer, got ${process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS}`,
+    )
+  }
+  return Math.min(fallback, value)
+}
+
+/**
  * What each corridor charges, from `<STEM>_FEE_BPS` and `<STEM>_FEE_FLAT_SATS`.
  *
  * Zero for both on every corridor by default, which is exactly what the solver
@@ -867,6 +899,8 @@ export const loadConfig = (): Config => {
 
   // Default: three max-size swaps in flight. The same non-finite rule as the
   // per-swap limits — absorbing NaN here silently removes the cap.
+  const corridorLimits = corridorLimitsFromEnv(limits)
+
   const maxExposedSats =
     process.env.MAX_EXPOSED_SATS !== undefined ? Number(process.env.MAX_EXPOSED_SATS) : limits.maxSats * 3
   if (!Number.isFinite(maxExposedSats) || maxExposedSats <= 0) {
@@ -940,8 +974,9 @@ export const loadConfig = (): Config => {
     // resolveLimits refuses to widen, so an override here can only ever make the
     // amount at risk smaller.
     limits,
-    corridorLimits: corridorLimitsFromEnv(limits),
+    corridorLimits,
     corridorFees: corridorFeesFromEnv(),
+    onchainReceiveMaxBandSats: onchainReceiveMaxBandSatsFromEnv(corridorLimits['onchain:BTC->arkade:BTC']),
     corridorNetworkFees: corridorNetworkFeesFromEnv(),
     onchainFeeRateRefreshMs,
     onchainFeeRateStaleMs,

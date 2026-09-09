@@ -170,19 +170,19 @@ describe('the operator caps how much flexibility it offers', () => {
   })
 
   it('leaves a band inside the cap exactly as asked', () => {
-    expect(clampOnchainReceiveBand(band(49_000, 51_000), quote, 5_000)).toEqual(band(49_000, 51_000))
+    expect(clampOnchainReceiveBand(band(49_000, 51_000), quote.amountSats, 5_000)).toEqual(band(49_000, 51_000))
   })
 
   it('narrows a wider band around the quote rather than to one end', () => {
-    expect(clampOnchainReceiveBand(band(10_000, 90_000), quote, 1_000)).toEqual(band(49_500, 50_500))
+    expect(clampOnchainReceiveBand(band(10_000, 90_000), quote.amountSats, 1_000)).toEqual(band(49_500, 50_500))
   })
 
   it('never widens a band the client asked to be narrow', () => {
-    expect(clampOnchainReceiveBand(band(49_900, 50_000), quote, 999_000)).toEqual(band(49_900, 50_000))
+    expect(clampOnchainReceiveBand(band(49_900, 50_000), quote.amountSats, 999_000)).toEqual(band(49_900, 50_000))
   })
 
   it('holds the cap on an odd width', () => {
-    const clamped = clampOnchainReceiveBand(band(10_000, 90_000), quote, 999)
+    const clamped = clampOnchainReceiveBand(band(10_000, 90_000), quote.amountSats, 999)
     expect(clamped.maxFromSats - clamped.minFromSats).toBe(999)
   })
 })

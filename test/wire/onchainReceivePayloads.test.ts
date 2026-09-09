@@ -50,7 +50,127 @@ const row: OnchainReceiveSwapRow = {
   stampedAt: null,
   fundedValueSats: null,
   fundedPayoutSats: null,
+  minFromSats: null,
+  maxFromSats: null,
 }
+
+describe('the wire a client that declared no band still sees', () => {
+  // Recorded by running 249ead5's own `onchainReceivePayloads.ts` against this
+  // exact row in the same process, then pasting what it serialised. Key order
+  // included: this is the bytes, not the shape. `toMatchObject` elsewhere in
+  // this file passes happily when a key is ADDED, which is the one thing the
+  // tolerance band could break for an existing client.
+  const QUOTE_249EAD5 =
+    '{"v":1,"type":"rfq_quote","rfq_id":"rfq-1","pair":"onchain:BTC->arkade:BTC","from_amount":50000,' +
+    '"to_amount":49450,"solver_pubkey":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",' +
+    '"valid_until":1800000900,"refund_locktime":1800000000,"profile":{"payment_hash":' +
+    '"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","claim_pubkey":' +
+    '"2222222222222222222222222222222222222222222222222222222222222222","htlc_locktime":1800000500,' +
+    '"min_confirmations":1,"lockup_address":"tark1example","htlc_address":"bcrt1pexample",' +
+    '"solver_refund_pk_script":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}'
+
+  const QUOTED_STATUS_249EAD5 =
+    '{"v":1,"type":"rfq_status","rfq_id":"rfq-1","state":"quoted","updated_at":1000,"profile":{"payment_hash":' +
+    '"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","lockup_address":"tark1example",' +
+    '"htlc_address":"bcrt1pexample","funding_txid":null,"arkade_claim_txid":null,"settle_txid":null,' +
+    '"refund_txid":null,"failure_reason":null}}'
+
+  const noBand = { ...row, payoutSats: 49_450 }
+
+  it('serialises the quote byte-for-byte as it did before the band existed', () => {
+    expect(JSON.stringify(onchainReceiveRfqQuotePayload(noBand, 1_800_000_900, 'rfq-1'))).toBe(QUOTE_249EAD5)
+  })
+
+  it('serialises rfq_status byte-for-byte as it did before the band existed', () => {
+    expect(JSON.stringify(onchainReceiveRfqStatusPayload(noBand, 'rfq-1'))).toBe(QUOTED_STATUS_249EAD5)
+  })
+
+  it('accepts a request that names no band, exactly as before', () => {
+    const parsed = OnchainReceiveRfqRequest.safeParse({
+      v: 1,
+      type: 'rfq_request',
+      rfq_id: 'a'.repeat(64),
+      pair: RFQ_PAIR_ONCHAIN_RECEIVE,
+      amount_side: 'from',
+      amount: 50_000,
+      profile: {
+        payment_hash: 'aa'.repeat(32),
+        refund_pubkey: '11'.repeat(32),
+        payout_address: 'tark1example',
+        payout_pubkey: 'dd'.repeat(32),
+      },
+    })
+    expect(parsed.success).toBe(true)
+    if (parsed.success) {
+      expect(parsed.data.min_from_amount).toBeUndefined()
+      expect(parsed.data.max_from_amount).toBeUndefined()
+    }
+  })
+})
+
+describe('the tolerance band on the wire', () => {
+  const bandRequest = (over: Record<string, unknown>) => ({
+    v: 1,
+    type: 'rfq_request',
+    rfq_id: 'a'.repeat(64),
+    pair: RFQ_PAIR_ONCHAIN_RECEIVE,
+    amount_side: 'from',
+    amount: 50_000,
+    profile: {
+      payment_hash: 'aa'.repeat(32),
+      refund_pubkey: '11'.repeat(32),
+      payout_address: 'tark1example',
+      payout_pubkey: 'dd'.repeat(32),
+    },
+    ...over,
+  })
+
+  it('accepts both bounds together, in the § 2.1 string form', () => {
+    const parsed = OnchainReceiveRfqRequest.safeParse(
+      bandRequest({ min_from_amount: '49000', max_from_amount: '51000' }),
+    )
+    expect(parsed.success).toBe(true)
+    if (parsed.success) expect([parsed.data.min_from_amount, parsed.data.max_from_amount]).toEqual([49_000, 51_000])
+  })
+
+  it.each([
+    ['min without max', { min_from_amount: 49_000 }],
+    ['max without min', { max_from_amount: 51_000 }],
+  ])('refuses %s', (_label, over) => {
+    expect(OnchainReceiveRfqRequest.safeParse(bandRequest(over)).success).toBe(false)
+  })
+
+  it('refuses an inverted band', () => {
+    expect(
+      OnchainReceiveRfqRequest.safeParse(bandRequest({ min_from_amount: 51_000, max_from_amount: 49_000 })).success,
+    ).toBe(false)
+  })
+
+  it('refuses a bound that is not a canonical amount', () => {
+    expect(
+      OnchainReceiveRfqRequest.safeParse(bandRequest({ min_from_amount: '4.9e4', max_from_amount: 51_000 })).success,
+    ).toBe(false)
+  })
+
+  it('echoes the band the row was bound to, and only then', () => {
+    const quote = onchainReceiveRfqQuotePayload(
+      { ...row, minFromSats: 49_000, maxFromSats: 51_000 },
+      1_800_000_900,
+      'rfq-1',
+    )
+    expect(quote).toMatchObject({ min_from_amount: 49_000, max_from_amount: 51_000 })
+    expect(onchainReceiveRfqQuotePayload(row, 1_800_000_900, 'rfq-1')).not.toHaveProperty('min_from_amount')
+  })
+
+  it('reports the amended amounts on rfq_status once a swap was re-sized', () => {
+    const amended = onchainReceiveRfqStatusPayload(
+      { ...row, state: 'awaiting_claim', fundedValueSats: 48_000, fundedPayoutSats: 47_450 },
+      'rfq-1',
+    )
+    expect(amended.profile).toMatchObject({ funded_from_amount: 48_000, funded_to_amount: 47_450 })
+    expect(onchainReceiveRfqStatusPayload(row, 'rfq-1').profile).not.toHaveProperty('funded_from_amount')
+  })
+})
 
 describe('RfqRequest for onchain:BTC->arkade:BTC', () => {
   const validRequest = {

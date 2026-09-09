@@ -384,24 +384,30 @@ describe('OnchainReceiveSwapStore — migration', () => {
       .map((c) => (c as { name: string }).name)
     expect(columns).toContain('funded_value_sats')
     expect(columns).toContain('funded_payout_sats')
+    expect(columns).toContain('min_from_sats')
+    expect(columns).toContain('max_from_sats')
 
     const row = await migrated.get('pre-band-row')
     // Never amended, and the row says so rather than echoing the quote.
     expect(row.fundedValueSats).toBeNull()
     expect(row.fundedPayoutSats).toBeNull()
+    // No band either: strict equality, which is what this row was quoted under.
+    expect(row.minFromSats).toBeNull()
+    expect(row.maxFromSats).toBeNull()
     expect(row.amountSats).toBe(50_000)
     expect(row.payoutSats).toBe(49_500)
+    const added = {
+      funded_value_sats: undefined,
+      funded_payout_sats: undefined,
+      min_from_sats: undefined,
+      max_from_sats: undefined,
+    }
     const after = db.prepare(`SELECT * FROM receive_onchain_swap WHERE id = 'pre-band-row'`).get() as Record<
       string,
       unknown
     >
-    expect({ ...after, funded_value_sats: undefined, funded_payout_sats: undefined }).toEqual({
-      ...(before as Record<string, unknown>),
-      funded_value_sats: undefined,
-      funded_payout_sats: undefined,
-    })
-    expect(after.funded_value_sats).toBeNull()
-    expect(after.funded_payout_sats).toBeNull()
+    expect({ ...after, ...added }).toEqual({ ...(before as Record<string, unknown>), ...added })
+    for (const column of Object.keys(added)) expect(after[column]).toBeNull()
   })
 
   it('round-trips both funded_* columns through the transition edge that writes them', async () => {

@@ -67,6 +67,17 @@ export const OnchainReceiveRfqRequest = z
     pair: z.string().min(1).max(MAX_PAIR_LENGTH),
     amount_side: z.enum(['from', 'to']),
     amount: WIRE_AMOUNT,
+    /**
+     * The client's tolerance for what it will ACTUALLY send, declared here so
+     * consent happens before funding — the client may go offline the moment it
+     * broadcasts, which is the entire case for this on an exchange withdrawal
+     * that deducts its own fee.
+     *
+     * Optional, and absent means strict equality on `amount`, unchanged. Both
+     * or neither; one alone is `unsupported_payload`.
+     */
+    min_from_amount: WIRE_AMOUNT.optional(),
+    max_from_amount: WIRE_AMOUNT.optional(),
     profile: z
       .object({
         payment_hash: HEX32,
@@ -82,6 +93,12 @@ export const OnchainReceiveRfqRequest = z
       .strict(),
   })
   .strict()
+  .refine((r) => (r.min_from_amount === undefined) === (r.max_from_amount === undefined), {
+    message: 'min_from_amount and max_from_amount must be given together',
+  })
+  .refine((r) => r.min_from_amount === undefined || r.min_from_amount <= r.max_from_amount!, {
+    message: 'min_from_amount must not exceed max_from_amount',
+  })
 
 export const onchainReceiveRfqQuotePayload = (
   row: OnchainReceiveSwapRow,
@@ -97,6 +114,16 @@ export const onchainReceiveRfqQuotePayload = (
   // with — the persisted payout, amount minus this corridor's fee.
   from_amount: row.amountSats,
   to_amount: row.payoutSats,
+  // BINDING, and echoed only when the client asked for one. A quote for a
+  // client that named no band is byte-for-byte the one this corridor already
+  // returned — which is the whole of the compatibility story, and what
+  // `onchainReceivePayloads.test.ts` pins against a recorded shape.
+  //
+  // Already narrowed to what this operator underwrites, so what comes back may
+  // be tighter than what was asked for; it is what the solver will honour.
+  ...(row.minFromSats === null || row.maxFromSats === null
+    ? {}
+    : { min_from_amount: row.minFromSats, max_from_amount: row.maxFromSats }),
   solver_pubkey: row.providerPubkey,
   valid_until: validUntil,
   // The SOLVER's own Arkade refund deadline on this leg — see
@@ -178,6 +205,12 @@ export const onchainReceiveRfqStatusPayload = (row: OnchainReceiveSwapRow, rfqId
       settle_txid: row.onchainClaimTxid,
       refund_txid: row.arkadeRefundTxid,
       failure_reason: row.failureReason,
+      // What the swap was actually re-sized to, once an output was adopted at
+      // something other than the quote. Absent on every unamended swap, so a
+      // client that named no band sees the status shape it always saw.
+      ...(row.fundedValueSats === null || row.fundedPayoutSats === null
+        ? {}
+        : { funded_from_amount: row.fundedValueSats, funded_to_amount: row.fundedPayoutSats }),
       // Preimages are receipts, emitted only once settlement itself
       // published them — rfq-protocol.md §6. `claimed` already has `P` on
       // disk (it is how the row got there) but the swap is NOT done yet
