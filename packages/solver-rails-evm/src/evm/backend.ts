@@ -110,10 +110,9 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
   })
 
   /**
-   * Every log this swap matches in `[fromBlock, tip]`, a page at a time.
-   *
-   * ONLY THE TIP ENDS THE LOOP, never an empty page: an unread stretch drops a
-   * Claim exactly as a too-late floor would.
+   * Every log this swap matches in `[fromBlock, tip]`, a page at a time. ONLY
+   * THE TIP ENDS THE LOOP, never an empty page: an unread stretch drops a Claim
+   * exactly as a too-late floor would.
    */
   const scanLogs = async <T>(
     topic: Uint8Array,

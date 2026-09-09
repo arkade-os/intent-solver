@@ -63,8 +63,8 @@ const TIMELOCK = 21_000_000n
 const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
   const store = await EvmSendSwapStore.open(betterSqliteDriver(':memory:'), () => NOW)
   await store.insertQuote(quote())
-  // An `evm` override MERGES onto this: replacing it dropped methods, and a
-  // missing one throws a TypeError the orchestrator swallows.
+  // An `evm` override MERGES onto this: a method missing from a replacement
+  // throws a TypeError the orchestrator swallows.
   const evm = {
     isLocked: vi.fn().mockResolvedValue(false),
     findClaimPreimage: vi.fn().mockResolvedValue(null),
@@ -347,9 +347,8 @@ describe('a preimage scan the node refuses must not strand the solver’s tokens
 })
 
 /**
- * Both scans used to start at block 0, which hosted providers reject. The two
- * error directions are not symmetric: too LATE returns "no claim" for a claim
- * that happened, and loses the solver its own leg.
+ * Both scans used to start at block 0, which hosted providers reject. Too LATE
+ * returns "no claim" for a claim that happened, losing the solver its own leg.
  */
 describe('the scan floor comes from the lock, never from the chain tip', () => {
   const exposed = async (over: Partial<EvmSendServiceDeps> = {}) => {

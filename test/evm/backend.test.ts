@@ -620,7 +620,6 @@ describe('the scan is paged, and pages all the way to the tip', () => {
   })
 
   it('finds a claim in the last page rather than stopping at the first empty one', async () => {
-    // The silent miss in its paging costume: an empty page is not the end.
     let pages = 0
     const rpc: JsonRpc = async (method) => {
       if (method === 'eth_blockNumber') return TIP_HEX
