@@ -800,6 +800,7 @@ export const createServices = async (
           pubkey: emulatorInfo.signerPubkey,
         }),
         limits: policy.corridorLimits['onchain:BTC->arkade:BTC'],
+        maxBandWidthSats: policy.onchainReceiveMaxBandSats,
         fee: policy.corridorFees['onchain:BTC->arkade:BTC'],
         // Here the CLIENT funds the HTLC and the solver claims it, so the
         // transaction this corridor pays for is that claim — which

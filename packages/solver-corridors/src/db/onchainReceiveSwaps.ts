@@ -84,6 +84,9 @@ const TRANSITION_COLUMNS = new Set([
   'onchain_claim_txid',
   'arkade_refund_txid',
   'failure_reason',
+  // Same edge as funding_txid/funding_vout: learned in the read that finds it.
+  'funded_value_sats',
+  'funded_payout_sats',
 ])
 /**
  * `arkade_refund_txid` is deliberately in BOTH sets — same reason
@@ -218,6 +221,18 @@ export interface OnchainReceiveSwapRow {
   fundStartedAt: number | null
   /** Set once THIS service funded a stamped lockup — @see receive/receiveSwaps.ts */
   stampedAt: number | null
+  /** What the output ACTUALLY holds. NULL is not a default — it is the fact that this swap was never amended. */
+  fundedValueSats: number | null
+  /** {@link payoutSats} re-derived against {@link fundedValueSats}. Persisted for the reason {@link payoutSats} is. */
+  fundedPayoutSats: number | null
+  /**
+   * The band the quote is bound to, narrowed to what this operator underwrites.
+   * Both NULL together, and absent is strict equality. Persisted because the
+   * quote is rebuilt from the row on every `rfq_status_request`, so a band held
+   * only in the request could not survive a restart.
+   */
+  minFromSats: number | null
+  maxFromSats: number | null
 }
 
 const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
@@ -259,7 +274,11 @@ const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
   failure_reason                   TEXT,
   rfq_id                           TEXT,
   fund_started_at                  INTEGER,
-  stamped_at                       INTEGER
+  stamped_at                       INTEGER,
+  funded_value_sats                INTEGER,
+  funded_payout_sats               INTEGER,
+  min_from_sats                    INTEGER,
+  max_from_sats                    INTEGER
 `
 
 const SCHEMA = `
@@ -335,6 +354,13 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   rfqId: raw.rfq_id === null || raw.rfq_id === undefined ? null : String(raw.rfq_id),
   fundStartedAt: raw.fund_started_at === null || raw.fund_started_at === undefined ? null : Number(raw.fund_started_at),
   stampedAt: raw.stamped_at === null || raw.stamped_at === undefined ? null : Number(raw.stamped_at),
+  // Unlike `payout_sats`, missing here means "never amended".
+  fundedValueSats:
+    raw.funded_value_sats === null || raw.funded_value_sats === undefined ? null : Number(raw.funded_value_sats),
+  fundedPayoutSats:
+    raw.funded_payout_sats === null || raw.funded_payout_sats === undefined ? null : Number(raw.funded_payout_sats),
+  minFromSats: raw.min_from_sats === null || raw.min_from_sats === undefined ? null : Number(raw.min_from_sats),
+  maxFromSats: raw.max_from_sats === null || raw.max_from_sats === undefined ? null : Number(raw.max_from_sats),
 })
 
 export interface OnchainReceiveQuoteRecord {
@@ -371,6 +397,9 @@ export interface OnchainReceiveQuoteRecord {
   onchainPkScript: string
   claimPacket: string | null
   rfqId?: string
+  /** @see OnchainReceiveSwapRow.minFromSats — both or neither, and absent is strict equality. */
+  minFromSats?: number
+  maxFromSats?: number
 }
 
 /**
@@ -423,6 +452,21 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
   }
 
   /**
+   * The base sums `amount_sats`, which here is the quote rather than the
+   * exposure: a row funded above it under-reports against `MAX_EXPOSED_SATS`.
+   * Overridden rather than fixed in the base, whose other tables lack the column.
+   */
+  override async committedSats(): Promise<number> {
+    const placeholders = this.shape.live.map(() => '?').join(',')
+    const row = await this.driver.get<{ total: number }>(
+      `SELECT COALESCE(SUM(COALESCE(funded_value_sats, amount_sats)), 0) AS total
+       FROM ${this.shape.table} WHERE state IN (${placeholders})`,
+      [...this.shape.live],
+    )
+    return Number(row?.total ?? 0)
+  }
+
+  /**
    * Additive migration for databases created before a column existed — same
    * rule and same technique `SwapStore.migrate()` (src/db/swaps.ts) uses:
    * `CREATE TABLE IF NOT EXISTS` never alters an existing table. Added
@@ -446,6 +490,18 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
     }
     if (!existing.has('non_interactive_parameters')) {
       await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN non_interactive_parameters TEXT`)
+    }
+    if (!existing.has('funded_value_sats')) {
+      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN funded_value_sats INTEGER`)
+    }
+    if (!existing.has('funded_payout_sats')) {
+      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN funded_payout_sats INTEGER`)
+    }
+    if (!existing.has('min_from_sats')) {
+      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN min_from_sats INTEGER`)
+    }
+    if (!existing.has('max_from_sats')) {
+      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN max_from_sats INTEGER`)
     }
   }
 
@@ -517,8 +573,9 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
         pk_script, lockup_address, refund_pk_script, client_payout_pk_script,
         non_interactive_parameters,
         htlc_pubkey, client_onchain_refund_pubkey,
-        onchain_address, onchain_pk_script, claim_packet, rfq_id
-      ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        onchain_address, onchain_pk_script, claim_packet, rfq_id,
+        min_from_sats, max_from_sats
+      ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         quote.id,
         at,
@@ -547,6 +604,8 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
         quote.onchainPkScript,
         quote.claimPacket ?? '',
         quote.rfqId ?? null,
+        quote.minFromSats ?? null,
+        quote.maxFromSats ?? null,
       ],
     )
     await this.recordEvent(quote.id, null, 'quoted', null)
