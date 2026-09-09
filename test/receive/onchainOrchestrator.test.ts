@@ -1247,15 +1247,47 @@ describe('OnchainReceiveSwapService', () => {
       expect(outcome.swap.maxFromSats).toBe(1_000_000)
     })
 
-    it('still funds only on exact equality: nothing reads the band at funding time yet', async () => {
+    it('adopts an in-band amount and records what actually landed', async () => {
       const svc = withBandWidth()
       const outcome = await svc.quote(quoteRequest({ minFromSats: 45_000, maxFromSats: 55_000 }))
       if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
       deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 48_000 })
       deps.onchain.mineBlocks(1)
       const row = await svc.tick(outcome.swap.id)
+      expect(row.state).toBe('awaiting_claim')
+      expect(row.fundedValueSats).toBe(48_000)
+      expect(row.fundedPayoutSats).toBe(48_000)
+    })
+
+    it('still refuses an out-of-band amount, band or no band', async () => {
+      const svc = withBandWidth()
+      const outcome = await svc.quote(quoteRequest({ minFromSats: 45_000, maxFromSats: 55_000 }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 44_999 })
+      deps.onchain.mineBlocks(1)
+      const row = await svc.tick(outcome.swap.id)
+      expect(row.state).toBe('refused')
+      expect(row.failureReason).toContain('quote accepts 45000 to 55000')
+    })
+
+    it('leaves a swap quoted without a band on exact equality, unchanged', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 48_000 })
+      deps.onchain.mineBlocks(1)
+      const row = await service.tick(outcome.swap.id)
       expect(row.state).toBe('refused')
       expect(row.failureReason).toContain('quote is for 50000')
+    })
+
+    it('records nothing on the funded columns when the amount matched the quote', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+      const row = await service.tick(outcome.swap.id)
+      expect(row.state).toBe('awaiting_claim')
+      expect(row.fundedValueSats).toBe(50_000)
     })
   })
 
@@ -1279,21 +1311,21 @@ describe('OnchainReceiveSwapService', () => {
         fee: { bps: 100, flatSats: 50 },
       })
 
-    /** The adoption edge a tolerance band will drive, written by hand — `whenQuoted` is unchanged and still demands exact equality. */
+    /** Adopt in-band but leave it UNCONFIRMED, so the row parks before any of the solver's money moves. */
     const adopt = async (svc: OnchainReceiveSwapService, fundedValueSats: number) => {
-      const outcome = await svc.quote(quoteRequest())
+      const outcome = await svc.quote(quoteRequest({ minFromSats: 40_000, maxFromSats: 60_000 }))
       if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
       const swap = outcome.swap
       deps.onchain.receiveExternal({ address: swap.onchainAddress, amountSats: fundedValueSats })
+      const adopted = await svc.tick(swap.id)
+      expect(adopted.state).toBe('awaiting_confirmations')
+      expect(adopted.fundedValueSats).toBe(fundedValueSats)
+      return adopted
+    }
+
+    const fund = async (svc: OnchainReceiveSwapService, id: string) => {
       deps.onchain.mineBlocks(1)
-      const output = (await deps.onchain.findOutputs({ address: swap.onchainAddress }))[0]!
-      await store.transition(swap.id, 'quoted', 'awaiting_confirmations', {
-        funding_txid: output.txid,
-        funding_vout: output.vout,
-        funded_value_sats: fundedValueSats,
-        funded_payout_sats: swap.payoutSats + (fundedValueSats - swap.amountSats),
-      })
-      return store.get(swap.id)
+      return svc.tick(id)
     }
 
     it('pays the Arkade lockup the amended payout, so the overfund reaches the CLIENT', async () => {
@@ -1302,7 +1334,7 @@ describe('OnchainReceiveSwapService', () => {
       expect(row.amountSats).toBe(50_000)
       expect(row.payoutSats).toBe(49_450)
 
-      expect((await svc.tick(row.id)).state).toBe('awaiting_claim')
+      expect((await fund(svc, row.id)).state).toBe('awaiting_claim')
       const lockup = deps.arkadeFake.lockups.get(row.pkScript)![0]!
       expect(lockup.value).toBe(54_450)
       // The solver's take is the fee it quoted, whatever turned up. Reading
@@ -1313,7 +1345,7 @@ describe('OnchainReceiveSwapService', () => {
     it('sizes the L1 claim on the funded value, so nothing is left behind for miners', async () => {
       const svc = withFee()
       const row = await adopt(svc, 55_000)
-      await svc.tick(row.id)
+      await fund(svc, row.id)
       deps.arkadeFake.spendLockup(row.pkScript, P)
       await store.transition(row.id, 'awaiting_claim', 'claimed', { preimage: hex.encode(P) })
 
@@ -1339,7 +1371,7 @@ describe('OnchainReceiveSwapService', () => {
     it('follows an UNDERfund down as readily as an overfund up', async () => {
       const svc = withFee()
       const row = await adopt(svc, 47_000)
-      expect((await svc.tick(row.id)).state).toBe('awaiting_claim')
+      expect((await fund(svc, row.id)).state).toBe('awaiting_claim')
       const lockup = deps.arkadeFake.lockups.get(row.pkScript)![0]!
       expect(lockup.value).toBe(46_450)
       expect(47_000 - lockup.value).toBe(550)
@@ -1351,16 +1383,44 @@ describe('OnchainReceiveSwapService', () => {
       // A crash between broadcast and the transition recording it. Sized against
       // `payoutSats` this still adopts, so the bug only bites on an UNDERfund.
       deps.arkadeFake.seedLockup(row.lockupAddress, { txid: 'external-fund', vout: 0, value: 54_450 })
-      expect((await svc.tick(row.id)).state).toBe('awaiting_claim')
+      expect((await fund(svc, row.id)).state).toBe('awaiting_claim')
       expect(deps.arkadeFake.lockups.get(row.pkScript)!.length).toBe(1)
     })
 
     it('does not pay an underfunded lockup a second time on resume', async () => {
       const svc = withFee()
       const row = await adopt(svc, 47_000)
+      // Sized against the quoted 49_450, `46_450 >= 49_450` is false and the
+      // solver pays the whole payout again. An overfund hides it.
       deps.arkadeFake.seedLockup(row.lockupAddress, { txid: 'external-fund', vout: 0, value: 46_450 })
-      expect((await svc.tick(row.id)).state).toBe('awaiting_claim')
+      expect((await fund(svc, row.id)).state).toBe('awaiting_claim')
       expect(deps.arkadeFake.lockups.get(row.pkScript)!.length).toBe(1)
+      expect(deps.arkadeFake.lockups.get(row.pkScript)![0]!.value).toBe(46_450)
+      // The one that would have cost real money: no second `fund` call at all.
+      expect(deps.arkadeFake.fundStamps).toHaveLength(0)
+    })
+
+    it('refuses rather than funds when the fee rate has left the amount unsweepable since adoption', async () => {
+      const svc = withFee()
+      const row = await adopt(svc, 47_000)
+      deps.onchain.estimateFeeRate = async () => 10_000
+
+      const after = await fund(svc, row.id)
+
+      // REFUSED, never stuck: the re-check runs on the state with a clean edge.
+      expect(after.state).toBe('refused')
+      expect(deps.arkadeFake.fundStamps).toHaveLength(0)
+      expect(deps.arkadeFake.lockups.get(row.pkScript) ?? []).toHaveLength(0)
+    })
+
+    it('still funds the exact quoted amount however high the fee rate goes', async () => {
+      const svc = withFee()
+      const outcome = await svc.quote(quoteRequest({ minFromSats: 40_000, maxFromSats: 60_000 }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.estimateFeeRate = async () => 10_000
+      deps.onchain.mineBlocks(1)
+      expect((await svc.tick(outcome.swap.id)).state).toBe('awaiting_claim')
     })
   })
 })

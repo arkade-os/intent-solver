@@ -7,6 +7,7 @@ import {
   onchainReceiveFundedPayout,
   clampOnchainReceiveBand,
   defaultMaxBandWidthSats,
+  DEFAULT_BAND_BELOW_SHARE,
   type OnchainReceiveFillOutput,
   type OnchainReceiveFillParams,
 } from '@arkade-os/solver-core/core/onchainReceive.js'
@@ -170,12 +171,36 @@ describe('the operator caps how much flexibility it offers', () => {
     expect(clampOnchainReceiveBand(band(49_000, 51_000), quote.amountSats, 5_000)).toEqual(band(49_000, 51_000))
   })
 
-  it('narrows a wider band around the quote rather than to one end', () => {
-    expect(clampOnchainReceiveBand(band(10_000, 90_000), quote.amountSats, 1_000)).toEqual(band(49_500, 50_500))
+  it('narrows a wider band onto the underfund side by default', () => {
+    expect(clampOnchainReceiveBand(band(10_000, 90_000), quote.amountSats, 1_000)).toEqual(band(49_000, 50_000))
+  })
+
+  it('splits the retained width where an operator asks it to', () => {
+    expect(clampOnchainReceiveBand(band(10_000, 90_000), quote.amountSats, 1_000, 0.5)).toEqual(band(49_500, 50_500))
+    expect(clampOnchainReceiveBand(band(10_000, 90_000), quote.amountSats, 1_000, 0)).toEqual(band(50_000, 51_000))
+  })
+
+  it('keeps the quote inside the band at every share', () => {
+    for (const share of [0, 0.25, 0.5, 0.75, 1]) {
+      const clamped = clampOnchainReceiveBand(band(10_000, 90_000), quote.amountSats, 1_000, share)
+      expect(clamped.minFromSats).toBeLessThanOrEqual(quote.amountSats)
+      expect(clamped.maxFromSats).toBeGreaterThanOrEqual(quote.amountSats)
+      expect(clamped.maxFromSats - clamped.minFromSats).toBe(1_000)
+    }
+  })
+
+  it('falls back to the default rather than trusting a nonsense share', () => {
+    const nonsense = clampOnchainReceiveBand(band(10_000, 90_000), quote.amountSats, 1_000, Number.NaN)
+    expect(nonsense).toEqual(clampOnchainReceiveBand(band(10_000, 90_000), quote.amountSats, 1_000))
+    expect(clampOnchainReceiveBand(band(10_000, 90_000), quote.amountSats, 1_000, 5)).toEqual(band(49_000, 50_000))
   })
 
   it('never widens a band the client asked to be narrow', () => {
     expect(clampOnchainReceiveBand(band(49_900, 50_000), quote.amountSats, 999_000)).toEqual(band(49_900, 50_000))
+  })
+
+  it('defaults to keeping the whole retained width below the quote', () => {
+    expect(DEFAULT_BAND_BELOW_SHARE).toBe(1)
   })
 
   it('holds the cap on an odd width', () => {

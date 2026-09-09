@@ -72,6 +72,7 @@ const solverConfig = (): Config => {
       'onchain:BTC->arkade:BTC': free,
     },
     onchainReceiveMaxBandSats: limits.maxSats - limits.minSats,
+    onchainReceiveBandBelowShare: 1,
     // Null on every corridor: no live chain-cost pricing, which is what an
     // unset `<STEM>_FEE_CAP_SATS` produces and the only shape this app —
     // which serves no built-in corridor — could want.
