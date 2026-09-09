@@ -23,6 +23,8 @@ export interface ApprovalGateDeps {
   corridor: string
   store: ApprovalRecordStore
   onHeld?: (request: SwapApprovalRequest) => void
+  /** A payout in an asset with NO threshold, once per id. @see approvalGateFor */
+  onUngatedAsset?: (assetId: string) => void
 }
 
 /**
@@ -31,13 +33,24 @@ export interface ApprovalGateDeps {
  *
  * PER ASSET it lives one level down — one gate object pays several assets, so an
  * unconfigured one resolves to a null threshold. `createServices` logs those.
+ *
+ * It PROCEEDS rather than holds: holding would make the first threshold an
+ * operator sets gate every other asset they serve. `onUngatedAsset` says so.
  */
 export const approvalGateFor = (deps: ApprovalGateDeps): ApprovalCheck | undefined => {
-  const { thresholdSats, assetThresholds, corridor, store, onHeld } = deps
+  const { thresholdSats, assetThresholds, corridor, store, onHeld, onUngatedAsset } = deps
   if (thresholdSats === null && !(assetThresholds && assetThresholds.size > 0)) return undefined
 
-  const thresholdFor = (assetId: string | null): bigint | null =>
-    assetId === null ? (thresholdSats === null ? null : BigInt(thresholdSats)) : (assetThresholds?.get(assetId) ?? null)
+  const announced = new Set<string>()
+  const thresholdFor = (assetId: string | null): bigint | null => {
+    if (assetId === null) return thresholdSats === null ? null : BigInt(thresholdSats)
+    const threshold = assetThresholds?.get(assetId)
+    if (threshold === undefined && !announced.has(assetId)) {
+      announced.add(assetId)
+      onUngatedAsset?.(assetId)
+    }
+    return threshold ?? null
+  }
 
   return async ({ swapId, assetId, amount }) => {
     const threshold = thresholdFor(assetId)

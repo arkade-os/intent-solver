@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { createNotifier, type NotifySink } from '@arkade-os/solver-app/ops/notify.js'
 
 const recordingSink = (name = 'telegram'): NotifySink & { sent: string[] } => {
@@ -124,5 +126,24 @@ describe('createNotifier', () => {
     notifier.post('x')
     await notifier.flush()
     expect(sleep).toHaveBeenCalled()
+  })
+})
+
+// Queued messages are lost at exit, and nothing at run time shows it.
+describe('the notifier is FLUSHED before shutdown tears anything down', () => {
+  const servicesSource = readFileSync(
+    fileURLToPath(new URL('../../packages/solver-app/src/ops/services.ts', import.meta.url)),
+    'utf8',
+  )
+
+  it('close() flushes it', () => {
+    expect(servicesSource).toContain("['notifier', () => notifier.flush()]")
+  })
+
+  it('flushes BEFORE the first resource close, not after', () => {
+    const flush = servicesSource.indexOf("['notifier', () => notifier.flush()]")
+    const firstClose = servicesSource.indexOf("['store', () => store.close()]")
+    expect(flush).toBeGreaterThan(-1)
+    expect(flush).toBeLessThan(firstClose)
   })
 })

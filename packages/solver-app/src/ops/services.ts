@@ -490,11 +490,21 @@ export const createServices = async (
   const assetSymbols = new Map(policy.assetRfqTokens.map((token) => [token.assetId, token.symbol]))
 
   // Logged, not refused: gating only some assets is legitimate, but a silently
-  // ungated one is the belief gap this gate exists to close.
+  // ungated one is the belief gap this gate exists to close. OFFER_MARKETS is
+  // enumerated too — its assets carry no symbol, so no threshold can name them.
   if (policy.approvalThresholdSats !== null || assetThresholds.size > 0) {
     const ungated = ungatedAssetSymbols(policy.assetRfqTokens)
     if (ungated.length > 0) {
       log(`approval gate: no ASSET_<SYMBOL>_APPROVAL_THRESHOLD for ${ungated.join(', ')} — payouts in them are ungated`)
+    }
+    const offerAssets = [...new Set(policy.offerMarkets.flatMap((m) => [m.a, m.b]))].filter(
+      (id): id is string => id !== null && !assetThresholds.has(id),
+    )
+    if (offerAssets.length > 0) {
+      log(
+        `approval gate: OFFER_MARKETS pays ${offerAssets.join(', ')} with no threshold — ` +
+          'name the asset in ASSET_MARKETS to give it a symbol one can be set under',
+      )
     }
   }
 
@@ -510,6 +520,8 @@ export const createServices = async (
       assetThresholds,
       corridor,
       store: adminStore,
+      onUngatedAsset: (assetId) =>
+        log(`approval gate: ${corridor} paid out ${assetSymbols.get(assetId) ?? assetId}, which has no threshold`),
       onHeld: (request) => {
         log(`swap ${request.swapId} on ${request.corridor} held for approval: ${heldAmount(request)}`)
         notifier.post(
@@ -1215,6 +1227,10 @@ export const createServices = async (
       // sequential await chain with no isolation would skip both if
       // store.close() (first, and least likely to matter) threw first.
       const steps: Array<[string, () => Promise<void> | void]> = [
+        // FIRST: `APPROVAL NEEDED` is the only signal a held swap gives, and every
+        // step below tears down what delivering it needs. Bounded by the sinks'
+        // own AbortSignal.timeout, so it cannot hang the shutdown it precedes.
+        ['notifier', () => notifier.flush()],
         ['store', () => store.close()],
         ['onchainStore', () => onchainStore.close()],
         ['receiveStore', () => receiveStore.close()],

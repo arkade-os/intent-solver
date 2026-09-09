@@ -44,6 +44,9 @@ import {
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { assetRfqCorridor, assetRfqDescriptor } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { Corridor } from '@arkade-os/solver-core/core/corridor.js'
+import { AdminStore, type SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
+import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
+import type { ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { requireStack } from './support/preflight.js'
 import {
   assertArkadeSpendable,
@@ -197,6 +200,7 @@ const harness = async (
     markets?: readonly AssetRfqMarket[]
     quoteValiditySeconds?: number
     balance?: () => Promise<ReadonlyMap<AssetLeg, bigint>>
+    approvalGate?: ApprovalCheck
   } = {},
 ): Promise<Harness> => {
   const markets = over.markets ?? [market()]
@@ -211,6 +215,7 @@ const harness = async (
     balance: over.balance ?? balance,
     fetchPrice: createPriceFeed(),
     settle,
+    ...(over.approvalGate ? { approvalGate: over.approvalGate } : {}),
   })
   const descriptor = assetRfqDescriptor(markets[0]!, 'sell_base')
   return { corridor: assetRfqCorridor(descriptor, service, store), store, pair: descriptor.pair }
@@ -486,6 +491,99 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
         swapAddress: mine.address,
       })
       await store.close()
+    },
+    SWAP_TIMEOUT_MS,
+  )
+})
+
+/**
+ * The gate on an ASSET payout, live. The sats threshold cannot express this leg:
+ * the solver pays `to_amount` of the minted asset.
+ */
+describe('e2e arkade asset RFQ — the approval gate', () => {
+  /** The payout the quote will oblige, by the formula the fill test pins. */
+  const payoutFor = (amount: bigint): bigint => amount - (amount * BigInt(FEE_BPS) + 9_999n) / 10_000n
+
+  const gated = async (thresholdUnits: bigint) => {
+    const admin = await AdminStore.open(join(dir, `admin-${randomBytes(6).toString('hex')}.sqlite`))
+    const held: SwapApprovalRequest[] = []
+    const built = await harness({
+      approvalGate: approvalGateFor({
+        thresholdSats: null,
+        assetThresholds: new Map([[assetId, thresholdUnits]]),
+        corridor: 'arkade asset RFQ',
+        store: admin,
+        onHeld: (request) => held.push(request),
+      }),
+    })
+    return { ...built, admin, held }
+  }
+
+  const quoteAndFund = async (corridor: Corridor, pair: string, amount: bigint) => {
+    const outcome = await corridor.quote(requestFor(pair, amount))
+    expect(outcome.kind, JSON.stringify(outcome)).toBe('quote')
+    const quote = outcome.payload as { to_amount: string; profile: { offer_address: string } }
+    expect(BigInt(quote.to_amount)).toBe(payoutFor(amount))
+    const mine = await clientOffer(BigInt(quote.to_amount))
+    await arkade.ctx.wallet.send({ address: mine.address, amount: Number(amount), extensions: [mine.extension] })
+  }
+
+  it(
+    'holds an asset payout AT its threshold, then fills it once approved',
+    async () => {
+      const amount = depositSats(20_000)
+      const { corridor, store, pair, admin, held } = await gated(payoutFor(amount))
+      expect(await admin.listPendingApprovals()).toEqual([])
+
+      await quoteAndFund(corridor, pair, amount)
+      const id = (await store.listNonTerminal())[0]!.id
+      await driveTo({ corridor, store }, id, 'funded')
+
+      // The approval ROW, never the state: `funded` is true before AND after.
+      const pending = await poll(
+        async () => {
+          await corridor.tickAll()
+          const rows = await admin.listPendingApprovals()
+          return rows.length > 0 ? rows : null
+        },
+        { attempts: 20, intervalMs: 1000, whenExhausted: `${id} was never recorded as awaiting approval` },
+      )
+      const expected = [{ swapId: id, corridor: 'arkade asset RFQ', assetId, amount: payoutFor(amount) }]
+      expect(
+        pending.map(({ swapId, corridor: c, assetId: a, amount: n }) => ({
+          swapId,
+          corridor: c,
+          assetId: a,
+          amount: n,
+        })),
+      ).toEqual(expected)
+      expect(held).toEqual(expected)
+
+      for (let i = 0; i < 3; i++) await corridor.tickAll()
+      expect(await store.get(id)).toMatchObject({ state: 'funded', fillTxid: null })
+
+      expect(await admin.approveSwap(id)).toBe(true)
+      const filled = await driveTo({ corridor, store }, id, 'filled')
+      expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
+      expect(await admin.listPendingApprovals()).toEqual([])
+    },
+    SWAP_TIMEOUT_MS,
+  )
+
+  it(
+    'fills a payout ONE UNIT below the threshold, recording nothing',
+    async () => {
+      const amount = depositSats(20_000)
+      const { corridor, store, pair, admin, held } = await gated(payoutFor(amount) + 1n)
+
+      await quoteAndFund(corridor, pair, amount)
+      const id = (await store.listNonTerminal())[0]!.id
+      await driveTo({ corridor, store }, id, 'funded')
+      const filled = await driveTo({ corridor, store }, id, 'filled')
+
+      expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
+      expect(await admin.listPendingApprovals()).toEqual([])
+      expect(held).toEqual([])
     },
     SWAP_TIMEOUT_MS,
   )

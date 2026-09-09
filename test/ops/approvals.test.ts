@@ -74,6 +74,36 @@ describe('approvalGateFor', () => {
     expect(store.requests).toEqual([])
   })
 
+  describe('an asset with no threshold is announced, not silently waved through', () => {
+    const withHook = (assetThresholds: ReadonlyMap<string, bigint>) => {
+      const seen: string[] = []
+      return {
+        seen,
+        check: approvalGateFor({
+          thresholdSats: null,
+          assetThresholds,
+          corridor: 'arkade offer fill',
+          store: fakeStore(),
+          onUngatedAsset: (assetId) => seen.push(assetId),
+        }),
+      }
+    }
+
+    it('names the id ONCE, however many swaps pay it', async () => {
+      const { seen, check } = withHook(new Map([[USDA, 1n]]))
+      await check!(units('swap-1', OTHER, 5n))
+      await check!(units('swap-2', OTHER, 9n))
+      expect(seen).toEqual([OTHER])
+    })
+
+    it('says nothing about a configured asset, or about the BTC leg', async () => {
+      const { seen, check } = withHook(new Map([[USDA, 1n]]))
+      await check!(units('swap-1', USDA, 5n))
+      await check!(sats('swap-2', 5))
+      expect(seen).toEqual([])
+    })
+  })
+
   // Two units, two thresholds: neither may answer for the other.
   it('does not let an asset amount trip the SATS threshold, or the reverse', async () => {
     const { check } = gate(100_000, fakeStore(), [], new Map([[USDA, 10n ** 12n]]))
