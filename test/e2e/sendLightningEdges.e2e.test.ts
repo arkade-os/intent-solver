@@ -271,6 +271,8 @@ describe('e2e arkade:BTC->lightning:BTC (send) — refusals, refunds and recover
     SWAP_TIMEOUT_MS,
   )
 
+  // Intermittently red in CI, with a different arkd error each time. Tracked
+  // in #104; undiagnosed, so do not read a green run as proof it is fixed.
   it(
     'refuses a lockup funded twice, and refunds both vtxos in one covenant spend',
     async () => {
