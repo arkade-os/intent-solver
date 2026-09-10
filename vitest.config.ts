@@ -83,5 +83,11 @@ export default defineConfig({
      */
     dir: 'test',
     poolOptions: { forks: { singleFork: true } },
+    /**
+     * `@arkade-os/swap` ships pre-built `dist/`, so vitest leaves it external
+     * and a `vi.mock` of the SDK never reaches the imports *inside* it — a test
+     * that stubs the REST providers watches it call the network regardless.
+     */
+    server: { deps: { inline: ['@arkade-os/swap'] } },
   },
 })

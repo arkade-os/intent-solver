@@ -39,6 +39,6 @@
     "hono": "^4.13.0"
   },
   "devDependencies": {
-    "@arkade-os/swap": "0.0.14"
+    "@arkade-os/swap": "file:../../vendor/arkade-os-swap-3d92c04b.tgz"
   }
 }
