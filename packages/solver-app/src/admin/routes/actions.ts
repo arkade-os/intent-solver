@@ -422,6 +422,34 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     },
   },
 
+  /**
+   * THE ONLY WAY AN APPROVAL ARRIVES — deliberately not an inbound webhook, which
+   * would be a public listener on a port that is `127.0.0.1`-only and off by
+   * default. Confirmed by the SWAP ID for the reason `fund-withdraw` gives, and
+   * refuses an id the gate never held. No `deny-swap`: `park-swap` already lands
+   * an unexposed row in `refused`, which routes the lockup to the refund sweep.
+   */
+  'approve-swap': {
+    tier: 'armed',
+    confirmKind: 'swap-id',
+    expectedConfirm: idConfirm,
+    target: idTarget,
+    warning:
+      'AUTHORISES THE SOLVER TO PAY OUT on a swap held for being at or above the approval threshold. The next tick ' +
+      'will fund or pay it. Read the row first — the amount, the corridor, and how long it has been waiting. To ' +
+      'refuse instead use park-swap, which stops it being driven and routes the client’s lockup to the refund sweep.',
+    run: async (services, body) => {
+      const id = requireId(body)
+      if (!(await services.adminStore.approveSwap(id))) {
+        throw new Error(
+          `no swap is being held for approval under id ${id} — approval is only possible for one the gate has ` +
+            'already held, so check the id against the pending list on the overview',
+        )
+      }
+      return { approved: id }
+    },
+  },
+
   /** Read the float's shape. Spends nothing; the dry run of `pool-mint`. */
   'pool-plan': {
     tier: 'safe',

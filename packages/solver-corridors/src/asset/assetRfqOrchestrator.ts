@@ -45,6 +45,7 @@ import {
 } from '@arkade-os/solver-core/core/assetRfq.js'
 import type { Price } from '@arkade-os/solver-core/core/priceFeed.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { askApprovalFor, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow, type AssetRfqSwapState } from '../db/assetRfqSwaps.js'
 
@@ -123,6 +124,8 @@ export interface AssetRfqDeps {
   fetchPrice: (feedUrl: string, pricePath: string) => Promise<Price>
   /** Spend the deposit through `fulfill`, paying the client. Returns the txid. */
   settle: (row: AssetRfqSwapRow) => Promise<string>
+  /** The large-swap approval gate. Absent means no gate. @see ops/approvals.ts */
+  approvalGate?: ApprovalCheck
   onError?: (id: string, error: unknown) => void
   now?: () => number
   newId?: () => string
@@ -365,6 +368,10 @@ export class AssetRfqSwapService {
     // one that still reads fillable and would be submitted twice.
     // Carrying the outpoint the decision was made ABOUT: the settle spends the RECORDED one.
     const seen = deposit ? { deposit_txid: deposit.txid, deposit_vout: deposit.vout } : undefined
+    // AFTER the fill decision, BEFORE the CAS. The TO leg is what the solver pays,
+    // and `decision.fill` is false past `validUntil`, so a hold still terminates.
+    if (!(await askApprovalFor(this.deps.approvalGate, row.id, { assetId: row.toAssetId, amount: row.toAmount })))
+      return
     if (!(await this.deps.store.transition(row.id, 'funded', 'filling', seen))) return
     try {
       const txid = await this.deps.settle(await this.deps.store.get(row.id))

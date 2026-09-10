@@ -42,6 +42,7 @@ import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-db/driver.
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { EVM_SEND_NON_TERMINAL, type EvmSendSwapState } from '@arkade-os/solver-core/core/evmSwapState.js'
+import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
 
 export interface EvmSendSwapRow {
   id: string
@@ -501,7 +502,11 @@ export class EvmSendSwapStore {
       from,
       to,
     ])
+    announceTransition(this.onTransition, id, from, to)
   }
+
+  /** @see BaseSwapStore.onTransition — this store carries its own `transition`. */
+  onTransition?: TransitionHook
 
   /**
    * Set fields WITHOUT moving the row.

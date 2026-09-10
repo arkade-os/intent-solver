@@ -173,6 +173,8 @@ const REFUND_SWEEP_MS = 60_000
  * one sees the same coins, a little closer to expiry.
  */
 const VTXO_LIFECYCLE_MS = 300_000
+/** How often the notification balance is refreshed. @see Services.sampleBalances */
+const BALANCE_SAMPLE_MS = 60_000
 
 /** Recover, then drive every swap and sweep refunds until SIGINT/SIGTERM. */
 const watchUntilStopped = async (services: Services): Promise<void> => {
@@ -406,6 +408,7 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
   let lastFullSweep = 0
   let lastRefundSweep = 0
   let lastVtxoLifecycle = 0
+  let lastBalanceSample = 0
   let lastWatchSync = 0
   while (running) {
     await sleep(HOT_TICK_MS)
@@ -485,6 +488,13 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       } catch (error) {
         log('onchain refund deposit sweep failed:', error instanceof Error ? error.message : String(error))
       }
+    }
+    // Refreshed here and NOWHERE on the money path: the read costs ~951ms and a
+    // business event must never pay it. Absent unless a sink is configured.
+    // `sample()` swallows its own failures, like the passes above.
+    if (services.sampleBalances && Date.now() - lastBalanceSample > BALANCE_SAMPLE_MS) {
+      lastBalanceSample = Date.now()
+      await services.sampleBalances()
     }
     if (Date.now() - lastVtxoLifecycle > VTXO_LIFECYCLE_MS) {
       lastVtxoLifecycle = Date.now()

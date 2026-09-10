@@ -14,6 +14,8 @@ import {
   parseAssetMarkets,
   type AssetOfferDeps,
 } from '@arkade-os/solver-app/ops/assetOffers.js'
+import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
+import type { SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
@@ -703,5 +705,58 @@ describe('assertMarketsPriced', () => {
 
   it('allows pricing with no market — nothing is served, nothing is at risk', () => {
     expect(() => assertMarketsPriced([], [priced(BTC, USDA)])).not.toThrow()
+  })
+})
+
+describe('the approval gate on offer fills', () => {
+  const gateWith = (thresholdSats: number | null, assetThresholds?: ReadonlyMap<string, bigint>) => {
+    const requests: SwapApprovalRequest[] = []
+    return {
+      requests,
+      gate: approvalGateFor({
+        thresholdSats,
+        assetThresholds,
+        corridor: 'arkade offer fill',
+        store: {
+          isSwapApproved: async () => false,
+          recordApprovalRequest: async (request) => {
+            requests.push(request)
+            return true
+          },
+        },
+      }),
+    }
+  }
+
+  it('submits nothing at the threshold, and leaves the row FILLABLE rather than filling', async () => {
+    const { requests, gate } = gateWith(1_000)
+    const settle = vi.fn(async () => '0xfill')
+    const { store, service } = await build({ settle, approvalGate: gate })
+    await service.consider(found)
+
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+    expect(requests).toEqual([{ swapId: 'fill-1', corridor: 'arkade offer fill', assetId: null, amount: 1_000n }])
+  })
+
+  it('fills ONE SAT below the threshold, recording nothing and asking nobody', async () => {
+    const { requests, gate } = gateWith(1_001)
+    const settle = vi.fn(async () => '0xfill')
+    const { store, service } = await build({ settle, approvalGate: gate })
+    await service.consider(found)
+
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled', fillTxid: '0xfill' })
+    expect(requests).toEqual([])
+  })
+
+  it('fills as before when no gate is wired at all', async () => {
+    const settle = vi.fn(async () => '0xfill')
+    const { service } = await build({ settle })
+    await service.consider(found)
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(1)
   })
 })

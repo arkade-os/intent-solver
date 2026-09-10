@@ -11,6 +11,7 @@ import { EvmSendSwapService, type EvmSendServiceDeps } from '@arkade-os/solver-c
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { EvmSendSwapStore, type EvmSendQuoteRecord } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import { APPROVAL_REFUSAL } from '@arkade-os/solver-core/core/approvalGate.js'
 
 const NOW = 1_800_000_000
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
@@ -125,6 +126,83 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
   }
   return { store, deps, service: new EvmSendSwapService(deps) }
 }
+
+// The gate sits before the transition into `locking_evm`, so a held swap never
+// enters the exposed state; `broadcast` proves whether tokens were committed.
+describe('the approval gate on arkade:BTC->ethereum', () => {
+  it('does not broadcast or expose the row while the gate holds', async () => {
+    const broadcast = vi.fn().mockResolvedValue('0xtx')
+    const { store, service } = await build({
+      broadcast,
+      approvalGate: async () => ({ proceed: false, reason: APPROVAL_REFUSAL }),
+    })
+    await service.tick('swap-1')
+    expect(broadcast).not.toHaveBeenCalled()
+    expect((await store.get('swap-1')).state).toBe('quoted')
+  })
+
+  it('locks once the gate proceeds', async () => {
+    const { store, service } = await build({ approvalGate: async () => ({ proceed: true }) })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('locking_evm')
+    expect((await store.get('swap-1')).evmLockTxid).toBe('0xtx')
+  })
+
+  it('asks about the Arkade-side amount and the row id', async () => {
+    const asked: { swapId: string; assetId: string | null; amount: bigint }[] = []
+    const { service } = await build({
+      approvalGate: async (swap) => {
+        asked.push(swap)
+        return { proceed: false, reason: APPROVAL_REFUSAL }
+      },
+    })
+    await service.tick('swap-1')
+    expect(asked).toEqual([{ swapId: 'swap-1', assetId: null, amount: 50_000n }])
+  })
+
+  // `planEvmSend` returns `lock_evm` from TWO states. The tests above enter from
+  // `quoted`; this enters from `funded`, the bypass a per-branch gate would leave.
+  it('holds a row that reaches the lock from FUNDED, not just from quoted', async () => {
+    const broadcast = vi.fn().mockResolvedValue('0xtx')
+    const { store, service } = await build({
+      broadcast,
+      approvalGate: async () => ({ proceed: false, reason: APPROVAL_REFUSAL }),
+    })
+    await store.transition('swap-1', 'quoted', 'funded')
+    await service.tick('swap-1')
+    expect(broadcast).not.toHaveBeenCalled()
+    expect((await store.get('swap-1')).state).toBe('funded')
+  })
+
+  // A re-drive of an already-exposed row must not lock a SECOND time — the
+  // planner has no `lock_evm` in `locking_evm`, so the gate is never reached.
+  it('never re-locks a row already in locking_evm', async () => {
+    const broadcast = vi.fn().mockResolvedValue('0xtx')
+    const { store, service } = await build({ broadcast, approvalGate: async () => ({ proceed: true }) })
+    await service.tick('swap-1')
+    expect(broadcast).toHaveBeenCalledTimes(2)
+    expect((await store.get('swap-1')).state).toBe('locking_evm')
+    broadcast.mockClear()
+    await service.tick('swap-1')
+    expect(broadcast).not.toHaveBeenCalled()
+  })
+
+  // The other two legs prove this; this one relied on the planner's rule alone.
+  it('a held swap REFUSES at its own quote deadline rather than waiting forever', async () => {
+    let clock = NOW
+    const { store, service } = await build({
+      approvalGate: async () => ({ proceed: false, reason: APPROVAL_REFUSAL }),
+      now: () => clock,
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('quoted')
+    clock = NOW + 61
+    await service.tick('swap-1')
+    const row = await store.get('swap-1')
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toMatch(/quote expired/)
+  })
+})
 
 describe('the row enters the exposed state BEFORE the lock is broadcast', () => {
   it('is already locking_evm by the time broadcast is called', async () => {

@@ -14,6 +14,8 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
+import type { SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import {
   AssetRfqSwapService,
@@ -440,5 +442,63 @@ describe('tickAll — the periodic pass', () => {
     // The second row was still visited despite the first throwing.
     expect(calls).toBe(2)
     expect(await store.listNonTerminal()).toHaveLength(2)
+  })
+})
+
+describe('the approval gate on asset RFQ fills', () => {
+  /** What the default quote obliges this solver to pay out, in ASSET_A units. */
+  const PAYOUT = 99_500_000_000n
+
+  const gateWith = (assetThresholds?: ReadonlyMap<string, bigint>, thresholdSats: number | null = null) => {
+    const requests: SwapApprovalRequest[] = []
+    return {
+      requests,
+      gate: approvalGateFor({
+        thresholdSats,
+        assetThresholds,
+        corridor: 'arkade asset RFQ',
+        store: {
+          isSwapApproved: async () => false,
+          recordApprovalRequest: async (request) => {
+            requests.push(request)
+            return true
+          },
+        },
+      }),
+    }
+  }
+
+  const driven = async (gate: ReturnType<typeof gateWith>['gate']) => {
+    const built = await harness({ depositAt: async () => deposit(), approvalGate: gate })
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    await built.service.tick('swap-1')
+    return built
+  }
+
+  it('settles nothing AT the asset threshold, leaving the row funded and reclaimable', async () => {
+    const { requests, gate } = gateWith(new Map([[ASSET_A, PAYOUT]]))
+    const { store, settled } = await driven(gate)
+
+    expect(settled).toEqual([])
+    expect(await store.get('swap-1')).toMatchObject({ state: 'funded' })
+    expect(requests).toEqual([{ swapId: 'swap-1', corridor: 'arkade asset RFQ', assetId: ASSET_A, amount: PAYOUT }])
+  })
+
+  it('settles ONE UNIT below the threshold, recording nothing', async () => {
+    const { requests, gate } = gateWith(new Map([[ASSET_A, PAYOUT + 1n]]))
+    const { store, settled } = await driven(gate)
+
+    expect(settled).toEqual(['swap-1'])
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled' })
+    expect(requests).toEqual([])
+  })
+
+  it('is untouched by APPROVAL_THRESHOLD_SATS, which speaks a different unit', async () => {
+    const { requests, gate } = gateWith(undefined, 1)
+    const { settled } = await driven(gate)
+
+    expect(settled).toEqual(['swap-1'])
+    expect(requests).toEqual([])
   })
 })

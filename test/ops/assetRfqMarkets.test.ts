@@ -7,7 +7,11 @@
  * served with no bounds would quote an unbounded payout out of the float.
  */
 import { describe, it, expect } from 'vitest'
-import { assetRfqMarketsFrom, parseAssetRfqTokens } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
+import {
+  assetRfqMarketsFrom,
+  parseAssetRfqTokens,
+  ungatedAssetSymbols,
+} from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { assetRfqDescriptor, assetRfqEnvStem } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
@@ -35,10 +39,26 @@ describe('parseAssetRfqTokens', () => {
     expect(parseAssetRfqTokens('   ', none)).toEqual([])
   })
 
-  it('reads SYMBOL:<asset id>, both directions on', () => {
+  it('reads SYMBOL:<asset id>, both directions on and no approval threshold', () => {
     expect(parseAssetRfqTokens(`USDA:${USDA}`, none)).toEqual([
-      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } },
+      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true }, approvalThresholdUnits: null },
     ])
+  })
+
+  it('reads ASSET_<SYMBOL>_APPROVAL_THRESHOLD as atomic units, past what a double holds', () => {
+    const read = (name: string) => (name === 'ASSET_USDA_APPROVAL_THRESHOLD' ? '18446744073709551617' : undefined)
+    expect(parseAssetRfqTokens(`USDA:${USDA}`, read)[0]!.approvalThresholdUnits).toBe(2n ** 64n + 1n)
+  })
+
+  // At BOOT, so a malformed threshold can never become a runtime `unreadable`.
+  it.each([['-1'], ['1.5'], ['1e6'], ['many']])('refuses %s as an approval threshold', (raw) => {
+    const read = (name: string) => (name === 'ASSET_USDA_APPROVAL_THRESHOLD' ? raw : undefined)
+    expect(() => parseAssetRfqTokens(`USDA:${USDA}`, read)).toThrow(/ASSET_USDA_APPROVAL_THRESHOLD/)
+  })
+
+  it('treats a blank threshold as unset rather than zero, which would gate everything', () => {
+    const read = (name: string) => (name === 'ASSET_USDA_APPROVAL_THRESHOLD' ? '   ' : undefined)
+    expect(parseAssetRfqTokens(`USDA:${USDA}`, read)[0]!.approvalThresholdUnits).toBeNull()
   })
 
   it('closes exactly the direction whose stem says so', () => {
@@ -90,6 +110,7 @@ describe('assetRfqMarketsFrom', () => {
     symbol: 'USDA',
     assetId: USDA,
     enabled: { sell_base: true, buy_base: true },
+    approvalThresholdUnits: null,
     ...over,
   })
 
@@ -158,5 +179,27 @@ describe('assetRfqMarketsFrom', () => {
       [pricing({ sellBase: undefined })],
     )
     expect(market!.sellBase).toEqual({ min: 0n, max: 0n })
+  })
+})
+
+describe('ungatedAssetSymbols', () => {
+  const token = (symbol: string, approvalThresholdUnits: bigint | null) => ({
+    symbol,
+    assetId: symbol.toLowerCase().padEnd(68, '0'),
+    enabled: { sell_base: true, buy_base: true },
+    approvalThresholdUnits,
+  })
+
+  it('names the payable assets no threshold covers, which boot logs', () => {
+    expect(ungatedAssetSymbols([token('USDA', 1_000n), token('EURA', null)])).toEqual(['EURA'])
+  })
+
+  it('is empty when every served asset is gated', () => {
+    expect(ungatedAssetSymbols([token('USDA', 1_000n), token('EURA', 0n)])).toEqual([])
+  })
+
+  // Zero is a THRESHOLD, not an absence: it gates every swap of that asset.
+  it('does not mistake a zero threshold for an unset one', () => {
+    expect(ungatedAssetSymbols([token('USDA', 0n)])).toEqual([])
   })
 })

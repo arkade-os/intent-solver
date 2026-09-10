@@ -23,6 +23,7 @@ import {
   type PageOptions,
   type PageRawFields,
 } from '@arkade-os/solver-core/core/page.js'
+import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
 
 /** A row as the driver hands it back, before the store's own mapper narrows it. */
 export type RawRow = Record<string, unknown>
@@ -217,8 +218,22 @@ export abstract class BaseSwapStore<Row, State extends string> {
       id,
       from,
     ])
-    if (result.changes === 1) await this.recordEvent(id, from, to, null)
+    if (result.changes === 1) {
+      await this.recordEvent(id, from, to, null)
+      this.announce(id, from, to)
+    }
     return result.changes === 1
+  }
+
+  /**
+   * Under the same `changes === 1` guard as `recordEvent`, so it inherits the
+   * compare-and-swap's exactly-once property: the loser of a race announces
+   * nothing. Synchronous and void — an awaitable hook could delay a settlement.
+   */
+  onTransition?: TransitionHook
+
+  private announce(id: string, from: State | null, to: State): void {
+    announceTransition(this.onTransition, id, from, to)
   }
 
   async patch(id: string, fields: Record<string, unknown>): Promise<void> {
