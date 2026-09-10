@@ -38,6 +38,7 @@ import { EvmReceiveSwapStore } from '@arkade-os/solver-corridors-evm/db/evmRecei
 import { loadEvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
 import { createJsonRpc } from '@arkade-os/solver-rails-evm/evm/rpc.js'
 import { createEvmHtlcBackend } from '@arkade-os/solver-rails-evm/evm/backend.js'
+import { probeLogScanRange } from '@arkade-os/solver-rails-evm/evm/logScanProbe.js'
 import { createEvmBroadcaster, nonceSourceFor } from '@arkade-os/solver-rails-evm/evm/broadcast.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { addressFromPrivateKey } from '@arkade-os/solver-rails-evm/evm/transaction.js'
@@ -268,6 +269,23 @@ export interface Services {
   /** Provider x-only pubkey (hex) — the relay address clients send offers to. */
   providerPubkey: string
   close(): Promise<void>
+}
+
+/**
+ * An endpoint's HOST, for saying which one answered without saying how.
+ *
+ * RPC urls routinely carry the API key in the path or query
+ * (`.../v2/<key>`), so printing one into a log or a crash message hands the
+ * credential to whatever aggregator collects them. The host names the provider,
+ * which is all an operator needs to act. An unparseable url yields no fragment
+ * of itself rather than falling back to the raw string.
+ */
+export const endpointHost = (raw: string): string => {
+  try {
+    return new URL(raw).host
+  } catch {
+    return '(unparseable url)'
+  }
 }
 
 /**
@@ -899,6 +917,28 @@ export const createServices = async (
       rpc,
       logScanRange: evmChain.logScanRange,
     })
+    // @see logScanProbe.ts on why this is asked at boot, and on the split.
+    const probe = await probeLogScanRange({
+      rpc,
+      contractAddress: evmChain.contractAddress,
+      logScanRange: evmChain.logScanRange,
+    })
+    if (probe.kind === 'range_rejected') {
+      throw new Error(
+        `EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} is wider than ${endpointHost(evmChain.rpcUrl)} allows: ` +
+          `${probe.message}. Lower it to the endpoint's cap; too low only costs round trips, ` +
+          'too high loses claims silently.',
+      )
+    }
+    if (probe.kind === 'inconclusive') {
+      // NOT fatal: a node that blinked is not evidence about the setting.
+      log(
+        `evm: could not verify EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} against ${endpointHost(evmChain.rpcUrl)}`,
+        probe.message,
+      )
+    } else if (probe.blocks < BigInt(evmChain.logScanRange)) {
+      log(`evm: EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} unproven — the chain is only ${probe.blocks} blocks long`)
+    }
     // Number, not bigint, because that is what both orchestrators' deps take.
     // Safe for as long as block heights stay under 2^53 — nine orders of
     // magnitude away on every chain this could serve.

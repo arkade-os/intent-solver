@@ -17,6 +17,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { corridorSetFromDeps, readerSetFromDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
+import { endpointHost } from '@arkade-os/solver-app/ops/services.js'
 import { createServicesBody, servicesSource } from '../support/createServicesBody.js'
 import { evmCorridorFor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { EvmCorridorPolicy } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
@@ -218,5 +219,56 @@ describe('both legs are actually driven', () => {
     // So once the receive tick stops, nothing refunds its lockup at all.
     expect(corridors.get(SEND_PAIR)?.refundSweep).toBeTypeOf('function')
     expect(corridors.get(RECEIVE_PAIR)?.refundSweep).toBeUndefined()
+  })
+})
+
+describe('the rpc url never reaches a log or an error', () => {
+  // An rpc url routinely carries the API key in its path (`.../v2/<key>`), so
+  // one interpolation hands the credential to every log aggregator downstream.
+  // Raised by arkana on #127, where the scan-range probe introduced the first
+  // two such call sites in this module.
+  it('interpolates the host, never the url itself', () => {
+    const body = createServicesBody()
+    expect(body).toContain('endpointHost(evmChain.rpcUrl)')
+    expect(body).not.toContain('${evmChain.rpcUrl}')
+  })
+
+  it('passes the url only where a client is constructed from it', () => {
+    const uses = createServicesBody()
+      .split(/\r?\n/)
+      .filter((line) => line.includes('evmChain.rpcUrl'))
+    expect(uses).toHaveLength(3)
+    expect(uses.filter((line) => line.includes('createJsonRpc'))).toHaveLength(1)
+    expect(uses.filter((line) => line.includes('endpointHost'))).toHaveLength(2)
+  })
+})
+
+describe('endpointHost keeps the provider and drops the secret', () => {
+  // The REAL function, not a copy of it. An earlier cut re-implemented the
+  // three lines here and asserted against that, which verified the copy and
+  // would have passed unchanged had the original started returning the url.
+  it('yields the host alone for the shapes providers actually use', () => {
+    expect(endpointHost('https://eth-mainnet.g.alchemy.com/v2/SECRETKEY')).toBe('eth-mainnet.g.alchemy.com')
+    expect(endpointHost('https://mainnet.infura.io/v3/SECRETKEY')).toBe('mainnet.infura.io')
+    expect(endpointHost('https://rpc.ankr.com/eth/SECRETKEY?apikey=ALSOSECRET')).toBe('rpc.ankr.com')
+  })
+
+  it('keeps a non-default port, which identifies a self-hosted node', () => {
+    expect(endpointHost('https://mynode.example.com:8545/')).toBe('mynode.example.com:8545')
+  })
+
+  it('leaks no fragment of an unparseable url', () => {
+    expect(endpointHost('not a url at all')).toBe('(unparseable url)')
+  })
+
+  it('never returns anything containing the secret', () => {
+    for (const raw of [
+      'https://eth-mainnet.g.alchemy.com/v2/SECRETKEY',
+      'https://mainnet.infura.io/v3/SECRETKEY',
+      'https://rpc.ankr.com/eth/SECRETKEY?apikey=ALSOSECRET',
+    ]) {
+      expect(endpointHost(raw)).not.toContain('SECRETKEY')
+      expect(endpointHost(raw)).not.toContain('ALSOSECRET')
+    }
   })
 })
