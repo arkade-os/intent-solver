@@ -29,7 +29,7 @@
 
 import { hex, base64 } from '@scure/base'
 import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
-import { appendArkadeScript, claimPacketShape } from './claimPacket.js'
+import { appendArkadeScript, claimPacketShape } from '@arkade-os/swap'
 import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { ArkAddress } from '@arkade-os/sdk'
@@ -491,7 +491,7 @@ export class OnchainReceiveSwapService {
   ): ClaimPacketStamp | undefined {
     if (row.claimPacket === null) return undefined
     const shape = claimPacketShape(row.claimPacket)
-    if (shape.kind !== 'packet' || !shape.covclaimdPubKey) return undefined
+    if (shape.kind !== 'packet' || !shape.covclaimdPubkey) return undefined
     const arkadeScript = script.nonInteractiveClaimArkadeScript
     if (!shape.needsArkadeScript) return { packet: shape.body, tapTree: script.encode() }
     if (!arkadeScript) return undefined

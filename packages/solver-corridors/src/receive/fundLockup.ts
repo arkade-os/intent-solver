@@ -18,7 +18,7 @@
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { selectLockupFunding } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
-import { CLAIM_PACKET_TYPE } from './claimPacket.js'
+import { CLAIM_PACKET_TYPE } from '@arkade-os/swap'
 import { MAX_REFUND_HORIZON } from '@arkade-os/solver-core/core/receive.js'
 import { log } from '@arkade-os/solver-core/util/poll.js'
 

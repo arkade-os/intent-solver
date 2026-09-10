@@ -56,7 +56,7 @@ import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilater
 import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
-import { appendArkadeScript, claimPacketShape } from './claimPacket.js'
+import { appendArkadeScript, claimPacketShape } from '@arkade-os/swap'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
 import { FundNotSubmittedError } from './fundLockup.js'
 import type { CovclaimdClient } from './covclaimd.js'
@@ -993,7 +993,7 @@ export class ReceiveSwapService {
     if (shape.kind !== 'packet') return undefined
     // Without `0x03` no covclaimd's filter selects the tx, so stamping would
     // strand it AND turn off the reveal that could still have settled it.
-    if (!shape.covclaimdPubKey) return undefined
+    if (!shape.covclaimdPubkey) return undefined
     const arkadeScript = script.nonInteractiveClaimArkadeScript
     if (!shape.needsArkadeScript) return { packet: shape.body, tapTree: script.encode() }
     // No leaf to derive from: fall back to the reveal, whose guard reports it.

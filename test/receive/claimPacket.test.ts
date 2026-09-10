@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { base64 } from '@scure/base'
-import { claimPacketShape } from '@arkade-os/solver-corridors/receive/claimPacket.js'
+import { claimPacketShape } from '@arkade-os/swap'
 
 /** `ephPub(33) || nonce(12) || AES-GCM of a 32-byte preimage (48)` — the shape `sealClaimPacket` emits. */
 const sealedCiphertext = (): Uint8Array => Uint8Array.from({ length: 93 }, (_, i) => i & 0xff)
@@ -16,6 +16,20 @@ const PUBKEY = Uint8Array.from([0x02, ...Array<number>(32).fill(0x11)])
 const fullPacket = (): Uint8Array => concat(tlv(0x01, sealedCiphertext()), tlv(0x02, ARKADE_SCRIPT), tlv(0x03, PUBKEY))
 
 describe('claimPacketShape', () => {
+  it('keeps the solver-corridors claim-packet subpath importable', async () => {
+    await expect(import('@arkade-os/solver-corridors/receive/claimPacket.js')).resolves.toMatchObject({
+      claimPacketShape: expect.any(Function),
+    })
+  })
+
+  it('keeps the old pubkey spelling on the solver-corridors subpath', async () => {
+    const legacy = await import('@arkade-os/solver-corridors/receive/claimPacket.js')
+    const shape = legacy.claimPacketShape(base64.encode(fullPacket()))
+    expect(shape.kind).toBe('packet')
+    if (shape.kind !== 'packet') return
+    expect(shape.covclaimdPubKey).toEqual(PUBKEY)
+  })
+
   it('reads a 93-byte blob as the sealed ciphertext', () => {
     expect(claimPacketShape(base64.encode(sealedCiphertext()))).toEqual({ kind: 'ciphertext' })
   })
@@ -24,19 +38,16 @@ describe('claimPacketShape', () => {
     const shape = claimPacketShape(base64.encode(fullPacket()))
     expect(shape.kind).toBe('packet')
     if (shape.kind !== 'packet') return
-    expect(shape.covclaimdPubKey).toEqual(PUBKEY)
+    expect(shape.covclaimdPubkey).toEqual(PUBKEY)
   })
 
   it('never produces a packet as short as the ciphertext it wraps', () => {
     expect(fullPacket().length).toBeGreaterThan(93)
   })
 
-  it('accepts the two-TLV shape covclaimd still parses, with no pubkey named', () => {
+  it('keeps a two-TLV shape with no pubkey on the legacy reveal path', () => {
     const twoTlv = concat(tlv(0x01, sealedCiphertext()), tlv(0x02, ARKADE_SCRIPT))
-    const shape = claimPacketShape(base64.encode(twoTlv))
-    expect(shape.kind).toBe('packet')
-    if (shape.kind !== 'packet') return
-    expect(shape.covclaimdPubKey).toBeUndefined()
+    expect(claimPacketShape(base64.encode(twoTlv))).toEqual({ kind: 'ciphertext' })
   })
 
   it('reads a ciphertext-and-pubkey body as a packet the solver must complete', () => {
@@ -44,7 +55,7 @@ describe('claimPacketShape', () => {
     expect(shape.kind).toBe('packet')
     if (shape.kind !== 'packet') return
     expect(shape.needsArkadeScript).toBe(true)
-    expect(shape.covclaimdPubKey).toEqual(PUBKEY)
+    expect(shape.covclaimdPubkey).toEqual(PUBKEY)
   })
 
   it('marks a body that already carries 0x02 as needing nothing', () => {
