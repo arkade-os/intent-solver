@@ -39,6 +39,6 @@
     "hono": "^4.13.0"
   },
   "devDependencies": {
-    "@arkade-os/swap": "0.0.16"
+    "@arkade-os/swap": "0.0.17"
   }
 }
