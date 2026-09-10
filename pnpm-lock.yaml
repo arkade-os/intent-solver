@@ -88,8 +88,8 @@ importers:
         version: 3.25.76
     devDependencies:
       '@arkade-os/swap':
-        specifier: file:./vendor/arkade-os-swap-3d92c04b.tgz
-        version: file:vendor/arkade-os-swap-3d92c04b.tgz(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.0.15
+        version: 0.0.15(nostr-tools@2.24.1(typescript@5.9.3))
       '@types/better-sqlite3':
         specifier: ^7.6.12
         version: 7.6.13
@@ -173,8 +173,8 @@ importers:
         version: 4.13.0
     devDependencies:
       '@arkade-os/swap':
-        specifier: file:../../vendor/arkade-os-swap-3d92c04b.tgz
-        version: file:vendor/arkade-os-swap-3d92c04b.tgz(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.0.15
+        version: 0.0.15(nostr-tools@2.24.1(typescript@5.9.3))
 
   packages/solver-arkade:
     dependencies:
@@ -185,8 +185,8 @@ importers:
         specifier: workspace:*
         version: link:../solver-core
       '@arkade-os/swap':
-        specifier: file:../../vendor/arkade-os-swap-3d92c04b.tgz
-        version: file:vendor/arkade-os-swap-3d92c04b.tgz(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.0.15
+        version: 0.0.15(nostr-tools@2.24.1(typescript@5.9.3))
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.2.0
@@ -428,9 +428,8 @@ packages:
     resolution: {integrity: sha512-i77/BCAmHY4fec41HfYb5osu+QkCEOf2jLha1HX5pkp6bHGrm10WG8eOGREKqPCC4bOI3E8cKwEVGxP0qlNt5g==}
     engines: {node: '>=18'}
 
-  '@arkade-os/swap@file:vendor/arkade-os-swap-3d92c04b.tgz':
-    resolution: {integrity: sha512-6ZlGTNXXGPlxpxmErl7QMKjnHGgEO77ZrKz6P3KzRKYOuxy06k0noHi0GRE1Fj5yHw4dMndNdndpx9JczsTPyw==, tarball: file:vendor/arkade-os-swap-3d92c04b.tgz}
-    version: 0.0.14
+  '@arkade-os/swap@0.0.15':
+    resolution: {integrity: sha512-G7XQs9YwtfxVCNMUFj4/JvmymdoEZbr2jcTZExE+ogebbamqRDW8OWyIXOw6s9dp4gjg1JSkuxJf9v1RGgobMA==}
     peerDependencies:
       nostr-tools: ^2.12.0
     peerDependenciesMeta:
@@ -1661,7 +1660,7 @@ snapshots:
 
   '@arkade-os/solver-discovery@0.2.3': {}
 
-  '@arkade-os/swap@file:vendor/arkade-os-swap-3d92c04b.tgz(nostr-tools@2.24.1(typescript@5.9.3))':
+  '@arkade-os/swap@0.0.15(nostr-tools@2.24.1(typescript@5.9.3))':
     dependencies:
       '@arkade-os/sdk': 0.4.71
       '@arkade-os/solver-discovery': 0.2.3

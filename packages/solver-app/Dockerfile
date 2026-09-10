@@ -60,11 +60,6 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # one workspace project among twelve, and there is deliberately no second copy
 # of it.
 COPY packages ./packages
-# Same rule as the workspace links above, for the same reason: a `file:` pin in
-# the lockfile is resolved during install, so a vendored tarball absent from the
-# build context fails it outright. See vendor/README.md — this line goes when
-# the pin returns to a published version.
-COPY vendor ./vendor
 RUN pnpm install --frozen-lockfile
 # The root tsconfig, which every package's `tsconfig.build.json` extends — not
 # an emit config in its own right. The root emits nothing at all now.

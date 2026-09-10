@@ -52,7 +52,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@arkade-os/swap": "file:./vendor/arkade-os-swap-3d92c04b.tgz",
+    "@arkade-os/swap": "0.0.15",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^24.13.3",
     "@types/ws": "^8.18.1",
