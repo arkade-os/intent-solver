@@ -4,9 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  '@arkade-os/sdk': 0.4.72
-
 importers:
 
   .:
@@ -91,8 +88,8 @@ importers:
         version: 3.25.76
     devDependencies:
       '@arkade-os/swap':
-        specifier: 0.0.15
-        version: 0.0.15(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.0.16
+        version: 0.0.16(nostr-tools@2.24.1(typescript@5.9.3))
       '@types/better-sqlite3':
         specifier: ^7.6.12
         version: 7.6.13
@@ -176,8 +173,8 @@ importers:
         version: 4.13.0
     devDependencies:
       '@arkade-os/swap':
-        specifier: 0.0.15
-        version: 0.0.15(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.0.16
+        version: 0.0.16(nostr-tools@2.24.1(typescript@5.9.3))
 
   packages/solver-arkade:
     dependencies:
@@ -188,8 +185,8 @@ importers:
         specifier: workspace:*
         version: link:../solver-core
       '@arkade-os/swap':
-        specifier: 0.0.15
-        version: 0.0.15(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.0.16
+        version: 0.0.16(nostr-tools@2.24.1(typescript@5.9.3))
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.2.0
@@ -431,8 +428,8 @@ packages:
     resolution: {integrity: sha512-i77/BCAmHY4fec41HfYb5osu+QkCEOf2jLha1HX5pkp6bHGrm10WG8eOGREKqPCC4bOI3E8cKwEVGxP0qlNt5g==}
     engines: {node: '>=18'}
 
-  '@arkade-os/swap@0.0.15':
-    resolution: {integrity: sha512-G7XQs9YwtfxVCNMUFj4/JvmymdoEZbr2jcTZExE+ogebbamqRDW8OWyIXOw6s9dp4gjg1JSkuxJf9v1RGgobMA==}
+  '@arkade-os/swap@0.0.16':
+    resolution: {integrity: sha512-ux01KxNhLXfz7t0D1+wOWWq0cKvp9TR0PwOwomH3mTKh7ZsDHiPZlxl3g8mPnXso51dsXVozC+r+4BPhtS0ulQ==}
     peerDependencies:
       nostr-tools: ^2.12.0
     peerDependenciesMeta:
@@ -1663,7 +1660,7 @@ snapshots:
 
   '@arkade-os/solver-discovery@0.2.3': {}
 
-  '@arkade-os/swap@0.0.15(nostr-tools@2.24.1(typescript@5.9.3))':
+  '@arkade-os/swap@0.0.16(nostr-tools@2.24.1(typescript@5.9.3))':
     dependencies:
       '@arkade-os/sdk': 0.4.72
       '@arkade-os/solver-discovery': 0.2.3

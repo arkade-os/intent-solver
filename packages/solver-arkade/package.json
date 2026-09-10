@@ -28,7 +28,7 @@
   "dependencies": {
     "@arkade-os/sdk": "0.4.72",
     "@arkade-os/solver-core": "workspace:*",
-    "@arkade-os/swap": "0.0.15",
+    "@arkade-os/swap": "0.0.16",
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
     "better-sqlite3": "^12.11.1"
