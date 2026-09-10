@@ -123,12 +123,23 @@ const offerFor = (over: Record<string, unknown>): Offer => {
   return { ...terms, swapPkScript: offerVtxoScript(terms, SERVER_KEY).pkScript } as Offer
 }
 
-/** Group ids in packet order — the covenant's own requirement. */
+/**
+ * Group ids in packet order — the covenant's own requirement.
+ *
+ * `assetId` is an `asset.AssetId`, not a string: the SDK models it as a class
+ * and `toString()` is its canonical hex. Comparing the object would compare
+ * identity, which passes or fails for reasons unrelated to the packet.
+ */
 const groupIds = (packet: unknown): string[] =>
   ((packet as { groups?: { assetId: { toString(): string } }[] }).groups ?? []).map((g) => g.assetId.toString())
 
-const packetGroups = () =>
-  groupIds(Extension.fromTx(Transaction.fromPSBT(base64.decode(state.arkTx!))).getAssetPacket())
+/** Decoded once per call site: a second decode of the same tx would report a
+ * mismatch as two separate failures. Throws rather than dereferencing an absent
+ * tx, so "the fill never reached the emulator" says so. */
+const packetGroups = (): string[] => {
+  if (state.arkTx === undefined) throw new Error('no ark tx reached the emulator: the fill did not submit')
+  return groupIds(Extension.fromTx(Transaction.fromPSBT(base64.decode(state.arkTx))).getAssetPacket())
+}
 
 describe('the asset packet fulfillOffer submits', () => {
   const deposit = (assets?: { assetId: string; amount: bigint }[]) => {
@@ -149,8 +160,9 @@ describe('the asset packet fulfillOffer submits', () => {
       at,
     )
 
-    expect(packetGroups()[0]).toBe(ASSET_A)
-    expect(packetGroups()).toEqual([ASSET_A, ASSET_B])
+    const groups = packetGroups()
+    expect(groups[0]).toBe(ASSET_A)
+    expect(groups).toEqual([ASSET_A, ASSET_B])
   })
 
   it('hoists the wanted asset even when ONE COIN carries it second', async () => {
