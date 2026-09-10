@@ -143,6 +143,9 @@ export interface ArkadeWalletConfig {
 export interface ArkadeContext {
   wallet: Awaited<ReturnType<typeof Wallet.create>>
   identity: MnemonicIdentity
+  /** The server the wallet was built against. Carried because the SDK's own
+   * entry points take it separately — the wallet does not expose it. */
+  arkServerUrl: string
   /** Unilateral delays this server will accept, derived from its own minimum. */
   unilateralDelays: UnilateralDelays
   /** As advertised, BEFORE `ARK_UNILATERAL_EXIT_DELAY`: a client compiles an
@@ -326,6 +329,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   return {
     wallet,
     identity,
+    arkServerUrl: config.arkServerUrl,
     unilateralDelays: deriveUnilateralDelays(config.unilateralExitDelayOverride ?? advertisedExitDelay),
     advertisedExitDelay,
     timelockUnit: advertisedUnit,
