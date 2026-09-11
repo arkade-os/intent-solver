@@ -64,6 +64,7 @@ import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js
 import type { ReceiveSwapRow, ReceiveSwapStore } from '../db/receiveSwaps.js'
 import type { SendSwapRow } from '../db/swaps.js'
 import { nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
+import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 
 /**
  * How long a minted hold invoice stays valid, seconds — DERIVED, never chosen.
@@ -159,6 +160,7 @@ export const receiveCovenantRowFor = (row: ReceiveSwapRow): CovenantScriptRow =>
 })
 
 export interface ReceiveServiceDeps {
+  quoteLimiter?: RateLimiter
   /**
    * How this corridor prices. Absent means the configured flat+bps `fee`,
    * which is what every deployment used before pricing became injectable.
@@ -255,6 +257,7 @@ export interface ReceiveServiceDeps {
 export type CoupledSendRow = Pick<SendSwapRow, 'state' | 'pkScript' | 'amountSats'>
 
 export interface ReceiveQuoteRequest {
+  requesterKey?: string
   /** `H = sha256(P)`, client-chosen, hex. */
   paymentHash: string
   /**
@@ -274,6 +277,7 @@ export interface ReceiveQuoteRequest {
 }
 
 export type QuoteRefusal =
+  | 'rate_limited'
   | 'amount_out_of_range'
   | 'fee_consumes_swap'
   | 'invalid_payout_address'
@@ -292,6 +296,7 @@ export type QuoteOutcome =
 
 export class ReceiveSwapService {
   private readonly now: () => number
+  private readonly quoteLimiter: RateLimiter
   private readonly inFlight = new Set<string>()
   private readonly fee: Fee
   /** How this corridor prices. Defaults to the configured flat+bps fee. */
@@ -302,6 +307,7 @@ export class ReceiveSwapService {
   constructor(private readonly deps: ReceiveServiceDeps) {
     this.admission = deps.admission
     this.now = deps.now ?? nowSeconds
+    this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
     this.fee = deps.fee ?? FREE
     this.pricing = deps.pricing ?? fixedFeePricing(this.fee)
   }
@@ -460,6 +466,9 @@ export class ReceiveSwapService {
     // Refuse before createHoldInvoice so a declined quote leaves no hold invoice.
     if (await this.deps.coupledSendStore?.findLiveByPaymentHash(request.paymentHash)) {
       return { accepted: false, reason: 'duplicate_swap' }
+    }
+    if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
+      return { accepted: false, reason: 'rate_limited' }
     }
     // `totalCommitted()`, not this store's own `committedSats()`: the cap is
     // the HOUSE's, so a corridor must not be able to spend it four times over.

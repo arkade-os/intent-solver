@@ -7,6 +7,9 @@ export interface RfqRefusalMetadata {
 
 export type RfqRefusalObserver = (context: string, detail: string, metadata: RfqRefusalMetadata) => void
 
+export const sanitizeRfqRefusalText = (text: string, limit: number): string =>
+  text.slice(0, limit).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ')
+
 export const reportRfqRefusal = (
   observer: RfqRefusalObserver | undefined,
   transport: RfqRefusalMetadata['transport'],
@@ -20,9 +23,13 @@ export const reportRfqRefusal = (
     return
   const payload = outcome.payload ?? {}
   const rfqId = typeof payload.rfq_id === 'string' && /^[0-9a-f]{64}$/.test(payload.rfq_id) ? payload.rfq_id : null
-  const reason = typeof payload.reason === 'string' ? payload.reason : 'unsupported_payload'
+  const reason = sanitizeRfqRefusalText(
+    typeof payload.reason === 'string' ? payload.reason : 'unsupported_payload',
+    100,
+  )
+  const detail = sanitizeRfqRefusalText(`${outcome.kind}: ${outcome.detail ?? reason}`, 1024)
   try {
-    observer(`${transport} refused`, `${outcome.kind}: ${outcome.detail ?? reason}`, {
+    observer(`${transport} refused`, detail, {
       transport,
       requestType,
       rfqId,

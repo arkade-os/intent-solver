@@ -15,13 +15,14 @@ import { SendSwapService, type ArkadeOps } from '@arkade-os/solver-corridors/sen
 import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
-import { QUOTE_RATE_LIMIT } from '@arkade-os/solver-core/core/rateLimit.js'
+import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { FakeOnchainBackend } from '@arkade-os/solver-rails-fake/onchain/fake/backend.js'
 import { forgeInvoice } from '@arkade-os/solver-rails-fake/ln/fake/bolt11.js'
 import { ROUTE_CLTV_BUDGET_BLOCKS } from '@arkade-os/solver-core/core/send.js'
-import { buildAppFrom } from '../support/transportFrom.js'
+import type { RelayConnection, RelayEvent } from '@arkade-os/solver-transport/relay/connection.js'
+import { buildAppFrom, relayIngressFrom } from '../support/transportFrom.js'
 
 const INVOICE =
   'lnbc21u1pnk8larsp526g88ejh9ac0es9j6juxwenzdzvs6hcrphna5pp3jefpukmtk3hqpp5m206npk0fr6k45u8f90capqw48k3pzymlqhk0j98kyx4mz383pkqdz9235x2gr3w45kx6eqvfex7amwypnx77pqdf6k6urnyphhvetjyp6xsefqd3sh57fqv3hkwxqyp2xqcqz95rzjqv9ruzr6quwpsuwmyshlvenk0xm7djrtt8ugt2ja6cx3dkqtccdgvzzxeyqq28qqqqqqqqqqqqqqq9gq2y9qyysgqvu5k5w9q0xe62envhds058r9h8v5uak09hn3uzlw39sqkcuwh34j44gc53j6x6sg0u6yf6l0durxqqekytupxpf66zc7rc9cpav72ssqpcgv3p'
@@ -106,10 +107,13 @@ const receiveQuote = {
 let clock: number
 let store: SwapStore
 let onchainStore: OnchainSendSwapStore
+let onchainService: OnchainSendSwapService
+let quoteLimiter: RateLimiter
 let app: ReturnType<typeof buildAppFrom>
 
 beforeEach(async () => {
   clock = INVOICE_TIMESTAMP + 100
+  quoteLimiter = new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, () => clock)
   store = await SwapStore.open(':memory:', () => clock)
   const service = new SendSwapService({
     store,
@@ -130,7 +134,7 @@ beforeEach(async () => {
   // Not exercised by this file's tests — real store + fake chain backend,
   // just enough to satisfy buildApp's HttpDeps.
   onchainStore = await OnchainSendSwapStore.open(':memory:', () => clock)
-  const onchainService = new OnchainSendSwapService({
+  onchainService = new OnchainSendSwapService({
     store: onchainStore,
     onchain: new FakeOnchainBackend(),
     arkade,
@@ -139,6 +143,7 @@ beforeEach(async () => {
     maxExposedSats: 5_000,
     totalCommitted: () => store.committedSats(),
     admission: new AdmissionControl(),
+    quoteLimiter,
     signer: { sign: async (tx) => tx }, // never invoked — no test in this suite drives refunding_onchain
     refundDestinationScript: Uint8Array.from([0x51, 0x20, ...new Uint8Array(32).fill(1)]),
     now: () => clock,
@@ -422,10 +427,12 @@ describe('quote admission control', () => {
         maxExposedSats: 5_000,
         totalCommitted: () => store.committedSats(),
         admission: new AdmissionControl(),
+        quoteLimiter,
         now: () => clock,
       }),
       store,
       onchainStore,
+      onchainService,
       network: 'bitcoin',
       clientKey: () => 'ip:one-client',
     })
@@ -456,9 +463,54 @@ describe('quote admission control', () => {
 
     for (let i = 1; i <= QUOTE_RATE_LIMIT; i++) {
       expect((await spamQuote(i)).status).toBe(201)
+      if (i === 1) {
+        for (let retry = 0; retry < 8; retry++) expect((await spamQuote(1)).status).toBe(201)
+      }
     }
     const refused = await spamQuote(QUOTE_RATE_LIMIT + 1)
     expect(refused.status).toBe(422)
     expect(((await refused.json()) as Record<string, unknown>).reason).toBe('rate_limited')
+    expect((await spamQuote(1)).status).toBe(201)
+
+    let deliver!: (event: RelayEvent) => void | Promise<void>
+    let reply: unknown
+    const connection: RelayConnection = {
+      subscribe: async (_filter, handler) => {
+        deliver = handler
+        return { close: async () => {} }
+      },
+      publish: async (event) => {
+        reply = event.payload
+      },
+      close: async () => {},
+      isConnected: () => true,
+    }
+    const ingress = relayIngressFrom({ connection, providerPubkey: key(1), store, onchainStore, onchainService })
+    const event: RelayEvent = {
+      id: 'onchain-event',
+      author: 'ip:one-client',
+      createdAtMs: clock * 1000,
+      payload: rfqRequest({
+        rfq_id: OTHER_RFQ_ID,
+        pair: 'arkade:BTC->onchain:BTC',
+        amount_side: 'from',
+        amount: 500,
+        profile: {
+          payment_hash: 'dd'.repeat(32),
+          payout_pubkey: CLIENT_REFUND_PUBKEY,
+          refund_address: REFUND_ADDRESS,
+          client_refund_pubkey: CLIENT_REFUND_PUBKEY,
+        },
+      }),
+    }
+    await ingress.start()
+    try {
+      await deliver(event)
+      expect(reply).toMatchObject({ type: 'rfq_refusal', reason: 'rate_limited' })
+      await deliver({ ...event, author: 'another-client' })
+      expect(reply).toMatchObject({ type: 'rfq_quote', rfq_id: OTHER_RFQ_ID })
+    } finally {
+      await ingress.stop()
+    }
   })
 })

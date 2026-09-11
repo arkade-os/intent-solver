@@ -308,11 +308,9 @@ export class EvmReceiveSwapService {
    */
   async quote(request: EvmReceiveQuoteRequest): Promise<EvmReceiveQuoteOutcome> {
     const { store, arkade, chain } = this.deps
-    // Admission first, like every other corridor: a quote is free to request
-    // but holds provider capacity for its whole validity window and costs a
-    // feed fetch apiece, so the meter runs before any work happens.
-    if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
-      return { accepted: false, reason: 'rate_limited' }
+    if (request.requesterKey !== undefined) {
+      if (await store.findLiveByPaymentHash(request.paymentHash)) return { accepted: false, reason: 'duplicate_swap' }
+      if (!this.quoteLimiter.take(request.requesterKey)) return { accepted: false, reason: 'rate_limited' }
     }
     const served = this.deps.markets.get(request.tokenAddress.toLowerCase())
     if (served === undefined) return { accepted: false, reason: 'unsupported_token' }

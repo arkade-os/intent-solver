@@ -86,6 +86,97 @@ const rawPublish = async (port: number, event: RelayEvent): Promise<void> => {
 }
 
 describe('webSocketRelayConnection', () => {
+  it('bounds running callbacks and drops overflow beyond a bounded backlog', async () => {
+    const server = startBroker(0)
+    const port = (server.address() as { port: number }).port
+    const started: string[] = []
+    const releases: (() => void)[] = []
+    let decoded = 0
+    let active = 0
+    let peak = 0
+    const connection = track(
+      webSocketRelayConnection(`ws://127.0.0.1:${port}`, {
+        maxConcurrentHandlers: 2,
+        maxQueuedEvents: 2,
+        codec: {
+          ...devCodec,
+          decodeEvent: (raw) => {
+            decoded++
+            return devCodec.decodeEvent(raw)
+          },
+        },
+      }),
+      server,
+    )
+    await connection.subscribe({}, async (event) => {
+      started.push(event.id)
+      peak = Math.max(peak, ++active)
+      await new Promise<void>((resolve) => releases.push(resolve))
+      active--
+    })
+    await until(() => connection.isConnected())
+    const send = (id: string) => {
+      for (const socket of server.clients) {
+        socket.send(devCodec.encodeEvent({ id, author: 'client', createdAtMs: Date.now(), payload: {} }))
+      }
+    }
+    for (let i = 0; i < 8; i++) send(String(i))
+    await until(() => decoded === 8)
+    expect(started).toEqual(['0', '1'])
+    releases[0]!()
+    await until(() => started.length === 3)
+    releases[1]!()
+    await until(() => started.length === 4)
+    expect(started).toEqual(['0', '1', '2', '3'])
+    for (const release of releases) release()
+    await until(() => active === 0)
+    send('fresh')
+    await until(() => started.length === 5)
+    expect(started[4]).toBe('fresh')
+    expect(peak).toBe(2)
+    releases[4]!()
+  })
+
+  it.each(['subscription', 'connection'] as const)('discards queued callbacks when the %s closes', async (scope) => {
+    const server = startBroker(0)
+    const port = (server.address() as { port: number }).port
+    const started: string[] = []
+    let release!: () => void
+    let decoded = 0
+    let completed = false
+    const connection = track(
+      webSocketRelayConnection(`ws://127.0.0.1:${port}`, {
+        maxConcurrentHandlers: 1,
+        maxQueuedEvents: 2,
+        codec: {
+          ...devCodec,
+          decodeEvent: (raw) => {
+            decoded++
+            return devCodec.decodeEvent(raw)
+          },
+        },
+      }),
+      server,
+    )
+    const subscription = await connection.subscribe({}, async (event) => {
+      started.push(event.id)
+      await new Promise<void>((resolve) => (release = resolve))
+      completed = true
+    })
+    await until(() => connection.isConnected())
+    for (const socket of server.clients) {
+      for (let i = 0; i < 3; i++) {
+        socket.send(devCodec.encodeEvent({ id: String(i), author: 'client', createdAtMs: Date.now(), payload: {} }))
+      }
+    }
+    await until(() => decoded === 3)
+    expect(started).toEqual(['0'])
+    await (scope === 'subscription' ? subscription.close() : connection.close())
+    release()
+    await until(() => completed)
+    expect(started).toEqual(['0'])
+  })
+
   it('delivers events matching a subscription, outbound only', async () => {
     const server = startBroker(0)
     const port = (server.address() as { port: number }).port

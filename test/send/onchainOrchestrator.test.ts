@@ -143,6 +143,21 @@ describe('OnchainSendSwapService', () => {
     })
   })
 
+  it('meters new requester quotes while preserving duplicate and other-client outcomes', async () => {
+    const request = (n: number, requesterKey = 'client') => ({
+      paymentHash: n.toString(16).padStart(64, '0'),
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+      requesterKey,
+    })
+    for (let i = 1; i <= 5; i++) expect((await service.quote(request(i))).accepted).toBe(true)
+    expect(await service.quote(request(6))).toEqual({ accepted: false, reason: 'rate_limited' })
+    expect(await service.quote(request(1))).toEqual({ accepted: false, reason: 'duplicate_swap' })
+    expect((await service.quote(request(6, 'other-client'))).accepted).toBe(true)
+  })
+
   // Issue #105. `quote()` reads the committed total, compares it against the
   // cap, and only then inserts. Both reads land before either insert, so both
   // quotes see the same headroom and both take it.

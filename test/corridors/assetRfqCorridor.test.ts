@@ -43,6 +43,7 @@ const SELL = assetRfqDescriptor(MARKET, 'buy_base')
 
 const harness = async () => {
   let clock = 1_000
+  let sequence = 0
   const store = await AssetRfqSwapStore.open(':memory:', () => clock)
   const service = new AssetRfqSwapService({
     store,
@@ -62,7 +63,7 @@ const harness = async () => {
         [null, 10n ** 12n],
       ]),
     settle: async () => 'fa'.repeat(32),
-    newId: () => 'swap-1',
+    newId: () => `swap-${++sequence}`,
   })
   return { store, service, corridor: assetRfqCorridor(BUY, service, store), tick: (n: number) => (clock = n) }
 }
@@ -169,6 +170,24 @@ describe('the eleven required members', () => {
 })
 
 describe('quote — the corridor RFQ arm', () => {
+  it('meters requester quotes through the registered asset corridor', async () => {
+    const { corridor, store } = await harness()
+    const request = (n: number) =>
+      rfqRequest({
+        rfq_id: n.toString(16).padStart(64, '0'),
+        profile: { maker_pk_script: PK_SCRIPT, maker_public_key: n.toString(16).padStart(64, '0') },
+      })
+    try {
+      for (let i = 1; i <= 5; i++)
+        expect((await corridor.quote(request(i), { requesterKey: 'client' })).kind).toBe('quote')
+      expect((await corridor.quote(request(6), { requesterKey: 'client' })).payload.reason).toBe('rate_limited')
+      expect((await corridor.quote(request(1), { requesterKey: 'client' })).payload.reason).toBe('quote_conflict')
+      expect((await corridor.quote(request(6), { requesterKey: 'other-client' })).kind).toBe('quote')
+    } finally {
+      await store.close()
+    }
+  })
+
   it('answers a well-formed request with a quote', async () => {
     const { corridor } = await harness()
     const outcome = await corridor.quote(rfqRequest())

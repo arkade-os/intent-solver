@@ -81,6 +81,7 @@ import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covcl
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
 import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
+import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { poolPlan, mintPool, committedAcrossCorridors } from './pool.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { assertMarketsPriced, AssetOfferService } from './assetOffers.js'
@@ -396,6 +397,7 @@ export const createServices = async (
    * same headroom or the bound is only ever per-corridor again.
    */
   const admission = new AdmissionControl()
+  const quoteLimiter = new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, nowSeconds)
   /**
    * ONE tracker for every corridor: the backoff exists so a FAILING BACKEND is
    * not hammered, and the corridors share their backends.
@@ -540,6 +542,7 @@ export const createServices = async (
   }
   const assetRfqService = assetRfqStore
     ? new AssetRfqSwapService({
+        quoteLimiter,
         store: assetRfqStore,
         markets: assetRfqMarkets,
         solverPubkey: hex.encode(await arkade.identity.xOnlyPublicKey()),
@@ -649,6 +652,7 @@ export const createServices = async (
 
   const service = enabled('arkade:BTC->lightning:BTC')
     ? new SendSwapService({
+        quoteLimiter,
         store,
         chainTip,
         ln: rail!.ln,
@@ -725,6 +729,7 @@ export const createServices = async (
 
   const onchainService = enabled('arkade:BTC->onchain:BTC')
     ? new OnchainSendSwapService({
+        quoteLimiter,
         store: onchainStore,
         onchain: rail!.onchain,
         arkade: arkadeOps,
@@ -799,6 +804,7 @@ export const createServices = async (
   })
   const receiveService = enabled('lightning:BTC->arkade:BTC')
     ? new ReceiveSwapService({
+        quoteLimiter,
         store: receiveStore,
         chainTip,
         ln: rail!.ln,
@@ -849,6 +855,7 @@ export const createServices = async (
 
   const onchainReceiveService = enabled('onchain:BTC->arkade:BTC')
     ? new OnchainReceiveSwapService({
+        quoteLimiter,
         store: onchainReceiveStore,
         onchain: rail!.onchain,
         arkade: await onchainReceiveArkadeOpsFromContext(arkade, {
@@ -1001,6 +1008,7 @@ export const createServices = async (
         }),
     )
     evmSendService = new EvmSendSwapService({
+      quoteLimiter,
       store: evmSendStore,
       evm,
       broadcast,
@@ -1045,6 +1053,7 @@ export const createServices = async (
         }),
     )
     evmReceiveService = new EvmReceiveSwapService({
+      quoteLimiter,
       store: evmReceiveStore,
       evm,
       broadcast,
