@@ -9,14 +9,21 @@ import { hex } from '@scure/base'
 // drive its events directly, the same way wallet.test.ts module-mocks
 // @arkade-os/sdk's RestEmulatorProvider for the same reason (constructed
 // internally, not injected).
-const { subscribeToChainSpend, createChainAddress, getChainFeeRate, sendToChainAddress, getChainTransactions } =
-  vi.hoisted(() => ({
-    subscribeToChainSpend: vi.fn(),
-    createChainAddress: vi.fn(),
-    getChainFeeRate: vi.fn(),
-    sendToChainAddress: vi.fn(),
-    getChainTransactions: vi.fn(),
-  }))
+const {
+  subscribeToChainSpend,
+  createChainAddress,
+  getChainFeeRate,
+  sendToChainAddress,
+  getChainTransactions,
+  getWalletInfo,
+} = vi.hoisted(() => ({
+  subscribeToChainSpend: vi.fn(),
+  createChainAddress: vi.fn(),
+  getChainFeeRate: vi.fn(),
+  sendToChainAddress: vi.fn(),
+  getChainTransactions: vi.fn(),
+  getWalletInfo: vi.fn(async () => ({ current_block_height: 102 })),
+}))
 vi.mock('lightning', async (importOriginal) => {
   const actual = await importOriginal<typeof import('lightning')>()
   return {
@@ -24,7 +31,7 @@ vi.mock('lightning', async (importOriginal) => {
     authenticatedLndGrpc: vi.fn(() => ({ lnd: {} })),
     // `current_block_height` is the chain tip findOutputs derives confirmations
     // from — LND stays the single source of truth for the tip, not Esplora.
-    getWalletInfo: vi.fn(async () => ({ current_block_height: 102 })),
+    getWalletInfo,
     subscribeToChainSpend,
     createChainAddress,
     getChainFeeRate,
@@ -185,6 +192,8 @@ describe('LndOnchainAdapter.findSpendWitness', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     subscribeToChainSpend.mockReset()
+    getWalletInfo.mockReset()
+    getWalletInfo.mockResolvedValue({ current_block_height: 102 })
   })
   afterEach(() => {
     vi.useRealTimers()
@@ -228,6 +237,10 @@ describe('LndOnchainAdapter.findSpendWitness', () => {
   }
 
   const outpoint = { txid: 'f'.repeat(64), vout: 1, outputScript: new Uint8Array() }
+  const unknownSpender = (status: unknown = { confirmed: true, block_height: 90 }) => ({
+    [`/tx/${outpoint.txid}/outspends`]: [{ spent: false }, { spent: true }],
+    [`/tx/${outpoint.txid}/status`]: status,
+  })
 
   it('returns null only when the chain API says the output is UNSPENT', async () => {
     // The one answer that licenses a refund, so it must come from a real
@@ -243,6 +256,7 @@ describe('LndOnchainAdapter.findSpendWitness', () => {
       { '/tx/abc/hex': raw },
     )
     expect(await adapter.findSpendWitness(outpoint)).toHaveLength(2)
+    expect(subscribeToChainSpend).not.toHaveBeenCalled()
   })
 
   it('falls back to the plural endpoint when the singular one is absent', async () => {
@@ -257,7 +271,7 @@ describe('LndOnchainAdapter.findSpendWitness', () => {
     // transaction, which is what makes the preimage readable.
     const sub = new EventEmitter()
     subscribeToChainSpend.mockReturnValue(sub)
-    const adapter = await withEsplora({ [`/tx/${outpoint.txid}/outspends`]: [{ spent: false }, { spent: true }] })
+    const adapter = await withEsplora(unknownSpender())
 
     const promise = adapter.findSpendWitness(outpoint)
     await vi.advanceTimersByTimeAsync(0)
@@ -271,7 +285,7 @@ describe('LndOnchainAdapter.findSpendWitness', () => {
     // spent, whose witness may carry the preimage we needed.
     const sub = new EventEmitter()
     subscribeToChainSpend.mockReturnValue(sub)
-    const adapter = await withEsplora({ [`/tx/${outpoint.txid}/outspends`]: [{ spent: false }, { spent: true }] })
+    const adapter = await withEsplora(unknownSpender())
 
     // The rejection handler has to be attached BEFORE the timers advance. The
     // 5s timeout is what makes this reject, so it rejects *inside*
@@ -292,7 +306,7 @@ describe('LndOnchainAdapter.findSpendWitness', () => {
     // which is far harder to notice than an error.
     const sub = new EventEmitter()
     subscribeToChainSpend.mockReturnValue(sub)
-    const adapter = await withEsplora({ [`/tx/${outpoint.txid}/outspends`]: [{ spent: false }, { spent: true }] })
+    const adapter = await withEsplora(unknownSpender())
 
     const promise = adapter.findSpendWitness(outpoint)
     const assertion = expect(promise).rejects.toThrow('subscription failed')
@@ -308,30 +322,61 @@ describe('LndOnchainAdapter.findSpendWitness', () => {
     const sub = new EventEmitter()
     const removeAllListeners = vi.spyOn(sub, 'removeAllListeners')
     subscribeToChainSpend.mockReturnValue(sub)
-    const adapter = await withEsplora({ [`/tx/${outpoint.txid}/outspends`]: [{ spent: false }, { spent: true }] })
+    const adapter = await withEsplora(unknownSpender())
 
     const promise = adapter.findSpendWitness(outpoint)
     await Promise.all([expect(promise).rejects.toThrow(/already spent/i), vi.advanceTimersByTimeAsync(5_000)])
     expect(removeAllListeners).toHaveBeenCalledOnce()
   })
 
-  it('subscribes with min_height 1, never 0 — the underlying call falsy-checks it and throws', async () => {
-    // Restored from main: this moved into the private `witnessFromLndSpend`
-    // during the refactor and lost its coverage on the way. The `lightning`
-    // library falsy-checks `min_height`, so a 0 there throws rather than
-    // meaning "from genesis" — a footgun worth keeping pinned. Reaching the
-    // subscription now needs Esplora to say spent-by-unknown first.
+  it('bounds the lnd rescan at the confirmed funding block height', async () => {
     const sub = new EventEmitter()
     subscribeToChainSpend.mockReturnValue(sub)
-    const adapter = await withEsplora({ [`/tx/${outpoint.txid}/outspends`]: [{ spent: false }, { spent: true }] })
+    const adapter = await withEsplora(unknownSpender({ confirmed: true, block_height: 87 }))
 
     const promise = adapter.findSpendWitness(outpoint)
     const settled = promise.catch(() => {}) // handler attached before it can reject
     await vi.advanceTimersByTimeAsync(0)
     expect(subscribeToChainSpend).toHaveBeenCalledWith(
-      expect.objectContaining({ transaction_id: outpoint.txid, transaction_vout: 1, min_height: 1 }),
+      expect.objectContaining({ transaction_id: outpoint.txid, transaction_vout: 1, min_height: 87 }),
     )
     sub.emit('error', new Error('cleanup')) // let the pending promise settle
+    await settled
+  })
+
+  it('uses the lnd tip sampled before an unconfirmed funding status as the rescan bound', async () => {
+    const sub = new EventEmitter()
+    subscribeToChainSpend.mockReturnValue(sub)
+    let resolveTip!: (info: { current_block_height: number }) => void
+    const tip = new Promise<{ current_block_height: number }>((resolve) => {
+      resolveTip = resolve
+    })
+    getWalletInfo.mockReset()
+    getWalletInfo.mockResolvedValueOnce({ current_block_height: 101 }).mockReturnValueOnce(tip)
+    const statusRequested = vi.fn()
+    const statusPath = `/tx/${outpoint.txid}/status`
+    const json = unknownSpender()
+    Object.defineProperty(json, statusPath, {
+      enumerable: true,
+      get: () => {
+        statusRequested()
+        return { confirmed: false, block_height: null }
+      },
+    })
+    const adapter = await withEsplora(json)
+
+    const promise = adapter.findSpendWitness(outpoint)
+    const settled = promise.catch(() => {})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getWalletInfo).toHaveBeenCalledTimes(2)
+    expect(statusRequested).not.toHaveBeenCalled()
+    expect(subscribeToChainSpend).not.toHaveBeenCalled()
+
+    resolveTip({ current_block_height: 102 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(statusRequested).toHaveBeenCalledOnce()
+    expect(subscribeToChainSpend).toHaveBeenCalledWith(expect.objectContaining({ min_height: 102 }))
+    sub.emit('error', new Error('cleanup'))
     await settled
   })
 
