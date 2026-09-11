@@ -897,9 +897,12 @@ export const refundWithoutReceiverSwapScript = async (
     checkpoints.map((c) => base64.encode(c.toPSBT())),
   )
 
+  assertSubmittedArkTxid(submitted, signedArkTx, 'refundWithoutReceiverSwapScript')
+  const matched = matchServerCheckpoints(submitted.signedCheckpointTxs, checkpoints, 'refundWithoutReceiverSwapScript')
+
   const finalCheckpoints = await Promise.all(
-    submitted.signedCheckpointTxs.map(async (encoded) => {
-      const signed = await ctx.identity.sign(Transaction.fromPSBT(base64.decode(encoded)), [0])
+    matched.map(async ({ server }) => {
+      const signed = await ctx.identity.sign(server, [0])
       return base64.encode(signed.toPSBT())
     }),
   )
