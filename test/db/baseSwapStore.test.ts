@@ -178,6 +178,22 @@ describe('BaseSwapStore reads', () => {
     expect((await store.findRecoverable()).map((r) => r.id)).toEqual(['a', 'b'])
   })
 
+  it('pages live rows oldest first with a stable insertion-order tie-break', async () => {
+    await store.seed('b', 'funded', 1000, 2)
+    await store.seed('terminal', 'settled', 1000, 1)
+    await store.seed('a', 'quoted', 1000, 1)
+    await store.seed('c', 'funded', 1000, 2)
+    await store.seed('d', 'quoted', 1000, 3)
+
+    const first = await store.pageRecoverable({ limit: 2 })
+    const second = await store.pageRecoverable({ limit: 2, cursor: first.nextCursor })
+
+    expect(first.rows.map((row) => row.id)).toEqual(['a', 'b'])
+    expect(first.nextCursor).not.toBeNull()
+    expect(second.rows.map((row) => row.id)).toEqual(['c', 'd'])
+    expect(second.nextCursor).toBeNull()
+  })
+
   it('answers an empty state list with no query at all', async () => {
     await store.seed('a', 'funded', 1000)
     expect(await store.findByStates([])).toEqual([])

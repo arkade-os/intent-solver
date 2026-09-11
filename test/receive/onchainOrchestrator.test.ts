@@ -214,6 +214,88 @@ describe('OnchainReceiveSwapService', () => {
     ...overrides,
   })
 
+  const serviceWithRecoveryBudget = (recoverySweepRowBudget: number) =>
+    new OnchainReceiveSwapService({
+      store,
+      onchain: deps.onchain,
+      arkade: deps.arkadeFake.arkade,
+      covclaimd: deps.covclaimd,
+      limits: { minSats: 1_000, maxSats: 1_000_000 },
+      maxExposedSats: 1_000_000,
+      totalCommitted: () => store.committedSats(),
+      admission: new AdmissionControl(),
+      network: 'regtest',
+      signer,
+      claimDestinationScript,
+      now: clock,
+      recoverySweepRowBudget,
+    })
+
+  const quoteRows = async (count: number): Promise<OnchainReceiveSwapRow[]> => {
+    const rows: OnchainReceiveSwapRow[] = []
+    for (let index = 1; index <= count; index++) {
+      const outcome = await service.quote(quoteRequest({ paymentHash: index.toString(16).padStart(64, '0') }))
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      rows.push(outcome.swap)
+    }
+    return rows
+  }
+
+  describe('tickAll recovery budget', () => {
+    it('processes at most the configured number of rows per sweep', async () => {
+      await quoteRows(3)
+      const bounded = serviceWithRecoveryBudget(2)
+
+      expect(await bounded.tickAll()).toHaveLength(2)
+    })
+
+    it('uses the default budget when the configured budget is invalid', async () => {
+      await quoteRows(3)
+      const bounded = serviceWithRecoveryBudget(0)
+
+      expect(await bounded.tickAll()).toHaveLength(3)
+    })
+
+    it('visits five live rows in pages of 2, 2, and 1 before repeating', async () => {
+      const quoted = await quoteRows(5)
+      const bounded = serviceWithRecoveryBudget(2)
+      const visited: string[] = []
+      bounded.onTickSuccess = (id) => visited.push(id)
+
+      await bounded.tickAll()
+      expect(visited).toEqual(quoted.slice(0, 2).map((row) => row.id))
+      await bounded.tickAll()
+      expect(visited).toEqual(quoted.slice(0, 4).map((row) => row.id))
+      await bounded.tickAll()
+      expect(visited).toEqual(quoted.map((row) => row.id))
+      await bounded.tickAll()
+      expect(visited).toEqual([...quoted, ...quoted.slice(0, 2)].map((row) => row.id))
+    })
+
+    it('advances past skipped and throwing rows without changing hook semantics', async () => {
+      const quoted = await quoteRows(4)
+      const bounded = serviceWithRecoveryBudget(1)
+      const tick = bounded.tick.bind(bounded)
+      const successes: string[] = []
+      const errors: string[] = []
+      bounded.shouldSkipTick = (id) => id === quoted[0]!.id
+      bounded.tick = async (id) => {
+        if (id === quoted[1]!.id) throw new Error('backend unavailable')
+        return tick(id)
+      }
+      bounded.onTickSuccess = (id) => successes.push(id)
+      bounded.onTickError = (id) => errors.push(id)
+
+      await bounded.tickAll()
+      await bounded.tickAll()
+      const third = await bounded.tickAll()
+
+      expect(third.map((row) => row.id)).toEqual([quoted[2]!.id])
+      expect(successes).toEqual([quoted[2]!.id])
+      expect(errors).toEqual([quoted[1]!.id])
+    })
+  })
+
   describe('quote()', () => {
     it('meters new requester quotes while preserving duplicate and other-client outcomes', async () => {
       const request = (n: number, requesterKey = 'client') =>

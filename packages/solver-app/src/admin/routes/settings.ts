@@ -70,7 +70,13 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
 
     // null clears the override, reverting the knob to the environment's value.
     if (value === null) {
-      await deps.services.adminStore.setOverride(key, null)
+      await deps.services.adminStore.setOverrideWithAudit(key, null, {
+        action: 'setting-clear',
+        target: key,
+        params: '{}',
+        outcome: 'ok',
+        detail: null,
+      })
       return c.json(await snapshot(deps, key))
     }
     if (typeof value !== 'string') {
@@ -86,7 +92,13 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
       return c.json({ error: 'rejected', message: error instanceof Error ? error.message : String(error) }, 400)
     }
 
-    await deps.services.adminStore.setOverride(key, value)
+    await deps.services.adminStore.setOverrideWithAudit(key, value, {
+      action: 'setting-set',
+      target: key,
+      params: JSON.stringify({ value }),
+      outcome: 'ok',
+      detail: null,
+    })
     return c.json(await snapshot(deps, key))
   })
 }

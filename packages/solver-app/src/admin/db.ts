@@ -188,6 +188,13 @@ export class AdminStore {
     )
   }
 
+  async setOverrideWithAudit(key: string, value: string | null, entry: AuditEntry): Promise<void> {
+    await this.driver.transaction(async () => {
+      await this.setOverride(key, value)
+      await this.recordAction(entry)
+    })
+  }
+
   /**
    * Every configured market, disabled ones included.
    *

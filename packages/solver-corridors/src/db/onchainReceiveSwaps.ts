@@ -284,6 +284,9 @@ const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS receive_onchain_swap (${RECEIVE_ONCHAIN_SWAP_COLUMNS});
 CREATE INDEX IF NOT EXISTS idx_receive_onchain_swap_state ON receive_onchain_swap(state);
+CREATE INDEX IF NOT EXISTS idx_receive_onchain_swap_live_recovery_order
+  ON receive_onchain_swap(created_at)
+  WHERE state IN ('quoted','awaiting_confirmations','funding_arkade','awaiting_claim','claimed','refunding_arkade');
 CREATE UNIQUE INDEX IF NOT EXISTS idx_receive_onchain_swap_live_hash
   ON receive_onchain_swap(payment_hash) WHERE state != 'refused';
 -- Partial for the same reason as send_swap's: findByRfqId runs on every
@@ -432,6 +435,7 @@ const SHAPE: StoreShape<OnchainReceiveSwapRow, OnchainReceiveSwapState> = {
   noun: 'onchain receive swap',
   lifecycleLabel: 'onchain receive lifecycle',
   searchColumns: ONCHAIN_RECEIVE_SEARCH_COLUMNS,
+  recoveryOrderIndex: 'idx_receive_onchain_swap_live_recovery_order',
   legalEdges: LEGAL_EDGES,
   transitionColumns: TRANSITION_COLUMNS,
   patchColumns: PATCH_COLUMNS,

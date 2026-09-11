@@ -186,12 +186,9 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
    * replays from `min_height` if the spend already happened, not just future
    * ones), then tear down either way — the orchestrator's own tick loop
    * (`whenAwaitingClaim`) is the real poll; this call only answers "as of
-   * right now". `min_height: 1` rescans (almost) the whole chain on every
-   * call, cheap on regtest's short history; a mainnet deployment would want
-   * the funding height here instead to bound the rescan. NOT 0: the
-   * underlying call falsy-checks `min_height` and throws
-   * `ExpectedMinHeightToSubscribeToChainSpend` for it, rejecting silently
-   * inside the Promise executor on every single attempt.
+   * right now". The rescan starts at the funding block, or at the LND tip
+   * sampled before an unconfirmed funding status. It is never 0: the
+   * underlying call falsy-checks `min_height` and throws.
    */
   /**
    * Read through ESPLORA, not through lnd.
@@ -251,7 +248,11 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
       // spend is confirmed, and only by pushing it at a subscription. So ask,
       // briefly: a confirmed spend answers in milliseconds (measured: 32ms),
       // and a mempool-only one answers never, which is the case below.
-      const viaLnd = await this.witnessFromLndSpend(params)
+      const { current_block_height } = await getWalletInfo({ lnd: this.lnd })
+      const fundingStatus = (await this.esplora.getJson(`/tx/${params.txid}/status`)) as
+        { confirmed: false } | { confirmed: true; block_height: number }
+      const minHeight = fundingStatus.confirmed ? fundingStatus.block_height : current_block_height
+      const viaLnd = await this.witnessFromLndSpend(params, minHeight)
       if (viaLnd) return viaLnd
       // SPENT, and this chain API will not say by what. Emphatically NOT null:
       // the caller reads null as "nobody has taken this output" and
@@ -281,18 +282,21 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
    * spent. That turns "no event" from an ambiguity into a fact — the spend
    * exists and is not yet confirmed — and null here says exactly that.
    */
-  private async witnessFromLndSpend(params: {
-    txid: string
-    vout: number
-    outputScript: Uint8Array
-  }): Promise<Uint8Array[] | null> {
+  private async witnessFromLndSpend(
+    params: {
+      txid: string
+      vout: number
+      outputScript: Uint8Array
+    },
+    minHeight: number,
+  ): Promise<Uint8Array[] | null> {
     return new Promise((resolve, reject) => {
       const sub = subscribeToChainSpend({
         lnd: this.lnd,
         transaction_id: params.txid,
         transaction_vout: params.vout,
         output_script: hex.encode(params.outputScript),
-        min_height: 1,
+        min_height: minHeight,
       })
       const timer = setTimeout(() => {
         sub.removeAllListeners()

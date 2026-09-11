@@ -6,13 +6,16 @@ import type { SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
 let now = 1_000_000
 const clock = () => now
 
-const driverOver = (db: Database.Database): SqlDriver => ({
+const driverOver = (db: Database.Database, onAll?: (sql: string, params: unknown[]) => void): SqlDriver => ({
   exec: async (sql) => {
     db.exec(sql)
   },
   run: async (sql, params = []) => ({ changes: db.prepare(sql).run(...(params as never[])).changes }),
   get: async (sql, params = []) => db.prepare(sql).get(...(params as never[])) as never,
-  all: async (sql, params = []) => db.prepare(sql).all(...(params as never[])) as never,
+  all: async (sql, params = []) => {
+    onAll?.(sql, params)
+    return db.prepare(sql).all(...(params as never[])) as never
+  },
   transaction: async (fn) => fn(),
   close: async () => {
     db.close()
@@ -224,6 +227,57 @@ describe('OnchainReceiveSwapStore', () => {
     await store.transition('swap-2', 'quoted', 'refused', {})
     const rows = await store.findRecoverable()
     expect(rows.map((r) => r.id)).toEqual(['swap-1'])
+  })
+
+  it('streams recoverable pages through a live-only ordering index after upgrading', async () => {
+    const db = new Database(':memory:')
+    await OnchainReceiveSwapStore.open(driverOver(db), clock)
+    db.exec(`
+      DROP INDEX IF EXISTS idx_receive_onchain_swap_live_recovery_order;
+      DROP INDEX IF EXISTS idx_receive_onchain_swap_recovery_order;
+      CREATE INDEX idx_receive_onchain_swap_recovery_order ON receive_onchain_swap(created_at);
+    `)
+    const recoveryQueries: { sql: string; params: unknown[] }[] = []
+    const traced = await OnchainReceiveSwapStore.open(
+      driverOver(db, (sql, params) => {
+        if (sql.includes('ORDER BY created_at ASC, rowid ASC LIMIT ?')) recoveryQueries.push({ sql, params })
+      }),
+      clock,
+    )
+
+    for (let index = 1; index <= 12; index++) {
+      const id = `terminal-${index}`
+      await traced.insertQuote({ ...baseQuote, id, paymentHash: index.toString(16).padStart(64, '0') })
+      await traced.transition(id, 'quoted', 'refused', {})
+    }
+    await traced.insertQuote(baseQuote)
+    await traced.insertQuote({ ...baseQuote, id: 'swap-2', paymentHash: 'bb'.repeat(32) })
+    await traced.insertQuote({ ...baseQuote, id: 'swap-3', paymentHash: 'cc'.repeat(32) })
+    const first = await traced.pageRecoverable({ limit: 2 })
+    const second = await traced.pageRecoverable({ limit: 2, cursor: first.nextCursor })
+    const details = recoveryQueries.map(({ sql, params }) =>
+      (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...(params as never[])) as { detail: string }[])
+        .map((step) => step.detail)
+        .join('\n'),
+    )
+    const indexEntries = Number(
+      (
+        db
+          .prepare(`SELECT SUM(ncell) AS entries FROM dbstat WHERE name = ?`)
+          .get('idx_receive_onchain_swap_live_recovery_order') as { entries: number }
+      ).entries,
+    )
+    await traced.close()
+
+    expect(first.rows.map((row) => row.id)).toEqual(['swap-1', 'swap-2'])
+    expect(second.rows.map((row) => row.id)).toEqual(['swap-3'])
+    expect(indexEntries).toBe(3)
+    expect(details).toHaveLength(2)
+    for (const detail of details) {
+      expect(detail).toContain('idx_receive_onchain_swap_live_recovery_order')
+      expect(detail).not.toContain('USE TEMP B-TREE')
+    }
+    expect(details[1]).toContain('SEARCH receive_onchain_swap USING INDEX')
   })
 
   it('findByRfqId finds the most recent row for a correlation id', async () => {

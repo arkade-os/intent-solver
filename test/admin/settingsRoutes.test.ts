@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
+import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
+import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 
 const baseConfig = {
   network: 'regtest',
@@ -40,12 +42,12 @@ const baseConfig = {
 }
 
 const build = (overrides: Record<string, string> = {}) => {
-  const setOverride = vi.fn().mockResolvedValue(undefined)
+  const setOverrideWithAudit = vi.fn().mockResolvedValue(undefined)
   const services = {
     config: structuredClone(baseConfig),
-    adminStore: { getOverrides: vi.fn().mockResolvedValue(overrides), setOverride },
+    adminStore: { getOverrides: vi.fn().mockResolvedValue(overrides), setOverrideWithAudit },
   } as never
-  return { app: buildAdminApp({ services, startedAt: 1, mode: 'relay' }), setOverride }
+  return { app: buildAdminApp({ services, startedAt: 1, mode: 'relay' }), setOverrideWithAudit }
 }
 
 const patch = (app: ReturnType<typeof buildAdminApp>, body: unknown) =>
@@ -56,6 +58,22 @@ const patch = (app: ReturnType<typeof buildAdminApp>, body: unknown) =>
       body: JSON.stringify(body),
     }),
   )
+
+const buildReal = async () => {
+  const driver = betterSqliteDriver(':memory:')
+  const adminStore = await AdminStore.open(driver, () => 1_000_000)
+  const services = { config: structuredClone(baseConfig), adminStore } as never
+  return { app: buildAdminApp({ services, startedAt: 1, mode: 'relay' }), adminStore, driver }
+}
+
+const rejectAuditInserts = (driver: ReturnType<typeof betterSqliteDriver>) =>
+  driver.exec(`
+    CREATE TRIGGER reject_admin_action
+    BEFORE INSERT ON admin_action
+    BEGIN
+      SELECT RAISE(FAIL, 'audit insert failed');
+    END;
+  `)
 
 describe('GET /api/settings', () => {
   it('lists knobs with their source', async () => {
@@ -77,10 +95,16 @@ describe('GET /api/settings', () => {
 
 describe('PATCH /api/settings', () => {
   it('persists a narrowing override', async () => {
-    const { app, setOverride } = build()
+    const { app, setOverrideWithAudit } = build()
     const response = await patch(app, { key: 'LN_SEND_MAX_SATS', value: '50000' })
     expect(response.status).toBe(200)
-    expect(setOverride).toHaveBeenCalledWith('LN_SEND_MAX_SATS', '50000')
+    expect(setOverrideWithAudit).toHaveBeenCalledWith('LN_SEND_MAX_SATS', '50000', {
+      action: 'setting-set',
+      target: 'LN_SEND_MAX_SATS',
+      params: '{"value":"50000"}',
+      outcome: 'ok',
+      detail: null,
+    })
   })
 
   it('always reports that a restart is needed, because nothing can apply live', async () => {
@@ -96,40 +120,78 @@ describe('PATCH /api/settings', () => {
   })
 
   it('persists a WIDENING value, which the narrowing guard used to refuse', async () => {
-    const { app, setOverride } = build()
+    const { app, setOverrideWithAudit } = build()
     const response = await patch(app, { key: 'LN_SEND_MAX_SATS', value: '200000' })
     expect(response.status).toBe(200)
-    expect(setOverride).toHaveBeenCalledWith('LN_SEND_MAX_SATS', '200000')
+    expect(setOverrideWithAudit).toHaveBeenCalledWith(
+      'LN_SEND_MAX_SATS',
+      '200000',
+      expect.objectContaining({ action: 'setting-set' }),
+    )
   })
 
   it('refuses a malformed value and PERSISTS NOTHING', async () => {
     // Validate-before-persist still holds for the rules that remain; only the
     // narrowing rule went away.
-    const { app, setOverride } = build()
+    const { app, setOverrideWithAudit } = build()
     const response = await patch(app, { key: 'LN_SEND_MAX_SATS', value: '1e5x' })
     expect(response.status).toBe(400)
     expect(await response.json()).toMatchObject({ error: 'rejected' })
-    expect(setOverride).not.toHaveBeenCalled()
+    expect(setOverrideWithAudit).not.toHaveBeenCalled()
   })
 
   it('refuses a non-editable key', async () => {
-    const { app, setOverride } = build()
+    const { app, setOverrideWithAudit } = build()
     expect((await patch(app, { key: 'ARK_MNEMONIC', value: 'hunter2' })).status).toBe(400)
-    expect(setOverride).not.toHaveBeenCalled()
+    expect(setOverrideWithAudit).not.toHaveBeenCalled()
   })
 
   it('refuses to enable a corridor the environment disabled', async () => {
-    const { app, setOverride } = build()
+    const { app, setOverrideWithAudit } = build()
     const response = await patch(app, { key: 'ONCHAIN_SEND_ENABLED', value: 'true' })
     expect(response.status).toBe(400)
     expect(((await response.json()) as { message: string }).message).toMatch(/disabled in the environment/i)
-    expect(setOverride).not.toHaveBeenCalled()
+    expect(setOverrideWithAudit).not.toHaveBeenCalled()
   })
 
   it('clears an override when given null', async () => {
-    const { app, setOverride } = build({ LN_SEND_FEE_BPS: '25' })
+    const { app, setOverrideWithAudit } = build({ LN_SEND_FEE_BPS: '25' })
     expect((await patch(app, { key: 'LN_SEND_FEE_BPS', value: null })).status).toBe(200)
-    expect(setOverride).toHaveBeenCalledWith('LN_SEND_FEE_BPS', null)
+    expect(setOverrideWithAudit).toHaveBeenCalledWith('LN_SEND_FEE_BPS', null, {
+      action: 'setting-clear',
+      target: 'LN_SEND_FEE_BPS',
+      params: '{}',
+      outcome: 'ok',
+      detail: null,
+    })
+  })
+
+  it('rolls back a set when its audit insert fails', async () => {
+    const { app, adminStore, driver } = await buildReal()
+    try {
+      await adminStore.setOverride('LN_SEND_MAX_SATS', '25000')
+      await rejectAuditInserts(driver)
+
+      expect((await patch(app, { key: 'LN_SEND_MAX_SATS', value: '50000' })).status).toBe(500)
+      expect(await adminStore.getOverrides()).toEqual({ LN_SEND_MAX_SATS: '25000' })
+      expect(await adminStore.listActions()).toEqual([])
+    } finally {
+      await adminStore.close()
+    }
+  })
+
+  it('rolls back a clear when its audit insert fails', async () => {
+    const { app, adminStore, driver } = await buildReal()
+    try {
+      await adminStore.setOverride('LN_SEND_FEE_BPS', '25')
+      await rejectAuditInserts(driver)
+
+      expect((await patch(app, { key: 'LN_SEND_FEE_BPS', value: null })).status).toBe(500)
+      expect(await adminStore.getOverrides()).toEqual({ LN_SEND_FEE_BPS: '25' })
+      expect(await adminStore.listActions()).toEqual([])
+    } finally {
+      await adminStore.close()
+    }
   })
 
   it('rejects a malformed body rather than 500ing', async () => {
