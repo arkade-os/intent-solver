@@ -321,7 +321,7 @@ describe('the solver spread', () => {
     expect(ln.payCalls[0]?.maxFeeSats).toBe(75)
   })
 
-  it('prices the production case as 50,000 payout plus 278 routing sats and 30 bps', async () => {
+  it('can subsidize the client quote without lowering the full prepared payment cap', async () => {
     const invoice = forgeInvoice({
       network: 'bc',
       amountSats: 50_000,
@@ -330,7 +330,10 @@ describe('the solver spread', () => {
       expirySeconds: 43_200,
       minFinalCltvBlocks: 180,
     })
-    ln.feeEstimate = { feeSats: 278 }
+    // The backend expects to spend 278 sats, but the rail has elected to absorb
+    // 150 sats of its own provider charge. The client therefore sees only 128
+    // sats of dynamic fee.
+    ln.feeEstimate = { feeSats: 278, billableFeeSats: 128 }
     const svc = new SendSwapService({
       store,
       ln,
@@ -346,7 +349,26 @@ describe('the solver spread', () => {
 
     const outcome = await svc.quote(invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
 
-    expect(outcome).toMatchObject({ accepted: true, swap: { amountSats: 50_430, quotedRoutingFeeSats: 278 } })
+    expect(outcome).toMatchObject({ accepted: true, swap: { amountSats: 50_279, quotedRoutingFeeSats: 278 } })
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+
+    arkade.lockups = [{ txid: 'd'.repeat(64), vout: 0, value: outcome.swap.amountSats }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+    await svc.tick(outcome.swap.id)
+
+    // 250 is the old 0.5%-of-50k fallback. A fresh prepared quote must never
+    // silently fall back to it: payment is authorized for the full 278 sats we
+    // actually measured even though the customer was billed only 128 of them.
+    expect(ln.payCalls[0]?.maxFeeSats).toBe(278)
+    expect(ln.payCalls[0]?.maxFeeSats).not.toBe(maxRoutingFeeSats(50_000))
+  })
+
+  it('rejects a billable estimate that exceeds the backend cost', async () => {
+    ln.feeEstimate = { feeSats: 10, billableFeeSats: 11 }
+
+    await expect(
+      withFee().quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY }),
+    ).rejects.toThrow(/invalid billableFeeSats/i)
   })
 
   it('charges nothing when the fee is free, exactly as before it existed', async () => {

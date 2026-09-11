@@ -291,7 +291,7 @@ export const feeSatsFromMtokens = (mtokens: string): number => {
  * Whether a `getRoutingFeeEstimate` rejection is one of the ordinary misses the port
  * answers null for, rather than a fault to re-throw.
  *
- * Two shapes, and both mean "no number for this payment" rather than "the node is
+ * These shapes mean "no number for this payment" rather than "the node is
  * broken":
  *
  *  - `RouteToDestinationNotFound` — the vendor's own mapping of any
@@ -302,6 +302,8 @@ export const feeSatsFromMtokens = (mtokens: string): number => {
  *  - a nested gRPC UNIMPLEMENTED — `estimateRouteFee` does not exist before LND 0.18.4,
  *    so an older node rejects every call. A permanent, knowable absence of the
  *    capability, which is precisely what null is for.
+ *  - LND rejecting a probe to its own node. The existing self-payment path decides
+ *    that swap from the payee-side invoice state; the probe has no fee to add.
  *
  * UNAVAILABLE is deliberately NOT here. A node that cannot be reached is the same fault
  * every other call on this adapter would hit, and reporting it as "no estimate" would
@@ -313,7 +315,8 @@ export const isNoFeeEstimate = (error: unknown): boolean => {
   if (!Array.isArray(error)) return false
   if (error[1] === 'RouteToDestinationNotFound') return true
   if (error[1] !== 'UnexpectedGetRoutingFeeEstimateError') return false
-  return (error[2] as { err?: { code?: number } } | undefined)?.err?.code === 12
+  const cause = (error[2] as { err?: { code?: number; details?: string } } | undefined)?.err
+  return cause?.code === 12 || (cause?.code === 2 && cause.details === 'self-payments not allowed')
 }
 
 export interface AdapterConfig {

@@ -287,6 +287,17 @@ export interface SendFeeEstimate {
    */
   feeSats: number
   /**
+   * The part of {@link feeSats} this rail wants included in the client quote.
+   *
+   * Omit it to bill the full backend cost. A rail may set a smaller value when
+   * it deliberately subsidizes a provider-specific component, but it may never
+   * exceed `feeSats`: this only separates price from cost; it does not create a
+   * larger margin or weaken the payment cap. The send orchestrator persists
+   * `feeSats` as {@link PayInvoiceParams.maxFeeSats} and uses this field only to
+   * calculate the lockup amount.
+   */
+  billableFeeSats?: number
+  /**
    * An opaque token the backend will honour if it is handed back to
    * {@link SendBackend.payInvoice} as {@link PayInvoiceParams.feeHandle}.
    *

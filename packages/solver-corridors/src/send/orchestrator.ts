@@ -569,12 +569,26 @@ export class SendSwapService {
     if (feeEstimate !== null && (!Number.isSafeInteger(feeEstimate.feeSats) || feeEstimate.feeSats < 0)) {
       throw new Error(`lightning fee estimator returned invalid feeSats: ${feeEstimate.feeSats}`)
     }
+    if (
+      feeEstimate?.billableFeeSats !== undefined &&
+      (!Number.isSafeInteger(feeEstimate.billableFeeSats) ||
+        feeEstimate.billableFeeSats < 0 ||
+        feeEstimate.billableFeeSats > feeEstimate.feeSats)
+    ) {
+      throw new Error(
+        `lightning fee estimator returned invalid billableFeeSats: ${feeEstimate.billableFeeSats} ` +
+          `(feeSats: ${feeEstimate.feeSats})`,
+      )
+    }
     // What the client must lock: the invoice plus this corridor's cut. The
     // limits above bound the INVOICE — the size of the payment the client asked
     // us to make, which is the number they think in — while everything from here
     // down deals in the lockup, because that is the amount that actually has to
     // arrive. With a zero fee the two are equal and this is a no-op.
-    const quoteFee = feeEstimate === null ? this.fee : { bps: this.fee.bps, flatSats: feeEstimate.feeSats }
+    const quoteFee =
+      feeEstimate === null
+        ? this.fee
+        : { bps: this.fee.bps, flatSats: feeEstimate.billableFeeSats ?? feeEstimate.feeSats }
     const lockupSats = giveSatsFor(decoded.amountSats, quoteFee)
     // RESERVED, not merely observed: the row below is what makes this swap
     // visible to `totalCommitted()`, and until it lands a concurrent quote
