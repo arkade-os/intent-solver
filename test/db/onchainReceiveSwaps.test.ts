@@ -229,8 +229,14 @@ describe('OnchainReceiveSwapStore', () => {
     expect(rows.map((r) => r.id)).toEqual(['swap-1'])
   })
 
-  it('streams recoverable pages without a temporary ORDER BY sort', async () => {
+  it('streams recoverable pages through a live-only ordering index after upgrading', async () => {
     const db = new Database(':memory:')
+    await OnchainReceiveSwapStore.open(driverOver(db), clock)
+    db.exec(`
+      DROP INDEX IF EXISTS idx_receive_onchain_swap_live_recovery_order;
+      DROP INDEX IF EXISTS idx_receive_onchain_swap_recovery_order;
+      CREATE INDEX idx_receive_onchain_swap_recovery_order ON receive_onchain_swap(created_at);
+    `)
     const recoveryQueries: { sql: string; params: unknown[] }[] = []
     const traced = await OnchainReceiveSwapStore.open(
       driverOver(db, (sql, params) => {
@@ -239,21 +245,36 @@ describe('OnchainReceiveSwapStore', () => {
       clock,
     )
 
+    for (let index = 1; index <= 12; index++) {
+      const id = `terminal-${index}`
+      await traced.insertQuote({ ...baseQuote, id, paymentHash: index.toString(16).padStart(64, '0') })
+      await traced.transition(id, 'quoted', 'refused', {})
+    }
     await traced.insertQuote(baseQuote)
     await traced.insertQuote({ ...baseQuote, id: 'swap-2', paymentHash: 'bb'.repeat(32) })
     await traced.insertQuote({ ...baseQuote, id: 'swap-3', paymentHash: 'cc'.repeat(32) })
     const first = await traced.pageRecoverable({ limit: 2 })
-    await traced.pageRecoverable({ limit: 2, cursor: first.nextCursor })
+    const second = await traced.pageRecoverable({ limit: 2, cursor: first.nextCursor })
     const details = recoveryQueries.map(({ sql, params }) =>
       (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...(params as never[])) as { detail: string }[])
         .map((step) => step.detail)
         .join('\n'),
     )
+    const indexEntries = Number(
+      (
+        db
+          .prepare(`SELECT SUM(ncell) AS entries FROM dbstat WHERE name = ?`)
+          .get('idx_receive_onchain_swap_live_recovery_order') as { entries: number }
+      ).entries,
+    )
     await traced.close()
 
+    expect(first.rows.map((row) => row.id)).toEqual(['swap-1', 'swap-2'])
+    expect(second.rows.map((row) => row.id)).toEqual(['swap-3'])
+    expect(indexEntries).toBe(3)
     expect(details).toHaveLength(2)
     for (const detail of details) {
-      expect(detail).toContain('idx_receive_onchain_swap_recovery_order')
+      expect(detail).toContain('idx_receive_onchain_swap_live_recovery_order')
       expect(detail).not.toContain('USE TEMP B-TREE')
     }
     expect(details[1]).toContain('SEARCH receive_onchain_swap USING INDEX')

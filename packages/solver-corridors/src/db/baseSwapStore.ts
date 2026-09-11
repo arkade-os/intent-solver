@@ -76,6 +76,8 @@ const assertColumns = (columns: string[], allowed: ReadonlySet<string>, method: 
   }
 }
 
+const sqlStringLiteral = (value: string): string => `'${value.replaceAll("'", "''")}'`
+
 export abstract class BaseSwapStore<Row, State extends string> {
   protected constructor(
     protected readonly driver: SqlDriver,
@@ -165,12 +167,15 @@ export abstract class BaseSwapStore<Row, State extends string> {
     const cursor = decodeCursor(options.cursor)
     const placeholders = this.shape.live.map(() => '?').join(',')
     const indexClause = this.shape.recoveryOrderIndex ? ` INDEXED BY ${this.shape.recoveryOrderIndex}` : ''
+    const stateClause = this.shape.recoveryOrderIndex
+      ? `state IN (${this.shape.live.map(sqlStringLiteral).join(',')})`
+      : `state IN (${placeholders})`
     const cursorClause = cursor ? ' AND (created_at, rowid) > (?, ?)' : ''
-    const params: unknown[] = [...this.shape.live]
+    const params: unknown[] = this.shape.recoveryOrderIndex ? [] : [...this.shape.live]
     if (cursor) params.push(cursor.createdAt, cursor.rowid)
     const raw = await this.driver.all<RawRow & PageRawFields>(
       `SELECT *, rowid AS _rowid FROM ${this.shape.table}${indexClause}
-       WHERE state IN (${placeholders})${cursorClause}
+       WHERE ${stateClause}${cursorClause}
        ORDER BY created_at ASC, rowid ASC LIMIT ?`,
       [...params, limit + 1],
     )
