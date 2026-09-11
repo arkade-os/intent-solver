@@ -93,6 +93,7 @@ describe('e2e self-payment refresh (lightning:BTC->arkade:BTC coupled to arkade:
       const countingLn = {
         routeCltvBudgetBlocks: ln.routeCltvBudgetBlocks,
         enforcesRouteCltv: ln.enforcesRouteCltv,
+        getBalance: () => ln.getBalance(),
         payInvoice: async (...args: Parameters<typeof ln.payInvoice>) => {
           payAttempts += 1
           return ln.payInvoice(...args)
