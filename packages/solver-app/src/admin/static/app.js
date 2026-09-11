@@ -510,8 +510,8 @@ const marketCard = (market) =>
       h('dt', 'fee'),
       h(
         'dd',
-        `${market.feeBps} bps; flat ${market.sellBaseFeeFlat} ${legLabel(market.base)} when selling base, ` +
-          `${market.buyBaseFeeFlat} ${legLabel(market.quote)} when buying base; ${market.toleranceBps} bps band`,
+        `${market.feeBps} bps; flat ${market.sellBaseFeeFlat} ${legLabel(market.base)} atomic units when selling base, ` +
+          `${market.buyBaseFeeFlat} ${legLabel(market.quote)} atomic units when buying base; ${market.toleranceBps} bps band`,
       ),
     ),
   )
@@ -1502,7 +1502,11 @@ const marketsView = () => {
                 h('td', { title: market.marketKey }, `${legLabel(market.base)} / ${legLabel(market.quote)}`),
                 h('td.faint', { title: `${market.feedUrl} ${market.pricePath}` }, shortId(market.feedUrl)),
                 h('td.num', `${market.toleranceBps} bps`),
-                h('td.num', `${market.feeBps} bps + ${market.sellBaseFeeFlat}/${market.buyBaseFeeFlat} flat`),
+                h(
+                  'td.num',
+                  `${market.feeBps} bps + ${market.sellBaseFeeFlat} ${legLabel(market.base)} atomic / ` +
+                    `${market.buyBaseFeeFlat} ${legLabel(market.quote)} atomic`,
+                ),
                 h(
                   'td',
                   // Three states, not two, and the middle one is the point of
