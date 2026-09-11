@@ -127,10 +127,12 @@ class FakeLn {
   /** When set, payInvoice throws it — the way a rejected RPC leaves the row. */
   payThrows: Error | null = null
   feeEstimate: SendFeeEstimate | null = null
+  feeEstimateThrows: Error | null = null
   feeEstimateCalls: EstimateSendFeeParams[] = []
 
   async estimateSendFee(params: EstimateSendFeeParams): Promise<SendFeeEstimate | null> {
     this.feeEstimateCalls.push(params)
+    if (this.feeEstimateThrows) throw this.feeEstimateThrows
     return this.feeEstimate
   }
 
@@ -306,6 +308,15 @@ describe('the solver spread', () => {
     expect(outcome.swap.amountSats).toBe(2197)
     expect(outcome.swap.quotedRoutingFeeSats).toBe(75)
     expect(ln.feeEstimateCalls).toEqual([{ invoice: INVOICE, timeoutMs: expect.any(Number) }])
+  })
+
+  it('surfaces an estimator fault instead of silently quoting the configured fallback', async () => {
+    ln.feeEstimateThrows = new Error('backend unavailable')
+
+    await expect(
+      withFee().quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY }),
+    ).rejects.toThrow('backend unavailable')
+    await expect(store.findByPaymentHash(PAYMENT_HASH)).resolves.toBeNull()
   })
 
   it('uses the persisted quote-time routing budget when the funded swap pays', async () => {
