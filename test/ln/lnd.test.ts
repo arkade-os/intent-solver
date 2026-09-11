@@ -565,6 +565,15 @@ describe('isNoFeeEstimate', () => {
     expect(isNoFeeEstimate([503, 'ExpectedFeeInGetRoutingFeeEstimateResponse'])).toBe(false)
     expect(isNoFeeEstimate(new Error('network error'))).toBe(false)
   })
+
+  it('recognises only the exact self-payment code and detail', () => {
+    expect(
+      isNoFeeEstimate([503, 'UnexpectedGetRoutingFeeEstimateError', { err: { code: 2, details: 'other failure' } }]),
+    ).toBe(false)
+    expect(
+      isNoFeeEstimate([503, 'UnexpectedGetRoutingFeeEstimateError', { err: { details: 'self-payments not allowed' } }]),
+    ).toBe(false)
+  })
 })
 
 describe('LndLightningBackendAdapter.estimateSendFee', () => {
@@ -615,6 +624,15 @@ describe('LndLightningBackendAdapter.estimateSendFee', () => {
 
   it('answers null on a node too old for the call', async () => {
     getRoutingFeeEstimate.mockRejectedValue([503, 'UnexpectedGetRoutingFeeEstimateError', { err: { code: 12 } }])
+    await expect(estimate()).resolves.toBeNull()
+  })
+
+  it('answers null when LND cannot estimate a payment to its own node', async () => {
+    getRoutingFeeEstimate.mockRejectedValue([
+      503,
+      'UnexpectedGetRoutingFeeEstimateError',
+      { err: { code: 2, details: 'self-payments not allowed' } },
+    ])
     await expect(estimate()).resolves.toBeNull()
   })
 

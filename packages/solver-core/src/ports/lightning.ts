@@ -94,6 +94,14 @@ export class PaymentHashRegistered extends Error {
   }
 }
 
+/** The backend rejected this invocation before it submitted or committed a payment. */
+export class PaymentNotStarted extends Error {
+  constructor(reason: string) {
+    super(reason)
+    this.name = 'PaymentNotStarted'
+  }
+}
+
 /** Where a hold invoice we issued has got to. */
 export type HoldStatus =
   /** Issued; nothing has arrived. */
@@ -278,6 +286,17 @@ export interface SendFeeEstimate {
    * the difference — while over-reporting only makes one quote less competitive.
    */
   feeSats: number
+  /**
+   * The part of {@link feeSats} this rail wants included in the client quote.
+   *
+   * Omit it to bill the full backend cost. A rail may set a smaller value when
+   * it deliberately subsidizes a provider-specific component, but it may never
+   * exceed `feeSats`: this only separates price from cost; it does not create a
+   * larger margin or weaken the payment cap. The send orchestrator persists
+   * `feeSats` as {@link PayInvoiceParams.maxFeeSats} and uses this field only to
+   * calculate the lockup amount.
+   */
+  billableFeeSats?: number
   /**
    * An opaque token the backend will honour if it is handed back to
    * {@link SendBackend.payInvoice} as {@link PayInvoiceParams.feeHandle}.
