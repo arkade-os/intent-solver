@@ -137,6 +137,40 @@ describe('RFQ refusal diagnostics', () => {
     expect(tail.recent().entries[0]?.detail).not.toBe('modified')
   })
 
+  it.each(['http', 'relay'] as const)('sanitizes and bounds text before the %s observer', (transport) => {
+    const observer = vi.fn()
+    reportRfqRefusal(observer, transport, 'rfq_request', {
+      kind: 'invalid',
+      detail: `first\r\nforged\u001b[31m\u2028next${'x'.repeat(5000)}`,
+      payload: { reason: `bad\r\n\u0000reason${'x'.repeat(200)}` },
+    })
+    const [, detail, metadata] = observer.mock.calls[0]!
+    expect(detail).toHaveLength(1024)
+    expect(detail.startsWith('invalid: first  forged [31m next')).toBe(true)
+    expect(metadata.reason).toHaveLength(100)
+    expect(metadata.reason.startsWith('bad   reason')).toBe(true)
+  })
+
+  it('sanitizes direct recorder input before both the log and retained tail', () => {
+    const tail = createRfqRefusalTail()
+    const record = vi.spyOn(tail, 'record')
+    const log = vi.fn()
+    const observer = recordRfqRefusals(tail, log)
+    observer('relay refused', `first\n\u202e${'x'.repeat(2000)}`, {
+      transport: 'relay',
+      requestType: 'rfq_request',
+      rfqId: null,
+      reason: `bad\r\n${'x'.repeat(200)}`,
+    })
+    const entry = tail.recent().entries[0]!
+    expect(entry.reason).toHaveLength(100)
+    expect(entry.reason.startsWith('bad  ')).toBe(true)
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({ reason: entry.reason, detail: entry.detail }))
+    expect(entry.detail).toHaveLength(1024)
+    expect(entry.detail.startsWith('first  ')).toBe(true)
+    expect(log).toHaveBeenCalledWith('relay refused:', entry.detail)
+  })
+
   it('does not let a diagnostic sink change the response path', () => {
     expect(() =>
       reportRfqRefusal(

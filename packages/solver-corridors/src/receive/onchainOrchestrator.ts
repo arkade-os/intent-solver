@@ -64,8 +64,10 @@ import type { OnchainReceiveSwapRow, OnchainReceiveSwapStore } from '../db/oncha
 import type { CovclaimdClient } from './covclaimd.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 
 export interface OnchainReceiveServiceDeps {
+  quoteLimiter?: RateLimiter
   /**
    * How this corridor prices. Absent means the configured flat+bps `fee`,
    * which is what every deployment used before pricing became injectable.
@@ -125,6 +127,7 @@ export interface OnchainReceiveServiceDeps {
 
 export type QuoteRefusal =
   | OnchainReceiveAcceptanceRefusal
+  | 'rate_limited'
   | 'fee_consumes_swap'
   | 'payout_below_dust'
   | 'duplicate_swap'
@@ -135,6 +138,7 @@ export type QuoteOutcome =
   { accepted: true; swap: OnchainReceiveSwapRow; lockupDeadline: number } | { accepted: false; reason: QuoteRefusal }
 
 export interface OnchainReceiveQuoteRequest {
+  requesterKey?: string
   /** `sha256(P)`, hex (64 chars) — client-chosen. Same wire field as `payment_hash`. */
   paymentHash: string
   /**
@@ -212,6 +216,7 @@ export const receiveCovenantRowFor = (row: OnchainReceiveSwapRow): CovenantScrip
 
 export class OnchainReceiveSwapService {
   private readonly now: () => number
+  private readonly quoteLimiter: RateLimiter
   private readonly inFlight = new Set<string>()
   private readonly fee: Fee
   /** How this corridor prices. Defaults to the configured flat+bps fee. */
@@ -223,6 +228,7 @@ export class OnchainReceiveSwapService {
   constructor(private readonly deps: OnchainReceiveServiceDeps) {
     this.admission = deps.admission
     this.now = deps.now ?? nowSeconds
+    this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
     this.fee = deps.fee ?? FREE
     this.pricing = deps.pricing ?? fixedFeePricing(this.fee)
   }
@@ -339,6 +345,9 @@ export class OnchainReceiveSwapService {
       if (await peer.findLiveByPaymentHash(request.paymentHash)) {
         return { accepted: false, reason: 'duplicate_swap' }
       }
+    }
+    if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
+      return { accepted: false, reason: 'rate_limited' }
     }
     // RESERVED, not merely observed: the row below is what makes this swap
     // visible to `totalCommitted()`, and until it lands a concurrent quote

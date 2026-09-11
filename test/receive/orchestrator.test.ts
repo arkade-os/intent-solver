@@ -227,6 +227,15 @@ const quoteRequest = (over: Partial<Parameters<ReceiveSwapService['quote']>[0]> 
 })
 
 describe('ReceiveSwapService.quote', () => {
+  it('meters new requester quotes while preserving duplicate and other-client outcomes', async () => {
+    const request = (n: number, requesterKey = 'client') =>
+      quoteRequest({ paymentHash: n.toString(16).padStart(64, '0'), requesterKey })
+    for (let i = 1; i <= 5; i++) expect((await service.quote(request(i))).accepted).toBe(true)
+    expect(await service.quote(request(6))).toEqual({ accepted: false, reason: 'rate_limited' })
+    expect(await service.quote(request(1))).toEqual({ accepted: false, reason: 'duplicate_swap' })
+    expect((await service.quote(request(6, 'other-client'))).accepted).toBe(true)
+  })
+
   it('accepts a valid request, mints a hold invoice, and persists a quoted row', async () => {
     const outcome = await service.quote(quoteRequest())
     expect(outcome.accepted).toBe(true)

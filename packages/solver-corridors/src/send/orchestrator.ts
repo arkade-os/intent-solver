@@ -460,14 +460,6 @@ export class SendSwapService {
   ): Promise<QuoteOutcome> {
     const { store, arkade, limits, invoicePrefix } = this.deps
 
-    // Admission first: a quote is free to request but holds provider capacity
-    // for a whole window, so the meter runs before any work happens. Retries
-    // and relay redeliveries consume budget like any other request — the quota
-    // is sized so that is plenty for a client driving one negotiation.
-    if (options?.requesterKey !== undefined && !this.quoteLimiter.take(options.requesterKey)) {
-      return { accepted: false, reason: 'rate_limited' }
-    }
-
     // The denylist reaches EVERY decode of this string, not just this one — see
     // `whenFunded` and `submitPayment` below. The totals here are what the
     // refund deadline is priced from; a pay-time re-decode reading the raw
@@ -530,6 +522,9 @@ export class SendSwapService {
       // A `refused` prior swap does NOT block: it never moved money and never
       // learned a preimage, so its still-valid invoice may be quoted again.
       return { accepted: false, reason: 'duplicate_swap' }
+    }
+    if (options.requesterKey !== undefined && !this.quoteLimiter.take(options.requesterKey)) {
+      return { accepted: false, reason: 'rate_limited' }
     }
     // The Lightning receive corridor, asked FIRST and by name, because its
     // answer is the one that can be something other than a refusal: a live row

@@ -1,4 +1,8 @@
-import type { RfqRefusalMetadata, RfqRefusalObserver } from '@arkade-os/solver-transport/ingress/refusals.js'
+import {
+  sanitizeRfqRefusalText,
+  type RfqRefusalMetadata,
+  type RfqRefusalObserver,
+} from '@arkade-os/solver-transport/ingress/refusals.js'
 
 export interface RecordedRfqRefusal extends RfqRefusalMetadata {
   at: number
@@ -15,8 +19,8 @@ export const createRfqRefusalTail = (capacity = 200) => {
         transport: refusal.transport,
         requestType: refusal.requestType,
         rfqId: refusal.rfqId,
-        reason: refusal.reason.slice(0, 100),
-        detail: refusal.detail.slice(0, 1024),
+        reason: sanitizeRfqRefusalText(refusal.reason, 100),
+        detail: sanitizeRfqRefusalText(refusal.detail, 1024),
       })
       if (entries.length > capacity) entries.length = capacity
     },
@@ -33,6 +37,12 @@ export const recordRfqRefusals =
     now: () => number = () => Math.floor(Date.now() / 1000),
   ): RfqRefusalObserver =>
   (context, detail, metadata) => {
-    recorder.record({ ...metadata, at: now(), detail })
-    log(`${context}:`, detail)
+    const safeDetail = sanitizeRfqRefusalText(detail, 1024)
+    recorder.record({
+      ...metadata,
+      reason: sanitizeRfqRefusalText(metadata.reason, 100),
+      at: now(),
+      detail: safeDetail,
+    })
+    log(`${context}:`, safeDetail)
   }

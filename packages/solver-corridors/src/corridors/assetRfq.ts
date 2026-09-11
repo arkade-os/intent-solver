@@ -37,7 +37,7 @@
 import { parkVia, type Corridor, type CorridorReader } from '@arkade-os/solver-core/core/corridor.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 import { diagnose, phaseOfStates, type AdminSwap } from '@arkade-os/solver-core/core/swapView.js'
-import type { CorridorRfqOutcome as RfqOutcome } from '@arkade-os/solver-core/core/corridor.js'
+import type { CorridorRfqOutcome as RfqOutcome, QuoteOptions } from '@arkade-os/solver-core/core/corridor.js'
 import { extractRfqId, zodDetail } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import { rfqRefusalPayload } from '../wire/payloads.js'
 import {
@@ -176,7 +176,7 @@ export const assetRfqCorridor = (
   store: AssetRfqSwapStore,
 ): Corridor => ({
   ...assetRfqReader(descriptor, store),
-  quote: (payload) => respondToAssetRfqRequest(service, descriptor.pair, payload),
+  quote: (payload, options) => respondToAssetRfqRequest(service, descriptor.pair, payload, options),
   tick: (id) => service.tick(id),
   tickAll: async () => (await service.tickAll()).length,
   park: (id, reason) => parkVia(store, { live: NON_TERMINAL, parked: ASSET_RFQ_PARKED }, id, reason),
@@ -195,6 +195,7 @@ export const respondToAssetRfqRequest = async (
   service: AssetRfqSwapService,
   servedPair: string,
   payload: unknown,
+  options?: QuoteOptions,
 ): Promise<RfqOutcome> => {
   const parsed = AssetRfqRequest.safeParse(payload)
   if (!parsed.success) {
@@ -224,6 +225,7 @@ export const respondToAssetRfqRequest = async (
     amountSide: request.amount_side,
     makerPkScript: request.profile.maker_pk_script,
     makerPublicKey: request.profile.maker_public_key,
+    requesterKey: options?.requesterKey,
   })
   if (outcome.accepted) {
     return { kind: 'quote', payload: assetRfqQuotePayload(outcome.swap, request.rfq_id) }

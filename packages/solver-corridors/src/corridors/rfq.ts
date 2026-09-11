@@ -22,7 +22,7 @@ import { hex } from '@scure/base'
 import { lockupDeadlineFor } from '@arkade-os/solver-core/core/send.js'
 import { decodeInvoice, InvalidInvoice, type InvoiceRejection } from '@arkade-os/solver-core/invoice/decode.js'
 import type { RfqRefusalError, RfqRefusalErrorCode } from '@arkade-os/solver-core/core/rfqProtocol.js'
-import type { CorridorRfqOutcome as RfqOutcome } from '@arkade-os/solver-core/core/corridor.js'
+import type { CorridorRfqOutcome as RfqOutcome, QuoteOptions } from '@arkade-os/solver-core/core/corridor.js'
 import type { SendSwapService } from '../send/orchestrator.js'
 import type { OnchainSendSwapService } from '../send/onchainOrchestrator.js'
 import type { ReceiveSwapService } from '../receive/orchestrator.js'
@@ -68,6 +68,7 @@ import { extractRfqId, zodDetail } from '@arkade-os/solver-core/core/rfqProtocol
 export const respondToLightningReceiveRfqRequest = async (
   service: ReceiveSwapService,
   payload: unknown,
+  options?: QuoteOptions,
 ): Promise<RfqOutcome> => {
   const parsed = LightningReceiveRfqRequest.safeParse(payload)
   if (!parsed.success) {
@@ -94,6 +95,7 @@ export const respondToLightningReceiveRfqRequest = async (
     payoutPubkey: request.profile.payout_pubkey,
     claimPacket: request.profile.claim_packet ?? null,
     rfqId: request.rfq_id,
+    requesterKey: options?.requesterKey,
   })
   if (outcome.accepted) {
     return {
@@ -108,6 +110,7 @@ export const respondToLightningReceiveRfqRequest = async (
 export const respondToOnchainReceiveRfqRequest = async (
   service: OnchainReceiveSwapService,
   payload: unknown,
+  options?: QuoteOptions,
 ): Promise<RfqOutcome> => {
   const parsed = OnchainReceiveRfqRequest.safeParse(payload)
   if (!parsed.success) {
@@ -137,6 +140,7 @@ export const respondToOnchainReceiveRfqRequest = async (
     rfqId: request.rfq_id,
     minFromSats: request.min_from_amount,
     maxFromSats: request.max_from_amount,
+    requesterKey: options?.requesterKey,
   })
   if (outcome.accepted) {
     return {
@@ -301,6 +305,7 @@ export const respondToOnchainRfqRequest = async (
   service: OnchainSendSwapService,
   store: OnchainSendSwapStore,
   payload: unknown,
+  options?: QuoteOptions,
 ): Promise<RfqOutcome> => {
   const parsed = OnchainRfqRequest.safeParse(payload)
   if (!parsed.success) {
@@ -339,6 +344,7 @@ export const respondToOnchainRfqRequest = async (
     refundAddress: request.profile.refund_address,
     clientRefundPubkey: request.profile.client_refund_pubkey,
     rfqId: request.rfq_id,
+    requesterKey: options?.requesterKey,
   })
   if (outcome.accepted) {
     return { kind: 'quote', payload: onchainRfqQuotePayload(outcome.swap, outcome.lockupDeadline, request.rfq_id) }

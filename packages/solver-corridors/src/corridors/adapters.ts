@@ -170,7 +170,7 @@ export const lightningSendCorridor = (service: SendSwapService, store: SwapStore
 
 export const lightningReceiveCorridor = (service: ReceiveSwapService, store: ReceiveSwapStore): Corridor => ({
   ...lightningReceiveReader(store),
-  quote: (payload) => respondToLightningReceiveRfqRequest(service, payload),
+  quote: (payload, options) => respondToLightningReceiveRfqRequest(service, payload, options),
   tick: async (id) => {
     await service.tick(id)
   },
@@ -181,7 +181,7 @@ export const lightningReceiveCorridor = (service: ReceiveSwapService, store: Rec
 
 export const onchainSendCorridor = (service: OnchainSendSwapService, store: OnchainSendSwapStore): Corridor => ({
   ...onchainSendReader(store),
-  quote: (payload) => respondToOnchainRfqRequest(service, store, payload),
+  quote: (payload, options) => respondToOnchainRfqRequest(service, store, payload, options),
   tick: async (id) => {
     await service.tick(id)
   },
@@ -196,7 +196,7 @@ export const onchainReceiveCorridor = (
   store: OnchainReceiveSwapStore,
 ): Corridor => ({
   ...onchainReceiveReader(store),
-  quote: (payload) => respondToOnchainReceiveRfqRequest(service, payload),
+  quote: (payload, options) => respondToOnchainReceiveRfqRequest(service, payload, options),
   tick: async (id) => {
     await service.tick(id)
   },

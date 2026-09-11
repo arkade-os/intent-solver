@@ -450,11 +450,9 @@ export class EvmSendSwapService {
    */
   async quote(request: EvmSendQuoteRequest): Promise<EvmSendQuoteOutcome> {
     const { store, arkade, chain } = this.deps
-    // Admission first, like the Lightning send leg: a quote is free to request
-    // but holds provider capacity for its whole validity window and costs a
-    // feed fetch apiece, so the meter runs before any work happens.
-    if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
-      return { accepted: false, reason: 'rate_limited' }
+    if (request.requesterKey !== undefined) {
+      if (await store.findLiveByPaymentHash(request.paymentHash)) return { accepted: false, reason: 'duplicate_swap' }
+      if (!this.quoteLimiter.take(request.requesterKey)) return { accepted: false, reason: 'rate_limited' }
     }
     // Refused by name rather than falling through to a default: a client that
     // named a token this deployment does not serve should hear that, not get a

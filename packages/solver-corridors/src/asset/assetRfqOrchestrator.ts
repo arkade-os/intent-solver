@@ -45,6 +45,7 @@ import {
 } from '@arkade-os/solver-core/core/assetRfq.js'
 import type { Price } from '@arkade-os/solver-core/core/priceFeed.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow, type AssetRfqSwapState } from '../db/assetRfqSwaps.js'
 
@@ -98,6 +99,7 @@ export interface OfferTerms {
 }
 
 export interface AssetRfqDeps {
+  quoteLimiter?: RateLimiter
   store: AssetRfqSwapStore
   /** Markets served. An empty list serves none, which is the safe default. */
   markets: readonly AssetRfqMarket[]
@@ -129,6 +131,7 @@ export interface AssetRfqDeps {
 }
 
 export type AssetRfqQuoteRefusal =
+  | 'rate_limited'
   | 'unsupported_pair'
   | 'exact_out_unsupported'
   | 'price_unavailable'
@@ -141,6 +144,7 @@ export type AssetRfqQuoteOutcome =
   { accepted: true; swap: AssetRfqSwapRow } | { accepted: false; reason: AssetRfqQuoteRefusal; detail?: string }
 
 export interface AssetRfqQuoteRequest {
+  requesterKey?: string
   rfqId: string
   pair: string
   amount: bigint
@@ -162,10 +166,12 @@ const heldOf = (deposit: ObservedDeposit, leg: AssetLeg): bigint => {
 
 export class AssetRfqSwapService {
   private readonly now: () => number
+  private readonly quoteLimiter: RateLimiter
   private readonly newId: () => string
 
   constructor(private readonly deps: AssetRfqDeps) {
     this.now = deps.now ?? nowSeconds
+    this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
     this.newId = deps.newId ?? (() => crypto.randomUUID())
   }
 
@@ -202,6 +208,9 @@ export class AssetRfqSwapService {
     // id cannot drive traffic to the price source.
     if (await this.deps.store.findByRfqId(request.rfqId)) {
       return { accepted: false, reason: 'duplicate_swap', detail: 'rfq_id already names a negotiation' }
+    }
+    if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
+      return { accepted: false, reason: 'rate_limited' }
     }
 
     let feed: Price

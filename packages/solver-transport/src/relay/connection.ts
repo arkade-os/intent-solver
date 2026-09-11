@@ -209,6 +209,8 @@ export interface WebSocketRelayOptions {
    * backfill raises it here rather than being silently truncated.
    */
   maxReplayMs?: number
+  maxConcurrentHandlers?: number
+  maxQueuedEvents?: number
   now?: () => number
   /** Wire dialect; defaults to the dev broker framing ({@link devCodec}). */
   codec?: WireCodec
@@ -265,6 +267,14 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
   const codec = options.codec ?? devCodec
 
   const maxReplayMs = options.maxReplayMs ?? DEFAULT_MAX_REPLAY_MS
+  const maxConcurrentHandlers = options.maxConcurrentHandlers ?? 8
+  const maxQueuedEvents = options.maxQueuedEvents ?? 256
+  if (!Number.isSafeInteger(maxConcurrentHandlers) || maxConcurrentHandlers < 1) {
+    throw new Error('maxConcurrentHandlers must be a positive integer')
+  }
+  if (!Number.isSafeInteger(maxQueuedEvents) || maxQueuedEvents < 0) {
+    throw new Error('maxQueuedEvents must be a non-negative integer')
+  }
 
   interface Subscription {
     /** The caller's floor, defaulted to subscribe time. Floor for every replay. */
@@ -280,6 +290,27 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
   let closed = false
   let attempt = 0
   let subCounter = 0
+  let activeHandlers = 0
+  let queuedHandlers: { sub: Subscription; event: RelayEvent; stampedAt: number }[] = []
+
+  const dispatch = (sub: Subscription, event: RelayEvent, stampedAt: number): void => {
+    activeHandlers++
+    if (stampedAt > sub.highWaterMs) sub.highWaterMs = stampedAt
+    const finished = () => {
+      activeHandlers--
+      while (!closed && activeHandlers < maxConcurrentHandlers && queuedHandlers.length > 0) {
+        const next = queuedHandlers.shift()!
+        dispatch(next.sub, next.event, next.stampedAt)
+      }
+    }
+    let result: Promise<void>
+    try {
+      result = Promise.resolve(sub.onEvent(event))
+    } catch (error) {
+      result = Promise.reject(error)
+    }
+    void result.then(finished, finished)
+  }
 
   /**
    * Events waiting for a socket. Subscriptions replay from their map on every
@@ -420,10 +451,9 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
       const stampedAt = Math.min(event.createdAtMs, now())
       for (const sub of subscriptions.values()) {
         if (!matchesFilter(event, sub.armed)) continue
-        // Advance before dispatch: a handler that throws must not make the
-        // subscription replay from an older point on the next reconnect.
-        if (stampedAt > sub.highWaterMs) sub.highWaterMs = stampedAt
-        void sub.onEvent(event)
+        if (activeHandlers < maxConcurrentHandlers) dispatch(sub, event, stampedAt)
+        else if (queuedHandlers.length < maxQueuedEvents) queuedHandlers.push({ sub, event, stampedAt })
+        // Overflow is dropped without advancing the replay cursor; clients can retry.
       }
     })
     ws.addEventListener('close', onDown)
@@ -444,12 +474,15 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
       return {
         close: async () => {
           subscriptions.delete(id)
+          queuedHandlers = queuedHandlers.filter((entry) => entry.sub !== sub)
           send(codec.encodeUnsub(id))
         },
       }
     },
     close: async () => {
       closed = true
+      queuedHandlers.length = 0
+      subscriptions.clear()
       if (reconnectTimer) clearTimeout(reconnectTimer)
       socket?.close()
     },
