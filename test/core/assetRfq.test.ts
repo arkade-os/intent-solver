@@ -86,6 +86,8 @@ const MARKET: AssetQuoteMarket = {
   baseDecimals: 8,
   quoteDecimals: 6,
   feeBps: 50,
+  sellBaseFeeFlat: 0n,
+  buyBaseFeeFlat: 0n,
   minPayout: 1n,
   maxPayout: 10n ** 24n,
 }
@@ -115,6 +117,40 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       feed: FEED,
     })
     expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000_000n, toAmount: 99_500_000n })
+  })
+
+  it('subtracts the sell-base flat fee from the BTC input before conversion', () => {
+    const outcome = resolveAssetQuote({
+      pair: { from: null, to: ASSET_A },
+      amount: 100_000_000n,
+      amountSide: 'from',
+      market: { ...MARKET, feeBps: 0, sellBaseFeeFlat: 330n },
+      feed: FEED,
+    })
+    expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000n, toAmount: 99_999_670_000n })
+  })
+
+  it('subtracts the buy-base flat fee from the asset input before conversion', () => {
+    const outcome = resolveAssetQuote({
+      pair: { from: ASSET_A, to: null },
+      amount: 100_000_000_000n,
+      amountSide: 'from',
+      market: { ...MARKET, feeBps: 0, buyBaseFeeFlat: 1_000_000n },
+      feed: FEED,
+    })
+    expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000_000n, toAmount: 99_999_000n })
+  })
+
+  it('refuses an input entirely consumed by its direction flat fee', () => {
+    expect(
+      resolveAssetQuote({
+        pair: { from: null, to: ASSET_A },
+        amount: 330n,
+        amountSide: 'from',
+        market: { ...MARKET, feeBps: 0, sellBaseFeeFlat: 330n },
+        feed: FEED,
+      }),
+    ).toEqual({ ok: false, reason: 'fee_consumes_swap' })
   })
 
   it('keeps full precision on an 18-decimal asset, where a double would not', () => {

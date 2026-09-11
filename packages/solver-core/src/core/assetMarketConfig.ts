@@ -68,6 +68,10 @@ export interface AssetMarketConfig {
   toleranceBps: number
   /** The solver's margin, folded into the offer price against the maker. */
   feeBps: number
+  /** Atomic units charged from the base input when the maker sells base. Defaults to zero. */
+  sellBaseFeeFlat?: bigint
+  /** Atomic units charged from the quote input when the maker buys base. Defaults to zero. */
+  buyBaseFeeFlat?: bigint
   /** Payout bounds per direction, or null to inherit the deployment-wide pair. */
   sellBase: AssetMarketBounds | null
   buyBase: AssetMarketBounds | null
@@ -178,6 +182,10 @@ const checkBounds = (label: string, bounds: AssetMarketBounds | null): void => {
   }
 }
 
+const checkFlatFee = (label: string, value: bigint): void => {
+  if (value < 0n) throw new Error(`${label} must be a non-negative integer of atomic units, got ${value}`)
+}
+
 /**
  * Refuse a market this solver must not act on, naming the reason. Throws;
  * returns nothing.
@@ -205,6 +213,8 @@ export const validateAssetMarket = (market: AssetMarketConfig): void => {
   checkDecimals('quoteDecimals', market.quoteDecimals)
   checkBps('toleranceBps', market.toleranceBps)
   checkBps('feeBps', market.feeBps)
+  checkFlatFee('sellBaseFeeFlat', market.sellBaseFeeFlat ?? 0n)
+  checkFlatFee('buyBaseFeeFlat', market.buyBaseFeeFlat ?? 0n)
   checkBounds('sellBase', market.sellBase)
   checkBounds('buyBase', market.buyBase)
 
@@ -252,6 +262,8 @@ export interface AssetMarketPricingView {
   readonly pricePath: string
   readonly toleranceBps: number
   readonly feeBps: number
+  readonly sellBaseFeeFlat: bigint
+  readonly buyBaseFeeFlat: bigint
   readonly sellBase?: AssetMarketBounds
   readonly buyBase?: AssetMarketBounds
 }
@@ -308,6 +320,8 @@ export const assetMarketPolicy = (
       pricePath: market.pricePath,
       toleranceBps: market.toleranceBps,
       feeBps: market.feeBps,
+      sellBaseFeeFlat: market.sellBaseFeeFlat ?? 0n,
+      buyBaseFeeFlat: market.buyBaseFeeFlat ?? 0n,
       ...(market.sellBase === null ? {} : { sellBase: market.sellBase }),
       ...(market.buyBase === null ? {} : { buyBase: market.buyBase }),
     })),

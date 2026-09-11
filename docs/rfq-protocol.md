@@ -297,10 +297,15 @@ same-asset corridor market the two denominations coincide; on a
 cross-asset one they are different assets, so a card's `fee_flat` and a
 bid's are not comparable numbers. That costs nothing today precisely
 because the card is indicative: the bid and the quote carry the terms.
-Where a card advertises one market standing for both directions of a
-corridor, its `fee_bps` and `fee_flat` are each the **maximum** across the
+Where a same-asset card advertises one market standing for both directions of
+a corridor, its `fee_bps` and `fee_flat` are each the **maximum** across the
 directions it stands for — overstating a fee is the safe direction, and a
 client expects worse than it gets; understating one is a card that lies.
+An Arkade cross-asset market may charge a direction-specific flat amount in
+either input leg. A quote-leg input amount fits this card field directly; an
+enabled base-leg input amount does not, so the reference solver omits that
+market from its card with an operator-visible diagnostic rather than publish a
+false zero.
 
 Rendezvous is keyed by **protocol**, not by a bare list of URLs:
 
@@ -427,6 +432,10 @@ one.
   Both are canonical decimal strings of atomic units (§ 2.1), each in the
   asset of its own leg — so on a cross-asset pair they are denominated in
   different assets and are not comparable as numbers.
+  For an exact-in cross-asset quote with a flat input fee, pricing first removes
+  that fee from `from_amount`, converts the remainder at the reference price,
+  then applies the proportional spread to the converted payout. The quote still
+  carries only the two resolved amounts.
 - `solver_pubkey` — the solver's settlement key (x-only). In v1 it SHOULD
   equal the transport identity key that signed the event.
 - `valid_until` — § 5.

@@ -32,6 +32,8 @@ const market = (over: Partial<AssetMarketConfig> = {}): AssetMarketConfig => ({
   pricePath: '/price',
   toleranceBps: 10,
   feeBps: 0,
+  sellBaseFeeFlat: 0n,
+  buyBaseFeeFlat: 0n,
   sellBase: null,
   buyBase: null,
   enabled: true,
@@ -206,15 +208,29 @@ describe('payout bounds', () => {
   })
 })
 
+describe('directional flat fees', () => {
+  it('refuses a negative fee on either input leg', () => {
+    expect(() => validateAssetMarket(market({ sellBaseFeeFlat: -1n }))).toThrow(/sellBaseFeeFlat/)
+    expect(() => validateAssetMarket(market({ buyBaseFeeFlat: -1n }))).toThrow(/buyBaseFeeFlat/)
+  })
+})
+
 describe('assetMarketPolicy', () => {
   it('produces nothing at all from no markets, which is the untouched default', () => {
     expect(assetMarketPolicy([])).toEqual({ pairs: [], pricing: [] })
   })
 
   it('produces the pair and the pricing for a served market', () => {
-    const { pairs, pricing } = assetMarketPolicy([market()])
+    const { pairs, pricing } = assetMarketPolicy([market({ sellBaseFeeFlat: 330n, buyBaseFeeFlat: 1_000_000n })])
     expect(pairs).toEqual([{ a: null, b: USDT }])
-    expect(pricing[0]).toMatchObject({ base: null, quote: USDT, toleranceBps: 10, feeBps: 0 })
+    expect(pricing[0]).toMatchObject({
+      base: null,
+      quote: USDT,
+      toleranceBps: 10,
+      feeBps: 0,
+      sellBaseFeeFlat: 330n,
+      buyBaseFeeFlat: 1_000_000n,
+    })
   })
 
   /**

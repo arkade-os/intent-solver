@@ -76,6 +76,8 @@ interface MarketBody {
   pricePath?: unknown
   toleranceBps?: unknown
   feeBps?: unknown
+  sellBaseFeeFlat?: unknown
+  buyBaseFeeFlat?: unknown
   sellBase?: unknown
   buyBase?: unknown
   enabled?: unknown
@@ -98,6 +100,14 @@ const leg = (label: string, value: unknown): string | null => {
 const int = (label: string, value: unknown): number => {
   if (typeof value !== 'number' || !Number.isInteger(value)) throw new BadRequest(`${label} must be an integer`)
   return value
+}
+
+const atomic = (label: string, value: unknown): bigint => {
+  if (value === undefined || value === null) return 0n
+  if (typeof value !== 'string' || !/^[0-9]+$/.test(value)) {
+    throw new BadRequest(`${label} must be a decimal string of atomic units`)
+  }
+  return BigInt(value)
 }
 
 const bounds = (label: string, value: unknown): AssetMarketBounds | null => {
@@ -130,6 +140,8 @@ const marketFrom = (body: MarketBody): AssetMarketConfig => ({
   pricePath: body.pricePath === undefined || body.pricePath === null ? '' : String(body.pricePath).trim(),
   toleranceBps: int('toleranceBps', body.toleranceBps),
   feeBps: int('feeBps', body.feeBps),
+  sellBaseFeeFlat: atomic('sellBaseFeeFlat', body.sellBaseFeeFlat),
+  buyBaseFeeFlat: atomic('buyBaseFeeFlat', body.buyBaseFeeFlat),
   sellBase: bounds('sellBase', body.sellBase),
   buyBase: bounds('buyBase', body.buyBase),
   // Enabled unless explicitly switched off, matching the corridors: configuring
@@ -151,6 +163,8 @@ const marketJson = (row: AssetMarketRow) => ({
   pricePath: row.pricePath,
   toleranceBps: row.toleranceBps,
   feeBps: row.feeBps,
+  sellBaseFeeFlat: String(row.sellBaseFeeFlat ?? 0n),
+  buyBaseFeeFlat: String(row.buyBaseFeeFlat ?? 0n),
   sellBase: row.sellBase === null ? null : { min: String(row.sellBase.min), max: String(row.sellBase.max) },
   buyBase: row.buyBase === null ? null : { min: String(row.buyBase.min), max: String(row.buyBase.max) },
   enabled: row.enabled,

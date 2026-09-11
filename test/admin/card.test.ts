@@ -80,6 +80,8 @@ const makeDeps = (
     nostrAdPublish?: AdPublishMode
     adPublisher?: AdPublisher
     assetMarkets?: unknown[]
+    assetRfqMarkets?: unknown[]
+    offerMarkets?: Array<{ a: string | null; b: string | null }>
     evmCorridors?: { corridor: string; enabled: boolean }[]
     offerFill?: { min: bigint; max: bigint }
     /** Collects the audit rows the route writes, so they can be asserted. */
@@ -111,10 +113,12 @@ const makeDeps = (
           'lightning:BTC->arkade:BTC': { bps: 10, flatSats: 0 },
         },
         evmCorridors: over.evmCorridors ?? [],
+        offerMarkets: over.offerMarkets ?? [],
         offerMinFillAmount: over.offerFill?.min ?? 5_000n,
         offerMaxFillAmount: over.offerFill?.max ?? 900_000n,
       },
       assetMarkets: over.assetMarkets ?? [],
+      assetRfqMarkets: over.assetRfqMarkets ?? [],
       providerPubkey: PUBKEY,
       emulatorPubkey: EMULATOR_PUBKEY,
       arkade: {
@@ -210,6 +214,7 @@ describe('GET /api/card', () => {
     // A market the deployment serves and the card omits is the whole bug.
     const { body } = await getCard(
       makeDeps({
+        offerMarkets: [{ a: null, b: ASSET }],
         assetMarkets: [
           {
             base: null,
@@ -239,11 +244,37 @@ describe('GET /api/card', () => {
     expect(verifyCardSig(body.card!)).toBe(true)
   })
 
+  it('publishes only the asset directions enabled by the effective RFQ policy', async () => {
+    const configured = {
+      base: null,
+      quote: ASSET,
+      baseDecimals: 8,
+      quoteDecimals: 6,
+      feedUrl: 'https://feed.test/price',
+      pricePath: '/price',
+      toleranceBps: 10,
+      feeBps: 25,
+      sellBaseFeeFlat: 330n,
+      buyBaseFeeFlat: 1_000_000n,
+      sellBase: { min: 1n, max: 100n },
+      buyBase: { min: 2n, max: 200n },
+    }
+    const { body } = await getCard(
+      makeDeps({
+        assetMarkets: [configured],
+        assetRfqMarkets: [{ ...configured, symbol: 'ASSET', sellBase: { min: 0n, max: 0n } }],
+      }),
+    )
+    expect(body.cardOmitted).toEqual([])
+    const asset = body.card!.markets.find((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)!
+    expect(asset).toMatchObject({ fee_flat: '1000000', min_quote_amount: '0', max_quote_amount: '0' })
+  })
+
   /**
    * The mutinynet report: four corridors served, one asset market saved with
    * every bound blank, and no OFFER_MARKETS — so the card used to die whole.
    */
-  it('publishes the four BTC corridors when one asset market cannot be published', async () => {
+  it('publishes the four BTC corridors without advertising an unserved saved asset market', async () => {
     const { status, body } = await getCard(
       makeDeps({
         offerFill: { min: 0n, max: 0n },
@@ -270,9 +301,7 @@ describe('GET /api/card', () => {
       expect([market.min_quote_amount, market.max_quote_amount]).toEqual(['1000', '50000'])
     }
     expect(verifyCardSig(body.card!)).toBe(true)
-    expect(body.cardOmitted).toHaveLength(1)
-    expect(body.cardOmitted[0]).toContain(GUCCI)
-    expect(body.cardOmitted[0]).toContain('OFFER_MIN_FILL_AMOUNT')
+    expect(body.cardOmitted).toEqual([])
     expect(JSON.stringify(body.card)).not.toContain(GUCCI)
   })
 
