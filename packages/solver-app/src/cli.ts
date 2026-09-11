@@ -86,6 +86,7 @@ import { unilateralExitDepsFor } from '@arkade-os/solver-arkade/arkade/unilatera
 import { claimNow } from './ops/claims.js'
 import { poolPlan, mintPool } from './ops/pool.js'
 import { maybeMintPool, runFloatLifecycle } from './ops/float.js'
+import { withEvmSendSweep } from './ops/evmSendSweep.js'
 import { lightningRailFor, requireLn, requireOnchain } from './ops/rails.js'
 
 /**
@@ -176,19 +177,33 @@ const VTXO_LIFECYCLE_MS = 300_000
 
 /** Recover, then drive every swap and sweep refunds until SIGINT/SIGTERM. */
 const watchUntilStopped = async (services: Services): Promise<void> => {
-  let running = true
-  const stop = (): void => {
-    running = false
-  }
+  const controller = new AbortController()
+  const stop = (): void => controller.abort()
   process.once('SIGINT', stop)
   process.once('SIGTERM', stop)
+  try {
+    await withEvmSendSweep({
+      service: services.evmSendService,
+      policies: services.policy.evmCorridors,
+      intervalMs: FULL_SWEEP_MS,
+      signal: controller.signal,
+      run: (startSweep) => watchSwaps(services, startSweep, controller.signal),
+      onError: (error) => log('EVM send sweep failed:', error instanceof Error ? error.message : String(error)),
+    })
+  } finally {
+    process.removeListener('SIGINT', stop)
+    process.removeListener('SIGTERM', stop)
+  }
+}
 
+const watchSwaps = async (services: Services, startEvmSendSweep: () => void, signal: AbortSignal): Promise<void> => {
   log('recovering...')
   // Every registered corridor, not the two that used to be named here — a
   // corridor left out of recovery starts the process with its non-terminal rows
   // untouched until the first full sweep comes round.
   let recovered = 0
   for (const corridor of services.corridors) recovered += await corridor.tickAll()
+  startEvmSendSweep()
   log(`recovered ${recovered} swap(s) across ${services.corridors.size} corridor(s); watching`)
   const served = CORRIDORS.filter((corridor) => services.config.corridorEnabled[corridor])
   log(`serving ${served.length === CORRIDORS.length ? 'all four corridors' : served.join(', ')}`)
@@ -407,7 +422,7 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
   let lastRefundSweep = 0
   let lastVtxoLifecycle = 0
   let lastWatchSync = 0
-  while (running) {
+  while (!signal.aborted) {
     await sleep(HOT_TICK_MS)
     // Money already in flight, checked on its own cadence: waiting for the full
     // sweep here rounds a sub-second Lightning payment up to that sweep's
