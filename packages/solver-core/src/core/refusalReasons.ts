@@ -150,9 +150,9 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
   },
   insufficient_float: {
     meaning:
-      "The onchain wallet does not hold enough CONFIRMED sats to fund this swap's HTLC and pay to broadcast it, counting payouts already owed by swaps that have not funded yet.",
+      'The payout rail does not hold enough spendable sats to fund this swap and its execution fee, counting payouts already owed by swaps that have not funded yet.',
     whatToDo:
-      "Deposit into the rail. Unlike `provider_at_capacity` there is no cap to relax and no backlog to clear: the corridor keeps refusing until the wallet is funded. The console's onchain probe reports the balance beside the floor.",
+      'Deposit into the rail. Unlike `provider_at_capacity` there is no cap to relax: the corridor keeps refusing until spendable balance covers this payout and those already owed.',
   },
   provider_at_capacity: {
     meaning: 'Serving this swap would push total exposure across live swaps past MAX_EXPOSED_SATS.',

@@ -190,6 +190,22 @@ const railInvoiceDeposit = async (
   }
 }
 
+const railNativeDeposit = async (services: Services): Promise<{ option: FundDeposit | null; error: string | null }> => {
+  const ln = services.ln
+  if (!ln?.createDepositAddress) return { option: null, error: null }
+  const minted = await attempt(() => ln.createDepositAddress!())
+  if (minted.error !== null) return { option: null, error: minted.error }
+  return {
+    option: {
+      address: minted.value.address,
+      addressKind: minted.value.addressKind,
+      settleRequired: false,
+      note: 'Lands directly in this rail’s native spendable balance.',
+    },
+    error: null,
+  }
+}
+
 /**
  * Turn deposits the rail is holding into balance it can spend.
  *
@@ -318,19 +334,27 @@ export const railFundSource = (services: Services): FundSource | null => {
     // the one that needs no settle step. The onchain option is always present,
     // so a backend that cannot mint one still has somewhere to send.
     depositOptions: async () => {
-      const invoice = await railInvoiceDeposit(services)
+      const [invoice, native] = await Promise.all([railInvoiceDeposit(services), railNativeDeposit(services)])
       // AFTER the invoice attempt and unconditionally: this is the option that
       // must survive a node which cannot mint. `railDeposit` is still allowed to
       // throw, because the only thing it throws on is an address belonging to
       // another chain — a fault where handing back SOMETHING is the dangerous
       // answer, not the safe one.
       const onchain = await railDeposit(services)
-      if (invoice.option) return [invoice.option, onchain]
-      if (invoice.error === null) return [onchain]
+      const options = [invoice.option, native.option, onchain].filter(
+        (option): option is FundDeposit => option !== null,
+      )
+      const unavailable = [
+        invoice.error === null ? null : `Lightning deposit unavailable: ${invoice.error}`,
+        native.error === null ? null : `Native deposit unavailable: ${native.error}`,
+      ].filter((message): message is string => message !== null)
+      if (unavailable.length === 0) return options
       // The rail CAN mint invoices and could not this time. Said on the option
       // the operator is left with, because the alternative is a Lightning route
       // that vanishes without explanation and reads as never having existed.
-      return [{ ...onchain, note: `${onchain.note} Lightning deposit unavailable: ${invoice.error}` }]
+      return options.map((option) =>
+        option === onchain ? { ...option, note: `${option.note} ${unavailable.join(' ')}` } : option,
+      )
     },
     ...(onchain.settleReceiveAddress === undefined ? {} : { settleDeposits: () => railSettle(services) }),
     withdraw: (params) => railWithdraw(services, params),

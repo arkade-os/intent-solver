@@ -129,6 +129,13 @@ class FakeLn {
   feeEstimate: SendFeeEstimate | null = null
   feeEstimateThrows: Error | null = null
   feeEstimateCalls: EstimateSendFeeParams[] = []
+  balance = { availableSats: Number.MAX_SAFE_INTEGER, incomingSats: 0 }
+  balanceCalls = 0
+
+  async getBalance() {
+    this.balanceCalls += 1
+    return this.balance
+  }
 
   async estimateSendFee(params: EstimateSendFeeParams): Promise<SendFeeEstimate | null> {
     this.feeEstimateCalls.push(params)
@@ -437,6 +444,16 @@ describe('the solver spread', () => {
 })
 
 describe('quote', () => {
+  it('refuses before creating a swap when Lightning float cannot cover the payment and routing fee', async () => {
+    ln.feeEstimate = { feeSats: 278 }
+    ln.balance = { availableSats: AMOUNT + 277, incomingSats: 1_000_000 }
+
+    const outcome = await service.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+
+    expect(outcome).toEqual({ accepted: false, reason: 'insufficient_float' })
+    expect(await store.findByPaymentHash(PAYMENT_HASH)).toBeNull()
+  })
+
   it('persists the swap before returning the lockup address', async () => {
     const outcome = await quoted()
     const row = await store.get(outcome.swap.id)
@@ -1599,6 +1616,7 @@ describe('tick: failure and recovery', () => {
     const withoutProbe = {
       routeCltvBudgetBlocks: UNENFORCED_ROUTE_CLTV_BUDGET_BLOCKS,
       enforcesRouteCltv: false,
+      getBalance: () => ln.getBalance(),
       payInvoice: (p: PayInvoiceParams) => ln.payInvoice(p),
       getPayment: (id: string) => ln.getPayment(id),
       getOwnInvoiceState: (h: string) => ln.getOwnInvoiceState(h),
@@ -2202,6 +2220,30 @@ describe('coupling a self-payment at quote time', () => {
     expect(consulted).toContain(PAYMENT_HASH)
   })
 
+  it('does not price or reserve Lightning float for a coupled quote', async () => {
+    ln.balance = { availableSats: 0, incomingSats: 0 }
+    ln.feeEstimate = { feeSats: 278 }
+
+    const outcome = await withCoupledReceive(safeRow()).quote(INVOICE, REFUND_ADDRESS, {
+      clientRefundPubkey: CLIENT_REFUND_PUBKEY,
+    })
+
+    expect(outcome.accepted).toBe(true)
+    expect(ln.feeEstimateCalls).toHaveLength(0)
+    expect(ln.balanceCalls).toBe(0)
+  })
+
+  it('does not count a coupled row against a later Lightning payout', async () => {
+    const svc = withCoupledReceive(safeRow())
+    const coupled = await svc.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!coupled.accepted) throw new Error(`coupled quote refused: ${coupled.reason}`)
+    ln.balance = { availableSats: AMOUNT + maxRoutingFeeSats(AMOUNT), incomingSats: 0 }
+
+    const ordinary = await svc.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+
+    expect(ordinary.accepted).toBe(true)
+  })
+
   it('still refuses once the receive row has armed', async () => {
     // An armed row took a REAL htlc from somewhere: a genuine conflict, not a
     // self-payment. Coupling must never override it.
@@ -2530,6 +2572,20 @@ describe('a payment refused before submission', () => {
     expect(arkade.refundCalls).toHaveLength(0)
   })
 
+  it('records a refusal and refunds when submission was disproven without a payee-side probe', async () => {
+    const outcome = await quoted()
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    Object.defineProperty(ln, 'getOwnInvoiceState', { value: undefined })
+    ln.payThrows = new PaymentNotStarted('wallet balance is insufficient before submission')
+
+    const row = await service.tick(outcome.swap.id)
+
+    expect(row.state).toBe('refused')
+    expect(row.refundOutcome).toBe('pushed')
+    expect(row.paymentId).toBeNull()
+    expect(arkade.refundCalls).toHaveLength(1)
+  })
+
   it('blocks a same-hash requote until a failed immediate refund is proven spent', async () => {
     const outcome = await quoted()
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
@@ -2639,6 +2695,7 @@ describe('a hash the backend blocks but holds nothing for', () => {
     const withoutProbe = {
       routeCltvBudgetBlocks: ln.routeCltvBudgetBlocks,
       enforcesRouteCltv: ln.enforcesRouteCltv,
+      getBalance: () => ln.getBalance(),
       payInvoice: (p: PayInvoiceParams) => ln.payInvoice(p),
       getPayment: (id: string) => ln.getPayment(id),
       getOwnInvoiceState: (h: string) => ln.getOwnInvoiceState(h),

@@ -89,6 +89,7 @@ export interface SendServiceDeps {
     SendBackend,
     | 'payInvoice'
     | 'estimateSendFee'
+    | 'getBalance'
     | 'getPayment'
     | 'routeCltvBudgetBlocks'
     | 'enforcesRouteCltv'
@@ -272,6 +273,7 @@ export type QuoteRefusal =
   | SendAcceptanceRefusal
   | 'duplicate_swap'
   | 'provider_at_capacity'
+  | 'insufficient_float'
   | 'invalid_refund_address'
   | 'rate_limited'
   // A coupled self-payment whose two refund deadlines are too close together
@@ -561,11 +563,12 @@ export class SendSwapService {
         return { accepted: false, reason: 'duplicate_swap' }
       }
     }
-    const feeEstimate =
-      (await this.deps.ln.estimateSendFee?.({
-        invoice: decoded.invoice,
-        timeoutMs: SEND_FEE_ESTIMATE_TIMEOUT_MS,
-      })) ?? null
+    const feeEstimate = coupled
+      ? null
+      : ((await this.deps.ln.estimateSendFee?.({
+          invoice: decoded.invoice,
+          timeoutMs: SEND_FEE_ESTIMATE_TIMEOUT_MS,
+        })) ?? null)
     if (feeEstimate !== null && (!Number.isSafeInteger(feeEstimate.feeSats) || feeEstimate.feeSats < 0)) {
       throw new Error(`lightning fee estimator returned invalid feeSats: ${feeEstimate.feeSats}`)
     }
@@ -595,14 +598,20 @@ export class SendSwapService {
     // reads the same headroom and takes it too (#105). Handed back in the
     // `finally`, by which point either the row counts instead or nothing
     // was committed at all.
+    const routingFeeSats = feeEstimate?.feeSats ?? maxRoutingFeeSats(decoded.amountSats)
+    const refusal: { ceiling?: 'exposure' | 'float' } = {}
     const reservation = await this.admission.admit({
       pair: RFQ_PAIR_SEND,
       giveSats: lockupSats,
       capSats: this.deps.maxExposedSats,
       committedSats: this.deps.totalCommitted,
+      ...(coupled ? {} : { float: await this.lightningFloatRequirement(decoded.amountSats + routingFeeSats) }),
+      onRefused: (ceiling) => {
+        refusal.ceiling = ceiling
+      },
     })
     if (reservation === null) {
-      return { accepted: false, reason: 'provider_at_capacity' }
+      return { accepted: false, reason: refusal.ceiling === 'float' ? 'insufficient_float' : 'provider_at_capacity' }
     }
     try {
       const serverKey = hex.decode(arkade.serverPubkey)
@@ -678,6 +687,36 @@ export class SendSwapService {
     } finally {
       reservation.release()
     }
+  }
+
+  private async lightningFloatRequirement(requiredSats: number) {
+    const balance = await this.deps.ln.getBalance()
+    if (!Number.isSafeInteger(balance.availableSats) || balance.availableSats < 0) {
+      throw new Error(`lightning backend returned invalid available balance: ${balance.availableSats}`)
+    }
+    return {
+      requiredSats,
+      available: { sats: balance.availableSats, ageMs: 0 },
+      owedSats: () => this.owedLightningSats(),
+    }
+  }
+
+  private async owedLightningSats(): Promise<number> {
+    const rows = await this.deps.store.findByStates(['quoted', 'funded', 'paying'])
+    const owed = await Promise.all(
+      rows.map(async (row) => {
+        const coupled = await this.deps.coupling?.receiveStore.findLiveByPaymentHash(row.paymentHash)
+        if (coupled?.invoice.toLowerCase() === row.invoice.toLowerCase()) return 0
+        let payoutSats = row.amountSats
+        try {
+          payoutSats = decodeInvoice(row.invoice, this.sendHintScidDenylist).amountSats
+        } catch {
+          // Legacy/test rows may not carry a decodable invoice. Their lockup is a conservative fallback.
+        }
+        return payoutSats + (row.quotedRoutingFeeSats ?? maxRoutingFeeSats(payoutSats))
+      }),
+    )
+    return owed.reduce((total, sats) => total + sats, 0)
   }
 
   /**
@@ -1378,15 +1417,8 @@ export class SendSwapService {
   }
 
   private async refuseUnsubmittedPayment(row: SendSwapRow, detail: string): Promise<void> {
-    const verdict = await this.refundProvenSelfPayment(row, 'paying')
-    if (verdict === 'resolved') return
     const reason = `refused before Lightning submission: ${detail}`
-    if (verdict === 'withhold') {
-      await this.deps.store.fail(row.id, 'paying', `${reason}; refund withheld because our own node may still collect`)
-      return
-    }
-    const to = verdict === 'not-ours' ? 'refused' : 'stuck'
-    const won = await this.deps.store.transition(row.id, 'paying', to, { failure_reason: reason })
+    const won = await this.deps.store.transition(row.id, 'paying', 'refused', { failure_reason: reason })
     if (won) await this.refundAfterTerminalFailure(row)
   }
 

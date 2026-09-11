@@ -120,6 +120,7 @@ beforeEach(async () => {
     ln: {
       routeCltvBudgetBlocks: ROUTE_CLTV_BUDGET_BLOCKS,
       enforcesRouteCltv: true,
+      getBalance: async () => ({ availableSats: 1_000_000, incomingSats: 0 }),
       payInvoice: async () => ({ id: 'p', status: 'pending' as const }),
       getPayment: async () => ({ id: 'p', status: 'pending' as const }),
     },
@@ -418,6 +419,7 @@ describe('quote admission control', () => {
         ln: {
           routeCltvBudgetBlocks: ROUTE_CLTV_BUDGET_BLOCKS,
           enforcesRouteCltv: true,
+          getBalance: async () => ({ availableSats: 1_000_000, incomingSats: 0 }),
           payInvoice: async () => ({ id: 'p', status: 'pending' as const }),
           getPayment: async () => ({ id: 'p', status: 'pending' as const }),
         },

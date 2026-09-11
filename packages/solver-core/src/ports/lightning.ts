@@ -519,6 +519,9 @@ export interface SendBackend {
     /** Unix seconds. Required: an invoice the console cannot age is one an operator pays late. */
     expiresAt: number
   }>
+
+  /** Mint a native rail address for operator deposits, when the backend supports one. */
+  createDepositAddress?(): Promise<{ address: string; addressKind: string }>
 }
 
 /** The receive leg's view: issue a hold invoice and settle it with the preimage. */
