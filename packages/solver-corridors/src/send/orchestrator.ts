@@ -51,7 +51,7 @@ import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import type { HoldState, ReceiveBackend, SendBackend, SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
-import { PaymentHashRegistered } from '@arkade-os/solver-core/ports/lightning.js'
+import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
 import type { SendSwapRow, SendSwapState, SwapStore } from '../db/swaps.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
@@ -61,6 +61,8 @@ export type { CovenantScriptRow }
 
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 export type { ArkadeOps }
+
+const SEND_FEE_ESTIMATE_TIMEOUT_MS = 5_000
 
 /**
  * What this corridor needs to read off a coupled RECEIVE row: whether it is
@@ -86,6 +88,7 @@ export interface SendServiceDeps {
   ln: Pick<
     SendBackend,
     | 'payInvoice'
+    | 'estimateSendFee'
     | 'getPayment'
     | 'routeCltvBudgetBlocks'
     | 'enforcesRouteCltv'
@@ -558,12 +561,21 @@ export class SendSwapService {
         return { accepted: false, reason: 'duplicate_swap' }
       }
     }
+    const feeEstimate =
+      (await this.deps.ln.estimateSendFee?.({
+        invoice: decoded.invoice,
+        timeoutMs: SEND_FEE_ESTIMATE_TIMEOUT_MS,
+      })) ?? null
+    if (feeEstimate !== null && (!Number.isSafeInteger(feeEstimate.feeSats) || feeEstimate.feeSats < 0)) {
+      throw new Error(`lightning fee estimator returned invalid feeSats: ${feeEstimate.feeSats}`)
+    }
     // What the client must lock: the invoice plus this corridor's cut. The
     // limits above bound the INVOICE — the size of the payment the client asked
     // us to make, which is the number they think in — while everything from here
     // down deals in the lockup, because that is the amount that actually has to
     // arrive. With a zero fee the two are equal and this is a no-op.
-    const lockupSats = giveSatsFor(decoded.amountSats, this.fee)
+    const quoteFee = feeEstimate === null ? this.fee : { bps: this.fee.bps, flatSats: feeEstimate.feeSats }
+    const lockupSats = giveSatsFor(decoded.amountSats, quoteFee)
     // RESERVED, not merely observed: the row below is what makes this swap
     // visible to `totalCommitted()`, and until it lands a concurrent quote
     // reads the same headroom and takes it too (#105). Handed back in the
@@ -637,6 +649,8 @@ export class SendSwapService {
           clientRefundPubkey: options?.clientRefundPubkey,
           receiverPkScript: options?.clientRefundPubkey !== undefined ? arkade.receiverPkScript : undefined,
           nonInteractiveParameters: true,
+          quotedRoutingFeeSats: feeEstimate?.feeSats,
+          feeHandle: feeEstimate?.feeHandle,
           rfqId: options?.rfqId,
         })
         return { accepted: true, swap, lockupDeadline: acceptance.lockupDeadline }
@@ -1288,26 +1302,20 @@ export class SendSwapService {
       else await store.fail(row.id, row.state, reason)
       return false
     }
-    const result = await ln.payInvoice({
-      invoice: row.invoice,
-      // Sized against what is actually being ROUTED, not against the lockup:
-      // the lockup carries our fee too, and a routing cap inflated by our own
-      // spread would quietly authorise paying more away than the swap earns.
-      // Re-decoded from the row's own invoice for the same reason
-      // `maxCltvBlocks` below is.
-      maxFeeSats: maxRoutingFeeSats(invoice.amountSats),
-      idempotencyKey: row.idempotencyKey,
-      // Built above from the row's own invoice rather than stored alongside
-      // `refundLocktime`: `decodeInvoice` is pure and `row.invoice` is the
-      // verbatim string the quote was built from, so this is the same
-      // `minFinalCltvBlocks` that priced the deadline -- by construction, with
-      // no second copy that could go stale against it.
-      //
-      // Clamped to what is LEFT of that deadline, not the whole budget it was
-      // quoted with: this runs on the crash-recovery path too, where the gap
-      // between quoting and paying is unbounded. See `payableCltvBlocks`.
-      maxCltvBlocks: payableCltvBlocks(cltv, refundDeadlineForCltv, this.now()),
-    })
+    let result
+    try {
+      result = await ln.payInvoice({
+        invoice: row.invoice,
+        maxFeeSats: row.quotedRoutingFeeSats ?? maxRoutingFeeSats(invoice.amountSats),
+        idempotencyKey: row.idempotencyKey,
+        maxCltvBlocks: payableCltvBlocks(cltv, refundDeadlineForCltv, this.now()),
+        ...(row.feeHandle !== null ? { feeHandle: row.feeHandle } : {}),
+      })
+    } catch (error) {
+      if (!(error instanceof PaymentNotStarted) || !nothingCommitted) throw error
+      await this.refuseUnsubmittedPayment(row, error.message)
+      return false
+    }
     // WITH the id, not after it: an id recorded without the wallet that minted
     // it is exactly the row that later reads as "provider lost the record" when
     // the truth is "you switched providers". Best-effort — a backend that
@@ -1353,6 +1361,19 @@ export class SendSwapService {
     // window; when it is absent, `whenPaid` polls exactly as it always did.
     if (result.preimage) await this.claimWithPreimage(row.id, row.paymentHash, result.preimage)
     return true
+  }
+
+  private async refuseUnsubmittedPayment(row: SendSwapRow, detail: string): Promise<void> {
+    const verdict = await this.refundProvenSelfPayment(row, 'paying')
+    if (verdict === 'resolved') return
+    const reason = `refused before Lightning submission: ${detail}`
+    if (verdict === 'withhold') {
+      await this.deps.store.fail(row.id, 'paying', `${reason}; refund withheld because our own node may still collect`)
+      return
+    }
+    const to = verdict === 'not-ours' ? 'refused' : 'stuck'
+    const won = await this.deps.store.transition(row.id, 'paying', to, { failure_reason: reason })
+    if (won) await this.refundAfterTerminalFailure(row)
   }
 
   /**

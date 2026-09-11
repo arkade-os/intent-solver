@@ -224,4 +224,24 @@ describe('the same store behaviour through the D1 driver', () => {
     // And live uniqueness still holds.
     await expect(migrated.insertQuote(quote({ id: 'swap-3' }))).rejects.toThrow(/UNIQUE/i)
   })
+
+  it('opens a legacy database that already has a funded refusal beside a live row on the same hash', async () => {
+    const legacy = openDb()
+    const seeded = await SwapStore.open(d1Driver(fakeD1(legacy)), () => clock)
+    await seeded.insertQuote(quote())
+    await seeded.transition('swap-1', 'quoted', 'funded', { lockup_txid: 'funding-tx', lockup_value: 500 })
+    await seeded.transition('swap-1', 'funded', 'refused')
+    legacy.exec(`DROP INDEX idx_send_swap_live_hash`)
+    legacy.exec(`CREATE UNIQUE INDEX idx_send_swap_live_hash ON send_swap(payment_hash) WHERE state != 'refused'`)
+    const columns = legacy
+      .prepare(`PRAGMA table_info(send_swap)`)
+      .all()
+      .map((column) => String((column as { name: unknown }).name))
+    const selected = columns.map((column) => (column === 'id' ? `'swap-2'` : column === 'state' ? `'quoted'` : column))
+    legacy.exec(
+      `INSERT INTO send_swap (${columns.join(', ')}) SELECT ${selected.join(', ')} FROM send_swap WHERE id = 'swap-1'`,
+    )
+
+    await expect(SwapStore.open(d1Driver(fakeD1(legacy)), () => clock)).resolves.toBeInstanceOf(SwapStore)
+  })
 })

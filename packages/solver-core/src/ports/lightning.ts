@@ -94,6 +94,14 @@ export class PaymentHashRegistered extends Error {
   }
 }
 
+/** The backend rejected this invocation before it submitted or committed a payment. */
+export class PaymentNotStarted extends Error {
+  constructor(reason: string) {
+    super(reason)
+    this.name = 'PaymentNotStarted'
+  }
+}
+
 /** Where a hold invoice we issued has got to. */
 export type HoldStatus =
   /** Issued; nothing has arrived. */

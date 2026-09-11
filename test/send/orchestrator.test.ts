@@ -28,11 +28,13 @@ import {
 import { QUOTE_RATE_LIMIT } from '@arkade-os/solver-core/core/rateLimit.js'
 import { TickErrorTracker } from '@arkade-os/solver-app/ops/tickErrors.js'
 import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import { PaymentHashRegistered } from '@arkade-os/solver-core/ports/lightning.js'
+import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
 import type {
+  EstimateSendFeeParams,
   HoldState,
   PayInvoiceParams,
   PaymentResult,
+  SendFeeEstimate,
   SendHtlcState,
 } from '@arkade-os/solver-core/ports/lightning.js'
 import { ORPHANED_REGISTRATION_SECONDS } from '@arkade-os/solver-corridors/send/orchestrator.js'
@@ -124,6 +126,13 @@ class FakeLn {
   payGate: Promise<void> | null = null
   /** When set, payInvoice throws it — the way a rejected RPC leaves the row. */
   payThrows: Error | null = null
+  feeEstimate: SendFeeEstimate | null = null
+  feeEstimateCalls: EstimateSendFeeParams[] = []
+
+  async estimateSendFee(params: EstimateSendFeeParams): Promise<SendFeeEstimate | null> {
+    this.feeEstimateCalls.push(params)
+    return this.feeEstimate
+  }
 
   async payInvoice(params: PayInvoiceParams): Promise<PaymentResult> {
     this.payCalls.push(params)
@@ -286,6 +295,58 @@ describe('the solver spread', () => {
     const row = await store.get(outcome.swap.id)
     expect(row.amountSats).toBe(EXPECTED_LOCKUP)
     expect(row.amountSats).toBeGreaterThan(AMOUNT)
+  })
+
+  it('replaces the configured flat guess with the backend fee estimate and persists its payment budget', async () => {
+    ln.feeEstimate = { feeSats: 75 }
+
+    const outcome = await withFee().quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+
+    expect(outcome.swap.amountSats).toBe(2197)
+    expect(outcome.swap.quotedRoutingFeeSats).toBe(75)
+    expect(ln.feeEstimateCalls).toEqual([{ invoice: INVOICE, timeoutMs: expect.any(Number) }])
+  })
+
+  it('uses the persisted quote-time routing budget when the funded swap pays', async () => {
+    ln.feeEstimate = { feeSats: 75 }
+    const svc = withFee()
+    const outcome = await svc.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+    arkade.lockups = [{ txid: 'a'.repeat(64), vout: 0, value: outcome.swap.amountSats }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+
+    await svc.tick(outcome.swap.id)
+
+    expect(ln.payCalls[0]?.maxFeeSats).toBe(75)
+  })
+
+  it('prices the production case as 50,000 payout plus 278 routing sats and 30 bps', async () => {
+    const invoice = forgeInvoice({
+      network: 'bc',
+      amountSats: 50_000,
+      paymentHash: new Uint8Array(32).fill(21),
+      timestamp: INVOICE_TIMESTAMP,
+      expirySeconds: 43_200,
+      minFinalCltvBlocks: 180,
+    })
+    ln.feeEstimate = { feeSats: 278 }
+    const svc = new SendSwapService({
+      store,
+      ln,
+      arkade,
+      limits: { minSats: 500, maxSats: 50_000 },
+      invoicePrefix: 'bc',
+      maxExposedSats: 100_000,
+      totalCommitted: () => store.committedSats(),
+      admission: new AdmissionControl(),
+      now: () => clock,
+      fee: { bps: 30, flatSats: 0 },
+    })
+
+    const outcome = await svc.quote(invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+
+    expect(outcome).toMatchObject({ accepted: true, swap: { amountSats: 50_430, quotedRoutingFeeSats: 278 } })
   })
 
   it('charges nothing when the fee is free, exactly as before it existed', async () => {
@@ -585,6 +646,9 @@ describe('tick: the full drive', () => {
     expect(row.failureReason).toContain('overfunded')
     expect(row.lockupValue).toBe(2 * AMOUNT) // whole lockup recorded for the refund
     expect(ln.payCalls).toHaveLength(0) // never paid
+    await expect(
+      service.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY }),
+    ).resolves.toMatchObject({ accepted: false, reason: 'duplicate_swap' })
   })
 
   it('drives a funded swap through payment to paid in one tick', async () => {
@@ -712,6 +776,9 @@ describe('tick: refusals before money moves', () => {
     const row = await service.tick(swap.id)
     expect(row.state).toBe('refused')
     expect(row.failureReason).toContain('partial 500')
+    await expect(
+      service.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY }),
+    ).resolves.toMatchObject({ accepted: false, reason: 'duplicate_swap' })
   })
 
   it('never pays a lockup observed after the funding deadline', async () => {
@@ -728,6 +795,9 @@ describe('tick: refusals before money moves', () => {
     expect(row.failureReason).toContain('after the funding deadline')
     expect(row.lockupValue).toBe(AMOUNT) // recorded so the sweep can refund it
     expect(ln.payCalls).toHaveLength(0)
+    await expect(
+      service.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY }),
+    ).resolves.toMatchObject({ accepted: false, reason: 'duplicate_swap' })
   })
 
   it('clamps the CLTV ceiling to what is left of the deadline when funding was slow', async () => {
@@ -2389,6 +2459,56 @@ describe('a payment whose commitment outlived its id', () => {
 
     expect(row.state).toBe('paid')
     expect(row.paymentId).toBe('pay-2')
+  })
+})
+
+describe('a payment refused before submission', () => {
+  it('terminally refuses and refunds immediately after durably stopping retries', async () => {
+    const outcome = await quoted()
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payThrows = new PaymentNotStarted('lightning fee 26 sat exceeds this swap budget')
+    let stateAtRefund: string | undefined
+    arkade.refund = async (row, outputs) => {
+      stateAtRefund = (await store.get(row.id)).state
+      arkade.refundCalls.push({ rowId: row.id, outputs })
+      return 'refund-txid'
+    }
+
+    const row = await service.tick(outcome.swap.id)
+
+    expect(row.state).toBe('refused')
+    expect(row.refundOutcome).toBe('pushed')
+    expect(row.paymentId).toBeNull()
+    expect(stateAtRefund).toBe('refused')
+    expect(arkade.refundCalls).toHaveLength(1)
+  })
+
+  it('does not refund a recovered paying row when no hash probe proves the earlier attempt absent', async () => {
+    const outcome = await quoted()
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payThrows = new Error('transport failed after an unknown submission point')
+    await expect(service.tick(outcome.swap.id)).rejects.toThrow(/unknown submission point/)
+
+    Object.defineProperty(ln, 'getSendHtlcState', { value: undefined })
+    ln.payThrows = new PaymentNotStarted('this invocation stopped before submission')
+    await expect(service.tick(outcome.swap.id)).rejects.toThrow(PaymentNotStarted)
+
+    expect((await store.get(outcome.swap.id)).state).toBe('paying')
+    expect(arkade.refundCalls).toHaveLength(0)
+  })
+
+  it('blocks a same-hash requote until a failed immediate refund is proven spent', async () => {
+    const outcome = await quoted()
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    arkade.refund = async () => {
+      throw new Error('refund transport unavailable')
+    }
+    ln.payThrows = new PaymentNotStarted('fee moved above the persisted budget')
+    await service.tick(outcome.swap.id)
+
+    const retry = await service.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+
+    expect(retry).toMatchObject({ accepted: false, reason: 'duplicate_swap' })
   })
 })
 

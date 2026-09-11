@@ -226,6 +226,10 @@ export interface SendSwapRow {
    */
   paymentBackend: string | null
   paymentWallet: string | null
+  /** Routing fee learned when this quote was priced; null on legacy or unestimated rows. */
+  quotedRoutingFeeSats: number | null
+  /** Opaque backend token paired with the quote-time routing fee, when one was supplied. */
+  feeHandle: string | null
   lockupTxid: string | null
   lockupVout: number | null
   lockupValue: number | null
@@ -298,6 +302,8 @@ const SEND_SWAP_COLUMNS = `
   refund_attempt                TEXT,
   payment_backend               TEXT,
   payment_wallet                TEXT,
+  quoted_routing_fee_sats       INTEGER,
+  fee_handle                    TEXT,
   lockup_txid                   TEXT,
   lockup_vout                   INTEGER,
   lockup_value                  INTEGER,
@@ -379,6 +385,11 @@ const toRow = (raw: Raw): SendSwapRow => ({
   paymentBackend:
     raw.payment_backend === null || raw.payment_backend === undefined ? null : String(raw.payment_backend),
   paymentWallet: raw.payment_wallet === null || raw.payment_wallet === undefined ? null : String(raw.payment_wallet),
+  quotedRoutingFeeSats:
+    raw.quoted_routing_fee_sats === null || raw.quoted_routing_fee_sats === undefined
+      ? null
+      : Number(raw.quoted_routing_fee_sats),
+  feeHandle: raw.fee_handle === null || raw.fee_handle === undefined ? null : String(raw.fee_handle),
   lockupTxid: raw.lockup_txid === null ? null : String(raw.lockup_txid),
   lockupVout: raw.lockup_vout === null ? null : Number(raw.lockup_vout),
   lockupValue: raw.lockup_value === null ? null : Number(raw.lockup_value),
@@ -430,6 +441,8 @@ export interface QuoteRecord {
    * optional by mistake, not by a reason that held up.
    */
   nonInteractiveParameters: boolean
+  quotedRoutingFeeSats?: number
+  feeHandle?: string
   rfqId?: string
 }
 
@@ -499,22 +512,24 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
   private async migrate(): Promise<void> {
     const columns = await this.driver.all<{ name: string }>(`PRAGMA table_info(send_swap)`)
     const existing = new Set(columns.map((c) => c.name))
-    for (const column of [
-      'refund_attempt',
-      'payment_backend',
-      'payment_wallet',
-      'refund_pk_script',
-      'emulator_pubkey',
-      'refund_ark_txid',
-      'refund_outcome',
-      'rfq_id',
-      'client_refund_pubkey',
-      'receiver_pk_script',
-      'payment_evidence',
-      'payment_failure_reason',
-      'non_interactive_parameters',
-    ]) {
-      if (!existing.has(column)) await this.driver.exec(`ALTER TABLE send_swap ADD COLUMN ${column} TEXT`)
+    for (const [column, type] of [
+      ['refund_attempt', 'TEXT'],
+      ['payment_backend', 'TEXT'],
+      ['payment_wallet', 'TEXT'],
+      ['refund_pk_script', 'TEXT'],
+      ['emulator_pubkey', 'TEXT'],
+      ['refund_ark_txid', 'TEXT'],
+      ['refund_outcome', 'TEXT'],
+      ['rfq_id', 'TEXT'],
+      ['client_refund_pubkey', 'TEXT'],
+      ['receiver_pk_script', 'TEXT'],
+      ['payment_evidence', 'TEXT'],
+      ['payment_failure_reason', 'TEXT'],
+      ['non_interactive_parameters', 'TEXT'],
+      ['quoted_routing_fee_sats', 'INTEGER'],
+      ['fee_handle', 'TEXT'],
+    ] as const) {
+      if (!existing.has(column)) await this.driver.exec(`ALTER TABLE send_swap ADD COLUMN ${column} ${type}`)
     }
 
     // Databases created when payment_hash carried a column-level UNIQUE burn a
@@ -609,14 +624,18 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
    */
   async insertQuote(quote: QuoteRecord): Promise<SendSwapRow> {
     const at = this.now()
-    await this.driver.run(
+    const inserted = await this.driver.run(
       `INSERT INTO send_swap (
         id, state, created_at, updated_at, invoice, payment_hash, amount_sats, invoice_expires_at,
         refund_locktime, sender_pubkey, receiver_pubkey, server_pubkey,
         claim_delay, refund_delay, refund_without_receiver_delay, pk_script, lockup_address,
         refund_pk_script, emulator_pubkey, client_refund_pubkey, receiver_pk_script,
-        non_interactive_parameters, rfq_id
-      ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        non_interactive_parameters, quoted_routing_fee_sats, fee_handle, rfq_id
+      ) SELECT ?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE NOT EXISTS (
+        SELECT 1 FROM send_swap WHERE payment_hash = ?
+        AND (state != 'refused' OR (COALESCE(lockup_value, 0) > 0 AND refund_outcome IS NULL))
+      )`,
       [
         quote.id,
         at,
@@ -644,9 +663,13 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
         // rebuilds the eight-leaf shape for both, so this is not a distinction the row needs
         // to carry. Only `true` changes what gets derived.
         quote.nonInteractiveParameters === undefined ? null : quote.nonInteractiveParameters ? '1' : null,
+        quote.quotedRoutingFeeSats ?? null,
+        quote.feeHandle ?? null,
         quote.rfqId ?? null,
+        quote.paymentHash,
       ],
     )
+    if (inserted.changes !== 1) throw new Error('UNIQUE constraint failed: send_swap.payment_hash')
     await this.recordEvent(quote.id, null, 'quoted', null)
     return this.get(quote.id)
   }
@@ -676,15 +699,11 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
     return raw ? toRow(raw) : null
   }
 
-  /**
-   * The swap that BLOCKS a new quote for this hash, if any: every state except
-   * `refused`. Mirrors the partial unique index — `refused` swaps never moved
-   * money and never learned a preimage, so their invoice may be quoted again;
-   * anything else (live, claimed, stuck) holds the hash.
-   */
+  /** The row that still blocks this hash, including a funded refusal awaiting proof of refund. */
   async findLiveByPaymentHash(paymentHash: string): Promise<SendSwapRow | null> {
     const raw = await this.driver.get<Raw>(
-      `SELECT * FROM send_swap WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
+      `SELECT * FROM send_swap WHERE payment_hash = ?
+       AND (state != 'refused' OR (COALESCE(lockup_value, 0) > 0 AND refund_outcome IS NULL)) LIMIT 1`,
       [paymentHash],
     )
     return raw ? toRow(raw) : null
