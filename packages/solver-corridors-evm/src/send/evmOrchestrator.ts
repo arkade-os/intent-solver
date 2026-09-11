@@ -101,6 +101,8 @@ export interface EvmSendServiceDeps {
     cadence: EvmBlockCadence
     /** How long the quoted rate binds, seconds. @see EvmChainConfig.quoteValiditySeconds */
     quoteValiditySeconds: number
+    /** Optional override for the Arkade-after-EVM deadline margin. */
+    orderMarginSeconds?: number
   }
   /** Every other corridor's store, so a payment hash live anywhere is spoken for. */
   peerStores?: readonly { findLiveByPaymentHash(hash: string): Promise<unknown> }[]
@@ -477,6 +479,7 @@ export class EvmSendSwapService {
       limits,
       unilateralClaimDelay: arkade.delays.unilateralClaimDelay,
       nowSeconds,
+      orderMarginSeconds: chain.orderMarginSeconds,
     })
     if (!acceptance.accept) return { accepted: false, reason: acceptance.reason }
 

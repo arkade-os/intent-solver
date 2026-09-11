@@ -75,6 +75,8 @@ export interface EvmReceiveServiceDeps {
     cadence: EvmBlockCadence
     /** How long the quoted rate binds, seconds. @see EvmChainConfig.quoteValiditySeconds */
     quoteValiditySeconds: number
+    /** Optional override for the EVM-after-Arkade deadline margin. */
+    orderMarginSeconds?: number
   }
   /**
    * The shared reservation control — the SAME instance every other corridor
@@ -392,7 +394,11 @@ export class EvmReceiveSwapService {
       nowSeconds,
       cadence: chain.cadence,
     })
-    const refundLocktime = arkadeRefundLocktimeFor({ evmTimeout: evmTimeoutSeconds, nowSeconds })
+    const refundLocktime = arkadeRefundLocktimeFor({
+      evmTimeout: evmTimeoutSeconds,
+      nowSeconds,
+      orderMarginSeconds: chain.orderMarginSeconds,
+    })
     if (refundLocktime === null) {
       // Recovered rather than collapsed, same as the send leg: null means no
       // safe value exists, and WHICH rule bit is what an operator can act on.
@@ -400,6 +406,7 @@ export class EvmReceiveSwapService {
         evmTimeout: evmTimeoutSeconds,
         refundLocktime: evmTimeoutSeconds,
         nowSeconds,
+        orderMarginSeconds: chain.orderMarginSeconds,
       })
       return { accepted: false, reason: decision.ok ? 'deadlines_cannot_be_ordered' : decision.reason }
     }

@@ -13,6 +13,7 @@
  */
 
 import { assertCadence, type EvmBlockCadence } from './blockTime.js'
+import { EVM_ORDER_MARGIN_SECONDS } from '@arkade-os/solver-core/core/evmSend.js'
 
 /** What the adapter and the corridor need to know about one chain. */
 export interface EvmChainConfig {
@@ -89,6 +90,8 @@ export interface EvmChainConfig {
    * vol the embedded option is ~20 bps of notional before any spread.
    */
   quoteValiditySeconds: number
+  /** Recourse margin between the EVM expiry and the Arkade refund, in seconds. */
+  orderMarginSeconds: number
   /**
    * Blocks per `eth_getLogs` request, defaulted to the 10k cap Alchemy and
    * Infura publish. Settable: some cap at 2k, and a rejected scan reads as an
@@ -235,6 +238,13 @@ export const loadEvmChainConfig = (env: NodeJS.ProcessEnv = process.env): EvmCha
     maxFeeCeilingPerGas: bigintFrom(env, 'EVM_MAX_FEE_PER_GAS_CEILING'),
     headroomSeconds: numberFrom(env, 'EVM_FEE_HEADROOM_SECONDS', Number.MIN_VALUE),
     quoteValiditySeconds: intFromOptional(env, 'EVM_QUOTE_VALIDITY_SECONDS', 60, 10, 900),
+    orderMarginSeconds: intFromOptional(
+      env,
+      'EVM_ORDER_MARGIN_SECONDS',
+      EVM_ORDER_MARGIN_SECONDS,
+      1,
+      Number.MAX_SAFE_INTEGER,
+    ),
     logScanRange: intFromOptional(env, 'EVM_LOG_SCAN_RANGE', 10_000, 1, 10_000_000),
   }
 }
