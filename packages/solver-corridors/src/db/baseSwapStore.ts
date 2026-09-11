@@ -17,6 +17,8 @@
  */
 import type { SqlDriver } from './driver.js'
 import {
+  clampLimit,
+  decodeCursor,
   pageQuery,
   takePage,
   type FindByStatesOptions,
@@ -48,6 +50,7 @@ export interface StoreShape<Row, State extends string> {
    */
   readonly lifecycleLabel: string
   readonly searchColumns: readonly string[]
+  readonly recoveryOrderIndex?: string
   readonly legalEdges: Readonly<Record<State, readonly State[]>>
   readonly transitionColumns: ReadonlySet<string>
   readonly patchColumns: ReadonlySet<string>
@@ -153,6 +156,26 @@ export abstract class BaseSwapStore<Row, State extends string> {
 
   async findRecoverable(): Promise<Row[]> {
     return this.findByStates(this.shape.live)
+  }
+
+  async pageRecoverable(
+    options: Pick<PageOptions, 'cursor' | 'limit'> = {},
+  ): Promise<{ rows: Row[]; nextCursor: string | null }> {
+    const limit = clampLimit(options.limit)
+    const cursor = decodeCursor(options.cursor)
+    const placeholders = this.shape.live.map(() => '?').join(',')
+    const indexClause = this.shape.recoveryOrderIndex ? ` INDEXED BY ${this.shape.recoveryOrderIndex}` : ''
+    const cursorClause = cursor ? ' AND (created_at, rowid) > (?, ?)' : ''
+    const params: unknown[] = [...this.shape.live]
+    if (cursor) params.push(cursor.createdAt, cursor.rowid)
+    const raw = await this.driver.all<RawRow & PageRawFields>(
+      `SELECT *, rowid AS _rowid FROM ${this.shape.table}${indexClause}
+       WHERE state IN (${placeholders})${cursorClause}
+       ORDER BY created_at ASC, rowid ASC LIMIT ?`,
+      [...params, limit + 1],
+    )
+    const { page, nextCursor } = takePage(raw, limit)
+    return { rows: page.map((row) => this.shape.toRow(row)), nextCursor }
   }
 
   async page(options: PageOptions = {}): Promise<{ rows: Row[]; nextCursor: string | null }> {

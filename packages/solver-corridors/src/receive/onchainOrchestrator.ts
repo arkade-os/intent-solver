@@ -66,6 +66,8 @@ import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 
+const DEFAULT_RECOVERY_SWEEP_ROW_BUDGET = 25
+
 export interface OnchainReceiveServiceDeps {
   quoteLimiter?: RateLimiter
   /**
@@ -123,6 +125,7 @@ export interface OnchainReceiveServiceDeps {
    */
   peerStores?: readonly { findLiveByPaymentHash(paymentHash: string): Promise<unknown> }[]
   now?: () => number
+  recoverySweepRowBudget?: number
 }
 
 export type QuoteRefusal =
@@ -219,6 +222,8 @@ export class OnchainReceiveSwapService {
   private readonly quoteLimiter: RateLimiter
   private readonly inFlight = new Set<string>()
   private readonly fee: Fee
+  private readonly recoverySweepRowBudget: number
+  private recoverySweepCursor: string | null = null
   /** How this corridor prices. Defaults to the configured flat+bps fee. */
   private readonly pricing: PricingStrategy
 
@@ -231,6 +236,13 @@ export class OnchainReceiveSwapService {
     this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
     this.fee = deps.fee ?? FREE
     this.pricing = deps.pricing ?? fixedFeePricing(this.fee)
+    const configuredRecoverySweepRowBudget = deps.recoverySweepRowBudget
+    this.recoverySweepRowBudget =
+      configuredRecoverySweepRowBudget !== undefined &&
+      Number.isSafeInteger(configuredRecoverySweepRowBudget) &&
+      configuredRecoverySweepRowBudget > 0
+        ? configuredRecoverySweepRowBudget
+        : DEFAULT_RECOVERY_SWEEP_ROW_BUDGET
   }
 
   onTickError?: (id: string, error: unknown) => void
@@ -465,7 +477,12 @@ export class OnchainReceiveSwapService {
 
   async tickAll(): Promise<OnchainReceiveSwapRow[]> {
     const rows: OnchainReceiveSwapRow[] = []
-    for (const row of await this.deps.store.findRecoverable()) {
+    const page = await this.deps.store.pageRecoverable({
+      cursor: this.recoverySweepCursor,
+      limit: this.recoverySweepRowBudget,
+    })
+    this.recoverySweepCursor = page.nextCursor
+    for (const row of page.rows) {
       // Held off after repeated failures, or already being ticked elsewhere.
       // Neither means the swap advanced, so the row comes back unchanged and
       // `onTickSuccess` does not fire. Gated here rather than in `tick` so a
