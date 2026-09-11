@@ -242,7 +242,7 @@ export const loadEvmChainConfig = (env: NodeJS.ProcessEnv = process.env): EvmCha
       env,
       'EVM_ORDER_MARGIN_SECONDS',
       EVM_ORDER_MARGIN_SECONDS,
-      1,
+      EVM_ORDER_MARGIN_SECONDS,
       Number.MAX_SAFE_INTEGER,
     ),
     logScanRange: intFromOptional(env, 'EVM_LOG_SCAN_RANGE', 10_000, 1, 10_000_000),

@@ -75,7 +75,7 @@ export interface EvmReceiveServiceDeps {
     cadence: EvmBlockCadence
     /** How long the quoted rate binds, seconds. @see EvmChainConfig.quoteValiditySeconds */
     quoteValiditySeconds: number
-    /** Optional override for the EVM-after-Arkade deadline margin. */
+    /** Optional override for the Arkade-refund-before-EVM-timeout margin. */
     orderMarginSeconds?: number
   }
   /**

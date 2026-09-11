@@ -81,7 +81,12 @@ describe('loadEvmChainConfig', () => {
   it('loads the advertised EVM deadline margin and keeps the documented default', () => {
     expect(loadEvmChainConfig(env())!.orderMarginSeconds).toBe(EVM_ORDER_MARGIN_SECONDS)
     expect(loadEvmChainConfig(env({ EVM_ORDER_MARGIN_SECONDS: '7500' }))!.orderMarginSeconds).toBe(7500)
-    expect(() => loadEvmChainConfig(env({ EVM_ORDER_MARGIN_SECONDS: '0' }))).toThrow(/EVM_ORDER_MARGIN_SECONDS/)
+    expect(
+      loadEvmChainConfig(env({ EVM_ORDER_MARGIN_SECONDS: String(EVM_ORDER_MARGIN_SECONDS) }))!.orderMarginSeconds,
+    ).toBe(EVM_ORDER_MARGIN_SECONDS)
+    expect(() => loadEvmChainConfig(env({ EVM_ORDER_MARGIN_SECONDS: String(EVM_ORDER_MARGIN_SECONDS - 1) }))).toThrow(
+      /EVM_ORDER_MARGIN_SECONDS/,
+    )
   })
 
   it('refuses nonsense numbers', () => {
