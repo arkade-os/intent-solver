@@ -180,6 +180,8 @@ const nowSeconds = (): number => Math.floor(Date.now() / 1000)
 
 export class EvmSendSwapService {
   private readonly inFlight = new Set<string>()
+  private sweepInFlight: Promise<EvmSendSwapRow[]> | undefined
+  private lockSequence: Promise<void> = Promise.resolve()
   private readonly admission: AdmissionControl
   private readonly quoteLimiter: RateLimiter
 
@@ -351,45 +353,29 @@ export class EvmSendSwapService {
         return false
 
       case 'lock_evm': {
-        // The row enters the EXPOSED state BEFORE the call goes out. A crash
-        // between the two must not leave a lock nobody knows about: better to
-        // re-observe a row that claims to be locking and find no lock, than to
-        // have locked tokens against a row still reading `funded`.
-        await store.transition(row.id, row.state, 'locking_evm')
-        const lock = this.deps.lockFor(row)
-        // APPROVE FIRST. `ERC20Swap.lock` moves the tokens with `transferFrom`,
-        // so without an allowance the lock REVERTS — and `planEvmSend` cannot
-        // tell a revert from a lock that has not landed, so it would wait out
-        // `evmTimeout` and then refund a lock that never existed. Silent, and it
-        // costs the whole timeout on every swap.
-        //
-        // The allowance is READ rather than assumed, because a previous lock
-        // that reverted leaves its approval behind and some tokens (USDT) refuse
-        // a non-zero-to-non-zero change. `lockCalls` decides how many
-        // transactions that costs; here we only sequence them.
-        const allowance = await this.deps.evm.allowance(lock.tokenAddress, this.deps.solverEvmAddress)
-        const calls = this.deps.evm.lockCalls(lock, allowance)
-        // `lockCalls` always ends with the lock itself, so an empty list is a
-        // broken binding rather than a state to carry on from. Said here because
-        // the alternative is silent: the loop below would leave `txid` at its
-        // initial value and the row would record an EMPTY lock id, which reads
-        // downstream as "we locked, and here is where" — pointing at nothing.
-        // The row is already `locking_evm` by this point, so that row would sit
-        // in the exposed state naming a transaction that does not exist.
-        if (calls.length === 0) {
-          throw new Error(`lockCalls returned no calls for swap ${row.id}; the lock call is never optional`)
-        }
-        let txid = ''
-        for (const call of calls) txid = await this.deps.broadcast(call)
-        // The LAST call is the lock, and its id is the one the row keeps: an
-        // approval txid recorded as the lock would send anyone reading the row
-        // to a transaction that moved nothing.
-        //
-        // Recorded before its status is known, deliberately: the txid is the only
-        // handle on the receipt that answers whether the lock exists, so a
-        // restart in that window could not otherwise ask.
-        await store.patch(row.id, { evm_lock_txid: txid })
-        return true
+        // Allowance belongs to the account, so another row must not approve between these calls.
+        const locking = this.lockSequence.then(async () => {
+          const current = await store.get(row.id)
+          if (planEvmSend(current, await this.observe(current)).do !== 'lock_evm') return true
+          // Exposure precedes even the approval, preserving recovery after a crash.
+          await store.transition(current.id, current.state, 'locking_evm')
+          const lock = this.deps.lockFor(current)
+          const allowance = await this.deps.evm.allowance(lock.tokenAddress, this.deps.solverEvmAddress)
+          const calls = this.deps.evm.lockCalls(lock, allowance)
+          if (calls.length === 0) {
+            throw new Error(`lockCalls returned no calls for swap ${current.id}; the lock call is never optional`)
+          }
+          let txid = ''
+          for (const call of calls) txid = await this.deps.broadcast(call)
+          // The last call is the lock; its receipt, not approval's, proves the payout.
+          await store.patch(current.id, { evm_lock_txid: txid })
+          return true
+        })
+        this.lockSequence = locking.then(
+          () => {},
+          () => {},
+        )
+        return locking
       }
 
       case 'await_claim':
@@ -670,7 +656,15 @@ export class EvmSendSwapService {
    * A failing row must not stop the others: this shares a loop with the other
    * corridors, and one stuck swap taking the sweep down would stall all of them.
    */
-  async tickAll(): Promise<EvmSendSwapRow[]> {
+  tickAll(): Promise<EvmSendSwapRow[]> {
+    if (this.sweepInFlight) return this.sweepInFlight
+    this.sweepInFlight = this.sweepRows().finally(() => {
+      this.sweepInFlight = undefined
+    })
+    return this.sweepInFlight
+  }
+
+  private async sweepRows(): Promise<EvmSendSwapRow[]> {
     const rows: EvmSendSwapRow[] = []
     for (const row of await this.deps.store.findLive()) {
       try {
