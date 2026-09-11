@@ -45,6 +45,8 @@ const fingerprint = (market: AssetMarketPricingView | AssetMarketConfig): string
     market.pricePath,
     market.toleranceBps,
     market.feeBps,
+    String(market.sellBaseFeeFlat ?? 0n),
+    String(market.buyBaseFeeFlat ?? 0n),
     bound(market.sellBase),
     bound(market.buyBase),
   ])

@@ -459,6 +459,11 @@ A deployment that sets none of these behaves exactly as it did before they
 existed: no `offer_fill` table is opened, no subscription to arkd's filtered
 transaction stream, nothing decided and nothing spent.
 
+The Markets console prices both this path and the quoted path below. Besides
+`feeBps`, each market has `sellBaseFeeFlat` (base atomic units) and
+`buyBaseFeeFlat` (quote atomic units). The selected flat fee is removed from
+what the maker deposited before the feed and bps checks. Both default to zero.
+
 | Var                     | Notes                                                                                                                                                                                                                                                                                                                                              |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `OFFER_MARKETS`         | the markets taken, `A/B` pairs comma-separated, where `BTC` is the sats leg and anything else is a 68-hex asset id: `BTC/<assetId>,<assetIdA>/<assetIdB>`. Unordered — one entry serves both directions. Unset serves none, which is the whole path off. An entry naming one thing twice, or not shaped `A/B`, throws                              |
@@ -478,6 +483,13 @@ packet, and the quote binds for a window instead of standing open.
 A deployment that sets none of these behaves exactly as it did before they
 existed: no asset RFQ store is opened, no service is constructed, and every
 asset pair refuses by name at the ingress.
+
+Asset RFQs use the same market fees. For exact-in, the solver subtracts the
+direction's flat fee from `from_amount`, converts the remainder at the feed
+price, then removes `feeBps` from the converted payout. A flat fee that consumes
+the input refuses `pricing_unavailable`. For a BTC/asset market, set the fee on
+the BTC input direction to the carrier dust the solver spends when it delivers
+the asset; the opposite direction can remain zero.
 
 | Var                              | Notes                                                                                                                                                                                                                                                                                                            |
 | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

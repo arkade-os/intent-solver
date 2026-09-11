@@ -57,6 +57,8 @@ const market = (over: Record<string, unknown> = {}) => ({
   pricePath: '/price',
   toleranceBps: 50,
   feeBps: 10,
+  sellBaseFeeFlat: 0n,
+  buyBaseFeeFlat: 0n,
   sellBase: null,
   buyBase: null,
   enabled: true,
@@ -112,6 +114,12 @@ describe('marketDrift — the case the override diff cannot see', () => {
 
   it('names a re-priced market rather than reading it as untouched', () => {
     expect(marketDrift([market()] as never, [market({ feeBps: 40 })] as never)).toEqual([
+      { key: `market ${KEY}`, loaded: 'as booted', stored: 'edited' },
+    ])
+  })
+
+  it('names a directional flat-fee edit as a pending re-price', () => {
+    expect(marketDrift([market()] as never, [market({ sellBaseFeeFlat: 330n })] as never)).toEqual([
       { key: `market ${KEY}`, loaded: 'as booted', stored: 'edited' },
     ])
   })

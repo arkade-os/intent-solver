@@ -7,7 +7,6 @@
  */
 import type { Hono } from 'hono'
 import {
-  assetCardMarkets,
   buildSolverCard,
   publishableAssetMarkets,
   signSolverCard,
@@ -20,6 +19,7 @@ import type { SolverAd } from '@arkade-os/solver-core/core/solverAd.js'
 import type { Services } from '../../ops/services.js'
 import { publishStateOf } from '../publishState.js'
 import type { AdminDeps } from '../server.js'
+import { assetCardMarketsFromPolicy } from '../../ops/assetRfqMarkets.js'
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
@@ -95,9 +95,14 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
     // Outside the try: an unadvertisable market is still reported when the card
     // fails for another reason. ENABLED already — `assetMarketPolicy` drops a pause.
     const { publishable, omitted } = publishableAssetMarkets(
-      assetCardMarkets(deps.services.assetMarkets, {
-        min: deps.services.policy.offerMinFillAmount,
-        max: deps.services.policy.offerMaxFillAmount,
+      assetCardMarketsFromPolicy({
+        pricing: deps.services.assetMarkets,
+        offerMarkets: deps.services.policy.offerMarkets,
+        offerBounds: {
+          min: deps.services.policy.offerMinFillAmount,
+          max: deps.services.policy.offerMaxFillAmount,
+        },
+        rfqMarkets: deps.services.assetRfqMarkets,
       }),
       deps.services.config.network,
     )

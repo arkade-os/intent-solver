@@ -98,6 +98,8 @@ const marketCards = (rows: readonly AssetMarketRow[], services: AdminDeps['servi
     baseDecimals: row.baseDecimals,
     quoteDecimals: row.quoteDecimals,
     feeBps: row.feeBps,
+    sellBaseFeeFlat: String(row.sellBaseFeeFlat ?? 0n),
+    buyBaseFeeFlat: String(row.buyBaseFeeFlat ?? 0n),
     toleranceBps: row.toleranceBps,
     enabled: row.enabled,
     active: active.has(row.marketKey),

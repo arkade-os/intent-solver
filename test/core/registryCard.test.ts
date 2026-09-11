@@ -338,6 +338,8 @@ const market = (over: Partial<AssetCardMarket> = {}): AssetCardMarket => ({
   feedUrl: 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
   pricePath: '/price',
   feeBps: 30,
+  sellBaseFeeFlat: 0n,
+  buyBaseFeeFlat: 0n,
   sellBase: { min: 1_000_000n, max: 500_000_000n },
   buyBase: { min: 10_000n, max: 2_000_000n },
   ...over,
@@ -376,6 +378,22 @@ describe('asset markets on the card', () => {
     expect(asset.max_quote_amount).toBe('500000000')
     expect(asset.min_base_amount).toBe('10000')
     expect(asset.max_base_amount).toBe('2000000')
+  })
+
+  it('publishes the quote-input flat fee in the registry fee_flat field', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market({ buyBaseFeeFlat: 1_000_000n })] })).markets[1]!
+    expect(asset.fee_flat).toBe('1000000')
+  })
+
+  it('omits fee_flat when the quote-input fee is zero', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market()] })).markets[1]!
+    expect('fee_flat' in asset).toBe(false)
+  })
+
+  it('refuses an enabled base-input flat fee the card cannot denominate honestly', () => {
+    expect(() => buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeFlat: 330n })] }))).toThrow(
+      /base-input flat fee.*quote-asset/,
+    )
   })
 
   it('publishes an unserved direction as the schema`s disabled zero', () => {
@@ -435,12 +453,16 @@ describe('assetCardMarkets', () => {
           pricePath: '',
           toleranceBps: 10,
           feeBps: 25,
+          sellBaseFeeFlat: 330n,
+          buyBaseFeeFlat: 1_000_000n,
         },
       ],
       { min: 5_000n, max: 900_000n },
     )
     expect(resolved).toMatchObject({
       pricePath: '/price',
+      sellBaseFeeFlat: 330n,
+      buyBaseFeeFlat: 1_000_000n,
       sellBase: { min: 5_000n, max: 900_000n },
       buyBase: { min: 5_000n, max: 900_000n },
     })
@@ -458,6 +480,8 @@ describe('assetCardMarkets', () => {
           pricePath: '/data/last',
           toleranceBps: 10,
           feeBps: 25,
+          sellBaseFeeFlat: 330n,
+          buyBaseFeeFlat: 1_000_000n,
           sellBase: { min: 1n, max: 2n },
           buyBase: { min: 3n, max: 4n },
         },
@@ -466,6 +490,8 @@ describe('assetCardMarkets', () => {
     )
     expect(resolved).toMatchObject({
       pricePath: '/data/last',
+      sellBaseFeeFlat: 330n,
+      buyBaseFeeFlat: 1_000_000n,
       sellBase: { min: 1n, max: 2n },
       buyBase: { min: 3n, max: 4n },
     })
@@ -498,6 +524,12 @@ describe('markets no card can carry', () => {
     expect(omitted[0]).toContain('fee_bps')
   })
 
+  it('reports a base-input fee the registry cannot express', () => {
+    const { publishable, omitted } = publishableAssetMarkets([market({ sellBaseFeeFlat: 330n })], 'mutinynet')
+    expect(publishable).toEqual([])
+    expect(omitted[0]).toMatch(/base-input flat fee.*quote-asset/)
+  })
+
   it('keeps the first of a duplicated pair and reports the second', () => {
     const { publishable, omitted } = publishableAssetMarkets(
       [market({ feeBps: 30 }), market({ feeBps: 40 })],
@@ -519,6 +551,8 @@ describe('a bound with nothing to inherit', () => {
     pricePath: '/price',
     toleranceBps: 10,
     feeBps: 25,
+    sellBaseFeeFlat: 0n,
+    buyBaseFeeFlat: 0n,
     ...over,
   })
 

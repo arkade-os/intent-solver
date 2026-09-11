@@ -29,6 +29,7 @@
  * other's arithmetic.
  */
 import type { Price } from './priceFeed.js'
+import { assetExactInPayout } from './assetExactInPrice.js'
 
 /**
  * One leg's asset: the canonical 68-hex Arkade asset id, or `null` for BTC.
@@ -96,6 +97,10 @@ export interface AssetQuoteMarket {
   quoteDecimals: number
   /** The solver's margin, taken out of the payout. */
   feeBps: number
+  /** Atomic units of the base input, charged when the client sells base. */
+  sellBaseFeeFlat?: bigint
+  /** Atomic units of the quote input, charged when the client buys base. */
+  buyBaseFeeFlat?: bigint
   /** Inclusive bounds on the PAYOUT — the `to` leg — in its atomic units. */
   minPayout: bigint
   maxPayout: bigint
@@ -106,9 +111,6 @@ export type AssetQuoteRefusal =
 
 export type AssetQuoteOutcome =
   { ok: true; fromAmount: bigint; toAmount: bigint } | { ok: false; reason: AssetQuoteRefusal }
-
-const BPS = 10_000n
-const pow10 = (n: number): bigint => 10n ** BigInt(n)
 
 /**
  * The two amounts a quote resolves, exactly — § 4.2's "the solver's fee lives
@@ -149,22 +151,19 @@ export const resolveAssetQuote = (args: {
   if (market.feeBps < 0 || market.feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
   if (amount <= 0n) return { ok: false, reason: 'amount_out_of_range' }
 
-  const scale = pow10(feed.scale)
-  const baseUnit = pow10(market.baseDecimals)
-  const quoteUnit = pow10(market.quoteDecimals)
+  const flatFee = (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
+  if (flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
+  const netAmount = amount - flatFee
+  if (netAmount <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
 
-  // The payout before the solver's margin, floored — one division, so one
-  // rounding, and it lands against the client the way every other payout in
-  // this repo does.
-  const mid = givesBase
-    ? (amount * feed.mantissa * quoteUnit) / (baseUnit * scale)
-    : (amount * baseUnit * scale) / (quoteUnit * feed.mantissa)
-
-  // Fee rounded UP out of the floored mid, matching `corridorPolicy.ts`'s
-  // `feeSatsFor` exactly rather than inventing a second convention: rounding a
-  // fee down means the solver eats the remainder on every swap.
-  const fee = (mid * BigInt(market.feeBps) + BPS - 1n) / BPS
-  const toAmount = mid - fee
+  const toAmount = assetExactInPayout({
+    netInput: netAmount,
+    givesBase,
+    baseDecimals: market.baseDecimals,
+    quoteDecimals: market.quoteDecimals,
+    feeBps: market.feeBps,
+    feed,
+  })
 
   // Not clamped to zero, for the reason `payoutSatsFor` states: "the fee ate
   // the swap" and "the amount is below the minimum" want different refusals,

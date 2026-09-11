@@ -65,6 +65,9 @@ export interface AssetMarketPricing {
   readonly toleranceBps: number
   /** The solver's margin, folded against the maker. */
   readonly feeBps: number
+  /** Directional flat charges in the atomic units of the maker's deposit leg. */
+  readonly sellBaseFeeFlat?: bigint
+  readonly buyBaseFeeFlat?: bigint
   /**
    * Payout bounds in the WANT leg's units, per direction. A max of `0n`
    * DISABLES that direction, matching the reference — so a market can be

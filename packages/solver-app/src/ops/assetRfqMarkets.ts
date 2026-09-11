@@ -18,6 +18,8 @@ import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled
 import { assetRfqEnvStem, type AssetRfqDirection } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { assetCardMarkets, type AssetCardMarket } from '@arkade-os/solver-core/core/registryCard.js'
+import type { AssetMarket } from './assetOffers.js'
 
 /** One served asset, its operator-facing label, and whether each direction is open. */
 export interface AssetRfqToken {
@@ -133,9 +135,54 @@ export const assetRfqMarketsFrom = (
       baseDecimals: market.baseDecimals,
       quoteDecimals: market.quoteDecimals,
       feeBps: market.feeBps,
+      sellBaseFeeFlat: market.sellBaseFeeFlat,
+      buyBaseFeeFlat: market.buyBaseFeeFlat,
       sellBase: boundsFor('sell_base'),
       buyBase: boundsFor('buy_base'),
       feedUrl: market.feedUrl,
       pricePath: market.pricePath,
     }
+  })
+
+type Bounds = { min: bigint; max: bigint }
+
+const samePair = (market: AssetMarketPricingView, pair: AssetMarket): boolean =>
+  (market.base === pair.a && market.quote === pair.b) || (market.base === pair.b && market.quote === pair.a)
+
+const unionBounds = (...bounds: Array<Bounds | null | undefined>): Bounds | undefined => {
+  const present = bounds.filter((bound): bound is Bounds => bound !== null && bound !== undefined)
+  const enabled = present.filter((bound) => bound.max > 0n)
+  if (enabled.length === 0) return present.length === 0 ? undefined : { min: 0n, max: 0n }
+  return {
+    min: enabled.reduce((value, bound) => (bound.min < value ? bound.min : value), enabled[0]!.min),
+    max: enabled.reduce((value, bound) => (bound.max > value ? bound.max : value), enabled[0]!.max),
+  }
+}
+
+/** Projects console rows onto the union of directions the offer and RFQ paths actually serve. */
+export const assetCardMarketsFromPolicy = (args: {
+  pricing: readonly AssetMarketPricingView[]
+  offerMarkets: readonly AssetMarket[]
+  offerBounds: Bounds
+  rfqMarkets: readonly AssetRfqMarket[]
+}): AssetCardMarket[] =>
+  assetCardMarkets(args.pricing, args.offerBounds).flatMap((market) => {
+    const pricing = args.pricing.find(
+      (candidate) => candidate.base === market.base && candidate.quote === market.quote,
+    )!
+    const servesOffers = args.offerMarkets.some((pair) => samePair(pricing, pair))
+    const rfq = args.rfqMarkets.find((candidate) => candidate.base === market.base && candidate.quote === market.quote)
+    if (!servesOffers && !rfq) return []
+
+    const sellBase = unionBounds(servesOffers ? market.sellBase : undefined, rfq?.sellBase)
+    const buyBase = unionBounds(servesOffers ? market.buyBase : undefined, rfq?.buyBase)
+    return [
+      {
+        ...market,
+        sellBase,
+        buyBase,
+        sellBaseFeeFlat: sellBase && sellBase.max > 0n ? market.sellBaseFeeFlat : 0n,
+        buyBaseFeeFlat: buyBase && buyBase.max > 0n ? market.buyBaseFeeFlat : 0n,
+      },
+    ]
   })

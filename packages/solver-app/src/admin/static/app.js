@@ -508,7 +508,11 @@ const marketCard = (market) =>
       h('dt', 'buy base'),
       h('dd', marketBounds(market.buyBase, market.baseDecimals)),
       h('dt', 'fee'),
-      h('dd', `${market.feeBps} bps, ${market.toleranceBps} bps band`),
+      h(
+        'dd',
+        `${market.feeBps} bps; flat ${market.sellBaseFeeFlat} ${legLabel(market.base)} when selling base, ` +
+          `${market.buyBaseFeeFlat} ${legLabel(market.quote)} when buying base; ${market.toleranceBps} bps band`,
+      ),
     ),
   )
 
@@ -1310,6 +1314,8 @@ const blankMarket = () => ({
   pricePath: '',
   toleranceBps: '10',
   feeBps: '0',
+  sellBaseFeeFlat: '0',
+  buyBaseFeeFlat: '0',
   sellBaseMin: '',
   sellBaseMax: '',
   buyBaseMin: '',
@@ -1326,6 +1332,8 @@ const draftFrom = (market) => ({
   pricePath: market.pricePath,
   toleranceBps: String(market.toleranceBps),
   feeBps: String(market.feeBps),
+  sellBaseFeeFlat: String(market.sellBaseFeeFlat),
+  buyBaseFeeFlat: String(market.buyBaseFeeFlat),
   sellBaseMin: market.sellBase?.min ?? '',
   sellBaseMax: market.sellBase?.max ?? '',
   buyBaseMin: market.buyBase?.min ?? '',
@@ -1354,6 +1362,8 @@ const marketBody = (d) => ({
   pricePath: d.pricePath,
   toleranceBps: Number(d.toleranceBps),
   feeBps: Number(d.feeBps),
+  sellBaseFeeFlat: d.sellBaseFeeFlat.trim(),
+  buyBaseFeeFlat: d.buyBaseFeeFlat.trim(),
   sellBase: draftBounds(d.sellBaseMin, d.sellBaseMax),
   buyBase: draftBounds(d.buyBaseMin, d.buyBaseMax),
   enabled: d.enabled,
@@ -1410,6 +1420,12 @@ const marketForm = () =>
     field('price path', 'pricePath', 'RFC 6901 pointer; blank derives it where the provider is known'),
     field('tolerance bps', 'toleranceBps', 'deviation from the feed accepted; below 10000'),
     field('fee bps', 'feeBps', 'margin folded against the maker; below 10000'),
+    field(
+      'sell-base flat fee',
+      'sellBaseFeeFlat',
+      'base atomic units removed from the input; 330 sats covers asset carrier dust when base is BTC',
+    ),
+    field('buy-base flat fee', 'buyBaseFeeFlat', 'quote atomic units removed from the input'),
     field('sell-base min', 'sellBaseMin', 'atomic units of the want leg; blank inherits'),
     field('sell-base max', 'sellBaseMax', '0 closes this direction'),
     field('buy-base min', 'buyBaseMin'),
@@ -1486,7 +1502,7 @@ const marketsView = () => {
                 h('td', { title: market.marketKey }, `${legLabel(market.base)} / ${legLabel(market.quote)}`),
                 h('td.faint', { title: `${market.feedUrl} ${market.pricePath}` }, shortId(market.feedUrl)),
                 h('td.num', `${market.toleranceBps} bps`),
-                h('td.num', `${market.feeBps} bps`),
+                h('td.num', `${market.feeBps} bps + ${market.sellBaseFeeFlat}/${market.buyBaseFeeFlat} flat`),
                 h(
                   'td',
                   // Three states, not two, and the middle one is the point of
