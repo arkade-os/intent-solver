@@ -37,7 +37,7 @@ import {
   MAX_REFUND_HORIZON,
   minFinalCltvBlocksFor,
 } from '@arkade-os/solver-core/core/receive.js'
-import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
+import { MIN_CLAIM_WINDOW, refundWithoutReceiverDelayCovers } from '@arkade-os/solver-core/core/send.js'
 import {
   absoluteLocktimeIn,
   absoluteLocktimeReached,
@@ -254,7 +254,10 @@ export interface ReceiveServiceDeps {
  * A `Pick` rather than the whole `SendSwapRow`, so this corridor depends on
  * three fields instead of the other's entire shape.
  */
-export type CoupledSendRow = Pick<SendSwapRow, 'state' | 'pkScript' | 'amountSats'>
+export type CoupledSendRow = Pick<
+  SendSwapRow,
+  'state' | 'pkScript' | 'amountSats' | 'refundLocktime' | 'refundWithoutReceiverDelay' | 'createdAt'
+>
 
 export interface ReceiveQuoteRequest {
   requesterKey?: string
@@ -714,6 +717,16 @@ export class ReceiveSwapService {
         return false
       }
       if (coupled.state !== 'funded') return false
+      if (
+        !refundWithoutReceiverDelayCovers(
+          coupled.refundWithoutReceiverDelay,
+          await this.refundDeadlineSeconds(coupled.refundLocktime),
+          coupled.createdAt,
+        )
+      ) {
+        await store.fail(row.id, 'quoted', 'refused to fund: coupled send refund timing is unsafe')
+        return false
+      }
       const outputs = await arkade.findLockups(coupled.pkScript)
       // Exact value, not a minimum, for the same reason the funding guard
       // below filters exactly: a lockup a sat short is not a smaller swap, it
@@ -845,6 +858,16 @@ export class ReceiveSwapService {
       // silently inherit that guarantee.
       if (coupled.state !== 'funded') {
         await store.fail(row.id, 'armed', `refused to fund: coupled send swap is ${coupled.state}, not funded`)
+        return false
+      }
+      if (
+        !refundWithoutReceiverDelayCovers(
+          coupled.refundWithoutReceiverDelay,
+          await this.refundDeadlineSeconds(coupled.refundLocktime),
+          coupled.createdAt,
+        )
+      ) {
+        await store.fail(row.id, 'armed', 'refused to fund: coupled send refund timing is unsafe')
         return false
       }
       // Not load-bearing: both amounts are frozen at their quotes, so

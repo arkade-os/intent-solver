@@ -346,7 +346,11 @@ const NO_DENIED_SCIDS: ReadonlySet<string> = new Set()
  * deadline is priced from, and quote, funding and payment disagreeing about
  * them is the stale-second-copy failure this decode is pure to avoid.
  */
-export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DENIED_SCIDS): DecodedInvoice => {
+const decodeInvoiceWithPolicy = (
+  raw: string,
+  denylist: ReadonlySet<string>,
+  enforceClientCltv: boolean,
+): DecodedInvoice => {
   if (raw.length > MAX_INVOICE_LENGTH) {
     throw new InvalidInvoice('too_long', undefined, {
       actual: raw.length,
@@ -409,7 +413,7 @@ export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DE
   // one that is load-bearing, because an invoice can demand unbounded CLTV
   // through `r` fields without touching `c` at all. If either goes, this is the
   // one that goes.
-  if (minFinalCltvBlocks > MAX_CLIENT_FINAL_CLTV_BLOCKS) {
+  if (enforceClientCltv && minFinalCltvBlocks > MAX_CLIENT_FINAL_CLTV_BLOCKS) {
     throw new InvalidInvoice('cltv_too_large', `final delta ${minFinalCltvBlocks} > ${MAX_CLIENT_FINAL_CLTV_BLOCKS}`, {
       actual: minFinalCltvBlocks,
       limit: MAX_CLIENT_FINAL_CLTV_BLOCKS,
@@ -477,7 +481,7 @@ export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DE
   // 40000 is one alternative among several. Whether THIS deployment's rail can
   // steer around it is `evaluateSendAcceptance`'s question; decode knows no
   // backend, which is why the bound that lives here is the backend-blind one.
-  if (minFinalCltvBlocks + bestRouteHintCltvBlocks > MAX_CLIENT_CLTV_BLOCKS) {
+  if (enforceClientCltv && minFinalCltvBlocks + bestRouteHintCltvBlocks > MAX_CLIENT_CLTV_BLOCKS) {
     throw new InvalidInvoice(
       'cltv_too_large',
       `final delta ${minFinalCltvBlocks} + best route hint ${bestRouteHintCltvBlocks} = ` +
@@ -507,3 +511,10 @@ export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DE
     ...(dropped.length > 0 ? { droppedHints: dropped } : {}),
   }
 }
+
+export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DENIED_SCIDS): DecodedInvoice =>
+  decodeInvoiceWithPolicy(raw, denylist, true)
+
+/** Decode an exact invoice this solver minted for a coupled send, without external-send CLTV policy. */
+export const decodeCoupledInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DENIED_SCIDS): DecodedInvoice =>
+  decodeInvoiceWithPolicy(raw, denylist, false)

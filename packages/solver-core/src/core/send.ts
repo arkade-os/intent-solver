@@ -18,7 +18,15 @@
  * never needs to see P until the payment itself yields it.
  */
 
-import { HOUR, MINUTE, rawDelaySeconds } from './timelocks.js'
+import {
+  HOUR,
+  MINUTE,
+  NOMINAL_BLOCK_SECONDS,
+  ceilToGranularity,
+  isEncodableDelay,
+  rawDelaySeconds,
+  relativeDelayFrom,
+} from './timelocks.js'
 import { MAX_CLIENT_CLTV_BLOCKS } from '../invoice/decode.js'
 
 /**
@@ -393,6 +401,22 @@ export const refundLocktimeFor = (
 
   return Math.max(htlcBound, unilateralBound)
 }
+
+/** Size the client's solo CSV so it cannot open before the absolute refund path. */
+export const refundWithoutReceiverDelayFor = (baseDelay: number, refundLocktime: number, quotedAt: number): number => {
+  const horizon = Math.max(0, refundLocktime - quotedAt)
+  const unit = relativeDelayFrom(baseDelay).unit
+  const required = unit === 'seconds' ? ceilToGranularity(horizon) : Math.ceil(horizon / NOMINAL_BLOCK_SECONDS)
+  const delay = Math.max(baseDelay, required)
+  if (!isEncodableDelay(delay) || relativeDelayFrom(delay).unit !== unit) {
+    throw new Error(`refund horizon requires an unencodable ${unit} relative delay: ${delay}`)
+  }
+  return delay
+}
+
+/** True when a stored solo CSV still protects the absolute refund quoted with it. */
+export const refundWithoutReceiverDelayCovers = (delay: number, refundLocktime: number, quotedAt: number): boolean =>
+  rawDelaySeconds(delay) >= refundLocktime - quotedAt
 
 /** Why a send swap was refused at creation time. */
 export type SendAcceptanceRefusal =

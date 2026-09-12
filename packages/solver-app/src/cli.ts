@@ -1158,7 +1158,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         },
         // The client's OWN key, generated above — not taken from the quote.
         client: clientRefundPub,
-        clientRefundDelay: services.arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay,
+        clientRefundDelay: swap.refundWithoutReceiverDelay,
         refundWithoutServerDelay: services.arkade.unilateralDelays.unilateralRefundDelay,
         // Every quote the service issues now carries the full covenant suite;
         // matching that here is what makes `localAddress` below agree with

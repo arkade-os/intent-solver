@@ -130,7 +130,7 @@ const traderDerivation = (quote: {
       preimageHash: scriptHashFromPaymentHash(PAYMENT_HASH),
       claimDelay: 4096,
       client: keyBytes(20),
-      clientRefundDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
+      clientRefundDelay: quote.profile.refund_without_receiver_delay as number,
       refundWithoutServerDelay: arkade.delays.unilateralRefundDelay,
       nonInteractiveParameters: {
         emulatorPubkey: keyBytes(9),
@@ -266,7 +266,10 @@ describe('rfq-core.d.mts', () => {
     const quote = {
       solver_pubkey: key(1),
       refund_locktime: 1_800_000_000,
-      profile: { receiver_pk_script: hex.encode(Uint8Array.from([0x51, 0x20, ...keyBytes(1)])) },
+      profile: {
+        receiver_pk_script: hex.encode(Uint8Array.from([0x51, 0x20, ...keyBytes(1)])),
+        refund_without_receiver_delay: 5120,
+      },
     }
 
     const mine = deriveLockup({

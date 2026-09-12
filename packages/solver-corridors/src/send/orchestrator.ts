@@ -27,12 +27,15 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import {
   DEFAULT_LOCKUP_TIMEOUT,
+  MIN_CLAIM_WINDOW,
   evaluateCouplingDeadlines,
   evaluateSendAcceptance,
   evaluateSendPayment,
   lockupDeadlineFor,
   payableCltvBlocks,
   deadlineContainsHtlc,
+  refundWithoutReceiverDelayFor,
+  refundWithoutReceiverDelayCovers,
   type SendAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/send.js'
 import { maxRoutingFeeSats, type Limits } from '@arkade-os/solver-core/core/limits.js'
@@ -46,7 +49,12 @@ import {
   relativeDelayFrom,
 } from '@arkade-os/solver-core/core/timelocks.js'
 import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
-import { decodeInvoice, type DroppedHint } from '@arkade-os/solver-core/invoice/decode.js'
+import {
+  decodeCoupledInvoice,
+  decodeInvoice,
+  paymentHashOf,
+  type DroppedHint,
+} from '@arkade-os/solver-core/invoice/decode.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
@@ -470,7 +478,13 @@ export class SendSwapService {
     // refund deadline is priced from; a pay-time re-decode reading the raw
     // hints would refuse, on a rail that caps nothing, the row this quote
     // accepted.
-    const decoded = decodeInvoice(rawInvoice, this.sendHintScidDenylist)
+    const paymentHash = paymentHashOf(rawInvoice)
+    const coupledCandidate = (await this.deps.coupling?.receiveStore.findLiveByPaymentHash(paymentHash)) ?? null
+    const exactCoupledInvoice =
+      coupledCandidate !== null && rawInvoice.toLowerCase() === coupledCandidate.invoice.toLowerCase()
+    const decoded = exactCoupledInvoice
+      ? decodeCoupledInvoice(rawInvoice, this.sendHintScidDenylist)
+      : decodeInvoice(rawInvoice, this.sendHintScidDenylist)
     if (decoded.droppedHints) {
       this.onDroppedRouteHints?.({
         paymentHash: decoded.paymentHash,
@@ -498,26 +512,36 @@ export class SendSwapService {
       return { accepted: false, reason: 'invalid_refund_address' }
     }
 
-    const acceptance = evaluateSendAcceptance({
+    const quotedAt = this.now()
+    let acceptance = evaluateSendAcceptance({
       invoiceExpiresAt: decoded.expiresAt,
       invoiceAmountSats: decoded.amountSats,
       invoiceNetwork: decoded.network,
       providerNetwork: invoicePrefix,
       limits,
-      minFinalCltvBlocks: decoded.minFinalCltvBlocks,
+      minFinalCltvBlocks: exactCoupledInvoice ? 0 : decoded.minFinalCltvBlocks,
       // CLTV the INVOICE dictates, and what THIS backend's routes may add on
       // top — the second pair is the backend's own answer because only it knows
       // whether `maxCltvBlocks` is a ceiling it enforces or merely a hope (see
       // `SendBackend.routeCltvBudgetBlocks`). Both hint totals go over
       // un-selected: `evaluateSendAcceptance` needs the raw worst.
-      worstRouteHintCltvBlocks: decoded.worstRouteHintCltvBlocks,
-      bestRouteHintCltvBlocks: decoded.bestRouteHintCltvBlocks,
-      routeCltvBudgetBlocks: this.deps.ln.routeCltvBudgetBlocks,
-      enforcesRouteCltv: this.deps.ln.enforcesRouteCltv,
+      worstRouteHintCltvBlocks: exactCoupledInvoice ? 0 : decoded.worstRouteHintCltvBlocks,
+      bestRouteHintCltvBlocks: exactCoupledInvoice ? 0 : decoded.bestRouteHintCltvBlocks,
+      routeCltvBudgetBlocks: exactCoupledInvoice ? 0 : this.deps.ln.routeCltvBudgetBlocks,
+      enforcesRouteCltv: exactCoupledInvoice || this.deps.ln.enforcesRouteCltv,
       unilateralClaimDelay: arkade.delays.unilateralClaimDelay,
       lockupTimeout: this.lockupTimeout,
-      now: this.now(),
+      now: quotedAt,
     })
+    if (acceptance.accept && exactCoupledInvoice && coupledCandidate !== null) {
+      acceptance = {
+        ...acceptance,
+        refundLocktime: Math.max(
+          acceptance.refundLocktime,
+          (await this.refundDeadlineSeconds(coupledCandidate.refundLocktime)) + MIN_CLAIM_WINDOW,
+        ),
+      }
+    }
     if (!acceptance.accept)
       return { accepted: false, reason: acceptance.reason, ...(acceptance.detail ? { detail: acceptance.detail } : {}) }
 
@@ -534,7 +558,7 @@ export class SendSwapService {
     // The Lightning receive corridor, asked FIRST and by name, because its
     // answer is the one that can be something other than a refusal: a live row
     // there means this client is refreshing Arkade funds through us.
-    const coupled = (await this.deps.coupling?.receiveStore.findLiveByPaymentHash(decoded.paymentHash)) ?? null
+    const coupled = coupledCandidate
     if (coupled) {
       // Only from `quoted`. A receive row that reached `armed` took a REAL htlc
       // from somewhere — a genuine conflict, and the case the cross-corridor
@@ -547,7 +571,7 @@ export class SendSwapService {
       }
       const deadlines = evaluateCouplingDeadlines({
         sendRefundLocktime: acceptance.refundLocktime,
-        receiveRefundLocktime: coupled.refundLocktime,
+        receiveRefundLocktime: await this.refundDeadlineSeconds(coupled.refundLocktime),
       })
       // Refused with its OWN reason, not `duplicate_swap`: the request is
       // legitimate and the deadline is what cannot be served, which is the
@@ -561,6 +585,20 @@ export class SendSwapService {
     for (const peer of this.deps.peerStores ?? []) {
       if (await peer.findLiveByPaymentHash(decoded.paymentHash)) {
         return { accepted: false, reason: 'duplicate_swap' }
+      }
+    }
+    let refundWithoutReceiverDelay: number
+    try {
+      refundWithoutReceiverDelay = refundWithoutReceiverDelayFor(
+        arkade.delays.unilateralRefundWithoutReceiverDelay,
+        acceptance.refundLocktime,
+        quotedAt,
+      )
+    } catch (error) {
+      return {
+        accepted: false,
+        reason: 'cltv_too_large',
+        detail: error instanceof Error ? error.message : String(error),
       }
     }
     const feeEstimate = coupled
@@ -631,7 +669,7 @@ export class SendSwapService {
         refundLocktime,
         claimDelay: arkade.delays.unilateralClaimDelay,
         client: hex.decode(options.clientRefundPubkey),
-        clientRefundDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
+        clientRefundDelay: refundWithoutReceiverDelay,
         refundWithoutServerDelay: arkade.delays.unilateralRefundDelay,
         // Every quote from here on carries the current, full covenant suite —
         // no legacy selector. See `NonInteractiveParameters.legacy`'s own doc comment
@@ -664,7 +702,7 @@ export class SendSwapService {
           serverPubkey: arkade.serverPubkey,
           claimDelay: arkade.delays.unilateralClaimDelay,
           refundDelay: arkade.delays.unilateralRefundDelay,
-          refundWithoutReceiverDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
+          refundWithoutReceiverDelay,
           pkScript: hex.encode(script.pkScript),
           lockupAddress: script.address(arkade.hrp, serverKey).encode(),
           refundPkScript: hex.encode(refundPkScript),
@@ -997,6 +1035,11 @@ export class SendSwapService {
       await store.fail(row.id, 'funded', 'provider key rotated since quote; refusing to pay an unclaimable lockup')
       return false
     }
+    const refundDeadline = await this.refundDeadlineSeconds(row.refundLocktime)
+    if (!refundWithoutReceiverDelayCovers(row.refundWithoutReceiverDelay, refundDeadline, row.createdAt)) {
+      await store.fail(row.id, 'funded', 'refused to proceed: client solo refund opens before the quoted refund')
+      return false
+    }
     // A COUPLED row can never be paid: the invoice is one we minted, and a node
     // cannot pay its own invoice. Its preimage arrives on-chain instead, when
     // the client claims the payout we already made on the receive leg — so this
@@ -1030,7 +1073,6 @@ export class SendSwapService {
     const invoice = decodeInvoice(row.invoice, this.sendHintScidDenylist)
     // Resolved to seconds first: `evaluateSendPayment` measures the remaining claim
     // window against MIN_CLAIM_WINDOW, and a raw height there reads as a deadline in 1970.
-    const refundDeadline = await this.refundDeadlineSeconds(row.refundLocktime)
     const decision = evaluateSendPayment({
       invoiceExpiresAt: row.invoiceExpiresAt,
       refundLocktime: refundDeadline,
@@ -1303,6 +1345,13 @@ export class SendSwapService {
       await store.fail(row.id, row.state, 'paying state with no idempotency key')
       return false
     }
+    const refundDeadlineForCltv = await this.refundDeadlineSeconds(row.refundLocktime)
+    if (!refundWithoutReceiverDelayCovers(row.refundWithoutReceiverDelay, refundDeadlineForCltv, row.createdAt)) {
+      const reason = 'refused to pay: client_solo_refund_too_soon'
+      if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
+      else await store.fail(row.id, row.state, reason)
+      return false
+    }
     // Decoded once for every field below — same reasoning as `whenFunded`'s.
     const invoice = decodeInvoice(row.invoice, this.sendHintScidDenylist)
     const cltv = {
@@ -1348,7 +1397,6 @@ export class SendSwapService {
     // Resolved to seconds for the same reason `whenFunded` resolves it: both readings
     // below order this deadline against a CLTV budget, which is Lightning's and is
     // wall-clock whatever unit our covenant counts.
-    const refundDeadlineForCltv = await this.refundDeadlineSeconds(row.refundLocktime)
     if (!ln.enforcesRouteCltv && !deadlineContainsHtlc(cltv, refundDeadlineForCltv, this.now())) {
       const reason = 'refused to pay: uncapped_route_deadline_too_short'
       if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })

@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
+  refundWithoutReceiverDelayFor,
+  refundWithoutReceiverDelayCovers,
   refundLocktimeFor,
   worstCaseHtlcBlocks,
   REFUND_SAFETY_MARGIN,
@@ -96,5 +98,21 @@ describe('refundLocktimeFor', () => {
     const MAINNET_CLAIM_DELAY = 605184
     const refundAt = refundLocktimeFor(cltvOf(18), MAINNET_CLAIM_DELAY, NOW)
     expect(refundAt).toBeGreaterThan(NOW + MAINNET_CLAIM_DELAY)
+  })
+})
+
+describe('refundWithoutReceiverDelayFor', () => {
+  it('extends a seconds ladder through the quoted absolute refund horizon', () => {
+    const refundLocktime = NOW + 420 * SECONDS_PER_BLOCK
+    const delay = refundWithoutReceiverDelayFor(5120, refundLocktime, NOW)
+
+    expect(delay).toBe(252_416)
+    expect(refundWithoutReceiverDelayCovers(delay, refundLocktime, NOW)).toBe(true)
+    expect(refundWithoutReceiverDelayCovers(delay - 512, refundLocktime, NOW)).toBe(false)
+  })
+
+  it('preserves a block-typed ladder and rounds the horizon up in blocks', () => {
+    expect(refundWithoutReceiverDelayFor(28, NOW + 21 * 600 + 1, NOW)).toBe(28)
+    expect(refundWithoutReceiverDelayFor(28, NOW + 28 * 600 + 1, NOW)).toBe(29)
   })
 })
