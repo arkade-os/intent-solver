@@ -20,6 +20,7 @@ import { setFrom, type RfqServices } from '../support/corridorSet.js'
 import { forgeInvoiceWithPreimage } from '@arkade-os/solver-rails-fake/ln/fake/bolt11.js'
 import type { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
+import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
 
 const DENIED = 'aaaaaaaaaaaaaaaa'
 const CLIENT_REFUND_PUBKEY = hex.encode(schnorr.getPublicKey(new Uint8Array(32).fill(20)))
@@ -44,7 +45,10 @@ const serviceWith = (denylist: ReadonlySet<string>) =>
   ({
     send: {
       sendHintScidDenylist: denylist,
-      quote: async () => ({ accepted: false, reason: 'pricing_unavailable' }),
+      quote: async (invoice: string) => {
+        decodeInvoice(invoice, denylist)
+        return { accepted: false, reason: 'pricing_unavailable' }
+      },
     } as unknown as SendSwapService,
   }) as RfqServices
 
@@ -69,7 +73,7 @@ describe('the RFQ ingress decodes with the send service hint denylist', () => {
     // really is where it fires — before the quote.
     const outcome = await respondToRfqRequest(setFrom(serviceWith(new Set()), { store }), request)
     expect(outcome.kind).toBe('invalid')
-    expect(outcome.detail).toContain('profile.invoice did not decode')
+    expect(outcome.detail).toContain('quote rejected the invoice')
     expect(outcome.detail).toContain('cltv_too_large')
   })
 

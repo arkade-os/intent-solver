@@ -40,6 +40,7 @@ import type {
 import { ORPHANED_REGISTRATION_SECONDS } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { rfqStateFromRow, rfqStatusPayload } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
+import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
 
 /**
  * The CLTV terms, with no route hint and an enforcing backend unless stated.
@@ -644,7 +645,7 @@ describe('quote', () => {
       refundLocktime: swap.refundLocktime, // trusted: deadline
       claimDelay: 4096, // client's own aspInfo derivation
       client: keyBytes(11), // the client's OWN key, sent with the request
-      clientRefundDelay: 5120, // client's own aspInfo derivation
+      clientRefundDelay: swap.refundWithoutReceiverDelay, // binding quote field
       refundWithoutServerDelay: 4608, // client's own aspInfo derivation
       // Every quote the service issues now carries the full covenant suite;
       // matching that here is what makes the derived address agree with
@@ -966,7 +967,7 @@ describe('tick: refusals before money moves', () => {
       serverPubkey: key(3),
       claimDelay: 4096,
       refundDelay: 4608,
-      refundWithoutReceiverDelay: 5120,
+      refundWithoutReceiverDelay: 100_352,
       pkScript: '5120' + 'ef'.repeat(32),
       lockupAddress: 'ark1qexpiring',
       nonInteractiveParameters: true,
@@ -996,7 +997,7 @@ describe('tick: refusals before money moves', () => {
       serverPubkey: key(3),
       claimDelay: 4096,
       refundDelay: 4608,
-      refundWithoutReceiverDelay: 5120,
+      refundWithoutReceiverDelay: 5632,
       pkScript: '5120' + 'cd'.repeat(32),
       lockupAddress: 'ark1qtight',
       nonInteractiveParameters: true,
@@ -1006,6 +1007,33 @@ describe('tick: refusals before money moves', () => {
     const row = await service.tick('tight')
     expect(row.state).toBe('refused')
     expect(row.failureReason).toContain('claim_window_too_short')
+    expect(ln.payCalls).toHaveLength(0)
+  })
+
+  it('refuses a legacy row whose solo refund opens before its absolute refund', async () => {
+    await store.insertQuote({
+      id: 'legacy-timing',
+      invoice: INVOICE,
+      paymentHash: 'c'.repeat(64),
+      amountSats: AMOUNT,
+      invoiceExpiresAt: clock + 3600,
+      refundLocktime: clock + 100_000,
+      senderPubkey: key(1),
+      receiverPubkey: key(1),
+      serverPubkey: key(3),
+      claimDelay: 4096,
+      refundDelay: 4608,
+      refundWithoutReceiverDelay: 5120,
+      pkScript: '5120' + 'bc'.repeat(32),
+      lockupAddress: 'ark1qlegacytiming',
+      nonInteractiveParameters: true,
+    })
+    await store.transition('legacy-timing', 'quoted', 'funded', { lockup_value: AMOUNT })
+
+    const row = await service.tick('legacy-timing')
+
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toContain('solo refund opens before')
     expect(ln.payCalls).toHaveLength(0)
   })
 
@@ -1515,6 +1543,28 @@ describe('tick: failure and recovery', () => {
     expect(row.state).toBe('paid')
     expect(ln.payCalls).toHaveLength(1)
     expect(ln.payCalls[0]?.idempotencyKey).toBe(`swap-${PAYMENT_HASH}`)
+  })
+
+  it('refuses to submit an unsafe pre-upgrade row already persisted as paying', async () => {
+    const { swap } = await quoted()
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+    await store.transition(swap.id, 'funded', 'paying', {
+      pay_attempted_at: clock,
+      idempotency_key: `swap-${PAYMENT_HASH}`,
+    })
+    await (store as unknown as { driver: { run: (sql: string, params: unknown[]) => Promise<unknown> } }).driver.run(
+      'UPDATE send_swap SET refund_without_receiver_delay = ? WHERE id = ?',
+      [512, swap.id],
+    )
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+
+    const row = await service.tick(swap.id)
+
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toContain('client_solo_refund_too_soon')
+    expect(ln.sendHtlcCalls).toEqual([swap.paymentHash])
+    expect(ln.payCalls).toHaveLength(0)
   })
 
   it('refuses to re-submit a mid-payment row after the rail lost its CLTV ceiling', async () => {
@@ -2220,6 +2270,32 @@ describe('coupling a self-payment at quote time', () => {
     expect(consulted).toContain(PAYMENT_HASH)
   })
 
+  it('accepts the exact 420-block invoice it minted and moves the solo refund behind both legs', async () => {
+    const invoice = forgeInvoice({
+      network: 'bc',
+      amountSats: AMOUNT,
+      paymentHash: hex.decode(PAYMENT_HASH),
+      timestamp: INVOICE_TIMESTAMP,
+      expirySeconds: 43_200,
+      minFinalCltvBlocks: 420,
+    })
+    const receiveRefundLocktime = clock + 2 * 3600
+    const outcome = await withCoupledReceive(safeRow({ invoice, refundLocktime: receiveRefundLocktime })).quote(
+      invoice,
+      REFUND_ADDRESS,
+      { clientRefundPubkey: CLIENT_REFUND_PUBKEY },
+    )
+
+    expect(outcome.accepted).toBe(true)
+    if (!outcome.accepted) return
+    expect(outcome.swap.refundLocktime).toBe(receiveRefundLocktime + MIN_CLAIM_WINDOW)
+    expect(rawDelaySeconds(outcome.swap.refundWithoutReceiverDelay)).toBeGreaterThanOrEqual(
+      outcome.swap.refundLocktime - outcome.swap.createdAt,
+    )
+    expect(ln.feeEstimateCalls).toHaveLength(0)
+    expect(ln.balanceCalls).toBe(0)
+  })
+
   it('does not price or reserve Lightning float for a coupled quote', async () => {
     ln.balance = { availableSats: 0, incomingSats: 0 }
     ln.feeEstimate = { feeSats: 278 }
@@ -2280,16 +2356,14 @@ describe('coupling a self-payment at quote time', () => {
     expect(outcome).toEqual({ accepted: false, reason: 'coupled_invoice_mismatch' })
   })
 
-  it('refuses a coupling whose deadlines do not clear the claim window', async () => {
-    // One second short: the client could refund their lockup the moment Ds
-    // opens and only THEN claim our payout, still before Dr — both sides.
+  it('extends a coupling whose initial deadline does not clear the claim window', async () => {
     const row = safeRow({ refundLocktime: sendRefundLocktime() - MIN_CLAIM_WINDOW + 1 })
     const outcome = await withCoupledReceive(row).quote(INVOICE, REFUND_ADDRESS, {
       clientRefundPubkey: CLIENT_REFUND_PUBKEY,
     })
-    // Not `duplicate_swap`: the request was legitimate, and the deadline — not
-    // a conflict — is the reason it cannot be served.
-    expect(outcome).toEqual({ accepted: false, reason: 'coupled_deadline_unsafe' })
+    expect(outcome.accepted).toBe(true)
+    if (!outcome.accepted) return
+    expect(outcome.swap.refundLocktime).toBe(row.refundLocktime + MIN_CLAIM_WINDOW)
   })
 
   it('still refuses a hash live in an opaque peer store', async () => {
@@ -2929,7 +3003,7 @@ describe('SendSwapService — block-typed timelocks', () => {
   const staticTip = { height: async () => TIP }
 
   it('writes the refund deadline as a HEIGHT that still carries the unilateral bound', async () => {
-    const outcome = await blockService(staticTip).quote(INVOICE, REFUND_ADDRESS, {
+    const outcome = await blockService(staticTip).quote(FORGED.invoice, REFUND_ADDRESS, {
       clientRefundPubkey: CLIENT_REFUND_PUBKEY,
     })
     if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
@@ -2947,7 +3021,7 @@ describe('SendSwapService — block-typed timelocks', () => {
   })
 
   it('builds the covenant from that same height, so the row can spend its own lockup', async () => {
-    const outcome = await blockService(staticTip).quote(INVOICE, REFUND_ADDRESS, {
+    const outcome = await blockService(staticTip).quote(FORGED.invoice, REFUND_ADDRESS, {
       clientRefundPubkey: CLIENT_REFUND_PUBKEY,
     })
     if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
@@ -2959,32 +3033,16 @@ describe('SendSwapService — block-typed timelocks', () => {
 
   it('refuses to quote at all when block mode has nowhere to read a height', async () => {
     await expect(
-      blockService(undefined).quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY }),
+      blockService(undefined).quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY }),
     ).rejects.toThrow(/no chainTip provider is wired/)
   })
 
-  it('resolves the height to seconds before ordering it against a route CLTV budget', async () => {
-    // The rail that cannot cap a route is the one that consults the deadline
-    // directly. A raw height there reads as a deadline in 1970, so the row is
-    // refused `uncapped_route_deadline_too_short` with a lockup already funded.
+  it('refuses an uncapped route whose protected horizon cannot fit a block-typed CSV', async () => {
     ln.enforcesRouteCltv = false
     ln.routeCltvBudgetBlocks = UNENFORCED_ROUTE_CLTV_BUDGET_BLOCKS
     const svc = blockService(staticTip)
     const outcome = await svc.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
-    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
-    const swap = outcome.swap
-    // Non-vacuous: the stored value taken at face value fails this very gate.
-    expect(
-      deadlineContainsHtlc(cltvOf(180, 0, UNENFORCED_ROUTE_CLTV_BUDGET_BLOCKS, false), swap.refundLocktime, clock),
-    ).toBe(false)
-
-    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
-    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
-    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
-    const row = await svc.tick(swap.id)
-    expect(row.state).not.toBe('refused')
-    expect(row.failureReason ?? '').not.toContain('uncapped_route_deadline_too_short')
-    expect(ln.payCalls).toHaveLength(1)
+    expect(outcome).toMatchObject({ accepted: false, reason: 'cltv_too_large' })
   })
 
   it('leaves a seconds-typed deployment writing a unix-seconds deadline, as it always did', async () => {

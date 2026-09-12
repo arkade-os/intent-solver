@@ -86,15 +86,16 @@ whichever derivation matched.
 
 Every `rfq_request` now requires `client_refund_pubkey` in `profile` — the
 client's own key for three additional covenant leaves the solver's quote
-`profile.receiver_pk_script` and the operator's own `/v1/info` delays
+`profile.receiver_pk_script`, required
+`profile.refund_without_receiver_delay`, and the operator's own `/v1/info`
 complete (see `docs/rfq-protocol.md` § 7.1.1.1 for the full picture — eight
 leaves, nine once the solver has deployed the timelocked non-interactive
 refund leaf). The one that matters most for the client's own recourse is the
 fully unilateral one: needs nobody, not the Arkade server, not the emulator,
 not the solver, once its own CSV delay
-(`unilateral_refund_without_receiver_delay`, from the same Arkade operator
-`/v1/info` `unilateral_claim_delay` already comes from — no wire echo
-needed) has passed since funding. The other two (`refund_collaborative`,
+(`unilateral_refund_without_receiver_delay`, negotiated so it cannot mature
+before the quote's absolute `refund_locktime`) has passed since funding. The
+other two (`refund_collaborative`,
 `refund_without_server`) are faster, more-cooperative fallbacks that resolve
 before that one becomes necessary — `deriveLockup` derives all of them
 locally alongside the rest of the script; there is nothing further to call.

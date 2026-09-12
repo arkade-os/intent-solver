@@ -21,7 +21,8 @@ import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestr
 import { arkadeOpsFromContext } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { findClaimPreimage, findLockupOutpoints } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import { HOUR } from '@arkade-os/solver-core/core/timelocks.js'
+import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
+import { HOUR, rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
 import { nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { newSealedPreimage } from './support/claimPacket.js'
 import { payFromCounterparty, solverInvoice, type CounterpartyPayment } from './support/counterparty.js'
@@ -127,13 +128,12 @@ describe('e2e self-payment refresh — edges and failure spine', () => {
   })
 
   it(
-    'REFUSES the coupling when the two refund deadlines are too close together',
+    'extends the send refund horizon when the two initial deadlines are too close together',
     async () => {
-      // `Dr` is fixed at the receive leg's quote clock + MAX_REFUND_HORIZON, and
-      // `Ds` at the send leg's clock plus a constant derived from the invoice.
-      // Quoting the receive leg far in the FUTURE pushes `Dr` past `Ds`, which
-      // is the shape the invariant exists to catch: a client able to refund
-      // their lockup before our recourse on the payout has opened.
+      // Quoting the receive leg far in the future pushes its provider refund
+      // deadline past the send leg's ordinary deadline. The send quote must
+      // extend both its absolute deadline and the relative CSV committed in
+      // the script so our claim window remains real and client-derivable.
       const far = () => nowSeconds() + 4 * 24 * HOUR
       const { swap } = await quoteReceive(receiveWith(far))
 
@@ -141,10 +141,13 @@ describe('e2e self-payment refresh — edges and failure spine', () => {
         clientRefundPubkey: CLIENT_REFUND_PUBKEY,
       })
 
-      expect(outcome.accepted).toBe(false)
-      if (!outcome.accepted) expect(outcome.reason).toBe('coupled_deadline_unsafe')
-      // Nothing persisted behind the refusal.
-      expect(await sendStore.findByPaymentHash(swap.paymentHash)).toBeNull()
+      expect(outcome.accepted).toBe(true)
+      if (!outcome.accepted) return
+      expect(outcome.swap.refundLocktime - swap.refundLocktime).toBeGreaterThanOrEqual(MIN_CLAIM_WINDOW)
+      expect(rawDelaySeconds(outcome.swap.refundWithoutReceiverDelay)).toBeGreaterThanOrEqual(
+        outcome.swap.refundLocktime - outcome.swap.createdAt,
+      )
+      expect(await sendStore.findByPaymentHash(swap.paymentHash)).toEqual(outcome.swap)
     },
     SWAP_TIMEOUT_MS,
   )

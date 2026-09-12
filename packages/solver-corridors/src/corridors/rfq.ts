@@ -20,7 +20,12 @@
 import { ArkAddress } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { lockupDeadlineFor } from '@arkade-os/solver-core/core/send.js'
-import { decodeInvoice, InvalidInvoice, type InvoiceRejection } from '@arkade-os/solver-core/invoice/decode.js'
+import {
+  amountSatsOf,
+  paymentHashOf,
+  InvalidInvoice,
+  type InvoiceRejection,
+} from '@arkade-os/solver-core/invoice/decode.js'
 import type { RfqRefusalError, RfqRefusalErrorCode } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import type { CorridorRfqOutcome as RfqOutcome, QuoteOptions } from '@arkade-os/solver-core/core/corridor.js'
 import type { SendSwapService } from '../send/orchestrator.js'
@@ -196,9 +201,11 @@ export const respondToLightningRfqRequest = async (
   // refuse at the ingress exactly the invoice the denylist makes payable one
   // call later — the best-hint floor fires on the very hint we are declining to
   // price.
-  let decoded
+  let paymentHash: string
+  let invoiceAmountSats: number
   try {
-    decoded = decodeInvoice(request.profile.invoice, service.sendHintScidDenylist)
+    paymentHash = paymentHashOf(request.profile.invoice)
+    invoiceAmountSats = amountSatsOf(request.profile.invoice)
   } catch (error) {
     if (error instanceof InvalidInvoice) {
       return {
@@ -209,17 +216,17 @@ export const respondToLightningRfqRequest = async (
     }
     throw error
   }
-  if (request.amount !== undefined && request.amount !== decoded.amountSats) {
+  if (request.amount !== undefined && request.amount !== invoiceAmountSats) {
     return {
       kind: 'invalid',
       payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload', {
         error_code: 'invoice_amount_mismatch',
         field: 'amount',
         actual: request.amount,
-        expected: decoded.amountSats,
+        expected: invoiceAmountSats,
         unit: 'sats',
       }),
-      detail: `amount ${request.amount} does not match the invoice's ${decoded.amountSats} sats`,
+      detail: `amount ${request.amount} does not match the invoice's ${invoiceAmountSats} sats`,
     }
   }
 
@@ -227,7 +234,7 @@ export const respondToLightningRfqRequest = async (
   // prior negotiation is in (spec § 4.5). Same content falls through to the
   // natural-key path below, which re-emits or conflicts as the row dictates.
   const prior = await store.findByRfqId(request.rfq_id)
-  if (prior && prior.paymentHash !== decoded.paymentHash) {
+  if (prior && prior.paymentHash !== paymentHash) {
     return {
       kind: 'refused',
       payload: rfqRefusalPayload(request.rfq_id, 'quote_conflict'),
@@ -276,7 +283,7 @@ export const respondToLightningRfqRequest = async (
     // before it ever reaches address verification — re-emitting it here
     // would hand the client a payload its own code cannot parse, not a clean
     // refusal. Only an RFQ-family row's OWN key is ever binding.
-    const existing = await store.findLiveByPaymentHash(decoded.paymentHash)
+    const existing = await store.findLiveByPaymentHash(paymentHash)
     if (
       existing?.state === 'quoted' &&
       existing.clientRefundPubkey === request.profile.client_refund_pubkey &&

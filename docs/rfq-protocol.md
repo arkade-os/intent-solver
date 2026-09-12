@@ -387,7 +387,10 @@ one.
   "pair": "arkade:BTC->lightning:BTC",
   "amount_side": "to",
   "amount": "50000",
-  "profile": { "…": "per-profile fields, § 7" }
+  "profile": {
+    "refund_without_receiver_delay": 606208,
+    "…": "per-profile fields, § 7"
+  }
 }
 ```
 
@@ -433,9 +436,10 @@ one.
 - `refund_locktime` — HTLC-class quotes only (absent for atomic class): the
   absolute unix-seconds time the client's refund path opens.
 - The top-level fields `solver_pubkey`, `valid_until`, `from_amount`,
-  `to_amount` and `refund_locktime` are the **binding fields** — the only
-  fields a client trusts (§ 6). Everything in `profile` is compare-only or
-  informational.
+  `to_amount` and `refund_locktime` are **binding fields**. HTLC send quotes
+  also bind `profile.refund_without_receiver_delay`: the exact BIP68 delay the
+  client must put in its solo-refund leaf. Other profile fields are
+  compare-only or informational.
 
 ### 4.3 `rfq_refusal`
 
@@ -854,11 +858,12 @@ server and the emulator are ever both unavailable, by the client's own
 unilateral broadcast using `client_refund_pubkey`'s key, which is state the
 client itself now holds by design (see `docs/integration-js.md`).
 
-The client-side leaves' CSV delays (`unilateral_refund_delay`,
-`unilateral_refund_without_receiver_delay`) are not carried on the wire: they
-derive purely from the Arkade operator's own public `/v1/info`, the same
-source `unilateral_claim_delay` already comes from, so both sides reach the
-same numbers independently.
+`unilateral_refund_delay` still derives from the Arkade operator's public
+`/v1/info`. The solo `unilateral_refund_without_receiver_delay` is instead the
+quote's required `profile.refund_without_receiver_delay`, because it may need
+to extend beyond the operator's base ladder to stay behind `refund_locktime`.
+The client validates that value, builds it into its local derivation, and
+refuses a quote that omits it or opens the solo refund too early.
 
 ##### 7.1.1.1 The covenant script: eight leaves, nine with the timelocked non-interactive refund leaf
 

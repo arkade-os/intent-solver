@@ -106,6 +106,7 @@ export const rfqQuotePayload = (row: SendSwapRow, validUntil: number, rfqId: str
   profile: {
     payment_hash: row.paymentHash,
     lockup_address: row.lockupAddress,
+    refund_without_receiver_delay: row.refundWithoutReceiverDelay,
     // Compare-only, same as lockup_address: the solver's own claim
     // destination, needed only so the client's local script reconstruction
     // (which must include EVERY leaf to compute a matching merkle root) can

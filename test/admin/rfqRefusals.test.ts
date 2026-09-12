@@ -7,6 +7,7 @@ import { reportRfqRefusal } from '@arkade-os/solver-transport/ingress/refusals.j
 import type { RelayConnection, RelayEvent } from '@arkade-os/solver-transport/relay/connection.js'
 import { createCorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
 import { forgeInvoice } from '@arkade-os/solver-rails-fake/ln/fake/bolt11.js'
+import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
 import { setFrom } from '../support/corridorSet.js'
 
 const RFQ_ID = 'ab'.repeat(32)
@@ -32,8 +33,15 @@ const request = {
 }
 
 const setup = () => {
-  const quote = vi.fn()
-  const corridors = setFrom({ send: { quote } as never })
+  const quote = vi.fn(async (rawInvoice: string) => {
+    decodeInvoice(rawInvoice)
+    return { accepted: false as const, reason: 'pricing_unavailable' as never }
+  })
+  const store = {
+    findByRfqId: async () => null,
+    findLiveByPaymentHash: async () => null,
+  }
+  const corridors = setFrom({ send: { quote } as never }, { store: store as never })
   const readers = createCorridorReaderSet([])
   const rfqRefusals = createRfqRefusalTail()
   const log = vi.fn()
@@ -80,7 +88,7 @@ describe('RFQ refusal diagnostics', () => {
       limit: 288,
       unit: 'blocks',
     })
-    expect(deps.quote).not.toHaveBeenCalled()
+    expect(deps.quote).toHaveBeenCalledOnce()
     const response = await deps.admin.request('/api/rfq-refusals')
     expect(response.status).toBe(200)
     const body = (await response.json()) as {
