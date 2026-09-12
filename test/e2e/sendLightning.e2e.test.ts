@@ -249,7 +249,11 @@ const clientDerivedAddress = (swap: SendSwapRow, invoice: string, refundAddress:
     // here would only agree with it while the regtest stack happened to be
     // configured the way they were written — and the assertion below would then
     // be comparing two addresses derived from different parameters.
-    clientRefundDelay: arkade.ctx.unilateralDelays.unilateralRefundWithoutReceiverDelay,
+    // This delay is part of the quote because the absolute refund horizon can
+    // grow with the invoice's CLTV exposure. Reusing the Arkade base delay
+    // would reconstruct the pre-change script, not the script the client is
+    // being asked to fund.
+    clientRefundDelay: swap.refundWithoutReceiverDelay,
     refundWithoutServerDelay: arkade.ctx.unilateralDelays.unilateralRefundDelay,
     nonInteractiveParameters: {
       emulatorPubkey: hex.decode(arkade.emulator.pubkey),
