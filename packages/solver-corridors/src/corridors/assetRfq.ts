@@ -152,8 +152,8 @@ export const assetRfqReader = (descriptor: CorridorDescriptor, store: AssetRfqSw
   // Narrowed like every other read here: one store backs every market.
   committedSats: () => store.committedSats(descriptor.pair),
   page: async (options) => {
-    const { rows, nextCursor } = await store.page(options)
-    return { swaps: rows.filter((row) => row.pair === descriptor.pair).map(projectAssetRfq), nextCursor }
+    const { rows, nextCursor } = await store.page({ ...options, pair: descriptor.pair })
+    return { swaps: rows.map(projectAssetRfq), nextCursor }
   },
   detail: async (id) => {
     try {

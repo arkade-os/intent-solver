@@ -14,7 +14,7 @@
  */
 import { hex } from '@scure/base'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
-import { CovenantSwapScript } from './covenant.js'
+import { CovenantSwapScript, parseAssetId } from './covenant.js'
 /**
  * The structural subset of a swap row `covenantScriptFromRow`
  * (`src/send/arkadeOps.ts`) needs to rebuild the Arkade-side covenant
@@ -70,6 +70,21 @@ export interface CovenantScriptRow {
    * distinction ever mattered; today nothing asks it to.
    */
   nonInteractiveParameters: boolean | null
+  /**
+   * The asset this lockup is denominated in — canonical 68-hex, or absent/null
+   * for a sats lockup.
+   *
+   * OPTIONAL, and its absence is the sats answer rather than a missing value:
+   * every row written before an asset corridor existed omits it, and omitting
+   * it reproduces the covenant those rows were funded against byte for byte.
+   *
+   * It has to be on the ROW rather than re-derived from configuration, for the
+   * same reason `nonInteractiveParameters` is: this field SELECTS a script
+   * shape. An asset lockup rebuilt without it derives a different `pkScript`,
+   * `assertScriptMatchesRow` then refuses every spend, and the solver's asset
+   * is stranded behind a covenant nothing can reconstruct.
+   */
+  asset?: string | null
 }
 
 /**
@@ -139,6 +154,12 @@ export const assertCovenantScriptRow = (row: unknown, source: string): CovenantS
       `${source} supplied a live lockup whose nonInteractiveParameters is ${typeof suite}, not a boolean or null`,
     )
   }
+  // Absence is legitimate — it is the sats answer — but a present-and-wrong
+  // value selects a different script shape, which is the fault this narrows.
+  const asset = candidate.asset
+  if (asset !== undefined && asset !== null && typeof asset !== 'string') {
+    throw new Error(`${source} supplied a live lockup whose asset is ${typeof asset}, not a string, null or absent`)
+  }
   return candidate as unknown as CovenantScriptRow
 }
 
@@ -178,5 +199,9 @@ export const covenantScriptFromRow = (row: CovenantScriptRow): CovenantSwapScrip
       // funded against. See `NonInteractiveParameters.legacy`'s doc comment.
       ...(row.nonInteractiveParameters ? {} : { legacy: 'preTimelockedRefund' as const }),
     },
+    // CANONICAL order — `parseAssetId` returns the id as the registry publishes
+    // it and `VHTLC.ScriptV2` reverses it for `INSPECTOUTASSETLOOKUP` itself.
+    // Pre-reversing here would rebuild a script the lockup was never funded to.
+    ...(row.asset ? { asset: parseAssetId(row.asset) } : {}),
   })
 }
