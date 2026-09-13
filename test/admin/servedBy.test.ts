@@ -61,6 +61,8 @@ const market = (over: Record<string, unknown> = {}) => ({
   pricePath: '/price',
   toleranceBps: 50,
   feeBps: 10,
+  sellBaseFeeFlat: 330n,
+  buyBaseFeeFlat: 1_000_000n,
   sellBase: null,
   buyBase: null,
   enabled: true,
@@ -211,6 +213,8 @@ const overview = async (policy: Record<string, unknown>, rows: unknown[] = [mark
       enabled: boolean
       active: boolean
       servedBy: string[]
+      sellBaseFeeFlat: string
+      buyBaseFeeFlat: string
       sellBase: { min: string; max: string } | null
       buyBase: { min: string; max: string } | null
     }[]
@@ -248,6 +252,13 @@ describe('GET /api/overview — markets', () => {
     const body = await overview({}, [bounded])
     expect(body.markets[0]?.sellBase).toEqual({ min: '1', max: String(2n ** 70n) })
     expect(body.markets[0]?.buyBase).toBeNull()
+  })
+
+  it('sends directional flat fees as decimal strings', async () => {
+    expect((await overview({})).markets[0]).toMatchObject({
+      sellBaseFeeFlat: '330',
+      buyBaseFeeFlat: '1000000',
+    })
   })
 })
 

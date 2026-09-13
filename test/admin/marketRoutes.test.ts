@@ -29,6 +29,8 @@ const body = (over: Record<string, unknown> = {}) => ({
   pricePath: '/price',
   toleranceBps: 10,
   feeBps: 25,
+  sellBaseFeeFlat: '330',
+  buyBaseFeeFlat: '1000000',
   ...over,
 })
 
@@ -100,6 +102,14 @@ describe('GET /api/markets', () => {
     expect(market!.buyBase).toEqual({ min: '0', max: '123456789012345678901234567890' })
     await adminStore.close()
   })
+
+  it('renders each directional flat fee as an exact decimal string', async () => {
+    const { app, adminStore } = await build()
+    await put(app, body())
+    const [market] = (await list(app)).markets
+    expect(market).toMatchObject({ sellBaseFeeFlat: '330', buyBaseFeeFlat: '1000000' })
+    await adminStore.close()
+  })
 })
 
 describe('PUT /api/markets', () => {
@@ -138,6 +148,14 @@ describe('PUT /api/markets', () => {
     const { app, adminStore } = await build()
     await put(app, body())
     expect((await adminStore.getMarket(KEY))!.enabled).toBe(true)
+    await adminStore.close()
+  })
+
+  it('defaults omitted flat fees to zero for pre-feature clients', async () => {
+    const { app, adminStore } = await build()
+    const response = await put(app, body({ sellBaseFeeFlat: undefined, buyBaseFeeFlat: undefined }))
+    expect(response.status).toBe(200)
+    expect(await adminStore.getMarket(KEY)).toMatchObject({ sellBaseFeeFlat: 0n, buyBaseFeeFlat: 0n })
     await adminStore.close()
   })
 
@@ -205,6 +223,11 @@ describe('PUT refuses what the runtime would refuse', () => {
   it('refuses a non-integer where an integer is required', async () => {
     expect((await refusal(body({ baseDecimals: '8' }))).status).toBe(400)
     expect((await refusal(body({ toleranceBps: 1.5 }))).status).toBe(400)
+  })
+
+  it('refuses a negative or numeric flat fee', async () => {
+    expect((await refusal(body({ sellBaseFeeFlat: '-1' }))).status).toBe(400)
+    expect((await refusal(body({ buyBaseFeeFlat: 1_000_000 }))).status).toBe(400)
   })
 
   it('refuses a half-stated bound, which reads as a bound and is not one', async () => {

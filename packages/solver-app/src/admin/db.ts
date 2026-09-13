@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS admin_market (
   price_path      TEXT NOT NULL,
   tolerance_bps   INTEGER NOT NULL,
   fee_bps         INTEGER NOT NULL,
+  sell_base_fee_flat TEXT NOT NULL DEFAULT '0',
+  buy_base_fee_flat  TEXT NOT NULL DEFAULT '0',
   sell_base_min   TEXT,
   sell_base_max   TEXT,
   buy_base_min    TEXT,
@@ -132,6 +134,8 @@ const marketFrom = (raw: MarketRaw): AssetMarketRow => ({
   pricePath: String(raw.price_path),
   toleranceBps: Number(raw.tolerance_bps),
   feeBps: Number(raw.fee_bps),
+  sellBaseFeeFlat: BigInt(String(raw.sell_base_fee_flat ?? 0)),
+  buyBaseFeeFlat: BigInt(String(raw.buy_base_fee_flat ?? 0)),
   sellBase: boundsFrom(raw.sell_base_min, raw.sell_base_max),
   buyBase: boundsFrom(raw.buy_base_min, raw.buy_base_max),
   enabled: Number(raw.enabled) === 1,
@@ -156,7 +160,19 @@ export class AdminStore {
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<AdminStore> {
     const store = new AdminStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
     await store.driver.exec(SCHEMA)
+    await store.migrate()
     return store
+  }
+
+  private async migrate(): Promise<void> {
+    const columns = new Set(
+      (await this.driver.all<{ name: string }>('PRAGMA table_info(admin_market)')).map((c) => c.name),
+    )
+    for (const column of ['sell_base_fee_flat', 'buy_base_fee_flat']) {
+      if (!columns.has(column)) {
+        await this.driver.exec(`ALTER TABLE admin_market ADD COLUMN ${column} TEXT NOT NULL DEFAULT '0'`)
+      }
+    }
   }
 
   async close(): Promise<void> {
@@ -230,12 +246,13 @@ export class AdminStore {
     const at = this.now()
     await this.driver.run(
       'INSERT INTO admin_market (market_key, base, quote, base_decimals, quote_decimals, feed_url, price_path, ' +
-        'tolerance_bps, fee_bps, sell_base_min, sell_base_max, buy_base_min, buy_base_max, enabled, created_at, ' +
-        'updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+        'tolerance_bps, fee_bps, sell_base_fee_flat, buy_base_fee_flat, sell_base_min, sell_base_max, buy_base_min, ' +
+        'buy_base_max, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
         'ON CONFLICT(market_key) DO UPDATE SET base = excluded.base, quote = excluded.quote, ' +
         'base_decimals = excluded.base_decimals, quote_decimals = excluded.quote_decimals, ' +
         'feed_url = excluded.feed_url, price_path = excluded.price_path, ' +
         'tolerance_bps = excluded.tolerance_bps, fee_bps = excluded.fee_bps, ' +
+        'sell_base_fee_flat = excluded.sell_base_fee_flat, buy_base_fee_flat = excluded.buy_base_fee_flat, ' +
         'sell_base_min = excluded.sell_base_min, sell_base_max = excluded.sell_base_max, ' +
         'buy_base_min = excluded.buy_base_min, buy_base_max = excluded.buy_base_max, ' +
         'enabled = excluded.enabled, updated_at = excluded.updated_at',
@@ -249,6 +266,8 @@ export class AdminStore {
         market.pricePath,
         market.toleranceBps,
         market.feeBps,
+        String(market.sellBaseFeeFlat ?? 0n),
+        String(market.buyBaseFeeFlat ?? 0n),
         // Decimal strings, per the note on `boundsFrom`. `null` for both halves
         // when the direction inherits the deployment-wide pair.
         market.sellBase === null ? null : String(market.sellBase.min),

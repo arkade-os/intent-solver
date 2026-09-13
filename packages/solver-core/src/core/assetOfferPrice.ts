@@ -7,12 +7,13 @@
  * and the reference solver applies before solvency.
  *
  * EXACT, never float. The feed price is a `Price` (`mantissa / 10 ** scale`)
- * and both amounts are integers, so the comparison cross-multiplies into bigint
- * rather than dividing. The reference implementation uses float64 here; at
- * 6-decimal stablecoin amounts against a sats leg the rounding is real, and it
- * decides money.
+ * and both amounts stay bigint through the same conversion-and-fee helper used
+ * by RFQ quotes. The reference implementation uses float64 here; at 6-decimal
+ * stablecoin amounts against a sats leg the rounding is real, and it decides
+ * money.
  */
 import type { Price } from './priceFeed.js'
+import { assetExactInPayout } from './assetExactInPrice.js'
 
 /** Which side of the market the maker is on. */
 export type OfferDirection = 'sell_base' | 'buy_base'
@@ -25,6 +26,10 @@ export interface OfferPriceMarket {
   toleranceBps: number
   /** The solver's margin, folded into the offer price against the maker. */
   feeBps: number
+  /** Atomic units of the base deposit, charged when the maker sells base. */
+  sellBaseFeeFlat?: bigint
+  /** Atomic units of the quote deposit, charged when the maker buys base. */
+  buyBaseFeeFlat?: bigint
 }
 
 /**
@@ -39,9 +44,6 @@ export interface OfferPriceMarket {
  * loosened here alone, which is the fund-loss the guard exists to stop.
  */
 export const BPS_DENOMINATOR = 10_000
-
-const BPS = BigInt(BPS_DENOMINATOR)
-const pow10 = (n: number): bigint => 10n ** BigInt(n)
 
 /**
  * Is the offer within tolerance of the feed?
@@ -66,31 +68,28 @@ export const offerWithinTolerance = (args: {
   const { depositAmount, wantAmount, direction, market, feed } = args
   if (depositAmount <= 0n || wantAmount <= 0n) return false
   if (feed.mantissa <= 0n) return false
-  // Both bounds are checked at BPS, and the tolerance one is not symmetry for
-  // its own sake. `buy_base` compares against `feed * (BPS - tolerance)`: at a
-  // tolerance of BPS or more that factor goes to zero or negative, `right` with
-  // it, and `left >= right` is trivially true — the solver would accept ANY
-  // buy_base offer at ANY price. A 100% tolerance is not a configuration, it is
-  // the gate switched off, so it is refused rather than honoured.
+  // Both bounds are checked at BPS. A buy-base tolerance at BPS makes its
+  // adjusted feed price zero, so every payout would appear affordable (and the
+  // exact formula would divide by zero). That is the gate switched off, not a
+  // useful configuration, so it is refused rather than honoured.
   if (market.toleranceBps < 0 || market.toleranceBps >= BPS_DENOMINATOR) return false
   if (market.feeBps < 0 || market.feeBps >= BPS_DENOMINATOR) return false
 
-  const tolerance = BigInt(market.toleranceBps)
-  const fee = BigInt(market.feeBps)
-  const scale = pow10(feed.scale)
-  const base = pow10(market.baseDecimals)
-  const quote = pow10(market.quoteDecimals)
+  const flatFee = (direction === 'sell_base' ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
+  if (flatFee < 0n) return false
+  const netDeposit = depositAmount - flatFee
+  if (netDeposit <= 0n) return false
 
-  if (direction === 'sell_base') {
-    // offer = (want / 10^qd) / (deposit / 10^bd) * (1 + fee)  <=  feed * (1 + tol)
-    const left = wantAmount * base * (BPS + fee) * scale
-    const right = feed.mantissa * (BPS + tolerance) * depositAmount * quote
-    return left <= right
-  }
-  // buy_base: offer = (deposit / 10^qd) / (want / 10^bd) * (1 - fee)  >=  feed * (1 - tol)
-  const left = depositAmount * base * (BPS - fee) * scale
-  const right = feed.mantissa * (BPS - tolerance) * wantAmount * quote
-  return left >= right
+  const payout = assetExactInPayout({
+    netInput: netDeposit,
+    givesBase: direction === 'sell_base',
+    baseDecimals: market.baseDecimals,
+    quoteDecimals: market.quoteDecimals,
+    feeBps: market.feeBps,
+    toleranceBps: market.toleranceBps,
+    feed,
+  })
+  return wantAmount <= payout
 }
 
 /**

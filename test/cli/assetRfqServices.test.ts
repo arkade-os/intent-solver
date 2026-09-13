@@ -138,6 +138,8 @@ describe('a configured market really does become a served corridor', () => {
     pricePath: '/price',
     toleranceBps: 10,
     feeBps: 25,
+    sellBaseFeeFlat: 0n,
+    buyBaseFeeFlat: 0n,
     sellBase: { min: 1n, max: 10n ** 12n },
     buyBase: { min: 1n, max: 10n ** 12n },
   }

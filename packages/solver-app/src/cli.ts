@@ -1785,10 +1785,16 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     }
     const { MnemonicIdentity } = await import('@arkade-os/sdk')
     const identity = MnemonicIdentity.fromMnemonic(config.arkade.mnemonic, { isMainnet: config.arkade.isMainnet })
-    const { assetCardMarkets, buildSolverCard, publishableAssetMarkets, signSolverCard, unpublishableCorridors } =
+    const { buildSolverCard, publishableAssetMarkets, signSolverCard, unpublishableCorridors } =
       await import('@arkade-os/solver-core/core/registryCard.js')
+    const { assetCardMarketsFromPolicy, assetRfqMarketsFrom } = await import('./ops/assetRfqMarkets.js')
     const { publishable, omitted } = publishableAssetMarkets(
-      assetCardMarkets(assetMarkets, { min: policy.offerMinFillAmount, max: policy.offerMaxFillAmount }),
+      assetCardMarketsFromPolicy({
+        pricing: assetMarkets,
+        offerMarkets: policy.offerMarkets,
+        offerBounds: { min: policy.offerMinFillAmount, max: policy.offerMaxFillAmount },
+        rfqMarkets: assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets),
+      }),
       config.network,
     )
     const card = await signSolverCard(

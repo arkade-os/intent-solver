@@ -95,6 +95,8 @@ export interface AssetCardMarket {
   /** RFC 6901 pointer, ALREADY resolved: `''` reads as the whole document to a client. */
   pricePath: string
   feeBps: number
+  sellBaseFeeFlat?: bigint
+  buyBaseFeeFlat?: bigint
   /** Maker sells base, so it RECEIVES quote — this bounds the QUOTE side. */
   sellBase?: { min: bigint; max: bigint } | null
   /** Maker buys base, so it RECEIVES base — this bounds the BASE side. */
@@ -230,6 +232,16 @@ const assetMarketEntry = (
   }
   const base = cardAmounts(`${pair} buyBase`, market.buyBase)
   const quote = cardAmounts(`${pair} sellBase`, market.sellBase)
+  const sellBaseFeeFlat = market.sellBaseFeeFlat ?? 0n
+  const buyBaseFeeFlat = market.buyBaseFeeFlat ?? 0n
+  if (sellBaseFeeFlat < 0n || buyBaseFeeFlat < 0n) {
+    throw new Error(`${pair} flat fees must be non-negative atomic-unit amounts`)
+  }
+  if (quote.max !== '0' && sellBaseFeeFlat > 0n) {
+    throw new Error(
+      `${pair} has a base-input flat fee, but the registry fee_flat field is denominated in quote-asset units`,
+    )
+  }
   if (base.max === '0' && quote.max === '0') {
     // Never stated is a different fault from deliberately closed.
     if (market.buyBase === undefined && market.sellBase === undefined) {
@@ -245,6 +257,7 @@ const assetMarketEntry = (
     base_asset: baseAsset,
     quote_asset: quoteAsset,
     fee_bps: market.feeBps,
+    ...(base.max !== '0' && buyBaseFeeFlat > 0n ? { fee_flat: String(buyBaseFeeFlat) } : {}),
     price_feed: market.feedUrl,
     price_feed_schema: { type: 'json', price_path: market.pricePath },
     price_decimals: priceDecimals,
@@ -284,6 +297,8 @@ export const assetCardMarkets = (
     // refuses an empty path its feed url cannot supply one for.
     pricePath: market.pricePath || (defaultPricePath(market.feedUrl) ?? ''),
     feeBps: market.feeBps,
+    sellBaseFeeFlat: market.sellBaseFeeFlat,
+    buyBaseFeeFlat: market.buyBaseFeeFlat,
     // Blank inherits where it can and otherwise stays blank; neither is unserved.
     sellBase: market.sellBase ?? fallback,
     buyBase: market.buyBase ?? fallback,

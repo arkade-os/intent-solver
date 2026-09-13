@@ -7,7 +7,11 @@
  * served with no bounds would quote an unbounded payout out of the float.
  */
 import { describe, it, expect } from 'vitest'
-import { assetRfqMarketsFrom, parseAssetRfqTokens } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
+import {
+  assetCardMarketsFromPolicy,
+  assetRfqMarketsFrom,
+  parseAssetRfqTokens,
+} from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { assetRfqDescriptor, assetRfqEnvStem } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
@@ -24,6 +28,8 @@ const pricing = (over: Partial<AssetMarketPricingView> = {}): AssetMarketPricing
   pricePath: '/price',
   toleranceBps: 10,
   feeBps: 25,
+  sellBaseFeeFlat: 330n,
+  buyBaseFeeFlat: 1_000_000n,
   sellBase: { min: 1n, max: 10n ** 12n },
   buyBase: { min: 2n, max: 10n ** 9n },
   ...over,
@@ -102,6 +108,8 @@ describe('assetRfqMarketsFrom', () => {
       baseDecimals: 8,
       quoteDecimals: 6,
       feeBps: 25,
+      sellBaseFeeFlat: 330n,
+      buyBaseFeeFlat: 1_000_000n,
       sellBase: { min: 1n, max: 10n ** 12n },
       buyBase: { min: 2n, max: 10n ** 9n },
       feedUrl: 'https://feed.test/price',
@@ -158,5 +166,43 @@ describe('assetRfqMarketsFrom', () => {
       [pricing({ sellBase: undefined })],
     )
     expect(market!.sellBase).toEqual({ min: 0n, max: 0n })
+  })
+})
+
+describe('assetCardMarketsFromPolicy', () => {
+  const token = (enabled: { sell_base: boolean; buy_base: boolean }) => ({
+    symbol: 'USDA',
+    assetId: USDA,
+    enabled,
+  })
+
+  it('drops a disabled RFQ direction and its flat fee from the card projection', () => {
+    const rfq = assetRfqMarketsFrom([token({ sell_base: false, buy_base: true })], [pricing()])
+    const [card] = assetCardMarketsFromPolicy({
+      pricing: [pricing()],
+      offerMarkets: [],
+      offerBounds: { min: 0n, max: 0n },
+      rfqMarkets: rfq,
+    })
+    expect(card).toMatchObject({
+      sellBase: { min: 0n, max: 0n },
+      buyBase: { min: 2n, max: 10n ** 9n },
+      sellBaseFeeFlat: 0n,
+      buyBaseFeeFlat: 1_000_000n,
+    })
+  })
+
+  it('keeps a direction served by offers when the RFQ policy disables it', () => {
+    const rfq = assetRfqMarketsFrom([token({ sell_base: false, buy_base: true })], [pricing()])
+    const [card] = assetCardMarketsFromPolicy({
+      pricing: [pricing()],
+      offerMarkets: [{ a: null, b: USDA }],
+      offerBounds: { min: 5n, max: 20n },
+      rfqMarkets: rfq,
+    })
+    expect(card).toMatchObject({
+      sellBase: { min: 1n, max: 10n ** 12n },
+      sellBaseFeeFlat: 330n,
+    })
   })
 })
