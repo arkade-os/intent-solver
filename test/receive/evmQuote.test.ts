@@ -83,6 +83,7 @@ const build = async (over: Partial<EvmReceiveServiceDeps> = {}) => {
       minAgeSeconds: 780,
       cadence: CADENCE,
       quoteValiditySeconds: 60,
+      orderMarginSeconds: 7_500,
     },
     maxExposedSats: 100_000_000,
     admission: new AdmissionControl(),
@@ -128,7 +129,7 @@ describe('the happy path', () => {
     expect(outcome.accepted).toBe(true)
     if (outcome.accepted) {
       const evmTimeoutSeconds = NOW + (TIMEOUT_BLOCK - CURRENT_BLOCK) * CADENCE.fastestSecondsPerBlock
-      expect(outcome.swap.refundLocktime + EVM_ORDER_MARGIN_SECONDS).toBeLessThanOrEqual(evmTimeoutSeconds)
+      expect(outcome.swap.refundLocktime + 7_500).toBeLessThanOrEqual(evmTimeoutSeconds)
     }
   })
 

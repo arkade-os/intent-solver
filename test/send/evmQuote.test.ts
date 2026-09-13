@@ -78,6 +78,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
       minAgeSeconds: 780,
       cadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 15 },
       quoteValiditySeconds: 60,
+      orderMarginSeconds: 7_500,
     },
     now: () => NOW,
     ...over,
@@ -169,6 +170,7 @@ describe('the happy path', () => {
       // lock lands. The seconds ordering this derives from is unit-tested
       // against evaluateEvmSendAcceptance in test/core/evmSend.test.ts.
       expect(outcome.swap.evmTimeout).toBeGreaterThan(20_000_000)
+      expect(outcome.swap.refundLocktime).toBe(NOW + DELAY + 7_500)
     }
   })
 })

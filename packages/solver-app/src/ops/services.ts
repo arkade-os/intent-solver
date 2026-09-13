@@ -1032,6 +1032,7 @@ export const createServices = async (
         minAgeSeconds: evmChain.minAgeSeconds,
         cadence: evmChain.cadence,
         quoteValiditySeconds: evmChain.quoteValiditySeconds,
+        orderMarginSeconds: evmChain.orderMarginSeconds,
       },
       peerStores: [store, onchainStore, receiveStore, onchainReceiveStore],
       onTickError: (id, error) =>
@@ -1072,6 +1073,7 @@ export const createServices = async (
         minAgeSeconds: evmChain.minAgeSeconds,
         cadence: evmChain.cadence,
         quoteValiditySeconds: evmChain.quoteValiditySeconds,
+        orderMarginSeconds: evmChain.orderMarginSeconds,
       },
       maxExposedSats: policy.maxExposedSats,
       totalCommitted,

@@ -472,6 +472,43 @@ describe('the preimage is persisted BEFORE the Arkade claim is attempted', () =>
 })
 
 describe('tickAll', () => {
+  it('coalesces overlapping sweeps until the active rows finish', async () => {
+    let release!: () => void
+    let entered!: () => void
+    const blocked = new Promise<void>((resolve) => (release = resolve))
+    const started = new Promise<void>((resolve) => (entered = resolve))
+    const { store, service } = await build({
+      arkadeLockupFunded: async () => {
+        entered()
+        await blocked
+        return false
+      },
+    })
+    const findLive = vi.spyOn(store, 'findLive')
+    const first = service.tickAll()
+    try {
+      await started
+      const second = service.tickAll()
+      expect(second).toBe(first)
+      expect(findLive).toHaveBeenCalledOnce()
+    } finally {
+      release()
+      await first
+      await store.close()
+    }
+  })
+
+  it('allows a new sweep after a store read rejects', async () => {
+    const { store, service } = await build({ arkadeLockupFunded: async () => false })
+    vi.spyOn(store, 'findLive').mockRejectedValueOnce(new Error('store unavailable'))
+    try {
+      await expect(service.tickAll()).rejects.toThrow('store unavailable')
+      await expect(service.tickAll()).resolves.toHaveLength(1)
+    } finally {
+      await store.close()
+    }
+  })
+
   it('does not let one failing row stop the others', async () => {
     // Shared loop with every other corridor: one stuck swap taking the sweep
     // down would stall all of them.
@@ -496,6 +533,124 @@ describe('tickAll', () => {
     expect((await store.get('swap-1')).evmLockTxid).toBe(null)
     expect((await store.get('swap-2')).evmLockTxid).toBe('0xtx')
     expect(calls).toBeGreaterThan(1)
+  })
+})
+
+describe('concurrent EVM lock submissions', () => {
+  const concurrent = async (over: Partial<EvmSendServiceDeps> = {}, failFirst = false) => {
+    let release!: () => void
+    let entered!: () => void
+    const blocked = new Promise<void>((resolve) => (release = resolve))
+    const started = new Promise<void>((resolve) => (entered = resolve))
+    const sequence: string[] = []
+    let allowance = 0n
+    const { store, service } = await build({
+      lockFor: (row) => ({ amount: BigInt(row.id.slice(-1)), timelock: TIMELOCK }) as never,
+      evm: {
+        allowance: async () => {
+          sequence.push(`allowance:${allowance}`)
+          return allowance
+        },
+        lockCalls: (lock: { amount: bigint }) => [
+          { to: new Uint8Array(20), data: Uint8Array.of(Number(lock.amount), 0) },
+          { to: new Uint8Array(20), data: Uint8Array.of(Number(lock.amount), 1) },
+        ],
+      } as unknown as EvmSendServiceDeps['evm'],
+      broadcast: async (call) => {
+        const [id, action] = call.data
+        sequence.push(`${action === 0 ? 'approve' : 'lock'}:${id}`)
+        if (id === 1 && action === 0) {
+          entered()
+          await blocked
+          if (failFirst) throw new Error('rpc unavailable')
+        }
+        if (action === 1) allowance = 9n
+        return `tx-${id}-${action}`
+      },
+      ...over,
+    })
+    await store.insertQuote({ ...quote(), id: 'swap-2', paymentHash: 'ab'.repeat(32), rfqId: 'rfq-2' })
+    return { store, service, sequence, release, started }
+  }
+
+  it('keeps a watcher tick from interleaving another row between approval and lock', async () => {
+    const h = await concurrent()
+    const first = h.service.tickAll()
+    let second: Promise<unknown> | undefined
+    try {
+      await h.started
+      second = h.service.tick('swap-2')
+      await new Promise((resolve) => setImmediate(resolve))
+      expect([...h.sequence]).toEqual(['allowance:0', 'approve:1'])
+      h.release()
+      await Promise.all([first, second])
+      expect(h.sequence).toEqual(['allowance:0', 'approve:1', 'lock:1', 'allowance:9', 'approve:2', 'lock:2'])
+    } finally {
+      h.release()
+      await Promise.allSettled([first, second])
+      await h.store.close()
+    }
+  })
+
+  it('rechecks a queued row before committing an approval', async () => {
+    const h = await concurrent()
+    const first = h.service.tick('swap-1')
+    let second: Promise<unknown> | undefined
+    try {
+      await h.started
+      second = h.service.tick('swap-2')
+      await new Promise((resolve) => setImmediate(resolve))
+      await h.store.transition('swap-2', 'quoted', 'refused', { failure_reason: 'operator stopped the swap' })
+      h.release()
+      await Promise.all([first, second])
+      expect(h.sequence).toEqual(['allowance:0', 'approve:1', 'lock:1'])
+      expect((await h.store.get('swap-2')).evmLockTxid).toBeNull()
+    } finally {
+      h.release()
+      await Promise.allSettled([first, second])
+      await h.store.close()
+    }
+  })
+
+  it('refuses a quote that expires while waiting to submit its lock', async () => {
+    let now = NOW
+    const h = await concurrent({ now: () => now })
+    const first = h.service.tick('swap-1')
+    let second: Promise<unknown> | undefined
+    try {
+      await h.started
+      second = h.service.tick('swap-2')
+      await new Promise((resolve) => setImmediate(resolve))
+      now += 61
+      h.release()
+      await Promise.all([first, second])
+      expect(h.sequence).toEqual(['allowance:0', 'approve:1', 'lock:1'])
+      expect((await h.store.get('swap-2')).state).toBe('refused')
+    } finally {
+      h.release()
+      await Promise.allSettled([first, second])
+      await h.store.close()
+    }
+  })
+
+  it('releases the submission queue when an earlier approval fails', async () => {
+    const h = await concurrent({}, true)
+    const first = h.service.tick('swap-1').catch((error: unknown) => error)
+    let second: Promise<unknown> | undefined
+    try {
+      await h.started
+      second = h.service.tick('swap-2')
+      await new Promise((resolve) => setImmediate(resolve))
+      h.release()
+      expect(await first).toMatchObject({ message: 'rpc unavailable' })
+      await second
+      expect(h.sequence).toEqual(['allowance:0', 'approve:1', 'allowance:0', 'approve:2', 'lock:2'])
+      expect((await h.store.get('swap-2')).evmLockTxid).toBe('tx-2-1')
+    } finally {
+      h.release()
+      await Promise.allSettled([first, second])
+      await h.store.close()
+    }
   })
 })
 
