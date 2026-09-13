@@ -10,10 +10,15 @@
 
 import { describe, it, expect } from 'vitest'
 import { hex } from '@scure/base'
-import { receiveLockFromRow, sendLockFromRow } from '@arkade-os/solver-corridors-evm/evm/lockFromRow.js'
+import {
+  assetSendLockFromRow,
+  receiveLockFromRow,
+  sendLockFromRow,
+} from '@arkade-os/solver-corridors-evm/evm/lockFromRow.js'
 import { swapKey } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import type { EvmSendSwapRow } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import type { EvmReceiveSwapRow } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
+import type { AssetEvmSendSwapRow } from '@arkade-os/solver-corridors-evm/db/assetEvmSendSwaps.js'
 
 const CLIENT = '0x2222222222222222222222222222222222222222'
 const SOLVER = '0x3333333333333333333333333333333333333333'
@@ -107,5 +112,56 @@ describe('receiveLockFromRow', () => {
       swapKey(sendLockFromRow(sendRow({ evmAmount: '1000000', evmClaimAddress: CLIENT, evmRefundAddress: SOLVER }))),
     )
     expect(receive).not.toBe(send)
+  })
+})
+
+describe('assetSendLockFromRow', () => {
+  const assetRow = (over: Partial<AssetEvmSendSwapRow> = {}): AssetEvmSendSwapRow =>
+    ({
+      paymentHash: 'aa'.repeat(32),
+      evmAmount: '123456789012345678901234567890',
+      tokenAddress: TOKEN,
+      evmClaimAddress: CLIENT,
+      evmRefundAddress: SOLVER,
+      evmTimeout: 21_000_000,
+      // Present on the row and NOT one of the contract's six key fields — the
+      // assertion below is that it stays out of the derivation.
+      assetId: '11'.repeat(32) + '0000',
+      assetUnits: '1000000',
+      ...over,
+    }) as AssetEvmSendSwapRow
+
+  it('derives the SAME key as the sats leg, since the funding leg is not a key field', () => {
+    // A second copy of six fields, so it can drift. It must not: the corridor
+    // reads the lock back through the same `swaps(bytes32)` flag, and a key that
+    // differs by one byte reports our own funded lock as never created.
+    const asset = swapKey(assetSendLockFromRow(assetRow()))
+    const sats = swapKey(sendLockFromRow(sendRow()))
+    expect(hex.encode(asset)).toBe(hex.encode(sats))
+  })
+
+  it('does not round a 256-bit amount through a float', () => {
+    expect(assetSendLockFromRow(assetRow()).amount.toString()).toBe('123456789012345678901234567890')
+  })
+
+  it('gives a DIFFERENT key when any single field differs', () => {
+    const base = hex.encode(swapKey(assetSendLockFromRow(assetRow())))
+    const variants: Partial<AssetEvmSendSwapRow>[] = [
+      { paymentHash: 'bb'.repeat(32) },
+      { evmAmount: '123456789012345678901234567891' },
+      { tokenAddress: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' },
+      { evmClaimAddress: SOLVER },
+      { evmRefundAddress: CLIENT },
+      { evmTimeout: 21_000_001 },
+    ]
+    for (const over of variants) {
+      expect(hex.encode(swapKey(assetSendLockFromRow(assetRow(over))))).not.toBe(base)
+    }
+  })
+
+  it('refuses a malformed field rather than deriving a key from a guess', () => {
+    expect(() => assetSendLockFromRow(assetRow({ tokenAddress: '0xabc' }))).toThrow(/20 bytes/)
+    expect(() => assetSendLockFromRow(assetRow({ paymentHash: 'aa' }))).toThrow(/32 bytes/)
+    expect(() => assetSendLockFromRow(assetRow({ evmAmount: '1.5' }))).toThrow(/decimal integer/)
   })
 })

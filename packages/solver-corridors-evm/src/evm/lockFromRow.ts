@@ -20,6 +20,7 @@
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import type { EvmSendSwapRow } from '../db/evmSendSwaps.js'
 import type { EvmReceiveSwapRow } from '../db/evmReceiveSwaps.js'
+import type { AssetEvmSendSwapRow } from '../db/assetEvmSendSwaps.js'
 
 const bytesFromHex = (value: string, name: string, length: number): Uint8Array => {
   const body = value.startsWith('0x') ? value.slice(2) : value
@@ -51,6 +52,26 @@ const amountOf = (raw: string, name: string): bigint => {
  * `claimAddress` is the client's and `refundAddress` is the solver's own.
  */
 export const sendLockFromRow = (row: EvmSendSwapRow): Erc20SwapLock => ({
+  preimageHash: bytesFromHex(row.paymentHash, 'paymentHash', 32),
+  amount: amountOf(row.evmAmount, 'evmAmount'),
+  tokenAddress: bytesFromHex(row.tokenAddress, 'tokenAddress', 20),
+  claimAddress: bytesFromHex(row.evmClaimAddress, 'evmClaimAddress', 20),
+  refundAddress: bytesFromHex(row.evmRefundAddress, 'evmRefundAddress', 20),
+  timelock: BigInt(row.evmTimeout),
+})
+
+/**
+ * The lock the SOLVER created, for `arkade:<asset>->ethereum:<token>`.
+ *
+ * The EVM half is IDENTICAL to `sendLockFromRow`: what the client locked on the
+ * Arkade side is not one of the contract's six key fields, so the denomination
+ * of the funding leg cannot reach the swap key. Written out rather than passed a
+ * row-shaped union, so the six fields stay greppable per corridor — and so this
+ * one keeps deriving through the same `swapKey` the backend uses. A key derived
+ * any other way reads `swaps(bytes32) -> false`, which is indistinguishable from
+ * a lock that was never created.
+ */
+export const assetSendLockFromRow = (row: AssetEvmSendSwapRow): Erc20SwapLock => ({
   preimageHash: bytesFromHex(row.paymentHash, 'paymentHash', 32),
   amount: amountOf(row.evmAmount, 'evmAmount'),
   tokenAddress: bytesFromHex(row.tokenAddress, 'tokenAddress', 20),
