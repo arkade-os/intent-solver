@@ -357,6 +357,9 @@ describe('ReceiveSwapService.quote', () => {
           state: 'quoted',
           pkScript: hex.encode(p2tr(keyBytes(11))),
           amountSats: 1_000,
+          refundLocktime: now + 3600,
+          refundWithoutReceiverDelay: 5120,
+          createdAt: now,
         }),
       },
     })
@@ -1700,6 +1703,15 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
   let sendRow: CoupledSendRow | null
   let sendLockups: FundedOutput[]
 
+  const coupledSendRow = (state: CoupledSendRow['state'], amountSats = SEND_AMOUNT): CoupledSendRow => ({
+    state,
+    pkScript: SEND_PKSCRIPT,
+    amountSats,
+    refundLocktime: now + 3600,
+    refundWithoutReceiverDelay: 5120,
+    createdAt: now,
+  })
+
   beforeEach(() => {
     // No send row AT QUOTE TIME, because that is the only state a coupling is
     // ever quoted from: the receive leg mints the bolt11 first and the send
@@ -1746,7 +1758,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
     // Their leg has not been funded yet: we must not go first.
-    sendRow = { state: 'quoted', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('quoted')
 
     const row = await svc.tick(swap.id)
 
@@ -1764,7 +1776,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     expect(swap.payoutSats).toBe(5_000)
     // Funded, and holding exactly what it promised: every pre-existing gate on
     // this path is satisfied. Only the two amounts are wrong against each other.
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: 1_000 }
+    sendRow = coupledSendRow('funded', 1_000)
     sendLockups = [{ txid: 's1', vout: 0, value: 1_000 }]
 
     const row = await svc.tick(swap.id)
@@ -1803,7 +1815,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
           // has to see nothing: a coupling is always quoted before its send
           // leg exists. Then `whenQuoted`, then `whenArmed`.
           if (answered === 1) return null
-          return { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: answered === 2 ? SEND_AMOUNT : 1_000 }
+          return coupledSendRow('funded', answered === 2 ? SEND_AMOUNT : 1_000)
         },
       },
     })
@@ -1823,7 +1835,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
   it('funds once the coupled send lockup is funded and holds the quoted amount', async () => {
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('funded')
     sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
 
     const row = await svc.tick(swap.id)
@@ -1834,10 +1846,27 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     expect(row.htlcExpiresAt).toBeNull()
   })
 
+  it('does not pay out against a legacy coupled send whose solo refund opens too early', async () => {
+    const svc = coupledService()
+    const swap = await quotedCoupled(svc)
+    sendRow = {
+      ...coupledSendRow('funded'),
+      refundLocktime: now + 10_000,
+      refundWithoutReceiverDelay: 5120,
+    }
+    sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
+
+    const row = await svc.tick(swap.id)
+
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toContain('refund timing is unsafe')
+    expect(arkade.state.fundCalls).toHaveLength(0)
+  })
+
   it('does not fund when the coupled send lockup holds the wrong amount', async () => {
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('funded')
     // A sat short is not a smaller swap — it is a swap whose collect leg would
     // not cover this payout.
     sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT - 1 }]
@@ -1866,7 +1895,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     // lockup — twice off one preimage.
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('funded')
     sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
 
     expect((await ln.getHoldState(paymentHash)).status).toBe('pending')
@@ -1904,7 +1933,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
       coupledSendStore: { findLiveByPaymentHash: async () => sendRow },
     })
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('funded')
     sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
 
     const row = await svc.tick(swap.id)
@@ -1918,7 +1947,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     // point only means a late htlc fails back at E instead of immediately.
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('funded')
     sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
     ln.cancelHold = async () => {
       throw new Error('backend unreachable')
@@ -1935,7 +1964,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     // a legitimate thing for the client to do.
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'quoted', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('quoted')
 
     await svc.tick(swap.id)
 
@@ -1947,7 +1976,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     // be funded against a send lockup while an htlc it must settle is also live.
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('funded')
     sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
     const e = now + 4 * 3600
     ln.armHold(paymentHash, e)

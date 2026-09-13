@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { hex } from '@scure/base'
 import {
   amountSatsOf,
+  decodeCoupledInvoice,
   decodeInvoice,
   expiresAtOf,
   finalCltvBlocksOf,
@@ -82,6 +83,22 @@ describe('decodeInvoice', () => {
     } catch (e) {
       expect((e as Error).message).not.toContain('notavalidinvoice')
     }
+  })
+})
+
+describe('decodeCoupledInvoice', () => {
+  it('parses an exact solver-minted invoice without applying the external 288-block policy', () => {
+    const invoice = forgeInvoice({
+      network: 'bc',
+      amountSats: 2100,
+      paymentHash: new Uint8Array(32).fill(7),
+      timestamp: 1_734_606_755,
+      expirySeconds: 3600,
+      minFinalCltvBlocks: 420,
+    })
+
+    expect(() => decodeInvoice(invoice)).toThrow(/cltv_too_large/)
+    expect(decodeCoupledInvoice(invoice).minFinalCltvBlocks).toBe(420)
   })
 })
 

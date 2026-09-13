@@ -209,7 +209,12 @@ describe('POST /v1/swap with rfq_request', () => {
       v: 'number',
       valid_until: 'number',
     })
-    expect(shapeOf(profile)).toEqual({ lockup_address: 'string', payment_hash: 'string', receiver_pk_script: 'string' })
+    expect(shapeOf(profile)).toEqual({
+      lockup_address: 'string',
+      payment_hash: 'string',
+      receiver_pk_script: 'string',
+      refund_without_receiver_delay: 'number',
+    })
     // The row carries the correlation id.
     expect((await store.findByPaymentHash(PAYMENT_HASH))!.rfqId).toBe(RFQ_ID)
   })

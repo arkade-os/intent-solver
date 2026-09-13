@@ -2,7 +2,8 @@
 // local script derivation, funding, and on-chain settlement watching.
 //
 // This layer is where the trust model becomes code. From a quote it uses ONLY
-// the binding fields (solver_pubkey, refund_locktime, valid_until, amounts);
+// the binding fields (solver_pubkey, refund_locktime, valid_until, amounts,
+// profile.refund_without_receiver_delay);
 // every other script parameter is the trader's own data: preimage hash from
 // its own invoice, server key from its own Arkade connection, emulator key
 // from its own fetch, refund destination from its own wallet. The solver's
@@ -174,6 +175,10 @@ export const fetchEmulatorPubkey = async (emulatorUrl) =>
 export const deriveLockup = ({ quote, invoice, refundAddress, arkade, emulatorPubkey, clientRefundPubkey }) => {
   const decoded = typeof invoice === 'string' ? decodeInvoice(invoice) : invoice
   const serverKey = arkade.wallet.arkServerPublicKey
+  const clientRefundDelay = quote.profile.refund_without_receiver_delay
+  if (!Number.isSafeInteger(clientRefundDelay) || clientRefundDelay <= 0) {
+    throw new Error('quote has no valid profile.refund_without_receiver_delay')
+  }
   const build = (legacy) => {
     const script = new CovenantSwapScript({
       receiver: hex.decode(quote.solver_pubkey), //  binding field #1
@@ -199,7 +204,7 @@ export const deriveLockup = ({ quote, invoice, refundAddress, arkade, emulatorPu
       // Same key the request already carried as client_refund_pubkey — the
       // solver bakes it into the same covenant this derivation re-derives.
       client: hex.decode(clientRefundPubkey),
-      clientRefundDelay: arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay,
+      clientRefundDelay,
       refundWithoutServerDelay: arkade.unilateralDelays.unilateralRefundDelay,
     })
     return {

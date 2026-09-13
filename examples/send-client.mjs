@@ -9,6 +9,7 @@
 //   1. decode the invoice YOURSELF
 //   2. send an rfq_request (pair arkade:BTC->lightning:BTC, your own rfq_id)
 //   3. trust only the quote's BINDING fields (solver_pubkey, refund_locktime,
+//      profile.refund_without_receiver_delay,
 //      valid_until, from/to_amount)
 //   4. derive the swap script LOCALLY; refuse to fund on any address mismatch
 //   5. gate (invoice live, ≥90min headroom, before valid_until), fund your
