@@ -69,6 +69,7 @@ import {
   minFinalCltvBlocksFor,
 } from '@arkade-os/solver-core/core/receive.js'
 import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
+import { relativeDelayFrom, secondsForBlockRung } from '@arkade-os/solver-core/core/timelocks.js'
 import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
 import { FakeLightningBackend } from '@arkade-os/solver-rails-fake/ln/fake/backend.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
@@ -1155,12 +1156,20 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       // accepted, one state after the client would have funded it.
       const decoded = decodeInvoice(invoice, services.service.sendHintScidDenylist)
       const serverKey = services.arkade.wallet.arkServerPublicKey
+      // A flipped quote re-clocked the whole ladder: the solo rung arrives in
+      // seconds on a block-typed deployment, and the other two rungs must be
+      // converted with the service's exact rule or this derivation mixes units
+      // and the addresses diverge. The unit rides on the quoted value, so a
+      // seconds deployment needs no branch — its base is seconds already.
+      const soloUnit = relativeDelayFrom(swap.refundWithoutReceiverDelay).unit
+      const rung = (base: number): number =>
+        soloUnit === 'seconds' && relativeDelayFrom(base).unit === 'blocks' ? secondsForBlockRung(base) : base
       const local = new CovenantSwapScript({
         receiver: hex.decode(swap.receiverPubkey), // trusted from quote: provider key
         server: serverKey,
         preimageHash: scriptHashFromPaymentHash(decoded.paymentHash),
         refundLocktime: swap.refundLocktime, // trusted from quote: deadline
-        claimDelay: services.arkade.unilateralDelays.unilateralClaimDelay,
+        claimDelay: rung(services.arkade.unilateralDelays.unilateralClaimDelay),
         nonInteractiveParameters: {
           emulatorPubkey: hex.decode(services.emulatorPubkey),
           // The one field here that does come from the quote, and the rule above
@@ -1174,7 +1183,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         // The client's OWN key, generated above — not taken from the quote.
         client: clientRefundPub,
         clientRefundDelay: swap.refundWithoutReceiverDelay,
-        refundWithoutServerDelay: services.arkade.unilateralDelays.unilateralRefundDelay,
+        refundWithoutServerDelay: rung(services.arkade.unilateralDelays.unilateralRefundDelay),
         // Every quote the service issues now carries the full covenant suite;
         // matching that here is what makes `localAddress` below agree with
         // `swap.lockupAddress`.

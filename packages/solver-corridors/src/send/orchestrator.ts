@@ -34,7 +34,7 @@ import {
   lockupDeadlineFor,
   payableCltvBlocks,
   deadlineContainsHtlc,
-  refundWithoutReceiverDelayFor,
+  unilateralLadderFor,
   refundWithoutReceiverDelayCovers,
   type SendAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/send.js'
@@ -47,6 +47,7 @@ import {
   absoluteLocktimeSeconds,
   absoluteLocktimeUnit,
   relativeDelayFrom,
+  type UnilateralDelays,
 } from '@arkade-os/solver-core/core/timelocks.js'
 import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
 import {
@@ -587,13 +588,13 @@ export class SendSwapService {
         return { accepted: false, reason: 'duplicate_swap' }
       }
     }
-    let refundWithoutReceiverDelay: number
+    // The quote's own ladder, not the deployment base: when the horizon
+    // overflows a block-typed ladder the whole thing re-clocks to seconds,
+    // and the script, the row and the absolute locktime below must all run
+    // on the flipped clock — a rung taken from base here would mix units.
+    let ladder: UnilateralDelays
     try {
-      refundWithoutReceiverDelay = refundWithoutReceiverDelayFor(
-        arkade.delays.unilateralRefundWithoutReceiverDelay,
-        acceptance.refundLocktime,
-        quotedAt,
-      )
+      ladder = unilateralLadderFor(arkade.delays, acceptance.refundLocktime, quotedAt)
     } catch (error) {
       return {
         accepted: false,
@@ -660,17 +661,19 @@ export class SendSwapService {
       // the row cannot spend.
       const refundLocktime = await this.absoluteLocktimeFor(
         acceptance.refundLocktime,
-        arkade.delays.unilateralClaimDelay,
+        // The ladder's rung, not the base: on a flipped quote the deadline is
+        // written in seconds, on an unflipped one in the deployment's unit.
+        ladder.unilateralClaimDelay,
       )
       const script = new CovenantSwapScript({
         receiver: hex.decode(arkade.providerPubkey),
         server: serverKey,
         preimageHash: scriptHashFromPaymentHash(decoded.paymentHash),
         refundLocktime,
-        claimDelay: arkade.delays.unilateralClaimDelay,
+        claimDelay: ladder.unilateralClaimDelay,
         client: hex.decode(options.clientRefundPubkey),
-        clientRefundDelay: refundWithoutReceiverDelay,
-        refundWithoutServerDelay: arkade.delays.unilateralRefundDelay,
+        clientRefundDelay: ladder.unilateralRefundWithoutReceiverDelay,
+        refundWithoutServerDelay: ladder.unilateralRefundDelay,
         // Every quote from here on carries the current, full covenant suite —
         // no legacy selector. See `NonInteractiveParameters.legacy`'s own doc comment
         // for why that is not simply always omitted.
@@ -700,9 +703,9 @@ export class SendSwapService {
           senderPubkey: arkade.providerPubkey,
           receiverPubkey: arkade.providerPubkey,
           serverPubkey: arkade.serverPubkey,
-          claimDelay: arkade.delays.unilateralClaimDelay,
-          refundDelay: arkade.delays.unilateralRefundDelay,
-          refundWithoutReceiverDelay,
+          claimDelay: ladder.unilateralClaimDelay,
+          refundDelay: ladder.unilateralRefundDelay,
+          refundWithoutReceiverDelay: ladder.unilateralRefundWithoutReceiverDelay,
           pkScript: hex.encode(script.pkScript),
           lockupAddress: script.address(arkade.hrp, serverKey).encode(),
           refundPkScript: hex.encode(refundPkScript),

@@ -874,6 +874,14 @@ to extend beyond the operator's base ladder to stay behind `refund_locktime`.
 The client validates that value, builds it into its local derivation, and
 refuses a quote that omits it or opens the solo refund too early.
 
+When the horizon overflows a block-typed ladder the solver re-clocks the whole
+ladder to seconds rather than refusing: a seconds-typed
+`profile.refund_without_receiver_delay` against block-typed `/v1/info` delays
+means `unilateral_claim_delay` and `unilateral_refund_delay` moved clocks too,
+each converted as blocks × 600 climbed to a 512-second boundary. A client that
+re-derives with the base values mixes units and its address will not match —
+derive the other two rungs with that same rule.
+
 ##### 7.1.1.1 The covenant script: eight leaves, nine with the timelocked non-interactive refund leaf
 
 Every RFQ-family quote commits to the extended tree — `VHTLC.ScriptV2` from

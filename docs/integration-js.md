@@ -99,6 +99,10 @@ other two (`refund_collaborative`,
 `refund_without_server`) are faster, more-cooperative fallbacks that resolve
 before that one becomes necessary — `deriveLockup` derives all of them
 locally alongside the rest of the script; there is nothing further to call.
+When the quote's `refund_without_receiver_delay` is seconds-typed while the
+operator's delays are block-typed, the solver re-clocked the ladder for that
+quote and `deriveLockup` converts the other two rungs by the same rule
+(blocks × 600, up to a 512s boundary).
 
 `sendToLightning` uses **the wallet's own key** — `arkade.identity`, the
 same one that signs the funding — and returns it as `clientRefundPubkey`.

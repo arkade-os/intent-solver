@@ -1,13 +1,19 @@
 import { describe, it, expect } from 'vitest'
 import {
-  refundWithoutReceiverDelayFor,
   refundWithoutReceiverDelayCovers,
   refundLocktimeFor,
+  unilateralLadderFor,
   worstCaseHtlcBlocks,
   REFUND_SAFETY_MARGIN,
   ROUTE_CLTV_BUDGET_BLOCKS,
   SECONDS_PER_BLOCK,
 } from '@arkade-os/solver-core/core/send.js'
+import {
+  MAX_BIP68_SECONDS,
+  relativeDelayFrom,
+  secondsForBlockRung,
+  type UnilateralDelays,
+} from '@arkade-os/solver-core/core/timelocks.js'
 
 /**
  * The CLTV terms, with no route hint and an enforcing backend unless stated.
@@ -101,18 +107,82 @@ describe('refundLocktimeFor', () => {
   })
 })
 
-describe('refundWithoutReceiverDelayFor', () => {
+describe('unilateralLadderFor', () => {
+  const secondsBase: UnilateralDelays = {
+    unilateralClaimDelay: 5120,
+    unilateralRefundDelay: 5120,
+    unilateralRefundWithoutReceiverDelay: 5120,
+  }
+  const blocksBase: UnilateralDelays = {
+    unilateralClaimDelay: 20,
+    unilateralRefundDelay: 20,
+    unilateralRefundWithoutReceiverDelay: 28,
+  }
+
   it('extends a seconds ladder through the quoted absolute refund horizon', () => {
     const refundLocktime = NOW + 420 * SECONDS_PER_BLOCK
-    const delay = refundWithoutReceiverDelayFor(5120, refundLocktime, NOW)
+    const ladder = unilateralLadderFor(secondsBase, refundLocktime, NOW)
 
-    expect(delay).toBe(252_416)
-    expect(refundWithoutReceiverDelayCovers(delay, refundLocktime, NOW)).toBe(true)
-    expect(refundWithoutReceiverDelayCovers(delay - 512, refundLocktime, NOW)).toBe(false)
+    expect(ladder.unilateralRefundWithoutReceiverDelay).toBe(252_416)
+    expect(ladder.unilateralClaimDelay).toBe(5120)
+    expect(ladder.unilateralRefundDelay).toBe(5120)
+    expect(refundWithoutReceiverDelayCovers(ladder.unilateralRefundWithoutReceiverDelay, refundLocktime, NOW)).toBe(
+      true,
+    )
+    expect(
+      refundWithoutReceiverDelayCovers(ladder.unilateralRefundWithoutReceiverDelay - 512, refundLocktime, NOW),
+    ).toBe(false)
   })
 
   it('preserves a block-typed ladder and rounds the horizon up in blocks', () => {
-    expect(refundWithoutReceiverDelayFor(28, NOW + 21 * 600 + 1, NOW)).toBe(28)
-    expect(refundWithoutReceiverDelayFor(28, NOW + 28 * 600 + 1, NOW)).toBe(29)
+    expect(unilateralLadderFor(blocksBase, NOW + 21 * 600 + 1, NOW)).toMatchObject({
+      unilateralClaimDelay: 20,
+      unilateralRefundDelay: 20,
+      unilateralRefundWithoutReceiverDelay: 28,
+    })
+    expect(unilateralLadderFor(blocksBase, NOW + 28 * 600 + 1, NOW)).toMatchObject({
+      unilateralRefundWithoutReceiverDelay: 29,
+    })
+  })
+
+  it('re-clocks a block ladder to seconds when the horizon overflows it', () => {
+    // The regtest shape: 5-block server delay, 524-block horizon (40 final +
+    // 40 hint + 432 LND budget + 2h margin). 524 would read back as seconds,
+    // so every rung moves clocks instead of the quote refusing.
+    const regtestBase: UnilateralDelays = {
+      unilateralClaimDelay: 5,
+      unilateralRefundDelay: 5,
+      unilateralRefundWithoutReceiverDelay: 13,
+    }
+    const ladder = unilateralLadderFor(regtestBase, NOW + 524 * 600, NOW)
+
+    expect(ladder).toEqual({
+      unilateralClaimDelay: secondsForBlockRung(5),
+      unilateralRefundDelay: secondsForBlockRung(5),
+      unilateralRefundWithoutReceiverDelay: 314_880,
+    })
+    for (const rung of Object.values(ladder)) expect(relativeDelayFrom(rung).unit).toBe('seconds')
+    expect(refundWithoutReceiverDelayCovers(ladder.unilateralRefundWithoutReceiverDelay, NOW + 524 * 600, NOW)).toBe(
+      true,
+    )
+  })
+
+  it('flips exactly where blocks stop meaning blocks', () => {
+    const fits = unilateralLadderFor(blocksBase, NOW + 511 * 600, NOW)
+    expect(relativeDelayFrom(fits.unilateralRefundWithoutReceiverDelay).unit).toBe('blocks')
+    expect(fits.unilateralRefundWithoutReceiverDelay).toBe(511)
+    const flipped = unilateralLadderFor(blocksBase, NOW + 511 * 600 + 1, NOW)
+    expect(relativeDelayFrom(flipped.unilateralRefundWithoutReceiverDelay).unit).toBe('seconds')
+    expect(flipped.unilateralClaimDelay).toBe(secondsForBlockRung(20))
+  })
+
+  it('still refuses past what BIP68 can encode', () => {
+    expect(() => unilateralLadderFor(secondsBase, NOW + MAX_BIP68_SECONDS + 512, NOW)).toThrow(/unencodable/)
+  })
+
+  it('refuses a mixed-unit base rather than converting from two clocks', () => {
+    expect(() => unilateralLadderFor({ ...blocksBase, unilateralRefundDelay: 5120 }, NOW + 600, NOW)).toThrow(
+      /mixes units/,
+    )
   })
 })

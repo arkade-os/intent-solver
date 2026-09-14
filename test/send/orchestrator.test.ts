@@ -23,6 +23,7 @@ import {
   SECONDS_PER_BLOCK,
   deadlineContainsHtlc,
   refundLocktimeFor,
+  refundWithoutReceiverDelayCovers,
   worstCaseHtlcBlocks,
 } from '@arkade-os/solver-core/core/send.js'
 import { QUOTE_RATE_LIMIT } from '@arkade-os/solver-core/core/rateLimit.js'
@@ -40,7 +41,7 @@ import type {
 import { ORPHANED_REGISTRATION_SECONDS } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { rfqStateFromRow, rfqStatusPayload } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
-import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
+import { rawDelaySeconds, relativeDelayFrom, secondsForBlockRung } from '@arkade-os/solver-core/core/timelocks.js'
 
 /**
  * The CLTV terms, with no route hint and an enforcing backend unless stated.
@@ -3037,12 +3038,27 @@ describe('SendSwapService — block-typed timelocks', () => {
     ).rejects.toThrow(/no chainTip provider is wired/)
   })
 
-  it('refuses an uncapped route whose protected horizon cannot fit a block-typed CSV', async () => {
+  it('re-clocks an uncapped route whose horizon overflows blocks, instead of refusing it', async () => {
+    // INVOICE carries an 81-block hint (decode tests pin it); on the uncapped
+    // rail the 2016-block budget prices the horizon near 2300 blocks — past
+    // anything a block-typed CSV can hold. The quote still happens, on a
+    // seconds ladder the row can spend.
     ln.enforcesRouteCltv = false
     ln.routeCltvBudgetBlocks = UNENFORCED_ROUTE_CLTV_BUDGET_BLOCKS
     const svc = blockService(staticTip)
     const outcome = await svc.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
-    expect(outcome).toMatchObject({ accepted: false, reason: 'cltv_too_large' })
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason} ${outcome.detail ?? ''}`)
+    const row = await store.get(outcome.swap.id)
+
+    expect(row.claimDelay).toBe(secondsForBlockRung(20))
+    expect(row.refundDelay).toBe(secondsForBlockRung(20))
+    expect(relativeDelayFrom(row.refundWithoutReceiverDelay).unit).toBe('seconds')
+    expect(refundWithoutReceiverDelayCovers(row.refundWithoutReceiverDelay, row.refundLocktime, row.createdAt)).toBe(
+      true,
+    )
+    // The absolute deadline flipped clocks with the ladder: seconds, not a height.
+    expect(row.refundLocktime).toBeGreaterThanOrEqual(500_000_000)
+    expect(hex.encode(covenantScriptFromRow(row).pkScript)).toBe(row.pkScript)
   })
 
   it('leaves a seconds-typed deployment writing a unix-seconds deadline, as it always did', async () => {
