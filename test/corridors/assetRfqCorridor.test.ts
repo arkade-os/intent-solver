@@ -68,6 +68,24 @@ const harness = async () => {
   return { store, service, corridor: assetRfqCorridor(BUY, service, store), tick: (n: number) => (clock = n) }
 }
 
+/** A quoted row on a chosen pair. Both unique indexes are keyed off the id. */
+const seed = (store: AssetRfqSwapStore, pair: string, id: string) =>
+  store.insertQuote({
+    id,
+    rfqId: id.padEnd(64, '0'),
+    pair,
+    fromAssetId: null,
+    fromAmount: 100_000n,
+    toAssetId: ASSET_A,
+    toAmount: 1_000n,
+    makerPkScript: PK_SCRIPT,
+    makerPublicKey: XONLY,
+    offerPkScript: `5120${id.padEnd(64, 'd')}`,
+    offerAddress: `ark1q${id}`,
+    solverPubkey: 'e'.repeat(64),
+    validUntil: 2_000,
+  })
+
 const rfqRequest = (over: Record<string, unknown> = {}) => ({
   v: 1,
   type: 'rfq_request',
@@ -317,6 +335,33 @@ describe('the read half', () => {
     expect((await corridor.page({})).swaps).toHaveLength(1)
     expect((await sell.page({})).swaps).toHaveLength(0)
     expect(service).toBeDefined()
+  })
+
+  it('fills a page from its own rows when another market interleaves them', async () => {
+    const { store, corridor } = await harness()
+    await seed(store, BUY.pair, 'buy-1')
+    await seed(store, SELL.pair, 'sell-1')
+    await seed(store, BUY.pair, 'buy-2')
+    expect((await corridor.page({ limit: 2 })).swaps.map((s) => s.id)).toEqual(['buy-2', 'buy-1'])
+  })
+
+  it('hands back a cursor that ends only when this pair is exhausted', async () => {
+    const { store, corridor } = await harness()
+    await seed(store, BUY.pair, 'buy-1')
+    await seed(store, SELL.pair, 'sell-1')
+    await seed(store, BUY.pair, 'buy-2')
+
+    // A cursor taken from the unfiltered read ends this drain on `sell-1`.
+    const seen: string[] = []
+    let cursor: string | null = null
+    for (;;) {
+      const page = await corridor.page({ limit: 1, cursor })
+      if (page.swaps.length === 0) break
+      seen.push(...page.swaps.map((s) => s.id))
+      cursor = page.nextCursor
+      if (cursor === null) break
+    }
+    expect(seen).toEqual(['buy-2', 'buy-1'])
   })
 
   it('renders a row for the console under its own pair', async () => {

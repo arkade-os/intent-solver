@@ -50,9 +50,19 @@ describe('createServices — one admission control for every corridor', () => {
     // each read the same pre-commit total and both pass a cap only one fits
     // under — the #105 race, reopened for two corridors and invisible because
     // the number was hard-coded to the corridors that existed when it was written.
+    // SEVEN since the onchain asset receive leg. This number tracks reality on
+    // purpose — the paragraph above is what happened the last time it did not.
     const body = createServicesBody()
-    expect(body.match(/^\s*admission,$/gm) ?? []).toHaveLength(6)
-    expect(body.match(/^\s*totalCommitted,$/gm) ?? []).toHaveLength(6)
+    expect(body.match(/^\s*admission,$/gm) ?? []).toHaveLength(7)
+    expect(body.match(/^\s*totalCommitted,$/gm) ?? []).toHaveLength(7)
+  })
+
+  // The EVM block declares a SECOND `totalCommitted`, and either spelling type-checks.
+  it('reads the asset receive store in BOTH totalCommitted closures', () => {
+    const body = createServicesBody()
+    const starts = [...body.matchAll(/const totalCommitted\b/g)].map((m) => m.index ?? 0)
+    expect(starts).toHaveLength(2)
+    for (const at of starts) expect(body.slice(at, at + 700)).toContain('onchainAssetReceiveStore')
   })
 })
 
