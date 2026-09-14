@@ -24,6 +24,7 @@ import { randomBytes, randomInt } from 'node:crypto'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { WebSocketServer } from 'ws'
+import { schnorr } from '@noble/curves/secp256k1.js'
 import { ArkAddress, asset, hasTerminalSpend, Transaction } from '@arkade-os/sdk'
 import { createOffer, relayTransport, type Offer } from '@arkade-os/swap'
 import { base64, hex } from '@scure/base'
@@ -65,6 +66,16 @@ import {
 } from './support/stack.js'
 
 const ARKD_URL = process.env.ARK_SERVER_URL ?? 'http://localhost:7070'
+
+/**
+ * Relay addressing identity, DISTINCT from the covenant maker key: the broker
+ * delivers every event to every matching subscriber, so sharing one pubkey for
+ * addressing and for the covenant echoes our own request back to us — and
+ * `expectQuote` throws on the first reply carrying our rfq_id whatever its
+ * type (`unexpected reply: rfq_request`). Fresh per transport, so concurrent
+ * tests never share a subscription either.
+ */
+const relayClientKey = (): string => hex.encode(schnorr.getPublicKey(randomBytes(32)))
 
 /** Enough for deposits in both directions plus carriers and change. */
 const NEEDED_SATS = 150_000
@@ -323,7 +334,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
     async () => {
       const { ingress, store, pairSell, tickAll } = await harness()
       try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: makerPublicKey })
+        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
         const amount = depositSats(20_000)
         const rfqId = randomBytes(32).toString('hex')
         const quote = (await transport.requestQuote(assetRequestFor(pairSell, amount, rfqId))) as unknown as {
@@ -367,7 +378,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         // on this class).
         const statusTransport = relayTransport(relayUrl, {
           solverPubkey: makerPublicKey,
-          clientPubkey: makerPublicKey,
+          clientPubkey: relayClientKey(),
         })
         const status = await statusTransport.status(rfqId)
         await statusTransport.close()
@@ -385,7 +396,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
     async () => {
       const { ingress, store, pairBuy, tickAll } = await harness()
       try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: makerPublicKey })
+        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
         const held = await heldAsset()
         expect(held, 'wallet holds no asset for the asset->BTC leg').not.toBeNull()
         const amount = BigInt(50 + randomInt(1, 200))
@@ -430,7 +441,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
 
         const statusTransport = relayTransport(relayUrl, {
           solverPubkey: makerPublicKey,
-          clientPubkey: makerPublicKey,
+          clientPubkey: relayClientKey(),
         })
         const status = await statusTransport.status(rfqId)
         await statusTransport.close()
@@ -448,7 +459,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
     async () => {
       const { ingress, store, pairSell } = await harness()
       try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: makerPublicKey })
+        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
         const rfqId = randomBytes(32).toString('hex')
         await expect(
           transport.requestQuote({
@@ -478,7 +489,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
       // status face instead: quoted, then funded, then settled — polled.
       const { ingress, store, pairSell, tickAll } = await harness()
       try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: makerPublicKey })
+        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
         const amount = depositSats(4_000)
         const rfqId = randomBytes(32).toString('hex')
         const quote = (await transport.requestQuote(assetRequestFor(pairSell, amount, rfqId))) as unknown as {
@@ -505,7 +516,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
 
         const statusTransport = relayTransport(relayUrl, {
           solverPubkey: makerPublicKey,
-          clientPubkey: makerPublicKey,
+          clientPubkey: relayClientKey(),
         })
         status = await statusTransport.status(rfqId)
         await statusTransport.close()
