@@ -46,6 +46,7 @@ WORKDIR /app
 # Build deps for better-sqlite3's node-gyp fallback.
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY vendor ./vendor
 # The workspace packages must land BEFORE `pnpm install`: the lockfile records
 # `@arkade-os/solver-*` as workspace links, and a frozen install fails outright if the
 # projects they point at are absent.
