@@ -182,8 +182,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (feed) await new Promise<void>((resolve) => feed.close(() => resolve()))
-  for (const client of broker?.clients ?? []) client.terminate()
-  await new Promise<void>((resolve) => broker?.close(() => resolve()))
+  // Guarded, not optional-chained: with no broker the executor below would
+  // never resolve and would hide the setup failure behind a hang.
+  if (broker) {
+    for (const client of broker.clients) client.terminate()
+    await new Promise<void>((resolve) => broker.close(() => resolve()))
+  }
   arkade?.close()
 })
 
@@ -375,7 +379,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         expect(fill.getOutput(0)!.amount).toBe(ASSET_CARRIER_SATS)
 
         // Status over the relay too: the receipt is the fill txid (no preimage
-        // on this class).
+        // on this class), and it must be the fill this swap settled with.
         const statusTransport = relayTransport(relayUrl, {
           solverPubkey: makerPublicKey,
           clientPubkey: relayClientKey(),
@@ -383,6 +387,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         const status = await statusTransport.status(rfqId)
         await statusTransport.close()
         expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
+        expect(status?.profile['fill_txid']).toBe(filled.fillTxid)
         await store.close()
       } finally {
         await ingress.stop()
