@@ -18,7 +18,7 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { finalizeEvent } from 'nostr-tools/pure'
 import { getConversationKey, encrypt, decrypt } from 'nostr-tools/nip44'
-import { CovenantSwapScript, decodeInvoice, findLockups, scriptHashFromPaymentHash } from '../../packages/solver-app/dist/index.js'
+import { CovenantSwapScript, decodeInvoice, findLockups, scriptHashFromPaymentHash, relativeDelayFrom, secondsForBlockRung } from '../../packages/solver-app/dist/index.js'
 import { assertFundable, expectQuote, newRfqId, requestQuote, verifyLockupAddress } from './rfq-core.mjs'
 
 export * from './rfq-core.mjs'
@@ -179,13 +179,20 @@ export const deriveLockup = ({ quote, invoice, refundAddress, arkade, emulatorPu
   if (!Number.isSafeInteger(clientRefundDelay) || clientRefundDelay <= 0) {
     throw new Error('quote has no valid profile.refund_without_receiver_delay')
   }
+  // A flipped quote re-clocked the whole ladder: a seconds-typed solo rung on
+  // a block-typed deployment means the other two rungs moved clocks too, by
+  // the service's exact rule — anything else mixes units and the addresses
+  // diverge, which verifyLockupAddress then refuses to fund.
+  const soloUnit = relativeDelayFrom(clientRefundDelay).unit
+  const rung = (base) =>
+    soloUnit === 'seconds' && relativeDelayFrom(base).unit === 'blocks' ? secondsForBlockRung(base) : base
   const build = (legacy) => {
     const script = new CovenantSwapScript({
       receiver: hex.decode(quote.solver_pubkey), //  binding field #1
       refundLocktime: quote.refund_locktime, //      binding field #2
       server: serverKey,
       preimageHash: scriptHashFromPaymentHash(decoded.paymentHash),
-      claimDelay: arkade.unilateralDelays.unilateralClaimDelay,
+      claimDelay: rung(arkade.unilateralDelays.unilateralClaimDelay),
       // The leaves no participant has to be online for. Grouped rather than
       // flat because they are one unit: a row rebuilt from stored state has to
       // reproduce the shape it was funded with, and `legacy` is what moves it.
@@ -205,7 +212,7 @@ export const deriveLockup = ({ quote, invoice, refundAddress, arkade, emulatorPu
       // solver bakes it into the same covenant this derivation re-derives.
       client: hex.decode(clientRefundPubkey),
       clientRefundDelay,
-      refundWithoutServerDelay: arkade.unilateralDelays.unilateralRefundDelay,
+      refundWithoutServerDelay: rung(arkade.unilateralDelays.unilateralRefundDelay),
     })
     return {
       script,

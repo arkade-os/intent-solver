@@ -20,12 +20,16 @@
 
 import {
   HOUR,
+  MAX_BIP68_SECONDS,
   MINUTE,
   NOMINAL_BLOCK_SECONDS,
+  SEQUENCE_GRANULARITY_SECONDS,
   ceilToGranularity,
   isEncodableDelay,
   rawDelaySeconds,
   relativeDelayFrom,
+  secondsForBlockRung,
+  type UnilateralDelays,
 } from './timelocks.js'
 import { MAX_CLIENT_CLTV_BLOCKS } from '../invoice/decode.js'
 
@@ -402,16 +406,62 @@ export const refundLocktimeFor = (
   return Math.max(htlcBound, unilateralBound)
 }
 
-/** Size the client's solo CSV so it cannot open before the absolute refund path. */
-export const refundWithoutReceiverDelayFor = (baseDelay: number, refundLocktime: number, quotedAt: number): number => {
-  const horizon = Math.max(0, refundLocktime - quotedAt)
-  const unit = relativeDelayFrom(baseDelay).unit
-  const required = unit === 'seconds' ? ceilToGranularity(horizon) : Math.ceil(horizon / NOMINAL_BLOCK_SECONDS)
-  const delay = Math.max(baseDelay, required)
-  if (!isEncodableDelay(delay) || relativeDelayFrom(delay).unit !== unit) {
-    throw new Error(`refund horizon requires an unencodable ${unit} relative delay: ${delay}`)
+/**
+ * Size the ladder for one quote: the deployment base stretched, where needed,
+ * so the solo rung cannot open before the quoted absolute refund horizon.
+ *
+ * Stays in the base unit while the horizon fits it. Past it — a block ladder
+ * whose horizon needs SEQUENCE_GRANULARITY_SECONDS or more blocks, where the
+ * value would read back as seconds — the whole ladder re-clocks to seconds
+ * rather than refusing: every rung converted conservatively, so each ordering
+ * the base ladder held still holds and the solo rung still opens last. Refuses
+ * only past MAX_BIP68_SECONDS, which no quotable invoice can reach.
+ */
+export const unilateralLadderFor = (
+  base: UnilateralDelays,
+  refundLocktime: number,
+  quotedAt: number,
+): UnilateralDelays => {
+  const baseUnits = new Set(
+    [base.unilateralClaimDelay, base.unilateralRefundDelay, base.unilateralRefundWithoutReceiverDelay].map(
+      (rung) => relativeDelayFrom(rung).unit,
+    ),
+  )
+  if (baseUnits.size !== 1) {
+    throw new Error(`unilateral ladder base mixes units: ${JSON.stringify(base)}`)
   }
-  return delay
+  const horizon = Math.max(0, refundLocktime - quotedAt)
+  if (baseUnits.has('seconds')) {
+    const solo = Math.max(base.unilateralRefundWithoutReceiverDelay, ceilToGranularity(horizon))
+    if (!isEncodableDelay(solo) || solo > MAX_BIP68_SECONDS) {
+      throw new Error(`refund horizon requires an unencodable seconds relative delay: ${solo}`)
+    }
+    return { ...base, unilateralRefundWithoutReceiverDelay: solo }
+  }
+  const requiredBlocks = Math.ceil(horizon / NOMINAL_BLOCK_SECONDS)
+  if (Math.max(base.unilateralRefundWithoutReceiverDelay, requiredBlocks) < SEQUENCE_GRANULARITY_SECONDS) {
+    return {
+      ...base,
+      unilateralRefundWithoutReceiverDelay: Math.max(base.unilateralRefundWithoutReceiverDelay, requiredBlocks),
+    }
+  }
+  const ladder: UnilateralDelays = {
+    unilateralClaimDelay: secondsForBlockRung(base.unilateralClaimDelay),
+    unilateralRefundDelay: secondsForBlockRung(base.unilateralRefundDelay),
+    unilateralRefundWithoutReceiverDelay: Math.max(
+      secondsForBlockRung(base.unilateralRefundWithoutReceiverDelay),
+      ceilToGranularity(horizon),
+    ),
+  }
+  if (
+    !isEncodableDelay(ladder.unilateralRefundWithoutReceiverDelay) ||
+    ladder.unilateralRefundWithoutReceiverDelay > MAX_BIP68_SECONDS
+  ) {
+    throw new Error(
+      `refund horizon requires an unencodable seconds relative delay: ${ladder.unilateralRefundWithoutReceiverDelay}`,
+    )
+  }
+  return ladder
 }
 
 /** True when a stored solo CSV still protects the absolute refund quoted with it. */

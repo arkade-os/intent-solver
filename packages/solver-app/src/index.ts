@@ -52,10 +52,16 @@ export {
   evaluateSendAcceptance,
   evaluateSendPayment,
   refundLocktimeFor,
+  unilateralLadderFor,
   type SendAcceptanceDecision,
   type SendPaymentDecision,
 } from '@arkade-os/solver-core/core/send.js'
-export { deriveUnilateralDelays, type UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
+export {
+  deriveUnilateralDelays,
+  relativeDelayFrom,
+  secondsForBlockRung,
+  type UnilateralDelays,
+} from '@arkade-os/solver-core/core/timelocks.js'
 export { resolveLimits, maxRoutingFeeSats, type Limits } from '@arkade-os/solver-core/core/limits.js'
 export { NETWORKS, type SwapNetwork, type NetworkProfile } from '@arkade-os/solver-core/core/networks.js'
 export { loadConfig, type Config } from './config.js'
