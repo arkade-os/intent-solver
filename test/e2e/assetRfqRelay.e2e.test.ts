@@ -26,7 +26,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { WebSocketServer } from 'ws'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { ArkAddress, asset, hasTerminalSpend, Transaction } from '@arkade-os/sdk'
-import { cancelOffer, createOffer, InMemoryAssetSwapRepository, relayTransport, type Offer } from '@arkade-os/swap'
+import { createOffer, relayTransport, type Offer } from '@arkade-os/swap'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { GiveUp, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
@@ -397,27 +397,17 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
   )
 
   it(
-    'quotes asset->BTC over the relay, recognises the deposit, and returns it on cancel',
+    'quotes asset->BTC over the relay, recognises the deposit and fills it',
     async () => {
-      // Quote, fund and recognition for the buy direction. The fill half is
-      // deliberately NOT driven here: filling an asset-carrying deposit fails
-      // at emulator submit (code 13, internal error — see the note below), a
-      // path with no live coverage anywhere (every fill any suite settles is
-      // a sats deposit). Until that is fixed the client reclaims via the
-      // cooperative cancel, which this test proves end to end instead.
-      //
-      // Reproducer for the fill gap: drive this row to `filling` and watch
-      // the sweep's settle (`fulfillOffer` over the SDK's `fillOffer`) fail
-      // with `Failed to submit tx to emulator: {"code":13,...}` while the
-      // same harness fills sats deposits. First suspect is the SDK fill
-      // assembly for asset-carrying inputs, which no test runs against a
-      // live emulator (ts-sdk fill tests are mocked; its e2e fills sats).
+      // The payout must clear taproot dust (330 sats): arkd refuses a smaller
+      // output 0, so the corridor refuses to quote one (`resolveAssetQuote`'s
+      // dust floor) and these amounts stay an order of magnitude above it.
       const { ingress, store, pairBuy, tickAll } = await harness()
       try {
         const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
         const held = await heldAsset()
         expect(held, 'wallet holds no asset for the asset->BTC leg').not.toBeNull()
-        const amount = BigInt(50 + randomInt(1, 200))
+        const amount = BigInt(2000 + randomInt(1, 500))
         expect(held!.amount).toBeGreaterThanOrEqual(amount)
         const rfqId = randomBytes(32).toString('hex')
         const quote = (await transport.requestQuote(assetRequestFor(pairBuy, amount, rfqId))) as unknown as {
@@ -427,6 +417,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
           profile: { offer_address: string; offer_pk_script: string }
         }
         expect(BigInt(quote.from_amount)).toBe(amount)
+        expect(BigInt(quote.to_amount)).toBeGreaterThanOrEqual(330n)
         await transport.close()
 
         const mine = await createOffer(arkade.ctx.wallet, ARKD_URL, {
@@ -448,20 +439,24 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         const funded = await driveTo(tickAll, store, id, 'funded')
         expect(funded.depositTxid).toBe(fundingTxid)
 
-        // NOT the solver's to refund — the `cancel` leaf is a 2-of-2 of the
-        // funder and the Arkade Service — so the client takes it back itself,
-        // asset and all.
-        const cancelTxid = await cancelOffer(arkade.ctx.wallet, ARKD_URL, mine.offerHex, {
-          repository: new InMemoryAssetSwapRepository(),
-          fundingTxid,
-          swapAddress: mine.address,
+        const filled = await driveTo(tickAll, store, id, 'filled')
+        expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
+        expect(await depositAt(filled.offerPkScript)).toBeNull()
+
+        // The fill pays sats to the maker's script on this direction.
+        const { txs } = await arkade.ctx.wallet.indexerProvider.getVirtualTxs([filled.fillTxid!])
+        const fill = Transaction.fromPSBT(base64.decode(txs[0]!))
+        expect(hex.encode(fill.getOutput(0)!.script!)).toBe(makerPkScript)
+        expect(fill.getOutput(0)!.amount).toBe(BigInt(quote.to_amount))
+
+        const statusTransport = relayTransport(relayUrl, {
+          solverPubkey: makerPublicKey,
+          clientPubkey: relayClientKey(),
         })
-        expect(cancelTxid).toMatch(/^[0-9a-f]{64}$/)
-        await poll(async () => ((await depositAt(hex.encode(mine.swapPkScript))) === null ? true : null), {
-          attempts: 20,
-          intervalMs: 2000,
-          whenExhausted: 'the cancelled asset deposit never left the offer script',
-        })
+        const status = await statusTransport.status(rfqId)
+        await statusTransport.close()
+        expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
+        expect(status?.profile['fill_txid']).toBe(filled.fillTxid)
         await store.close()
       } finally {
         await ingress.stop()
@@ -473,7 +468,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
   it(
     'refuses an asset request with an empty profile over the relay, in the closed vocabulary',
     async () => {
-      const { ingress, store, pairSell } = await harness()
+      const { ingress, store, pairSell, pairBuy } = await harness()
       try {
         const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
         const rfqId = randomBytes(32).toString('hex')
@@ -488,6 +483,12 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
             profile: {},
           }),
         ).rejects.toMatchObject({ name: 'SwapRefusal' })
+
+        // And a buy payout under taproot dust (330 sats): arkd could never
+        // settle it, so the corridor refuses to quote it at all.
+        await expect(
+          transport.requestQuote(assetRequestFor(pairBuy, 100n, randomBytes(32).toString('hex'))),
+        ).rejects.toMatchObject({ name: 'SwapRefusal', reason: 'amount_out_of_range' })
         await transport.close()
         await store.close()
       } finally {
