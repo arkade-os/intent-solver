@@ -1,6 +1,6 @@
 {
   "name": "@arkade-os/solver-rails",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Part of the Arkade intent-solver: rails primitives.",
   "license": "MIT",
   "repository": {
