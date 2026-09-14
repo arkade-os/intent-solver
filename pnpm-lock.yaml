@@ -88,8 +88,8 @@ importers:
         version: 3.25.76
     devDependencies:
       '@arkade-os/swap':
-        specifier: 0.0.17
-        version: 0.0.17(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: file:vendor/arkade-os-swap-0.0.18-pr917-73379957.tgz
+        version: file:vendor/arkade-os-swap-0.0.18-pr917-73379957.tgz(nostr-tools@2.24.1(typescript@5.9.3))
       '@types/better-sqlite3':
         specifier: ^7.6.12
         version: 7.6.13
@@ -431,8 +431,21 @@ packages:
     resolution: {integrity: sha512-iLjcZhnNmzndD6KLbgmMbyYL/JqmMYA2gSOn6MrESAMHWuF68CRtqn9ijvnDJDz8BzYXuFMZ/ghZfLjIvrdAdA==}
     engines: {node: '>=18'}
 
+  '@arkade-os/solver-discovery@0.2.5':
+    resolution: {integrity: sha512-eCJESOApkm78OWLPSRSi7RajysHPAkRozD2Um+IimRbbgSK7e+/1Ufw4hrOR8LuPKwMRvDQx7nUbcl1CL8HsDg==}
+    engines: {node: '>=18'}
+
   '@arkade-os/swap@0.0.17':
     resolution: {integrity: sha512-49VzrCKW8yg+TIzRXyt9D6Ho3cJjz7VxcfJMvy5n5VcR6Okd7aPsKV1PaV0PP4pkcQwoLUSZ/ynbDHIo+AGSnA==}
+    peerDependencies:
+      nostr-tools: ^2.12.0
+    peerDependenciesMeta:
+      nostr-tools:
+        optional: true
+
+  '@arkade-os/swap@file:vendor/arkade-os-swap-0.0.18-pr917-73379957.tgz':
+    resolution: {integrity: sha512-TBodeKUJkuphZxKYoXI8clUiizNUG/Rn5mpdqssTIMcbLet7ZlVmCz4l4kUMHx2zu5J+S7MOFUewbL8HXPHB+Q==, tarball: file:vendor/arkade-os-swap-0.0.18-pr917-73379957.tgz}
+    version: 0.0.18
     peerDependencies:
       nostr-tools: ^2.12.0
     peerDependenciesMeta:
@@ -1663,10 +1676,36 @@ snapshots:
 
   '@arkade-os/solver-discovery@0.2.4': {}
 
+  '@arkade-os/solver-discovery@0.2.5': {}
+
   '@arkade-os/swap@0.0.17(nostr-tools@2.24.1(typescript@5.9.3))':
     dependencies:
       '@arkade-os/sdk': 0.4.72
       '@arkade-os/solver-discovery': 0.2.4
+      '@noble/ciphers': 2.1.1
+      '@noble/curves': 2.0.1
+      '@noble/hashes': 2.0.1
+      '@scure/base': 2.0.0
+      '@scure/btc-signer': 2.0.1
+    optionalDependencies:
+      nostr-tools: 2.24.1(typescript@5.9.3)
+    transitivePeerDependencies:
+      - '@ledgerhq/ledger-bitcoin'
+      - '@react-native-async-storage/async-storage'
+      - bip32
+      - bitcoinjs-lib
+      - bufferutil
+      - ecpair
+      - expo
+      - expo-background-task
+      - expo-sqlite
+      - expo-task-manager
+      - utf-8-validate
+
+  '@arkade-os/swap@file:vendor/arkade-os-swap-0.0.18-pr917-73379957.tgz(nostr-tools@2.24.1(typescript@5.9.3))':
+    dependencies:
+      '@arkade-os/sdk': 0.4.72
+      '@arkade-os/solver-discovery': 0.2.5
       '@noble/ciphers': 2.1.1
       '@noble/curves': 2.0.1
       '@noble/hashes': 2.0.1
