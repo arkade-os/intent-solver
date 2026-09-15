@@ -121,9 +121,19 @@ describe('the corridors reach the registry and the console', () => {
     expect(body()).toContain("['assetRfqStore', () => assetRfqStore.close()]")
   })
 
+  it('hands the offer service the PRICED subset of OFFER_MARKETS, at boot and on swap', () => {
+    // An unpriced market fills at the maker's price, so the derivation is the
+    // guard: handing `policy.offerMarkets` over directly is what breaks it.
+    expect(body()).toContain('const liveOfferMarkets = offerMarketsPricedBy(assetMarkets.pricing)')
+    expect(body()).toContain('markets: liveOfferMarkets,')
+    expect(body()).toContain('const offers = offerMarketsPricedBy(next.pricing)')
+    expect(body()).toContain('replaceMarkets({ markets: offers, pricing: next.pricing })')
+    expect(body()).not.toContain('markets: policy.offerMarkets')
+  })
+
   it('hot-swaps the captured corridor set in place after a console write', () => {
     expect(body()).toContain('retainReadableMarkets(rfq, readableMarkets, live)')
-    expect(body()).toContain('replaceTail.then(job, job)')
+    expect(body()).toContain('replaceQueue(async () => {')
     expect(body().indexOf('const nextSets = setsFrom(rfq, readable)')).toBeLessThan(
       body().indexOf('await assetRfqService.replaceMarkets(rfq)'),
     )
