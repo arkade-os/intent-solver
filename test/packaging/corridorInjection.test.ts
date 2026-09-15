@@ -49,8 +49,8 @@ describe('a consumer corridor joins the shipped registry', () => {
   })
 
   it('is driven by the same sweep, so its swaps reach a terminal state', async () => {
-    // The watch loop is `for (const corridor of services.corridors) corridor.tickAll()`.
-    // Absent from the set, an injected corridor quotes and then never advances.
+    // The watch loop iterates `services.corridors` (ASSET_ plugin corridors skip
+    // and ride `assetRfqService.tickAll()` once). An injected stem is still driven.
     const set = corridorSetFromDeps(bareDeps, [corridorFor('arkade:BTC->example:BTC', 'EXAMPLE')])
     let ticked = 0
     for (const corridor of set) ticked += await corridor.tickAll()

@@ -225,13 +225,17 @@ describe('the sweep a consumer has to write themselves', () => {
   })
 
   it('is what the shipped loop does at boot, over exactly the same set', () => {
-    // `services.corridors` is a `CorridorSet`, and the daemon's recovery pass is
-    // this loop verbatim. A consumer reproducing the cadences is reproducing
-    // policy; reproducing this is reproducing the contract.
+    // Recovery still iterates `services.corridors`. Asset RFQ plugin corridors
+    // skip that pass because they share one service; an injected corridor is
+    // not `ASSET_` and is still driven here, which is the contract this file
+    // pins.
     const cliSource = readFileSync(
       fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)),
       'utf8',
     )
-    expect(cliSource).toContain('for (const corridor of services.corridors) recovered += await corridor.tickAll()')
+    expect(cliSource).toContain('for (const corridor of services.corridors)')
+    expect(cliSource).toContain("if (corridor.descriptor?.envStem.startsWith('ASSET_')) continue")
+    expect(cliSource).toContain('recovered += await corridor.tickAll()')
+    expect(cliSource).toContain('recovered += (await services.assetRfqService?.tickAll())?.length ?? 0')
   })
 })
