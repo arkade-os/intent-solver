@@ -53,8 +53,7 @@ describe('createServices — asset markets', () => {
   it('does not swallow a bad market the way it deliberately swallows a bad override', () => {
     // `applyOverrides` skips what it cannot validate, and is right to: refusing
     // to boot over a preference takes a solver down for nothing. Markets get
-    // the opposite treatment and the asymmetry must stay visible — a `try`
-    // around this call would restore the silent-empty-pricing path.
+    // the opposite treatment so invalid stored operator state stays visible.
     const body = createServicesBody()
     const at = body.indexOf('assetMarketPolicy(')
     expect(at).toBeGreaterThan(-1)
@@ -113,10 +112,8 @@ describe('what startup does with a stored market', () => {
 
   it('refuses to start on a market that no longer validates, rather than dropping it', async () => {
     // Reachable only by a hand-edited database or a bound tightened in a later
-    // release — the route refuses this before it is ever written. It matters
-    // because dropping it would empty `pricing`, and an empty `pricing` is read
-    // by `AssetOfferService` as "not opted into price gating": it fills at
-    // whatever a maker asks. Loud beats silent-and-generous.
+    // release — the route refuses this before it is ever written. Dropping it
+    // would hide operator state and make the configured market silently vanish.
     const store = await AdminStore.open(':memory:', () => 1)
     await store.putMarket(market())
     // Straight past the store's own API, which is the only way to produce it.

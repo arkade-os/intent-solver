@@ -53,6 +53,20 @@ const build = async (over: Partial<AssetOfferDeps> = {}) => {
 }
 
 const found = { offer: offer(), txid: 'a'.repeat(64), vout: 0 }
+// BTC/USDT: the maker deposits 900 USDT-units and wants 1000 sats. Feed is
+// sats-per-USDT, so 1.12 admits the fixture and 0.5 is far out.
+const pricing = [
+  {
+    base: USDT,
+    quote: null,
+    baseDecimals: 0,
+    quoteDecimals: 0,
+    feedUrl: 'https://feed.test/p',
+    pricePath: '/price',
+    toleranceBps: 100,
+    feeBps: 0,
+  },
+]
 
 describe('consider', () => {
   it('records an intent for an offer it can fill', async () => {
@@ -138,21 +152,6 @@ describe('offer consistency — Swap Protocol V1 § 5.1', () => {
 })
 
 describe('the price gate', () => {
-  // BTC/USDT: the maker deposits 900 USDT-units and wants 1000 sats. Feed is
-  // sats-per-USDT so the fixture's ratio sits near it.
-  const pricing = [
-    {
-      base: USDT,
-      quote: null,
-      baseDecimals: 0,
-      quoteDecimals: 0,
-      feedUrl: 'https://feed.test/p',
-      pricePath: '/price',
-      toleranceBps: 100,
-      feeBps: 0,
-    },
-  ]
-
   it('takes an offer inside tolerance', async () => {
     const { service } = await build({ pricing, fetchPrice: async () => priceFrom('1.12') })
     expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
@@ -191,6 +190,11 @@ describe('the price gate', () => {
     // Opting out entirely is allowed; opting in halfway is not.
     const { service } = await build()
     expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+  })
+
+  it('FAILS CLOSED when configured pricing is empty', async () => {
+    const { service } = await build({ pricing: [] })
+    expect(await service.consider(found)).toEqual({ fill: false, reason: 'price_out_of_tolerance' })
   })
 
   it('does not read the feed for an offer the cheap gates already refused', async () => {
@@ -425,12 +429,18 @@ describe('replaceMarkets', () => {
     })
   })
 
-  it('fills an already-recorded intent after the market is dropped', async () => {
-    const { store, service } = await build({ settle: async () => '0xfill' })
+  it('refuses an already-recorded intent when configured pricing disappears', async () => {
+    const settle = vi.fn(async () => '0xfill')
+    const { store, service } = await build({
+      pricing,
+      fetchPrice: async () => priceFrom('1.12'),
+      settle,
+    })
     expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
-    await service.replaceMarkets({ markets: [] })
-    expect(await service.tickAll()).toBe(1)
-    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled', fillTxid: '0xfill' })
+    await service.replaceMarkets({ markets: [], pricing: [] })
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'refused', fillTxid: null })
   })
 
   it('waits for an in-flight consider before swapping the list', async () => {
@@ -465,20 +475,6 @@ describe('replaceMarkets', () => {
 // `consider` admits a price; `tickAll` spends at it on a worker loop and at
 // startup recovery, arbitrary wall time later. Nothing between them re-asks.
 describe('tickAll re-runs price admission', () => {
-  // 900 USDT-units against 1000 sats wanted, so 1.12 admits and 0.5 is far out.
-  const pricing = [
-    {
-      base: USDT,
-      quote: null,
-      baseDecimals: 0,
-      quoteDecimals: 0,
-      feedUrl: 'https://feed.test/p',
-      pricePath: '/price',
-      toleranceBps: 100,
-      feeBps: 0,
-    },
-  ]
-
   let duringPriceRead: (() => Promise<void>) | null = null
   beforeEach(() => void (duringPriceRead = null))
 
