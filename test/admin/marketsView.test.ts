@@ -5,10 +5,10 @@
  * reads the file — the approach `armedActions.test.ts` and `quotesView.test.ts`
  * already take, and for the same reason.
  *
- * The claims worth pinning are the honest ones. A console that shows a market as
- * configured and lets an operator read that as "we are trading it" is the
- * failure this screen most easily produces: nothing here reaches a running
- * solver, and a market added since boot cannot be filled against.
+ * The claims worth pinning are the honest ones. CRUD applies live; the notice
+ * and the `active` list are how the screen says a stored row is this process's
+ * serve list. A row that is stored but served by nothing is still the failure
+ * this screen most easily produces.
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'

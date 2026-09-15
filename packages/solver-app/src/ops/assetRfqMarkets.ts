@@ -2,17 +2,10 @@
  * Which asset markets this deployment serves over RFQ, and under which env
  * stems.
  *
- * TWO SOURCES, joined here, and neither is redundant. The console's market rows
- * already hold everything about a market's ECONOMICS — the feed, each leg's
- * precision, the spread, the payout bounds — and `assetMarketConfig.ts` explains
- * why a second spelling of those would let two directions disagree about one
- * price. What they do not hold is a SYMBOL, and a symbol is what a corridor's
- * env stem is made of: `ASSET_<68 hex>_BUY` is legal shell and unusable, the
- * same argument `evmCorridorConfig.ts` makes for naming a token.
- *
- * So `ASSET_MARKETS` names the assets served and labels them, exactly as
- * `EVM_TOKENS` does; the console prices them. Unset serves none, which is the
- * default and leaves the deployment as it was.
+ * Console rows are the live serve list. `ASSET_MARKETS` still names a symbol
+ * (so env stems stay typeable) and can close a direction; it is not required
+ * to quote. Unset still serves every enabled console market that RFQ can
+ * express — one asset leg, at least one open direction.
  */
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
 import { assetRfqEnvStem, type AssetRfqDirection } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
@@ -38,11 +31,8 @@ const DIRECTIONS: readonly AssetRfqDirection[] = ['sell_base', 'buy_base']
 const CLOSED = { min: 0n, max: 0n }
 
 /**
- * `SYMBOL:<asset id>`, comma separated. Empty or unset means no asset RFQ
- * corridors.
- *
- * `read` supplies `<STEM>_ENABLED` per direction, defaulting to on, and takes
- * only the exact strings for the reason `corridorEnabledFrom` gives.
+ * `SYMBOL:<asset id>`, comma separated. Empty or unset names no symbols; the
+ * console rows are still the serve list.
  */
 export const parseAssetRfqTokens = (
   raw: string | undefined,
@@ -81,68 +71,53 @@ export const parseAssetRfqTokens = (
   })
 }
 
+const rfqSymbolFor = (assetId: string): string => `A${assetId.slice(0, 11).toUpperCase()}`
+
 /**
- * The markets the corridors are built from: a named asset joined to the console
- * row that prices it.
+ * Console rows as RFQ markets. `tokens` supply a typeable symbol and can close
+ * a direction; a named asset with no console row is omitted rather than taking
+ * the process down — the row is what the dashboard adds next.
  *
- * THROWS on a named asset the console does not price, rather than dropping it.
- * An operator who wrote `ASSET_MARKETS` meant to trade that pair, and a solver
- * that came up serving nothing would look like a quiet market instead of a
- * misconfiguration — the same call `assertMarketsPriced` makes for the packet
- * path, and for the same reason.
- *
- * Bounds are REQUIRED, with no deployment-wide fallback. The packet path has one
- * (`OFFER_MIN_FILL_AMOUNT`), and it is a sats figure: applying it to a payout leg
- * denominated in an asset's atomic units would bound one unit with another. An
- * operator states both directions or serves neither.
+ * Unbounded or env-closed directions become `{ min: 0n, max: 0n }` (refuse by
+ * amount) rather than an unbounded payout. Both directions closed, or an
+ * asset-to-asset pair the covenant cannot express, drops the market.
  */
 export const assetRfqMarketsFrom = (
   tokens: readonly AssetRfqToken[],
   pricing: readonly AssetMarketPricingView[],
-): readonly AssetRfqMarket[] =>
-  tokens.map((token) => {
-    const market = pricing.find((m) => m.base === token.assetId || m.quote === token.assetId)
-    if (!market) {
-      throw new Error(
-        `ASSET_MARKETS names ${token.symbol} (${token.assetId}) but no enabled market in the console prices it. ` +
-          `Add the market and its price feed in the console, or stop serving the asset.`,
-      )
-    }
-    // Exactly one leg may be an asset: `parseAssetPair` refuses the rest, and
-    // the offer packet cannot express an asset-to-asset swap at all. A market
-    // configured that way is quotable on neither direction of this corridor.
-    if (market.base !== null && market.quote !== null) {
-      throw new Error(
-        `the market for ${token.symbol} names an asset on both legs, which the offer covenant cannot express`,
-      )
-    }
+): readonly AssetRfqMarket[] => {
+  const byAsset = new Map(tokens.map((token) => [token.assetId, token]))
+  return pricing.flatMap((market) => {
+    if (market.base !== null && market.quote !== null) return []
+    const assetId = market.base ?? market.quote
+    if (!assetId) return []
+    const token = byAsset.get(assetId)
+    const symbol = token?.symbol ?? rfqSymbolFor(assetId)
     const boundsFor = (direction: AssetRfqDirection) => {
-      if (!token.enabled[direction]) return CLOSED
-      const bounds = direction === 'sell_base' ? market.sellBase : market.buyBase
-      if (!bounds) {
-        throw new Error(
-          `the market for ${token.symbol} states no ${direction === 'sell_base' ? 'sellBase' : 'buyBase'} bounds, ` +
-            `so ${assetRfqEnvStem(token, direction)} would quote an unbounded payout. Set them in the console, ` +
-            `or close the direction with ${assetRfqEnvStem(token, direction)}_ENABLED=false.`,
-        )
-      }
-      return bounds
+      if (token && !token.enabled[direction]) return CLOSED
+      return (direction === 'sell_base' ? market.sellBase : market.buyBase) ?? CLOSED
     }
-    return {
-      base: market.base,
-      quote: market.quote,
-      symbol: token.symbol,
-      baseDecimals: market.baseDecimals,
-      quoteDecimals: market.quoteDecimals,
-      feeBps: market.feeBps,
-      sellBaseFeeFlat: market.sellBaseFeeFlat,
-      buyBaseFeeFlat: market.buyBaseFeeFlat,
-      sellBase: boundsFor('sell_base'),
-      buyBase: boundsFor('buy_base'),
-      feedUrl: market.feedUrl,
-      pricePath: market.pricePath,
-    }
+    const sellBase = boundsFor('sell_base')
+    const buyBase = boundsFor('buy_base')
+    if (sellBase.max === 0n && buyBase.max === 0n) return []
+    return [
+      {
+        base: market.base,
+        quote: market.quote,
+        symbol,
+        baseDecimals: market.baseDecimals,
+        quoteDecimals: market.quoteDecimals,
+        feeBps: market.feeBps,
+        sellBaseFeeFlat: market.sellBaseFeeFlat,
+        buyBaseFeeFlat: market.buyBaseFeeFlat,
+        sellBase,
+        buyBase,
+        feedUrl: market.feedUrl,
+        pricePath: market.pricePath,
+      },
+    ]
   })
+}
 
 type Bounds = { min: bigint; max: bigint }
 

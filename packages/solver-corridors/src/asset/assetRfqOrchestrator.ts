@@ -195,11 +195,31 @@ export class AssetRfqSwapService {
   private readonly now: () => number
   private readonly quoteLimiter: RateLimiter
   private readonly newId: () => string
+  private markets: readonly AssetRfqMarket[]
+  /** ponytail: process-wide quote/replace mutex; per-market locks if concurrent pairs matter */
+  private tail: Promise<unknown> = Promise.resolve()
 
   constructor(private readonly deps: AssetRfqDeps) {
     this.now = deps.now ?? nowSeconds
     this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
     this.newId = deps.newId ?? (() => crypto.randomUUID())
+    this.markets = deps.markets
+  }
+
+  private serialise<T>(job: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(job, job)
+    this.tail = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
+  }
+
+  /** Swap the live serve list. In-flight rows keep the terms already recorded. */
+  replaceMarkets(markets: readonly AssetRfqMarket[]): Promise<void> {
+    return this.serialise(async () => {
+      this.markets = markets
+    })
   }
 
   /**
@@ -209,7 +229,11 @@ export class AssetRfqSwapService {
    * expensive gate runs last: the pair and the market are answered without
    * touching the network, and only then is a price fetched.
    */
-  async quote(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
+  quote(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
+    return this.serialise(() => this.quoteInner(request))
+  }
+
+  private async quoteInner(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
     const pair = parseAssetPair(request.pair)
     if (!pair) {
       return {
@@ -219,7 +243,7 @@ export class AssetRfqSwapService {
       }
     }
 
-    const market = this.deps.markets.find(
+    const market = this.markets.find(
       (m) => (pair.from === m.base && pair.to === m.quote) || (pair.from === m.quote && pair.to === m.base),
     )
     if (!market) return { accepted: false, reason: 'unsupported_pair', detail: 'no market configured for this pair' }
@@ -314,7 +338,11 @@ export class AssetRfqSwapService {
    * Each arm ends at a compare-and-swap, so two ticks racing one row cannot
    * both act.
    */
-  async tick(id: string): Promise<void> {
+  tick(id: string): Promise<void> {
+    return this.serialise(() => this.drive(id))
+  }
+
+  private async drive(id: string): Promise<void> {
     const row = await this.deps.store.findById(id)
     if (!row) return
     switch (row.state) {
@@ -340,17 +368,19 @@ export class AssetRfqSwapService {
    * One row's failure is isolated from the rest: an indexer blip on the first
    * negotiation must not stop the second from being driven.
    */
-  async tickAll(): Promise<string[]> {
-    const driven: string[] = []
-    for (const row of await this.deps.store.listNonTerminal()) {
-      try {
-        await this.tick(row.id)
-        driven.push(row.id)
-      } catch (error) {
-        this.deps.onError?.(row.id, error)
+  tickAll(): Promise<string[]> {
+    return this.serialise(async () => {
+      const driven: string[] = []
+      for (const row of await this.deps.store.listNonTerminal()) {
+        try {
+          await this.drive(row.id)
+          driven.push(row.id)
+        } catch (error) {
+          this.deps.onError?.(row.id, error)
+        }
       }
-    }
-    return driven
+      return driven
+    })
   }
 
   /** Awaiting the client's deposit, until `valid_until`. */

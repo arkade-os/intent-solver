@@ -563,3 +563,51 @@ describe('the market mark', () => {
     expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillPriceMantissa: null })
   })
 })
+
+describe('replaceMarkets', () => {
+  it('starts quoting a market that was empty at construction', async () => {
+    const { service } = await harness({ markets: [] })
+    expect(await service.quote(request())).toMatchObject({ accepted: false, reason: 'unsupported_pair' })
+    await service.replaceMarkets([MARKET])
+    expect(await service.quote(request())).toMatchObject({ accepted: true })
+  })
+
+  it('refuses new quotes after the market is dropped, and fills the in-flight one at quoted terms', async () => {
+    const { service, store, settled } = await harness({ depositAt: async () => deposit() })
+    const quoted = await service.quote(request())
+    if (!quoted.accepted) throw new Error('expected a quote')
+    const { fromAmount, toAmount } = quoted.swap
+    await service.replaceMarkets([])
+    expect(await service.quote(request({ rfqId: 'f'.repeat(64) }))).toMatchObject({
+      accepted: false,
+      reason: 'unsupported_pair',
+    })
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    expect(settled).toEqual(['swap-1'])
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fromAmount, toAmount })
+  })
+
+  it('waits for an in-flight quote before swapping the list', async () => {
+    let release!: (price: { mantissa: bigint; scale: number }) => void
+    const blocked = new Promise<{ mantissa: bigint; scale: number }>((resolve) => {
+      release = resolve
+    })
+    const { service } = await harness({ fetchPrice: () => blocked })
+    const quoting = service.quote(request())
+    let replaced = false
+    const replacing = service.replaceMarkets([]).then(() => {
+      replaced = true
+    })
+    await Promise.resolve()
+    expect(replaced).toBe(false)
+    release({ mantissa: 100_000n, scale: 0 })
+    expect(await quoting).toMatchObject({ accepted: true })
+    await replacing
+    expect(replaced).toBe(true)
+    expect(await service.quote(request({ rfqId: 'f'.repeat(64) }))).toMatchObject({
+      accepted: false,
+      reason: 'unsupported_pair',
+    })
+  })
+})

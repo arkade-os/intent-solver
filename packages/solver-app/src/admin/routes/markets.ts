@@ -9,15 +9,12 @@
  * `PATCH {key, value}` has no spelling for "delete the third one". Hence a
  * collection, keyed by the canonical § 2 market key.
  *
- * ## The same restart honesty, for the same reason
+ * ## Live for this process
  *
- * Nothing here reaches a running solver. `createServices` reads the markets once
- * and hands the offer path the two lists it derives; `AssetOfferService.deps` is
- * `private readonly` and is never revisited, exactly as
- * `routes/settings.ts` documents for every other knob. So every mutating
- * response carries `restartRequired: true` and says so in words. A console that
- * claimed a new market was live when it was not would have an operator watching
- * for fills that cannot happen.
+ * PUT/DELETE persist, then `replaceMarkets()` rebuilds the in-memory serve list
+ * and swaps the running corridor set. Rails, mnemonic and relay URL still need
+ * a restart; market CRUD does not. In-flight swaps keep the terms they were
+ * quoted with.
  *
  * ## Validated before it is stored, and again at startup
  *
@@ -45,7 +42,7 @@ import {
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import type { AssetMarketRow } from '../db.js'
-import { servedBy } from '../servedBy.js'
+import { servedBy, servingOf } from '../servedBy.js'
 import type { AdminDeps } from '../server.js'
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
@@ -55,10 +52,8 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
  * same sentence everywhere — the shape `routes/settings.ts`'s `RESTART_NOTICE`
  * established, and for the same reason.
  */
-export const MARKETS_RESTART_NOTICE =
-  'Stored. It takes effect when the solver restarts: createServices reads the markets at startup and hands the ' +
-  'offer path the lists it derives, and nothing re-reads them afterwards. The markets shown here are what the ' +
-  'NEXT process will trade; a market added since boot is not one this process is filling against.'
+export const MARKETS_LIVE_NOTICE =
+  'Live on this process. In-flight swaps keep the terms they were quoted with; only new quotes see the change.'
 
 /**
  * The wire shape. `null` is the BTC leg, matching the packet and the store.
@@ -179,20 +174,16 @@ export const registerMarketRoutes = (app: Hono, deps: AdminDeps): void => {
 
   app.get('/api/markets', async (c) => {
     const rows = await deps.services.adminStore.listMarkets()
-    const { policy } = deps.services
     return c.json({
       // `servedBy` is a SECOND axis, beside the row's own `enabled`. A market can
       // be enabled and served by nothing, which is the state that cost an
       // operator an evening. @see admin/servedBy.ts
-      markets: rows.map((row) => ({ ...marketJson(row), servedBy: servedBy(row, policy) })),
+      markets: rows.map((row) => ({ ...marketJson(row), servedBy: servedBy(row, servingOf(deps.services)) })),
       /**
-       * Which of these the RUNNING process is actually trading against — not the
-       * same set as `markets`, and the difference is the point. A market added
-       * or disabled since boot shows here as pending, so the console can badge
-       * it rather than implying the solver is already acting on it.
+       * Which of these the RUNNING process is actually trading against.
        */
       active: deps.services.assetMarkets.map((market) => assetMarketKey(market.base, market.quote)),
-      restartNotice: MARKETS_RESTART_NOTICE,
+      restartNotice: MARKETS_LIVE_NOTICE,
     })
   })
 
@@ -250,7 +241,8 @@ export const registerMarketRoutes = (app: Hono, deps: AdminDeps): void => {
       outcome: 'ok',
       detail: null,
     })
-    return c.json({ market: marketJson(row), restartRequired: true, restartNotice: MARKETS_RESTART_NOTICE })
+    await deps.services.replaceMarkets?.()
+    return c.json({ market: marketJson(row), restartRequired: false, restartNotice: MARKETS_LIVE_NOTICE })
   })
 
   app.delete('/api/markets/:key', async (c) => {
@@ -264,6 +256,7 @@ export const registerMarketRoutes = (app: Hono, deps: AdminDeps): void => {
       outcome: 'ok',
       detail: null,
     })
-    return c.json({ deleted: key, restartRequired: true, restartNotice: MARKETS_RESTART_NOTICE })
+    await deps.services.replaceMarkets?.()
+    return c.json({ deleted: key, restartRequired: false, restartNotice: MARKETS_LIVE_NOTICE })
   })
 }

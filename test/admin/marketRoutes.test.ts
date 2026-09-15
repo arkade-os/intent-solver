@@ -40,12 +40,17 @@ const build = async (opts: { active?: { base: string | null; quote: string | nul
     if (opts.feedFails) throw new Error('HTTP 503 Service Unavailable')
     return priceFrom('100000')
   })
-  // `policy` carries the boot lists the served-by column is derived from.
   const services = {
     config: {},
     policy: { offerMarkets: [], assetRfqTokens: [] },
     adminStore,
     assetMarkets: opts.active ?? [],
+    assetRfqMarkets: [] as { base: string | null; quote: string | null }[],
+    replaceMarkets: async () => {
+      const rows = await adminStore.listMarkets()
+      services.assetMarkets = rows.filter((row) => row.enabled).map((row) => ({ base: row.base, quote: row.quote }))
+      services.assetRfqMarkets = services.assetMarkets
+    },
   } as never
   const app = buildAdminApp({ services, startedAt: 1, mode: 'relay', fetchPrice })
   return { app, adminStore, fetchPrice }
@@ -76,14 +81,14 @@ describe('GET /api/markets', () => {
     await adminStore.close()
   })
 
-  it('says a stored market is not in force until the solver restarts', async () => {
+  it('marks a stored market active on this process without a restart', async () => {
     const { app, adminStore } = await build()
     await put(app, body())
     const seen = await list(app)
     expect(seen.markets).toHaveLength(1)
-    // Stored but NOT active: this process was built before the row existed.
-    expect(seen.active).toEqual([])
-    expect(seen.restartNotice).toMatch(/restarts/)
+    expect(seen.active).toEqual([KEY])
+    expect(seen.markets[0]).toMatchObject({ servedBy: ['rfq'] })
+    expect(seen.restartNotice).toMatch(/Live on this process/)
     await adminStore.close()
   })
 
@@ -113,13 +118,13 @@ describe('GET /api/markets', () => {
 })
 
 describe('PUT /api/markets', () => {
-  it('stores a market and says it needs a restart', async () => {
+  it('stores a market and does not ask for a restart', async () => {
     const { app, adminStore } = await build()
     const response = await put(app, body())
     expect(response.status).toBe(200)
     const answered = (await response.json()) as { market: { marketKey: string }; restartRequired: boolean }
     expect(answered.market.marketKey).toBe(KEY)
-    expect(answered.restartRequired).toBe(true)
+    expect(answered.restartRequired).toBe(false)
     expect(await adminStore.getMarket(KEY)).not.toBeNull()
     await adminStore.close()
   })
@@ -275,14 +280,14 @@ describe('the feed probe', () => {
 })
 
 describe('DELETE /api/markets/:key', () => {
-  it('removes a market and says a restart is needed', async () => {
+  it('removes a market and does not ask for a restart', async () => {
     const { app, adminStore } = await build()
     await put(app, body())
     const response = await app.fetch(
       new Request(`http://admin/api/markets/${encodeURIComponent(KEY)}`, { method: 'DELETE' }),
     )
     expect(response.status).toBe(200)
-    expect((await response.json()) as { restartRequired: boolean }).toMatchObject({ restartRequired: true })
+    expect((await response.json()) as { restartRequired: boolean }).toMatchObject({ restartRequired: false })
     expect(await adminStore.listMarkets()).toEqual([])
     await adminStore.close()
   })

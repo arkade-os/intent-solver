@@ -25,10 +25,11 @@ describe('createServices — the asset RFQ service', () => {
     expect(body()).toContain('new AssetRfqSwapService(')
   })
 
-  it('opens its store only when a market is served', () => {
-    // A deployment that named no asset must gain no table it never asked for,
-    // the same property the EVM stores have.
-    expect(body()).toMatch(/assetRfqMarkets\.length > 0 \? await AssetRfqSwapStore\.open/)
+  it('constructs one even when no market is served yet', () => {
+    // A first dashboard row has to attach to a running service.
+    expect(body()).toContain('new AssetRfqSwapService(')
+    expect(body()).toContain('await AssetRfqSwapStore.open(swapFile)')
+    expect(body()).not.toMatch(/assetRfqMarkets\.length > 0 \? await AssetRfqSwapStore\.open/)
   })
 
   it('puts the table in the swap file, sharing the connection', () => {
@@ -48,9 +49,10 @@ describe('createServices — the asset RFQ service', () => {
     expect(body().indexOf('assetRfqMarketsFrom(')).toBeLessThan(body().indexOf('AssetRfqSwapStore.open'))
   })
 
-  it('joins the named assets to the console rows, never to a second list', () => {
+  it('joins console rows to optional ASSET_MARKETS symbols, never to a second list', () => {
     expect(body()).toContain('assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)')
-    expect(body().match(/assetRfqMarketsFrom\(/g)).toHaveLength(1)
+    expect(body()).toContain('assetRfqMarketsFrom(policy.assetRfqTokens, next.pricing)')
+    expect(body().match(/assetRfqMarketsFrom\(/g)).toHaveLength(2)
   })
 })
 
@@ -115,7 +117,13 @@ describe('the corridors reach the registry and the console', () => {
   })
 
   it('closes the store, isolated like every other resource', () => {
-    expect(body()).toContain("['assetRfqStore', () => assetRfqStore?.close()]")
+    expect(body()).toContain("['assetRfqStore', () => assetRfqStore.close()]")
+  })
+
+  it('hot-swaps the captured corridor set in place after a console write', () => {
+    expect(body()).toContain('await assetRfqService.replaceMarkets(rfq)')
+    expect(body()).toContain('services.corridors.replace')
+    expect(body()).toContain('services.readers.replace')
   })
 })
 
@@ -168,14 +176,14 @@ describe('a configured market really does become a served corridor', () => {
     await built.assetRfqStore.close()
   })
 
-  it('registers nothing at all when no asset is named', async () => {
+  it('registers nothing at all when the console holds no market', async () => {
     const store = await AssetRfqSwapStore.open(':memory:')
     const corridors = corridorSetFromDeps({
       store: null as never,
       onchainStore: null as never,
       assetRfqService: { tickAll: async () => [] } as never,
       assetRfqStore: store,
-      assetRfqMarkets: assetRfqMarketsFrom([], [pricing]),
+      assetRfqMarkets: assetRfqMarketsFrom([], []),
     })
     expect([...corridors]).toHaveLength(0)
     await store.close()
