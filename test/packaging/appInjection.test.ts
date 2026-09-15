@@ -178,7 +178,7 @@ describe('a deployment described in code rather than in the environment', () => 
     // the entrypoint runs. Corridors have no such ordering hazard: they are
     // arguments.
     expect(servicesSource).toContain('const extraCorridors = opts?.corridors ?? []')
-    expect(servicesSource).toContain('corridorSetFromDeps(corridorDeps, extraCorridors)')
+    expect(servicesSource).toContain('corridorSetFromDeps({ ...shared, assetRfqMarkets: serving }, extraCorridors)')
     expect(sdk.createServices.length).toBeGreaterThanOrEqual(1)
   })
 })

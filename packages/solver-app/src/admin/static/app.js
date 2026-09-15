@@ -487,7 +487,7 @@ const marketState = (market) =>
     ? h('span.muted', 'disabled')
     : market.active
       ? h('span.muted', 'trading')
-      : h('span.phase.phase-exposed', 'pending restart')
+      : h('span.phase.phase-exposed', 'not quoting')
 
 const marketCard = (market) =>
   h(
@@ -1520,7 +1520,7 @@ const marketsView = () => {
                     ? h('span.muted', 'disabled')
                     : active.has(market.marketKey)
                       ? h('span.muted', 'trading')
-                      : h('span.phase.phase-exposed', 'pending restart'),
+                      : h('span.phase.phase-exposed', 'not quoting'),
                 ),
                 // A SECOND axis, never folded into `state`: a market can read
                 // `trading` and be filled by nothing.

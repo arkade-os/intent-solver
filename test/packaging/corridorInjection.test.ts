@@ -93,7 +93,7 @@ describe('createServices exposes the extension point', () => {
     // Passing it to only one leaves a corridor that quotes but reports no
     // status, or reports status it never served.
     expect(servicesSource).toContain('const extraCorridors = opts?.corridors ?? []')
-    expect(servicesSource).toContain('corridorSetFromDeps(corridorDeps, extraCorridors)')
-    expect(servicesSource).toContain('readerSetFromDeps(corridorDeps, extraCorridors)')
+    expect(servicesSource).toContain('corridorSetFromDeps({ ...shared, assetRfqMarkets: serving }, extraCorridors)')
+    expect(servicesSource).toContain('readerSetFromDeps({ ...shared, assetRfqMarkets: readable }, extraCorridors)')
   })
 })

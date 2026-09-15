@@ -205,7 +205,10 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // corridor left out of recovery starts the process with its non-terminal rows
   // untouched until the first full sweep comes round.
   let recovered = 0
-  for (const corridor of services.corridors) recovered += await corridor.tickAll()
+  for (const corridor of services.corridors) {
+    if (corridor.descriptor?.envStem.startsWith('ASSET_')) continue
+    recovered += await corridor.tickAll()
+  }
   try {
     recovered += (await services.assetRfqService?.tickAll())?.length ?? 0
   } catch (error) {
@@ -451,7 +454,10 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
       // The EVM legs ride this same loop: no hot tick (an EVM confirmation
       // depth is minutes wide, so a sub-second cadence would buy nothing but
       // RPC calls), and their rows are driven by the sweep alone.
-      for (const corridor of services.corridors) await corridor.tickAll()
+      for (const corridor of services.corridors) {
+        if (corridor.descriptor?.envStem.startsWith('ASSET_')) continue
+        await corridor.tickAll()
+      }
       try {
         await services.assetRfqService?.tickAll()
       } catch (error) {

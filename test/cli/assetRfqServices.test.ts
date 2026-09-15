@@ -110,10 +110,11 @@ describe('the corridors reach the registry and the console', () => {
     // `corridorSetFromDeps` registers only when the first two are present, and
     // `readerSetFromDeps` needs the store for an operator to see a live
     // negotiation at all.
-    const shared = body().slice(body().indexOf('const corridorDeps'))
+    const shared = body().slice(body().indexOf('const shared = {'))
     expect(shared).toContain('assetRfqService,')
     expect(shared).toContain('assetRfqStore,')
-    expect(shared).toContain('assetRfqMarkets,')
+    expect(body()).toContain('assetRfqMarkets: serving')
+    expect(body()).toContain('assetRfqMarkets: readable')
   })
 
   it('closes the store, isolated like every other resource', () => {
@@ -121,7 +122,10 @@ describe('the corridors reach the registry and the console', () => {
   })
 
   it('hot-swaps the captured corridor set in place after a console write', () => {
-    expect(body()).toContain('await assetRfqService.replaceMarkets(rfq)')
+    expect(body()).toContain('await assetRfqStore.listNonTerminal()')
+    expect(body().indexOf('const nextSets = setsFrom(rfq, readable)')).toBeLessThan(
+      body().indexOf('await assetRfqService.replaceMarkets(rfq)'),
+    )
     expect(body()).toContain('services.corridors.replace')
     expect(body()).toContain('services.readers.replace')
   })

@@ -184,6 +184,8 @@ export interface Services {
    */
   offerStore: OfferFillStore | null
   assetOffers: AssetOfferService | null
+  /** Priced subset of `OFFER_MARKETS` this process will actually fill. */
+  liveOfferMarkets: readonly AssetMarket[]
   /** Offers DECLINED. NOT nullable beside the two above: a refusal is not a row. */
   offerRefusals: OfferRefusalRecorder
   rfqRefusals: RfqRefusalRecorder
@@ -1170,8 +1172,8 @@ export const createServices = async (
   }
 
   const extraCorridors = opts?.corridors ?? []
-  const setsFrom = (rfq: readonly AssetRfqMarket[]) => {
-    const corridorDeps = {
+  const setsFrom = (serving: readonly AssetRfqMarket[], readable: readonly AssetRfqMarket[] = serving) => {
+    const shared = {
       service,
       store,
       onchainService,
@@ -1188,11 +1190,10 @@ export const createServices = async (
       evmCorridors: policy.evmCorridors,
       assetRfqService,
       assetRfqStore,
-      assetRfqMarkets: rfq,
     }
     return {
-      corridors: corridorSetFromDeps(corridorDeps, extraCorridors),
-      readers: readerSetFromDeps(corridorDeps, extraCorridors),
+      corridors: corridorSetFromDeps({ ...shared, assetRfqMarkets: serving }, extraCorridors),
+      readers: readerSetFromDeps({ ...shared, assetRfqMarkets: readable }, extraCorridors),
     }
   }
   const { corridors, readers } = setsFrom(assetRfqMarkets)
@@ -1213,6 +1214,7 @@ export const createServices = async (
     evmReceiveService,
     offerStore,
     assetOffers,
+    liveOfferMarkets,
     offerRefusals,
     rfqRefusals,
     assetRfqStore,
@@ -1223,14 +1225,29 @@ export const createServices = async (
       const rfq = assetRfqMarketsFrom(policy.assetRfqTokens, next.pricing)
       const offers = offerMarketsPricedBy(next.pricing)
       if (offers.length > 0) assertMarketsPriced(offers, next.pricing)
+      const live = await assetRfqStore.listNonTerminal()
+      const readable = [...rfq]
+      for (const market of services.assetRfqMarkets) {
+        if (readable.some((row) => row.base === market.base && row.quote === market.quote)) continue
+        if (
+          live.some(
+            (row) =>
+              (row.fromAssetId === market.base && row.toAssetId === market.quote) ||
+              (row.fromAssetId === market.quote && row.toAssetId === market.base),
+          )
+        ) {
+          readable.push(market)
+        }
+      }
+      const nextSets = setsFrom(rfq, readable)
       await assetRfqService.replaceMarkets(rfq)
       await assetOffers?.replaceMarkets({ markets: offers, pricing: next.pricing })
-      const nextSets = setsFrom(rfq)
       services.corridors.replace([...nextSets.corridors])
       services.readers.replace([...nextSets.readers])
       services.assetMarkets = next.pricing
       services.assetMarketPairs = next.pairs
       services.assetRfqMarkets = rfq
+      services.liveOfferMarkets = offers
     },
     adminStore,
     arkade,

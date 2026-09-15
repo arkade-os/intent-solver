@@ -55,10 +55,10 @@ describe('the screen does not let a stored market read as a live one', () => {
     expect(marketsBlock()).toContain('m.restartNotice')
   })
 
-  it('distinguishes trading from pending restart, using the API’s active list', () => {
+  it('distinguishes trading from not quoting, using the API’s active list', () => {
     const block = marketsBlock()
     expect(block).toContain('new Set(m.active)')
-    expect(block).toMatch(/pending restart/)
+    expect(block).toMatch(/not quoting/)
     expect(block).toMatch(/trading/)
   })
 
