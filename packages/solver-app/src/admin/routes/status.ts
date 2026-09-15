@@ -12,7 +12,7 @@ import type { Hono } from 'hono'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
 import { applyOverrides, pendingRestartKeys } from '../settings.js'
-import { marketDrift, settingsDrift } from '../drift.js'
+import { settingsDrift } from '../drift.js'
 import { servedBy } from '../servedBy.js'
 import { assetMarketKey, type AssetMarketBounds } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import type { AssetMarketRow } from '../db.js'
@@ -103,7 +103,7 @@ const marketCards = (rows: readonly AssetMarketRow[], services: AdminDeps['servi
     toleranceBps: row.toleranceBps,
     enabled: row.enabled,
     active: active.has(row.marketKey),
-    servedBy: servedBy(row, services.policy),
+    servedBy: servedBy(row, services),
     sellBase: boundsJson(row.sellBase),
     buyBase: boundsJson(row.buyBase),
   }))
@@ -185,11 +185,8 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       // copy that will eventually point a mainnet swap at a signet explorer.
       explorers: NETWORKS[services.config.network].explorers,
       uptimeSeconds: Math.max(0, (deps.now?.() ?? Math.floor(Date.now() / 1000)) - deps.startedAt),
-      /** Overrides AND markets: both are resolved once at boot. @see admin/drift.ts */
-      pendingRestart: [
-        ...settingsDrift(services.policy, effective, pendingRestartKeys(services.bootOverrides, overrides)),
-        ...marketDrift(services.assetMarkets, storedMarkets),
-      ],
+      /** Settings overrides still need a restart. Market CRUD is live on this process. */
+      pendingRestart: settingsDrift(services.policy, effective, pendingRestartKeys(services.bootOverrides, overrides)),
       restartEnabled: services.config.adminRestartEnabled,
       providerPubkey: services.providerPubkey,
       markets: marketCards(storedMarkets, services),

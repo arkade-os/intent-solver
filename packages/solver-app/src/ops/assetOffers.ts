@@ -30,8 +30,13 @@ import {
   type OfferFillPolicy,
   type OfferFillRefusal,
 } from '@arkade-os/solver-core/core/assetOffer.js'
-import { offerDirectionOn, offerWithinTolerance } from '@arkade-os/solver-core/core/assetOfferPrice.js'
+import {
+  offerDirectionOn,
+  offerWithinTolerance,
+  type OfferDirection,
+} from '@arkade-os/solver-core/core/assetOfferPrice.js'
 import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
+import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { offerFillInputFrom } from '@arkade-os/solver-arkade/arkade/offerFill.js'
 import { offerFromFundingTx } from '@arkade-os/solver-arkade/arkade/offerPacket.js'
 import { offerDepositFrom, type OfferOutputView } from '@arkade-os/solver-arkade/arkade/offerDeposit.js'
@@ -160,15 +165,28 @@ export type ConsiderOutcome = OfferFillDecision & { id?: string }
 
 export class AssetOfferService {
   private readonly newId: () => string
+  private markets: readonly AssetMarket[]
+  private pricing: readonly AssetMarketPricing[] | undefined
+  private readonly serialise: Serialiser = createSerialiser()
 
   constructor(private readonly deps: AssetOfferDeps) {
     this.newId = deps.newId ?? (() => crypto.randomUUID())
+    this.markets = deps.markets
+    this.pricing = deps.pricing
+  }
+
+  /** Swap the live serve list. Recorded intents keep the amounts already stored. */
+  replaceMarkets(args: { markets: readonly AssetMarket[]; pricing?: readonly AssetMarketPricing[] }): Promise<void> {
+    return this.serialise(async () => {
+      this.markets = args.markets
+      this.pricing = args.pricing
+    })
   }
 
   /** Markets are static; inventory is read fresh every decision. */
   private async policy(bounds: AppliedBounds): Promise<OfferFillPolicy> {
     return {
-      markets: this.deps.markets,
+      markets: this.markets,
       available: offerInventoryFrom(await this.deps.balance()),
       minFillAmount: bounds.min,
       maxFillAmount: bounds.max,
@@ -193,13 +211,19 @@ export class AssetOfferService {
 
   /** The bounds this offer's direction states, when its market states any. */
   private boundsFor(input: OfferFillInput): { min: bigint; max: bigint } | null {
-    for (const market of this.deps.pricing ?? []) {
+    const match = this.pricingFor(input)
+    if (match === null) return null
+    const { market, direction } = match
+    const bounds = direction === 'sell_base' ? market.sellBase : market.buyBase
+    // `max: 0n` disables the direction rather than meaning "unbounded", so it
+    // is returned as-is and refuses every amount.
+    return bounds ?? null
+  }
+
+  private pricingFor(input: OfferFillInput): { market: AssetMarketPricing; direction: OfferDirection } | null {
+    for (const market of this.pricing ?? []) {
       const direction = offerDirectionOn(market, input.offerAssetId, input.wantAssetId)
-      if (direction === null) continue
-      const bounds = direction === 'sell_base' ? market.sellBase : market.buyBase
-      // `max: 0n` disables the direction rather than meaning "unbounded", so it
-      // is returned as-is and refuses every amount.
-      return bounds ?? null
+      if (direction !== null) return { market, direction }
     }
     return null
   }
@@ -207,20 +231,16 @@ export class AssetOfferService {
   /**
    * Is the offer's implied price one we will take?
    *
-   * True when no pricing is configured at all — a deployment that has not
-   * opted into price gating is unchanged. But a market that IS priced and
-   * cannot be read refuses: an unreadable feed must not become a free fill.
-   * A feed failure is reported under `id`, which defaults because `consider`
-   * has no row yet; `tickAll` has one and passes it.
+   * True only when pricing is omitted as an explicit opt-out. Once configured,
+   * an empty list, missing market, or unreadable feed refuses. A feed failure
+   * is reported under `id`, which defaults because `consider` has no row yet;
+   * `tickAll` has one and passes it.
    */
   private async withinTolerance(input: OfferFillInput, id = 'price'): Promise<boolean> {
-    const pricing = this.deps.pricing
-    if (!pricing || pricing.length === 0) return true
-
-    const market = pricing.find((m) => offerDirectionOn(m, input.offerAssetId, input.wantAssetId) !== null)
-    if (!market || !this.deps.fetchPrice) return false
-    const direction = offerDirectionOn(market, input.offerAssetId, input.wantAssetId)
-    if (direction === null) return false
+    if (this.pricing === undefined) return true
+    const match = this.pricingFor(input)
+    if (match === null || !this.deps.fetchPrice) return false
+    const { market, direction } = match
 
     try {
       const feed = await this.deps.fetchPrice(market.feedUrl, market.pricePath)
@@ -243,7 +263,11 @@ export class AssetOfferService {
    * The deposit is OBSERVED at the offer's script, never read from the packet —
    * an offer can advertise a deposit it does not hold.
    */
-  async consider({ offer, txid, vout }: DiscoveredOffer): Promise<ConsiderOutcome> {
+  consider({ offer, txid, vout }: DiscoveredOffer): Promise<ConsiderOutcome> {
+    return this.serialise(() => this.considerInner({ offer, txid, vout }))
+  }
+
+  private async considerInner({ offer, txid, vout }: DiscoveredOffer): Promise<ConsiderOutcome> {
     const outpoint = `${txid}:${vout}`
     // Idempotent on the outpoint: rediscovering a funded offer must not open a
     // second intent against the same deposit.
@@ -325,7 +349,11 @@ export class AssetOfferService {
    *
    * Price admission is re-run first; this loop reaches a row arbitrarily late.
    */
-  async tickAll(): Promise<number> {
+  tickAll(): Promise<number> {
+    return this.serialise(() => this.tickAllInner())
+  }
+
+  private async tickAllInner(): Promise<number> {
     if (!this.deps.settle) return 0
     let filled = 0
     for (const row of await this.deps.store.listNonTerminal()) {
@@ -377,45 +405,4 @@ export const parseAssetMarkets = (raw: string | undefined): readonly AssetMarket
       if (market.a === market.b) throw new Error(`OFFER_MARKETS entry ${JSON.stringify(entry)} names one thing twice`)
       return market
     })
-}
-
-/**
- * Refuse a served market this deployment cannot price.
- *
- * {@link AssetOfferService.withinTolerance} returns TRUE when the pricing list
- * is empty — "a deployment that has not opted into price gating is unchanged".
- * That is right for a deployment serving nothing, and a fail-OPEN the moment one
- * market is served without one: the offer is then taken at any price the maker
- * names, which is what {@link AssetMarketPricing} warns about.
- *
- * It became reachable only when the two halves arrived by different routes —
- * `OFFER_MARKETS` names pairs from the environment, the console's market rows
- * carry the feed. `assetMarketConfig.ts`'s `assetMarketPolicy` derives both from
- * one filter precisely so they cannot separate; this is the same guarantee for
- * a market that came from anywhere else.
- *
- * ONE DIRECTION ONLY. Pricing without a market is fine — nothing is served, so
- * nothing is at risk. And pricing present but unreadable already refuses, since
- * `withinTolerance` returns false with no `fetchPrice`. Market-without-pricing
- * is the only combination that fills blind, so it is the only one refused.
- *
- * Thrown at STARTUP rather than per offer: an operator who configured a market
- * meant to trade it, and discovering at the first fill that it was never priced
- * is discovering it after the money moved.
- */
-export const assertMarketsPriced = (markets: readonly AssetMarket[], pricing: readonly AssetMarketPricing[]): void => {
-  const label = (id: string | null): string => id ?? 'BTC'
-  for (const market of markets) {
-    // The market is unordered and the feed is not, so either orientation counts.
-    const covered = pricing.some(
-      (p) => (p.base === market.a && p.quote === market.b) || (p.base === market.b && p.quote === market.a),
-    )
-    if (!covered) {
-      throw new Error(
-        `asset market ${label(market.a)}/${label(market.b)} is served but has no pricing: an offer on it ` +
-          `would be filled at whatever price the maker named. Configure the market's price feed in the ` +
-          `console, or stop serving the pair.`,
-      )
-    }
-  }
 }

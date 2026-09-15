@@ -478,7 +478,7 @@ const marketState = (market) =>
     ? h('span.muted', 'disabled')
     : market.active
       ? h('span.muted', 'trading')
-      : h('span.phase.phase-exposed', 'pending restart')
+      : h('span.phase.phase-exposed', 'not quoting')
 
 const marketCard = (market) =>
   h(
@@ -494,8 +494,7 @@ const marketCard = (market) =>
               'span.phase.phase-failed',
               {
                 title:
-                  'No path fills this market. OFFER_MARKETS drives the offer path and ASSET_MARKETS the RFQ ' +
-                  'corridors; neither names this pair. Both are on the settings page.',
+                  'No path fills this market. OFFER_MARKETS drives the offer path; RFQ follows enabled console rows with bounds.',
               },
               'nothing',
             )
@@ -1457,8 +1456,7 @@ const servedByCell = (paths) =>
           'span.phase.phase-failed',
           {
             title:
-              'No path fills this market. OFFER_MARKETS drives the offer path and ASSET_MARKETS the RFQ ' +
-              'corridors; neither names this pair, so nothing is watching for it. Both are on the settings page.',
+              'No path fills this market. OFFER_MARKETS drives the offer path; RFQ follows enabled console rows with bounds.',
           },
           'nothing',
         )
@@ -1471,9 +1469,7 @@ const marketsView = () => {
   const active = new Set(m.active)
   return h(
     'div',
-    // The same honesty the settings page carries, and it matters more here: a
-    // market added now is invisible to this process, so an operator watching
-    // for fills against it would be watching for something that cannot happen.
+    // Live on this process: a market added now is quoted on the next RFQ.
     h('p.notice', m.restartNotice),
     h('p.toolbar', h('button.act', { onclick: () => ((marketDraft = blankMarket()), render()) }, 'add market')),
     marketDraft ? marketForm() : null,
@@ -1509,14 +1505,13 @@ const marketsView = () => {
                 ),
                 h(
                   'td',
-                  // Three states, not two, and the middle one is the point of
-                  // this column: stored-and-enabled is NOT the same as being
-                  // traded by the process answering this request.
+                  // Enabled+active is trading; enabled+not-active is a row
+                  // replaceMarkets has not yet attached (should not stick).
                   !market.enabled
                     ? h('span.muted', 'disabled')
                     : active.has(market.marketKey)
                       ? h('span.muted', 'trading')
-                      : h('span.phase.phase-exposed', 'pending restart'),
+                      : h('span.phase.phase-exposed', 'not quoting'),
                 ),
                 // A SECOND axis, never folded into `state`: a market can read
                 // `trading` and be filled by nothing.
