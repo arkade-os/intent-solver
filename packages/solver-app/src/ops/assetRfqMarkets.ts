@@ -71,7 +71,10 @@ export const parseAssetRfqTokens = (
   })
 }
 
-const rfqSymbolFor = (assetId: string): string => `A${assetId.slice(0, 11).toUpperCase()}`
+// 12-char stem: issuance prefix plus gidx. First-11-hex alone collides two
+// assets from the same tx with different group indexes.
+const rfqSymbolFor = (assetId: string): string =>
+  `A${assetId.slice(0, 7).toUpperCase()}${assetId.slice(64).toUpperCase()}`
 
 /**
  * Console rows as RFQ markets. `tokens` supply a typeable symbol and can close
@@ -117,6 +120,33 @@ export const assetRfqMarketsFrom = (
       },
     ]
   })
+}
+
+const coversLive = (
+  market: Pick<AssetRfqMarket, 'base' | 'quote'>,
+  live: readonly { fromAssetId: string | null; toAssetId: string | null }[],
+): boolean =>
+  live.some(
+    (row) =>
+      (row.fromAssetId === market.base && row.toAssetId === market.quote) ||
+      (row.fromAssetId === market.quote && row.toAssetId === market.base),
+  )
+
+/**
+ * Serving list plus previous markets that still have a non-terminal row.
+ * `previous` is the last readable set, not the last serving set.
+ */
+export const retainReadableMarkets = (
+  serving: readonly AssetRfqMarket[],
+  previous: readonly AssetRfqMarket[],
+  live: readonly { fromAssetId: string | null; toAssetId: string | null }[],
+): readonly AssetRfqMarket[] => {
+  const readable = [...serving]
+  for (const market of previous) {
+    if (readable.some((row) => row.base === market.base && row.quote === market.quote)) continue
+    if (coversLive(market, live)) readable.push(market)
+  }
+  return readable
 }
 
 type Bounds = { min: bigint; max: bigint }

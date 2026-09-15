@@ -195,8 +195,8 @@ export class RelayIngress implements SwapIngress {
    * one to rediscover per quote — happens in `packages/solver-app/src/ops/corridorSet.ts`, before
    * this is ever constructed.
    */
-  private corridors: CorridorSet
-  private readers: CorridorReaderSet
+  private readonly corridors: CorridorSet
+  private readonly readers: CorridorReaderSet
 
   constructor(private readonly deps: RelayIngressDeps) {
     this.now = deps.now ?? (() => Date.now())
