@@ -72,6 +72,7 @@ import {
   type AssetMarketPair,
   type AssetMarketPricingView,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { offerDirectionOn } from '@arkade-os/solver-core/core/assetOfferPrice.js'
 import { applyOverrides } from '../admin/settings.js'
 import { createOfferRefusalTail, type OfferRefusalRecorder } from '../admin/offerRefusals.js'
 import { createRfqRefusalTail, type RfqRefusalRecorder } from '../admin/rfqRefusals.js'
@@ -471,9 +472,7 @@ export const createServices = async (
    * live and refusing every offer at the price gate.
    */
   const offerMarketsPricedBy = (pricing: readonly AssetMarketPricingView[]): readonly AssetMarket[] =>
-    policy.offerMarkets.filter((pair) =>
-      pricing.some((p) => (p.base === pair.a && p.quote === pair.b) || (p.base === pair.b && p.quote === pair.a)),
-    )
+    policy.offerMarkets.filter((pair) => pricing.some((market) => offerDirectionOn(market, pair.a, pair.b) !== null))
   const liveOfferMarkets = offerMarketsPricedBy(assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
   const offerRefusals = createOfferRefusalTail()
