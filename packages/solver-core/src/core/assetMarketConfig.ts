@@ -219,7 +219,7 @@ export const validateAssetMarket = (market: AssetMarketConfig): void => {
   checkBounds('buyBase', market.buyBase)
 
   const feedUrl = market.feedUrl.trim()
-  if (!feedUrl) throw new Error('feedUrl is required: a market that cannot be priced fills at whatever a maker asks')
+  if (!feedUrl) throw new Error('feedUrl is required for configured market pricing')
   let parsed: URL
   try {
     parsed = new URL(feedUrl)
@@ -271,22 +271,15 @@ export interface AssetMarketPricingView {
 /**
  * The two lists the offer path needs, from the stored rows. Together, always.
  *
- * ONE FUNCTION FOR BOTH, and that is the safety property rather than a
- * convenience. `AssetOfferService` reads them separately and they fail in
- * OPPOSITE directions:
+ * `AssetOfferService` reads them separately:
  *
  * - `markets` empty means no offer matches a served pair, so everything is
- *   refused. Safe.
- * - `pricing` empty means `withinTolerance` returns TRUE for every offer — the
- *   deployment is read as "has not opted into price gating", and the solver
- *   fills at whatever a maker names.
+ *   refused.
+ * - `pricing` supplies that pair's feed, bounds, and fees. When configured but
+ *   empty, the price gate refuses rather than treating it as an opt-out.
  *
- * So a market must never leave one list without leaving the other. Deriving both
- * here, from one filter, makes the dangerous combination unrepresentable at the
- * call site: disable every market and `markets` empties too, which refuses
- * rather than fills.
- *
- * Disabled rows are dropped from BOTH for exactly that reason.
+ * Deriving both from one enabled-row filter keeps admission and economics in
+ * sync. Disabled rows leave both lists.
  */
 export const assetMarketPolicy = (
   markets: readonly AssetMarketConfig[],

@@ -125,14 +125,10 @@ export interface Services {
    *
    * Both halves together, and never one without the other — @see
    * `core/assetMarketConfig.ts`'s `assetMarketPolicy`, which derives them from
-   * one filter for exactly that reason. `assetMarketPairs` empty refuses every
-   * offer; `assetMarkets` empty means "this deployment has not opted into price
-   * gating" and fills at whatever a maker asks.
+   * one filter so the serve list and its economics cannot drift apart.
    *
-   * EMPTY on a deployment that has configured none, which is the default and the
-   * whole of the additive claim: no market rows means both lists are empty, the
-   * offer path serves no pair, and the solver behaves exactly as it did before
-   * markets could be configured at all.
+   * EMPTY on a deployment that has configured none: no market rows means both
+   * lists are empty and the offer path serves no pair.
    */
   assetMarkets: readonly AssetMarketPricingView[]
   assetMarketPairs: readonly AssetMarketPair[]
@@ -517,17 +513,10 @@ export const createServices = async (
   /**
    * The asset markets, read once from the same store and validated HERE.
    *
-   * THROWS on a stored market that no longer validates, and that is the
-   * opposite treatment `applyOverrides` gives a bad override — where skipping is
-   * right, because refusing to start would take a solver down over a preference.
-   * A market is not a preference, and the asymmetry is a fund-loss one:
-   *
-   * `AssetOfferService.withinTolerance` reads an EMPTY pricing list as "this
-   * deployment has not opted into price gating" and returns true for every
-   * offer — it fills at whatever a maker names. So a startup that dropped bad
-   * markets one at a time could empty the list and, in doing so, silently turn
-   * the price gate OFF on a deployment that had configured it on. Refusing to
-   * start is loud, is recoverable from the console, and cannot mislead.
+   * THROWS on a stored market that no longer validates instead of silently
+   * dropping operator state. This is deliberately stricter than a bad override,
+   * which is only a preference and may be skipped without changing what markets
+   * the deployment trades.
    *
    * NO FEED PROBE. Whether the URL answers today is deliberately not a boot
    * condition: it was checked when the market was written, the runtime already
@@ -562,11 +551,9 @@ export const createServices = async (
    */
   const servesOffers = policy.offerMarkets.length > 0
   /**
-   * THE PRICED SUBSET IS THE GUARD, and a money one: `withinTolerance` waves
-   * every offer through on an empty pricing list, so a market served without a
-   * feed fills at the maker's price. Deriving the serve list BY the pricing
-   * makes that unreachable, and lets an env name the console does not price yet
-   * wait for its dashboard row instead of refusing to boot.
+   * The environment permits offers; enabled console rows activate them. An env
+   * name the console does not price yet waits for its row instead of appearing
+   * live and refusing every offer at the price gate.
    */
   const offerMarketsPricedBy = (pricing: readonly AssetMarketPricingView[]): readonly AssetMarket[] =>
     policy.offerMarkets.filter((pair) =>

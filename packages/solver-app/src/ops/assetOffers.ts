@@ -30,7 +30,11 @@ import {
   type OfferFillPolicy,
   type OfferFillRefusal,
 } from '@arkade-os/solver-core/core/assetOffer.js'
-import { offerDirectionOn, offerWithinTolerance } from '@arkade-os/solver-core/core/assetOfferPrice.js'
+import {
+  offerDirectionOn,
+  offerWithinTolerance,
+  type OfferDirection,
+} from '@arkade-os/solver-core/core/assetOfferPrice.js'
 import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { offerFillInputFrom } from '@arkade-os/solver-arkade/arkade/offerFill.js'
@@ -207,13 +211,21 @@ export class AssetOfferService {
 
   /** The bounds this offer's direction states, when its market states any. */
   private boundsFor(input: OfferFillInput): { min: bigint; max: bigint } | null {
+    const match = this.pricingFor(input)
+    if (match === null) return null
+    const { market, direction } = match
+    const bounds = direction === 'sell_base' ? market.sellBase : market.buyBase
+    // `max: 0n` disables the direction rather than meaning "unbounded", so it
+    // is returned as-is and refuses every amount.
+    return bounds ?? null
+  }
+
+  private pricingFor(
+    input: OfferFillInput,
+  ): { market: AssetMarketPricing; direction: OfferDirection } | null {
     for (const market of this.pricing ?? []) {
       const direction = offerDirectionOn(market, input.offerAssetId, input.wantAssetId)
-      if (direction === null) continue
-      const bounds = direction === 'sell_base' ? market.sellBase : market.buyBase
-      // `max: 0n` disables the direction rather than meaning "unbounded", so it
-      // is returned as-is and refuses every amount.
-      return bounds ?? null
+      if (direction !== null) return { market, direction }
     }
     return null
   }
@@ -221,20 +233,16 @@ export class AssetOfferService {
   /**
    * Is the offer's implied price one we will take?
    *
-   * True when no pricing is configured at all — a deployment that has not
-   * opted into price gating is unchanged. But a market that IS priced and
-   * cannot be read refuses: an unreadable feed must not become a free fill.
-   * A feed failure is reported under `id`, which defaults because `consider`
-   * has no row yet; `tickAll` has one and passes it.
+   * True only when pricing is omitted as an explicit opt-out. Once configured,
+   * an empty list, missing market, or unreadable feed refuses. A feed failure
+   * is reported under `id`, which defaults because `consider` has no row yet;
+   * `tickAll` has one and passes it.
    */
   private async withinTolerance(input: OfferFillInput, id = 'price'): Promise<boolean> {
-    const pricing = this.pricing
-    if (!pricing || pricing.length === 0) return true
-
-    const market = pricing.find((m) => offerDirectionOn(m, input.offerAssetId, input.wantAssetId) !== null)
-    if (!market || !this.deps.fetchPrice) return false
-    const direction = offerDirectionOn(market, input.offerAssetId, input.wantAssetId)
-    if (direction === null) return false
+    if (this.pricing === undefined) return true
+    const match = this.pricingFor(input)
+    if (match === null || !this.deps.fetchPrice) return false
+    const { market, direction } = match
 
     try {
       const feed = await this.deps.fetchPrice(market.feedUrl, market.pricePath)
