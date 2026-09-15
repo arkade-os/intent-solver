@@ -81,10 +81,11 @@ import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covcl
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
 import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
+import { createSerialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { poolPlan, mintPool, committedAcrossCorridors } from './pool.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
-import { assertMarketsPriced, AssetOfferService, type AssetMarket } from './assetOffers.js'
+import { AssetOfferService, type AssetMarket } from './assetOffers.js'
 import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
@@ -560,14 +561,18 @@ export const createServices = async (
    * is ever added, rather than something to remember at that point.
    */
   const servesOffers = policy.offerMarkets.length > 0
+  /**
+   * THE PRICED SUBSET IS THE GUARD, and a money one: `withinTolerance` waves
+   * every offer through on an empty pricing list, so a market served without a
+   * feed fills at the maker's price. Deriving the serve list BY the pricing
+   * makes that unreachable, and lets an env name the console does not price yet
+   * wait for its dashboard row instead of refusing to boot.
+   */
   const offerMarketsPricedBy = (pricing: readonly AssetMarketPricingView[]): readonly AssetMarket[] =>
     policy.offerMarkets.filter((pair) =>
       pricing.some((p) => (p.base === pair.a && p.quote === pair.b) || (p.base === pair.b && p.quote === pair.a)),
     )
-  // Priced subset only: an env name without a console row waits for the dashboard
-  // rather than refusing to boot, and empty markets refuse every offer (safe).
   const liveOfferMarkets = offerMarketsPricedBy(assetMarkets.pricing)
-  if (liveOfferMarkets.length > 0) assertMarketsPriced(liveOfferMarkets, assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
   const offerRefusals = createOfferRefusalTail()
   const rfqRefusals = createRfqRefusalTail()
@@ -575,9 +580,8 @@ export const createServices = async (
     ? new AssetOfferService({
         store: offerStore,
         markets: liveOfferMarkets,
-        // The console's market rows, in the shape this service consumes. The
-        // assertion above is what guarantees this covers every served market;
-        // without both, `withinTolerance` waves every offer through.
+        // The console's market rows, in the shape this service consumes. Every
+        // served market is in here by construction — see the serve list above.
         pricing: assetMarkets.pricing,
         // Same reader the EVM corridors price from — the market config
         // deliberately speaks `evmCorridorConfig.ts`'s feed-plus-pointer dialect
@@ -1172,7 +1176,7 @@ export const createServices = async (
   }
 
   let readableMarkets: readonly AssetRfqMarket[] = assetRfqMarkets
-  let replaceTail: Promise<unknown> = Promise.resolve()
+  const replaceQueue = createSerialiser()
   const extraCorridors = opts?.corridors ?? []
   const setsFrom = (serving: readonly AssetRfqMarket[], readable: readonly AssetRfqMarket[] = serving) => {
     const shared = {
@@ -1222,12 +1226,11 @@ export const createServices = async (
     assetRfqStore,
     assetRfqService,
     assetRfqMarkets,
-    replaceMarkets: (): Promise<void> => {
-      const job = async () => {
+    replaceMarkets: (): Promise<void> =>
+      replaceQueue(async () => {
         const next = assetMarketPolicy(await adminStore.listMarkets())
         const rfq = assetRfqMarketsFrom(policy.assetRfqTokens, next.pricing)
         const offers = offerMarketsPricedBy(next.pricing)
-        if (offers.length > 0) assertMarketsPriced(offers, next.pricing)
         const live = await assetRfqStore.listNonTerminal()
         const readable = retainReadableMarkets(rfq, readableMarkets, live)
         const nextSets = setsFrom(rfq, readable)
@@ -1240,14 +1243,7 @@ export const createServices = async (
         services.assetRfqMarkets = rfq
         services.liveOfferMarkets = offers
         readableMarkets = readable
-      }
-      const result = replaceTail.then(job, job)
-      replaceTail = result.then(
-        () => undefined,
-        () => undefined,
-      )
-      return result
-    },
+      }),
     adminStore,
     arkade,
     ln: rail?.ln ?? null,
