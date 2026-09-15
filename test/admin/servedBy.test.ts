@@ -16,11 +16,10 @@ const KEY = assetMarketKey(null, USDT)
 
 const btcUsdt = { base: null, quote: USDT }
 const token = (assetId: string) => ({ symbol: 'USDT', assetId, enabled: { sell_base: true, buy_base: true } })
-
-const boot = (over: Record<string, unknown> = {}) => ({ offerMarkets: [], assetRfqTokens: [], ...over }) as never
+const boot = (over: Record<string, unknown> = {}) => ({ offerMarkets: [], assetRfqMarkets: [], ...over }) as never
 
 describe('servedBy', () => {
-  it('reports NOTHING when neither variable names the pair', () => {
+  it('reports NOTHING when neither path fills the pair', () => {
     expect(servedBy(btcUsdt, boot())).toEqual([])
   })
 
@@ -32,22 +31,25 @@ describe('servedBy', () => {
     expect(servedBy(btcUsdt, boot({ offerMarkets: [{ a: USDT, b: null }] }))).toEqual(['offer'])
   })
 
-  it('reports the RFQ path when ASSET_MARKETS names one of the legs', () => {
-    expect(servedBy(btcUsdt, boot({ assetRfqTokens: [token(USDT)] }))).toEqual(['rfq'])
+  it('reports the RFQ path when this process is serving the pair', () => {
+    expect(servedBy(btcUsdt, boot({ assetRfqMarkets: [btcUsdt] }))).toEqual(['rfq'])
   })
 
-  it('reports both when both name it', () => {
-    const served = servedBy(btcUsdt, boot({ offerMarkets: [{ a: null, b: USDT }], assetRfqTokens: [token(USDT)] }))
+  it('reports both when both paths fill it', () => {
+    const served = servedBy(btcUsdt, boot({ offerMarkets: [{ a: null, b: USDT }], assetRfqMarkets: [btcUsdt] }))
     expect(served).toEqual(['offer', 'rfq'])
   })
 
   it('does not match a DIFFERENT asset', () => {
-    const served = servedBy(btcUsdt, boot({ offerMarkets: [{ a: null, b: OTHER }], assetRfqTokens: [token(OTHER)] }))
+    const served = servedBy(
+      btcUsdt,
+      boot({ offerMarkets: [{ a: null, b: OTHER }], assetRfqMarkets: [{ base: null, quote: OTHER }] }),
+    )
     expect(served).toEqual([])
   })
 
   it('never matches on the BTC leg alone, which every market shares', () => {
-    expect(servedBy({ base: null, quote: OTHER }, boot({ assetRfqTokens: [token(USDT)] }))).toEqual([])
+    expect(servedBy({ base: null, quote: OTHER }, boot({ assetRfqMarkets: [btcUsdt] }))).toEqual([])
   })
 })
 
@@ -76,6 +78,7 @@ const marketsApp = (policy: Record<string, unknown>, rows: unknown[] = [market()
     services: {
       policy: { offerMarkets: [], assetRfqTokens: [], ...policy },
       assetMarkets: [],
+      assetRfqMarkets: policy.assetRfqMarkets ?? [],
       adminStore: { listMarkets: vi.fn().mockResolvedValue(rows) },
     } as never,
     startedAt: 1,
@@ -100,8 +103,8 @@ describe('GET /api/markets — served by', () => {
     expect(body.markets[0]).toMatchObject({ enabled: false, servedBy: ['offer'] })
   })
 
-  it('reports both paths when both variables name the pair', async () => {
-    const body = await listMarkets({ offerMarkets: [{ a: null, b: USDT }], assetRfqTokens: [token(USDT)] })
+  it('reports both paths when both fill the pair', async () => {
+    const body = await listMarkets({ offerMarkets: [{ a: null, b: USDT }], assetRfqMarkets: [btcUsdt] })
     expect(body.markets[0]?.servedBy).toEqual(['offer', 'rfq'])
   })
 })
@@ -189,6 +192,7 @@ const overview = async (policy: Record<string, unknown>, rows: unknown[] = [mark
       policy: { ...(settingsConfig() as Record<string, unknown>), offerMarkets: [], assetRfqTokens: [], ...policy },
       bootOverrides: {},
       assetMarkets: [],
+      assetRfqMarkets: policy.assetRfqMarkets ?? [],
       tickErrors: { failing: [] },
       providerPubkey: 'aa'.repeat(32),
       store: swapStore(),
@@ -233,7 +237,7 @@ describe('GET /api/overview — markets', () => {
   })
 
   it('reports the paths that do fill it', async () => {
-    const body = await overview({ offerMarkets: [{ a: null, b: USDT }], assetRfqTokens: [token(USDT)] })
+    const body = await overview({ offerMarkets: [{ a: null, b: USDT }], assetRfqMarkets: [btcUsdt] })
     expect(body.markets[0]?.servedBy).toEqual(['offer', 'rfq'])
   })
 

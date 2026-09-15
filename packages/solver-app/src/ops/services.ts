@@ -84,7 +84,7 @@ import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-co
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { poolPlan, mintPool, committedAcrossCorridors } from './pool.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
-import { assertMarketsPriced, AssetOfferService } from './assetOffers.js'
+import { assertMarketsPriced, AssetOfferService, type AssetMarket } from './assetOffers.js'
 import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
@@ -119,8 +119,8 @@ export interface Services {
    * tell an override already in force from one still waiting. */
   bootOverrides: Record<string, string>
   /**
-   * The Arkade asset markets this process trades, resolved once at startup from
-   * the console's stored rows.
+   * The Arkade asset markets this process trades, from the console's stored rows.
+   * {@link Services.replaceMarkets} refreshes both lists without a restart.
    *
    * Both halves together, and never one without the other — @see
    * `core/assetMarketConfig.ts`'s `assetMarketPolicy`, which derives them from
@@ -188,8 +188,8 @@ export interface Services {
   offerRefusals: OfferRefusalRecorder
   rfqRefusals: RfqRefusalRecorder
   /**
-   * The atomic class reached over RFQ, or NULL when `ASSET_MARKETS` names no
-   * asset (the default).
+   * The atomic class over RFQ. Always constructed, including with an empty
+   * market list, so a dashboard row added after boot has a service to attach to.
    *
    * A CORRIDOR, unlike {@link Services.assetOffers} above, and the same
    * settlement: there the maker names the price and this solver decides, here
@@ -201,9 +201,11 @@ export interface Services {
    * DIRECTION — the shape the EVM family already has, and for the same reason:
    * the pair carries the asset id, so the registry key is per market.
    */
-  assetRfqStore: AssetRfqSwapStore | null
-  assetRfqService: AssetRfqSwapService | null
+  assetRfqStore: AssetRfqSwapStore
+  assetRfqService: AssetRfqSwapService
   assetRfqMarkets: readonly AssetRfqMarket[]
+  /** Rebuild in-memory markets from the console store and swap the live corridor set. */
+  replaceMarkets(): Promise<void>
   /**
    * Settings overrides and the action audit log, in their own database. Open
    * whether or not the console is running: operator actions are auditable from
@@ -471,20 +473,23 @@ export const createServices = async (
    * is ever added, rather than something to remember at that point.
    */
   const servesOffers = policy.offerMarkets.length > 0
-  // BEFORE the store is opened, so a deployment that cannot price what it serves
-  // does not come up at all. `withinTolerance` returns TRUE on an empty pricing
-  // list, so a market without one is not gated leniently — it is not gated. The
-  // two halves arrived by different routes (`OFFER_MARKETS` from the
-  // environment, the feed from the console's market rows) and nothing until now
-  // required them to meet.
-  if (servesOffers) assertMarketsPriced(policy.offerMarkets, assetMarkets.pricing)
+  const offerMarketsPricedBy = (pricing: readonly AssetMarketPricingView[]): readonly AssetMarket[] =>
+    policy.offerMarkets.filter((pair) =>
+      pricing.some(
+        (p) => (p.base === pair.a && p.quote === pair.b) || (p.base === pair.b && p.quote === pair.a),
+      ),
+    )
+  // Priced subset only: an env name without a console row waits for the dashboard
+  // rather than refusing to boot, and empty markets refuse every offer (safe).
+  const liveOfferMarkets = offerMarketsPricedBy(assetMarkets.pricing)
+  if (liveOfferMarkets.length > 0) assertMarketsPriced(liveOfferMarkets, assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
   const offerRefusals = createOfferRefusalTail()
   const rfqRefusals = createRfqRefusalTail()
   const assetOffers = offerStore
     ? new AssetOfferService({
         store: offerStore,
-        markets: policy.offerMarkets,
+        markets: liveOfferMarkets,
         // The console's market rows, in the shape this service consumes. The
         // assertion above is what guarantees this covers every served market;
         // without both, `withinTolerance` waves every offer through.
@@ -517,20 +522,17 @@ export const createServices = async (
     : null
 
   /**
-   * The atomic class over RFQ. Off unless `ASSET_MARKETS` names an asset, and in
-   * the swap file for the reason the EVM tables are: no previous release, so no
-   * legacy split file to preserve.
-   *
-   * The join THROWS on an asset the console does not price or bound, so a
-   * deployment that cannot honour what it advertises does not come up — the same
-   * call `assertMarketsPriced` makes above.
+   * The atomic class over RFQ. Always constructed, even with an empty list, so
+   * a first dashboard market has a service to attach to. In the swap file for
+   * the reason the EVM tables are: no previous release, so no legacy split file
+   * to preserve.
    *
    * The four Arkade seams are wired here because this is where the wallet, the
    * emulator key and the network prefix meet. Every guard on the spend lives in
    * `arkade/quotedOfferSettle.ts`.
    */
   const assetRfqMarkets = assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)
-  const assetRfqStore = assetRfqMarkets.length > 0 ? await AssetRfqSwapStore.open(swapFile) : null
+  const assetRfqStore = await AssetRfqSwapStore.open(swapFile)
   const assetRfqDerivation = {
     serverPubkey: arkade.wallet.arkServerPublicKey,
     // X-ONLY. The emulator advertises a compressed key and the covenant takes
@@ -540,27 +542,25 @@ export const createServices = async (
     // Boot-captured beside the two keys above, all three from one `getInfo()`.
     exitDelay: offerExitDelay(arkade.advertisedExitDelay),
   }
-  const assetRfqService = assetRfqStore
-    ? new AssetRfqSwapService({
-        quoteLimiter,
-        store: assetRfqStore,
-        markets: assetRfqMarkets,
-        solverPubkey: hex.encode(await arkade.identity.xOnlyPublicKey()),
-        quoteValiditySeconds: policy.assetQuoteValiditySeconds,
-        deriveOffer: offerScriptFrom(assetRfqDerivation),
-        depositAt: async (offerPkScript, depositLeg) =>
-          largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),
-        // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
-        balance: async () => offerInventoryFrom(await arkade.wallet.getBalance()),
-        fetchPrice: createPriceFeed(),
-        settle: quotedOfferSettleFor({
-          ctx: arkade,
-          emulatorUrl: config.emulatorUrl,
-          derivation: assetRfqDerivation,
-        }),
-        onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
-      })
-    : null
+  const assetRfqService = new AssetRfqSwapService({
+    quoteLimiter,
+    store: assetRfqStore,
+    markets: assetRfqMarkets,
+    solverPubkey: hex.encode(await arkade.identity.xOnlyPublicKey()),
+    quoteValiditySeconds: policy.assetQuoteValiditySeconds,
+    deriveOffer: offerScriptFrom(assetRfqDerivation),
+    depositAt: async (offerPkScript, depositLeg) =>
+      largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),
+    // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
+    balance: async () => offerInventoryFrom(await arkade.wallet.getBalance()),
+    fetchPrice: createPriceFeed(),
+    settle: quotedOfferSettleFor({
+      ctx: arkade,
+      emulatorUrl: config.emulatorUrl,
+      derivation: assetRfqDerivation,
+    }),
+    onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
+  })
 
   /**
    * Whether to build a BTC corridor's service — its own switch, and a rail to
@@ -1086,33 +1086,35 @@ export const createServices = async (
     })
   }
 
-  // Shared by both sets so they cannot drift: the readers' extra width (stores
-  // outlive their service) must be the only difference.
-  const corridorDeps = {
-    service,
-    store,
-    onchainService,
-    onchainFloat,
-    onchainStore,
-    receiveService,
-    receiveStore,
-    onchainReceiveService,
-    onchainReceiveStore,
-    // The EVM family registers per token: one corridor per enabled policy,
-    // and only when its leg's service exists (a chain is configured).
-    evmSendService,
-    evmSendStore,
-    evmReceiveService,
-    evmReceiveStore,
-    evmCorridors: policy.evmCorridors,
-    // The atomic class registers per market per DIRECTION, on the same rule:
-    // both the service and the store, or the pair refuses by name.
-    assetRfqService,
-    assetRfqStore,
-    assetRfqMarkets,
+  const extraCorridors = opts?.corridors ?? []
+  const setsFrom = (rfq: readonly AssetRfqMarket[]) => {
+    const corridorDeps = {
+      service,
+      store,
+      onchainService,
+      onchainFloat,
+      onchainStore,
+      receiveService,
+      receiveStore,
+      onchainReceiveService,
+      onchainReceiveStore,
+      evmSendService,
+      evmSendStore,
+      evmReceiveService,
+      evmReceiveStore,
+      evmCorridors: policy.evmCorridors,
+      assetRfqService,
+      assetRfqStore,
+      assetRfqMarkets: rfq,
+    }
+    return {
+      corridors: corridorSetFromDeps(corridorDeps, extraCorridors),
+      readers: readerSetFromDeps(corridorDeps, extraCorridors),
+    }
   }
+  const { corridors, readers } = setsFrom(assetRfqMarkets)
 
-  return {
+  const services: Services = {
     config,
     policy,
     bootOverrides,
@@ -1133,6 +1135,20 @@ export const createServices = async (
     assetRfqStore,
     assetRfqService,
     assetRfqMarkets,
+    replaceMarkets: async () => {
+      const next = assetMarketPolicy(await adminStore.listMarkets())
+      const rfq = assetRfqMarketsFrom(policy.assetRfqTokens, next.pricing)
+      const offers = offerMarketsPricedBy(next.pricing)
+      if (offers.length > 0) assertMarketsPriced(offers, next.pricing)
+      await assetRfqService.replaceMarkets(rfq)
+      await assetOffers?.replaceMarkets({ markets: offers, pricing: next.pricing })
+      const nextSets = setsFrom(rfq)
+      services.corridors.replace([...nextSets.corridors])
+      services.readers.replace([...nextSets.readers])
+      services.assetMarkets = next.pricing
+      services.assetMarketPairs = next.pairs
+      services.assetRfqMarkets = rfq
+    },
     adminStore,
     arkade,
     ln: rail?.ln ?? null,
@@ -1141,14 +1157,8 @@ export const createServices = async (
     onchainService,
     receiveService,
     onchainReceiveService,
-    // Built once, here, from the services just constructed. A corridor is in
-    // the set iff its service exists, which is iff `enabled()` said so — so
-    // the registry IS the corridor-enablement decision, made in one place
-    // instead of re-derived at every dispatch.
-    corridors: corridorSetFromDeps(corridorDeps, opts?.corridors ?? []),
-    // Built here, not per call site: a consumer's corridor has no store on
-    // `Services` for a re-derivation to find.
-    readers: readerSetFromDeps(corridorDeps, opts?.corridors ?? []),
+    corridors,
+    readers,
     tickErrors,
     emulatorPubkey: emulatorInfo.signerPubkey,
     providerPubkey: arkadeOps.providerPubkey,
@@ -1164,7 +1174,7 @@ export const createServices = async (
         ['receiveStore', () => receiveStore.close()],
         ['onchainReceiveStore', () => onchainReceiveStore.close()],
         ['offerStore', () => offerStore?.close()],
-        ['assetRfqStore', () => assetRfqStore?.close()],
+        ['assetRfqStore', () => assetRfqStore.close()],
         ['adminStore', () => adminStore.close()],
         ['arkade', () => arkade.close()],
         ['ln', () => rail?.ln.close?.()],
@@ -1179,4 +1189,5 @@ export const createServices = async (
       }
     },
   }
+  return services
 }

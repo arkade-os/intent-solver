@@ -160,15 +160,38 @@ export type ConsiderOutcome = OfferFillDecision & { id?: string }
 
 export class AssetOfferService {
   private readonly newId: () => string
+  private markets: readonly AssetMarket[]
+  private pricing: readonly AssetMarketPricing[] | undefined
+  /** ponytail: process-wide consider/replace mutex; per-market locks if concurrent pairs matter */
+  private tail: Promise<unknown> = Promise.resolve()
 
   constructor(private readonly deps: AssetOfferDeps) {
     this.newId = deps.newId ?? (() => crypto.randomUUID())
+    this.markets = deps.markets
+    this.pricing = deps.pricing
+  }
+
+  private serialise<T>(job: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(job, job)
+    this.tail = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
+  }
+
+  /** Swap the live serve list. Recorded intents keep the amounts already stored. */
+  replaceMarkets(args: { markets: readonly AssetMarket[]; pricing?: readonly AssetMarketPricing[] }): Promise<void> {
+    return this.serialise(async () => {
+      this.markets = args.markets
+      this.pricing = args.pricing
+    })
   }
 
   /** Markets are static; inventory is read fresh every decision. */
   private async policy(bounds: AppliedBounds): Promise<OfferFillPolicy> {
     return {
-      markets: this.deps.markets,
+      markets: this.markets,
       available: offerInventoryFrom(await this.deps.balance()),
       minFillAmount: bounds.min,
       maxFillAmount: bounds.max,
@@ -193,7 +216,7 @@ export class AssetOfferService {
 
   /** The bounds this offer's direction states, when its market states any. */
   private boundsFor(input: OfferFillInput): { min: bigint; max: bigint } | null {
-    for (const market of this.deps.pricing ?? []) {
+    for (const market of this.pricing ?? []) {
       const direction = offerDirectionOn(market, input.offerAssetId, input.wantAssetId)
       if (direction === null) continue
       const bounds = direction === 'sell_base' ? market.sellBase : market.buyBase
@@ -214,7 +237,7 @@ export class AssetOfferService {
    * has no row yet; `tickAll` has one and passes it.
    */
   private async withinTolerance(input: OfferFillInput, id = 'price'): Promise<boolean> {
-    const pricing = this.deps.pricing
+    const pricing = this.pricing
     if (!pricing || pricing.length === 0) return true
 
     const market = pricing.find((m) => offerDirectionOn(m, input.offerAssetId, input.wantAssetId) !== null)
@@ -243,7 +266,11 @@ export class AssetOfferService {
    * The deposit is OBSERVED at the offer's script, never read from the packet —
    * an offer can advertise a deposit it does not hold.
    */
-  async consider({ offer, txid, vout }: DiscoveredOffer): Promise<ConsiderOutcome> {
+  consider({ offer, txid, vout }: DiscoveredOffer): Promise<ConsiderOutcome> {
+    return this.serialise(() => this.considerInner({ offer, txid, vout }))
+  }
+
+  private async considerInner({ offer, txid, vout }: DiscoveredOffer): Promise<ConsiderOutcome> {
     const outpoint = `${txid}:${vout}`
     // Idempotent on the outpoint: rediscovering a funded offer must not open a
     // second intent against the same deposit.
@@ -325,7 +352,11 @@ export class AssetOfferService {
    *
    * Price admission is re-run first; this loop reaches a row arbitrarily late.
    */
-  async tickAll(): Promise<number> {
+  tickAll(): Promise<number> {
+    return this.serialise(() => this.tickAllInner())
+  }
+
+  private async tickAllInner(): Promise<number> {
     if (!this.deps.settle) return 0
     let filled = 0
     for (const row of await this.deps.store.listNonTerminal()) {

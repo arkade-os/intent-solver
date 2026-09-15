@@ -128,28 +128,29 @@ describe('assetRfqMarketsFrom', () => {
     expect([market!.base, market!.quote]).toEqual([USDA, null])
   })
 
-  it('serves nothing when nothing is named, whatever the console holds', () => {
-    expect(assetRfqMarketsFrom([], [pricing()])).toEqual([])
+  it('serves the console row when nothing is named in ASSET_MARKETS', () => {
+    const [market] = assetRfqMarketsFrom([], [pricing()])
+    expect(market?.quote).toBe(USDA)
+    expect(market?.symbol).toMatch(/^A[0-9A-F]{11}$/)
   })
 
-  it('refuses to start on an asset the console does not price', () => {
-    // Dropping it would come up serving nothing, which reads as a quiet market
-    // rather than as the misconfiguration it is.
-    expect(() => assetRfqMarketsFrom([token()], [])).toThrow(/no enabled market in the console prices it/)
-    expect(() => assetRfqMarketsFrom([token()], [pricing({ quote: OTHER })])).toThrow(/prices it/)
+  it('omits a named asset the console does not price, so a first dashboard row can land', () => {
+    expect(assetRfqMarketsFrom([token()], [])).toEqual([])
+    expect(assetRfqMarketsFrom([token()], [pricing({ quote: OTHER })])).toEqual([])
   })
 
-  it('refuses a market with an asset on both legs, which no offer packet expresses', () => {
-    expect(() => assetRfqMarketsFrom([token()], [pricing({ base: OTHER, quote: USDA })])).toThrow(/asset on both legs/)
+  it('omits a market with an asset on both legs, which no offer packet expresses', () => {
+    expect(assetRfqMarketsFrom([token()], [pricing({ base: OTHER, quote: USDA })])).toEqual([])
   })
 
-  it('refuses a served direction the console left unbounded', () => {
-    // No fallback to the packet path's `OFFER_MIN_FILL_AMOUNT`: that is a sats
-    // figure, and this payout leg can be an asset's atomic units.
-    expect(() => assetRfqMarketsFrom([token()], [pricing({ sellBase: undefined })])).toThrow(
-      /states no sellBase bounds/,
-    )
-    expect(() => assetRfqMarketsFrom([token()], [pricing({ buyBase: undefined })])).toThrow(/states no buyBase bounds/)
+  it('closes a served direction the console left unbounded rather than quoting without a ceiling', () => {
+    const [market] = assetRfqMarketsFrom([token()], [pricing({ sellBase: undefined })])
+    expect(market!.sellBase).toEqual({ min: 0n, max: 0n })
+    expect(market!.buyBase).toEqual({ min: 2n, max: 10n ** 9n })
+  })
+
+  it('drops a market whose directions are both closed', () => {
+    expect(assetRfqMarketsFrom([token()], [pricing({ sellBase: undefined, buyBase: undefined })])).toEqual([])
   })
 
   it('closes a direction to zero rather than darkening the pair', () => {

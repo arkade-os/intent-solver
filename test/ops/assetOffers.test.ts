@@ -374,6 +374,7 @@ describe('refusals an operator can read', () => {
     // The second silence, driven for real in test/e2e/assetOffer.e2e.test.ts.
     expect(servicesSource).toMatch(/servesOffers\s*=\s*policy\.offerMarkets\.length > 0/)
     expect(servicesSource).toMatch(/servesOffers\s*\?\s*await OfferFillStore\.open/)
+    expect(servicesSource).toContain('replaceMarkets:')
   })
 })
 
@@ -415,6 +416,54 @@ describe('tickAll', () => {
     await service.consider(found)
     expect(await service.tickAll()).toBe(0)
     expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+  })
+})
+
+describe('replaceMarkets', () => {
+  it('starts refusing new offers once the serve list is emptied', async () => {
+    const { service } = await build()
+    expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+    await service.replaceMarkets({ markets: [] })
+    expect(await service.consider({ ...found, txid: 'b'.repeat(64) })).toEqual({
+      fill: false,
+      reason: 'unsupported_pair',
+    })
+  })
+
+  it('fills an already-recorded intent after the market is dropped', async () => {
+    const { store, service } = await build({ settle: async () => '0xfill' })
+    expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+    await service.replaceMarkets({ markets: [] })
+    expect(await service.tickAll()).toBe(1)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled', fillTxid: '0xfill' })
+  })
+
+  it('waits for an in-flight consider before swapping the list', async () => {
+    let release!: () => void
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { service } = await build({
+      outputsAt: async () => {
+        await blocked
+        return [{ script: SCRIPT_HEX, value: 500, assets: [{ assetId: USDT, amount: 900n }] }]
+      },
+    })
+    const considering = service.consider(found)
+    let replaced = false
+    const replacing = service.replaceMarkets({ markets: [] }).then(() => {
+      replaced = true
+    })
+    await Promise.resolve()
+    expect(replaced).toBe(false)
+    release()
+    expect(await considering).toEqual({ fill: true, id: 'fill-1' })
+    await replacing
+    expect(replaced).toBe(true)
+    expect(await service.consider({ ...found, txid: 'b'.repeat(64) })).toEqual({
+      fill: false,
+      reason: 'unsupported_pair',
+    })
   })
 })
 

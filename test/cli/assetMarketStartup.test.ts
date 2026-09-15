@@ -74,9 +74,8 @@ describe('createServices — asset markets', () => {
     expect(at).toBeGreaterThan(-1)
     const call = body.slice(at, body.indexOf('\n', at))
     expect(call).toBe('assetMarketPolicy(await adminStore.listMarkets())')
-    // Exactly once: a second resolution could disagree with the first, and only
-    // one of them reaches `Services`.
-    expect(body.match(/assetMarketPolicy\(/g)).toHaveLength(1)
+    // Boot plus replaceMarkets: both read the same store.
+    expect(body.match(/assetMarketPolicy\(/g)).toHaveLength(2)
   })
 })
 
