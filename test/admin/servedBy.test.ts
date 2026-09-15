@@ -6,7 +6,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
-import { servedBy } from '@arkade-os/solver-app/admin/servedBy.js'
+import { servedBy, servingOf } from '@arkade-os/solver-app/admin/servedBy.js'
 import { describeSettings } from '@arkade-os/solver-app/admin/settings.js'
 import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
@@ -50,6 +50,19 @@ describe('servedBy', () => {
 
   it('never matches on the BTC leg alone, which every market shares', () => {
     expect(servedBy({ base: null, quote: OTHER }, boot({ assetRfqMarkets: [btcUsdt] }))).toEqual([])
+  })
+
+  it('does not report offer for an env pair this process is not pricing', () => {
+    expect(
+      servedBy(
+        btcUsdt,
+        servingOf({
+          policy: { offerMarkets: [{ a: null, b: USDT }] },
+          liveOfferMarkets: [],
+          assetRfqMarkets: [],
+        }),
+      ),
+    ).toEqual([])
   })
 })
 
@@ -280,7 +293,7 @@ describe('the console renders served-by', () => {
   it('gives it a column of its own rather than overloading state', () => {
     expect(view()).toContain("h('th', 'served by')")
     expect(view()).toContain('servedByCell(market.servedBy ?? [])')
-    expect(view()).toContain("h('span.phase.phase-exposed', 'pending restart')")
+    expect(view()).toContain("h('span.phase.phase-exposed', 'not quoting')")
   })
 
   it('puts the markets on the overview, in its own grid', () => {

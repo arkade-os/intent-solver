@@ -13,9 +13,10 @@ export interface BootServing {
 
 export const servingOf = (services: {
   policy: { offerMarkets: readonly AssetMarket[] }
+  liveOfferMarkets?: readonly AssetMarket[]
   assetRfqMarkets: readonly { base: string | null; quote: string | null }[]
 }): BootServing => ({
-  offerMarkets: services.policy.offerMarkets,
+  offerMarkets: services.liveOfferMarkets ?? services.policy.offerMarkets,
   assetRfqMarkets: services.assetRfqMarkets,
 })
 
