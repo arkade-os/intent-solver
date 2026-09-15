@@ -560,9 +560,7 @@ export const createServices = async (
   const servesOffers = policy.offerMarkets.length > 0
   const offerMarketsPricedBy = (pricing: readonly AssetMarketPricingView[]): readonly AssetMarket[] =>
     policy.offerMarkets.filter((pair) =>
-      pricing.some(
-        (p) => (p.base === pair.a && p.quote === pair.b) || (p.base === pair.b && p.quote === pair.a),
-      ),
+      pricing.some((p) => (p.base === pair.a && p.quote === pair.b) || (p.base === pair.b && p.quote === pair.a)),
     )
   // Priced subset only: an env name without a console row waits for the dashboard
   // rather than refusing to boot, and empty markets refuse every offer (safe).

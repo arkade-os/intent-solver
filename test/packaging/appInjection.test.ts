@@ -177,7 +177,8 @@ describe('a deployment described in code rather than in the environment', () => 
     // state that `loadConfig` reads once, so registration has to happen before
     // the entrypoint runs. Corridors have no such ordering hazard: they are
     // arguments.
-    expect(servicesSource).toContain('corridorSetFromDeps(corridorDeps, opts?.corridors ?? [])')
+    expect(servicesSource).toContain('const extraCorridors = opts?.corridors ?? []')
+    expect(servicesSource).toContain('corridorSetFromDeps(corridorDeps, extraCorridors)')
     expect(sdk.createServices.length).toBeGreaterThanOrEqual(1)
   })
 })

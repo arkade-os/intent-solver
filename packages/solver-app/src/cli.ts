@@ -206,7 +206,11 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // untouched until the first full sweep comes round.
   let recovered = 0
   for (const corridor of services.corridors) recovered += await corridor.tickAll()
-  recovered += (await services.assetRfqService.tickAll()).length
+  try {
+    recovered += (await services.assetRfqService?.tickAll())?.length ?? 0
+  } catch (error) {
+    log('asset rfq recovery failed:', error instanceof Error ? error.message : String(error))
+  }
   startEvmSendSweep()
   log(`recovered ${recovered} swap(s) across ${services.corridors.size} corridor(s); watching`)
   const served = CORRIDORS.filter((corridor) => services.config.corridorEnabled[corridor])
@@ -449,7 +453,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
       // RPC calls), and their rows are driven by the sweep alone.
       for (const corridor of services.corridors) await corridor.tickAll()
       try {
-        await services.assetRfqService.tickAll()
+        await services.assetRfqService?.tickAll()
       } catch (error) {
         log('asset rfq sweep failed:', error instanceof Error ? error.message : String(error))
       }

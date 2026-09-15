@@ -51,8 +51,8 @@ const build = async (opts: { active?: { base: string | null; quote: string | nul
       services.assetMarkets = rows.filter((row) => row.enabled).map((row) => ({ base: row.base, quote: row.quote }))
       services.assetRfqMarkets = services.assetMarkets
     },
-  } as never
-  const app = buildAdminApp({ services, startedAt: 1, mode: 'relay', fetchPrice })
+  }
+  const app = buildAdminApp({ services: services as never, startedAt: 1, mode: 'relay', fetchPrice })
   return { app, adminStore, fetchPrice }
 }
 

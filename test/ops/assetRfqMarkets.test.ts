@@ -136,7 +136,10 @@ describe('assetRfqMarketsFrom', () => {
 
   it('omits a named asset the console does not price, so a first dashboard row can land', () => {
     expect(assetRfqMarketsFrom([token()], [])).toEqual([])
-    expect(assetRfqMarketsFrom([token()], [pricing({ quote: OTHER })])).toEqual([])
+  })
+
+  it('still serves a console row when ASSET_MARKETS names a different asset', () => {
+    expect(assetRfqMarketsFrom([token()], [pricing({ quote: OTHER })])[0]?.quote).toBe(OTHER)
   })
 
   it('omits a market with an asset on both legs, which no offer packet expresses', () => {
