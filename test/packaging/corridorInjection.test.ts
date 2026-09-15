@@ -92,7 +92,8 @@ describe('createServices exposes the extension point', () => {
   it('threads opts.corridors into BOTH the quoting set and the readers', () => {
     // Passing it to only one leaves a corridor that quotes but reports no
     // status, or reports status it never served.
-    expect(servicesSource).toContain('corridorSetFromDeps(corridorDeps, opts?.corridors ?? [])')
-    expect(servicesSource).toContain('readerSetFromDeps(corridorDeps, opts?.corridors ?? [])')
+    expect(servicesSource).toContain('const extraCorridors = opts?.corridors ?? []')
+    expect(servicesSource).toContain('corridorSetFromDeps(corridorDeps, extraCorridors)')
+    expect(servicesSource).toContain('readerSetFromDeps(corridorDeps, extraCorridors)')
   })
 })

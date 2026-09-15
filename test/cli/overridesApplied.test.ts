@@ -82,7 +82,7 @@ describe('createServices resolves stored overrides', () => {
     // has no service object to enable. Handing them the already-layered policy
     // would lose the difference between "off in env" and "off by override".
     const body = createServices()
-    expect(body).toMatch(/return \{\s*config,\s*policy,/)
+    expect(body).toMatch(/const services: Services = \{\s*config,\s*policy,/)
   })
 })
 
