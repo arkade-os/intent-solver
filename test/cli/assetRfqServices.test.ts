@@ -123,6 +123,7 @@ describe('the corridors reach the registry and the console', () => {
 
   it('hot-swaps the captured corridor set in place after a console write', () => {
     expect(body()).toContain('retainReadableMarkets(rfq, readableMarkets, live)')
+    expect(body()).toContain('replaceTail.then(job, job)')
     expect(body().indexOf('const nextSets = setsFrom(rfq, readable)')).toBeLessThan(
       body().indexOf('await assetRfqService.replaceMarkets(rfq)'),
     )

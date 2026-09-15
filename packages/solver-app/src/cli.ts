@@ -206,11 +206,11 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // untouched until the first full sweep comes round.
   let recovered = 0
   for (const corridor of services.corridors) {
-    if (corridor.descriptor?.envStem.startsWith('ASSET_')) continue
+    if (corridor.descriptor.envStem.startsWith('ASSET_')) continue
     recovered += await corridor.tickAll()
   }
   try {
-    recovered += (await services.assetRfqService?.tickAll())?.length ?? 0
+    recovered += (await services.assetRfqService.tickAll()).length
   } catch (error) {
     log('asset rfq recovery failed:', error instanceof Error ? error.message : String(error))
   }
@@ -455,11 +455,11 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
       // depth is minutes wide, so a sub-second cadence would buy nothing but
       // RPC calls), and their rows are driven by the sweep alone.
       for (const corridor of services.corridors) {
-        if (corridor.descriptor?.envStem.startsWith('ASSET_')) continue
+        if (corridor.descriptor.envStem.startsWith('ASSET_')) continue
         await corridor.tickAll()
       }
       try {
-        await services.assetRfqService?.tickAll()
+        await services.assetRfqService.tickAll()
       } catch (error) {
         log('asset rfq sweep failed:', error instanceof Error ? error.message : String(error))
       }
