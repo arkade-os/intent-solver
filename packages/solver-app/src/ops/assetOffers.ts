@@ -220,9 +220,7 @@ export class AssetOfferService {
     return bounds ?? null
   }
 
-  private pricingFor(
-    input: OfferFillInput,
-  ): { market: AssetMarketPricing; direction: OfferDirection } | null {
+  private pricingFor(input: OfferFillInput): { market: AssetMarketPricing; direction: OfferDirection } | null {
     for (const market of this.pricing ?? []) {
       const direction = offerDirectionOn(market, input.offerAssetId, input.wantAssetId)
       if (direction !== null) return { market, direction }
