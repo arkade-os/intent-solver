@@ -66,6 +66,8 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
     // Boot snapshots, equal to the store so the quiet case is the default.
     policy: config,
     assetMarkets: [],
+    liveOfferMarkets: [],
+    assetRfqMarkets: [],
     ...stores,
     readers: readerSetFromDeps(stores as unknown as FlatCorridorDeps),
     adminStore: { getOverrides: vi.fn().mockResolvedValue({}), listMarkets: vi.fn().mockResolvedValue([]) },

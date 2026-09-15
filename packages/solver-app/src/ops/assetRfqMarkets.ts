@@ -122,32 +122,23 @@ export const assetRfqMarketsFrom = (
   })
 }
 
-const coversLive = (
-  market: Pick<AssetRfqMarket, 'base' | 'quote'>,
-  live: readonly { fromAssetId: string | null; toAssetId: string | null }[],
-): boolean =>
-  live.some(
-    (row) =>
-      (row.fromAssetId === market.base && row.toAssetId === market.quote) ||
-      (row.fromAssetId === market.quote && row.toAssetId === market.base),
-  )
-
-/**
- * Serving list plus previous markets that still have a non-terminal row.
- * `previous` is the last readable set, not the last serving set.
- */
+/** Serving list plus previous markets that still have a non-terminal row. */
 export const retainReadableMarkets = (
   serving: readonly AssetRfqMarket[],
   previous: readonly AssetRfqMarket[],
   live: readonly { fromAssetId: string | null; toAssetId: string | null }[],
-): readonly AssetRfqMarket[] => {
-  const readable = [...serving]
-  for (const market of previous) {
-    if (readable.some((row) => row.base === market.base && row.quote === market.quote)) continue
-    if (coversLive(market, live)) readable.push(market)
-  }
-  return readable
-}
+): readonly AssetRfqMarket[] => [
+  ...serving,
+  ...previous.filter(
+    (market) =>
+      !serving.some((row) => row.base === market.base && row.quote === market.quote) &&
+      live.some(
+        (row) =>
+          (row.fromAssetId === market.base && row.toAssetId === market.quote) ||
+          (row.fromAssetId === market.quote && row.toAssetId === market.base),
+      ),
+  ),
+]
 
 type Bounds = { min: bigint; max: bigint }
 

@@ -340,7 +340,7 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
     it('reports a configured market as served by NOTHING when OFFER_MARKETS is unset', async () => {
       const admin = await AdminStore.open(betterSqliteDriver(':memory:'))
       await admin.putMarket(rowFor())
-      const boot = { offerMarkets: parseAssetMarkets(undefined), assetRfqTokens: [] }
+      const boot = { offerMarkets: parseAssetMarkets(undefined), assetRfqMarkets: [] }
       expect(boot.offerMarkets).toEqual([])
       expect(servedBy((await admin.listMarkets())[0]!, boot)).toEqual([])
       await admin.close()
