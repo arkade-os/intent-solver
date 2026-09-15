@@ -226,15 +226,14 @@ describe('the sweep a consumer has to write themselves', () => {
 
   it('is what the shipped loop does at boot, over exactly the same set', () => {
     // Recovery still iterates `services.corridors`. Asset RFQ plugin corridors
-    // skip that pass because they share one service; an injected corridor is
-    // not `ASSET_` and is still driven here, which is the contract this file
-    // pins.
+    // skip that pass because they share one service; exact pairs identify them
+    // so an injected corridor remains driven regardless of its env stem.
     const cliSource = readFileSync(
       fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)),
       'utf8',
     )
     expect(cliSource).toContain('for (const corridor of services.corridors)')
-    expect(cliSource).toContain("if (corridor.descriptor.envStem.startsWith('ASSET_')) continue")
+    expect(cliSource).toContain('if (assetRfqPairs.has(corridor.descriptor.pair)) continue')
     expect(cliSource).toContain('ticked += await corridor.tickAll()')
     expect(cliSource).toContain('ticked += (await services.assetRfqService.tickAll()).length')
   })

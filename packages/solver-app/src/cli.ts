@@ -60,6 +60,7 @@ import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { lockupSource, runContractLifecycle } from '@arkade-os/solver-arkade/arkade/contractLifecycle.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { RFQ_PAIR_SEND } from '@arkade-os/solver-corridors/wire/payloads.js'
+import { assetRfqPairFor } from '@arkade-os/solver-corridors/wire/assetRfqPayloads.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { assetMarketPolicy } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import type { Corridor } from '@arkade-os/solver-core/core/corridor.js'
@@ -203,14 +204,20 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // corridor left out of recovery starts the process with its non-terminal rows
   // untouched until the first full sweep comes round.
   //
-  // EXCEPT the ASSET_ corridors: every one of them wraps the SAME service, so
+  // EXCEPT the generated asset-RFQ corridors: every one wraps the SAME service, so
   // ticking per corridor would drive each row once per market per pass. The
-  // service's own `tickAll` covers them all, wrapped because the serve list can
-  // now be empty and a feed fault must not end the loop.
+  // exact pair set distinguishes them from injected corridors whose env stem
+  // may also start with ASSET_. The service's own `tickAll` covers them all.
   const tickEveryCorridor = async (phase: string): Promise<number> => {
     let ticked = 0
+    const assetRfqPairs = new Set(
+      services.assetRfqMarkets.flatMap(({ base, quote }) => [
+        assetRfqPairFor(base, quote),
+        assetRfqPairFor(quote, base),
+      ]),
+    )
     for (const corridor of services.corridors) {
-      if (corridor.descriptor.envStem.startsWith('ASSET_')) continue
+      if (assetRfqPairs.has(corridor.descriptor.pair)) continue
       ticked += await corridor.tickAll()
     }
     try {
