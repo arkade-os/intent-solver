@@ -118,6 +118,7 @@ const makeDeps = (
         offerMaxFillAmount: over.offerFill?.max ?? 900_000n,
       },
       assetMarkets: over.assetMarkets ?? [],
+      liveOfferMarkets: over.offerMarkets ?? [],
       assetRfqMarkets: over.assetRfqMarkets ?? [],
       providerPubkey: PUBKEY,
       emulatorPubkey: EMULATOR_PUBKEY,

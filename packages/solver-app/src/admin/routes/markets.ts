@@ -241,7 +241,7 @@ export const registerMarketRoutes = (app: Hono, deps: AdminDeps): void => {
       outcome: 'ok',
       detail: null,
     })
-    await deps.services.replaceMarkets?.()
+    await deps.services.replaceMarkets()
     return c.json({ market: marketJson(row), restartRequired: false, restartNotice: MARKETS_LIVE_NOTICE })
   })
 
@@ -256,7 +256,7 @@ export const registerMarketRoutes = (app: Hono, deps: AdminDeps): void => {
       outcome: 'ok',
       detail: null,
     })
-    await deps.services.replaceMarkets?.()
+    await deps.services.replaceMarkets()
     return c.json({ deleted: key, restartRequired: false, restartNotice: MARKETS_LIVE_NOTICE })
   })
 }

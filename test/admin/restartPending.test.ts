@@ -78,6 +78,8 @@ const services = (over: Record<string, unknown> = {}) =>
     policy: config(),
     bootOverrides: {},
     assetMarkets: [],
+    liveOfferMarkets: [],
+    assetRfqMarkets: [],
     tickErrors: { failing: [] },
     providerPubkey: 'aa'.repeat(32),
     store: store(),

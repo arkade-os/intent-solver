@@ -57,7 +57,6 @@ describe('servedBy', () => {
       servedBy(
         btcUsdt,
         servingOf({
-          policy: { offerMarkets: [{ a: null, b: USDT }] },
           liveOfferMarkets: [],
           assetRfqMarkets: [],
         }),
@@ -91,6 +90,7 @@ const marketsApp = (policy: Record<string, unknown>, rows: unknown[] = [market()
     services: {
       policy: { offerMarkets: [], assetRfqTokens: [], ...policy },
       assetMarkets: [],
+      liveOfferMarkets: policy.liveOfferMarkets ?? [],
       assetRfqMarkets: policy.assetRfqMarkets ?? [],
       adminStore: { listMarkets: vi.fn().mockResolvedValue(rows) },
     } as never,
@@ -112,12 +112,12 @@ describe('GET /api/markets — served by', () => {
   })
 
   it('keeps served-by independent of the market’s own enabled state', async () => {
-    const body = await listMarkets({ offerMarkets: [{ a: null, b: USDT }] }, [market({ enabled: false })])
+    const body = await listMarkets({ liveOfferMarkets: [{ a: null, b: USDT }] }, [market({ enabled: false })])
     expect(body.markets[0]).toMatchObject({ enabled: false, servedBy: ['offer'] })
   })
 
   it('reports both paths when both fill the pair', async () => {
-    const body = await listMarkets({ offerMarkets: [{ a: null, b: USDT }], assetRfqMarkets: [btcUsdt] })
+    const body = await listMarkets({ liveOfferMarkets: [{ a: null, b: USDT }], assetRfqMarkets: [btcUsdt] })
     expect(body.markets[0]?.servedBy).toEqual(['offer', 'rfq'])
   })
 })
@@ -205,6 +205,7 @@ const overview = async (policy: Record<string, unknown>, rows: unknown[] = [mark
       policy: { ...(settingsConfig() as Record<string, unknown>), offerMarkets: [], assetRfqTokens: [], ...policy },
       bootOverrides: {},
       assetMarkets: [],
+      liveOfferMarkets: policy.liveOfferMarkets ?? [],
       assetRfqMarkets: policy.assetRfqMarkets ?? [],
       tickErrors: { failing: [] },
       providerPubkey: 'aa'.repeat(32),
@@ -250,12 +251,12 @@ describe('GET /api/overview — markets', () => {
   })
 
   it('reports the paths that do fill it', async () => {
-    const body = await overview({ offerMarkets: [{ a: null, b: USDT }], assetRfqMarkets: [btcUsdt] })
+    const body = await overview({ liveOfferMarkets: [{ a: null, b: USDT }], assetRfqMarkets: [btcUsdt] })
     expect(body.markets[0]?.servedBy).toEqual(['offer', 'rfq'])
   })
 
   it('keeps the market’s own state a separate field from served-by', async () => {
-    const body = await overview({ offerMarkets: [{ a: null, b: USDT }] }, [market({ enabled: false })])
+    const body = await overview({ liveOfferMarkets: [{ a: null, b: USDT }] }, [market({ enabled: false })])
     expect(body.markets[0]).toMatchObject({ enabled: false, servedBy: ['offer'] })
   })
 

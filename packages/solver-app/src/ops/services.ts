@@ -1174,30 +1174,28 @@ export const createServices = async (
   let readableMarkets: readonly AssetRfqMarket[] = assetRfqMarkets
   let replaceTail: Promise<unknown> = Promise.resolve()
   const extraCorridors = opts?.corridors ?? []
-  const setsFrom = (serving: readonly AssetRfqMarket[], readable: readonly AssetRfqMarket[] = serving) => {
-    const shared = {
-      service,
-      store,
-      onchainService,
-      onchainFloat,
-      onchainStore,
-      receiveService,
-      receiveStore,
-      onchainReceiveService,
-      onchainReceiveStore,
-      evmSendService,
-      evmSendStore,
-      evmReceiveService,
-      evmReceiveStore,
-      evmCorridors: policy.evmCorridors,
-      assetRfqService,
-      assetRfqStore,
-    }
-    return {
-      corridors: corridorSetFromDeps({ ...shared, assetRfqMarkets: serving }, extraCorridors),
-      readers: readerSetFromDeps({ ...shared, assetRfqMarkets: readable }, extraCorridors),
-    }
+  const shared = {
+    service,
+    store,
+    onchainService,
+    onchainFloat,
+    onchainStore,
+    receiveService,
+    receiveStore,
+    onchainReceiveService,
+    onchainReceiveStore,
+    evmSendService,
+    evmSendStore,
+    evmReceiveService,
+    evmReceiveStore,
+    evmCorridors: policy.evmCorridors,
+    assetRfqService,
+    assetRfqStore,
   }
+  const setsFrom = (serving: readonly AssetRfqMarket[], readable: readonly AssetRfqMarket[] = serving) => ({
+    corridors: corridorSetFromDeps({ ...shared, assetRfqMarkets: serving }, extraCorridors),
+    readers: readerSetFromDeps({ ...shared, assetRfqMarkets: readable }, extraCorridors),
+  })
   const { corridors, readers } = setsFrom(assetRfqMarkets)
 
   const services: Services = {
