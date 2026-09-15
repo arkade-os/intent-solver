@@ -51,6 +51,7 @@ describe('the watch loop during slow wallet maintenance', () => {
     const maintenance = vi.fn(() => blocked.promise)
     let funded = false
     const progressed = vi.fn()
+    const customCorridorTick = vi.fn(async () => 0)
     const tickAll = vi.fn(async () => {
       if (funded) progressed()
       return []
@@ -61,12 +62,20 @@ describe('the watch loop during slow wallet maintenance', () => {
       arkade: { wallet: { getContractManager: async () => ({}) } },
       readers: [],
       evmSendService: { tickAll },
-      corridors: [{ descriptor: { envStem: 'LN_SEND' }, tickAll, findRecoverable: async () => [] }],
+      corridors: [
+        {
+          descriptor: { pair: 'custom:asset->custom:btc', envStem: 'ASSET_CUSTOM' },
+          tickAll: customCorridorTick,
+          findRecoverable: async () => [],
+        },
+      ],
       assetRfqService: { tickAll: async () => [] },
+      assetRfqMarkets: [],
     }
     const watch = runInNewContext(`${compiled}; watchUntilStopped`, {
       process: signals,
       withEvmSendSweep,
+      assetRfqPairFor: (from: string | null, to: string | null) => `${from}->${to}`,
       log: () => {},
       CORRIDORS: [],
       Date,
@@ -90,6 +99,7 @@ describe('the watch loop during slow wallet maintenance', () => {
     try {
       await vi.advanceTimersByTimeAsync(250)
       expect(maintenance).toHaveBeenCalledOnce()
+      expect(customCorridorTick).toHaveBeenCalled()
       funded = true
       await vi.advanceTimersByTimeAsync(3000)
       expect(progressed).toHaveBeenCalled()
