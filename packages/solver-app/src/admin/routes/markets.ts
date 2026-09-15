@@ -42,7 +42,7 @@ import {
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import type { AssetMarketRow } from '../db.js'
-import { servedBy, servingOf } from '../servedBy.js'
+import { servedBy } from '../servedBy.js'
 import type { AdminDeps } from '../server.js'
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
@@ -178,7 +178,7 @@ export const registerMarketRoutes = (app: Hono, deps: AdminDeps): void => {
       // `servedBy` is a SECOND axis, beside the row's own `enabled`. A market can
       // be enabled and served by nothing, which is the state that cost an
       // operator an evening. @see admin/servedBy.ts
-      markets: rows.map((row) => ({ ...marketJson(row), servedBy: servedBy(row, servingOf(deps.services)) })),
+      markets: rows.map((row) => ({ ...marketJson(row), servedBy: servedBy(row, deps.services) })),
       /**
        * Which of these the RUNNING process is actually trading against.
        */

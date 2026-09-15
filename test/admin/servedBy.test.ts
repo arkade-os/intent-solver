@@ -6,7 +6,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
-import { servedBy, servingOf } from '@arkade-os/solver-app/admin/servedBy.js'
+import { servedBy } from '@arkade-os/solver-app/admin/servedBy.js'
 import { describeSettings } from '@arkade-os/solver-app/admin/settings.js'
 import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
@@ -16,7 +16,7 @@ const KEY = assetMarketKey(null, USDT)
 
 const btcUsdt = { base: null, quote: USDT }
 const token = (assetId: string) => ({ symbol: 'USDT', assetId, enabled: { sell_base: true, buy_base: true } })
-const boot = (over: Record<string, unknown> = {}) => ({ offerMarkets: [], assetRfqMarkets: [], ...over }) as never
+const boot = (over: Record<string, unknown> = {}) => ({ liveOfferMarkets: [], assetRfqMarkets: [], ...over }) as never
 
 describe('servedBy', () => {
   it('reports NOTHING when neither path fills the pair', () => {
@@ -24,11 +24,11 @@ describe('servedBy', () => {
   })
 
   it('reports the offer path when OFFER_MARKETS names the pair', () => {
-    expect(servedBy(btcUsdt, boot({ offerMarkets: [{ a: null, b: USDT }] }))).toEqual(['offer'])
+    expect(servedBy(btcUsdt, boot({ liveOfferMarkets: [{ a: null, b: USDT }] }))).toEqual(['offer'])
   })
 
   it('matches OFFER_MARKETS with the legs the other way round', () => {
-    expect(servedBy(btcUsdt, boot({ offerMarkets: [{ a: USDT, b: null }] }))).toEqual(['offer'])
+    expect(servedBy(btcUsdt, boot({ liveOfferMarkets: [{ a: USDT, b: null }] }))).toEqual(['offer'])
   })
 
   it('reports the RFQ path when this process is serving the pair', () => {
@@ -36,32 +36,20 @@ describe('servedBy', () => {
   })
 
   it('reports both when both paths fill it', () => {
-    const served = servedBy(btcUsdt, boot({ offerMarkets: [{ a: null, b: USDT }], assetRfqMarkets: [btcUsdt] }))
+    const served = servedBy(btcUsdt, boot({ liveOfferMarkets: [{ a: null, b: USDT }], assetRfqMarkets: [btcUsdt] }))
     expect(served).toEqual(['offer', 'rfq'])
   })
 
   it('does not match a DIFFERENT asset', () => {
     const served = servedBy(
       btcUsdt,
-      boot({ offerMarkets: [{ a: null, b: OTHER }], assetRfqMarkets: [{ base: null, quote: OTHER }] }),
+      boot({ liveOfferMarkets: [{ a: null, b: OTHER }], assetRfqMarkets: [{ base: null, quote: OTHER }] }),
     )
     expect(served).toEqual([])
   })
 
   it('never matches on the BTC leg alone, which every market shares', () => {
     expect(servedBy({ base: null, quote: OTHER }, boot({ assetRfqMarkets: [btcUsdt] }))).toEqual([])
-  })
-
-  it('does not report offer for an env pair this process is not pricing', () => {
-    expect(
-      servedBy(
-        btcUsdt,
-        servingOf({
-          liveOfferMarkets: [],
-          assetRfqMarkets: [],
-        }),
-      ),
-    ).toEqual([])
   })
 })
 
@@ -114,6 +102,11 @@ describe('GET /api/markets — served by', () => {
   it('keeps served-by independent of the market’s own enabled state', async () => {
     const body = await listMarkets({ liveOfferMarkets: [{ a: null, b: USDT }] }, [market({ enabled: false })])
     expect(body.markets[0]).toMatchObject({ enabled: false, servedBy: ['offer'] })
+  })
+
+  it('does not report offer for an OFFER_MARKETS pair this process is not pricing', async () => {
+    const body = await listMarkets({ offerMarkets: [{ a: null, b: USDT }] })
+    expect(body.markets[0]?.servedBy).toEqual([])
   })
 
   it('reports both paths when both fill the pair', async () => {

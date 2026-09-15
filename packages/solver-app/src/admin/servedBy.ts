@@ -6,23 +6,15 @@ import type { AssetMarket } from '../ops/assetOffers.js'
 
 export type ServingPath = 'offer' | 'rfq'
 
-export interface BootServing {
-  readonly offerMarkets: readonly AssetMarket[]
+export interface Serving {
+  readonly liveOfferMarkets: readonly AssetMarket[]
   readonly assetRfqMarkets: readonly { base: string | null; quote: string | null }[]
 }
 
-export const servingOf = (services: {
-  liveOfferMarkets: readonly AssetMarket[]
-  assetRfqMarkets: readonly { base: string | null; quote: string | null }[]
-}): BootServing => ({
-  offerMarkets: services.liveOfferMarkets,
-  assetRfqMarkets: services.assetRfqMarkets,
-})
-
-export const servedBy = (market: Pick<AssetMarketConfig, 'base' | 'quote'>, boot: BootServing): ServingPath[] => {
+export const servedBy = (market: Pick<AssetMarketConfig, 'base' | 'quote'>, serving: Serving): ServingPath[] => {
   const key = assetMarketKey(market.base, market.quote)
   const paths: ServingPath[] = []
-  if (boot.offerMarkets.some((pair) => assetMarketKey(pair.a, pair.b) === key)) paths.push('offer')
-  if (boot.assetRfqMarkets.some((row) => row.base === market.base && row.quote === market.quote)) paths.push('rfq')
+  if (serving.liveOfferMarkets.some((pair) => assetMarketKey(pair.a, pair.b) === key)) paths.push('offer')
+  if (serving.assetRfqMarkets.some((row) => row.base === market.base && row.quote === market.quote)) paths.push('rfq')
   return paths
 }

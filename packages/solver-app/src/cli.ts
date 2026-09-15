@@ -204,16 +204,25 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // Every registered corridor, not the two that used to be named here — a
   // corridor left out of recovery starts the process with its non-terminal rows
   // untouched until the first full sweep comes round.
-  let recovered = 0
-  for (const corridor of services.corridors) {
-    if (corridor.descriptor.envStem.startsWith('ASSET_')) continue
-    recovered += await corridor.tickAll()
+  //
+  // EXCEPT the ASSET_ corridors: every one of them wraps the SAME service, so
+  // ticking per corridor would drive each row once per market per pass. The
+  // service's own `tickAll` covers them all, wrapped because the serve list can
+  // now be empty and a feed fault must not end the loop.
+  const tickEveryCorridor = async (phase: string): Promise<number> => {
+    let ticked = 0
+    for (const corridor of services.corridors) {
+      if (corridor.descriptor.envStem.startsWith('ASSET_')) continue
+      ticked += await corridor.tickAll()
+    }
+    try {
+      ticked += (await services.assetRfqService.tickAll()).length
+    } catch (error) {
+      log(`asset rfq ${phase} failed:`, error instanceof Error ? error.message : String(error))
+    }
+    return ticked
   }
-  try {
-    recovered += (await services.assetRfqService.tickAll()).length
-  } catch (error) {
-    log('asset rfq recovery failed:', error instanceof Error ? error.message : String(error))
-  }
+  const recovered = await tickEveryCorridor('recovery')
   startEvmSendSweep()
   log(`recovered ${recovered} swap(s) across ${services.corridors.size} corridor(s); watching`)
   const served = CORRIDORS.filter((corridor) => services.config.corridorEnabled[corridor])
@@ -454,15 +463,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
       // The EVM legs ride this same loop: no hot tick (an EVM confirmation
       // depth is minutes wide, so a sub-second cadence would buy nothing but
       // RPC calls), and their rows are driven by the sweep alone.
-      for (const corridor of services.corridors) {
-        if (corridor.descriptor.envStem.startsWith('ASSET_')) continue
-        await corridor.tickAll()
-      }
-      try {
-        await services.assetRfqService.tickAll()
-      } catch (error) {
-        log('asset rfq sweep failed:', error instanceof Error ? error.message : String(error))
-      }
+      await tickEveryCorridor('sweep')
       // The offer path rides the same cadence and needs no other: a fill is one
       // Arkade transaction with no confirmation to wait on, so there is nothing
       // a faster loop could observe.
