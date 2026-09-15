@@ -305,7 +305,7 @@ export const createCorridorSet = (corridors: readonly Corridor[]): CorridorSet =
   index(corridors)
   return {
     get: (pair) => byPair.get(pair),
-    replace: (next) => index(next),
+    replace: index,
     get size() {
       return byPair.size
     },
@@ -338,7 +338,7 @@ export const createCorridorReaderSet = (corridors: readonly CorridorReader[]): C
   index(corridors)
   return {
     get: (pair) => byPair.get(pair),
-    replace: (next) => index(next),
+    replace: index,
     get size() {
       return byPair.size
     },
