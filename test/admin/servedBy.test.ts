@@ -40,10 +40,7 @@ describe('servedBy', () => {
   })
 
   it('reports both when both paths fill it', () => {
-    const served = servedBy(
-      btcUsdt,
-      serving({ liveOfferMarkets: [{ a: null, b: USDT }], assetRfqMarkets: [btcUsdt] }),
-    )
+    const served = servedBy(btcUsdt, serving({ liveOfferMarkets: [{ a: null, b: USDT }], assetRfqMarkets: [btcUsdt] }))
     expect(served).toEqual(['offer', 'rfq'])
   })
 
