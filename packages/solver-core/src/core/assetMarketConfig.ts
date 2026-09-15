@@ -219,7 +219,7 @@ export const validateAssetMarket = (market: AssetMarketConfig): void => {
   checkBounds('buyBase', market.buyBase)
 
   const feedUrl = market.feedUrl.trim()
-  if (!feedUrl) throw new Error('feedUrl is required for configured market pricing')
+  if (!feedUrl) throw new Error('feedUrl is required: a configured market without one cannot be priced')
   let parsed: URL
   try {
     parsed = new URL(feedUrl)
