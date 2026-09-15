@@ -46,6 +46,7 @@ import {
 } from '@arkade-os/solver-core/core/assetRfq.js'
 import type { Price } from '@arkade-os/solver-core/core/priceFeed.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow, type AssetRfqSwapState } from '../db/assetRfqSwaps.js'
@@ -196,23 +197,13 @@ export class AssetRfqSwapService {
   private readonly quoteLimiter: RateLimiter
   private readonly newId: () => string
   private markets: readonly AssetRfqMarket[]
-  /** ponytail: process-wide quote/replace mutex; per-market locks if concurrent pairs matter */
-  private tail: Promise<unknown> = Promise.resolve()
+  private readonly serialise: Serialiser = createSerialiser()
 
   constructor(private readonly deps: AssetRfqDeps) {
     this.now = deps.now ?? nowSeconds
     this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
     this.newId = deps.newId ?? (() => crypto.randomUUID())
     this.markets = deps.markets
-  }
-
-  private serialise<T>(job: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(job, job)
-    this.tail = result.then(
-      () => undefined,
-      () => undefined,
-    )
-    return result
   }
 
   /** Swap the live serve list. In-flight rows keep the terms already recorded. */
