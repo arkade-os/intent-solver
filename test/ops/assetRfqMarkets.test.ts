@@ -11,6 +11,7 @@ import {
   assetCardMarketsFromPolicy,
   assetRfqMarketsFrom,
   parseAssetRfqTokens,
+  retainReadableMarkets,
 } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { assetRfqDescriptor, assetRfqEnvStem } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
@@ -208,5 +209,37 @@ describe('assetCardMarketsFromPolicy', () => {
       sellBase: { min: 1n, max: 10n ** 12n },
       sellBaseFeeFlat: 330n,
     })
+  })
+})
+
+describe('auto-symbols', () => {
+  it('distinguishes two assets of the same issuance', () => {
+    const tx = 'ab'.repeat(32)
+    const a = assetRfqMarketsFrom([], [pricing({ quote: `${tx}0100` })])[0]!
+    const b = assetRfqMarketsFrom([], [pricing({ quote: `${tx}0200` })])[0]!
+    expect(a.symbol).not.toBe(b.symbol)
+    expect(a.symbol).toMatch(/^A[0-9A-F]{11}$/)
+  })
+})
+
+describe('retainReadableMarkets', () => {
+  const served = () => assetRfqMarketsFrom([], [pricing()])[0]!
+  const other = () => assetRfqMarketsFrom([], [pricing({ quote: OTHER })])[0]!
+
+  it('keeps a dropped market while a live row still names its pair', () => {
+    const dropped = served()
+    expect(retainReadableMarkets([], [dropped], [{ fromAssetId: null, toAssetId: USDA }])).toEqual([dropped])
+  })
+
+  it('still keeps it after a later write whose serving list has forgotten it', () => {
+    const dropped = served()
+    const next = other()
+    const afterDelete = retainReadableMarkets([], [dropped], [{ fromAssetId: null, toAssetId: USDA }])
+    const afterOther = retainReadableMarkets([next], afterDelete, [{ fromAssetId: null, toAssetId: USDA }])
+    expect(afterOther).toEqual([next, dropped])
+  })
+
+  it('drops it once nothing is in flight', () => {
+    expect(retainReadableMarkets([], [served()], [])).toEqual([])
   })
 })

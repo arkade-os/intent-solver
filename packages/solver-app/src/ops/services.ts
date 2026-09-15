@@ -89,7 +89,7 @@ import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import { assetRfqMarketsFrom } from './assetRfqMarkets.js'
+import { assetRfqMarketsFrom, retainReadableMarkets } from './assetRfqMarkets.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
@@ -1171,6 +1171,7 @@ export const createServices = async (
     })
   }
 
+  let readableMarkets: readonly AssetRfqMarket[] = assetRfqMarkets
   const extraCorridors = opts?.corridors ?? []
   const setsFrom = (serving: readonly AssetRfqMarket[], readable: readonly AssetRfqMarket[] = serving) => {
     const shared = {
@@ -1226,19 +1227,7 @@ export const createServices = async (
       const offers = offerMarketsPricedBy(next.pricing)
       if (offers.length > 0) assertMarketsPriced(offers, next.pricing)
       const live = await assetRfqStore.listNonTerminal()
-      const readable = [...rfq]
-      for (const market of services.assetRfqMarkets) {
-        if (readable.some((row) => row.base === market.base && row.quote === market.quote)) continue
-        if (
-          live.some(
-            (row) =>
-              (row.fromAssetId === market.base && row.toAssetId === market.quote) ||
-              (row.fromAssetId === market.quote && row.toAssetId === market.base),
-          )
-        ) {
-          readable.push(market)
-        }
-      }
+      const readable = retainReadableMarkets(rfq, readableMarkets, live)
       const nextSets = setsFrom(rfq, readable)
       await assetRfqService.replaceMarkets(rfq)
       await assetOffers?.replaceMarkets({ markets: offers, pricing: next.pricing })
@@ -1248,6 +1237,7 @@ export const createServices = async (
       services.assetMarketPairs = next.pairs
       services.assetRfqMarkets = rfq
       services.liveOfferMarkets = offers
+      readableMarkets = readable
     },
     adminStore,
     arkade,
