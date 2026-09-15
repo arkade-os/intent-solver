@@ -109,6 +109,15 @@ export interface AssetQuoteMarket {
 export type AssetQuoteRefusal =
   'unsupported_pair' | 'exact_out_unsupported' | 'price_unavailable' | 'fee_consumes_swap' | 'amount_out_of_range'
 
+/**
+ * Taproot dust, in sats. A BTC-leg payout under this can never settle — arkd
+ * refuses the output — so quoting one strands the client's deposit: the sweep
+ * would fail the fill and the client would eat a cancel round trip for a swap
+ * that was never servable. An asset-leg payout has no such floor (an asset
+ * rides its carrier), so this binds only the sats leg.
+ */
+export const ARKADE_DUST_SATS = 330n
+
 export type AssetQuoteOutcome =
   { ok: true; fromAmount: bigint; toAmount: bigint } | { ok: false; reason: AssetQuoteRefusal }
 
@@ -173,6 +182,13 @@ export const resolveAssetQuote = (args: {
   // Bounds are evaluated on the TO leg — what the solver pays out — which is
   // § 4.6's rule for `min`/`max` and the registry card's own convention.
   if (toAmount < market.minPayout || toAmount > market.maxPayout) {
+    return { ok: false, reason: 'amount_out_of_range' }
+  }
+
+  // After the configured bounds: a payout the operator's own range admits but
+  // the chain cannot carry. A sats payout under dust is not a cheap swap, it
+  // is an unfillable one, and quoting it strands the client's deposit.
+  if (pair.to === null && toAmount < ARKADE_DUST_SATS) {
     return { ok: false, reason: 'amount_out_of_range' }
   }
 

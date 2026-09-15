@@ -269,6 +269,53 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       }),
     ).toMatchObject({ ok: true, toAmount: 99_500_000_000n })
   })
+
+  /**
+   * A sats payout under taproot dust (330) can never settle — arkd refuses
+   * the output — so quoting one strands the client's deposit: the sweep would
+   * fail the fill and the client would eat a cancel round trip for a swap that
+   * was never servable. Observed live as an emulator code-13 on a 115-sat
+   * buy payout. The floor binds only the sats leg; an asset payout of any
+   * size above the market minimum still quotes.
+   */
+  it('refuses a sats payout under dust even inside the market bounds', () => {
+    // mid = 100_000 / 1000 = 100 sats; fee = ceil(100 * 50 / 10_000) = 1.
+    expect(
+      resolveAssetQuote({
+        pair: { from: ASSET_A, to: null },
+        amount: 100_000n,
+        amountSide: 'from',
+        market: MARKET,
+        feed: FEED,
+      }),
+    ).toEqual({ ok: false, reason: 'amount_out_of_range' })
+  })
+
+  it('admits a sats payout exactly at dust', () => {
+    // mid = 332; fee = ceil(332 * 50 / 10_000) = 2; payout = 330.
+    expect(
+      resolveAssetQuote({
+        pair: { from: ASSET_A, to: null },
+        amount: 332_000n,
+        amountSide: 'from',
+        market: MARKET,
+        feed: FEED,
+      }),
+    ).toEqual({ ok: true, fromAmount: 332_000n, toAmount: 330n })
+  })
+
+  it('puts no dust floor on an asset payout', () => {
+    // mid = 100 * 1e5 * 1e6 / 1e8 = 100_000 units; fee = 500.
+    expect(
+      resolveAssetQuote({
+        pair: { from: null, to: ASSET_A },
+        amount: 100n,
+        amountSide: 'from',
+        market: MARKET,
+        feed: FEED,
+      }),
+    ).toEqual({ ok: true, fromAmount: 100n, toAmount: 99_500n })
+  })
 })
 
 /**
