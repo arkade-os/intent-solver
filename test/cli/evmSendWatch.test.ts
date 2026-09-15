@@ -61,7 +61,8 @@ describe('the watch loop during slow wallet maintenance', () => {
       arkade: { wallet: { getContractManager: async () => ({}) } },
       readers: [],
       evmSendService: { tickAll },
-      corridors: [{ tickAll, findRecoverable: async () => [] }],
+      corridors: [{ descriptor: { envStem: 'LN_SEND' }, tickAll, findRecoverable: async () => [] }],
+      assetRfqService: { tickAll: async () => [] },
     }
     const watch = runInNewContext(`${compiled}; watchUntilStopped`, {
       process: signals,

@@ -234,8 +234,8 @@ describe('the sweep a consumer has to write themselves', () => {
       'utf8',
     )
     expect(cliSource).toContain('for (const corridor of services.corridors)')
-    expect(cliSource).toContain("if (corridor.descriptor?.envStem.startsWith('ASSET_')) continue")
+    expect(cliSource).toContain("if (corridor.descriptor.envStem.startsWith('ASSET_')) continue")
     expect(cliSource).toContain('recovered += await corridor.tickAll()')
-    expect(cliSource).toContain('recovered += (await services.assetRfqService?.tickAll())?.length ?? 0')
+    expect(cliSource).toContain('recovered += (await services.assetRfqService.tickAll()).length')
   })
 })

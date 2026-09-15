@@ -1087,6 +1087,7 @@ export const createServices = async (
   }
 
   let readableMarkets: readonly AssetRfqMarket[] = assetRfqMarkets
+  let replaceTail: Promise<unknown> = Promise.resolve()
   const extraCorridors = opts?.corridors ?? []
   const setsFrom = (serving: readonly AssetRfqMarket[], readable: readonly AssetRfqMarket[] = serving) => {
     const shared = {
@@ -1136,23 +1137,31 @@ export const createServices = async (
     assetRfqStore,
     assetRfqService,
     assetRfqMarkets,
-    replaceMarkets: async () => {
-      const next = assetMarketPolicy(await adminStore.listMarkets())
-      const rfq = assetRfqMarketsFrom(policy.assetRfqTokens, next.pricing)
-      const offers = offerMarketsPricedBy(next.pricing)
-      if (offers.length > 0) assertMarketsPriced(offers, next.pricing)
-      const live = await assetRfqStore.listNonTerminal()
-      const readable = retainReadableMarkets(rfq, readableMarkets, live)
-      const nextSets = setsFrom(rfq, readable)
-      await assetRfqService.replaceMarkets(rfq)
-      await assetOffers?.replaceMarkets({ markets: offers, pricing: next.pricing })
-      services.corridors.replace([...nextSets.corridors])
-      services.readers.replace([...nextSets.readers])
-      services.assetMarkets = next.pricing
-      services.assetMarketPairs = next.pairs
-      services.assetRfqMarkets = rfq
-      services.liveOfferMarkets = offers
-      readableMarkets = readable
+    replaceMarkets: (): Promise<void> => {
+      const job = async () => {
+        const next = assetMarketPolicy(await adminStore.listMarkets())
+        const rfq = assetRfqMarketsFrom(policy.assetRfqTokens, next.pricing)
+        const offers = offerMarketsPricedBy(next.pricing)
+        if (offers.length > 0) assertMarketsPriced(offers, next.pricing)
+        const live = await assetRfqStore.listNonTerminal()
+        const readable = retainReadableMarkets(rfq, readableMarkets, live)
+        const nextSets = setsFrom(rfq, readable)
+        await assetRfqService.replaceMarkets(rfq)
+        await assetOffers?.replaceMarkets({ markets: offers, pricing: next.pricing })
+        services.corridors.replace([...nextSets.corridors])
+        services.readers.replace([...nextSets.readers])
+        services.assetMarkets = next.pricing
+        services.assetMarketPairs = next.pairs
+        services.assetRfqMarkets = rfq
+        services.liveOfferMarkets = offers
+        readableMarkets = readable
+      }
+      const result = replaceTail.then(job, job)
+      replaceTail = result.then(
+        () => undefined,
+        () => undefined,
+      )
+      return result
     },
     adminStore,
     arkade,
