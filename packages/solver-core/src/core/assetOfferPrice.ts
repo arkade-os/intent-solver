@@ -64,10 +64,10 @@ export const offerWithinTolerance = (args: {
   direction: OfferDirection
   market: OfferPriceMarket
   feed: Price
-  /** Headroom for a maker who priced back the carrier they fronted. Zero unless the want leg is BTC. */
   carrierSats?: bigint
+  wantIsBtc?: boolean
 }): boolean => {
-  const { depositAmount, wantAmount, direction, market, feed, carrierSats = 0n } = args
+  const { depositAmount, wantAmount, direction, market, feed, carrierSats = 0n, wantIsBtc = true } = args
   if (carrierSats < 0n) return false
   if (depositAmount <= 0n || wantAmount <= 0n) return false
   if (feed.mantissa <= 0n) return false
@@ -80,7 +80,8 @@ export const offerWithinTolerance = (args: {
 
   const flatFee = (direction === 'sell_base' ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
   if (flatFee < 0n) return false
-  const netDeposit = depositAmount - flatFee
+  // A carrier we deliver is not deposit we keep — as `resolveAssetQuote` nets it.
+  const netDeposit = depositAmount - flatFee - (wantIsBtc ? 0n : carrierSats)
   if (netDeposit <= 0n) return false
 
   const payout = assetExactInPayout({
@@ -92,7 +93,7 @@ export const offerWithinTolerance = (args: {
     toleranceBps: market.toleranceBps,
     feed,
   })
-  return wantAmount <= payout + carrierSats
+  return wantAmount <= payout + (wantIsBtc ? carrierSats : 0n)
 }
 
 /**

@@ -129,8 +129,8 @@ export const assetRfqQuotePayload = (
   // comparable as numbers.
   from_amount: row.fromAmount.toString(),
   to_amount: row.toAmount.toString(),
-  // NOT a fee: the sats an asset rides on, already netted into the amounts above.
-  // Published so a client can fund a deposit, or aim at a payout, exactly.
+  // NOT a fee: already netted into the amounts above, published so a client can
+  // fund a deposit, or aim at a payout, exactly.
   ...(carrierSats > 0n ? { carrier_sats: carrierSats.toString() } : {}),
   solver_pubkey: row.solverPubkey,
   valid_until: row.validUntil,

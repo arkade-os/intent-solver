@@ -231,7 +231,8 @@ export class AssetOfferService {
         direction,
         market,
         feed,
-        carrierSats: input.wantAssetId === null ? (this.deps.carrierSats ?? 0n) : 0n,
+        carrierSats: this.deps.carrierSats ?? 0n,
+        wantIsBtc: input.wantAssetId === null,
       })
     } catch (error) {
       this.deps.onError?.(id, error)

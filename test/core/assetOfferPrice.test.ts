@@ -392,3 +392,23 @@ describe('the carrier a BTC-wanting maker fronted', () => {
     expect(at(payout + 331n, 330n)).toBe(false)
   })
 })
+
+/** Without this the packet path still funds the carrier it delivers. */
+describe('the carrier an asset-wanting maker is delivered', () => {
+  const at = (wantAmount: bigint, carrierSats: bigint) =>
+    offerWithinTolerance({
+      depositAmount: 100_000_000n,
+      wantAmount,
+      direction: 'sell_base',
+      market: market(),
+      feed,
+      carrierSats,
+      wantIsBtc: false,
+    })
+
+  it('is charged against the deposit, tightening what we will fill', () => {
+    expect(at(100_100_000_000n, 0n)).toBe(true)
+    expect(at(100_100_000_000n, 330n)).toBe(false)
+    expect(at(100_099_669_670n, 330n)).toBe(true)
+  })
+})
