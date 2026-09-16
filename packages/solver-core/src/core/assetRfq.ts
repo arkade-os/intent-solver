@@ -109,15 +109,6 @@ export interface AssetQuoteMarket {
 export type AssetQuoteRefusal =
   'unsupported_pair' | 'exact_out_unsupported' | 'price_unavailable' | 'fee_consumes_swap' | 'amount_out_of_range'
 
-/**
- * Taproot dust, in sats. A BTC-leg payout under this can never settle — arkd
- * refuses the output — so quoting one strands the client's deposit: the sweep
- * would fail the fill and the client would eat a cancel round trip for a swap
- * that was never servable. An asset-leg payout has no such floor (an asset
- * rides its carrier), so this binds only the sats leg.
- */
-export const ARKADE_DUST_SATS = 330n
-
 export type AssetQuoteOutcome =
   { ok: true; fromAmount: bigint; toAmount: bigint } | { ok: false; reason: AssetQuoteRefusal }
 
@@ -143,8 +134,10 @@ export const resolveAssetQuote = (args: {
   amountSide: 'from' | 'to'
   market: AssetQuoteMarket
   feed: Price
+  /** Sats an asset rides on: returned on a BTC payout, charged on an asset payout. */
+  carrierSats: bigint
 }): AssetQuoteOutcome => {
-  const { pair, amount, amountSide, market, feed } = args
+  const { pair, amount, amountSide, market, feed, carrierSats } = args
 
   if (amountSide !== 'from') return { ok: false, reason: 'exact_out_unsupported' }
 
@@ -160,12 +153,15 @@ export const resolveAssetQuote = (args: {
   if (market.feeBps < 0 || market.feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
   if (amount <= 0n) return { ok: false, reason: 'amount_out_of_range' }
 
+  if (carrierSats < 0n) return { ok: false, reason: 'price_unavailable' }
+
   const flatFee = (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
   if (flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
-  const netAmount = amount - flatFee
+  // An asset payout rides a carrier we supply, so those sats are not input we keep.
+  const netAmount = amount - flatFee - (pair.to === null ? 0n : carrierSats)
   if (netAmount <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
 
-  const toAmount = assetExactInPayout({
+  const payout = assetExactInPayout({
     netInput: netAmount,
     givesBase,
     baseDecimals: market.baseDecimals,
@@ -177,18 +173,20 @@ export const resolveAssetQuote = (args: {
   // Not clamped to zero, for the reason `payoutSatsFor` states: "the fee ate
   // the swap" and "the amount is below the minimum" want different refusals,
   // and a clamp would silently turn the first into a payout of nothing.
-  if (toAmount <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
+  if (payout <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
 
   // Bounds are evaluated on the TO leg — what the solver pays out — which is
-  // § 4.6's rule for `min`/`max` and the registry card's own convention.
-  if (toAmount < market.minPayout || toAmount > market.maxPayout) {
+  // § 4.6's rule for `min`/`max` and the registry card's own convention. The
+  // carrier is a pass-through rather than payout, so it lands after them.
+  if (payout < market.minPayout || payout > market.maxPayout) {
     return { ok: false, reason: 'amount_out_of_range' }
   }
 
-  // After the configured bounds: a payout the operator's own range admits but
-  // the chain cannot carry. A sats payout under dust is not a cheap swap, it
-  // is an unfillable one, and quoting it strands the client's deposit.
-  if (pair.to === null && toAmount < ARKADE_DUST_SATS) {
+  const toAmount = pair.to === null ? payout + carrierSats : payout
+
+  // Returning the carrier already lifts output 0 clear of dust, so this is
+  // unreachable rather than dead: it is what keeps that true.
+  if (pair.to === null && toAmount < carrierSats) {
     return { ok: false, reason: 'amount_out_of_range' }
   }
 

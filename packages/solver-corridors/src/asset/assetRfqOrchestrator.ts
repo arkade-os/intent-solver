@@ -113,6 +113,7 @@ export interface AssetRfqDeps {
    * the market for the whole window, so the window is the exposure.
    */
   quoteValiditySeconds: number
+  carrierSats: bigint
   /**
    * The offer covenant this solver will watch, derived from terms it has
    * already fixed. `offerVtxoScript` in the composition root.
@@ -175,6 +176,10 @@ export class AssetRfqSwapService {
     this.newId = deps.newId ?? (() => crypto.randomUUID())
   }
 
+  get carrierSats(): bigint {
+    return this.deps.carrierSats
+  }
+
   /**
    * Issue or refuse terms for one request.
    *
@@ -228,6 +233,7 @@ export class AssetRfqSwapService {
       amountSide: request.amountSide,
       market: priced,
       feed,
+      carrierSats: this.deps.carrierSats,
     })
     if (!resolved.ok) return { accepted: false, reason: resolved.reason }
 

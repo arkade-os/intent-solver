@@ -206,6 +206,7 @@ const harness = async (
     markets,
     solverPubkey: makerPublicKey,
     quoteValiditySeconds: over.quoteValiditySeconds ?? 600,
+    carrierSats: arkade.ctx.dustSats,
     deriveOffer,
     depositAt,
     balance: over.balance ?? balance,

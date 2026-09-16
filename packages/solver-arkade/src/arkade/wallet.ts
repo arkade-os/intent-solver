@@ -151,6 +151,7 @@ export interface ArkadeContext {
   /** As advertised, BEFORE `ARK_UNILATERAL_EXIT_DELAY`: a client compiles an
    * offer's exit leaf from this, so that covenant follows the server. */
   advertisedExitDelay: number
+  dustSats: bigint
   /**
    * Which clock this deployment's covenant timelocks count on, INFERRED from the
    * server's own advertised exit delay rather than configured beside it.
@@ -332,6 +333,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     arkServerUrl: config.arkServerUrl,
     unilateralDelays: deriveUnilateralDelays(config.unilateralExitDelayOverride ?? advertisedExitDelay),
     advertisedExitDelay,
+    dustSats: BigInt(info.dust),
     timelockUnit: advertisedUnit,
     hrp: config.arkadeHrp,
     reservations: createReservationLedger(),

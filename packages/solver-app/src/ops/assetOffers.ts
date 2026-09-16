@@ -111,6 +111,7 @@ export interface AssetOfferDeps {
   pricing?: readonly AssetMarketPricing[]
   /** The feed read. Omitted with `pricing` set refuses every offer. */
   fetchPrice?: FetchPrice
+  carrierSats?: bigint
   /**
    * Spend the offer's deposit, paying the maker what the covenant obliges.
    * Returns the fill txid. Absent means this deployment decides but never fills.
@@ -230,6 +231,7 @@ export class AssetOfferService {
         direction,
         market,
         feed,
+        carrierSats: input.wantAssetId === null ? (this.deps.carrierSats ?? 0n) : 0n,
       })
     } catch (error) {
       this.deps.onError?.(id, error)

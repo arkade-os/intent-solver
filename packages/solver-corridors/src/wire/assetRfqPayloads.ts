@@ -114,7 +114,11 @@ export const assetRfqPairFor = (from: AssetLeg, to: AssetLeg): string =>
  * client checks against two different things: the address is what its wallet
  * sends to, and the script is what its own `offerVtxoScript` compiles to.
  */
-export const assetRfqQuotePayload = (row: AssetRfqSwapRow, rfqId: string): Record<string, unknown> => ({
+export const assetRfqQuotePayload = (
+  row: AssetRfqSwapRow,
+  rfqId: string,
+  carrierSats = 0n,
+): Record<string, unknown> => ({
   v: 1,
   type: 'rfq_quote',
   rfq_id: rfqId,
@@ -125,6 +129,9 @@ export const assetRfqQuotePayload = (row: AssetRfqSwapRow, rfqId: string): Recor
   // comparable as numbers.
   from_amount: row.fromAmount.toString(),
   to_amount: row.toAmount.toString(),
+  // NOT a fee: the sats an asset rides on, already netted into the amounts above.
+  // Published so a client can fund a deposit, or aim at a payout, exactly.
+  ...(carrierSats > 0n ? { carrier_sats: carrierSats.toString() } : {}),
   solver_pubkey: row.solverPubkey,
   valid_until: row.validUntil,
   // Deliberately NO `refund_locktime`. See this module's header.

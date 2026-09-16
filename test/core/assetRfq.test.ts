@@ -103,6 +103,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       amountSide: 'from',
       market: MARKET,
       feed: FEED,
+      carrierSats: 0n,
     })
     expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000n, toAmount: 99_500_000_000n })
   })
@@ -115,6 +116,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       amountSide: 'from',
       market: MARKET,
       feed: FEED,
+      carrierSats: 0n,
     })
     expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000_000n, toAmount: 99_500_000n })
   })
@@ -126,6 +128,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       amountSide: 'from',
       market: { ...MARKET, feeBps: 0, sellBaseFeeFlat: 330n },
       feed: FEED,
+      carrierSats: 0n,
     })
     expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000n, toAmount: 99_999_670_000n })
   })
@@ -137,6 +140,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       amountSide: 'from',
       market: { ...MARKET, feeBps: 0, buyBaseFeeFlat: 1_000_000n },
       feed: FEED,
+      carrierSats: 0n,
     })
     expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000_000n, toAmount: 99_999_000n })
   })
@@ -149,6 +153,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         amountSide: 'from',
         market: { ...MARKET, feeBps: 0, sellBaseFeeFlat: 330n },
         feed: FEED,
+        carrierSats: 0n,
       }),
     ).toEqual({ ok: false, reason: 'fee_consumes_swap' })
   })
@@ -160,6 +165,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       amount: 100_000_000n,
       amountSide: 'from',
       market,
+      carrierSats: 0n,
       feed: { mantissa: 1n, scale: 0 },
     })
     // 1 BTC at a price of 1 = 1.0 of an 18-decimal asset = 10^18 atomic units,
@@ -179,6 +185,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       amount: 3n,
       amountSide: 'from',
       market,
+      carrierSats: 0n,
       // A price that cannot divide evenly: 3 sats * 7 / 10^3 with the decimal
       // shift is deliberately fractional.
       feed: { mantissa: 7n, scale: 3 },
@@ -196,6 +203,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       amountSide: 'from',
       market,
       feed: FEED,
+      carrierSats: 0n,
     })
     expect(outcome).toMatchObject({ ok: false, reason: 'fee_consumes_swap' })
   })
@@ -214,6 +222,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       amountSide: 'to',
       market: MARKET,
       feed: FEED,
+      carrierSats: 0n,
     })
     expect(outcome).toEqual({ ok: false, reason: 'exact_out_unsupported' })
   })
@@ -225,6 +234,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       amountSide: 'from',
       market: MARKET,
       feed: FEED,
+      carrierSats: 0n,
     })
     expect(outcome).toEqual({ ok: false, reason: 'unsupported_pair' })
   })
@@ -240,6 +250,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         amountSide: 'from',
         market: MARKET,
         feed,
+        carrierSats: 0n,
       }),
     ).toEqual({ ok: false, reason: 'price_unavailable' })
   })
@@ -253,6 +264,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         amountSide: 'from',
         market,
         feed: FEED,
+        carrierSats: 0n,
       }),
     ).toEqual({ ok: false, reason: 'amount_out_of_range' })
   })
@@ -266,19 +278,16 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         amountSide: 'from',
         market,
         feed: FEED,
+        carrierSats: 0n,
       }),
     ).toMatchObject({ ok: true, toAmount: 99_500_000_000n })
   })
 
   /**
-   * A sats payout under taproot dust (330) can never settle — arkd refuses
-   * the output — so quoting one strands the client's deposit: the sweep would
-   * fail the fill and the client would eat a cancel round trip for a swap that
-   * was never servable. Observed live as an emulator code-13 on a 115-sat
-   * buy payout. The floor binds only the sats leg; an asset payout of any
-   * size above the market minimum still quotes.
+   * Refused before because arkd rejects a sub-dust output — seen live as an
+   * emulator code-13. The carrier fixes that at the root: output 0 lands at 429.
    */
-  it('refuses a sats payout under dust even inside the market bounds', () => {
+  it('quotes a sub-dust payout once the returned carrier lifts output 0 clear', () => {
     // mid = 100_000 / 1000 = 100 sats; fee = ceil(100 * 50 / 10_000) = 1.
     expect(
       resolveAssetQuote({
@@ -287,12 +296,12 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         amountSide: 'from',
         market: MARKET,
         feed: FEED,
+        carrierSats: 330n,
       }),
-    ).toEqual({ ok: false, reason: 'amount_out_of_range' })
+    ).toEqual({ ok: true, fromAmount: 100_000n, toAmount: 429n })
   })
 
-  it('admits a sats payout exactly at dust', () => {
-    // mid = 332; fee = ceil(332 * 50 / 10_000) = 2; payout = 330.
+  it('returns the carrier on top of the payout, not inside it', () => {
     expect(
       resolveAssetQuote({
         pair: { from: ASSET_A, to: null },
@@ -300,8 +309,35 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         amountSide: 'from',
         market: MARKET,
         feed: FEED,
+        carrierSats: 330n,
       }),
-    ).toEqual({ ok: true, fromAmount: 332_000n, toAmount: 330n })
+    ).toEqual({ ok: true, fromAmount: 332_000n, toAmount: 660n })
+  })
+
+  it('charges the carrier out of the input on an asset payout', () => {
+    expect(
+      resolveAssetQuote({
+        pair: { from: null, to: ASSET_A },
+        amount: 430n,
+        amountSide: 'from',
+        market: MARKET,
+        feed: FEED,
+        carrierSats: 330n,
+      }),
+    ).toEqual({ ok: true, fromAmount: 430n, toAmount: 99_500n })
+  })
+
+  it('refuses a deposit the carrier alone would consume', () => {
+    expect(
+      resolveAssetQuote({
+        pair: { from: null, to: ASSET_A },
+        amount: 330n,
+        amountSide: 'from',
+        market: MARKET,
+        feed: FEED,
+        carrierSats: 330n,
+      }),
+    ).toEqual({ ok: false, reason: 'fee_consumes_swap' })
   })
 
   it('puts no dust floor on an asset payout', () => {
@@ -313,6 +349,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         amountSide: 'from',
         market: MARKET,
         feed: FEED,
+        carrierSats: 0n,
       }),
     ).toEqual({ ok: true, fromAmount: 100n, toAmount: 99_500n })
   })

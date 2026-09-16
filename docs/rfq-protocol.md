@@ -430,6 +430,14 @@ one.
 }
 ```
 
+- An Arkade asset rides on sats, and an asset-swap quote MAY carry
+  `carrier_sats` — the canonical decimal string of that dust. It is **not a fee**
+  and is already netted into the two amounts: returned inside `to_amount` when
+  the payout leg is BTC (the maker fronted it on their deposit), and charged out
+  of `from_amount` when the payout leg is an asset (the solver fronts it at
+  output 0). A client funding an asset deposit sends `from_amount` of the asset
+  plus `carrier_sats` in sats, and a client aiming at a target payout adds
+  `carrier_sats` to the input it asks to be quoted on. Absent means zero.
 - A quote resolves **both** `from_amount` and `to_amount`. The solver's fee
   lives in the spread between them; there is **no separate fee field**.
   Both are canonical decimal strings of atomic units (§ 2.1), each in the

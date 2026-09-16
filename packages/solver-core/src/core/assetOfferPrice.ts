@@ -64,8 +64,11 @@ export const offerWithinTolerance = (args: {
   direction: OfferDirection
   market: OfferPriceMarket
   feed: Price
+  /** Headroom for a maker who priced back the carrier they fronted. Zero unless the want leg is BTC. */
+  carrierSats?: bigint
 }): boolean => {
-  const { depositAmount, wantAmount, direction, market, feed } = args
+  const { depositAmount, wantAmount, direction, market, feed, carrierSats = 0n } = args
+  if (carrierSats < 0n) return false
   if (depositAmount <= 0n || wantAmount <= 0n) return false
   if (feed.mantissa <= 0n) return false
   // Both bounds are checked at BPS. A buy-base tolerance at BPS makes its
@@ -89,7 +92,7 @@ export const offerWithinTolerance = (args: {
     toleranceBps: market.toleranceBps,
     feed,
   })
-  return wantAmount <= payout
+  return wantAmount <= payout + carrierSats
 }
 
 /**

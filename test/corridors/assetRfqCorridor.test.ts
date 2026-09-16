@@ -50,6 +50,7 @@ const harness = async () => {
     markets: [MARKET],
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
+    carrierSats: 0n,
     now: () => clock,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
     deriveOffer: (terms) => ({

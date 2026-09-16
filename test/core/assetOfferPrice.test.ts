@@ -35,6 +35,7 @@ const sell = (usdt: number, over: Partial<OfferPriceMarket> = {}) =>
     direction: 'sell_base',
     market: market(over),
     feed,
+    carrierSats: 0n,
   })
 
 /** A maker depositing `usdt` whole USDT and wanting 1 BTC. */
@@ -45,6 +46,7 @@ const buy = (usdt: number, over: Partial<OfferPriceMarket> = {}) =>
     direction: 'buy_base',
     market: market(over),
     feed,
+    carrierSats: 0n,
   })
 
 describe('sell_base — the maker sells BTC, we pay USDT', () => {
@@ -110,6 +112,7 @@ describe('the fee is folded in against the maker', () => {
         direction: 'sell_base',
         market: market({ toleranceBps: 0, sellBaseFeeFlat: 330n }),
         feed,
+        carrierSats: 0n,
       })
     expect(priced(99_999_670_000n)).toBe(true)
     expect(priced(99_999_670_001n)).toBe(false)
@@ -123,6 +126,7 @@ describe('the fee is folded in against the maker', () => {
         direction: 'sell_base',
         market: market({ toleranceBps: 0, feeBps: 100, sellBaseFeeFlat: 330n }),
         feed,
+        carrierSats: 0n,
       })
     expect(priced(98_999_673_300n)).toBe(true)
     expect(priced(98_999_673_301n)).toBe(false)
@@ -136,6 +140,7 @@ describe('the fee is folded in against the maker', () => {
         direction: 'buy_base',
         market: market({ toleranceBps: 0, buyBaseFeeFlat: 1_000_000n }),
         feed,
+        carrierSats: 0n,
       })
     expect(priced(100_001_000_000n)).toBe(true)
     expect(priced(100_000_999_999n)).toBe(false)
@@ -149,6 +154,7 @@ describe('the fee is folded in against the maker', () => {
         direction: 'buy_base',
         market: market({ toleranceBps: 0, feeBps: 100, buyBaseFeeFlat: 1_000_000n }),
         feed,
+        carrierSats: 0n,
       })
     expect(priced(99_000_000n)).toBe(true)
     expect(priced(99_000_001n)).toBe(false)
@@ -167,6 +173,7 @@ describe('the fee is folded in against the maker', () => {
         amountSide: 'from',
         market: { ...priced, base: null, quote: asset, minPayout: 1n, maxPayout: 10n ** 20n },
         feed,
+        carrierSats: 0n,
       })
       expect(quote.ok).toBe(true)
       if (!quote.ok) continue
@@ -177,6 +184,7 @@ describe('the fee is folded in against the maker', () => {
           direction: trade.direction,
           market: priced,
           feed,
+          carrierSats: 0n,
         }),
       ).toBe(true)
       expect(
@@ -186,6 +194,7 @@ describe('the fee is folded in against the maker', () => {
           direction: trade.direction,
           market: priced,
           feed,
+          carrierSats: 0n,
         }),
       ).toBe(false)
     }
@@ -218,6 +227,7 @@ describe('refusals that would otherwise accept anything', () => {
         direction: 'buy_base',
         market: market({ toleranceBps }),
         feed,
+        carrierSats: 0n,
       })
     expect(wildlyUnderpriced(9_999)).toBe(false)
     expect(wildlyUnderpriced(10_000)).toBe(false)
@@ -233,6 +243,7 @@ describe('refusals that would otherwise accept anything', () => {
         direction: 'sell_base',
         market: market({ toleranceBps: 10_000 }),
         feed,
+        carrierSats: 0n,
       }),
     ).toBe(false)
   })
@@ -246,6 +257,7 @@ describe('refusals that would otherwise accept anything', () => {
         direction: 'sell_base',
         market: market(),
         feed,
+        carrierSats: 0n,
       }),
     ).toBe(false)
   })
@@ -308,6 +320,7 @@ describe('exactness', () => {
       direction: 'sell_base',
       market: market(),
       feed,
+      carrierSats: 0n,
     })
     const over = offerWithinTolerance({
       depositAmount: 100_000_000n,
@@ -315,6 +328,7 @@ describe('exactness', () => {
       direction: 'sell_base',
       market: market(),
       feed,
+      carrierSats: 0n,
     })
     expect([at, over]).toEqual([true, false])
   })
@@ -350,5 +364,31 @@ describe('offerDirectionOn', () => {
     const EURC = '22'.repeat(34)
     expect(offerDirectionOn({ base: USDT, quote: EURC }, USDT, EURC)).toBe('sell_base')
     expect(offerDirectionOn({ base: USDT, quote: EURC }, EURC, USDT)).toBe('buy_base')
+  })
+})
+
+/** This solver's own RFQ offers are this shape too, not just third-party makers. */
+describe('the carrier a BTC-wanting maker fronted', () => {
+  const deposit = 100_000_000_000n
+  const at = (wantAmount: bigint, carrierSats: bigint) =>
+    offerWithinTolerance({
+      depositAmount: deposit,
+      wantAmount,
+      direction: 'buy_base',
+      market: market(),
+      feed,
+      carrierSats,
+    })
+
+  const payout = 100_100_100n
+
+  it('is not granted when no carrier is supplied', () => {
+    expect(at(payout, 0n)).toBe(true)
+    expect(at(payout + 1n, 0n)).toBe(false)
+  })
+
+  it('grants exactly one carrier of headroom, never two', () => {
+    expect(at(payout + 330n, 330n)).toBe(true)
+    expect(at(payout + 331n, 330n)).toBe(false)
   })
 })
