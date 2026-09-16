@@ -15,6 +15,8 @@
  * finished-looking row for a swap that is still at risk.
  */
 
+import { barsChart, categoryChart, cumulativeChart, decayChart } from './charts.js'
+
 /* ---- tiny element helper ------------------------------------------------ */
 
 /** h('td.num', 'text') | h('div', {onclick}, child, child) */
@@ -272,6 +274,8 @@ const state = {
   banner: null,
   data: {},
   filters: { corridor: '', phase: '', q: '' },
+  /** The P&L view's own controls. Bucket empty means "let the server choose from the window". */
+  pnl: { window: '7d', bucket: '' },
   detail: null,
   dialog: null,
   /** The action currently in flight, or null. See `runAction`. */
@@ -282,6 +286,7 @@ const state = {
 
 const VIEWS = [
   ['overview', 'overview'],
+  ['pnl', 'p&l'],
   ['swaps', 'swaps'],
   ['offers', 'offers'],
   ['quotes', 'quotes'],
@@ -2390,6 +2395,294 @@ const MIN_SEARCH = 3
 const SEARCH_DEBOUNCE_MS = 250
 let searchTimer = null
 
+/* ---- p&l ---------------------------------------------------------------- */
+
+/**
+ * The book.
+ *
+ * EVERY PANEL IS PAIRED WITH A TABLE, and that is not belt-and-braces. A chart
+ * answers "is something wrong"; the number an operator then reconciles against
+ * a wallet has to be readable, copyable and exact. It is also the only form of
+ * these panels a screen reader can use.
+ *
+ * The gross caveat sits ABOVE the figures rather than under them. It decides
+ * what every number on the screen means — a corridor quoting 30bps into a fee
+ * market that took 40 shows a profit here and lost money in fact — and a reader
+ * who meets it after the totals has already formed the wrong impression.
+ */
+
+const signedSats = (value) =>
+  value === null || value === undefined ? '—' : `${value >= 0 ? '+' : '−'}${Math.abs(value).toLocaleString('en-US')}`
+
+const bps = (value) => (value === null || value === undefined ? '—' : `${value >= 0 ? '+' : '−'}${Math.abs(value)}bp`)
+
+/** A headline number. `tone` is only ever risk: see the palette rule in styles.css. */
+const figure = (label, value, note, tone) =>
+  h(
+    'div.figure',
+    h('b', tone ? { class: tone } : null, value),
+    h('span', label),
+    note ? h('span.faint', ` ${note}`) : null,
+  )
+
+const pnlToolbar = () =>
+  h(
+    'div.toolbar',
+    h('span.muted', 'window'),
+    ...['1h', '6h', '24h', '7d', '30d', '90d'].map((name) =>
+      h(
+        'button',
+        {
+          'aria-current': String(state.pnl.window === name),
+          onclick: () => {
+            state.pnl.window = name
+            // Cleared, not preserved: a 5-minute bucket chosen for an hour
+            // window is sixteen thousand points over ninety days. The server
+            // picks a readable default for whatever window is now in force.
+            state.pnl.bucket = ''
+            load('pnl')
+          },
+        },
+        name,
+      ),
+    ),
+    h('span.spacer'),
+    h('span.muted', 'bucket'),
+    ...['5m', '1h', '6h', '1d'].map((name) =>
+      h(
+        'button',
+        {
+          'aria-current': String(state.pnl.bucket === name),
+          onclick: () => {
+            state.pnl.bucket = state.pnl.bucket === name ? '' : name
+            load('pnl')
+          },
+        },
+        name,
+      ),
+    ),
+  )
+
+const pnlFigures = (summary) =>
+  h(
+    'div.figures',
+    figure(
+      'gross, sats',
+      signedSats(summary.grossSats),
+      `over ${summary.pricedCount} priced swap${summary.pricedCount === 1 ? '' : 's'}`,
+      summary.grossSats < 0 ? 'c-loss' : null,
+    ),
+    figure('margin', bps(summary.marginBps), `on ${sats(summary.volumeSats)} sat volume`),
+    // Only rendered when non-zero. A permanent "0 at risk" is a position the
+    // eye learns to skip, which is exactly where this number needs to be seen —
+    // the same rule the status bar's stuck count follows.
+    summary.atRiskSats > 0
+      ? figure('at risk, sats', sats(summary.atRiskSats), 'paid out, not recovered', 'c-risk')
+      : figure('at risk', 'none', 'nothing outstanding'),
+    figure('settled', String(summary.realizedCount), `${summary.failedCount} failed`),
+    figure('open', String(summary.openCount), 'still in flight'),
+    // Realized but not expressible in sats — an asset-to-asset fill. Shown only
+    // when there are any, because on a sats-only deployment it is always zero
+    // and a permanent zero teaches the reader to stop looking.
+    summary.unpricedCount > 0 ? figure('unpriced', String(summary.unpricedCount), 'cross-asset, see FX below') : null,
+  )
+
+const pnlBasis = (coverage) =>
+  h(
+    'p.basis',
+    h('b', 'These are GROSS figures. '),
+    'No corridor records what execution actually cost, so chain fees and routing fees are missing from every ' +
+      'total here rather than deducted from it. A corridor quoting 30bp into a fee market that took 40 shows a ' +
+      'profit on this screen and lost money in fact.',
+    coverage.unmeasured.length > 0
+      ? h(
+          'span',
+          h('br'),
+          h('b', 'Not measured: '),
+          coverage.unmeasured.join(', '),
+          ' — reported as unknown, not counted as zero.',
+        )
+      : null,
+    coverage.truncated.length > 0
+      ? h(
+          'span',
+          h('br'),
+          h('b', 'Truncated: '),
+          `${coverage.truncated.join(', ')} had more rows in this window than were read. These totals cover part ` +
+            'of the book. Narrow the window.',
+        )
+      : null,
+  )
+
+const corridorTable = (corridors) =>
+  h(
+    'table',
+    h(
+      'thead',
+      h(
+        'tr',
+        h('th', 'corridor'),
+        h('th.right', 'gross'),
+        h('th.right', 'margin'),
+        h('th.right', 'volume'),
+        h('th.right', 'settled'),
+        h('th.right', 'failed'),
+        h('th.right', 'at risk'),
+        h('th.right', 'median fill'),
+        h('th.right', 'p90 fill'),
+      ),
+    ),
+    h(
+      'tbody',
+      ...corridors.map((row) =>
+        h(
+          'tr',
+          h('td.mono', row.corridor, row.crossAsset ? h('span.faint', ' fx') : null),
+          h('td.right', row.pricedCount === 0 ? h('span.faint', '—') : signedSats(row.grossSats)),
+          h('td.right', bps(row.marginBps)),
+          h('td.right', sats(row.volumeSats)),
+          h('td.right', String(row.realizedCount)),
+          h('td.right', row.failedCount > 0 ? String(row.failedCount) : h('span.faint', '0')),
+          h('td.right', row.atRiskSats > 0 ? h('span.at-risk', sats(row.atRiskSats)) : h('span.faint', '—')),
+          h('td.right', duration(row.medianDurationSeconds)),
+          h('td.right', duration(row.p90DurationSeconds)),
+        ),
+      ),
+    ),
+  )
+
+/**
+ * Margin against how long the fill took.
+ *
+ * THE CHART THE FX QUESTION IS ASKED OF. A quote commits this solver to a price
+ * for its validity window while the market keeps moving, so a swap that took
+ * two hours was priced against a two-hour-old view. If the bottom band's margin
+ * is materially worse than the top's, that gap is what a drawn-out fill costs —
+ * and it is invisible in any total that does not split on time.
+ */
+const durationPanel = (bands) =>
+  h(
+    'section.panel',
+    h('h2', 'margin by time to fill'),
+    h(
+      'p.muted',
+      'A quote holds a price while the market moves. Margin falling down this table is the cost of a slow fill.',
+    ),
+    categoryChart(bands, {
+      label: (band) => band.label,
+      value: (band) => band.marginBps ?? 0,
+      note: (band) =>
+        `${band.label}: ${band.count} swap(s), ${bps(band.marginBps)} on ${band.volumeSats.toLocaleString('en-US')} sats`,
+    }),
+    h(
+      'table',
+      h(
+        'thead',
+        h(
+          'tr',
+          h('th', 'time to fill'),
+          h('th.right', 'swaps'),
+          h('th.right', 'margin'),
+          h('th.right', 'median'),
+          h('th.right', 'gross'),
+          h('th.right', 'volume'),
+        ),
+      ),
+      h(
+        'tbody',
+        ...bands.map((band) =>
+          h(
+            'tr',
+            h('td', band.label),
+            h('td.right', String(band.count)),
+            h('td.right', bps(band.marginBps)),
+            h('td.right', bps(band.medianBps)),
+            h('td.right', band.pricedCount === 0 ? h('span.faint', '—') : signedSats(band.grossSats)),
+            h('td.right', sats(band.volumeSats)),
+          ),
+        ),
+      ),
+    ),
+  )
+
+/**
+ * One panel per directional FX leg.
+ *
+ * The benchmark is the solver's OWN book over the window — the volume-weighted
+ * mean rate — and the panel says so, because that limitation changes the
+ * reading. It answers "was this fill worse than the ones around it", never "was
+ * it worse than the market". A feed-relative mark needs the feed price at quote
+ * time, which nothing records today.
+ */
+const fxPanel = (leg) => {
+  const worst = [...leg.points].sort((a, b) => (a.driftBps ?? 0) - (b.driftBps ?? 0)).slice(0, 5)
+  return h(
+    'section.panel',
+    h('h2', leg.leg),
+    h(
+      'p.muted',
+      `${leg.count} fill${leg.count === 1 ? '' : 's'} on `,
+      h('span.mono', leg.corridor),
+      '. Drift is measured against this window’s volume-weighted mean rate — this solver’s own book, not a ' +
+        'price feed. Below the line is a fill that came in worse than its peers.',
+    ),
+    decayChart(leg.points),
+    worst.length === 0
+      ? null
+      : h(
+          'table',
+          h(
+            'thead',
+            h('tr', h('th', 'worst fills'), h('th.right', 'took'), h('th.right', 'drift'), h('th.right', 'settled')),
+          ),
+          h(
+            'tbody',
+            ...worst.map((point) =>
+              h(
+                'tr',
+                h('td.mono', shortId(point.id)),
+                h('td.right', duration(point.durationSeconds)),
+                h('td.right', (point.driftBps ?? 0) < 0 ? h('span.at-risk', bps(point.driftBps)) : bps(point.driftBps)),
+                h('td.right', ago(point.at)),
+              ),
+            ),
+          ),
+        ),
+  )
+}
+
+const pnlView = () => {
+  const data = state.data.pnl
+  if (!data) return h('section.panel', h('p.muted', 'loading…'))
+
+  return h(
+    'div',
+    pnlToolbar(),
+    pnlBasis(data.coverage),
+    pnlFigures(data.summary),
+    h(
+      'section.panel',
+      h('h2', 'cumulative gross'),
+      cumulativeChart(data.series),
+      h('h2', 'per bucket'),
+      h('p.muted', 'Profit up, sats at risk down. A loss is not a smaller profit.'),
+      barsChart(data.series),
+    ),
+    h(
+      'section.panel',
+      h('h2', 'by corridor'),
+      categoryChart(data.corridors, {
+        label: (row) => row.corridor,
+        value: (row) => row.grossSats,
+        note: (row) => `${row.corridor}: ${signedSats(row.grossSats)} sats over ${row.realizedCount} settled swap(s)`,
+      }),
+      corridorTable(data.corridors),
+    ),
+    durationPanel(data.durationBands),
+    ...data.fx.map(fxPanel),
+  )
+}
+
 /* ---- loading and rendering ---------------------------------------------- */
 
 const ENDPOINTS = {
@@ -2402,6 +2695,11 @@ const ENDPOINTS = {
     // typing. Held back until it can succeed.
     if (state.filters.q.trim().length >= MIN_SEARCH) params.set('q', state.filters.q.trim())
     return `/api/swaps?${params}`
+  },
+  pnl: () => {
+    const params = new URLSearchParams({ window: state.pnl.window })
+    if (state.pnl.bucket) params.set('bucket', state.pnl.bucket)
+    return `/api/pnl?${params}`
   },
   offers: () => '/api/offers',
   refusals: () => '/api/rfq-refusals',
@@ -2445,6 +2743,7 @@ const go = (view) => {
 
 const BODIES = {
   overview: overviewView,
+  pnl: pnlView,
   swaps: swapsView,
   offers: offersView,
   refusals: refusalsView,

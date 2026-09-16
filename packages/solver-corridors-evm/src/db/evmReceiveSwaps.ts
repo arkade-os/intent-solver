@@ -33,6 +33,7 @@ import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-db/driver.
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { EVM_RECEIVE_NON_TERMINAL, type EvmReceiveSwapState } from '@arkade-os/solver-core/core/evmSwapState.js'
+import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
 export interface EvmReceiveSwapRow {
   id: string
@@ -391,6 +392,16 @@ export class EvmReceiveSwapStore {
       to: String(raw.to_state),
       detail: text(raw.detail),
     }))
+  }
+
+  /** Rows whose last movement falls in a window. @see BaseSwapStore.ledgerRows */
+  async ledgerRows(window: LedgerWindow): Promise<{ rows: EvmReceiveSwapRow[]; truncated: boolean }> {
+    const limit = clampLedgerLimit(window.limit)
+    const raw = await this.driver.all<Raw>(
+      `SELECT * FROM receive_evm_swap WHERE updated_at >= ? AND updated_at < ? ORDER BY updated_at DESC LIMIT ?`,
+      [window.since, window.until, limit + 1],
+    )
+    return { rows: raw.slice(0, limit).map(toRow), truncated: raw.length > limit }
   }
 
   async page(options: PageOptions = {}): Promise<{ rows: EvmReceiveSwapRow[]; nextCursor: string | null }> {

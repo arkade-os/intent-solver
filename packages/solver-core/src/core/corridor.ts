@@ -11,6 +11,7 @@
  */
 import type { CorridorDescriptor } from './corridorDescriptor.js'
 import type { PageOptions } from './page.js'
+import type { CorridorLedger, LedgerWindow } from '../analytics/economics.js'
 
 /** What a corridor hands back from an RFQ. Mirrors `ingress/rfq.ts`'s outcome. */
 export interface CorridorRfqOutcome {
@@ -161,6 +162,22 @@ export interface CorridorReader {
   lockupFor?(id: string): Promise<{ lockup: unknown; preimage: string | null } | null>
 
   committedSats(): Promise<number>
+
+  /**
+   * This corridor's rows in a window, projected into the book's vocabulary.
+   *
+   * OPTIONAL, and absence means the P&L screen reports this corridor as
+   * UNMEASURED rather than as zero — the same rule `liveLockups` states, and
+   * here it protects the same thing. A corridor silently contributing nothing
+   * to a profit total is indistinguishable from one that broke even, and an
+   * operator reading a headline figure has no way to tell which they are
+   * looking at.
+   *
+   * Only the corridor can implement it: which of its columns the solver
+   * received and which it paid out is the same knowledge `project` needs, and
+   * getting the two the wrong way round reports a loss as a profit.
+   */
+  economics?(window: LedgerWindow): Promise<CorridorLedger>
 
   page(options: PageOptions): Promise<{ swaps: CorridorSwapView[]; nextCursor: string | null }>
 

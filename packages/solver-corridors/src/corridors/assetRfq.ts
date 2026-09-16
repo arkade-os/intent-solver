@@ -54,6 +54,7 @@ import {
   type AssetRfqSwapStore,
 } from '../db/assetRfqSwaps.js'
 import type { AssetRfqMarket, AssetRfqSwapService } from '../asset/assetRfqOrchestrator.js'
+import { assetRfqEconomics } from './economics.js'
 
 /** Which way round a market is being served. */
 export type AssetRfqDirection = 'sell_base' | 'buy_base'
@@ -151,6 +152,17 @@ export const assetRfqReader = (descriptor: CorridorDescriptor, store: AssetRfqSw
       .map((row) => ({ id: row.id, pkScript: row.offerPkScript })),
   // Narrowed like every other read here: one store backs every market.
   committedSats: () => store.committedSats(descriptor.pair),
+  economics: async (window) => {
+    const { rows, truncated } = await store.ledgerRows(window)
+    // Same narrowing, and it matters more here than anywhere else: without it
+    // every asset corridor would report every OTHER market's fills as its own,
+    // and the P&L total would multiply by the number of markets served.
+    return {
+      corridor: descriptor.pair,
+      records: rows.filter((row) => row.pair === descriptor.pair).map((row) => assetRfqEconomics(row, descriptor)),
+      truncated,
+    }
+  },
   page: async (options) => {
     const { rows, nextCursor } = await store.page(options)
     return { swaps: rows.filter((row) => row.pair === descriptor.pair).map(projectAssetRfq), nextCursor }

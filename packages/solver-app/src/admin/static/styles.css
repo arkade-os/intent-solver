@@ -624,3 +624,129 @@ tr.note td {
   font: inherit;
   padding: 0.3rem 0.5rem;
 }
+
+/*
+ * Charts (static/charts.js).
+ *
+ * The `c-` prefix is not decoration: `.bar` already exists above as an HTML
+ * meter, with a CSS `height`, and SVG2 makes `height` a CSS-settable geometry
+ * property on a <rect>. An unprefixed `.bar` in a chart would therefore be
+ * silently resized by a rule written for something else entirely.
+ *
+ * COLOUR IS RESERVED FOR RISK here as everywhere: the profit line, its fill and
+ * every ordinary mark are greyscale, and the only two saturated things are a
+ * loss (--failed) and sats at risk (--exposed). No token is introduced and no
+ * new foreground/background pair is composed, so test/admin/contrast.test.ts's
+ * declared list is unchanged — the marks below are strokes and fills, never
+ * text on a coloured ground.
+ */
+
+.c-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  /* The SVG scales but its text must not: `preserveAspectRatio: none` stretches
+     the viewBox to the panel width, and without this the axis labels stretch
+     with it into something unreadable at a wide window. */
+  font-family: var(--mono);
+}
+
+.c-line {
+  fill: none;
+  stroke: var(--text);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.c-area {
+  fill: var(--text);
+  opacity: 0.09;
+  stroke: none;
+}
+
+.c-area.c-loss {
+  fill: var(--failed);
+  opacity: 0.18;
+}
+
+.c-grid {
+  stroke: var(--line);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.c-grid.c-zero {
+  stroke: var(--line-strong);
+}
+
+.c-axis,
+.c-cat {
+  fill: var(--text-dim);
+  font-size: 10px;
+}
+
+.c-cat {
+  dominant-baseline: middle;
+}
+
+.c-bar {
+  fill: var(--text-faint);
+}
+
+.c-bar.c-loss {
+  fill: var(--failed);
+}
+
+.c-bar.c-risk {
+  fill: var(--exposed);
+}
+
+.c-dot {
+  fill: var(--text-dim);
+}
+
+.c-dot.c-loss {
+  fill: var(--failed);
+}
+
+/* The caveat under every total. Not a footnote — it decides what the number means. */
+.basis {
+  border-left: 2px solid var(--exposed);
+  padding: 0.3rem 0 0.3rem 0.75rem;
+  margin: 0 0 0.75rem;
+  color: var(--text-dim);
+  font-family: var(--sans);
+}
+
+/* The headline figures. Tabular so the digits line up between refreshes. */
+.figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.figure {
+  min-width: 8rem;
+}
+
+.figure b {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.figure b.c-loss {
+  color: var(--failed);
+}
+
+.figure b.c-risk {
+  color: var(--exposed);
+}
+
+.figure span {
+  color: var(--text-dim);
+  font-size: 0.85em;
+}

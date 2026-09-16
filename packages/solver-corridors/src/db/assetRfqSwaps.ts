@@ -38,6 +38,7 @@
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
 export type AssetRfqSwapState = 'quoted' | 'funded' | 'filling' | 'filled' | 'refused' | 'stuck'
 
@@ -337,6 +338,23 @@ export class AssetRfqSwapStore {
       pair === undefined ? [] : [pair],
     )
     return raws.reduce((total, raw) => total + Number(String(raw.to_amount)), 0)
+  }
+
+  /**
+   * Rows whose last movement falls in a window. @see BaseSwapStore.ledgerRows
+   *
+   * Duplicated rather than inherited because this store is not a
+   * `BaseSwapStore` — its amounts are bigints in TEXT columns and its lifecycle
+   * is its own — and the shared base is the wrong place to grow a second
+   * hierarchy for one method.
+   */
+  async ledgerRows(window: LedgerWindow): Promise<{ rows: AssetRfqSwapRow[]; truncated: boolean }> {
+    const limit = clampLedgerLimit(window.limit)
+    const raw = await this.driver.all<Raw>(
+      `SELECT * FROM asset_rfq_swap WHERE updated_at >= ? AND updated_at < ? ORDER BY updated_at DESC LIMIT ?`,
+      [window.since, window.until, limit + 1],
+    )
+    return { rows: raw.slice(0, limit).map(toRow), truncated: raw.length > limit }
   }
 
   async page(options: PageOptions = {}): Promise<{ rows: AssetRfqSwapRow[]; nextCursor: string | null }> {
