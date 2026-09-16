@@ -215,16 +215,32 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
    * cross-asset by construction — the pair parser above refuses same-asset
    * pairs outright — so exact-out is never servable on it.
    */
-  it('refuses exact-out, as every cross-asset corridor in this repo does', () => {
-    const outcome = resolveAssetQuote({
+  it('resolves exact-out to the least input that reaches the payout', () => {
+    const wanted = 100_000_000_000n
+    const exactOut = resolveAssetQuote({
       pair: { from: null, to: ASSET_A },
-      amount: 100_000_000n,
+      amount: wanted,
       amountSide: 'to',
       market: MARKET,
       feed: FEED,
       carrierSats: 0n,
     })
-    expect(outcome).toEqual({ ok: false, reason: 'exact_out_unsupported' })
+    expect(exactOut).toMatchObject({ ok: true, toAmount: wanted })
+    const { fromAmount } = exactOut as { fromAmount: bigint }
+
+    const payoutAt = (amount: bigint): bigint => {
+      const outcome = resolveAssetQuote({
+        pair: { from: null, to: ASSET_A },
+        amount,
+        amountSide: 'from',
+        market: MARKET,
+        feed: FEED,
+        carrierSats: 0n,
+      })
+      return outcome.ok ? outcome.toAmount : 0n
+    }
+    expect(payoutAt(fromAmount)).toBeGreaterThanOrEqual(wanted)
+    expect(payoutAt(fromAmount - 1n)).toBeLessThan(wanted)
   })
 
   it('refuses a pair the market does not name', () => {

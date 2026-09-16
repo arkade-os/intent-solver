@@ -323,9 +323,9 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       expect(tooBig.kind).toBe('refused')
       expect(tooBig.payload).toMatchObject({ reason: 'amount_out_of_range' })
 
-      const exactOut = await corridor.quote({ ...requestFor(pair, 50n), amount_side: 'to' })
-      expect(exactOut.kind).toBe('refused')
-      expect(exactOut.payload).toMatchObject({ reason: 'unsupported_payload' })
+      const exactOut = await corridor.quote({ ...requestFor(pair, 60n), amount_side: 'to' })
+      expect(exactOut.kind, JSON.stringify(exactOut)).toBe('quote')
+      expect(exactOut.payload).toMatchObject({ to_amount: '60' })
 
       // § 4.5: one rfq_id names one negotiation, whatever became of it.
       // Above the carrier, or it is refused `fee_consumes_swap` before the id binds.

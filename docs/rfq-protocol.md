@@ -438,6 +438,12 @@ one.
   output 0). A client funding an asset deposit sends `from_amount` of the asset
   plus `carrier_sats` in sats, and a client aiming at a target payout adds
   `carrier_sats` to the input it asks to be quoted on. Absent means zero.
+- The Arkade asset corridor serves `amount_side: "to"` as well as `"from"`.
+  Exact-out resolves `from_amount` to the LEAST input whose exact-in payout
+  reaches the requested `to_amount`, so the two sides share one rounding
+  convention rather than inverting the rate a second way, and the rounding
+  still falls to the solver. Any carrier is included in the `from_amount`
+  returned. The EVM corridors continue to refuse exact-out (§ 7.1.5).
 - A quote resolves **both** `from_amount` and `to_amount`. The solver's fee
   lives in the spread between them; there is **no separate fee field**.
   Both are canonical decimal strings of atomic units (§ 2.1), each in the
@@ -1037,7 +1043,7 @@ The client is paid over Lightning and the sats land on Arkade
 
   - the sealed ciphertext above, fixed at **93 bytes** decoded. The solver hands
     it to covclaimd over the Reveal API, which requires the solver and the client
-    to have been pointed at the *same* covclaimd — an agreement nothing on this
+    to have been pointed at the _same_ covclaimd — an agreement nothing on this
     wire expresses, and whose absence funds a lockup that is never claimed.
   - covclaimd's serialised `ClaimPacket` body (`pkg/preimage/packet.go`): TLVs
     `0x01` ciphertext, `0x02` arkade_script, `0x03` covclaimd_pub_key, each a
@@ -1064,6 +1070,7 @@ The client is paid over Lightning and the sats land on Arkade
   unchanged — this is additive in both directions. Senders SHOULD prefer the
   packet shape; the `0x03` TLV is REQUIRED when sending it, because covclaimd's
   extension filter selects on that TLV.
+
 - **quote.profile**: `payment_hash` (echo), the hold `invoice` on `H` (its
   expiry SHOULD equal `valid_until`), `lockup_address` (compare-only — the
   solver's derivation of the funding contract) and `solver_refund_pk_script`
@@ -1230,7 +1237,7 @@ A client needs it for **two distinct purposes**, and neither is optional:
 1. **It is the sixth field of the swap hash.** `ERC20Swap` stores no per-swap
    struct — it keeps `mapping(bytes32 => bool)` keyed by
    `keccak256(abi.encode(preimageHash, amount, tokenAddress, claimAddress,
-   refundAddress, timelock))`. With five of the six a client cannot compute the
+refundAddress, timelock))`. With five of the six a client cannot compute the
    key, so it cannot read `swaps(key)` to prove the solver ever locked, and has
    no way to check the lock before parting with its preimage.
 2. **`claim` takes it as an explicit argument.** In
@@ -1634,15 +1641,15 @@ The other three corridors (`packages/solver-corridors/src/db/receiveSwaps.ts`, `
 
 The atomic class over RFQ (`packages/solver-corridors/src/db/assetRfqSwaps.ts`):
 
-| RFQ state  | asset-RFQ state | note                                                                                                                                                  |
-| ---------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `quoted`   | `quoted`        | terms issued; awaiting the client's deposit until `valid_until`                                                                                       |
-| `funded`   | `funded`        | a deposit matching the quoted terms sits at the offer's script. Funding is still how a client accepts here, so the word is exact despite § 8's HTLC gloss |
-| `filling`  | `filling`       | `fulfill` submitted — the only state in which solver capital is committed                                                                              |
-| `settled`  | `filled`        | NOT `filled`: `fulfill` pays the client and takes the deposit in ONE transaction, so there is no interval of "fill landed, solver still collecting"    |
-| `expired`  | `refused`       | folded into `refused` and distinguished by the reason, as the send leg does                                                                           |
-| `refused`  | `refused`       |                                                                                                                                                       |
-| `stuck`    | `stuck`         |                                                                                                                                                       |
+| RFQ state | asset-RFQ state | note                                                                                                                                                      |
+| --------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `quoted`  | `quoted`        | terms issued; awaiting the client's deposit until `valid_until`                                                                                           |
+| `funded`  | `funded`        | a deposit matching the quoted terms sits at the offer's script. Funding is still how a client accepts here, so the word is exact despite § 8's HTLC gloss |
+| `filling` | `filling`       | `fulfill` submitted — the only state in which solver capital is committed                                                                                 |
+| `settled` | `filled`        | NOT `filled`: `fulfill` pays the client and takes the deposit in ONE transaction, so there is no interval of "fill landed, solver still collecting"       |
+| `expired` | `refused`       | folded into `refused` and distinguished by the reason, as the send leg does                                                                               |
+| `refused` | `refused`       |                                                                                                                                                           |
+| `stuck`   | `stuck`         |                                                                                                                                                           |
 
 There is deliberately **no `refunded`** state on this corridor. The refund is
 `cancel`, a 2-of-2 of the funder and the Arkade Service, which the solver cannot
@@ -1754,24 +1761,24 @@ older clients to ignore every added field. `field` is an OPTIONAL dotted request
 path. `actual`, `expected` and `limit` are OPTIONAL integers whose meaning is
 fixed by the code; `unit`, when present, is `blocks`, `characters` or `sats`.
 
-| `error_code`                    | client action                                                                 |
-| ------------------------------- | ----------------------------------------------------------------------------- |
-| `amount_side_unsupported`       | use the amount side required by this profile                                  |
-| `exact_out_unsupported`         | request exact-in terms for this pair                                          |
-| `invalid_amount`                | correct the amount's encoding or value                                        |
-| `invalid_payout_address`        | provide a payout address valid for the requested corridor                     |
-| `invalid_refund_address`        | provide a refund address valid for the requested corridor                     |
-| `invoice_amount_mismatch`       | make `amount` equal the BOLT11 amount, or omit the restatement                 |
-| `invoice_cltv_too_large`        | use another solver or an invoice whose CLTV is within `limit`                 |
-| `invoice_malformed`             | replace the BOLT11                                                             |
-| `invoice_missing_amount`        | provide an amount-bearing BOLT11                                               |
-| `invoice_missing_network`       | provide a BOLT11 that names a network                                          |
-| `invoice_missing_payment_hash`  | provide a BOLT11 containing a payment hash                                     |
-| `invoice_missing_timestamp`     | provide a BOLT11 containing a timestamp                                        |
-| `invoice_mixed_case`            | use one Bech32 case consistently                                               |
-| `invoice_sub_satoshi_amount`    | use an invoice whose amount is a whole number of sats                         |
-| `invoice_too_long`              | use an invoice no longer than `limit` characters                              |
-| `invoice_wrong_network`         | use an invoice for the pair's network                                          |
+| `error_code`                   | client action                                                                                         |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `amount_side_unsupported`      | use the amount side required by this profile                                                          |
+| `exact_out_unsupported`        | request exact-in terms for this pair (the EVM corridors; the Arkade asset corridor serves both sides) |
+| `invalid_amount`               | correct the amount's encoding or value                                                                |
+| `invalid_payout_address`       | provide a payout address valid for the requested corridor                                             |
+| `invalid_refund_address`       | provide a refund address valid for the requested corridor                                             |
+| `invoice_amount_mismatch`      | make `amount` equal the BOLT11 amount, or omit the restatement                                        |
+| `invoice_cltv_too_large`       | use another solver or an invoice whose CLTV is within `limit`                                         |
+| `invoice_malformed`            | replace the BOLT11                                                                                    |
+| `invoice_missing_amount`       | provide an amount-bearing BOLT11                                                                      |
+| `invoice_missing_network`      | provide a BOLT11 that names a network                                                                 |
+| `invoice_missing_payment_hash` | provide a BOLT11 containing a payment hash                                                            |
+| `invoice_missing_timestamp`    | provide a BOLT11 containing a timestamp                                                               |
+| `invoice_mixed_case`           | use one Bech32 case consistently                                                                      |
+| `invoice_sub_satoshi_amount`   | use an invoice whose amount is a whole number of sats                                                 |
+| `invoice_too_long`             | use an invoice no longer than `limit` characters                                                      |
+| `invoice_wrong_network`        | use an invoice for the pair's network                                                                 |
 
 Solvers MUST NOT return free-form diagnostic text, raw request values, backend
 errors, inventory levels or pricing configuration in a refusal. Those belong in

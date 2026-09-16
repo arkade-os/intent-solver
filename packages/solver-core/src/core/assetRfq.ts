@@ -29,7 +29,7 @@
  * other's arithmetic.
  */
 import type { Price } from './priceFeed.js'
-import { assetExactInPayout } from './assetExactInPrice.js'
+import { assetExactInPayout, assetExactOutInput } from './assetExactInPrice.js'
 
 /**
  * One leg's asset: the canonical 68-hex Arkade asset id, or `null` for BTC.
@@ -106,8 +106,7 @@ export interface AssetQuoteMarket {
   maxPayout: bigint
 }
 
-export type AssetQuoteRefusal =
-  'unsupported_pair' | 'exact_out_unsupported' | 'price_unavailable' | 'fee_consumes_swap' | 'amount_out_of_range'
+export type AssetQuoteRefusal = 'unsupported_pair' | 'price_unavailable' | 'fee_consumes_swap' | 'amount_out_of_range'
 
 export type AssetQuoteOutcome =
   { ok: true; fromAmount: bigint; toAmount: bigint } | { ok: false; reason: AssetQuoteRefusal }
@@ -121,12 +120,8 @@ export type AssetQuoteOutcome =
  * float64 rounding is real and it decides money. Here it would decide it in a
  * direction nobody chose.
  *
- * EXACT-IN ONLY. § 7.1.5 refuses exact-out on the EVM corridors because "the
- * two legs are different assets, so exact-out would mean inverting a fetched,
- * rounded, directional rate", and this corridor is cross-asset by construction
- * — `parseAssetPair` refuses a same-asset pair outright. So the same refusal
- * applies for the same reason, rather than a second rounding convention being
- * invented for one corridor.
+ * BOTH SIDES: `assetExactOutInput` searches the forward function, so one rounding
+ * convention decides each direction (§ 7.1.5's objection to exact-out).
  */
 export const resolveAssetQuote = (args: {
   pair: AssetPair
@@ -138,8 +133,6 @@ export const resolveAssetQuote = (args: {
   carrierSats: bigint
 }): AssetQuoteOutcome => {
   const { pair, amount, amountSide, market, feed, carrierSats } = args
-
-  if (amountSide !== 'from') return { ok: false, reason: 'exact_out_unsupported' }
 
   // Which way round the client is trading across this market's two legs.
   const givesBase = pair.from === market.base && pair.to === market.quote
@@ -161,7 +154,28 @@ export const resolveAssetQuote = (args: {
   const flatFee = (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
   if (flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
   // An asset payout rides a carrier we supply, so those sats are not input we keep.
-  const netAmount = amount - flatFee - (pair.to === null ? 0n : carrierSats)
+  const suppliedCarrier = pair.to === null ? 0n : carrierSats
+
+  if (amountSide === 'to') {
+    // On a BTC payout the named amount already holds the carrier coming back.
+    const wanted = pair.to === null ? amount - carrierSats : amount
+    if (wanted <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
+    if (wanted < market.minPayout || wanted > market.maxPayout) {
+      return { ok: false, reason: 'amount_out_of_range' }
+    }
+    const netInput = assetExactOutInput({
+      payout: wanted,
+      givesBase,
+      baseDecimals: market.baseDecimals,
+      quoteDecimals: market.quoteDecimals,
+      feeBps: market.feeBps,
+      feed,
+    })
+    if (netInput === null) return { ok: false, reason: 'price_unavailable' }
+    return { ok: true, fromAmount: netInput + flatFee + suppliedCarrier, toAmount: amount }
+  }
+
+  const netAmount = amount - flatFee - suppliedCarrier
   if (netAmount <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
 
   const payout = assetExactInPayout({

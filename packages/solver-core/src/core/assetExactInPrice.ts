@@ -24,3 +24,34 @@ export const assetExactInPayout = (args: {
   const fee = (mid * BigInt(feeBps) + BPS - 1n) / BPS
   return mid - fee
 }
+
+/**
+ * The least `netInput` whose `assetExactInPayout` reaches `payout`, or null when none
+ * does. Searched, not inverted, so exact-out adds no second rounding convention
+ * (§ 7.1.5); sound because the forward function is monotonic in `netInput`.
+ */
+export const assetExactOutInput = (args: {
+  payout: bigint
+  givesBase: boolean
+  baseDecimals: number
+  quoteDecimals: number
+  feeBps: number
+  toleranceBps?: number
+  feed: Price
+}): bigint | null => {
+  const { payout, ...rate } = args
+  if (payout <= 0n) return null
+  const reaches = (netInput: bigint): boolean => assetExactInPayout({ netInput, ...rate }) >= payout
+
+  let hi = 1n
+  for (let i = 0; i < 256 && !reaches(hi); i++) hi *= 2n
+  if (!reaches(hi)) return null
+
+  let lo = 1n
+  while (lo < hi) {
+    const mid = (lo + hi) / 2n
+    if (reaches(mid)) hi = mid
+    else lo = mid + 1n
+  }
+  return lo
+}

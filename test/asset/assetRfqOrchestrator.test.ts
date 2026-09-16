@@ -176,12 +176,11 @@ describe('quote', () => {
     expect(await service.quote(request(over))).toMatchObject({ accepted: false, reason: 'unsupported_pair' })
   })
 
-  it('refuses exact-out, which would invert a rounded directional rate', async () => {
+  it('quotes exact-out, binding the payout the client named', async () => {
     const { service } = await harness()
-    expect(await service.quote(request({ amountSide: 'to' }))).toMatchObject({
-      accepted: false,
-      reason: 'exact_out_unsupported',
-    })
+    const outcome = await service.quote(request({ amount: 1_000_000n, amountSide: 'to' }))
+    expect(outcome).toMatchObject({ accepted: true })
+    expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(1_000_000n)
   })
 
   /** An unreadable feed must never become a free fill. */
@@ -248,7 +247,7 @@ describe('quote', () => {
 
   it('does not record a row when it refuses', async () => {
     const { service, store } = await harness()
-    await service.quote(request({ amountSide: 'to' }))
+    await service.quote(request({ pair: 'arkade:BTC->arkade:BTC' }))
     expect(await store.listNonTerminal()).toHaveLength(0)
   })
 })
