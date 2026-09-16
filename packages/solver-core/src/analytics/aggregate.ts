@@ -21,6 +21,31 @@ export const BUCKETS = { '5m': 300, '1h': 3_600, '6h': 21_600, '1d': 86_400 } as
 export type BucketName = keyof typeof BUCKETS
 
 /**
+ * The most buckets {@link series} will build, and the reason it is a HARD
+ * REFUSAL rather than a clamp.
+ *
+ * `series` allocates one object per bucket across the whole window, whether or
+ * not a swap landed in it — that is what makes a quiet period draw as a gap.
+ * The cost is linear in `(until - since) / bucketSeconds`, and BOTH of those
+ * come from a request: `since=0&bucket=5m` spans from the epoch and asks for
+ * roughly six million objects. On a port with no authentication in front of it
+ * that is a memory exhaustion, not a slow chart.
+ *
+ * Clamping the count silently would answer a different question from the one
+ * asked — a chart labelled "90 days" showing six hours — so the caller is told
+ * to widen the bucket instead. The bound is generous against any real reading:
+ * 7 days at 5 minutes is 2,016, 90 days at an hour is 2,160, and no chart this
+ * console draws is more than a thousand pixels wide.
+ */
+export const MAX_SERIES_BUCKETS = 5_000
+
+/** How many buckets a window would produce. Exported so a caller can refuse BEFORE allocating. */
+export const bucketCount = (since: number, until: number, bucketSeconds: number): number =>
+  until <= since || bucketSeconds <= 0
+    ? 0
+    : Math.ceil((until - Math.floor(since / bucketSeconds) * bucketSeconds) / bucketSeconds)
+
+/**
  * How long a swap took, banded — the axis the FX question is asked on.
  *
  * Bands rather than a raw scatter because the question is comparative: does
@@ -148,6 +173,16 @@ export interface LedgerSummary {
   atRiskSats: number
   /** Rows in the window this layer could not price, and therefore left out of every total. */
   unpricedCount: number
+  /**
+   * Rows that ARE a loss whose size cannot be said in sats — a token payout on
+   * a corridor with no sats notional.
+   *
+   * The at-risk side's answer to `unpricedCount`. `atRiskSats` sums with a
+   * `?? 0`, so without this counter an unmeasurable loss and no loss at all
+   * render as the same zero, on the one figure an operator most needs to be
+   * able to trust.
+   */
+  atRiskUnknownCount: number
   /** Rows still open at the end of the window — money committed, outcome unknown. */
   openCount: number
 }
@@ -178,8 +213,28 @@ const marginBpsOf = (grossSats: number, volumeSats: number): number | null =>
 /** A record counts toward a total only when it both delivered and has a sats spread. */
 const priced = (record: SwapEconomics): boolean => record.realized && record.grossSats !== null
 
-const inboundSats = (record: SwapEconomics): number =>
-  record.inbound.assetId === null && record.inbound.amount !== null ? Number(record.inbound.amount) : 0
+/**
+ * The sats size of a trade — THE DENOMINATOR every margin is a margin of.
+ *
+ * Takes whichever leg is actually sats, not the inbound one. Reading the
+ * inbound leg alone was a unit error with a visible consequence: on the ERC20
+ * RECEIVE direction the intake is a token and the payout is sats, so its spread
+ * entered the numerator while its notional contributed nothing to the
+ * denominator. One 500-sat spread on a 50,000-sat trade then moved a blended
+ * `marginBps` by fifty basis points while adding no volume at all — and the
+ * mirror direction, whose intake IS sats, behaved correctly, so the error was
+ * asymmetric and looked like a real difference between the two legs.
+ *
+ * Intake and payout differ by exactly the spread, which is immaterial as a
+ * denominator and is why either leg will do as "the size of the trade".
+ * Zero only when NEITHER leg is sats — a genuine asset-to-asset fill, which has
+ * no `grossSats` either and so never reaches a total.
+ */
+const notionalSats = (record: SwapEconomics): number => {
+  if (record.inbound.assetId === null && record.inbound.amount !== null) return Number(record.inbound.amount)
+  if (record.outbound.assetId === null && record.outbound.amount !== null) return Number(record.outbound.amount)
+  return 0
+}
 
 export const summarise = (records: readonly SwapEconomics[], since: number, until: number): LedgerSummary => {
   let grossSats = 0
@@ -189,16 +244,18 @@ export const summarise = (records: readonly SwapEconomics[], since: number, unti
   let failedCount = 0
   let pricedCount = 0
   let openCount = 0
+  let atRiskUnknownCount = 0
 
   for (const record of records) {
     if (record.realized) realizedCount += 1
     if (record.phase === 'failed') failedCount += 1
     if (record.phase === 'open' || record.phase === 'exposed') openCount += 1
     atRiskSats += record.atRiskSats ?? 0
+    if (record.atRiskUnknown) atRiskUnknownCount += 1
     if (!priced(record)) continue
     pricedCount += 1
     grossSats += record.grossSats ?? 0
-    volumeSats += inboundSats(record)
+    volumeSats += notionalSats(record)
   }
 
   return {
@@ -216,6 +273,7 @@ export const summarise = (records: readonly SwapEconomics[], since: number, unti
     // headline total can be read as covering part of the book rather than all
     // of it.
     unpricedCount: realizedCount - pricedCount,
+    atRiskUnknownCount,
     openCount,
   }
 }
@@ -239,6 +297,14 @@ export const series = (
   const { since, until, bucketSeconds } = options
   if (!Number.isFinite(bucketSeconds) || bucketSeconds <= 0) throw new Error('bucketSeconds must be positive')
   if (until <= since) return []
+  // The backstop, not the gate: the admin route refuses this with a 400 and a
+  // sentence naming the fix. Here so that a caller reaching this function
+  // directly — a future CLI, an embedder — cannot exhaust memory by forgetting
+  // to check. @see MAX_SERIES_BUCKETS
+  const wanted = bucketCount(since, until, bucketSeconds)
+  if (wanted > MAX_SERIES_BUCKETS) {
+    throw new Error(`series would build ${wanted} buckets, over the ${MAX_SERIES_BUCKETS} cap; widen bucketSeconds`)
+  }
 
   const start = Math.floor(since / bucketSeconds) * bucketSeconds
   const points = new Map<number, SeriesPoint>()
@@ -257,6 +323,13 @@ export const series = (
   }
 
   for (const record of records) {
+    // The window, enforced HERE and not only by the caller. The first bucket
+    // starts at `floor(since / bucketSeconds)`, which can precede `since` — so
+    // a record settled in the minutes before the window opened lands in a
+    // bucket that exists and is counted. The admin route never shows it,
+    // because its stores filter on `updated_at` first; a direct caller of this
+    // exported function has no such protection.
+    if (record.settledAt < since || record.settledAt >= until) continue
     const bucket = points.get(Math.floor(record.settledAt / bucketSeconds) * bucketSeconds)
     if (!bucket) continue
     bucket.count += 1
@@ -266,7 +339,7 @@ export const series = (
     if (!priced(record)) continue
     bucket.pricedCount += 1
     bucket.grossSats += record.grossSats ?? 0
-    bucket.volumeSats += inboundSats(record)
+    bucket.volumeSats += notionalSats(record)
   }
 
   let running = 0
@@ -290,7 +363,7 @@ export const byCorridor = (records: readonly SwapEconomics[]): CorridorBreakdown
     .map(([corridor, group]) => {
       const pricedRows = group.filter(priced)
       const grossSats = pricedRows.reduce((total, record) => total + (record.grossSats ?? 0), 0)
-      const volumeSats = pricedRows.reduce((total, record) => total + inboundSats(record), 0)
+      const volumeSats = pricedRows.reduce((total, record) => total + notionalSats(record), 0)
       const durations = sortedNumbers(group.filter((r) => r.realized).map((r) => r.durationSeconds))
       return {
         corridor,
@@ -329,7 +402,7 @@ export const byDuration = (records: readonly SwapEconomics[]): DurationBand[] =>
     const group = realized.filter((record) => bandOf(record.durationSeconds) === index)
     const pricedRows = group.filter(priced)
     const grossSats = pricedRows.reduce((total, record) => total + (record.grossSats ?? 0), 0)
-    const volumeSats = pricedRows.reduce((total, record) => total + inboundSats(record), 0)
+    const volumeSats = pricedRows.reduce((total, record) => total + notionalSats(record), 0)
     return {
       label: band.label,
       untilSeconds: band.untilSeconds,

@@ -102,7 +102,107 @@ describe('summarise', () => {
   })
 })
 
+/**
+ * A cross-asset corridor that books its spread in sats — the ERC20 legs.
+ *
+ * `takes` says which leg the SATS are on. On the receive direction the intake
+ * is a token and the payout is sats, which is the case that broke the
+ * denominator: the spread entered the numerator while the notional contributed
+ * nothing, so one small fill moved a blended margin by tens of basis points.
+ */
+const erc20 = (over: { id: string; at: number; sats: number; spread: number; takes: 'sats' | 'token' }) =>
+  economicsOf({
+    id: over.id,
+    corridor: `arkade:BTC->ethereum:usdt`,
+    state: 'claimed',
+    phase: 'done',
+    quotedAt: over.at - 30,
+    settledAt: over.at,
+    inbound: over.takes === 'sats' ? sats(over.sats) : token('50000000'),
+    outbound: over.takes === 'sats' ? token('50000000') : sats(over.sats - over.spread),
+    quotedSpreadSats: over.spread,
+    exposureSats: over.sats - over.spread,
+  })
+
+describe('volume is the sats size of the trade, whichever leg the sats are on', () => {
+  it('counts an ERC20 RECEIVE fill in the denominator as well as the numerator', () => {
+    const summary = summarise(
+      [erc20({ id: 'r', at: T0, sats: 50_000, spread: 500, takes: 'token' })],
+      T0 - HOUR,
+      T0 + HOUR,
+    )
+    expect(summary.grossSats).toBe(500)
+    // The sats leg is the PAYOUT here. Zero volume would make marginBps null
+    // while the 500 still moved every blended total it appeared in.
+    expect(summary.volumeSats).toBe(49_500)
+    expect(summary.marginBps).toBe(101)
+  })
+
+  it('does not let a token-intake fill distort a blended margin', () => {
+    const blended = summarise(
+      [
+        won({ id: 'a', at: T0, give: 100_000, spread: 1_000 }),
+        erc20({ id: 'r', at: T0, sats: 50_000, spread: 500, takes: 'token' }),
+      ],
+      T0 - HOUR,
+      T0 + HOUR,
+    )
+    // 1,500 over 149,500. Reading only the inbound leg gave 1,500 over 100,000
+    // — 150bp for a book whose real blended margin is 100.
+    expect(blended.grossSats).toBe(1_500)
+    expect(blended.volumeSats).toBe(149_500)
+    expect(blended.marginBps).toBe(100)
+  })
+
+  it('still reads the intake on the direction whose intake IS sats', () => {
+    const summary = summarise(
+      [erc20({ id: 's', at: T0, sats: 50_000, spread: 500, takes: 'sats' })],
+      T0 - HOUR,
+      T0 + HOUR,
+    )
+    expect(summary.volumeSats).toBe(50_000)
+  })
+})
+
+describe('a loss that cannot be priced in sats', () => {
+  it('is counted rather than folded into the total as zero', () => {
+    const lostToken = economicsOf({
+      id: 'stuck-asset',
+      corridor: 'arkade:BTC->arkade:usdt',
+      state: 'stuck',
+      phase: 'failed',
+      quotedAt: T0 - 60,
+      settledAt: T0,
+      inbound: sats(100_000),
+      outbound: token('50000000'),
+      lost: true,
+    })
+    const summary = summarise([lostToken], T0 - HOUR, T0 + HOUR)
+    expect(summary.atRiskSats).toBe(0)
+    // Without this counter, "nothing is outstanding" and "something is
+    // outstanding and nobody can price it" are the same zero.
+    expect(summary.atRiskUnknownCount).toBe(1)
+  })
+
+  it('is zero when every loss in the window could be priced', () => {
+    expect(summarise([lost({ id: 'x', at: T0, payout: 50_151 })], T0 - HOUR, T0 + HOUR).atRiskUnknownCount).toBe(0)
+  })
+})
+
 describe('series', () => {
+  it('ignores a record that settled outside the window, even when its bucket exists', () => {
+    // The first bucket starts at `floor(since / bucketSeconds)`, which can
+    // precede `since` — so a record settled just before the window opened lands
+    // in a bucket that exists and was silently counted.
+    const before = won({ id: 'early', at: T0 - 30, give: 100_300, spread: 300 })
+    const points = series([before], { since: T0 - 10, until: T0 + HOUR, bucketSeconds: HOUR })
+    expect(points.reduce((total, point) => total + point.count, 0)).toBe(0)
+  })
+
+  it('refuses a window that would allocate more buckets than the cap', () => {
+    expect(() => series([], { since: 0, until: 1_800_000_000, bucketSeconds: 300 })).toThrow(/cap/)
+  })
+
   it('emits EMPTY buckets so a quiet period draws as a gap rather than a trend', () => {
     const points = series([won({ id: 'a', at: T0, give: 100_300, spread: 300 })], {
       since: T0,

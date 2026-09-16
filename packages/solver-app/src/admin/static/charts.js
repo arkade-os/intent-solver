@@ -87,6 +87,25 @@ const clockLabel = (unixSeconds) => {
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
+/**
+ * Document-unique ids for the clip paths, from a counter rather than
+ * `Math.random()`.
+ *
+ * Two reasons the random version was wrong, and neither is the obvious one.
+ * `toString(36)` does not pad, so the slice can be shorter than six characters
+ * and the space is smaller than it looks — but more importantly a collision
+ * does not fail loudly: `url(#id)` resolves to the first match in document
+ * order, so one chart's loss fill would be clipped at another chart's zero line
+ * and profit would render in the loss colour. A counter cannot collide within a
+ * document, and it makes the output deterministic, which `charts.test.ts`
+ * otherwise cannot snapshot.
+ */
+let nextId = 0
+const uniqueId = (prefix) => `${prefix}-${(nextId += 1)}`
+
+/** Drop anything that would poison a shared scale. @see cumulativeChart */
+const finite = (value) => typeof value === 'number' && Number.isFinite(value)
+
 const frame = (width, height, label) =>
   s('svg.c-chart', {
     viewBox: `0 0 ${width} ${height}`,
@@ -129,8 +148,14 @@ const gridlines = (values, y, width, format) =>
  * and came back says so even at a glance. A single fill would render the two
  * halves identically.
  */
-export const cumulativeChart = (points, { width = 720, height = 190, value = (p) => p.cumulativeGrossSats } = {}) => {
+export const cumulativeChart = (all, { width = 720, height = 190, value = (p) => p.cumulativeGrossSats } = {}) => {
   const svg = frame(width, height, 'Cumulative gross profit over the window')
+  // One unusable number must not blank the whole panel. Every coordinate here
+  // feeds a SHARED domain and a SHARED path string, so a single non-finite
+  // value makes `Math.min`/`Math.max` NaN and every mark on the chart vanishes
+  // — which reads as "nothing traded", the one thing this must never say by
+  // accident. Dropping the bad point loses one mark instead of all of them.
+  const points = all.filter((point) => finite(point?.at) && finite(value(point)))
   if (points.length === 0) return svg
 
   const values = points.map(value)
@@ -147,7 +172,7 @@ export const cumulativeChart = (points, { width = 720, height = 190, value = (p)
   // Clipped to either side of zero, so one path can serve both halves. Two
   // separate paths would have to be split at the exact crossing point, which
   // is arithmetic this does not need to get right to be correct.
-  const id = `zero-${Math.random().toString(36).slice(2, 8)}`
+  const id = uniqueId('zero')
   svg.appendChild(
     s(
       'defs',
@@ -198,7 +223,15 @@ export const barsChart = (points, { width = 720, height = 150 } = {}) => {
   const max = Math.max(0, ...values)
   const y = scale(min, max, height - PAD.bottom, PAD.top)
   const span = (width - PAD.left - PAD.right) / points.length
-  const bar = Math.max(1, Math.min(18, span - 2))
+  // NEVER WIDER THAN ITS OWN SLOT, and that means NO absolute floor. `span - 2`
+  // leaves a readable gap at ordinary bucket counts, but 7 days at a 5-minute
+  // bucket is 2,016 points and a slot 0.32px wide — at which any fixed minimum
+  // makes each bar several times its slot and they overlap into one solid block
+  // that reads as a single enormous value. Below a few pixels the gap is given
+  // up, and below one pixel the bar is genuinely sub-pixel: the browser
+  // antialiases it to a faint line, which is what 2,016 buckets in 644px
+  // honestly looks like.
+  const bar = span <= 3 ? span * 0.8 : Math.min(18, span - 2)
 
   svg.appendChild(gridlines(ticks(min, max), y, width, compact))
   points.forEach((point, index) => {
@@ -240,9 +273,13 @@ export const barsChart = (points, { width = 720, height = 150 } = {}) => {
  * Horizontal because the labels are corridor pairs: `arkade:BTC->lightning:BTC`
  * does not fit under a vertical bar at any width this console has.
  */
-export const categoryChart = (rows, { width = 720, rowHeight = 22, label, value, note } = {}) => {
+export const categoryChart = (rows, { width = 720, rowHeight = 22, label, value, note, title } = {}) => {
   const height = Math.max(1, rows.length) * rowHeight + 10
-  const svg = frame(width, height, 'Gross profit by category')
+  // The caller names it, because this chart does not know what it is plotting.
+  // A hardcoded "gross profit" was a LIE on the duration panel, which plots
+  // basis points of margin — and a screen reader had no other source for the
+  // quantity, since the heading that disambiguates it sits outside the SVG.
+  const svg = frame(width, height, title ?? 'Gross profit by category')
   if (rows.length === 0) return svg
 
   const amounts = rows.map(value)
@@ -295,8 +332,19 @@ export const categoryChart = (rows, { width = 720, rowHeight = 22, label, value,
  * the shape worth looking for is those points drifting rightward — a book
  * whose margin erodes with time-to-fill.
  */
-export const decayChart = (points, { width = 720, height = 210 } = {}) => {
-  const svg = frame(width, height, 'Rate drift against time to fill')
+export const decayChart = (all, { width = 720, height = 210, title } = {}) => {
+  // Named by the caller, so N leg panels are distinguishable in a screen
+  // reader's list rather than N repeats of one sentence.
+  const svg = frame(width, height, title ?? 'Rate drift against time to fill')
+  // `durationSeconds` feeds a shared `Math.max` for the x-domain, so one
+  // non-finite value made EVERY dot `cx="NaN"` and the panel rendered empty.
+  //
+  // A NULL `driftBps` is dropped too, and that is a correctness point rather
+  // than a robustness one: it means the benchmark could not be computed for
+  // this leg at all, and the old `?? 0` drew such a point ON the zero line and
+  // coloured it favourable — rendering "we cannot tell" as "exactly at peer
+  // mean", which is the strongest possible claim about a number nobody has.
+  const points = all.filter((point) => finite(point?.durationSeconds) && finite(point?.driftBps))
   if (points.length === 0) return svg
 
   const logged = (seconds) => Math.log10(1 + Math.max(0, seconds))
@@ -331,7 +379,7 @@ export const decayChart = (points, { width = 720, height = 210 } = {}) => {
   }
 
   for (const point of points) {
-    const drift = point.driftBps ?? 0
+    const drift = point.driftBps
     svg.appendChild(
       titled(
         s('circle.c-dot', {

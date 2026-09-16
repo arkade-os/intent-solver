@@ -463,12 +463,27 @@ export class EvmSendSwapStore {
     }))
   }
 
-  /** Rows whose last movement falls in a window. @see BaseSwapStore.ledgerRows */
-  async ledgerRows(window: LedgerWindow): Promise<{ rows: EvmSendSwapRow[]; truncated: boolean }> {
+  /**
+   * Rows whose last movement falls in a window. @see BaseSwapStore.ledgerRows
+   *
+   * `tokenAddress` NARROWS IN SQL, and must, for the reason `committedSats`
+   * takes one: this table serves every token, so filtering AFTER the `LIMIT`
+   * would let a busy token's rows push a quiet one's out of the result — and
+   * the quiet corridor then reports no profit for a window in which it settled
+   * fills, silently, on a screen that looks healthy.
+   */
+  async ledgerRows(
+    window: LedgerWindow,
+    tokenAddress?: string,
+  ): Promise<{ rows: EvmSendSwapRow[]; truncated: boolean }> {
     const limit = clampLedgerLimit(window.limit)
     const raw = await this.driver.all<Raw>(
-      `SELECT * FROM send_evm_swap WHERE updated_at >= ? AND updated_at < ? ORDER BY updated_at DESC LIMIT ?`,
-      [window.since, window.until, limit + 1],
+      `SELECT * FROM send_evm_swap WHERE updated_at >= ? AND updated_at < ?` +
+        (tokenAddress === undefined ? '' : ' AND token_address = ?') +
+        ` ORDER BY updated_at DESC LIMIT ?`,
+      tokenAddress === undefined
+        ? [window.since, window.until, limit + 1]
+        : [window.since, window.until, tokenAddress, limit + 1],
     )
     return { rows: raw.slice(0, limit).map(toRow), truncated: raw.length > limit }
   }

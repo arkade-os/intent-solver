@@ -15,12 +15,13 @@
  * WHAT THIS SCREEN DOES NOT KNOW, stated here because it is the first thing a
  * reader should learn and the last thing they should have to discover:
  *
- *  - **Every figure is GROSS.** No corridor records what execution actually
- *    cost — `ports/lightning.ts`'s `PaymentResult` carries no routing fee, and
- *    no swap table has a fee column — so chain fees and routing fees are
- *    missing from every total on this screen, not netted out of it. A corridor
- *    quoting 30bps against a fee market that took 40 shows a profit here and
- *    lost money in fact.
+ *  - **Every figure is GROSS.** `ports/lightning.ts`'s `PaymentResult` carries
+ *    no routing fee, so what a payment actually cost is written down nowhere —
+ *    chain and routing costs are missing from every total here, not netted out
+ *    of it. A corridor quoting 30bps against a fee market that took 40 shows a
+ *    profit on this screen and lost money in fact. A quote-time BUDGET does
+ *    exist on some rows and rides along as `quotedCostSats`; it is a ceiling,
+ *    never a cost, and nothing here deducts it.
  *  - **A corridor with no `economics` is UNMEASURED, never zero.** It is named
  *    in `unmeasured` so the console can say so rather than silently averaging
  *    it in at nothing.
@@ -38,6 +39,8 @@ import {
 } from '@arkade-os/solver-core/analytics/economics.js'
 import {
   BUCKETS,
+  MAX_SERIES_BUCKETS,
+  bucketCount,
   byCorridor,
   byDuration,
   byFxLeg,
@@ -59,6 +62,17 @@ const WINDOWS: Record<string, number> = {
 const DEFAULT_WINDOW = '7d'
 
 /**
+ * The most records `/api/pnl/swaps` will serialise into one body.
+ *
+ * A separate bound from the per-corridor row cap, because they bound different
+ * things: that one limits each SCAN, this one limits their CONCATENATION, and
+ * on a deployment with one corridor per market per direction the second grows
+ * with the market list however modest the first is. The true match count rides
+ * alongside, so a capped list is never mistaken for the whole set.
+ */
+const MAX_RECORDS = 2_000
+
+/**
  * A bucket width narrow enough to show shape and wide enough to stay readable.
  *
  * Chosen from the window rather than fixed, because one setting cannot serve
@@ -71,10 +85,21 @@ const defaultBucketFor = (windowSeconds: number): BucketName =>
 
 class BadRequest extends Error {}
 
+/**
+ * A non-negative integer, parsed from the STRING rather than coerced.
+ *
+ * `Number()` alone is too generous in three ways that all reach this route:
+ * `Number('')` is 0, so `?since=` silently means the epoch; `Number('0x10')` is
+ * 16; and `Number('1e18')` is an integer as far as `Number.isInteger` is
+ * concerned, which is how a window nobody could mean gets through validation.
+ * A digits-only test rejects all three, and rejects them as the caller
+ * mistakes they are rather than answering a different question.
+ */
 const positiveInt = (raw: string | undefined, label: string): number | undefined => {
   if (raw === undefined) return undefined
+  if (!/^\d+$/.test(raw)) throw new BadRequest(`${label} must be a non-negative integer, got ${JSON.stringify(raw)}`)
   const value = Number(raw)
-  if (!Number.isInteger(value) || value < 0) throw new BadRequest(`${label} must be a non-negative integer, got ${raw}`)
+  if (!Number.isSafeInteger(value)) throw new BadRequest(`${label} is too large to be a unix timestamp: ${raw}`)
   return value
 }
 
@@ -119,6 +144,17 @@ interface Scan {
   measured: string[]
   /** Corridors with no `economics` capability — reported, never counted as zero. */
   unmeasured: string[]
+  /**
+   * Corridors that HAVE the capability and threw.
+   *
+   * Split from {@link Scan.unmeasured} because the two mean different things to
+   * whoever is reading: a corridor that never claimed to answer is a gap in
+   * coverage, and one that claimed to and failed is a FAULT — a broken store, a
+   * corridor that cannot attribute its own rows — and someone should go and
+   * look. Folding them together made a live incident indistinguishable from a
+   * corridor nobody has got round to instrumenting.
+   */
+  failed: { corridor: string; reason: string }[]
   /** Corridors whose window overflowed the row cap. */
   truncated: string[]
 }
@@ -140,19 +176,23 @@ const scan = async (deps: AdminDeps, window: LedgerWindow): Promise<Scan> => {
   const readers = [...deps.services.readers]
   const results = await Promise.all(
     readers.map(async (reader) => {
-      if (!reader.economics) return { pair: reader.descriptor.pair, ledger: null }
+      const pair = reader.descriptor.pair
+      if (!reader.economics) return { pair, ledger: null, reason: null }
       try {
-        return { pair: reader.descriptor.pair, ledger: await reader.economics(window) }
-      } catch {
-        return { pair: reader.descriptor.pair, ledger: null }
+        return { pair, ledger: await reader.economics(window), reason: null }
+      } catch (error) {
+        // The message only — never the error object, which is the rule
+        // `cli.ts` states for the same reason config objects carry mnemonics.
+        return { pair, ledger: null, reason: error instanceof Error ? error.message : String(error) }
       }
     }),
   )
 
-  const scanned: Scan = { records: [], measured: [], unmeasured: [], truncated: [] }
-  for (const { pair, ledger } of results) {
+  const scanned: Scan = { records: [], measured: [], unmeasured: [], failed: [], truncated: [] }
+  for (const { pair, ledger, reason } of results) {
     if (!ledger) {
-      scanned.unmeasured.push(pair)
+      if (reason === null) scanned.unmeasured.push(pair)
+      else scanned.failed.push({ corridor: pair, reason })
       continue
     }
     scanned.measured.push(pair)
@@ -171,6 +211,19 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
     try {
       window = windowFrom(c.req.query(), now())
       bucket = bucketFrom(c.req.query().bucket, window.until - window.since)
+      // BEFORE the scan, and before `series` allocates anything. `since` and
+      // `bucket` are both caller-supplied and their quotient is the allocation:
+      // `since=0&bucket=5m` spans from the epoch and asks for roughly six
+      // million bucket objects. Refused with the fix named rather than clamped,
+      // because a chart labelled "90 days" that silently shows six hours
+      // answers a question nobody asked. @see MAX_SERIES_BUCKETS
+      const wanted = bucketCount(window.since, window.until, bucket.seconds)
+      if (wanted > MAX_SERIES_BUCKETS) {
+        throw new BadRequest(
+          `that window at bucket=${bucket.name} is ${wanted} buckets, over the ${MAX_SERIES_BUCKETS} limit — ` +
+            'use a wider bucket or a shorter window',
+        )
+      }
     } catch (error) {
       if (!(error instanceof BadRequest)) throw error
       return c.json({ error: 'bad_request', message: error.message }, 400)
@@ -187,12 +240,15 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
       coverage: {
         measured: scanned.measured,
         unmeasured: scanned.unmeasured,
+        failed: scanned.failed,
         truncated: scanned.truncated,
         // Restated in the payload, not only in this file's comments: anything
         // reading the admin API programmatically deserves the caveat that
         // decides whether these numbers mean what they appear to.
         basis: 'gross',
-        note: 'Execution cost (chain and routing fees) is not recorded by any corridor and is NOT deducted here.',
+        note:
+          'Realized execution cost (chain and routing fees) is recorded by no corridor and is NOT deducted here. ' +
+          'Where a row carries a quote-time fee BUDGET it rides along as quotedCostSats — a ceiling, never a cost.',
       },
       buckets: Object.keys(BUCKETS),
       windows: Object.keys(WINDOWS),
@@ -220,14 +276,29 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
     }
 
     const scanned = await scan(deps, window)
-    const records = scanned.records
+    const matched = scanned.records
       .filter((record) => query.corridor === undefined || record.corridor === query.corridor)
       .sort((a, b) => b.settledAt - a.settledAt || a.id.localeCompare(b.id))
+    // The per-corridor cap bounds each SCAN; it does not bound this BODY, which
+    // is their concatenation. At the ceiling — `MAX_LEDGER_LIMIT` rows across
+    // one corridor per market per direction — that is six figures of records in
+    // a single response, tens of megabytes, on a route an operator reaches from
+    // a laptop over a tunnel. Capped here, with the true match count reported
+    // beside it so a truncated list can never read as the whole set.
+    const records = matched.slice(0, MAX_RECORDS)
 
     return c.json({
       window: { since: window.since, until: window.until, label: window.label },
       records,
-      coverage: { measured: scanned.measured, unmeasured: scanned.unmeasured, truncated: scanned.truncated },
+      matchedCount: matched.length,
+      returnedCount: records.length,
+      recordLimit: MAX_RECORDS,
+      coverage: {
+        measured: scanned.measured,
+        unmeasured: scanned.unmeasured,
+        failed: scanned.failed,
+        truncated: scanned.truncated,
+      },
     })
   })
 }

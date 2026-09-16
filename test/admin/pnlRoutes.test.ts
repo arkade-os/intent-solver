@@ -17,6 +17,18 @@ import { createCorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js
 
 const NOW = 1_800_000_000
 
+/**
+ * The repo's standard test invoice, which pays 2,100 sats.
+ *
+ * A REAL, decodable one, because on this corridor the invoice is the outlay:
+ * `amount_sats` is the lockup and the only record of what the solver paid is
+ * the invoice string itself. A placeholder would make the outlay unreadable and
+ * quietly turn every assertion below into a test of the null path.
+ */
+const INVOICE =
+  'lnbc21u1pnk8larsp526g88ejh9ac0es9j6juxwenzdzvs6hcrphna5pp3jefpukmtk3hqpp5m206npk0fr6k45u8f90capqw48k3pzymlqhk0j98kyx4mz383pkqdz9235x2gr3w45kx6eqvfex7amwypnx77pqdf6k6urnyphhvetjyp6xsefqd3sh57fqv3hkwxqyp2xqcqz95rzjqv9ruzr6quwpsuwmyshlvenk0xm7djrtt8ugt2ja6cx3dkqtccdgvzzxeyqq28qqqqqqqqqqqqqqq9gq2y9qyysgqvu5k5w9q0xe62envhds058r9h8v5uak09hn3uzlw39sqkcuwh34j44gc53j6x6sg0u6yf6l0durxqqekytupxpf66zc7rc9cpav72ssqpcgv3p'
+const INVOICE_SATS = 2_100
+
 interface PnlBody {
   window: { since: number; until: number; label: string; bucketSeconds: number }
   summary: {
@@ -34,14 +46,22 @@ interface PnlBody {
   corridors: { corridor: string; grossSats: number; marginBps: number | null; atRiskSats: number }[]
   durationBands: { label: string; count: number; marginBps: number | null }[]
   fx: { leg: string; points: { id: string; driftBps: number | null }[] }[]
-  coverage: { measured: string[]; unmeasured: string[]; truncated: string[]; basis: string }
+  coverage: {
+    measured: string[]
+    unmeasured: string[]
+    failed: { corridor: string; reason: string }[]
+    truncated: string[]
+    basis: string
+  }
 }
 
 const sendQuote = (over: Partial<QuoteRecord> = {}): QuoteRecord => ({
   id: 'send-1',
-  invoice: 'lnbc5u1p...',
+  invoice: INVOICE,
   paymentHash: 'a'.repeat(64),
-  amountSats: 100_000,
+  // THE LOCKUP, not the invoice — `send/orchestrator.ts` stores
+  // `giveSatsFor(invoice, fee)` here, so this is the invoice plus the spread.
+  amountSats: INVOICE_SATS + 300,
   invoiceExpiresAt: NOW + 3_600,
   refundLocktime: NOW + 7_200,
   senderPubkey: '01'.repeat(32),
@@ -99,18 +119,28 @@ const get = async (app: Awaited<ReturnType<typeof build>>['app'], path = '/api/p
   return { status: response.status, body: (await response.json()) as PnlBody }
 }
 
-/** Quote → funded at `lockupValue` → paid → claimed: the delivered send swap. */
+/**
+ * Quote → funded → paid → claimed: the delivered send swap, funded the way the
+ * orchestrator actually allows.
+ *
+ * `lockup_value` IS `amountSats`, and that is not a simplification — the
+ * funding gate transitions only on `locked === row.amountSats` and refuses an
+ * overfunded lockup outright, because an Arkade vtxo is exact-value. A fixture
+ * that set them to different numbers would be asserting against a row the
+ * orchestrator can never produce, which is exactly how the first version of
+ * this file tested its author's assumption instead of the store.
+ */
 const deliveredSend = async (
   store: SwapStore,
   at: (seconds: number) => void,
-  over: { id: string; amountSats: number; lockupValue: number; quotedAt: number; settledAt: number },
+  over: { id: string; lockupSats: number; quotedAt: number; settledAt: number },
 ) => {
   at(over.quotedAt)
-  await store.insertQuote(sendQuote({ id: over.id, amountSats: over.amountSats, paymentHash: over.id.padEnd(64, '0') }))
+  await store.insertQuote(sendQuote({ id: over.id, amountSats: over.lockupSats, paymentHash: over.id.padEnd(64, '0') }))
   await store.transition(over.id, 'quoted', 'funded', {
     lockup_txid: 'cc'.repeat(32),
     lockup_vout: 0,
-    lockup_value: over.lockupValue,
+    lockup_value: over.lockupSats,
   })
   await store.transition(over.id, 'funded', 'paying')
   await store.transition(over.id, 'paying', 'paid', { payment_id: 'p1' })
@@ -124,25 +154,27 @@ describe('GET /api/pnl: the Lightning send leg reads its own columns the right w
     const { app, sendStore, at } = await build()
     await deliveredSend(sendStore, at, {
       id: 'send-1',
-      amountSats: 100_000,
-      lockupValue: 100_300,
+      lockupSats: INVOICE_SATS + 300,
       quotedAt: NOW - 600,
       settledAt: NOW - 300,
     })
 
     const { body } = await get(app)
+    // 2,400 in, 2,100 out. Reading the two COLUMNS instead would give
+    // `lockup_value - amount_sats` = 0 on every realized row of this corridor,
+    // at any fee — a permanent hard zero counted as priced, and so
+    // indistinguishable on screen from a corridor that genuinely broke even.
     expect(body.summary.grossSats).toBe(300)
-    expect(body.summary.volumeSats).toBe(100_300)
-    expect(body.summary.marginBps).toBe(29)
+    expect(body.summary.volumeSats).toBe(INVOICE_SATS + 300)
+    expect(body.summary.marginBps).toBe(1_250)
   })
 
   it('reports a LOSS as negative rather than as an absolute number', async () => {
     const { app, sendStore, at } = await build()
     await deliveredSend(sendStore, at, {
       id: 'send-1',
-      amountSats: 100_000,
-      // Underfunded: the solver paid the invoice out of a smaller lockup.
-      lockupValue: 99_000,
+      // A lockup SMALLER than the invoice: the solver pays out more than it took.
+      lockupSats: INVOICE_SATS - 1_000,
       quotedAt: NOW - 600,
       settledAt: NOW - 300,
     })
@@ -164,17 +196,23 @@ describe('GET /api/pnl: what has not settled, and what is gone', () => {
     expect(body.summary.openCount).toBe(1)
   })
 
+  /**
+   * The INVOICE, which is the money that actually left, and not the lockup.
+   * The two differ by the spread, so reporting the lockup overstates the loss
+   * by exactly the fee on every stuck row of this corridor — small per swap and
+   * wrong in the same direction every time.
+   */
   it('reports a stuck swap’s payout as at risk, and never as profit', async () => {
     const { app, sendStore, at } = await build()
     at(NOW - 600)
-    await sendStore.insertQuote(sendQuote({ amountSats: 50_151 }))
-    await sendStore.transition('send-1', 'quoted', 'funded', { lockup_value: 50_300 })
+    await sendStore.insertQuote(sendQuote({ amountSats: INVOICE_SATS + 300 }))
+    await sendStore.transition('send-1', 'quoted', 'funded', { lockup_value: INVOICE_SATS + 300 })
     await sendStore.transition('send-1', 'funded', 'paying')
     at(NOW - 300)
     await sendStore.fail('send-1', 'paying', 'the backend went dark mid-payment')
 
     const { body } = await get(app)
-    expect(body.summary.atRiskSats).toBe(50_151)
+    expect(body.summary.atRiskSats).toBe(INVOICE_SATS)
     expect(body.summary.grossSats).toBe(0)
     expect(body.summary.failedCount).toBe(1)
   })
@@ -185,8 +223,7 @@ describe('GET /api/pnl: across corridors', () => {
     const { app, sendStore, receiveStore, at } = await build()
     await deliveredSend(sendStore, at, {
       id: 'send-1',
-      amountSats: 100_000,
-      lockupValue: 100_300,
+      lockupSats: INVOICE_SATS + 300,
       quotedAt: NOW - 600,
       settledAt: NOW - 300,
     })
@@ -248,7 +285,13 @@ describe('GET /api/pnl: a corridor that cannot answer', () => {
     expect(body.coverage.measured).toEqual([])
   })
 
-  it('reports a corridor whose scan THREW as unmeasured, not as complete', async () => {
+  /**
+   * A corridor that HAS the capability and threw is a FAULT, not a gap in
+   * coverage, and the two must not share a list: folded together, a broken
+   * store reads as a corridor nobody has got round to instrumenting, and
+   * nobody goes to look.
+   */
+  it('reports a corridor whose scan THREW as failed — separately from unmeasured, and never as complete', async () => {
     const readers = createCorridorReaderSet([
       {
         ...mute,
@@ -260,7 +303,28 @@ describe('GET /api/pnl: a corridor that cannot answer', () => {
     const app = buildAdminApp({ services: { readers } as never, startedAt: 1, mode: 'serve', now: () => NOW })
     const { status, body } = await get(app)
     expect(status).toBe(200)
-    expect(body.coverage.unmeasured).toEqual(['arkade:BTC->mute:BTC'])
+    expect(body.coverage.failed).toEqual([{ corridor: 'arkade:BTC->mute:BTC', reason: 'store is gone' }])
+    expect(body.coverage.unmeasured).toEqual([])
+    expect(body.coverage.measured).toEqual([])
+  })
+})
+
+describe('GET /api/pnl: parameters that are not numbers', () => {
+  /**
+   * `Number('')` is 0, so an empty `since=` used to mean "from the epoch"
+   * silently — which is also the entry point for a window large enough to
+   * exhaust memory. Parsed from the string rather than coerced.
+   */
+  it('refuses an empty numeric parameter rather than reading it as zero', async () => {
+    const { app } = await build()
+    expect((await app.fetch(new Request('http://admin/api/pnl?since='))).status).toBe(400)
+    expect((await app.fetch(new Request('http://admin/api/pnl?until='))).status).toBe(400)
+  })
+
+  it('refuses hex and exponential notation, which Number() would have accepted', async () => {
+    const { app } = await build()
+    expect((await app.fetch(new Request('http://admin/api/pnl?since=0x10'))).status).toBe(400)
+    expect((await app.fetch(new Request('http://admin/api/pnl?until=1e18'))).status).toBe(400)
   })
 })
 
@@ -269,8 +333,7 @@ describe('GET /api/pnl: the window', () => {
     const { app, sendStore, at } = await build()
     await deliveredSend(sendStore, at, {
       id: 'send-1',
-      amountSats: 100_000,
-      lockupValue: 100_300,
+      lockupSats: INVOICE_SATS + 300,
       quotedAt: NOW - 10 * 86_400,
       settledAt: NOW - 9 * 86_400,
     })
@@ -303,6 +366,32 @@ describe('GET /api/pnl: the window', () => {
     const { app } = await build()
     expect((await app.fetch(new Request('http://admin/api/pnl?bucket=1y'))).status).toBe(400)
   })
+
+  /**
+   * `series` allocates one object per bucket across the WHOLE window, empty
+   * ones included — that is what makes a quiet period draw as a gap. Both ends
+   * of the quotient are caller-supplied, so `since=0&bucket=5m` spans from the
+   * epoch and asks for roughly six million objects on a port that has no
+   * authentication in front of it.
+   */
+  it('refuses a window that would allocate millions of buckets, and names the fix', async () => {
+    const { app } = await build()
+    const response = await app.fetch(new Request(`http://admin/api/pnl?since=0&until=${NOW}&bucket=5m`))
+    expect(response.status).toBe(400)
+    expect(((await response.json()) as { message: string }).message).toMatch(/use a wider bucket or a shorter window/)
+  })
+
+  it('refuses an absurd until for the same reason', async () => {
+    const { app } = await build()
+    expect((await app.fetch(new Request('http://admin/api/pnl?since=0&until=999999999999&bucket=1d'))).status).toBe(400)
+  })
+
+  it('still serves the widest window a real reading uses', async () => {
+    const { app } = await build()
+    // 90 days at an hour is 2,160 buckets — under the cap, and the coarsest
+    // question an operator actually asks of this screen.
+    expect((await get(app, '/api/pnl?window=90d&bucket=1h')).body.series.length).toBeGreaterThan(2_000)
+  })
 })
 
 describe('GET /api/pnl/swaps', () => {
@@ -310,15 +399,13 @@ describe('GET /api/pnl/swaps', () => {
     const { app, sendStore, at } = await build()
     await deliveredSend(sendStore, at, {
       id: 'send-1',
-      amountSats: 100_000,
-      lockupValue: 100_300,
+      lockupSats: INVOICE_SATS + 300,
       quotedAt: NOW - 900,
       settledAt: NOW - 800,
     })
     await deliveredSend(sendStore, at, {
       id: 'send-2',
-      amountSats: 100_000,
-      lockupValue: 100_400,
+      lockupSats: INVOICE_SATS + 400,
       quotedAt: NOW - 600,
       settledAt: NOW - 300,
     })

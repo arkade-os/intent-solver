@@ -176,6 +176,71 @@ describe('categoryChart', () => {
   })
 })
 
+describe('a bad value never blanks a whole chart', () => {
+  /**
+   * Every coordinate in these charts feeds a SHARED domain and, in the
+   * cumulative chart, a shared path string — so one non-finite number made
+   * `Math.min`/`Math.max` NaN and every mark on the panel vanished. An empty
+   * panel reads as "nothing traded", which is the one thing it must never say
+   * by accident.
+   */
+  it('drops the unusable point and still draws the rest', () => {
+    const svg = charts.cumulativeChart([
+      point({ at: 1_000, count: 1, cumulativeGrossSats: 300 }),
+      { at: Number.NaN, count: 1, grossSats: 0, cumulativeGrossSats: Number.NaN, atRiskSats: 0 },
+      point({ at: 3_000, count: 1, cumulativeGrossSats: 500 }),
+    ]) as unknown as Stub
+    expect(withClass(svg, 'c-dot')).toHaveLength(2)
+    expect(coordinates(svg).every(Number.isFinite)).toBe(true)
+    expect(paths(svg).every((d) => !d.includes('NaN'))).toBe(true)
+  })
+
+  it('does the same on the decay chart, where duration feeds the x-domain', () => {
+    const svg = charts.decayChart([
+      { id: 'ok', at: 1_000, durationSeconds: 30, rate: 500, driftBps: 5 },
+      { id: 'bad', at: 2_000, durationSeconds: Number.NaN, rate: 500, driftBps: 5 },
+    ]) as unknown as Stub
+    expect(withClass(svg, 'c-dot')).toHaveLength(1)
+    expect(coordinates(svg).every(Number.isFinite)).toBe(true)
+  })
+})
+
+describe('chart labelling', () => {
+  it('lets the caller name the quantity, because the chart does not know it', () => {
+    const svg = charts.categoryChart([{ label: 'a', v: 1 }], {
+      title: 'Realized margin in basis points',
+      label: (row: { label: string }) => row.label,
+      value: (row: { v: number }) => row.v,
+    }) as unknown as Stub
+    expect(svg.attributes['aria-label']).toBe('Realized margin in basis points')
+  })
+
+  it('gives two charts on one page distinct clip ids, so neither clips the other', () => {
+    const clips = (node: Stub) =>
+      flatten(node)
+        .map((child) => child.attributes.id)
+        .filter((id): id is string => id !== undefined)
+    const first = clips(charts.cumulativeChart([point({ at: 1_000, cumulativeGrossSats: 1 })]) as unknown as Stub)
+    const second = clips(charts.cumulativeChart([point({ at: 1_000, cumulativeGrossSats: 1 })]) as unknown as Stub)
+    expect(first).toHaveLength(2)
+    expect(first.filter((id) => second.includes(id))).toEqual([])
+  })
+})
+
+describe('barsChart bar width', () => {
+  /**
+   * 7 days at a 5-minute bucket is 2,016 points and a slot 0.32px wide. A flat
+   * one-pixel floor made every bar three times its own slot, so they
+   * overlapped into a solid block that read as one enormous value.
+   */
+  it('never draws a bar wider than its own slot, however many buckets there are', () => {
+    const many = Array.from({ length: 2_016 }, (_, i) => point({ at: 1_000 + i * 300, grossSats: 100 }))
+    const svg = charts.barsChart(many) as unknown as Stub
+    const slot = (720 - 62 - 14) / many.length
+    for (const bar of withClass(svg, 'c-bar')) expect(Number(bar.attributes.width)).toBeLessThanOrEqual(slot)
+  })
+})
+
 describe('decayChart', () => {
   const fills = [
     { id: 'fast', at: 1_000, durationSeconds: 5, rate: 500, driftBps: 12 },

@@ -37,6 +37,12 @@ export interface FxPointLike {
 export interface ChartSize {
   width?: number
   height?: number
+  /**
+   * The chart's `aria-label`. Supplied by the caller because a chart does not
+   * know what it is plotting — `categoryChart` serves both sats of gross and
+   * basis points of margin, and a hardcoded label announces one of them wrongly.
+   */
+  title?: string
 }
 
 export declare const cumulativeChart: (
@@ -51,6 +57,7 @@ export declare const categoryChart: <Row>(
   options: {
     width?: number
     rowHeight?: number
+    title?: string
     label: (row: Row) => string
     value: (row: Row) => number
     note?: (row: Row) => string

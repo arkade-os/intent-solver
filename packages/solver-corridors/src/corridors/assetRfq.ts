@@ -152,16 +152,14 @@ export const assetRfqReader = (descriptor: CorridorDescriptor, store: AssetRfqSw
       .map((row) => ({ id: row.id, pkScript: row.offerPkScript })),
   // Narrowed like every other read here: one store backs every market.
   committedSats: () => store.committedSats(descriptor.pair),
+  // Narrowed IN SQL, not afterwards. One store backs every market, so a filter
+  // applied after the store's `LIMIT` would let a busy market's rows evict a
+  // quiet one's from the window — under-reporting that corridor to zero while
+  // the screen looks healthy. It is also what makes `truncated` a fact about
+  // THIS corridor rather than about the table.
   economics: async (window) => {
-    const { rows, truncated } = await store.ledgerRows(window)
-    // Same narrowing, and it matters more here than anywhere else: without it
-    // every asset corridor would report every OTHER market's fills as its own,
-    // and the P&L total would multiply by the number of markets served.
-    return {
-      corridor: descriptor.pair,
-      records: rows.filter((row) => row.pair === descriptor.pair).map((row) => assetRfqEconomics(row, descriptor)),
-      truncated,
-    }
+    const { rows, truncated } = await store.ledgerRows(window, descriptor.pair)
+    return { corridor: descriptor.pair, records: rows.map((row) => assetRfqEconomics(row, descriptor)), truncated }
   },
   page: async (options) => {
     const { rows, nextCursor } = await store.page(options)

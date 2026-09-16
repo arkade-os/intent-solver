@@ -394,12 +394,19 @@ export class EvmReceiveSwapStore {
     }))
   }
 
-  /** Rows whose last movement falls in a window. @see BaseSwapStore.ledgerRows */
-  async ledgerRows(window: LedgerWindow): Promise<{ rows: EvmReceiveSwapRow[]; truncated: boolean }> {
+  /** Rows whose last movement falls in a window. @see EvmSendSwapStore.ledgerRows for why the token narrows in SQL. */
+  async ledgerRows(
+    window: LedgerWindow,
+    tokenAddress?: string,
+  ): Promise<{ rows: EvmReceiveSwapRow[]; truncated: boolean }> {
     const limit = clampLedgerLimit(window.limit)
     const raw = await this.driver.all<Raw>(
-      `SELECT * FROM receive_evm_swap WHERE updated_at >= ? AND updated_at < ? ORDER BY updated_at DESC LIMIT ?`,
-      [window.since, window.until, limit + 1],
+      `SELECT * FROM receive_evm_swap WHERE updated_at >= ? AND updated_at < ?` +
+        (tokenAddress === undefined ? '' : ' AND token_address = ?') +
+        ` ORDER BY updated_at DESC LIMIT ?`,
+      tokenAddress === undefined
+        ? [window.since, window.until, limit + 1]
+        : [window.since, window.until, tokenAddress, limit + 1],
     )
     return { rows: raw.slice(0, limit).map(toRow), truncated: raw.length > limit }
   }

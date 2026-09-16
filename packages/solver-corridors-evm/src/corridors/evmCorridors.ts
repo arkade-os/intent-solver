@@ -137,7 +137,8 @@ interface EvmReadableStore<Row extends { id: string; pkScript: string }> {
   findLive(): Promise<Row[]>
   findByRfqId(rfqId: string): Promise<Row | null>
   committedSats(tokenAddress?: string): Promise<number>
-  ledgerRows(window: LedgerWindow): Promise<{ rows: Row[]; truncated: boolean }>
+  /** Narrowed to one token IN SQL — @see EvmSendSwapStore.ledgerRows. */
+  ledgerRows(window: LedgerWindow, tokenAddress?: string): Promise<{ rows: Row[]; truncated: boolean }>
   page(options: PageOptions): Promise<{ rows: Row[]; nextCursor: string | null }>
   get(id: string): Promise<Row>
   history(id: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>
@@ -166,14 +167,19 @@ const evmReaderFor = <Row extends { id: string; pkScript: string; tokenAddress: 
   // `committedAcrossCorridors` sums once per reader — unnarrowed counts the table once per `EVM_TOKENS` entry.
   committedSats: () => store.committedSats(evmTokenOf(descriptor.pair) ?? undefined),
   economics: async (window) => {
-    const { rows, truncated } = await store.ledgerRows(window)
-    // Narrowed to this corridor's own token, for the reason `committedSats`
-    // above is: one store per direction serves every token, and the P&L
-    // aggregate sums once per reader — so unnarrowed, a two-token deployment
-    // would report exactly twice the profit it made.
     const token = evmTokenOf(descriptor.pair)
-    const mine = token === null ? rows : rows.filter((row) => row.tokenAddress === token)
-    return { corridor: descriptor.pair, records: mine.map(toEconomics), truncated }
+    // THROWS rather than falling through to the whole table. `committedSats`
+    // above passes `?? undefined` and so reads every token when it cannot name
+    // its own — tolerable for a cap, and wrong here: this figure is summed once
+    // per reader, so a corridor claiming every token's rows multiplies the
+    // reported profit by the number of tokens served. `scan()` in the admin
+    // route turns a throw into an UNMEASURED corridor, which is the honest
+    // answer for "I cannot tell which of these rows are mine".
+    if (token === null) throw new Error(`no ERC20 token in corridor pair ${descriptor.pair}; cannot attribute its P&L`)
+    // Narrowed IN SQL. Filtering after the store's `LIMIT` would let a busy
+    // token's rows evict a quiet one's from the window entirely.
+    const { rows, truncated } = await store.ledgerRows(window, token)
+    return { corridor: descriptor.pair, records: rows.map(toEconomics), truncated }
   },
   page: async (options) => {
     const { rows, nextCursor } = await store.page(options)

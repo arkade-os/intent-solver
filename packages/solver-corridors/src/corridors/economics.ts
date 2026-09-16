@@ -17,6 +17,7 @@
  */
 import { economicsOf, type SwapEconomics } from '@arkade-os/solver-core/analytics/economics.js'
 import { phaseOfStates } from '@arkade-os/solver-core/core/swapView.js'
+import { amountSatsOf } from '@arkade-os/solver-core/invoice/decode.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 import { LN_SEND, LN_RECEIVE, ONCHAIN_SEND, ONCHAIN_RECEIVE } from './index.js'
 import { presentedState } from './projections.js'
@@ -44,13 +45,41 @@ const sats = (amount: number | null): { assetId: null; amount: string | null; de
 })
 
 /**
- * Lightning send. Inbound is the LOCKUP, not `amountSats`.
+ * The invoice's own amount, or null when it cannot be read.
  *
- * `amountSats` is the invoice this solver pays; what it takes in is whatever
- * the client's covenant actually held, which is null until the lockup is seen.
- * Null rather than the quoted figure on purpose — before funding there is no
- * intake, and substituting the quote would book a spread on a swap that may
- * never happen.
+ * `amountSatsOf` throws on an amountless or malformed invoice. This corridor
+ * cannot quote one — the limits bound the invoice amount before anything is
+ * stored — but the ledger is a BULK READ over historical rows, and one
+ * unparseable string from some earlier release must degrade to "this swap's
+ * outlay is unknown" rather than take down the whole P&L scan with it. Null is
+ * already the vocabulary for that everywhere else here.
+ */
+const invoiceSats = (invoice: string): number | null => {
+  try {
+    return amountSatsOf(invoice)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Lightning send — the corridor where BOTH columns mean intake, and reading
+ * them as a pair yields exactly zero.
+ *
+ * `amount_sats` here is THE LOCKUP, not the invoice. `send/orchestrator.ts`
+ * stores `giveSatsFor(invoice, fee)` into it and says so at the call site, and
+ * the funding gate then transitions only on `locked === row.amountSats` — an
+ * overfunded lockup is refused outright, because an Arkade vtxo is exact-value.
+ * So on every row that can ever be realized, `lockup_value` and `amount_sats`
+ * are EQUAL BY CONSTRUCTION. Subtracting one from the other reports a flat zero
+ * for the whole corridor, at any fee setting, while counting it as priced —
+ * indistinguishable on screen from a corridor that genuinely broke even.
+ *
+ * The outlay is the INVOICE, re-decoded from the row. That is not a shortcut:
+ * the orchestrator calls the persisted invoice "authoritative" for exactly this
+ * question, and `wire/payloads.ts` already answers the client's `to_amount`
+ * the same way. The invoice amount is the only record of what this solver paid,
+ * because nothing else on the row holds it.
  */
 export const sendEconomics = (row: SendSwapRow): SwapEconomics => {
   const state = presentedState(row.state, row.refundOutcome)
@@ -61,8 +90,14 @@ export const sendEconomics = (row: SendSwapRow): SwapEconomics => {
     phase: phaseOfStates(LN_SEND.states, state),
     quotedAt: row.createdAt,
     settledAt: row.updatedAt,
+    // Null until the lockup is seen. Substituting the quoted figure would book
+    // a spread on a swap nobody has funded and may never fund.
     inbound: sats(row.lockupValue),
-    outbound: sats(row.amountSats),
+    outbound: sats(invoiceSats(row.invoice)),
+    // What a quote BUDGETED for routing — an upper bound set at quote time and
+    // used as `maxFeeSats`, never the fee actually paid. Reported beside the
+    // spread and never subtracted from it. @see SwapEconomics.quotedCostSats
+    quotedCostSats: row.quotedRoutingFeeSats,
     lost: row.state === LOST,
   })
 }

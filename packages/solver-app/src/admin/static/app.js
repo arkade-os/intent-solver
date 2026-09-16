@@ -2476,8 +2476,19 @@ const pnlFigures = (summary) =>
     // Only rendered when non-zero. A permanent "0 at risk" is a position the
     // eye learns to skip, which is exactly where this number needs to be seen —
     // the same rule the status bar's stuck count follows.
-    summary.atRiskSats > 0
-      ? figure('at risk, sats', sats(summary.atRiskSats), 'paid out, not recovered', 'c-risk')
+    // The unknown count rides WITH the figure, not beside it: a zero at-risk
+    // total next to an uncounted unpriceable loss reads as "nothing
+    // outstanding", which is the one reassurance this screen must not give
+    // falsely.
+    summary.atRiskSats > 0 || summary.atRiskUnknownCount > 0
+      ? figure(
+          'at risk, sats',
+          summary.atRiskSats > 0 ? sats(summary.atRiskSats) : '?',
+          summary.atRiskUnknownCount > 0
+            ? `paid out, not recovered · ${summary.atRiskUnknownCount} more not priceable in sats`
+            : 'paid out, not recovered',
+          'c-risk',
+        )
       : figure('at risk', 'none', 'nothing outstanding'),
     figure('settled', String(summary.realizedCount), `${summary.failedCount} failed`),
     figure('open', String(summary.openCount), 'still in flight'),
@@ -2503,6 +2514,19 @@ const pnlBasis = (coverage) =>
           ' — reported as unknown, not counted as zero.',
         )
       : null,
+    // A corridor that HAS the capability and threw is a fault, not a gap, and
+    // someone should go and look. Shown separately from `unmeasured` for that
+    // reason — folded together, a live incident reads as a corridor nobody has
+    // got round to instrumenting.
+    (coverage.failed ?? []).length > 0
+      ? h(
+          'span',
+          h('br'),
+          h('b', 'Failed to read: '),
+          coverage.failed.map((entry) => `${entry.corridor} (${entry.reason})`).join('; '),
+          ' — these are missing from every total above.',
+        )
+      : null,
     coverage.truncated.length > 0
       ? h(
           'span',
@@ -2513,6 +2537,65 @@ const pnlBasis = (coverage) =>
         )
       : null,
   )
+
+/**
+ * The numbers behind the two time charts.
+ *
+ * Both of those are `role="img"`, which hides their `<title>` marks from a
+ * screen reader — and the marks are hover-only for a keyboard user besides. So
+ * without this the one panel on the page whose data was unreachable without
+ * sight was the headline one.
+ *
+ * ONLY buckets where something happened. The series deliberately carries empty
+ * buckets so a quiet period draws as a gap in the chart, but a table of two
+ * thousand rows reading "0" is not a reading aid, and the newest are the ones
+ * worth having first.
+ */
+const SERIES_ROWS = 40
+
+const seriesTable = (series) => {
+  const active = series.filter((point) => point.count > 0).reverse()
+  if (active.length === 0) return h('p.muted', 'Nothing settled in this window.')
+  const shown = active.slice(0, SERIES_ROWS)
+  return h(
+    'div',
+    h(
+      'table',
+      h(
+        'thead',
+        h(
+          'tr',
+          h('th', 'bucket'),
+          h('th.right', 'swaps'),
+          h('th.right', 'gross'),
+          h('th.right', 'cumulative'),
+          h('th.right', 'volume'),
+          h('th.right', 'at risk'),
+        ),
+      ),
+      h(
+        'tbody',
+        ...shown.map((point) =>
+          h(
+            'tr',
+            h('td', new Date(point.at * 1000).toISOString().slice(0, 16).replace('T', ' ')),
+            h('td.right', String(point.count)),
+            h('td.right', point.pricedCount === 0 ? h('span.faint', '—') : signedSats(point.grossSats)),
+            h('td.right', signedSats(point.cumulativeGrossSats)),
+            h('td.right', sats(point.volumeSats)),
+            h('td.right', point.atRiskSats > 0 ? h('span.at-risk', sats(point.atRiskSats)) : h('span.faint', '—')),
+          ),
+        ),
+      ),
+    ),
+    active.length > shown.length
+      ? h(
+          'p.faint',
+          `${active.length - shown.length} earlier bucket(s) not listed — the charts above cover all of them.`,
+        )
+      : null,
+  )
+}
 
 const corridorTable = (corridors) =>
   h(
@@ -2569,6 +2652,9 @@ const durationPanel = (bands) =>
       'A quote holds a price while the market moves. Margin falling down this table is the cost of a slow fill.',
     ),
     categoryChart(bands, {
+      // Basis points of MARGIN, not sats of gross — the default label would
+      // have announced the wrong quantity to a screen reader.
+      title: 'Realized margin in basis points, banded by time to fill',
       label: (band) => band.label,
       value: (band) => band.marginBps ?? 0,
       note: (band) =>
@@ -2626,7 +2712,9 @@ const fxPanel = (leg) => {
       '. Drift is measured against this window’s volume-weighted mean rate — this solver’s own book, not a ' +
         'price feed. Below the line is a fill that came in worse than its peers.',
     ),
-    decayChart(leg.points),
+    // Named per leg, so N of these are distinguishable in a screen reader's
+    // list of figures rather than N repeats of one sentence.
+    decayChart(leg.points, { title: `Rate drift against time to fill, ${leg.leg} on ${leg.corridor}` }),
     worst.length === 0
       ? null
       : h(
@@ -2667,11 +2755,13 @@ const pnlView = () => {
       h('h2', 'per bucket'),
       h('p.muted', 'Profit up, sats at risk down. A loss is not a smaller profit.'),
       barsChart(data.series),
+      seriesTable(data.series),
     ),
     h(
       'section.panel',
       h('h2', 'by corridor'),
       categoryChart(data.corridors, {
+        title: 'Gross profit by corridor, in sats',
         label: (row) => row.corridor,
         value: (row) => row.grossSats,
         note: (row) => `${row.corridor}: ${signedSats(row.grossSats)} sats over ${row.realizedCount} settled swap(s)`,
@@ -2965,7 +3055,16 @@ const listen = () => {
     // reload buys nothing — and it would rebuild an open market form, handing
     // back an input with no focus and a caret at zero while someone is typing a
     // 68-character asset id into it.
-    if (state.view !== 'settings' && state.view !== 'markets' && !state.dialog) load(state.view)
+    //
+    // `pnl` joins them for a different reason, and a stronger one. It IS
+    // derived from swap state, but it is the most expensive read this console
+    // has — one full window scan of every swap store per request — and it
+    // answers a question about a window rather than about right now. Reloading
+    // it on every swap event turns the console into a load generator against
+    // the one endpoint built to avoid that, and drops keyboard focus off its
+    // toolbar each time (`render` restores focus only for `.search`). An
+    // operator who wants it fresher re-picks the window, which reloads.
+    if (state.view !== 'settings' && state.view !== 'markets' && state.view !== 'pnl' && !state.dialog) load(state.view)
   })
   // EventSource reconnects on its own; nothing to do but not treat it as fatal.
   source.addEventListener('error', () => {})

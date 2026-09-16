@@ -11,13 +11,17 @@
  * the alternative is a dashboard that reports a number the solver cannot
  * actually stand behind:
  *
- * 1. **This is GROSS, never net.** No store on any corridor records a realized
- *    execution cost — `ports/lightning.ts`'s `PaymentResult` carries no routing
- *    fee, and no swap table has a fee column — so the chain and routing costs
- *    the solver actually paid are UNKNOWN here, not zero. {@link SwapEconomics}
- *    therefore reports what was quoted and kept, and the admin route says so in
- *    its own payload (`coverage.basis`) rather than only in a comment. A reader
- *    that wants net has to instrument the backends first.
+ * 1. **This is GROSS, never net.** No store records a REALIZED execution cost:
+ *    `ports/lightning.ts`'s `PaymentResult` carries no routing fee, so what a
+ *    payment actually cost is never written down anywhere. What some rows DO
+ *    carry is a quote-time BUDGET — Lightning-send persists
+ *    `quoted_routing_fee_sats` and spends against it as `maxFeeSats` — and that
+ *    is a ceiling rather than a cost. It is surfaced as
+ *    {@link SwapEconomics.quotedCostSats} and never subtracted, because netting
+ *    an upper bound out of a spread understates profit by an unknown amount
+ *    while looking exactly like the net figure this screen does not have.
+ *    The admin route repeats the caveat in its own payload (`coverage.basis`)
+ *    rather than only in a comment.
  * 2. **An unknown number is null, never a zero.** A `quoted` row has no inbound
  *    amount because nothing was funded; a cross-asset fill has no sats spread
  *    because its two legs are different units. Both would sum into a headline
@@ -115,6 +119,23 @@ export interface SwapEconomics {
    * question.
    */
   readonly atRiskSats: number | null
+  /**
+   * What the quote BUDGETED for execution, in sats, where the corridor recorded
+   * a figure. NEVER subtracted from {@link SwapEconomics.grossSats}.
+   *
+   * Lightning-send persists `quoted_routing_fee_sats` and spends against it as
+   * `maxFeeSats`, so it is a CEILING set before the payment rather than the fee
+   * that was actually paid — the real one is still unrecorded anywhere. Netting
+   * an upper bound out of a spread would understate profit by an unknown amount
+   * and dress the result up as the net figure this screen explicitly does not
+   * have. Reported alongside instead, so an operator can see the budget they
+   * were quoting against and how much of their spread it could consume.
+   *
+   * Null on every corridor that records no such figure.
+   */
+  readonly quotedCostSats: number | null
+  /** @see the note where this is assigned — a loss that cannot be priced in sats. */
+  readonly atRiskUnknown: boolean
 }
 
 /** Which part of the ledger a caller wants. Seconds, half-open `[since, until)`. */
@@ -202,6 +223,8 @@ export const economicsOf = (parts: {
    * never be quietly zero.
    */
   exposureSats?: number | null
+  /** @see SwapEconomics.quotedCostSats */
+  quotedCostSats?: number | null
   /** True only for a TERMINAL row that was exposed — see {@link SwapEconomics.atRiskSats}. */
   lost?: boolean
 }): SwapEconomics => {
@@ -214,6 +237,9 @@ export const economicsOf = (parts: {
       ? inboundAmount - outboundAmount
       : null
     : (parts.quotedSpreadSats ?? null)
+
+  const atRisk =
+    parts.lost === true ? (parts.exposureSats ?? (outbound.assetId === null ? outboundAmount : null)) : null
 
   return {
     id: parts.id,
@@ -238,7 +264,19 @@ export const economicsOf = (parts: {
         ? null
         : { numerator: outbound.amount, denominator: inbound.amount },
     realized: parts.phase === 'done',
-    atRiskSats:
-      parts.lost === true ? (parts.exposureSats ?? (outbound.assetId === null ? outboundAmount : null)) : null,
+    atRiskSats: atRisk,
+    /**
+     * True when this row IS a loss whose size cannot be said in sats — a token
+     * payout on a corridor that supplied no sats notional.
+     *
+     * Carried rather than inferred from `atRiskSats === null`, which is also
+     * what a perfectly healthy swap reports. Without it the aggregate's `?? 0`
+     * folds an unmeasurable loss into the total as zero, so "nothing is
+     * outstanding" and "something is outstanding and nobody can price it"
+     * render identically — the same failure `unpricedCount` prevents on the
+     * profit side.
+     */
+    atRiskUnknown: parts.lost === true && atRisk === null,
+    quotedCostSats: parts.quotedCostSats ?? null,
   }
 }
