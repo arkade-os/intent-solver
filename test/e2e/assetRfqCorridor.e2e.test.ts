@@ -269,7 +269,8 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
         profile: { offer_address: string; offer_pk_script: string }
       }
       expect(BigInt(quote.from_amount)).toBe(amount)
-      expect(BigInt(quote.to_amount)).toBe(amount - (amount * BigInt(FEE_BPS) + 9_999n) / 10_000n)
+      const net = amount - arkade.ctx.dustSats
+      expect(BigInt(quote.to_amount)).toBe(net - (net * BigInt(FEE_BPS) + 9_999n) / 10_000n)
 
       // § 6 compare-only, and why this corridor needs no accept message: the
       // client derives the covenant itself and funds only its own derivation.
@@ -327,9 +328,11 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       expect(exactOut.payload).toMatchObject({ reason: 'unsupported_payload' })
 
       // § 4.5: one rfq_id names one negotiation, whatever became of it.
+      // Above the carrier, or it is refused `fee_consumes_swap` before the id binds.
       const id = randomBytes(32).toString('hex')
-      expect((await corridor.quote(requestFor(pair, 50n, id))).kind).toBe('quote')
-      const twice = await corridor.quote(requestFor(pair, 50n, id))
+      const buy = 50n + arkade.ctx.dustSats
+      expect((await corridor.quote(requestFor(pair, buy, id))).kind).toBe('quote')
+      const twice = await corridor.quote(requestFor(pair, buy, id))
       expect(twice.kind).toBe('refused')
       expect(twice.payload).toMatchObject({ reason: 'quote_conflict' })
     },
