@@ -92,10 +92,12 @@ let dir: string
 let broker: WebSocketServer
 let relayUrl: string
 
-const heldAsset = async (): Promise<{ assetId: string; amount: bigint } | null> => {
+const heldAsset = async (wantedId?: string): Promise<{ assetId: string; amount: bigint } | null> => {
   const balance = await arkade.ctx.wallet.getBalance()
   const held = (balance.availableAssets ?? []) as { assetId: string; amount: bigint }[]
-  const usable = held.find((entry) => BigInt(entry.amount) > 0n)
+  const usable = held.find(
+    (entry) => BigInt(entry.amount) > 0n && (wantedId === undefined || entry.assetId === wantedId),
+  )
   return usable ? { assetId: usable.assetId, amount: BigInt(usable.amount) } : null
 }
 
@@ -357,8 +359,8 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         await statusTransport.close()
         expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
         expect(status?.profile['fill_txid']).toBe(filled.fillTxid)
-        await store.close()
       } finally {
+        await store.close()
         await ingress.stop()
       }
     },
@@ -374,7 +376,9 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
       const { ingress, store, tickAll } = await harness()
       try {
         const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
-        const held = await heldAsset()
+        // Bound to `assetId`: the balance this asserts must be the asset the
+        // request and `wallet.send` below actually move.
+        const held = await heldAsset(assetId)
         expect(held, 'wallet holds no asset for the asset->BTC leg').not.toBeNull()
         const amount = BigInt(2000 + randomInt(1, 500))
         expect(held!.amount).toBeGreaterThanOrEqual(amount)
@@ -418,8 +422,8 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         await statusTransport.close()
         expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
         expect(status?.profile['fill_txid']).toBe(filled.fillTxid)
-        await store.close()
       } finally {
+        await store.close()
         await ingress.stop()
       }
     },
@@ -454,8 +458,8 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
           }),
         ).rejects.toMatchObject({ name: 'SwapRefusal', reason: 'amount_out_of_range' })
         await transport.close()
-        await store.close()
       } finally {
+        await store.close()
         await ingress.stop()
       }
     },
@@ -463,11 +467,11 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
   )
 
   it(
-    'leaves a lapsed relay quote for the client to reclaim via cancel',
+    'reports quoted, funded, and settled through polled relay status',
     async () => {
-      // Quote validity is a harness constant (600s) here; the lapse path is
-      // covered by `assetRfqCorridor.e2e.test.ts`. This asserts the relay
-      // status face instead: quoted, then funded, then settled — polled.
+      // Quote validity is a harness constant (600s) here, so the lapse path is
+      // not reachable from this test and is covered by
+      // `assetRfqCorridor.e2e.test.ts`. This asserts the relay status face.
       const { ingress, store, tickAll } = await harness()
       try {
         const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
@@ -500,8 +504,8 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         status = await statusTransport.status(rfqId)
         await statusTransport.close()
         expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
-        await store.close()
       } finally {
+        await store.close()
         await ingress.stop()
       }
     },
