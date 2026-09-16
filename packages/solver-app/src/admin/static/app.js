@@ -274,8 +274,12 @@ const state = {
   banner: null,
   data: {},
   filters: { corridor: '', phase: '', q: '' },
-  /** The P&L view's own controls. Bucket empty means "let the server choose from the window". */
-  pnl: { window: '7d', bucket: '' },
+  /**
+   * The P&L view's own controls. Bucket empty means "let the server choose from
+   * the window"; `focus` is the toolbar control to restore after a reload
+   * rebuilds the tree.
+   */
+  pnl: { window: '7d', bucket: '', focus: null },
   detail: null,
   dialog: null,
   /** The action currently in flight, or null. See `runAction`. */
@@ -2425,6 +2429,15 @@ const figure = (label, value, note, tone) =>
     note ? h('span.faint', ` ${note}`) : null,
   )
 
+/**
+ * Which toolbar control was last pressed, so `render` can give focus back.
+ *
+ * Every button here reloads, and a reload ends in `render`, which rebuilds the
+ * whole tree — so the pressed button leaves the document and focus falls to
+ * `body`. `render` restores focus for `input.search` alone, and there is no
+ * search box on this view, so a keyboard user had to tab from the top of the
+ * page after every window or bucket change.
+ */
 const pnlToolbar = () =>
   h(
     'div.toolbar',
@@ -2433,8 +2446,10 @@ const pnlToolbar = () =>
       h(
         'button',
         {
+          'data-pnl-control': `window:${name}`,
           'aria-current': String(state.pnl.window === name),
           onclick: () => {
+            state.pnl.focus = `window:${name}`
             state.pnl.window = name
             // Cleared, not preserved: a 5-minute bucket chosen for an hour
             // window is sixteen thousand points over ninety days. The server
@@ -2452,8 +2467,10 @@ const pnlToolbar = () =>
       h(
         'button',
         {
+          'data-pnl-control': `bucket:${name}`,
           'aria-current': String(state.pnl.bucket === name),
           onclick: () => {
+            state.pnl.focus = `bucket:${name}`
             state.pnl.bucket = state.pnl.bucket === name ? '' : name
             load('pnl')
           },
@@ -2553,6 +2570,18 @@ const pnlBasis = (coverage) =>
  */
 const SERIES_ROWS = 40
 
+/**
+ * A bucket's start, in LOCAL time and the same shape `charts.js` labels its
+ * axis with. The two must agree: the table sits directly under the chart it
+ * describes, and a UTC table beside a local-time axis is two clocks for one
+ * bucket with nothing on screen saying which is which.
+ */
+const bucketLabel = (unixSeconds) => {
+  const date = new Date(unixSeconds * 1000)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 const seriesTable = (series) => {
   const active = series.filter((point) => point.count > 0).reverse()
   if (active.length === 0) return h('p.muted', 'Nothing settled in this window.')
@@ -2578,7 +2607,12 @@ const seriesTable = (series) => {
         ...shown.map((point) =>
           h(
             'tr',
-            h('td', new Date(point.at * 1000).toISOString().slice(0, 16).replace('T', ' ')),
+            // LOCAL time, in the same shape the charts label their axis with.
+            // `toISOString()` is UTC, so the table and the chart directly above
+            // it showed two different clock values for the same bucket — and a
+            // reader has no way to tell which one their wallet's timestamps
+            // match.
+            h('td', bucketLabel(point.at)),
             h('td.right', String(point.count)),
             h('td.right', point.pricedCount === 0 ? h('span.faint', '—') : signedSats(point.grossSats)),
             h('td.right', signedSats(point.cumulativeGrossSats)),
@@ -2969,6 +3003,16 @@ const render = () => {
 
   // After everything is in the document: focusing a detached node does nothing,
   // which is how the modal scroll fix was wrong the first time.
+  // The P&L toolbar's equivalent of the search-box restore above, and needed
+  // for the same reason: the rebuild removed the button that was pressed. Read
+  // once and cleared, so a later render caused by anything else does not steal
+  // focus back to a control nobody touched.
+  if (state.pnl.focus) {
+    const control = root.querySelector(`[data-pnl-control="${state.pnl.focus}"]`)
+    state.pnl.focus = null
+    if (control) control.focus()
+  }
+
   if (typing) {
     const box = root.querySelector('input.search')
     if (box) {

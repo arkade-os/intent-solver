@@ -45,9 +45,9 @@ import type { EvmReceiveSwapRow } from '../db/evmReceiveSwaps.js'
  */
 const LOST = 'stuck'
 
-const satsLeg = (amount: number): { assetId: null; amount: string; decimals: number } => ({
+const satsLeg = (amount: number | null): { assetId: null; amount: string | null; decimals: number } => ({
   assetId: null,
-  amount: String(amount),
+  amount: amount === null ? null : String(amount),
   decimals: 8,
 })
 
@@ -57,45 +57,69 @@ const satsLeg = (amount: number): { assetId: null; amount: string; decimals: num
  * are null rather than assumed, since a 6-decimal USDC and an 18-decimal DAI
  * would otherwise plot on one axis twelve orders of magnitude apart.
  */
-const tokenLeg = (row: {
-  evmAmount: string
-  tokenAddress: string
-}): { assetId: string; amount: string; decimals: null } => ({
+const tokenLeg = (
+  row: { evmAmount: string; tokenAddress: string },
+  funded = true,
+): { assetId: string; amount: string | null; decimals: null } => ({
   assetId: row.tokenAddress,
-  amount: row.evmAmount,
+  amount: funded ? row.evmAmount : null,
   decimals: null,
 })
+
+/**
+ * Did the client's money actually arrive?
+ *
+ * Mirrors `corridors/economics.ts`'s rule, and matters here for the same
+ * reason: `ledgerRows` returns `quoted` and lapsed rows too, and a quote is a
+ * set of TERMS. Left ungated, an unfunded row reports an intake, a sats spread
+ * and an executed-looking rate for a trade that never happened.
+ *
+ * The RECEIVE direction has exact evidence — `evmLockTxid` is the client's own
+ * ERC20 lock. The SEND direction has none: no column records the client's
+ * Arkade lockup, so the lifecycle answers, with `refundOutcome` telling a
+ * lapsed quote from a funded swap that was given back.
+ */
+const sendFunded = (state: string, refundOutcome: 'pushed' | 'external' | null): boolean =>
+  state !== 'quoted' && !(state === 'refused' && refundOutcome === null)
 
 export const evmSendEconomics = (
   row: EvmSendSwapRow,
   descriptor: CorridorDescriptor,
   presented: string,
-): SwapEconomics =>
-  economicsOf({
+): SwapEconomics => {
+  const funded = sendFunded(row.state, row.refundOutcome as 'pushed' | 'external' | null)
+  return economicsOf({
     id: row.id,
     corridor: descriptor.pair,
     state: presented,
     phase: phaseOfStates(descriptor.states, presented),
     quotedAt: row.createdAt,
     settledAt: row.updatedAt,
-    inbound: satsLeg(row.amountSats),
-    outbound: tokenLeg(row),
-    quotedSpreadSats: row.amountSats - row.payoutSats,
+    inbound: satsLeg(funded ? row.amountSats : null),
+    outbound: tokenLeg(row, funded),
+    // Gated with the legs. A spread on a trade that never happened is not a
+    // spread, and reporting one would put quote terms in the record list
+    // looking exactly like an execution.
+    quotedSpreadSats: funded ? row.amountSats - row.payoutSats : null,
     exposureSats: row.payoutSats,
     lost: row.state === LOST,
   })
+}
 
-export const evmReceiveEconomics = (row: EvmReceiveSwapRow, descriptor: CorridorDescriptor): SwapEconomics =>
-  economicsOf({
+export const evmReceiveEconomics = (row: EvmReceiveSwapRow, descriptor: CorridorDescriptor): SwapEconomics => {
+  // The client's own ERC20 lock — exact evidence, unlike the send direction.
+  const funded = row.evmLockTxid !== null
+  return economicsOf({
     id: row.id,
     corridor: descriptor.pair,
     state: row.state,
     phase: phaseOfStates(descriptor.states, row.state),
     quotedAt: row.createdAt,
     settledAt: row.updatedAt,
-    inbound: tokenLeg(row),
+    inbound: tokenLeg(row, funded),
     outbound: satsLeg(row.payoutSats),
-    quotedSpreadSats: row.amountSats - row.payoutSats,
+    quotedSpreadSats: funded ? row.amountSats - row.payoutSats : null,
     exposureSats: row.payoutSats,
     lost: row.state === LOST,
   })
+}

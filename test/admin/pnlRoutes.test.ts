@@ -197,6 +197,58 @@ describe('GET /api/pnl: what has not settled, and what is gone', () => {
   })
 
   /**
+   * A quote is a set of TERMS. Reporting its amounts as an intake gives a swap
+   * that never happened a spread and an executed-looking rate in the record
+   * list, which is the same class of mistake as reporting a corridor at zero
+   * instead of unmeasured.
+   */
+  it('never reports quote terms as an intake on an unfunded row', async () => {
+    const { app, sendStore, receiveStore, at } = await build()
+    at(NOW - 120)
+    await sendStore.insertQuote(sendQuote())
+    await receiveStore.insertQuote(receiveQuote())
+
+    const response = await app.fetch(new Request('http://admin/api/pnl/swaps'))
+    const body = (await response.json()) as {
+      records: { id: string; inbound: { amount: string | null }; grossSats: number | null; rate: unknown }[]
+    }
+    expect(body.records).toHaveLength(2)
+    for (const record of body.records) {
+      expect(record.inbound.amount).toBeNull()
+      expect(record.grossSats).toBeNull()
+      expect(record.rate).toBeNull()
+    }
+  })
+
+  it('reports the intake once the client has actually funded', async () => {
+    const { app, receiveStore, at } = await build()
+    at(NOW - 300)
+    await receiveStore.insertQuote(receiveQuote())
+    await receiveStore.transition('recv-1', 'quoted', 'armed', { htlc_expires_at: NOW + 600 })
+
+    const response = await app.fetch(new Request('http://admin/api/pnl/swaps'))
+    const body = (await response.json()) as { records: { inbound: { amount: string | null } }[] }
+    expect(body.records[0]!.inbound.amount).toBe('50000')
+  })
+
+  /**
+   * The COUPLED path arms with `htlc_expires_at: null` by design — there is no
+   * `E` to record on it. A projector reading that column as funding evidence
+   * would report no intake on every coupled swap, settled ones included, which
+   * is why this leg reads its lifecycle instead.
+   */
+  it('reports the intake on a coupled row, which is armed with no htlc deadline', async () => {
+    const { app, receiveStore, at } = await build()
+    at(NOW - 300)
+    await receiveStore.insertQuote(receiveQuote())
+    await receiveStore.transition('recv-1', 'quoted', 'armed', { htlc_expires_at: null })
+
+    const response = await app.fetch(new Request('http://admin/api/pnl/swaps'))
+    const body = (await response.json()) as { records: { inbound: { amount: string | null } }[] }
+    expect(body.records[0]!.inbound.amount).toBe('50000')
+  })
+
+  /**
    * The INVOICE, which is the money that actually left, and not the lockup.
    * The two differ by the spread, so reporting the lockup overstates the loss
    * by exactly the fee on every stuck row of this corridor — small per swap and

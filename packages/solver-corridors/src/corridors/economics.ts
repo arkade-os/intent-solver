@@ -45,6 +45,30 @@ const sats = (amount: number | null): { assetId: null; amount: string | null; de
 })
 
 /**
+ * Did the client's money actually ARRIVE?
+ *
+ * The ledger is a window over every row, `quoted` and lapsed ones included, and
+ * a quote is a set of TERMS rather than a record of anything that happened.
+ * Reporting its amounts as an intake gives an unfunded row a spread and an
+ * executed-looking rate — which is the same class of mistake as reporting a
+ * corridor at zero instead of unmeasured, and it contradicts the rule this
+ * module opens with.
+ *
+ * Each corridor answers from its own evidence. Two shapes appear below:
+ *
+ *  - **A column**, where one exists, is exact — a lockup value, a deposit
+ *    txid, a held-HTLC deadline.
+ *  - **The lifecycle**, where no column records the client's side. `quoted`
+ *    means "nothing has moved" in every store's own vocabulary, and a
+ *    `refused` row is the ambiguous one: it is a lapsed quote when nothing was
+ *    refunded, and a funded swap that was given back when something was. That
+ *    is precisely what `refundOutcome` records, which is why `presentedState`
+ *    already reads it to tell those two apart.
+ */
+const fundedByLifecycle = (state: string, refundOutcome: 'pushed' | 'external' | null): boolean =>
+  state !== 'quoted' && !(state === 'refused' && refundOutcome === null)
+
+/**
  * The invoice's own amount, or null when it cannot be read.
  *
  * `amountSatsOf` throws on an amountless or malformed invoice. This corridor
@@ -102,6 +126,21 @@ export const sendEconomics = (row: SendSwapRow): SwapEconomics => {
   })
 }
 
+/**
+ * Lightning receive. The intake is the client's held HTLC, and the evidence is
+ * the LIFECYCLE — specifically NOT `htlcExpiresAt`, which looks like the right
+ * column and is a trap.
+ *
+ * That field is null on the COUPLED path by design: `receive/orchestrator.ts`
+ * transitions `quoted -> armed` with `htlc_expires_at: null` precisely because
+ * there is no `E` to record there, and uses the null as the marker for that
+ * path. Reading it as "not funded" would report no intake on every coupled
+ * swap, settled ones included.
+ *
+ * `refundOutcome` is passed as null because this store has no such column — it
+ * records a refund as a STATE. That makes the rule `state` is neither `quoted`
+ * nor `refused`, which is what those two words mean here.
+ */
 export const receiveEconomics = (row: ReceiveSwapRow): SwapEconomics =>
   economicsOf({
     id: row.id,
@@ -110,7 +149,7 @@ export const receiveEconomics = (row: ReceiveSwapRow): SwapEconomics =>
     phase: phaseOfStates(LN_RECEIVE.states, row.state),
     quotedAt: row.createdAt,
     settledAt: row.updatedAt,
-    inbound: sats(row.amountSats),
+    inbound: sats(fundedByLifecycle(row.state, null) ? row.amountSats : null),
     outbound: sats(row.payoutSats),
     lost: row.state === LOST,
   })
@@ -124,7 +163,9 @@ export const onchainSendEconomics = (row: OnchainSendSwapRow): SwapEconomics => 
     phase: phaseOfStates(ONCHAIN_SEND.states, state),
     quotedAt: row.createdAt,
     settledAt: row.updatedAt,
-    inbound: sats(row.amountSats),
+    // No column records the client's Arkade lockup on this leg, so the
+    // lifecycle is the evidence. @see fundedByLifecycle
+    inbound: sats(fundedByLifecycle(row.state, row.refundOutcome) ? row.amountSats : null),
     outbound: sats(row.payoutSats),
     lost: row.state === LOST,
   })
@@ -147,7 +188,9 @@ export const onchainReceiveEconomics = (row: OnchainReceiveSwapRow): SwapEconomi
     phase: phaseOfStates(ONCHAIN_RECEIVE.states, row.state),
     quotedAt: row.createdAt,
     settledAt: row.updatedAt,
-    inbound: sats(row.fundedValueSats ?? row.amountSats),
+    // `fundingTxid` is the CLIENT's HTLC — the solver's own broadcast is
+    // `arkadeFundTxid` — so it is exact evidence that the intake arrived.
+    inbound: sats(row.fundingTxid === null ? null : (row.fundedValueSats ?? row.amountSats)),
     outbound: sats(row.fundedPayoutSats ?? row.payoutSats),
     lost: row.state === LOST,
   })
@@ -177,7 +220,13 @@ export const assetRfqEconomics = (row: AssetRfqSwapRow, descriptor: CorridorDesc
     phase: phaseOfStates(descriptor.states, row.state),
     quotedAt: row.createdAt,
     settledAt: row.updatedAt,
-    inbound: { assetId: row.fromAssetId, amount: row.fromAmount.toString(), decimals: null },
+    // The deposit outpoint is exact evidence: until one is observed at the
+    // offer script, the quoted `fromAmount` is terms and not an intake.
+    inbound: {
+      assetId: row.fromAssetId,
+      amount: row.depositTxid === null ? null : row.fromAmount.toString(),
+      decimals: null,
+    },
     outbound: { assetId: row.toAssetId, amount: row.toAmount.toString(), decimals: null },
     lost: row.state === LOST,
   })

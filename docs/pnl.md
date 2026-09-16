@@ -31,10 +31,15 @@ is a number nobody can stand behind:
   **has** the capability and throws is named in `coverage.failed` instead — a
   fault is not a gap in coverage, and folding the two together made a broken
   store read as a corridor nobody had got round to instrumenting.
-- **An unknown number is null, never zero.** An unfunded quote has no intake. A
-  genuine asset-to-asset fill has no sats spread. Both are excluded from the
-  totals and counted in `unpricedCount`, so a stablecoin book never reads as
-  having made nothing.
+- **An unknown number is null, never zero.** An unfunded quote has no intake, so
+  its amounts, spread and rate are all null — a quote is a set of terms, and
+  reporting them as an execution gives a swap that never happened a rate that
+  looks like one. Each corridor decides from its own evidence: a lockup value, a
+  deposit txid, a held-HTLC deadline, or — where no column records the client's
+  side — its own lifecycle. Such a row is counted in `openCount`.
+- A realized fill that cannot be priced in sats — a genuine asset-to-asset one —
+  is excluded from the totals and counted in `unpricedCount`, so a stablecoin
+  book never reads as having made nothing.
 
 ## What a swap contributes
 

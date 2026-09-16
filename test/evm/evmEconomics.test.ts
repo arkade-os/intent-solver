@@ -85,16 +85,39 @@ afterEach(async () => {
   await receiveStore.close()
 })
 
+/**
+ * A row the client has actually funded.
+ *
+ * `ledgerRows` returns `quoted` rows too, and a quote is a set of TERMS — so an
+ * unfunded row reports no legs, no spread and no rate. Every assertion about
+ * economics therefore has to fund first, which is the fixture saying the same
+ * thing the projector does.
+ */
+const fundedSend = async () => {
+  await sendStore.insertQuote(sendQuote())
+  // The client's Arkade lockup is seen. No column records its value on this
+  // direction, so the state IS the evidence.
+  await sendStore.transition('send-1', 'quoted', 'funded')
+}
+
+const fundedReceive = async () => {
+  await receiveStore.insertQuote(receiveQuote())
+  // `evm_lock_txid` is the CLIENT's ERC20 lock — exact evidence here, unlike
+  // the send direction which has no column for the client's side at all.
+  await receiveStore.transition('send-1', 'quoted', 'awaiting_lock')
+  await receiveStore.transition('send-1', 'awaiting_lock', 'locked', { evm_lock_txid: `0x${'ab'.repeat(32)}` })
+}
+
 describe('the EVM send leg: sats in, token out', () => {
   it('books the persisted sats spread, which its two legs cannot express', async () => {
-    await sendStore.insertQuote(sendQuote())
+    await fundedSend()
     const [record] = (await evmSendReader(evmSendDescriptor(TOKEN_META), sendStore).economics!(WINDOW)).records
     expect(record!.grossSats).toBe(500)
     expect(record!.grossBps).toBe(100)
   })
 
   it('carries the rate as TOKEN per SAT, the direction the trade actually ran', async () => {
-    await sendStore.insertQuote(sendQuote())
+    await fundedSend()
     const [record] = (await evmSendReader(evmSendDescriptor(TOKEN_META), sendStore).economics!(WINDOW)).records
     expect(record!.rate).toEqual({ numerator: '25000000', denominator: '50000' })
     expect(record!.inbound.assetId).toBeNull()
@@ -132,7 +155,7 @@ describe('the EVM send leg: sats in, token out', () => {
 
 describe('the EVM receive leg: token in, sats out', () => {
   it('runs the legs the OTHER way round from its sibling', async () => {
-    await receiveStore.insertQuote(receiveQuote())
+    await fundedReceive()
     const [record] = (await evmReceiveReader(evmReceiveDescriptor(TOKEN_META), receiveStore).economics!(WINDOW)).records
     expect(record!.inbound.assetId).toBe(TOKEN)
     expect(record!.outbound.assetId).toBeNull()
@@ -140,7 +163,7 @@ describe('the EVM receive leg: token in, sats out', () => {
   })
 
   it('books the same persisted sats spread, and refuses to call it a basis point of a token intake', async () => {
-    await receiveStore.insertQuote(receiveQuote())
+    await fundedReceive()
     const [record] = (await evmReceiveReader(evmReceiveDescriptor(TOKEN_META), receiveStore).economics!(WINDOW)).records
     expect(record!.grossSats).toBe(500)
     expect(record!.grossBps).toBeNull()

@@ -172,8 +172,14 @@ interface Scan {
  * as an unmeasured corridor: the honest report of "this one is not in the
  * number you are looking at".
  */
-const scan = async (deps: AdminDeps, window: LedgerWindow): Promise<Scan> => {
-  const readers = [...deps.services.readers]
+const scan = async (deps: AdminDeps, window: LedgerWindow, corridor?: string): Promise<Scan> => {
+  // Narrowed BEFORE the scan, not after it. A request for one corridor used to
+  // read and sort every other corridor's rows up to their caps and then discard
+  // them — and a slow unrelated store delayed the answer. Asking only the named
+  // corridor is the point of the filter, which is the same reasoning
+  // `routes/swaps.ts` states for its own.
+  const all = [...deps.services.readers]
+  const readers = corridor === undefined ? all : all.filter((r) => r.descriptor.pair === corridor)
   const results = await Promise.all(
     readers.map(async (reader) => {
       const pair = reader.descriptor.pair
@@ -275,10 +281,8 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
       return c.json({ error: 'unknown_corridor', corridor: query.corridor }, 400)
     }
 
-    const scanned = await scan(deps, window)
-    const matched = scanned.records
-      .filter((record) => query.corridor === undefined || record.corridor === query.corridor)
-      .sort((a, b) => b.settledAt - a.settledAt || a.id.localeCompare(b.id))
+    const scanned = await scan(deps, window, query.corridor)
+    const matched = [...scanned.records].sort((a, b) => b.settledAt - a.settledAt || a.id.localeCompare(b.id))
     // The per-corridor cap bounds each SCAN; it does not bound this BODY, which
     // is their concatenation. At the ceiling — `MAX_LEDGER_LIMIT` rows across
     // one corridor per market per direction — that is six figures of records in
