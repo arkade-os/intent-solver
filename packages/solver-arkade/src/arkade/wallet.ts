@@ -319,6 +319,12 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     )
   }
 
+  const dustSats = BigInt(info.dust)
+  // A quote prices against this; zero would remove the sats leg's dust floor.
+  if (dustSats <= 0n) {
+    throw new Error(`Arkade server at ${config.arkServerUrl} reports dust=${info.dust}, which no asset can ride on`)
+  }
+
   const advertisedExitDelay = Number(info.unilateralExitDelay)
   const { unit: advertisedUnit, notices } = resolveTimelockUnit({
     advertisedExitDelay,
@@ -333,7 +339,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     arkServerUrl: config.arkServerUrl,
     unilateralDelays: deriveUnilateralDelays(config.unilateralExitDelayOverride ?? advertisedExitDelay),
     advertisedExitDelay,
-    dustSats: BigInt(info.dust),
+    dustSats,
     timelockUnit: advertisedUnit,
     hrp: config.arkadeHrp,
     reservations: createReservationLedger(),

@@ -173,7 +173,7 @@ describe('the fee is folded in against the maker', () => {
         amountSide: 'from',
         market: { ...priced, base: null, quote: asset, minPayout: 1n, maxPayout: 10n ** 20n },
         feed,
-        carrierSats: 0n,
+        carrierSats: 330n,
       })
       expect(quote.ok).toBe(true)
       if (!quote.ok) continue
@@ -184,7 +184,8 @@ describe('the fee is folded in against the maker', () => {
           direction: trade.direction,
           market: priced,
           feed,
-          carrierSats: 0n,
+          carrierSats: 330n,
+          wantIsBtc: trade.to === null,
         }),
       ).toBe(true)
       expect(
@@ -194,7 +195,8 @@ describe('the fee is folded in against the maker', () => {
           direction: trade.direction,
           market: priced,
           feed,
-          carrierSats: 0n,
+          carrierSats: 330n,
+          wantIsBtc: trade.to === null,
         }),
       ).toBe(false)
     }

@@ -46,6 +46,7 @@ const build = async (over: Partial<AssetOfferDeps> = {}) => {
   let n = 0
   const deps: AssetOfferDeps = {
     store,
+    carrierSats: 0n,
     markets: [{ a: USDT, b: null }],
     minFillAmount: 10n,
     maxFillAmount: 100_000n,

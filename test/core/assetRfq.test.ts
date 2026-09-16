@@ -116,9 +116,9 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       amountSide: 'from',
       market: MARKET,
       feed: FEED,
-      carrierSats: 0n,
+      carrierSats: 330n,
     })
-    expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000_000n, toAmount: 99_500_000n })
+    expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000_000n, toAmount: 99_500_000n + 330n })
   })
 
   it('subtracts the sell-base flat fee from the BTC input before conversion', () => {
@@ -140,9 +140,9 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       amountSide: 'from',
       market: { ...MARKET, feeBps: 0, buyBaseFeeFlat: 1_000_000n },
       feed: FEED,
-      carrierSats: 0n,
+      carrierSats: 330n,
     })
-    expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000_000n, toAmount: 99_999_000n })
+    expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000_000n, toAmount: 99_999_000n + 330n })
   })
 
   it('refuses an input entirely consumed by its direction flat fee', () => {

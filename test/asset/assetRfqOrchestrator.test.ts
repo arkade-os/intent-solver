@@ -58,7 +58,7 @@ const harness = async (over: Partial<AssetRfqDeps> = {}) => {
     markets: [MARKET],
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
-    carrierSats: 0n,
+    carrierSats: 330n,
     now: () => clock,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
     deriveOffer: () => ({ pkScript: OFFER_SCRIPT, address: 'ark1qoffer' }),
@@ -123,7 +123,7 @@ describe('quote', () => {
     expect(outcome.swap).toMatchObject({
       state: 'quoted',
       fromAmount: 100_000_000n,
-      toAmount: 99_500_000_000n,
+      toAmount: 99_499_671_650n,
       offerAddress: 'ark1qoffer',
     })
     // Written BEFORE the client could act on it: a quote this solver has no row
@@ -154,7 +154,7 @@ describe('quote', () => {
     })
     await service.quote(request())
     expect(seen[0]).toMatchObject({
-      wantAmount: 99_500_000_000n,
+      wantAmount: 99_499_671_650n,
       wantAssetId: ASSET_A,
       offerAssetId: null,
       makerPkScript: PK_SCRIPT,

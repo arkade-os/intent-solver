@@ -153,7 +153,10 @@ export const resolveAssetQuote = (args: {
   if (market.feeBps < 0 || market.feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
   if (amount <= 0n) return { ok: false, reason: 'amount_out_of_range' }
 
-  if (carrierSats < 0n) return { ok: false, reason: 'price_unavailable' }
+  // The sats leg's dust floor IS the carrier; a zero one removes it silently.
+  if (carrierSats < 0n || (pair.to === null && carrierSats <= 0n)) {
+    return { ok: false, reason: 'price_unavailable' }
+  }
 
   const flatFee = (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
   if (flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
