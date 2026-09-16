@@ -136,6 +136,20 @@ export interface SwapEconomics {
   readonly quotedCostSats: number | null
   /** @see the note where this is assigned — a loss that cannot be priced in sats. */
   readonly atRiskUnknown: boolean
+  /**
+   * True when this corridor's `atRiskSats` is an UPPER BOUND rather than a
+   * measurement.
+   *
+   * Both ERC20 stores' `fail()` transitions to `stuck` whatever the row's
+   * exposure, unlike the four BTC stores which route a failure by it — so a row
+   * that failed before locking anything is filed beside one that failed after.
+   * The corridor declares that about itself here.
+   *
+   * On the RECORD rather than only in prose, because a caller reading this API
+   * programmatically never sees `docs/pnl.md`. A bare number they cannot tell is
+   * a ceiling is exactly the kind of figure this feature exists not to publish.
+   */
+  readonly atRiskUpperBound: boolean
 }
 
 /** Which part of the ledger a caller wants. Seconds, half-open `[since, until)`. */
@@ -225,6 +239,8 @@ export const economicsOf = (parts: {
   exposureSats?: number | null
   /** @see SwapEconomics.quotedCostSats */
   quotedCostSats?: number | null
+  /** @see SwapEconomics.atRiskUpperBound */
+  atRiskUpperBound?: boolean
   /** True only for a TERMINAL row that was exposed — see {@link SwapEconomics.atRiskSats}. */
   lost?: boolean
 }): SwapEconomics => {
@@ -277,6 +293,8 @@ export const economicsOf = (parts: {
      * profit side.
      */
     atRiskUnknown: parts.lost === true && atRisk === null,
+    // Only meaningful where there IS an at-risk figure to qualify.
+    atRiskUpperBound: parts.atRiskUpperBound === true && atRisk !== null,
     quotedCostSats: parts.quotedCostSats ?? null,
   }
 }

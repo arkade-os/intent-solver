@@ -189,6 +189,98 @@ describe('a loss that cannot be priced in sats', () => {
   })
 })
 
+describe('an at-risk figure that is a ceiling says so in the payload', () => {
+  const ceiling = economicsOf({
+    id: 'evm-stuck',
+    corridor: 'arkade:BTC->ethereum:usdt',
+    state: 'stuck',
+    phase: 'failed',
+    quotedAt: T0 - 60,
+    settledAt: T0,
+    inbound: sats(50_000),
+    outbound: token('25000000'),
+    exposureSats: 49_500,
+    lost: true,
+    atRiskUpperBound: true,
+  })
+
+  it('flags the corridor and the summary, not just the docs', () => {
+    expect(byCorridor([ceiling])[0]!.atRiskUpperBound).toBe(true)
+    expect(summarise([ceiling], T0 - HOUR, T0 + HOUR).atRiskUpperBound).toBe(true)
+  })
+
+  it('leaves a corridor that measures its losses unflagged', () => {
+    expect(byCorridor([lost({ id: 'x', at: T0, payout: 50_151 })])[0]!.atRiskUpperBound).toBe(false)
+    expect(summarise([lost({ id: 'x', at: T0, payout: 50_151 })], T0 - HOUR, T0 + HOUR).atRiskUpperBound).toBe(false)
+  })
+
+  it('does not flag a healthy row merely because its corridor would qualify one', () => {
+    const fine = economicsOf({
+      id: 'evm-ok',
+      corridor: 'arkade:BTC->ethereum:usdt',
+      state: 'claimed',
+      phase: 'done',
+      quotedAt: T0 - 60,
+      settledAt: T0,
+      inbound: sats(50_000),
+      outbound: token('25000000'),
+      quotedSpreadSats: 500,
+      exposureSats: 49_500,
+      atRiskUpperBound: true,
+    })
+    expect(fine.atRiskUpperBound).toBe(false)
+    expect(summarise([fine], T0 - HOUR, T0 + HOUR).atRiskUpperBound).toBe(false)
+  })
+})
+
+describe('byFxLeg on 18-decimal tokens', () => {
+  const dai = (id: string, sat: number, units: string) =>
+    economicsOf({
+      id,
+      corridor: 'arkade:BTC->ethereum:dai',
+      state: 'claimed',
+      phase: 'done',
+      quotedAt: T0 - 30,
+      settledAt: T0,
+      inbound: token(units, 'dai'),
+      outbound: sats(sat),
+      quotedSpreadSats: 0,
+    })
+
+  /**
+   * $100k of an 18-decimal token is ~10^23 atomic units, against a safe-integer
+   * ceiling of ~9·10^15. The weighted mean is `Σ(rateᵢ·denᵢ)/Σ(denᵢ)`, and
+   * `rateᵢ·denᵢ` is just `numᵢ` — so summing as bigint and dividing ONCE keeps
+   * the benchmark exact right up to that single division.
+   *
+   * This pins the property, not the discrimination: the residual error below is
+   * the final `Number()` division alone, which is unavoidable and ~1e-16
+   * relative — sixteen orders of magnitude under the basis point anything is
+   * reported in.
+   */
+  it('computes the benchmark as an exact ratio of sums, dividing only once', () => {
+    const legs = byFxLeg([dai('a', 100_000, '100000' + '0'.repeat(18)), dai('b', 250_000, '250000' + '0'.repeat(18))])
+    expect(legs).toHaveLength(1)
+    const expected = Number(350_000n) / Number(BigInt('350000' + '0'.repeat(18)))
+    expect(legs[0]!.meanRate).toBe(expected)
+    expect(legs[0]!.meanRate).toBeCloseTo(1e-18, 25)
+  })
+
+  it('reports no drift for fills that all executed at the same rate', () => {
+    const legs = byFxLeg([dai('a', 100_000, '100000' + '0'.repeat(18)), dai('b', 250_000, '250000' + '0'.repeat(18))])
+    expect(legs[0]!.points.map((p) => p.driftBps)).toEqual([0, 0])
+  })
+
+  it('still ranks a worse fill below the benchmark at this scale', () => {
+    // 'b' pays out the same sats for MORE token intake, so it took in more per
+    // sat delivered — the favourable side.
+    const legs = byFxLeg([dai('a', 100_000, '100000' + '0'.repeat(18)), dai('b', 100_000, '200000' + '0'.repeat(18))])
+    const drifts = Object.fromEntries(legs[0]!.points.map((p) => [p.id, p.driftBps ?? 0]))
+    expect(drifts.a).toBeLessThan(0)
+    expect(drifts.b).toBeGreaterThan(0)
+  })
+})
+
 describe('series', () => {
   it('ignores a record that settled outside the window, even when its bucket exists', () => {
     // The first bucket starts at `floor(since / bucketSeconds)`, which can

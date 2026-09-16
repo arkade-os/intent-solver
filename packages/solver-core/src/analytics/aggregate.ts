@@ -95,6 +95,13 @@ export interface CorridorBreakdown {
   /** Volume-weighted margin, basis points. Null when nothing priceable settled. */
   marginBps: number | null
   atRiskSats: number
+  /**
+   * True when `atRiskSats` on this corridor is a CEILING rather than a
+   * measurement — see `SwapEconomics.atRiskUpperBound`. Carried on the row so a
+   * caller reading this API programmatically is told, rather than having to
+   * find it in the docs.
+   */
+  atRiskUpperBound: boolean
   medianDurationSeconds: number | null
   p90DurationSeconds: number | null
   /**
@@ -183,6 +190,8 @@ export interface LedgerSummary {
    * able to trust.
    */
   atRiskUnknownCount: number
+  /** True when ANY corridor in the window reports its at-risk figure as a ceiling. */
+  atRiskUpperBound: boolean
   /** Rows still open at the end of the window — money committed, outcome unknown. */
   openCount: number
 }
@@ -245,6 +254,7 @@ export const summarise = (records: readonly SwapEconomics[], since: number, unti
   let pricedCount = 0
   let openCount = 0
   let atRiskUnknownCount = 0
+  let atRiskUpperBound = false
 
   for (const record of records) {
     if (record.realized) realizedCount += 1
@@ -252,6 +262,7 @@ export const summarise = (records: readonly SwapEconomics[], since: number, unti
     if (record.phase === 'open' || record.phase === 'exposed') openCount += 1
     atRiskSats += record.atRiskSats ?? 0
     if (record.atRiskUnknown) atRiskUnknownCount += 1
+    if (record.atRiskUpperBound) atRiskUpperBound = true
     if (!priced(record)) continue
     pricedCount += 1
     grossSats += record.grossSats ?? 0
@@ -274,6 +285,7 @@ export const summarise = (records: readonly SwapEconomics[], since: number, unti
     // of it.
     unpricedCount: realizedCount - pricedCount,
     atRiskUnknownCount,
+    atRiskUpperBound,
     openCount,
   }
 }
@@ -375,6 +387,7 @@ export const byCorridor = (records: readonly SwapEconomics[]): CorridorBreakdown
         volumeSats,
         marginBps: marginBpsOf(grossSats, volumeSats),
         atRiskSats: group.reduce((total, record) => total + (record.atRiskSats ?? 0), 0),
+        atRiskUpperBound: group.some((record) => record.atRiskUpperBound),
         medianDurationSeconds: percentile(durations, 0.5),
         p90DurationSeconds: percentile(durations, 0.9),
         crossAsset: group.some((r) => r.inbound.assetId !== r.outbound.assetId),
@@ -443,19 +456,30 @@ export const byFxLeg = (records: readonly SwapEconomics[]): FxLeg[] => {
       // Weighted by the inbound leg so a large fill moves the benchmark more
       // than a dust one — an unweighted mean lets a handful of tiny swaps set
       // the line every real trade is then judged against.
-      let weight = 0
-      let weighted = 0
+      //
+      // SUMMED AS BIGINT, then divided ONCE. The weighted mean is
+      // `Σ(rateᵢ · denᵢ) / Σ(denᵢ)`, and `rateᵢ · denᵢ` is just `numᵢ` — so the
+      // whole thing collapses to `Σnum / Σden`, which is exact until the final
+      // division. Accumulating in a float instead loses the benchmark's
+      // precision on 18-decimal tokens, where $100k of notional is ~10^23
+      // atomic units against a safe-integer ceiling of ~9·10^15: every drift
+      // figure on the chart is then measured against a mean that has drifted
+      // itself. A deployment serving both USDC (6dp) and DAI (18dp) hits this
+      // at ordinary trade sizes, not exotic ones.
+      let weight = 0n
+      let weighted = 0n
       const rated = rows.map((record) => {
-        const denominator = Number(record.rate?.denominator ?? '0')
-        const numerator = Number(record.rate?.numerator ?? '0')
-        const rate = denominator > 0 ? numerator / denominator : Number.NaN
-        if (Number.isFinite(rate) && denominator > 0) {
+        const denominator = BigInt(record.rate?.denominator ?? '0')
+        const numerator = BigInt(record.rate?.numerator ?? '0')
+        if (denominator > 0n) {
           weight += denominator
-          weighted += rate * denominator
+          weighted += numerator
         }
-        return { record, rate }
+        // The per-point rate stays a float: it is an SVG coordinate, and the
+        // record carries the exact ratio for anything that needs it.
+        return { record, rate: denominator > 0n ? Number(numerator) / Number(denominator) : Number.NaN }
       })
-      const meanRate = weight > 0 ? weighted / weight : null
+      const meanRate = weight > 0n ? Number(weighted) / Number(weight) : null
 
       return {
         leg,
@@ -469,7 +493,12 @@ export const byFxLeg = (records: readonly SwapEconomics[]): FxLeg[] => {
             at: record.settledAt,
             durationSeconds: record.durationSeconds,
             rate,
-            driftBps: meanRate !== null && meanRate > 0 ? Math.trunc(((meanRate - rate) / meanRate) * 10_000) : null,
+            // `+ 0` normalises the negative zero `Math.trunc` returns for a
+            // fill a hair under the benchmark. It is the same quantity, but a
+            // strict consumer comparing with `Object.is` — or a reader seeing
+            // `-0` in the JSON — would take it for a signal.
+            driftBps:
+              meanRate !== null && meanRate > 0 ? Math.trunc(((meanRate - rate) / meanRate) * 10_000) + 0 : null,
           }))
           .sort((a, b) => a.at - b.at),
       }

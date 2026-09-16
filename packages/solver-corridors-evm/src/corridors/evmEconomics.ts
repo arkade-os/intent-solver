@@ -103,6 +103,8 @@ export const evmSendEconomics = (
     quotedSpreadSats: funded ? row.amountSats - row.payoutSats : null,
     exposureSats: row.payoutSats,
     lost: row.state === LOST,
+    // This store parks every failure as `stuck`. @see LOST
+    atRiskUpperBound: true,
   })
 }
 
@@ -121,5 +123,7 @@ export const evmReceiveEconomics = (row: EvmReceiveSwapRow, descriptor: Corridor
     quotedSpreadSats: funded ? row.amountSats - row.payoutSats : null,
     exposureSats: row.payoutSats,
     lost: row.state === LOST,
+    // This store parks every failure as `stuck`. @see LOST
+    atRiskUpperBound: true,
   })
 }

@@ -2499,8 +2499,11 @@ const pnlFigures = (summary) =>
     // falsely.
     summary.atRiskSats > 0 || summary.atRiskUnknownCount > 0
       ? figure(
-          'at risk, sats',
-          summary.atRiskSats > 0 ? sats(summary.atRiskSats) : '?',
+          // `≤` when any corridor in the window reports a ceiling rather than a
+          // measurement, so the qualifier sits ON the number instead of in a
+          // footnote an operator reads once.
+          summary.atRiskUpperBound ? 'at risk, sats (at most)' : 'at risk, sats',
+          summary.atRiskSats > 0 ? `${summary.atRiskUpperBound ? '≤' : ''}${sats(summary.atRiskSats)}` : '?',
           summary.atRiskUnknownCount > 0
             ? `paid out, not recovered · ${summary.atRiskUnknownCount} more not priceable in sats`
             : 'paid out, not recovered',
@@ -2660,7 +2663,20 @@ const corridorTable = (corridors) =>
           h('td.right', sats(row.volumeSats)),
           h('td.right', String(row.realizedCount)),
           h('td.right', row.failedCount > 0 ? String(row.failedCount) : h('span.faint', '0')),
-          h('td.right', row.atRiskSats > 0 ? h('span.at-risk', sats(row.atRiskSats)) : h('span.faint', '—')),
+          h(
+            'td.right',
+            row.atRiskSats > 0
+              ? h(
+                  'span.at-risk',
+                  {
+                    title: row.atRiskUpperBound
+                      ? 'An upper bound: this corridor parks every failure as stuck, whatever its exposure.'
+                      : 'Paid out and not recovered.',
+                  },
+                  `${row.atRiskUpperBound ? '≤' : ''}${sats(row.atRiskSats)}`,
+                )
+              : h('span.faint', '—'),
+          ),
           h('td.right', duration(row.medianDurationSeconds)),
           h('td.right', duration(row.p90DurationSeconds)),
         ),

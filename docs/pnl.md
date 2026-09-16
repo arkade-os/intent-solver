@@ -98,6 +98,12 @@ outstanding and nobody can price it" render as the same reassuring zero.
 > transitions to `stuck` unconditionally, unlike the four BTC stores, which
 > route a failure by exposure. Narrowing it means changing a money path and
 > belongs in its own commit.
+>
+> **That qualifier is in the API, not only here.** `atRiskUpperBound` is on each
+> record, on every corridor row and on the summary, and the console prefixes the
+> figure with `≤`. A caller building tooling on this endpoint never reads this
+> file, and a bare number they cannot tell is a ceiling is exactly the kind of
+> figure this screen exists not to publish.
 
 ## The FX question
 
