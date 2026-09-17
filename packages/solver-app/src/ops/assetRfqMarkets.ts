@@ -165,6 +165,8 @@ export const assetCardMarketsFromPolicy = (args: {
   offerMarkets: readonly AssetMarket[]
   offerBounds: Bounds
   rfqMarkets: readonly AssetRfqMarket[]
+  /** @see Config.offerChargesDeliveredCarrier — advertised so a maker can price it. */
+  chargesDeliveredCarrier?: boolean
 }): AssetCardMarket[] =>
   assetCardMarkets(args.pricing, args.offerBounds).flatMap((market) => {
     const pricing = args.pricing.find(
@@ -179,6 +181,7 @@ export const assetCardMarketsFromPolicy = (args: {
     return [
       {
         ...market,
+        ...(servesOffers && args.chargesDeliveredCarrier === true ? { chargesDeliveredCarrier: true } : {}),
         sellBase,
         buyBase,
         sellBaseFeeFlat: sellBase && sellBase.max > 0n ? market.sellBaseFeeFlat : 0n,

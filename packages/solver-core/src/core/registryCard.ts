@@ -101,6 +101,7 @@ export interface AssetCardMarket {
   sellBase?: { min: bigint; max: bigint } | null
   /** Maker buys base, so it RECEIVES base — this bounds the BASE side. */
   buyBase?: { min: bigint; max: bigint } | null
+  chargesDeliveredCarrier?: boolean
 }
 
 /**
@@ -237,11 +238,6 @@ const assetMarketEntry = (
   if (sellBaseFeeFlat < 0n || buyBaseFeeFlat < 0n) {
     throw new Error(`${pair} flat fees must be non-negative atomic-unit amounts`)
   }
-  if (quote.max !== '0' && sellBaseFeeFlat > 0n) {
-    throw new Error(
-      `${pair} has a base-input flat fee, but the registry fee_flat field is denominated in quote-asset units`,
-    )
-  }
   if (base.max === '0' && quote.max === '0') {
     // Never stated is a different fault from deliberately closed.
     if (market.buyBase === undefined && market.sellBase === undefined) {
@@ -258,6 +254,8 @@ const assetMarketEntry = (
     quote_asset: quoteAsset,
     fee_bps: market.feeBps,
     ...(base.max !== '0' && buyBaseFeeFlat > 0n ? { fee_flat: String(buyBaseFeeFlat) } : {}),
+    // `fee_flat` is quote-denominated both ways, so this needs its own field.
+    ...(quote.max !== '0' && sellBaseFeeFlat > 0n ? { fee_flat_base: String(sellBaseFeeFlat) } : {}),
     price_feed: market.feedUrl,
     price_feed_schema: { type: 'json', price_path: market.pricePath },
     price_decimals: priceDecimals,
@@ -265,6 +263,7 @@ const assetMarketEntry = (
     max_base_amount: base.max,
     min_quote_amount: quote.min,
     max_quote_amount: quote.max,
+    ...(market.chargesDeliveredCarrier === true ? { charges_delivered_carrier: true } : {}),
   }
 }
 

@@ -390,10 +390,17 @@ describe('asset markets on the card', () => {
     expect('fee_flat' in asset).toBe(false)
   })
 
-  it('refuses an enabled base-input flat fee the card cannot denominate honestly', () => {
-    expect(() => buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeFlat: 330n })] }))).toThrow(
-      /base-input flat fee.*quote-asset/,
-    )
+  /** Refused while `fee_flat`, quote-denominated both ways, was the only field. */
+  it('publishes a base-input flat fee in base units, not converted', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeFlat: 330n })] })).markets[1]!
+    expect(asset.fee_flat_base).toBe('330')
+    expect(asset.fee_flat).toBeUndefined()
+  })
+
+  it('publishes the delivered-carrier charge, and omits it when not charging', () => {
+    const charging = buildSolverCard(inputs({ assetMarkets: [market({ chargesDeliveredCarrier: true })] })).markets[1]!
+    expect(charging.charges_delivered_carrier).toBe(true)
+    expect('charges_delivered_carrier' in buildSolverCard(inputs({ assetMarkets: [market()] })).markets[1]!).toBe(false)
   })
 
   it('publishes an unserved direction as the schema`s disabled zero', () => {
@@ -524,10 +531,10 @@ describe('markets no card can carry', () => {
     expect(omitted[0]).toContain('fee_bps')
   })
 
-  it('reports a base-input fee the registry cannot express', () => {
+  it('publishes a base-input fee rather than omitting the market', () => {
     const { publishable, omitted } = publishableAssetMarkets([market({ sellBaseFeeFlat: 330n })], 'mutinynet')
-    expect(publishable).toEqual([])
-    expect(omitted[0]).toMatch(/base-input flat fee.*quote-asset/)
+    expect(publishable).toHaveLength(1)
+    expect(omitted).toEqual([])
   })
 
   it('keeps the first of a duplicated pair and reports the second', () => {

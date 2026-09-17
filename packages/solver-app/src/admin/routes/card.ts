@@ -103,6 +103,7 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
           max: deps.services.policy.offerMaxFillAmount,
         },
         rfqMarkets: deps.services.assetRfqMarkets,
+        chargesDeliveredCarrier: deps.services.policy.offerChargesDeliveredCarrier,
       }),
       deps.services.config.network,
     )
