@@ -15,6 +15,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import {
   AssetRfqSwapService,
   type AssetRfqDeps,
@@ -58,7 +59,9 @@ const harness = async (over: Partial<AssetRfqDeps> = {}) => {
     markets: [MARKET],
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
-    carrierSats: 330n,
+    // Matches the shipped default (ASSET_CARRIER_PRICING=false); the carrier
+    // itself is pinned in test/core/assetRfq.test.ts.
+    carrierSats: 0n,
     dustSats: 330n,
     now: () => clock,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
@@ -124,7 +127,7 @@ describe('quote', () => {
     expect(outcome.swap).toMatchObject({
       state: 'quoted',
       fromAmount: 100_000_000n,
-      toAmount: 99_499_671_650n,
+      toAmount: 99_500_000_000n,
       offerAddress: 'ark1qoffer',
     })
     // Written BEFORE the client could act on it: a quote this solver has no row
@@ -155,7 +158,7 @@ describe('quote', () => {
     })
     await service.quote(request())
     expect(seen[0]).toMatchObject({
-      wantAmount: 99_499_671_650n,
+      wantAmount: 99_500_000_000n,
       wantAssetId: ASSET_A,
       offerAssetId: null,
       makerPkScript: PK_SCRIPT,
@@ -175,6 +178,14 @@ describe('quote', () => {
   ])('refuses %s as unsupported_pair', async (_why, over) => {
     const { service } = await harness()
     expect(await service.quote(request(over))).toMatchObject({ accepted: false, reason: 'unsupported_pair' })
+  })
+
+  it('nets the carrier out of the payout when the operator prices it', async () => {
+    const { service } = await harness({ carrierSats: 330n })
+    const outcome = await service.quote(request())
+    expect(outcome).toMatchObject({ accepted: true })
+    // 330 of the deposit's sats buy the carrier the asset payout rides on.
+    expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(99_499_671_650n)
   })
 
   it('quotes exact-out, binding the payout the client named', async () => {
@@ -441,5 +452,173 @@ describe('tickAll — the periodic pass', () => {
     // The second row was still visited despite the first throwing.
     expect(calls).toBe(2)
     expect(await store.listNonTerminal()).toHaveLength(2)
+  })
+})
+
+describe('the market mark', () => {
+  it('records the price the quote FIXED, not the feed it came from', async () => {
+    const { service, store } = await harness()
+    await service.quote(request())
+
+    const row = await store.get('swap-1')
+    // 1 BTC in, 99,500 USDA out at 50bps against a feed of 100,000 — carried at
+    // the feed's scale plus the headroom that keeps a coarse feed from
+    // quantising the price into nonsense.
+    expect(row.quoteImpliedScale).toBe(0 + IMPLIED_PRICE_HEADROOM)
+    expect(row.quoteImpliedMantissa).toBe(99_500n * 10n ** BigInt(IMPLIED_PRICE_HEADROOM))
+    expect(row.quoteGivesBase).toBe(true)
+    // Storing the feed instead is the tautology this replaced: the payout is
+    // derived FROM it, so the two can never disagree by more than the spread.
+    expect(row.quoteImpliedMantissa).not.toBe(100_000n)
+  })
+
+  it('reads the feed again when the fill lands, and keeps that second number', async () => {
+    let reads = 0
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      fetchPrice: async () => {
+        reads += 1
+        return reads === 1 ? { mantissa: 100_000n, scale: 0 } : { mantissa: 90_000n, scale: 0 }
+      },
+    })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(await store.get('swap-1')).toMatchObject({
+      state: 'filled',
+      quoteImpliedMantissa: 99_500n * 10n ** BigInt(IMPLIED_PRICE_HEADROOM),
+      fillPriceMantissa: 90_000n,
+      fillPriceScale: 0,
+    })
+  })
+
+  /**
+   * The property that must never regress. A price feed is a third party, and a
+   * swap whose money has already moved must not be reported as anything other
+   * than filled because that third party was unreachable.
+   *
+   * The ERROR CHANNEL is what makes this test discriminating, and the row state
+   * is not: an unguarded read throws into the fill's own catch, whose
+   * `fail(id, 'filling', …)` is a compare-and-swap that no-ops against a row
+   * already `filled`. The state therefore looks identical either way, and only
+   * the reported fault distinguishes a feed being down from a swap going wrong.
+   */
+  it('still FILLS when the feed cannot be read as the fill lands, and blames the FEED', async () => {
+    let reads = 0
+    const errors: unknown[][] = []
+    const { service, store, settled } = await harness({
+      depositAt: async () => deposit(),
+      onError: (id, error) => errors.push([id, error]),
+      fetchPrice: async () => {
+        reads += 1
+        if (reads > 1) throw new Error('the feed is down')
+        return { mantissa: 100_000n, scale: 0 }
+      },
+    })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(settled).toEqual(['swap-1'])
+    expect(await store.get('swap-1')).toMatchObject({
+      state: 'filled',
+      fillTxid: 'fa'.repeat(32),
+      // Unmeasured, never zero.
+      fillPriceMantissa: null,
+    })
+    expect(errors.map(([id]) => id)).toEqual(['price'])
+  })
+
+  /**
+   * `updated_at` is settlement time on this corridor — `assetRfqEconomics` reads
+   * it as `settledAt`, so it sets `durationSeconds`, the x-axis of the very
+   * chart the mark is plotted on. Bumping it by the feed's latency would stretch
+   * every MARKED fill's duration and only the marked ones, biasing exactly the
+   * rows being compared against each other. It also windows `ledgerRows` and is
+   * published to the client in `rfq_status`.
+   */
+  it('does not move settlement time when it records the mark', async () => {
+    let reads = 0
+    const { service, store, tick } = await harness({
+      depositAt: async () => deposit(),
+      fetchPrice: async () => {
+        reads += 1
+        // The clock advances while the feed is being read, as a real one does.
+        if (reads > 1) tick(9_999)
+        return { mantissa: 100_000n, scale: 0 }
+      },
+    })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    const row = await store.get('swap-1')
+    expect(row.fillPriceMantissa).toBe(100_000n)
+    expect(row.updatedAt).not.toBe(9_999)
+  })
+
+  it('does not mark a fill against a price of zero', async () => {
+    let reads = 0
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      fetchPrice: async () => {
+        reads += 1
+        return reads === 1 ? { mantissa: 100_000n, scale: 0 } : { mantissa: 0n, scale: 0 }
+      },
+    })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillPriceMantissa: null })
+  })
+})
+
+describe('replaceMarkets', () => {
+  it('starts quoting a market that was empty at construction', async () => {
+    const { service } = await harness({ markets: [] })
+    expect(await service.quote(request())).toMatchObject({ accepted: false, reason: 'unsupported_pair' })
+    await service.replaceMarkets([MARKET])
+    expect(await service.quote(request())).toMatchObject({ accepted: true })
+  })
+
+  it('refuses new quotes after the market is dropped, and fills the in-flight one at quoted terms', async () => {
+    const { service, store, settled } = await harness({ depositAt: async () => deposit() })
+    const quoted = await service.quote(request())
+    if (!quoted.accepted) throw new Error('expected a quote')
+    const { fromAmount, toAmount } = quoted.swap
+    await service.replaceMarkets([])
+    expect(await service.quote(request({ rfqId: 'f'.repeat(64) }))).toMatchObject({
+      accepted: false,
+      reason: 'unsupported_pair',
+    })
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    expect(settled).toEqual(['swap-1'])
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fromAmount, toAmount })
+  })
+
+  it('waits for an in-flight quote before swapping the list', async () => {
+    let release!: (price: { mantissa: bigint; scale: number }) => void
+    const blocked = new Promise<{ mantissa: bigint; scale: number }>((resolve) => {
+      release = resolve
+    })
+    const { service } = await harness({ fetchPrice: () => blocked })
+    const quoting = service.quote(request())
+    let replaced = false
+    const replacing = service.replaceMarkets([]).then(() => {
+      replaced = true
+    })
+    await Promise.resolve()
+    expect(replaced).toBe(false)
+    release({ mantissa: 100_000n, scale: 0 })
+    expect(await quoting).toMatchObject({ accepted: true })
+    await replacing
+    expect(replaced).toBe(true)
+    expect(await service.quote(request({ rfqId: 'f'.repeat(64) }))).toMatchObject({
+      accepted: false,
+      reason: 'unsupported_pair',
+    })
   })
 })

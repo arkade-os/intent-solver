@@ -134,10 +134,9 @@ export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corr
       corridors.push(evmReceiveCorridor(policy, deps.evmReceiveService, deps.evmReceiveStore))
     }
   }
-  // The atomic class, on the same rule as the EVM family: a corridor per market
-  // per DIRECTION, registered only when both the service and the store exist.
-  // No service means no market was configured, and every asset pair then
-  // refuses by name as `unsupported_pair`.
+  // A corridor per market per DIRECTION. The service is always constructed, so
+  // an empty list (no console row yet) registers nothing and every asset pair
+  // refuses by name as `unsupported_pair` until replaceMarkets feeds one in.
   if (deps.assetRfqService && deps.assetRfqStore) {
     for (const market of deps.assetRfqMarkets ?? []) {
       for (const direction of ASSET_RFQ_DIRECTIONS) {

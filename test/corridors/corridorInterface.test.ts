@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { createCorridorSet, type Corridor } from '@arkade-os/solver-core/core/corridor.js'
+import { createCorridorSet, createCorridorReaderSet, type Corridor } from '@arkade-os/solver-core/core/corridor.js'
 import { respondToRfqRequest } from '@arkade-os/solver-transport/ingress/rfq.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 
@@ -54,8 +54,39 @@ describe('createCorridorSet', () => {
     expect([...set].map((c) => c.descriptor.pair)).toEqual(['a->b', 'c->d'])
   })
 
+  it('replaces its serve list in place so a captured set sees the new pair', () => {
+    const set = createCorridorSet([stub('a->b', 'A')])
+    set.replace([stub('c->d', 'C')])
+    expect(set.get('a->b')).toBeUndefined()
+    expect(set.get('c->d')?.descriptor.envStem).toBe('C')
+    expect([...set].map((c) => c.descriptor.pair)).toEqual(['c->d'])
+  })
+
+  it('leaves the previous list in force when replace refuses a collision', () => {
+    const set = createCorridorSet([stub('a->b', 'A')])
+    expect(() => set.replace([stub('x->y', 'X'), stub('x->y', 'Y')])).toThrow(/duplicate corridor pair/)
+    expect(set.get('a->b')?.descriptor.envStem).toBe('A')
+    expect(set.size).toBe(1)
+  })
+
   it('reports how many corridors it holds', () => {
     expect(createCorridorSet([stub('a->b', 'A'), stub('c->d', 'C')]).size).toBe(2)
+  })
+})
+
+describe('createCorridorReaderSet', () => {
+  it('replaces its serve list in place so a captured set sees the new pair', () => {
+    const set = createCorridorReaderSet([stub('a->b', 'A')])
+    set.replace([stub('c->d', 'C')])
+    expect(set.get('a->b')).toBeUndefined()
+    expect(set.get('c->d')?.descriptor.envStem).toBe('C')
+  })
+
+  it('leaves the previous list in force when replace refuses a collision', () => {
+    const set = createCorridorReaderSet([stub('a->b', 'A')])
+    expect(() => set.replace([stub('x->y', 'X'), stub('x->y', 'Y')])).toThrow(/duplicate corridor pair/)
+    expect(set.get('a->b')?.descriptor.envStem).toBe('A')
+    expect(set.size).toBe(1)
   })
 })
 

@@ -624,3 +624,157 @@ tr.note td {
   font: inherit;
   padding: 0.3rem 0.5rem;
 }
+
+/*
+ * Charts (static/charts.js).
+ *
+ * The `c-` prefix is not decoration: `.bar` already exists above as an HTML
+ * meter, with a CSS `height`, and SVG2 makes `height` a CSS-settable geometry
+ * property on a <rect>. An unprefixed `.bar` in a chart would therefore be
+ * silently resized by a rule written for something else entirely.
+ *
+ * COLOUR IS RESERVED FOR RISK here as everywhere: the profit line, its fill and
+ * every ordinary mark are greyscale, and the only two saturated things are a
+ * loss (--failed) and sats at risk (--exposed). No token is introduced and no
+ * new foreground/background pair is composed, so test/admin/contrast.test.ts's
+ * declared list is unchanged — the marks below are strokes and fills, never
+ * text on a coloured ground.
+ */
+
+.c-chart {
+  display: block;
+  width: 100%;
+  /* With a viewBox set, `height: auto` keeps the box at the viewBox's own
+     aspect ratio — which is also why `preserveAspectRatio` never comes into
+     play and nothing is ever stretched. */
+  height: auto;
+  /* Inherited rather than assumed: the axis labels are set inside the viewBox
+     and must match the console's face, not the browser's SVG default. */
+  font-family: var(--mono);
+}
+
+.c-line {
+  fill: none;
+  stroke: var(--text);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.c-area {
+  fill: var(--text);
+  opacity: 0.09;
+  stroke: none;
+}
+
+.c-area.c-loss {
+  fill: var(--failed);
+  opacity: 0.18;
+}
+
+.c-grid {
+  stroke: var(--line);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.c-grid.c-zero {
+  stroke: var(--line-strong);
+}
+
+.c-axis,
+.c-cat {
+  fill: var(--text-dim);
+  font-size: 10px;
+}
+
+.c-cat {
+  dominant-baseline: middle;
+}
+
+.c-bar {
+  fill: var(--text-faint);
+}
+
+.c-bar.c-loss {
+  fill: var(--failed);
+}
+
+.c-bar.c-risk {
+  fill: var(--exposed);
+}
+
+.c-dot {
+  fill: var(--text-dim);
+}
+
+.c-dot.c-loss {
+  fill: var(--failed);
+}
+
+/* The caveat under every total. Not a footnote — it decides what the number means. */
+.basis {
+  border-left: 2px solid var(--exposed);
+  padding: 0.3rem 0 0.3rem 0.75rem;
+  margin: 0 0 0.75rem;
+  color: var(--text-dim);
+  font-family: var(--sans);
+}
+
+/* The headline figures. Tabular so the digits line up between refreshes. */
+.figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.figure {
+  min-width: 8rem;
+}
+
+.figure b {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.figure b.c-loss {
+  color: var(--failed);
+}
+
+.figure b.c-risk {
+  color: var(--exposed);
+}
+
+.figure span {
+  color: var(--text-dim);
+  font-size: 0.85em;
+}
+
+/*
+ * `.figure span` above is 0-1-1 and beats `.faint` at 0-1-0, so without this
+ * the note under a headline rendered in the SAME colour as its label and the
+ * hierarchy the two-part caption exists for collapsed. Restated at equal
+ * specificity rather than by reordering, which would break again on the next
+ * rule added above it.
+ */
+.figure span.faint {
+  color: var(--text-faint);
+}
+
+/*
+ * Sats outstanding, in a table.
+ *
+ * `.at-risk` was only ever styled inside `.status` and as a meter fill, so a
+ * bare `span.at-risk` in a table body rendered in `--text` — the console's one
+ * design rule, COLOUR IS RESERVED FOR RISK, silently not applied on the panel
+ * whose subject is risk. Scoped to a panel because that is where these tables
+ * live, and `--exposed` on `--raised` is now a declared pair in
+ * `test/admin/contrast.test.ts`, which is what saying "this combination
+ * renders" means here.
+ */
+.panel .at-risk {
+  color: var(--exposed);
+}

@@ -233,15 +233,7 @@ describe('assetMarketPolicy', () => {
     })
   })
 
-  /**
-   * The reason both lists come out of one function.
-   *
-   * `AssetOfferService` reads an empty `pricing` as "not opted into price
-   * gating" and fills at any price, while an empty `markets` refuses
-   * everything. A disabled market that left one list but not the other would
-   * turn the gate off; this pins that it leaves both.
-   */
-  it('drops a disabled market from BOTH lists, so disabling cannot switch the price gate off', () => {
+  it('drops a disabled market from BOTH lists, keeping admission and pricing aligned', () => {
     const { pairs, pricing } = assetMarketPolicy([market({ enabled: false })])
     expect(pairs).toEqual([])
     expect(pricing).toEqual([])

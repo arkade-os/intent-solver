@@ -723,6 +723,47 @@ describe('tick: the full drive', () => {
     ])
   })
 
+  /**
+   * The realized routing fee, captured off the poll.
+   *
+   * `quotedRoutingFeeSats` beside it is the budget this swap was priced
+   * against; this is what came off the balance. Until this column existed the
+   * solver knew what it quoted to keep and never what it kept, which is why the
+   * P&L screen had to report every figure as gross.
+   */
+  it('records what routing actually cost, when the backend reports it', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    const swap = outcome.swap
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE, feePaidSats: 137 })
+
+    const row = await service.tick(swap.id)
+    expect(row.routingFeePaidSats).toBe(137)
+  })
+
+  it('leaves the fee NULL when the backend reports none — unmeasured, never free', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    const swap = outcome.swap
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE })
+
+    const row = await service.tick(swap.id)
+    expect(row.routingFeePaidSats).toBeNull()
+  })
+
+  it('keeps a zero fee as zero, which is not the same as never having been told', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    const swap = outcome.swap
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE, feePaidSats: 0 })
+
+    const row = await service.tick(swap.id)
+    expect(row.routingFeePaidSats).toBe(0)
+  })
+
   it('claims once the preimage is known, in the same tick', async () => {
     const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
     if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
@@ -737,6 +778,39 @@ describe('tick: the full drive', () => {
     expect(row.preimage).toBe(FORGED_PREIMAGE)
     expect(arkade.claimCalls).toHaveLength(1)
     expect(arkade.claimCalls[0]?.outputs).toHaveLength(1)
+  })
+
+  /**
+   * The FAST path's fee, which the polled capture cannot see.
+   *
+   * A payment that settles inside `payInvoice` is claimed straight from the
+   * preimage it returned and never reaches `getPayment` — the test below this
+   * one pins that, with an empty payments map so a re-fetch would fail rather
+   * than pass quietly. `ln.payments` is left empty here for the same reason: if
+   * this fee could only arrive by polling, this test would throw instead of
+   * recording it.
+   */
+  it('records the routing fee from a payment that settled inside payInvoice', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payResult = { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE, feePaidSats: 91 }
+
+    const row = await service.tick(outcome.swap.id)
+
+    expect(row.state).toBe('claimed')
+    expect(row.routingFeePaidSats).toBe(91)
+    expect(ln.getPaymentCalls).toEqual([])
+  })
+
+  it('leaves the fee null when a fast settlement reported none', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payResult = { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE }
+
+    const row = await service.tick(outcome.swap.id)
+    expect(row.routingFeePaidSats).toBeNull()
   })
 
   it('claims from the preimage payInvoice already returned, with no getPayment round trip', async () => {
