@@ -134,6 +134,32 @@ export interface SwapEconomics {
    * Null on every corridor that records no such figure.
    */
   readonly quotedCostSats: number | null
+  /**
+   * What executing this swap ACTUALLY cost, in sats, where the rail reported it.
+   *
+   * The figure this whole screen was missing. `quotedCostSats` beside it is the
+   * budget; this is the bill. Today only the Lightning send leg can source one
+   * — `PaymentResult.feePaidSats`, from the backend, on a settled payment — and
+   * every other rail reports null because no port in this service returns a
+   * realized fee: `OnchainTxOutcome` is a status word and `fund()` answers
+   * `{txid, vout}`.
+   *
+   * NULL IS UNMEASURED, NEVER FREE, and the distinction decides whether
+   * {@link SwapEconomics.netSats} exists at all. A swap whose cost nobody
+   * recorded must not be netted to look like one that cost nothing.
+   */
+  readonly realizedCostSats: number | null
+  /**
+   * `grossSats - realizedCostSats` — WHAT THE SOLVER ACTUALLY KEPT.
+   *
+   * The bottom line, and null unless BOTH halves are known. A net figure
+   * derived from a missing cost is just the gross wearing a different label,
+   * which is the single most misleading thing this screen could publish: the
+   * whole reason the gross caveat is stated three times is that someone will
+   * otherwise read gross AS net. So the field is absent rather than
+   * approximated, and the aggregate counts how much of the book it covers.
+   */
+  readonly netSats: number | null
   /** @see the note where this is assigned — a loss that cannot be priced in sats. */
   readonly atRiskUnknown: boolean
   /**
@@ -239,6 +265,8 @@ export const economicsOf = (parts: {
   exposureSats?: number | null
   /** @see SwapEconomics.quotedCostSats */
   quotedCostSats?: number | null
+  /** @see SwapEconomics.realizedCostSats */
+  realizedCostSats?: number | null
   /** @see SwapEconomics.atRiskUpperBound */
   atRiskUpperBound?: boolean
   /** True only for a TERMINAL row that was exposed — see {@link SwapEconomics.atRiskSats}. */
@@ -256,6 +284,13 @@ export const economicsOf = (parts: {
 
   const atRisk =
     parts.lost === true ? (parts.exposureSats ?? (outbound.assetId === null ? outboundAmount : null)) : null
+
+  // Only on a swap that DELIVERED. A cost recorded against a failed payment
+  // would be netted out of a spread that was never earned, turning a refund
+  // into a loss on the screen; and a swap still in flight has not finished
+  // paying for itself. Both are null rather than zero, so neither is mistaken
+  // for a swap that executed for free.
+  const realizedCostSats = parts.phase === 'done' ? (parts.realizedCostSats ?? null) : null
 
   return {
     id: parts.id,
@@ -296,5 +331,10 @@ export const economicsOf = (parts: {
     // Only meaningful where there IS an at-risk figure to qualify.
     atRiskUpperBound: parts.atRiskUpperBound === true && atRisk !== null,
     quotedCostSats: parts.quotedCostSats ?? null,
+    realizedCostSats,
+    // Both halves or nothing. A realized cost on a swap with no priceable
+    // spread nets to nothing meaningful, and a spread with no cost is the gross
+    // figure this field exists to be distinguishable from.
+    netSats: grossSats === null || realizedCostSats === null ? null : grossSats - realizedCostSats,
   }
 }

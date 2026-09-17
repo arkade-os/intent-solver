@@ -78,6 +78,14 @@ export interface SeriesPoint {
   grossSats: number
   /** Running total of `grossSats` from the start of the window. */
   cumulativeGrossSats: number
+  /** Realized execution cost in this bucket, over the rows that reported one. */
+  realizedCostSats: number
+  /** `grossSats - realizedCostSats` over this bucket's costed rows, or null when it has none. */
+  netSats: number | null
+  /** Running total of `netSats`, treating an uncosted bucket as contributing nothing. */
+  cumulativeNetSats: number
+  /** Rows in this bucket that carried a realized cost. */
+  costedCount: number
   /** Inbound notional of the priced rows — the volume the margin is a margin OF. */
   volumeSats: number
   /** Sats known to be gone: the payout of a terminal exposed row. */
@@ -94,6 +102,14 @@ export interface CorridorBreakdown {
   volumeSats: number
   /** Volume-weighted margin, basis points. Null when nothing priceable settled. */
   marginBps: number | null
+  /** @see LedgerSummary.realizedCostSats */
+  realizedCostSats: number
+  /** @see LedgerSummary.netSats */
+  netSats: number | null
+  /** @see LedgerSummary.costedCount */
+  costedCount: number
+  /** Volume-weighted NET margin, basis points, over the costed rows alone. */
+  netMarginBps: number | null
   atRiskSats: number
   /**
    * True when `atRiskSats` on this corridor is a CEILING rather than a
@@ -177,6 +193,31 @@ export interface LedgerSummary {
   grossSats: number
   volumeSats: number
   marginBps: number | null
+  /**
+   * Realized execution cost over the rows that reported one — chain and routing
+   * fees actually paid. NOT the whole window's cost: see `costedCount`.
+   */
+  realizedCostSats: number
+  /**
+   * `grossSats - realizedCostSats`, over the rows where BOTH are known — the
+   * bottom line.
+   *
+   * Null when no row in the window could be netted, which is the honest answer
+   * on a deployment whose rails report no cost at all. Never falls back to the
+   * gross figure: the entire point of this field is to be distinguishable from
+   * it.
+   */
+  netSats: number | null
+  /** Priced rows that also carried a realized cost — how much of the book `netSats` covers. */
+  costedCount: number
+  /**
+   * Volume-weighted NET margin in basis points, over the costed rows ALONE.
+   *
+   * Deliberately not `netSats` over the whole window's volume: mixing a cost
+   * drawn from part of the book with a denominator drawn from all of it
+   * overstates the margin by exactly the share that reports no cost.
+   */
+  netMarginBps: number | null
   atRiskSats: number
   /** Rows in the window this layer could not price, and therefore left out of every total. */
   unpricedCount: number
@@ -223,6 +264,15 @@ const marginBpsOf = (grossSats: number, volumeSats: number): number | null =>
 const priced = (record: SwapEconomics): boolean => record.realized && record.grossSats !== null
 
 /**
+ * A record that can be NETTED: priced, and the rail told us what it cost.
+ *
+ * Strictly narrower than {@link priced}, and every net figure is reported
+ * alongside the count of rows that satisfied this — because on a deployment
+ * whose rails report no cost, "net" would otherwise silently equal "gross".
+ */
+const costed = (record: SwapEconomics): boolean => priced(record) && record.realizedCostSats !== null
+
+/**
  * The sats size of a trade — THE DENOMINATOR every margin is a margin of.
  *
  * Takes whichever leg is actually sats, not the inbound one. Reading the
@@ -255,6 +305,10 @@ export const summarise = (records: readonly SwapEconomics[], since: number, unti
   let openCount = 0
   let atRiskUnknownCount = 0
   let atRiskUpperBound = false
+  let realizedCostSats = 0
+  let costedGrossSats = 0
+  let costedVolumeSats = 0
+  let costedCount = 0
 
   for (const record of records) {
     if (record.realized) realizedCount += 1
@@ -267,6 +321,15 @@ export const summarise = (records: readonly SwapEconomics[], since: number, unti
     pricedCount += 1
     grossSats += record.grossSats ?? 0
     volumeSats += notionalSats(record)
+    if (!costed(record)) continue
+    costedCount += 1
+    realizedCostSats += record.realizedCostSats ?? 0
+    // The gross and volume OF THE COSTED ROWS ALONE. Netting the window's whole
+    // gross against a cost drawn from part of it would overstate the margin by
+    // however much of the book reports no cost — which on a mixed deployment is
+    // most of it.
+    costedGrossSats += record.grossSats ?? 0
+    costedVolumeSats += notionalSats(record)
   }
 
   return {
@@ -279,6 +342,10 @@ export const summarise = (records: readonly SwapEconomics[], since: number, unti
     grossSats,
     volumeSats,
     marginBps: marginBpsOf(grossSats, volumeSats),
+    realizedCostSats,
+    netSats: costedCount === 0 ? null : costedGrossSats - realizedCostSats,
+    costedCount,
+    netMarginBps: costedCount === 0 ? null : marginBpsOf(costedGrossSats - realizedCostSats, costedVolumeSats),
     atRiskSats,
     // Realized but unpriceable — a cross-asset fill, mostly. Reported so the
     // headline total can be read as covering part of the book rather than all
@@ -329,6 +396,10 @@ export const series = (
       pricedCount: 0,
       grossSats: 0,
       cumulativeGrossSats: 0,
+      realizedCostSats: 0,
+      netSats: null,
+      cumulativeNetSats: 0,
+      costedCount: 0,
       volumeSats: 0,
       atRiskSats: 0,
     })
@@ -352,13 +423,26 @@ export const series = (
     bucket.pricedCount += 1
     bucket.grossSats += record.grossSats ?? 0
     bucket.volumeSats += notionalSats(record)
+    if (!costed(record)) continue
+    bucket.costedCount += 1
+    bucket.realizedCostSats += record.realizedCostSats ?? 0
+    // Accumulated on the bucket's COSTED rows only, for the reason `summarise`
+    // gives: a bucket's whole gross netted against a partial cost is not a net.
+    bucket.netSats = (bucket.netSats ?? 0) + (record.grossSats ?? 0) - (record.realizedCostSats ?? 0)
   }
 
   let running = 0
+  let runningNet = 0
   const ordered = [...points.values()].sort((a, b) => a.at - b.at)
   for (const point of ordered) {
     running += point.grossSats
     point.cumulativeGrossSats = running
+    // A bucket with nothing costed contributes nothing and the line holds flat,
+    // rather than breaking. The cumulative NET is therefore only comparable to
+    // the cumulative gross where `costedCount` tracks `pricedCount` — which is
+    // why both counts are on every point.
+    runningNet += point.netSats ?? 0
+    point.cumulativeNetSats = runningNet
   }
   return ordered
 }
@@ -376,6 +460,13 @@ export const byCorridor = (records: readonly SwapEconomics[]): CorridorBreakdown
       const pricedRows = group.filter(priced)
       const grossSats = pricedRows.reduce((total, record) => total + (record.grossSats ?? 0), 0)
       const volumeSats = pricedRows.reduce((total, record) => total + notionalSats(record), 0)
+      // Costed rows carry their own gross and volume, for the reason `summarise`
+      // states: netting a whole corridor's gross against a cost drawn from part
+      // of it overstates the margin by the uncosted share.
+      const costedRows = group.filter(costed)
+      const costedGross = costedRows.reduce((total, record) => total + (record.grossSats ?? 0), 0)
+      const costedVolume = costedRows.reduce((total, record) => total + notionalSats(record), 0)
+      const realizedCostSats = costedRows.reduce((total, record) => total + (record.realizedCostSats ?? 0), 0)
       const durations = sortedNumbers(group.filter((r) => r.realized).map((r) => r.durationSeconds))
       return {
         corridor,
@@ -386,6 +477,10 @@ export const byCorridor = (records: readonly SwapEconomics[]): CorridorBreakdown
         grossSats,
         volumeSats,
         marginBps: marginBpsOf(grossSats, volumeSats),
+        realizedCostSats,
+        netSats: costedRows.length === 0 ? null : costedGross - realizedCostSats,
+        costedCount: costedRows.length,
+        netMarginBps: costedRows.length === 0 ? null : marginBpsOf(costedGross - realizedCostSats, costedVolume),
         atRiskSats: group.reduce((total, record) => total + (record.atRiskSats ?? 0), 0),
         atRiskUpperBound: group.some((record) => record.atRiskUpperBound),
         medianDurationSeconds: percentile(durations, 0.5),

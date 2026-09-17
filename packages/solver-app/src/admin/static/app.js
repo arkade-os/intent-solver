@@ -2490,6 +2490,18 @@ const pnlFigures = (summary) =>
       summary.grossSats < 0 ? 'c-loss' : null,
     ),
     figure('margin', bps(summary.marginBps), `on ${sats(summary.volumeSats)} sat volume`),
+    // NET, and only where a rail actually reported what execution cost. Shown
+    // beside the gross rather than instead of it, with the covered count on the
+    // label: a net figure that silently covers a third of the book, standing
+    // where the gross used to, is the one misreading this screen must prevent.
+    summary.costedCount > 0
+      ? figure(
+          'net, sats',
+          signedSats(summary.netSats),
+          `after ${sats(summary.realizedCostSats)} sat cost · ${summary.costedCount} of ${summary.pricedCount} priced`,
+          summary.netSats !== null && summary.netSats < 0 ? 'c-loss' : null,
+        )
+      : figure('net', 'unknown', 'no rail reported an execution cost'),
     // Only rendered when non-zero. A permanent "0 at risk" is a position the
     // eye learns to skip, which is exactly where this number needs to be seen —
     // the same rule the status bar's stuck count follows.
@@ -2521,10 +2533,11 @@ const pnlFigures = (summary) =>
 const pnlBasis = (coverage) =>
   h(
     'p.basis',
-    h('b', 'These are GROSS figures. '),
-    'No corridor records what execution actually cost, so chain fees and routing fees are missing from every ' +
-      'total here rather than deducted from it. A corridor quoting 30bp into a fee market that took 40 shows a ' +
-      'profit on this screen and lost money in fact.',
+    h('b', coverage.basis === 'mixed' ? 'These figures are PART net, part gross. ' : 'These are GROSS figures. '),
+    coverage.note ??
+      'No corridor records what execution actually cost, so chain fees and routing fees are missing from every ' +
+        'total here rather than deducted from it.',
+    ' A corridor whose cost is unreported shows a profit here even where a fee market took more than its spread.',
     coverage.unmeasured.length > 0
       ? h(
           'span',
@@ -2643,6 +2656,7 @@ const corridorTable = (corridors) =>
         'tr',
         h('th', 'corridor'),
         h('th.right', 'gross'),
+        h('th.right', 'net'),
         h('th.right', 'margin'),
         h('th.right', 'volume'),
         h('th.right', 'settled'),
@@ -2659,6 +2673,16 @@ const corridorTable = (corridors) =>
           'tr',
           h('td.mono', row.corridor, row.crossAsset ? h('span.faint', ' fx') : null),
           h('td.right', row.pricedCount === 0 ? h('span.faint', '—') : signedSats(row.grossSats)),
+          h(
+            'td.right',
+            row.costedCount === 0
+              ? h('span.faint', { title: 'This rail reports no execution cost, so it cannot be netted.' }, '—')
+              : h(
+                  'span',
+                  { title: `after ${row.realizedCostSats.toLocaleString('en-US')} sats of realized cost` },
+                  signedSats(row.netSats),
+                ),
+          ),
           h('td.right', bps(row.marginBps)),
           h('td.right', sats(row.volumeSats)),
           h('td.right', String(row.realizedCount)),

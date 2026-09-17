@@ -122,6 +122,12 @@ export const sendEconomics = (row: SendSwapRow): SwapEconomics => {
     // used as `maxFeeSats`, never the fee actually paid. Reported beside the
     // spread and never subtracted from it. @see SwapEconomics.quotedCostSats
     quotedCostSats: row.quotedRoutingFeeSats,
+    // The bill, beside the budget. This is the only corridor in the service
+    // that can report one: its backend answers with the routing fee actually
+    // paid once a payment settles, and no other port returns a realized cost at
+    // all. Null on rows predating the column and on any backend that does not
+    // report a fee — unmeasured, never free. @see SwapEconomics.realizedCostSats
+    realizedCostSats: row.routingFeePaidSats,
     lost: row.state === LOST,
   })
 }

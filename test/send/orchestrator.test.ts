@@ -723,6 +723,47 @@ describe('tick: the full drive', () => {
     ])
   })
 
+  /**
+   * The realized routing fee, captured off the poll.
+   *
+   * `quotedRoutingFeeSats` beside it is the budget this swap was priced
+   * against; this is what came off the balance. Until this column existed the
+   * solver knew what it quoted to keep and never what it kept, which is why the
+   * P&L screen had to report every figure as gross.
+   */
+  it('records what routing actually cost, when the backend reports it', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    const swap = outcome.swap
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE, feePaidSats: 137 })
+
+    const row = await service.tick(swap.id)
+    expect(row.routingFeePaidSats).toBe(137)
+  })
+
+  it('leaves the fee NULL when the backend reports none — unmeasured, never free', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    const swap = outcome.swap
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE })
+
+    const row = await service.tick(swap.id)
+    expect(row.routingFeePaidSats).toBeNull()
+  })
+
+  it('keeps a zero fee as zero, which is not the same as never having been told', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    const swap = outcome.swap
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE, feePaidSats: 0 })
+
+    const row = await service.tick(swap.id)
+    expect(row.routingFeePaidSats).toBe(0)
+  })
+
   it('claims once the preimage is known, in the same tick', async () => {
     const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
     if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)

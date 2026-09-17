@@ -1633,6 +1633,20 @@ export class SendSwapService {
     if (polled.failureReason !== undefined && polled.failureReason !== row.paymentFailureReason) {
       await store.patch(row.id, { payment_failure_reason: polled.failureReason })
     }
+    // What routing ACTUALLY cost, recorded the moment the backend will say.
+    // The only realized execution cost this service has: `quotedRoutingFeeSats`
+    // beside it is the budget the swap was priced against, and the gap between
+    // the two is the difference between a corridor that made money and one that
+    // looked like it did.
+    //
+    // Same only-on-change rule as the two patches above, for the same reason —
+    // this poll runs every tick and the figure lands once. Undefined is left
+    // alone rather than written as null: a backend that does not report a fee
+    // has not told us the payment was free, and overwriting a fee we already
+    // captured with a null on a later poll would lose it.
+    if (polled.feePaidSats !== undefined && polled.feePaidSats !== row.routingFeePaidSats) {
+      await store.patch(row.id, { routing_fee_paid_sats: polled.feePaidSats })
+    }
     if (polled.status === 'failed') {
       // The self-payment exception applies to the polled failure exactly as to
       // the immediate one: from either non-terminal payment state, "failed"
