@@ -34,7 +34,14 @@ import { Address } from '@scure/btc-signer'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { requireLn, requireOnchain } from './rails.js'
 import type { Services } from './services.js'
-import type { FundBalance, FundDeposit, FundSettlement, FundSource, FundWithdrawal } from './fundSources.js'
+import {
+  parseWholeSats,
+  type FundBalance,
+  type FundDeposit,
+  type FundSettlement,
+  type FundSource,
+  type FundWithdrawal,
+} from './fundSources.js'
 
 export const RAIL_FUND_SOURCE_ID = 'rail'
 
@@ -272,14 +279,7 @@ const railWithdraw = async (
   const { address } = params
   const network = services.config.network
 
-  const amountSats = Number(params.amount)
-  // Round-tripped, not merely coerced: `Number('1e3')` is 1000 and
-  // `Number(' 12 ')` is 12, so a lenient parse would accept strings an operator
-  // did not mean as sat counts, and a 256-bit quantity would silently lose
-  // precision.
-  if (!Number.isSafeInteger(amountSats) || amountSats <= 0 || String(amountSats) !== params.amount.trim()) {
-    throw new Error(`amount must be a whole positive number of sats, got ${JSON.stringify(params.amount)}`)
-  }
+  const amountSats = parseWholeSats(params.amount)
   try {
     Address(ONCHAIN_NETWORKS[network]).decode(address)
   } catch {

@@ -399,7 +399,7 @@ alike — any amount is accepted and you choose at pay time.
 | source            | balance split                                          | deposit options                                     | settle                      | withdraw |
 | ----------------- | ------------------------------------------------------ | --------------------------------------------------- | --------------------------- | -------- |
 | `rail` (BTC rail) | channel out/in, onchain confirmed/unconfirmed, fee rate | invoice (if the backend mints one), onchain address | if the backend has the step | yes      |
-| `arkade` (float)  | available, boarding, recoverable, total                 | Arkade address, boarding address                    | no — use `float-lifecycle`  | no       |
+| `arkade` (float)  | available, boarding, recoverable, total                 | Arkade address, boarding address                    | no — use `float-lifecycle`  | yes — Arkade address (offchain) or bitcoin address (collaborative exit) |
 
 The rail's invoice comes from `LightningBackend.createInvoice`, itself optional —
 a backend without it keeps its onchain option rather than losing both. The same
@@ -415,11 +415,16 @@ enforces. The console renders the time remaining and replaces it with a banner
 once it has passed; press the button again for a fresh one.
 
 `rail` is absent entirely on a deployment with no `LN_BACKEND`, the same way the
-four BTC corridors are. `arkade` declines to settle or withdraw on purpose:
-settling boarded sats is `float-lifecycle`'s job (it carries the CLTV guard, and
-a bare `settle()` would merge the whole float into one coin), and paying an
-arbitrary address out of the float would spend coins outside the process-local
-reservation ledger.
+four BTC corridors are. `arkade` declines to settle on purpose: settling boarded
+sats is `float-lifecycle`'s job (it carries the CLTV guard, and a bare
+`settle()` would merge the whole float into one coin). It does withdraw, and the
+destination's form picks the rail — an Arkade address is paid offchain at once,
+a bitcoin address by collaborative exit at the server's next batch. Either way
+the coins are selected in-process, filtered against the reservation ledger and
+pinned for the spend, because the SDK's own selection cannot be told "not that
+one" and could take a coin out from under an in-flight lockup funding. The
+destination receives exactly the typed amount; the exit's intent fees come out
+of the change back to the float.
 
 **Nothing here opens Lightning channels.** Neither port has a channel primitive,
 so a rail deposit lands in its onchain wallet and whether it becomes inbound or
@@ -432,10 +437,11 @@ the entrypoint — same shape and same reasoning as `registerLightningRail`.
 by a swap, which is why it is confirmed with the destination address rather than
 a fixed word: a literal becomes muscle memory, and a confirmation that differs
 per request cannot. The source then applies its own checks before touching a
-backend — the rail decodes the address against this deployment's network (the
-one mistake retyping cannot catch, since an operator confirming a wrong-chain
-address types the same wrong string twice) and refuses an amount above the
-**confirmed** balance. It is **not safe to repeat**: nothing persists or
+backend — each decodes the address against this deployment's network (the one
+mistake retyping cannot catch, since an operator confirming a wrong-chain
+address types the same wrong string twice), the rail refuses an amount above the
+**confirmed** balance, and the float refuses one above the **available** one or
+its unreserved coins. It is **not safe to repeat**: nothing persists or
 re-drives it, so each attempt is a separate payment and a withdrawal that timed
 out must be checked against the chain before retrying.
 
