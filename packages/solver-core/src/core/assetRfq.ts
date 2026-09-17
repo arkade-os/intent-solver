@@ -97,7 +97,6 @@ export interface AssetQuoteMarket {
   quoteDecimals: number
   /** The solver's margin, taken out of the payout. */
   feeBps: number
-  /** Per-direction margin, each defaulting to `feeBps`, so unset is symmetric. */
   sellBaseFeeBps?: number
   buyBaseFeeBps?: number
   /** Atomic units of the base input, charged when the client sells base. */

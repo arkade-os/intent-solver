@@ -51,7 +51,6 @@ describe('a spread per direction', () => {
   it('refuses on the widened side and leaves the other alone', () => {
     expect(sell(100_000)).toBe(true)
     expect(sell(100_000, { sellBaseFeeBps: 900 })).toBe(false)
-    // Widening the OTHER direction must not reach this one.
     expect(sell(100_000, { buyBaseFeeBps: 900 })).toBe(true)
   })
 

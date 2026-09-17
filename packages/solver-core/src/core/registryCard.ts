@@ -193,16 +193,18 @@ const cardAmounts = (label: string, bound?: { min: bigint; max: bigint } | null)
 /** Order-free, so one pair cannot be published twice with its legs swapped. */
 const legPairKey = (market: AssetCardMarket): string => [market.base ?? 'btc', market.quote ?? 'btc'].sort().join('/')
 
-/** Keyed by the side DEPOSITED. A term equal to `fee_bps` is left out, so a
- * symmetric market publishes the card it did before directional spreads. */
 interface SolverFeeSide {
   flat: bigint
   bps: number
 }
 
-const solverFeeField = (base: SolverFeeSide, quote: SolverFeeSide, feeBps: number): Record<string, unknown> => {
+/** Keyed by the side DEPOSITED. When the spreads differ BOTH are stated, even
+ * the one equal to `fee_bps`: the registry requires `fee_bps` to equal the widest
+ * spread declared, so stating only the narrower gets the card refused. */
+const solverFeeField = (base: SolverFeeSide, quote: SolverFeeSide): Record<string, unknown> => {
+  const directional = base.bps !== quote.bps
   const side = (s: SolverFeeSide): Record<string, unknown> | null => {
-    const entry = { ...(s.bps !== feeBps ? { bps: s.bps } : {}), ...(s.flat > 0n ? { flat: String(s.flat) } : {}) }
+    const entry = { ...(directional ? { bps: s.bps } : {}), ...(s.flat > 0n ? { flat: String(s.flat) } : {}) }
     return Object.keys(entry).length === 0 ? null : entry
   }
   const entries = { ...(side(base) ? { base: side(base) } : {}), ...(side(quote) ? { quote: side(quote) } : {}) }
@@ -280,7 +282,6 @@ const assetMarketEntry = (
     ...solverFeeField(
       { flat: quote.max !== '0' ? sellBaseFeeFlat : 0n, bps: sellBaseFeeBps },
       { flat: base.max !== '0' ? buyBaseFeeFlat : 0n, bps: buyBaseFeeBps },
-      Math.max(sellBaseFeeBps, buyBaseFeeBps),
     ),
     price_feed: market.feedUrl,
     price_feed_schema: { type: 'json', price_path: market.pricePath },
@@ -322,6 +323,8 @@ export const assetCardMarkets = (
     // refuses an empty path its feed url cannot supply one for.
     pricePath: market.pricePath || (defaultPricePath(market.feedUrl) ?? ''),
     feeBps: market.feeBps,
+    sellBaseFeeBps: market.sellBaseFeeBps,
+    buyBaseFeeBps: market.buyBaseFeeBps,
     sellBaseFeeFlat: market.sellBaseFeeFlat,
     buyBaseFeeFlat: market.buyBaseFeeFlat,
     // Blank inherits where it can and otherwise stays blank; neither is unserved.
