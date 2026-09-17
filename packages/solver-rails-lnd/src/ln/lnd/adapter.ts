@@ -451,7 +451,12 @@ export class LndLightningBackendAdapter implements LightningBackend {
         id: result.id,
         status: 'succeeded',
         preimage: result.secret,
-        ...realizedFeeSats((result as { fee_mtokens?: string }).fee_mtokens),
+        // `result.fee_mtokens`, NOT a cast. `PayViaPaymentRequestResult` declares
+        // it top-level and required (`lightning@12.2.3`), so reading it through
+        // the vendor's own type means a rename in a future version fails the
+        // build — where a cast keeps compiling and quietly reports every
+        // payment as having cost nothing.
+        ...realizedFeeSats(result.fee_mtokens),
       }
     } catch (error) {
       const reason = rejectionReason(error)

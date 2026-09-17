@@ -780,6 +780,39 @@ describe('tick: the full drive', () => {
     expect(arkade.claimCalls[0]?.outputs).toHaveLength(1)
   })
 
+  /**
+   * The FAST path's fee, which the polled capture cannot see.
+   *
+   * A payment that settles inside `payInvoice` is claimed straight from the
+   * preimage it returned and never reaches `getPayment` — the test below this
+   * one pins that, with an empty payments map so a re-fetch would fail rather
+   * than pass quietly. `ln.payments` is left empty here for the same reason: if
+   * this fee could only arrive by polling, this test would throw instead of
+   * recording it.
+   */
+  it('records the routing fee from a payment that settled inside payInvoice', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payResult = { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE, feePaidSats: 91 }
+
+    const row = await service.tick(outcome.swap.id)
+
+    expect(row.state).toBe('claimed')
+    expect(row.routingFeePaidSats).toBe(91)
+    expect(ln.getPaymentCalls).toEqual([])
+  })
+
+  it('leaves the fee null when a fast settlement reported none', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payResult = { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE }
+
+    const row = await service.tick(outcome.swap.id)
+    expect(row.routingFeePaidSats).toBeNull()
+  })
+
   it('claims from the preimage payInvoice already returned, with no getPayment round trip', async () => {
     const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
     if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)

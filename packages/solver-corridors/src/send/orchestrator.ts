@@ -1429,6 +1429,15 @@ export class SendSwapService {
       payment_id: result.id,
       ...(this.backendName ? { payment_backend: this.backendName } : {}),
       ...(wallet ? { payment_wallet: wallet } : {}),
+      // The fee, captured HERE and not only on the poll. A payment that settles
+      // inside `payInvoice` is claimed straight from the preimage it returned
+      // and NEVER reaches `getPayment` — `test/send/orchestrator.test.ts`'s
+      // "claims from the preimage payInvoice already returned, with no
+      // getPayment round trip" pins exactly that, with an empty payments map so
+      // a re-fetch would fail the test. Capturing only on the polled path would
+      // therefore lose the routing fee for every fast route, which is most of
+      // them, while the adapter had it in hand.
+      ...(result.feePaidSats === undefined ? {} : { routing_fee_paid_sats: result.feePaidSats }),
     })
     if (result.status === 'failed') {
       // Terminal per the adapter's allowlist, and that is a stronger fact than

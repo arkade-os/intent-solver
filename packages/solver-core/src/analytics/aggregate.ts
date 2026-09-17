@@ -230,6 +230,14 @@ export interface LedgerSummary {
   /**
    * Realized execution cost over the rows that reported one — chain and routing
    * fees actually paid. NOT the whole window's cost: see `costedCount`.
+   *
+   * **ZERO when `costedCount` is zero, not null**, and it is the one figure here
+   * that breaks the null-means-unknown convention. It is a SUM: the sum over no
+   * rows is zero, and making it null would mean `realizedCostSats` could not be
+   * added up by a caller without a guard on every window. `netSats` carries the
+   * unknown instead — it is null in exactly that case — so a consumer deciding
+   * whether anything is known should read `costedCount` or `netSats`, never a
+   * zero here.
    */
   realizedCostSats: number
   /**
