@@ -216,6 +216,14 @@ export const toFailureReason = (failed: PaymentFailureFlags | undefined): Paymen
  * it. Here the payment has already settled and the preimage is in hand: failing
  * this mapping would strand a swap that succeeded over a number used only for
  * reporting. Unmeasured is the honest degradation.
+ *
+ * KNOWN IMPRECISION, tracked in #155. `feeSatsFromMtokens` rounds UP, which is
+ * right for the estimate it was written for and conservative-in-the-wrong-
+ * direction here: summed over many payments it overstates realized cost by up
+ * to a sat each, so reported net profit is a floor rather than the figure.
+ * Round-to-nearest is NOT the fix — it would report a real sub-sat fee as zero,
+ * and zero means free on every surface this feeds. Carrying millisats through
+ * the analytics layer is.
  */
 const realizedFeeSats = (mtokens: string | undefined): { feePaidSats?: number } => {
   if (mtokens === undefined) return {}

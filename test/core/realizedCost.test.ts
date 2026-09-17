@@ -29,7 +29,7 @@ const swap = (over: {
   cost?: number | null
   at?: number
   corridor?: string
-  phase?: 'done' | 'failed'
+  phase?: 'open' | 'exposed' | 'done' | 'failed'
 }) =>
   economicsOf({
     id: over.id,
@@ -79,15 +79,33 @@ describe('a swap whose cost nobody recorded', () => {
   })
 })
 
-describe('a cost is only meaningful on a swap that delivered', () => {
+describe('a cost that was really paid survives a swap that did not deliver', () => {
   /**
-   * A cost recorded against a failed payment would be netted out of a spread
-   * that was never earned — turning a refund into a loss on the screen.
+   * The case this got wrong: the payment SUCCEEDED and its fee was captured,
+   * then the claim failed. Gating the cost on `phase === 'done'` dropped a fee
+   * the solver really paid and understated the loss by exactly that much. A
+   * rail reports a fee only on a confirmed payment, so the value is its own
+   * evidence that the money left.
    */
-  it('ignores a cost on a row that did not deliver', () => {
-    const record = swap({ id: 'a', give: 100_300, spread: 300, cost: 120, phase: 'failed' })
-    expect(record.realizedCostSats).toBeNull()
-    expect(record.netSats).toBeNull()
+  it('keeps the fee on a swap whose claim failed after the payment settled', () => {
+    const record = swap({ id: 'a', give: 100_300, spread: 300, cost: 120, phase: 'exposed' })
+    expect(record.realizedCostSats).toBe(120)
+  })
+
+  /**
+   * And the property the old phase gate was really protecting, which is enforced
+   * a layer up instead: a cost on a swap that never delivered cannot be netted
+   * out of a spread that was never earned, because every total gates on
+   * `realized`.
+   */
+  it('still lets no undelivered row reach a total', () => {
+    for (const phase of ['open', 'exposed', 'failed'] as const) {
+      const summary = summarise([swap({ id: 'a', give: 100_300, spread: 300, cost: 120, phase })], T0 - HOUR, T0 + HOUR)
+      expect(summary.costedCount).toBe(0)
+      expect(summary.pricedCount).toBe(0)
+      expect(summary.realizedCostSats).toBe(0)
+      expect(summary.netSats).toBeNull()
+    }
   })
 })
 

@@ -32,6 +32,12 @@ A quote-time **budget** also exists on the send row (`quoted_routing_fee_sats`,
 spent against as `maxFeeSats`). It rides along as `quotedCostSats` and is
 **never deducted**: it is a ceiling, not a cost.
 
+The realized fee is stored in whole satoshis, rounded **up** from the millisat
+truth. Summed over many payments that overstates cost by up to a sat each, so
+**reported net profit is a floor, not the exact figure**. Round-to-nearest would
+be worse — a real sub-sat fee would read as `0`, and zero means free here.
+Carrying millisats is the fix; tracked in #155.
+
 Two other honesty rules hold throughout, and both exist because the alternative
 is a number nobody can stand behind:
 

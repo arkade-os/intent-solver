@@ -285,12 +285,13 @@ export const economicsOf = (parts: {
   const atRisk =
     parts.lost === true ? (parts.exposureSats ?? (outbound.assetId === null ? outboundAmount : null)) : null
 
-  // Only on a swap that DELIVERED. A cost recorded against a failed payment
-  // would be netted out of a spread that was never earned, turning a refund
-  // into a loss on the screen; and a swap still in flight has not finished
-  // paying for itself. Both are null rather than zero, so neither is mistaken
-  // for a swap that executed for free.
-  const realizedCostSats = parts.phase === 'done' ? (parts.realizedCostSats ?? null) : null
+  // Kept whatever the phase. A rail reports a fee only on a CONFIRMED payment,
+  // so a value here is already evidence the money left — including on a swap
+  // whose CLAIM then failed, where gating on `done` hid a fee that was really
+  // paid and understated the loss by exactly that much. No total can be
+  // disturbed by this: `costed()` gates on `realized`, which is `phase ===
+  // 'done'`, so an unfinished swap still reaches no sum.
+  const realizedCostSats = parts.realizedCostSats ?? null
 
   return {
     id: parts.id,
