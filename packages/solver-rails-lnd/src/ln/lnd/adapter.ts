@@ -336,8 +336,16 @@ export const probeTimeoutMs = (timeoutMs: number): number => Math.max(MIN_ROUTE_
  * where a response this adapter cannot read belongs.
  */
 export const feeSatsFromMtokens = (mtokens: string): number => {
+  // DIGITS ONLY, because `Number('')`, `Number(' ')` and `Number('\t')` are all
+  // 0 — so a blank figure read as a route that cost NOTHING rather than one that
+  // could not be read. Zero is a fact here and blank is the absence of one, and
+  // both callers need them apart: an estimate that cannot be read must stop a
+  // quote priced on it, and a realized cost that cannot be read is unmeasured,
+  // never free. The same test rejects `1e3` and `0x10`, which `Number` accepts
+  // and a wire integer should never be.
+  if (!/^\d+$/.test(mtokens)) throw new Error(`LND reported an unreadable routing fee: ${mtokens}`)
   const msat = Number(mtokens)
-  if (!Number.isFinite(msat) || msat < 0) throw new Error(`LND reported an unreadable routing fee: ${mtokens}`)
+  if (!Number.isFinite(msat)) throw new Error(`LND reported an unreadable routing fee: ${mtokens}`)
   return Math.ceil(msat / 1000)
 }
 

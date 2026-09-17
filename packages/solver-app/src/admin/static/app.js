@@ -2489,7 +2489,9 @@ const pnlFigures = (summary) =>
       `over ${summary.pricedCount} priced swap${summary.pricedCount === 1 ? '' : 's'}`,
       summary.grossSats < 0 ? 'c-loss' : null,
     ),
-    figure('margin', bps(summary.marginBps), `on ${sats(summary.volumeSats)} sat volume`),
+    // Named GROSS margin. Unqualified beside a net figure it reads as the net
+    // one, which is the same misreading the net column guards against.
+    figure('gross margin', bps(summary.marginBps), `on ${sats(summary.volumeSats)} sat volume`),
     // NET, and only where a rail actually reported what execution cost. Shown
     // beside the gross rather than instead of it, with the covered count on the
     // label: a net figure that silently covers a third of the book, standing
@@ -2498,7 +2500,8 @@ const pnlFigures = (summary) =>
       ? figure(
           'net, sats',
           signedSats(summary.netSats),
-          `after ${sats(summary.realizedCostSats)} sat cost · ${summary.costedCount} of ${summary.pricedCount} priced`,
+          `${bps(summary.netMarginBps)} after ${sats(summary.realizedCostSats)} sat cost · ` +
+            `${summary.costedCount} of ${summary.pricedCount} priced`,
           summary.netSats !== null && summary.netSats < 0 ? 'c-loss' : null,
         )
       : figure('net', 'unknown', 'no rail reported an execution cost'),
@@ -2656,8 +2659,11 @@ const corridorTable = (corridors) =>
         'tr',
         h('th', 'corridor'),
         h('th.right', 'gross'),
+        // Each margin sits beside the figure it describes. A single `margin`
+        // column next to `net` reads as the net margin, and it is the gross.
+        h('th.right', 'gross bp'),
         h('th.right', 'net'),
-        h('th.right', 'margin'),
+        h('th.right', 'net bp'),
         h('th.right', 'volume'),
         h('th.right', 'settled'),
         h('th.right', 'failed'),
@@ -2673,6 +2679,7 @@ const corridorTable = (corridors) =>
           'tr',
           h('td.mono', row.corridor, row.crossAsset ? h('span.faint', ' fx') : null),
           h('td.right', row.pricedCount === 0 ? h('span.faint', '—') : signedSats(row.grossSats)),
+          h('td.right', bps(row.marginBps)),
           h(
             'td.right',
             row.costedCount > 0
@@ -2683,7 +2690,7 @@ const corridorTable = (corridors) =>
                 )
               : h('span.faint', { title: 'This rail reports no execution cost, so it cannot be netted.' }, '—'),
           ),
-          h('td.right', bps(row.marginBps)),
+          h('td.right', bps(row.netMarginBps)),
           h('td.right', sats(row.volumeSats)),
           h('td.right', String(row.realizedCount)),
           h('td.right', row.failedCount > 0 ? String(row.failedCount) : h('span.faint', '0')),
