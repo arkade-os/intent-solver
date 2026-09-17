@@ -393,14 +393,14 @@ describe('asset markets on the card', () => {
   /** Refused while `fee_flat`, quote-denominated both ways, was the only field. */
   it('publishes a base-input flat fee in base units, not converted', () => {
     const asset = buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeFlat: 330n })] })).markets[1]!
-    expect(asset.solver_fee).toEqual({ bps: 30, flat: { base: '330' } })
+    expect(asset.solver_fee).toEqual({ base: { flat: '330' } })
     expect(asset.fee_flat).toBeUndefined()
   })
 
   it('keys each flat fee by the side deposited, and still emits fee_flat for older readers', () => {
     const asset = buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeFlat: 330n, buyBaseFeeFlat: 50n })] }))
       .markets[1]!
-    expect(asset.solver_fee).toEqual({ bps: 30, flat: { base: '330', quote: '50' } })
+    expect(asset.solver_fee).toEqual({ base: { flat: '330' }, quote: { flat: '50' } })
     expect(asset.fee_flat).toBe('50')
   })
 

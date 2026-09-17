@@ -191,17 +191,14 @@ const cardAmounts = (label: string, bound?: { min: bigint; max: bigint } | null)
 /** Order-free, so one pair cannot be published twice with its legs swapped. */
 const legPairKey = (market: AssetCardMarket): string => [market.base ?? 'btc', market.quote ?? 'btc'].sort().join('/')
 
-/** Keyed by the side DEPOSITED, which quote-denominated `fee_flat` cannot say — a
- * reader applies that both ways and misprices one. Omitted when neither charges. */
-const solverFeeField = (feeBps: number, baseDeposit: bigint, quoteDeposit: bigint): Record<string, unknown> => {
+/** Keyed by the side DEPOSITED, which quote-denominated `fee_flat` cannot say. No
+ * per-side `bps`: we hold one spread, so each side inherits `fee_bps`. */
+const solverFeeField = (baseDeposit: bigint, quoteDeposit: bigint): Record<string, unknown> => {
   if (baseDeposit <= 0n && quoteDeposit <= 0n) return {}
   return {
     solver_fee: {
-      bps: feeBps,
-      flat: {
-        ...(baseDeposit > 0n ? { base: String(baseDeposit) } : {}),
-        ...(quoteDeposit > 0n ? { quote: String(quoteDeposit) } : {}),
-      },
+      ...(baseDeposit > 0n ? { base: { flat: String(baseDeposit) } } : {}),
+      ...(quoteDeposit > 0n ? { quote: { flat: String(quoteDeposit) } } : {}),
     },
   }
 }
@@ -270,7 +267,7 @@ const assetMarketEntry = (
     fee_bps: market.feeBps,
     // Kept for readers predating `solver_fee`, which supersedes it.
     ...(base.max !== '0' && buyBaseFeeFlat > 0n ? { fee_flat: String(buyBaseFeeFlat) } : {}),
-    ...solverFeeField(market.feeBps, quote.max !== '0' ? sellBaseFeeFlat : 0n, base.max !== '0' ? buyBaseFeeFlat : 0n),
+    ...solverFeeField(quote.max !== '0' ? sellBaseFeeFlat : 0n, base.max !== '0' ? buyBaseFeeFlat : 0n),
     price_feed: market.feedUrl,
     price_feed_schema: { type: 'json', price_path: market.pricePath },
     price_decimals: priceDecimals,
