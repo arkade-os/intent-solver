@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, beforeEach } from 'vitest'
 import Database from 'better-sqlite3'
 import { d1Driver, type D1Like } from '@arkade-os/solver-corridors/db/driver.js'
 import { SwapStore, type QuoteRecord } from '@arkade-os/solver-corridors/db/swaps.js'
+import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 
 /**
  * A minimal in-process D1: the same prepare/bind/run/first/all surface with the
@@ -243,5 +244,79 @@ describe('the same store behaviour through the D1 driver', () => {
     )
 
     await expect(SwapStore.open(d1Driver(fakeD1(legacy)), () => clock)).resolves.toBeInstanceOf(SwapStore)
+  })
+})
+
+/**
+ * This store's FIRST migration, and the branch it exists for.
+ *
+ * Every other test opens a fresh database, where `CREATE TABLE` already carries
+ * the columns and the ALTER loop never runs — so without this the migration is
+ * exercised by nothing. Its failure mode is not a missing figure: `insertQuote`
+ * names its columns explicitly, so a column that never arrived throws inside the
+ * orchestrator's try, whose catch answers `duplicate_swap`. Every quote on every
+ * market would be refused and the operator sent to debug a duplicate id.
+ */
+describe('AssetRfqSwapStore.migrate', () => {
+  const LEGACY = `CREATE TABLE asset_rfq_swap (
+    id TEXT PRIMARY KEY, state TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+    rfq_id TEXT NOT NULL, pair TEXT NOT NULL, from_asset_id TEXT, from_amount TEXT NOT NULL,
+    to_asset_id TEXT, to_amount TEXT NOT NULL, maker_pk_script TEXT NOT NULL, maker_public_key TEXT NOT NULL,
+    offer_pk_script TEXT NOT NULL, offer_address TEXT NOT NULL, solver_pubkey TEXT NOT NULL,
+    valid_until INTEGER NOT NULL, deposit_txid TEXT, deposit_vout INTEGER, fill_txid TEXT, failure_reason TEXT
+  )`
+
+  it('adds the market-mark columns to a database that predates them', async () => {
+    const legacy = openDb()
+    legacy.exec(LEGACY)
+
+    await AssetRfqSwapStore.open(d1Driver(fakeD1(legacy)))
+
+    const columns = legacy
+      .prepare(`PRAGMA table_info(asset_rfq_swap)`)
+      .all()
+      .map((row) => (row as { name: string }).name)
+    for (const added of [
+      'quote_implied_mantissa',
+      'quote_implied_scale',
+      'quote_gives_base',
+      'fill_price_mantissa',
+      'fill_price_scale',
+    ]) {
+      expect(columns).toContain(added)
+    }
+  })
+
+  it('can quote against the migrated table, which is what a missing ALTER breaks', async () => {
+    const legacy = openDb()
+    legacy.exec(LEGACY)
+    const store = await AssetRfqSwapStore.open(d1Driver(fakeD1(legacy)), () => 1_000)
+
+    const row = await store.insertQuote({
+      id: 'swap-1',
+      rfqId: 'a'.repeat(64),
+      pair: 'arkade:BTC->arkade:USDA',
+      fromAssetId: null,
+      fromAmount: 100n,
+      toAssetId: 'b'.repeat(68),
+      toAmount: 200n,
+      makerPkScript: `5120${'c'.repeat(64)}`,
+      makerPublicKey: 'd'.repeat(64),
+      offerPkScript: `5120${'e'.repeat(64)}`,
+      offerAddress: 'ark1qoffer',
+      solverPubkey: 'f'.repeat(64),
+      validUntil: 2_000,
+      quotePrice: { impliedMantissa: 99_500n, scale: 2, givesBase: true },
+    })
+
+    expect(row.quoteImpliedMantissa).toBe(99_500n)
+    expect(row.quoteGivesBase).toBe(true)
+  })
+
+  it('is idempotent, so a second open does not fail on a duplicate column', async () => {
+    const legacy = openDb()
+    legacy.exec(LEGACY)
+    await AssetRfqSwapStore.open(d1Driver(fakeD1(legacy)))
+    await expect(AssetRfqSwapStore.open(d1Driver(fakeD1(legacy)))).resolves.toBeInstanceOf(AssetRfqSwapStore)
   })
 })

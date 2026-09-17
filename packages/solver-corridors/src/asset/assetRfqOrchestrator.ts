@@ -38,6 +38,7 @@
 
 import {
   evaluateAssetFill,
+  impliedQuotePrice,
   parseAssetPair,
   resolveAssetQuote,
   type AssetLeg,
@@ -45,6 +46,7 @@ import {
 } from '@arkade-os/solver-core/core/assetRfq.js'
 import type { Price } from '@arkade-os/solver-core/core/priceFeed.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow, type AssetRfqSwapState } from '../db/assetRfqSwaps.js'
@@ -167,15 +169,51 @@ const heldOf = (deposit: ObservedDeposit, leg: AssetLeg): bigint => {
   return held
 }
 
+/**
+ * The half of a market mark the solver controls: the price these terms fixed,
+ * and which way round the trade ran.
+ *
+ * Spread into the insert so a degenerate price records NO snapshot rather than
+ * half of one — a price with no direction beside it cannot be signed.
+ */
+const quoteSnapshot = (args: {
+  resolved: { fromAmount: bigint; toAmount: bigint }
+  market: AssetQuoteMarket
+  pair: { from: AssetLeg; to: AssetLeg }
+  feed: Price
+}): { quotePrice?: { impliedMantissa: bigint; scale: number; givesBase: boolean } } => {
+  const { resolved, market, pair, feed } = args
+  const givesBase = pair.from === market.base && pair.to === market.quote
+  const implied = impliedQuotePrice({
+    fromAmount: resolved.fromAmount,
+    toAmount: resolved.toAmount,
+    givesBase,
+    baseDecimals: market.baseDecimals,
+    quoteDecimals: market.quoteDecimals,
+    scale: feed.scale,
+  })
+  return implied === null ? {} : { quotePrice: { impliedMantissa: implied.mantissa, scale: implied.scale, givesBase } }
+}
+
 export class AssetRfqSwapService {
   private readonly now: () => number
   private readonly quoteLimiter: RateLimiter
   private readonly newId: () => string
+  private markets: readonly AssetRfqMarket[]
+  private readonly serialise: Serialiser = createSerialiser()
 
   constructor(private readonly deps: AssetRfqDeps) {
     this.now = deps.now ?? nowSeconds
     this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
     this.newId = deps.newId ?? (() => crypto.randomUUID())
+    this.markets = deps.markets
+  }
+
+  /** Swap the live serve list. In-flight rows keep the terms already recorded. */
+  replaceMarkets(markets: readonly AssetRfqMarket[]): Promise<void> {
+    return this.serialise(async () => {
+      this.markets = markets
+    })
   }
 
   get carrierSats(): bigint {
@@ -189,7 +227,11 @@ export class AssetRfqSwapService {
    * expensive gate runs last: the pair and the market are answered without
    * touching the network, and only then is a price fetched.
    */
-  async quote(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
+  quote(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
+    return this.serialise(() => this.quoteInner(request))
+  }
+
+  private async quoteInner(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
     const pair = parseAssetPair(request.pair)
     if (!pair) {
       return {
@@ -199,7 +241,7 @@ export class AssetRfqSwapService {
       }
     }
 
-    const market = this.deps.markets.find(
+    const market = this.markets.find(
       (m) => (pair.from === m.base && pair.to === m.quote) || (pair.from === m.quote && pair.to === m.base),
     )
     if (!market) return { accepted: false, reason: 'unsupported_pair', detail: 'no market configured for this pair' }
@@ -274,6 +316,11 @@ export class AssetRfqSwapService {
         offerAddress: offer.address,
         solverPubkey: this.deps.solverPubkey,
         validUntil: this.now() + this.deps.quoteValiditySeconds,
+        // The price this quote FIXED — not the feed it was derived from.
+        // Against a feed read at fill time it measures how far the market moved
+        // while the quote was outstanding; against its own feed it would measure
+        // the configured spread and nothing else.
+        ...quoteSnapshot({ resolved, market: priced, pair, feed }),
       })
       return { accepted: true, swap }
     } catch (error) {
@@ -291,7 +338,11 @@ export class AssetRfqSwapService {
    * Each arm ends at a compare-and-swap, so two ticks racing one row cannot
    * both act.
    */
-  async tick(id: string): Promise<void> {
+  tick(id: string): Promise<void> {
+    return this.serialise(() => this.drive(id))
+  }
+
+  private async drive(id: string): Promise<void> {
     const row = await this.deps.store.findById(id)
     if (!row) return
     switch (row.state) {
@@ -317,17 +368,19 @@ export class AssetRfqSwapService {
    * One row's failure is isolated from the rest: an indexer blip on the first
    * negotiation must not stop the second from being driven.
    */
-  async tickAll(): Promise<string[]> {
-    const driven: string[] = []
-    for (const row of await this.deps.store.listNonTerminal()) {
-      try {
-        await this.tick(row.id)
-        driven.push(row.id)
-      } catch (error) {
-        this.deps.onError?.(row.id, error)
+  tickAll(): Promise<string[]> {
+    return this.serialise(async () => {
+      const driven: string[] = []
+      for (const row of await this.deps.store.listNonTerminal()) {
+        try {
+          await this.drive(row.id)
+          driven.push(row.id)
+        } catch (error) {
+          this.deps.onError?.(row.id, error)
+        }
       }
-    }
-    return driven
+      return driven
+    })
   }
 
   /** Awaiting the client's deposit, until `valid_until`. */
@@ -386,12 +439,57 @@ export class AssetRfqSwapService {
     if (!(await this.deps.store.transition(row.id, 'funded', 'filling', seen))) return
     try {
       const txid = await this.deps.settle(await this.deps.store.get(row.id))
-      await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
+      const filled = await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
+      // AFTER the transition, never before. A feed read between `settle` and
+      // this CAS would widen the window in which a crash leaves a submitted fill
+      // reading `filling` — which `recoverFilling` escalates to `stuck`, needing
+      // a human. The money is already moved by the time this runs, so the worst
+      // a slow or broken feed can cost is the mark itself.
+      //
+      // Only on a row THIS call moved. A lost CAS means another worker already
+      // escalated it, and marking a `stuck` row prices a fill that is under
+      // investigation.
+      if (filled) await this.recordFillMark(row)
     } catch (error) {
       // `filling` fails to `stuck`, never to something retryable: the spend may
       // already have been submitted, and only a human can tell which.
       this.deps.onError?.(row.id, error)
       await this.deps.store.fail(row.id, 'filling', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /**
+   * What the market said as the fill landed — the other half of the mark.
+   *
+   * PURE OBSERVATION, and every failure path is a silent no-op: no market for
+   * the pair, an unreadable feed, a non-positive price. The fill has already
+   * settled by the time this runs, and a swap that succeeded must never be
+   * reported as anything else over a number used only for reporting. That is the
+   * same rule the Lightning rail follows for a realized routing fee, and the
+   * opposite of the quote path's, where an unreadable feed must stop a quote.
+   */
+  private async recordFillMark(row: AssetRfqSwapRow): Promise<void> {
+    try {
+      const market = this.deps.markets.find(
+        (m) =>
+          (row.fromAssetId === m.base && row.toAssetId === m.quote) ||
+          (row.fromAssetId === m.quote && row.toAssetId === m.base),
+      )
+      // Reported, not swallowed. A pair quoted under an earlier configuration
+      // goes unmarked FOREVER, and silence reads on the screen as "the feature
+      // is not deployed" rather than "this market is misconfigured".
+      if (!market) {
+        this.deps.onError?.('price', new Error(`no market configured for ${row.pair}; fill ${row.id} goes unmarked`))
+        return
+      }
+      const feed = await this.deps.fetchPrice(market.feedUrl, market.pricePath)
+      if (feed.mantissa <= 0n || feed.scale < 0) {
+        this.deps.onError?.('price', new Error(`unusable price for ${row.pair}: ${feed.mantissa}e-${feed.scale}`))
+        return
+      }
+      await this.deps.store.recordFillMark(row.id, { mantissa: feed.mantissa, scale: feed.scale })
+    } catch (error) {
+      this.deps.onError?.('price', error)
     }
   }
 

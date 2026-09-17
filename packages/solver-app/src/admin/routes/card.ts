@@ -97,7 +97,7 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
     const { publishable, omitted } = publishableAssetMarkets(
       assetCardMarketsFromPolicy({
         pricing: deps.services.assetMarkets,
-        offerMarkets: deps.services.policy.offerMarkets,
+        offerMarkets: deps.services.liveOfferMarkets,
         offerBounds: {
           min: deps.services.policy.offerMinFillAmount,
           max: deps.services.policy.offerMaxFillAmount,

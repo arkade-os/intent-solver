@@ -11,6 +11,7 @@ import {
   assetCardMarketsFromPolicy,
   assetRfqMarketsFrom,
   parseAssetRfqTokens,
+  retainReadableMarkets,
 } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { assetRfqDescriptor, assetRfqEnvStem } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
@@ -128,28 +129,32 @@ describe('assetRfqMarketsFrom', () => {
     expect([market!.base, market!.quote]).toEqual([USDA, null])
   })
 
-  it('serves nothing when nothing is named, whatever the console holds', () => {
-    expect(assetRfqMarketsFrom([], [pricing()])).toEqual([])
+  it('serves the console row when nothing is named in ASSET_MARKETS', () => {
+    const [market] = assetRfqMarketsFrom([], [pricing()])
+    expect(market?.quote).toBe(USDA)
+    expect(market?.symbol).toMatch(/^A[0-9A-F]{11}$/)
   })
 
-  it('refuses to start on an asset the console does not price', () => {
-    // Dropping it would come up serving nothing, which reads as a quiet market
-    // rather than as the misconfiguration it is.
-    expect(() => assetRfqMarketsFrom([token()], [])).toThrow(/no enabled market in the console prices it/)
-    expect(() => assetRfqMarketsFrom([token()], [pricing({ quote: OTHER })])).toThrow(/prices it/)
+  it('omits a named asset the console does not price, so a first dashboard row can land', () => {
+    expect(assetRfqMarketsFrom([token()], [])).toEqual([])
   })
 
-  it('refuses a market with an asset on both legs, which no offer packet expresses', () => {
-    expect(() => assetRfqMarketsFrom([token()], [pricing({ base: OTHER, quote: USDA })])).toThrow(/asset on both legs/)
+  it('still serves a console row when ASSET_MARKETS names a different asset', () => {
+    expect(assetRfqMarketsFrom([token()], [pricing({ quote: OTHER })])[0]?.quote).toBe(OTHER)
   })
 
-  it('refuses a served direction the console left unbounded', () => {
-    // No fallback to the packet path's `OFFER_MIN_FILL_AMOUNT`: that is a sats
-    // figure, and this payout leg can be an asset's atomic units.
-    expect(() => assetRfqMarketsFrom([token()], [pricing({ sellBase: undefined })])).toThrow(
-      /states no sellBase bounds/,
-    )
-    expect(() => assetRfqMarketsFrom([token()], [pricing({ buyBase: undefined })])).toThrow(/states no buyBase bounds/)
+  it('omits a market with an asset on both legs, which no offer packet expresses', () => {
+    expect(assetRfqMarketsFrom([token()], [pricing({ base: OTHER, quote: USDA })])).toEqual([])
+  })
+
+  it('closes a served direction the console left unbounded rather than quoting without a ceiling', () => {
+    const [market] = assetRfqMarketsFrom([token()], [pricing({ sellBase: undefined })])
+    expect(market!.sellBase).toEqual({ min: 0n, max: 0n })
+    expect(market!.buyBase).toEqual({ min: 2n, max: 10n ** 9n })
+  })
+
+  it('drops a market whose directions are both closed', () => {
+    expect(assetRfqMarketsFrom([token()], [pricing({ sellBase: undefined, buyBase: undefined })])).toEqual([])
   })
 
   it('closes a direction to zero rather than darkening the pair', () => {
@@ -225,5 +230,37 @@ describe('assetCardMarketsFromPolicy', () => {
       sellBase: { min: 1n, max: 10n ** 12n },
       sellBaseFeeFlat: 330n,
     })
+  })
+})
+
+describe('auto-symbols', () => {
+  it('distinguishes two assets of the same issuance', () => {
+    const tx = 'ab'.repeat(32)
+    const a = assetRfqMarketsFrom([], [pricing({ quote: `${tx}0100` })])[0]!
+    const b = assetRfqMarketsFrom([], [pricing({ quote: `${tx}0200` })])[0]!
+    expect(a.symbol).not.toBe(b.symbol)
+    expect(a.symbol).toMatch(/^A[0-9A-F]{11}$/)
+  })
+})
+
+describe('retainReadableMarkets', () => {
+  const served = () => assetRfqMarketsFrom([], [pricing()])[0]!
+  const other = () => assetRfqMarketsFrom([], [pricing({ quote: OTHER })])[0]!
+
+  it('keeps a dropped market while a live row still names its pair', () => {
+    const dropped = served()
+    expect(retainReadableMarkets([], [dropped], [{ fromAssetId: null, toAssetId: USDA }])).toEqual([dropped])
+  })
+
+  it('still keeps it after a later write whose serving list has forgotten it', () => {
+    const dropped = served()
+    const next = other()
+    const afterDelete = retainReadableMarkets([], [dropped], [{ fromAssetId: null, toAssetId: USDA }])
+    const afterOther = retainReadableMarkets([next], afterDelete, [{ fromAssetId: null, toAssetId: USDA }])
+    expect(afterOther).toEqual([next, dropped])
+  })
+
+  it('drops it once nothing is in flight', () => {
+    expect(retainReadableMarkets([], [served()], [])).toEqual([])
   })
 })

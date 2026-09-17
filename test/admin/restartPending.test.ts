@@ -1,12 +1,11 @@
-// `pendingRestartKeys` diffs the override MAP and a market is a row, so one added
-// in the console got silence. `names a market added since boot` is the test that
-// has to fail without `marketDrift`.
+// Settings overrides still need a restart. Market CRUD is live and must not
+// appear on the overview banner.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
-import { marketDrift, settingsDrift } from '@arkade-os/solver-app/admin/drift.js'
+import { settingsDrift } from '@arkade-os/solver-app/admin/drift.js'
 import { pendingRestartKeys } from '@arkade-os/solver-app/admin/settings.js'
 import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
 import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
@@ -79,6 +78,8 @@ const services = (over: Record<string, unknown> = {}) =>
     policy: config(),
     bootOverrides: {},
     assetMarkets: [],
+    liveOfferMarkets: [],
+    assetRfqMarkets: [],
     tickErrors: { failing: [] },
     providerPubkey: 'aa'.repeat(32),
     store: store(),
@@ -100,52 +101,6 @@ const overview = async (over: Record<string, unknown> = {}) => {
   expect(response.status).toBe(200)
   return (await response.json()) as { pendingRestart: { key: string; loaded: string; stored: string }[] }
 }
-
-describe('marketDrift — the case the override diff cannot see', () => {
-  it('is empty when the stored rows are the ones this process loaded', () => {
-    expect(marketDrift([market()] as never, [market()] as never)).toEqual([])
-  })
-
-  it('names a market added since boot', () => {
-    expect(marketDrift([], [market()] as never)).toEqual([
-      { key: `market ${KEY}`, loaded: 'not trading', stored: 'trading' },
-    ])
-  })
-
-  it('names a re-priced market rather than reading it as untouched', () => {
-    expect(marketDrift([market()] as never, [market({ feeBps: 40 })] as never)).toEqual([
-      { key: `market ${KEY}`, loaded: 'as booted', stored: 'edited' },
-    ])
-  })
-
-  it('names a directional flat-fee edit as a pending re-price', () => {
-    expect(marketDrift([market()] as never, [market({ sellBaseFeeFlat: 330n })] as never)).toEqual([
-      { key: `market ${KEY}`, loaded: 'as booted', stored: 'edited' },
-    ])
-  })
-
-  it('names a market this process trades and the store no longer has', () => {
-    expect(marketDrift([market()] as never, [])).toEqual([
-      { key: `market ${KEY}`, loaded: 'trading', stored: 'not trading' },
-    ])
-  })
-
-  it('treats a paused market as leaving, because the next process will not trade it either', () => {
-    expect(marketDrift([market()] as never, [market({ enabled: false })] as never)).toEqual([
-      { key: `market ${KEY}`, loaded: 'trading', stored: 'not trading' },
-    ])
-  })
-
-  it('compares the bounds, whose atomic units are bigints', () => {
-    const bounded = market({ sellBase: { min: 1n, max: 2n } })
-    expect(marketDrift([bounded] as never, [bounded] as never)).toEqual([])
-    expect(marketDrift([bounded] as never, [market({ sellBase: { min: 1n, max: 3n } })] as never)).toHaveLength(1)
-  })
-
-  it('survives a stored row that has gone bad, because the overview must still render', () => {
-    expect(() => marketDrift([], [market({ toleranceBps: -1 })] as never)).not.toThrow()
-  })
-})
 
 describe('settingsDrift — the values behind the keys', () => {
   it('says what a knob moves from and to', () => {
@@ -174,14 +129,14 @@ describe('GET /api/overview — pendingRestart', () => {
     expect((await overview()).pendingRestart).toEqual([])
   })
 
-  it('names a market added since boot — the scenario the shipped alert stayed silent for', async () => {
+  it('does not treat a market added since boot as a pending restart', async () => {
     const body = await overview({
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({}),
         listMarkets: vi.fn().mockResolvedValue([market()]),
       },
     })
-    expect(body.pendingRestart).toEqual([{ key: `market ${KEY}`, loaded: 'not trading', stored: 'trading' }])
+    expect(body.pendingRestart).toEqual([])
   })
 
   it('carries an override with both of its values, not the bare key', async () => {
@@ -194,15 +149,14 @@ describe('GET /api/overview — pendingRestart', () => {
     expect(body.pendingRestart).toEqual([{ key: 'LN_SEND_FEE_BPS', loaded: '0', stored: '25' }])
   })
 
-  it('reports a knob and a market together, from one banner', async () => {
+  it('still reports a settings knob while a new market is already live', async () => {
     const body = await overview({
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({ MAX_EXPOSED_SATS: '900000' }),
         listMarkets: vi.fn().mockResolvedValue([market()]),
       },
     })
-    expect(body.pendingRestart).toHaveLength(2)
-    expect(body.pendingRestart.map((item) => item.key)).toEqual(['MAX_EXPOSED_SATS', `market ${KEY}`])
+    expect(body.pendingRestart).toEqual([{ key: 'MAX_EXPOSED_SATS', loaded: '300000', stored: '900000' }])
   })
 
   it('stays quiet when the override is the one this process already loaded', async () => {

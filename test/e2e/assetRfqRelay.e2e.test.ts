@@ -230,6 +230,30 @@ const depositAt = async (offerPkScript: string): Promise<ObservedDeposit | null>
   return { txid: biggest.txid, vout: biggest.vout, sats: BigInt(biggest.value), assets }
 }
 
+/**
+ * Wait for the fill's spend to reach the indexer.
+ *
+ * Polling `depositAt(...) === null` would wait out the propagation race, but is
+ * WEAKER than the single read it replaces: `depositAt` answers null for an empty
+ * indexer response too, so one transient blank anywhere in the window passes.
+ * Waiting for the vtxo to come back CARRYING a terminal spend cannot be satisfied
+ * that way — `getVtxos` is called with no filter, so spent outputs are still
+ * returned, which is why `depositAt` has to filter them locally.
+ */
+const depositSpent = async (offerPkScript: string): Promise<'spent'> =>
+  poll(
+    async () => {
+      const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ scripts: [offerPkScript] })
+      if (!vtxos?.length) return null
+      return vtxos.every((vtxo) => hasTerminalSpend(vtxo) || vtxo.isSwept === true) ? 'spent' : null
+    },
+    {
+      attempts: 15,
+      intervalMs: 1_000,
+      whenExhausted: `the deposit at ${offerPkScript} was never spent by the fill`,
+    },
+  )
+
 const balance = async (): Promise<ReadonlyMap<AssetLeg, bigint>> =>
   offerInventoryFrom(await arkade.ctx.wallet.getBalance())
 
@@ -344,7 +368,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
 
         const filled = await driveTo(tickAll, store, id, 'filled')
         expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
-        expect(await depositAt(filled.offerPkScript)).toBeNull()
+        expect(await depositSpent(filled.offerPkScript)).toBe('spent')
 
         const { txs } = await arkade.ctx.wallet.indexerProvider.getVirtualTxs([filled.fillTxid!])
         const fill = Transaction.fromPSBT(base64.decode(txs[0]!))
@@ -408,7 +432,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
 
         const filled = await driveTo(tickAll, store, id, 'filled')
         expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
-        expect(await depositAt(filled.offerPkScript)).toBeNull()
+        expect(await depositSpent(filled.offerPkScript)).toBe('spent')
 
         // The fill pays sats to the maker's script on this direction.
         const { txs } = await arkade.ctx.wallet.indexerProvider.getVirtualTxs([filled.fillTxid!])

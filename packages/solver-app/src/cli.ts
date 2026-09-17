@@ -60,6 +60,7 @@ import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { lockupSource, runContractLifecycle } from '@arkade-os/solver-arkade/arkade/contractLifecycle.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { RFQ_PAIR_SEND } from '@arkade-os/solver-corridors/wire/payloads.js'
+import { assetRfqPairFor } from '@arkade-os/solver-corridors/wire/assetRfqPayloads.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { assetMarketPolicy } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import type { Corridor } from '@arkade-os/solver-core/core/corridor.js'
@@ -142,7 +143,9 @@ const bar = (deltaSeconds: number, slowestSeconds: number, width = 30): string =
   return '#'.repeat(Math.max(1, Math.round((deltaSeconds / slowestSeconds) * width)))
 }
 
-import { createServices } from './ops/services.js'
+import { createServices, openReportReaders } from './ops/services.js'
+import { DEFAULT_LEDGER_LIMIT, type SwapEconomics } from '@arkade-os/solver-core/analytics/economics.js'
+import { PNL_WINDOWS, pnlReportLines } from './ops/pnlReport.js'
 
 /**
  * The watch loop's four cadences, fastest first.
@@ -202,8 +205,31 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // Every registered corridor, not the two that used to be named here — a
   // corridor left out of recovery starts the process with its non-terminal rows
   // untouched until the first full sweep comes round.
-  let recovered = 0
-  for (const corridor of services.corridors) recovered += await corridor.tickAll()
+  //
+  // EXCEPT the generated asset-RFQ corridors: every one wraps the SAME service, so
+  // ticking per corridor would drive each row once per market per pass. The
+  // exact pair set distinguishes them from injected corridors whose env stem
+  // may also start with ASSET_. The service's own `tickAll` covers them all.
+  const tickEveryCorridor = async (phase: string): Promise<number> => {
+    let ticked = 0
+    const assetRfqPairs = new Set(
+      services.assetRfqMarkets.flatMap(({ base, quote }) => [
+        assetRfqPairFor(base, quote),
+        assetRfqPairFor(quote, base),
+      ]),
+    )
+    for (const corridor of services.corridors) {
+      if (assetRfqPairs.has(corridor.descriptor.pair)) continue
+      ticked += await corridor.tickAll()
+    }
+    try {
+      ticked += (await services.assetRfqService.tickAll()).length
+    } catch (error) {
+      log(`asset rfq ${phase} failed:`, error instanceof Error ? error.message : String(error))
+    }
+    return ticked
+  }
+  const recovered = await tickEveryCorridor('recovery')
   startEvmSendSweep()
   log(`recovered ${recovered} swap(s) across ${services.corridors.size} corridor(s); watching`)
   const served = CORRIDORS.filter((corridor) => services.config.corridorEnabled[corridor])
@@ -444,7 +470,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
       // The EVM legs ride this same loop: no hot tick (an EVM confirmation
       // depth is minutes wide, so a sub-second cadence would buy nothing but
       // RPC calls), and their rows are driven by the sweep alone.
-      for (const corridor of services.corridors) await corridor.tickAll()
+      await tickEveryCorridor('sweep')
       // The offer path rides the same cadence and needs no other: a fill is one
       // Arkade transaction with no confirmation to wait on, so there is nothing
       // a faster loop could observe.
@@ -872,6 +898,73 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       if (row.state !== 'claimed') process.exitCode = 2
     } finally {
       await services.close()
+    }
+  },
+
+  /**
+   * The book, in a terminal.
+   *
+   * The console and `GET /api/pnl` already answer this, and both need
+   * `ADMIN_PORT` set and reachable — which an operator ssh'd into a box has
+   * neither. Same aggregation and the same honesty rules: this reads each
+   * corridor's `economics()` and hands the records to the same pure functions
+   * the screen uses, so the two cannot disagree on any corridor this binary
+   * serves (an embedder's injected corridors reach `/api/pnl` and not this).
+   *
+   * Read-only, and deliberately thin: everything that FORMATS money lives in
+   * `ops/pnlReport.ts`, where a test can reach it.
+   */
+  async pnl([windowArg]) {
+    const label = windowArg ?? '7d'
+    // `hasOwn`, not an undefined check: the presets are an object literal, so
+    // `PNL_WINDOWS['constructor']` answers with an inherited value and `pnl
+    // constructor` would print a well-formed EMPTY book instead of the usage.
+    if (!Object.hasOwn(PNL_WINDOWS, label)) throw new GiveUp(`usage: pnl [${Object.keys(PNL_WINDOWS).join('|')}]`)
+    const seconds = PNL_WINDOWS[label]!
+    const config = loadConfig()
+    // READERS ONLY, and no network. `createServices` would create the Lightning
+    // rail, the Arkade context and call the emulator before returning — so a
+    // report of what the book DID would refuse to run whenever a rail is down,
+    // which is exactly when an operator reaches for it. `timeline` already opens
+    // its store directly for the same reason.
+    const { readers, close } = await openReportReaders(config)
+    try {
+      const until = Math.floor(Date.now() / 1000)
+      const window = { since: until - seconds, until, limit: DEFAULT_LEDGER_LIMIT }
+      const records: SwapEconomics[] = []
+      const unmeasured: string[] = []
+      const failed: { corridor: string; reason: string }[] = []
+      const truncated: string[] = []
+      for (const reader of readers) {
+        if (!reader.economics) {
+          // Named, never counted as zero — the rule the screen follows too.
+          unmeasured.push(reader.descriptor.pair)
+          continue
+        }
+        try {
+          const ledger = await reader.economics(window)
+          records.push(...ledger.records)
+          if (ledger.truncated) truncated.push(reader.descriptor.pair)
+        } catch (error) {
+          // One broken store must not take the other corridors' book down with
+          // it: the operator reaching for this is on the degraded box already.
+          const reason = error instanceof Error ? error.message : String(error)
+          failed.push({ corridor: reader.descriptor.pair, reason })
+        }
+      }
+      for (const line of pnlReportLines({
+        records,
+        label,
+        since: window.since,
+        until,
+        unmeasured,
+        failed,
+        truncated,
+      })) {
+        log(line)
+      }
+    } finally {
+      await close()
     }
   },
 
