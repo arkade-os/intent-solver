@@ -234,8 +234,17 @@ const assetMarketEntry = (
   if (seen.has(key)) throw new Error(`${pair} is configured twice; one pair may publish only one price`)
   seen.add(key)
 
-  if (!Number.isInteger(market.feeBps) || market.feeBps < 0 || market.feeBps > 10000) {
-    throw new Error(`${pair} fee_bps must be an integer in [0, 10000], got ${market.feeBps}`)
+  // Every spread the card can carry: a caller hands us an AssetCardMarket, so a
+  // bad directional value would reach `Math.max` and publish a bad fee_bps.
+  for (const [label, value] of [
+    ['fee_bps', market.feeBps],
+    ['sell_base_fee_bps', market.sellBaseFeeBps],
+    ['buy_base_fee_bps', market.buyBaseFeeBps],
+  ] as const) {
+    if (value === undefined) continue
+    if (!Number.isInteger(value) || value < 0 || value > 10000) {
+      throw new Error(`${pair} ${label} must be an integer in [0, 10000], got ${value}`)
+    }
   }
   if (!market.feedUrl.trim()) {
     throw new Error(`${pair} carries different assets, so it must publish a price_feed`)

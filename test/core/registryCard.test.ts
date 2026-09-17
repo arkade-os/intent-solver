@@ -404,6 +404,17 @@ describe('asset markets on the card', () => {
     expect(asset.fee_flat).toBe('50')
   })
 
+  it('refuses a directional spread out of range, by field name', () => {
+    for (const bad of [10_001, -1, 12.5]) {
+      expect(() => buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeBps: bad })] }))).toThrow(
+        /sell_base_fee_bps must be an integer/,
+      )
+      expect(() => buildSolverCard(inputs({ assetMarkets: [market({ buyBaseFeeBps: bad })] }))).toThrow(
+        /buy_base_fee_bps must be an integer/,
+      )
+    }
+  })
+
   it('publishes a spread per direction, and the widest as fee_bps', () => {
     const asset = buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeBps: 10, buyBaseFeeBps: 900 })] }))
       .markets[1]!
