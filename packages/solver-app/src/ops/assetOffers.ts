@@ -226,16 +226,19 @@ export class AssetOfferService {
 
     try {
       const feed = await this.deps.fetchPrice(market.feedUrl, market.pricePath)
+      // An asset on BOTH legs: the maker fronts one, we deliver one, they cancel.
+      const fronted = input.offerAssetId !== null
+      const delivered = input.wantAssetId !== null
       return offerWithinTolerance({
         depositAmount: input.offerAmount,
         wantAmount: input.wantAmount,
         direction,
         market,
         feed,
-        // Headroom is a loosening and always applies; the charge tightens, so it is opt-in.
-        carrierSats:
-          input.wantAssetId === null || this.deps.chargesDeliveredCarrier === true ? this.deps.carrierSats : 0n,
-        wantIsBtc: input.wantAssetId === null,
+        // The charge tightens an already-funded offer, so unlike the headroom it is opt-in.
+        carrierCharged:
+          delivered && !fronted && this.deps.chargesDeliveredCarrier === true ? this.deps.carrierSats : 0n,
+        carrierReturned: fronted && !delivered ? this.deps.carrierSats : 0n,
       })
     } catch (error) {
       this.deps.onError?.(id, error)

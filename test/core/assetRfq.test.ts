@@ -313,6 +313,23 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
     ).toMatchObject({ ok: true, toAmount: 99_500_000_000n })
   })
 
+  /** Both legs assets: the two carriers cancel. Gated upstream by `parseAssetPair`. */
+  it('prices no carrier when an asset rides on both legs', () => {
+    const market: AssetQuoteMarket = { ...MARKET, base: ASSET_A, quote: ASSET_B, baseDecimals: 6, quoteDecimals: 6 }
+    const quote = (carrierSats: bigint) =>
+      resolveAssetQuote({
+        pair: { from: ASSET_A, to: ASSET_B },
+        amount: 1_000_000n,
+        amountSide: 'from',
+        market,
+        feed: FEED,
+        carrierSats,
+        dustSats: 330n,
+      })
+    expect(quote(330n)).toEqual(quote(0n))
+    expect(quote(330n).ok).toBe(true)
+  })
+
   /** `ASSET_CARRIER_PRICING` off: the amounts quoted before it was priced. */
   it('quotes the pre-carrier amounts when the carrier is not priced', () => {
     expect(

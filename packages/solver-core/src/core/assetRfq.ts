@@ -121,7 +121,7 @@ export type AssetQuoteOutcome =
  * direction nobody chose.
  *
  * BOTH SIDES: `assetExactOutInput` searches the forward function, so one rounding
- * convention decides each direction (§ 7.1.5's objection to exact-out).
+ * convention decides each (§ 7.1.5's objection).
  */
 export const resolveAssetQuote = (args: {
   pair: AssetPair
@@ -152,12 +152,15 @@ export const resolveAssetQuote = (args: {
 
   const flatFee = (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
   if (flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
-  // An asset payout rides a carrier we supply, so those sats are not input we keep.
-  const suppliedCarrier = pair.to === null ? 0n : carrierSats
+  // BOTH legs counted: an asset deposit carries one, an asset payout needs one.
+  const clientFronts = pair.from !== null
+  const solverDelivers = pair.to !== null
+  const chargedCarrier = solverDelivers && !clientFronts ? carrierSats : 0n
+  const returnedCarrier = clientFronts && !solverDelivers ? carrierSats : 0n
 
   if (amountSide === 'to') {
-    // On a BTC payout the named amount already holds the carrier coming back.
-    const wanted = pair.to === null ? amount - carrierSats : amount
+    // The named amount already holds whatever comes back to them.
+    const wanted = amount - returnedCarrier
     if (wanted <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
     if (wanted < market.minPayout || wanted > market.maxPayout) {
       return { ok: false, reason: 'amount_out_of_range' }
@@ -171,11 +174,11 @@ export const resolveAssetQuote = (args: {
       feed,
     })
     if (netInput === null) return { ok: false, reason: 'price_unavailable' }
-    if (pair.to === null && amount < dustSats) return { ok: false, reason: 'amount_out_of_range' }
-    return { ok: true, fromAmount: netInput + flatFee + suppliedCarrier, toAmount: amount }
+    if (!solverDelivers && amount < dustSats) return { ok: false, reason: 'amount_out_of_range' }
+    return { ok: true, fromAmount: netInput + flatFee + chargedCarrier, toAmount: amount }
   }
 
-  const netAmount = amount - flatFee - suppliedCarrier
+  const netAmount = amount - flatFee - chargedCarrier
   if (netAmount <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
 
   const payout = assetExactInPayout({
@@ -199,11 +202,10 @@ export const resolveAssetQuote = (args: {
     return { ok: false, reason: 'amount_out_of_range' }
   }
 
-  const toAmount = pair.to === null ? payout + carrierSats : payout
+  const toAmount = payout + returnedCarrier
 
-  // arkd rejects a sub-dust output 0 — observed as an emulator code-13 — so this
-  // binds whether or not the carrier is priced.
-  if (pair.to === null && toAmount < dustSats) {
+  // arkd rejects a sub-dust output 0, priced carrier or not.
+  if (!solverDelivers && toAmount < dustSats) {
     return { ok: false, reason: 'amount_out_of_range' }
   }
 
