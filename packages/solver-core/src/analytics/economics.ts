@@ -11,17 +11,21 @@
  * the alternative is a dashboard that reports a number the solver cannot
  * actually stand behind:
  *
- * 1. **This is GROSS, never net.** No store records a REALIZED execution cost:
- *    `ports/lightning.ts`'s `PaymentResult` carries no routing fee, so what a
- *    payment actually cost is never written down anywhere. What some rows DO
- *    carry is a quote-time BUDGET — Lightning-send persists
- *    `quoted_routing_fee_sats` and spends against it as `maxFeeSats` — and that
- *    is a ceiling rather than a cost. It is surfaced as
- *    {@link SwapEconomics.quotedCostSats} and never subtracted, because netting
- *    an upper bound out of a spread understates profit by an unknown amount
- *    while looking exactly like the net figure this screen does not have.
- *    The admin route repeats the caveat in its own payload (`coverage.basis`)
- *    rather than only in a comment.
+ * 1. **GROSS AND NET ARE SEPARATE FIELDS, and net exists only where a rail said
+ *    what execution actually cost.** Lightning send is the only one that can
+ *    today — `PaymentResult.feePaidSats`, off the settled payment — so
+ *    {@link SwapEconomics.realizedCostSats} is null on every other corridor and
+ *    {@link SwapEconomics.netSats} is null with it. Null rather than a fallback
+ *    to the gross: a net figure derived from a missing cost is the gross wearing
+ *    a different label, and that is the one misreading here that costs money.
+ *    The quote-time BUDGET is a third thing again — Lightning-send persists
+ *    `quoted_routing_fee_sats` and spends against it as `maxFeeSats` — and it is
+ *    a ceiling, not a cost. It rides along as
+ *    {@link SwapEconomics.quotedCostSats} and is NEVER subtracted, because
+ *    netting an upper bound out of a spread understates profit by an unknown
+ *    amount while looking exactly like the real net figure. The admin route
+ *    states how much of the book is netted in its own payload
+ *    (`coverage.basis`) rather than only in a comment.
  * 2. **An unknown number is null, never a zero.** A `quoted` row has no inbound
  *    amount because nothing was funded; a cross-asset fill has no sats spread
  *    because its two legs are different units. Both would sum into a headline
