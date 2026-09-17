@@ -143,6 +143,8 @@ const bar = (deltaSeconds: number, slowestSeconds: number, width = 30): string =
 }
 
 import { createServices } from './ops/services.js'
+import { DEFAULT_LEDGER_LIMIT, type SwapEconomics } from '@arkade-os/solver-core/analytics/economics.js'
+import { PNL_WINDOWS, pnlReportLines } from './ops/pnlReport.js'
 
 /**
  * The watch loop's four cadences, fastest first.
@@ -870,6 +872,48 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       const row = await driveToTerminal(services.service, id)
       log('terminal:', json(printable(row)))
       if (row.state !== 'claimed') process.exitCode = 2
+    } finally {
+      await services.close()
+    }
+  },
+
+  /**
+   * The book, in a terminal.
+   *
+   * The console and `GET /api/pnl` already answer this, and both need
+   * `ADMIN_PORT` set and reachable — which an operator ssh'd into a box has
+   * neither. Same aggregation and the same honesty rules: this reads each
+   * corridor's `economics()` and hands the records to the same pure functions
+   * the screen uses, so a figure here and a figure there cannot disagree.
+   *
+   * Read-only, and deliberately thin: everything that FORMATS money lives in
+   * `ops/pnlReport.ts`, where a test can reach it.
+   */
+  async pnl([windowArg]) {
+    const label = windowArg ?? '7d'
+    const seconds = PNL_WINDOWS[label]
+    if (seconds === undefined) throw new GiveUp(`usage: pnl [${Object.keys(PNL_WINDOWS).join('|')}]`)
+    const config = loadConfig()
+    const services = await createServices(config)
+    try {
+      const until = Math.floor(Date.now() / 1000)
+      const window = { since: until - seconds, until, limit: DEFAULT_LEDGER_LIMIT }
+      const records: SwapEconomics[] = []
+      const unmeasured: string[] = []
+      const truncated: string[] = []
+      for (const reader of services.readers) {
+        if (!reader.economics) {
+          // Named, never counted as zero — the rule the screen follows too.
+          unmeasured.push(reader.descriptor.pair)
+          continue
+        }
+        const ledger = await reader.economics(window)
+        records.push(...ledger.records)
+        if (ledger.truncated) truncated.push(reader.descriptor.pair)
+      }
+      for (const line of pnlReportLines({ records, label, since: window.since, until, unmeasured, truncated })) {
+        log(line)
+      }
     } finally {
       await services.close()
     }
