@@ -25,6 +25,7 @@ import { registerStatusRoutes } from './routes/status.js'
 import { registerDiagnosticsRoutes } from './routes/diagnostics.js'
 import { registerSettingsRoutes } from './routes/settings.js'
 import { registerMarketRoutes } from './routes/markets.js'
+import { registerPnlRoutes } from './routes/pnl.js'
 import { registerActionRoutes } from './routes/actions.js'
 import { registerCardRoutes } from './routes/card.js'
 import { registerEventRoutes } from './routes/events.js'
@@ -89,6 +90,10 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   app.get('/api/rfq-refusals', (c) => c.json(deps.services.rfqRefusals.recent()))
   registerSettingsRoutes(app, deps)
   registerMarketRoutes(app, deps)
+  // BEFORE the actions route, for the reason the card route states below: that
+  // route claims `/api/actions/:name` only, but registration order is what
+  // keeps the `*` fallback at the very bottom from shadowing anything.
+  registerPnlRoutes(app, deps)
   // BEFORE the actions route, and it must stay there: that route claims
   // `/api/actions/:name`, which matches `/api/actions/post-ad` too, and Hono runs
   // handlers in registration order — so registering afterwards yields a 404

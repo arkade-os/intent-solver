@@ -15,6 +15,8 @@
  * finished-looking row for a swap that is still at risk.
  */
 
+import { barsChart, categoryChart, cumulativeChart, decayChart } from './charts.js'
+
 /* ---- tiny element helper ------------------------------------------------ */
 
 /** h('td.num', 'text') | h('div', {onclick}, child, child) */
@@ -272,6 +274,12 @@ const state = {
   banner: null,
   data: {},
   filters: { corridor: '', phase: '', q: '' },
+  /**
+   * The P&L view's own controls. Bucket empty means "let the server choose from
+   * the window"; `focus` is the toolbar control to restore after a reload
+   * rebuilds the tree.
+   */
+  pnl: { window: '7d', bucket: '', focus: null },
   detail: null,
   dialog: null,
   /** The action currently in flight, or null. See `runAction`. */
@@ -282,6 +290,7 @@ const state = {
 
 const VIEWS = [
   ['overview', 'overview'],
+  ['pnl', 'p&l'],
   ['swaps', 'swaps'],
   ['offers', 'offers'],
   ['quotes', 'quotes'],
@@ -2390,6 +2399,430 @@ const MIN_SEARCH = 3
 const SEARCH_DEBOUNCE_MS = 250
 let searchTimer = null
 
+/* ---- p&l ---------------------------------------------------------------- */
+
+/**
+ * The book.
+ *
+ * EVERY PANEL IS PAIRED WITH A TABLE, and that is not belt-and-braces. A chart
+ * answers "is something wrong"; the number an operator then reconciles against
+ * a wallet has to be readable, copyable and exact. It is also the only form of
+ * these panels a screen reader can use.
+ *
+ * The gross caveat sits ABOVE the figures rather than under them. It decides
+ * what every number on the screen means — a corridor quoting 30bps into a fee
+ * market that took 40 shows a profit here and lost money in fact — and a reader
+ * who meets it after the totals has already formed the wrong impression.
+ */
+
+const signedSats = (value) =>
+  value === null || value === undefined ? '—' : `${value >= 0 ? '+' : '−'}${Math.abs(value).toLocaleString('en-US')}`
+
+const bps = (value) => (value === null || value === undefined ? '—' : `${value >= 0 ? '+' : '−'}${Math.abs(value)}bp`)
+
+/** A headline number. `tone` is only ever risk: see the palette rule in styles.css. */
+const figure = (label, value, note, tone) =>
+  h(
+    'div.figure',
+    h('b', tone ? { class: tone } : null, value),
+    h('span', label),
+    note ? h('span.faint', ` ${note}`) : null,
+  )
+
+/**
+ * Which toolbar control was last pressed, so `render` can give focus back.
+ *
+ * Every button here reloads, and a reload ends in `render`, which rebuilds the
+ * whole tree — so the pressed button leaves the document and focus falls to
+ * `body`. `render` restores focus for `input.search` alone, and there is no
+ * search box on this view, so a keyboard user had to tab from the top of the
+ * page after every window or bucket change.
+ */
+const pnlToolbar = () =>
+  h(
+    'div.toolbar',
+    h('span.muted', 'window'),
+    ...['1h', '6h', '24h', '7d', '30d', '90d'].map((name) =>
+      h(
+        'button',
+        {
+          'data-pnl-control': `window:${name}`,
+          'aria-current': String(state.pnl.window === name),
+          onclick: () => {
+            state.pnl.focus = `window:${name}`
+            state.pnl.window = name
+            // Cleared, not preserved: a 5-minute bucket chosen for an hour
+            // window is sixteen thousand points over ninety days. The server
+            // picks a readable default for whatever window is now in force.
+            state.pnl.bucket = ''
+            load('pnl')
+          },
+        },
+        name,
+      ),
+    ),
+    h('span.spacer'),
+    h('span.muted', 'bucket'),
+    ...['5m', '1h', '6h', '1d'].map((name) =>
+      h(
+        'button',
+        {
+          'data-pnl-control': `bucket:${name}`,
+          'aria-current': String(state.pnl.bucket === name),
+          onclick: () => {
+            state.pnl.focus = `bucket:${name}`
+            state.pnl.bucket = state.pnl.bucket === name ? '' : name
+            load('pnl')
+          },
+        },
+        name,
+      ),
+    ),
+  )
+
+const pnlFigures = (summary) =>
+  h(
+    'div.figures',
+    figure(
+      'gross, sats',
+      signedSats(summary.grossSats),
+      `over ${summary.pricedCount} priced swap${summary.pricedCount === 1 ? '' : 's'}`,
+      summary.grossSats < 0 ? 'c-loss' : null,
+    ),
+    figure('margin', bps(summary.marginBps), `on ${sats(summary.volumeSats)} sat volume`),
+    // Only rendered when non-zero. A permanent "0 at risk" is a position the
+    // eye learns to skip, which is exactly where this number needs to be seen —
+    // the same rule the status bar's stuck count follows.
+    // The unknown count rides WITH the figure, not beside it: a zero at-risk
+    // total next to an uncounted unpriceable loss reads as "nothing
+    // outstanding", which is the one reassurance this screen must not give
+    // falsely.
+    summary.atRiskSats > 0 || summary.atRiskUnknownCount > 0
+      ? figure(
+          // `≤` when any corridor in the window reports a ceiling rather than a
+          // measurement, so the qualifier sits ON the number instead of in a
+          // footnote an operator reads once.
+          summary.atRiskUpperBound ? 'at risk, sats (at most)' : 'at risk, sats',
+          summary.atRiskSats > 0 ? `${summary.atRiskUpperBound ? '≤' : ''}${sats(summary.atRiskSats)}` : '?',
+          summary.atRiskUnknownCount > 0
+            ? `paid out, not recovered · ${summary.atRiskUnknownCount} more not priceable in sats`
+            : 'paid out, not recovered',
+          'c-risk',
+        )
+      : figure('at risk', 'none', 'nothing outstanding'),
+    figure('settled', String(summary.realizedCount), `${summary.failedCount} failed`),
+    figure('open', String(summary.openCount), 'still in flight'),
+    // Realized but not expressible in sats — an asset-to-asset fill. Shown only
+    // when there are any, because on a sats-only deployment it is always zero
+    // and a permanent zero teaches the reader to stop looking.
+    summary.unpricedCount > 0 ? figure('unpriced', String(summary.unpricedCount), 'cross-asset, see FX below') : null,
+  )
+
+const pnlBasis = (coverage) =>
+  h(
+    'p.basis',
+    h('b', 'These are GROSS figures. '),
+    'No corridor records what execution actually cost, so chain fees and routing fees are missing from every ' +
+      'total here rather than deducted from it. A corridor quoting 30bp into a fee market that took 40 shows a ' +
+      'profit on this screen and lost money in fact.',
+    coverage.unmeasured.length > 0
+      ? h(
+          'span',
+          h('br'),
+          h('b', 'Not measured: '),
+          coverage.unmeasured.join(', '),
+          ' — reported as unknown, not counted as zero.',
+        )
+      : null,
+    // A corridor that HAS the capability and threw is a fault, not a gap, and
+    // someone should go and look. Shown separately from `unmeasured` for that
+    // reason — folded together, a live incident reads as a corridor nobody has
+    // got round to instrumenting.
+    (coverage.failed ?? []).length > 0
+      ? h(
+          'span',
+          h('br'),
+          h('b', 'Failed to read: '),
+          coverage.failed.map((entry) => `${entry.corridor} (${entry.reason})`).join('; '),
+          ' — these are missing from every total above.',
+        )
+      : null,
+    coverage.truncated.length > 0
+      ? h(
+          'span',
+          h('br'),
+          h('b', 'Truncated: '),
+          `${coverage.truncated.join(', ')} had more rows in this window than were read. These totals cover part ` +
+            'of the book. Narrow the window.',
+        )
+      : null,
+  )
+
+/**
+ * The numbers behind the two time charts.
+ *
+ * Both of those are `role="img"`, which hides their `<title>` marks from a
+ * screen reader — and the marks are hover-only for a keyboard user besides. So
+ * without this the one panel on the page whose data was unreachable without
+ * sight was the headline one.
+ *
+ * ONLY buckets where something happened. The series deliberately carries empty
+ * buckets so a quiet period draws as a gap in the chart, but a table of two
+ * thousand rows reading "0" is not a reading aid, and the newest are the ones
+ * worth having first.
+ */
+const SERIES_ROWS = 40
+
+/**
+ * A bucket's start, in LOCAL time and the same shape `charts.js` labels its
+ * axis with. The two must agree: the table sits directly under the chart it
+ * describes, and a UTC table beside a local-time axis is two clocks for one
+ * bucket with nothing on screen saying which is which.
+ */
+const bucketLabel = (unixSeconds) => {
+  const date = new Date(unixSeconds * 1000)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+const seriesTable = (series) => {
+  const active = series.filter((point) => point.count > 0).reverse()
+  if (active.length === 0) return h('p.muted', 'Nothing settled in this window.')
+  const shown = active.slice(0, SERIES_ROWS)
+  return h(
+    'div',
+    h(
+      'table',
+      h(
+        'thead',
+        h(
+          'tr',
+          h('th', 'bucket'),
+          h('th.right', 'swaps'),
+          h('th.right', 'gross'),
+          h('th.right', 'cumulative'),
+          h('th.right', 'volume'),
+          h('th.right', 'at risk'),
+        ),
+      ),
+      h(
+        'tbody',
+        ...shown.map((point) =>
+          h(
+            'tr',
+            // LOCAL time, in the same shape the charts label their axis with.
+            // `toISOString()` is UTC, so the table and the chart directly above
+            // it showed two different clock values for the same bucket — and a
+            // reader has no way to tell which one their wallet's timestamps
+            // match.
+            h('td', bucketLabel(point.at)),
+            h('td.right', String(point.count)),
+            h('td.right', point.pricedCount === 0 ? h('span.faint', '—') : signedSats(point.grossSats)),
+            h('td.right', signedSats(point.cumulativeGrossSats)),
+            h('td.right', sats(point.volumeSats)),
+            h('td.right', point.atRiskSats > 0 ? h('span.at-risk', sats(point.atRiskSats)) : h('span.faint', '—')),
+          ),
+        ),
+      ),
+    ),
+    active.length > shown.length
+      ? h(
+          'p.faint',
+          `${active.length - shown.length} earlier bucket(s) not listed — the charts above cover all of them.`,
+        )
+      : null,
+  )
+}
+
+const corridorTable = (corridors) =>
+  h(
+    'table',
+    h(
+      'thead',
+      h(
+        'tr',
+        h('th', 'corridor'),
+        h('th.right', 'gross'),
+        h('th.right', 'margin'),
+        h('th.right', 'volume'),
+        h('th.right', 'settled'),
+        h('th.right', 'failed'),
+        h('th.right', 'at risk'),
+        h('th.right', 'median fill'),
+        h('th.right', 'p90 fill'),
+      ),
+    ),
+    h(
+      'tbody',
+      ...corridors.map((row) =>
+        h(
+          'tr',
+          h('td.mono', row.corridor, row.crossAsset ? h('span.faint', ' fx') : null),
+          h('td.right', row.pricedCount === 0 ? h('span.faint', '—') : signedSats(row.grossSats)),
+          h('td.right', bps(row.marginBps)),
+          h('td.right', sats(row.volumeSats)),
+          h('td.right', String(row.realizedCount)),
+          h('td.right', row.failedCount > 0 ? String(row.failedCount) : h('span.faint', '0')),
+          h(
+            'td.right',
+            row.atRiskSats > 0
+              ? h(
+                  'span.at-risk',
+                  {
+                    title: row.atRiskUpperBound
+                      ? 'An upper bound: this corridor parks every failure as stuck, whatever its exposure.'
+                      : 'Paid out and not recovered.',
+                  },
+                  `${row.atRiskUpperBound ? '≤' : ''}${sats(row.atRiskSats)}`,
+                )
+              : h('span.faint', '—'),
+          ),
+          h('td.right', duration(row.medianDurationSeconds)),
+          h('td.right', duration(row.p90DurationSeconds)),
+        ),
+      ),
+    ),
+  )
+
+/**
+ * Margin against how long the fill took.
+ *
+ * THE CHART THE FX QUESTION IS ASKED OF. A quote commits this solver to a price
+ * for its validity window while the market keeps moving, so a swap that took
+ * two hours was priced against a two-hour-old view. If the bottom band's margin
+ * is materially worse than the top's, that gap is what a drawn-out fill costs —
+ * and it is invisible in any total that does not split on time.
+ */
+const durationPanel = (bands) =>
+  h(
+    'section.panel',
+    h('h2', 'margin by time to fill'),
+    h(
+      'p.muted',
+      'A quote holds a price while the market moves. Margin falling down this table is the cost of a slow fill.',
+    ),
+    categoryChart(bands, {
+      // Basis points of MARGIN, not sats of gross — the default label would
+      // have announced the wrong quantity to a screen reader.
+      title: 'Realized margin in basis points, banded by time to fill',
+      label: (band) => band.label,
+      value: (band) => band.marginBps ?? 0,
+      note: (band) =>
+        `${band.label}: ${band.count} swap(s), ${bps(band.marginBps)} on ${band.volumeSats.toLocaleString('en-US')} sats`,
+    }),
+    h(
+      'table',
+      h(
+        'thead',
+        h(
+          'tr',
+          h('th', 'time to fill'),
+          h('th.right', 'swaps'),
+          h('th.right', 'margin'),
+          h('th.right', 'median'),
+          h('th.right', 'gross'),
+          h('th.right', 'volume'),
+        ),
+      ),
+      h(
+        'tbody',
+        ...bands.map((band) =>
+          h(
+            'tr',
+            h('td', band.label),
+            h('td.right', String(band.count)),
+            h('td.right', bps(band.marginBps)),
+            h('td.right', bps(band.medianBps)),
+            h('td.right', band.pricedCount === 0 ? h('span.faint', '—') : signedSats(band.grossSats)),
+            h('td.right', sats(band.volumeSats)),
+          ),
+        ),
+      ),
+    ),
+  )
+
+/**
+ * One panel per directional FX leg.
+ *
+ * The benchmark is the solver's OWN book over the window — the volume-weighted
+ * mean rate — and the panel says so, because that limitation changes the
+ * reading. It answers "was this fill worse than the ones around it", never "was
+ * it worse than the market". A feed-relative mark needs the feed price at quote
+ * time, which nothing records today.
+ */
+const fxPanel = (leg) => {
+  const worst = [...leg.points].sort((a, b) => (a.driftBps ?? 0) - (b.driftBps ?? 0)).slice(0, 5)
+  return h(
+    'section.panel',
+    h('h2', leg.leg),
+    h(
+      'p.muted',
+      `${leg.count} fill${leg.count === 1 ? '' : 's'} on `,
+      h('span.mono', leg.corridor),
+      '. Drift is measured against this window’s volume-weighted mean rate — this solver’s own book, not a ' +
+        'price feed. Below the line is a fill that came in worse than its peers.',
+    ),
+    // Named per leg, so N of these are distinguishable in a screen reader's
+    // list of figures rather than N repeats of one sentence.
+    decayChart(leg.points, { title: `Rate drift against time to fill, ${leg.leg} on ${leg.corridor}` }),
+    worst.length === 0
+      ? null
+      : h(
+          'table',
+          h(
+            'thead',
+            h('tr', h('th', 'worst fills'), h('th.right', 'took'), h('th.right', 'drift'), h('th.right', 'settled')),
+          ),
+          h(
+            'tbody',
+            ...worst.map((point) =>
+              h(
+                'tr',
+                h('td.mono', shortId(point.id)),
+                h('td.right', duration(point.durationSeconds)),
+                h('td.right', (point.driftBps ?? 0) < 0 ? h('span.at-risk', bps(point.driftBps)) : bps(point.driftBps)),
+                h('td.right', ago(point.at)),
+              ),
+            ),
+          ),
+        ),
+  )
+}
+
+const pnlView = () => {
+  const data = state.data.pnl
+  if (!data) return h('section.panel', h('p.muted', 'loading…'))
+
+  return h(
+    'div',
+    pnlToolbar(),
+    pnlBasis(data.coverage),
+    pnlFigures(data.summary),
+    h(
+      'section.panel',
+      h('h2', 'cumulative gross'),
+      cumulativeChart(data.series),
+      h('h2', 'per bucket'),
+      h('p.muted', 'Profit up, sats at risk down. A loss is not a smaller profit.'),
+      barsChart(data.series),
+      seriesTable(data.series),
+    ),
+    h(
+      'section.panel',
+      h('h2', 'by corridor'),
+      categoryChart(data.corridors, {
+        title: 'Gross profit by corridor, in sats',
+        label: (row) => row.corridor,
+        value: (row) => row.grossSats,
+        note: (row) => `${row.corridor}: ${signedSats(row.grossSats)} sats over ${row.realizedCount} settled swap(s)`,
+      }),
+      corridorTable(data.corridors),
+    ),
+    durationPanel(data.durationBands),
+    ...data.fx.map(fxPanel),
+  )
+}
+
 /* ---- loading and rendering ---------------------------------------------- */
 
 const ENDPOINTS = {
@@ -2402,6 +2835,11 @@ const ENDPOINTS = {
     // typing. Held back until it can succeed.
     if (state.filters.q.trim().length >= MIN_SEARCH) params.set('q', state.filters.q.trim())
     return `/api/swaps?${params}`
+  },
+  pnl: () => {
+    const params = new URLSearchParams({ window: state.pnl.window })
+    if (state.pnl.bucket) params.set('bucket', state.pnl.bucket)
+    return `/api/pnl?${params}`
   },
   offers: () => '/api/offers',
   refusals: () => '/api/rfq-refusals',
@@ -2445,6 +2883,7 @@ const go = (view) => {
 
 const BODIES = {
   overview: overviewView,
+  pnl: pnlView,
   swaps: swapsView,
   offers: offersView,
   refusals: refusalsView,
@@ -2580,6 +3019,16 @@ const render = () => {
 
   // After everything is in the document: focusing a detached node does nothing,
   // which is how the modal scroll fix was wrong the first time.
+  // The P&L toolbar's equivalent of the search-box restore above, and needed
+  // for the same reason: the rebuild removed the button that was pressed. Read
+  // once and cleared, so a later render caused by anything else does not steal
+  // focus back to a control nobody touched.
+  if (state.pnl.focus) {
+    const control = root.querySelector(`[data-pnl-control="${state.pnl.focus}"]`)
+    state.pnl.focus = null
+    if (control) control.focus()
+  }
+
   if (typing) {
     const box = root.querySelector('input.search')
     if (box) {
@@ -2666,7 +3115,16 @@ const listen = () => {
     // reload buys nothing — and it would rebuild an open market form, handing
     // back an input with no focus and a caret at zero while someone is typing a
     // 68-character asset id into it.
-    if (state.view !== 'settings' && state.view !== 'markets' && !state.dialog) load(state.view)
+    //
+    // `pnl` joins them for a different reason, and a stronger one. It IS
+    // derived from swap state, but it is the most expensive read this console
+    // has — one full window scan of every swap store per request — and it
+    // answers a question about a window rather than about right now. Reloading
+    // it on every swap event turns the console into a load generator against
+    // the one endpoint built to avoid that, and drops keyboard focus off its
+    // toolbar each time (`render` restores focus only for `.search`). An
+    // operator who wants it fresher re-picks the window, which reloads.
+    if (state.view !== 'settings' && state.view !== 'markets' && state.view !== 'pnl' && !state.dialog) load(state.view)
   })
   // EventSource reconnects on its own; nothing to do but not treat it as fatal.
   source.addEventListener('error', () => {})

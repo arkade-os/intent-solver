@@ -31,6 +31,8 @@ import {
   type CorridorSwapView,
 } from '@arkade-os/solver-core/core/corridor.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
+import type { LedgerWindow, SwapEconomics } from '@arkade-os/solver-core/analytics/economics.js'
+import { evmSendEconomics, evmReceiveEconomics } from './evmEconomics.js'
 import type { PageOptions } from '@arkade-os/solver-core/core/page.js'
 import { diagnose, phaseOfStates } from '@arkade-os/solver-core/core/swapView.js'
 import type { AdminSwap } from '@arkade-os/solver-core/core/swapView.js'
@@ -135,17 +137,20 @@ interface EvmReadableStore<Row extends { id: string; pkScript: string }> {
   findLive(): Promise<Row[]>
   findByRfqId(rfqId: string): Promise<Row | null>
   committedSats(tokenAddress?: string): Promise<number>
+  /** Narrowed to one token IN SQL — @see EvmSendSwapStore.ledgerRows. */
+  ledgerRows(window: LedgerWindow, tokenAddress?: string): Promise<{ rows: Row[]; truncated: boolean }>
   page(options: PageOptions): Promise<{ rows: Row[]; nextCursor: string | null }>
   get(id: string): Promise<Row>
   history(id: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>
   close(): Promise<void>
 }
 
-const evmReaderFor = <Row extends { id: string; pkScript: string }>(
+const evmReaderFor = <Row extends { id: string; pkScript: string; tokenAddress: string }>(
   descriptor: CorridorDescriptor,
   store: EvmReadableStore<Row>,
   project: (row: Row) => CorridorSwapView,
   toCovenantRow: (row: Row) => CovenantScriptRow,
+  toEconomics: (row: Row) => SwapEconomics,
 ): CorridorReader => ({
   descriptor,
   // findLive rather than findRecoverable, which the EVM stores do not carry:
@@ -161,6 +166,21 @@ const evmReaderFor = <Row extends { id: string; pkScript: string }>(
   // Narrowed to this corridor's OWN token: one store per direction serves every token, and
   // `committedAcrossCorridors` sums once per reader — unnarrowed counts the table once per `EVM_TOKENS` entry.
   committedSats: () => store.committedSats(evmTokenOf(descriptor.pair) ?? undefined),
+  economics: async (window) => {
+    const token = evmTokenOf(descriptor.pair)
+    // THROWS rather than falling through to the whole table. `committedSats`
+    // above passes `?? undefined` and so reads every token when it cannot name
+    // its own — tolerable for a cap, and wrong here: this figure is summed once
+    // per reader, so a corridor claiming every token's rows multiplies the
+    // reported profit by the number of tokens served. `scan()` in the admin
+    // route turns a throw into an UNMEASURED corridor, which is the honest
+    // answer for "I cannot tell which of these rows are mine".
+    if (token === null) throw new Error(`no ERC20 token in corridor pair ${descriptor.pair}; cannot attribute its P&L`)
+    // Narrowed IN SQL. Filtering after the store's `LIMIT` would let a busy
+    // token's rows evict a quiet one's from the window entirely.
+    const { rows, truncated } = await store.ledgerRows(window, token)
+    return { corridor: descriptor.pair, records: rows.map(toEconomics), truncated }
+  },
   page: async (options) => {
     const { rows, nextCursor } = await store.page(options)
     return { swaps: rows.map(project), nextCursor }
@@ -177,10 +197,14 @@ const evmReaderFor = <Row extends { id: string; pkScript: string }>(
 })
 
 export const evmSendReader = (descriptor: CorridorDescriptor, store: EvmSendSwapStore): CorridorReader =>
-  evmReaderFor(descriptor, store, projectEvmSend, evmSendCovenantRowFor)
+  evmReaderFor(descriptor, store, projectEvmSend, evmSendCovenantRowFor, (row) =>
+    evmSendEconomics(row, descriptor, presentedState(row.state, row.refundOutcome as 'pushed' | 'external' | null)),
+  )
 
 export const evmReceiveReader = (descriptor: CorridorDescriptor, store: EvmReceiveSwapStore): CorridorReader =>
-  evmReaderFor(descriptor, store, projectEvmReceive, evmReceiveCovenantRowFor)
+  evmReaderFor(descriptor, store, projectEvmReceive, evmReceiveCovenantRowFor, (row) =>
+    evmReceiveEconomics(row, descriptor),
+  )
 
 /**
  * The serving corridor for one token. Registered only when the policy is

@@ -38,6 +38,7 @@
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
 export type AssetRfqSwapState = 'quoted' | 'funded' | 'filling' | 'filled' | 'refused' | 'stuck'
 
@@ -337,6 +338,32 @@ export class AssetRfqSwapStore {
       pair === undefined ? [] : [pair],
     )
     return raws.reduce((total, raw) => total + Number(String(raw.to_amount)), 0)
+  }
+
+  /**
+   * Rows whose last movement falls in a window. @see BaseSwapStore.ledgerRows
+   *
+   * Duplicated rather than inherited because this store is not a
+   * `BaseSwapStore` — its amounts are bigints in TEXT columns and its lifecycle
+   * is its own — and the shared base is the wrong place to grow a second
+   * hierarchy for one method.
+   *
+   * `pair` NARROWS IN SQL, AND MUST. One table backs every asset market, so a
+   * caller that took the whole window and filtered afterwards would be applying
+   * `LIMIT` across every market and then discarding — a busy market's rows push
+   * a quiet one's out of the result entirely, and the quiet corridor reports no
+   * profit for a window in which it settled fills. Silent, and the screen looks
+   * healthy. The same reason `committedSats` above takes a pair.
+   */
+  async ledgerRows(window: LedgerWindow, pair?: string): Promise<{ rows: AssetRfqSwapRow[]; truncated: boolean }> {
+    const limit = clampLedgerLimit(window.limit)
+    const raw = await this.driver.all<Raw>(
+      `SELECT * FROM asset_rfq_swap WHERE updated_at >= ? AND updated_at < ?` +
+        (pair === undefined ? '' : ' AND pair = ?') +
+        ` ORDER BY updated_at DESC LIMIT ?`,
+      pair === undefined ? [window.since, window.until, limit + 1] : [window.since, window.until, pair, limit + 1],
+    )
+    return { rows: raw.slice(0, limit).map(toRow), truncated: raw.length > limit }
   }
 
   async page(options: PageOptions = {}): Promise<{ rows: AssetRfqSwapRow[]; nextCursor: string | null }> {

@@ -212,6 +212,14 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   reverse proxy in front of it, or tunnel to the default loopback bind. See
   `docs/runbook.md` § "The admin console".
 
+  Its **p&l** tab (and `GET /api/pnl`) charts what the book made, by corridor,
+  by time to fill, and per cross-asset fill against the window's own mean rate —
+  which is how a drawn-out swap that priced against a stale view becomes
+  visible. **Every figure there is GROSS: no corridor records what execution
+  cost, so chain and routing fees are missing from the totals rather than
+  deducted from them.** That caveat, and what each corridor counts as its
+  intake, are in [`docs/pnl.md`](docs/pnl.md).
+
   `ADMIN_HOST` chooses that bind, and defaults to `127.0.0.1` — which is the
   whole of the console's access control. Setting it to `0.0.0.0` publishes an
   unauthenticated money-moving interface to every interface the host has; do
