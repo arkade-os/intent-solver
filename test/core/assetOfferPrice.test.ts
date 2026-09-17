@@ -369,7 +369,6 @@ describe('offerDirectionOn', () => {
   })
 })
 
-/** This solver's own RFQ offers are this shape too, not just third-party makers. */
 describe('the carrier a BTC-wanting maker fronted', () => {
   const deposit = 100_000_000_000n
   const at = (wantAmount: bigint, carrierSats: bigint) =>

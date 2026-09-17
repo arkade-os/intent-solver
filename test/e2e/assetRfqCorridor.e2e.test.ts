@@ -328,7 +328,6 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       expect(exactOut.payload).toMatchObject({ to_amount: '60' })
 
       // § 4.5: one rfq_id names one negotiation, whatever became of it.
-      // Above the carrier, or it is refused `fee_consumes_swap` before the id binds.
       const id = randomBytes(32).toString('hex')
       const buy = 50n + arkade.ctx.dustSats
       expect((await corridor.quote(requestFor(pair, buy, id))).kind).toBe('quote')

@@ -171,6 +171,42 @@ describe('the price gate', () => {
     expect(await store.listNonTerminal()).toHaveLength(0)
   })
 
+  /** Charging this leg refuses an ALREADY-FUNDED offer, so it stays opt-in. */
+  describe('the carrier we deliver on an asset-want offer', () => {
+    const wantsAsset = {
+      offer: {
+        swapPkScript: SCRIPT,
+        wantAmount: 900n,
+        wantAsset: { toString: () => USDT },
+        offerAsset: undefined,
+      } as unknown as Offer,
+      txid: 'b'.repeat(64),
+      vout: 0,
+    }
+    const satsDeposit = async () => [{ script: SCRIPT_HEX, value: 1000 }]
+
+    it('is NOT charged by default, so a maker pricing off the card still fills', async () => {
+      const { service } = await build({
+        pricing,
+        fetchPrice: async () => priceFrom('1.12'),
+        carrierSats: 330n,
+        outputsAt: satsDeposit,
+      })
+      expect(await service.consider(wantsAsset)).toMatchObject({ fill: true })
+    })
+
+    it('is charged when the operator opts in', async () => {
+      const { service } = await build({
+        pricing,
+        fetchPrice: async () => priceFrom('1.12'),
+        carrierSats: 330n,
+        chargesDeliveredCarrier: true,
+        outputsAt: satsDeposit,
+      })
+      expect(await service.consider(wantsAsset)).toEqual({ fill: false, reason: 'price_out_of_tolerance' })
+    })
+  })
+
   it('FAILS CLOSED when the feed cannot be read', async () => {
     // An unreadable feed must not become a free fill at whatever was asked.
     const errors: unknown[] = []

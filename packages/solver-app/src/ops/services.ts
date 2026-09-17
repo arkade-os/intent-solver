@@ -494,6 +494,7 @@ export const createServices = async (
         // so one implementation serves both.
         fetchPrice: createPriceFeed(),
         carrierSats: arkade.dustSats,
+        chargesDeliveredCarrier: policy.offerChargesDeliveredCarrier,
         minFillAmount: policy.offerMinFillAmount,
         maxFillAmount: policy.offerMaxFillAmount,
         // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts

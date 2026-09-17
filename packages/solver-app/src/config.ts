@@ -234,6 +234,12 @@ export interface Config {
   offerMinFillAmount: bigint
   offerMaxFillAmount: bigint
   /**
+   * `OFFER_CHARGE_CARRIER`. Off by default: the MAKER prices this path and the
+   * card has no field to tell them the carrier exists, so charging would refuse
+   * an already-funded offer with no channel to say why. Off costs us the carrier.
+   */
+  offerChargesDeliveredCarrier: boolean
+  /**
    * Assets this solver QUOTES against over RFQ (`ASSET_MARKETS`), each with the
    * symbol its env stems are built from.
    *
@@ -963,6 +969,7 @@ export const loadConfig = (): Config => {
   const offerMarkets = parseAssetMarkets(process.env.OFFER_MARKETS)
   const offerMinFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv('OFFER_MIN_FILL_AMOUNT') : 0n
   const offerMaxFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv('OFFER_MAX_FILL_AMOUNT') : 0n
+  const offerChargesDeliveredCarrier = process.env.OFFER_CHARGE_CARRIER?.trim() === 'true'
   // Refused at boot rather than per offer: inverted bounds refuse every offer,
   // which is indistinguishable from a quiet market and would be diagnosed as
   // one. `evaluateOfferFill` compares against both, so it cannot report this.
@@ -997,6 +1004,7 @@ export const loadConfig = (): Config => {
     offerMarkets,
     offerMinFillAmount,
     offerMaxFillAmount,
+    offerChargesDeliveredCarrier,
     // Read here so a malformed list refuses at boot beside every other knob.
     // What each named asset is WORTH still comes from the console's market rows,
     // which `createServices` joins to these.

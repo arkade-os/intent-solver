@@ -112,6 +112,7 @@ export interface AssetOfferDeps {
   /** The feed read. Omitted with `pricing` set refuses every offer. */
   fetchPrice?: FetchPrice
   carrierSats: bigint
+  chargesDeliveredCarrier?: boolean
   /**
    * Spend the offer's deposit, paying the maker what the covenant obliges.
    * Returns the fill txid. Absent means this deployment decides but never fills.
@@ -231,7 +232,9 @@ export class AssetOfferService {
         direction,
         market,
         feed,
-        carrierSats: this.deps.carrierSats,
+        // Headroom is a loosening and always applies; the charge tightens, so it is opt-in.
+        carrierSats:
+          input.wantAssetId === null || this.deps.chargesDeliveredCarrier === true ? this.deps.carrierSats : 0n,
         wantIsBtc: input.wantAssetId === null,
       })
     } catch (error) {
