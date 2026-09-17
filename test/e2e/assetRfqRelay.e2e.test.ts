@@ -231,29 +231,28 @@ const depositAt = async (offerPkScript: string): Promise<ObservedDeposit | null>
 }
 
 /**
- * Wait for the fill's spend to REACH THE INDEXER, then assert the deposit is gone.
+ * Wait for the fill's spend to reach the indexer.
  *
- * `depositAt` above is a single indexer read with no retry. The fill transaction
- * has only just been submitted when the row reaches `filled`, so whether the
- * deposit is already marked spent at that instant is a race — and one this test
- * lost intermittently in CI, alternating which direction failed, 19 of 20
- * passing each time. That is the signature of a propagation wait nobody wrote,
- * not of a fill that did not happen: `fillTxid` is a valid txid on every one of
- * those runs.
- *
- * The assertion is UNCHANGED in strength. The deposit must still disappear; it
- * is now allowed the seconds the indexer needs to say so, and still fails if it
- * never does.
- *
- * Returns a sentinel rather than the value, because `poll` reads null as "not
- * yet" and null is precisely the state being waited for.
+ * Polling `depositAt(...) === null` would wait out the propagation race, but is
+ * WEAKER than the single read it replaces: `depositAt` answers null for an empty
+ * indexer response too, so one transient blank anywhere in the window passes.
+ * Waiting for the vtxo to come back CARRYING a terminal spend cannot be satisfied
+ * that way — `getVtxos` is called with no filter, so spent outputs are still
+ * returned, which is why `depositAt` has to filter them locally.
  */
-const depositGone = async (offerPkScript: string): Promise<'gone'> =>
-  poll(async () => ((await depositAt(offerPkScript)) === null ? 'gone' : null), {
-    attempts: 15,
-    intervalMs: 1_000,
-    whenExhausted: `the deposit at ${offerPkScript} is still live after the fill`,
-  })
+const depositSpent = async (offerPkScript: string): Promise<'spent'> =>
+  poll(
+    async () => {
+      const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ scripts: [offerPkScript] })
+      if (!vtxos?.length) return null
+      return vtxos.every((vtxo) => hasTerminalSpend(vtxo) || vtxo.isSwept === true) ? 'spent' : null
+    },
+    {
+      attempts: 15,
+      intervalMs: 1_000,
+      whenExhausted: `the deposit at ${offerPkScript} was never spent by the fill`,
+    },
+  )
 
 const balance = async (): Promise<ReadonlyMap<AssetLeg, bigint>> =>
   offerInventoryFrom(await arkade.ctx.wallet.getBalance())
@@ -367,7 +366,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
 
         const filled = await driveTo(tickAll, store, id, 'filled')
         expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
-        expect(await depositGone(filled.offerPkScript)).toBe('gone')
+        expect(await depositSpent(filled.offerPkScript)).toBe('spent')
 
         const { txs } = await arkade.ctx.wallet.indexerProvider.getVirtualTxs([filled.fillTxid!])
         const fill = Transaction.fromPSBT(base64.decode(txs[0]!))
@@ -431,7 +430,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
 
         const filled = await driveTo(tickAll, store, id, 'filled')
         expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
-        expect(await depositGone(filled.offerPkScript)).toBe('gone')
+        expect(await depositSpent(filled.offerPkScript)).toBe('spent')
 
         // The fill pays sats to the maker's script on this direction.
         const { txs } = await arkade.ctx.wallet.indexerProvider.getVirtualTxs([filled.fillTxid!])
