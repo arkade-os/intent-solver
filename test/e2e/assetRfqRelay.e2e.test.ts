@@ -230,6 +230,31 @@ const depositAt = async (offerPkScript: string): Promise<ObservedDeposit | null>
   return { txid: biggest.txid, vout: biggest.vout, sats: BigInt(biggest.value), assets }
 }
 
+/**
+ * Wait for the fill's spend to REACH THE INDEXER, then assert the deposit is gone.
+ *
+ * `depositAt` above is a single indexer read with no retry. The fill transaction
+ * has only just been submitted when the row reaches `filled`, so whether the
+ * deposit is already marked spent at that instant is a race — and one this test
+ * lost intermittently in CI, alternating which direction failed, 19 of 20
+ * passing each time. That is the signature of a propagation wait nobody wrote,
+ * not of a fill that did not happen: `fillTxid` is a valid txid on every one of
+ * those runs.
+ *
+ * The assertion is UNCHANGED in strength. The deposit must still disappear; it
+ * is now allowed the seconds the indexer needs to say so, and still fails if it
+ * never does.
+ *
+ * Returns a sentinel rather than the value, because `poll` reads null as "not
+ * yet" and null is precisely the state being waited for.
+ */
+const depositGone = async (offerPkScript: string): Promise<'gone'> =>
+  poll(async () => ((await depositAt(offerPkScript)) === null ? 'gone' : null), {
+    attempts: 15,
+    intervalMs: 1_000,
+    whenExhausted: `the deposit at ${offerPkScript} is still live after the fill`,
+  })
+
 const balance = async (): Promise<ReadonlyMap<AssetLeg, bigint>> =>
   offerInventoryFrom(await arkade.ctx.wallet.getBalance())
 
@@ -342,7 +367,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
 
         const filled = await driveTo(tickAll, store, id, 'filled')
         expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
-        expect(await depositAt(filled.offerPkScript)).toBeNull()
+        expect(await depositGone(filled.offerPkScript)).toBe('gone')
 
         const { txs } = await arkade.ctx.wallet.indexerProvider.getVirtualTxs([filled.fillTxid!])
         const fill = Transaction.fromPSBT(base64.decode(txs[0]!))
@@ -406,7 +431,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
 
         const filled = await driveTo(tickAll, store, id, 'filled')
         expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
-        expect(await depositAt(filled.offerPkScript)).toBeNull()
+        expect(await depositGone(filled.offerPkScript)).toBe('gone')
 
         // The fill pays sats to the maker's script on this direction.
         const { txs } = await arkade.ctx.wallet.indexerProvider.getVirtualTxs([filled.fillTxid!])
