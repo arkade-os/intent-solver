@@ -404,6 +404,28 @@ describe('asset markets on the card', () => {
     expect(asset.fee_flat).toBe('50')
   })
 
+  it('publishes a spread per direction, and the widest as fee_bps', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeBps: 10, buyBaseFeeBps: 900 })] }))
+      .markets[1]!
+    expect(asset.fee_bps).toBe(900)
+    // Omitting the quote side makes a reader fall back to exactly its 900.
+    expect(asset.solver_fee).toEqual({ base: { bps: 10 } })
+  })
+
+  it('widens fee_bps for one override, leaving the inherited side to say so', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market({ buyBaseFeeBps: 900 })] })).markets[1]!
+    expect(asset.fee_bps).toBe(900)
+    // sellBase inherits the market's 30, which now differs from fee_bps.
+    expect(asset.solver_fee).toEqual({ base: { bps: 30 } })
+  })
+
+  it('publishes the card it always did when both directions price the same', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeBps: 30, buyBaseFeeBps: 30 })] }))
+      .markets[1]!
+    expect('solver_fee' in asset).toBe(false)
+    expect(asset.fee_bps).toBe(30)
+  })
+
   it('omits solver_fee entirely when neither side charges a flat fee', () => {
     const asset = buildSolverCard(inputs({ assetMarkets: [market()] })).markets[1]!
     expect('solver_fee' in asset).toBe(false)

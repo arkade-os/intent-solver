@@ -95,6 +95,8 @@ export interface AssetCardMarket {
   /** RFC 6901 pointer, ALREADY resolved: `''` reads as the whole document to a client. */
   pricePath: string
   feeBps: number
+  sellBaseFeeBps?: number
+  buyBaseFeeBps?: number
   sellBaseFeeFlat?: bigint
   buyBaseFeeFlat?: bigint
   /** Maker sells base, so it RECEIVES quote — this bounds the QUOTE side. */
@@ -191,16 +193,20 @@ const cardAmounts = (label: string, bound?: { min: bigint; max: bigint } | null)
 /** Order-free, so one pair cannot be published twice with its legs swapped. */
 const legPairKey = (market: AssetCardMarket): string => [market.base ?? 'btc', market.quote ?? 'btc'].sort().join('/')
 
-/** Keyed by the side DEPOSITED, which quote-denominated `fee_flat` cannot say. No
- * per-side `bps`: we hold one spread, so each side inherits `fee_bps`. */
-const solverFeeField = (baseDeposit: bigint, quoteDeposit: bigint): Record<string, unknown> => {
-  if (baseDeposit <= 0n && quoteDeposit <= 0n) return {}
-  return {
-    solver_fee: {
-      ...(baseDeposit > 0n ? { base: { flat: String(baseDeposit) } } : {}),
-      ...(quoteDeposit > 0n ? { quote: { flat: String(quoteDeposit) } } : {}),
-    },
+/** Keyed by the side DEPOSITED. A term equal to `fee_bps` is left out, so a
+ * symmetric market publishes the card it did before directional spreads. */
+interface SolverFeeSide {
+  flat: bigint
+  bps: number
+}
+
+const solverFeeField = (base: SolverFeeSide, quote: SolverFeeSide, feeBps: number): Record<string, unknown> => {
+  const side = (s: SolverFeeSide): Record<string, unknown> | null => {
+    const entry = { ...(s.bps !== feeBps ? { bps: s.bps } : {}), ...(s.flat > 0n ? { flat: String(s.flat) } : {}) }
+    return Object.keys(entry).length === 0 ? null : entry
   }
+  const entries = { ...(side(base) ? { base: side(base) } : {}), ...(side(quote) ? { quote: side(quote) } : {}) }
+  return Object.keys(entries).length === 0 ? {} : { solver_fee: entries }
 }
 
 const assetMarketEntry = (
@@ -247,6 +253,8 @@ const assetMarketEntry = (
   const quote = cardAmounts(`${pair} sellBase`, market.sellBase)
   const sellBaseFeeFlat = market.sellBaseFeeFlat ?? 0n
   const buyBaseFeeFlat = market.buyBaseFeeFlat ?? 0n
+  const sellBaseFeeBps = market.sellBaseFeeBps ?? market.feeBps
+  const buyBaseFeeBps = market.buyBaseFeeBps ?? market.feeBps
   if (sellBaseFeeFlat < 0n || buyBaseFeeFlat < 0n) {
     throw new Error(`${pair} flat fees must be non-negative atomic-unit amounts`)
   }
@@ -264,10 +272,16 @@ const assetMarketEntry = (
   return {
     base_asset: baseAsset,
     quote_asset: quoteAsset,
-    fee_bps: market.feeBps,
+    // The WIDEST, which the registry requires: an old reader applies this both
+    // ways, and understating it would price a payout we refuse once funded.
+    fee_bps: Math.max(sellBaseFeeBps, buyBaseFeeBps),
     // Kept for readers predating `solver_fee`, which supersedes it.
     ...(base.max !== '0' && buyBaseFeeFlat > 0n ? { fee_flat: String(buyBaseFeeFlat) } : {}),
-    ...solverFeeField(quote.max !== '0' ? sellBaseFeeFlat : 0n, base.max !== '0' ? buyBaseFeeFlat : 0n),
+    ...solverFeeField(
+      { flat: quote.max !== '0' ? sellBaseFeeFlat : 0n, bps: sellBaseFeeBps },
+      { flat: base.max !== '0' ? buyBaseFeeFlat : 0n, bps: buyBaseFeeBps },
+      Math.max(sellBaseFeeBps, buyBaseFeeBps),
+    ),
     price_feed: market.feedUrl,
     price_feed_schema: { type: 'json', price_path: market.pricePath },
     price_decimals: priceDecimals,

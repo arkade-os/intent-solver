@@ -109,6 +109,30 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
     expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000n, toAmount: 99_500_000_000n })
   })
 
+  it('prices each direction at its own spread', () => {
+    const market = { ...MARKET, sellBaseFeeBps: 0, buyBaseFeeBps: 900 }
+    const args = { amountSide: 'from' as const, market, feed: FEED, carrierSats: 0n, dustSats: 0n }
+    expect(resolveAssetQuote({ ...args, pair: { from: null, to: ASSET_A }, amount: 100_000_000n })).toEqual({
+      ok: true,
+      fromAmount: 100_000_000n,
+      toAmount: 100_000_000_000n,
+    })
+    // Giving quote takes buyBaseFeeBps = 900: 1e8 - ceil(1e8 * 900 / 1e4).
+    expect(resolveAssetQuote({ ...args, pair: { from: ASSET_A, to: null }, amount: 100_000_000_000n })).toEqual({
+      ok: true,
+      fromAmount: 100_000_000_000n,
+      toAmount: 91_000_000n,
+    })
+  })
+
+  it('leaves a side with no override priced exactly as feeBps alone', () => {
+    const pair = { from: null, to: ASSET_A }
+    const args = { pair, amount: 100_000_000n, amountSide: 'from' as const, feed: FEED, carrierSats: 0n, dustSats: 0n }
+    expect(resolveAssetQuote({ ...args, market: { ...MARKET, buyBaseFeeBps: 900 } })).toEqual(
+      resolveAssetQuote({ ...args, market: MARKET }),
+    )
+  })
+
   it('prices the mirror direction, asset in and sats out', () => {
     // mid = 1e11 * 1e8 / (1e6 * 1e5) = 1e8 sats;  fee = ceil(1e8*50/1e4) = 5e5
     const outcome = resolveAssetQuote({

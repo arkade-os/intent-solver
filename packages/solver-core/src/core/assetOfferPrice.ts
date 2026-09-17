@@ -26,6 +26,9 @@ export interface OfferPriceMarket {
   toleranceBps: number
   /** The solver's margin, folded into the offer price against the maker. */
   feeBps: number
+  /** Per-direction margin, each defaulting to `feeBps`. */
+  sellBaseFeeBps?: number
+  buyBaseFeeBps?: number
   /** Atomic units of the base deposit, charged when the maker sells base. */
   sellBaseFeeFlat?: bigint
   /** Atomic units of the quote deposit, charged when the maker buys base. */
@@ -77,7 +80,8 @@ export const offerWithinTolerance = (args: {
   // exact formula would divide by zero). That is the gate switched off, not a
   // useful configuration, so it is refused rather than honoured.
   if (market.toleranceBps < 0 || market.toleranceBps >= BPS_DENOMINATOR) return false
-  if (market.feeBps < 0 || market.feeBps >= BPS_DENOMINATOR) return false
+  const feeBps = (direction === 'sell_base' ? market.sellBaseFeeBps : market.buyBaseFeeBps) ?? market.feeBps
+  if (feeBps < 0 || feeBps >= BPS_DENOMINATOR) return false
 
   const flatFee = (direction === 'sell_base' ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
   if (flatFee < 0n) return false
@@ -89,7 +93,7 @@ export const offerWithinTolerance = (args: {
     givesBase: direction === 'sell_base',
     baseDecimals: market.baseDecimals,
     quoteDecimals: market.quoteDecimals,
-    feeBps: market.feeBps,
+    feeBps,
     toleranceBps: market.toleranceBps,
     feed,
   })

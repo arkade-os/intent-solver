@@ -111,6 +111,8 @@ export const assetRfqMarketsFrom = (
         baseDecimals: market.baseDecimals,
         quoteDecimals: market.quoteDecimals,
         feeBps: market.feeBps,
+        sellBaseFeeBps: market.sellBaseFeeBps,
+        buyBaseFeeBps: market.buyBaseFeeBps,
         sellBaseFeeFlat: market.sellBaseFeeFlat,
         buyBaseFeeFlat: market.buyBaseFeeFlat,
         sellBase,

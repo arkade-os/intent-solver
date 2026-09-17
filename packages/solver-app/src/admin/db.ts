@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS admin_market (
   fee_bps         INTEGER NOT NULL,
   sell_base_fee_flat TEXT NOT NULL DEFAULT '0',
   buy_base_fee_flat  TEXT NOT NULL DEFAULT '0',
+  sell_base_fee_bps  INTEGER,
+  buy_base_fee_bps   INTEGER,
   sell_base_min   TEXT,
   sell_base_max   TEXT,
   buy_base_min    TEXT,
@@ -136,6 +138,12 @@ const marketFrom = (raw: MarketRaw): AssetMarketRow => ({
   feeBps: Number(raw.fee_bps),
   sellBaseFeeFlat: BigInt(String(raw.sell_base_fee_flat ?? 0)),
   buyBaseFeeFlat: BigInt(String(raw.buy_base_fee_flat ?? 0)),
+  ...(raw.sell_base_fee_bps === null || raw.sell_base_fee_bps === undefined
+    ? {}
+    : { sellBaseFeeBps: Number(raw.sell_base_fee_bps) }),
+  ...(raw.buy_base_fee_bps === null || raw.buy_base_fee_bps === undefined
+    ? {}
+    : { buyBaseFeeBps: Number(raw.buy_base_fee_bps) }),
   sellBase: boundsFrom(raw.sell_base_min, raw.sell_base_max),
   buyBase: boundsFrom(raw.buy_base_min, raw.buy_base_max),
   enabled: Number(raw.enabled) === 1,
@@ -150,6 +158,15 @@ const marketFrom = (raw: MarketRaw): AssetMarketRow => ({
  */
 export const adminDbPath = (swapDbPath: string): string =>
   swapDbPath.endsWith('.sqlite') ? swapDbPath.replace(/\.sqlite$/, '-admin.sqlite') : `${swapDbPath}-admin`
+
+/** Added after the table shipped. The bps pair is NULLABLE: absent must stay
+ * distinguishable from "equals fee_bps", or widening fee_bps would skip that side. */
+const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
+  ['sell_base_fee_flat', "TEXT NOT NULL DEFAULT '0'"],
+  ['buy_base_fee_flat', "TEXT NOT NULL DEFAULT '0'"],
+  ['sell_base_fee_bps', 'INTEGER'],
+  ['buy_base_fee_bps', 'INTEGER'],
+]
 
 export class AdminStore {
   private constructor(
@@ -168,9 +185,9 @@ export class AdminStore {
     const columns = new Set(
       (await this.driver.all<{ name: string }>('PRAGMA table_info(admin_market)')).map((c) => c.name),
     )
-    for (const column of ['sell_base_fee_flat', 'buy_base_fee_flat']) {
+    for (const [column, type] of ADDED_COLUMNS) {
       if (!columns.has(column)) {
-        await this.driver.exec(`ALTER TABLE admin_market ADD COLUMN ${column} TEXT NOT NULL DEFAULT '0'`)
+        await this.driver.exec(`ALTER TABLE admin_market ADD COLUMN ${column} ${type}`)
       }
     }
   }
@@ -246,13 +263,15 @@ export class AdminStore {
     const at = this.now()
     await this.driver.run(
       'INSERT INTO admin_market (market_key, base, quote, base_decimals, quote_decimals, feed_url, price_path, ' +
-        'tolerance_bps, fee_bps, sell_base_fee_flat, buy_base_fee_flat, sell_base_min, sell_base_max, buy_base_min, ' +
-        'buy_base_max, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+        'tolerance_bps, fee_bps, sell_base_fee_flat, buy_base_fee_flat, sell_base_fee_bps, buy_base_fee_bps, ' +
+        'sell_base_min, sell_base_max, buy_base_min, buy_base_max, enabled, created_at, updated_at) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
         'ON CONFLICT(market_key) DO UPDATE SET base = excluded.base, quote = excluded.quote, ' +
         'base_decimals = excluded.base_decimals, quote_decimals = excluded.quote_decimals, ' +
         'feed_url = excluded.feed_url, price_path = excluded.price_path, ' +
         'tolerance_bps = excluded.tolerance_bps, fee_bps = excluded.fee_bps, ' +
         'sell_base_fee_flat = excluded.sell_base_fee_flat, buy_base_fee_flat = excluded.buy_base_fee_flat, ' +
+        'sell_base_fee_bps = excluded.sell_base_fee_bps, buy_base_fee_bps = excluded.buy_base_fee_bps, ' +
         'sell_base_min = excluded.sell_base_min, sell_base_max = excluded.sell_base_max, ' +
         'buy_base_min = excluded.buy_base_min, buy_base_max = excluded.buy_base_max, ' +
         'enabled = excluded.enabled, updated_at = excluded.updated_at',
@@ -268,6 +287,8 @@ export class AdminStore {
         market.feeBps,
         String(market.sellBaseFeeFlat ?? 0n),
         String(market.buyBaseFeeFlat ?? 0n),
+        market.sellBaseFeeBps ?? null,
+        market.buyBaseFeeBps ?? null,
         // Decimal strings, per the note on `boundsFrom`. `null` for both halves
         // when the direction inherits the deployment-wide pair.
         market.sellBase === null ? null : String(market.sellBase.min),

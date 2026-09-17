@@ -97,6 +97,9 @@ export interface AssetQuoteMarket {
   quoteDecimals: number
   /** The solver's margin, taken out of the payout. */
   feeBps: number
+  /** Per-direction margin, each defaulting to `feeBps`, so unset is symmetric. */
+  sellBaseFeeBps?: number
+  buyBaseFeeBps?: number
   /** Atomic units of the base input, charged when the client sells base. */
   sellBaseFeeFlat?: bigint
   /** Atomic units of the quote input, charged when the client buys base. */
@@ -152,6 +155,9 @@ export const resolveAssetQuote = (args: {
 
   const flatFee = (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
   if (flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
+  // Same selection as the flat fee: the direction decides the spread too.
+  const feeBps = (givesBase ? market.sellBaseFeeBps : market.buyBaseFeeBps) ?? market.feeBps
+  if (feeBps < 0 || feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
   // BOTH legs counted: an asset deposit carries one, an asset payout needs one.
   const clientFronts = pair.from !== null
   const solverDelivers = pair.to !== null
@@ -170,7 +176,7 @@ export const resolveAssetQuote = (args: {
       givesBase,
       baseDecimals: market.baseDecimals,
       quoteDecimals: market.quoteDecimals,
-      feeBps: market.feeBps,
+      feeBps,
       feed,
     })
     if (netInput === null) return { ok: false, reason: 'price_unavailable' }
@@ -186,7 +192,7 @@ export const resolveAssetQuote = (args: {
     givesBase,
     baseDecimals: market.baseDecimals,
     quoteDecimals: market.quoteDecimals,
-    feeBps: market.feeBps,
+    feeBps,
     feed,
   })
 
