@@ -15,13 +15,16 @@
  * WHAT THIS SCREEN DOES NOT KNOW, stated here because it is the first thing a
  * reader should learn and the last thing they should have to discover:
  *
- *  - **Every figure is GROSS.** `ports/lightning.ts`'s `PaymentResult` carries
- *    no routing fee, so what a payment actually cost is written down nowhere —
- *    chain and routing costs are missing from every total here, not netted out
- *    of it. A corridor quoting 30bps against a fee market that took 40 shows a
- *    profit on this screen and lost money in fact. A quote-time BUDGET does
- *    exist on some rows and rides along as `quotedCostSats`; it is a ceiling,
- *    never a cost, and nothing here deducts it.
+ *  - **Figures are GROSS unless a rail reported what execution cost.** Where one
+ *    did, `netSats` sits beside `grossSats` and `costedCount` says over how many
+ *    rows — today that is the Lightning send leg alone, whose backend reports
+ *    the routing fee it actually paid. Every other rail reports no realized cost
+ *    at all (`OnchainTxOutcome` is a status word; `fund()` answers a txid), so
+ *    on those corridors chain fees are missing from the total rather than
+ *    deducted from it, and a corridor quoting 30bps into a fee market that took
+ *    40 still shows a profit here. `netSats` is null rather than falling back to
+ *    the gross, because the one thing this screen must never do is let gross be
+ *    read as net.
  *  - **A corridor with no `economics` is UNMEASURED, never zero.** It is named
  *    in `unmeasured` so the console can say so rather than silently averaging
  *    it in at nothing.
@@ -236,9 +239,10 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
     }
 
     const scanned = await scan(deps, window)
+    const summary = summarise(scanned.records, window.since, window.until)
     return c.json({
       window: { since: window.since, until: window.until, label: window.label, bucketSeconds: bucket.seconds },
-      summary: summarise(scanned.records, window.since, window.until),
+      summary,
       series: series(scanned.records, { since: window.since, until: window.until, bucketSeconds: bucket.seconds }),
       corridors: byCorridor(scanned.records),
       durationBands: byDuration(scanned.records),
@@ -251,10 +255,15 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
         // Restated in the payload, not only in this file's comments: anything
         // reading the admin API programmatically deserves the caveat that
         // decides whether these numbers mean what they appear to.
-        basis: 'gross',
+        // `mixed` once any row in the window carried a realized cost: part of
+        // the book is net and part is gross, and saying 'net' would claim the
+        // deduction covers all of it.
+        basis: summary.costedCount === 0 ? 'gross' : 'mixed',
         note:
-          'Realized execution cost (chain and routing fees) is recorded by no corridor and is NOT deducted here. ' +
-          'Where a row carries a quote-time fee BUDGET it rides along as quotedCostSats — a ceiling, never a cost.',
+          summary.costedCount === 0
+            ? 'No rail in this window reported what execution cost, so nothing is deducted: every figure is gross.'
+            : `netSats deducts the realized execution cost of ${summary.costedCount} of ${summary.pricedCount} ` +
+              'priced swaps. The rest report no cost and are gross. grossSats never has anything deducted.',
       },
       buckets: Object.keys(BUCKETS),
       windows: Object.keys(WINDOWS),

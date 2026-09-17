@@ -114,6 +114,32 @@ export interface AssetRfqSwapRow {
   depositVout: number | null
   fillTxid: string | null
   failureReason: string | null
+  /**
+   * THIS QUOTE'S OWN PRICE at the moment it was issued — quote-asset per
+   * base-asset, `mantissa / 10 ** scale`, never a float. TEXT because it is a
+   * bigint, for the reason the amount columns beside it are TEXT.
+   *
+   * Deliberately NOT the feed price it was derived from. Storing that and
+   * comparing the two is a tautology: `resolveAssetQuote` computes the payout
+   * from the feed, so the difference is always the configured spread.
+   */
+  quoteImpliedMantissa: bigint | null
+  quoteImpliedScale: number | null
+  /**
+   * Whether the CLIENT gave the base asset. The one bit that makes the mark
+   * directional: paying less quote per base is good when the solver buys base
+   * and bad when it sells, so without it one subtraction means opposite things
+   * on the two legs of one market.
+   */
+  quoteGivesBase: boolean | null
+  /**
+   * WHAT THE MARKET SAID WHEN THE FILL LANDED — the other half of the mark.
+   *
+   * Null on every row quoted before this shipped, on a fill whose feed read
+   * failed, and on every row that never filled. Unmeasured, never zero.
+   */
+  fillPriceMantissa: bigint | null
+  fillPriceScale: number | null
 }
 
 export interface AssetRfqQuoteRecord {
@@ -130,6 +156,15 @@ export interface AssetRfqQuoteRecord {
   offerAddress: string
   solverPubkey: string
   validUntil: number
+  /**
+   * The quote's own price and direction, recorded with the terms that fixed it.
+   *
+   * Omitted together or not at all: a price with no direction beside it cannot
+   * be signed, and an unsigned mark means opposite things on the two legs of one
+   * market.
+   * @see AssetRfqSwapRow.quoteImpliedMantissa
+   */
+  quotePrice?: { impliedMantissa: bigint; scale: number; givesBase: boolean }
 }
 
 const COLUMNS = `
@@ -152,7 +187,12 @@ const COLUMNS = `
   deposit_txid     TEXT,
   deposit_vout     INTEGER,
   fill_txid        TEXT,
-  failure_reason   TEXT
+  failure_reason   TEXT,
+  quote_implied_mantissa TEXT,
+  quote_implied_scale    INTEGER,
+  quote_gives_base       INTEGER,
+  fill_price_mantissa    TEXT,
+  fill_price_scale       INTEGER
 `
 
 const SCHEMA = `
@@ -213,7 +253,22 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
   depositVout: raw.deposit_vout === null ? null : Number(raw.deposit_vout),
   fillTxid: raw.fill_txid === null ? null : String(raw.fill_txid),
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
+  // `?? null` on every one: a row read from a database that has not been
+  // migrated yet answers `undefined`, not null, and the analytics layer reads
+  // null as "unmeasured" and undefined as a missing field.
+  quoteImpliedMantissa: bigIntOrNull(raw.quote_implied_mantissa),
+  quoteImpliedScale: numberOrNull(raw.quote_implied_scale),
+  quoteGivesBase:
+    raw.quote_gives_base === null || raw.quote_gives_base === undefined ? null : Number(raw.quote_gives_base) === 1,
+  fillPriceMantissa: bigIntOrNull(raw.fill_price_mantissa),
+  fillPriceScale: numberOrNull(raw.fill_price_scale),
 })
+
+const bigIntOrNull = (value: string | number | null | undefined): bigint | null =>
+  value === null || value === undefined ? null : BigInt(String(value))
+
+const numberOrNull = (value: string | number | null | undefined): number | null =>
+  value === null || value === undefined ? null : Number(value)
 
 export class AssetRfqSwapStore {
   private constructor(
@@ -224,7 +279,57 @@ export class AssetRfqSwapStore {
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<AssetRfqSwapStore> {
     const store = new AssetRfqSwapStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
     await store.driver.exec(SCHEMA)
+    await store.migrate()
     return store
+  }
+
+  /**
+   * Additive migration, for the reason the other stores state: `CREATE TABLE IF
+   * NOT EXISTS` never alters an existing table, so a column added above must be
+   * added here too.
+   *
+   * This store's FIRST, and its failure mode is why it is tested rather than
+   * assumed: `insertQuote` names its columns explicitly, so a missing ALTER
+   * throws inside the orchestrator's try — whose catch maps everything to
+   * `duplicate_swap`. Every quote on every market would be refused, and the
+   * operator told it was a duplicate-id problem.
+   */
+  private async migrate(): Promise<void> {
+    const columns = await this.driver.all<{ name: string }>(`PRAGMA table_info(asset_rfq_swap)`)
+    const existing = new Set(columns.map((c) => c.name))
+    for (const [column, type] of [
+      ['quote_implied_mantissa', 'TEXT'],
+      ['quote_implied_scale', 'INTEGER'],
+      ['quote_gives_base', 'INTEGER'],
+      ['fill_price_mantissa', 'TEXT'],
+      ['fill_price_scale', 'INTEGER'],
+    ] as const) {
+      if (!existing.has(column)) await this.driver.exec(`ALTER TABLE asset_rfq_swap ADD COLUMN ${column} ${type}`)
+    }
+  }
+
+  /**
+   * The market price observed just AFTER a fill landed.
+   *
+   * A named writer rather than a general `patch`: these two columns are pure
+   * observation with no bearing on the state machine, and a general column
+   * setter on a money table is a larger surface than this needs. Never touches
+   * `state`, so it cannot race a transition — the worst case is landing on a row
+   * another worker has already moved on, and the value is still true.
+   */
+  async recordFillMark(id: string, mark: { mantissa: bigint; scale: number }): Promise<void> {
+    // `updated_at` is deliberately NOT touched. On this corridor it is
+    // settlement time — `assetRfqEconomics` reads it as `settledAt`, so it sets
+    // `durationSeconds`, the x-axis of the very chart this mark is plotted on.
+    // Bumping it would stretch every marked fill's duration by the feed's
+    // latency, and ONLY the marked ones, biasing exactly the rows being
+    // compared. It also windows `ledgerRows` (a fill could fall out of the
+    // window it settled in) and is published to the client in `rfq_status`.
+    await this.driver.run(`UPDATE asset_rfq_swap SET fill_price_mantissa = ?, fill_price_scale = ? WHERE id = ?`, [
+      mark.mantissa.toString(),
+      mark.scale,
+      id,
+    ])
   }
 
   /**
@@ -241,8 +346,9 @@ export class AssetRfqSwapStore {
       `INSERT INTO asset_rfq_swap (
          id, state, created_at, updated_at, rfq_id, pair, from_asset_id, from_amount,
          to_asset_id, to_amount, maker_pk_script, maker_public_key, offer_pk_script,
-         offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)`,
+         offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason,
+         quote_implied_mantissa, quote_implied_scale, quote_gives_base
+       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?)`,
       [
         record.id,
         at,
@@ -259,6 +365,11 @@ export class AssetRfqSwapStore {
         record.offerAddress,
         record.solverPubkey,
         record.validUntil,
+        // All three or none — the spread at the call site is all-or-nothing, so
+        // a half-recorded mark cannot reach the column.
+        record.quotePrice?.impliedMantissa.toString() ?? null,
+        record.quotePrice?.scale ?? null,
+        record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
       ],
     )
     await this.recordEvent(record.id, null, 'quoted', null)

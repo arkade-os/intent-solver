@@ -11,17 +11,21 @@
  * the alternative is a dashboard that reports a number the solver cannot
  * actually stand behind:
  *
- * 1. **This is GROSS, never net.** No store records a REALIZED execution cost:
- *    `ports/lightning.ts`'s `PaymentResult` carries no routing fee, so what a
- *    payment actually cost is never written down anywhere. What some rows DO
- *    carry is a quote-time BUDGET — Lightning-send persists
- *    `quoted_routing_fee_sats` and spends against it as `maxFeeSats` — and that
- *    is a ceiling rather than a cost. It is surfaced as
- *    {@link SwapEconomics.quotedCostSats} and never subtracted, because netting
- *    an upper bound out of a spread understates profit by an unknown amount
- *    while looking exactly like the net figure this screen does not have.
- *    The admin route repeats the caveat in its own payload (`coverage.basis`)
- *    rather than only in a comment.
+ * 1. **GROSS AND NET ARE SEPARATE FIELDS, and net exists only where a rail said
+ *    what execution actually cost.** Lightning send is the only one that can
+ *    today — `PaymentResult.feePaidSats`, off the settled payment — so
+ *    {@link SwapEconomics.realizedCostSats} is null on every other corridor and
+ *    {@link SwapEconomics.netSats} is null with it. Null rather than a fallback
+ *    to the gross: a net figure derived from a missing cost is the gross wearing
+ *    a different label, and that is the one misreading here that costs money.
+ *    The quote-time BUDGET is a third thing again — Lightning-send persists
+ *    `quoted_routing_fee_sats` and spends against it as `maxFeeSats` — and it is
+ *    a ceiling, not a cost. It rides along as
+ *    {@link SwapEconomics.quotedCostSats} and is NEVER subtracted, because
+ *    netting an upper bound out of a spread understates profit by an unknown
+ *    amount while looking exactly like the real net figure. The admin route
+ *    states how much of the book is netted in its own payload
+ *    (`coverage.basis`) rather than only in a comment.
  * 2. **An unknown number is null, never a zero.** A `quoted` row has no inbound
  *    amount because nothing was funded; a cross-asset fill has no sats spread
  *    because its two legs are different units. Both would sum into a headline
@@ -125,15 +129,59 @@ export interface SwapEconomics {
    *
    * Lightning-send persists `quoted_routing_fee_sats` and spends against it as
    * `maxFeeSats`, so it is a CEILING set before the payment rather than the fee
-   * that was actually paid — the real one is still unrecorded anywhere. Netting
-   * an upper bound out of a spread would understate profit by an unknown amount
-   * and dress the result up as the net figure this screen explicitly does not
-   * have. Reported alongside instead, so an operator can see the budget they
-   * were quoting against and how much of their spread it could consume.
+   * that was actually paid. The real one lives in
+   * {@link SwapEconomics.realizedCostSats} wherever a rail reported it, and that
+   * is the only figure {@link SwapEconomics.netSats} is ever derived from.
+   * Netting an upper bound out of a spread would understate profit by an unknown
+   * amount while looking exactly like the real net figure, so this one is
+   * reported alongside and never subtracted — an operator can see the budget
+   * they were quoting against and how much of their spread it could consume.
    *
    * Null on every corridor that records no such figure.
    */
   readonly quotedCostSats: number | null
+  /**
+   * What executing this swap ACTUALLY cost, in sats, where the rail reported it.
+   *
+   * The figure this whole screen was missing. `quotedCostSats` beside it is the
+   * budget; this is the bill. Today only the Lightning send leg can source one
+   * — `PaymentResult.feePaidSats`, from the backend, on a settled payment — and
+   * every other rail reports null because no port in this service returns a
+   * realized fee: `OnchainTxOutcome` is a status word and `fund()` answers
+   * `{txid, vout}`.
+   *
+   * NULL IS UNMEASURED, NEVER FREE, and the distinction decides whether
+   * {@link SwapEconomics.netSats} exists at all. A swap whose cost nobody
+   * recorded must not be netted to look like one that cost nothing.
+   */
+  readonly realizedCostSats: number | null
+  /**
+   * `grossSats - realizedCostSats` — WHAT THE SOLVER ACTUALLY KEPT.
+   *
+   * The bottom line, and null unless BOTH halves are known. A net figure
+   * derived from a missing cost is just the gross wearing a different label,
+   * which is the single most misleading thing this screen could publish: the
+   * whole reason the gross caveat is stated three times is that someone will
+   * otherwise read gross AS net. So the field is absent rather than
+   * approximated, and the aggregate counts how much of the book it covers.
+   */
+  readonly netSats: number | null
+  /**
+   * HOW FAR THE MARKET MOVED between this quote being issued and its fill
+   * landing, in basis points, SIGNED so that positive is in the solver's favour.
+   *
+   * The question peer drift structurally cannot answer. That one benchmarks a
+   * fill against this solver's OTHER fills, so a market that ran against every
+   * quote in a window leaves them all looking flawless beside each other. This
+   * one compares two observations taken at two different TIMES — which is the
+   * whole point, and what the first attempt at this got wrong by comparing the
+   * quote to the very feed instant it was derived from.
+   *
+   * Null unless both halves exist: every corridor but the asset RFQ leg, rows
+   * quoted before the columns shipped, fills whose feed read failed, and
+   * anything that never filled. Unmeasured, never zero.
+   */
+  readonly marketDriftBps: number | null
   /** @see the note where this is assigned — a loss that cannot be priced in sats. */
   readonly atRiskUnknown: boolean
   /**
@@ -203,6 +251,39 @@ export const bpsOf = (amount: number, notional: number): number | null => {
 }
 
 /**
+ * The market's move between quote and fill, in basis points, positive in the
+ * solver's favour.
+ *
+ * CROSS-MULTIPLIED rather than rescaled. The two observations are separate feed
+ * reads and need not share a scale, and normalising one to the other would
+ * either divide (losing precision in the figure being measured) or multiply into
+ * a comparison that no longer matches its denominator. Exact bigint throughout;
+ * the single division is the last step, into basis points.
+ *
+ * The direction bit is why `givesBase` is stored. The ratio is quote-per-base
+ * either way, but the solver sits on opposite sides of it:
+ *
+ *  - `givesBase` — the client hands over base, so the solver BUYS base at
+ *    `implied`. A market above that means it bought below the market: good.
+ *  - otherwise — the client hands over quote, so the solver SELLS base at
+ *    `implied`. A market below that means it sold above the market: good.
+ */
+const marketDriftBpsOf = (
+  quote: { impliedMantissa: string; scale: number; givesBase: boolean } | null,
+  fill: { mantissa: string; scale: number } | null,
+): number | null => {
+  if (quote === null || fill === null) return null
+  const implied = BigInt(quote.impliedMantissa)
+  const market = BigInt(fill.mantissa)
+  if (implied <= 0n || market <= 0n || quote.scale < 0 || fill.scale < 0) return null
+  // Both sides raised to the other's scale, so they are directly comparable.
+  const impliedAt = implied * 10n ** BigInt(fill.scale)
+  const marketAt = market * 10n ** BigInt(quote.scale)
+  const favourable = quote.givesBase ? marketAt - impliedAt : impliedAt - marketAt
+  return Number((favourable * 10_000n) / impliedAt)
+}
+
+/**
  * Assemble a {@link SwapEconomics} from the parts a corridor knows, deriving
  * the three fields that are pure arithmetic over them.
  *
@@ -239,6 +320,12 @@ export const economicsOf = (parts: {
   exposureSats?: number | null
   /** @see SwapEconomics.quotedCostSats */
   quotedCostSats?: number | null
+  /** @see SwapEconomics.realizedCostSats */
+  realizedCostSats?: number | null
+  /** The price these terms fixed, and which way round the trade ran. */
+  quotePrice?: { impliedMantissa: string; scale: number; givesBase: boolean } | null
+  /** What the feed said as the fill landed. */
+  fillPrice?: { mantissa: string; scale: number } | null
   /** @see SwapEconomics.atRiskUpperBound */
   atRiskUpperBound?: boolean
   /** True only for a TERMINAL row that was exposed — see {@link SwapEconomics.atRiskSats}. */
@@ -256,6 +343,14 @@ export const economicsOf = (parts: {
 
   const atRisk =
     parts.lost === true ? (parts.exposureSats ?? (outbound.assetId === null ? outboundAmount : null)) : null
+
+  // Kept whatever the phase. A rail reports a fee only on a CONFIRMED payment,
+  // so a value here is already evidence the money left — including on a swap
+  // whose CLAIM then failed, where gating on `done` hid a fee that was really
+  // paid and understated the loss by exactly that much. No total can be
+  // disturbed by this: `costed()` gates on `realized`, which is `phase ===
+  // 'done'`, so an unfinished swap still reaches no sum.
+  const realizedCostSats = parts.realizedCostSats ?? null
 
   return {
     id: parts.id,
@@ -296,5 +391,11 @@ export const economicsOf = (parts: {
     // Only meaningful where there IS an at-risk figure to qualify.
     atRiskUpperBound: parts.atRiskUpperBound === true && atRisk !== null,
     quotedCostSats: parts.quotedCostSats ?? null,
+    realizedCostSats,
+    // Both halves or nothing. A realized cost on a swap with no priceable
+    // spread nets to nothing meaningful, and a spread with no cost is the gross
+    // figure this field exists to be distinguishable from.
+    netSats: grossSats === null || realizedCostSats === null ? null : grossSats - realizedCostSats,
+    marketDriftBps: marketDriftBpsOf(parts.quotePrice ?? null, parts.fillPrice ?? null),
   }
 }

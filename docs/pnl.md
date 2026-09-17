@@ -3,24 +3,40 @@
 What this solver made, where, and where it went wrong — on the console's **p&l**
 tab and at `GET /api/pnl`.
 
-## Read this first: every figure is GROSS
+## Read this first: what is net and what is gross
 
-`ports/lightning.ts`'s `PaymentResult` carries no routing fee, so what a payment
-actually cost is written down nowhere. **Chain fees and routing fees are missing
-from every total on this screen rather than deducted from it.**
+A figure is **net** only where a rail reported what execution actually cost.
+Today that is the **Lightning send leg alone**: its backend answers with the
+routing fee it paid once a payment settles, and the row keeps it in
+`routing_fee_paid_sats`.
 
-A corridor quoting 30bp into a fee market that took 40 shows a profit here and
-lost money in fact. Netting these out means instrumenting the backends — the
-Lightning port would have to report a realized fee alongside the preimage, and
-each store a column to keep it in. Until then, treat these numbers as the
-revenue line and not the bottom one.
+Every other rail reports no realized cost at all — `OnchainTxOutcome` is a
+status word, `fund()` answers `{txid, vout}`, and the Arkade lifecycle reports
+no per-transaction fee. On those corridors chain fees are **missing from the
+total rather than deducted from it**, and a corridor quoting 30bp into a fee
+market that took 40 still shows a profit here.
 
-A quote-time **budget** does exist on one corridor: Lightning-send persists
-`quoted_routing_fee_sats` and spends against it as `maxFeeSats`. It rides along
-as `quotedCostSats` and is **never deducted**, because it is a ceiling rather
-than a cost — subtracting an upper bound would understate profit by an unknown
-amount while looking exactly like the net figure this screen does not have.
-It is there so an operator can see how much of a spread the budget could eat.
+So the screen carries both. `grossSats` never has anything deducted.
+`netSats` is `grossSats - realizedCostSats`, and is **null rather than falling
+back to the gross** wherever a cost is unknown — a net figure derived from a
+missing cost is just the gross wearing a different label, which is the one
+misreading this screen must not produce. `costedCount` says over how much of the
+book the net figure holds, and `coverage.basis` answers `mixed` when part of the
+window is net and part is gross.
+
+Every net figure is computed over the **costed rows alone** — their own gross,
+their own volume. Netting a window's whole gross against a cost drawn from part
+of it overstates the margin by exactly the uncosted share.
+
+A quote-time **budget** also exists on the send row (`quoted_routing_fee_sats`,
+spent against as `maxFeeSats`). It rides along as `quotedCostSats` and is
+**never deducted**: it is a ceiling, not a cost.
+
+The realized fee is stored in whole satoshis, rounded **up** from the millisat
+truth. Summed over many payments that overstates cost by up to a sat each, so
+**reported net profit is a floor, not the exact figure**. Round-to-nearest would
+be worse — a real sub-sat fee would read as `0`, and zero means free here.
+Carrying millisats is the fix; tracked in #155.
 
 Two other honesty rules hold throughout, and both exist because the alternative
 is a number nobody can stand behind:
@@ -123,11 +139,55 @@ so the spread can be textbook and the trade still a loss. Two panels answer it:
   for the same directional leg. Positive is in the solver's favour. The shape
   worth looking for is points below the line drifting rightward.
 
-The benchmark is **this solver's own book**, not a price feed, and that limit
-changes the reading: it answers "was this fill worse than the ones around it",
-never "was it worse than the market". A feed-relative mark needs the feed price
-at quote time, which nothing records today — that is the other half of the
-instrumentation the gross caveat above asks for.
+Two benchmarks, answering different questions. Both signed so **positive is in
+the solver's favour**.
+
+- **vs peers** (`driftBps`) — against this window's volume-weighted mean rate for
+  the same leg, i.e. this solver's own book. Finds a bad _fill_.
+- **vs market** (`marketDriftBps`) — the price a quote FIXED, against the feed
+  read again **when the fill landed**. Finds a market that _ran away_.
+
+The second is what the first cannot give: a market that moved against every quote
+in a window leaves them all looking flawless beside each other.
+
+It must be **two observations at two times**. Snapshotting the feed at quote time
+and comparing it to the quote derived from that same instant is a tautology — it
+returns the configured spread on every input and can never go negative. An
+earlier attempt shipped exactly that and was withdrawn.
+
+**The spread is inside this number, so zero is the breakeven line.** A flat
+market reads as roughly the margin; below zero the market has moved further than
+the margin covered and the fill is under water.
+
+"Roughly" is exact enough to rely on and is not an identity. At ordinary fees a
+flat market reads exactly `feeBps` on both legs, but the buying leg is really
+`feeBps / (1 − feeBps/10⁴)` — indistinguishable below 1%, `526` at `feeBps: 500`
+— and a flat per-trade fee adds to it. **The zero crossing is exact on both legs
+at every fee**, which is the part the screens actually lean on. On a 30bp market:
+
+| market at fill | mark |
+| --- | --- |
+| +10% | `+1033bp` |
+| flat | `+30bp` |
+| −0.3% | `0bp` — breakeven, the move exactly ate the margin |
+| −1% | `-70bp` |
+
+The direction bit (`quote_gives_base`) is what makes it signable: the ratio is
+quote-per-base either way, but paying less quote per base is good when the solver
+buys base and bad when it sells, so one unnormalised subtraction would call the
+same move good on one leg and bad on the other.
+
+The comparison is exact bigint, cross-multiplied — the stored implied price and
+the fill-time observation are carried at their own scales and neither is rescaled
+into the other — and divides once into basis points.
+
+**The fill-time read never blocks a fill.** It runs *after* the `filling ->
+filled` transition, so a slow feed cannot widen the window in which a crash
+leaves a submitted fill reading `filling` (which `recoverFilling` escalates to
+`stuck`). Every failure — no market, an unreadable feed, a non-positive price —
+leaves the mark null and the fill untouched, and is reported as a **price** fault
+rather than a swap fault. Each leg reports `markedCount` beside its median, so a
+mark covering part of a leg is never read as covering all of it.
 
 Legs are grouped by corridor **and** direction. `A->B` and `B->A` are
 reciprocals, so pooling them would average a rate against its own inverse and
@@ -182,11 +242,22 @@ Both routes are read-only, like everything on the console but `actions.ts`, and
 both sit behind the same deployment assumption as the rest of this port: no
 authentication, a reverse proxy in front. See [runbook.md](./runbook.md).
 
+## From a terminal
+
+`pnl [1h|24h|7d|30d|90d]` prints the same figures without a browser, for a box
+where `ADMIN_PORT` is not set or not reachable. It reads the same
+`economics()` and runs the same pure aggregations as the screen, so the two
+cannot disagree. The rendering lives in `ops/pnlReport.ts` as a pure function
+because it formats money and therefore has to be testable.
+
 ## Known gaps
 
-- **Net-of-fees P&L.** Needs a realized fee on the Lightning port and a column
-  per store. The largest single improvement available to this screen.
-- **Feed-relative FX marks.** Needs the feed price snapshotted at quote time on
-  the asset RFQ row.
-- **No CLI equivalent.** The console and the API have it; `cli.ts` does not.
-- **Exposure-routed failures on the ERC20 legs**, per the note above.
+- **Realized cost on every rail but Lightning send.** Needs a port change per
+  rail: a fee on `OnchainBackend.fund()`/`transactionOutcome`, and a per-transaction
+  figure from the Arkade lifecycle. The model already carries it — those
+  corridors report `realizedCostSats` null and are counted out of `costedCount`
+  rather than netted at zero.
+- **Feed-relative marks on corridors other than asset RFQ.** The other cross-asset
+  legs (both ERC20 directions) quote against configuration rather than a live
+  feed, so there is no market price to snapshot.
+- **`atRiskSats` is an upper bound on the two ERC20 legs**, per the note above.

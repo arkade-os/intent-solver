@@ -70,6 +70,28 @@ export interface PaymentResult {
    * preimage as failure.
    */
   preimage?: string
+  /**
+   * What routing this payment ACTUALLY cost, in sats — the fee the backend
+   * paid, not the one it was budgeted.
+   *
+   * THE ONLY REALIZED EXECUTION COST ANY PORT IN THIS SERVICE REPORTS. Without
+   * it the solver knows what it quoted to keep and never what it kept: a
+   * corridor priced at 30bps into a fee market that took 40 is a loss that
+   * every figure on the P&L screen renders as a profit. `maxFeeSats` bounds it
+   * and `estimateSendFee` predicts it; neither is a record of what happened.
+   *
+   * Present only alongside `succeeded`, and only from a backend that knows. A
+   * failed payment cost nothing to route — nothing was delivered — and the
+   * in-flight case has no answer yet.
+   *
+   * OPTIONAL, under `ln/port.ts`'s rule that an absent capability is a
+   * documented degradation: a backend that cannot answer must not guess, and
+   * `undefined` here means UNMEASURED rather than free. Every consumer treats
+   * the two differently — `analytics/economics.ts` will not net a cost it was
+   * never given, and says so on the screen rather than quietly reporting gross
+   * as though it were net.
+   */
+  feePaidSats?: number
 }
 
 /**

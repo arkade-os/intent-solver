@@ -331,6 +331,91 @@ const createRail = async (config: Config): Promise<LightningRail> => {
 }
 
 /**
+ * The corridor READERS alone, over the swap stores, touching no network.
+ *
+ * For read-only reporting — `pnl` today. {@link createServices} cannot serve it:
+ * that function creates the Lightning rail, the Arkade context and calls
+ * `RestEmulatorProvider.getInfo()` before it returns, so a report of what the
+ * book DID would refuse to run whenever a rail is down. That is precisely when
+ * an operator wants it, and `timeline` already shows the lighter shape by
+ * opening its store directly.
+ *
+ * Nothing is CONTACTED: the overrides and the asset markets come out of the
+ * admin store exactly as `createServices` reads them, so a market an operator
+ * configured is reported on without a network call. Not read-only, though —
+ * every `open()` runs its own additive migration, so this writes DDL to a
+ * database the live solver may also have open.
+ *
+ * READERS, never corridors: a reader needs only a store, which is the whole
+ * reason `CorridorReader` is split from `Corridor`. Nothing returned here can
+ * quote or move money. Consumer corridors injected through
+ * `createServices({ corridors })` are absent — nothing in this binary passes
+ * any, but an embedder's would be counted by `/api/pnl` and not by the CLI.
+ */
+export const openReportReaders = async (
+  config: Config,
+): Promise<{ readers: CorridorReaderSet; close: () => Promise<void> }> => {
+  // Named as they open, so a throw partway through still closes what already
+  // did — and so each close is isolated the way `Services.close()` isolates its
+  // own. A close that throws out of the CLI's `finally` would otherwise replace
+  // the real error with itself.
+  const opened: Array<[string, { close: () => Promise<void> }]> = []
+  const track = <T extends { close: () => Promise<void> }>(name: string, store: T): T => {
+    opened.push([name, store])
+    return store
+  }
+  const close = async () => {
+    for (const [name, store] of [...opened].reverse()) {
+      try {
+        await store.close()
+      } catch (error) {
+        log(`close(${name}) failed:`, error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+
+  try {
+    const layout = resolveDbLayout(config.swapDbPath)
+    const swapFile = betterSqliteDriver(config.swapDbPath)
+    const shared = layout.consolidated ? swapFile : undefined
+    const store = track('store', await SwapStore.open(swapFile))
+    const onchainStore = track('onchainStore', await OnchainSendSwapStore.open(shared ?? layout.onchainSend))
+    const receiveStore = track('receiveStore', await ReceiveSwapStore.open(shared ?? layout.receive))
+    const onchainReceiveStore = track(
+      'onchainReceiveStore',
+      await OnchainReceiveSwapStore.open(shared ?? layout.onchainReceive),
+    )
+    const servesEvm = config.evmCorridors.length > 0
+    const evmSendStore = servesEvm ? track('evmSendStore', await EvmSendSwapStore.open(swapFile)) : null
+    const evmReceiveStore = servesEvm ? track('evmReceiveStore', await EvmReceiveSwapStore.open(swapFile)) : null
+    const adminStore = track('adminStore', await AdminStore.open(shared ?? layout.admin))
+
+    const policy = applyOverrides(config, await adminStore.getOverrides())
+    const assetMarkets = assetMarketPolicy(await adminStore.listMarkets())
+    const assetRfqMarkets = assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)
+    const assetRfqStore =
+      assetRfqMarkets.length > 0 ? track('assetRfqStore', await AssetRfqSwapStore.open(swapFile)) : null
+
+    const readers = readerSetFromDeps({
+      store,
+      onchainStore,
+      receiveStore,
+      onchainReceiveStore,
+      ...(evmSendStore ? { evmSendStore } : {}),
+      ...(evmReceiveStore ? { evmReceiveStore } : {}),
+      evmCorridors: policy.evmCorridors,
+      ...(assetRfqStore ? { assetRfqStore } : {}),
+      assetRfqMarkets,
+    })
+
+    return { readers, close }
+  } catch (error) {
+    await close()
+    throw error
+  }
+}
+
+/**
  * Build the full service stack.
  *
  * The Lightning and Arkade wallets are initialised SEQUENTIALLY on purpose: two

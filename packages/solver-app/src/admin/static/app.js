@@ -2489,7 +2489,22 @@ const pnlFigures = (summary) =>
       `over ${summary.pricedCount} priced swap${summary.pricedCount === 1 ? '' : 's'}`,
       summary.grossSats < 0 ? 'c-loss' : null,
     ),
-    figure('margin', bps(summary.marginBps), `on ${sats(summary.volumeSats)} sat volume`),
+    // Named GROSS margin. Unqualified beside a net figure it reads as the net
+    // one, which is the same misreading the net column guards against.
+    figure('gross margin', bps(summary.marginBps), `on ${sats(summary.volumeSats)} sat volume`),
+    // NET, and only where a rail actually reported what execution cost. Shown
+    // beside the gross rather than instead of it, with the covered count on the
+    // label: a net figure that silently covers a third of the book, standing
+    // where the gross used to, is the one misreading this screen must prevent.
+    summary.costedCount > 0
+      ? figure(
+          'net, sats',
+          signedSats(summary.netSats),
+          `${bps(summary.netMarginBps)} after ${sats(summary.realizedCostSats)} sat cost · ` +
+            `${summary.costedCount} of ${summary.pricedCount} priced`,
+          summary.netSats !== null && summary.netSats < 0 ? 'c-loss' : null,
+        )
+      : figure('net', 'unknown', 'no rail reported an execution cost'),
     // Only rendered when non-zero. A permanent "0 at risk" is a position the
     // eye learns to skip, which is exactly where this number needs to be seen —
     // the same rule the status bar's stuck count follows.
@@ -2521,10 +2536,11 @@ const pnlFigures = (summary) =>
 const pnlBasis = (coverage) =>
   h(
     'p.basis',
-    h('b', 'These are GROSS figures. '),
-    'No corridor records what execution actually cost, so chain fees and routing fees are missing from every ' +
-      'total here rather than deducted from it. A corridor quoting 30bp into a fee market that took 40 shows a ' +
-      'profit on this screen and lost money in fact.',
+    h('b', coverage.basis === 'mixed' ? 'These figures are PART net, part gross. ' : 'These are GROSS figures. '),
+    coverage.note ??
+      'No corridor records what execution actually cost, so chain fees and routing fees are missing from every ' +
+        'total here rather than deducted from it.',
+    ' A corridor whose cost is unreported shows a profit here even where a fee market took more than its spread.',
     coverage.unmeasured.length > 0
       ? h(
           'span',
@@ -2643,7 +2659,11 @@ const corridorTable = (corridors) =>
         'tr',
         h('th', 'corridor'),
         h('th.right', 'gross'),
-        h('th.right', 'margin'),
+        // Each margin sits beside the figure it describes. A single `margin`
+        // column next to `net` reads as the net margin, and it is the gross.
+        h('th.right', 'gross bp'),
+        h('th.right', 'net'),
+        h('th.right', 'net bp'),
         h('th.right', 'volume'),
         h('th.right', 'settled'),
         h('th.right', 'failed'),
@@ -2660,6 +2680,17 @@ const corridorTable = (corridors) =>
           h('td.mono', row.corridor, row.crossAsset ? h('span.faint', ' fx') : null),
           h('td.right', row.pricedCount === 0 ? h('span.faint', '—') : signedSats(row.grossSats)),
           h('td.right', bps(row.marginBps)),
+          h(
+            'td.right',
+            row.costedCount > 0
+              ? h(
+                  'span',
+                  { title: `after ${row.realizedCostSats.toLocaleString('en-US')} sats of realized cost` },
+                  signedSats(row.netSats),
+                )
+              : h('span.faint', { title: 'This rail reports no execution cost, so it cannot be netted.' }, '—'),
+          ),
+          h('td.right', bps(row.netMarginBps)),
           h('td.right', sats(row.volumeSats)),
           h('td.right', String(row.realizedCount)),
           h('td.right', row.failedCount > 0 ? String(row.failedCount) : h('span.faint', '0')),
@@ -2742,13 +2773,18 @@ const durationPanel = (bands) =>
   )
 
 /**
- * One panel per directional FX leg.
+ * One panel per directional FX leg, against TWO benchmarks that answer
+ * different questions — which is why both are on screen and both are labelled.
  *
- * The benchmark is the solver's OWN book over the window — the volume-weighted
- * mean rate — and the panel says so, because that limitation changes the
- * reading. It answers "was this fill worse than the ones around it", never "was
- * it worse than the market". A feed-relative mark needs the feed price at quote
- * time, which nothing records today.
+ * `vs peers` is this window's volume-weighted mean rate: the solver's own book.
+ * It finds a bad fill and is blind to a bad book, because a market that moved
+ * against every quote leaves them all looking fine beside each other.
+ *
+ * `vs market` compares the price a quote FIXED against a feed read again when
+ * the fill landed — two observations at two times. The spread sits inside it, so
+ * a flat market reads as roughly the margin and ZERO is the breakeven line:
+ * below it the market has moved further than the margin covered. The zero
+ * crossing is exact; the flat baseline is only approximately `feeBps`.
  */
 const fxPanel = (leg) => {
   const worst = [...leg.points].sort((a, b) => (a.driftBps ?? 0) - (b.driftBps ?? 0)).slice(0, 5)
@@ -2759,9 +2795,25 @@ const fxPanel = (leg) => {
       'p.muted',
       `${leg.count} fill${leg.count === 1 ? '' : 's'} on `,
       h('span.mono', leg.corridor),
-      '. Drift is measured against this window’s volume-weighted mean rate — this solver’s own book, not a ' +
-        'price feed. Below the line is a fill that came in worse than its peers.',
+      '. Drift is measured against this window’s volume-weighted mean rate — this solver’s own book. ' +
+        'Below the line is a fill that came in worse than its peers.',
     ),
+    // The leg-level verdict peer drift cannot give. Coloured only against the
+    // solver, and it carries its own denominator: a median over an unstated
+    // share of the leg is the reading this screen works to prevent elsewhere.
+    leg.medianMarketDriftBps === null || leg.medianMarketDriftBps === undefined
+      ? h(
+          'p.faint',
+          `No market mark: none of these ${leg.count} fills carry both a quote price and a feed read at fill time.`,
+        )
+      : h(
+          'p.muted',
+          'Against the market when it filled, the median fill on this leg priced ',
+          leg.medianMarketDriftBps < 0
+            ? h('span.at-risk', `${bps(leg.medianMarketDriftBps)} under water`)
+            : h('b', `${bps(leg.medianMarketDriftBps)} ahead`),
+          `, over ${leg.markedCount ?? 0} of ${leg.count} marked. The spread is included, so zero is breakeven.`,
+        ),
     // Named per leg, so N of these are distinguishable in a screen reader's
     // list of figures rather than N repeats of one sentence.
     decayChart(leg.points, { title: `Rate drift against time to fill, ${leg.leg} on ${leg.corridor}` }),
@@ -2771,7 +2823,14 @@ const fxPanel = (leg) => {
           'table',
           h(
             'thead',
-            h('tr', h('th', 'worst fills'), h('th.right', 'took'), h('th.right', 'drift'), h('th.right', 'settled')),
+            h(
+              'tr',
+              h('th', 'worst fills'),
+              h('th.right', 'took'),
+              h('th.right', 'vs peers'),
+              h('th.right', 'vs market'),
+              h('th.right', 'settled'),
+            ),
           ),
           h(
             'tbody',
@@ -2781,6 +2840,14 @@ const fxPanel = (leg) => {
                 h('td.mono', shortId(point.id)),
                 h('td.right', duration(point.durationSeconds)),
                 h('td.right', (point.driftBps ?? 0) < 0 ? h('span.at-risk', bps(point.driftBps)) : bps(point.driftBps)),
+                h(
+                  'td.right',
+                  point.marketDriftBps === null || point.marketDriftBps === undefined
+                    ? h('span.faint', { title: 'No feed read landed against this fill.' }, '—')
+                    : point.marketDriftBps < 0
+                      ? h('span.at-risk', bps(point.marketDriftBps))
+                      : bps(point.marketDriftBps),
+                ),
                 h('td.right', ago(point.at)),
               ),
             ),

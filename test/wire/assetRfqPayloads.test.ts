@@ -116,6 +116,13 @@ const row = (over: Partial<AssetRfqSwapRow> = {}): AssetRfqSwapRow => ({
   depositVout: null,
   fillTxid: null,
   failureReason: null,
+  // The market mark. Null here: this fixture is about the WIRE payload, which
+  // carries none of it.
+  quoteImpliedMantissa: null,
+  quoteImpliedScale: null,
+  quoteGivesBase: null,
+  fillPriceMantissa: null,
+  fillPriceScale: null,
   ...over,
 })
 
