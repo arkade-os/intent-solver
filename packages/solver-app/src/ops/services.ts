@@ -331,6 +331,78 @@ const createRail = async (config: Config): Promise<LightningRail> => {
 }
 
 /**
+ * The corridor READERS alone, over the swap stores, touching no network.
+ *
+ * For read-only reporting — `pnl` today. {@link createServices} cannot serve it:
+ * that function creates the Lightning rail, the Arkade context and calls
+ * `RestEmulatorProvider.getInfo()` before it returns, so a report of what the
+ * book DID would refuse to run whenever a rail is down. That is precisely when
+ * an operator wants it, and `timeline` already shows the lighter shape by
+ * opening its store directly.
+ *
+ * Everything here is a store read. The overrides and the asset markets come out
+ * of the admin store exactly as `createServices` reads them, so a market an
+ * operator configured is reported on, and nothing is contacted to find that out.
+ *
+ * READERS, never corridors: a reader needs only a store, which is the whole
+ * reason `CorridorReader` is split from `Corridor`. Nothing returned here can
+ * quote or move money.
+ */
+export const openReportReaders = async (
+  config: Config,
+): Promise<{ readers: CorridorReaderSet; close: () => Promise<void> }> => {
+  const layout = resolveDbLayout(config.swapDbPath)
+  const swapFile = betterSqliteDriver(config.swapDbPath)
+  const shared = layout.consolidated ? swapFile : undefined
+  const store = await SwapStore.open(swapFile)
+  const onchainStore = await OnchainSendSwapStore.open(shared ?? layout.onchainSend)
+  const receiveStore = await ReceiveSwapStore.open(shared ?? layout.receive)
+  const onchainReceiveStore = await OnchainReceiveSwapStore.open(shared ?? layout.onchainReceive)
+  const servesEvm = config.evmCorridors.length > 0
+  const evmSendStore = servesEvm ? await EvmSendSwapStore.open(swapFile) : null
+  const evmReceiveStore = servesEvm ? await EvmReceiveSwapStore.open(swapFile) : null
+  const adminStore = await AdminStore.open(shared ?? layout.admin)
+
+  const policy = applyOverrides(config, await adminStore.getOverrides())
+  const assetMarkets = assetMarketPolicy(await adminStore.listMarkets())
+  const assetRfqMarkets = assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)
+  const assetRfqStore = assetRfqMarkets.length > 0 ? await AssetRfqSwapStore.open(swapFile) : null
+
+  const readers = readerSetFromDeps({
+    store,
+    onchainStore,
+    receiveStore,
+    onchainReceiveStore,
+    ...(evmSendStore ? { evmSendStore } : {}),
+    ...(evmReceiveStore ? { evmReceiveStore } : {}),
+    evmCorridors: policy.evmCorridors,
+    ...(assetRfqStore ? { assetRfqStore } : {}),
+    assetRfqMarkets,
+  })
+
+  return {
+    readers,
+    // Each store closes itself. On the consolidated layout they share one
+    // handle and better-sqlite3's close is a no-op after the first, which is
+    // the same property `Services.close()` relies on.
+    close: async () => {
+      for (const closeable of [
+        store,
+        onchainStore,
+        receiveStore,
+        onchainReceiveStore,
+        evmSendStore,
+        evmReceiveStore,
+        assetRfqStore,
+        adminStore,
+      ]) {
+        await closeable?.close()
+      }
+    },
+  }
+}
+
+/**
  * Build the full service stack.
  *
  * The Lightning and Arkade wallets are initialised SEQUENTIALLY on purpose: two

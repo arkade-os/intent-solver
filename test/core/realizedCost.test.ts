@@ -185,4 +185,31 @@ describe('series', () => {
     expect(points.map((p) => p.costedCount)).toEqual([1, 0, 0])
     expect(points[1]!.netSats).toBeNull()
   })
+
+  /**
+   * An entirely uncosted window has no net result, and a flat zero line reads
+   * as "we netted nothing" rather than "nobody knows" — the same collapse the
+   * whole feature is built to avoid, on the one figure a reader is most likely
+   * to trust at a glance.
+   */
+  it('keeps the cumulative net NULL until something is actually costed', () => {
+    const points = series([swap({ id: 'a', at: T0 + 10, give: 100_300, spread: 300 })], {
+      since: T0,
+      until: T0 + 2 * HOUR,
+      bucketSeconds: HOUR,
+    })
+    expect(points.map((p) => p.cumulativeNetSats)).toEqual([null, null])
+    expect(points.map((p) => p.cumulativeGrossSats)).toEqual([300, 300])
+  })
+
+  it('stays null across the buckets BEFORE the first costed one, then carries forward', () => {
+    const points = series(
+      [
+        swap({ id: 'early', at: T0 + 10, give: 100_300, spread: 300 }),
+        swap({ id: 'costed', at: T0 + HOUR + 10, give: 100_400, spread: 400, cost: 150 }),
+      ],
+      { since: T0, until: T0 + 3 * HOUR, bucketSeconds: HOUR },
+    )
+    expect(points.map((p) => p.cumulativeNetSats)).toEqual([null, 250, 250])
+  })
 })

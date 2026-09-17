@@ -82,8 +82,17 @@ export interface SeriesPoint {
   realizedCostSats: number
   /** `grossSats - realizedCostSats` over this bucket's costed rows, or null when it has none. */
   netSats: number | null
-  /** Running total of `netSats`, treating an uncosted bucket as contributing nothing. */
-  cumulativeNetSats: number
+  /**
+   * Running total of `netSats` — NULL until the first costed bucket appears.
+   *
+   * Null rather than zero for the reason every other figure here is: an
+   * entirely uncosted window has no net result, and a flat zero line reads as
+   * "we netted nothing" rather than "nobody knows". Once a costed bucket
+   * exists the total carries forward across uncosted ones, which HOLDS the line
+   * flat rather than breaking it — and `costedCount` on each point is what says
+   * the net and gross lines have stopped measuring the same set of swaps.
+   */
+  cumulativeNetSats: number | null
   /** Rows in this bucket that carried a realized cost. */
   costedCount: number
   /** Inbound notional of the priced rows — the volume the margin is a margin OF. */
@@ -423,7 +432,7 @@ export const series = (
       cumulativeGrossSats: 0,
       realizedCostSats: 0,
       netSats: null,
-      cumulativeNetSats: 0,
+      cumulativeNetSats: null,
       costedCount: 0,
       volumeSats: 0,
       atRiskSats: 0,
@@ -457,16 +466,17 @@ export const series = (
   }
 
   let running = 0
-  let runningNet = 0
+  // Null until something is actually costed, so an uncosted window never
+  // reports a net of zero.
+  let runningNet: number | null = null
   const ordered = [...points.values()].sort((a, b) => a.at - b.at)
   for (const point of ordered) {
     running += point.grossSats
     point.cumulativeGrossSats = running
-    // A bucket with nothing costed contributes nothing and the line holds flat,
-    // rather than breaking. The cumulative NET is therefore only comparable to
-    // the cumulative gross where `costedCount` tracks `pricedCount` — which is
-    // why both counts are on every point.
-    runningNet += point.netSats ?? 0
+    // A bucket with nothing costed contributes nothing and the line holds flat
+    // rather than breaking — but only once there IS a line. Before the first
+    // costed bucket the total stays null, because zero would be a claim.
+    if (point.netSats !== null) runningNet = (runningNet ?? 0) + point.netSats
     point.cumulativeNetSats = runningNet
   }
   return ordered

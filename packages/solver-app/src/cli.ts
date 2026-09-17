@@ -142,7 +142,7 @@ const bar = (deltaSeconds: number, slowestSeconds: number, width = 30): string =
   return '#'.repeat(Math.max(1, Math.round((deltaSeconds / slowestSeconds) * width)))
 }
 
-import { createServices } from './ops/services.js'
+import { createServices, openReportReaders } from './ops/services.js'
 import { DEFAULT_LEDGER_LIMIT, type SwapEconomics } from '@arkade-os/solver-core/analytics/economics.js'
 import { PNL_WINDOWS, pnlReportLines } from './ops/pnlReport.js'
 
@@ -894,14 +894,19 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const seconds = PNL_WINDOWS[label]
     if (seconds === undefined) throw new GiveUp(`usage: pnl [${Object.keys(PNL_WINDOWS).join('|')}]`)
     const config = loadConfig()
-    const services = await createServices(config)
+    // READERS ONLY, and no network. `createServices` would create the Lightning
+    // rail, the Arkade context and call the emulator before returning — so a
+    // report of what the book DID would refuse to run whenever a rail is down,
+    // which is exactly when an operator reaches for it. `timeline` already opens
+    // its store directly for the same reason.
+    const { readers, close } = await openReportReaders(config)
     try {
       const until = Math.floor(Date.now() / 1000)
       const window = { since: until - seconds, until, limit: DEFAULT_LEDGER_LIMIT }
       const records: SwapEconomics[] = []
       const unmeasured: string[] = []
       const truncated: string[] = []
-      for (const reader of services.readers) {
+      for (const reader of readers) {
         if (!reader.economics) {
           // Named, never counted as zero — the rule the screen follows too.
           unmeasured.push(reader.descriptor.pair)
@@ -915,7 +920,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         log(line)
       }
     } finally {
-      await services.close()
+      await close()
     }
   },
 
