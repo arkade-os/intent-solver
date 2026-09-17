@@ -275,6 +275,8 @@ export interface Corridor extends CorridorReader {
 export interface CorridorSet extends Iterable<Corridor> {
   get(pair: string): Corridor | undefined
   readonly size: number
+  /** Swap the serve list in place so a captured set (ingress, HTTP) sees new pairs. */
+  replace(corridors: readonly Corridor[]): void
 }
 
 /**
@@ -288,6 +290,7 @@ export interface CorridorSet extends Iterable<Corridor> {
 export interface CorridorReaderSet extends Iterable<CorridorReader> {
   get(pair: string): CorridorReader | undefined
   readonly size: number
+  replace(corridors: readonly CorridorReader[]): void
 }
 
 /**
@@ -302,18 +305,24 @@ export interface CorridorReaderSet extends Iterable<CorridorReader> {
  * rather than a build fault.
  */
 export const createCorridorSet = (corridors: readonly Corridor[]): CorridorSet => {
-  const byPair = new Map<string, Corridor>()
-  const stems = new Map<string, string>()
-  for (const corridor of corridors) {
-    const { pair, envStem } = corridor.descriptor
-    if (byPair.has(pair)) throw new Error(`duplicate corridor pair: ${pair}`)
-    const claimed = stems.get(envStem)
-    if (claimed !== undefined) throw new Error(`duplicate corridor env stem ${envStem}: ${claimed} and ${pair}`)
-    stems.set(envStem, pair)
-    byPair.set(pair, corridor)
+  let byPair = new Map<string, Corridor>()
+  const index = (list: readonly Corridor[]): void => {
+    const next = new Map<string, Corridor>()
+    const stems = new Map<string, string>()
+    for (const corridor of list) {
+      const { pair, envStem } = corridor.descriptor
+      if (next.has(pair)) throw new Error(`duplicate corridor pair: ${pair}`)
+      const claimed = stems.get(envStem)
+      if (claimed !== undefined) throw new Error(`duplicate corridor env stem ${envStem}: ${claimed} and ${pair}`)
+      stems.set(envStem, pair)
+      next.set(pair, corridor)
+    }
+    byPair = next
   }
+  index(corridors)
   return {
     get: (pair) => byPair.get(pair),
+    replace: index,
     get size() {
       return byPair.size
     },
@@ -332,15 +341,21 @@ export const createCorridorSet = (corridors: readonly Corridor[]): CorridorSet =
  * is the same class of silent narrowing this split exists to prevent.
  */
 export const createCorridorReaderSet = (corridors: readonly CorridorReader[]): CorridorReaderSet => {
-  const byPair = new Map<string, CorridorReader>()
-  for (const corridor of corridors) {
-    if (byPair.has(corridor.descriptor.pair)) {
-      throw new Error(`duplicate corridor pair: ${corridor.descriptor.pair}`)
+  let byPair = new Map<string, CorridorReader>()
+  const index = (list: readonly CorridorReader[]): void => {
+    const next = new Map<string, CorridorReader>()
+    for (const corridor of list) {
+      if (next.has(corridor.descriptor.pair)) {
+        throw new Error(`duplicate corridor pair: ${corridor.descriptor.pair}`)
+      }
+      next.set(corridor.descriptor.pair, corridor)
     }
-    byPair.set(corridor.descriptor.pair, corridor)
+    byPair = next
   }
+  index(corridors)
   return {
     get: (pair) => byPair.get(pair),
+    replace: index,
     get size() {
       return byPair.size
     },

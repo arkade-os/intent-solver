@@ -298,8 +298,8 @@ rest of the admin console.
 
 ### Access and deployment
 
-An operator console — swaps, quotes, settings, wallet, backend status, audit —
-on **its own port**, served from inside the running provider.
+An operator console — swaps, quotes, asset markets, settings, wallet, backend
+status, audit — on **its own port**, served from inside the running provider.
 
 ```bash
 ADMIN_PORT=8788 pnpm cli relay     # or serve, or watch
@@ -460,6 +460,11 @@ before. Nothing re-reads a running service's policy. The Settings view shows
 what THIS process is quoting; a pending override is what the next one will.
 Every API response says so and the UI badges it.
 
+Asset **markets** are the exception: PUT/DELETE on the **markets** tab persist,
+probe the feed, then rebuild this process's RFQ serve list. The next RFQ quotes
+a new pair; disable or delete refuses new quotes. In-flight swaps keep the terms
+they were quoted with. Rails, mnemonic and relay URL still need a restart.
+
 Everything that has to agree with what gets quoted reads the same resolved
 policy: the ingress corridor gate, the open-RFQ bidder, and the registry card.
 A card advertising a fee the corridor does not charge would be a listing that
@@ -489,21 +494,14 @@ un-redact.
 
 ### What the restart banner names
 
-Two sources, not one. `createServices` takes both snapshots at startup and the
-console diffs the store against each:
+Overrides only. `createServices` snapshots `bootOverrides` at startup and the
+console diffs the store against that snapshot, with each knob's running and
+stored values (`LN_SEND_FEE_BPS 0 → 25`). A key whose effective value did not
+move is dropped: an override equal to the environment's own value changes
+nothing a restart would apply.
 
-- **overrides** — `bootOverrides` against what `AdminStore` holds now, with each
-  knob's running and stored values (`LN_SEND_FEE_BPS 0 → 25`). A key whose
-  effective value did not move is dropped: an override equal to the
-  environment's own value changes nothing a restart would apply.
-- **asset markets** — `assetMarkets` against the `admin_market` rows, reported
-  as added, edited or no longer trading. A paused market reads as leaving,
-  because the next process will not trade it either.
-
-Markets are the half worth stating out loud: they are ROWS rather than
-overrides, so a diff of the override map cannot see one — and the markets tab is
-where the staleness matters most, since a market added since boot is not one this
-process is filling against.
+Asset markets are not in the banner. They apply live (see above), so a
+"restart to trade this pair" item would be a lie.
 
 **restart solver** sits in that banner. Before the confirmation the console
 states what a restart would interrupt: swaps live, swaps exposed, sats committed

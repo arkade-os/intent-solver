@@ -177,7 +177,8 @@ describe('a deployment described in code rather than in the environment', () => 
     // state that `loadConfig` reads once, so registration has to happen before
     // the entrypoint runs. Corridors have no such ordering hazard: they are
     // arguments.
-    expect(servicesSource).toContain('corridorSetFromDeps(corridorDeps, opts?.corridors ?? [])')
+    expect(servicesSource).toContain('const extraCorridors = opts?.corridors ?? []')
+    expect(servicesSource).toContain('corridorSetFromDeps({ ...shared, assetRfqMarkets: serving }, extraCorridors)')
     expect(sdk.createServices.length).toBeGreaterThanOrEqual(1)
   })
 })
@@ -224,13 +225,16 @@ describe('the sweep a consumer has to write themselves', () => {
   })
 
   it('is what the shipped loop does at boot, over exactly the same set', () => {
-    // `services.corridors` is a `CorridorSet`, and the daemon's recovery pass is
-    // this loop verbatim. A consumer reproducing the cadences is reproducing
-    // policy; reproducing this is reproducing the contract.
+    // Recovery still iterates `services.corridors`. Asset RFQ plugin corridors
+    // skip that pass because they share one service; exact pairs identify them
+    // so an injected corridor remains driven regardless of its env stem.
     const cliSource = readFileSync(
       fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)),
       'utf8',
     )
-    expect(cliSource).toContain('for (const corridor of services.corridors) recovered += await corridor.tickAll()')
+    expect(cliSource).toContain('for (const corridor of services.corridors)')
+    expect(cliSource).toContain('if (assetRfqPairs.has(corridor.descriptor.pair)) continue')
+    expect(cliSource).toContain('ticked += await corridor.tickAll()')
+    expect(cliSource).toContain('ticked += (await services.assetRfqService.tickAll()).length')
   })
 })

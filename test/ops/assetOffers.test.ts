@@ -8,12 +8,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import {
-  AssetOfferService,
-  assertMarketsPriced,
-  parseAssetMarkets,
-  type AssetOfferDeps,
-} from '@arkade-os/solver-app/ops/assetOffers.js'
+import { AssetOfferService, parseAssetMarkets, type AssetOfferDeps } from '@arkade-os/solver-app/ops/assetOffers.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
@@ -58,6 +53,20 @@ const build = async (over: Partial<AssetOfferDeps> = {}) => {
 }
 
 const found = { offer: offer(), txid: 'a'.repeat(64), vout: 0 }
+// BTC/USDT: the maker deposits 900 USDT-units and wants 1000 sats. Feed is
+// sats-per-USDT, so 1.12 admits the fixture and 0.5 is far out.
+const pricing = [
+  {
+    base: USDT,
+    quote: null,
+    baseDecimals: 0,
+    quoteDecimals: 0,
+    feedUrl: 'https://feed.test/p',
+    pricePath: '/price',
+    toleranceBps: 100,
+    feeBps: 0,
+  },
+]
 
 describe('consider', () => {
   it('records an intent for an offer it can fill', async () => {
@@ -143,21 +152,6 @@ describe('offer consistency — Swap Protocol V1 § 5.1', () => {
 })
 
 describe('the price gate', () => {
-  // BTC/USDT: the maker deposits 900 USDT-units and wants 1000 sats. Feed is
-  // sats-per-USDT so the fixture's ratio sits near it.
-  const pricing = [
-    {
-      base: USDT,
-      quote: null,
-      baseDecimals: 0,
-      quoteDecimals: 0,
-      feedUrl: 'https://feed.test/p',
-      pricePath: '/price',
-      toleranceBps: 100,
-      feeBps: 0,
-    },
-  ]
-
   it('takes an offer inside tolerance', async () => {
     const { service } = await build({ pricing, fetchPrice: async () => priceFrom('1.12') })
     expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
@@ -196,6 +190,11 @@ describe('the price gate', () => {
     // Opting out entirely is allowed; opting in halfway is not.
     const { service } = await build()
     expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+  })
+
+  it('FAILS CLOSED when configured pricing is empty', async () => {
+    const { service } = await build({ pricing: [] })
+    expect(await service.consider(found)).toEqual({ fill: false, reason: 'price_out_of_tolerance' })
   })
 
   it('does not read the feed for an offer the cheap gates already refused', async () => {
@@ -374,6 +373,7 @@ describe('refusals an operator can read', () => {
     // The second silence, driven for real in test/e2e/assetOffer.e2e.test.ts.
     expect(servicesSource).toMatch(/servesOffers\s*=\s*policy\.offerMarkets\.length > 0/)
     expect(servicesSource).toMatch(/servesOffers\s*\?\s*await OfferFillStore\.open/)
+    expect(servicesSource).toContain('replaceMarkets:')
   })
 })
 
@@ -418,23 +418,63 @@ describe('tickAll', () => {
   })
 })
 
+describe('replaceMarkets', () => {
+  it('starts refusing new offers once the serve list is emptied', async () => {
+    const { service } = await build()
+    expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+    await service.replaceMarkets({ markets: [] })
+    expect(await service.consider({ ...found, txid: 'b'.repeat(64) })).toEqual({
+      fill: false,
+      reason: 'unsupported_pair',
+    })
+  })
+
+  it('refuses an already-recorded intent when configured pricing disappears', async () => {
+    const settle = vi.fn(async () => '0xfill')
+    const { store, service } = await build({
+      pricing,
+      fetchPrice: async () => priceFrom('1.12'),
+      settle,
+    })
+    expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+    await service.replaceMarkets({ markets: [], pricing: [] })
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'refused', fillTxid: null })
+  })
+
+  it('waits for an in-flight consider before swapping the list', async () => {
+    let release!: () => void
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { service } = await build({
+      outputsAt: async () => {
+        await blocked
+        return [{ script: SCRIPT_HEX, value: 500, assets: [{ assetId: USDT, amount: 900n }] }]
+      },
+    })
+    const considering = service.consider(found)
+    let replaced = false
+    const replacing = service.replaceMarkets({ markets: [] }).then(() => {
+      replaced = true
+    })
+    await Promise.resolve()
+    expect(replaced).toBe(false)
+    release()
+    expect(await considering).toEqual({ fill: true, id: 'fill-1' })
+    await replacing
+    expect(replaced).toBe(true)
+    expect(await service.consider({ ...found, txid: 'b'.repeat(64) })).toEqual({
+      fill: false,
+      reason: 'unsupported_pair',
+    })
+  })
+})
+
 // `consider` admits a price; `tickAll` spends at it on a worker loop and at
 // startup recovery, arbitrary wall time later. Nothing between them re-asks.
 describe('tickAll re-runs price admission', () => {
-  // 900 USDT-units against 1000 sats wanted, so 1.12 admits and 0.5 is far out.
-  const pricing = [
-    {
-      base: USDT,
-      quote: null,
-      baseDecimals: 0,
-      quoteDecimals: 0,
-      feedUrl: 'https://feed.test/p',
-      pricePath: '/price',
-      toleranceBps: 100,
-      feeBps: 0,
-    },
-  ]
-
   let duringPriceRead: (() => Promise<void>) | null = null
   beforeEach(() => void (duringPriceRead = null))
 
@@ -648,60 +688,5 @@ describe('parseAssetMarkets', () => {
   it('refuses a malformed entry rather than silently serving fewer markets', () => {
     expect(() => parseAssetMarkets('BTC')).toThrow(/not A\/B/)
     expect(() => parseAssetMarkets('a/b/c')).toThrow(/not A\/B/)
-  })
-})
-
-/**
- * A served market with no pricing takes an offer at ANY price the maker names —
- * `assetOffers.ts` says so on `AssetMarketPricing`, and `withinTolerance`
- * returns true when the pricing list is empty. That is a FAIL-OPEN: the gate
- * reads as optional, and absent it is not lenient but disabled.
- *
- * It only became reachable when a producer for `markets` arrived without one for
- * `pricing` — `OFFER_MARKETS` names pairs, and the console's market rows are
- * what carry a feed. Either alone is a configuration a deployment can express;
- * this refuses the combination rather than serving it quietly.
- *
- * Note which direction is safe. Pricing WITHOUT a matching market is fine —
- * nothing is served. Pricing set but unreadable already refuses (`fetchPrice`
- * absent returns false). Only market-without-pricing fills blind.
- */
-describe('assertMarketsPriced', () => {
-  const BTC = null
-  const USDA = 'aa'.repeat(32)
-  const EURX = 'bb'.repeat(32)
-  const priced = (base: string | null, quote: string | null) =>
-    ({
-      base,
-      quote,
-      baseDecimals: 8,
-      quoteDecimals: 6,
-      feedUrl: 'https://f',
-      pricePath: '/p',
-      toleranceBps: 100,
-    }) as never
-
-  it('accepts a market its pricing covers', () => {
-    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [priced(BTC, USDA)])).not.toThrow()
-  })
-
-  it('accepts it in either orientation — the market is unordered, the feed is not', () => {
-    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [priced(USDA, BTC)])).not.toThrow()
-  })
-
-  it('REFUSES a served market with no pricing at all', () => {
-    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [])).toThrow(/pricing|price/i)
-  })
-
-  it('refuses when the pricing covers a different market', () => {
-    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [priced(BTC, EURX)])).toThrow(/pricing|price/i)
-  })
-
-  it('names the market that is unpriced, so an operator can fix it', () => {
-    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [])).toThrow(new RegExp(USDA.slice(0, 16)))
-  })
-
-  it('allows pricing with no market — nothing is served, nothing is at risk', () => {
-    expect(() => assertMarketsPriced([], [priced(BTC, USDA)])).not.toThrow()
   })
 })

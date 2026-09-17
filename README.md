@@ -204,12 +204,12 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   file included), purely-outbound relay mode, and the Cloudflare Workers shape
   with its caveat stated.
 - **Admin console:** `ADMIN_PORT=8788 pnpm cli relay` serves an operator
-  console — swaps across every corridor the deployment serves, quotes, the
-  wallet (sats and every Arkade asset it holds) and VTXO pool, the funding
-  sources, backend status, settings and an action audit log — on its own port,
-  from inside the running provider. Off unless `ADMIN_PORT` is set. **It has no
-  authentication: anything that can reach that port can move money.** Put a
-  reverse proxy in front of it, or tunnel to the default loopback bind. See
+  console — swaps across every corridor the deployment serves, quotes, asset
+  markets, the wallet (sats and every Arkade asset it holds) and VTXO pool, the
+  funding sources, backend status, settings and an action audit log — on its own
+  port, from inside the running provider. Off unless `ADMIN_PORT` is set. **It
+  has no authentication: anything that can reach that port can move money.** Put
+  a reverse proxy in front of it, or tunnel to the default loopback bind. See
   `docs/runbook.md` § "The admin console".
 
   Its **p&l** tab (and `GET /api/pnl`) charts what the book made, by corridor,
@@ -228,26 +228,24 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   cannot silently darken the console an operator believes is up.
 
   `ADMIN_RESTART_ENABLED` lets the console restart the solver, which is how a
-  stored override or a market edit takes effect. Off unless set to `true`, and
-  deliberately so twice over: the process can only stop itself, so without a
-  supervisor that starts it again — `docker-compose.yml` sets
-  `restart: unless-stopped`, systemd needs `Restart=always` — "restart" means
-  "stop"; and on a port with no authentication of its own, a default-on
+  stored override takes effect. Market CRUD does not wait on it: add, edit or
+  delete on the **markets** tab and the next RFQ uses the new list. Off unless
+  set to `true`, and deliberately so twice over: the process can only stop
+  itself, so without a supervisor that starts it again — `docker-compose.yml`
+  sets `restart: unless-stopped`, systemd needs `Restart=always` — "restart"
+  means "stop"; and on a port with no authentication of its own, a default-on
   off-switch is reachable by anything the proxy admits. The action is armed
   regardless, so it still takes typing `RESTART`, and the console renders it
   disabled with the reason rather than hiding it — an operator asking "why has
   my override not taken effect" needs to find that answer, not silence.
 
-  The banner beside it names **asset markets as well as overrides**, and gives
-  each item both of its values (`LN_SEND_FEE_BPS 0 → 25`, `market … not trading
-  → trading`). Markets are the case that most needs it: they are rows rather
-  than overrides, so a market added in the console is invisible to a diff of the
-  override map — while the markets tab's own notice says a market added since
-  boot is not one this process is filling against. Before the confirmation the
-  console states what a restart would interrupt — swaps live, swaps exposed,
-  sats committed across every corridor, rows already parked in `stuck` — and the
-  audit row records those figures, so "who restarted a solver holding 50,151
-  sats" is answerable later.
+  The banner beside it names **overrides that a restart would apply**, each with
+  both of its values (`LN_SEND_FEE_BPS 0 → 25`). Markets are not in it: they are
+  already this process's serve list. Before the confirmation the console states
+  what a restart would interrupt — swaps live, swaps exposed, sats committed
+  across every corridor, rows already parked in `stuck` — and the audit row
+  records those figures, so "who restarted a solver holding 50,151 sats" is
+  answerable later.
 
 - **Funding sources:** every place this deployment keeps coins answers one
   interface (`packages/solver-app/src/ops/fundSources.ts`), so the console can
@@ -467,10 +465,12 @@ A deployment that sets none of these behaves exactly as it did before they
 existed: no `offer_fill` table is opened, no subscription to arkd's filtered
 transaction stream, nothing decided and nothing spent.
 
-The Markets console prices both this path and the quoted path below. Besides
-`feeBps`, each market has `sellBaseFeeFlat` (base atomic units) and
-`buyBaseFeeFlat` (quote atomic units). The selected flat fee is removed from
-what the maker deposited before the feed and bps checks. Both default to zero.
+The **markets** tab prices both this path and the quoted path below. RFQ is the
+default serve path for those rows; this packet path stays off until
+`OFFER_MARKETS` names a pair. Besides `feeBps`, each market has `sellBaseFeeFlat`
+(base atomic units) and `buyBaseFeeFlat` (quote atomic units). The selected flat
+fee is removed from what the maker deposited before the feed and bps checks. Both
+default to zero.
 
 | Var                     | Notes                                                                                                                                                                                                                                                                                                                                              |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -478,19 +478,29 @@ what the maker deposited before the feed and bps checks. Both default to zero.
 | `OFFER_MIN_FILL_AMOUNT` | **required once `OFFER_MARKETS` names a market**, with no default shipped: this is how much of the float one discovered offer may take, which is the deployment's answer rather than this repository's. A whole number in the WANT leg's own units — asset units, or sats when that leg is BTC — parsed as bigint, since an asset amount is 256-bit |
 | `OFFER_MAX_FILL_AMOUNT` | same rule, the upper bound. A max below the min throws at startup: it would refuse every offer, which is indistinguishable from a quiet market and would be diagnosed as one                                                                                                                                                                       |
 
-### Environment — Arkade asset RFQ (the quoted path), off unless `ASSET_MARKETS` is set
+### Environment — Arkade asset RFQ (the quoted path; default for console markets)
 
-The other way to reach an asset, and the mirror of the packet path above: there
-a maker publishes a price and this solver decides, here a client asks and this
-solver names a binding one. **The solver is still the TAKER** — `docs/rfq-protocol.md`
-§ 7.2.1 keeps it so as a money constraint, not a convention: it never publishes
-an offer and never funds a covenant. What changes is who names the price, so
-the covenant is derived from the row it negotiated rather than read off a
-packet, and the quote binds for a window instead of standing open.
+The default way a **markets** tab row is served, and the mirror of the packet
+path above: there a maker publishes a price and this solver decides, here a
+client sends `rfq_request` (same wire as Lightning) and this solver names a
+binding quote from the market's feed. **The solver is still the TAKER** —
+`docs/rfq-protocol.md` § 7.2.1 keeps it so as a money constraint, not a
+convention: it never publishes an offer and never funds a covenant. What changes
+is who names the price, so the covenant is derived from the row it negotiated
+rather than read off a packet, and the quote binds for a window instead of
+standing open.
 
-A deployment that sets none of these behaves exactly as it did before they
-existed: no asset RFQ store is opened, no service is constructed, and every
-asset pair refuses by name at the ingress.
+Console rows are the live serve list. Add `BTC/<asset id>` plus a feed and the
+next RFQ quotes it; disable or delete refuses new quotes. No restart. The RFQ
+store and service are always constructed, even with an empty list, so a first
+dashboard row has something to attach to. The discovery card (`#discovery`) is
+assembled from those live rows.
+
+`ASSET_MARKETS` is optional. It names a typeable symbol (so
+`ASSET_<SYMBOL>_*_ENABLED` stems stay readable) and can close a direction. Unset
+still serves every enabled console market RFQ can express — one asset leg, at
+least one open direction. A named asset with no console row is omitted rather
+than taking the process down.
 
 Asset RFQs use the same market fees. For exact-in, the solver subtracts the
 direction's flat fee from `from_amount`, converts the remainder at the feed
@@ -501,7 +511,7 @@ the asset; the opposite direction can remain zero.
 
 | Var                              | Notes                                                                                                                                                                                                                                                                                                            |
 | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ASSET_MARKETS`                  | the assets quoted against over RFQ, `SYMBOL:<assetId>` comma-separated. The symbol is what this market's other env stems are built from, for the reason `EVM_TOKENS` gives: a 68-hex asset id in a variable name is legal shell and unreadable. Unset serves none, which is the whole path off                     |
+| `ASSET_MARKETS`                  | optional `SYMBOL:<assetId>` comma-separated. The symbol is what this market's other env stems are built from, for the reason `EVM_TOKENS` gives: a 68-hex asset id in a variable name is legal shell and unreadable. Unset names no symbols; console rows still quote                                             |
 | `ASSET_QUOTE_VALIDITY_SECONDS`   | how long an asset quote binds. Default 30, floor 5, ceiling 900. Short on purpose — every pair here is cross-asset by construction, so the solver is short the market for the whole window and the window IS the exposure. § 5 puts cross-asset windows "on the order of ~30 seconds"                              |
 
 ### Environment — `LN_BACKEND=lnd` only
