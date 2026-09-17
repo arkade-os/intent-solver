@@ -207,7 +207,8 @@ const solverFeeField = (base: SolverFeeSide, quote: SolverFeeSide): Record<strin
     const entry = { ...(directional ? { bps: s.bps } : {}), ...(s.flat > 0n ? { flat: String(s.flat) } : {}) }
     return Object.keys(entry).length === 0 ? null : entry
   }
-  const entries = { ...(side(base) ? { base: side(base) } : {}), ...(side(quote) ? { quote: side(quote) } : {}) }
+  const [baseSide, quoteSide] = [side(base), side(quote)]
+  const entries = { ...(baseSide ? { base: baseSide } : {}), ...(quoteSide ? { quote: quoteSide } : {}) }
   return Object.keys(entries).length === 0 ? {} : { solver_fee: entries }
 }
 
