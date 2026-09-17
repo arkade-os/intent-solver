@@ -51,6 +51,7 @@ const harness = async () => {
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
     carrierSats: 0n,
+    dustSats: 0n,
     now: () => clock,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
     deriveOffer: (terms) => ({

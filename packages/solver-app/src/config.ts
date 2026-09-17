@@ -240,6 +240,12 @@ export interface Config {
    */
   offerChargesDeliveredCarrier: boolean
   /**
+   * `ASSET_CARRIER_PRICING`. Off by default so quoted prices move when an
+   * operator decides, not on upgrade. On, realised margin equals the advertised
+   * fee on both legs. The dust floor applies either way, being a chain rule.
+   */
+  assetCarrierPricing: boolean
+  /**
    * Assets this solver QUOTES against over RFQ (`ASSET_MARKETS`), each with the
    * symbol its env stems are built from.
    *
@@ -970,6 +976,7 @@ export const loadConfig = (): Config => {
   const offerMinFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv('OFFER_MIN_FILL_AMOUNT') : 0n
   const offerMaxFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv('OFFER_MAX_FILL_AMOUNT') : 0n
   const offerChargesDeliveredCarrier = process.env.OFFER_CHARGE_CARRIER?.trim() === 'true'
+  const assetCarrierPricing = process.env.ASSET_CARRIER_PRICING?.trim() === 'true'
   // Refused at boot rather than per offer: inverted bounds refuse every offer,
   // which is indistinguishable from a quiet market and would be diagnosed as
   // one. `evaluateOfferFill` compares against both, so it cannot report this.
@@ -1005,6 +1012,7 @@ export const loadConfig = (): Config => {
     offerMinFillAmount,
     offerMaxFillAmount,
     offerChargesDeliveredCarrier,
+    assetCarrierPricing,
     // Read here so a malformed list refuses at boot beside every other knob.
     // What each named asset is WORTH still comes from the console's market rows,
     // which `createServices` joins to these.

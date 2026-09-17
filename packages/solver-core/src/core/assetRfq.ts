@@ -129,10 +129,12 @@ export const resolveAssetQuote = (args: {
   amountSide: 'from' | 'to'
   market: AssetQuoteMarket
   feed: Price
-  /** Sats an asset rides on: returned on a BTC payout, charged on an asset payout. */
+  /** Sats to NET as a pass-through. Zero quotes exactly as before it was priced. */
   carrierSats: bigint
+  /** The Service's dust: a CHAIN constraint, equal in value to the carrier and unrelated in meaning. */
+  dustSats: bigint
 }): AssetQuoteOutcome => {
-  const { pair, amount, amountSide, market, feed, carrierSats } = args
+  const { pair, amount, amountSide, market, feed, carrierSats, dustSats } = args
 
   // Which way round the client is trading across this market's two legs.
   const givesBase = pair.from === market.base && pair.to === market.quote
@@ -146,10 +148,7 @@ export const resolveAssetQuote = (args: {
   if (market.feeBps < 0 || market.feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
   if (amount <= 0n) return { ok: false, reason: 'amount_out_of_range' }
 
-  // The sats leg's dust floor IS the carrier; a zero one removes it silently.
-  if (carrierSats < 0n || (pair.to === null && carrierSats <= 0n)) {
-    return { ok: false, reason: 'price_unavailable' }
-  }
+  if (carrierSats < 0n || dustSats < 0n) return { ok: false, reason: 'price_unavailable' }
 
   const flatFee = (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
   if (flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
@@ -172,6 +171,7 @@ export const resolveAssetQuote = (args: {
       feed,
     })
     if (netInput === null) return { ok: false, reason: 'price_unavailable' }
+    if (pair.to === null && amount < dustSats) return { ok: false, reason: 'amount_out_of_range' }
     return { ok: true, fromAmount: netInput + flatFee + suppliedCarrier, toAmount: amount }
   }
 
@@ -201,9 +201,9 @@ export const resolveAssetQuote = (args: {
 
   const toAmount = pair.to === null ? payout + carrierSats : payout
 
-  // Returning the carrier already lifts output 0 clear of dust, so this is
-  // unreachable rather than dead: it is what keeps that true.
-  if (pair.to === null && toAmount < carrierSats) {
+  // arkd rejects a sub-dust output 0 — observed as an emulator code-13 — so this
+  // binds whether or not the carrier is priced.
+  if (pair.to === null && toAmount < dustSats) {
     return { ok: false, reason: 'amount_out_of_range' }
   }
 

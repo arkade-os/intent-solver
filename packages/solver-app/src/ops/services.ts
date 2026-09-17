@@ -549,7 +549,8 @@ export const createServices = async (
         markets: assetRfqMarkets,
         solverPubkey: hex.encode(await arkade.identity.xOnlyPublicKey()),
         quoteValiditySeconds: policy.assetQuoteValiditySeconds,
-        carrierSats: arkade.dustSats,
+        carrierSats: policy.assetCarrierPricing ? arkade.dustSats : 0n,
+        dustSats: arkade.dustSats,
         deriveOffer: offerScriptFrom(assetRfqDerivation),
         depositAt: async (offerPkScript, depositLeg) =>
           largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),

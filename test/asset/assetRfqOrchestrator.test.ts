@@ -59,6 +59,7 @@ const harness = async (over: Partial<AssetRfqDeps> = {}) => {
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
     carrierSats: 330n,
+    dustSats: 330n,
     now: () => clock,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
     deriveOffer: () => ({ pkScript: OFFER_SCRIPT, address: 'ark1qoffer' }),

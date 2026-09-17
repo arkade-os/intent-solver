@@ -174,6 +174,7 @@ describe('the fee is folded in against the maker', () => {
         market: { ...priced, base: null, quote: asset, minPayout: 1n, maxPayout: 10n ** 20n },
         feed,
         carrierSats: 330n,
+        dustSats: 330n,
       })
       expect(quote.ok).toBe(true)
       if (!quote.ok) continue

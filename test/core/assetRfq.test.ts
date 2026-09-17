@@ -104,6 +104,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       market: MARKET,
       feed: FEED,
       carrierSats: 0n,
+      dustSats: 0n,
     })
     expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000n, toAmount: 99_500_000_000n })
   })
@@ -117,6 +118,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       market: MARKET,
       feed: FEED,
       carrierSats: 330n,
+      dustSats: 330n,
     })
     expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000_000n, toAmount: 99_500_000n + 330n })
   })
@@ -129,6 +131,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       market: { ...MARKET, feeBps: 0, sellBaseFeeFlat: 330n },
       feed: FEED,
       carrierSats: 0n,
+      dustSats: 0n,
     })
     expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000n, toAmount: 99_999_670_000n })
   })
@@ -141,6 +144,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       market: { ...MARKET, feeBps: 0, buyBaseFeeFlat: 1_000_000n },
       feed: FEED,
       carrierSats: 330n,
+      dustSats: 330n,
     })
     expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000_000n, toAmount: 99_999_000n + 330n })
   })
@@ -154,6 +158,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         market: { ...MARKET, feeBps: 0, sellBaseFeeFlat: 330n },
         feed: FEED,
         carrierSats: 0n,
+        dustSats: 0n,
       }),
     ).toEqual({ ok: false, reason: 'fee_consumes_swap' })
   })
@@ -166,6 +171,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       amountSide: 'from',
       market,
       carrierSats: 0n,
+      dustSats: 0n,
       feed: { mantissa: 1n, scale: 0 },
     })
     // 1 BTC at a price of 1 = 1.0 of an 18-decimal asset = 10^18 atomic units,
@@ -186,6 +192,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       amountSide: 'from',
       market,
       carrierSats: 0n,
+      dustSats: 0n,
       // A price that cannot divide evenly: 3 sats * 7 / 10^3 with the decimal
       // shift is deliberately fractional.
       feed: { mantissa: 7n, scale: 3 },
@@ -204,6 +211,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       market,
       feed: FEED,
       carrierSats: 0n,
+      dustSats: 0n,
     })
     expect(outcome).toMatchObject({ ok: false, reason: 'fee_consumes_swap' })
   })
@@ -224,6 +232,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       market: MARKET,
       feed: FEED,
       carrierSats: 0n,
+      dustSats: 0n,
     })
     expect(exactOut).toMatchObject({ ok: true, toAmount: wanted })
     const { fromAmount } = exactOut as { fromAmount: bigint }
@@ -236,6 +245,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         market: MARKET,
         feed: FEED,
         carrierSats: 0n,
+        dustSats: 0n,
       })
       return outcome.ok ? outcome.toAmount : 0n
     }
@@ -251,6 +261,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       market: MARKET,
       feed: FEED,
       carrierSats: 0n,
+      dustSats: 0n,
     })
     expect(outcome).toEqual({ ok: false, reason: 'unsupported_pair' })
   })
@@ -267,6 +278,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         market: MARKET,
         feed,
         carrierSats: 0n,
+        dustSats: 0n,
       }),
     ).toEqual({ ok: false, reason: 'price_unavailable' })
   })
@@ -281,6 +293,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         market,
         feed: FEED,
         carrierSats: 0n,
+        dustSats: 0n,
       }),
     ).toEqual({ ok: false, reason: 'amount_out_of_range' })
   })
@@ -295,8 +308,38 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         market,
         feed: FEED,
         carrierSats: 0n,
+        dustSats: 0n,
       }),
     ).toMatchObject({ ok: true, toAmount: 99_500_000_000n })
+  })
+
+  /** `ASSET_CARRIER_PRICING` off: the amounts quoted before it was priced. */
+  it('quotes the pre-carrier amounts when the carrier is not priced', () => {
+    expect(
+      resolveAssetQuote({
+        pair: { from: ASSET_A, to: null },
+        amount: 100_000_000_000n,
+        amountSide: 'from',
+        market: MARKET,
+        feed: FEED,
+        carrierSats: 0n,
+        dustSats: 330n,
+      }),
+    ).toEqual({ ok: true, fromAmount: 100_000_000_000n, toAmount: 99_500_000n })
+  })
+
+  it('keeps the sats-leg dust floor when the carrier is not priced', () => {
+    expect(
+      resolveAssetQuote({
+        pair: { from: ASSET_A, to: null },
+        amount: 100_000n,
+        amountSide: 'from',
+        market: MARKET,
+        feed: FEED,
+        carrierSats: 0n,
+        dustSats: 330n,
+      }),
+    ).toEqual({ ok: false, reason: 'amount_out_of_range' })
   })
 
   /**
@@ -313,6 +356,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         market: MARKET,
         feed: FEED,
         carrierSats: 330n,
+        dustSats: 330n,
       }),
     ).toEqual({ ok: true, fromAmount: 100_000n, toAmount: 429n })
   })
@@ -326,6 +370,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         market: MARKET,
         feed: FEED,
         carrierSats: 330n,
+        dustSats: 330n,
       }),
     ).toEqual({ ok: true, fromAmount: 332_000n, toAmount: 660n })
   })
@@ -339,6 +384,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         market: MARKET,
         feed: FEED,
         carrierSats: 330n,
+        dustSats: 330n,
       }),
     ).toEqual({ ok: true, fromAmount: 430n, toAmount: 99_500n })
   })
@@ -352,6 +398,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         market: MARKET,
         feed: FEED,
         carrierSats: 330n,
+        dustSats: 330n,
       }),
     ).toEqual({ ok: false, reason: 'fee_consumes_swap' })
   })
@@ -366,6 +413,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
         market: MARKET,
         feed: FEED,
         carrierSats: 0n,
+        dustSats: 0n,
       }),
     ).toEqual({ ok: true, fromAmount: 100n, toAmount: 99_500n })
   })

@@ -267,6 +267,7 @@ const harness = async (): Promise<Harness> => {
     solverPubkey: makerPublicKey,
     quoteValiditySeconds: 600,
     carrierSats: arkade.ctx.dustSats,
+    dustSats: arkade.ctx.dustSats,
     deriveOffer,
     depositAt,
     balance,

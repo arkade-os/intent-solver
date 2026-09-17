@@ -45,6 +45,7 @@ const built = async () => {
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
     carrierSats: 0n,
+    dustSats: 0n,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
     deriveOffer: () => ({ pkScript: `5120${'d'.repeat(64)}`, address: 'ark1q' }),
     depositAt: async () => null,

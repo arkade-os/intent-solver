@@ -113,7 +113,9 @@ export interface AssetRfqDeps {
    * the market for the whole window, so the window is the exposure.
    */
   quoteValiditySeconds: number
+  /** @see AssetQuoteMarket — sats to net, and the Service's dust floor. */
   carrierSats: bigint
+  dustSats: bigint
   /**
    * The offer covenant this solver will watch, derived from terms it has
    * already fixed. `offerVtxoScript` in the composition root.
@@ -234,6 +236,7 @@ export class AssetRfqSwapService {
       market: priced,
       feed,
       carrierSats: this.deps.carrierSats,
+      dustSats: this.deps.dustSats,
     })
     if (!resolved.ok) return { accepted: false, reason: resolved.reason }
 
