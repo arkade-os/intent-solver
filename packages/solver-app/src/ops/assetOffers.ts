@@ -116,6 +116,8 @@ export interface AssetOfferDeps {
   pricing?: readonly AssetMarketPricing[]
   /** The feed read. Omitted with `pricing` set refuses every offer. */
   fetchPrice?: FetchPrice
+  carrierSats: bigint
+  chargesDeliveredCarrier?: boolean
   /**
    * Spend the offer's deposit, paying the maker what the covenant obliges.
    * Returns the fill txid. Absent means this deployment decides but never fills.
@@ -244,12 +246,19 @@ export class AssetOfferService {
 
     try {
       const feed = await this.deps.fetchPrice(market.feedUrl, market.pricePath)
+      // An asset on BOTH legs: the maker fronts one, we deliver one, they cancel.
+      const fronted = input.offerAssetId !== null
+      const delivered = input.wantAssetId !== null
       return offerWithinTolerance({
         depositAmount: input.offerAmount,
         wantAmount: input.wantAmount,
         direction,
         market,
         feed,
+        // The charge tightens an already-funded offer, so unlike the headroom it is opt-in.
+        carrierCharged:
+          delivered && !fronted && this.deps.chargesDeliveredCarrier === true ? this.deps.carrierSats : 0n,
+        carrierReturned: fronted && !delivered ? this.deps.carrierSats : 0n,
       })
     } catch (error) {
       this.deps.onError?.(id, error)

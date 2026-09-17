@@ -290,6 +290,8 @@ const harness = async (): Promise<Harness> => {
     markets,
     solverPubkey: makerPublicKey,
     quoteValiditySeconds: 600,
+    carrierSats: arkade.ctx.dustSats,
+    dustSats: arkade.ctx.dustSats,
     deriveOffer,
     depositAt,
     balance,
@@ -473,14 +475,13 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
           }),
         ).rejects.toMatchObject({ name: 'SwapRefusal' })
 
-        // And a buy payout under taproot dust (330 sats): arkd could never
-        // settle it, so the corridor refuses to quote it at all.
-        await expect(
-          requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
-            amount: 100n,
-            offerAsset: asset.AssetId.fromString(assetId),
-          }),
-        ).rejects.toMatchObject({ name: 'SwapRefusal', reason: 'amount_out_of_range' })
+        // A payout alone under dust now quotes: the maker's carrier comes back on
+        // top, lifting output 0 clear of what arkd would reject.
+        const tiny = await requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
+          amount: 100n,
+          offerAsset: asset.AssetId.fromString(assetId),
+        })
+        expect(BigInt(tiny.quote.to_amount)).toBeGreaterThan(arkade.ctx.dustSats)
         await transport.close()
       } finally {
         await store.close()

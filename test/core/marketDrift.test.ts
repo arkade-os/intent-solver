@@ -20,6 +20,9 @@ import { impliedQuotePrice, resolveAssetQuote, type AssetQuoteMarket } from '@ar
 import { economicsOf } from '@arkade-os/solver-core/analytics/economics.js'
 import { byFxLeg } from '@arkade-os/solver-core/analytics/aggregate.js'
 
+/** Neutral here: drift is a price question, and 0 carrier is the compatible default. */
+const DUST = 330n
+
 const USDT = 'a'.repeat(68)
 const BTC = null
 
@@ -52,7 +55,15 @@ const fill = (args: {
   const pair = givesBase ? { from: m.base, to: m.quote } : { from: m.quote, to: m.base }
   const amount = args.amount ?? (givesBase ? 10n ** 8n : 100_000_000n)
 
-  const resolved = resolveAssetQuote({ pair, amount, amountSide: 'from', market: m, feed: args.quoteFeed })
+  const resolved = resolveAssetQuote({
+    pair,
+    amount,
+    amountSide: 'from',
+    market: m,
+    feed: args.quoteFeed,
+    carrierSats: 0n,
+    dustSats: DUST,
+  })
   if (!resolved.ok) throw new Error(`the fixture did not resolve: ${resolved.reason}`)
 
   const implied = impliedQuotePrice({

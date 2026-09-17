@@ -206,6 +206,8 @@ const harness = async (
     markets,
     solverPubkey: makerPublicKey,
     quoteValiditySeconds: over.quoteValiditySeconds ?? 600,
+    carrierSats: arkade.ctx.dustSats,
+    dustSats: arkade.ctx.dustSats,
     deriveOffer,
     depositAt,
     balance: over.balance ?? balance,
@@ -268,7 +270,8 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
         profile: { offer_address: string; offer_pk_script: string }
       }
       expect(BigInt(quote.from_amount)).toBe(amount)
-      expect(BigInt(quote.to_amount)).toBe(amount - (amount * BigInt(FEE_BPS) + 9_999n) / 10_000n)
+      const net = amount - arkade.ctx.dustSats
+      expect(BigInt(quote.to_amount)).toBe(net - (net * BigInt(FEE_BPS) + 9_999n) / 10_000n)
 
       // § 6 compare-only, and why this corridor needs no accept message: the
       // client derives the covenant itself and funds only its own derivation.
@@ -321,14 +324,15 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       expect(tooBig.kind).toBe('refused')
       expect(tooBig.payload).toMatchObject({ reason: 'amount_out_of_range' })
 
-      const exactOut = await corridor.quote({ ...requestFor(pair, 50n), amount_side: 'to' })
-      expect(exactOut.kind).toBe('refused')
-      expect(exactOut.payload).toMatchObject({ reason: 'unsupported_payload' })
+      const exactOut = await corridor.quote({ ...requestFor(pair, 60n), amount_side: 'to' })
+      expect(exactOut.kind, JSON.stringify(exactOut)).toBe('quote')
+      expect(exactOut.payload).toMatchObject({ to_amount: '60' })
 
       // § 4.5: one rfq_id names one negotiation, whatever became of it.
       const id = randomBytes(32).toString('hex')
-      expect((await corridor.quote(requestFor(pair, 50n, id))).kind).toBe('quote')
-      const twice = await corridor.quote(requestFor(pair, 50n, id))
+      const buy = 50n + arkade.ctx.dustSats
+      expect((await corridor.quote(requestFor(pair, buy, id))).kind).toBe('quote')
+      const twice = await corridor.quote(requestFor(pair, buy, id))
       expect(twice.kind).toBe('refused')
       expect(twice.payload).toMatchObject({ reason: 'quote_conflict' })
     },

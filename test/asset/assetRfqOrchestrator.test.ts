@@ -59,6 +59,10 @@ const harness = async (over: Partial<AssetRfqDeps> = {}) => {
     markets: [MARKET],
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
+    // Matches the shipped default (ASSET_CARRIER_PRICING=false); the carrier
+    // itself is pinned in test/core/assetRfq.test.ts.
+    carrierSats: 0n,
+    dustSats: 330n,
     now: () => clock,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
     deriveOffer: () => ({ pkScript: OFFER_SCRIPT, address: 'ark1qoffer' }),
@@ -176,12 +180,19 @@ describe('quote', () => {
     expect(await service.quote(request(over))).toMatchObject({ accepted: false, reason: 'unsupported_pair' })
   })
 
-  it('refuses exact-out, which would invert a rounded directional rate', async () => {
+  it('nets the carrier out of the payout when the operator prices it', async () => {
+    const { service } = await harness({ carrierSats: 330n })
+    const outcome = await service.quote(request())
+    expect(outcome).toMatchObject({ accepted: true })
+    // 330 of the deposit's sats buy the carrier the asset payout rides on.
+    expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(99_499_671_650n)
+  })
+
+  it('quotes exact-out, binding the payout the client named', async () => {
     const { service } = await harness()
-    expect(await service.quote(request({ amountSide: 'to' }))).toMatchObject({
-      accepted: false,
-      reason: 'exact_out_unsupported',
-    })
+    const outcome = await service.quote(request({ amount: 1_000_000n, amountSide: 'to' }))
+    expect(outcome).toMatchObject({ accepted: true })
+    expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(1_000_000n)
   })
 
   /** An unreadable feed must never become a free fill. */
@@ -248,7 +259,7 @@ describe('quote', () => {
 
   it('does not record a row when it refuses', async () => {
     const { service, store } = await harness()
-    await service.quote(request({ amountSide: 'to' }))
+    await service.quote(request({ pair: 'arkade:BTC->arkade:BTC' }))
     expect(await store.listNonTerminal()).toHaveLength(0)
   })
 })

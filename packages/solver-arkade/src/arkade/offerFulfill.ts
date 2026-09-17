@@ -84,8 +84,9 @@ export const fulfillOffer = async (
   const spendable = (await ctx.wallet.getSpendableVtxos()) as ExtendedVirtualCoin[]
 
   // What output[0] must carry in SATS. An asset-wanting maker is paid through
-  // the asset packet, so its BTC leg is only the dust carrier (§ 4.1).
-  const makerSats = wantedAssetId === undefined ? wantAmount : ASSET_CARRIER_SATS
+  // the asset packet, so its BTC leg is only this server's own dust (§ 4.1).
+  const carrierSats = ctx.dustSats
+  const makerSats = wantedAssetId === undefined ? wantAmount : carrierSats
 
   // Coins that carry the wanted ASSET when there is one, otherwise coins that
   // carry enough sats. Either way this is what funds the maker.
@@ -126,6 +127,7 @@ export const fulfillOffer = async (
     // The deposit this fill was admitted against. Identical offers share one
     // address, so without it `fillOffer` refuses rather than guessing.
     fundingTxid: deposit.txid,
+    assetCarrierSats: carrierSats,
     emulator: emulatorUrl,
     // No `emulatorPubkey`: that override is 33-byte COMPRESSED and an offer
     // carries the x-only 32, which cannot be widened — the parity bit is not in

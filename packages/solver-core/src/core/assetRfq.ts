@@ -29,7 +29,7 @@
  * other's arithmetic.
  */
 import type { Price } from './priceFeed.js'
-import { assetExactInPayout } from './assetExactInPrice.js'
+import { assetExactInPayout, assetExactOutInput } from './assetExactInPrice.js'
 
 /**
  * One leg's asset: the canonical 68-hex Arkade asset id, or `null` for BTC.
@@ -106,17 +106,7 @@ export interface AssetQuoteMarket {
   maxPayout: bigint
 }
 
-export type AssetQuoteRefusal =
-  'unsupported_pair' | 'exact_out_unsupported' | 'price_unavailable' | 'fee_consumes_swap' | 'amount_out_of_range'
-
-/**
- * Taproot dust, in sats. A BTC-leg payout under this can never settle — arkd
- * refuses the output — so quoting one strands the client's deposit: the sweep
- * would fail the fill and the client would eat a cancel round trip for a swap
- * that was never servable. An asset-leg payout has no such floor (an asset
- * rides its carrier), so this binds only the sats leg.
- */
-export const ARKADE_DUST_SATS = 330n
+export type AssetQuoteRefusal = 'unsupported_pair' | 'price_unavailable' | 'fee_consumes_swap' | 'amount_out_of_range'
 
 export type AssetQuoteOutcome =
   { ok: true; fromAmount: bigint; toAmount: bigint } | { ok: false; reason: AssetQuoteRefusal }
@@ -130,12 +120,8 @@ export type AssetQuoteOutcome =
  * float64 rounding is real and it decides money. Here it would decide it in a
  * direction nobody chose.
  *
- * EXACT-IN ONLY. § 7.1.5 refuses exact-out on the EVM corridors because "the
- * two legs are different assets, so exact-out would mean inverting a fetched,
- * rounded, directional rate", and this corridor is cross-asset by construction
- * — `parseAssetPair` refuses a same-asset pair outright. So the same refusal
- * applies for the same reason, rather than a second rounding convention being
- * invented for one corridor.
+ * BOTH SIDES: `assetExactOutInput` searches the forward function, so one rounding
+ * convention decides each (§ 7.1.5's objection).
  */
 export const resolveAssetQuote = (args: {
   pair: AssetPair
@@ -143,10 +129,12 @@ export const resolveAssetQuote = (args: {
   amountSide: 'from' | 'to'
   market: AssetQuoteMarket
   feed: Price
+  /** Sats to NET as a pass-through. Zero quotes exactly as before it was priced. */
+  carrierSats: bigint
+  /** The Service's dust: a CHAIN constraint, equal in value to the carrier and unrelated in meaning. */
+  dustSats: bigint
 }): AssetQuoteOutcome => {
-  const { pair, amount, amountSide, market, feed } = args
-
-  if (amountSide !== 'from') return { ok: false, reason: 'exact_out_unsupported' }
+  const { pair, amount, amountSide, market, feed, carrierSats, dustSats } = args
 
   // Which way round the client is trading across this market's two legs.
   const givesBase = pair.from === market.base && pair.to === market.quote
@@ -160,12 +148,40 @@ export const resolveAssetQuote = (args: {
   if (market.feeBps < 0 || market.feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
   if (amount <= 0n) return { ok: false, reason: 'amount_out_of_range' }
 
+  if (carrierSats < 0n || dustSats < 0n) return { ok: false, reason: 'price_unavailable' }
+
   const flatFee = (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
   if (flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
-  const netAmount = amount - flatFee
+  // BOTH legs counted: an asset deposit carries one, an asset payout needs one.
+  const clientFronts = pair.from !== null
+  const solverDelivers = pair.to !== null
+  const chargedCarrier = solverDelivers && !clientFronts ? carrierSats : 0n
+  const returnedCarrier = clientFronts && !solverDelivers ? carrierSats : 0n
+
+  if (amountSide === 'to') {
+    // The named amount already holds whatever comes back to them.
+    const wanted = amount - returnedCarrier
+    if (wanted <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
+    if (wanted < market.minPayout || wanted > market.maxPayout) {
+      return { ok: false, reason: 'amount_out_of_range' }
+    }
+    const netInput = assetExactOutInput({
+      payout: wanted,
+      givesBase,
+      baseDecimals: market.baseDecimals,
+      quoteDecimals: market.quoteDecimals,
+      feeBps: market.feeBps,
+      feed,
+    })
+    if (netInput === null) return { ok: false, reason: 'price_unavailable' }
+    if (!solverDelivers && amount < dustSats) return { ok: false, reason: 'amount_out_of_range' }
+    return { ok: true, fromAmount: netInput + flatFee + chargedCarrier, toAmount: amount }
+  }
+
+  const netAmount = amount - flatFee - chargedCarrier
   if (netAmount <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
 
-  const toAmount = assetExactInPayout({
+  const payout = assetExactInPayout({
     netInput: netAmount,
     givesBase,
     baseDecimals: market.baseDecimals,
@@ -177,18 +193,19 @@ export const resolveAssetQuote = (args: {
   // Not clamped to zero, for the reason `payoutSatsFor` states: "the fee ate
   // the swap" and "the amount is below the minimum" want different refusals,
   // and a clamp would silently turn the first into a payout of nothing.
-  if (toAmount <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
+  if (payout <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
 
   // Bounds are evaluated on the TO leg — what the solver pays out — which is
-  // § 4.6's rule for `min`/`max` and the registry card's own convention.
-  if (toAmount < market.minPayout || toAmount > market.maxPayout) {
+  // § 4.6's rule for `min`/`max` and the registry card's own convention. The
+  // carrier is a pass-through rather than payout, so it lands after them.
+  if (payout < market.minPayout || payout > market.maxPayout) {
     return { ok: false, reason: 'amount_out_of_range' }
   }
 
-  // After the configured bounds: a payout the operator's own range admits but
-  // the chain cannot carry. A sats payout under dust is not a cheap swap, it
-  // is an unfillable one, and quoting it strands the client's deposit.
-  if (pair.to === null && toAmount < ARKADE_DUST_SATS) {
+  const toAmount = payout + returnedCarrier
+
+  // arkd rejects a sub-dust output 0, priced carrier or not.
+  if (!solverDelivers && toAmount < dustSats) {
     return { ok: false, reason: 'amount_out_of_range' }
   }
 

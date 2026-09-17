@@ -64,8 +64,12 @@ export const offerWithinTolerance = (args: {
   direction: OfferDirection
   market: OfferPriceMarket
   feed: Price
+  /** Both already netted across the legs by the caller: charged against the deposit, returned as headroom. */
+  carrierCharged?: bigint
+  carrierReturned?: bigint
 }): boolean => {
-  const { depositAmount, wantAmount, direction, market, feed } = args
+  const { depositAmount, wantAmount, direction, market, feed, carrierCharged = 0n, carrierReturned = 0n } = args
+  if (carrierCharged < 0n || carrierReturned < 0n) return false
   if (depositAmount <= 0n || wantAmount <= 0n) return false
   if (feed.mantissa <= 0n) return false
   // Both bounds are checked at BPS. A buy-base tolerance at BPS makes its
@@ -77,7 +81,7 @@ export const offerWithinTolerance = (args: {
 
   const flatFee = (direction === 'sell_base' ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
   if (flatFee < 0n) return false
-  const netDeposit = depositAmount - flatFee
+  const netDeposit = depositAmount - flatFee - carrierCharged
   if (netDeposit <= 0n) return false
 
   const payout = assetExactInPayout({
@@ -89,7 +93,7 @@ export const offerWithinTolerance = (args: {
     toleranceBps: market.toleranceBps,
     feed,
   })
-  return wantAmount <= payout
+  return wantAmount <= payout + carrierReturned
 }
 
 /**

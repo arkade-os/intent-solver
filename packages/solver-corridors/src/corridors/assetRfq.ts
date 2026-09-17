@@ -238,7 +238,7 @@ export const respondToAssetRfqRequest = async (
     requesterKey: options?.requesterKey,
   })
   if (outcome.accepted) {
-    return { kind: 'quote', payload: assetRfqQuotePayload(outcome.swap, request.rfq_id) }
+    return { kind: 'quote', payload: assetRfqQuotePayload(outcome.swap, request.rfq_id, service.carrierSats) }
   }
   return {
     kind: 'refused',

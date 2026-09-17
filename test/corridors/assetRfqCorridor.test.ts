@@ -50,6 +50,8 @@ const harness = async () => {
     markets: [MARKET],
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
+    carrierSats: 0n,
+    dustSats: 0n,
     now: () => clock,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
     deriveOffer: (terms) => ({
@@ -237,7 +239,7 @@ describe('quote — the corridor RFQ arm', () => {
       'rate_limited',
     ]
     const outcomes = [
-      await corridor.quote(rfqRequest({ amount_side: 'to' })),
+      await corridor.quote(rfqRequest({ amount_side: 'to', amount: '100000000000000000000' })),
       await corridor.quote({ v: 1, type: 'rfq_request' }),
       await corridor.quote(rfqRequest({ pair: SELL.pair })),
       await corridor.quote(rfqRequest({ rfq_id: 'c'.repeat(64), amount: '100000000000000000000' })),

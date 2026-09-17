@@ -573,6 +573,8 @@ export const createServices = async (
         // deliberately speaks `evmCorridorConfig.ts`'s feed-plus-pointer dialect
         // so one implementation serves both.
         fetchPrice: createPriceFeed(),
+        carrierSats: arkade.dustSats,
+        chargesDeliveredCarrier: policy.offerChargesDeliveredCarrier,
         minFillAmount: policy.offerMinFillAmount,
         maxFillAmount: policy.offerMaxFillAmount,
         // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
@@ -623,6 +625,8 @@ export const createServices = async (
     markets: assetRfqMarkets,
     solverPubkey: hex.encode(await arkade.identity.xOnlyPublicKey()),
     quoteValiditySeconds: policy.assetQuoteValiditySeconds,
+    carrierSats: policy.assetCarrierPricing ? arkade.dustSats : 0n,
+    dustSats: arkade.dustSats,
     deriveOffer: offerScriptFrom(assetRfqDerivation),
     depositAt: async (offerPkScript, depositLeg) =>
       largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),

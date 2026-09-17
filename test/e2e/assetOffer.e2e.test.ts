@@ -238,6 +238,7 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
     const refusals: { outpoint: string; reason: string; detail: string }[] = []
     const service = new AssetOfferService({
       store,
+      carrierSats: arkade.ctx.dustSats,
       markets: [{ a: null, b: assetId }],
       // Deliberately wide, so a refusal below can only have come from `sellBase`.
       minFillAmount: 1n,

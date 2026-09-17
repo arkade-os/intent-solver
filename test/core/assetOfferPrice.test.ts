@@ -167,6 +167,8 @@ describe('the fee is folded in against the maker', () => {
         amountSide: 'from',
         market: { ...priced, base: null, quote: asset, minPayout: 1n, maxPayout: 10n ** 20n },
         feed,
+        carrierSats: 330n,
+        dustSats: 330n,
       })
       expect(quote.ok).toBe(true)
       if (!quote.ok) continue
@@ -177,6 +179,8 @@ describe('the fee is folded in against the maker', () => {
           direction: trade.direction,
           market: priced,
           feed,
+          carrierCharged: trade.to === null ? 0n : 330n,
+          carrierReturned: trade.to === null ? 330n : 0n,
         }),
       ).toBe(true)
       expect(
@@ -186,6 +190,8 @@ describe('the fee is folded in against the maker', () => {
           direction: trade.direction,
           market: priced,
           feed,
+          carrierCharged: trade.to === null ? 0n : 330n,
+          carrierReturned: trade.to === null ? 330n : 0n,
         }),
       ).toBe(false)
     }
@@ -350,5 +356,49 @@ describe('offerDirectionOn', () => {
     const EURC = '22'.repeat(34)
     expect(offerDirectionOn({ base: USDT, quote: EURC }, USDT, EURC)).toBe('sell_base')
     expect(offerDirectionOn({ base: USDT, quote: EURC }, EURC, USDT)).toBe('buy_base')
+  })
+})
+
+describe('the carrier a BTC-wanting maker fronted', () => {
+  const deposit = 100_000_000_000n
+  const at = (wantAmount: bigint, carrierReturned: bigint) =>
+    offerWithinTolerance({
+      depositAmount: deposit,
+      wantAmount,
+      direction: 'buy_base',
+      market: market(),
+      feed,
+      carrierReturned,
+    })
+
+  const payout = 100_100_100n
+
+  it('is not granted when no carrier is supplied', () => {
+    expect(at(payout, 0n)).toBe(true)
+    expect(at(payout + 1n, 0n)).toBe(false)
+  })
+
+  it('grants exactly one carrier of headroom, never two', () => {
+    expect(at(payout + 330n, 330n)).toBe(true)
+    expect(at(payout + 331n, 330n)).toBe(false)
+  })
+})
+
+/** Without this the packet path still funds the carrier it delivers. */
+describe('the carrier an asset-wanting maker is delivered', () => {
+  const at = (wantAmount: bigint, carrierCharged: bigint) =>
+    offerWithinTolerance({
+      depositAmount: 100_000_000n,
+      wantAmount,
+      direction: 'sell_base',
+      market: market(),
+      feed,
+      carrierCharged,
+    })
+
+  it('is charged against the deposit, tightening what we will fill', () => {
+    expect(at(100_100_000_000n, 0n)).toBe(true)
+    expect(at(100_100_000_000n, 330n)).toBe(false)
+    expect(at(100_099_669_670n, 330n)).toBe(true)
   })
 })
