@@ -133,32 +133,19 @@ so the spread can be textbook and the trade still a loss. Two panels answer it:
   for the same directional leg. Positive is in the solver's favour. The shape
   worth looking for is points below the line drifting rightward.
 
-Two benchmarks, and the difference between them matters:
+The benchmark is **this solver's own book** (`driftBps`), and the limitation is
+stated wherever the figure appears, because it changes the reading: it answers
+"was this fill worse than the ones around it", never "was it worse than the
+market". A market that moved against every quote in a window leaves them all
+looking flawless beside each other, and peer drift cannot see it.
 
-- **vs peers** (`driftBps`) — against this window's volume-weighted mean rate
-  for the same leg, i.e. this solver's own book. Finds a bad _fill_.
-- **vs market** (`marketDriftBps`) — against the price the feed gave **at the
-  moment the quote was issued**, which the row now snapshots. Finds a bad
-  _book_.
+Signed so **positive is in the solver's favour**, like every other figure here.
 
-The second is what the first cannot give. A market that moved against every
-quote in a window leaves them all looking flawless beside each other; only a
-feed-relative mark sees it. Each leg also reports `medianMarketDriftBps`, a
-leg-level verdict.
-
-Both are signed so **positive is in the solver's favour**. That needs
-`quote_gives_base`, stored beside the prices: the ratio is quote-per-base either
-way, but paying less quote per base is good when the solver buys base and bad
-when it sells, so one unnormalised subtraction would mean opposite things on the
-two legs of one market.
-
-The comparison is exact bigint. `quote_implied_mantissa` is this quote's own
-price at the feed's own scale, computed at quote time by `impliedQuotePrice`
-from the amounts the orchestrator already holds — so the reader needs no
-decimals, no units and no float, and divides once into basis points.
-
-Rows quoted before those columns shipped, and every corridor but the asset RFQ
-leg, report `marketDriftBps` null and say so rather than rendering as zero drift.
+A feed-relative mark is the missing half, and it is **not built**. It needs the
+feed read again at FILL time and compared against the quote's own implied price:
+snapshotting the feed at quote time alone cannot work, because the quote is
+_derived from_ that same feed instant, so the comparison returns the configured
+spread and nothing else. See the follow-up issue.
 
 Legs are grouped by corridor **and** direction. `A->B` and `B->A` are
 reciprocals, so pooling them would average a rate against its own inverse and

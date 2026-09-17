@@ -114,47 +114,6 @@ export interface AssetRfqSwapRow {
   depositVout: number | null
   fillTxid: string | null
   failureReason: string | null
-  /**
-   * WHAT THE MARKET SAID WHEN THIS QUOTE WAS ISSUED — the feed price, exactly as
-   * `assetOfferPrice.ts` holds one: `mantissa / 10 ** scale`, never a float.
-   *
-   * The feed is already read on the quote path to decide whether terms are
-   * acceptable; until this column existed the answer was used and the number
-   * thrown away. Without it a fill can only be compared against the solver's
-   * OWN other fills, which cannot distinguish a bad fill from a bad book: if the
-   * market ran against every quote in a window, they all look fine relative to
-   * each other.
-   *
-   * NULL on rows quoted before this existed, and on any market whose feed could
-   * not be read — unmeasured, never zero, the same rule every other absent
-   * figure in this tree follows.
-   *
-   * TEXT for the mantissa because it is a bigint, for the reason the amount
-   * columns beside it are TEXT.
-   */
-  quotePriceMantissa: bigint | null
-  quotePriceScale: number | null
-  /**
-   * THIS QUOTE'S OWN PRICE, in the same units and at the same scale as
-   * {@link AssetRfqSwapRow.quotePriceMantissa} — quote-asset per base-asset.
-   *
-   * Computed at quote time from the exact bigints the orchestrator already
-   * holds, rather than left to be re-derived. Re-deriving it downstream would
-   * need this market's two decimal counts and its base/quote orientation, none
-   * of which is on the row — so it would mean either three more columns or an
-   * analytics layer that reaches into market config. One number at a known
-   * scale is cheaper and cannot drift from what was actually quoted.
-   */
-  quoteImpliedMantissa: bigint | null
-  /**
-   * Whether the CLIENT gave the base asset — `resolveAssetQuote`'s `givesBase`.
-   *
-   * The one bit that makes a price comparison directional. Paying less quote per
-   * base is good when the solver is buying base and bad when it is selling, so
-   * without this a drift figure cannot be signed consistently, and a screen with
-   * two opposite sign conventions on it is worse than one with none.
-   */
-  quoteGivesBase: boolean | null
 }
 
 export interface AssetRfqQuoteRecord {
@@ -171,15 +130,6 @@ export interface AssetRfqQuoteRecord {
   offerAddress: string
   solverPubkey: string
   validUntil: number
-  /**
-   * The market price this quote was priced against, this quote's own implied
-   * price at the same scale, and which way round the trade ran.
-   *
-   * Omitted together or not at all: a feed price without the implied price
-   * beside it cannot be compared to anything.
-   * @see AssetRfqSwapRow.quotePriceMantissa
-   */
-  quotePrice?: { mantissa: bigint; scale: number; impliedMantissa: bigint; givesBase: boolean }
 }
 
 const COLUMNS = `
@@ -202,11 +152,7 @@ const COLUMNS = `
   deposit_txid     TEXT,
   deposit_vout     INTEGER,
   fill_txid        TEXT,
-  failure_reason   TEXT,
-  quote_price_mantissa TEXT,
-  quote_price_scale    INTEGER,
-  quote_implied_mantissa TEXT,
-  quote_gives_base     INTEGER
+  failure_reason   TEXT
 `
 
 const SCHEMA = `
@@ -267,18 +213,6 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
   depositVout: raw.deposit_vout === null ? null : Number(raw.deposit_vout),
   fillTxid: raw.fill_txid === null ? null : String(raw.fill_txid),
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
-  quotePriceMantissa:
-    raw.quote_price_mantissa === null || raw.quote_price_mantissa === undefined
-      ? null
-      : BigInt(String(raw.quote_price_mantissa)),
-  quotePriceScale:
-    raw.quote_price_scale === null || raw.quote_price_scale === undefined ? null : Number(raw.quote_price_scale),
-  quoteImpliedMantissa:
-    raw.quote_implied_mantissa === null || raw.quote_implied_mantissa === undefined
-      ? null
-      : BigInt(String(raw.quote_implied_mantissa)),
-  quoteGivesBase:
-    raw.quote_gives_base === null || raw.quote_gives_base === undefined ? null : Number(raw.quote_gives_base) === 1,
 })
 
 export class AssetRfqSwapStore {
@@ -290,31 +224,7 @@ export class AssetRfqSwapStore {
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<AssetRfqSwapStore> {
     const store = new AssetRfqSwapStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
     await store.driver.exec(SCHEMA)
-    await store.migrate()
     return store
-  }
-
-  /**
-   * Additive migration, for the reason the other stores state: `CREATE TABLE IF
-   * NOT EXISTS` never alters an existing table, so a column added to the schema
-   * above must also be added here or a deployment that already has this file
-   * reads a column that is not there.
-   *
-   * This store had no migration at all before — it had never needed one — so
-   * this is the first, and the column check goes through the driver's prepared
-   * `all` because that form works on both runtimes.
-   */
-  private async migrate(): Promise<void> {
-    const columns = await this.driver.all<{ name: string }>(`PRAGMA table_info(asset_rfq_swap)`)
-    const existing = new Set(columns.map((c) => c.name))
-    for (const [column, type] of [
-      ['quote_price_mantissa', 'TEXT'],
-      ['quote_price_scale', 'INTEGER'],
-      ['quote_implied_mantissa', 'TEXT'],
-      ['quote_gives_base', 'INTEGER'],
-    ] as const) {
-      if (!existing.has(column)) await this.driver.exec(`ALTER TABLE asset_rfq_swap ADD COLUMN ${column} ${type}`)
-    }
   }
 
   /**
@@ -331,9 +241,8 @@ export class AssetRfqSwapStore {
       `INSERT INTO asset_rfq_swap (
          id, state, created_at, updated_at, rfq_id, pair, from_asset_id, from_amount,
          to_asset_id, to_amount, maker_pk_script, maker_public_key, offer_pk_script,
-         offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason,
-         quote_price_mantissa, quote_price_scale, quote_implied_mantissa, quote_gives_base
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?)`,
+         offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason
+       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)`,
       [
         record.id,
         at,
@@ -350,10 +259,6 @@ export class AssetRfqSwapStore {
         record.offerAddress,
         record.solverPubkey,
         record.validUntil,
-        record.quotePrice === undefined ? null : record.quotePrice.mantissa.toString(),
-        record.quotePrice === undefined ? null : record.quotePrice.scale,
-        record.quotePrice === undefined ? null : record.quotePrice.impliedMantissa.toString(),
-        record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
       ],
     )
     await this.recordEvent(record.id, null, 'quoted', null)

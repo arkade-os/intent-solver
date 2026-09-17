@@ -884,15 +884,19 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    * `ADMIN_PORT` set and reachable — which an operator ssh'd into a box has
    * neither. Same aggregation and the same honesty rules: this reads each
    * corridor's `economics()` and hands the records to the same pure functions
-   * the screen uses, so a figure here and a figure there cannot disagree.
+   * the screen uses, so the two cannot disagree on any corridor this binary
+   * serves (an embedder's injected corridors reach `/api/pnl` and not this).
    *
    * Read-only, and deliberately thin: everything that FORMATS money lives in
    * `ops/pnlReport.ts`, where a test can reach it.
    */
   async pnl([windowArg]) {
     const label = windowArg ?? '7d'
-    const seconds = PNL_WINDOWS[label]
-    if (seconds === undefined) throw new GiveUp(`usage: pnl [${Object.keys(PNL_WINDOWS).join('|')}]`)
+    // `hasOwn`, not an undefined check: the presets are an object literal, so
+    // `PNL_WINDOWS['constructor']` answers with an inherited value and `pnl
+    // constructor` would print a well-formed EMPTY book instead of the usage.
+    if (!Object.hasOwn(PNL_WINDOWS, label)) throw new GiveUp(`usage: pnl [${Object.keys(PNL_WINDOWS).join('|')}]`)
+    const seconds = PNL_WINDOWS[label]!
     const config = loadConfig()
     // READERS ONLY, and no network. `createServices` would create the Lightning
     // rail, the Arkade context and call the emulator before returning — so a
@@ -905,6 +909,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       const window = { since: until - seconds, until, limit: DEFAULT_LEDGER_LIMIT }
       const records: SwapEconomics[] = []
       const unmeasured: string[] = []
+      const failed: { corridor: string; reason: string }[] = []
       const truncated: string[] = []
       for (const reader of readers) {
         if (!reader.economics) {
@@ -912,11 +917,26 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
           unmeasured.push(reader.descriptor.pair)
           continue
         }
-        const ledger = await reader.economics(window)
-        records.push(...ledger.records)
-        if (ledger.truncated) truncated.push(reader.descriptor.pair)
+        try {
+          const ledger = await reader.economics(window)
+          records.push(...ledger.records)
+          if (ledger.truncated) truncated.push(reader.descriptor.pair)
+        } catch (error) {
+          // One broken store must not take the other corridors' book down with
+          // it: the operator reaching for this is on the degraded box already.
+          const reason = error instanceof Error ? error.message : String(error)
+          failed.push({ corridor: reader.descriptor.pair, reason })
+        }
       }
-      for (const line of pnlReportLines({ records, label, since: window.since, until, unmeasured, truncated })) {
+      for (const line of pnlReportLines({
+        records,
+        label,
+        since: window.since,
+        until,
+        unmeasured,
+        failed,
+        truncated,
+      })) {
         log(line)
       }
     } finally {

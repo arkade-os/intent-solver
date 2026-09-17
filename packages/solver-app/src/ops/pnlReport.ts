@@ -47,20 +47,31 @@ export interface PnlReportInput {
   until: number
   /** Corridors with no `economics` capability — named, never counted as zero. */
   unmeasured: readonly string[]
+  /**
+   * Corridors that HAVE the capability and threw — a FAULT, kept separate from
+   * {@link unmeasured} for the reason the admin route states: a corridor nobody
+   * instrumented is a coverage gap, one that broke is an incident.
+   */
+  failed: readonly { corridor: string; reason: string }[]
   /** Corridors whose window overflowed the row cap. */
   truncated: readonly string[]
 }
 
 export const pnlReportLines = (input: PnlReportInput): string[] => {
-  const { records, label, since, until, unmeasured, truncated } = input
+  const { records, label, since, until, unmeasured, failed, truncated } = input
   const summary = summarise(records, since, until)
   const lines: string[] = []
 
+  for (const { corridor, reason } of failed) lines.push(`! ${corridor}: FAILED to report - ${reason}`)
   for (const corridor of truncated) lines.push(`! ${corridor}: more rows in this window than were read`)
 
   lines.push(`window   last ${label} (${summary.count} rows)`)
   lines.push(`settled  ${summary.realizedCount}, ${summary.failedCount} failed, ${summary.openCount} still open`)
-  lines.push(`gross    ${signed(summary.grossSats)} sats over ${summary.pricedCount} priced, ${bps(summary.marginBps)}`)
+  lines.push(
+    summary.pricedCount === 0
+      ? 'gross    - nothing in this window carried a price'
+      : `gross    ${signed(summary.grossSats)} sats over ${summary.pricedCount} priced, ${bps(summary.marginBps)}`,
+  )
   // Never a fallback to the gross. A net figure derived from a missing cost is
   // the gross wearing a different label, which is the one misreading this
   // report must not produce.
@@ -68,7 +79,7 @@ export const pnlReportLines = (input: PnlReportInput): string[] => {
     summary.costedCount === 0
       ? 'net      unknown - no rail in this window reported an execution cost'
       : `net      ${signed(summary.netSats)} sats after ${summary.realizedCostSats.toLocaleString('en-US')} cost, ` +
-          `over ${summary.costedCount} of ${summary.pricedCount} priced`,
+          `over ${summary.costedCount} of ${summary.pricedCount} priced, ${bps(summary.netMarginBps)}`,
   )
   if (summary.atRiskSats > 0 || summary.atRiskUnknownCount > 0) {
     lines.push(
@@ -81,16 +92,19 @@ export const pnlReportLines = (input: PnlReportInput): string[] => {
   const corridors = byCorridor(records)
   if (corridors.length > 0) {
     lines.push('')
+    // Each margin sits immediately right of the figure it describes. A single
+    // `margin` column next to `net` reads as the net margin, and it is the gross.
     lines.push(
-      `  ${'corridor'.padEnd(34)}${'gross'.padStart(12)}${'net'.padStart(12)}` +
-        `${'margin'.padStart(9)}${'settled'.padStart(9)}`,
+      `  ${'corridor'.padEnd(34)}${'gross'.padStart(12)}${'gross bp'.padStart(10)}` +
+        `${'net'.padStart(12)}${'net bp'.padStart(10)}${'settled'.padStart(9)}`,
     )
     for (const row of corridors) {
       lines.push(
         `  ${row.corridor.padEnd(34)}` +
           `${(row.pricedCount === 0 ? '-' : signed(row.grossSats)).padStart(12)}` +
+          `${bps(row.marginBps).padStart(10)}` +
           `${(row.costedCount === 0 ? '-' : signed(row.netSats)).padStart(12)}` +
-          `${bps(row.marginBps).padStart(9)}${String(row.realizedCount).padStart(9)}`,
+          `${bps(row.netMarginBps).padStart(10)}${String(row.realizedCount).padStart(9)}`,
       )
     }
   }
@@ -104,10 +118,13 @@ export const pnlReportLines = (input: PnlReportInput): string[] => {
   for (const leg of byFxLeg(records)) {
     lines.push('')
     lines.push(`  ${leg.leg} on ${leg.corridor} - ${leg.count} fill(s)`)
+    // Benchmarked against this leg's OWN mean, and named as such: it finds a bad
+    // fill among its peers and is blind to a market that moved against them all.
+    const drifts = leg.points.map((point) => point.driftBps).filter((drift): drift is number => drift !== null)
     lines.push(
-      leg.medianMarketDriftBps === null
-        ? '    no market mark: these fills carry no quote-time feed price'
-        : `    median fill priced ${bps(leg.medianMarketDriftBps)} against the market feed at quote time`,
+      drifts.length === 0
+        ? '    no rate spread: nothing here to compare these fills against'
+        : `    worst fill ${bps(Math.min(...drifts))} against this leg's own mean rate`,
     )
   }
 

@@ -137,43 +137,6 @@ export type AssetQuoteOutcome =
  * applies for the same reason, rather than a second rounding convention being
  * invented for one corridor.
  */
-/**
- * This quote's OWN price, in the feed's units and at the feed's scale —
- * quote-asset per base-asset, as an exact integer mantissa.
- *
- * The comparison a feed-relative mark needs, computed where the exact bigints
- * and the market's two decimal counts are already in hand. Re-deriving it from
- * a stored row would need both decimal counts and the base/quote orientation on
- * that row, so this is the cheaper half of the trade: one number the reader can
- * compare against {@link Price.mantissa} with no unit knowledge at all.
- *
- * Both directions produce the SAME ratio — quote per base — so a drift figure
- * derived from it is comparable across them. Which direction is FAVOURABLE is
- * not: paying less quote per base is good when the solver buys base and bad
- * when it sells, which is why `givesBase` is stored beside it.
- *
- * Returns null on a degenerate amount rather than dividing by it; the caller
- * treats that as "no mark", not as a price of zero.
- */
-export const impliedQuotePrice = (args: {
-  fromAmount: bigint
-  toAmount: bigint
-  givesBase: boolean
-  baseDecimals: number
-  quoteDecimals: number
-  scale: number
-}): bigint | null => {
-  const { fromAmount, toAmount, givesBase, baseDecimals, quoteDecimals, scale } = args
-  // Base and quote, whichever way the client traded.
-  const baseAtomic = givesBase ? fromAmount : toAmount
-  const quoteAtomic = givesBase ? toAmount : fromAmount
-  if (baseAtomic <= 0n || quoteAtomic <= 0n) return null
-  // (quote / 10^qd) / (base / 10^bd) * 10^scale, as integers throughout.
-  return (
-    (quoteAtomic * 10n ** BigInt(baseDecimals) * 10n ** BigInt(scale)) / (baseAtomic * 10n ** BigInt(quoteDecimals))
-  )
-}
-
 export const resolveAssetQuote = (args: {
   pair: AssetPair
   amount: bigint

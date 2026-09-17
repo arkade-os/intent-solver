@@ -34,6 +34,7 @@ const report = (records: ReturnType<typeof swap>[], over: Partial<Parameters<typ
     since: T0 - 604_800,
     until: T0 + 60,
     unmeasured: [],
+    failed: [],
     truncated: [],
     ...over,
   }).join('\n')
@@ -58,6 +59,19 @@ describe('the headline', () => {
     expect(out).not.toMatch(/net\s+\+300/)
   })
 
+  it('dashes the gross on an empty book rather than reporting a zero it did not measure', () => {
+    expect(report([])).toMatch(/gross\s+- nothing in this window carried a price/)
+  })
+
+  /**
+   * The net margin was computed and rendered nowhere, so the only bp on screen
+   * was the GROSS one — sitting beside a net figure it does not describe.
+   */
+  it('prints the net margin beside the net figure', () => {
+    const out = report([swap({ id: 'a', give: 100_300, spread: 300, cost: 100 })])
+    expect(out).toMatch(/net\s+\+200 sats after 100 cost, over 1 of 1 priced, [+-]\d+bp/)
+  })
+
   it('nets once a cost exists, and says over how much of the book', () => {
     const out = report([
       swap({ id: 'a', give: 100_300, spread: 300, cost: 100 }),
@@ -70,6 +84,20 @@ describe('the headline', () => {
 describe('coverage is stated, never assumed', () => {
   it('names an unmeasured corridor rather than averaging it in at nothing', () => {
     expect(report([], { unmeasured: ['arkade:BTC->mute:BTC'] })).toContain('unmeasured arkade:BTC->mute:BTC')
+  })
+
+  /**
+   * A corridor that claimed to answer and threw is an incident, not a gap — and
+   * it must not take the rest of the book down with it, which is what an
+   * uncaught `economics()` did to the whole command.
+   */
+  it('names a broken corridor as a fault and still prints every other corridor', () => {
+    const out = report([swap({ id: 'a', give: 100_300, spread: 300 })], {
+      failed: [{ corridor: 'arkade:BTC->onchain:BTC', reason: 'database is locked' }],
+    })
+    expect(out).toContain('! arkade:BTC->onchain:BTC: FAILED to report - database is locked')
+    expect(out).toMatch(/gross\s+\+300 sats/)
+    expect(out).not.toContain('unmeasured arkade:BTC->onchain:BTC')
   })
 
   it('warns when a corridor had more rows than were read', () => {
@@ -91,9 +119,8 @@ describe('the corridor table', () => {
     const line = report([swap({ id: 'a', give: 100_600, spread: 600, corridor: 'arkade:BTC->onchain:BTC' })])
       .split('\n')
       .find((l) => l.includes('arkade:BTC->onchain:BTC'))!
-    expect(line).toMatch(/\+600/)
-    // The net column, which has nothing to show.
-    expect(line).toMatch(/\+600\s+-\s/)
+    // Gross, then its OWN margin, then the two net columns with nothing to show.
+    expect(line).toMatch(/\+600\s+[+-]\d+bp\s+-\s+-\s/)
   })
 
   it('prints both figures where the corridor reported a cost', () => {

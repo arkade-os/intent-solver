@@ -160,46 +160,6 @@ export interface SwapEconomics {
    * approximated, and the aggregate counts how much of the book it covers.
    */
   readonly netSats: number | null
-  /**
-   * THE MARKET PRICE THIS SWAP WAS QUOTED AGAINST — `mantissa / 10 ** scale`,
-   * as a decimal string, never a float.
-   *
-   * The benchmark that makes a drift figure mean something outside this
-   * solver's own book. Without it a fill can only be compared against its
-   * peers, which cannot tell a bad fill from a bad book: a market that ran
-   * against every quote in a window leaves them all looking fine relative to
-   * each other.
-   *
-   * Only the asset RFQ corridor records one today, and only for rows quoted
-   * after the column shipped. Null everywhere else — unmeasured, never zero.
-   */
-  readonly quotePrice: {
-    readonly mantissa: string
-    readonly scale: number
-    readonly impliedMantissa: string
-    readonly givesBase: boolean
-  } | null
-  /**
-   * HOW THIS QUOTE PRICED AGAINST THE MARKET, in basis points, SIGNED so that
-   * positive is in the solver's favour — the same convention as every other
-   * figure on this screen.
-   *
-   * The mark `driftBps` in the aggregate cannot give you. That one benchmarks a
-   * fill against this solver's OTHER fills, so it finds a bad fill and is blind
-   * to a bad book: a market that ran against every quote in a window leaves them
-   * all looking fine relative to each other. This compares the quote to what the
-   * feed said at the moment it was issued.
-   *
-   * The sign needs `givesBase`, which is why it is stored. Both directions
-   * produce the same ratio — quote per base — but paying less quote per base is
-   * good when the solver BUYS base and bad when it sells, so a single
-   * unnormalised subtraction would mean opposite things on the two legs of one
-   * market.
-   *
-   * Null unless a snapshot was recorded: rows quoted before the columns shipped,
-   * and every corridor but the asset RFQ leg.
-   */
-  readonly marketDriftBps: number | null
   /** @see the note where this is assigned — a loss that cannot be priced in sats. */
   readonly atRiskUnknown: boolean
   /**
@@ -277,39 +237,6 @@ export const bpsOf = (amount: number, notional: number): number | null => {
  * that wrote it backwards would report its losses as profit on a screen built
  * to be trusted.
  */
-/**
- * A quote's price against the market it was quoted into, in basis points,
- * normalised so POSITIVE IS IN THE SOLVER'S FAVOUR.
- *
- * Exact bigint throughout: both mantissas are at the same scale by construction
- * — the orchestrator computes the implied one at the feed's own scale — so the
- * comparison needs no decimals, no units and no float. The single division is
- * the last step, into basis points.
- *
- * The direction is the whole reason `givesBase` is carried. The ratio is
- * quote-per-base either way, but the solver is on opposite sides of it:
- *
- *  - `givesBase` — the client hands over base, so the solver PAYS quote for it.
- *    Paying less than the market is the good outcome: favourable when implied
- *    is BELOW feed.
- *  - otherwise — the client hands over quote, so the solver pays base and
- *    receives quote. Receiving more quote per base is the good outcome:
- *    favourable when implied is ABOVE feed.
- *
- * Null on a non-positive feed price rather than dividing by it — an unusable
- * feed is not a drift of zero.
- */
-const marketDriftBpsOf = (
-  quotePrice: { mantissa: string; impliedMantissa: string; givesBase: boolean } | null,
-): number | null => {
-  if (quotePrice === null) return null
-  const feed = BigInt(quotePrice.mantissa)
-  const implied = BigInt(quotePrice.impliedMantissa)
-  if (feed <= 0n) return null
-  const favourable = quotePrice.givesBase ? feed - implied : implied - feed
-  return Number((favourable * 10_000n) / feed)
-}
-
 export const economicsOf = (parts: {
   id: string
   corridor: string
@@ -340,8 +267,6 @@ export const economicsOf = (parts: {
   quotedCostSats?: number | null
   /** @see SwapEconomics.realizedCostSats */
   realizedCostSats?: number | null
-  /** @see SwapEconomics.quotePrice */
-  quotePrice?: { mantissa: string; scale: number; impliedMantissa: string; givesBase: boolean } | null
   /** @see SwapEconomics.atRiskUpperBound */
   atRiskUpperBound?: boolean
   /** True only for a TERMINAL row that was exposed — see {@link SwapEconomics.atRiskSats}. */
@@ -411,7 +336,5 @@ export const economicsOf = (parts: {
     // spread nets to nothing meaningful, and a spread with no cost is the gross
     // figure this field exists to be distinguishable from.
     netSats: grossSats === null || realizedCostSats === null ? null : grossSats - realizedCostSats,
-    quotePrice: parts.quotePrice ?? null,
-    marketDriftBps: marketDriftBpsOf(parts.quotePrice ?? null),
   }
 }

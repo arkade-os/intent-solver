@@ -116,12 +116,6 @@ const row = (over: Partial<AssetRfqSwapRow> = {}): AssetRfqSwapRow => ({
   depositVout: null,
   fillTxid: null,
   failureReason: null,
-  // The quote-time price snapshot. Null here: this fixture is about the WIRE
-  // payload, which carries none of it.
-  quotePriceMantissa: null,
-  quotePriceScale: null,
-  quoteImpliedMantissa: null,
-  quoteGivesBase: null,
   ...over,
 })
 
