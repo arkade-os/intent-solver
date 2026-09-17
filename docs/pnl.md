@@ -145,7 +145,8 @@ A feed-relative mark is the missing half, and it is **not built**. It needs the
 feed read again at FILL time and compared against the quote's own implied price:
 snapshotting the feed at quote time alone cannot work, because the quote is
 _derived from_ that same feed instant, so the comparison returns the configured
-spread and nothing else. See the follow-up issue.
+spread and nothing else. Tracked in #153, with the constraints an implementation
+has to meet.
 
 Legs are grouped by corridor **and** direction. `A->B` and `B->A` are
 reciprocals, so pooling them would average a rate against its own inverse and
