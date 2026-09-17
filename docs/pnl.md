@@ -139,20 +139,48 @@ so the spread can be textbook and the trade still a loss. Two panels answer it:
   for the same directional leg. Positive is in the solver's favour. The shape
   worth looking for is points below the line drifting rightward.
 
-The benchmark is **this solver's own book** (`driftBps`), and the limitation is
-stated wherever the figure appears, because it changes the reading: it answers
-"was this fill worse than the ones around it", never "was it worse than the
-market". A market that moved against every quote in a window leaves them all
-looking flawless beside each other, and peer drift cannot see it.
+Two benchmarks, answering different questions. Both signed so **positive is in
+the solver's favour**.
 
-Signed so **positive is in the solver's favour**, like every other figure here.
+- **vs peers** (`driftBps`) — against this window's volume-weighted mean rate for
+  the same leg, i.e. this solver's own book. Finds a bad _fill_.
+- **vs market** (`marketDriftBps`) — the price a quote FIXED, against the feed
+  read again **when the fill landed**. Finds a market that _ran away_.
 
-A feed-relative mark is the missing half, and it is **not built**. It needs the
-feed read again at FILL time and compared against the quote's own implied price:
-snapshotting the feed at quote time alone cannot work, because the quote is
-_derived from_ that same feed instant, so the comparison returns the configured
-spread and nothing else. Tracked in #153, with the constraints an implementation
-has to meet.
+The second is what the first cannot give: a market that moved against every quote
+in a window leaves them all looking flawless beside each other.
+
+It must be **two observations at two times**. Snapshotting the feed at quote time
+and comparing it to the quote derived from that same instant is a tautology — it
+returns the configured spread on every input and can never go negative. An
+earlier attempt shipped exactly that and was withdrawn.
+
+**The spread is inside this number, so zero is the breakeven line.** A flat
+market reads as `+feeBps`; below zero the market has moved further than the
+margin covered and the fill is under water. On a 30bp market:
+
+| market at fill | mark |
+| --- | --- |
+| +10% | `+1033bp` |
+| flat | `+30bp` |
+| −0.3% | `0bp` — breakeven, the move exactly ate the margin |
+| −1% | `-70bp` |
+
+The direction bit (`quote_gives_base`) is what makes it signable: the ratio is
+quote-per-base either way, but paying less quote per base is good when the solver
+buys base and bad when it sells, so one unnormalised subtraction would call the
+same move good on one leg and bad on the other.
+
+The comparison is exact bigint, cross-multiplied — the two feed reads need not
+come back at the same scale — and divides once into basis points.
+
+**The fill-time read never blocks a fill.** It runs *after* the `filling ->
+filled` transition, so a slow feed cannot widen the window in which a crash
+leaves a submitted fill reading `filling` (which `recoverFilling` escalates to
+`stuck`). Every failure — no market, an unreadable feed, a non-positive price —
+leaves the mark null and the fill untouched, and is reported as a **price** fault
+rather than a swap fault. Each leg reports `markedCount` beside its median, so a
+mark covering part of a leg is never read as covering all of it.
 
 Legs are grouped by corridor **and** direction. `A->B` and `B->A` are
 reciprocals, so pooling them would average a rate against its own inverse and

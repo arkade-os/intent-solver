@@ -137,6 +137,42 @@ export type AssetQuoteOutcome =
  * applies for the same reason, rather than a second rounding convention being
  * invented for one corridor.
  */
+/**
+ * This quote's OWN price — quote-asset per base-asset, as an exact integer
+ * mantissa at `scale`.
+ *
+ * The half of a market mark that the solver controls. Compared against a feed
+ * read LATER, at fill time, it says how far the market moved while the quote was
+ * outstanding. Compared against the feed it was derived from it says nothing at
+ * all, which is the trap the first attempt at this fell into: `resolveAssetQuote`
+ * computes the payout FROM that feed, so the two cannot disagree by more than
+ * the configured spread.
+ *
+ * Both directions produce the same ratio, so a drift derived from it is
+ * comparable across them. Which direction is FAVOURABLE is not — see
+ * `marketDriftBps`.
+ *
+ * Null rather than zero on a degenerate result. A feed reporting `1.0` parses to
+ * `scale: 0`, and the division then truncates a real price to `0n`; storing that
+ * as valid reported a fill as +10000bp in the solver's favour.
+ */
+export const impliedQuotePrice = (args: {
+  fromAmount: bigint
+  toAmount: bigint
+  givesBase: boolean
+  baseDecimals: number
+  quoteDecimals: number
+  scale: number
+}): bigint | null => {
+  const { fromAmount, toAmount, givesBase, baseDecimals, quoteDecimals, scale } = args
+  const baseAtomic = givesBase ? fromAmount : toAmount
+  const quoteAtomic = givesBase ? toAmount : fromAmount
+  if (baseAtomic <= 0n || quoteAtomic <= 0n || scale < 0) return null
+  const implied =
+    (quoteAtomic * 10n ** BigInt(baseDecimals) * 10n ** BigInt(scale)) / (baseAtomic * 10n ** BigInt(quoteDecimals))
+  return implied > 0n ? implied : null
+}
+
 export const resolveAssetQuote = (args: {
   pair: AssetPair
   amount: bigint

@@ -442,3 +442,93 @@ describe('tickAll — the periodic pass', () => {
     expect(await store.listNonTerminal()).toHaveLength(2)
   })
 })
+
+describe('the market mark', () => {
+  it('records the price the quote FIXED, not the feed it came from', async () => {
+    const { service, store } = await harness()
+    await service.quote(request())
+
+    const row = await store.get('swap-1')
+    // 1 BTC in, 99,500 USDA out at 50bps against a feed of 100,000.
+    expect(row.quoteImpliedMantissa).toBe(99_500n)
+    expect(row.quoteImpliedScale).toBe(0)
+    expect(row.quoteGivesBase).toBe(true)
+    // Storing the feed instead is the tautology this replaced: the payout is
+    // derived FROM it, so the two can never disagree by more than the spread.
+    expect(row.quoteImpliedMantissa).not.toBe(100_000n)
+  })
+
+  it('reads the feed again when the fill lands, and keeps that second number', async () => {
+    let reads = 0
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      fetchPrice: async () => {
+        reads += 1
+        return reads === 1 ? { mantissa: 100_000n, scale: 0 } : { mantissa: 90_000n, scale: 0 }
+      },
+    })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(await store.get('swap-1')).toMatchObject({
+      state: 'filled',
+      quoteImpliedMantissa: 99_500n,
+      fillPriceMantissa: 90_000n,
+      fillPriceScale: 0,
+    })
+  })
+
+  /**
+   * The property that must never regress. A price feed is a third party, and a
+   * swap whose money has already moved must not be reported as anything other
+   * than filled because that third party was unreachable.
+   *
+   * The ERROR CHANNEL is what makes this test discriminating, and the row state
+   * is not: an unguarded read throws into the fill's own catch, whose
+   * `fail(id, 'filling', …)` is a compare-and-swap that no-ops against a row
+   * already `filled`. The state therefore looks identical either way, and only
+   * the reported fault distinguishes a feed being down from a swap going wrong.
+   */
+  it('still FILLS when the feed cannot be read as the fill lands, and blames the FEED', async () => {
+    let reads = 0
+    const errors: unknown[][] = []
+    const { service, store, settled } = await harness({
+      depositAt: async () => deposit(),
+      onError: (id, error) => errors.push([id, error]),
+      fetchPrice: async () => {
+        reads += 1
+        if (reads > 1) throw new Error('the feed is down')
+        return { mantissa: 100_000n, scale: 0 }
+      },
+    })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(settled).toEqual(['swap-1'])
+    expect(await store.get('swap-1')).toMatchObject({
+      state: 'filled',
+      fillTxid: 'fa'.repeat(32),
+      // Unmeasured, never zero.
+      fillPriceMantissa: null,
+    })
+    expect(errors.map(([id]) => id)).toEqual(['price'])
+  })
+
+  it('does not mark a fill against a price of zero', async () => {
+    let reads = 0
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      fetchPrice: async () => {
+        reads += 1
+        return reads === 1 ? { mantissa: 100_000n, scale: 0 } : { mantissa: 0n, scale: 0 }
+      },
+    })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillPriceMantissa: null })
+  })
+})

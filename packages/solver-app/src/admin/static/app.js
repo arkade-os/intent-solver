@@ -2766,13 +2766,17 @@ const durationPanel = (bands) =>
   )
 
 /**
- * One panel per directional FX leg.
+ * One panel per directional FX leg, against TWO benchmarks that answer
+ * different questions — which is why both are on screen and both are labelled.
  *
- * The benchmark is the solver's OWN book over the window — the volume-weighted
- * mean rate — and the panel says so, because that limitation changes the
- * reading. It answers "was this fill worse than the ones around it", never "was
- * it worse than the market". A feed-relative mark needs the feed price at quote
- * time, which nothing records today.
+ * `vs peers` is this window's volume-weighted mean rate: the solver's own book.
+ * It finds a bad fill and is blind to a bad book, because a market that moved
+ * against every quote leaves them all looking fine beside each other.
+ *
+ * `vs market` compares the price a quote FIXED against a feed read again when
+ * the fill landed — two observations at two times. The spread sits inside it, so
+ * a flat market reads as the fee and ZERO is the breakeven line: below it the
+ * market has moved further than the margin covered.
  */
 const fxPanel = (leg) => {
   const worst = [...leg.points].sort((a, b) => (a.driftBps ?? 0) - (b.driftBps ?? 0)).slice(0, 5)
@@ -2786,6 +2790,22 @@ const fxPanel = (leg) => {
       '. Drift is measured against this window’s volume-weighted mean rate — this solver’s own book. ' +
         'Below the line is a fill that came in worse than its peers.',
     ),
+    // The leg-level verdict peer drift cannot give. Coloured only against the
+    // solver, and it carries its own denominator: a median over an unstated
+    // share of the leg is the reading this screen works to prevent elsewhere.
+    leg.medianMarketDriftBps === null || leg.medianMarketDriftBps === undefined
+      ? h(
+          'p.faint',
+          `No market mark: none of these ${leg.count} fills carry both a quote price and a feed read at fill time.`,
+        )
+      : h(
+          'p.muted',
+          'Against the market when it filled, the median fill on this leg priced ',
+          leg.medianMarketDriftBps < 0
+            ? h('span.at-risk', `${bps(leg.medianMarketDriftBps)} under water`)
+            : h('b', `${bps(leg.medianMarketDriftBps)} ahead`),
+          `, over ${leg.markedCount ?? 0} of ${leg.count} marked. The spread is included, so zero is breakeven.`,
+        ),
     // Named per leg, so N of these are distinguishable in a screen reader's
     // list of figures rather than N repeats of one sentence.
     decayChart(leg.points, { title: `Rate drift against time to fill, ${leg.leg} on ${leg.corridor}` }),
@@ -2795,7 +2815,14 @@ const fxPanel = (leg) => {
           'table',
           h(
             'thead',
-            h('tr', h('th', 'worst fills'), h('th.right', 'took'), h('th.right', 'vs peers'), h('th.right', 'settled')),
+            h(
+              'tr',
+              h('th', 'worst fills'),
+              h('th.right', 'took'),
+              h('th.right', 'vs peers'),
+              h('th.right', 'vs market'),
+              h('th.right', 'settled'),
+            ),
           ),
           h(
             'tbody',
@@ -2805,6 +2832,14 @@ const fxPanel = (leg) => {
                 h('td.mono', shortId(point.id)),
                 h('td.right', duration(point.durationSeconds)),
                 h('td.right', (point.driftBps ?? 0) < 0 ? h('span.at-risk', bps(point.driftBps)) : bps(point.driftBps)),
+                h(
+                  'td.right',
+                  point.marketDriftBps === null || point.marketDriftBps === undefined
+                    ? h('span.faint', { title: 'No feed read landed against this fill.' }, '—')
+                    : point.marketDriftBps < 0
+                      ? h('span.at-risk', bps(point.marketDriftBps))
+                      : bps(point.marketDriftBps),
+                ),
                 h('td.right', ago(point.at)),
               ),
             ),

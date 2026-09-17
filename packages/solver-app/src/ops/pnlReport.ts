@@ -118,13 +118,22 @@ export const pnlReportLines = (input: PnlReportInput): string[] => {
   for (const leg of byFxLeg(records)) {
     lines.push('')
     lines.push(`  ${leg.leg} on ${leg.corridor} - ${leg.count} fill(s)`)
-    // Benchmarked against this leg's OWN mean, and named as such: it finds a bad
-    // fill among its peers and is blind to a market that moved against them all.
+    // The spread is INSIDE this number, so a flat market reads as the fee and
+    // zero is the breakeven line — said here because a bare "-30bp" beside a
+    // 30bp margin reads as a loss when it is the market having eaten the margin.
+    lines.push(
+      leg.medianMarketDriftBps === null
+        ? `    vs market  unmarked - 0 of ${leg.count} carry both a quote price and a fill-time read`
+        : `    vs market  median ${bps(leg.medianMarketDriftBps)} over ${leg.markedCount} of ${leg.count} marked` +
+            ' - spread included, so below zero is under water',
+    )
+    // The other benchmark, named as this leg's own book: it finds a bad fill
+    // among its peers and is blind to a market that moved against them all.
     const drifts = leg.points.map((point) => point.driftBps).filter((drift): drift is number => drift !== null)
     lines.push(
       drifts.length === 0
-        ? '    no rate spread: nothing here to compare these fills against'
-        : `    worst fill ${bps(Math.min(...drifts))} against this leg's own mean rate`,
+        ? '    vs peers   no rate spread to compare these fills against'
+        : `    vs peers   worst fill ${bps(Math.min(...drifts))} against this leg's own mean rate`,
     )
   }
 

@@ -180,6 +180,16 @@ export interface FxPoint {
    * the feed price at quote time, which nothing records today.
    */
   driftBps: number | null
+  /**
+   * How far the market moved between this quote and its fill, positive in the
+   * solver's favour — `SwapEconomics.marketDriftBps`.
+   *
+   * The mark `driftBps` above cannot give. That one benchmarks a fill against
+   * this solver's other fills, so it finds a bad fill and is blind to a bad
+   * book. Read together: a point low on `driftBps` was a bad fill among its
+   * peers, and a leg low on `marketDriftBps` was one the market ran away from.
+   */
+  marketDriftBps: number | null
 }
 
 export interface FxLeg {
@@ -189,6 +199,25 @@ export interface FxLeg {
   count: number
   /** Volume-weighted mean rate over the window — the benchmark `driftBps` is measured against. */
   meanRate: number | null
+  /**
+   * The median market drift across this leg's MARKED fills, in basis points.
+   *
+   * A leg-level verdict: a leg whose median sits well below zero was one the
+   * market moved against consistently, however tidy its fills looked beside each
+   * other.
+   *
+   * Null when no fill on this leg carries both halves of a mark.
+   */
+  medianMarketDriftBps: number | null
+  /**
+   * How many of `count` carried a mark — the denominator that makes the median
+   * readable.
+   *
+   * Reported for the same reason `costedCount` is: a median over an unstated
+   * share of the leg invites exactly the reading the net figure guards against,
+   * where a number drawn from part of the book is taken for the whole of it.
+   */
+  markedCount: number
   points: FxPoint[]
 }
 
@@ -593,12 +622,15 @@ export const byFxLeg = (records: readonly SwapEconomics[]): FxLeg[] => {
         return { record, rate: denominator > 0n ? Number(numerator) / Number(denominator) : Number.NaN }
       })
       const meanRate = weight > 0n ? Number(weighted) / Number(weight) : null
+      const marks = rows.map((record) => record.marketDriftBps).filter((bps): bps is number => bps !== null)
 
       return {
         leg,
         corridor,
         count: rows.length,
         meanRate,
+        medianMarketDriftBps: median(marks),
+        markedCount: marks.length,
         points: rated
           .filter(({ rate }) => Number.isFinite(rate))
           .map(({ record, rate }) => ({
@@ -612,6 +644,7 @@ export const byFxLeg = (records: readonly SwapEconomics[]): FxLeg[] => {
             // `-0` in the JSON — would take it for a signal.
             driftBps:
               meanRate !== null && meanRate > 0 ? Math.trunc(((meanRate - rate) / meanRate) * 10_000) + 0 : null,
+            marketDriftBps: record.marketDriftBps,
           }))
           .sort((a, b) => a.at - b.at),
       }

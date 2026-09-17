@@ -160,6 +160,22 @@ export interface SwapEconomics {
    * approximated, and the aggregate counts how much of the book it covers.
    */
   readonly netSats: number | null
+  /**
+   * HOW FAR THE MARKET MOVED between this quote being issued and its fill
+   * landing, in basis points, SIGNED so that positive is in the solver's favour.
+   *
+   * The question peer drift structurally cannot answer. That one benchmarks a
+   * fill against this solver's OTHER fills, so a market that ran against every
+   * quote in a window leaves them all looking flawless beside each other. This
+   * one compares two observations taken at two different TIMES — which is the
+   * whole point, and what the first attempt at this got wrong by comparing the
+   * quote to the very feed instant it was derived from.
+   *
+   * Null unless both halves exist: every corridor but the asset RFQ leg, rows
+   * quoted before the columns shipped, fills whose feed read failed, and
+   * anything that never filled. Unmeasured, never zero.
+   */
+  readonly marketDriftBps: number | null
   /** @see the note where this is assigned — a loss that cannot be priced in sats. */
   readonly atRiskUnknown: boolean
   /**
@@ -237,6 +253,39 @@ export const bpsOf = (amount: number, notional: number): number | null => {
  * that wrote it backwards would report its losses as profit on a screen built
  * to be trusted.
  */
+/**
+ * The market's move between quote and fill, in basis points, positive in the
+ * solver's favour.
+ *
+ * CROSS-MULTIPLIED rather than rescaled. The two observations are separate feed
+ * reads and need not share a scale, and normalising one to the other would
+ * either divide (losing precision in the figure being measured) or multiply into
+ * a comparison that no longer matches its denominator. Exact bigint throughout;
+ * the single division is the last step, into basis points.
+ *
+ * The direction bit is why `givesBase` is stored. The ratio is quote-per-base
+ * either way, but the solver sits on opposite sides of it:
+ *
+ *  - `givesBase` — the client hands over base, so the solver BUYS base at
+ *    `implied`. A market above that means it bought below the market: good.
+ *  - otherwise — the client hands over quote, so the solver SELLS base at
+ *    `implied`. A market below that means it sold above the market: good.
+ */
+const marketDriftBpsOf = (
+  quote: { impliedMantissa: string; scale: number; givesBase: boolean } | null,
+  fill: { mantissa: string; scale: number } | null,
+): number | null => {
+  if (quote === null || fill === null) return null
+  const implied = BigInt(quote.impliedMantissa)
+  const market = BigInt(fill.mantissa)
+  if (implied <= 0n || market <= 0n || quote.scale < 0 || fill.scale < 0) return null
+  // Both sides raised to the other's scale, so they are directly comparable.
+  const impliedAt = implied * 10n ** BigInt(fill.scale)
+  const marketAt = market * 10n ** BigInt(quote.scale)
+  const favourable = quote.givesBase ? marketAt - impliedAt : impliedAt - marketAt
+  return Number((favourable * 10_000n) / impliedAt)
+}
+
 export const economicsOf = (parts: {
   id: string
   corridor: string
@@ -267,6 +316,10 @@ export const economicsOf = (parts: {
   quotedCostSats?: number | null
   /** @see SwapEconomics.realizedCostSats */
   realizedCostSats?: number | null
+  /** The price these terms fixed, and which way round the trade ran. */
+  quotePrice?: { impliedMantissa: string; scale: number; givesBase: boolean } | null
+  /** What the feed said as the fill landed. */
+  fillPrice?: { mantissa: string; scale: number } | null
   /** @see SwapEconomics.atRiskUpperBound */
   atRiskUpperBound?: boolean
   /** True only for a TERMINAL row that was exposed — see {@link SwapEconomics.atRiskSats}. */
@@ -337,5 +390,6 @@ export const economicsOf = (parts: {
     // spread nets to nothing meaningful, and a spread with no cost is the gross
     // figure this field exists to be distinguishable from.
     netSats: grossSats === null || realizedCostSats === null ? null : grossSats - realizedCostSats,
+    marketDriftBps: marketDriftBpsOf(parts.quotePrice ?? null, parts.fillPrice ?? null),
   }
 }

@@ -234,5 +234,20 @@ export const assetRfqEconomics = (row: AssetRfqSwapRow, descriptor: CorridorDesc
       decimals: null,
     },
     outbound: { assetId: row.toAssetId, amount: row.toAmount.toString(), decimals: null },
+    // Two observations taken at two TIMES. All-or-nothing on each half: an
+    // implied price with no direction beside it cannot be signed, and either
+    // half on its own marks against nothing.
+    quotePrice:
+      row.quoteImpliedMantissa === null || row.quoteImpliedScale === null || row.quoteGivesBase === null
+        ? null
+        : {
+            impliedMantissa: row.quoteImpliedMantissa.toString(),
+            scale: row.quoteImpliedScale,
+            givesBase: row.quoteGivesBase,
+          },
+    fillPrice:
+      row.fillPriceMantissa === null || row.fillPriceScale === null
+        ? null
+        : { mantissa: row.fillPriceMantissa.toString(), scale: row.fillPriceScale },
     lost: row.state === LOST,
   })
