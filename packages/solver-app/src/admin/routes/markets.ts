@@ -73,6 +73,8 @@ interface MarketBody {
   feeBps?: unknown
   sellBaseFeeFlat?: unknown
   buyBaseFeeFlat?: unknown
+  sellBaseFeeBps?: unknown
+  buyBaseFeeBps?: unknown
   sellBase?: unknown
   buyBase?: unknown
   enabled?: unknown
@@ -96,6 +98,9 @@ const int = (label: string, value: unknown): number => {
   if (typeof value !== 'number' || !Number.isInteger(value)) throw new BadRequest(`${label} must be an integer`)
   return value
 }
+
+const optionalInt = (label: string, value: unknown): number | undefined =>
+  value === undefined || value === null ? undefined : int(label, value)
 
 const atomic = (label: string, value: unknown): bigint => {
   if (value === undefined || value === null) return 0n
@@ -137,6 +142,8 @@ const marketFrom = (body: MarketBody): AssetMarketConfig => ({
   feeBps: int('feeBps', body.feeBps),
   sellBaseFeeFlat: atomic('sellBaseFeeFlat', body.sellBaseFeeFlat),
   buyBaseFeeFlat: atomic('buyBaseFeeFlat', body.buyBaseFeeFlat),
+  sellBaseFeeBps: optionalInt('sellBaseFeeBps', body.sellBaseFeeBps),
+  buyBaseFeeBps: optionalInt('buyBaseFeeBps', body.buyBaseFeeBps),
   sellBase: bounds('sellBase', body.sellBase),
   buyBase: bounds('buyBase', body.buyBase),
   // Enabled unless explicitly switched off, matching the corridors: configuring
@@ -160,6 +167,8 @@ const marketJson = (row: AssetMarketRow) => ({
   feeBps: row.feeBps,
   sellBaseFeeFlat: String(row.sellBaseFeeFlat ?? 0n),
   buyBaseFeeFlat: String(row.buyBaseFeeFlat ?? 0n),
+  sellBaseFeeBps: row.sellBaseFeeBps ?? null,
+  buyBaseFeeBps: row.buyBaseFeeBps ?? null,
   sellBase: row.sellBase === null ? null : { min: String(row.sellBase.min), max: String(row.sellBase.max) },
   buyBase: row.buyBase === null ? null : { min: String(row.buyBase.min), max: String(row.buyBase.max) },
   enabled: row.enabled,

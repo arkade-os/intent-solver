@@ -47,6 +47,19 @@ const buy = (usdt: number, over: Partial<OfferPriceMarket> = {}) =>
     feed,
   })
 
+describe('a spread per direction', () => {
+  it('refuses on the widened side and leaves the other alone', () => {
+    expect(sell(100_000)).toBe(true)
+    expect(sell(100_000, { sellBaseFeeBps: 900 })).toBe(false)
+    expect(sell(100_000, { buyBaseFeeBps: 900 })).toBe(true)
+  })
+
+  it('is symmetric in the mirror direction', () => {
+    expect(buy(100_000, { buyBaseFeeBps: 900 })).toBe(false)
+    expect(buy(100_000, { sellBaseFeeBps: 900 })).toBe(buy(100_000))
+  })
+})
+
 describe('sell_base — the maker sells BTC, we pay USDT', () => {
   it('takes an offer at the feed price', () => {
     expect(sell(100_000)).toBe(true)

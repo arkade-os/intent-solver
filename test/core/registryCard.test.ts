@@ -390,10 +390,87 @@ describe('asset markets on the card', () => {
     expect('fee_flat' in asset).toBe(false)
   })
 
-  it('refuses an enabled base-input flat fee the card cannot denominate honestly', () => {
-    expect(() => buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeFlat: 330n })] }))).toThrow(
-      /base-input flat fee.*quote-asset/,
-    )
+  /** Refused while `fee_flat`, quote-denominated both ways, was the only field. */
+  it('publishes a base-input flat fee in base units, not converted', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeFlat: 330n })] })).markets[1]!
+    expect(asset.solver_fee).toEqual({ base: { flat: '330' } })
+    expect(asset.fee_flat).toBeUndefined()
+  })
+
+  it('keys each flat fee by the side deposited, and still emits fee_flat for older readers', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeFlat: 330n, buyBaseFeeFlat: 50n })] }))
+      .markets[1]!
+    expect(asset.solver_fee).toEqual({ base: { flat: '330' }, quote: { flat: '50' } })
+    expect(asset.fee_flat).toBe('50')
+  })
+
+  it('refuses a directional spread out of range, by field name', () => {
+    for (const bad of [10_001, -1, 12.5]) {
+      expect(() => buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeBps: bad })] }))).toThrow(
+        /sell_base_fee_bps must be an integer/,
+      )
+      expect(() => buildSolverCard(inputs({ assetMarkets: [market({ buyBaseFeeBps: bad })] }))).toThrow(
+        /buy_base_fee_bps must be an integer/,
+      )
+    }
+  })
+
+  it('publishes a spread per direction, and the widest as fee_bps', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeBps: 10, buyBaseFeeBps: 900 })] }))
+      .markets[1]!
+    expect(asset.fee_bps).toBe(900)
+    // BOTH stated though quote's 900 equals fee_bps — see solverFeeField.
+    expect(asset.solver_fee).toEqual({ base: { bps: 10 }, quote: { bps: 900 } })
+  })
+
+  it('widens fee_bps for one override, stating the inherited side too', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market({ buyBaseFeeBps: 900 })] })).markets[1]!
+    expect(asset.fee_bps).toBe(900)
+    expect(asset.solver_fee).toEqual({ base: { bps: 30 }, quote: { bps: 900 } })
+  })
+
+  // Mirrors solver-registry's `marketSolverFeeErrors`, the way the name and
+  // relay rules above mirror their schema counterparts: a card that breaks it is
+  // refused by the reducer, and nothing in THIS repo would otherwise notice.
+  const registryRejects = (m: Record<string, unknown>): string | null => {
+    const fee = m.solver_fee as { base?: { bps?: number }; quote?: { bps?: number } } | undefined
+    const declared = [fee?.base?.bps, fee?.quote?.bps].filter((b): b is number => typeof b === 'number')
+    if (declared.length === 0) return null
+    const widest = Math.max(...declared)
+    return m.fee_bps === widest ? null : `fee_bps ${String(m.fee_bps)} is not the widest declared ${widest}`
+  }
+
+  const SPREADS = [undefined, 0, 10, 30, 900] as const
+  for (const sellBaseFeeBps of SPREADS) {
+    for (const buyBaseFeeBps of SPREADS) {
+      it(`emits a card the registry accepts for sell=${String(sellBaseFeeBps)} buy=${String(buyBaseFeeBps)}`, () => {
+        const asset = buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeBps, buyBaseFeeBps })] })).markets[1]!
+        expect(registryRejects(asset)).toBeNull()
+        const sell = sellBaseFeeBps ?? 30
+        const buy = buyBaseFeeBps ?? 30
+        expect(asset.fee_bps).toBe(Math.max(sell, buy))
+        if (sell === buy) expect('solver_fee' in asset).toBe(false)
+        else expect(asset.solver_fee).toEqual({ base: { bps: sell }, quote: { bps: buy } })
+      })
+    }
+  }
+
+  it('publishes the card it always did when both directions price the same', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market({ sellBaseFeeBps: 30, buyBaseFeeBps: 30 })] }))
+      .markets[1]!
+    expect('solver_fee' in asset).toBe(false)
+    expect(asset.fee_bps).toBe(30)
+  })
+
+  it('omits solver_fee entirely when neither side charges a flat fee', () => {
+    const asset = buildSolverCard(inputs({ assetMarkets: [market()] })).markets[1]!
+    expect('solver_fee' in asset).toBe(false)
+  })
+
+  it('publishes the delivered-carrier charge, and omits it when not charging', () => {
+    const charging = buildSolverCard(inputs({ assetMarkets: [market({ chargesDeliveredCarrier: true })] })).markets[1]!
+    expect(charging.charges_delivered_carrier).toBe(true)
+    expect('charges_delivered_carrier' in buildSolverCard(inputs({ assetMarkets: [market()] })).markets[1]!).toBe(false)
   })
 
   it('publishes an unserved direction as the schema`s disabled zero', () => {
@@ -524,10 +601,10 @@ describe('markets no card can carry', () => {
     expect(omitted[0]).toContain('fee_bps')
   })
 
-  it('reports a base-input fee the registry cannot express', () => {
+  it('publishes a base-input fee rather than omitting the market', () => {
     const { publishable, omitted } = publishableAssetMarkets([market({ sellBaseFeeFlat: 330n })], 'mutinynet')
-    expect(publishable).toEqual([])
-    expect(omitted[0]).toMatch(/base-input flat fee.*quote-asset/)
+    expect(publishable).toHaveLength(1)
+    expect(omitted).toEqual([])
   })
 
   it('keeps the first of a duplicated pair and reports the second', () => {
@@ -554,6 +631,19 @@ describe('a bound with nothing to inherit', () => {
     sellBaseFeeFlat: 0n,
     buyBaseFeeFlat: 0n,
     ...over,
+  })
+
+  // The path production actually takes. Every other spread test builds an
+  // AssetCardMarket by hand, so a field this bridge forgets to forward would
+  // leave the feature a silent no-op with the whole suite green.
+  it('carries the directional spread from the stored view through to the card', () => {
+    const bounds = { min: 1_000_000n, max: 500_000_000n }
+    const markets = assetCardMarkets([view({ sellBaseFeeBps: 10, buyBaseFeeBps: 900 })], bounds)
+    expect(markets[0]!.sellBaseFeeBps).toBe(10)
+    expect(markets[0]!.buyBaseFeeBps).toBe(900)
+    const asset = buildSolverCard(inputs({ assetMarkets: markets })).markets[1]!
+    expect(asset.fee_bps).toBe(900)
+    expect(asset.solver_fee).toEqual({ base: { bps: 10 }, quote: { bps: 900 } })
   })
 
   it('does not inherit a zeroed deployment-wide pair', () => {

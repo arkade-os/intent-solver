@@ -95,12 +95,15 @@ export interface AssetCardMarket {
   /** RFC 6901 pointer, ALREADY resolved: `''` reads as the whole document to a client. */
   pricePath: string
   feeBps: number
+  sellBaseFeeBps?: number
+  buyBaseFeeBps?: number
   sellBaseFeeFlat?: bigint
   buyBaseFeeFlat?: bigint
   /** Maker sells base, so it RECEIVES quote — this bounds the QUOTE side. */
   sellBase?: { min: bigint; max: bigint } | null
   /** Maker buys base, so it RECEIVES base — this bounds the BASE side. */
   buyBase?: { min: bigint; max: bigint } | null
+  chargesDeliveredCarrier?: boolean
 }
 
 /**
@@ -190,6 +193,25 @@ const cardAmounts = (label: string, bound?: { min: bigint; max: bigint } | null)
 /** Order-free, so one pair cannot be published twice with its legs swapped. */
 const legPairKey = (market: AssetCardMarket): string => [market.base ?? 'btc', market.quote ?? 'btc'].sort().join('/')
 
+interface SolverFeeSide {
+  flat: bigint
+  bps: number
+}
+
+/** Keyed by the side DEPOSITED. When the spreads differ BOTH are stated, even
+ * the one equal to `fee_bps`: the registry requires `fee_bps` to equal the widest
+ * spread declared, so stating only the narrower gets the card refused. */
+const solverFeeField = (base: SolverFeeSide, quote: SolverFeeSide): Record<string, unknown> => {
+  const directional = base.bps !== quote.bps
+  const side = (s: SolverFeeSide): Record<string, unknown> | null => {
+    const entry = { ...(directional ? { bps: s.bps } : {}), ...(s.flat > 0n ? { flat: String(s.flat) } : {}) }
+    return Object.keys(entry).length === 0 ? null : entry
+  }
+  const [baseSide, quoteSide] = [side(base), side(quote)]
+  const entries = { ...(baseSide ? { base: baseSide } : {}), ...(quoteSide ? { quote: quoteSide } : {}) }
+  return Object.keys(entries).length === 0 ? {} : { solver_fee: entries }
+}
+
 const assetMarketEntry = (
   market: AssetCardMarket,
   seen: Set<string>,
@@ -213,8 +235,17 @@ const assetMarketEntry = (
   if (seen.has(key)) throw new Error(`${pair} is configured twice; one pair may publish only one price`)
   seen.add(key)
 
-  if (!Number.isInteger(market.feeBps) || market.feeBps < 0 || market.feeBps > 10000) {
-    throw new Error(`${pair} fee_bps must be an integer in [0, 10000], got ${market.feeBps}`)
+  // Every spread the card can carry: a caller hands us an AssetCardMarket, so a
+  // bad directional value would reach `Math.max` and publish a bad fee_bps.
+  for (const [label, value] of [
+    ['fee_bps', market.feeBps],
+    ['sell_base_fee_bps', market.sellBaseFeeBps],
+    ['buy_base_fee_bps', market.buyBaseFeeBps],
+  ] as const) {
+    if (value === undefined) continue
+    if (!Number.isInteger(value) || value < 0 || value > 10000) {
+      throw new Error(`${pair} ${label} must be an integer in [0, 10000], got ${value}`)
+    }
   }
   if (!market.feedUrl.trim()) {
     throw new Error(`${pair} carries different assets, so it must publish a price_feed`)
@@ -234,13 +265,10 @@ const assetMarketEntry = (
   const quote = cardAmounts(`${pair} sellBase`, market.sellBase)
   const sellBaseFeeFlat = market.sellBaseFeeFlat ?? 0n
   const buyBaseFeeFlat = market.buyBaseFeeFlat ?? 0n
+  const sellBaseFeeBps = market.sellBaseFeeBps ?? market.feeBps
+  const buyBaseFeeBps = market.buyBaseFeeBps ?? market.feeBps
   if (sellBaseFeeFlat < 0n || buyBaseFeeFlat < 0n) {
     throw new Error(`${pair} flat fees must be non-negative atomic-unit amounts`)
-  }
-  if (quote.max !== '0' && sellBaseFeeFlat > 0n) {
-    throw new Error(
-      `${pair} has a base-input flat fee, but the registry fee_flat field is denominated in quote-asset units`,
-    )
   }
   if (base.max === '0' && quote.max === '0') {
     // Never stated is a different fault from deliberately closed.
@@ -256,8 +284,15 @@ const assetMarketEntry = (
   return {
     base_asset: baseAsset,
     quote_asset: quoteAsset,
-    fee_bps: market.feeBps,
+    // The WIDEST, which the registry requires: an old reader applies this both
+    // ways, and understating it would price a payout we refuse once funded.
+    fee_bps: Math.max(sellBaseFeeBps, buyBaseFeeBps),
+    // Kept for readers predating `solver_fee`, which supersedes it.
     ...(base.max !== '0' && buyBaseFeeFlat > 0n ? { fee_flat: String(buyBaseFeeFlat) } : {}),
+    ...solverFeeField(
+      { flat: quote.max !== '0' ? sellBaseFeeFlat : 0n, bps: sellBaseFeeBps },
+      { flat: base.max !== '0' ? buyBaseFeeFlat : 0n, bps: buyBaseFeeBps },
+    ),
     price_feed: market.feedUrl,
     price_feed_schema: { type: 'json', price_path: market.pricePath },
     price_decimals: priceDecimals,
@@ -265,6 +300,7 @@ const assetMarketEntry = (
     max_base_amount: base.max,
     min_quote_amount: quote.min,
     max_quote_amount: quote.max,
+    ...(market.chargesDeliveredCarrier === true ? { charges_delivered_carrier: true } : {}),
   }
 }
 
@@ -297,6 +333,8 @@ export const assetCardMarkets = (
     // refuses an empty path its feed url cannot supply one for.
     pricePath: market.pricePath || (defaultPricePath(market.feedUrl) ?? ''),
     feeBps: market.feeBps,
+    sellBaseFeeBps: market.sellBaseFeeBps,
+    buyBaseFeeBps: market.buyBaseFeeBps,
     sellBaseFeeFlat: market.sellBaseFeeFlat,
     buyBaseFeeFlat: market.buyBaseFeeFlat,
     // Blank inherits where it can and otherwise stays blank; neither is unserved.

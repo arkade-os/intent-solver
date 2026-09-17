@@ -188,6 +188,7 @@ describe('assetCardMarketsFromPolicy', () => {
       offerMarkets: [],
       offerBounds: { min: 0n, max: 0n },
       rfqMarkets: rfq,
+      chargesDeliveredCarrier: undefined,
     })
     expect(card).toMatchObject({
       sellBase: { min: 0n, max: 0n },
@@ -197,6 +198,30 @@ describe('assetCardMarketsFromPolicy', () => {
     })
   })
 
+  /** A maker pricing from the card nets the same charge we do — where we take offers. */
+  it('advertises the delivered-carrier charge only when offers are served and it is on', () => {
+    const served = { pricing: [pricing()], offerMarkets: [{ a: null, b: USDA }], offerBounds: { min: 5n, max: 20n } }
+    expect(
+      assetCardMarketsFromPolicy({ ...served, rfqMarkets: [], chargesDeliveredCarrier: true })[0]!
+        .chargesDeliveredCarrier,
+    ).toBe(true)
+    expect(
+      assetCardMarketsFromPolicy({ ...served, rfqMarkets: [], chargesDeliveredCarrier: undefined })[0]!
+        .chargesDeliveredCarrier,
+    ).toBeUndefined()
+
+    const rfqOnly = assetRfqMarketsFrom([token({ sell_base: true, buy_base: true })], [pricing()])
+    expect(
+      assetCardMarketsFromPolicy({
+        pricing: [pricing()],
+        offerMarkets: [],
+        offerBounds: { min: 0n, max: 0n },
+        rfqMarkets: rfqOnly,
+        chargesDeliveredCarrier: true,
+      })[0]!.chargesDeliveredCarrier,
+    ).toBeUndefined()
+  })
+
   it('keeps a direction served by offers when the RFQ policy disables it', () => {
     const rfq = assetRfqMarketsFrom([token({ sell_base: false, buy_base: true })], [pricing()])
     const [card] = assetCardMarketsFromPolicy({
@@ -204,6 +229,7 @@ describe('assetCardMarketsFromPolicy', () => {
       offerMarkets: [{ a: null, b: USDA }],
       offerBounds: { min: 5n, max: 20n },
       rfqMarkets: rfq,
+      chargesDeliveredCarrier: undefined,
     })
     expect(card).toMatchObject({
       sellBase: { min: 1n, max: 10n ** 12n },

@@ -282,8 +282,8 @@ interface Harness {
 }
 
 /** Both asset directions behind ONE relay ingress, as a deployment serves them. */
-const harness = async (): Promise<Harness> => {
-  const markets = [market()]
+const harness = async (over: Partial<AssetRfqMarket> = {}): Promise<Harness> => {
+  const markets = [market(over)]
   const store = await AssetRfqSwapStore.open(join(dir, `assetrfq-relay-${randomBytes(6).toString('hex')}.sqlite`))
   const service = new AssetRfqSwapService({
     store,
@@ -451,6 +451,58 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
       } finally {
         await store.close()
         await ingress.stop()
+      }
+    },
+    SWAP_TIMEOUT_MS,
+  )
+
+  // A live quote per combination: only a real payout off a real arkd proves the
+  // configured spread reached pricing rather than being dropped on the way in.
+  const payoutsFor = async (over: Partial<AssetRfqMarket>) => {
+    const { ingress, store } = await harness(over)
+    try {
+      const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
+      const sell = await requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
+        amount: 20_000n,
+        rfqId: randomBytes(32).toString('hex'),
+        wantAsset: asset.AssetId.fromString(assetId),
+      })
+      const buy = await requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
+        amount: 2000n,
+        rfqId: randomBytes(32).toString('hex'),
+        offerAsset: asset.AssetId.fromString(assetId),
+      })
+      await transport.close()
+      return { sell: BigInt(sell.quote.to_amount), buy: BigInt(buy.quote.to_amount) }
+    } finally {
+      await store.close()
+      await ingress.stop()
+    }
+  }
+
+  it(
+    'prices each direction at its own spread, end to end over the relay',
+    async () => {
+      const symmetric = await payoutsFor({})
+      const narrowSell = await payoutsFor({ sellBaseFeeBps: 0 })
+      const wideBuy = await payoutsFor({ buyBaseFeeBps: 900 })
+      const both = await payoutsFor({ sellBaseFeeBps: 0, buyBaseFeeBps: 900 })
+
+      // Narrowing the sell side pays the maker more; the buy side is untouched.
+      expect(narrowSell.sell).toBeGreaterThan(symmetric.sell)
+      expect(narrowSell.buy).toBe(symmetric.buy)
+
+      // Widening the buy side pays less; the sell side is untouched.
+      expect(wideBuy.buy).toBeLessThan(symmetric.buy)
+      expect(wideBuy.sell).toBe(symmetric.sell)
+
+      // Both at once is each one's effect, not a blend.
+      expect(both.sell).toBe(narrowSell.sell)
+      expect(both.buy).toBe(wideBuy.buy)
+
+      for (const p of [symmetric, narrowSell, wideBuy, both]) {
+        expect(p.buy).toBeGreaterThanOrEqual(arkade.ctx.dustSats)
+        expect(p.sell).toBeGreaterThan(0n)
       }
     },
     SWAP_TIMEOUT_MS,

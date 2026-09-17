@@ -111,6 +111,8 @@ export const assetRfqMarketsFrom = (
         baseDecimals: market.baseDecimals,
         quoteDecimals: market.quoteDecimals,
         feeBps: market.feeBps,
+        sellBaseFeeBps: market.sellBaseFeeBps,
+        buyBaseFeeBps: market.buyBaseFeeBps,
         sellBaseFeeFlat: market.sellBaseFeeFlat,
         buyBaseFeeFlat: market.buyBaseFeeFlat,
         sellBase,
@@ -161,6 +163,10 @@ export const assetCardMarketsFromPolicy = (args: {
   offerMarkets: readonly AssetMarket[]
   offerBounds: Bounds
   rfqMarkets: readonly AssetRfqMarket[]
+  /** @see Config.offerChargesDeliveredCarrier. REQUIRED, not optional: `cli card`
+   * and `/api/card` both publish through here and the CLI silently omitted it once,
+   * which prices a maker without a charge we apply — funded, then refused. */
+  chargesDeliveredCarrier: boolean | undefined
 }): AssetCardMarket[] =>
   assetCardMarkets(args.pricing, args.offerBounds).flatMap((market) => {
     const pricing = args.pricing.find(
@@ -175,6 +181,7 @@ export const assetCardMarketsFromPolicy = (args: {
     return [
       {
         ...market,
+        ...(servesOffers && args.chargesDeliveredCarrier === true ? { chargesDeliveredCarrier: true } : {}),
         sellBase,
         buyBase,
         sellBaseFeeFlat: sellBase && sellBase.max > 0n ? market.sellBaseFeeFlat : 0n,

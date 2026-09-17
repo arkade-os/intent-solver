@@ -68,6 +68,9 @@ export interface AssetMarketConfig {
   toleranceBps: number
   /** The solver's margin, folded into the offer price against the maker. */
   feeBps: number
+  /** Per-direction margin — an illiquid side can cost more to take on than to shed. Each defaults to `feeBps`. */
+  sellBaseFeeBps?: number
+  buyBaseFeeBps?: number
   /** Atomic units charged from the base input when the maker sells base. Defaults to zero. */
   sellBaseFeeFlat?: bigint
   /** Atomic units charged from the quote input when the maker buys base. Defaults to zero. */
@@ -213,6 +216,8 @@ export const validateAssetMarket = (market: AssetMarketConfig): void => {
   checkDecimals('quoteDecimals', market.quoteDecimals)
   checkBps('toleranceBps', market.toleranceBps)
   checkBps('feeBps', market.feeBps)
+  if (market.sellBaseFeeBps !== undefined) checkBps('sellBaseFeeBps', market.sellBaseFeeBps)
+  if (market.buyBaseFeeBps !== undefined) checkBps('buyBaseFeeBps', market.buyBaseFeeBps)
   checkFlatFee('sellBaseFeeFlat', market.sellBaseFeeFlat ?? 0n)
   checkFlatFee('buyBaseFeeFlat', market.buyBaseFeeFlat ?? 0n)
   checkBounds('sellBase', market.sellBase)
@@ -262,6 +267,9 @@ export interface AssetMarketPricingView {
   readonly pricePath: string
   readonly toleranceBps: number
   readonly feeBps: number
+  /** Resolved by `assetMarketPolicy`; consumers still fall back to `feeBps`. */
+  readonly sellBaseFeeBps?: number
+  readonly buyBaseFeeBps?: number
   readonly sellBaseFeeFlat: bigint
   readonly buyBaseFeeFlat: bigint
   readonly sellBase?: AssetMarketBounds
@@ -313,6 +321,8 @@ export const assetMarketPolicy = (
       pricePath: market.pricePath,
       toleranceBps: market.toleranceBps,
       feeBps: market.feeBps,
+      sellBaseFeeBps: market.sellBaseFeeBps ?? market.feeBps,
+      buyBaseFeeBps: market.buyBaseFeeBps ?? market.feeBps,
       sellBaseFeeFlat: market.sellBaseFeeFlat ?? 0n,
       buyBaseFeeFlat: market.buyBaseFeeFlat ?? 0n,
       ...(market.sellBase === null ? {} : { sellBase: market.sellBase }),
