@@ -163,8 +163,10 @@ export const assetCardMarketsFromPolicy = (args: {
   offerMarkets: readonly AssetMarket[]
   offerBounds: Bounds
   rfqMarkets: readonly AssetRfqMarket[]
-  /** @see Config.offerChargesDeliveredCarrier — advertised so a maker can price it. */
-  chargesDeliveredCarrier?: boolean
+  /** @see Config.offerChargesDeliveredCarrier. REQUIRED, not optional: `cli card`
+   * and `/api/card` both publish through here and the CLI silently omitted it once,
+   * which prices a maker without a charge we apply — funded, then refused. */
+  chargesDeliveredCarrier: boolean | undefined
 }): AssetCardMarket[] =>
   assetCardMarkets(args.pricing, args.offerBounds).flatMap((market) => {
     const pricing = args.pricing.find(

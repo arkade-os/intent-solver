@@ -188,6 +188,7 @@ describe('assetCardMarketsFromPolicy', () => {
       offerMarkets: [],
       offerBounds: { min: 0n, max: 0n },
       rfqMarkets: rfq,
+      chargesDeliveredCarrier: undefined,
     })
     expect(card).toMatchObject({
       sellBase: { min: 0n, max: 0n },
@@ -204,7 +205,10 @@ describe('assetCardMarketsFromPolicy', () => {
       assetCardMarketsFromPolicy({ ...served, rfqMarkets: [], chargesDeliveredCarrier: true })[0]!
         .chargesDeliveredCarrier,
     ).toBe(true)
-    expect(assetCardMarketsFromPolicy({ ...served, rfqMarkets: [] })[0]!.chargesDeliveredCarrier).toBeUndefined()
+    expect(
+      assetCardMarketsFromPolicy({ ...served, rfqMarkets: [], chargesDeliveredCarrier: undefined })[0]!
+        .chargesDeliveredCarrier,
+    ).toBeUndefined()
 
     const rfqOnly = assetRfqMarketsFrom([token({ sell_base: true, buy_base: true })], [pricing()])
     expect(
@@ -225,6 +229,7 @@ describe('assetCardMarketsFromPolicy', () => {
       offerMarkets: [{ a: null, b: USDA }],
       offerBounds: { min: 5n, max: 20n },
       rfqMarkets: rfq,
+      chargesDeliveredCarrier: undefined,
     })
     expect(card).toMatchObject({
       sellBase: { min: 1n, max: 10n ** 12n },

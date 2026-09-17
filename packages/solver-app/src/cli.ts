@@ -1911,6 +1911,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         offerMarkets: policy.offerMarkets,
         offerBounds: { min: policy.offerMinFillAmount, max: policy.offerMaxFillAmount },
         rfqMarkets: assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets),
+        chargesDeliveredCarrier: policy.offerChargesDeliveredCarrier,
       }),
       config.network,
     )

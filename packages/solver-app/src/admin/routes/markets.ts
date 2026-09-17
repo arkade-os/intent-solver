@@ -99,7 +99,6 @@ const int = (label: string, value: unknown): number => {
   return value
 }
 
-/** Absent stays absent, so a side that was never set keeps inheriting `feeBps`. */
 const optionalInt = (label: string, value: unknown): number | undefined =>
   value === undefined || value === null ? undefined : int(label, value)
 
