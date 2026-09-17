@@ -129,11 +129,13 @@ export interface SwapEconomics {
    *
    * Lightning-send persists `quoted_routing_fee_sats` and spends against it as
    * `maxFeeSats`, so it is a CEILING set before the payment rather than the fee
-   * that was actually paid — the real one is still unrecorded anywhere. Netting
-   * an upper bound out of a spread would understate profit by an unknown amount
-   * and dress the result up as the net figure this screen explicitly does not
-   * have. Reported alongside instead, so an operator can see the budget they
-   * were quoting against and how much of their spread it could consume.
+   * that was actually paid. The real one lives in
+   * {@link SwapEconomics.realizedCostSats} wherever a rail reported it, and that
+   * is the only figure {@link SwapEconomics.netSats} is ever derived from.
+   * Netting an upper bound out of a spread would understate profit by an unknown
+   * amount while looking exactly like the real net figure, so this one is
+   * reported alongside and never subtracted — an operator can see the budget
+   * they were quoting against and how much of their spread it could consume.
    *
    * Null on every corridor that records no such figure.
    */

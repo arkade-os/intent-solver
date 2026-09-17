@@ -177,8 +177,9 @@ quote-per-base either way, but paying less quote per base is good when the solve
 buys base and bad when it sells, so one unnormalised subtraction would call the
 same move good on one leg and bad on the other.
 
-The comparison is exact bigint, cross-multiplied — the two feed reads need not
-come back at the same scale — and divides once into basis points.
+The comparison is exact bigint, cross-multiplied — the stored implied price and
+the fill-time observation are carried at their own scales and neither is rescaled
+into the other — and divides once into basis points.
 
 **The fill-time read never blocks a fill.** It runs *after* the `filling ->
 filled` transition, so a slow feed cannot widen the window in which a crash
