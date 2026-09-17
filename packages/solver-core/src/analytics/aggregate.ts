@@ -171,6 +171,20 @@ export interface FxPoint {
    * the feed price at quote time, which nothing records today.
    */
   driftBps: number | null
+  /**
+   * How this fill priced against THE MARKET at quote time, in basis points,
+   * positive in the solver's favour — `SwapEconomics.marketDriftBps`.
+   *
+   * The mark `driftBps` above cannot give. That one benchmarks a fill against
+   * this solver's other fills, so it finds a bad fill and is blind to a bad
+   * book; this one compares the quote to what the feed said when it was issued.
+   * Read together: a point low on `driftBps` was a bad fill among its peers, and
+   * a whole leg low on `marketDriftBps` was a bad leg whatever its peers did.
+   *
+   * Null on every row with no price snapshot — every corridor but the asset RFQ
+   * leg, and any row quoted before those columns shipped.
+   */
+  marketDriftBps: number | null
 }
 
 export interface FxLeg {
@@ -180,6 +194,17 @@ export interface FxLeg {
   count: number
   /** Volume-weighted mean rate over the window — the benchmark `driftBps` is measured against. */
   meanRate: number | null
+  /**
+   * The median market drift across this leg's fills, in basis points.
+   *
+   * A LEG-LEVEL verdict, which is what the feed-relative mark buys that the
+   * self-referential one cannot: a leg whose median sits well below zero was
+   * priced against the market badly and consistently, however tidy its fills
+   * looked beside each other.
+   *
+   * Null when no fill on this leg carried a price snapshot.
+   */
+  medianMarketDriftBps: number | null
   points: FxPoint[]
 }
 
@@ -581,6 +606,9 @@ export const byFxLeg = (records: readonly SwapEconomics[]): FxLeg[] => {
         corridor,
         count: rows.length,
         meanRate,
+        medianMarketDriftBps: median(
+          rows.map((record) => record.marketDriftBps).filter((bps): bps is number => bps !== null),
+        ),
         points: rated
           .filter(({ rate }) => Number.isFinite(rate))
           .map(({ record, rate }) => ({
@@ -594,6 +622,7 @@ export const byFxLeg = (records: readonly SwapEconomics[]): FxLeg[] => {
             // `-0` in the JSON — would take it for a signal.
             driftBps:
               meanRate !== null && meanRate > 0 ? Math.trunc(((meanRate - rate) / meanRate) * 10_000) + 0 : null,
+            marketDriftBps: record.marketDriftBps,
           }))
           .sort((a, b) => a.at - b.at),
       }

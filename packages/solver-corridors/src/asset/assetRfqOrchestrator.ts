@@ -40,6 +40,7 @@ import {
   evaluateAssetFill,
   parseAssetPair,
   resolveAssetQuote,
+  impliedQuotePrice,
   type AssetLeg,
   type AssetQuoteMarket,
 } from '@arkade-os/solver-core/core/assetRfq.js'
@@ -164,6 +165,40 @@ const heldOf = (deposit: ObservedDeposit, leg: AssetLeg): bigint => {
   return held
 }
 
+/**
+ * The price snapshot a quote leaves behind: what the MARKET said, what THIS
+ * QUOTE said, and which way round the trade ran.
+ *
+ * The feed is read on the quote path anyway, to decide whether these terms are
+ * acceptable — and until this existed the answer was used and the number thrown
+ * away. Without it a fill can only be marked against this solver's other fills,
+ * which cannot tell a bad fill from a bad book: a market that moved against
+ * every quote in a window leaves them all looking fine relative to each other.
+ *
+ * Spread into the insert, so a degenerate amount records NO snapshot rather
+ * than a half of one — a feed price with no implied price beside it can be
+ * compared to nothing.
+ */
+const quotePriceSnapshot = (args: {
+  resolved: { fromAmount: bigint; toAmount: bigint }
+  market: AssetQuoteMarket
+  pair: { from: string | null; to: string | null }
+  feed: Price
+}): { quotePrice?: { mantissa: bigint; scale: number; impliedMantissa: bigint; givesBase: boolean } } => {
+  const { resolved, market, pair, feed } = args
+  const givesBase = pair.from === market.base && pair.to === market.quote
+  const impliedMantissa = impliedQuotePrice({
+    fromAmount: resolved.fromAmount,
+    toAmount: resolved.toAmount,
+    givesBase,
+    baseDecimals: market.baseDecimals,
+    quoteDecimals: market.quoteDecimals,
+    scale: feed.scale,
+  })
+  if (impliedMantissa === null) return {}
+  return { quotePrice: { mantissa: feed.mantissa, scale: feed.scale, impliedMantissa, givesBase } }
+}
+
 export class AssetRfqSwapService {
   private readonly now: () => number
   private readonly quoteLimiter: RateLimiter
@@ -265,6 +300,13 @@ export class AssetRfqSwapService {
         offerAddress: offer.address,
         solverPubkey: this.deps.solverPubkey,
         validUntil: this.now() + this.deps.quoteValiditySeconds,
+        // The price the quote was PRICED AGAINST, snapshotted rather than
+        // re-read. It was already fetched above to decide whether these terms
+        // are acceptable, and was then discarded — so afterwards nothing could
+        // say whether a fill was worse than the market or merely worse than
+        // this solver's other fills. Those are different questions, and only
+        // the first can see a market that ran against every quote in a window.
+        ...quotePriceSnapshot({ resolved, market: priced, pair, feed }),
       })
       return { accepted: true, swap }
     } catch (error) {

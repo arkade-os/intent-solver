@@ -234,5 +234,24 @@ export const assetRfqEconomics = (row: AssetRfqSwapRow, descriptor: CorridorDesc
       decimals: null,
     },
     outbound: { assetId: row.toAssetId, amount: row.toAmount.toString(), decimals: null },
+    // What the MARKET said when these terms were issued. Carried so a fill can
+    // be marked against the market rather than only against this solver's own
+    // other fills — the difference between spotting a bad fill and spotting a
+    // bad book. Null on rows quoted before the column existed.
+    // All four parts or none: a feed price without this quote's own price beside
+    // it can be compared to nothing, and the direction bit is what lets the
+    // comparison be signed the same way round as every other figure on screen.
+    quotePrice:
+      row.quotePriceMantissa === null ||
+      row.quotePriceScale === null ||
+      row.quoteImpliedMantissa === null ||
+      row.quoteGivesBase === null
+        ? null
+        : {
+            mantissa: row.quotePriceMantissa.toString(),
+            scale: row.quotePriceScale,
+            impliedMantissa: row.quoteImpliedMantissa.toString(),
+            givesBase: row.quoteGivesBase,
+          },
     lost: row.state === LOST,
   })

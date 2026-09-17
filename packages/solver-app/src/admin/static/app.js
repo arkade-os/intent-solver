@@ -2783,9 +2783,25 @@ const fxPanel = (leg) => {
       'p.muted',
       `${leg.count} fill${leg.count === 1 ? '' : 's'} on `,
       h('span.mono', leg.corridor),
-      '. Drift is measured against this window’s volume-weighted mean rate — this solver’s own book, not a ' +
-        'price feed. Below the line is a fill that came in worse than its peers.',
+      '. Drift is measured against this window’s volume-weighted mean rate — this solver’s own book. ' +
+        'Below the line is a fill that came in worse than its peers.',
     ),
+    // THE LEG-LEVEL VERDICT, and the thing peer drift cannot give: a market that
+    // moved against every quote in a window leaves them all looking fine beside
+    // each other. Coloured only when it is against the solver.
+    leg.medianMarketDriftBps === null || leg.medianMarketDriftBps === undefined
+      ? h(
+          'p.faint',
+          'No market mark: these fills carry no quote-time feed price, so they can only be compared with each other.',
+        )
+      : h(
+          'p.muted',
+          'Against the market feed at quote time, the median fill on this leg priced ',
+          leg.medianMarketDriftBps < 0
+            ? h('span.at-risk', `${bps(leg.medianMarketDriftBps)} against`)
+            : h('b', `${bps(leg.medianMarketDriftBps)} in favour of`),
+          ' this solver.',
+        ),
     // Named per leg, so N of these are distinguishable in a screen reader's
     // list of figures rather than N repeats of one sentence.
     decayChart(leg.points, { title: `Rate drift against time to fill, ${leg.leg} on ${leg.corridor}` }),
@@ -2795,7 +2811,14 @@ const fxPanel = (leg) => {
           'table',
           h(
             'thead',
-            h('tr', h('th', 'worst fills'), h('th.right', 'took'), h('th.right', 'drift'), h('th.right', 'settled')),
+            h(
+              'tr',
+              h('th', 'worst fills'),
+              h('th.right', 'took'),
+              h('th.right', 'vs peers'),
+              h('th.right', 'vs market'),
+              h('th.right', 'settled'),
+            ),
           ),
           h(
             'tbody',
@@ -2805,6 +2828,14 @@ const fxPanel = (leg) => {
                 h('td.mono', shortId(point.id)),
                 h('td.right', duration(point.durationSeconds)),
                 h('td.right', (point.driftBps ?? 0) < 0 ? h('span.at-risk', bps(point.driftBps)) : bps(point.driftBps)),
+                h(
+                  'td.right',
+                  point.marketDriftBps === null || point.marketDriftBps === undefined
+                    ? h('span.faint', { title: 'No quote-time feed price was recorded for this fill.' }, '—')
+                    : point.marketDriftBps < 0
+                      ? h('span.at-risk', bps(point.marketDriftBps))
+                      : bps(point.marketDriftBps),
+                ),
                 h('td.right', ago(point.at)),
               ),
             ),
