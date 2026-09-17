@@ -118,9 +118,11 @@ export const pnlReportLines = (input: PnlReportInput): string[] => {
   for (const leg of byFxLeg(records)) {
     lines.push('')
     lines.push(`  ${leg.leg} on ${leg.corridor} - ${leg.count} fill(s)`)
-    // The spread is INSIDE this number, so a flat market reads as the fee and
-    // zero is the breakeven line — said here because a bare "-30bp" beside a
-    // 30bp margin reads as a loss when it is the market having eaten the margin.
+    // The spread is INSIDE this number, so a flat market reads as roughly the
+    // margin and zero is the breakeven line — said here because a bare "-30bp"
+    // beside a 30bp margin reads as a loss when it is the market having eaten
+    // the margin. The zero crossing is exact; the flat baseline is only
+    // approximately `feeBps`, and drifts above it at fees over ~1%.
     lines.push(
       leg.medianMarketDriftBps === null
         ? `    vs market  unmarked - 0 of ${leg.count} carry both a quote price and a fill-time read`

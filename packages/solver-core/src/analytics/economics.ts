@@ -245,15 +245,6 @@ export const bpsOf = (amount: number, notional: number): number | null => {
 }
 
 /**
- * Assemble a {@link SwapEconomics} from the parts a corridor knows, deriving
- * the three fields that are pure arithmetic over them.
- *
- * Shared rather than written once per corridor because `grossSats` is where a
- * sign error hides: every corridor computes inbound-minus-outbound, and one
- * that wrote it backwards would report its losses as profit on a screen built
- * to be trusted.
- */
-/**
  * The market's move between quote and fill, in basis points, positive in the
  * solver's favour.
  *
@@ -286,6 +277,15 @@ const marketDriftBpsOf = (
   return Number((favourable * 10_000n) / impliedAt)
 }
 
+/**
+ * Assemble a {@link SwapEconomics} from the parts a corridor knows, deriving
+ * the three fields that are pure arithmetic over them.
+ *
+ * Shared rather than written once per corridor because `grossSats` is where a
+ * sign error hides: every corridor computes inbound-minus-outbound, and one
+ * that wrote it backwards would report its losses as profit on a screen built
+ * to be trusted.
+ */
 export const economicsOf = (parts: {
   id: string
   corridor: string

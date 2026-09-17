@@ -55,7 +55,7 @@ const fill = (args: {
   const resolved = resolveAssetQuote({ pair, amount, amountSide: 'from', market: m, feed: args.quoteFeed })
   if (!resolved.ok) throw new Error(`the fixture did not resolve: ${resolved.reason}`)
 
-  const impliedMantissa = impliedQuotePrice({
+  const implied = impliedQuotePrice({
     fromAmount: resolved.fromAmount,
     toAmount: resolved.toAmount,
     givesBase,
@@ -74,9 +74,7 @@ const fill = (args: {
     inbound: { assetId: pair.from, amount: resolved.fromAmount.toString(), decimals: null },
     outbound: { assetId: pair.to, amount: resolved.toAmount.toString(), decimals: null },
     quotePrice:
-      impliedMantissa === null
-        ? null
-        : { impliedMantissa: impliedMantissa.toString(), scale: args.quoteFeed.scale, givesBase },
+      implied === null ? null : { impliedMantissa: implied.mantissa.toString(), scale: implied.scale, givesBase },
     fillPrice:
       args.fillFeed === null ? null : { mantissa: args.fillFeed.mantissa.toString(), scale: args.fillFeed.scale },
   })
@@ -95,8 +93,49 @@ describe('the mark moves with the market, which is the whole point', () => {
     const flat = fill({ quoteFeed: FEED, fillFeed: FEED })
     const moved = fill({ quoteFeed: FEED, fillFeed: { mantissa: 5_940_000n, scale: 2 } })
     expect(flat.marketDriftBps).not.toBe(moved.marketDriftBps)
-    // Flat reads as the configured spread, and nothing else does.
     expect(flat.marketDriftBps).toBe(30)
+  })
+
+  /**
+   * The flat-market baseline, pinned HONESTLY rather than at the one fee where
+   * the convenient identity happens to hold.
+   *
+   * A flat market reads as the spread, and at ordinary fees that IS `feeBps` on
+   * both legs. It is not an identity: the buying leg reads
+   * `feeBps / (1 - feeBps/10_000)`, which is indistinguishable below 1% and
+   * diverges above it. Documenting `+feeBps` as exact was wrong, and the earlier
+   * test pinned `feeBps: 30` on the buying leg only — the single combination
+   * where the claim survives.
+   */
+  it('reads the spread on a flat market, and both legs agree at ordinary fees', () => {
+    for (const feeBps of [1, 30, 50, 99]) {
+      const m = market({ feeBps })
+      expect(fill({ quoteFeed: FEED, fillFeed: FEED, market: m, givesBase: true }).marketDriftBps).toBe(feeBps)
+      expect(fill({ quoteFeed: FEED, fillFeed: FEED, market: m, givesBase: false }).marketDriftBps).toBe(feeBps)
+    }
+  })
+
+  it('diverges from feeBps on the buying leg at a large fee, as the ratio says it must', () => {
+    const big = market({ feeBps: 500 })
+    // 500 / (1 - 0.05) = 526.3
+    expect(fill({ quoteFeed: FEED, fillFeed: FEED, market: big, givesBase: true }).marketDriftBps).toBe(526)
+    expect(fill({ quoteFeed: FEED, fillFeed: FEED, market: big, givesBase: false }).marketDriftBps).toBe(500)
+  })
+
+  /**
+   * What IS exact on both legs at every fee, and the only claim the screens make
+   * operationally: the number crosses zero when the market has moved exactly as
+   * far as the margin.
+   */
+  it('puts breakeven at zero on both legs', () => {
+    const m = market({ feeBps: 500 })
+    for (const givesBase of [true, false]) {
+      const flat = fill({ quoteFeed: FEED, fillFeed: FEED, market: m, givesBase }).marketDriftBps!
+      expect(flat).toBeGreaterThan(0)
+      // Move the market against the solver by more than the margin: it must flip.
+      const against = givesBase ? { mantissa: 5_400_000n, scale: 2 } : { mantissa: 6_600_000n, scale: 2 }
+      expect(fill({ quoteFeed: FEED, fillFeed: against, market: m, givesBase }).marketDriftBps!).toBeLessThan(0)
+    }
   })
 
   /**
@@ -141,19 +180,32 @@ describe('what cannot be marked says so', () => {
   })
 
   /**
-   * A feed reporting `1.0` parses to `scale: 0`, and the implied price then
-   * truncates to `0n`. Stored as valid it reported +10000bp in the solver's
-   * favour — a swap that made 100% — which is how the old bug would have looked
-   * on a real screen.
+   * THE QUANTISATION DEFECT, and the reason the implied price carries headroom
+   * rather than the feed's own scale.
+   *
+   * CoinGecko is a first-class provider here and returns unquoted JSON numbers,
+   * so a $1.50 token arrives as `1.5` — `scale: 1`. Carried at that scale, an
+   * implied price of 1.4955 truncated to `14`, and the drift read **+714bp on a
+   * flat market and +607bp on a fill 70bp under water**: a loss rendered as a
+   * large gain, and uncoloured, because `marketDriftBps < 0` was false.
    */
-  it('refuses a degenerate implied price rather than reporting +10000bp', () => {
-    const degenerate = fill({
-      quoteFeed: { mantissa: 1n, scale: 0 },
-      fillFeed: { mantissa: 1n, scale: 0 },
-      market: market({ baseDecimals: 8, quoteDecimals: 6 }),
-    })
-    expect(degenerate.marketDriftBps).not.toBe(10_000)
-    expect(degenerate.marketDriftBps).toBeNull()
+  it('does not quantise a coarse feed into a false gain', () => {
+    const cheap = { mantissa: 15n, scale: 1 }
+    const rich = { mantissa: 6_000_000n, scale: 2 }
+
+    expect(fill({ quoteFeed: cheap, fillFeed: cheap }).marketDriftBps).toBe(30)
+    // The same market move reads the same whatever precision the feed arrived in.
+    expect(fill({ quoteFeed: cheap, fillFeed: { mantissa: 1_485n, scale: 3 } }).marketDriftBps).toBe(
+      fill({ quoteFeed: rich, fillFeed: { mantissa: 5_940_000n, scale: 2 } }).marketDriftBps,
+    )
+    expect(fill({ quoteFeed: cheap, fillFeed: { mantissa: 1_485n, scale: 3 } }).marketDriftBps).toBeLessThan(0)
+  })
+
+  it('reports no implied price at all for a degenerate quote', () => {
+    const degenerate = { givesBase: true, baseDecimals: 8, quoteDecimals: 6, scale: 2 }
+    expect(impliedQuotePrice({ ...degenerate, fromAmount: 0n, toAmount: 1n })).toBeNull()
+    expect(impliedQuotePrice({ ...degenerate, fromAmount: 1n, toAmount: 0n })).toBeNull()
+    expect(impliedQuotePrice({ ...degenerate, fromAmount: 1n, toAmount: 1n, scale: -1 })).toBeNull()
   })
 
   it('compares across feeds that came back at different scales', () => {

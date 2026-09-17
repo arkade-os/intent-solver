@@ -2782,8 +2782,9 @@ const durationPanel = (bands) =>
  *
  * `vs market` compares the price a quote FIXED against a feed read again when
  * the fill landed — two observations at two times. The spread sits inside it, so
- * a flat market reads as the fee and ZERO is the breakeven line: below it the
- * market has moved further than the margin covered.
+ * a flat market reads as roughly the margin and ZERO is the breakeven line:
+ * below it the market has moved further than the margin covered. The zero
+ * crossing is exact; the flat baseline is only approximately `feeBps`.
  */
 const fxPanel = (leg) => {
   const worst = [...leg.points].sort((a, b) => (a.driftBps ?? 0) - (b.driftBps ?? 0)).slice(0, 5)

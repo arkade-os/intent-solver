@@ -622,7 +622,10 @@ export const byFxLeg = (records: readonly SwapEconomics[]): FxLeg[] => {
         return { record, rate: denominator > 0n ? Number(numerator) / Number(denominator) : Number.NaN }
       })
       const meanRate = weight > 0n ? Number(weighted) / Number(weight) : null
-      const marks = rows.map((record) => record.marketDriftBps).filter((bps): bps is number => bps !== null)
+      // `typeof`, not `!== null`: a record deserialized from a remote server can
+      // omit the field entirely, and `undefined !== null` would survive to
+      // inflate `markedCount` past the number of marks actually held.
+      const marks = rows.map((record) => record.marketDriftBps).filter((bps): bps is number => typeof bps === 'number')
 
       return {
         leg,

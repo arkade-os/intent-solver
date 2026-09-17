@@ -156,8 +156,14 @@ returns the configured spread on every input and can never go negative. An
 earlier attempt shipped exactly that and was withdrawn.
 
 **The spread is inside this number, so zero is the breakeven line.** A flat
-market reads as `+feeBps`; below zero the market has moved further than the
-margin covered and the fill is under water. On a 30bp market:
+market reads as roughly the margin; below zero the market has moved further than
+the margin covered and the fill is under water.
+
+"Roughly" is exact enough to rely on and is not an identity. At ordinary fees a
+flat market reads exactly `feeBps` on both legs, but the buying leg is really
+`feeBps / (1 − feeBps/10⁴)` — indistinguishable below 1%, `526` at `feeBps: 500`
+— and a flat per-trade fee adds to it. **The zero crossing is exact on both legs
+at every fee**, which is the part the screens actually lean on. On a 30bp market:
 
 | market at fill | mark |
 | --- | --- |

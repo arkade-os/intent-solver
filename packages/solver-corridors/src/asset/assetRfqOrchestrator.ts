@@ -180,7 +180,7 @@ const quoteSnapshot = (args: {
 }): { quotePrice?: { impliedMantissa: bigint; scale: number; givesBase: boolean } } => {
   const { resolved, market, pair, feed } = args
   const givesBase = pair.from === market.base && pair.to === market.quote
-  const impliedMantissa = impliedQuotePrice({
+  const implied = impliedQuotePrice({
     fromAmount: resolved.fromAmount,
     toAmount: resolved.toAmount,
     givesBase,
@@ -188,7 +188,7 @@ const quoteSnapshot = (args: {
     quoteDecimals: market.quoteDecimals,
     scale: feed.scale,
   })
-  return impliedMantissa === null ? {} : { quotePrice: { impliedMantissa, scale: feed.scale, givesBase } }
+  return implied === null ? {} : { quotePrice: { impliedMantissa: implied.mantissa, scale: implied.scale, givesBase } }
 }
 
 export class AssetRfqSwapService {
@@ -409,13 +409,17 @@ export class AssetRfqSwapService {
     if (!(await this.deps.store.transition(row.id, 'funded', 'filling', seen))) return
     try {
       const txid = await this.deps.settle(await this.deps.store.get(row.id))
-      await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
+      const filled = await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
       // AFTER the transition, never before. A feed read between `settle` and
       // this CAS would widen the window in which a crash leaves a submitted fill
       // reading `filling` — which `recoverFilling` escalates to `stuck`, needing
       // a human. The money is already moved by the time this runs, so the worst
       // a slow or broken feed can cost is the mark itself.
-      await this.recordFillMark(row)
+      //
+      // Only on a row THIS call moved. A lost CAS means another worker already
+      // escalated it, and marking a `stuck` row prices a fill that is under
+      // investigation.
+      if (filled) await this.recordFillMark(row)
     } catch (error) {
       // `filling` fails to `stuck`, never to something retryable: the spend may
       // already have been submitted, and only a human can tell which.
@@ -441,9 +445,18 @@ export class AssetRfqSwapService {
           (row.fromAssetId === m.base && row.toAssetId === m.quote) ||
           (row.fromAssetId === m.quote && row.toAssetId === m.base),
       )
-      if (!market) return
+      // Reported, not swallowed. A pair quoted under an earlier configuration
+      // goes unmarked FOREVER, and silence reads on the screen as "the feature
+      // is not deployed" rather than "this market is misconfigured".
+      if (!market) {
+        this.deps.onError?.('price', new Error(`no market configured for ${row.pair}; fill ${row.id} goes unmarked`))
+        return
+      }
       const feed = await this.deps.fetchPrice(market.feedUrl, market.pricePath)
-      if (feed.mantissa <= 0n || feed.scale < 0) return
+      if (feed.mantissa <= 0n || feed.scale < 0) {
+        this.deps.onError?.('price', new Error(`unusable price for ${row.pair}: ${feed.mantissa}e-${feed.scale}`))
+        return
+      }
       await this.deps.store.recordFillMark(row.id, { mantissa: feed.mantissa, scale: feed.scale })
     } catch (error) {
       this.deps.onError?.('price', error)

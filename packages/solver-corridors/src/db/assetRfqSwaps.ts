@@ -318,10 +318,18 @@ export class AssetRfqSwapStore {
    * another worker has already moved on, and the value is still true.
    */
   async recordFillMark(id: string, mark: { mantissa: bigint; scale: number }): Promise<void> {
-    await this.driver.run(
-      `UPDATE asset_rfq_swap SET fill_price_mantissa = ?, fill_price_scale = ?, updated_at = ? WHERE id = ?`,
-      [mark.mantissa.toString(), mark.scale, this.now(), id],
-    )
+    // `updated_at` is deliberately NOT touched. On this corridor it is
+    // settlement time — `assetRfqEconomics` reads it as `settledAt`, so it sets
+    // `durationSeconds`, the x-axis of the very chart this mark is plotted on.
+    // Bumping it would stretch every marked fill's duration by the feed's
+    // latency, and ONLY the marked ones, biasing exactly the rows being
+    // compared. It also windows `ledgerRows` (a fill could fall out of the
+    // window it settled in) and is published to the client in `rfq_status`.
+    await this.driver.run(`UPDATE asset_rfq_swap SET fill_price_mantissa = ?, fill_price_scale = ? WHERE id = ?`, [
+      mark.mantissa.toString(),
+      mark.scale,
+      id,
+    ])
   }
 
   /**
