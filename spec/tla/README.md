@@ -17,10 +17,11 @@ function, a method, a `case` arm, an exported constant, or one of the EVM
 planners' numbered `RULE`s. Several modules bind a short name once in their
 header (`plan`, `orchestrator`, `broadcast`) and use it throughout.
 
-Line numbers are deliberately absent. They were the previous convention and
-every one of them had gone stale, silently resolving to unrelated code in the
-same file. A symbol survives the next refactor, and when it does not, it fails
-loudly under `grep` instead of pointing somewhere plausible and wrong.
+Line numbers are deliberately absent. They were the previous convention, and
+after the workspace split they resolved silently to unrelated code in the same
+file: every one sampled landed somewhere other than what its own prose
+described. A symbol survives the next refactor, and when it does not it fails
+loudly under `grep` rather than pointing somewhere plausible and wrong.
 
 | File | What it is |
 |---|---|
