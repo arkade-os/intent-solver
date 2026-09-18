@@ -321,7 +321,7 @@ export class AssetRfqSwapService {
         // Against a feed read at fill time it measures how far the market moved
         // while the quote was outstanding; against its own feed it would measure
         // the configured spread and nothing else.
-        ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: this.deps.carrierSats }),
+        ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: market.carrierSats }),
       })
       return { accepted: true, swap, carrierSats: market.carrierSats }
     } catch (error) {

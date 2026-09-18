@@ -496,7 +496,7 @@ describe('the market mark', () => {
 
   it('records the same price whether or not the carrier is priced', async () => {
     const struck = async (carrierSats: bigint) => {
-      const { service, store } = await harness({ carrierSats })
+      const { service, store } = await harness({ markets: [{ ...MARKET, carrierSats }] })
       await service.quote(request({ amount: 50_000n }))
       return store.get('swap-1')
     }
