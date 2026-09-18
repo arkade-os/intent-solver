@@ -145,6 +145,19 @@ export const carrierLegs = (pair: AssetPair, carrierSats: bigint): CarrierLegs =
   }
 }
 
+/** What the PRICE put on neither leg: `struckQuotePrice` takes these back off. */
+const flatPartsOf = (args: {
+  pair: AssetPair
+  market: AssetQuoteMarket
+  givesBase: boolean
+  carrierSats: bigint
+}): { flatFee: bigint; from: bigint; to: bigint } => {
+  const { pair, market, givesBase, carrierSats } = args
+  const flatFee = assetFlatFeeFor(givesBase, market)
+  const legs = carrierLegs(pair, carrierSats)
+  return { flatFee, from: flatFee + legs.charged, to: legs.returned }
+}
+
 /**
  * The two amounts a quote resolves, exactly — § 4.2's "the solver's fee lives
  * in the spread between them; there is no separate fee field".
@@ -182,16 +195,15 @@ export const resolveAssetQuote = (args: {
 
   if (carrierSats < 0n || dustSats < 0n) return { ok: false, reason: 'price_unavailable' }
 
-  const flatFee = assetFlatFeeFor(givesBase, market)
-  if (flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
+  const flat = flatPartsOf({ pair, market, givesBase, carrierSats })
+  if (flat.flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
   const feeBps = assetFeeBpsFor(givesBase, market)
   if (feeBps < 0 || feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
   const solverDelivers = pair.to !== null
-  const { charged: chargedCarrier, returned: returnedCarrier } = carrierLegs(pair, carrierSats)
 
   if (amountSide === 'to') {
     // The named amount already holds whatever comes back to them.
-    const wanted = amount - returnedCarrier
+    const wanted = amount - flat.to
     if (wanted <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
     if (wanted < market.minPayout || wanted > market.maxPayout) {
       return { ok: false, reason: 'amount_out_of_range' }
@@ -206,10 +218,10 @@ export const resolveAssetQuote = (args: {
     })
     if (netInput === null) return { ok: false, reason: 'price_unavailable' }
     if (!solverDelivers && amount < dustSats) return { ok: false, reason: 'amount_out_of_range' }
-    return { ok: true, fromAmount: netInput + flatFee + chargedCarrier, toAmount: amount }
+    return { ok: true, fromAmount: netInput + flat.from, toAmount: amount }
   }
 
-  const netAmount = amount - flatFee - chargedCarrier
+  const netAmount = amount - flat.from
   if (netAmount <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
 
   const payout = assetExactInPayout({
@@ -233,7 +245,7 @@ export const resolveAssetQuote = (args: {
     return { ok: false, reason: 'amount_out_of_range' }
   }
 
-  const toAmount = payout + returnedCarrier
+  const toAmount = payout + flat.to
 
   // arkd rejects a sub-dust output 0, priced carrier or not.
   if (!solverDelivers && toAmount < dustSats) {
@@ -294,6 +306,33 @@ export const impliedQuotePrice = (args: {
   const mantissa =
     (quoteAtomic * 10n ** BigInt(baseDecimals) * 10n ** BigInt(scale)) / (baseAtomic * 10n ** BigInt(quoteDecimals))
   return mantissa > 0n ? { mantissa, scale } : null
+}
+
+/**
+ * The rate this swap was STRUCK at — {@link impliedQuotePrice} net of the flat
+ * parts, which folded in bias the ratio by a term that GROWS as the swap
+ * shrinks. The bps spread stays: proportional, it shifts the ratio by the
+ * constant `marketDriftBps` already pins as the flat-market baseline.
+ */
+export const struckQuotePrice = (args: {
+  fromAmount: bigint
+  toAmount: bigint
+  pair: AssetPair
+  market: AssetQuoteMarket
+  carrierSats: bigint
+  givesBase: boolean
+  scale: number
+}): { mantissa: bigint; scale: number } | null => {
+  const { pair, market, givesBase, carrierSats } = args
+  const flat = flatPartsOf({ pair, market, givesBase, carrierSats })
+  return impliedQuotePrice({
+    fromAmount: args.fromAmount - flat.from,
+    toAmount: args.toAmount - flat.to,
+    givesBase,
+    baseDecimals: market.baseDecimals,
+    quoteDecimals: market.quoteDecimals,
+    scale: args.scale,
+  })
 }
 
 export type AssetFillRefusal = 'quote_expired' | 'deposit_short' | 'insufficient_inventory'

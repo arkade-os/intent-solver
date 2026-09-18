@@ -401,7 +401,7 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
     expect(findRefund).toHaveBeenCalledWith(expect.anything(), TIMELOCK)
   })
 
-  it('falls back to genesis rather than skipping a row whose txid patch was lost', async () => {
+  it('falls back to the row`s own creation height rather than skipping a row whose txid patch was lost', async () => {
     const findClaimPreimage = vi.fn().mockResolvedValue(null)
     const { store, service } = await build({
       evm: { isLocked: vi.fn().mockResolvedValue(true), findClaimPreimage } as never,
@@ -409,10 +409,10 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
     await store.transition('swap-1', 'quoted', 'funded')
     await store.transition('swap-1', 'funded', 'locking_evm')
     await service.tick('swap-1')
-    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n)
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 20_000_000n - BigInt(quote().minConfirmations))
   })
 
-  it('falls back to genesis when the lock txid resolves to no receipt', async () => {
+  it('falls back to the row`s own creation height when the lock txid resolves to no receipt', async () => {
     const findClaimPreimage = vi.fn().mockResolvedValue(null)
     const { service } = await exposed({
       evm: {
@@ -420,6 +420,45 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
         findClaimPreimage,
         transactionBlock: vi.fn().mockResolvedValue(null),
       } as never,
+    })
+    await service.tick('swap-1')
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 20_000_000n - BigInt(quote().minConfirmations))
+  })
+
+  it('still finds a Claim mined in the row`s own creation block', async () => {
+    // At exactly `fastestSecondsPerBlock`: the worst case for this bound.
+    const CREATED_AT_HEIGHT = 20_000_000n
+    const ELAPSED = 43_200
+    const preimage = Uint8Array.from(Buffer.from('cd'.repeat(32), 'hex'))
+    let scannedFrom: bigint | undefined
+    const findClaimPreimage = vi.fn().mockImplementation(async (_lock: unknown, from: bigint) => {
+      scannedFrom = from
+      return from <= CREATED_AT_HEIGHT ? preimage : null
+    })
+    const { store, service } = await exposed({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(true),
+        findClaimPreimage,
+        transactionBlock: vi.fn().mockResolvedValue(null),
+      } as never,
+      blockHeight: vi.fn().mockResolvedValue(Number(CREATED_AT_HEIGHT) + ELAPSED / 12),
+      now: () => NOW + ELAPSED,
+    })
+    await service.tick('swap-1')
+    expect(scannedFrom, 'a genesis walk, not a bound').toBeGreaterThan(0n)
+    expect(scannedFrom).toBeLessThanOrEqual(CREATED_AT_HEIGHT)
+    expect((await store.get('swap-1')).preimage).toBe('cd'.repeat(32))
+  })
+
+  it('falls back to genesis, never to the tip, when the clock is behind the row', async () => {
+    const findClaimPreimage = vi.fn().mockResolvedValue(null)
+    const { service } = await exposed({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(true),
+        findClaimPreimage,
+        transactionBlock: vi.fn().mockResolvedValue(null),
+      } as never,
+      now: () => NOW - 600,
     })
     await service.tick('swap-1')
     expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n)
@@ -1248,6 +1287,19 @@ describe('a lock that lands after the books closed', () => {
     await store.close()
   })
 
+  it('scans a still-pending lock from the row`s creation height, not from genesis', async () => {
+    const { store, service, evm } = await closedOverLock({
+      evm: { transactionBlock: vi.fn().mockResolvedValue(null) } as never,
+    })
+    await store.patch('swap-1', { evm_lock_txid: '0xlock' })
+    evm.findClaimPreimage.mockClear()
+
+    await service.tickAll()
+
+    expect(evm.findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 20_999_999n)
+    await store.close()
+  })
+
   it('leaves a row that never reached a lock call alone', async () => {
     const isLocked = vi.fn().mockResolvedValue(true)
     const { store, service } = await build({ evm: { isLocked } as unknown as EvmSendServiceDeps['evm'] })
@@ -1256,6 +1308,51 @@ describe('a lock that lands after the books closed', () => {
     await service.tickAll()
 
     expect(isLocked).not.toHaveBeenCalled()
+    await store.close()
+  })
+
+  const refundedOverLock = async () => {
+    const onTickError = vi.fn()
+    const evm = {
+      isLocked: vi.fn().mockResolvedValue(false),
+      findClaimPreimage: vi.fn().mockResolvedValue(null),
+      findRefund: vi.fn().mockResolvedValue(false),
+      transactionOutcome: vi.fn().mockResolvedValue('pending'),
+    }
+    const built = await build({
+      blockHeight: vi.fn().mockResolvedValue(21_000_000),
+      onTickError,
+      evm: evm as unknown as EvmSendServiceDeps['evm'],
+    })
+    await built.store.transition('swap-1', 'quoted', 'locking_evm')
+    await built.service.tickAll()
+    expect((await built.store.get('swap-1')).state).toBe('refunding_evm')
+
+    evm.transactionOutcome.mockResolvedValue('success')
+    await built.service.tickAll()
+    expect((await built.store.get('swap-1')).state).toBe('refunded')
+    onTickError.mockClear()
+
+    return { ...built, evm, onTickError }
+  }
+
+  it('reports a live lock under a refunded row, which the receipt alone cannot rule out', async () => {
+    const { store, service, evm, onTickError } = await refundedOverLock()
+    evm.isLocked.mockResolvedValue(true)
+
+    await service.tickAll()
+
+    expect(onTickError).toHaveBeenCalledTimes(1)
+    expect(onTickError.mock.calls[0]?.[1].message).toContain('the ERC20 lock is funded on a closed row')
+    await store.close()
+  })
+
+  it('leaves a refunded row whose lock is gone alone', async () => {
+    const { store, service, onTickError } = await refundedOverLock()
+
+    await service.tickAll()
+
+    expect(onTickError).not.toHaveBeenCalled()
     await store.close()
   })
 })

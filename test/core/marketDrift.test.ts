@@ -1,7 +1,7 @@
 /**
  * The market mark, composed through the REAL quote path.
  *
- * Every fixture here runs `resolveAssetQuote` -> `impliedQuotePrice` -> the
+ * Every fixture here runs `resolveAssetQuote` -> `struckQuotePrice` -> the
  * drift, exactly as the orchestrator does, and never hand-builds the stored
  * numbers. The first attempt at this feature did hand-build them, and the test
  * agreed with its author while the production path computed something else
@@ -16,7 +16,12 @@
  * market has moved further than the margin, and the fill is under water.
  */
 import { describe, it, expect } from 'vitest'
-import { impliedQuotePrice, resolveAssetQuote, type AssetQuoteMarket } from '@arkade-os/solver-core/core/assetRfq.js'
+import {
+  impliedQuotePrice,
+  resolveAssetQuote,
+  struckQuotePrice,
+  type AssetQuoteMarket,
+} from '@arkade-os/solver-core/core/assetRfq.js'
 import { economicsOf } from '@arkade-os/solver-core/analytics/economics.js'
 import { byFxLeg } from '@arkade-os/solver-core/analytics/aggregate.js'
 
@@ -49,11 +54,13 @@ const fill = (args: {
   givesBase?: boolean
   amount?: bigint
   market?: AssetQuoteMarket
+  carrierSats?: bigint
 }) => {
   const m = args.market ?? market()
   const givesBase = args.givesBase ?? true
   const pair = givesBase ? { from: m.base, to: m.quote } : { from: m.quote, to: m.base }
   const amount = args.amount ?? (givesBase ? 10n ** 8n : 100_000_000n)
+  const carrierSats = args.carrierSats ?? 0n
 
   const resolved = resolveAssetQuote({
     pair,
@@ -61,21 +68,22 @@ const fill = (args: {
     amountSide: 'from',
     market: m,
     feed: args.quoteFeed,
-    carrierSats: 0n,
+    carrierSats,
     dustSats: DUST,
   })
   if (!resolved.ok) throw new Error(`the fixture did not resolve: ${resolved.reason}`)
 
-  const implied = impliedQuotePrice({
+  const implied = struckQuotePrice({
     fromAmount: resolved.fromAmount,
     toAmount: resolved.toAmount,
+    pair,
+    market: m,
+    carrierSats,
     givesBase,
-    baseDecimals: m.baseDecimals,
-    quoteDecimals: m.quoteDecimals,
     scale: args.quoteFeed.scale,
   })
 
-  return economicsOf({
+  const economics = economicsOf({
     id: 'swap-1',
     corridor: 'arkade:BTC->arkade:USDT',
     state: 'filled',
@@ -89,6 +97,7 @@ const fill = (args: {
     fillPrice:
       args.fillFeed === null ? null : { mantissa: args.fillFeed.mantissa.toString(), scale: args.fillFeed.scale },
   })
+  return { ...economics, implied }
 }
 
 const FEED = { mantissa: 6_000_000n, scale: 2 } // $60,000.00
@@ -223,6 +232,40 @@ describe('what cannot be marked says so', () => {
     const coarse = fill({ quoteFeed: FEED, fillFeed: { mantissa: 5_940_000n, scale: 2 } })
     const fine = fill({ quoteFeed: FEED, fillFeed: { mantissa: 594_000_000_000n, scale: 7 } })
     expect(fine.marketDriftBps).toBe(coarse.marketDriftBps)
+  })
+})
+
+describe('the mark prices the rate, not what rode along with it', () => {
+  /** #165: folded in, 330 sats against a ~50k notional read as ~66bp of drift. */
+  it('reads the same mark whether or not the carrier is priced', () => {
+    for (const [givesBase, amount] of [
+      [true, 50_000n],
+      [false, 30_000_000n],
+    ] as const) {
+      const off = fill({ quoteFeed: FEED, fillFeed: FEED, givesBase, amount, carrierSats: 0n })
+      const on = fill({ quoteFeed: FEED, fillFeed: FEED, givesBase, amount, carrierSats: DUST })
+      expect(on.implied).toEqual(off.implied)
+      expect(on.marketDriftBps).toBe(off.marketDriftBps)
+      expect(on.outbound.amount).not.toBe(off.outbound.amount)
+    }
+  })
+
+  it('reads the same mark whether or not a flat fee is charged', () => {
+    for (const [givesBase, amount, flat] of [
+      [true, 50_000n, { sellBaseFeeFlat: 330n }],
+      [false, 30_000_000n, { buyBaseFeeFlat: 200_000n }],
+    ] as const) {
+      const off = fill({ quoteFeed: FEED, fillFeed: FEED, givesBase, amount })
+      const on = fill({ quoteFeed: FEED, fillFeed: FEED, givesBase, amount, market: market(flat) })
+      // Within a tick, not equal: the fee moves the netted INPUT, so the payout truncation can land either side.
+      expect(Math.abs(on.marketDriftBps! - off.marketDriftBps!)).toBeLessThanOrEqual(1)
+      expect(on.outbound.amount).not.toBe(off.outbound.amount)
+    }
+  })
+
+  it('still reads the spread on a flat market once the carrier is priced', () => {
+    const marked = fill({ quoteFeed: FEED, fillFeed: FEED, amount: 50_000n, carrierSats: DUST })
+    expect(marked.marketDriftBps).toBe(30)
   })
 })
 

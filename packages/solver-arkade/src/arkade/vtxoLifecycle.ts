@@ -456,8 +456,8 @@ export const isRenewalDue = (vtxo: RenewableVtxo, nowMs: number): boolean => {
   return expiry - nowMs <= renewalThresholdMs(vtxo)
 }
 
-/** The fee-program inputs a coin contributes, mirroring the SDK's `toOffchainInputFeeParams`. */
-const offchainInputFeeParams = (vtxo: RenewableVtxo): OffchainInput => {
+/** The fee-program inputs a coin contributes, mirroring the SDK's `toOffchainInputFeeParams`. Exported so a withdrawal's exit (`ops/arkadeFunds.ts`) prices inputs through the same mapping. */
+export const offchainInputFeeParams = (vtxo: RenewableVtxo): OffchainInput => {
   const expiry = batchExpiryMs(vtxo)
   return {
     amount: BigInt(vtxo.value),

@@ -241,8 +241,7 @@ export class EvmSendSwapService {
   /**
    * FROM THE LOCK, never back from the tip: a claim cannot precede the lock it
    * spends, so this holds however old the row gets, where a lookback window
-   * stops covering the stuck rows the scan exists for. Genesis when no txid
-   * resolves - that patch lands after the broadcast.
+   * stops covering the stuck rows the scan exists for.
    *
    * The margin is ASYMMETRIC in its error direction - too large costs scan time,
    * too small misses a claim in silence - so it wants a defensible upper bound.
@@ -250,12 +249,27 @@ export class EvmSendSwapService {
    * skew between two RPC calls a load-balanced provider may serve from different
    * views; `minConfirmations` is the operator's declaration of settled depth.
    */
-  private async claimScanFloor(row: EvmSendSwapRow): Promise<bigint> {
-    if (row.evmLockTxid === null) return 0n
-    const mined = await this.deps.evm.transactionBlock(row.evmLockTxid)
-    if (mined === null) return 0n
+  private async claimScanFloor(row: EvmSendSwapRow, height: number): Promise<bigint> {
+    const mined = row.evmLockTxid === null ? null : await this.deps.evm.transactionBlock(row.evmLockTxid)
+    const floor = mined ?? this.rowCreationFloor(row, height)
     const margin = BigInt(row.minConfirmations)
-    return mined > margin ? mined - margin : 0n
+    return floor > margin ? floor - margin : 0n
+  }
+
+  /**
+   * The floor when the lock's own height is unreadable — a lost txid patch or a
+   * pending broadcast, where genesis cost a whole-chain walk. The lock cannot
+   * predate the row, and the tip less the most blocks `fastestSecondsPerBlock`
+   * allows since `createdAt` is at or below the height the row was inserted at.
+   */
+  private rowCreationFloor(row: EvmSendSwapRow, height: number): bigint {
+    const elapsed = this.now() - row.createdAt
+    // A clock behind the row's own stamp bounds nothing, and clamping it to zero
+    // would put the floor at the TIP - a silent miss where genesis is only slow.
+    if (elapsed < 0) return 0n
+    const blocks = BigInt(Math.ceil(elapsed / this.deps.chain.cadence.fastestSecondsPerBlock))
+    const tip = BigInt(height)
+    return tip > blocks ? tip - blocks : 0n
   }
 
   /**
@@ -292,7 +306,7 @@ export class EvmSendSwapService {
     if (preimage === null && (EVM_SEND_EXPOSED as readonly string[]).includes(row.state)) {
       // Reported and survived, as `provenDepth` treats its failed reads.
       try {
-        const found = await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row))
+        const found = await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height))
         preimage = found === null ? null : Buffer.from(found).toString('hex')
       } catch (error) {
         this.deps.onTickError?.(row.id, error)
@@ -684,19 +698,24 @@ export class EvmSendSwapService {
   }
 
   /**
-   * Keep reading the contract for a `stuck` row whose ERC20 may still be out: a
+   * Keep reading the contract for a closed row whose ERC20 may still be out: a
    * lock still pending at the timeout refund can mine at ANY later height, by
    * when the row has left `findLive()` and nothing asks again (#162). REPORTS,
    * never re-drives; the preimage is kept because no later read recovers it.
    */
   private async watchLateLocks(): Promise<void> {
     const { store } = this.deps
-    for (const row of await store.findStuckOverLock(this.now())) {
+    const watched = await store.findClosedOverLock(this.now())
+    if (watched.length === 0) return
+    const height = await this.deps.blockHeight()
+    for (const row of watched) {
       try {
         const lock = this.deps.lockFor(row)
         const present = await this.deps.evm.isLocked(lock)
         const claimed =
-          row.preimage === null ? await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row)) : null
+          row.preimage === null
+            ? await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height))
+            : null
         if (claimed !== null) {
           await store.patch(row.id, { preimage: Buffer.from(claimed).toString('hex') })
           this.deps.onTickError?.(

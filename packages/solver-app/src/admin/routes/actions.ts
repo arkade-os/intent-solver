@@ -813,9 +813,9 @@ export const ACTIONS: Record<string, ActionDefinition> = {
    *    amount by the confirmed balance, because a wrong-chain address is
    *    precisely the mistake retyping cannot catch: the operator confirms the
    *    same wrong string twice.
-   *  - and MOST SOURCES DO NOT OFFER IT AT ALL. The Arkade float does not,
-   *    because paying an arbitrary address out of it would spend coins outside
-   *    the process-local reservation ledger.
+   *  - and a source offers it only where the spend can honour the reservation
+   *    ledger. The Arkade float selects the coins itself, filtered against the
+   *    ledger and pinned for the spend. @see ops/arkadeFunds.ts
    */
   'fund-withdraw': {
     tier: 'armed',
@@ -831,8 +831,10 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'SENDS THIS SOURCE’S MONEY OUT OF THE SOLVER, to an address you type. Irreversible, and it is the only ' +
       'action here whose destination is not fixed by a swap. On the lightning rail it moves the ONCHAIN wallet and ' +
       'NOT channel liquidity — that is the wallet the onchain corridors fund from, so withdrawing leaves less to ' +
-      'fund them with. NOT SAFE TO REPEAT: each attempt is a separate payment, so a withdrawal that times out must ' +
-      'be checked against the chain before you try again.',
+      'fund them with. On the arkade float an Arkade address is paid offchain at once, while a bitcoin address ' +
+      'is paid by collaborative exit at the server’s next batch — so the request can take a minute — and either ' +
+      'leaves less float to fund swaps with. NOT SAFE TO REPEAT: each attempt is a separate payment, so a ' +
+      'withdrawal that times out must be checked against the chain before you try again.',
     run: async (services, body) => {
       const source = requireFundSource(fundSources(services), body.source)
       if (!source.withdraw) {

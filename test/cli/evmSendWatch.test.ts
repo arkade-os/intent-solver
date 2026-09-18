@@ -42,6 +42,29 @@ const deferred = () => {
 
 afterEach(() => vi.useRealTimers())
 
+const watchLoopIn = (signals: EventEmitter, overrides: Record<string, unknown> = {}) =>
+  runInNewContext(`${compiled}; watchUntilStopped`, {
+    process: signals,
+    withEvmSendSweep,
+    assetRfqPairFor: (from: string | null, to: string | null) => `${from}->${to}`,
+    log: () => {},
+    CORRIDORS: [],
+    Date,
+    AbortController,
+    LockupWatcher: class {
+      start() {}
+      sync() {}
+      async stop() {}
+    },
+    lazyContractSource: () => ({}),
+    lockupSource: () => ({}),
+    sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+    runContractLifecycle: async () => {},
+    runFloatLifecycle: async () => ({ failures: [] }),
+    maybeMintPool: async () => ({ minted: false, skipped: 'disabled' }),
+    ...overrides,
+  }) as (services: unknown) => Promise<void>
+
 describe('the watch loop during slow wallet maintenance', () => {
   it.each(['contract', 'float'])('drives EVM sends while %s maintenance is unresolved', async (stage) => {
     vi.useFakeTimers()
@@ -72,29 +95,13 @@ describe('the watch loop during slow wallet maintenance', () => {
       assetRfqService: { tickAll: async () => [] },
       assetRfqMarkets: [],
     }
-    const watch = runInNewContext(`${compiled}; watchUntilStopped`, {
-      process: signals,
-      withEvmSendSweep,
-      assetRfqPairFor: (from: string | null, to: string | null) => `${from}->${to}`,
-      log: () => {},
-      CORRIDORS: [],
-      Date,
-      AbortController,
-      LockupWatcher: class {
-        start() {}
-        sync() {}
-        async stop() {}
-      },
-      lazyContractSource: () => ({}),
-      lockupSource: () => ({}),
-      sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+    const watch = watchLoopIn(signals, {
       runContractLifecycle: stage === 'contract' ? maintenance : async () => {},
       runFloatLifecycle: async () => {
         if (stage === 'float') await maintenance()
         return { failures: [] }
       },
-      maybeMintPool: async () => ({ minted: false, skipped: 'disabled' }),
-    }) as (services: unknown) => Promise<void>
+    })
     const watching = watch(services)
     try {
       await vi.advanceTimersByTimeAsync(250)
@@ -111,6 +118,34 @@ describe('the watch loop during slow wallet maintenance', () => {
   })
 })
 
+describe('disabling the EVM send corridor', () => {
+  it('stops the corridor quoting without stopping the sweep that watches what it already locked', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_800_000_000_000)
+    const signals = new EventEmitter()
+    const tickAll = vi.fn(async () => [])
+    const services = {
+      config: { corridorEnabled: {}, contractRetentionMs: 0, poolAutoMint: false },
+      policy: { evmCorridors: [{ enabled: false, direction: 'send' }] },
+      arkade: { wallet: { getContractManager: async () => ({}) } },
+      readers: [],
+      evmSendService: { tickAll },
+      corridors: [],
+      assetRfqService: { tickAll: async () => [] },
+      assetRfqMarkets: [],
+    }
+    const watching = watchLoopIn(signals)(services)
+    try {
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(tickAll).toHaveBeenCalled()
+    } finally {
+      signals.emit('SIGTERM')
+      await vi.advanceTimersByTimeAsync(250)
+      await watching
+    }
+  })
+})
+
 describe('the independent EVM send sweep', () => {
   const harness = () => {
     vi.useFakeTimers()
@@ -118,7 +153,6 @@ describe('the independent EVM send sweep', () => {
     const tickAll = vi.fn().mockResolvedValue([])
     const input = {
       service: { tickAll },
-      policies: [{ enabled: true, direction: 'send' as const }],
       intervalMs: 3000,
       signal: controller.signal,
       onError: vi.fn(),
@@ -144,14 +178,11 @@ describe('the independent EVM send sweep', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it.each(['disabled', 'receive-only', 'no-service'])('does not schedule work for %s', async (configuration) => {
+  it('does not schedule work when the deployment has no EVM send service at all', async () => {
     const { input, tickAll } = harness()
     await withEvmSendSweep({
       ...input,
-      service: configuration === 'no-service' ? null : input.service,
-      policies: [
-        { enabled: configuration !== 'disabled', direction: configuration === 'receive-only' ? 'receive' : 'send' },
-      ],
+      service: null,
       run: async (start) => {
         start()
         expect(vi.getTimerCount()).toBe(0)
