@@ -234,11 +234,11 @@ const arkadeWithdraw = async (
     )
   }
 
-  // `available` counts no swept coins, so the selection must not either — and so `offchainInputFeeParams`
-  // below never sees `isSwept` set, always pricing a coin as a plain vtxo.
-  const [spendable, info] = await Promise.all([
+  // `available` counts no swept coins, so neither does the selection — so `offchainInputFeeParams` never sees `isSwept`.
+  const [spendable, info, changeAddress] = await Promise.all([
     wallet.getSpendableVtxos({ withRecoverable: false }),
     wallet.arkProvider.getInfo(),
+    wallet.getAddress(),
   ])
   const dust = BigInt(info.dust)
 
@@ -287,12 +287,24 @@ const arkadeWithdraw = async (
     estimator.evalOnchainOutput({ amount: BigInt(amountSats), script: hex.encode(route.script) }).satoshis,
   )
   const needed = BigInt(amountSats) + outputFee
+  const changeScript = hex.encode(ArkAddress.decode(changeAddress).pkScript)
+  // The change output's fee is charged on its own size, so fee and amount define each other: settle downwards.
+  const changeAfterFee = (left: bigint): bigint => {
+    let net = left
+    for (let i = 0; i < 8; i += 1) {
+      const next = left - BigInt(estimator.evalOffchainOutput({ amount: net, script: changeScript }).satoshis)
+      if (next === net) break
+      net = next
+    }
+    return net
+  }
 
   const selected: typeof ordered = []
   let gross = 0n
   let inputFees = 0n
   let carriesAsset = false
   let change: bigint | null = null
+  let changeFee = 0n
   for (const coin of ordered) {
     const value = BigInt(coin.value)
     const inputFee = BigInt(estimator.evalOffchainInput(offchainInputFeeParams(coin)).satoshis)
@@ -304,8 +316,14 @@ const arkadeWithdraw = async (
     const left = gross - needed
     // The change must be an output the server accepts: exactly nothing — and
     // then only when no asset needs a ride home on it — or at least dust.
-    if (left >= dust || (left === 0n && !carriesAsset)) {
-      change = left
+    if (left === 0n && !carriesAsset) {
+      change = 0n
+      break
+    }
+    const net = left > 0n ? changeAfterFee(left) : left
+    if (net >= dust) {
+      change = net
+      changeFee = left - net
       break
     }
   }
@@ -318,7 +336,8 @@ const arkadeWithdraw = async (
       )
     }
     throw new Error(
-      `withdrawing ${amountSats} sats leaves ${gross - needed} sats of change, below the ${dust} sat dust floor` +
+      `withdrawing ${amountSats} sats leaves ${changeAfterFee(gross - needed)} sats of change, below the ${dust} ` +
+        `sat dust floor` +
         (carriesAsset ? ' that the selection’s asset must ride on' : '') +
         ' — withdraw a little less, so the change clears it',
     )
@@ -333,13 +352,13 @@ const arkadeWithdraw = async (
   const release = services.arkade.reservations.reserve(selected)
   try {
     const outputs = [{ address, amount: BigInt(amountSats) }]
-    if (change > 0n) outputs.push({ address: await wallet.getAddress(), amount: change })
+    if (change > 0n) outputs.push({ address: changeAddress, amount: change })
     const txid = await wallet.settle({ inputs: [...selected], outputs })
     return {
       reference: txid,
       address,
       amount: String(amountSats),
-      detail: { route: 'onchain', feeSats: (inputFees + outputFee).toString() },
+      detail: { route: 'onchain', feeSats: (inputFees + outputFee + changeFee).toString() },
     }
   } finally {
     release()

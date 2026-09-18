@@ -51,14 +51,8 @@ const REGTEST_ADDRESS = addressOn('regtest', 0x11)
 const OTHER_REGTEST_ADDRESS = addressOn('regtest', 0x22)
 const MAINNET_ADDRESS = addressOn('bitcoin', 0x11)
 
-/**
- * A placeholder, unlike the three above, and the asymmetry mirrors the code: an
- * Arkade address is handed over WITHOUT a decode, because it encodes the server
- * key of the service this wallet is connected to and has no wrong-chain form for
- * a guard to catch. Nothing here parses it, so a real one would prove nothing
- * the short string does not.
- */
-const ARKADE_ADDRESS = 'tark1solverfloat'
+/** Real, not a placeholder: a withdrawal prices its change output against this address's script. */
+const ARKADE_ADDRESS = new ArkAddress(new Uint8Array(32).fill(9), new Uint8Array(32).fill(8), 'tark').encode()
 
 /**
  * The option a test is about, by KIND rather than by index.
@@ -737,6 +731,24 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     })
     expect(wallet.send).not.toHaveBeenCalled()
     expect(result).toMatchObject({ reference: 'ff'.repeat(32), detail: { route: 'onchain', feeSats: '107' } })
+  })
+
+  it('pays for the change output too, so the settlement is not underfunded', async () => {
+    // 100 exit + 7 input + 50 change = 157, so the float keeps 49_843 rather than 49_893.
+    const intentFee = { onchainOutput: '100.0', offchainInput: '7.0', offchainOutput: '50.0' }
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], {
+      arkProvider: { getInfo: vi.fn().mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee } }) },
+    })
+
+    const result = await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    const outputs: { address: string; amount: bigint }[] = wallet.settle.mock.calls[0]![0].outputs
+    expect(outputs).toEqual([
+      { address: REGTEST_ADDRESS, amount: 50_000n },
+      { address: ARKADE_ADDRESS, amount: 49_843n },
+    ])
+    expect(outputs.reduce((sum, o) => sum + o.amount, 157n)).toBe(100_000n)
+    expect(result).toMatchObject({ detail: { route: 'onchain', feeSats: '157' } })
   })
 
   it('spends the soonest-expiring coins first', async () => {
