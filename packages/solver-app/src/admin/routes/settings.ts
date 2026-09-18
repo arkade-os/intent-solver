@@ -33,7 +33,8 @@
  */
 
 import type { Hono } from 'hono'
-import { describeSettings, validateOverride, editableKeys } from '../settings.js'
+import { describeSettings, validateOverride, editableKeys, applyOverrides, pendingRestartKeys } from '../settings.js'
+import { settingsDrift } from '../drift.js'
 import type { AdminDeps } from '../server.js'
 
 /**
@@ -46,14 +47,22 @@ export const RESTART_NOTICE =
   'result to every service, and nothing re-reads that afterwards. The values shown here are what THIS process is ' +
   'quoting; a pending override is what the next one will.'
 
+// The same derivation `/api/overview` uses, reduced to keys. An override equal
+// to what boot resolved is NOT pending — which `Object.keys` could never say.
+const pendingKeys = (deps: AdminDeps, overrides: Record<string, string>): string[] => {
+  const effective = applyOverrides(deps.services.config, overrides)
+  const moved = pendingRestartKeys(deps.services.bootOverrides, overrides)
+  return settingsDrift(deps.services.policy, effective, moved).map((item) => item.key)
+}
+
 export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/settings', async (c) => {
     const overrides = await deps.services.adminStore.getOverrides()
+    const pending = pendingKeys(deps, overrides)
     return c.json({
-      knobs: describeSettings(deps.services.config, overrides),
+      knobs: describeSettings(deps.services.config, overrides, pending),
       editable: editableKeys(),
-      /** Every stored override is pending a restart; listed so the UI can badge them. */
-      pendingRestart: Object.keys(overrides),
+      pendingRestart: pending,
       restartNotice: RESTART_NOTICE,
     })
   })
@@ -105,10 +114,11 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
 
 const snapshot = async (deps: AdminDeps, changedKey: string) => {
   const overrides = await deps.services.adminStore.getOverrides()
+  const pending = pendingKeys(deps, overrides)
   return {
-    knobs: describeSettings(deps.services.config, overrides),
+    knobs: describeSettings(deps.services.config, overrides, pending),
     changed: changedKey,
-    restartRequired: true,
+    restartRequired: pending.includes(changedKey),
     restartNotice: RESTART_NOTICE,
   }
 }

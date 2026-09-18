@@ -103,6 +103,35 @@ describe('GET /api/settings', () => {
   })
 })
 
+describe('GET /api/settings — what is actually pending', () => {
+  const read = async (overrides: Record<string, string>, over: Record<string, unknown> = {}) => {
+    const { app } = build(overrides, over)
+    return (await (await app.fetch(new Request('http://admin/api/settings'))).json()) as {
+      knobs: { key: string; pending?: boolean; restartRequired?: boolean }[]
+      pendingRestart: string[]
+    }
+  }
+
+  it('omits an override this process already booted with', async () => {
+    const policy = structuredClone(baseConfig)
+    policy.corridorFees['arkade:BTC->lightning:BTC'] = { bps: 25, flatSats: 0 }
+    const body = await read({ LN_SEND_FEE_BPS: '25' }, { policy, bootOverrides: { LN_SEND_FEE_BPS: '25' } })
+
+    expect(body.pendingRestart).toEqual([])
+    expect(body.knobs.find((k) => k.key === 'LN_SEND_FEE_BPS')?.pending).toBeUndefined()
+  })
+
+  it('reports an override stored since boot, and still calls the knob restart-required', async () => {
+    const body = await read({ LN_SEND_FEE_BPS: '25' })
+
+    expect(body.pendingRestart).toEqual(['LN_SEND_FEE_BPS'])
+    const knob = body.knobs.find((k) => k.key === 'LN_SEND_FEE_BPS')
+    expect(knob?.pending).toBe(true)
+    // Unchanged and still true: no seam hands a running service new policy yet.
+    expect(knob?.restartRequired).toBe(true)
+  })
+})
+
 describe('PATCH /api/settings', () => {
   it('persists a narrowing override', async () => {
     const { app, setOverrideWithAudit } = build()
@@ -118,7 +147,8 @@ describe('PATCH /api/settings', () => {
   })
 
   it('always reports that a restart is needed, because nothing can apply live', async () => {
-    const { app } = build()
+    const alreadyStored = { LN_SEND_MAX_SATS: '50000' }
+    const { app } = build(alreadyStored)
     const body = await (await patch(app, { key: 'LN_SEND_MAX_SATS', value: '50000' })).json()
     expect(body).toMatchObject({ restartRequired: true })
     // The notice may only promise a restart applies the override because
