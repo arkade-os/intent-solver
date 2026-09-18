@@ -470,7 +470,7 @@ export class AssetRfqSwapService {
    */
   private async recordFillMark(row: AssetRfqSwapRow): Promise<void> {
     try {
-      const market = this.deps.markets.find(
+      const market = this.markets.find(
         (m) =>
           (row.fromAssetId === m.base && row.toAssetId === m.quote) ||
           (row.fromAssetId === m.quote && row.toAssetId === m.base),

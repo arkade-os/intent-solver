@@ -493,6 +493,24 @@ describe('the market mark', () => {
     })
   })
 
+  // Quoting reads the live list and the mark read the boot one, so a market added
+  // after boot quoted correctly and then went unmarked forever — a P&L loss, not a money one.
+  it('marks a fill on a market added live, not only one present at boot', async () => {
+    const errors: unknown[][] = []
+    const { service, store } = await harness({
+      markets: [],
+      depositAt: async () => deposit(),
+      onError: (id, error) => errors.push([id, error]),
+    })
+    await service.replaceMarkets([MARKET])
+    await service.quote(request())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(errors).toEqual([])
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillPriceMantissa: 100_000n })
+  })
+
   /**
    * The property that must never regress. A price feed is a third party, and a
    * swap whose money has already moved must not be reported as anything other
