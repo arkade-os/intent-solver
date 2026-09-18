@@ -421,8 +421,8 @@ HtlcLost(s)    == HtlcExpired(s) /\ ~settled[s]
 \* time — it needs NO server) and the solver's solo refund leaf (shipped in
 \* the covenant, and now spendable by
 \* packages/solver-arkade/src/arkade/unilateralExit.ts — so the action below
-\* is what the Go rewrite must keep, the same way ArkadeHonoursFundKey states
-\* current process-level Set merely stands in for).
+\* is what the Go rewrite must keep, the same way ArkadeHonoursFundKey
+\* states a property the current process-level Set merely stands in for).
 FundGateOpen(s) ==
     /\ clock < InvoiceExpiry                              \* (a) invoice_expired
     /\ htlcE[s] # 0                                       \*     htlc_not_armed

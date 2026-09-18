@@ -402,11 +402,13 @@ Edges == [ x \in AllSt |->
 (* construction, guarded only so a bad edit fails loudly:                   *)
 (*                                                                         *)
 (*   funding_arkade -> stuck    no fail() call site exists in this state    *)
-(*   awaiting_claim -> stuck    the missing-nonInteractiveClaim-leaf branch *)
-(*                              (whenAwaitingClaim); quote() always builds  *)
+(*   awaiting_claim -> stuck    the missing-nonInteractiveClaim-leaf        *)
+(*                              branch in whenAwaitingClaim; quote()        *)
+(*                              always builds it                            *)
 (*   awaiting_confirmations -> refused via the "no funding txid/vout"       *)
-(*                              branch in whenAwaitingConfirmations         *)
-(*                              writes both columns in the same UPDATE      *)
+(*                              branch in whenAwaitingConfirmations;        *)
+(*                              whenQuoted's CAS writes both columns        *)
+(*                              in the same UPDATE                          *)
 (*                                                                         *)
 (* ForwardOnly only constrains steps that are TAKEN, so an unmodelled edge *)
 (* costs nothing; leaving them in the table is what makes it diffable.     *)
@@ -1218,7 +1220,7 @@ NoSilentLoss == NoSilentLossShape(PaidOut, Collected, Terminal, "stuck")
 NoNetLoss == \A s \in Swaps : ~(ClientTookLockup(s) /\ L1Gone(s))
 
 \* Structural consequence of the edge table that this leg's ABSENCE of a
-\* refund sweep depends on (db/onchainReceiveSwaps.ts's state documentation
+\* refund sweep depends on (db/onchainReceiveSwaps.ts argues it in
 \* prose): `refused` must be unreachable from every EXPOSED state, so a
 \* refused row can never have a lockup of the solver's own behind it.
 \* Asserted as a theorem over the table rather than trusted, because a Go
