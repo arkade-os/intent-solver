@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
@@ -238,5 +240,27 @@ describe('PATCH /api/settings', () => {
     const { app } = build()
     expect((await patch(app, { value: '1' })).status).toBe(400)
     expect((await patch(app, { key: 'LN_SEND_FEE_BPS', value: 25 })).status).toBe(400)
+  })
+})
+
+describe('the settings table renders the pending state', () => {
+  const appSource = readFileSync(
+    fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
+    'utf8',
+  )
+  const view = (): string =>
+    appSource.slice(appSource.indexOf('const settingsView'), appSource.indexOf('/* ==== asset markets'))
+
+  it('badges a knob that is waiting, not merely one that is overridden', () => {
+    expect(view()).toContain('knob.pending')
+  })
+
+  it('stops spending the risk colour on every override', () => {
+    // Amber is reserved for risk (styles.css:4). Being overridden is not one;
+    // a stored change the process has not loaded is.
+    const source = view()
+    const amberAt = source.indexOf('phase-exposed')
+    expect(amberAt).toBeGreaterThan(-1)
+    expect(source.slice(amberAt - 120, amberAt)).toContain('pending')
   })
 })
