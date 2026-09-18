@@ -67,7 +67,7 @@ export const MARKETS_LIVE_NOTICE =
  * a bigint and `JSON.parse` has already destroyed anything past 2^53 by the time
  * a handler sees it — silently, and in the direction that widens a ceiling.
  */
-interface MarketBody {
+export interface MarketBody {
   base?: unknown
   quote?: unknown
   baseDecimals?: unknown
@@ -149,7 +149,7 @@ const carrierMode = (value: unknown): CarrierMode => {
 }
 
 /** The request body as a market, or a `BadRequest` naming the field that was wrong. */
-const marketFrom = (body: MarketBody): AssetMarketConfig => ({
+export const marketFrom = (body: MarketBody): AssetMarketConfig => ({
   ...DEFAULT_SERVING,
   symbol: body.symbol === undefined || body.symbol === null ? null : String(body.symbol).trim().toUpperCase() || null,
   servesOffer: body.servesOffer === true,
@@ -184,7 +184,7 @@ const marketFrom = (body: MarketBody): AssetMarketConfig => ({
  * Bigints do not survive `JSON.stringify`, which throws on them rather than
  * quietly narrowing — so every bound leaves as the decimal string it arrived as.
  */
-const marketJson = (row: AssetMarketRow) => ({
+export const marketJson = (row: AssetMarketRow) => ({
   marketKey: row.marketKey,
   base: row.base,
   quote: row.quote,
