@@ -36,6 +36,9 @@ export interface KnobView {
   editable: boolean
   /** Set when a knob is editable but the change cannot take effect until restart. */
   restartRequired?: boolean
+  /** Set when a STORED value has not reached this process. Distinct from
+   * {@link restartRequired}, which is about the knob rather than the moment. */
+  pending?: boolean
 }
 
 // Overrides that moved since boot. NOT `Object.keys(stored)`: a restart APPLIES
@@ -293,9 +296,14 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
  * plumbing ever grows a seam this becomes true incrementally instead of all at
  * once. See `routes/settings.ts` for the full derivation.
  */
-export const describeSettings = (config: Config, overrides: Record<string, string>): KnobView[] => {
+export const describeSettings = (
+  config: Config,
+  overrides: Record<string, string>,
+  pending: readonly string[] = [],
+): KnobView[] => {
   const effective = applyOverrides(config, overrides)
   const values = editableKnobValues(effective)
+  const waiting = new Set(pending)
   const sourceOf = (key: string): KnobSource => (overrides[key] === undefined ? 'env' : 'override')
   const knob = (key: string, editable = true): KnobView => ({
     key,
@@ -303,6 +311,7 @@ export const describeSettings = (config: Config, overrides: Record<string, strin
     source: sourceOf(key),
     editable,
     restartRequired: true,
+    ...(waiting.has(key) ? { pending: true } : {}),
   })
 
   const knobs: KnobView[] = []

@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
@@ -41,11 +43,20 @@ const baseConfig = {
   assetRfqTokens: [],
 }
 
-const build = (overrides: Record<string, string> = {}) => {
-  const setOverrideWithAudit = vi.fn().mockResolvedValue(undefined)
+const build = (overrides: Record<string, string> = {}, over: Record<string, unknown> = {}) => {
+  const stored: Record<string, string> = { ...overrides }
+  const setOverrideWithAudit = vi.fn(async (key: string, value: string | null) => {
+    if (value === null) delete stored[key]
+    else stored[key] = value
+  })
   const services = {
     config: structuredClone(baseConfig),
-    adminStore: { getOverrides: vi.fn().mockResolvedValue(overrides), setOverrideWithAudit },
+    // What this process actually resolved its policy from. Defaulting both to
+    // "booted with nothing overridden" keeps every existing case unchanged.
+    policy: structuredClone(baseConfig),
+    bootOverrides: {},
+    adminStore: { getOverrides: vi.fn(async () => ({ ...stored })), setOverrideWithAudit },
+    ...over,
   } as never
   return { app: buildAdminApp({ services, startedAt: 1, mode: 'relay' }), setOverrideWithAudit }
 }
@@ -62,7 +73,12 @@ const patch = (app: ReturnType<typeof buildAdminApp>, body: unknown) =>
 const buildReal = async () => {
   const driver = betterSqliteDriver(':memory:')
   const adminStore = await AdminStore.open(driver, () => 1_000_000)
-  const services = { config: structuredClone(baseConfig), adminStore } as never
+  const services = {
+    config: structuredClone(baseConfig),
+    policy: structuredClone(baseConfig),
+    bootOverrides: {},
+    adminStore,
+  } as never
   return { app: buildAdminApp({ services, startedAt: 1, mode: 'relay' }), adminStore, driver }
 }
 
@@ -91,6 +107,44 @@ describe('GET /api/settings', () => {
     const text = await (await app.fetch(new Request('http://admin/api/settings'))).text()
     expect(text).not.toContain('MNEMONIC')
   })
+
+  it('does not tell the operator that stored means pending', async () => {
+    const { app } = build()
+    const body = (await (await app.fetch(new Request('http://admin/api/settings'))).json()) as {
+      restartNotice: string
+    }
+    expect(body.restartNotice).not.toMatch(/^Stored\. It takes effect when the solver restarts/)
+    expect(body.restartNotice).toMatch(/badged pending/i)
+  })
+})
+
+describe('GET /api/settings — what is actually pending', () => {
+  const read = async (overrides: Record<string, string>, over: Record<string, unknown> = {}) => {
+    const { app } = build(overrides, over)
+    return (await (await app.fetch(new Request('http://admin/api/settings'))).json()) as {
+      knobs: { key: string; pending?: boolean; restartRequired?: boolean }[]
+      pendingRestart: string[]
+    }
+  }
+
+  it('omits an override this process already booted with', async () => {
+    const policy = structuredClone(baseConfig)
+    policy.corridorFees['arkade:BTC->lightning:BTC'] = { bps: 25, flatSats: 0 }
+    const body = await read({ LN_SEND_FEE_BPS: '25' }, { policy, bootOverrides: { LN_SEND_FEE_BPS: '25' } })
+
+    expect(body.pendingRestart).toEqual([])
+    expect(body.knobs.find((k) => k.key === 'LN_SEND_FEE_BPS')?.pending).toBeUndefined()
+  })
+
+  it('reports an override stored since boot, and still calls the knob restart-required', async () => {
+    const body = await read({ LN_SEND_FEE_BPS: '25' })
+
+    expect(body.pendingRestart).toEqual(['LN_SEND_FEE_BPS'])
+    const knob = body.knobs.find((k) => k.key === 'LN_SEND_FEE_BPS')
+    expect(knob?.pending).toBe(true)
+    // Unchanged and still true: no seam hands a running service new policy yet.
+    expect(knob?.restartRequired).toBe(true)
+  })
 })
 
 describe('PATCH /api/settings', () => {
@@ -107,7 +161,7 @@ describe('PATCH /api/settings', () => {
     })
   })
 
-  it('always reports that a restart is needed, because nothing can apply live', async () => {
+  it('reports a restart is needed for a value that differs from what booted', async () => {
     const { app } = build()
     const body = await (await patch(app, { key: 'LN_SEND_MAX_SATS', value: '50000' })).json()
     expect(body).toMatchObject({ restartRequired: true })
@@ -116,7 +170,15 @@ describe('PATCH /api/settings', () => {
     // test/cli/overridesApplied.test.ts, which pins that wiring. This claim
     // was false once; the pairing is what stops it being false again.
     const notice = (body as { restartNotice: string }).restartNotice
-    expect(notice).toMatch(/takes effect when the solver restarts/i)
+    expect(notice).toMatch(/read once at startup/i)
+  })
+
+  it('reports no restart needed for a value that already matches what booted', async () => {
+    const policy = structuredClone(baseConfig)
+    policy.corridorLimits['arkade:BTC->lightning:BTC'] = { minSats: 1_000, maxSats: 50_000 }
+    const { app } = build({ LN_SEND_MAX_SATS: '50000' }, { policy, bootOverrides: { LN_SEND_MAX_SATS: '50000' } })
+    const body = await (await patch(app, { key: 'LN_SEND_MAX_SATS', value: '50000' })).json()
+    expect(body).toMatchObject({ restartRequired: false })
   })
 
   it('persists a WIDENING value, which the narrowing guard used to refuse', async () => {
@@ -198,5 +260,27 @@ describe('PATCH /api/settings', () => {
     const { app } = build()
     expect((await patch(app, { value: '1' })).status).toBe(400)
     expect((await patch(app, { key: 'LN_SEND_FEE_BPS', value: 25 })).status).toBe(400)
+  })
+})
+
+describe('the settings table renders the pending state', () => {
+  const appSource = readFileSync(
+    fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
+    'utf8',
+  )
+  const view = (): string =>
+    appSource.slice(appSource.indexOf('const settingsView'), appSource.indexOf('/* ==== asset markets'))
+
+  it('badges a knob that is waiting, not merely one that is overridden', () => {
+    expect(view()).toContain('knob.pending')
+  })
+
+  it('stops spending the risk colour on every override', () => {
+    // Amber is reserved for risk (styles.css:4). Being overridden is not one;
+    // a stored change the process has not loaded is.
+    const source = view()
+    const amberAt = source.indexOf('phase-exposed')
+    expect(amberAt).toBeGreaterThan(-1)
+    expect(source.slice(amberAt - 120, amberAt)).toContain('pending')
   })
 })

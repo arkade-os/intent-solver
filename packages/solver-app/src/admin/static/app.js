@@ -1271,7 +1271,11 @@ const settingsView = () => {
             'tr',
             h('td', knob.key),
             h('td', String(knob.value)),
-            h('td', knob.source === 'override' ? h('span.phase.phase-exposed', 'override') : h('span.muted', 'env')),
+            h(
+              'td',
+              knob.source === 'override' ? h('span.muted', 'override') : h('span.faint', 'env'),
+              knob.pending ? [' ', h('span.phase.phase-exposed', { title: s.restartNotice }, 'pending restart')] : null,
+            ),
             h(
               'td',
               knob.editable

@@ -4,7 +4,7 @@
  * The layering rules live in `../settings.ts` and are pure; this module owns
  * the HTTP shape and persistence.
  *
- * ## Every override needs a restart, and the API says so
+ * ## Every override needs a restart to take effect, and the API says which ones are still waiting.
  *
  * This was checked against `src/cli.ts` and `src/send/orchestrator.ts` rather
  * than assumed, because a console that claims a change took effect when it did
@@ -22,10 +22,10 @@
  * - Corridor toggles go through `cli.ts`'s `enabled()` helper, which is
  *   evaluated ONCE when the ingress is built.
  *
- * So overrides are stored and take effect on next boot, and every response
- * carries `restartRequired: true`. Making them live means giving the services
- * a way to accept new policy — a change to money-path files, and a decision
- * for the operator rather than something to slip in behind a settings form.
+ * So overrides are stored and take effect on next boot. Making them live
+ * means giving the services a way to accept new policy — a change to
+ * money-path files, and a decision for the operator rather than something to
+ * slip in behind a settings form.
  *
  * Storing them is still worth doing on its own: it puts corridor pricing and
  * caps in one durable place an operator edits and reviews, instead of spread
@@ -33,7 +33,8 @@
  */
 
 import type { Hono } from 'hono'
-import { describeSettings, validateOverride, editableKeys } from '../settings.js'
+import { describeSettings, validateOverride, editableKeys, applyOverrides, pendingRestartKeys } from '../settings.js'
+import { settingsDrift } from '../drift.js'
 import type { AdminDeps } from '../server.js'
 
 /**
@@ -42,18 +43,28 @@ import type { AdminDeps } from '../server.js'
  * plumbing ever changes.
  */
 export const RESTART_NOTICE =
-  'Stored. It takes effect when the solver restarts: createServices resolves overrides at startup and hands the ' +
-  'result to every service, and nothing re-reads that afterwards. The values shown here are what THIS process is ' +
-  'quoting; a pending override is what the next one will.'
+  'Corridor fees, limits and caps are read once at startup: createServices resolves overrides and hands the result ' +
+  'to every service, and nothing re-reads it afterwards. A knob badged pending is one whose override differs from ' +
+  'what this process loaded at boot; every other value here is what it is quoting right now. ASSET_MARKETS and OFFER_MARKETS ' +
+  'below are read once at startup like everything else on this page, not an exception to it. The markets this ' +
+  'solver actually trades are a separate, live list — edited with no restart on the markets screen.'
+
+// The same derivation `/api/overview` uses, reduced to keys. An override equal
+// to what boot resolved is NOT pending — which `Object.keys` could never say.
+const pendingKeys = (deps: AdminDeps, overrides: Record<string, string>): string[] => {
+  const effective = applyOverrides(deps.services.config, overrides)
+  const moved = pendingRestartKeys(deps.services.bootOverrides, overrides)
+  return settingsDrift(deps.services.policy, effective, moved).map((item) => item.key)
+}
 
 export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/settings', async (c) => {
     const overrides = await deps.services.adminStore.getOverrides()
+    const pending = pendingKeys(deps, overrides)
     return c.json({
-      knobs: describeSettings(deps.services.config, overrides),
+      knobs: describeSettings(deps.services.config, overrides, pending),
       editable: editableKeys(),
-      /** Every stored override is pending a restart; listed so the UI can badge them. */
-      pendingRestart: Object.keys(overrides),
+      pendingRestart: pending,
       restartNotice: RESTART_NOTICE,
     })
   })
@@ -105,10 +116,11 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
 
 const snapshot = async (deps: AdminDeps, changedKey: string) => {
   const overrides = await deps.services.adminStore.getOverrides()
+  const pending = pendingKeys(deps, overrides)
   return {
-    knobs: describeSettings(deps.services.config, overrides),
+    knobs: describeSettings(deps.services.config, overrides, pending),
     changed: changedKey,
-    restartRequired: true,
+    restartRequired: pending.includes(changedKey),
     restartNotice: RESTART_NOTICE,
   }
 }
