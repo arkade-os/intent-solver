@@ -299,3 +299,27 @@ describe('a feed URL the admin port must not be talked into fetching', () => {
     ).not.toThrow()
   })
 })
+
+describe('the predicate actually closes the class it names', () => {
+  it('refuses the metadata address in its IPv4-mapped-IPv6 form, which URL renders as hex', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://[::ffff:169.254.169.254]/latest/meta-data/' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  it('admits a real public vendor whose hostname happens to start with fc', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'https://fcsapi.com/api-v3/forex/latest' }))).not.toThrow()
+  })
+
+  it('refuses a trailing-dot FQDN for localhost', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://localhost./price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  it('refuses the rest of the fe80::/10 range, not just the fe80: literal', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://[febf::1]/price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+})

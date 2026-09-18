@@ -114,10 +114,13 @@ export type AssetQuoteOutcome =
   { ok: true; fromAmount: bigint; toAmount: bigint } | { ok: false; reason: AssetQuoteRefusal }
 
 export interface CarrierLegs {
+  /** Netted OFF the deposit, when the solver delivers the asset. */
   charged: bigint
+  /** Added TO the payout, when the client fronted it. */
   returned: bigint
 }
 
+// BOTH legs counted: an asset deposit carries one, an asset payout needs one.
 export const carrierLegs = (pair: AssetPair, carrierSats: bigint): CarrierLegs => {
   const clientFronts = pair.from !== null
   const solverDelivers = pair.to !== null

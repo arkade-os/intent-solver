@@ -193,11 +193,23 @@ const V4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
 
 /** LITERALS ONLY: a hostname that resolves to one of these needs DNS, which this module has none of. */
 export const isPrivateFeedHost = (hostname: string): boolean => {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  const host = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
   if (host === 'localhost' || host.endsWith('.localhost') || host === '' || host === '::' || host === '::1') return true
-  if (host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd')) return true
-  const v6Mapped = /^::ffff:(.+)$/.exec(host)
-  if (v6Mapped) return isPrivateFeedHost(v6Mapped[1]!)
+  // A parsed hostname never contains a raw colon; only a bracket-stripped IPv6 literal does.
+  if (host.includes(':')) {
+    if (/^fe[89ab][0-9a-f]:/.test(host)) return true // fe80::/10, not just the fe80: literal
+    if (host.startsWith('fc') || host.startsWith('fd')) return true // fc00::/7
+    const v6Mapped = /^::ffff:(.+)$/.exec(host)
+    if (!v6Mapped) return false
+    // WHATWG serializes a mapped IPv4 as two hex groups, not a dotted quad.
+    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(v6Mapped[1]!)
+    if (!hex) return isPrivateFeedHost(v6Mapped[1]!)
+    const [hi, lo] = [Number.parseInt(hex[1]!, 16), Number.parseInt(hex[2]!, 16)]
+    return isPrivateFeedHost([hi >> 8, hi & 0xff, lo >> 8, lo & 0xff].join('.'))
+  }
   const v4 = V4.exec(host)
   if (!v4) return false
   const [a, b] = [Number(v4[1]), Number(v4[2])]
