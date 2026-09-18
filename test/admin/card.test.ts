@@ -84,11 +84,27 @@ const makeDeps = (
     offerMarkets?: Array<{ a: string | null; b: string | null }>
     evmCorridors?: { corridor: string; enabled: boolean }[]
     offerFill?: { min: bigint; max: bigint }
+    livePolicy?: Record<string, unknown>
     /** Collects the audit rows the route writes, so they can be asserted. */
     audit?: Record<string, unknown>[]
   } = {},
-) =>
-  ({
+) => {
+  const bootPolicy = {
+    corridorEnabled: over.allDisabled
+      ? allCorridors(false)
+      : { ...allCorridors(true), 'arkade:BTC->lightning:BTC': over.lnSendEnabled ?? true },
+    corridorLimits: allCorridors({ minSats: 1_000, maxSats: 50_000 }),
+    corridorFees: {
+      ...allCorridors({ bps: 0, flatSats: 0 }),
+      'arkade:BTC->lightning:BTC': { bps: 30, flatSats: over.lnSendFlatSats ?? 0 },
+      'lightning:BTC->arkade:BTC': { bps: 10, flatSats: 0 },
+    },
+    evmCorridors: over.evmCorridors ?? [],
+    offerMarkets: over.offerMarkets ?? [],
+    offerMinFillAmount: over.offerFill?.min ?? 5_000n,
+    offerMaxFillAmount: over.offerFill?.max ?? 900_000n,
+  }
+  return {
     services: {
       config: {
         relayUrl: over.relayUrl === undefined ? 'wss://relay.example' : over.relayUrl,
@@ -98,25 +114,8 @@ const makeDeps = (
         // reported mode — see the `publish` tests below.
         nostrAdPublish: over.nostrAdPublish ?? 'off',
       },
-      // The EFFECTIVE policy, which is what the card must state — deliberately
-      // the object the route reads fees and corridor toggles from.
-      policy: {
-        corridorEnabled: over.allDisabled
-          ? allCorridors(false)
-          : { ...allCorridors(true), 'arkade:BTC->lightning:BTC': over.lnSendEnabled ?? true },
-        // Per-corridor bounds now reach the card, so an admin override that
-        // narrows a corridor shows up in the listing.
-        corridorLimits: allCorridors({ minSats: 1_000, maxSats: 50_000 }),
-        corridorFees: {
-          ...allCorridors({ bps: 0, flatSats: 0 }),
-          'arkade:BTC->lightning:BTC': { bps: 30, flatSats: over.lnSendFlatSats ?? 0 },
-          'lightning:BTC->arkade:BTC': { bps: 10, flatSats: 0 },
-        },
-        evmCorridors: over.evmCorridors ?? [],
-        offerMarkets: over.offerMarkets ?? [],
-        offerMinFillAmount: over.offerFill?.min ?? 5_000n,
-        offerMaxFillAmount: over.offerFill?.max ?? 900_000n,
-      },
+      policy: { ...bootPolicy, ...(over.livePolicy ?? {}) },
+      bootPolicy,
       assetMarkets: over.assetMarkets ?? [],
       liveOfferMarkets: over.offerMarkets ?? [],
       assetRfqMarkets: over.assetRfqMarkets ?? [],
@@ -137,7 +136,8 @@ const makeDeps = (
     mode: 'relay',
     now: () => 1_800_000_060,
     ...(over.adPublisher ? { adPublisher: over.adPublisher } : {}),
-  }) as never
+  } as never
+}
 
 const ASSET = `${'9c'.repeat(32)}0001`
 const GUCCI = `f394dcbf${'e9'.repeat(30)}`
@@ -321,6 +321,32 @@ describe('GET /api/card', () => {
       makeDeps({ evmCorridors: [{ corridor: 'arkade:BTC->ethereum:0xdac1', enabled: false }] }),
     )
     expect(body.cardOmitted).toEqual([])
+  })
+
+  // `replacePolicy` rewrites `policy` from EVERY stored override, so a pending knob lands there on a LIVE flip.
+  it('advertises the bounds the corridor enforces, not a pending override', async () => {
+    const { body } = await getCard(
+      makeDeps({ livePolicy: { corridorLimits: allCorridors({ minSats: 1_000, maxSats: 500_000 }) } }),
+    )
+    expect(body.cardError).toBeNull()
+    for (const market of body.card!.markets) {
+      expect([market.min_base_amount, market.max_base_amount]).toEqual(['1000', '50000'])
+    }
+  })
+
+  it('advertises no corridor a pending toggle would have switched on', async () => {
+    const { body } = await getCard(
+      makeDeps({ lnSendEnabled: false, livePolicy: { corridorEnabled: allCorridors(true) } }),
+    )
+    expect(body.card!.markets.find((m) => quoteId(m) === BOLT11_BTC)).toMatchObject({ max_quote_amount: '0' })
+  })
+
+  it('still follows the LIVE policy for a field `rebuild` really does re-read', async () => {
+    const { body } = await getCard(
+      makeDeps({ livePolicy: { evmCorridors: [{ corridor: 'arkade:BTC->ethereum:0xdac1', enabled: true }] } }),
+    )
+    expect(body.cardOmitted).toHaveLength(1)
+    expect(body.cardOmitted[0]).toContain('arkade:BTC->ethereum:0xdac1')
   })
 
   it('adds SOLVER_CARD_RELAYS beyond RELAY_URL, exactly as `cli card` does', async () => {
