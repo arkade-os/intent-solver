@@ -224,6 +224,42 @@ describe('the audit trail of one save', () => {
   })
 })
 
+describe('the funding window is ordered, not left to the unlisted default', () => {
+  // The config's window is 3600, so 1800 shortens it and 5400 lengthens it.
+  const abortBetweenPasses = (services: { replaceMarkets: () => Promise<void> }) => {
+    const real = services.replaceMarkets
+    services.replaceMarkets = async () => {
+      services.replaceMarkets = real
+      throw new Error('rebuild refused')
+    }
+  }
+
+  it('applies a SHORTENED funding window in pass 1', async () => {
+    const { app, adminStore, services } = await build()
+    abortBetweenPasses(services)
+    await apply(app, { overrides: { LOCKUP_TIMEOUT_SECONDS: '1800' } })
+    expect((await adminStore.getOverrides()).LOCKUP_TIMEOUT_SECONDS).toBe('1800')
+    await adminStore.close()
+  })
+
+  it('defers a LENGTHENED funding window to pass 2', async () => {
+    const { app, adminStore, services } = await build()
+    abortBetweenPasses(services)
+    await apply(app, { overrides: { LOCKUP_TIMEOUT_SECONDS: '5400' } })
+    expect(await adminStore.getOverrides()).toEqual({})
+    await adminStore.close()
+  })
+
+  it('applies both directions when nothing fails', async () => {
+    const { app, adminStore } = await build()
+    expect((await answered(await apply(app, { overrides: { LOCKUP_TIMEOUT_SECONDS: '5400' } }))).applied).toEqual([
+      'LOCKUP_TIMEOUT_SECONDS',
+    ])
+    expect((await adminStore.getOverrides()).LOCKUP_TIMEOUT_SECONDS).toBe('5400')
+    await adminStore.close()
+  })
+})
+
 describe('overrides travel in the same two passes', () => {
   it('turns carrier pricing ON in pass 1 and OFF in pass 2', async () => {
     const on = await build({ assetCarrierPricing: false })

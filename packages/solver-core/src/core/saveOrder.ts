@@ -18,6 +18,7 @@ export type SaveField =
   | 'feeBps'
   | 'toleranceBps'
   | 'maxExposedSats'
+  | 'lockupTimeoutSeconds'
   | 'enabled'
   | 'servesOffer'
   | 'servesRfq'
@@ -33,6 +34,7 @@ export const SAVE_FIELDS: ReadonlySet<SaveField> = new Set<SaveField>([
   'feeBps',
   'toleranceBps',
   'maxExposedSats',
+  'lockupTimeoutSeconds',
   'enabled',
   'servesOffer',
   'servesRfq',
@@ -42,8 +44,13 @@ export const SAVE_FIELDS: ReadonlySet<SaveField> = new Set<SaveField>([
   'carrierPriced',
 ])
 
-/** Fields a RISE relaxes. Everywhere else a rise restricts — a floor, a fee, a spread. */
-const RAISING_WIDENS: ReadonlySet<SaveField> = new Set<SaveField>(['max', 'maxExposedSats', 'toleranceBps'])
+/** Fields a RISE relaxes. `lockupTimeoutSeconds` too: a longer funding window is longer exposure. */
+const RAISING_WIDENS: ReadonlySet<SaveField> = new Set<SaveField>([
+  'max',
+  'maxExposedSats',
+  'toleranceBps',
+  'lockupTimeoutSeconds',
+])
 
 /** Fields `true` relaxes. `carrierPriced` is absent: charging the carrier RESTRICTS. */
 const TRUE_WIDENS: ReadonlySet<SaveField> = new Set<SaveField>([

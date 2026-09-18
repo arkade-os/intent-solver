@@ -46,6 +46,11 @@ describe('savePassFor', () => {
     expect(savePassFor({ field: 'feeBps', before: 0n, after: 330n })).toBe('narrowing')
   })
 
+  it('lengthens the funding window last and shortens it first', () => {
+    expect(savePassFor({ field: 'lockupTimeoutSeconds', before: 3_600, after: 7_200 })).toBe('widening')
+    expect(savePassFor({ field: 'lockupTimeoutSeconds', before: 7_200, after: 3_600 })).toBe('narrowing')
+  })
+
   it('calls an unchanged value narrowing, so a no-op never rides the relaxing pass', () => {
     expect(savePassFor({ field: 'max', before: 50n, after: 50n })).toBe('narrowing')
     expect(savePassFor({ field: 'carrierPriced', before: true, after: true })).toBe('narrowing')
@@ -65,6 +70,7 @@ describe('savePassFor', () => {
       'feeBps',
       'toleranceBps',
       'maxExposedSats',
+      'lockupTimeoutSeconds',
       'enabled',
       'servesOffer',
       'servesRfq',

@@ -40,6 +40,7 @@ const asScalar = (value: unknown): bigint | number | boolean | null =>
 const fieldForOverride = (key: string): SaveField | null => {
   if (key === 'MAX_EXPOSED_SATS') return 'maxExposedSats'
   if (key === 'ASSET_CARRIER_PRICING') return 'carrierPriced'
+  if (key === 'LOCKUP_TIMEOUT_SECONDS') return 'lockupTimeoutSeconds'
   if (key.endsWith('_FEE_BPS') || key.endsWith('_FEE_FLAT_SATS')) return 'feeBps'
   if (key.endsWith('_MIN_SATS')) return 'min'
   if (key.endsWith('_MAX_SATS')) return 'max'
