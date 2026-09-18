@@ -8,22 +8,33 @@
 (* claims, the solver refunds its ERC20 at the block-height timeout and    *)
 (* the client refunds its sats after the (wall-clock) refund locktime.     *)
 (*                                                                         *)
-(* WHICH TYPESCRIPT THIS SPECIFIES                                         *)
+(* WHICH TYPESCRIPT THIS SPECIFIES.  The short names in brackets below are *)
+(* used throughout this module.                                            *)
 (*                                                                         *)
-(*   src/core/evmSendPlan.ts      the pure planner: (row, observation) ->  *)
-(*                                action.  THE EDGE AUTHORITY - the EVM    *)
-(*                                stores have no LEGAL_EDGES table (see    *)
-(*                                below).                                  *)
-(*   src/send/evmOrchestrator.ts  the I/O shell: CAS discipline, the       *)
-(*                                lock/claim/refund broadcasts, quote()    *)
-(*   src/db/evmSendSwaps.ts       from-state CAS, partial UNIQUE index     *)
-(*   src/evm/broadcast.ts         send-only broadcast: a hash comes back,  *)
-(*                                NO receipt/revert check (:91-95).  The   *)
-(*                                receipt is a SEPARATE read               *)
-(*                                (transactionOutcome, backend.ts:181-193) *)
-(*                                and only the planner acts on it.         *)
-(*   src/evm/blockTime.ts         seconds <-> blocks conversion            *)
-(*   src/evm/lockDepth.ts         the historical isLockedAt probe          *)
+(*   packages/solver-core/src/                                             *)
+(*     core/evmSendPlan.ts        [plan] the pure planner:                 *)
+(*                                (row, observation) -> action.  THE EDGE  *)
+(*                                AUTHORITY - the EVM stores have no       *)
+(*                                LEGAL_EDGES table (see below).           *)
+(*   packages/solver-corridors-evm/src/                                    *)
+(*     send/evmOrchestrator.ts    [orchestrator] the I/O shell: CAS        *)
+(*                                discipline, the lock/claim/refund        *)
+(*                                broadcasts, quote()                      *)
+(*     db/evmSendSwaps.ts         from-state CAS, partial UNIQUE index     *)
+(*     corridors/evmCorridors.ts  the registered corridor and its park()   *)
+(*   packages/solver-rails-evm/src/                                        *)
+(*     evm/broadcast.ts           [broadcast] createEvmBroadcaster:        *)
+(*                                send-only, a hash comes back and NO      *)
+(*                                receipt/revert check.  The receipt is a  *)
+(*                                SEPARATE read (transactionOutcome in     *)
+(*                                evm/backend.ts) and only the planner     *)
+(*                                acts on it.                              *)
+(*     evm/backend.ts             the contract reads: isLocked, the Claim  *)
+(*                                log scan, transactionOutcome             *)
+(*     evm/blockTime.ts           seconds <-> blocks conversion            *)
+(*     evm/lockDepth.ts           provenDepth, the historical isLockedAt   *)
+(*                                probe                                    *)
+(*     evm/nonce.ts               createNonceSource, one mark per account  *)
 (*                                                                         *)
 (* THE PLANNER/PLAN SPLIT, AND WHAT IT CHANGES HERE                        *)
 (*                                                                         *)
@@ -38,7 +49,7 @@
 (* THE PRE-SWITCH RULE IS A GLOBAL INTERRUPT                               *)
 (*                                                                         *)
 (* planEvmSend checks the preimage BEFORE the state switch                 *)
-(* (evmSendPlan.ts:98-110), from EVERY non-terminal state:                 *)
+(* (plan RULE 4, above the state switch), from EVERY non-terminal state:   *)
 (*   P seen, wall clock < refundLocktime  -> claim_arkade                  *)
 (*   P seen, wall clock >= refundLocktime -> stick                         *)
 (* That is why the edge table has -> claiming and -> stuck from every      *)
@@ -49,9 +60,9 @@
 (*                                                                         *)
 (* The Arkade deadlines (validUntil, refundLocktime) compare against WALL  *)
 (* seconds; the ERC20 refund timeout compares against BLOCK HEIGHT.  The   *)
-(* only bridge is the quote-time conversion (evmOrchestrator.ts:459):      *)
+(* only bridge is the quote-time conversion in orchestrator's quote():     *)
 (* evmTimeout is stored as a height via blocksForDuration, floored at the  *)
-(* SLOWEST cadence (blockTime.ts:103-107), so the timeout always arrives   *)
+(* SLOWEST cadence (blocksForDuration), so the timeout always arrives      *)
 (* no earlier in wall time than the naive estimate.  This module models    *)
 (* height as a second clock advancing inside a cadence band:               *)
 (*                                                                         *)
@@ -63,24 +74,24 @@
 (*                                                                         *)
 (* WHAT IS DELIBERATELY ABSTRACTED AWAY                                    *)
 (*                                                                         *)
-(*  - The ERC20 approval dance (approve/reset-approve, erc20Token.ts).     *)
+(*  - The ERC20 approval dance (approve/reset-approve, evm/erc20Token.ts). *)
 (*    It precedes the lock call in the same broadcast sequence; a crash    *)
 (*    there leaves no lock and no row change, which Crash already covers.  *)
 (*  - Token units, prices, 256-bit amounts.  Every swap is `Amount`.       *)
 (*  - The lockDepth probe's two thresholds (minConfirmations AND           *)
 (*    minAgeSeconds) are one "depth reached" step here: both are read off  *)
-(*    the same probe block (lockDepth.ts:72-84) and a failed probe is      *)
+(*    the same probe block (provenDepth) and a failed probe is             *)
 (*    UNPROVEN, never absent - which is exactly "depth not reached yet".   *)
 (*  - The contract's internal storage.  `evm` below IS the lock flag and   *)
-(*    its disposition: claim deletes the flag on claim (backend.ts:109-110)*)
-(*    and refund deletes it on refund, so absence is final.               *)
+(*    its disposition: claim deletes the flag on claim (backend's isLocked)*)
+(*    and refund deletes it on refund, so absence is final.                *)
 (*  - The sats covenant's construction.  `arkFund` is "the client's sats   *)
 (*    sit at the covenant"; the spending leaves are SwapCore's `conf`.     *)
 (*                                                                         *)
 (* MODELLING DECISIONS THAT ARE ASSUMPTIONS, NOT FACTS                     *)
 (*                                                                         *)
 (*  (A1) `LockCommitFirst`.  The shell CASes quoted -> locking_evm BEFORE  *)
-(*       the lock broadcast (evmOrchestrator.ts:281, comment :277-280),    *)
+(*       the lock broadcast (orchestrator's lock_evm arm),                 *)
 (*       so a second worker that read `quoted` loses its CAS and the       *)
 (*       planner has no re-broadcast branch from locking_evm: at most one  *)
 (*       lock call ever goes out.  The mutation broadcasts BEFORE the      *)
@@ -100,9 +111,9 @@
 (*  (A3) `ClaimLands`.  claimArkade is modelled as needing only serverUp   *)
 (*       and an unspent covenant; the send corridor never re-reads the     *)
 (*       outcome because `claiming` maps to `wait` in the planner          *)
-(*       (evmSendPlan.ts:176-178).  See THE PARKED STATES below.           *)
+(*       (plan, case refunding_evm).  See THE PARKED STATES below.         *)
 (*  (A4) `RefundSeesClaim`.  SHIPPED, not an open assumption               *)
-(*       (evmSendPlan.ts:165-174): `refunded` is written only for a        *)
+(*       (plan RULE 7): `refunded` is written only for a                   *)
 (*       refund whose own receipt says it MINED.  The row used to record   *)
 (*       it at SEND time, so a client claim that won the block race left   *)
 (*       a terminal row saying `refunded` over tokens the client held -    *)
@@ -127,10 +138,10 @@
 (*       sends that case to `stuck`, which NoSilentLoss permits from any   *)
 (*       exposed state.                                                    *)
 (*  (A5) `ScanFollowsTheRow`.  SHIPPED, not an open assumption             *)
-(*       (evmOrchestrator.ts:247-248): the preimage scan opens on the      *)
+(*       (orchestrator's observe()): the preimage scan opens on the        *)
 (*       ROW having entered locking_evm, not on the patched txid.  The     *)
 (*       txid patch is still a separate write after the lock broadcast     *)
-(*       (:357) and a crash between them still leaves evm_lock_txid        *)
+(*       and a crash between them still leaves evm_lock_txid               *)
 (*       null forever - it just no longer blinds the scan, which is the    *)
 (*       whole point of moving the gate.  The mutation restores the txid   *)
 (*       gate and NoNetLoss fails.  Finding F2, fixed.                     *)
@@ -188,7 +199,7 @@
 (*       nothing here claims the code recovers such a lock.                *)
 (*                                                                         *)
 (*  (A7) `TimeoutRefundCoversPresent`.  SHIPPED, not an open assumption    *)
-(*       (evmSendPlan.ts:141-155): the locking_evm timeout refund fires at *)
+(*       (plan, case locking_evm): the timeout refund fires at             *)
 (*       the height timeout whatever the lock's presence says.  It used to *)
 (*       require the lock ABSENT, so a lock present but never proven deep  *)
 (*       - the depth probe reads a failed node as UNPROVEN, never absent - *)
@@ -199,15 +210,15 @@
 (*       restores the absence condition and NoNetLoss fails.  Finding F5,  *)
 (*       fixed.                                                            *)
 (*  (A8) `ResendUnrecordedRefund`.  SHIPPED, not an open assumption        *)
-(*       (evmSendPlan.ts:176-182): a `refunding_evm` row whose             *)
+(*       (plan RULE 8): a `refunding_evm` row whose                        *)
 (*       evm_refund_txid is NULL sends a refund, given a present lock past *)
-(*       its timeout.  Null is not "unmined" - it is "the send threw, or a *)
-(*       crash landed before the patch" (evmOrchestrator.ts:380-384), and  *)
-(*       refundOutcome() answers `pending` for it because there is nothing *)
-(*       to ask.  The row then waited on a receipt that would never exist  *)
-(*       while the lock sat claimable; the client took the ERC20 and its   *)
-(*       own sats at the wall locktime.  The mutation deletes the resend   *)
-(*       and NoNetLoss fails.  Finding F6, fixed.                          *)
+(*       its timeout.  Null is not "unmined" - it is "the send threw, or   *)
+(*       a crash landed before the record" (orchestrator's refund_evm      *)
+(*       arm), and refundOutcome() answers `pending` for it because there  *)
+(*       is nothing to ask.  The row then waited on a receipt that would   *)
+(*       never exist while the lock sat claimable; the client took the     *)
+(*       ERC20 and its own sats at the wall locktime.  The mutation        *)
+(*       deletes the resend and NoNetLoss fails.  Finding F6, fixed.       *)
 (*                                                                         *)
 (*       THE BROADCAST IS NOW A SEPARATE STEP from the CAS, which is what  *)
 (*       lets the module reach that state at all: it used to set           *)
@@ -216,7 +227,7 @@
 (*                                                                         *)
 (*       ONE HALF IS DELIBERATELY NOT MODELLED.  `refundSent` here means   *)
 (*       RECORDED, so a broadcast that reached the mempool and lost its id *)
-(*       (a crash between :381 and :384) reads the same as one never sent. *)
+(*       (a crash between broadcast and record) reads the same as unsent.  *)
 (*       The code resends there too and the second refund reverts against  *)
 (*       a lock the first already took - harmless, and the row waits as it *)
 (*       did before.  Modelling it would need a second boolean per swap to *)
@@ -229,11 +240,11 @@
 (* it a receipt to read, so it leaves on its own for `refunded`, `stuck`   *)
 (* or (via the pre-switch rule) `claiming`.  It still parks in the one     *)
 (* window the receipt cannot reach: a crash between the refund broadcast   *)
-(* and the txid patch (evmOrchestrator.ts:382-392) leaves nothing to ask   *)
-(* about, the mirror of (A5) on the lock side.  A parked row is            *)
-(* NON_TERMINAL, EXPOSED and holding cap with no `stuck` escalation of     *)
-(* its own; an operator can still force one (evmCorridors.ts:209 parks     *)
-(* any non-terminal row), which is not modelled here.                      *)
+(* and the txid record (orchestrator's refund_evm arm, claimRefundTxid)    *)
+(* leaves nothing to ask about, the mirror of (A5) on the lock side.  A    *)
+(* parked row is NON_TERMINAL, EXPOSED and holding cap with no `stuck`     *)
+(* escalation of its own; an operator can still force one (evmCorridors.ts *)
+(* park(), which parks any non-terminal row), which is not modelled here.  *)
 (* The money outcome is still bounded (NoNetLoss / NoSilentLoss), and      *)
 (* Liveness below is stated so the parked states count as outcomes -       *)
 (* anything stricter is red for reasons that have nothing to do with       *)
@@ -243,26 +254,26 @@
 (*                                                                         *)
 (*  1. The CAS-before-broadcast order in lock_evm, and the pre-switch      *)
 (*     preimage rule's precedence over every state branch.                 *)
-(*  2. The ROW-STATE gate on the preimage scan (evmOrchestrator.ts:249):   *)
+(*  2. The ROW-STATE gate on the preimage scan (orchestrator's observe()): *)
 (*     the scan opens once the row has ENTERED locking_evm.  Both other    *)
 (*     gates are wrong and each loses money.  Gating on lock PRESENCE      *)
 (*     hides exactly the claims that matter, because the contract DELETES  *)
 (*     the lock flag on claim.  Gating on the patched evm_lock_txid reads  *)
-(*     one write too late: that patch lands AFTER the broadcast (:357), so *)
+(*     one write too late: that patch lands AFTER the broadcast, so        *)
 (*     a crash between them blinds the scan forever - which was F2.  The   *)
 (*     locking_evm CAS PRECEDES the broadcast, so it is the earliest gate  *)
 (*     that still cannot see a claim before a lock could exist.            *)
-(*  3. evm_timeout is a HEIGHT, never seconds (evmOrchestrator.ts:459).    *)
+(*  3. evm_timeout is a HEIGHT, never seconds (orchestrator's quote()).    *)
 (*  4. The locking_evm timeout refund is NOT conditioned on the lock's     *)
-(*     presence (evmSendPlan.ts:141-155).  Conditioning it was F5.         *)
+(*     presence (plan, case locking_evm).  Conditioning it was F5.         *)
 (*  5. A NULL evm_refund_txid is not a pending refund.  From               *)
 (*     refunding_evm, a null txid over a present lock past its timeout     *)
-(*     SENDS one (evmSendPlan.ts:176-182); the recorded txid is what stops *)
+(*     SENDS one (plan RULE 8); the recorded txid is what stops            *)
 (*     it firing twice, so a rewrite that records the id BEFORE the        *)
 (*     broadcast reintroduces F6 in the window it was meant to close.      *)
 (*     The resend must also skip the state write - the row is already      *)
 (*     refunding_evm and a self-transition falsifies the event log         *)
-(*     (evmOrchestrator.ts:380-382).                                       *)
+(*     (orchestrator's refund_evm arm).                                    *)
 (*  6. TERMINAL IS NOT UNOBSERVED.  A `stuck` or `refunded` row that once  *)
 (*     entered locking_evm keeps being read against the contract until its *)
 (*     wall refundLocktime, because the lock it closed over may still be   *)
@@ -396,7 +407,7 @@ HeightSane == clock >= evmHeight * FastCad
 (* GUARDS over the worker's snapshot.                                      *)
 (***************************************************************************)
 \* The preimage scan, gated on THE ROW HAVING ENTERED locking_evm - the
-\* honest guard of evmOrchestrator.ts:247-248.  Gating on lock PRESENCE
+\* honest guard of orchestrator's observe().  Gating on lock PRESENCE
 \* would hide claims, because the contract deletes the flag on claim; gating
 \* on the patched TXID read one write too late, because the patch lands
 \* after the broadcast (A5).  The CAS into locking_evm precedes the
@@ -505,7 +516,7 @@ ClientRefundsArkade(s) ==
 (***************************************************************************)
 \* store.get(id) plus the one Promise.all snapshot (funded / lockPresent /
 \* height) and the gated preimage scan - all sampled in one breath,
-\* evmOrchestrator.ts:192-223.  res compresses what the planner needs.
+\* orchestrator's observe().  res compresses what the planner needs.
 ReadSwap(w, s) ==
     /\ ReadRowWith(w, s, Drivable,
            CASE st[s] = "none" ->
@@ -526,7 +537,7 @@ GiveUp(w) ==
           /\ evm[loc[w].swap] = "none"
           /\ HeightUp
        \* THE SHELL ALWAYS PARKS HERE.  `refund_evm` ends with return false
-       \* (evmOrchestrator.ts:388), so the tick loop exits and the recording
+       \* (orchestrator's refund_evm arm), so the tick loop exits and the recording
        \* is a LATER tick's decision off a fresh read - RecordEvmRefund's own
        \* comment says as much.  Holding the phase is the over-approximation;
        \* parking is the shipped behaviour, so an unconditional arm would be
@@ -547,7 +558,7 @@ GiveUp(w) ==
 Crash(w) == CrashCore(w) /\ UNCHANGED LsVars
 
 \* (A5) THE WRITE ORDER, no longer a money assumption.  The txid patch is a
-\* separate write after the lock broadcast (evmOrchestrator.ts:357), so a
+\* separate write after the lock broadcast (orchestrator's lock_evm arm), so a
 \* crash between them leaves evm_lock_txid null forever.  That is still
 \* true of the shipped code; it stopped costing anything when the scan gate
 \* moved to the row's own state (ScanFollowsTheRow).  TxidPatchAtomic now
@@ -557,7 +568,7 @@ Crash(w) == CrashCore(w) /\ UNCHANGED LsVars
 \*
 \* quote(): the INSERT, cap-checked at read; AtomicAdmission = FALSE drops
 \* the re-check here, which is the admission race the reservation lease
-\* closes in the shipped code (evmOrchestrator.ts:500-505).
+\* closes in the shipped code (orchestrator's quote(), admission.reserve).
 InsertQuote(w, s) ==
     /\ Saw(w, s, "none")
     /\ loc[w].res \in { "capOk", "capFull" }
@@ -638,7 +649,7 @@ PatchTxid(w, s) ==
     /\ UNCHANGED << arkFund, evm, evmConfirmed, lockSends, refundSent >>
 
 \* The depth probe says final.  Measured, never fed back from config
-\* (evmOrchestrator.ts:240-250); modelled as one environment step.
+\* (orchestrator's observe(), the findClaimPreimage scan); one step here.
 ConfirmEvmLock(s) ==
     /\ evm[s] = "locked"
     /\ ~evmConfirmed[s]
@@ -657,8 +668,8 @@ RecordLock(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LsVars
 
-\* refund_evm.  From locking_evm (evmSendPlan.ts:141-155) and from
-\* awaiting_claim (:160-161) alike, the height timeout is now the whole
+\* refund_evm.  From locking_evm (plan, case locking_evm) and from
+\* awaiting_claim (plan, case awaiting_claim) alike, the height timeout is
 \* condition - the two states agree.  (A7): requiring the lock ABSENT, as
 \* locking_evm used to, defeats the whole margin whenever the lock is
 \* present but never proven deep, because the timeout exists to end the
@@ -681,7 +692,7 @@ SubmitEvmRefund(w, s) ==
                     lockSends, refundSent >>
 
 \* (A8) THE BROADCAST, a SEPARATE step from the CAS.  The shell transitions
-\* the row, then sends, then patches the txid (evmOrchestrator.ts:380-384);
+\* the row, then sends, then records the txid (orchestrator's refund_evm arm);
 \* a throw at the send or a crash before the patch leaves a row that says
 \* refunding_evm with nothing to ask about.  The phase is HELD rather than
 \* parked so RecordEvmRefund stays reachable - the PatchTxid trap.
@@ -703,7 +714,7 @@ BroadcastRefund(w, s) ==
 
 \* (A8) THE RESEND.  `refunding_evm` with no refund on record is not a row
 \* waiting on a receipt, it is a row with nothing in flight: the planner
-\* reads evm_refund_txid null and sends one (evmSendPlan.ts:176-182).  The
+\* reads evm_refund_txid null and sends one (plan RULE 8).  The
 \* guard is the lock's PRESENCE plus the timeout, so the resend only fires
 \* where it can succeed, and recording the txid is what bounds it to one.
 ResendEvmRefund(w, s) ==
@@ -730,7 +741,7 @@ RefundMines(s) ==
     /\ UNCHANGED << arkFund, evmConfirmed, lockTxid, lockSends, refundSent >>
 
 \* The recording CAS, and (A4) its receipt check.  RefundSeesClaim = TRUE
-\* is the SHIPPED planner (evmSendPlan.ts:165-174): `refunded` is written
+\* is the SHIPPED planner (plan RULE 7): `refunded` is written
 \* only for a refund the receipt says MINED.  The single arm is the point
 \* - see (A4) for why "there was nothing to refund" is not a second one.
 \* RefundSeesClaim = FALSE drops the check and writes the word over any
@@ -791,7 +802,7 @@ SubmitArkClaim(w, s) ==
 \* The recording CAS.  A crash before it leaves `claiming` parked with the
 \* outcome already final on the covenant.
 \* the shell records `claimed` only after claimArkade RETURNS
-\* (evmOrchestrator.ts:327-328), so a thrown claim never records.
+\* (orchestrator's claim_arkade arm), so a thrown claim never records.
 RecordClaimed(w, s) ==
     /\ Saw(w, s, "claiming")
     /\ conf[s] = { "solverClaim" }
@@ -881,7 +892,7 @@ AtMostOneOutcome == AtMostOneOutcomeInv
 ExposureBounded  == ExposureBoundedBy(NonTerminal)
 
 \* Edge-table assertions.  The EVM stores have no LEGAL_EDGES table - these
-\* pin the PLANNER's action set instead (evmSendPlan.ts), which is the
+\* pin the PLANNER's action set instead (plan), which is the
 \* authority a Go rewrite must reproduce.
 RefusedUnreachableFromExposed ==
     \A x \in Exposed : "refused" \notin Edges[x]
@@ -946,7 +957,7 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*     crash between them left it shut forever over a lock that existed:   *)
 (*     the client claimed invisibly, the timeout refund took the row and   *)
 (*     the sats refund took the rest.  The gate is now the row's own state *)
-(*     (evmOrchestrator.ts:247-248), which the CAS sets BEFORE the         *)
+(*     (orchestrator's observe()), which the CAS sets BEFORE the           *)
 (*     broadcast, so EvmSend_BlindScan.cfg is a genuine mutation - it      *)
 (*     restores the txid gate - and EvmSend_LostPatch.cfg is its control:  *)
 (*     the same lost patch, the shipped gate, green.                       *)
@@ -955,7 +966,7 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*     that won the block race left a terminal row lying over the money,   *)
 (*     and terminal ended the preimage scan that was the swap's way out.   *)
 (*     The shipped planner now records only a MINED refund                 *)
-(*     (evmSendPlan.ts:165-174), so EvmSend_NoReceipt.cfg is a genuine     *)
+(*     (plan RULE 7), so EvmSend_NoReceipt.cfg is a genuine                *)
 (*     mutation - it deletes the shipped check - rather than a record of   *)
 (*     shipped behaviour.                                                  *)
 (* F4  (A6) THE LATE LOCK - STILL OPEN, and NARROWED rather than closed.   *)
@@ -972,10 +983,10 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*     nobody coming for it - is (A8), fixed.  The residue needs the lock  *)
 (*     to land AND the client's claim to beat a refund that IS in flight:  *)
 (*     both transactions leave one solver EOA through one monotonic nonce  *)
-(*     source (broadcast.ts:69, nonce.ts:80-82), so the refund cannot mine *)
+(*     source (broadcast, via createNonceSource), so the refund cannot mine*)
 (*     before the lock and ordinarily takes the tokens back the block      *)
 (*     after.  What defeats that is the nonce mark not surviving a restart *)
-(*     (nonce.ts:28-33): the refund can be issued at the LOCK's nonce and  *)
+(*     (nonce.ts header): the refund can be issued at the LOCK's nonce and *)
 (*     lose the replacement race, after which the lock lands with a dead   *)
 (*     refund behind it.  Closing THAT needs the solver to spend the       *)
 (*     lock's nonce on a deliberate replacement - a cancel that races the  *)
@@ -996,7 +1007,7 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*     exist: refundOutcome() answers `pending` for a null txid because    *)
 (*     there is nothing to ask, and `pending` reached no branch.  The lock *)
 (*     stayed present and claimable and the client took both legs.  The    *)
-(*     planner now sends one (evmSendPlan.ts:176-182), so                  *)
+(*     planner now sends one (plan RULE 8), so                             *)
 (*     EvmSend_LostRefund.cfg is a genuine mutation of a shipped guard.    *)
 (*     Reachable with LockLandsPromptly = TRUE - it never needed F4.       *)
 (* F5  (A7) THE STRANDED LOCK - FIXED.  The locking_evm timeout refund     *)
@@ -1004,8 +1015,8 @@ ESSpendKinds == { "solverClaim", "clientRefund" }
 (*     deep (the depth probe's failed read is UNPROVEN, never absent -     *)
 (*     lockDepth.ts) withheld the very timeout that ends the client's      *)
 (*     option, and the client took both legs at the wall locktime.  The    *)
-(*     branch now reads the timeout before the presence (evmSendPlan.ts:   *)
-(*     141-155), so EvmSend_LockStrand.cfg is a genuine mutation - it      *)
+(*     branch now reads the timeout before the presence (plan, case        *)
+(*     locking_evm), so EvmSend_LockStrand.cfg is a genuine mutation - it  *)
 (*     restores the absence condition - rather than a record of shipped    *)
 (*     behaviour.                                                          *)
 (*                                                                         *)

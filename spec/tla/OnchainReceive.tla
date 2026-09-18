@@ -4,33 +4,41 @@
 (*                                                                         *)
 (* WHICH TYPESCRIPT THIS SPECIFIES                                         *)
 (*                                                                         *)
-(*   src/db/onchainReceiveSwaps.ts   the durable row, LEGAL_EDGES,         *)
-(*                                   transition(), patch(), fail(),        *)
-(*                                   committedSats(), findRecoverable()    *)
-(*   src/receive/onchainOrchestrator.ts  the whole state machine: quote(),  *)
-(*                                   tick(), tickAll(), step(), whenQuoted, *)
-(*                                   whenAwaitingConfirmations,            *)
-(*                                   whenFundingArkade, whenAwaitingClaim,  *)
-(*                                   whenClaimed, whenRefundingArkade      *)
-(*   src/core/onchainReceive.ts      htlcLocktimeFor,                      *)
-(*                                   arkadeRefundLocktimeFor,              *)
-(*                                   evaluateOnchainReceiveAcceptance,     *)
-(*                                   evaluateOnchainReceiveFunding,        *)
-(*                                   MIN_ARKADE_FUND_WINDOW,               *)
-(*                                   SETTLE_SAFETY_MARGIN,                 *)
-(*                                   MAX_REFUND_HORIZON, MIN_SETTLE_WINDOW,*)
-(*                                   DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT*)
-(*   src/receive/onchainArkadeOps.ts findLockups / findLockupOutpoints /   *)
-(*                                   findClaimPreimage / fund / refund     *)
-(*   src/receive/fundLockup.ts       the solver's own float leaving        *)
-(*   src/onchain/claim.ts            the L1 sweep (no CLTV on the claim    *)
-(*                                   leaf; sequence 0xfffffffd, RBF)       *)
-(*   src/receive/orchestrator.ts:86-99  EMPTY_LOCKUP_GRACE                 *)
-(*   packages/solver-app/src/worker.ts                   the queue fan-out and its safety claim*)
+(*   packages/solver-corridors/src/                                        *)
+(*     db/onchainReceiveSwaps.ts    the durable row, LEGAL_EDGES, the      *)
+(*                                  SHAPE's live/exposed lists,            *)
+(*                                  findRecoverable(), and an overridden   *)
+(*                                  committedSats().  transition(),        *)
+(*                                  patch() and fail() come from           *)
+(*                                  db/baseSwapStore.ts.                   *)
+(*     receive/onchainOrchestrator.ts  the whole state machine: quote(),   *)
+(*                                  tick(), tickAll(), step(),             *)
+(*                                  whenQuoted, whenAwaitingConfirmations, *)
+(*                                  whenFundingArkade, whenAwaitingClaim,  *)
+(*                                  whenClaimed, whenRefundingArkade       *)
+(*     receive/onchainArkadeOps.ts  findLockups / findLockupOutpoints /    *)
+(*                                  findClaimPreimage / fund / refund      *)
+(*     receive/fundLockup.ts        the solver's own float leaving         *)
+(*     receive/orchestrator.ts      EMPTY_LOCKUP_GRACE, shared with the    *)
+(*                                  Lightning receive leg                  *)
+(*   packages/solver-core/src/                                             *)
+(*     core/onchainReceive.ts       htlcLocktimeFor,                       *)
+(*                                  arkadeRefundLocktimeFor,               *)
+(*                                  evaluateOnchainReceiveAcceptance,      *)
+(*                                  evaluateOnchainReceiveFunding,         *)
+(*                                  MIN_ARKADE_FUND_WINDOW,                *)
+(*                                  SETTLE_SAFETY_MARGIN,                  *)
+(*                                  MAX_REFUND_HORIZON, MIN_SETTLE_WINDOW, *)
+(*                                  DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT *)
+(*   packages/solver-rails/src/                                            *)
+(*     onchain/claim.ts             the L1 sweep (no CLTV on the claim     *)
+(*                                  leaf; sequence 0xfffffffd, RBF)        *)
+(*   packages/solver-app/src/                                              *)
+(*     worker.ts                    the queue fan-out and its safety claim *)
 (*                                                                         *)
 (* AUTHORITY FOR THE EDGE TABLE                                            *)
 (*                                                                         *)
-(* src/db/onchainReceiveSwaps.ts lines 64-75, verbatim:                    *)
+(* LEGAL_EDGES in db/onchainReceiveSwaps.ts:                               *)
 (*                                                                         *)
 (*   quoted:                 ['awaiting_confirmations', 'refused']         *)
 (*   awaiting_confirmations: ['funding_arkade', 'refused']                 *)
@@ -40,7 +48,7 @@
 (*   refunding_arkade:       ['claimed', 'refunded', 'stuck']              *)
 (*   settled:  []   refunded: []   refused:  []   stuck:    []             *)
 (*                                                                         *)
-(* plus src/db/onchainReceiveSwaps.ts:49-63                                *)
+(* plus the SHAPE's live/exposed lists                                     *)
 (*   NON_TERMINAL = quoted awaiting_confirmations funding_arkade           *)
 (*                  awaiting_claim claimed refunding_arkade                *)
 (*   EXPOSED      = funding_arkade awaiting_claim claimed refunding_arkade *)
@@ -75,7 +83,7 @@
 (* reversed from both send legs, because here the solver is the one who    *)
 (* funded a script.  `BreakDeadlineOrder` deletes the `htlcLocktime -      *)
 (* SETTLE_SAFETY_MARGIN` term from arkadeRefundLocktimeFor                 *)
-(* (src/core/onchainReceive.ts:75-76) and is the mandated mutation.        *)
+(* (arkadeRefundLocktimeFor) and is the mandated mutation.                 *)
 (*                                                                         *)
 (* TWO CONTESTED OUTPUTS, WITH DIFFERENT ARBITERS                          *)
 (*                                                                         *)
@@ -103,22 +111,22 @@
 (*                                                                         *)
 (*  - Amounts.  Every swap is `Amount` sats and the client's L1 HTLC is    *)
 (*    either exactly right or absent.  whenQuoted's exact-amount filter    *)
-(*    (:452) protects against adopting a partial/dust payment, which is a  *)
+(*    (in whenQuoted) protects against adopting a partial/dust payment, a  *)
 (*    pre-exposure concern; it cannot reach the money invariant.           *)
 (*  - The preimage column.  P is written in the SAME UPDATE as the edge    *)
-(*    into `claimed` (:634, :895), so `st[s] = "claimed"` already means "P *)
+(*    into `claimed` (whenAwaitingClaim, whenRefundingArkade), so "P       *)
 (*    is on disk and the L1 sweep needs nothing external".  A separate     *)
 (*    variable could only disagree with the state, which the code prevents.*)
-(*  - findClaimPreimage's hash verification (src/arkade/wallet.ts:315-354).*)
+(*  - findClaimPreimage's hash verification (arkade/wallet.ts).            *)
 (*    A witness of the right SHAPE is never trusted, only a matching HASH, *)
 (*    so a readable claim IS a valid P.  Modelling a bogus one adds a      *)
 (*    paid-and-uncollected terminal that `stuck` already covers.           *)
 (*  - covclaimd.  Modelled as "somebody claims the lockup, or nobody       *)
 (*    does" — which is exactly what whenAwaitingClaim does: it looks for a *)
-(*    spend and does not care who made it (:610-615).  cli.ts:444-449 does *)
+(*    spend and does not care who made it (whenAwaitingClaim).  cli.ts does*)
 (*    not configure a covclaimd at all, so a spec that REQUIRED covclaimd  *)
 (*    to act would not describe the shipped deployment.                    *)
-(*  - The reservation ledger (src/arkade/reservations.ts).  It is a second *)
+(*  - The reservation ledger (arkade/reservations.ts).  It is a second     *)
 (*    in-process guard that also evaporates in Go, but its failure mode is *)
 (*    liveness (a swap dies with VTXO_ALREADY_SPENT), not money.  See the  *)
 (*    report.                                                              *)
@@ -126,14 +134,14 @@
 (*    this leg too, but the only columns it may write (refund_outcome,     *)
 (*    arkade_refund_txid) are advisory and no automatic path reads them.   *)
 (*    NOTE this makes EMPTY_LOCKUP_GRACE's stated assumption ("nothing on  *)
-(*    this leg patches a row, so updatedAt does not move while we wait",   *)
-(*    :910-911) true today and unenforced tomorrow.                        *)
+(*    this leg patches a row, so updatedAt does not move while we wait")   *)
+(*    true today and unenforced tomorrow.                                  *)
 (*                                                                         *)
 (* MODELLING DECISIONS THAT ARE ASSUMPTIONS, NOT FACTS                     *)
 (*                                                                         *)
 (*  (A1) `FundIsIdempotent`.  arkade.fund -> fundLockup -> wallet.send     *)
 (*       carries NO idempotency key of any kind, and the orchestrator      *)
-(*       itself says so (:538-545).  The green model ASSUMES a Go rewrite  *)
+(*       itself says so.  The green model ASSUMES a Go rewrite             *)
 (*       adds one, exactly as LightningSend assumes the Lightning backend  *)
 (*       honours the derived key.  With it FALSE — today's TypeScript —    *)
 (*       NoDoublePay fails, and it fails WITHOUT a crash: two workers      *)
@@ -155,7 +163,7 @@
 (*       outpoint that is already in the mempool does not propagate.  With *)
 (*       it FALSE both spends sit in the mempool and the miner picks, and  *)
 (*       since the solver's claim tx is RBF-signalling                     *)
-(*       (src/onchain/claim.ts:44) the client can in principle fee-bump    *)
+(*       (buildOnchainClaimTx) the client can in principle fee-bump        *)
 (*       past it.  Green kept it TRUE and NOTHING EXERCISED THE FALSE      *)
 (*       BRANCH until OnchainReceive_MempoolRace.cfg was added: the only   *)
 (*       mutation knob on this corridor that no cfg ever flipped.  It      *)
@@ -171,7 +179,7 @@
 (*                                                                         *)
 (*  (A5) `ClaimFeeAffordable`.  whenClaimed refuses to broadcast when the  *)
 (*       fee at the current rate leaves less than ONCHAIN_DUST_SATS        *)
-(*       (:771-786) and parks the row in terminal `stuck` — on a leg with  *)
+(*       (whenClaimed) and parks the row in `stuck` — on a leg with        *)
 (*       NO operator retry command.  Green assumes fees never spike into   *)
 (*       that branch, which is an assumption about the fee market, not a   *)
 (*       property of the code.                                             *)
@@ -181,7 +189,7 @@
 (*       after an eviction would only re-enter states already reachable.   *)
 (*                                                                         *)
 (*  (A8) `SettleNeedsConfirmation`.  SHIPPED, not an open assumption      *)
-(*       (receive/onchainOrchestrator.ts:735-742): `settled` is written    *)
+(*       (whenClaimed's settle branch): `settled` is written               *)
 (*       only for a claim whose own `transactionOutcome` reports CONFIRMED.*)
 (*       The mutation records on the broadcast alone, which is what this   *)
 (*       corridor shipped before the fix, and NoSilentLoss then fails: the *)
@@ -210,13 +218,13 @@
 (* WHAT A GO IMPLEMENTER MUST PRESERVE                                     *)
 (*                                                                         *)
 (*  1. awaiting_confirmations -> funding_arkade is committed BEFORE        *)
-(*     arkade.fund (:532 then :594).  That ordering is right and is the    *)
+(*     arkade.fund (whenFundingArkade).  That ordering is right and is the *)
 (*     template; it is NOT sufficient on its own, because the row stays in *)
 (*     `funding_arkade` for the whole duration of the send and every       *)
 (*     worker that reads it there will send again.  Add a per-swap lease   *)
 (*     or a funding idempotency key.  See (A1) and SubmitArkFund.          *)
 (*  2. The confirmation depth is the ENTIRE reorg policy and it is checked *)
-(*     exactly once, at that same edge (:512).  Nothing re-validates it    *)
+(*     exactly once, at that same edge.  Nothing re-validates it           *)
 (*     after the solver has paid out.  See BreakConfirmations and note the *)
 (*     missing lower clamp: Math.min(x ?? 1, 6) with no Math.max(1, ...)   *)
 (*     makes `(output?.confirmations ?? 0) >= 0` vacuously true for a      *)
@@ -226,7 +234,7 @@
 (*     dead code; raising the horizon silently re-arms it.  See            *)
 (*     OnchainReceive_Broken.cfg and its control.                          *)
 (*  4. A late-but-valid claim must be re-read BEFORE every refund attempt  *)
-(*     (:892-896).  refunding_arkade -> claimed is a RECOVERY, not a       *)
+(*     (whenRefundingArkade).  refunding_arkade -> claimed is RECOVERY, not*)
 (*     failure: it is what turns a lost Arkade race into a swap the solver *)
 (*     can still settle on L1.                                             *)
 (*  5. FIXED.  `settled` used to record a BROADCAST and was                 *)
@@ -252,7 +260,7 @@ CONSTANTS
     FundIsIdempotent,    \* MUTATION: see (A1)
     LockupProvablySpent, \* COUNTERFACTUAL: whenFundingArkade's alreadyFunded read
                          \* is NOT spendableOnly.  FALSE is the shipped TypeScript
-                         \* (arkade.findLockups, :551) and is what every cfg here
+                         \* (arkade.findLockups, in whenFundingArkade) and is what every cfg here
                          \* sets; TRUE is the fix a Go rewrite should adopt.
     IndexerNeverLies,    \* MUTATION: see (A4)
     ClaimFeeAffordable,  \* MUTATION: see (A5)
@@ -263,7 +271,7 @@ CONSTANTS
 MinOf(a, b) == IF a <= b THEN a ELSE b
 
 (***************************************************************************)
-(* arkadeRefundLocktimeFor, src/core/onchainReceive.ts:75-76:              *)
+(* arkadeRefundLocktimeFor, in core/onchainReceive.ts:                     *)
 (*                                                                         *)
 (*   Math.min(htlcLocktime - SETTLE_SAFETY_MARGIN, now + MAX_REFUND_HORIZON)*)
 (*                                                                         *)
@@ -286,7 +294,7 @@ RefundLocktime ==
 (***************************************************************************)
 (* The constant ordering is the whole content of the timing guards.        *)
 (*                                                                         *)
-(* Real values, from src/core/onchainReceive.ts with minConfirmations = 1  *)
+(* Real values, from core/onchainReceive.ts with minConfirmations = 1      *)
 (* and T0 = quote time:                                                    *)
 (*                                                                         *)
 (*   client's funding deadline   T0 +   900   (DEFAULT_..._LOCKUP_TIMEOUT) *)
@@ -307,8 +315,8 @@ ASSUME MinConfirmations >= 1                     \* the missing Math.max(1, ...)
 (* reading that the margin term is what covers the tip lag.  That is FALSE  *)
 (* for the shipped constants and it names the wrong pair:                   *)
 (*                                                                         *)
-(*   SETTLE_SAFETY_MARGIN  900 s   (src/core/onchainReceive.ts:51)         *)
-(*   MTP lag              ~3600 s  (src/core/send.ts:39-42, the codebase's *)
+(*   SETTLE_SAFETY_MARGIN  900 s   (core/onchainReceive.ts)                *)
+(*   MTP lag              ~3600 s  (MIN_CLAIM_WINDOW, the codebase's       *)
 (*                                  own figure, and the reason              *)
 (*                                  MIN_CLAIM_WINDOW is 90 min not 15)      *)
 (*                                                                         *)
@@ -340,7 +348,7 @@ VARIABLES
                     \* never against wall clock.
     htlc,           \* [Swaps -> "none"|"seen"|"confirmed"|"gone"] the CLIENT's
                     \* L1 HTLC funding output.  "seen" = broadcast, 0 conf, and
-                    \* whenQuoted adopts it at that depth (:451-459).  "gone" =
+                    \* whenQuoted adopts it at that depth.  "gone" =
                     \* reorged away; only a "seen" output can be, which IS the
                     \* whole content of the min_confirmations policy.
     arkFund,        \* [Swaps -> 0..2] Arkade lockup fundings the solver's own
@@ -350,7 +358,7 @@ VARIABLES
     l1,             \* [Swaps -> SUBSET L1Spends] the CONFIRMED spend.  At most one.
     refEmptySeen    \* [Swaps -> BOOLEAN] EMPTY_LOCKUP_GRACE, abstracted: a
                     \* refunding_arkade row that reads empty may not be judged
-                    \* on ONE look (:898-917).
+                    \* on ONE look (whenRefundingArkade's grace).
 
 OrVars == << chainTime, htlc, arkFund, bcast, l1, refEmptySeen >>
 vars   == << clock, st, loc, conf, serverUp,
@@ -367,7 +375,7 @@ L1Spends     == { "solverClaim", "clientRefund" }   \* the L1 HTLC outpoint
 
 (***************************************************************************)
 (* THE EDGE TABLE.  Diff this against                                      *)
-(* src/db/onchainReceiveSwaps.ts:64-75.                                    *)
+(* LEGAL_EDGES in db/onchainReceiveSwaps.ts.                               *)
 (***************************************************************************)
 Row   == { "quoted", "awaiting_confirmations", "funding_arkade",
            "awaiting_claim", "claimed", "settled", "refunding_arkade",
@@ -395,9 +403,9 @@ Edges == [ x \in AllSt |->
 (*                                                                         *)
 (*   funding_arkade -> stuck    no fail() call site exists in this state    *)
 (*   awaiting_claim -> stuck    the missing-nonInteractiveClaim-leaf branch *)
-(*                              (:646-652); quote() always builds it        *)
+(*                              (whenAwaitingClaim); quote() always builds  *)
 (*   awaiting_confirmations -> refused via the "no funding txid/vout"       *)
-(*                              branch (:506-509); the CAS at :456-459      *)
+(*                              branch in whenAwaitingConfirmations         *)
 (*                              writes both columns in the same UPDATE      *)
 (*                                                                         *)
 (* ForwardOnly only constrains steps that are TAKEN, so an unmodelled edge *)
@@ -420,7 +428,7 @@ Drivable    == NonTerminal \cup { "none" }   \* findRecoverable(), plus quote()
 \* of the solver's own is at risk until awaiting_confirmations resolves.
 L1Exists(s)    == htlc[s] \in { "seen", "confirmed" }
 
-\* (output?.confirmations ?? 0) >= row.minConfirmations, :512.
+\* (output?.confirmations ?? 0) >= row.minConfirmations, in whenAwaitingConfirmations.
 \* THE MUTATION reproduces minConfirmations = 0 exactly: with `?? 0 >= 0` a
 \* MISSING output passes too, not merely a shallow one.
 HtlcDeepEnough(s) == BreakConfirmations \/ htlc[s] = "confirmed"
@@ -429,13 +437,13 @@ HtlcDeepEnough(s) == BreakConfirmations \/ htlc[s] = "confirmed"
 \* empties the INSTANT any spend of the lockup lands.
 ArkLockupSpendable(s) == arkFund[s] >= 1 /\ conf[s] = {}
 
-\* whenFundingArkade's alreadyFunded read, :551-552.  Because findLockups is
+\* whenFundingArkade's alreadyFunded read.  Because findLockups is
 \* spendableOnly it cannot tell "never funded" from "funded and already
 \* claimed" — the crash-then-claim hole.  The corridor already owns the reads
 \* that close it (findLockupOutpoints, unfiltered, is on the same ops
 \* interface two methods away; lockupProvablySpent is used by BOTH send legs
 \* and is deliberately absent from OnchainReceiveArkadeOps' Pick list,
-\* src/receive/onchainArkadeOps.ts:28-38).
+\* receive/onchainArkadeOps.ts).
 \*
 \* LockupProvablySpent = FALSE IS THE SHIPPED CODE and is what every cfg in
 \* this directory sets.  TRUE is the counterfactual in which the Go rewrite
@@ -458,13 +466,13 @@ AlreadyFunded(s) ==
 ClaimReadable(s)  == SpentBy(s, "clientClaim")
 ClaimReadsNull(s) == ~ClaimReadable(s) \/ ~IndexerNeverLies
 
-\* onchain.findSpendWitness (src/receive/onchainOrchestrator.ts:704-708), plus
+\* onchain.findSpendWitness (called from whenClaimed), plus
 \* any broadcast/mempool sighting — Esplora reports a mempool spend as spent,
 \* which is why `bcast` and not only `l1` counts here.  WitnessSeen itself
 \* stays truthiness-only, for the urgency arms and guards that care merely
 \* WHETHER some spend exists; the discriminator lives in the KIND-specific
 \* predicates below, the model's rendering of whenClaimed's ourClaim match
-\* (src/receive/onchainOrchestrator.ts:725-727) — a spend through the claim
+\* (whenClaimed's ourClaim branch) — a spend through the claim
 \* leaf is the only one that carries the row's preimage, and on this leg the
 \* claim path is the solver's own.  (The code shipped the discriminator
 \* first; the model adds it here.)
@@ -498,7 +506,7 @@ ArkRefunded(s) == SpentBy(s, "solverRefund")
 Collected(s) == L1Swept(s) \/ ArkRefunded(s)
 
 \* whenClaimed's own read of `transactionOutcome` on the txid it pre-committed
-\* (:735-742).  `confirmed` is the only answer that settles; `mempool` waits and
+\* (whenClaimed).  `confirmed` is the only answer that settles; `mempool` waits and
 \* `unknown` rebuilds.  The mutation is the shipped behaviour BEFORE that fix.
 SettleReadable(s) ==
     /\ OwnClaimSeen(s)
@@ -519,22 +527,22 @@ L1Gone(s)       == ~L1Exists(s) \/ ClientTookL1(s)
 (* re-evaluated on every tick, never once at quote time.                   *)
 (***************************************************************************)
 
-\* evaluateOnchainReceiveFunding, src/core/onchainReceive.ts:134-153.
+\* evaluateOnchainReceiveFunding, in packages/solver-core/src/core/onchainReceive.ts.
 \* `now >= arkadeRefundLocktime - MIN_ARKADE_FUND_WINDOW` refuses; written as
 \* addition so Naturals never goes negative.
 \*
-\* THE SAME PREDICATE gates creating the exposure (:514-521) and unwinding it
-\* (:665-672).  Consequence the spec makes visible: the solver starts refunding
+\* THE SAME PREDICATE gates creating the exposure and unwinding it
+\* (whenAwaitingConfirmations, whenAwaitingClaim).  Consequence: the solver refunds
 \* MIN_ARKADE_FUND_WINDOW before its own refund path is even open, so
 \* `refunding_arkade` is normally entered long before the CLTV matures and
 \* sits there retrying.
 FundGateOpen == clock + MinArkFundWindow < RefundLocktime
 
-\* whenQuoted's deadline, :453.
+\* whenQuoted's deadline.
 LockupTimedOut == clock >= LockupDeadline
 
 \* The covenant refund's absolute CLTV matures against the CHAIN TIP's
-\* timestamp, not wall clock (src/arkade/wallet.ts:572-575, :691-697).  Before
+\* timestamp, not wall clock (arkade/wallet.ts).  Before
 \* it does, the Arkade server rejects with FORFEIT_CLOSURE_LOCKED — which in
 \* the TypeScript is a THROW out of tick(), leaving the row exactly where it
 \* was for the next sweep.  Modelled as the action simply being disabled.
@@ -570,7 +578,7 @@ ConfirmHtlcFunding(s) ==
 
 \* A REORG EVICTS THE CLIENT'S FUNDING.  Only reachable while the output has
 \* not reached min_confirmations — which is the ENTIRE reorg policy of this
-\* corridor, checked once at :512 and never re-validated after the solver has
+\* corridor, checked once in whenAwaitingConfirmations and never re-validated
 \* paid out.  Any spend broadcast against the evicted outpoint dies with it.
 ReorgHtlcFunding(s) ==
     /\ htlc[s] = "seen"
@@ -666,8 +674,8 @@ ChainTick ==
 
 \* store.get(id) / findRecoverable(), and — in the same breath — whatever
 \* else the handler samples before it decides:
-\*   quote()             `admission.reserve` (deps.totalCommitted) (:288)
-\*   whenFundingArkade   `await arkade.findLockups(row.pkScript)` (:551)
+\*   quote()             `admission.reserve` (deps.totalCommitted)
+\*   whenFundingArkade   `await arkade.findLockups(row.pkScript)`
 \* ALWAYS a separate step from the write that follows, which is the whole
 \* point: every await in the TypeScript yields the event loop, and every
 \* goroutine boundary in Go yields the scheduler.  Sampling findLockups HERE
@@ -693,13 +701,13 @@ GiveUp(w) ==
 
 Crash(w) == CrashCore(w) /\ UNCHANGED OrVars
 
-(***** quote() : src/receive/onchainOrchestrator.ts:222-370 ****************)
+(***** quote() *************************************************************)
 
 \* insertQuote().  The partial UNIQUE index on payment_hash makes the INSERT
 \* itself single-winner, which is modelled by the CAS on "none".  There is NO
 \* equivalent backstop for the exposure cap: with AtomicAdmission = FALSE the
 \* insert trusts the admission.reserve lease taken earlier, which is today's
-\* TypeScript (:288, in-process only).  With TRUE the cap is re-checked by the write that
+\* TypeScript (quote()'s reserve, in-process only).  With TRUE the cap is re-checked by the write that
 \* consumes it, which is what a Go handler pool requires.
 InsertQuote(w, s) ==
     /\ Saw(w, s, "none")
@@ -716,7 +724,7 @@ InsertQuote(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OrVars
 
-(***** whenQuoted : :449-490 ***********************************************)
+(***** whenQuoted **********************************************************)
 
 \* An output of EXACTLY amount_sats is at the client's HTLC address.  Adopted
 \* at ANY depth — funding_txid and funding_vout are written in the same UPDATE
@@ -733,7 +741,7 @@ SeeHtlcFunding(w, s) ==
 
 \* Nothing arrived by created_at + DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT.
 \* Pre-exposure, so `refused` is the right terminal and this leg needs no
-\* refund sweep for it (src/db/onchainReceiveSwaps.ts:591-606).
+\* refund sweep for it (see db/onchainReceiveSwaps.ts's state documentation).
 RefuseQuoted(w, s) ==
     /\ Saw(w, s, "quoted")
     /\ ~L1Exists(s)
@@ -744,11 +752,11 @@ RefuseQuoted(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OrVars
 
-(***** whenAwaitingConfirmations : :504-533 ********************************)
+(***** whenAwaitingConfirmations *******************************************)
 
 \* THE INTENT COMMIT, and the one thing this corridor gets structurally right
 \* that the Lightning receive leg does not: the CAS into an EXPOSED state runs
-\* BEFORE the irreversible arkade.fund (:532 then :594).  What it does NOT
+\* BEFORE the irreversible arkade.fund (whenFundingArkade).  What it does NOT
 \* buy is exclusivity — the row stays in `funding_arkade` for the whole
 \* duration of the send, and every worker that reads it there will send again.
 \* See SubmitArkFund.
@@ -775,7 +783,7 @@ RefuseAwaiting(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OrVars
 
-(***** whenFundingArkade : :547-604 ****************************************)
+(***** whenFundingArkade ***************************************************)
 
 \* Crash recovery: this swap's own (unique) script already holds the money, so
 \* transition without funding again.  Asking the world what landed, instead of
@@ -793,11 +801,11 @@ AdoptFunding(w, s) ==
 
 \* THE IRREVERSIBLE ACT OF THIS CORRIDOR: the solver's own float leaves.
 \* arkade.fund -> fundLockup -> wallet.sendBitcoin, with NO idempotency key of
-\* any kind — the orchestrator says so itself at :538-545.  It happens BEFORE
+\* any kind — the orchestrator says so itself in whenFundingArkade.  Before
 \* the CAS that records it, and — critically — the enabling condition is a
 \* READ taken in an earlier step, so TWO workers can both hold res = "empty"
 \* and both send.  In TypeScript the only thing preventing that is the
-\* in-process `inFlight` Set (:193, :374-383) plus cli.ts's single sequential
+\* in-process `inFlight` Set plus cli.ts's single sequential
 \* watch loop.  The CAS below decides who RECORDS the outpoint, never who
 \* PAYS.  (A1) FundIsIdempotent is the assumption a Go rewrite must supply,
 \* by a durable per-swap lease or a client-side key the wallet honours.
@@ -834,10 +842,10 @@ RecordFunding(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OrVars
 
-(***** whenAwaitingClaim : :626-677 ****************************************)
+(***** whenAwaitingClaim ***************************************************)
 
 \* Somebody spent the lockup with a witness that hash-verifies against
-\* payment_hash.  WHO is not this method's business (:610-615) — the client's
+\* payment_hash.  WHO is not this method's business — the client's
 \* collaborative claim and covclaimd's nonInteractiveClaim reveal the same P.
 \* Checked BEFORE the reveal re-push and BEFORE the deadline backstop, so an
 \* observable claim always beats a refund decision on the same tick.
@@ -854,7 +862,7 @@ SeeArkadeClaim(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OrVars
 
-\* The deadline backstop, :661-675.  Reuses evaluateOnchainReceiveFunding —
+\* The deadline backstop in whenAwaitingClaim.  Reuses evaluateOnchainReceiveFunding —
 \* the SAME predicate that gated creating the exposure — so the solver starts
 \* unwinding MIN_ARKADE_FUND_WINDOW before its own refund path opens.
 \* Requires the preimage read to have returned null, because the code checks
@@ -869,11 +877,11 @@ ArmRefund(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OrVars
 
-(***** whenClaimed : :694-792 — THE SHARPEST WINDOW IN THE SYSTEM *********)
+(***** whenClaimed — THE SHARPEST WINDOW IN THE SYSTEM *********************)
 
 \* The outpoint is already spent by the CLIENT'S REFUND: htlc_locktime has
 \* passed and the client pulled its L1 HTLC back before the solver claimed
-\* it.  whenClaimed's fail() branch, src/receive/onchainOrchestrator.ts:736-740.
+\* it.  whenClaimed's fail() branch.
 \* `stuck` has no outgoing edge; the reason string names the client, and —
 \* unlike the code before the discriminator — that attribution is CORRECT, because the
 \* own-claim flavour is handled first.  The ~OwnClaimSeen conjunct is that
@@ -890,10 +898,10 @@ ClaimSeesPriorSpend(w, s) ==
 
 \* The solver's OWN claim sits at the outpoint: SubmitL1Claim broadcast it
 \* and the process died before RecordSettled's CAS, so the row still reads
-\* `claimed`.  whenClaimed's ourClaim branch, :725-734: the witness carries
+\* `claimed`.  whenClaimed's ourClaim branch: the witness carries
 \* the row's preimage, which only the claim leaf reveals, so the swap is
 \* recovered as `settled` — with onchain_claim_txid honestly left null, as
-\* the shipped comment argues (:729-733; the spec has no txid column to
+\* the shipped comment argues (the spec has no txid column to
 \* model).  Without the discriminator this read as a false-negative `stuck`; the
 \* truthiness-only behaviour is what ClaimSeesPriorSpend modelled until the
 \* discriminator was added here.
@@ -906,7 +914,7 @@ ClaimSeesOwnClaim(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OrVars
 
-\* The fee at the current rate leaves less than ONCHAIN_DUST_SATS, :771-786.
+\* The fee at the current rate leaves less than ONCHAIN_DUST_SATS.
 \* Refusing to build a non-standard transaction is right; parking a swap where
 \* the solver HAS ALREADY PAID OUT in a terminal state with no operator retry
 \* command is the part (A5) makes visible.
@@ -951,11 +959,11 @@ RecordSettled(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OrVars
 
-(***** whenRefundingArkade : :885-935 **************************************)
+(***** whenRefundingArkade *************************************************)
 
 \* THE BACK-EDGE, AND THE REASON THIS CORRIDOR IS WORTH SPECIFYING.  The
 \* solver decided to refund and the counterparty's claim landed instead.
-\* Re-read on EVERY tick and BEFORE any refund is pushed (:892-896), because
+\* Re-read on EVERY tick and BEFORE any refund is pushed, because
 \* the refund and the claim are competing spends of the same VTXO and the
 \* claim can land right up until the refund executes.  Losing that race is not
 \* a loss: the solver now has P and can still sweep the L1 HTLC — which is the
@@ -1001,7 +1009,7 @@ RecordRefunded(w, s) ==
     /\ UNCHANGED OrVars
 
 \* Nothing provably claimed it and nothing is left to refund.  EMPTY_LOCKUP_
-\* GRACE, :898-917: this may not be judged on ONE look, because findLockups
+\* GRACE: this may not be judged on ONE look, because findLockups
 \* (spendableOnly) empties the instant a claim lands while findClaimPreimage
 \* still has to fetch the spending transaction.  The 120-second timer is
 \* abstracted to "a second observation", which is exactly the property the
@@ -1046,7 +1054,7 @@ RefundSeesEmpty(w, s) ==
 (*   "SubmitArkFund needs res = 'empty', and after the first send every     *)
 (*   fresh read of the row yields 'funded', so it can fire at most once per *)
 (*   swap."  That holds only under LockupProvablySpent = TRUE.  The SHIPPED *)
-(*   read is arkade.findLockups, which is spendableOnly (:551), so once the *)
+(*   read is arkade.findLockups, which is spendableOnly, so once the        *)
 (*   client's claim lands the lockup reads EMPTY again and SubmitArkFund    *)
 (*   re-enables for ever.  Merged, SF on the group is then discharged by    *)
 (*   re-submitting a fund that never advances the row — exactly the trap    *)
@@ -1210,7 +1218,7 @@ NoSilentLoss == NoSilentLossShape(PaidOut, Collected, Terminal, "stuck")
 NoNetLoss == \A s \in Swaps : ~(ClientTookLockup(s) /\ L1Gone(s))
 
 \* Structural consequence of the edge table that this leg's ABSENCE of a
-\* refund sweep depends on (src/db/onchainReceiveSwaps.ts:591-606 argues it in
+\* refund sweep depends on (db/onchainReceiveSwaps.ts's state documentation
 \* prose): `refused` must be unreachable from every EXPOSED state, so a
 \* refused row can never have a lockup of the solver's own behind it.
 \* Asserted as a theorem over the table rather than trusted, because a Go
@@ -1247,7 +1255,7 @@ ChainTimeSane == chainTime <= clock /\ clock <= chainTime + MtpLag
 (* finds outputs.length > 0, throws again, and the row sits in              *)
 (* `refunding_arkade` with the solver's float out, forever.  The Lightning  *)
 (* send corridor escalates claiming -> stuck once past the deadline         *)
-(* (src/send/orchestrator.ts:1526-1536); this leg has no equivalent, and the*)
+(* (send/orchestrator.ts's whenClaiming); this leg has no equivalent, and   *)
 (* empty-lockup grace cannot help because the lockup is not empty.          *)
 (*                                                                         *)
 (* So the property is stated as an implication rather than weakened into    *)
@@ -1343,13 +1351,13 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (* MIN_ARKADE_FUND_WINDOW gate at the exposure-creating edge untouched and  *)
 (* an invariant set has to be shown to catch a guard its author did not     *)
 (* choose:  delete `FundGateOpen` from `FundGate` (the spec's rendering of  *)
-(* evaluateOnchainReceiveFunding at src/receive/onchainOrchestrator.ts:514, *)
-(* :665) and the green cfg reports NoNetLoss violated at depth 24 — the     *)
-(* solver funds Arkade at wall clock 4, the chain tip catches up, and the   *)
-(* client takes both legs (SubmitArkFund, ClientClaimsLockup, ChainTick,    *)
-(* ClientRefundsL1, ConfirmL1).  Distinct from                              *)
-(* BreakDeadlineOrder, which changes the FORMULA for R rather than removing *)
-(* the gate that consults it.  The invariants have teeth on both.           *)
+(* evaluateOnchainReceiveFunding, called from whenAwaitingConfirmations     *)
+(* and whenAwaitingClaim) and the green cfg reports NoNetLoss violated at   *)
+(* depth 24 — the solver funds Arkade at wall clock 4, the chain tip        *)
+(* catches up, and the client takes both legs (SubmitArkFund,               *)
+(* ClientClaimsLockup, ChainTick, ClientRefundsL1, ConfirmL1).  Distinct    *)
+(* from BreakDeadlineOrder, which changes the FORMULA for R rather than     *)
+(* removing the gate that consults it.  The invariants have teeth on both.  *)
 (*                                                                         *)
 (* KNOWN-VACUOUS IN THE GREEN CFG, and stated so the next reader does not   *)
 (* over-read the pass:                                                      *)
@@ -1364,11 +1372,11 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*     violate them.  They belong in THEOREMS, and are listed under         *)
 (*     INVARIANTS only so a cfg cannot forget them.                         *)
 (*   ClaimSeesPriorSpend  fires in NO cfg, green included.  Both claimed    *)
-(*     conjuncts are Urgent (:620-621) and Tick refuses to advance while    *)
+(*     conjuncts are Urgent and Tick refuses to advance while               *)
 (*     SolverBehind holds, so the row is driven out of `claimed` — by       *)
 (*     ClaimSeesOwnClaim, ClaimDust or RecordSettled — before chain time    *)
 (*     can reach HtlcLocktime and open the client's L1 refund leaf.  The    *)
-(*     shipped fail branch (:736-740) fires only when a crash loop          *)
+(*     shipped fail branch in whenClaimed fires only when a crash loop      *)
 (*     outlasts the settlement margin, a timing the urgency discipline      *)
 (*     excludes by construction.  Kept because the branch exists in the     *)
 (*     code; the split merely makes its unreachability here visible.        *)

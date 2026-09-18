@@ -5,8 +5,10 @@
 (* WHICH TYPESCRIPT THIS SPECIFIES                                         *)
 (*                                                                         *)
 (*   packages/solver-corridors/src/                                        *)
-(*     db/swaps.ts           the durable row, LEGAL_EDGES, transition(),   *)
-(*                           patch(), fail(), committedSats()              *)
+(*     db/swaps.ts           the durable row, LEGAL_EDGES, the SHAPE's     *)
+(*                           live/exposed lists.  transition(), patch(),   *)
+(*                           fail() and committedSats() are inherited      *)
+(*                           from db/baseSwapStore.ts.                     *)
 (*     send/orchestrator.ts  the whole state machine: step(), whenQuoted,  *)
 (*                           whenFunded, whenPaying, submitPayment,        *)
 (*                           claimWithPreimage, whenPaid,                  *)
@@ -74,7 +76,7 @@
 (*                                                                         *)
 (*  - Amounts and overfunding.  Every swap is `Amount` sats and a lockup   *)
 (*    is exactly right or absent.  The overfund refusal                    *)
-(*    (orchestrator.ts:468-471) protects the CLIENT, not the solver's      *)
+(*    (orchestrator's quote()) protects the CLIENT, not the solver's      *)
 (*    money invariant, so it is out of scope here.                         *)
 (*  - The preimage column.  The code writes P in the SAME UPDATE as        *)
 (*    paid->claiming, so `st[s] = "claiming"` already means "P is on disk  *)
@@ -85,7 +87,7 @@
 (*    routes it to `stuck`.  Modelling it adds a paid-and-uncollected      *)
 (*    terminal that `stuck` already covers, and adds a loss no guard in    *)
 (*    this corridor addresses.  See the report.                            *)
-(*  - The payInvoice-response preimage shortcut (orchestrator.ts:574).     *)
+(*  - The payInvoice-response preimage shortcut (submitPayment).     *)
 (*    It is a latency optimisation over the getPayment poll; both are      *)
 (*    LearnPreimage here.                                                  *)
 (*  - The event log, column allowlists, the idempotency-key STRING.  The   *)
@@ -98,9 +100,9 @@
 (*  (A1) HtlcMaxLifetime.  An in-flight Lightning payment must resolve     *)
 (*       within HtlcMaxLifetime ticks.  This is not charity: it is         *)
 (*       maxCltvBlocks = worstCaseHtlcBlocks(minFinalCltv) which LND       *)
-(*       ENFORCES as max_timeout_height (src/ln/lnd/adapter.ts:194-205),   *)
+(*       ENFORCES as max_timeout_height (lnd adapter, payInvoice),   *)
 (*       and it is the same number refundLocktimeFor priced the deadline   *)
-(*       against (src/core/send.ts:111-129).  ASSUME below requires        *)
+(*       against (core/send.ts, refundLocktimeFor).  ASSUME below requires        *)
 (*       HtlcMaxLifetime < MinClaimWindow, which IS the design constraint. *)
 (*       On a backend with no way to express that ceiling, the assumption  *)
 (*       is only a hope, and that is a finding, not a model bug.           *)
@@ -123,7 +125,7 @@
 (*       client can only be LATER than this.  Modelling the earliest       *)
 (*       legal instant is the conservative direction for the solver.       *)
 (*       MIN_CLAIM_WINDOW is 90 minutes precisely to cover that lag        *)
-(*       (src/core/send.ts:38-44); the model collapses the lag into the    *)
+(*       (core/send.ts, MIN_CLAIM_WINDOW); the model collapses the lag into    *)
 (*       constant ordering HtlcMaxLifetime < MinClaimWindow.               *)
 (*                                                                         *)
 (* WHAT A GO IMPLEMENTER MUST PRESERVE                                     *)
@@ -286,7 +288,7 @@ ProofSatsNeverLeft(s) == pay[s] \in { "none", "failed" }
 (* quote time and never when the lockup was first seen.                    *)
 (***************************************************************************)
 
-\* evaluateSendPayment, src/core/send.ts:225-251.
+\* evaluateSendPayment, in packages/solver-core/src/core/send.ts.
 \* Subtraction is written as addition throughout so Naturals never goes negative.
 PayGateOpen ==
     /\ clock < InvoiceExpiry                                \* invoice_expired
@@ -294,7 +296,7 @@ PayGateOpen ==
     /\ ( BreakClaimWindow                                   \* <<< THE MUTATION
          \/ clock + MinClaimWindow <= RefundLocktime )      \* claim_window_too_short
 
-\* whenQuoted's two deadlines, src/send/orchestrator.ts:459, 483-503.
+\* whenQuoted's two deadlines, in send/orchestrator.ts.
 LockupTimedOut == clock >= LockupDeadline \/ clock >= InvoiceExpiry
 
 --------------------------------------------------------------------------
@@ -303,7 +305,7 @@ LockupTimedOut == clock >= LockupDeadline \/ clock >= InvoiceExpiry
 (***************************************************************************)
 
 \* The client locks up the exact amount.  May be on time or late; a late one
-\* must be refused, never paid (orchestrator.ts:483-503).
+\* must be refused, never paid (whenQuoted).
 ClientFunds(s) ==
     /\ st[s] = "quoted"
     /\ ~lockup[s]
@@ -315,7 +317,7 @@ ClientFunds(s) ==
 \* "succeeded", "failed" (only on the adapter's terminal allowlist), and
 \* "inflight" — everything unrecognised, every timeout, every dropped
 \* connection stays pending, because calling a live payment dead is the costly
-\* direction (src/ln/lnd/adapter.ts:55-63).  "inflight" persists across ticks;
+\* direction (lnd adapter, FAILED_PAYMENT_REASONS).  "inflight" persists;
 \* see (A1) for why it cannot persist forever.
 ResolvePayment(s) ==
     /\ pay[s] = "inflight"
@@ -457,7 +459,7 @@ GiveUp(w) ==
 
 Crash(w) == CrashCore(w) /\ UNCHANGED LsVars
 
-(***** quote() : src/send/orchestrator.ts:210-304 **************************)
+(***** quote() *************************************************************)
 
 \* insertQuote().  The partial UNIQUE index on payment_hash makes the INSERT
 \* itself single-winner, which is modelled by the CAS on "none".  There is NO
@@ -480,7 +482,7 @@ InsertQuote(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LsVars
 
-(***** whenQuoted : src/send/orchestrator.ts:454-503 ***********************)
+(***** whenQuoted **********************************************************)
 
 \* arkade.findLockups() saw the exact amount, in time.  Note the indexer is
 \* allowed to LAG: a worker may simply not take this action even though
@@ -507,7 +509,7 @@ RefuseQuoted(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LsVars
 
-(***** whenFunded : src/send/orchestrator.ts:506-531 ***********************)
+(***** whenFunded **********************************************************)
 
 \* THE INTENT COMMIT.  The one edge that decides who spends money.  The CAS
 \* runs BEFORE ln.payInvoice, and pay_attempted_at + idempotency_key land in
@@ -560,7 +562,7 @@ CollectCoupled(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LsVars
 
-(***** submitPayment : src/send/orchestrator.ts:543-576 ********************)
+(***** submitPayment *******************************************************)
 
 \* TWO ENTRY POINTS, and this is the race the CAS does NOT cover.
 \*   (a) the funded->paying winner, straight from whenFunded;
@@ -646,7 +648,8 @@ SubmitPay(w, s) ==
 
 \* patch(payment_id) then the paying->paid CAS.  The patch is a BLIND write:
 \* `UPDATE ... WHERE id = ?`, no state predicate, no CAS, return value ignored
-\* (src/db/swaps.ts:635-645).  It runs even when the payment failed, and even
+\* (patch() in db/baseSwapStore.ts).  It runs even when the payment failed,
+\* and even
 \* when the row has already moved on.  A crash between SubmitPay and here is
 \* THE UNKNOWN-RESULT CASE: the sats may or may not have left and the row
 \* cannot tell, which is exactly why the recovery path re-issues under the
@@ -683,7 +686,7 @@ RecordPay(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED << lockup, pay, payAged, payMoney >>
 
-(***** settleFromBackend / whenPaid : orchestrator.ts:603-623 **************)
+(***** settleFromBackend / whenPaid ****************************************)
 
 PollToPaid(w, s) ==
     /\ Saw(w, s, "paying")
@@ -740,7 +743,7 @@ LearnPreimage(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LsVars
 
-(***** whenClaiming : src/send/orchestrator.ts:625-665 *********************)
+(***** whenClaiming ********************************************************)
 
 \* THE DELIBERATE FALSE NEGATIVE.  findLockups returned [].  "Empty" is NOT
 \* "claimed": the read is spendableOnly and answers [] for a swept, renewed or
@@ -798,7 +801,7 @@ ClaimRefused(w, s) ==
     /\ UNCHANGED LsVars
 
 \* The ONLY edge into `claimed`, and it holds our own claim txid.  Its return
-\* value is IGNORED in the TypeScript (orchestrator.ts:649-650), so a lost CAS
+\* value is IGNORED in the TypeScript (whenClaiming), so a lost CAS
 \* silently discards claim_ark_txid — modelled by CasLost simply passing.
 RecordClaim(w, s) ==
     /\ At(w, s, "claimSent")
