@@ -43,7 +43,7 @@ const config = {
   // rather than showing empty.
   sendHintScidDenylist: new Set<string>(),
   // The two variables deciding whether a configured market is filled by
-  // anything; the read-only block renders both. @see admin/servedBy.ts
+  // anything; the read-only block renders both. @see admin/marketCapability.ts
   offerMarkets: [],
   assetRfqTokens: [],
   assetCarrierPricing: false,

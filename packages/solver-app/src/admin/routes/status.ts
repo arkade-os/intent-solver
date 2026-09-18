@@ -13,7 +13,7 @@ import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
 import { applyOverrides, pendingRestartKeys, LIVE_KEYS } from '../settings.js'
 import { settingsDrift } from '../drift.js'
-import { servedBy } from '../servedBy.js'
+import { marketCapability } from '../marketCapability.js'
 import { assetMarketKey, type AssetMarketBounds } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import type { AssetMarketRow } from '../db.js'
 import { probeBackends } from '../probes.js'
@@ -104,7 +104,7 @@ const marketCards = (rows: readonly AssetMarketRow[], services: AdminDeps['servi
     toleranceBps: row.toleranceBps,
     enabled: row.enabled,
     active: active.has(row.marketKey),
-    servedBy: servedBy(row, services),
+    ...marketCapability(row, services),
     sellBase: boundsJson(row.sellBase),
     buyBase: boundsJson(row.buyBase),
   }))

@@ -402,7 +402,7 @@ export const describeSettings = (
     // Whether a configured market is filled by ANYTHING, and the only place an
     // operator can see it. Read-only like its neighbours: `createServices` reads
     // these once and builds or omits a whole path, so an edit box would promise
-    // a seam that does not exist. @see admin/servedBy.ts
+    // a seam that does not exist. @see admin/marketCapability.ts
     {
       key: 'OFFER_MARKETS',
       value: config.offerMarkets.map((market) => assetMarketKey(market.a, market.b)).join(', ') || '(empty)',

@@ -45,7 +45,8 @@ const consoleForm = () => {
   }
 }
 
-const SERVER_DERIVED = ['marketKey', 'createdAt', 'updatedAt', 'servedBy']
+// `serving`/`gaps` are DERIVED from the running process, not stored: a round trip cannot echo them.
+const SERVER_DERIVED = ['marketKey', 'createdAt', 'updatedAt', 'serving', 'gaps']
 const editable = (row: Record<string, unknown>) =>
   Object.fromEntries(Object.entries(row).filter(([key]) => !SERVER_DERIVED.includes(key)))
 
@@ -117,7 +118,7 @@ describe('GET /api/markets', () => {
     const seen = await list(app)
     expect(seen.markets).toHaveLength(1)
     expect(seen.active).toEqual([KEY])
-    expect(seen.markets[0]).toMatchObject({ servedBy: ['rfq'] })
+    expect(seen.markets[0]).toMatchObject({ serving: ['rfq'] })
     expect(seen.restartNotice).toMatch(/Live on this process/)
     await adminStore.close()
   })
