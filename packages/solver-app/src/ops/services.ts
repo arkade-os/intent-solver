@@ -525,7 +525,8 @@ export const createServices = async (
    * third party's uptime would take four unrelated BTC corridors down with a
    * price API. @see admin/routes/markets.ts
    */
-  const assetMarkets = assetMarketPolicy(await adminStore.listMarkets())
+  const marketRows = await adminStore.listMarkets()
+  const assetMarkets = assetMarketPolicy(marketRows)
   // NULL exactly when `config.lnBackend` is, which `loadConfig` permits only
   // while all four BTC corridors are disabled — a deployment serving EVM or
   // asset flow alone, which has no use for a Lightning node and is not made to
@@ -556,9 +557,12 @@ export const createServices = async (
    * name the console does not price yet waits for its row instead of appearing
    * live and refusing every offer at the price gate.
    */
-  const offerMarketsPricedBy = (pricing: readonly AssetMarketPricingView[]): readonly AssetMarket[] =>
-    policy.offerMarkets.filter((pair) => pricing.some((market) => offerDirectionOn(market, pair.a, pair.b) !== null))
-  const liveOfferMarkets = offerMarketsPricedBy(assetMarkets.pricing)
+  const offerMarketsPricedBy = (
+    declared: readonly AssetMarket[],
+    pricing: readonly AssetMarketPricingView[],
+  ): readonly AssetMarket[] =>
+    declared.filter((pair) => pricing.some((market) => offerDirectionOn(market, pair.a, pair.b) !== null))
+  const liveOfferMarkets = offerMarketsPricedBy(policy.offerMarkets, assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
   const offerRefusals = createOfferRefusalTail()
   const rfqRefusals = createRfqRefusalTail()
@@ -1168,7 +1172,11 @@ export const createServices = async (
   let readableMarkets: readonly AssetRfqMarket[] = assetRfqMarkets
   const replaceQueue = createSerialiser()
   const extraCorridors = opts?.corridors ?? []
-  const setsFrom = (serving: readonly AssetRfqMarket[], readable: readonly AssetRfqMarket[] = serving) => {
+  const setsFrom = (
+    livePolicy: Config,
+    serving: readonly AssetRfqMarket[],
+    readable: readonly AssetRfqMarket[] = serving,
+  ) => {
     const shared = {
       service,
       store,
@@ -1183,7 +1191,7 @@ export const createServices = async (
       evmSendStore,
       evmReceiveService,
       evmReceiveStore,
-      evmCorridors: policy.evmCorridors,
+      evmCorridors: livePolicy.evmCorridors,
       assetRfqService,
       assetRfqStore,
     }
@@ -1192,7 +1200,7 @@ export const createServices = async (
       readers: readerSetFromDeps({ ...shared, assetRfqMarkets: readable }, extraCorridors),
     }
   }
-  const { corridors, readers } = setsFrom(assetRfqMarkets)
+  const { corridors, readers } = setsFrom(policy, assetRfqMarkets)
 
   const services: Services = {
     config,
@@ -1218,12 +1226,15 @@ export const createServices = async (
     assetRfqMarkets,
     replaceMarkets: (): Promise<void> =>
       replaceQueue(async () => {
+        // ONE read, at the top of the serialised job, so a policy swapped
+        // between two jobs cannot leave half this rebuild on the old value.
+        const livePolicy = services.policy
         const next = assetMarketPolicy(await adminStore.listMarkets())
-        const rfq = assetRfqMarketsFrom(policy.assetRfqTokens, next.pricing)
-        const offers = offerMarketsPricedBy(next.pricing)
+        const rfq = assetRfqMarketsFrom(livePolicy.assetRfqTokens, next.pricing)
+        const offers = offerMarketsPricedBy(livePolicy.offerMarkets, next.pricing)
         const live = await assetRfqStore.listNonTerminal()
         const readable = retainReadableMarkets(rfq, readableMarkets, live)
-        const nextSets = setsFrom(rfq, readable)
+        const nextSets = setsFrom(livePolicy, rfq, readable)
         await assetRfqService.replaceMarkets(rfq)
         await assetOffers?.replaceMarkets({ markets: offers, pricing: next.pricing })
         services.corridors.replace([...nextSets.corridors])

@@ -51,7 +51,7 @@ describe('createServices — the asset RFQ service', () => {
 
   it('joins console rows to optional ASSET_MARKETS symbols, never to a second list', () => {
     expect(body()).toContain('assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)')
-    expect(body()).toContain('assetRfqMarketsFrom(policy.assetRfqTokens, next.pricing)')
+    expect(body()).toContain('assetRfqMarketsFrom(livePolicy.assetRfqTokens, next.pricing)')
     expect(body().match(/assetRfqMarketsFrom\(/g)).toHaveLength(2)
   })
 })
@@ -124,9 +124,9 @@ describe('the corridors reach the registry and the console', () => {
   it('hands the offer service the PRICED subset of OFFER_MARKETS, at boot and on swap', () => {
     // An unpriced market fills at the maker's price, so the derivation is the
     // guard: handing `policy.offerMarkets` over directly is what breaks it.
-    expect(body()).toContain('const liveOfferMarkets = offerMarketsPricedBy(assetMarkets.pricing)')
+    expect(body()).toContain('const liveOfferMarkets = offerMarketsPricedBy(policy.offerMarkets, assetMarkets.pricing)')
     expect(body()).toContain('markets: liveOfferMarkets,')
-    expect(body()).toContain('const offers = offerMarketsPricedBy(next.pricing)')
+    expect(body()).toContain('const offers = offerMarketsPricedBy(livePolicy.offerMarkets, next.pricing)')
     expect(body()).toContain('replaceMarkets({ markets: offers, pricing: next.pricing })')
     expect(body()).not.toContain('markets: policy.offerMarkets')
   })
@@ -134,7 +134,7 @@ describe('the corridors reach the registry and the console', () => {
   it('hot-swaps the captured corridor set in place after a console write', () => {
     expect(body()).toContain('retainReadableMarkets(rfq, readableMarkets, live)')
     expect(body()).toContain('replaceQueue(async () => {')
-    expect(body().indexOf('const nextSets = setsFrom(rfq, readable)')).toBeLessThan(
+    expect(body().indexOf('const nextSets = setsFrom(livePolicy, rfq, readable)')).toBeLessThan(
       body().indexOf('await assetRfqService.replaceMarkets(rfq)'),
     )
     expect(body()).toContain('services.corridors.replace')

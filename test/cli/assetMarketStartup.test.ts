@@ -36,7 +36,7 @@ const market = (over: Partial<AssetMarketConfig> = {}): AssetMarketConfig => ({
 describe('createServices — asset markets', () => {
   it('reads them from the admin store at startup', () => {
     const body = createServicesBody()
-    expect(body).toContain('assetMarketPolicy(await adminStore.listMarkets())')
+    expect(body).toContain('const marketRows = await adminStore.listMarkets()')
   })
 
   it('hands BOTH derived lists to Services, from the one call', () => {
@@ -72,7 +72,7 @@ describe('createServices — asset markets', () => {
     const at = body.indexOf('assetMarketPolicy(')
     expect(at).toBeGreaterThan(-1)
     const call = body.slice(at, body.indexOf('\n', at))
-    expect(call).toBe('assetMarketPolicy(await adminStore.listMarkets())')
+    expect(call).toBe('assetMarketPolicy(marketRows)')
     // Boot plus replaceMarkets: both read the same store.
     expect(body.match(/assetMarketPolicy\(/g)).toHaveLength(2)
   })
