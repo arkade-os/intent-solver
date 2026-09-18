@@ -698,14 +698,14 @@ export class EvmSendSwapService {
   }
 
   /**
-   * Keep reading the contract for a `stuck` row whose ERC20 may still be out: a
+   * Keep reading the contract for a closed row whose ERC20 may still be out: a
    * lock still pending at the timeout refund can mine at ANY later height, by
    * when the row has left `findLive()` and nothing asks again (#162). REPORTS,
    * never re-drives; the preimage is kept because no later read recovers it.
    */
   private async watchLateLocks(): Promise<void> {
     const { store } = this.deps
-    const watched = await store.findStuckOverLock(this.now())
+    const watched = await store.findClosedOverLock(this.now())
     if (watched.length === 0) return
     const height = await this.deps.blockHeight()
     for (const row of watched) {

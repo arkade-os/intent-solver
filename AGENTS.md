@@ -72,10 +72,15 @@ happened here.
 `package.json`'s `test` script is `vitest run --exclude e2e`, and `ci.yml` runs
 `pnpm test`. The e2e suite has its own workflow, which runs on every PR and on
 each push to `main` — running there is not the same as blocking a merge, which is
-a branch-protection setting rather than anything that workflow states. Its
-`emulator` groups provision the regtest Arkade stack **only** — no EVM chain, so
-`evmErc20Swap.e2e.test.ts` self-skips and the job goes green having asserted
-nothing.
+a branch-protection setting rather than anything that workflow states.
+
+What runs where is `.github/e2e-groups.json`. The `evm` group carries
+`evmChain: true`, so the workflow starts anvil and `evmErc20Swap.e2e.test.ts`
+runs there against the real deployed bytecode. Every other group provisions the
+regtest Arkade stack only, so an EVM-dependent file added to one would
+self-skip — and a file named in no group runs nowhere at all.
+`scripts/e2e-report.mjs` fails the leg on a skipped test or on an expected file
+that never ran, which catches both of those shapes.
 
 So: ask "did my test run?", never "did the job pass?". Read the run log for the
 test's name.
