@@ -1498,6 +1498,13 @@ const marketForm = () =>
     field('quote decimals', 'quoteDecimals'),
     field('feed url', 'feedUrl', 'fetched and checked before this is stored'),
     field('price path', 'pricePath', 'RFC 6901 pointer; blank derives it where the provider is known'),
+    // Said here as well as in the notice above the table, which is read after the save.
+    h(
+      'p.faint',
+      'Tightening the price, tolerance or bounds below also re-judges maker offers ' +
+        'already recorded as fillable: they are refused rather than filled at the old ' +
+        'terms, and the maker is not told why their offer went unfilled.',
+    ),
     field('tolerance bps', 'toleranceBps', 'deviation from the feed accepted; below 10000'),
     field('fee bps', 'feeBps', 'margin folded against the maker; below 10000'),
     field(

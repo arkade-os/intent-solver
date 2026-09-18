@@ -426,6 +426,38 @@ describe('the serving fields an operator can only set from here', () => {
   })
 })
 
+describe('the notice a market save returns', () => {
+  // The OLD text said the opposite — "In-flight swaps keep the terms they were quoted
+  // with" — true of RFQ, false of a fillable offer row (`ops/assetOffers.ts:373-378`).
+  const ADMITTED = /already (recorded as )?fillable|already admitted/i
+  const UNTOLD = /maker is not told|no way to tell the maker/i
+
+  it('warns that a save can refuse offers already admitted, and that the maker is not told', async () => {
+    const { app, adminStore } = await build()
+    const notice = (await list(app)).restartNotice
+    expect(notice).toMatch(ADMITTED)
+    expect(notice).toMatch(UNTOLD)
+    expect(notice).not.toMatch(/In-flight swaps keep the terms they were quoted with/)
+    const written = (await (await put(app, body({ symbol: 'USDT' }))).json()) as { restartNotice: string }
+    expect(written.restartNotice).toBe(notice)
+    await adminStore.close()
+  })
+
+  it('keeps the RFQ half, which was the correct sentence in the old copy', async () => {
+    const { app, adminStore } = await build()
+    expect((await list(app)).restartNotice).toMatch(/RFQ/)
+    await adminStore.close()
+  })
+
+  it('makes both claims in the FORM too, against the same two regexes, not only after a save', async () => {
+    const start = appSource.indexOf('/* ==== asset markets — BEGIN')
+    const end = appSource.indexOf('/* ==== asset markets — END')
+    const form = appSource.slice(appSource.indexOf('const marketForm', start), end)
+    expect(form).toMatch(ADMITTED)
+    expect(form).toMatch(UNTOLD)
+  })
+})
+
 describe('a console save round-trips what the API handed it', () => {
   const saved = async () => {
     const built = await build()

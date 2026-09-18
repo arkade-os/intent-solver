@@ -13,8 +13,7 @@
  *
  * PUT/DELETE persist, then `replaceMarkets()` rebuilds the in-memory serve list
  * and swaps the running corridor set. Rails, mnemonic and relay URL still need
- * a restart; market CRUD does not. In-flight swaps keep the terms they were
- * quoted with.
+ * a restart; market CRUD does not. @see {@link MARKETS_LIVE_NOTICE}.
  *
  * ## Validated before it is stored, and again at startup
  *
@@ -55,7 +54,11 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
  * established, and for the same reason.
  */
 export const MARKETS_LIVE_NOTICE =
-  'Live on this process. In-flight swaps keep the terms they were quoted with; only new quotes see the change.'
+  'Live on this process: the next quote uses these values. A saved change to price, tolerance or ' +
+  'bounds is also re-applied to maker offers this solver has already recorded as fillable but not ' +
+  'yet filled — a tightened market refuses them rather than filling at the old terms. That is ' +
+  'deliberate and no money moves, but the maker is not told why their offer went unfilled. ' +
+  'RFQ swaps already quoted are unaffected: they keep the amounts stored on the swap row.'
 
 /**
  * The wire shape. `null` is the BTC leg, matching the packet and the store.
