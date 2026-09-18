@@ -11,7 +11,9 @@ import {
   DEFAULT_SERVING,
   type AssetMarketConfig,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
-import type { AssetMarketRow, ServingSeed } from '@arkade-os/solver-app/admin/db.js'
+import { AdminStore, type AssetMarketRow, type ServingSeed } from '@arkade-os/solver-app/admin/db.js'
+import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
+import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { createServicesBody } from '../support/createServicesBody.js'
 
 const USDA = '1a'.repeat(34)
@@ -69,6 +71,62 @@ describe('marketServingDivergence', () => {
 
   it('names an env symbol no row carries', () => {
     expect(marketServingDivergence([], env)[0]).toMatch(/ASSET_MARKETS names USDA/)
+  })
+
+  it('names a market that is enabled and quoting on neither path, and says what to do', () => {
+    const [line] = marketServingDivergence([row({ servesOffer: false, servesRfq: false })], env)
+    expect(line).toMatch(/USDA/)
+    expect(line).toMatch(/quoting nothing/)
+    expect(line).toMatch(/disable/)
+  })
+
+  it('stays quiet about a market the operator already disabled, which is not a surprise', () => {
+    const off = row({ servesOffer: false, servesRfq: false, enabled: false })
+    expect(marketServingDivergence([off], env)).toEqual([])
+  })
+})
+
+describe('the report catches a market the console itself leaves serving nothing', () => {
+  const body = {
+    base: null,
+    quote: USDA,
+    baseDecimals: 8,
+    quoteDecimals: 6,
+    feedUrl: 'https://feed.test/p',
+    pricePath: '/data/amount',
+    toleranceBps: 10,
+    feeBps: 25,
+    sellBaseFeeFlat: '0',
+    buyBaseFeeFlat: '0',
+    sellBase: { min: '1', max: '1000' },
+    buyBase: { min: '1', max: '1000' },
+  }
+
+  // The live case, end to end through the route an operator actually uses. The
+  // premise assertion below is deliberate: whoever puts `symbol` on the wire and
+  // drops the `servesRfq: false` bridge must come back and re-judge this test.
+  it('fires on a row created through PUT /api/markets', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    const store = await AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: [] })
+    const app = buildAdminApp({
+      services: { adminStore: store, config: {}, policy: {}, replaceMarkets: async () => {} } as never,
+      startedAt: 1,
+      mode: 'relay',
+      fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
+    })
+    const response = await app.fetch(
+      new Request('http://admin/api/markets', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+    )
+    expect(response.status).toBe(200)
+    const [stored] = await store.listMarkets()
+    expect(stored).toMatchObject({ enabled: true, servesOffer: false, servesRfq: false })
+    const [line] = marketServingDivergence([stored!], { offerMarkets: [], tokens: [] })
+    expect(line).toContain(stored!.marketKey)
+    expect(line).toMatch(/quoting nothing/)
   })
 })
 

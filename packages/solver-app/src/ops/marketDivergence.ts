@@ -20,6 +20,14 @@ export const marketServingDivergence = (rows: readonly AssetMarketRow[], env: Se
   const byAsset = new Map(env.tokens.map((token) => [token.assetId, token]))
 
   for (const row of rows) {
+    // A DISABLED row quoting nothing is what the operator asked for; an enabled
+    // one looks live on the console and refuses everything.
+    if (row.enabled && !row.servesOffer && !row.servesRfq) {
+      lines.push(
+        `${label(row)}: enabled and quoting nothing — neither offers nor RFQ. Turn one of them on for this ` +
+          `market, or disable it so it stops showing as live.`,
+      )
+    }
     if (declaredForOffers(row) !== row.servesOffer) {
       lines.push(
         `${label(row)}: OFFER_MARKETS ${declaredForOffers(row) ? 'names' : 'omits'} this pair, ` +
