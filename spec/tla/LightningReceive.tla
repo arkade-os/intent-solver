@@ -28,7 +28,7 @@
 (*                                                                         *)
 (*   quoted:    ['armed', 'refused']                                       *)
 (*   armed:     ['funded', 'refused']                                      *)
-(*   funded:    ['claimed', 'refunding', 'stuck']                          *)
+(*   funded:    ['claimed', 'refunding', 'refunded', 'stuck']              *)
 (*   claimed:   ['settled', 'stuck']                                       *)
 (*   refunding: ['refunded', 'claimed', 'stuck']                           *)
 (*   settled:   []                                                         *)
@@ -311,13 +311,15 @@ LRResults    == { "none", "capOk", "capFull", "sawFunded", "sawEmpty" }
 LRSpendKinds == { "clientClaim", "solverRefund" }
 
 (***************************************************************************)
-(* THE EDGE TABLE.  Diff this against src/db/receiveSwaps.ts:40-50 — with  *)
-(* ONE deliberate addition: funded -> refunded, the solo exit no shipped   *)
-(* code spends yet (TODO(unilateral-exit) in src/arkade/covenant.ts).  The *)
-(* edge exists here because gate (d)'s protection is unverifiable without  *)
-(* the leaf it prices — the same contract-first stance as                  *)
-(* ArkadeHonoursFundKey.  The shipped table gains this edge when the solo  *)
-(* exit ships; until then transition() would throw on it in production.    *)
+(* THE EDGE TABLE.  Diff this against src/db/receiveSwaps.ts:40-50 — it    *)
+(* now matches line for line, funded -> refunded included.  That edge      *)
+(* was spec-only until src/arkade/unilateralExit.ts shipped the leaf; it   *)
+(* exists here because gate (d)'s protection is unverifiable without the   *)
+(* leaf it prices — the same contract-first stance as                      *)
+(* ArkadeHonoursFundKey.  The shipped table gained it in #184: the solo    *)
+(* exit needs neither the Arkade Service nor refund_locktime, so it        *)
+(* lands on a row still `funded`, and refunding -> refunded cannot         *)
+(* record that.                                                            *)
 (***************************************************************************)
 Row   == { "quoted", "armed", "funded", "claimed", "settled",
            "refunding", "refunded", "refused", "stuck" }

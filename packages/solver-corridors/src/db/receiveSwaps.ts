@@ -20,8 +20,8 @@
  *               provider's own covenant refund back to itself (a late-but-valid
  *               claim can still land here — the edge back to `claimed` recovers it,
  *               mirroring `refunding_onchain` in `src/db/onchainSwaps.ts`)
- * - `refunded`  the provider's own refund landed — the swap failed, but no
- *               capital is stuck
+ * - `refunded`  the provider's own refund landed — co-signed from `refunding`,
+ *               or solo from `funded`; either way no capital is stuck
  * - `refused`   never armed, or armed but never funded — no exposure
  * - `stuck`     funded but could not settle before recourse ran out, or the
  *               funded lockup was spent by something ambiguous; needs a human
@@ -41,7 +41,7 @@ export const EXPOSED: readonly ReceiveSwapState[] = ['funded', 'claimed', 'refun
 const LEGAL_EDGES: Record<ReceiveSwapState, readonly ReceiveSwapState[]> = {
   quoted: ['armed', 'refused'],
   armed: ['funded', 'refused'],
-  funded: ['claimed', 'refunding', 'stuck'],
+  funded: ['claimed', 'refunding', 'refunded', 'stuck'],
   claimed: ['settled', 'stuck'],
   refunding: ['refunded', 'claimed', 'stuck'],
   settled: [],
