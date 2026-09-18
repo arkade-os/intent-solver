@@ -17,6 +17,16 @@ function, a method, a `case` arm, an exported constant, or one of the EVM
 planners' numbered `RULE`s. Several modules bind a short name once in their
 header (`plan`, `orchestrator`, `broadcast`) and use it throughout.
 
+A path may also be written relative to a `packages/<pkg>/src/` heading in the
+module's own header table — `arkade/wallet.ts` in `OnchainReceive.tla` resolves
+against the `packages/solver-arkade/src/` heading near the top of that file. The
+rule that makes this safe rather than merely short is: **every bare relative
+path in a module sits under a group that module's header declares.** That holds
+for all 55 of them today, and it is checkable — take each bare `a/b.ts`, join it
+to each `packages/*/src/` heading in the same file, and one of them must exist.
+A citation that cannot be resolved that way is the bug; add the group to the
+header rather than leaving the path dangling.
+
 Line numbers are deliberately absent. They were the previous convention, and
 after the workspace split they resolved silently to unrelated code in the same
 file: every one sampled landed somewhere other than what its own prose
