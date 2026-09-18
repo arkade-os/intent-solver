@@ -1310,4 +1310,49 @@ describe('a lock that lands after the books closed', () => {
     expect(isLocked).not.toHaveBeenCalled()
     await store.close()
   })
+
+  const refundedOverLock = async () => {
+    const onTickError = vi.fn()
+    const evm = {
+      isLocked: vi.fn().mockResolvedValue(false),
+      findClaimPreimage: vi.fn().mockResolvedValue(null),
+      findRefund: vi.fn().mockResolvedValue(false),
+      transactionOutcome: vi.fn().mockResolvedValue('pending'),
+    }
+    const built = await build({
+      blockHeight: vi.fn().mockResolvedValue(21_000_000),
+      onTickError,
+      evm: evm as unknown as EvmSendServiceDeps['evm'],
+    })
+    await built.store.transition('swap-1', 'quoted', 'locking_evm')
+    await built.service.tickAll()
+    expect((await built.store.get('swap-1')).state).toBe('refunding_evm')
+
+    evm.transactionOutcome.mockResolvedValue('success')
+    await built.service.tickAll()
+    expect((await built.store.get('swap-1')).state).toBe('refunded')
+    onTickError.mockClear()
+
+    return { ...built, evm, onTickError }
+  }
+
+  it('reports a live lock under a refunded row, which the receipt alone cannot rule out', async () => {
+    const { store, service, evm, onTickError } = await refundedOverLock()
+    evm.isLocked.mockResolvedValue(true)
+
+    await service.tickAll()
+
+    expect(onTickError).toHaveBeenCalledTimes(1)
+    expect(onTickError.mock.calls[0]?.[1].message).toContain('the ERC20 lock is funded on a closed row')
+    await store.close()
+  })
+
+  it('leaves a refunded row whose lock is gone alone', async () => {
+    const { store, service, onTickError } = await refundedOverLock()
+
+    await service.tickAll()
+
+    expect(onTickError).not.toHaveBeenCalled()
+    await store.close()
+  })
 })
