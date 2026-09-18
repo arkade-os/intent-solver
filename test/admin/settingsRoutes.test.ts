@@ -103,6 +103,15 @@ describe('GET /api/settings', () => {
     const text = await (await app.fetch(new Request('http://admin/api/settings'))).text()
     expect(text).not.toContain('MNEMONIC')
   })
+
+  it('does not tell the operator that stored means pending', async () => {
+    const { app } = build()
+    const body = (await (await app.fetch(new Request('http://admin/api/settings'))).json()) as {
+      restartNotice: string
+    }
+    expect(body.restartNotice).not.toMatch(/^Stored\. It takes effect when the solver restarts/)
+    expect(body.restartNotice).toMatch(/badged pending/i)
+  })
 })
 
 describe('GET /api/settings — what is actually pending', () => {
@@ -158,7 +167,7 @@ describe('PATCH /api/settings', () => {
     // test/cli/overridesApplied.test.ts, which pins that wiring. This claim
     // was false once; the pairing is what stops it being false again.
     const notice = (body as { restartNotice: string }).restartNotice
-    expect(notice).toMatch(/takes effect when the solver restarts/i)
+    expect(notice).toMatch(/read once at startup/i)
   })
 
   it('persists a WIDENING value, which the narrowing guard used to refuse', async () => {

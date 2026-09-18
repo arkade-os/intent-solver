@@ -43,9 +43,10 @@ import type { AdminDeps } from '../server.js'
  * plumbing ever changes.
  */
 export const RESTART_NOTICE =
-  'Stored. It takes effect when the solver restarts: createServices resolves overrides at startup and hands the ' +
-  'result to every service, and nothing re-reads that afterwards. The values shown here are what THIS process is ' +
-  'quoting; a pending override is what the next one will.'
+  'Corridor fees, limits and caps are read once at startup: createServices resolves overrides and hands the result ' +
+  'to every service, and nothing re-reads it afterwards. A knob badged pending is one whose stored value this ' +
+  'process has not loaded; every other value here is what it is quoting right now. Asset markets are not on this ' +
+  'page and are live — see the markets screen.'
 
 // The same derivation `/api/overview` uses, reduced to keys. An override equal
 // to what boot resolved is NOT pending — which `Object.keys` could never say.
