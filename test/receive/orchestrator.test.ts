@@ -2272,3 +2272,43 @@ describe('ReceiveSwapService — block-typed timelocks', () => {
     expect(row.refundLocktime).toBe(now + MAX_REFUND_HORIZON)
   })
 })
+
+describe('the CLTV headroom note at the armed edge', () => {
+  const noteOn = async (id: string): Promise<string | null> =>
+    (await store.history(id)).find((e) => e.from === 'armed' && e.to === 'armed')?.detail ?? null
+
+  const armAt = async (htlcExpiresAt: number) => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error(`expected acceptance, got ${outcome.reason}`)
+    ln.armHold(paymentHash, htlcExpiresAt)
+    return { row: await service.tick(outcome.swap.id), invoice: outcome.swap.invoice }
+  }
+
+  it('records what the route delivered, and the room left for a longer horizon', async () => {
+    const { row } = await armAt(now + 6 * 3600)
+    // Gate (c) wants E >= quote + MAX_REFUND_HORIZON + SETTLE_SAFETY_MARGIN, so 8100s of the 21600 is spent.
+    expect(await noteOn(row.id)).toBe('cltv headroom 21600s — 13500s spare')
+  })
+
+  it('goes negative on exactly the payment gate (c) then refuses, which is #161’s remaining cost', async () => {
+    const { row } = await armAt(now + 2 * 3600)
+    expect(await noteOn(row.id)).toBe('cltv headroom 7200s — -900s spare')
+    expect(row.failureReason).toBe('refused to fund: refund_deadline_too_late')
+  })
+
+  it('writes no note when the arm carries no E to measure', async () => {
+    ln.getHoldState = async () => ({ status: 'armed' as const, amountSats: 5_000, expiresAt: null })
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    await service.tick(outcome.swap.id)
+    expect((await store.history(outcome.swap.id)).map((e) => e.to)).toContain('armed')
+    expect(await noteOn(outcome.swap.id)).toBeNull()
+  })
+
+  it('carries two integers and nothing else — no preimage, no payment hash, no bolt11', async () => {
+    const { row, invoice } = await armAt(now + 6 * 3600)
+    const detail = await noteOn(row.id)
+    expect(detail).toMatch(/^cltv headroom -?\d+s — -?\d+s spare$/)
+    for (const secret of [hex.encode(P), paymentHash, invoice]) expect(detail).not.toContain(secret)
+  })
+})

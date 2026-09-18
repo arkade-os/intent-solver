@@ -488,4 +488,9 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
     )
     return raw ? toRow(raw) : null
   }
+
+  /** #161's measurement, as a NOTE (`from === to`): nothing moved. Two integers, no secrets. */
+  async noteCltvHeadroom(id: string, headroomSeconds: number, spareSeconds: number): Promise<void> {
+    await this.recordEvent(id, 'armed', 'armed', `cltv headroom ${headroomSeconds}s — ${spareSeconds}s spare`)
+  }
 }

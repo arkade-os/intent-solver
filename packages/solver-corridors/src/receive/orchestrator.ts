@@ -36,6 +36,7 @@ import {
   MAX_FINAL_CLTV_BLOCKS,
   MAX_REFUND_HORIZON,
   minFinalCltvBlocksFor,
+  SETTLE_SAFETY_MARGIN,
 } from '@arkade-os/solver-core/core/receive.js'
 import { MIN_CLAIM_WINDOW, refundWithoutReceiverDelayCovers } from '@arkade-os/solver-core/core/send.js'
 import {
@@ -694,7 +695,9 @@ export class ReceiveSwapService {
     // override one: a row funded against a send lockup while an htlc it is
     // obliged to settle is also live owes two payouts on one preimage.
     if (state.status === 'armed') {
-      return store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: state.expiresAt })
+      const armed = await store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: state.expiresAt })
+      if (armed) await this.noteCltvHeadroom(row, state.expiresAt)
+      return armed
     }
 
     // Coupled: no htlc will ever arrive, because the invoice is one we minted
@@ -786,6 +789,20 @@ export class ReceiveSwapService {
       await ln.cancelHold(paymentHash)
     } catch {
       // Intentionally ignored — see above.
+    }
+  }
+
+  /**
+   * #161's measurement. `spare` is taken off QUOTE time rather than the stored
+   * `refund_locktime`, which may be a height whose resolution needs a chain tip and throws.
+   */
+  private async noteCltvHeadroom(row: ReceiveSwapRow, htlcExpiresAt: number | null): Promise<void> {
+    if (htlcExpiresAt === null) return
+    const spare = htlcExpiresAt - row.createdAt - (MAX_REFUND_HORIZON + SETTLE_SAFETY_MARGIN)
+    try {
+      await this.deps.store.noteCltvHeadroom(row.id, htlcExpiresAt - this.now(), spare)
+    } catch {
+      // Housekeeping, like `retireInvoice`: the row is armed either way.
     }
   }
 

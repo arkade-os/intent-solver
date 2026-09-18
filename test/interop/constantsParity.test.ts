@@ -52,7 +52,14 @@ import {
   MIN_MIN_CONFIRMATIONS as RECEIVE_MIN_MIN_CONFIRMATIONS,
   ONCHAIN_SECONDS_PER_BLOCK as RECEIVE_SECONDS_PER_BLOCK,
   ONCHAIN_DUST_SATS as RECEIVE_DUST_SATS,
+  DEFAULT_MIN_CONFIRMATIONS,
+  MAX_REFUND_HORIZON as ONCHAIN_RECEIVE_HORIZON,
+  MIN_SETTLE_WINDOW as ONCHAIN_RECEIVE_MIN_SETTLE_WINDOW,
+  SETTLE_SAFETY_MARGIN as ONCHAIN_RECEIVE_SETTLE_SAFETY_MARGIN,
+  onchainReceiveClaimWindow,
 } from '@arkade-os/solver-core/core/onchainReceive.js'
+import { MAX_REFUND_HORIZON as LIGHTNING_RECEIVE_HORIZON } from '@arkade-os/solver-core/core/receive.js'
+import { HOUR } from '@arkade-os/solver-core/core/timelocks.js'
 import {
   MAX_MIN_CONFIRMATIONS as SEND_MAX_MIN_CONFIRMATIONS,
   MIN_MIN_CONFIRMATIONS as SEND_MIN_MIN_CONFIRMATIONS,
@@ -230,5 +237,53 @@ describe('the two onchain legs agree with each other', () => {
 
   it('shares one ceiling too, which the SDK checks separately but never against each other', () => {
     expect(RECEIVE_MAX_MIN_CONFIRMATIONS).toBe(SEND_MAX_MIN_CONFIRMATIONS)
+  })
+})
+
+/**
+ * `MAX_REFUND_HORIZON` is declared TWICE and independently: `core/receive.ts` supplies the payer's
+ * window, `core/onchainReceive.ts` the solver's L1 claim window. Tripwire, not ruling — #160, #161.
+ */
+describe('the two receive legs agree about the refund horizon', () => {
+  it('holds one value across both declarations, so neither leg can move alone in silence', () => {
+    expect(ONCHAIN_RECEIVE_HORIZON).toBe(LIGHTNING_RECEIVE_HORIZON)
+  })
+
+  const claimWindowAtHorizon = (horizon: number, minConfirmations: number): number =>
+    Math.max(
+      ONCHAIN_RECEIVE_SETTLE_SAFETY_MARGIN,
+      minConfirmations * RECEIVE_SECONDS_PER_BLOCK + 2 * ONCHAIN_RECEIVE_MIN_SETTLE_WINDOW - horizon,
+    )
+
+  it.each([
+    ['the default depth', DEFAULT_MIN_CONFIRMATIONS],
+    ['the maximum depth', RECEIVE_MAX_MIN_CONFIRMATIONS],
+  ])('models %s exactly as the shipped function computes it', (_what, depth) => {
+    expect(claimWindowAtHorizon(ONCHAIN_RECEIVE_HORIZON, depth)).toBe(onchainReceiveClaimWindow(depth, 1_800_000_000))
+  })
+
+  it.each([
+    ['2 h, today: the L1 claim window is 70 min at the default depth and 120 at the maximum', 2 * HOUR, 70, 120],
+    ['3 h: 15 min at the default depth — the SETTLE_SAFETY_MARGIN floor — and 60 at the maximum', 3 * HOUR, 15, 60],
+    ['4 h: 15 min at every depth, so the cap has stopped supplying anything', 4 * HOUR, 15, 15],
+  ])('%s', (_label, horizon, atDefault, atMax) => {
+    expect(claimWindowAtHorizon(horizon, DEFAULT_MIN_CONFIRMATIONS)).toBe(atDefault * 60)
+    expect(claimWindowAtHorizon(horizon, RECEIVE_MAX_MIN_CONFIRMATIONS)).toBe(atMax * 60)
+  })
+
+  it('sits on the 2 h row today, so the table above reads as current and not as history', () => {
+    expect(ONCHAIN_RECEIVE_HORIZON).toBe(2 * HOUR)
+  })
+
+  it('puts the default depth on the floor from 2 h 55 m onward, which is short of 3 h', () => {
+    const floorsAt =
+      DEFAULT_MIN_CONFIRMATIONS * RECEIVE_SECONDS_PER_BLOCK +
+      2 * ONCHAIN_RECEIVE_MIN_SETTLE_WINDOW -
+      ONCHAIN_RECEIVE_SETTLE_SAFETY_MARGIN
+    expect(floorsAt).toBe(175 * 60)
+    expect(claimWindowAtHorizon(floorsAt, DEFAULT_MIN_CONFIRMATIONS)).toBe(ONCHAIN_RECEIVE_SETTLE_SAFETY_MARGIN)
+    expect(claimWindowAtHorizon(floorsAt - 60, DEFAULT_MIN_CONFIRMATIONS)).toBeGreaterThan(
+      ONCHAIN_RECEIVE_SETTLE_SAFETY_MARGIN,
+    )
   })
 })
