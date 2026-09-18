@@ -269,3 +269,33 @@ describe('assetMarketPolicy', () => {
     expect(() => assetMarketPolicy([market({ enabled: false, toleranceBps: BPS_DENOMINATOR })])).toThrow(/switched off/)
   })
 })
+
+describe('a feed URL the admin port must not be talked into fetching', () => {
+  const REFUSED = [
+    'http://127.0.0.1/price',
+    'http://localhost:8080/price',
+    'http://169.254.169.254/latest/meta-data/',
+    'http://10.1.2.3/price',
+    'http://192.168.0.5/price',
+    'http://172.16.9.9/price',
+    'http://[::1]/price',
+    'http://[fd00::1]/price',
+    'http://0.0.0.0/price',
+  ]
+
+  it.each(REFUSED)('refuses %s on a write', (feedUrl) => {
+    expect(() => validateAssetMarket(market({ feedUrl }))).toThrow(/private, loopback or link-local/)
+  })
+
+  it('admits a public feed', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'https://api.binance.com/api/v3/ticker/price' }))).not.toThrow()
+  })
+
+  it('still admits a stored row at startup, which was written under the old rule', () => {
+    // Refusing here would take four unrelated BTC corridors down on upgrade,
+    // for a deployment whose feed is a sidecar it deliberately runs on loopback.
+    expect(() =>
+      assetMarketPolicy([market({ feedUrl: 'http://127.0.0.1:8080/price', pricePath: '/price' })]),
+    ).not.toThrow()
+  })
+})
