@@ -14,7 +14,9 @@
  */
 
 import {
+  evmReceiveFundWindowClosed,
   planEvmReceive,
+  EVM_RECEIVE_FUND_WINDOW_REFUSAL,
   type EvmReceiveAction,
   type EvmReceiveObservation,
 } from '@arkade-os/solver-core/core/evmReceivePlan.js'
@@ -251,6 +253,14 @@ export class EvmReceiveSwapService {
         return false
 
       case 'fund_arkade': {
+        // RULE 2 again on a height read NOW - the planner's came from this tick's
+        // observation. Before the CAS, so a closed window refuses rather than parks.
+        if (evmReceiveFundWindowClosed(await this.deps.blockHeight(), row.evmTimeout)) {
+          await store.transition(row.id, row.state, 'refused', {
+            failure_reason: EVM_RECEIVE_FUND_WINDOW_REFUSAL,
+          })
+          return false
+        }
         // Exposed BEFORE the sats go out. A crash between the two must not leave
         // a funded lockup against a row that still reads `locked` - that lockup
         // would be invisible to the exposure accounting and to the refund sweep.

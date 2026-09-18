@@ -10,9 +10,11 @@ import {
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { EvmReceiveSwapStore, type EvmReceiveQuoteRecord } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import { EVM_RECEIVE_CLAIM_MARGIN_BLOCKS } from '@arkade-os/solver-core/core/evmReceivePlan.js'
 
 const NOW = 1_800_000_000
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+const EVM_TIMEOUT = 21_000_000
 
 const quote = (over: Partial<EvmReceiveQuoteRecord> = {}): EvmReceiveQuoteRecord => ({
   id: 'swap-1',
@@ -23,7 +25,7 @@ const quote = (over: Partial<EvmReceiveQuoteRecord> = {}): EvmReceiveQuoteRecord
   tokenAddress: TOKEN,
   evmContractAddress: '0x1111111111111111111111111111111111111111',
   evmChainId: 8453,
-  evmTimeout: 21_000_000,
+  evmTimeout: EVM_TIMEOUT,
   validUntil: NOW + 60,
   minConfirmations: 1,
   minAgeSeconds: 0,
@@ -124,6 +126,38 @@ describe('the row is exposed BEFORE the sats go out', () => {
     await service.tick('swap-1')
     expect(stateAtFund).toBe('funding_arkade')
     expect((await store.get('swap-1')).fundArkTxid).toBe('ark-fund-txid')
+  })
+})
+
+// A chain that moves before the commit spends margin the plan already counted.
+describe('RULE 2 is re-asked at the moment the sats are committed', () => {
+  const FUNDABLE = EVM_TIMEOUT - EVM_RECEIVE_CLAIM_MARGIN_BLOCKS - 1
+  const CLOSED = EVM_TIMEOUT - EVM_RECEIVE_CLAIM_MARGIN_BLOCKS
+
+  it('refuses a window that closed between the observation and the broadcast', async () => {
+    const chain = [FUNDABLE, CLOSED]
+    const fundArkade = vi.fn()
+    const { store, service } = await build({
+      blockHeight: vi.fn().mockImplementation(async () => chain.shift() ?? CLOSED),
+      fundArkade,
+    })
+    await service.tick('swap-1')
+    expect(fundArkade).not.toHaveBeenCalled()
+    expect(await store.get('swap-1')).toMatchObject({
+      state: 'refused',
+      failureReason: 'client ERC20 timeout too close to fund against',
+    })
+  })
+
+  it('still funds when the chain has not moved past the gate', async () => {
+    const fundArkade = vi.fn().mockResolvedValue('ark-fund-txid')
+    const { store, service } = await build({
+      blockHeight: vi.fn().mockResolvedValue(FUNDABLE),
+      fundArkade,
+    })
+    await service.tick('swap-1')
+    expect(fundArkade).toHaveBeenCalledTimes(1)
+    expect((await store.get('swap-1')).state).toBe('funding_arkade')
   })
 })
 

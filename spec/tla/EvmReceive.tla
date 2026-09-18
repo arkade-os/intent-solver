@@ -18,8 +18,11 @@
 (* THE FOUR RULES (evmReceivePlan.ts:9-25), and where each lives here:     *)
 (*  1. Fund only against a lock proven deep AND old enough - the           *)
 (*     evmConfirmed snapshot gate in FundArkade.                           *)
-(*  2. Fund only with enough of the client's evm_timeout left to claim in  *)
-(*     - TooClose (EVM_RECEIVE_CLAIM_MARGIN_BLOCKS, plan:139).             *)
+(*  2. Fund only with enough of the client's evm_timeout left for BOTH     *)
+(*     landings - TooClose (EVM_RECEIVE_CLAIM_MARGIN_BLOCKS, which is now  *)
+(*     the SUM of EVM_RECEIVE_FUND_LANDING_BLOCKS and                      *)
+(*     EVM_RECEIVE_CLAIM_LANDING_BLOCKS), re-asked by the shell on a       *)
+(*     height read at the moment it commits.                               *)
 (*  3. A revealed preimage means CLAIM THE ERC20 NOW - the pre-switch      *)
 (*     rule, an interrupt from EVERY non-terminal state (plan:87-108).     *)
 (*  4. Preimage in hand past the client's timeout: stick, loudly           *)
@@ -87,10 +90,37 @@
 (*       gone out for nothing.  The mutation records at send time and      *)
 (*       NoSilentLoss fails.  Finding F2, fixed.                           *)
 (*  (B4) `FundLandsPromptly`.  fundArkade is one awaited call in the       *)
-(*       shell; RULE 2's 60-block margin is what makes "the fund landed    *)
-(*       quickly" safe to assume.  The mutation lets the accept land at    *)
-(*       or after the client's timeout height and NoNetLoss fails.         *)
-(*       Finding F3.                                                       *)
+(*       shell; RULE 2's margin is what makes "the fund landed quickly"    *)
+(*       safe to assume.  The mutation lets the accept land at or after    *)
+(*       the client's timeout height and NoNetLoss fails.  Finding F3,     *)
+(*       STILL OPEN - and the margin is the ONLY thing bounding it, which  *)
+(*       is why the constant is now written as the sum of the two landings *)
+(*       it has to pay for rather than as one number.                      *)
+(*                                                                         *)
+(*       WHAT #163 DID CHANGE, and why it is not this arm.  RULE 2 has     *)
+(*       TWO windows to survive: the one from the planner's height read to *)
+(*       the moment the sats are committed, and the one from that moment   *)
+(*       to the accept landing.  This module only ever modelled the        *)
+(*       second: TooClose below reads the LIVE evmHeight, so FundArkade    *)
+(*       has always been specified as gating on the height AT THE CAS.     *)
+(*       The shipped shell did not - it gated on the height its tick had   *)
+(*       observed, a depth probe and several round trips earlier - so the  *)
+(*       module was UNSOUND with respect to the code on exactly that       *)
+(*       point.  The shell now re-reads the height and re-asks RULE 2      *)
+(*       immediately before the exposure CAS (evmOrchestrator.ts, the      *)
+(*       fund_arkade arm), which is what makes FundArkade's `~TooClose` a  *)
+(*       faithful abstraction rather than an assumption.                   *)
+(*                                                                         *)
+(*       NO CFG CAN EXERCISE THAT FIRST WINDOW, which is why this change   *)
+(*       ships with a TypeScript regression test and no mutation cfg.  The *)
+(*       Urgent clauses below are exhaustive over a confirmed lock on a    *)
+(*       live row: QuoteStale takes the "locked late" arm, TooClose the    *)
+(*       "refuse now" arm, and ~TooClose /\ ~QuoteStale the "fund now"     *)
+(*       arm.  So such a row is ALWAYS Urgent, SolverBehind always holds,  *)
+(*       and HeightTick is disabled for as long as the row sits between    *)
+(*       ReadSwap and FundArkade.  Modelling the staleness would mean      *)
+(*       relaxing the urgency discipline, which every other timing result  *)
+(*       in this module rests on.                                          *)
 (*                                                                         *)
 (* HOW THIS WAS CHECKED: see THE GREEN RUN and MUTATION CHECKS at the      *)
 (* bottom of the module.                                                   *)
@@ -178,7 +208,11 @@ Edges == [ x \in Row |->
                                      "stuck" }
       [] x = "awaiting_lock"    -> { "funding_arkade", "claiming", "refused",
                                      "stuck" }
-      [] x = "locked"           -> { "funding_arkade", "claiming", "stuck" }
+      \* `refused` is reachable from `locked` since #163: the shell re-asks
+      \* RULE 2 before the CAS, and the planner funds this state
+      \* unconditionally, so the late refusal can fire from here too.
+      [] x = "locked"           -> { "funding_arkade", "claiming", "refused",
+                                     "stuck" }
       [] x = "funding_arkade"   -> { "awaiting_claim", "claiming", "stuck" }
       [] x = "awaiting_claim"   -> { "claiming", "refunding_arkade", "stuck" }
       [] x = "claiming"         -> { "claimed", "stuck" }
@@ -226,7 +260,11 @@ HeightSane == clock >= evmHeight * FastCad
 \* The client's ERC20 refund opens at this height (plan:71).
 HeightUp == evmHeight >= EvmTimeoutH
 
-\* RULE 2: not enough of the client's timeout left to claim in (plan:139).
+\* RULE 2: not enough of the client's timeout left to fund AND claim in
+\* (evmReceiveFundWindowClosed).  Reads the LIVE evmHeight, deliberately:
+\* every use below is at the moment the guard is ACTED on, which is what the
+\* shell's re-read before the exposure CAS now makes true of the code too.
+\* @see (B4).
 TooClose == evmHeight + ClaimMarginBlocks >= EvmTimeoutH
 
 \* The wall-clock deadlines.
@@ -754,11 +792,28 @@ ERSpendKinds == { "clientClaim", "solverRefund" }
 (*     on a revert, so EvmReceive_NoReceipt.cfg is a genuine mutation - it *)
 (*     deletes the shipped check - rather than a record of shipped         *)
 (*     behaviour.                                                          *)
-(* F3  (B4) THE LATE FUND.  RULE 2's 60-block margin budgets BOTH the      *)
-(*     fund landing and the claim landing; a fundArkade accept that lands  *)
-(*     only at the client's timeout height lets the client refund its      *)
-(*     ERC20 and claim the freshly-landed sats in one breath.              *)
-(*     EvmReceive_LateFund.cfg: NoNetLoss, depth 21.                       *)
+(* F3  (B4) THE LATE FUND - STILL OPEN, and NARROWED rather than closed by *)
+(*     #163.  RULE 2's margin budgets BOTH the fund landing and the claim  *)
+(*     landing; a fundArkade accept that lands only at the client's        *)
+(*     timeout height lets the client refund its ERC20 and claim the       *)
+(*     freshly-landed sats in one breath.  EvmReceive_LateFund.cfg:        *)
+(*     NoNetLoss, depth 21.                                                *)
+(*                                                                         *)
+(*     #163 shipped the two halves of the code-side answer: the shell      *)
+(*     re-asks RULE 2 on a height read at the moment it commits, and the   *)
+(*     constant is now EVM_RECEIVE_FUND_LANDING_BLOCKS +                   *)
+(*     EVM_RECEIVE_CLAIM_LANDING_BLOCKS so a reader can see which landing  *)
+(*     each block is bought for.  Neither closes this arm.  The re-read    *)
+(*     closes the window BEFORE the broadcast, which this module never     *)
+(*     modelled (see (B4)); the mutation's window is the one AFTER it, and *)
+(*     nothing the solver can check bounds a hung accept.  Only the        *)
+(*     margin does, and a margin denominated in BLOCKS is a different      *)
+(*     duration on every chain - ~12 minutes at Ethereum's cadence and     *)
+(*     ~15 seconds at Arbitrum's for the same 60.  Sizing it in SECONDS    *)
+(*     and converting at the chain's FASTEST cadence, the way every other  *)
+(*     deadline on this corridor is read (evm/blockTime.ts), is the        *)
+(*     remaining work; it is a money-path constant and not this change's   *)
+(*     to make.                                                            *)
 (* F4  (B5) THE STRANDED REFUND - FIXED.  refunding_arkade USED TO be      *)
 (*     parked, so a crash between the refund CAS and the refundArkade      *)
 (*     spend left the covenant unspent AND the row unwatched; the patient  *)
@@ -788,7 +843,19 @@ ERSpendKinds == { "clientClaim", "solverRefund" }
 (*                                has not landed yet.                      *)
 (*   EvmReceive_LateFund.cfg      FundLandsPromptly = FALSE                *)
 (*                                NoNetLoss violated, depth 21             *)
-(*                                (269,565/43,305).  STILL OPEN.           *)
+(*                                (269,565/43,305).  STILL OPEN - #163     *)
+(*                                narrowed the code-side window but this   *)
+(*                                arm is the one the margin alone bounds.  *)
+(*                                See F3.  Re-measured there on TLC 2.19:  *)
+(*                                same invariant, 269,670/43,327 at depth  *)
+(*                                21.  NOTE for anyone diffing these: on a *)
+(*                                run TLC ABORTS at, the counts and the    *)
+(*                                depth are both where the search happened *)
+(*                                to be when a worker hit the violation -  *)
+(*                                this cfg gives depth 20 at -workers 2    *)
+(*                                and 21 at -workers 4 on the SAME module. *)
+(*                                Only the green cfgs' figures are stable, *)
+(*                                and those two reproduce exactly.         *)
 (*   EvmReceive_RefundStrand.cfg  RefundRedrivenWhileUnspent = FALSE over  *)
 (*                                RefundSpendAtomic = FALSE (mutation of a *)
 (*                                SHIPPED guard since the F4 fix)          *)
@@ -821,7 +888,8 @@ ERSpendKinds == { "clientClaim", "solverRefund" }
 (*   awaiting_lock / locked rows: never entered - production never writes  *)
 (*     them (no transition targets them); they exist in Row and Edges      *)
 (*     because the planner handles them, and ForwardOnly pins those        *)
-(*     branches for the rewrite.                                           *)
+(*     branches for the rewrite.  #163's `locked` -> `refused` edge is     *)
+(*     inert here for the same reason, and is carried for the rewrite.     *)
 (*                                                                         *)
 (* Every other action fires in the green cfg.                              *)
 (***************************************************************************)
