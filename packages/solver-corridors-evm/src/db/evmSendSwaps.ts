@@ -116,7 +116,7 @@ export interface EvmSendSwapRow {
 // SCHEMA HISTORY. `valid_until` and `refund_outcome` were added after these
 // tables first shipped on the feat/evm-corridors branch. CREATE TABLE IF NOT
 // EXISTS does not extend an already-created table, so an environment whose
-// database was created by the pre-#228 schema needs, once, before this code
+// database predates those two columns needs, once, before this code
 // deploys against it:
 //
 //   ALTER TABLE send_evm_swap ADD COLUMN valid_until INTEGER NOT NULL DEFAULT 0;

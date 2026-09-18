@@ -872,7 +872,7 @@ ArmRefund(w, s) ==
 \* passed and the client pulled its L1 HTLC back before the solver claimed
 \* it.  whenClaimed's fail() branch, src/receive/onchainOrchestrator.ts:736-740.
 \* `stuck` has no outgoing edge; the reason string names the client, and —
-\* unlike the pre-#176 code — that attribution is CORRECT, because the
+\* unlike the code before the discriminator — that attribution is CORRECT, because the
 \* own-claim flavour is handled first.  The ~OwnClaimSeen conjunct is that
 \* precedence: shipped code checks `if (ourClaim)` before anything else.
 ClaimSeesPriorSpend(w, s) ==

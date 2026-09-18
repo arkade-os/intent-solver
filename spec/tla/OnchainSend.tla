@@ -862,7 +862,7 @@ RefundSeesClaim(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OsVars
 
-\* PRE-#169 ONLY.  Spent by something that is not a recognisable claim, which
+\* WITHOUT (A9) ONLY.  Spent by something that is not a recognisable claim, which
 \* in this model is ALWAYS the solver's own refund — nothing else can write
 \* `refundSeen` — and that is the finding rather than a modelling shortcut:
 \* witness shape cannot tell the two apart, so a refund that succeeded was
