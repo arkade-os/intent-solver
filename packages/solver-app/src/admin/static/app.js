@@ -1367,7 +1367,13 @@ const draftFrom = (market) => ({
  */
 const draftBounds = (min, max) => (min.trim() === '' && max.trim() === '' ? null : { min: min.trim(), max: max.trim() })
 
-const draftBps = (value) => (String(value ?? '').trim() === '' ? null : Number(value))
+const draftBps = (value) => {
+  const trimmed = String(value ?? '').trim()
+  if (trimmed === '') return null
+  const n = Number(trimmed)
+  // Sent as raw text when invalid, so int() rejects it loudly — NaN would collapse to null, read as "inherit".
+  return Number.isNaN(n) ? trimmed : n
+}
 
 /**
  * Decimals and bps go as JSON NUMBERS because they are small and the server

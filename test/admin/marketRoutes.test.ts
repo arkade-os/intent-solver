@@ -31,13 +31,17 @@ const appSource = readFileSync(
  * Run, not grepped: a field can be named in `app.js` and still never be sent, which is how this shipped.
  */
 const consoleForm = () => {
-  const start = appSource.indexOf('const blankMarket = ')
-  const end = appSource.indexOf('const field = (label, key, hint)')
+  const start = appSource.indexOf('/* ==== asset markets — BEGIN')
+  const end = appSource.indexOf('/* ==== asset markets — END')
   if (start === -1 || end === -1) throw new Error('the market form moved out of the slice this guard reads')
-  return new Function(`${appSource.slice(start, end)}\nreturn { blankMarket, draftFrom, marketBody }`)() as {
-    blankMarket: () => Record<string, unknown>
-    draftFrom: (row: Record<string, unknown>) => Record<string, unknown>
-    marketBody: (draft: Record<string, unknown>) => Record<string, unknown>
+  try {
+    return new Function(`${appSource.slice(start, end)}\nreturn { blankMarket, draftFrom, marketBody }`)() as {
+      blankMarket: () => Record<string, unknown>
+      draftFrom: (row: Record<string, unknown>) => Record<string, unknown>
+      marketBody: (draft: Record<string, unknown>) => Record<string, unknown>
+    }
+  } catch (error) {
+    throw new Error('the market form moved out of the slice this guard reads', { cause: error })
   }
 }
 
@@ -372,6 +376,16 @@ describe('a console save round-trips what the API handed it', () => {
     await put(app, marketBody(draftFrom((await list(app)).markets[0]!)))
     const [view] = assetMarketPolicy(await adminStore.listMarkets()).pricing
     expect(view).toMatchObject({ sellBaseFeeBps: 0, buyBaseFeeBps: 900 })
+    await adminStore.close()
+  })
+
+  it('refuses a bps draft that is not a number, rather than clearing the spread to inherited', async () => {
+    const { app, adminStore } = await saved()
+    const { draftFrom, marketBody } = consoleForm()
+    const draft = draftFrom((await list(app)).markets[0]!)
+    draft.sellBaseFeeBps = 'abc'
+    expect((await put(app, marketBody(draft))).status).toBe(400)
+    expect(await adminStore.listMarkets()).toMatchObject([{ sellBaseFeeBps: 0, buyBaseFeeBps: 900 }])
     await adminStore.close()
   })
 })
