@@ -1317,7 +1317,8 @@ let marketDraft = null
 // Assigned by the preview panel; a second declaration there is a load-time SyntaxError.
 let schedulePreview = () => {}
 
-/** `null` is the BTC leg everywhere below the wire; `BTC` is what an operator types. */
+/** `null` is the BTC leg everywhere below the wire; `BTC` is what an operator types.
+ *  The preview's `legs.from/to` arrive pre-stringified to `'BTC'`, so they need only `shortId`, never this. */
 const legLabel = (leg) => (leg === null ? 'BTC' : shortId(leg))
 
 const blankMarket = () => ({
@@ -1517,15 +1518,13 @@ const unit = (amount, decimals, label) => {
   return `${negative ? '-' : ''}${whole}.${raw.slice(-digits)} ${label}`
 }
 
-const legLabelFor = (leg) => (leg === 'BTC' ? 'sats' : shortId(leg))
-
 const ladderRow = (sample, legs, loss) =>
   sample.ok
     ? h(
         `tr${loss ? '.loss' : ''}`,
-        h('td', unit(sample.fromAmount, legs.fromDecimals, legLabelFor(legs.from))),
-        h('td.num', unit(sample.toAmount, legs.toDecimals, legLabelFor(legs.to))),
-        h('td.num', unit(sample.spreadFee, legs.toDecimals, legLabelFor(legs.to))),
+        h('td', unit(sample.fromAmount, legs.fromDecimals, shortId(legs.from))),
+        h('td.num', unit(sample.toAmount, legs.toDecimals, shortId(legs.to))),
+        h('td.num', unit(sample.spreadFee, legs.toDecimals, shortId(legs.to))),
         h('td.num', sample.marginBps === null ? '—' : `${sample.marginBps} bps`),
       )
     : h(
@@ -1533,8 +1532,8 @@ const ladderRow = (sample, legs, loss) =>
         h(
           'td',
           previewSide === 'from'
-            ? unit(sample.amount, legs.fromDecimals, legLabelFor(legs.from))
-            : unit(sample.amount, legs.toDecimals, legLabelFor(legs.to)),
+            ? unit(sample.amount, legs.fromDecimals, shortId(legs.from))
+            : unit(sample.amount, legs.toDecimals, shortId(legs.to)),
         ),
         h('td.num', { colspan: 3 }, h('span.phase.phase-failed', sample.reason)),
       )
@@ -1654,8 +1653,8 @@ const rfqDirectionLine = () => {
   return names.length === 0 ? 'both closed' : names.join(' + ')
 }
 
-const spreadHint =
-  'Bounds on what we pay out in this direction, not on what the customer sends. A maximum of 0 closes this direction and leaves everything else set up.'
+const boundsHint =
+  'Bounds on what we pay out in this direction, not on what the customer sends. Set both to 0 to close this direction while leaving everything else configured.'
 
 const marketForm = () =>
   h(
@@ -1701,20 +1700,20 @@ const marketForm = () =>
       field(
         'price path',
         'pricePath',
-        'RFC 6901 pointer; blank derives it where the provider is known',
+        'like /data/price; blank works for a known provider',
         "Where in the feed's reply the price sits, written like a folder path — /data/amount. Leave blank for a provider we already know.",
       ),
       group('what we charge'),
       field(
         'tolerance bps',
         'toleranceBps',
-        'deviation from the feed accepted; below 10000',
+        'how far a named price may differ from the feed; under 10000',
         "How far a customer's own price may sit from the feed before we turn their offer down. Only used when the customer names the price.",
       ),
       field(
         'fee bps',
         'feeBps',
-        'margin folded against the maker; below 10000',
+        'our cut of the trade, in bps; under 10000',
         'Our margin, taken out of what the customer receives. 50 bps is half of one percent. Leave the two boxes below blank to charge it both ways.',
       ),
       field(
@@ -1732,20 +1731,20 @@ const marketForm = () =>
       field(
         'sell-base flat fee',
         'sellBaseFeeFlat',
-        'base atomic units removed from the input; 330 sats covers asset carrier dust when base is BTC',
+        'smallest unit of the base asset, taken off the top; 330 covers the carrier when base is BTC',
         'A fixed amount taken off the top before the margin, in the smallest unit of whatever the customer sends. For a cost that does not grow with the trade.',
       ),
       field(
         'buy-base flat fee',
         'buyBaseFeeFlat',
-        'quote atomic units removed from the input',
+        'smallest unit of the quote asset, taken off the top',
         "The same, going the other way, in the other side's smallest unit.",
       ),
       group('limits'),
-      field('sell-base min', 'sellBaseMin', 'atomic units of the want leg; blank inherits', spreadHint),
-      field('sell-base max', 'sellBaseMax', '0 closes this direction', spreadHint),
-      field('buy-base min', 'buyBaseMin', undefined, spreadHint),
-      field('buy-base max', 'buyBaseMax', undefined, spreadHint),
+      field('sell-base min', 'sellBaseMin', 'smallest units of what we pay out; blank inherits', boundsHint),
+      field('sell-base max', 'sellBaseMax', '0 closes this direction', boundsHint),
+      field('buy-base min', 'buyBaseMin', undefined, boundsHint),
+      field('buy-base max', 'buyBaseMax', undefined, boundsHint),
       h(
         'span.label',
         'enabled',

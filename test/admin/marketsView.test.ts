@@ -307,7 +307,7 @@ const previewHarness = (response: unknown) => {
   ]
   const body = `${helperBlock()}\n${marketsBlock()}
     marketDraft = { ...blankMarket(), marketKey: 'k' }
-    return { previewPanel, refreshPreview, schedulePreview }`
+    return { previewPanel, refreshPreview, schedulePreview, marketsView }`
   const args = [
     stubDoc(),
     StubNode,
@@ -328,11 +328,22 @@ const previewHarness = (response: unknown) => {
       previewPanel: () => StubNode
       refreshPreview: () => Promise<void>
       schedulePreview: () => void
+      marketsView: () => StubNode
     }
     return { ...built, pending }
   } catch (error) {
     throw new Error('the preview moved out of the slice this guard reads', { cause: error })
   }
+}
+
+/** First node in the tree whose class list contains `className`, DOM-order (self before children). */
+const findByClass = (node: StubNode, className: string): StubNode | null => {
+  if (node.className.split(' ').includes(className)) return node
+  for (const child of node.childNodes) {
+    const found = findByClass(child, className)
+    if (found) return found
+  }
+  return null
 }
 
 const painted = async (response: unknown): Promise<string> => {
@@ -404,5 +415,28 @@ describe('the preview panel, run rather than grepped', () => {
 
   it('carries the carrier sentence in plain language', () => {
     expect(marketsBlock()).toContain('rides on a small amount of bitcoin called the carrier')
+  })
+
+  it('labels a BTC leg as BTC, not sats — the amount is already decimals-formatted', async () => {
+    const text = await painted(RESOLVED)
+    expect(text).toContain('1.00000000 BTC')
+    expect(text).not.toContain('1.00000000 sats')
+  })
+})
+
+describe('the markets view mounts what it builds', () => {
+  it('renders the form and the preview panel side by side, not the panel alone', () => {
+    const panel = previewHarness(RESOLVED)
+    const text = textOf(panel.marketsView())
+    expect(text).toContain('A pair may be configured once. Submitting one that exists edits it.')
+    expect(text).toContain('preview — what a customer is quoted')
+  })
+
+  it('keeps the grid to exactly its declared rows — a stray wrapper silently breaks alignment', () => {
+    const panel = previewHarness(RESOLVED)
+    const grid = findByClass(panel.marketsView(), 'form-grid')
+    expect(grid).not.toBeNull()
+    // 16 field() rows x 3 + 3 two-child rows spanning 2/4 + 5 groups spanning 1/4.
+    expect(grid!.childNodes.length).toBe(59)
   })
 })
