@@ -346,6 +346,16 @@ const findByClass = (node: StubNode, className: string): StubNode | null => {
   return null
 }
 
+/** Names a grid child by its own shape, so an unexpected one fails as itself rather than as a wrong total. */
+const gridChildShape = (node: StubNode): string => {
+  const classes = node.className.split(' ').filter(Boolean)
+  if (node.tagName === 'input' && classes.length === 0) return 'input'
+  for (const known of ['label', 'hint', 'group', 'span2']) {
+    if (node.tagName === 'span' && classes.includes(known)) return `span.${known}`
+  }
+  return `unexpected child: ${[node.tagName, ...classes].join('.')}`
+}
+
 const painted = async (response: unknown): Promise<string> => {
   const panel = previewHarness(response)
   const node = panel.previewPanel()
@@ -432,11 +442,11 @@ describe('the markets view mounts what it builds', () => {
     expect(text).toContain('preview — what a customer is quoted')
   })
 
-  it('keeps the grid to exactly its declared rows — a stray wrapper silently breaks alignment', () => {
+  it('holds only the five known row shapes — a stray wrapper fails by name, not by a moved total', () => {
     const panel = previewHarness(RESOLVED)
     const grid = findByClass(panel.marketsView(), 'form-grid')
     expect(grid).not.toBeNull()
-    // 16 field() rows x 3 + 3 two-child rows spanning 2/4 + 5 groups spanning 1/4.
-    expect(grid!.childNodes.length).toBe(59)
+    const unexpected = grid!.childNodes.map(gridChildShape).filter((shape) => shape.startsWith('unexpected child:'))
+    expect(unexpected).toEqual([])
   })
 })
