@@ -25,22 +25,34 @@
  *    `settle()` merges the whole float into ONE coin, flattening the very piece
  *    count `pool-mint` exists to build. The deposit's `note` names the action to
  *    use instead.
- *  - NO `withdraw`. Paying an arbitrary address out of the float means either an
- *    Arkade-address transfer or an offboard, and neither is "send n sats to this
- *    L1 address". Both would also spend float coins OUTSIDE the process-local
- *    reservation ledger, taking a coin out from under an in-flight lockup
- *    funding — the exact hazard `arkade/reservations.ts` exists for. The float's
- *    intended exits are the corridors.
+ *  - `withdraw` — BOTH ways out of the float, routed by the destination's form:
+ *    an Arkade address is paid offchain (`wallet.send`), a bitcoin address by
+ *    collaborative exit (`wallet.settle` with an onchain output). The coins are
+ *    selected HERE and pinned in the reservation ledger for the spend: the SDK's
+ *    own selection cannot be told "not that one" and could take a coin out from
+ *    under an in-flight lockup funding — the hazard `arkade/reservations.ts` exists for.
  *
- * That last pair is the point of a capability seam rather than an interface
- * every source must satisfy: absent is a fact the console can render, whereas a
- * method that threw would put two buttons on the screen that can only ever fail.
+ * The absent half of that pair is the point of a capability seam rather than an
+ * interface every source must satisfy: absent is a fact the console can render,
+ * whereas a method that threw would put a button on the screen that can only
+ * ever fail.
  */
 
-import { networks } from '@arkade-os/sdk'
+import { ArkAddress, Estimator, networks } from '@arkade-os/sdk'
+import { Address, OutScript } from '@scure/btc-signer'
+import { hex } from '@scure/base'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
+import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
+import { offchainInputFeeParams } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
+import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { Services } from './services.js'
-import type { FundBalance, FundDeposit, FundSource } from './fundSources.js'
+import {
+  parseWholeSats,
+  type FundBalance,
+  type FundDeposit,
+  type FundSource,
+  type FundWithdrawal,
+} from './fundSources.js'
 
 export const ARKADE_FUND_SOURCE_ID = 'arkade'
 
@@ -169,6 +181,192 @@ const arkadeOffchainDeposit = async (services: Services): Promise<FundDeposit> =
   }
 }
 
+type WithdrawRoute = { kind: 'arkade' } | { kind: 'onchain'; script: Uint8Array }
+
+/** An Arkade address for ANOTHER network must not fall through to the onchain attempt: it decodes as Arkade, so the refusal gets to name the real mistake. */
+const withdrawRoute = (address: string, network: SwapNetwork): WithdrawRoute => {
+  let arkade: ArkAddress | null = null
+  try {
+    arkade = ArkAddress.decode(address)
+  } catch {
+    arkade = null
+  }
+  if (arkade !== null) {
+    const hrp = networks[network].hrp
+    if (arkade.hrp !== hrp) {
+      throw new Error(
+        `${address} is an Arkade address for another network (its prefix is ${arkade.hrp}1…, this deployment is ` +
+          `${hrp}1…) — nothing was sent`,
+      )
+    }
+    return { kind: 'arkade' }
+  }
+  try {
+    return { kind: 'onchain', script: OutScript.encode(Address(ONCHAIN_NETWORKS[network]).decode(address)) }
+  } catch {
+    throw new Error(
+      `${address} is neither a ${network} Arkade address (${networks[network].hrp}1…) nor a ${network} bitcoin ` +
+        'address — nothing was sent',
+    )
+  }
+}
+
+/**
+ * Pay `amount` sats out of the float to an address the operator chose. The
+ * destination receives EXACTLY `amount` on both routes: the exit's intent fees
+ * are paid out of the change, never out of what the operator typed.
+ */
+const arkadeWithdraw = async (
+  services: Services,
+  params: { address: string; amount: string },
+): Promise<FundWithdrawal> => {
+  const { wallet } = services.arkade
+  const { address } = params
+  const amountSats = parseWholeSats(params.amount)
+  const route = withdrawRoute(address, services.config.network)
+
+  const balance = await wallet.getBalance()
+  // Advisory: `available` still counts coins the reservation ledger has pinned, so the selection below is the gate.
+  if (amountSats > balance.available) {
+    throw new Error(
+      `withdrawal of ${amountSats} sats exceeds the float's available balance ` +
+        `[requested: ${amountSats}, available: ${balance.available}, total: ${balance.total} sats]`,
+    )
+  }
+
+  // `available` counts no swept coins, so neither does the selection — so `offchainInputFeeParams` never sees `isSwept`.
+  const [spendable, info, changeAddress] = await Promise.all([
+    wallet.getSpendableVtxos({ withRecoverable: false }),
+    wallet.arkProvider.getInfo(),
+    wallet.getAddress(),
+  ])
+  const dust = BigInt(info.dust)
+
+  // No await between this read and the `reserve` below: the filter and the pin
+  // are one synchronous section, or the ledger arbitrates nothing.
+  const reserved = services.arkade.reservations.reserved()
+  const candidates = spendable.filter((vtxo) => !reserved.has(outpointKey(vtxo.txid, vtxo.vout)))
+  // Soonest-expiry first, the inverse of lockup funding's rule: a coin spent here
+  // is a renewal fee nobody has to pay.
+  const ordered = [...candidates].sort((a, b) => {
+    const byExpiry = (a.expiresAt?.getTime() ?? Infinity) - (b.expiresAt?.getTime() ?? Infinity)
+    return byExpiry !== 0 ? byExpiry : b.value - a.value
+  })
+
+  if (route.kind === 'arkade') {
+    const selected: typeof ordered = []
+    let covered = 0
+    for (const coin of ordered) {
+      const usable = usableSatsOf(coin, Number(dust))
+      if (usable <= 0) continue
+      selected.push(coin)
+      covered += usable
+      if (covered >= amountSats) break
+    }
+    if (covered < amountSats) {
+      throw new Error(
+        `the float's unreserved coins cover ${covered} of ${amountSats} sats — a live swap's funding pins the ` +
+          'rest, or the float needs topping up',
+      )
+    }
+    const release = services.arkade.reservations.reserve(selected)
+    try {
+      // number, not bigint: `Recipient.amount` is a number, unlike the exit route's `settle` outputs below.
+      const txid = await wallet.send({ recipients: [{ address, amount: amountSats }], selectedVtxos: [...selected] })
+      return { reference: txid, address, amount: String(amountSats), detail: { route: 'arkade' } }
+    } finally {
+      release()
+    }
+  }
+
+  if (BigInt(amountSats) < dust) {
+    throw new Error(`amount ${amountSats} is below the ${dust} sat dust floor — an onchain output cannot carry it`)
+  }
+  const estimator = new Estimator(info.fees.intentFee)
+  const outputFee = BigInt(
+    estimator.evalOnchainOutput({ amount: BigInt(amountSats), script: hex.encode(route.script) }).satoshis,
+  )
+  const needed = BigInt(amountSats) + outputFee
+  const changeScript = hex.encode(ArkAddress.decode(changeAddress).pkScript)
+  // Fee and amount define each other; unsettled underfunds the exit, so refuse rather than ship one.
+  const changeAfterFee = (left: bigint): bigint => {
+    let net = left
+    for (let i = 0; i < 8; i += 1) {
+      const next = left - BigInt(estimator.evalOffchainOutput({ amount: net, script: changeScript }).satoshis)
+      if (next === net) return net
+      net = next
+    }
+    throw new Error(
+      `the change fee does not settle after 8 rounds on ${left} sats of change — withdraw the whole float instead`,
+    )
+  }
+
+  const selected: typeof ordered = []
+  let gross = 0n
+  let inputFees = 0n
+  let carriesAsset = false
+  let change: bigint | null = null
+  let changeFee = 0n
+  for (const coin of ordered) {
+    const value = BigInt(coin.value)
+    const inputFee = BigInt(estimator.evalOffchainInput(offchainInputFeeParams(coin)).satoshis)
+    if (inputFee >= value) continue
+    selected.push(coin)
+    gross += value - inputFee
+    inputFees += inputFee
+    carriesAsset = carriesAsset || (coin.assets?.length ?? 0) > 0
+    const left = gross - needed
+    // The change must be an output the server accepts: exactly nothing — and
+    // then only when no asset needs a ride home on it — or at least dust.
+    if (left === 0n && !carriesAsset) {
+      change = 0n
+      break
+    }
+    const net = left > 0n ? changeAfterFee(left) : left
+    if (net >= dust) {
+      change = net
+      changeFee = left - net
+      break
+    }
+  }
+  if (change === null) {
+    if (gross < needed) {
+      throw new Error(
+        `the float's unreserved coins net ${gross} sats against the ${needed} needed ` +
+          `(${amountSats} + a ${outputFee} sat exit fee) — a live swap's funding pins the rest, or the float ` +
+          'needs topping up',
+      )
+    }
+    throw new Error(
+      `withdrawing ${amountSats} sats leaves ${changeAfterFee(gross - needed)} sats of change, below the ${dust} ` +
+        `sat dust floor` +
+        (carriesAsset ? ' that the selection’s asset must ride on' : '') +
+        ' — withdraw a little less, so the change clears it',
+    )
+  }
+  if (change > 0n && info.vtxoMaxAmount >= 0n && change > info.vtxoMaxAmount) {
+    throw new Error(
+      `the change of ${change} sats would come back as one coin above the server's ${info.vtxoMaxAmount} sat ` +
+        'per-output ceiling — withdraw more, or split the float first (pool-mint)',
+    )
+  }
+
+  const release = services.arkade.reservations.reserve(selected)
+  try {
+    const outputs = [{ address, amount: BigInt(amountSats) }]
+    if (change > 0n) outputs.push({ address: changeAddress, amount: change })
+    const txid = await wallet.settle({ inputs: [...selected], outputs })
+    return {
+      reference: txid,
+      address,
+      amount: String(amountSats),
+      detail: { route: 'onchain', feeSats: (inputFees + outputFee + changeFee).toString() },
+    }
+  } finally {
+    release()
+  }
+}
+
 /**
  * Always present — unlike the rail's, which is null without `LN_BACKEND`.
  *
@@ -180,6 +378,7 @@ export const arkadeFundSource = (services: Services): FundSource => ({
   label: 'arkade float',
   unit: 'sats',
   readBalance: () => arkadeBalance(services),
+  withdraw: (params) => arkadeWithdraw(services, params),
   // Arkade FIRST: it is the one that needs no settlement, so an operator who
   // takes the top option gets spendable float rather than a second chore.
   //

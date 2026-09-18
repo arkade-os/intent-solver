@@ -255,7 +255,10 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   they differ in speed, in chore and in whether they expire: the Arkade float
   takes an Arkade address (spendable float on arrival) or its boarding address
   (L1, settle first), and the rail takes an invoice or an onchain address. The
-  chore-free option is listed first. Two sources ship (`rail`, `arkade`); the
+  chore-free option is listed first. Withdrawals from the float route by the
+  destination's form: an Arkade address is paid offchain at once, a bitcoin
+  address by collaborative exit at the server's next batch. Two sources ship
+  (`rail`, `arkade`); the
   rail one is simply absent
   without `LN_BACKEND`, so **the list is the availability decision** rather than
   a set of buttons that fail when pressed. Only `readBalance` is required, and a
