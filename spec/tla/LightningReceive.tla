@@ -319,7 +319,11 @@ LRSpendKinds == { "clientClaim", "solverRefund" }
 (* ArkadeHonoursFundKey.  The shipped table gained it in #184: the solo    *)
 (* exit needs neither the Arkade Service nor refund_locktime, so it        *)
 (* lands on a row still `funded`, and refunding -> refunded cannot         *)
-(* record that.                                                            *)
+(* record that.  The edge RECORDS an exit; it does not drive one.          *)
+(* startUnilateralExit ships and spends the leaf, but only when an         *)
+(* operator runs it (cli unilateral-exit --go) and no sweep takes this     *)
+(* edge, so FundedSoloRefund stays a requirement on the recovery           *)
+(* software rather than a description of it.                               *)
 (***************************************************************************)
 Row   == { "quoted", "armed", "funded", "claimed", "settled",
            "refunding", "refunded", "refused", "stuck" }
