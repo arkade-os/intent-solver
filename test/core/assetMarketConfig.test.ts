@@ -14,6 +14,7 @@ import {
   assetMarketKey,
   assetMarketPolicy,
   validateAssetMarket,
+  DEFAULT_SERVING,
   type AssetMarketConfig,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { BPS_DENOMINATOR, offerWithinTolerance } from '@arkade-os/solver-core/core/assetOfferPrice.js'
@@ -22,8 +23,12 @@ import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
 /** 68 hex characters — `serializeAssetId` is a 32-byte txid plus a u16 index. */
 const USDT = 'aa'.repeat(34)
 const OTHER = 'bb'.repeat(34)
+const USDA = 'cc'.repeat(34)
 
 const market = (over: Partial<AssetMarketConfig> = {}): AssetMarketConfig => ({
+  ...DEFAULT_SERVING,
+  // Offer-only, so each case below stays about the rule it names; `rfq` re-spreads.
+  servesRfq: false,
   base: null,
   quote: USDT,
   baseDecimals: 8,
@@ -267,5 +272,34 @@ describe('assetMarketPolicy', () => {
     // A paused market is one an operator intends to resume; discovering on that
     // morning that it never loaded is discovering it at the worst moment.
     expect(() => assetMarketPolicy([market({ enabled: false, toleranceBps: BPS_DENOMINATOR })])).toThrow(/switched off/)
+  })
+})
+
+describe('the serving fields', () => {
+  const rfq = (over: Partial<AssetMarketConfig> = {}) => ({ ...market(), ...DEFAULT_SERVING, symbol: 'USDA', ...over })
+
+  it('refuses a symbol that is not a legal env stem', () => {
+    expect(() => validateAssetMarket(rfq({ symbol: 'usda' }))).toThrow(/uppercase alphanumerics/)
+    expect(() => validateAssetMarket(rfq({ symbol: 'US-DA' }))).toThrow(/uppercase alphanumerics/)
+  })
+
+  it('requires a symbol from a market declared for RFQ', () => {
+    expect(() => validateAssetMarket(rfq({ symbol: null }))).toThrow(/symbol is required/)
+  })
+
+  it('refuses RFQ on a pair the covenant cannot express', () => {
+    expect(() => validateAssetMarket(rfq({ base: USDA, quote: OTHER }))).toThrow(/exactly one BTC leg/)
+    expect(() => validateAssetMarket(rfq({ base: USDA, quote: OTHER, servesRfq: false, symbol: null }))).not.toThrow()
+  })
+
+  it('refuses two markets sharing one symbol', () => {
+    expect(() => assetMarketPolicy([rfq(), rfq({ base: null, quote: OTHER })])).toThrow(
+      /two markets share the symbol USDA/,
+    )
+  })
+
+  it('lets two markets share a NULL symbol', () => {
+    const offerOnly = { ...rfq({ servesRfq: false, symbol: null }) }
+    expect(() => assetMarketPolicy([offerOnly, { ...offerOnly, base: null, quote: OTHER }])).not.toThrow()
   })
 })

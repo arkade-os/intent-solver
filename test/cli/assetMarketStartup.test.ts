@@ -12,13 +12,19 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { assetMarketPolicy, type AssetMarketConfig } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import {
+  assetMarketPolicy,
+  DEFAULT_SERVING,
+  type AssetMarketConfig,
+} from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { createServicesBody } from '../support/createServicesBody.js'
 
 const USDT = 'aa'.repeat(34)
 
 const market = (over: Partial<AssetMarketConfig> = {}): AssetMarketConfig => ({
+  ...DEFAULT_SERVING,
+  symbol: 'USDT',
   base: null,
   quote: USDT,
   baseDecimals: 8,

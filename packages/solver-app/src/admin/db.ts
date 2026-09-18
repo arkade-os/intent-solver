@@ -98,6 +98,12 @@ CREATE TABLE IF NOT EXISTS admin_migration (
 );
 `
 
+// Exec'd AFTER migrate(): a table that shipped without `symbol` has no such
+// column when SCHEMA runs. Partial, so an offer-only deployment's NULLs survive.
+const MIGRATED_SCHEMA = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_market_symbol ON admin_market(symbol) WHERE symbol IS NOT NULL;
+`
+
 export interface AuditEntry {
   action: string
   /** What it acted on — a swap id, usually. Null for whole-wallet actions. */
@@ -219,6 +225,7 @@ export class AdminStore {
     const store = new AdminStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
     await store.driver.exec(SCHEMA)
     await store.migrate()
+    await store.driver.exec(MIGRATED_SCHEMA)
     return store
   }
 

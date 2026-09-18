@@ -14,7 +14,7 @@ import { corridorSetFromDeps, readerSetFromDeps } from '@arkade-os/solver-app/op
 import { assetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { resolveDbLayout } from '@arkade-os/solver-corridors/db/layout.js'
-import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { DEFAULT_SERVING, type AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { createServicesBody } from '../support/createServicesBody.js'
 
 const USDA = '1a'.repeat(34)
@@ -153,6 +153,7 @@ describe('the swap-file layout names the table', () => {
 
 describe('a configured market really does become a served corridor', () => {
   const pricing: AssetMarketPricingView = {
+    ...DEFAULT_SERVING,
     base: null,
     quote: USDA,
     baseDecimals: 8,

@@ -35,7 +35,7 @@ import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { poll } from '@arkade-os/solver-core/util/poll.js'
-import { assetMarketPolicy } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { assetMarketPolicy, DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { AssetOfferService, parseAssetMarkets } from '@arkade-os/solver-app/ops/assetOffers.js'
 import { createServices } from '@arkade-os/solver-app/ops/services.js'
 import { loadConfig } from '@arkade-os/solver-app/config.js'
@@ -324,6 +324,8 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
   // this pins it against a stored row rather than a hand-built one.
   describe('what this deployment says it will fill', () => {
     const rowFor = (over: Record<string, unknown> = {}) => ({
+      ...DEFAULT_SERVING,
+      symbol: 'E2E',
       base: null,
       quote: assetId,
       baseDecimals: 8,
@@ -404,6 +406,8 @@ describe('e2e arkade offers — what OFFER_MARKETS actually builds', () => {
     const swapDbPath = join(dir, `services-${randomBytes(6).toString('hex')}.sqlite`)
     const admin = await AdminStore.open(betterSqliteDriver(swapDbPath))
     await admin.putMarket({
+      ...DEFAULT_SERVING,
+      symbol: 'E2E',
       base: null,
       quote: assetId,
       baseDecimals: 8,

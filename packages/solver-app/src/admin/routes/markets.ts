@@ -37,6 +37,7 @@ import type { Hono } from 'hono'
 import {
   assetMarketKey,
   validateAssetMarket,
+  DEFAULT_SERVING,
   type AssetMarketBounds,
   type AssetMarketConfig,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
@@ -129,6 +130,10 @@ const bounds = (label: string, value: unknown): AssetMarketBounds | null => {
 
 /** The request body as a market, or a `BadRequest` naming the field that was wrong. */
 const marketFrom = (body: MarketBody): AssetMarketConfig => ({
+  ...DEFAULT_SERVING,
+  // The wire has no `symbol` yet and an RFQ-declared market requires one, so a
+  // write here is offer-only rather than the row `validateAssetMarket` refuses.
+  servesRfq: false,
   base: leg('base', body.base),
   quote: leg('quote', body.quote),
   baseDecimals: int('baseDecimals', body.baseDecimals),

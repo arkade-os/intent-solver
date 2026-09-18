@@ -14,13 +14,14 @@ import {
   retainReadableMarkets,
 } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { assetRfqDescriptor, assetRfqEnvStem } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
-import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { DEFAULT_SERVING, type AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
 const USDA = '1a'.repeat(34)
 const OTHER = '2b'.repeat(34)
 const none = () => undefined
 
 const pricing = (over: Partial<AssetMarketPricingView> = {}): AssetMarketPricingView => ({
+  ...DEFAULT_SERVING,
   base: null,
   quote: USDA,
   baseDecimals: 8,
