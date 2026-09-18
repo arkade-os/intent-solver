@@ -46,8 +46,20 @@ export interface EvmReceivePlanRow {
   evmClaimTxid: string | null
 }
 
-/** How much of the client's timeout must remain before the solver commits sats. */
-export const EVM_RECEIVE_CLAIM_MARGIN_BLOCKS = 60
+export const EVM_RECEIVE_FUND_LANDING_BLOCKS = 20
+export const EVM_RECEIVE_CLAIM_LANDING_BLOCKS = 40
+
+/**
+ * A SUM because RULE 2 budgets TWO landings: a fund accepted at or past
+ * `evm_timeout` buys tokens the client has already refunded (TLA+ F3). In BLOCKS,
+ * so the total is ~12 min at Ethereum's cadence and ~15s at Arbitrum's.
+ */
+export const EVM_RECEIVE_CLAIM_MARGIN_BLOCKS = EVM_RECEIVE_FUND_LANDING_BLOCKS + EVM_RECEIVE_CLAIM_LANDING_BLOCKS
+
+export const EVM_RECEIVE_FUND_WINDOW_REFUSAL = 'client ERC20 timeout too close to fund against'
+
+export const evmReceiveFundWindowClosed = (evmBlockHeight: number, evmTimeout: number): boolean =>
+  evmBlockHeight + EVM_RECEIVE_CLAIM_MARGIN_BLOCKS >= evmTimeout
 
 export interface EvmReceiveObservation {
   /** Does the client's ERC20 lock exist in the contract? */
@@ -137,10 +149,10 @@ export const planEvmReceive = (row: EvmReceivePlanRow, seen: EvmReceiveObservati
         return { do: 'wait' }
       }
       // RULE 2. Enough of the client's timeout must remain that the solver can
-      // still claim after the client reveals. Funding into a nearly-expired lock
-      // buys tokens the client can take straight back.
-      if (seen.evmBlockHeight + EVM_RECEIVE_CLAIM_MARGIN_BLOCKS >= row.evmTimeout) {
-        return { do: 'refuse', reason: 'client ERC20 timeout too close to fund against' }
+      // still fund AND claim. Funding into a nearly-expired lock buys tokens the
+      // client can take straight back. Re-asked at the broadcast, not only here.
+      if (evmReceiveFundWindowClosed(seen.evmBlockHeight, row.evmTimeout)) {
+        return { do: 'refuse', reason: EVM_RECEIVE_FUND_WINDOW_REFUSAL }
       }
       return { do: 'fund_arkade' }
     }
