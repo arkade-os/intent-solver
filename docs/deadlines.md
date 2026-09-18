@@ -95,7 +95,7 @@ number's job is to agree with whoever derives the same script.
 | `MAX_REFUND_HORIZON` | `core/receive.ts` | The **Lightning** receive leg's own refund deadline. Also the horizon `selectLockupFunding` prefers coins to outlive. |
 | `MAX_REFUND_HORIZON` | `core/onchainReceive.ts` | The **onchain** receive leg's. A separate declaration supplying a different quantity — see "Two horizons, not one". |
 | `ONCHAIN_ORDER_MARGIN_SECONDS` | `core/onchainSend.ts` | Ordering margin between the two legs' deadlines. |
-| `EVM_ORDER_MARGIN_SECONDS` | `core/evmSend.ts` *(unmerged)* | Same role on the EVM corridors. |
+| `EVM_ORDER_MARGIN_SECONDS` | `core/evmSend.ts` | Same role on the EVM corridors. |
 
 ### 15 minutes
 
