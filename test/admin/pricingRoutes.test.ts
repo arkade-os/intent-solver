@@ -381,6 +381,36 @@ describe('POST /api/pricing/preview — BTC corridors', () => {
     await adminStore.close()
   })
 
+  it('refuses overrides that are not an object of values', async () => {
+    // A bare string's own character-indices are each a one-character string,
+    // so without this guard 'bogus' would read as five valid entries.
+    const { app, adminStore } = await build()
+    const { body } = await preview(app, {
+      target: 'corridor',
+      corridor: 'arkade:BTC->lightning:BTC',
+      overrides: 'bogus',
+      side: 'from',
+    })
+    expect(body.invalid).toMatchObject([{ key: 'overrides' }])
+    expect(body.samples).toEqual([])
+    await adminStore.close()
+  })
+
+  it('refuses a non-string override value instead of silently coercing it', async () => {
+    // `PATCH /api/settings` refuses a non-string value outright; this route
+    // must not accept through a cast what that route would 400 on.
+    const { app, adminStore } = await build()
+    const { body } = await preview(app, {
+      target: 'corridor',
+      corridor: 'arkade:BTC->lightning:BTC',
+      overrides: { LN_SEND_FEE_BPS: 25 },
+      side: 'from',
+    })
+    expect(body.invalid).toMatchObject([{ key: 'LN_SEND_FEE_BPS' }])
+    expect(body.samples).toEqual([])
+    await adminStore.close()
+  })
+
   it('prices a corridor ladder in the payout leg when the customer names what they get', async () => {
     // A zero fee makes give and payout identical regardless of which side the
     // amount names, so this needs a real spread to tell the two apart.

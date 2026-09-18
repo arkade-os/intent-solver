@@ -322,4 +322,32 @@ describe('the predicate actually closes the class it names', () => {
       /private, loopback or link-local/,
     )
   })
+
+  // RFC 6598 CGNAT, 100.64.0.0/10 — Fly.io routes it to internal Wireguard
+  // peers, and other providers use it for load-balancer health endpoints.
+  it('refuses 100.64.0.0, the CGNAT range’s first address', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://100.64.0.0/price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  it('refuses 100.127.255.255, the CGNAT range’s last address', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://100.127.255.255/price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  it('admits 100.63.255.255, one address below the CGNAT range', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://100.63.255.255/price' }))).not.toThrow()
+  })
+
+  it('admits 100.128.0.0, one address above the CGNAT range', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://100.128.0.0/price' }))).not.toThrow()
+  })
+
+  it('refuses a CGNAT address in its IPv4-mapped-IPv6 form, which URL renders as hex', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://[::ffff:100.64.0.1]/price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
 })

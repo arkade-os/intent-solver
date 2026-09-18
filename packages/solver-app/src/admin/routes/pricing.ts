@@ -76,6 +76,21 @@ const refusalFor = (error: unknown): DraftRefusal => {
 
 const str = (value: bigint): string => value.toString()
 
+/** Every override as a decimal string — the shape `PATCH /api/settings` itself requires, not a cast that hides a mismatch. */
+const stringOverrides = (
+  raw: unknown,
+): { ok: true; draft: Record<string, string> } | { ok: false; invalid: DraftRefusal[] } => {
+  if (raw === undefined) return { ok: true, draft: {} }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { ok: false, invalid: [{ key: 'overrides', reason: 'overrides must be an object of string values' }] }
+  }
+  const entries = Object.entries(raw as Record<string, unknown>)
+  const invalid = entries
+    .filter(([, value]) => typeof value !== 'string')
+    .map(([key, value]) => ({ key, reason: `${key} must be a decimal string, got ${typeof value}` }))
+  return invalid.length > 0 ? { ok: false, invalid } : { ok: true, draft: raw as Record<string, string> }
+}
+
 export const registerPricingRoutes = (app: Hono, deps: AdminDeps, feeds: FeedCache): void => {
   app.post('/api/pricing/preview', async (c) => {
     let body: Record<string, unknown>
@@ -99,8 +114,9 @@ const corridorPreview = (deps: AdminDeps, body: Record<string, unknown>, side: '
       samples: [],
     }
   }
-  const draft = (body.overrides ?? {}) as Record<string, string>
-  const resolved = resolveDraftPolicy(deps.services.config, draft)
+  const parsed = stringOverrides(body.overrides)
+  if (!parsed.ok) return { invalid: parsed.invalid, samples: [] }
+  const resolved = resolveDraftPolicy(deps.services.config, parsed.draft)
   if (!resolved.ok) return { invalid: resolved.invalid, samples: [] }
 
   const fee = resolved.config.corridorFees[corridor]
