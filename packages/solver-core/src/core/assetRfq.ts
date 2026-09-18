@@ -113,6 +113,20 @@ export type AssetQuoteRefusal = 'unsupported_pair' | 'price_unavailable' | 'fee_
 export type AssetQuoteOutcome =
   { ok: true; fromAmount: bigint; toAmount: bigint } | { ok: false; reason: AssetQuoteRefusal }
 
+export interface CarrierLegs {
+  charged: bigint
+  returned: bigint
+}
+
+export const carrierLegs = (pair: AssetPair, carrierSats: bigint): CarrierLegs => {
+  const clientFronts = pair.from !== null
+  const solverDelivers = pair.to !== null
+  return {
+    charged: solverDelivers && !clientFronts ? carrierSats : 0n,
+    returned: clientFronts && !solverDelivers ? carrierSats : 0n,
+  }
+}
+
 /**
  * The two amounts a quote resolves, exactly — § 4.2's "the solver's fee lives
  * in the spread between them; there is no separate fee field".
@@ -157,11 +171,8 @@ export const resolveAssetQuote = (args: {
   // Same selection as the flat fee: the direction decides the spread too.
   const feeBps = (givesBase ? market.sellBaseFeeBps : market.buyBaseFeeBps) ?? market.feeBps
   if (feeBps < 0 || feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
-  // BOTH legs counted: an asset deposit carries one, an asset payout needs one.
-  const clientFronts = pair.from !== null
   const solverDelivers = pair.to !== null
-  const chargedCarrier = solverDelivers && !clientFronts ? carrierSats : 0n
-  const returnedCarrier = clientFronts && !solverDelivers ? carrierSats : 0n
+  const { charged: chargedCarrier, returned: returnedCarrier } = carrierLegs(pair, carrierSats)
 
   if (amountSide === 'to') {
     // The named amount already holds whatever comes back to them.

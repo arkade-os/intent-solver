@@ -17,6 +17,7 @@ import {
   parseAssetPair,
   resolveAssetQuote,
   evaluateAssetFill,
+  carrierLegs,
   type AssetQuoteMarket,
 } from '@arkade-os/solver-core/core/assetRfq.js'
 
@@ -540,5 +541,49 @@ describe('evaluateAssetFill — what must hold at the moment of filling', () => 
       fill: false,
       reason: 'quote_expired',
     })
+  })
+})
+
+describe('carrierLegs — which leg the carrier lands on', () => {
+  const asset = 'bb'.repeat(34)
+
+  it('charges the deposit when the solver delivers the asset', () => {
+    expect(carrierLegs({ from: null, to: asset }, 330n)).toEqual({ charged: 330n, returned: 0n })
+  })
+
+  it('returns it in the payout when the client fronted it', () => {
+    expect(carrierLegs({ from: asset, to: null }, 330n)).toEqual({ charged: 0n, returned: 330n })
+  })
+
+  it('is the rule resolveAssetQuote itself applies', () => {
+    // The identity that makes the preview safe to seed from: on asset->BTC an
+    // exact-out quote named at `minPayout` refuses, because the bound is checked
+    // against `amount - returnedCarrier` (assetRfq.ts:168). `+ returned` is what
+    // reaches it.
+    const market = {
+      base: asset,
+      quote: null,
+      baseDecimals: 6,
+      quoteDecimals: 8,
+      feeBps: 50,
+      minPayout: 1_000n,
+      maxPayout: 10n ** 12n,
+    }
+    const pair = { from: asset, to: null }
+    const { returned } = carrierLegs(pair, 330n)
+    const at = (amount: bigint) =>
+      resolveAssetQuote({
+        pair,
+        amount,
+        amountSide: 'to' as const,
+        market,
+        feed: { mantissa: 1n, scale: 5 },
+        carrierSats: 330n,
+        dustSats: 330n,
+      })
+
+    expect(returned).toBe(330n)
+    expect(at(market.minPayout).ok).toBe(false)
+    expect(at(market.minPayout + returned)).toMatchObject({ ok: true })
   })
 })
