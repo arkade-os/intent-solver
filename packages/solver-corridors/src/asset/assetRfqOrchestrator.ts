@@ -38,9 +38,9 @@
 
 import {
   evaluateAssetFill,
-  impliedQuotePrice,
   parseAssetPair,
   resolveAssetQuote,
+  struckQuotePrice,
   type AssetLeg,
   type AssetQuoteMarket,
 } from '@arkade-os/solver-core/core/assetRfq.js'
@@ -181,15 +181,17 @@ const quoteSnapshot = (args: {
   market: AssetQuoteMarket
   pair: { from: AssetLeg; to: AssetLeg }
   feed: Price
+  carrierSats: bigint
 }): { quotePrice?: { impliedMantissa: bigint; scale: number; givesBase: boolean } } => {
-  const { resolved, market, pair, feed } = args
+  const { resolved, market, pair, feed, carrierSats } = args
   const givesBase = pair.from === market.base && pair.to === market.quote
-  const implied = impliedQuotePrice({
+  const implied = struckQuotePrice({
     fromAmount: resolved.fromAmount,
     toAmount: resolved.toAmount,
+    pair,
+    market,
+    carrierSats,
     givesBase,
-    baseDecimals: market.baseDecimals,
-    quoteDecimals: market.quoteDecimals,
     scale: feed.scale,
   })
   return implied === null ? {} : { quotePrice: { impliedMantissa: implied.mantissa, scale: implied.scale, givesBase } }
@@ -320,7 +322,7 @@ export class AssetRfqSwapService {
         // Against a feed read at fill time it measures how far the market moved
         // while the quote was outstanding; against its own feed it would measure
         // the configured spread and nothing else.
-        ...quoteSnapshot({ resolved, market: priced, pair, feed }),
+        ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: this.deps.carrierSats }),
       })
       return { accepted: true, swap }
     } catch (error) {
