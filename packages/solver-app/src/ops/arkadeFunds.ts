@@ -288,15 +288,17 @@ const arkadeWithdraw = async (
   )
   const needed = BigInt(amountSats) + outputFee
   const changeScript = hex.encode(ArkAddress.decode(changeAddress).pkScript)
-  // The change output's fee is charged on its own size, so fee and amount define each other: settle downwards.
+  // Fee and amount define each other; unsettled underfunds the exit, so refuse rather than ship one.
   const changeAfterFee = (left: bigint): bigint => {
     let net = left
     for (let i = 0; i < 8; i += 1) {
       const next = left - BigInt(estimator.evalOffchainOutput({ amount: net, script: changeScript }).satoshis)
-      if (next === net) break
+      if (next === net) return net
       net = next
     }
-    return net
+    throw new Error(
+      `the change fee does not settle after 8 rounds on ${left} sats of change — withdraw the whole float instead`,
+    )
   }
 
   const selected: typeof ordered = []

@@ -751,6 +751,19 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     expect(result).toMatchObject({ detail: { route: 'onchain', feeSats: '157' } })
   })
 
+  it('refuses a change fee that never settles, rather than underfunding the exit', async () => {
+    // Charging the whole output oscillates change → 0 → change, never reaching a fixpoint.
+    const intentFee = { onchainOutput: '100.0', offchainOutput: 'amount' }
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], {
+      arkProvider: { getInfo: vi.fn().mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee } }) },
+    })
+
+    await expect(withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })).rejects.toThrow(
+      /change fee/i,
+    )
+    expect(wallet.settle).not.toHaveBeenCalled()
+  })
+
   it('spends the soonest-expiring coins first', async () => {
     const later = coin(0x01, 60_000, { expiresAt: new Date('2026-10-01T00:00:00Z') })
     const sooner = coin(0x02, 60_000, { expiresAt: new Date('2026-09-18T00:00:00Z') })
