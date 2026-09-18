@@ -93,7 +93,7 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   // Built once and shared: `feeds.read` is for the preview, never the write probe.
   const fetchPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
   const feeds = createFeedCache(fetchPrice)
-  registerMarketRoutes(app, deps, feeds)
+  registerMarketRoutes(app, { ...deps, fetchPrice }, feeds)
   // BEFORE the actions route, for the reason the card route states below: that
   // route claims `/api/actions/:name` only, but registration order is what
   // keeps the `*` fallback at the very bottom from shadowing anything.
