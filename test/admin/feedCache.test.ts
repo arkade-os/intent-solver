@@ -72,4 +72,20 @@ describe('createFeedCache', () => {
     expect(await cache.read('https://feed.test/p', '/price')).toEqual({ price: priceFrom('100000'), readAt: 1_000 })
     expect(fetchPrice).not.toHaveBeenCalled()
   })
+
+  it('evicts the oldest entry once the cap is exceeded', async () => {
+    const fetchPrice = vi.fn().mockResolvedValue(priceFrom('100000'))
+    const cache = createFeedCache(fetchPrice, { maxEntries: 3, now: at(1_000) })
+    for (let i = 0; i < 4; i++) await cache.read(`https://feed.test/${i}`, '/price')
+    await cache.read('https://feed.test/0', '/price')
+    expect(fetchPrice).toHaveBeenCalledTimes(5)
+  })
+
+  it('keeps the entries newer than the one it evicted', async () => {
+    const fetchPrice = vi.fn().mockResolvedValue(priceFrom('100000'))
+    const cache = createFeedCache(fetchPrice, { maxEntries: 3, now: at(1_000) })
+    for (let i = 0; i < 4; i++) await cache.read(`https://feed.test/${i}`, '/price')
+    await cache.read('https://feed.test/3', '/price')
+    expect(fetchPrice).toHaveBeenCalledTimes(4)
+  })
 })
