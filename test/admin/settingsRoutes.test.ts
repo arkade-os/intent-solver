@@ -4,6 +4,15 @@ import { fileURLToPath } from 'node:url'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import { AssetRfqSwapService } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import { assetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
+import {
+  assetMarketPolicy,
+  DEFAULT_SERVING,
+  type AssetMarketConfig,
+} from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { createServicesBody } from '../support/createServicesBody.js'
 
 const baseConfig = {
   network: 'regtest',
@@ -41,6 +50,8 @@ const baseConfig = {
   // anything; the read-only block renders both. @see admin/servedBy.ts
   offerMarkets: [],
   assetRfqTokens: [],
+  assetCarrierPricing: false,
+  offerChargesDeliveredCarrier: false,
 }
 
 const build = (overrides: Record<string, string> = {}, over: Record<string, unknown> = {}) => {
@@ -51,10 +62,10 @@ const build = (overrides: Record<string, string> = {}, over: Record<string, unkn
   })
   const services = {
     config: structuredClone(baseConfig),
-    // What this process actually resolved its policy from. Defaulting both to
-    // "booted with nothing overridden" keeps every existing case unchanged.
     policy: structuredClone(baseConfig),
+    bootPolicy: structuredClone(baseConfig),
     bootOverrides: {},
+    replacePolicy: vi.fn(),
     adminStore: { getOverrides: vi.fn(async () => ({ ...stored })), setOverrideWithAudit },
     ...over,
   } as never
@@ -76,10 +87,12 @@ const buildReal = async () => {
   const services = {
     config: structuredClone(baseConfig),
     policy: structuredClone(baseConfig),
+    bootPolicy: structuredClone(baseConfig),
     bootOverrides: {},
+    replacePolicy: vi.fn(),
     adminStore,
   } as never
-  return { app: buildAdminApp({ services, startedAt: 1, mode: 'relay' }), adminStore, driver }
+  return { app: buildAdminApp({ services, startedAt: 1, mode: 'relay' }), adminStore, driver, services }
 }
 
 const rejectAuditInserts = (driver: ReturnType<typeof betterSqliteDriver>) =>
@@ -130,7 +143,10 @@ describe('GET /api/settings — what is actually pending', () => {
   it('omits an override this process already booted with', async () => {
     const policy = structuredClone(baseConfig)
     policy.corridorFees['arkade:BTC->lightning:BTC'] = { bps: 25, flatSats: 0 }
-    const body = await read({ LN_SEND_FEE_BPS: '25' }, { policy, bootOverrides: { LN_SEND_FEE_BPS: '25' } })
+    const body = await read(
+      { LN_SEND_FEE_BPS: '25' },
+      { policy, bootPolicy: policy, bootOverrides: { LN_SEND_FEE_BPS: '25' } },
+    )
 
     expect(body.pendingRestart).toEqual([])
     expect(body.knobs.find((k) => k.key === 'LN_SEND_FEE_BPS')?.pending).toBeUndefined()
@@ -142,7 +158,7 @@ describe('GET /api/settings — what is actually pending', () => {
     expect(body.pendingRestart).toEqual(['LN_SEND_FEE_BPS'])
     const knob = body.knobs.find((k) => k.key === 'LN_SEND_FEE_BPS')
     expect(knob?.pending).toBe(true)
-    // Unchanged and still true: no seam hands a running service new policy yet.
+    // Unchanged: no seam reaches a corridor fee, whatever LIVE_KEYS now holds.
     expect(knob?.restartRequired).toBe(true)
   })
 })
@@ -176,7 +192,10 @@ describe('PATCH /api/settings', () => {
   it('reports no restart needed for a value that already matches what booted', async () => {
     const policy = structuredClone(baseConfig)
     policy.corridorLimits['arkade:BTC->lightning:BTC'] = { minSats: 1_000, maxSats: 50_000 }
-    const { app } = build({ LN_SEND_MAX_SATS: '50000' }, { policy, bootOverrides: { LN_SEND_MAX_SATS: '50000' } })
+    const { app } = build(
+      { LN_SEND_MAX_SATS: '50000' },
+      { policy, bootPolicy: policy, bootOverrides: { LN_SEND_MAX_SATS: '50000' } },
+    )
     const body = await (await patch(app, { key: 'LN_SEND_MAX_SATS', value: '50000' })).json()
     expect(body).toMatchObject({ restartRequired: false })
   })
@@ -260,6 +279,119 @@ describe('PATCH /api/settings', () => {
     const { app } = build()
     expect((await patch(app, { value: '1' })).status).toBe(400)
     expect((await patch(app, { key: 'LN_SEND_FEE_BPS', value: 25 })).status).toBe(400)
+  })
+})
+
+const USDA = '1a'.repeat(34)
+
+const marketFixture = (): AssetMarketConfig => ({
+  ...DEFAULT_SERVING,
+  symbol: 'USDA',
+  carrierMode: 'inherit',
+  base: null,
+  quote: USDA,
+  baseDecimals: 8,
+  quoteDecimals: 6,
+  feedUrl: 'https://feed.test/price',
+  pricePath: '/price',
+  toleranceBps: 10,
+  feeBps: 25,
+  sellBaseFeeFlat: 0n,
+  buyBaseFeeFlat: 0n,
+  sellBase: { min: 1n, max: 10n ** 24n },
+  buyBase: { min: 1n, max: 10n ** 24n },
+  enabled: true,
+})
+
+const quoteRequest = (n: number) => ({
+  rfqId: n.toString(16).padStart(64, '0'),
+  pair: `arkade:BTC->arkade:${USDA}`,
+  amount: 100_000_000n,
+  amountSide: 'from' as const,
+  makerPkScript: `5120${'c'.repeat(64)}`,
+  makerPublicKey: n.toString(16).padStart(64, '0'),
+})
+
+/** A real service, and a `replacePolicy` hand-wired from the shipped functions. Arm 2 stops it drifting. */
+const liveHarness = async () => {
+  const { adminStore } = await buildReal()
+  const swapStore = await AssetRfqSwapStore.open(':memory:')
+  const service = new AssetRfqSwapService({
+    store: swapStore,
+    markets: [],
+    solverPubkey: 'e'.repeat(64),
+    quoteValiditySeconds: 30,
+    dustSats: 330n,
+    fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
+    deriveOffer: (terms) => ({
+      pkScript: `5120${terms.makerPublicKey}`,
+      address: `ark1q${terms.makerPublicKey.slice(0, 8)}`,
+    }),
+    depositAt: async () => null,
+    balance: async () => new Map([[USDA, 10n ** 24n]]),
+    settle: async () => 'fa'.repeat(32),
+  })
+  const services = {
+    config: structuredClone(baseConfig),
+    policy: structuredClone(baseConfig),
+    bootPolicy: structuredClone(baseConfig),
+    bootOverrides: {},
+    adminStore,
+    replacePolicy: async (next: { assetCarrierPricing: boolean }) => {
+      services.policy = next as never
+      await service.replaceMarkets(
+        assetRfqMarketsFrom(assetMarketPolicy(await adminStore.listMarkets()).pricing, {
+          dustSats: 330n,
+          pricedByDefault: next.assetCarrierPricing,
+        }),
+      )
+    },
+    replaceMarkets: async () => {
+      await service.replaceMarkets(
+        assetRfqMarketsFrom(assetMarketPolicy(await adminStore.listMarkets()).pricing, {
+          dustSats: 330n,
+          pricedByDefault: services.policy.assetCarrierPricing,
+        }),
+      )
+    },
+  }
+  return {
+    app: buildAdminApp({ services: services as never, startedAt: 1, mode: 'relay' }),
+    service,
+    adminStore,
+    swapStore,
+    services,
+  }
+}
+
+describe('a live knob reaches the next quote without a restart', () => {
+  it('changes what the next quote costs, with no restart', async () => {
+    const { app, service, adminStore, swapStore, services } = await liveHarness()
+    await adminStore.putMarket(marketFixture())
+    await services.replaceMarkets()
+
+    const before = await service.quote(quoteRequest(1))
+    expect(before.accepted && before.carrierSats).toBe(0n)
+
+    const res = await patch(app, { key: 'ASSET_CARRIER_PRICING', value: 'true' })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { restartRequired: boolean }).restartRequired).toBe(false)
+
+    const after = await service.quote(quoteRequest(2))
+    expect(after.accepted && after.carrierSats).toBe(330n)
+    expect(after.accepted && before.accepted && BigInt(after.swap.toAmount) < BigInt(before.swap.toAmount)).toBe(true)
+    await swapStore.close()
+  })
+
+  it('builds replacePolicy from the same rebuild the market swap uses', () => {
+    const body = createServicesBody()
+    expect(body).toContain('replacePolicy: (next: Config): Promise<void> =>')
+    expect(body).toContain('services.policy = next')
+    expect(body).toContain('await rebuild(next)')
+    expect(body.match(/const rebuild = async/g)).toHaveLength(1)
+    expect(body).toContain('replaceMarkets: (): Promise<void> => replaceQueue(() => rebuild(services.policy))')
+    // ASSIGNED once: a `services.bootPolicy =` makes this two, a deleted one zero.
+    expect(body.match(/bootPolicy\s*[:=]/g)).toHaveLength(1)
   })
 })
 

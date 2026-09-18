@@ -200,6 +200,7 @@ const overview = async (policy: Record<string, unknown>, rows: unknown[] = [mark
     services: {
       config: settingsConfig(),
       policy: { ...(settingsConfig() as Record<string, unknown>), offerMarkets: [], assetRfqTokens: [], ...policy },
+      bootPolicy: { ...(settingsConfig() as Record<string, unknown>), offerMarkets: [], assetRfqTokens: [], ...policy },
       bootOverrides: {},
       assetMarkets: [],
       liveOfferMarkets: policy.liveOfferMarkets ?? [],

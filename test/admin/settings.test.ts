@@ -4,6 +4,7 @@ import {
   validateOverride,
   describeSettings,
   editableKeys,
+  LIVE_KEYS,
 } from '@arkade-os/solver-app/admin/settings.js'
 import type { Config } from '@arkade-os/solver-app/config.js'
 
@@ -45,22 +46,24 @@ const config = {
   // anything; the read-only block renders both. @see admin/servedBy.ts
   offerMarkets: [],
   assetRfqTokens: [],
+  assetCarrierPricing: false,
+  offerChargesDeliveredCarrier: false,
 } as unknown as Config
 
 describe('the editable key set', () => {
-  it('covers five knobs per corridor plus the two globals', () => {
+  it('covers five knobs per corridor plus the three globals', () => {
     // Deliberately a COUNT rather than a set comparison: it fails when a key
     // is added, which is the point. Anything reaching the admin port can write
     // every key in here, and the port has no authentication of its own, so
     // growing this surface should cost a deliberate edit here.
     //
-    // The globals are `MAX_EXPOSED_SATS` and `LOCKUP_TIMEOUT_SECONDS`.
-    expect(editableKeys()).toHaveLength(4 * 5 + 2)
+    expect(editableKeys()).toHaveLength(4 * 5 + 3)
   })
 
-  it('admits the two globals by name, so the count above cannot pass on the wrong pair', () => {
+  it('admits the globals by name, so the count above cannot pass on the wrong set', () => {
     expect(editableKeys()).toContain('MAX_EXPOSED_SATS')
     expect(editableKeys()).toContain('LOCKUP_TIMEOUT_SECONDS')
+    expect(editableKeys()).toContain('ASSET_CARRIER_PRICING')
   })
 
   it('never admits a secret or a path', () => {
@@ -208,16 +211,11 @@ describe('describeSettings', () => {
     expect(knobs.find((k) => k.key === 'LN_SEND_FEE_FLAT_SATS')).toMatchObject({ source: 'env' })
   })
 
-  it('reports EVERY editable knob as restart-required', () => {
-    // Not a limitation of this module: createServices hands each service its
-    // policy at construction (maxExposedSats by value, the rest as references
-    // it never revisits), the orchestrator's deps is `private readonly`, and
-    // corridor toggles are read once when the ingress is built. Nothing can
-    // hand a running service new policy, so claiming any of these apply live
-    // would be a lie an operator finds out about from a mispriced quote.
+  it('reports every editable knob as restart-required EXCEPT the ones a seam now reaches', () => {
     for (const knob of describeSettings(config, {}).filter((k) => k.editable)) {
-      expect(knob.restartRequired, `${knob.key} should be restart-required`).toBe(true)
+      expect(knob.restartRequired, `${knob.key}`).toBe(!LIVE_KEYS.has(knob.key))
     }
+    expect([...LIVE_KEYS]).toEqual(['ASSET_CARRIER_PRICING'])
   })
 
   it('never marks a read-only knob restart-required — there is nothing to restart for', () => {

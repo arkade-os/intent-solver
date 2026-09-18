@@ -108,16 +108,19 @@ export interface Services {
   config: Config
   /**
    * What this process actually quotes: {@link Services.config} narrowed by the
-   * console's stored overrides, resolved once at startup.
+   * console's stored overrides. {@link Services.replacePolicy} moves this.
    *
    * The services were constructed from these values and nothing re-reads them,
-   * which is why a settings change needs a restart. Anything that must AGREE
+   * which is why most settings changes need a restart. Anything that must AGREE
    * with what gets quoted — the ingress corridor gate, the open-RFQ bidder,
    * the registry card — reads this rather than `config`, or it would advertise
    * terms the corridor then refuses.
    */
   policy: Config
-  /** What {@link Services.policy} was resolved from, so `pendingRestartKeys` can
+  /** What `createServices` resolved at startup, NEVER reassigned: the baseline the restart-pending badge diffs
+   * against, since `replacePolicy` rewrites `policy` from ALL stored overrides at once. */
+  readonly bootPolicy: Config
+  /** What {@link Services.bootPolicy} was resolved from, so `pendingRestartKeys` can
    * tell an override already in force from one still waiting. */
   bootOverrides: Record<string, string>
   /**
@@ -206,6 +209,7 @@ export interface Services {
   assetRfqMarkets: readonly AssetRfqMarket[]
   /** Rebuild in-memory markets from the console store and swap the live corridor set. */
   replaceMarkets(): Promise<void>
+  replacePolicy(next: Config): Promise<void>
   /**
    * Settings overrides and the action audit log, in their own database. Open
    * whether or not the console is running: operator actions are auditable from
@@ -1207,9 +1211,31 @@ export const createServices = async (
   }
   const { corridors, readers } = setsFrom(policy, assetRfqMarkets)
 
+  const rebuild = async (livePolicy: Config): Promise<void> => {
+    const next = assetMarketPolicy(await adminStore.listMarkets())
+    const rfq = assetRfqMarketsFrom(next.pricing, {
+      dustSats: arkade.dustSats,
+      pricedByDefault: livePolicy.assetCarrierPricing,
+    })
+    const offers = offerMarketsFrom(next.pricing)
+    const live = await assetRfqStore.listNonTerminal()
+    const readable = retainReadableMarkets(rfq, readableMarkets, live)
+    const nextSets = setsFrom(livePolicy, rfq, readable)
+    await assetRfqService.replaceMarkets(rfq)
+    await assetOffers?.replaceMarkets({ markets: offers, pricing: next.pricing })
+    services.corridors.replace([...nextSets.corridors])
+    services.readers.replace([...nextSets.readers])
+    services.assetMarkets = next.pricing
+    services.assetMarketPairs = next.pairs
+    services.assetRfqMarkets = rfq
+    services.liveOfferMarkets = offers
+    readableMarkets = readable
+  }
+
   const services: Services = {
     config,
     policy,
+    bootPolicy: policy,
     bootOverrides,
     assetMarkets: assetMarkets.pricing,
     assetMarketPairs: assetMarkets.pairs,
@@ -1229,29 +1255,13 @@ export const createServices = async (
     assetRfqStore,
     assetRfqService,
     assetRfqMarkets,
-    replaceMarkets: (): Promise<void> =>
+    replaceMarkets: (): Promise<void> => replaceQueue(() => rebuild(services.policy)),
+    /** Same queue as `replaceMarkets`, so the two cannot interleave. Assignment FIRST, so a caller reading
+     * `services.policy` after sees what the lists were built from; ASSIGNS, which is what keeps `bootPolicy`. */
+    replacePolicy: (next: Config): Promise<void> =>
       replaceQueue(async () => {
-        // ONE read, at the top of the serialised job, so a policy swapped
-        // between two jobs cannot leave half this rebuild on the old value.
-        const livePolicy = services.policy
-        const next = assetMarketPolicy(await adminStore.listMarkets())
-        const rfq = assetRfqMarketsFrom(next.pricing, {
-          dustSats: arkade.dustSats,
-          pricedByDefault: livePolicy.assetCarrierPricing,
-        })
-        const offers = offerMarketsFrom(next.pricing)
-        const live = await assetRfqStore.listNonTerminal()
-        const readable = retainReadableMarkets(rfq, readableMarkets, live)
-        const nextSets = setsFrom(livePolicy, rfq, readable)
-        await assetRfqService.replaceMarkets(rfq)
-        await assetOffers?.replaceMarkets({ markets: offers, pricing: next.pricing })
-        services.corridors.replace([...nextSets.corridors])
-        services.readers.replace([...nextSets.readers])
-        services.assetMarkets = next.pricing
-        services.assetMarketPairs = next.pairs
-        services.assetRfqMarkets = rfq
-        services.liveOfferMarkets = offers
-        readableMarkets = readable
+        services.policy = next
+        await rebuild(next)
       }),
     adminStore,
     arkade,

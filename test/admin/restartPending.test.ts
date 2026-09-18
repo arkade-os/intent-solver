@@ -1,10 +1,12 @@
-// Settings overrides still need a restart. Market CRUD is live and must not
-// appear on the overview banner.
+// A settings override needs a restart EXCEPT for a LIVE_KEYS member. Market CRUD
+// is live and must not appear on the overview banner.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
+import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
+import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { settingsDrift } from '@arkade-os/solver-app/admin/drift.js'
 import { pendingRestartKeys } from '@arkade-os/solver-app/admin/settings.js'
 import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
@@ -40,8 +42,11 @@ const baseConfig = {
     'onchain:BTC->arkade:BTC': true,
   },
   adminRestartEnabled: true,
+  assetCarrierPricing: false,
+  offerChargesDeliveredCarrier: false,
   offerMarkets: [],
   assetRfqTokens: [],
+  sendHintScidDenylist: new Set<string>(),
 }
 
 const config = (over: Record<string, unknown> = {}) => ({ ...structuredClone(baseConfig), ...over }) as never
@@ -76,6 +81,7 @@ const services = (over: Record<string, unknown> = {}) =>
   ({
     config: config(),
     policy: config(),
+    bootPolicy: config(),
     bootOverrides: {},
     assetMarkets: [],
     liveOfferMarkets: [],
@@ -102,6 +108,66 @@ const overview = async (over: Record<string, unknown> = {}) => {
   expect(response.status).toBe(200)
   return (await response.json()) as { pendingRestart: { key: string; loaded: string; stored: string }[] }
 }
+
+const buildReal = async () => {
+  const adminStore = await AdminStore.open(betterSqliteDriver(':memory:'), () => 1_000_000)
+  const svc = services({ adminStore }) as unknown as {
+    policy: unknown
+    bootPolicy: { maxExposedSats: number }
+    replacePolicy: (next: unknown) => Promise<void>
+  }
+  // Exactly what the shipped one does to these two: ASSIGN `policy`, never `bootPolicy`.
+  svc.replacePolicy = async (next) => {
+    svc.policy = next
+  }
+  return { app: buildAdminApp({ services: svc as never, startedAt: 1, mode: 'relay' }), services: svc, adminStore }
+}
+
+type App = ReturnType<typeof buildAdminApp>
+
+const patch = (app: App, key: string, value: string) =>
+  app.fetch(
+    new Request('http://admin/api/settings', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key, value }),
+    }),
+  )
+
+const settingsOf = async (app: App) =>
+  (await (await app.fetch(new Request('http://admin/api/settings'))).json()) as {
+    pendingRestart: string[]
+    knobs: { key: string; pending?: boolean; restartRequired?: boolean }[]
+  }
+
+describe('a live knob must not un-badge the knobs that are still waiting', () => {
+  it('keeps badging a NON-LIVE knob pending after a LIVE knob is flipped', async () => {
+    const { app, services: svc } = await buildReal()
+    // No seam reaches this one: `maxExposedSats` is copied BY VALUE into six deps literals.
+    expect((await patch(app, 'MAX_EXPOSED_SATS', '900000')).status).toBe(200)
+    expect((await settingsOf(app)).pendingRestart).toContain('MAX_EXPOSED_SATS')
+
+    expect((await patch(app, 'ASSET_CARRIER_PRICING', 'true')).status).toBe(200)
+
+    const after = await settingsOf(app)
+    expect(after.pendingRestart).toContain('MAX_EXPOSED_SATS')
+    expect(after.knobs.find((k) => k.key === 'MAX_EXPOSED_SATS')).toMatchObject({ pending: true })
+    expect(after.pendingRestart).not.toContain('ASSET_CARRIER_PRICING')
+    // Premise: `replacePolicy` really did rewrite `policy` over EVERY stored override.
+    expect(svc.bootPolicy.maxExposedSats).toBe(300_000)
+    expect((svc.policy as { maxExposedSats: number }).maxExposedSats).toBe(900_000)
+  })
+
+  it('says the same thing on /api/overview, which derives it independently', async () => {
+    const { app } = await buildReal()
+    await patch(app, 'MAX_EXPOSED_SATS', '900000')
+    await patch(app, 'ASSET_CARRIER_PRICING', 'true')
+    const body = (await (await app.fetch(new Request('http://admin/api/overview'))).json()) as {
+      pendingRestart: { key: string; loaded: string; stored: string }[]
+    }
+    expect(body.pendingRestart).toEqual([{ key: 'MAX_EXPOSED_SATS', loaded: '300000', stored: '900000' }])
+  })
+})
 
 describe('settingsDrift — the values behind the keys', () => {
   it('says what a knob moves from and to', () => {
@@ -166,7 +232,7 @@ describe('GET /api/overview — pendingRestart', () => {
   it('stays quiet when the override is the one this process already loaded', async () => {
     const body = await overview({
       bootOverrides: { LN_SEND_FEE_BPS: '25' },
-      policy: config({
+      bootPolicy: config({
         corridorFees: { ...baseConfig.corridorFees, 'arkade:BTC->lightning:BTC': { bps: 25, flatSats: 0 } },
       }),
       adminStore: {

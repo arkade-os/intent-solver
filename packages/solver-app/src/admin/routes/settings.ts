@@ -33,7 +33,14 @@
  */
 
 import type { Hono } from 'hono'
-import { describeSettings, validateOverride, editableKeys, applyOverrides, pendingRestartKeys } from '../settings.js'
+import {
+  describeSettings,
+  validateOverride,
+  editableKeys,
+  applyOverrides,
+  pendingRestartKeys,
+  LIVE_KEYS,
+} from '../settings.js'
 import { settingsDrift } from '../drift.js'
 import type { AdminDeps } from '../server.js'
 
@@ -49,12 +56,15 @@ export const RESTART_NOTICE =
   'below are read once at startup like everything else on this page, not an exception to it. The markets this ' +
   'solver actually trades are a separate, live list — edited with no restart on the markets screen.'
 
-// The same derivation `/api/overview` uses, reduced to keys. An override equal
-// to what boot resolved is NOT pending — which `Object.keys` could never say.
+// The same derivation `/api/overview` uses, reduced to keys. `bootPolicy` NOT `policy`:
+// `replacePolicy` moves `policy` over EVERY stored override at once, so diffing that
+// would un-badge the ones that did not apply. A LIVE key is then subtracted.
 const pendingKeys = (deps: AdminDeps, overrides: Record<string, string>): string[] => {
   const effective = applyOverrides(deps.services.config, overrides)
   const moved = pendingRestartKeys(deps.services.bootOverrides, overrides)
-  return settingsDrift(deps.services.policy, effective, moved).map((item) => item.key)
+  return settingsDrift(deps.services.bootPolicy, effective, moved)
+    .map((item) => item.key)
+    .filter((key) => !LIVE_KEYS.has(key))
 }
 
 export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
@@ -110,6 +120,11 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
       outcome: 'ok',
       detail: null,
     })
+    // Re-read the store rather than patch policy here: `applyOverrides` is the one definition of layering.
+    if (LIVE_KEYS.has(key)) {
+      const stored = await deps.services.adminStore.getOverrides()
+      await deps.services.replacePolicy(applyOverrides(deps.services.config, stored))
+    }
     return c.json(await snapshot(deps, key))
   })
 }

@@ -11,7 +11,7 @@ export interface RestartItem {
   stored: string
 }
 
-/** That key set, not a second derivation. A key whose value did not move drops. */
+/** That key set, not a second derivation. `loaded` is BOOT policy — `Services.bootPolicy`, never the live one. */
 export const settingsDrift = (loaded: Config, stored: Config, keys: readonly string[]): RestartItem[] => {
   const was = editableKnobValues(loaded)
   const now = editableKnobValues(stored)

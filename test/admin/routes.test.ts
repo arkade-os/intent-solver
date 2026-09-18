@@ -70,6 +70,7 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
     config,
     // Boot snapshots, equal to the store so the quiet case is the default.
     policy: config,
+    bootPolicy: config,
     assetMarkets: [],
     liveOfferMarkets: [],
     assetRfqMarkets: [],

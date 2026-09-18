@@ -82,6 +82,7 @@ const fakeServices = (over: { balance?: unknown; assetManager?: unknown; vtxos?:
     config,
     // The boot snapshots the restart banner diffs the store against.
     policy: config,
+    bootPolicy: config,
     assetMarkets: [],
     liveOfferMarkets: [],
     assetRfqMarkets: [],
