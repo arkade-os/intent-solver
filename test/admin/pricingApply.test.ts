@@ -8,6 +8,8 @@ import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { assetMarketKey, assetMarketPolicy } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
 import { CORRIDORS, FREE } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { editableKeys } from '@arkade-os/solver-app/admin/settings.js'
+import { fieldForOverride } from '@arkade-os/solver-app/admin/routes/pricingApply.js'
 
 const USDT = 'aa'.repeat(34)
 const KEY = assetMarketKey(null, USDT)
@@ -221,6 +223,14 @@ describe('the audit trail of one save', () => {
     await put(app, body())
     expect((await adminStore.listActions())[0]!.revision).toBeNull()
     await adminStore.close()
+  })
+})
+
+describe('nothing hides in the neutral default', () => {
+  it('classifies every key editableKeys() itself yields, never a list copied beside it', () => {
+    const keys = editableKeys()
+    expect(keys.length).toBeGreaterThan(0)
+    expect(keys.filter((key) => fieldForOverride(key) === null)).toEqual([])
   })
 })
 

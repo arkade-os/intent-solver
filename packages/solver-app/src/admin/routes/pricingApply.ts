@@ -36,8 +36,8 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 const asScalar = (value: unknown): bigint | number | boolean | null =>
   typeof value === 'bigint' || typeof value === 'number' || typeof value === 'boolean' ? value : null
 
-/** `null` is ordering-neutral and rides the narrowing pass, the conservative default. */
-const fieldForOverride = (key: string): SaveField | null => {
+/** `null` is ordering-neutral and rides the narrowing pass. EXPORTED so a test can enumerate `editableKeys()`. */
+export const fieldForOverride = (key: string): SaveField | null => {
   if (key === 'MAX_EXPOSED_SATS') return 'maxExposedSats'
   if (key === 'ASSET_CARRIER_PRICING') return 'carrierPriced'
   if (key === 'LOCKUP_TIMEOUT_SECONDS') return 'lockupTimeoutSeconds'
