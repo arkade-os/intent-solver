@@ -291,7 +291,6 @@ const harness = async (over: Partial<AssetRfqMarket> = {}): Promise<Harness> => 
     markets,
     solverPubkey: makerPublicKey,
     quoteValiditySeconds: 600,
-    carrierSats: arkade.ctx.dustSats,
     dustSats: arkade.ctx.dustSats,
     deriveOffer,
     depositAt,

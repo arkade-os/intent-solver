@@ -76,8 +76,8 @@ export interface AssetRfqMarket extends Omit<AssetQuoteMarket, 'minPayout' | 'ma
   buyBase: { min: bigint; max: bigint }
   feedUrl: string
   pricePath: string
-  /** Resolved from the row's `carrier_mode`. DECLARED here, not yet read: the
-   * orchestrator still charges `AssetRfqDeps.carrierSats` deployment-wide. */
+  /** Sats netted into the quoted amounts for the carrier output. ON THE MARKET, not `deps`: it leaves on the
+   * quote's own outcome, so the published `carrier_sats` is always what the amounts were netted against. */
   carrierSats: bigint
 }
 
@@ -118,8 +118,7 @@ export interface AssetRfqDeps {
    * the market for the whole window, so the window is the exposure.
    */
   quoteValiditySeconds: number
-  /** @see AssetQuoteMarket — sats to net, and the Service's dust floor. */
-  carrierSats: bigint
+  /** The chain's dust floor. A rule, unlike the carrier, which is per market. */
   dustSats: bigint
   /**
    * The offer covenant this solver will watch, derived from terms it has
@@ -149,7 +148,8 @@ export type AssetRfqQuoteRefusal =
   | 'duplicate_swap'
 
 export type AssetRfqQuoteOutcome =
-  { accepted: true; swap: AssetRfqSwapRow } | { accepted: false; reason: AssetRfqQuoteRefusal; detail?: string }
+  | { accepted: true; swap: AssetRfqSwapRow; carrierSats: bigint }
+  | { accepted: false; reason: AssetRfqQuoteRefusal; detail?: string }
 
 export interface AssetRfqQuoteRequest {
   requesterKey?: string
@@ -219,10 +219,6 @@ export class AssetRfqSwapService {
     })
   }
 
-  get carrierSats(): bigint {
-    return this.deps.carrierSats
-  }
-
   /**
    * Issue or refuse terms for one request.
    *
@@ -280,7 +276,7 @@ export class AssetRfqSwapService {
       amountSide: request.amountSide,
       market: priced,
       feed,
-      carrierSats: this.deps.carrierSats,
+      carrierSats: market.carrierSats,
       dustSats: this.deps.dustSats,
     })
     if (!resolved.ok) return { accepted: false, reason: resolved.reason }
@@ -325,7 +321,7 @@ export class AssetRfqSwapService {
         // the configured spread and nothing else.
         ...quoteSnapshot({ resolved, market: priced, pair, feed }),
       })
-      return { accepted: true, swap }
+      return { accepted: true, swap, carrierSats: market.carrierSats }
     } catch (error) {
       // The unique indexes are the race-loser's answer: another worker quoted
       // this rfq_id, or already watches this offer address. Either way this

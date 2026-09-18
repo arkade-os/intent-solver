@@ -617,10 +617,8 @@ export const createServices = async (
    * emulator key and the network prefix meet. Every guard on the spend lives in
    * `arkade/quotedOfferSettle.ts`.
    */
-  const assetRfqMarkets = assetRfqMarketsFrom(assetMarkets.pricing, {
-    dustSats: arkade.dustSats,
-    pricedByDefault: policy.assetCarrierPricing,
-  })
+  const rfqCarrier = { dustSats: arkade.dustSats, pricedByDefault: policy.assetCarrierPricing }
+  const assetRfqMarkets = assetRfqMarketsFrom(assetMarkets.pricing, rfqCarrier)
   const assetRfqStore = await AssetRfqSwapStore.open(swapFile)
   const assetRfqDerivation = {
     serverPubkey: arkade.wallet.arkServerPublicKey,
@@ -637,7 +635,6 @@ export const createServices = async (
     markets: assetRfqMarkets,
     solverPubkey: hex.encode(await arkade.identity.xOnlyPublicKey()),
     quoteValiditySeconds: policy.assetQuoteValiditySeconds,
-    carrierSats: policy.assetCarrierPricing ? arkade.dustSats : 0n,
     dustSats: arkade.dustSats,
     deriveOffer: offerScriptFrom(assetRfqDerivation),
     depositAt: async (offerPkScript, depositLeg) =>
