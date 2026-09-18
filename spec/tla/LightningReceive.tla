@@ -97,7 +97,7 @@
 (*  - The preimage column.  P is written in the SAME UPDATE as              *)
 (*    funded->claimed / refunding->claimed, so `st[s] = "claimed"` already  *)
 (*    means "a hash-verified P is on disk".  findClaimPreimage never        *)
-(*    returns an unverified witness (arkade/wallet.ts findLockups), so a    *)
+(*    returns an unverified witness (arkade/wallet.ts), so a                *)
 (*    separate variable could only disagree with the state.                 *)
 (*  - covclaimd.  `revealed_at` is a data fact, not a state, reveal() is    *)
 (*    idempotent, and the shipped cli.ts passes no covclaimd at all.        *)
