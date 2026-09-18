@@ -110,6 +110,17 @@ export interface AssetQuoteMarket {
 
 export type AssetQuoteRefusal = 'unsupported_pair' | 'price_unavailable' | 'fee_consumes_swap' | 'amount_out_of_range'
 
+/** True if `pair`'s FROM leg is `market`'s base, false if the reverse, null if `pair` is not on `market` at all. */
+export const assetQuoteGivesBase = (pair: AssetPair, market: AssetQuoteMarket): boolean | null => {
+  if (pair.from === market.base && pair.to === market.quote) return true
+  if (pair.from === market.quote && pair.to === market.base) return false
+  return null
+}
+
+/** The direction's flat fee, atomic units of the FROM leg. Shared so a caller never restates the ternary. */
+export const assetFlatFeeFor = (givesBase: boolean, market: AssetQuoteMarket): bigint =>
+  (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
+
 export type AssetQuoteOutcome =
   { ok: true; fromAmount: bigint; toAmount: bigint } | { ok: false; reason: AssetQuoteRefusal }
 
@@ -156,20 +167,18 @@ export const resolveAssetQuote = (args: {
   const { pair, amount, amountSide, market, feed, carrierSats, dustSats } = args
 
   // Which way round the client is trading across this market's two legs.
-  const givesBase = pair.from === market.base && pair.to === market.quote
-  const givesQuote = pair.from === market.quote && pair.to === market.base
-  if (!givesBase && !givesQuote) return { ok: false, reason: 'unsupported_pair' }
+  const givesBase = assetQuoteGivesBase(pair, market)
+  if (givesBase === null) return { ok: false, reason: 'unsupported_pair' }
 
-  // A non-positive price is not a cheap swap, it is an unusable feed. Left
-  // unchecked, `givesQuote` would divide by zero and `givesBase` would price
-  // everything at nothing.
+  // A non-positive price is not a cheap swap, it is an unusable feed — left
+  // unchecked, either direction divides by zero or prices everything free.
   if (feed.mantissa <= 0n) return { ok: false, reason: 'price_unavailable' }
   if (market.feeBps < 0 || market.feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
   if (amount <= 0n) return { ok: false, reason: 'amount_out_of_range' }
 
   if (carrierSats < 0n || dustSats < 0n) return { ok: false, reason: 'price_unavailable' }
 
-  const flatFee = (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
+  const flatFee = assetFlatFeeFor(givesBase, market)
   if (flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
   // Same selection as the flat fee: the direction decides the spread too.
   const feeBps = (givesBase ? market.sellBaseFeeBps : market.buyBaseFeeBps) ?? market.feeBps

@@ -79,6 +79,66 @@ describe('decomposeAssetQuote agrees with the quote it decomposes', () => {
       expect(decomposed.marginBps).toBe(50)
     }
   })
+
+  it('pins the full success shape, so an added field cannot pass silently', () => {
+    expect(at(100_000n, 'from').preview).toEqual({
+      ok: true,
+      fromAmount: 100_000n,
+      toAmount: 99_171_650n,
+      midPayout: 99_670_000n,
+      spreadFee: 498_350n,
+      flatFee: 0n,
+      carrierCharged: 330n,
+      carrierReturned: 0n,
+      marginBps: 50,
+    })
+  })
+
+  it('returns the carrier into the payout on asset->BTC, where fronting it is the point', () => {
+    const decomposed = decomposeAssetQuote({
+      pair: { from: USDX, to: null },
+      amount: 100_000_000n,
+      amountSide: 'from',
+      market: sellUsdx,
+      feed,
+      carrierSats: 330n,
+      dustSats: 330n,
+    })
+    if (!decomposed.ok) throw new Error('expected a quote')
+    expect(decomposed.carrierCharged).toBe(0n)
+    expect(decomposed.carrierReturned).toBe(330n)
+    expect(decomposed.marginBps).toBe(50)
+  })
+
+  it('nets the sell-base flat fee out of the notional before pricing the mid', () => {
+    const decomposed = decomposeAssetQuote({
+      pair,
+      amount: 100_000_000n,
+      amountSide: 'from',
+      market: { ...sellUsdx, sellBaseFeeFlat: 500_000n },
+      feed,
+      carrierSats: 0n,
+      dustSats: 330n,
+    })
+    if (!decomposed.ok) throw new Error('expected a quote')
+    expect(decomposed.flatFee).toBe(500_000n)
+    expect(decomposed.marginBps).toBe(50)
+  })
+
+  it('nets the buy-base flat fee out of the notional before pricing the mid', () => {
+    const decomposed = decomposeAssetQuote({
+      pair: { from: USDX, to: null },
+      amount: 100_000_000n,
+      amountSide: 'from',
+      market: { ...sellUsdx, buyBaseFeeFlat: 500_000n },
+      feed,
+      carrierSats: 0n,
+      dustSats: 330n,
+    })
+    if (!decomposed.ok) throw new Error('expected a quote')
+    expect(decomposed.flatFee).toBe(500_000n)
+    expect(decomposed.marginBps).toBe(50)
+  })
 })
 
 describe('decomposeCorridorQuote', () => {
@@ -92,6 +152,17 @@ describe('decomposeCorridorQuote', () => {
     expect(decomposed.spreadSats).toBe(250)
     expect(decomposed.flatSats).toBe(150)
     expect(decomposed.spreadSats + decomposed.flatSats).toBe(100_000 - decomposed.payoutSats)
+  })
+
+  it('pins the full success shape, so an added field like breakEven cannot pass silently', () => {
+    expect(decomposeCorridorQuote({ amountSats: 100_000, amountSide: 'from', fee, limits })).toEqual({
+      ok: true,
+      giveSats: 100_000,
+      payoutSats: payoutSatsFor(100_000, fee),
+      spreadSats: 250,
+      flatSats: 150,
+      marginBps: 40,
+    })
   })
 
   it('bounds the GIVE leg, which is the opposite convention to the asset markets', () => {

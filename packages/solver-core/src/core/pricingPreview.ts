@@ -5,6 +5,8 @@
 import type { Price } from './priceFeed.js'
 import { assetExactInPayout } from './assetExactInPrice.js'
 import {
+  assetFlatFeeFor,
+  assetQuoteGivesBase,
   carrierLegs,
   resolveAssetQuote,
   type AssetPair,
@@ -46,10 +48,11 @@ export const decomposeAssetQuote = (args: {
   if (!outcome.ok) return outcome
 
   const { pair, market, feed, carrierSats } = args
-  // The orchestrator's own selection (assetRfqOrchestrator.ts:252).
-  const givesBase = pair.from === market.base
+  const givesBase = assetQuoteGivesBase(pair, market)
+  // Never null: `outcome.ok` means resolveAssetQuote already matched this pair to `market`.
+  if (givesBase === null) return { ok: false, reason: 'unsupported_pair' }
   const { charged, returned } = carrierLegs(pair, carrierSats)
-  const flatFee = (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
+  const flatFee = assetFlatFeeFor(givesBase, market)
 
   // The notional, recovered by re-pricing the SAME input at a zero spread.
   const midPayout = assetExactInPayout({
@@ -116,8 +119,9 @@ export const decomposeCorridorQuote = (args: {
 export type BreakEven = { kind: 'none' } | { kind: 'never' } | { kind: 'at'; amountSats: bigint }
 
 /**
- * The deposit at which the spread starts covering an unpriced carrier. Pass
- * `carrierSats: 0n` on the priced path, which has no break-even to print.
+ * The deposit at which the spread starts covering an unpriced carrier.
+ * `carrierSats` is the DEPLOYMENT's dust, not the quote's — pass `0n` on the
+ * priced path, which has no break-even to print.
  */
 export const carrierBreakEven = (args: { carrierSats: bigint; flatSats: bigint; feeBps: number }): BreakEven => {
   const { carrierSats, flatSats, feeBps } = args

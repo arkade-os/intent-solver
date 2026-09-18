@@ -558,7 +558,7 @@ describe('carrierLegs — which leg the carrier lands on', () => {
   it('is the rule resolveAssetQuote itself applies', () => {
     // The identity that makes the preview safe to seed from: on asset->BTC an
     // exact-out quote named at `minPayout` refuses, because the bound is checked
-    // against `amount - returnedCarrier` (assetRfq.ts:179). `+ returned` is what
+    // against `amount - returnedCarrier` (assetRfq.ts:192). `+ returned` is what
     // reaches it.
     const market = {
       base: asset,
