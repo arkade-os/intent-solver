@@ -11,6 +11,7 @@ import {
   type AssetQuoteMarket,
   type AssetQuoteRefusal,
 } from './assetRfq.js'
+import { offerWithinTolerance, type OfferDirection, type OfferPriceMarket } from './assetOfferPrice.js'
 import { feeSatsFor, giveSatsFor, payoutSatsFor, type Fee } from './corridorPolicy.js'
 
 export interface AssetDecomposition {
@@ -110,4 +111,49 @@ export const decomposeCorridorQuote = (args: {
     flatSats: fee.flatSats,
     marginBps: Math.round((feeSatsFor(giveSats, fee) * 10_000) / giveSats),
   }
+}
+
+export type BreakEven = { kind: 'none' } | { kind: 'never' } | { kind: 'at'; amountSats: bigint }
+
+/**
+ * The deposit at which the spread starts covering an unpriced carrier. Pass
+ * `carrierSats: 0n` on the priced path, which has no break-even to print.
+ */
+export const carrierBreakEven = (args: { carrierSats: bigint; flatSats: bigint; feeBps: number }): BreakEven => {
+  const { carrierSats, flatSats, feeBps } = args
+  if (carrierSats <= 0n || flatSats >= carrierSats) return { kind: 'none' }
+  if (feeBps <= 0) return { kind: 'never' }
+  const bps = BigInt(feeBps)
+  return { kind: 'at', amountSats: flatSats + ((carrierSats - flatSats) * 10_000n + bps - 1n) / bps }
+}
+
+/**
+ * Largest `wantAmount` accepted against `depositAmount`, or null if none is.
+ * Searched over the monotonic `offerWithinTolerance` gate rather than inverted.
+ */
+export const offerAcceptanceCeiling = (args: {
+  depositAmount: bigint
+  direction: OfferDirection
+  market: OfferPriceMarket
+  feed: Price
+  carrierCharged?: bigint
+  carrierReturned?: bigint
+}): bigint | null => {
+  const accepts = (wantAmount: bigint): boolean => offerWithinTolerance({ ...args, wantAmount })
+  if (!accepts(1n)) return null
+  let lo = 1n
+  let hi = 2n
+  for (let i = 0; i < 256 && accepts(hi); i++) {
+    lo = hi
+    hi *= 2n
+  }
+  // A positive feed makes the payout finite so doubling terminates; unbounded
+  // reads as "no answer" rather than a number nobody can defend.
+  if (accepts(hi)) return null
+  while (lo + 1n < hi) {
+    const mid = (lo + hi) / 2n
+    if (accepts(mid)) lo = mid
+    else hi = mid
+  }
+  return lo
 }

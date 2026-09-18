@@ -118,3 +118,71 @@ describe('decomposeCorridorQuote', () => {
     ).toEqual({ ok: false, reason: 'fee_consumes_swap' })
   })
 })
+
+import { carrierBreakEven, offerAcceptanceCeiling } from '@arkade-os/solver-core/core/pricingPreview.js'
+import { offerWithinTolerance } from '@arkade-os/solver-core/core/assetOfferPrice.js'
+
+describe('carrierBreakEven', () => {
+  it('is the size at which 50 bps covers 330 sats', () => {
+    expect(carrierBreakEven({ carrierSats: 330n, flatSats: 0n, feeBps: 50 })).toEqual({
+      kind: 'at',
+      amountSats: 66_000n,
+    })
+  })
+
+  it('says never rather than dividing, at the default spread of zero', () => {
+    expect(carrierBreakEven({ carrierSats: 330n, flatSats: 0n, feeBps: 0 })).toEqual({ kind: 'never' })
+  })
+
+  it('has none when the flat already covers the carrier', () => {
+    expect(carrierBreakEven({ carrierSats: 330n, flatSats: 330n, feeBps: 50 })).toEqual({ kind: 'none' })
+    expect(carrierBreakEven({ carrierSats: 330n, flatSats: 400n, feeBps: 0 })).toEqual({ kind: 'none' })
+  })
+
+  it('has none when the carrier is priced, because it is recovered in full', () => {
+    expect(carrierBreakEven({ carrierSats: 0n, flatSats: 0n, feeBps: 50 })).toEqual({ kind: 'none' })
+  })
+
+  it('starts from the flat and rounds up, so the figure is never under the true one', () => {
+    const at = carrierBreakEven({ carrierSats: 330n, flatSats: 100n, feeBps: 33 })
+    expect(at).toMatchObject({ kind: 'at' })
+    if (at.kind !== 'at') return
+    expect(at.amountSats).toBe(100n + (230n * 10_000n + 32n) / 33n)
+    expect(((at.amountSats - 100n) * 33n) / 10_000n + 100n).toBeGreaterThanOrEqual(330n)
+  })
+})
+
+describe('offerAcceptanceCeiling', () => {
+  const market = {
+    baseDecimals: 8,
+    quoteDecimals: 6,
+    toleranceBps: 10,
+    feeBps: 50,
+  }
+
+  it('is the largest want the gate accepts, and one more is refused', () => {
+    const args = { depositAmount: 100_000n, direction: 'sell_base' as const, market, feed }
+    const ceiling = offerAcceptanceCeiling(args)
+    expect(ceiling).not.toBeNull()
+    expect(offerWithinTolerance({ ...args, wantAmount: ceiling! })).toBe(true)
+    expect(offerWithinTolerance({ ...args, wantAmount: ceiling! + 1n })).toBe(false)
+  })
+
+  it('counts the returned carrier as headroom, exactly as the gate does', () => {
+    const args = { depositAmount: 100_000n, direction: 'sell_base' as const, market, feed }
+    const plain = offerAcceptanceCeiling(args)!
+    const withCarrier = offerAcceptanceCeiling({ ...args, carrierReturned: 330n })!
+    expect(withCarrier).toBe(plain + 330n)
+  })
+
+  it('is null when the gate accepts nothing at all', () => {
+    expect(
+      offerAcceptanceCeiling({
+        depositAmount: 100_000n,
+        direction: 'sell_base',
+        market,
+        feed: { mantissa: 0n, scale: 0 },
+      }),
+    ).toBeNull()
+  })
+})
