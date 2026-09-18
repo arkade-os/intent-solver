@@ -399,7 +399,7 @@ export class EvmSendSwapStore {
    * an unfunded row is a claim on the float, not free capacity. Counting only
    * the exposed states would let unlimited concurrent quotes slip past the cap
    * and all be paid at once — the invariant `src/db/swaps.ts` states on its
-   * own committedSats, and the one the #38 TLA+ admission guard asserts.
+   * own committedSats, and the one the TLA+ admission guard asserts.
    * One table backs every token, so a corridor asks for its own `token_address` and a
    * caller summing whole STORES omits it. Both callers exist.
    */

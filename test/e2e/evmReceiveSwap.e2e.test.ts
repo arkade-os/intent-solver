@@ -20,27 +20,27 @@
  * PREREQUISITES: the arkade regtest stack with `.env.regtest.lnd`, anvil, and a
  * float with spendable sats. Skipped, not failed, when any is absent.
  *
- * FAILS ON THIS BRANCH UNTIL #114 MERGES, and it is right to. Run against a
+ * FAILS ON THIS BRANCH UNTIL THE ASSET-COIN FUNDING FIX MERGES, and it is right to. Run against a
  * float whose coins carry assets, step 3 dies with
  *
  *   ASSET_VALIDATION_FAILED (33): asset packet not found in tx <txid>
  *
  * because spending an asset-bearing coin moves its asset, so the transaction
  * must carry a packet saying where that asset went — and `sendBitcoin` builds a
- * plain sats transfer with no packet. That is the defect #114 fixes, by letting
+ * plain sats transfer with no packet. That is the defect that fix addresses, by letting
  * the SDK's `send` route the asset change and discounting each asset-bearing
  * coin by one dust of headroom.
  *
- * Worth stating because it is not a rediscovery: #114 found this on the
+ * Worth stating because it is not a rediscovery: that fix found this on the
  * LIGHTNING receive leg. This file reproduces it on the EVM receive leg, which
  * that PR was never tested against — the fix is in shared funding code, so it
  * reaches both, and this is the evidence that it needs to.
  *
  * Observed float at the time of writing: one spendable coin, 6_992_307 sats,
- * carrying two assets — the shape issue #123 describes, where a no-arg settle
+ * carrying two assets — the shape a no-arg settle leaves, where it
  * merges every coin into one and the assets ride along.
  *
- * VERIFIED GREEN with #114 merged: this whole corridor runs against that same
+ * VERIFIED GREEN with that fix merged: this whole corridor runs against that same
  * asset-bearing float — the client locks, the solver funds sats out of a coin
  * carrying two assets, the client claims on Arkade, and the solver reads the
  * preimage back and takes the tokens. So the fix does reach this corridor,

@@ -393,7 +393,7 @@ describe('confirmKind is declared, not inferred', () => {
 })
 
 /**
- * The receive legs' operator refund — TLA+ findings F4 and F5 (#38) both need
+ * The receive legs' operator refund — TLA+ findings F4 and F5 both need
  * a way to act on a row that has stopped moving, and until these existed there
  * was none: `stuck` is terminal, excluded from every sweep, and no action
  * touched either receive store.
@@ -434,7 +434,7 @@ describe('the receive legs’ operator refund', () => {
 })
 
 /**
- * TLA+ finding F4 (#38) — the fee-dust retry, and the correction that came
+ * TLA+ finding F4 — the fee-dust retry, and the correction that came
  * with it.
  *
  * F4's row is at `claimed`: the client already took the Arkade lockup and

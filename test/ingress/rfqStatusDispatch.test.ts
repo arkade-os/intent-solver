@@ -169,7 +169,7 @@ describe('rfq status dispatch — all four corridors', () => {
 })
 
 /**
- * The gap this rewrite closed, raised in review of #215.
+ * The gap this rewrite closed, raised in review of the workspace split.
  *
  * A corridor registered through `CorridorSet` could be QUOTED — `respondToRfqRequest`
  * already routed through the registry — while `respondToRfqStatus` fell through

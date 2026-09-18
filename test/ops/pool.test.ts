@@ -156,7 +156,7 @@ describe('poolPlan', () => {
  * asset-bearing coin indistinguishable from ordinary sats inventory. It is not: an
  * asset must ride on sats, so spending the coin leaves one dust pinned on the change
  * output that carries the asset onward. `selectLockupFunding` has discounted for that
- * since #114; the pool did not, so the two disagreed about what the same coin could
+ * since the asset-coin fix; the pool did not, so the two disagreed about what the same coin could
  * fund — the pool planning against sats the funding path already knew it could not
  * reach.
  *
@@ -232,7 +232,7 @@ describe('poolPlan — an asset-bearing coin is not ordinary sats', () => {
 
 /**
  * This number bounds how much the solver may have at risk at once
- * (`MAX_EXPOSED_SATS`, issue #96), so a corridor missing from the sum is
+ * (`MAX_EXPOSED_SATS`), so a corridor missing from the sum is
  * headroom the cap hands out twice. It named the four stores explicitly, which
  * was correct while four was all there could be — and became a hole the moment
  * a corridor could be registered that this build was never compiled against.

@@ -336,7 +336,7 @@ export interface RenewVtxoDeps<V extends RenewableVtxo> {
    * Optional: absent means one output, unless the batch is past the ceiling.
    */
   poolTarget?: readonly PoolRung[]
-  /** Folded into `VtxoLifecycleReport.failures`, where the all-refused case throws (#166). */
+  /** Folded into `VtxoLifecycleReport.failures`, where the all-refused case throws. */
   warn?(message: string): void
   /** Wall clock, unix MILLISECONDS. Injected so a test can place the deadline. */
   nowMs(): number
@@ -530,7 +530,7 @@ export const renewExpiringVtxos = async <V extends RenewableVtxo>(deps: RenewVtx
   }
   if (refusedByCeiling > 0 && inputs.length === 0) {
     // `gross` never left zero, so each refusal was the coin judged ALONE and no
-    // later pass changes it. Worded to miss `BENIGN_RENEWAL` on purpose (#166).
+    // later pass changes it. Worded to miss `BENIGN_RENEWAL` on purpose.
     throw new Error(
       `${refusedByCeiling} expiring coin(s) exceed the operator's ${vtxoMaxAmount} sat per-output ceiling on their ` +
         'own and can never be renewed whole; split the float so each piece lands under it',
@@ -538,7 +538,7 @@ export const renewExpiringVtxos = async <V extends RenewableVtxo>(deps: RenewVtx
   }
   if (inputs.length === 0) throw new Error('No VTXOs available to renew: every expiring coin is below its own fee')
 
-  // Said not thrown: the settlement below must still happen. Silent in #166 (#27).
+  // Said not thrown: the settlement below must still happen. Silent before (#27).
   if (refusedByCeiling > 0) {
     deps.warn?.(
       `${refusedByCeiling} expiring coin(s) exceed the operator's ${vtxoMaxAmount} sat per-output ceiling on their ` +

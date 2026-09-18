@@ -7,7 +7,7 @@
  * The upper bound is the point. Slicing to end-of-file works only while
  * `createServices` is the last declaration in its module; a helper added after
  * it would silently enter the body under test and make assertions pass for the
- * wrong reason. Raised by arkana on #215.
+ * wrong reason. Raised by arkana on the workspace split.
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'

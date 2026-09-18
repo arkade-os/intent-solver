@@ -480,7 +480,7 @@ export const createServices = async (
   /**
    * ONE control for every corridor, deliberately. Each service would happily
    * make its own, and that still bounds a corridor against itself — but the
-   * cap is global (#96), so two corridors quoting at once must contend for the
+   * cap is global, so two corridors quoting at once must contend for the
    * same headroom or the bound is only ever per-corridor again.
    */
   const admission = new AdmissionControl()

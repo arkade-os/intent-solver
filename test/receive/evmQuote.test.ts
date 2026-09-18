@@ -300,7 +300,7 @@ describe('refusals', () => {
 })
 
 /**
- * THE #105 RACE on the receive leg, where the sats at stake are the SOLVER's
+ * THE CAP RACE on the receive leg, where the sats at stake are the SOLVER's
  * own — it funds this side out of its own capital, so the cap is what bounds
  * how much of it can be committed at once.
  *

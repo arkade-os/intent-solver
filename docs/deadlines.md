@@ -95,7 +95,7 @@ number's job is to agree with whoever derives the same script.
 | `MAX_REFUND_HORIZON` | `core/receive.ts` | The **Lightning** receive leg's own refund deadline. Also the horizon `selectLockupFunding` prefers coins to outlive. |
 | `MAX_REFUND_HORIZON` | `core/onchainReceive.ts` | The **onchain** receive leg's. A separate declaration supplying a different quantity — see "Two horizons, not one". |
 | `ONCHAIN_ORDER_MARGIN_SECONDS` | `core/onchainSend.ts` | Ordering margin between the two legs' deadlines. |
-| `EVM_ORDER_MARGIN_SECONDS` | `core/evmSend.ts` *(unmerged, #117)* | Same role on the EVM corridors. |
+| `EVM_ORDER_MARGIN_SECONDS` | `core/evmSend.ts` *(unmerged)* | Same role on the EVM corridors. |
 
 ### 15 minutes
 
@@ -117,7 +117,7 @@ number's job is to agree with whoever derives the same script.
 | Constant | Formula |
 |---|---|
 | `MAX_LOCKUP_TIMEOUT` | `= REFUND_SAFETY_MARGIN` |
-| `DEFAULT_HOLD_INVOICE_WINDOW` | `= MAX_REFUND_HORIZON - MIN_CLAIM_WINDOW`, the `core/receive.ts` copy *(#137)* |
+| `DEFAULT_HOLD_INVOICE_WINDOW` | `= MAX_REFUND_HORIZON - MIN_CLAIM_WINDOW`, the `core/receive.ts` copy |
 | `refundLocktimeFor(...)` | `max(worstCaseHtlcBlocks * 600 + REFUND_SAFETY_MARGIN, unilateralClaimDelay + REFUND_SAFETY_MARGIN)` |
 | `htlcLocktimeFor(...)` | `now + minConfirmations * 600 + 2 * ONCHAIN_CLAIM_MARGIN_SECONDS` |
 
@@ -221,7 +221,7 @@ Tunable from the admin console (`docs/environment.md` for the full env list):
 
 - `<CORRIDOR>_MIN_SATS` / `_MAX_SATS` / `_FEE_BPS` / `_FEE_FLAT_SATS` / `_ENABLED`
 - `MAX_EXPOSED_SATS`
-- `LOCKUP_TIMEOUT_SECONDS`, bounded `[60, MAX_LOCKUP_TIMEOUT]` *(#138)*
+- `LOCKUP_TIMEOUT_SECONDS`, bounded `[60, MAX_LOCKUP_TIMEOUT]`
 
 Everything else on this page is a constant. Changing one is a code change, on
 purpose: they are the terms on which the solver's own money is at risk.

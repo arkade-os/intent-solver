@@ -8,7 +8,7 @@
  * free to be narrower or wider.
  *
  * What a replacement may NOT drop is the reserve/release PAIRING. A strategy
- * that admits without reserving reintroduces issue #105: two concurrent quotes
+ * that admits without reserving reintroduces the cap race: two concurrent quotes
  * both read the same committed total, both see headroom, and both take it — the
  * solver ends up committed past a bound an operator set deliberately. That
  * window exists because a quote is invisible to `committedSats()` between the

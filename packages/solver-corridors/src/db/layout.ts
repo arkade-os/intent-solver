@@ -14,14 +14,14 @@ import { existsSync } from 'node:fs'
  * A FRESH deployment now puts every table in the single `SWAP_DB_PATH` file:
  * one file to back up, one connection, and — the reason this matters beyond
  * tidiness — one transaction that could span every corridor's table, which is
- * what a durable cross-corridor exposure reserve would need (#105 fixes the
+ * what a durable cross-corridor exposure reserve would need (today's reserve fixes the
  * in-process half; the multi-process half needs this).
  *
  * An EXISTING deployment keeps the files it already has. Nothing copies rows
  * between databases, so upgrading cannot strand, duplicate or half-move a
  * funded swap — the failure mode that makes automatic data migration a poor
  * trade on a money path. Those deployments keep today's behaviour exactly,
- * including #105's multi-process gap.
+ * including that multi-process gap.
  */
 export interface DbLayout {
   /** True when every table shares `swapDbPath`. */

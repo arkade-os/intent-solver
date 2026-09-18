@@ -159,7 +159,7 @@ export interface OnchainSendSwapRow {
   fundingVout: number | null
   preimage: string | null
   claimArkTxid: string | null
-  /** Written BEFORE the broadcast (#169): the refund ATTEMPTED, not one that landed. */
+  /** Written BEFORE the broadcast: the refund ATTEMPTED, not one that landed. */
   onchainRefundTxid: string | null
   refundArkTxid: string | null
   refundOutcome: 'pushed' | 'external' | null
@@ -436,7 +436,7 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
    * Claim the exclusive right to broadcast this swap's onchain HTLC funding.
    *
    * Returns true to exactly ONE caller — the mirror of the receive leg's lease,
-   * and the same defect (#103). Two workers reaching `submitFunding` together
+   * and the same defect. Two workers reaching `submitFunding` together
    * would both broadcast an L1 payment to the client's HTLC address, from
    * different UTXOs, because coin selection is per-process. The compare-and-swap
    * on `state` afterwards gates RECORDING, not spending.

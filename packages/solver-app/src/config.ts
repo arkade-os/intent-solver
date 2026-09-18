@@ -267,7 +267,7 @@ export interface Config {
   assetQuoteValiditySeconds: number
   /**
    * Whether `lightning:BTC->arkade:BTC` may be served when the solver's own
-   * solo recourse opens AFTER the incoming htlc's `E` — the #69 window.
+   * solo recourse opens AFTER the incoming htlc's `E` — the unilateral-gap window.
    *
    * Off by default, and the default is the safe one.
    *

@@ -157,7 +157,7 @@ describe('OnchainSendSwapStore — migration', () => {
   it('adds funding_vout/onchain_refund_txid/client_refund_pubkey/receiver_pk_script to a table predating them, without crashing on open', async () => {
     const db = new Database(':memory:')
     // The exact pre-this-PR shape: send_onchain_swap without the four columns
-    // this migration adds — what PR #7's schema left behind.
+    // this migration adds — what the original schema left behind.
     db.exec(`
       CREATE TABLE send_onchain_swap (
         id                            TEXT PRIMARY KEY,

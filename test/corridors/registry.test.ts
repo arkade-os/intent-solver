@@ -118,7 +118,7 @@ describe('descriptor state vocabularies', () => {
  * added to `CORRIDORS` and the only TS2366s came from those two switches.
  *
  * Deleting them without this check would leave nothing at all, which is the
- * exact shape of issue #88 — a bound whose documented reason is satisfied while
+ * exact shape of a retired bound — one whose documented reason is satisfied while
  * an unnamed invariant still rides on it.
  */
 describe('every corridor answers the questions the switches used to force', () => {

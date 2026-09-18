@@ -177,7 +177,7 @@ export const planPool = (args: {
  * So this is a SHAPE bound, not a protocol one, and it is safe by a wide margin
  * rather than by a check. If it ever grows materially - or if a settlement
  * starts carrying many more inputs - the figure that matters is `maxTxWeight`
- * and it should be estimated rather than assumed. Raised by review on #126.
+ * and it should be estimated rather than assumed.
  */
 export const MAX_SPLIT_OUTPUTS = 8
 

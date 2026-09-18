@@ -152,7 +152,7 @@ export const onchainReceiveRefundNow = async (services: Services, id: string): P
 }
 
 /**
- * NOT a refund — the onchain receive leg's fee-dust retry (TLA+ F4, #38). It lives here
+ * NOT a refund — the onchain receive leg's fee-dust retry (TLA+ F4). It lives here
  * because this is where the operator overrides live.
  *
  * A row at `claimed` has already paid the client out; if the fee then made the L1 claim

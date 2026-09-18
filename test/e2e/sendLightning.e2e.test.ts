@@ -47,7 +47,7 @@
  * `findLockups` once and took an empty answer as proof that "the client (or
  * another watcher) already moved it", writing `refund_outcome: 'external'`.
  * But `findLockups` is `getVtxos({ spendableOnly: true })` — the same read
- * whose lag PR #21 fixed on the receive leg, where `whenRefunding` had the
+ * whose lag the receive leg already fixed, where `whenRefunding` had the
  * identical single-read empty-lockup branch and sent COMPLETED swaps to a
  * terminal `stuck`. That fix's own message audits `send/onchainOrchestrator.ts`
  * and clears it (it needs positive evidence, not two reads disagreeing); this
@@ -382,7 +382,7 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       // out, so the pay gate lets the attempt happen.
       const paying = serviceWith(() => quoteClock() + PAY_AFTER_QUOTE)
       const row = await driveToTerminal(paying, swap.id)
-      // `refused`, not `stuck`: #182 — a terminal payment failure whose refund
+      // `refused`, not `stuck`: a terminal payment failure whose refund
       // has LANDED is finished business, and `stuck` is reserved for rows a
       // human must read. The reason records the failure either way.
       // One object, not four: asserting `state` first hid which branch (#102).
@@ -425,7 +425,7 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       // `refundLocktime` to have matured, which is what the three-clock idiom
       // above buys.
       //
-      // `refused` now — #182. The client is whole, so nothing needs a human:
+      // `refused` now. The client is whole, so nothing needs a human:
       // `stuck` is reserved for rows where the refund did NOT land or the
       // self-payment probe withheld it. `refund_outcome` tells the client they
       // were refunded; the state tells the operator there is nothing to do.
@@ -444,7 +444,7 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
     async () => {
       await assertArkadeSpendable(arkade, AMOUNT_SATS)
 
-      // THE OTHER FAILURE PATH, and the one #46 missed. Every other test here
+      // THE OTHER FAILURE PATH, and the one the immediate refund missed. Every other test here
       // reaches a terminal failure through `submitPayment`, because
       // `payViaPaymentRequest` answers before the call returns. A payment whose
       // id is on disk while its outcome is not takes `whenPaying` ->
@@ -487,7 +487,7 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       // since `failed` reads identically for a payment that was attempted and
       // died.
       expect(row.paymentEvidence).toBe('no_record')
-      // `refused`, not `stuck`: #182 reserves `stuck` for rows a human must
+      // `refused`, not `stuck`: `stuck` is reserved for rows a human must
       // read. Grouped as above, and for the same reason.
       expect({
         state: row.state,

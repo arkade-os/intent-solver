@@ -21,7 +21,7 @@ multi-solver **broadcast bidding** (open RFQ → sealed bids → directed close)
 is specified in [`rfq-protocol.md`](./rfq-protocol.md) § 4.6. The solver
 side of it is implemented (`packages/solver-core/src/core/openRfq.ts`, the topic subscription in
 `packages/solver-transport/src/ingress/relay.ts`, rate-capped by `OPEN_RFQ_MAX_BIDS_PER_MIN`); the
-client side lives in the ts-sdk, tracked in issue #4.
+client side lives in the ts-sdk.
 
 ## SEND — Arkade → Lightning
 

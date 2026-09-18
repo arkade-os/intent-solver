@@ -27,7 +27,7 @@ export const MAX_MIN_CONFIRMATIONS = 6
 export const DEFAULT_MIN_CONFIRMATIONS = 1
 
 /**
- * The FLOOR under `min_confirmations` (TLA+ F2, #38). Zero is the dangerous one HERE:
+ * The FLOOR under `min_confirmations` (TLA+ F2). Zero is the dangerous one HERE:
  * this leg funds Arkade against the client's HTLC, so zero confirmations means funding
  * against a transaction that can still be replaced. `test/interop/constantsParity.test.ts`
  * pins the two legs together.
@@ -67,7 +67,7 @@ export const htlcLocktimeFor = (minConfirmations: number, now: number): number =
  * land BEFORE the cross-side deadline.
  *
  * THE CAP ALWAYS WINS in the reachable input range, and that is load-bearing rather
- * than incidental (#141). It supplies 70–120 minutes of L1 claim slack where the
+ * than incidental (#160). It supplies 70–120 minutes of L1 claim slack where the
  * written formula would supply `SETTLE_SAFETY_MARGIN`'s 15. Raising
  * `MAX_REFUND_HORIZON` shrinks that toward 15; {@link onchainReceiveClaimWindow}
  * states the quantity so it can be pinned instead of emerging.
@@ -142,7 +142,7 @@ export const evaluateOnchainReceiveFunding = (params: {
   if (params.now >= params.arkadeRefundLocktime - MIN_ARKADE_FUND_WINDOW) {
     return { fund: false, reason: 'refused to fund: arkade refund window closing' }
   }
-  // Gate (d) against this corridor's cross-side deadline (#69). The check above bounds
+  // Gate (d) against this corridor's cross-side deadline. The check above bounds
   // the COLLABORATIVE refund, which needs the Arkade server; with it gone the trader's
   // `unilateralClaim` opens first, so an HTLC timing out before our own leaf opens lets
   // them reclaim onchain and then claim the Arkade payout — both sides.

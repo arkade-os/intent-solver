@@ -233,7 +233,7 @@ export type RfqStatusOutcome =
  * This previously fell through four hardcoded stores, with a comment saying
  * unifying it "needs a corridor that can be registered read-only, which is a
  * design this plan does not have". That design landed in this same change and
- * the comment went stale: raised in review of #215, where the consequence was
+ * the comment went stale: raised in review of that change, where the consequence was
  * that a corridor registered through `CorridorSet` could be QUOTED but its
  * in-flight swaps could never be retrieved — `rfq_status_request` would answer
  * "no negotiation with this rfq_id" for a swap that plainly exists.

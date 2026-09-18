@@ -306,7 +306,7 @@ describe('history notes carry their own transaction links', () => {
 
 describe('a stuck row that was already refunded', () => {
   it('is not glossed as needing a human', async () => {
-    // #182 makes NEW rows close as `refused`. Rows that reached `stuck` before
+    // NEW rows close as `refused`. Rows that reached `stuck` before
     // that keep it forever, and those are the ones on screen today — so the
     // reading has to come from the row, not from the state alone.
     const js = (await readStaticFile('/app.js'))?.body.toString() ?? ''

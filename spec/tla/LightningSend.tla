@@ -722,7 +722,7 @@ RefusedUnreachableFromExposed ==
 \* table itself: a future edit that drops a -> stuck edge from an exposed
 \* row, or adds an exposed state without one, fails every cfg loudly.  (The
 \* `-coverage` argument proves actions were TAKEN, not that stuck is
-\* REACHABLE FROM every exposed state; see #218/#234.)
+\* REACHABLE FROM every exposed state.)
 StuckReachableFromEveryExposed ==
     \A x \in Exposed : "stuck" \in Edges[x]
 

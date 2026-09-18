@@ -533,7 +533,7 @@ Relays redeliver, clients retry, and networks duplicate. The rules:
   exposure (a hash whose preimage the solver may already know is burned
   forever).
 
-### 4.6 Open RFQ — broadcast bidding _(solver side implemented — `packages/solver-core/src/core/openRfq.ts`, `packages/solver-transport/src/ingress/relay.ts`; the client side lives in the ts-sdk, tracked in issue #4)_
+### 4.6 Open RFQ — broadcast bidding _(solver side implemented — `packages/solver-core/src/core/openRfq.ts`, `packages/solver-transport/src/ingress/relay.ts`; the client side lives in the ts-sdk)_
 
 Directed negotiation (§ 4.1–4.5) presumes the client has already picked a
 solver from discovery data. When several solvers serve a pair — and

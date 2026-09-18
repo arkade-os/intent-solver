@@ -16,8 +16,8 @@
  * What the compiler still cannot see is the part that matters most: passing
  * FOUR SEPARATE controls type-checks perfectly and is silently wrong. Each one
  * bounds its own corridor, every single-corridor test keeps passing, and the
- * global cap #96 introduced quietly becomes per-corridor again — which is the
- * bound #105 is about. Counting constructions is what pins that.
+ * global cap quietly becomes per-corridor again — which is the
+ * bound the shared reserve is about. Counting constructions is what pins that.
  *
  * The layout assertions are here for the same reason: opening a store by a
  * hardcoded suffixed path instead of the layout works perfectly on a legacy
@@ -48,7 +48,7 @@ describe('createServices — one admission control for every corridor', () => {
     // written for: the EVM corridors took `totalCommitted` WITHOUT the control,
     // and their quote() did a plain read-then-check. Two concurrent quotes could
     // each read the same pre-commit total and both pass a cap only one fits
-    // under — the #105 race, reopened for two corridors and invisible because
+    // under — the cap race, reopened for two corridors and invisible because
     // the number was hard-coded to the corridors that existed when it was written.
     const body = createServicesBody()
     expect(body.match(/^\s*admission,$/gm) ?? []).toHaveLength(6)

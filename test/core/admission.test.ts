@@ -4,7 +4,7 @@ import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStr
 
 /**
  * A `committedSats` that only counts what has "landed" — the durable rows.
- * Quotes in flight are invisible to it, which is precisely the gap issue #105
+ * Quotes in flight are invisible to it, which is precisely the gap the cap race
  * lives in, so the fake reproduces it rather than papering over it.
  */
 const ledger = (start = 0) => {
@@ -370,7 +370,7 @@ describe('AdmissionStrategy', () => {
   /**
    * The reason this is an interface: a replacement can admit on something the
    * exposure cap cannot see. What it may NOT drop is the reserve/release
-   * pairing — see `admissionStrategy.ts` on issue #105.
+   * pairing — see `admissionStrategy.ts`.
    */
   it('lets a custom strategy admit per corridor rather than per sat', async () => {
     const dark = new Set(['arkade:BTC->onchain:BTC'])

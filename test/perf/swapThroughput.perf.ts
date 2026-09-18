@@ -25,7 +25,7 @@
  * opposite directions, so the channel nets out too and a long run does not
  * exhaust it.
  *
- * A PAIR OF DIFFERENT CLIENTS CANNOT SHARE A PAYMENT HASH. #47's
+ * A PAIR OF DIFFERENT CLIENTS CANNOT SHARE A PAYMENT HASH. The
  * cross-corridor duplicate-hash guard refuses `duplicate_swap` for a hash live
  * in any other corridor's store, so an A-to-B pair here is two independent
  * hashes whose ECONOMICS net, not one hash used twice.

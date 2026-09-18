@@ -125,7 +125,7 @@ export interface SendServiceDeps {
   /** Sum of committed sats across every corridor, not just this notebook. */
   totalCommitted: () => Promise<number>
   /**
-   * Reserves cap headroom for a quote whose row has not landed yet (#105).
+   * Reserves cap headroom for a quote whose row has not landed yet.
    * SHARE one instance across every corridor: a per-corridor control bounds
    * only its own concurrency, which is the narrower half of the problem.
    */
@@ -634,7 +634,7 @@ export class SendSwapService {
     const lockupSats = giveSatsFor(decoded.amountSats, quoteFee)
     // RESERVED, not merely observed: the row below is what makes this swap
     // visible to `totalCommitted()`, and until it lands a concurrent quote
-    // reads the same headroom and takes it too (#105). Handed back in the
+    // reads the same headroom and takes it too. Handed back in the
     // `finally`, by which point either the row counts instead or nothing
     // was committed at all.
     const routingFeeSats = feeEstimate?.feeSats ?? maxRoutingFeeSats(decoded.amountSats)
@@ -931,7 +931,7 @@ export class SendSwapService {
           // So require the spend ITSELF, not the absence of a spendable output.
           // Without it the row is left exactly as it was and the next sweep
           // looks again — costing only a delayed refund, against a permanent
-          // one. This is the same lag PR #21 fixed on the receive leg, but not
+          // one. This is the same read lag the receive leg fixed, but not
           // the same remedy: there a grace period worked because the row had
           // just entered `refunding`, whereas a row here becomes refundable
           // when its deadline matures, long after `updatedAt` last moved.

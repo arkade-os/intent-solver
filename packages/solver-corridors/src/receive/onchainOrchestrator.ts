@@ -101,7 +101,7 @@ export interface OnchainReceiveServiceDeps {
   /** Sum of committed sats across every corridor, not just this notebook. */
   totalCommitted: () => Promise<number>
   /**
-   * Reserves cap headroom for a quote whose row has not landed yet (#105).
+   * Reserves cap headroom for a quote whose row has not landed yet.
    * SHARE one instance across every corridor: a per-corridor control bounds
    * only its own concurrency, which is the narrower half of the problem.
    */
@@ -363,7 +363,7 @@ export class OnchainReceiveSwapService {
     }
     // RESERVED, not merely observed: the row below is what makes this swap
     // visible to `totalCommitted()`, and until it lands a concurrent quote
-    // reads the same headroom and takes it too (#105). Handed back in the
+    // reads the same headroom and takes it too. Handed back in the
     // `finally`, by which point either the row counts instead or nothing
     // was committed at all.
     const reservation = await this.admission.admit({
@@ -694,7 +694,7 @@ export class OnchainReceiveSwapService {
     // against ITS `now`, and a row can sit in `funding_arkade` across a restart
     // or a failed tick. `now` only moves forward, so a window that was open at
     // the hand-off can be shut by the time the payment is actually made — and
-    // funding then is precisely the trade #69 describes, where the trader lets
+    // funding then is precisely the unilateral-gap trade, where the trader lets
     // the onchain htlc time out and still claims the Arkade payout.
     const decision = evaluateOnchainReceiveFunding({
       arkadeRefundLocktime: row.refundLocktime,
@@ -838,7 +838,7 @@ export class OnchainReceiveSwapService {
       await store.fail(row.id, 'claimed', 'claimed state with no funding txid/vout')
       return false
     }
-    // A BROADCAST CLAIM IS NOT A LANDED ONE, and `settled` is terminal (#204).
+    // A BROADCAST CLAIM IS NOT A LANDED ONE, and `settled` is terminal.
     if (row.onchainClaimTxid) {
       const outcome = await onchain.transactionOutcome(row.onchainClaimTxid)
       if (outcome === 'confirmed') return store.transition(row.id, 'claimed', 'settled', {})
@@ -874,7 +874,7 @@ export class OnchainReceiveSwapService {
         // in the column. Leaving it null is the honest record — the state says
         // the money was collected, and inventing a txid to fill a field would
         // be worse than an empty one.
-        // Reachable only before the pre-commit above; no txid to poll (#204).
+        // Reachable only before the pre-commit above; no txid to poll.
         return store.transition(row.id, 'claimed', 'settled', {})
       }
       await store.fail(
@@ -937,7 +937,7 @@ export class OnchainReceiveSwapService {
 
   /**
    * Operator override: try the client's L1 HTLC claim again, at TODAY's fee
-   * rate. TLA+ finding F4 (#38).
+   * rate. TLA+ finding F4.
    *
    * The row is `stuck` with a dust refusal: not a lost claim, but one that was
    * uneconomic at a moment when the payout after fees fell under
@@ -962,7 +962,7 @@ export class OnchainReceiveSwapService {
     if (!row.fundingTxid || row.fundingVout === null) {
       return { refused: 'no funding txid/vout on the row: nothing to claim from' }
     }
-    // OUR OWN EARLIER ATTEMPT, BY NAME (#204), and BEFORE the spend read below,
+    // OUR OWN EARLIER ATTEMPT, BY NAME, and BEFORE the spend read below,
     // which cannot tell whose spend it found. `unknown` never went out: rebuild.
     if (row.onchainClaimTxid) {
       const outcome = await onchain.transactionOutcome(row.onchainClaimTxid)
@@ -1066,7 +1066,7 @@ export class OnchainReceiveSwapService {
       const txid = await arkade.refund(receiveCovenantRowFor(row), outputs)
       return store.transition(row.id, 'refunding_arkade', 'refunded', { arkade_refund_txid: txid })
     } catch (error) {
-      // TLA+ finding F5 (#38), the same escalation the Lightning receive leg
+      // TLA+ finding F5, the same escalation the Lightning receive leg
       // grows in `whenRefunding` and for the same reasons — see there for why
       // the deadline is `refundLocktime` rather than a grace, and why this is
       // only safe now that `onchain-receive-refund-now` gives a human somewhere
@@ -1083,7 +1083,7 @@ export class OnchainReceiveSwapService {
   /**
    * Operator override: push this row's Arkade refund now, whatever state it is
    * in. The only path out of `stuck` on this leg, and the thing TLA+ findings
-   * F4 and F5 (#38) both turn out to need first.
+   * F4 and F5 both turn out to need first.
    *
    * F4 says a fee-dust failure parks here "with no operator retry"; F5 asks for
    * a deadline escalation when the Arkade server stops co-signing. Both are

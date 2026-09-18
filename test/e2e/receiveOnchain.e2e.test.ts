@@ -259,7 +259,7 @@ describe('e2e onchain:BTC->arkade:BTC (receive)', () => {
       expect(claimed.preimage).toBe(hex.encode(sealed.preimage))
 
       // SOLVER: spend the client's onchain HTLC with the now-public P. The row
-      // holds at `claimed` until that CONFIRMS (#204) — ask for the block.
+      // holds at `claimed` until that CONFIRMS — ask for the block.
       const broadcast = await poll(
         async () => {
           const row = await service.tick(swap.id)
