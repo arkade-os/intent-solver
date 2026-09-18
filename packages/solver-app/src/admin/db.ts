@@ -17,10 +17,12 @@
 import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import {
   assetMarketKey,
+  rfqSymbolFor,
   type AssetMarketConfig,
   type CarrierMode,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import type { AssetRfqToken } from '../ops/assetRfqMarkets.js'
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS admin_override (
@@ -103,6 +105,14 @@ CREATE TABLE IF NOT EXISTS admin_migration (
 const MIGRATED_SCHEMA = `
 CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_market_symbol ON admin_market(symbol) WHERE symbol IS NOT NULL;
 `
+
+export const MARKET_SERVING_SEED = 'market-serving-seed-v1'
+
+/** The environment's answer, for the ONE boot that finds the marker absent. */
+export interface ServingSeed {
+  offerMarkets: readonly { a: string | null; b: string | null }[]
+  tokens: readonly AssetRfqToken[]
+}
 
 export interface AuditEntry {
   action: string
@@ -221,12 +231,59 @@ export class AdminStore {
     private readonly now: () => number,
   ) {}
 
-  static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<AdminStore> {
+  /**
+   * `seed` absent means do not consult the ENVIRONMENT and do not mark. It does
+   * NOT mean "no writes": `exec(SCHEMA)` and `migrate()` run on every opener.
+   */
+  static async open(
+    driver: SqlDriver | string,
+    now: () => number = nowSeconds,
+    seed?: ServingSeed,
+  ): Promise<AdminStore> {
     const store = new AdminStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
     await store.driver.exec(SCHEMA)
     await store.migrate()
+    // MUST stay: the symbol index names a column the ALTER loop adds, so SCHEMA cannot carry it.
     await store.driver.exec(MIGRATED_SCHEMA)
+    if (seed) await store.seedServing(seed)
     return store
+  }
+
+  /**
+   * Read the environment into the rows, ONCE. The marker is explicit (every
+   * candidate signal in the data is a supported state) and written in the SAME
+   * transaction, so no crash half-seeds rows beneath a marker saying they are
+   * done. `carrier_mode` is left out: `inherit` IS the environment's answer.
+   */
+  private async seedServing(seed: ServingSeed): Promise<void> {
+    const done = await this.driver.get('SELECT name FROM admin_migration WHERE name = ?', [MARKET_SERVING_SEED])
+    if (done) return
+    const rows = await this.listMarkets()
+    const byAsset = new Map(seed.tokens.map((token) => [token.assetId, token]))
+    const declaredForOffers = (row: AssetMarketRow): boolean =>
+      seed.offerMarkets.some(
+        (pair) => (pair.a === row.base && pair.b === row.quote) || (pair.a === row.quote && pair.b === row.base),
+      )
+    await this.driver.transaction(async () => {
+      for (const row of rows) {
+        const assetId = row.base !== null && row.quote !== null ? null : (row.base ?? row.quote)
+        const token = assetId === null ? undefined : byAsset.get(assetId)
+        const symbol = assetId === null ? null : (token?.symbol ?? rfqSymbolFor(assetId))
+        await this.driver.run(
+          'UPDATE admin_market SET symbol = ?, serves_offer = ?, serves_rfq = ?, rfq_sell_base = ?, ' +
+            'rfq_buy_base = ? WHERE market_key = ?',
+          [
+            symbol,
+            declaredForOffers(row) ? 1 : 0,
+            symbol === null ? 0 : 1,
+            symbol !== null && (token?.enabled.sell_base ?? true) ? 1 : 0,
+            symbol !== null && (token?.enabled.buy_base ?? true) ? 1 : 0,
+            row.marketKey,
+          ],
+        )
+      }
+      await this.driver.run('INSERT INTO admin_migration (name, at) VALUES (?, ?)', [MARKET_SERVING_SEED, this.now()])
+    })
   }
 
   private async migrate(): Promise<void> {

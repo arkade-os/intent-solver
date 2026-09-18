@@ -472,7 +472,11 @@ export const createServices = async (
   // Opened unconditionally, even when the console is off: the audit log is
   // written by operator actions the CLI can run too, and a store that exists
   // only sometimes is a branch every caller would have to think about.
-  const adminStore = await AdminStore.open(shared ?? layout.admin)
+  const adminStore = await AdminStore.open(shared ?? layout.admin, nowSeconds, {
+    // `config`, not `policy`: neither field is override-able, and `policy` is not resolved until below this.
+    offerMarkets: config.offerMarkets,
+    tokens: config.assetRfqTokens,
+  })
   // The READER set: a corridor an operator switched off still has in-flight
   // swaps, and those are still exposure the cap must count.
   const totalCommitted = () =>

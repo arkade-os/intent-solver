@@ -217,6 +217,11 @@ const checkFlatFee = (label: string, value: bigint): void => {
 /** § 2's stem rule, the same one `ops/assetRfqMarkets.ts` applied to `ASSET_MARKETS`. */
 const SYMBOL = /^[A-Z][A-Z0-9]{0,11}$/
 
+// 12-char stem: issuance prefix plus gidx. First-11-hex alone collides two
+// assets from the same tx with different group indexes.
+export const rfqSymbolFor = (assetId: string): string =>
+  `A${assetId.slice(0, 7).toUpperCase()}${assetId.slice(64).toUpperCase()}`
+
 const checkServing = (market: AssetMarketConfig): void => {
   if (market.symbol !== null && !SYMBOL.test(market.symbol)) {
     throw new Error(

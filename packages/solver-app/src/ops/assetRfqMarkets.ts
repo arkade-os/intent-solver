@@ -10,7 +10,7 @@
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
 import { assetRfqEnvStem, type AssetRfqDirection } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { rfqSymbolFor, type AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { assetCardMarkets, type AssetCardMarket } from '@arkade-os/solver-core/core/registryCard.js'
 import type { AssetMarket } from './assetOffers.js'
 
@@ -70,11 +70,6 @@ export const parseAssetRfqTokens = (
     return { symbol, assetId, enabled }
   })
 }
-
-// 12-char stem: issuance prefix plus gidx. First-11-hex alone collides two
-// assets from the same tx with different group indexes.
-const rfqSymbolFor = (assetId: string): string =>
-  `A${assetId.slice(0, 7).toUpperCase()}${assetId.slice(64).toUpperCase()}`
 
 /**
  * Console rows as RFQ markets. `tokens` supply a typeable symbol and can close

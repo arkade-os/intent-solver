@@ -1,9 +1,48 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { AdminStore, adminDbPath } from '@arkade-os/solver-app/admin/db.js'
-import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
-import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { AdminStore, adminDbPath, MARKET_SERVING_SEED } from '@arkade-os/solver-app/admin/db.js'
+import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import {
+  assetMarketKey,
+  assetMarketPolicy,
+  rfqSymbolFor,
+  DEFAULT_SERVING,
+  type AssetMarketConfig,
+} from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { assetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 
 const USDA = 'aa'.repeat(34)
+
+const marketFixture = (): AssetMarketConfig => ({
+  ...DEFAULT_SERVING,
+  base: null,
+  quote: USDA,
+  baseDecimals: 8,
+  quoteDecimals: 6,
+  feedUrl: 'https://feed.test/p',
+  pricePath: '/p',
+  toleranceBps: 10,
+  feeBps: 25,
+  sellBase: null,
+  buyBase: null,
+  enabled: true,
+})
+
+const preUpgradeDriver = async (): Promise<SqlDriver> => {
+  const driver = betterSqliteDriver(':memory:')
+  await driver.exec(
+    `CREATE TABLE admin_market (market_key TEXT PRIMARY KEY, base TEXT, quote TEXT,
+       base_decimals INTEGER NOT NULL, quote_decimals INTEGER NOT NULL, feed_url TEXT NOT NULL,
+       price_path TEXT NOT NULL, tolerance_bps INTEGER NOT NULL, fee_bps INTEGER NOT NULL,
+       sell_base_min TEXT, sell_base_max TEXT, buy_base_min TEXT, buy_base_max TEXT,
+       enabled INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+  )
+  await driver.run(
+    `INSERT INTO admin_market VALUES (?, NULL, ?, 8, 6, 'https://feed.test/p', '/p', 10, 25,
+       '1000', '1000000', '2000', '2000000', 1, 1, 1)`,
+    [assetMarketKey(null, USDA), USDA],
+  )
+  return driver
+}
 
 let now = 1_000_000
 const clock = () => now
@@ -138,5 +177,70 @@ describe('admin_market gains the serving columns', () => {
       revision: 'rev-1',
     })
     expect((await store.listActions()).map((row) => row.revision)).toEqual(['rev-1', null])
+  })
+})
+
+describe('the one-shot serving seed', () => {
+  const seed = {
+    offerMarkets: [{ a: null, b: USDA }],
+    tokens: [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: false } }],
+  }
+
+  const withRow = async () => {
+    const driver = betterSqliteDriver(':memory:')
+    const store = await AdminStore.open(driver, () => 1_000)
+    await store.putMarket({ ...marketFixture(), ...DEFAULT_SERVING, symbol: 'TMP' })
+    await driver.run('UPDATE admin_market SET symbol = NULL, serves_offer = 0, serves_rfq = 1, rfq_buy_base = 1')
+    await driver.run('DELETE FROM admin_migration')
+    return { driver, store }
+  }
+
+  it('writes the env into the rows, and the marker with them', async () => {
+    const { driver } = await withRow()
+    await AdminStore.open(driver, () => 2_000, seed)
+    const row = (await driver.all<Record<string, unknown>>('SELECT * FROM admin_market'))[0]!
+    expect(row).toMatchObject({ symbol: 'USDA', serves_offer: 1, serves_rfq: 1, rfq_sell_base: 1, rfq_buy_base: 0 })
+    expect(await driver.all('SELECT name FROM admin_migration')).toEqual([{ name: MARKET_SERVING_SEED }])
+  })
+
+  it('never runs twice, whatever the environment says the second time', async () => {
+    const { driver } = await withRow()
+    await AdminStore.open(driver, () => 2_000, seed)
+    await driver.run('UPDATE admin_market SET serves_rfq = 0')
+    await AdminStore.open(driver, () => 3_000, { offerMarkets: [], tokens: [] })
+    expect((await driver.all<{ serves_rfq: number }>('SELECT serves_rfq FROM admin_market'))[0]!.serves_rfq).toBe(0)
+  })
+
+  it('marks a store with no rows at all', async () => {
+    // Zero rows beside a non-empty OFFER_MARKETS is SUPPORTED, so deriving
+    // "already seeded" from the data would re-seed this deployment for ever.
+    const driver = betterSqliteDriver(':memory:')
+    await AdminStore.open(driver, () => 1_000, seed)
+    expect(await driver.all('SELECT name FROM admin_migration')).toEqual([{ name: MARKET_SERVING_SEED }])
+  })
+
+  it('does not seed or mark when no seed is supplied', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    await AdminStore.open(driver, () => 1_000)
+    expect(await driver.all('SELECT name FROM admin_migration')).toEqual([])
+  })
+
+  it('boots a real pre-upgrade file, and serves over RFQ exactly what it served before', async () => {
+    const driver = await preUpgradeDriver()
+    const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: [] })
+    const rows = await store.listMarkets()
+    expect(() => assetMarketPolicy(rows)).not.toThrow()
+    expect(rows[0]).toMatchObject({ symbol: rfqSymbolFor(USDA), servesRfq: true, rfqSellBase: true, rfqBuyBase: true })
+    expect(assetRfqMarketsFrom([], assetMarketPolicy(rows).pricing)).toMatchObject([
+      {
+        symbol: rfqSymbolFor(USDA),
+        base: null,
+        quote: USDA,
+        feeBps: 25,
+        feedUrl: 'https://feed.test/p',
+        sellBase: { min: 1_000n, max: 1_000_000n },
+        buyBase: { min: 2_000n, max: 2_000_000n },
+      },
+    ])
   })
 })
