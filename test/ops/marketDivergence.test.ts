@@ -86,10 +86,11 @@ describe('marketServingDivergence', () => {
   })
 })
 
-describe('the report catches a market the console itself leaves serving nothing', () => {
-  const body = {
+describe('what the console itself creates, through the route an operator uses', () => {
+  const body = (over: Record<string, unknown> = {}) => ({
     base: null,
     quote: USDA,
+    symbol: 'USDA',
     baseDecimals: 8,
     quoteDecimals: 6,
     feedUrl: 'https://feed.test/p',
@@ -100,12 +101,10 @@ describe('the report catches a market the console itself leaves serving nothing'
     buyBaseFeeFlat: '0',
     sellBase: { min: '1', max: '1000' },
     buyBase: { min: '1', max: '1000' },
-  }
+    ...over,
+  })
 
-  // The live case, end to end through the route an operator actually uses. The
-  // premise assertion below is deliberate: whoever puts `symbol` on the wire and
-  // drops the `servesRfq: false` bridge must come back and re-judge this test.
-  it('fires on a row created through PUT /api/markets', async () => {
+  const stored = async (over: Record<string, unknown> = {}): Promise<AssetMarketRow> => {
     const driver = betterSqliteDriver(':memory:')
     const store = await AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: [] })
     const app = buildAdminApp({
@@ -118,14 +117,26 @@ describe('the report catches a market the console itself leaves serving nothing'
       new Request('http://admin/api/markets', {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(body(over)),
       }),
     )
     expect(response.status).toBe(200)
-    const [stored] = await store.listMarkets()
-    expect(stored).toMatchObject({ enabled: true, servesOffer: false, servesRfq: false })
-    const [line] = marketServingDivergence([stored!], { offerMarkets: [], tokens: [] })
-    expect(line).toContain(stored!.marketKey)
+    return (await store.listMarkets())[0]!
+  }
+
+  // Inverted, not deleted. It used to pin the opposite — that this route stored a row
+  // quoting nothing — which is what the `servesRfq: false` bridge made true.
+  it('says nothing about a market created through PUT /api/markets: it serves RFQ', async () => {
+    const row = await stored()
+    expect(row).toMatchObject({ enabled: true, servesRfq: true })
+    expect(marketServingDivergence([row], { offerMarkets: [], tokens: [] })).toEqual([])
+  })
+
+  it('still fires when the operator switches both paths off through that same route', async () => {
+    const row = await stored({ servesRfq: false })
+    expect(row).toMatchObject({ enabled: true, servesOffer: false, servesRfq: false })
+    const [line] = marketServingDivergence([row], { offerMarkets: [], tokens: [] })
+    expect(line).toContain(row.symbol)
     expect(line).toMatch(/quoting nothing/)
   })
 })

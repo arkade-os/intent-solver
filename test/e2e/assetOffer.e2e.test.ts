@@ -320,7 +320,7 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
     SWAP_TIMEOUT_MS,
   )
 
-  // The boot-time derivation over a REAL stored market row. `servedBy` is #71's;
+  // The boot-time derivation over a REAL stored market row. `marketCapability` is #71's;
   // this pins it against a stored row rather than a hand-built one.
   describe('what this deployment says it will fill', () => {
     const rowFor = (over: Record<string, unknown> = {}) => ({

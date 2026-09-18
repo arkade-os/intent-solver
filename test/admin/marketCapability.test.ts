@@ -323,7 +323,7 @@ describe('GET /api/overview — markets', () => {
   })
 })
 
-describe('the console renders served-by', () => {
+describe('the console renders what fills a market, and what it cannot do', () => {
   const appSource = readFileSync(
     fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
     'utf8',
@@ -332,11 +332,11 @@ describe('the console renders served-by', () => {
   const view = (): string =>
     appSource.slice(appSource.indexOf('const marketsView'), appSource.indexOf('asset markets — END'))
   const cell = (): string =>
-    appSource.slice(appSource.indexOf('const servedByCell'), appSource.indexOf('const marketsView'))
+    appSource.slice(appSource.indexOf('const NOTHING_TITLE'), appSource.indexOf('const marketsView'))
 
   it('gives it a column of its own rather than overloading state', () => {
     expect(view()).toContain("h('th', 'served by')")
-    expect(view()).toContain('servedByCell(market.servedBy ?? [])')
+    expect(view()).toContain('capabilityCell(market.serving ?? [], market.gaps ?? [])')
     expect(view()).toContain("h('span.phase.phase-exposed', 'not quoting')")
   })
 
@@ -350,7 +350,7 @@ describe('the console renders served-by', () => {
   it('renders a market nothing fills as a failure on the overview card too', () => {
     const card = appSource.slice(appSource.indexOf('const marketCard'), appSource.indexOf('const marketsPanel'))
     expect(card).toContain("'span.phase.phase-failed'")
-    expect(card).toContain('market.servedBy.length === 0')
+    expect(card).toContain('market.serving.length === 0')
   })
 
   it('keeps `served by` off the corridor cards’ `serving` label', () => {
@@ -367,9 +367,17 @@ describe('the console renders served-by', () => {
     expect(bounds).not.toMatch(/10\s*\*\*|Math\.pow/)
   })
 
-  it('marks "nothing" distinctly, on the failure chip', () => {
+  it('marks "nothing" distinctly, on the failure chip, and says what would fill it', () => {
     expect(cell()).toContain("'span.phase.phase-failed'")
     expect(cell()).toContain("'nothing'")
-    expect(cell()).toContain('OFFER_MARKETS')
+    // The row is the serve list now, so the chip names the COLUMNS rather than the env vars.
+    expect(cell()).toContain('serves_rfq')
+    expect(cell()).toContain('serves_offer')
+  })
+
+  it('renders one chip per capability gap, carrying its detail as the title', () => {
+    expect(cell()).toContain('gaps.map((gap) =>')
+    expect(cell()).toMatch(/title: gap\.detail/)
+    expect(cell()).toContain('gap.kind')
   })
 })

@@ -40,6 +40,7 @@ import {
   DEFAULT_SERVING,
   type AssetMarketBounds,
   type AssetMarketConfig,
+  type CarrierMode,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import type { AssetMarketRow } from '../db.js'
@@ -79,6 +80,12 @@ interface MarketBody {
   sellBase?: unknown
   buyBase?: unknown
   enabled?: unknown
+  symbol?: unknown
+  servesOffer?: unknown
+  servesRfq?: unknown
+  rfqSellBase?: unknown
+  rfqBuyBase?: unknown
+  carrierMode?: unknown
 }
 
 class BadRequest extends Error {}
@@ -128,12 +135,26 @@ const bounds = (label: string, value: unknown): AssetMarketBounds | null => {
   return { min: BigInt(min), max: BigInt(max) }
 }
 
+const CARRIER_MODES: readonly CarrierMode[] = ['inherit', 'off', 'priced']
+
+const carrierMode = (value: unknown): CarrierMode => {
+  if (value === undefined || value === null) return 'inherit'
+  if (!CARRIER_MODES.includes(value as CarrierMode)) {
+    throw new BadRequest(`carrierMode must be one of ${CARRIER_MODES.join(', ')}`)
+  }
+  return value as CarrierMode
+}
+
 /** The request body as a market, or a `BadRequest` naming the field that was wrong. */
 const marketFrom = (body: MarketBody): AssetMarketConfig => ({
   ...DEFAULT_SERVING,
-  // The wire has no `symbol` yet and an RFQ-declared market requires one, so a
-  // write here is offer-only rather than the row `validateAssetMarket` refuses.
-  servesRfq: false,
+  symbol: body.symbol === undefined || body.symbol === null ? null : String(body.symbol).trim().toUpperCase() || null,
+  servesOffer: body.servesOffer === true,
+  // Enabled unless explicitly switched off, matching `enabled` below: configuring a market IS the opt-in.
+  servesRfq: body.servesRfq === undefined ? true : body.servesRfq === true,
+  rfqSellBase: body.rfqSellBase === undefined ? true : body.rfqSellBase === true,
+  rfqBuyBase: body.rfqBuyBase === undefined ? true : body.rfqBuyBase === true,
+  carrierMode: carrierMode(body.carrierMode),
   base: leg('base', body.base),
   quote: leg('quote', body.quote),
   baseDecimals: int('baseDecimals', body.baseDecimals),
@@ -177,6 +198,12 @@ const marketJson = (row: AssetMarketRow) => ({
   sellBase: row.sellBase === null ? null : { min: String(row.sellBase.min), max: String(row.sellBase.max) },
   buyBase: row.buyBase === null ? null : { min: String(row.buyBase.min), max: String(row.buyBase.max) },
   enabled: row.enabled,
+  symbol: row.symbol,
+  servesOffer: row.servesOffer,
+  servesRfq: row.servesRfq,
+  rfqSellBase: row.rfqSellBase,
+  rfqBuyBase: row.rfqBuyBase,
+  carrierMode: row.carrierMode,
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
 })
