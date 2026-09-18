@@ -309,6 +309,16 @@ describe('the feed probe', () => {
   })
 })
 
+describe('the write probe is never served from the preview cache', () => {
+  it('fetches on every PUT, and the second PUT reads the feed again', async () => {
+    const { app, adminStore, fetchPrice } = await build()
+    await put(app, body())
+    await put(app, body({ feeBps: 30 }))
+    expect(fetchPrice).toHaveBeenCalledTimes(2)
+    await adminStore.close()
+  })
+})
+
 describe('DELETE /api/markets/:key', () => {
   it('removes a market and does not ask for a restart', async () => {
     const { app, adminStore } = await build()

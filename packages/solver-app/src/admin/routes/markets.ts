@@ -44,6 +44,7 @@ import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/f
 import type { AssetMarketRow } from '../db.js'
 import { servedBy } from '../servedBy.js'
 import type { AdminDeps } from '../server.js'
+import type { FeedCache } from '../feedCache.js'
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
@@ -176,7 +177,7 @@ const marketJson = (row: AssetMarketRow) => ({
   updatedAt: row.updatedAt,
 })
 
-export const registerMarketRoutes = (app: Hono, deps: AdminDeps): void => {
+export const registerMarketRoutes = (app: Hono, deps: AdminDeps, feeds?: FeedCache): void => {
   // Built once per registration, not per request: `createPriceFeed` validates
   // its timeout eagerly, which is the whole point of that check.
   const fetchPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
@@ -226,7 +227,9 @@ export const registerMarketRoutes = (app: Hono, deps: AdminDeps): void => {
     // offer at run time, so storing it would be storing a pair this solver
     // advertises and never fills — discovered days later, by its absence.
     try {
-      await fetchPrice(market.feedUrl, market.pricePath)
+      const price = await fetchPrice(market.feedUrl, market.pricePath)
+      // Seeds the cache with a live read, so the preview is usable right after a save.
+      feeds?.prime(market.feedUrl, market.pricePath, price)
     } catch (error) {
       return c.json(
         {
