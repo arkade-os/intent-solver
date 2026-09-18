@@ -1314,6 +1314,9 @@ const settingsView = () => {
 /** The market being edited, or null when the form is closed. */
 let marketDraft = null
 
+// Assigned by the preview panel; a second declaration there is a load-time SyntaxError.
+let schedulePreview = () => {}
+
 /** `null` is the BTC leg everywhere below the wire; `BTC` is what an operator types. */
 const legLabel = (leg) => (leg === null ? 'BTC' : shortId(leg))
 
@@ -1335,6 +1338,7 @@ const blankMarket = () => ({
   buyBaseMin: '',
   buyBaseMax: '',
   enabled: true,
+  marketKey: null,
 })
 
 /** Unset is blank here and `null` on the wire — never `0`, which is a spread an operator sets deliberately. */
@@ -1362,6 +1366,7 @@ const draftFrom = (market) => ({
   buyBaseMin: market.buyBase?.min ?? '',
   buyBaseMax: market.buyBase?.max ?? '',
   enabled: market.enabled,
+  marketKey: market.marketKey,
 })
 
 /**
@@ -1402,18 +1407,18 @@ const marketBody = (d) => ({
   enabled: d.enabled,
 })
 
-const field = (label, key, hint) =>
-  h(
-    'p.toolbar',
-    h('span.muted', label),
-    h('input', {
-      value: String(marketDraft[key] ?? ''),
-      size: 44,
-      // No re-render: see the block header.
-      oninput: (e) => (marketDraft[key] = e.target.value),
-    }),
-    hint ? h('span.faint', hint) : null,
-  )
+const tip = (text) => h('span.tip', { tabindex: '0', role: 'note' }, '?', h('span.bubble', text))
+
+const group = (title) => h('span.group', title)
+
+const field = (label, key, hint, explain) => [
+  h('span.label', label, explain ? tip(explain) : null),
+  h('input', {
+    value: String(marketDraft[key] ?? ''),
+    oninput: (e) => ((marketDraft[key] = e.target.value), schedulePreview()),
+  }),
+  h('span.hint', hint ?? ''),
+]
 
 const saveMarket = async () => {
   try {
@@ -1438,6 +1443,9 @@ const deleteMarket = async (key) => {
   }
 }
 
+const spreadHint =
+  'Bounds on what we pay out in this direction, not on what the customer sends. A maximum of 0 closes this direction and leaves everything else set up.'
+
 const marketForm = () =>
   h(
     'section.panel',
@@ -1445,33 +1453,105 @@ const marketForm = () =>
     // The key is derived from the legs, so re-submitting a pair edits it. Said
     // out loud because there is no id field to make that obvious.
     h('p.faint', 'A pair may be configured once. Submitting one that exists edits it.'),
-    field('base', 'base', 'BTC, or a 68-character asset id'),
-    field('quote', 'quote', 'BTC, or a 68-character asset id'),
-    field('base decimals', 'baseDecimals'),
-    field('quote decimals', 'quoteDecimals'),
-    field('feed url', 'feedUrl', 'fetched and checked before this is stored'),
-    field('price path', 'pricePath', 'RFC 6901 pointer; blank derives it where the provider is known'),
-    field('tolerance bps', 'toleranceBps', 'deviation from the feed accepted; below 10000'),
-    field('fee bps', 'feeBps', 'margin folded against the maker; below 10000'),
-    field(
-      'sell-base flat fee',
-      'sellBaseFeeFlat',
-      'base atomic units removed from the input; 330 sats covers asset carrier dust when base is BTC',
-    ),
-    field('buy-base flat fee', 'buyBaseFeeFlat', 'quote atomic units removed from the input'),
-    field('sell-base min', 'sellBaseMin', 'atomic units of the want leg; blank inherits'),
-    field('sell-base max', 'sellBaseMax', '0 closes this direction'),
-    field('buy-base min', 'buyBaseMin'),
-    field('buy-base max', 'buyBaseMax'),
     h(
-      'p.toolbar',
-      h('span.muted', 'enabled'),
-      h('input', {
-        type: 'checkbox',
-        ...(marketDraft.enabled ? { checked: true } : {}),
-        oninput: (e) => (marketDraft.enabled = e.target.checked),
-      }),
-      h('span.faint', 'a disabled market is served by neither direction'),
+      'div.form-grid',
+      group('identity'),
+      field(
+        'base',
+        'base',
+        'BTC, or a 68-character asset id',
+        'Which asset the price is quoted per. Type BTC for the bitcoin side, or paste a 68-character asset id.',
+      ),
+      field(
+        'quote',
+        'quote',
+        'BTC, or a 68-character asset id',
+        "The other side of the pair. The feed's number means: this many quote units buy one whole base unit.",
+      ),
+      group('how it is priced'),
+      field(
+        'base decimals',
+        'baseDecimals',
+        undefined,
+        "How many digits this side's smallest unit has. Bitcoin is 8. Most stablecoins are 6. A wrong number here misprices by a factor of ten rather than failing.",
+      ),
+      field(
+        'quote decimals',
+        'quoteDecimals',
+        undefined,
+        "How many digits this side's smallest unit has. Bitcoin is 8. Most stablecoins are 6. A wrong number here misprices by a factor of ten rather than failing.",
+      ),
+      field(
+        'feed url',
+        'feedUrl',
+        'fetched and checked before this is stored',
+        'Where the price comes from. We fetch it and check it before saving, so a URL we cannot read is never stored.',
+      ),
+      field(
+        'price path',
+        'pricePath',
+        'RFC 6901 pointer; blank derives it where the provider is known',
+        "Where in the feed's reply the price sits, written like a folder path — /data/amount. Leave blank for a provider we already know.",
+      ),
+      group('what we charge'),
+      field(
+        'tolerance bps',
+        'toleranceBps',
+        'deviation from the feed accepted; below 10000',
+        "How far a customer's own price may sit from the feed before we turn their offer down. Only used when the customer names the price.",
+      ),
+      field(
+        'fee bps',
+        'feeBps',
+        'margin folded against the maker; below 10000',
+        'Our margin, taken out of what the customer receives. 50 bps is half of one percent. Leave the two boxes below blank to charge it both ways.',
+      ),
+      field(
+        '↳ selling base',
+        'sellBaseFeeBps',
+        'blank inherits fee bps',
+        'Our margin when the customer hands us the base asset. Blank means use the box above.',
+      ),
+      field(
+        '↳ buying base',
+        'buyBaseFeeBps',
+        'blank inherits fee bps',
+        'Our margin when the customer hands us the quote asset. Blank means use the box above.',
+      ),
+      field(
+        'sell-base flat fee',
+        'sellBaseFeeFlat',
+        'base atomic units removed from the input; 330 sats covers asset carrier dust when base is BTC',
+        'A fixed amount taken off the top before the margin, in the smallest unit of whatever the customer sends. For a cost that does not grow with the trade.',
+      ),
+      field(
+        'buy-base flat fee',
+        'buyBaseFeeFlat',
+        'quote atomic units removed from the input',
+        "The same, going the other way, in the other side's smallest unit.",
+      ),
+      group('limits'),
+      field('sell-base min', 'sellBaseMin', 'atomic units of the want leg; blank inherits', spreadHint),
+      field('sell-base max', 'sellBaseMax', '0 closes this direction', spreadHint),
+      field('buy-base min', 'buyBaseMin', undefined, spreadHint),
+      field('buy-base max', 'buyBaseMax', undefined, spreadHint),
+      h(
+        'span.label',
+        'enabled',
+        tip(
+          'A switched-off market is served by nothing. It stays set up, so turning it back on does not mean retyping a 68-character asset id.',
+        ),
+      ),
+      h(
+        'span.span2',
+        h('input', {
+          type: 'checkbox',
+          ...(marketDraft.enabled ? { checked: true } : {}),
+          oninput: (e) => ((marketDraft.enabled = e.target.checked), schedulePreview()),
+        }),
+        ' ',
+        h('span.faint', 'a disabled market is served by neither path'),
+      ),
     ),
     h(
       'p.toolbar',

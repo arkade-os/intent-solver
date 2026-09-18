@@ -122,3 +122,76 @@ describe('the form speaks the API’s dialect', () => {
     expect(marketsBlock()).toContain('encodeURIComponent(key)')
   })
 })
+
+describe('the form is laid out rather than run together', () => {
+  it('uses one grid for the whole form, not a toolbar per row', () => {
+    const block = marketsBlock()
+    expect(block).toContain("'div.form-grid'")
+    expect(block).not.toContain('const field = (label, key, hint) =>')
+  })
+
+  it('carries a plain-English sentence for the fields that decide money', () => {
+    const block = marketsBlock()
+    for (const phrase of [
+      'Our margin, taken out of what the customer receives',
+      'Bounds on what we pay out in this direction',
+      'Our margin when the customer hands us the base asset',
+    ]) {
+      expect(block).toContain(phrase)
+    }
+  })
+
+  it('renders the sentence through a tooltip rather than as a second hint', () => {
+    expect(marketsBlock()).toContain("h('span.tip'")
+  })
+
+  it('groups the fields, so the form reads as sections rather than a list', () => {
+    expect(marketsBlock()).toContain("group('what we charge')")
+  })
+
+  it('renders an input for each per-direction spread, which #171 stored but never showed', () => {
+    const block = marketsBlock()
+    expect(block).toContain("'sellBaseFeeBps'")
+    expect(block).toContain("'buyBaseFeeBps'")
+  })
+
+  it('carries the saved key on the draft, and keeps it off the wire body', () => {
+    const block = marketsBlock()
+    expect(block).toContain('marketKey: market.marketKey')
+    const body = block.slice(block.indexOf('const marketBody'), block.indexOf('const field'))
+    expect(body).not.toContain('marketKey')
+  })
+
+  it('declares schedulePreview exactly once, and as a `let` Task 11 can assign to', () => {
+    const block = marketsBlock()
+    expect(block).toContain('let schedulePreview')
+    expect(block.match(/(?:let|const|var)\s+schedulePreview\b/g)).toHaveLength(1)
+  })
+})
+
+describe('the preview styles spend no new colour', () => {
+  const css = readFileSync(
+    fileURLToPath(new URL('../../packages/solver-app/src/admin/static/styles.css', import.meta.url)),
+    'utf8',
+  )
+
+  const previewCss = (): string => {
+    const marker = '/* ---- the pricing editor'
+    const at = css.indexOf(marker)
+    expect(at).toBeGreaterThan(-1)
+    return css.slice(at)
+  }
+
+  it('introduces no token outside the two saturated ones', () => {
+    const block = previewCss()
+    expect(block.match(/var\(--failed\)/g)).toBeNull()
+    expect(block.match(/#[0-9a-fA-F]{3,6}/g)).toBeNull()
+  })
+
+  it('ships no rule this task does not render', () => {
+    const block = previewCss()
+    expect(block).not.toContain('.headline')
+    expect(block).not.toContain('.lead')
+    for (const cls of ['form-grid', 'tip']) expect(marketsBlock()).toContain(cls)
+  })
+})

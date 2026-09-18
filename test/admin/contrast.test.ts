@@ -84,6 +84,7 @@ const PAIRS: readonly (readonly [fg: string, bg: string, where: string])[] = [
   ['text', 'exposed-bg', 'the restart banner'],
   ['text-dim', 'exposed-bg', 'the values in the restart banner'],
   ['focus', 'ground', 'focus ring against the page'],
+  ['text', 'line', 'the pressed segment of a segmented control'],
 ]
 
 const AA = 4.5
