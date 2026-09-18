@@ -156,11 +156,13 @@ nothing else. Note also that 70 min is already under this module's own
 Lightning horizon should rise for payer UX is open alongside it (#161).
 
 The evidence #161 asked for is now collected rather than argued: every Lightning
-receive arm writes a `cltv headroom <E - now>s — <spare>s spare` note against its
-swap, where `spare` is how much further out the horizon could have been set and
-still funded that payment. A negative one is a payment gate (c) refused. Read
-them with `store.history(<swap id>)`; they are notes, so `summariseLatency`
-already ignores them.
+receive arm writes a `cltv headroom <E - armTime>s — <spare>s spare` note against
+its swap. The two halves run from different points, deliberately — the headroom
+is what was left when the HTLC armed, so it shrinks with polling lag, while
+`spare` runs from QUOTE time and is stable: it is how much further out the
+horizon could have been set and still funded that payment. A negative one is a
+payment gate (c) refused. Read them with `store.history(<swap id>)`; they are
+notes, so `summariseLatency` already ignores them.
 
 ---
 

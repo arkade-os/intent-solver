@@ -793,8 +793,8 @@ export class ReceiveSwapService {
   }
 
   /**
-   * #161's measurement. `spare` is taken off QUOTE time rather than the stored
-   * `refund_locktime`, which may be a height whose resolution needs a chain tip and throws.
+   * #161's measurement: headroom as of ARM time, `spare` from QUOTE time. `spare` avoids the
+   * stored `refund_locktime`, which may be a height whose resolution needs a chain tip and throws.
    */
   private async noteCltvHeadroom(row: ReceiveSwapRow, htlcExpiresAt: number | null): Promise<void> {
     if (htlcExpiresAt === null) return
