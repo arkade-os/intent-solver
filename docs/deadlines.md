@@ -92,7 +92,8 @@ number's job is to agree with whoever derives the same script.
 |---|---|---|
 | `REFUND_SAFETY_MARGIN` | `core/send.ts` | Margin on top of the **worst-case HTLC lifetime** before the client's refund may open. Not derived from the 90 above. |
 | `MAX_LOCKUP_TIMEOUT` | `core/send.ts` | `= REFUND_SAFETY_MARGIN`. A funding window longer than the margin would quote a deadline the refund cannot sit behind. |
-| `MAX_REFUND_HORIZON` | `core/receive.ts`, `core/onchainReceive.ts` | How far out the **solver's own** refund is set on a receive leg. Also the horizon `selectLockupFunding` prefers coins to outlive. |
+| `MAX_REFUND_HORIZON` | `core/receive.ts` | The **Lightning** receive leg's own refund deadline. Also the horizon `selectLockupFunding` prefers coins to outlive. |
+| `MAX_REFUND_HORIZON` | `core/onchainReceive.ts` | The **onchain** receive leg's. A separate declaration supplying a different quantity — see "Two horizons, not one". |
 | `ONCHAIN_ORDER_MARGIN_SECONDS` | `core/onchainSend.ts` | Ordering margin between the two legs' deadlines. |
 | `EVM_ORDER_MARGIN_SECONDS` | `core/evmSend.ts` *(unmerged, #117)* | Same role on the EVM corridors. |
 
@@ -116,13 +117,50 @@ number's job is to agree with whoever derives the same script.
 | Constant | Formula |
 |---|---|
 | `MAX_LOCKUP_TIMEOUT` | `= REFUND_SAFETY_MARGIN` |
-| `DEFAULT_HOLD_INVOICE_WINDOW` | `= MAX_REFUND_HORIZON - MIN_CLAIM_WINDOW` *(#137)* |
+| `DEFAULT_HOLD_INVOICE_WINDOW` | `= MAX_REFUND_HORIZON - MIN_CLAIM_WINDOW`, the `core/receive.ts` copy *(#137)* |
 | `refundLocktimeFor(...)` | `max(worstCaseHtlcBlocks * 600 + REFUND_SAFETY_MARGIN, unilateralClaimDelay + REFUND_SAFETY_MARGIN)` |
 | `htlcLocktimeFor(...)` | `now + minConfirmations * 600 + 2 * ONCHAIN_CLAIM_MARGIN_SECONDS` |
 
 **Prefer adding to this table over adding to the ones above.** A derived value
 cannot drift from the quantity it depends on; two hand-picked numbers can, and
 have — see the history note at the end.
+
+### Two horizons, not one
+
+`MAX_REFUND_HORIZON` is **declared twice, and the two are independent.** They
+hold the same value today and `test/interop/constantsParity.test.ts` pins them
+to each other, so neither can move alone in silence — but that is a tripwire,
+not a rule. Diverging them is a legitimate choice; it just has to be a deliberate
+one, because **the two do not buy the same thing.**
+
+| declaration | what it supplies | raising it |
+|---|---|---|
+| `core/receive.ts` | the payer's window, via `DEFAULT_HOLD_INVOICE_WINDOW` — 30 min today — and the minimum final CLTV the minted invoice demands | more time for a human paying by hand; costs float eligibility and narrows the routes that can pay |
+| `core/onchainReceive.ts` | the solver's own **L1 claim window**: what is left after the cap out-binds `htlcLocktime - SETTLE_SAFETY_MARGIN`, which it does across the whole reachable input range | **shrinks** that window, second for second |
+
+The second is the one whose miss costs real money rather than a failed swap:
+past it the lockup has been refunded while the counterparty can still sweep the
+HTLC.
+
+| onchain horizon | L1 claim window at 1 conf (default) | at 6 conf (max) |
+|---|---|---|
+| 2 h — today | 70 min | 120 min |
+| 2 h 55 m | 15 min — the `SETTLE_SAFETY_MARGIN` floor | 65 min |
+| 3 h | 15 min | 60 min |
+| 4 h | 15 min | 15 min |
+
+At the default depth the window hits the floor at **2 h 55 m**, not gradually at
+4 h, so any raise past that point leaves this leg `SETTLE_SAFETY_MARGIN` and
+nothing else. Note also that 70 min is already under this module's own
+`MIN_SETTLE_WINDOW` of 90. That contradiction is open (#160), and whether the
+Lightning horizon should rise for payer UX is open alongside it (#161).
+
+The evidence #161 asked for is now collected rather than argued: every Lightning
+receive arm writes a `cltv headroom <E - now>s — <spare>s spare` note against its
+swap, where `spare` is how much further out the horizon could have been set and
+still funded that payment. A negative one is a payment gate (c) refused. Read
+them with `store.history(<swap id>)`; they are notes, so `summariseLatency`
+already ignores them.
 
 ---
 
