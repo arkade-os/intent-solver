@@ -293,15 +293,22 @@ export const registerPricingApplyRoutes = (app: Hono, deps: AdminDeps): void => 
     }
 
     await writeOverrides('widening')
+    const widened: string[] = []
     for (const entry of survived) {
       try {
         await writeMarket(entry.target)
-        applied.push(entry.key)
+        widened.push(entry.key)
       } catch (error) {
         unapplied.push({ key: entry.key, reason: messageOf(error) })
       }
     }
-    await deps.services.replaceMarkets()
+    try {
+      await deps.services.replaceMarkets()
+      applied.push(...widened)
+    } catch (error) {
+      // On disk but not serving, so not `applied` — the same reading pass 1 gives a failed reload.
+      for (const key of widened) unapplied.push({ key, reason: messageOf(error) })
+    }
 
     return c.json({ revision, applied, unapplied })
   })

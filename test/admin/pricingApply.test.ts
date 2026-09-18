@@ -109,6 +109,36 @@ describe('a save that dies midway lands conservative', () => {
     await adminStore.close()
   })
 
+  /** Fail the SECOND replaceMarkets: the reload that activates pass 2, not the gate before it. */
+  const failFinalReload = (services: { replaceMarkets: () => Promise<void> }) => {
+    const real = services.replaceMarkets
+    let calls = 0
+    services.replaceMarkets = async () => {
+      if ((calls += 1) < 2) return real()
+      services.replaceMarkets = real
+      throw new Error('rebuild refused')
+    }
+  }
+
+  it('answers structurally when the reload that activates pass 2 throws', async () => {
+    const { app, adminStore, services } = await build()
+    await put(app, body({ sellBase: { min: '10', max: '100' } }))
+    failFinalReload(services)
+
+    const res = await apply(app, {
+      markets: [body({ sellBase: { min: '10', max: '400' } })],
+      overrides: { ASSET_CARRIER_PRICING: 'true' },
+    })
+
+    expect(res.status).toBe(200)
+    const seen = await answered(res)
+    // The widened row reached disk, but nothing is serving it, so it is not `applied`.
+    expect((await adminStore.listMarkets())[0]!.sellBase).toEqual({ min: 10n, max: 400n })
+    expect(seen.unapplied).toEqual([{ key: KEY, reason: 'rebuild refused' }])
+    expect(seen.applied).toEqual(['ASSET_CARRIER_PRICING'])
+    await adminStore.close()
+  })
+
   it('does not lower a per-direction fee when the widening pass dies', async () => {
     // 900 -> 0 is a RELAXATION; `buyBaseFeeFlat` 1000 -> 5000 is the control.
     const { app, adminStore } = await build()
