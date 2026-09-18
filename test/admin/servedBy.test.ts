@@ -213,6 +213,7 @@ const overview = async (policy: Record<string, unknown>, rows: unknown[] = [mark
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({}),
         listMarkets: vi.fn().mockResolvedValue(rows),
+        repairedServing: [],
       },
       ln: { getBalance: vi.fn().mockResolvedValue({ availableSats: 1, incomingSats: 0 }) },
       arkade: { wallet: { getBalance: vi.fn().mockResolvedValue({ total: 1 }) } },

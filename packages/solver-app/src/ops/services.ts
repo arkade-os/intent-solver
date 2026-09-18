@@ -92,6 +92,7 @@ import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import { assetRfqMarketsFrom, retainReadableMarkets } from './assetRfqMarkets.js'
+import { marketServingDivergence } from './marketDivergence.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
@@ -531,6 +532,12 @@ export const createServices = async (
    * price API. @see admin/routes/markets.ts
    */
   const marketRows = await adminStore.listMarkets()
+  for (const line of marketServingDivergence(marketRows, {
+    offerMarkets: config.offerMarkets,
+    tokens: config.assetRfqTokens,
+  })) {
+    log(`market serving divergence — ${line}`)
+  }
   const assetMarkets = assetMarketPolicy(marketRows)
   // NULL exactly when `config.lnBackend` is, which `loadConfig` permits only
   // while all four BTC corridors are disabled — a deployment serving EVM or

@@ -71,6 +71,8 @@ const fakeServices = (over: { balance?: unknown; assetManager?: unknown; vtxos?:
     arkade: { arkServerUrl: 'http://ark.test' },
     maxExposedSats: 300_000,
     limits: { minSats: 1_000, maxSats: 100_000 },
+    offerMarkets: [],
+    assetRfqTokens: [],
     corridorEnabled: corridorMap(true),
     corridorFees: corridorMap({ bps: 0, flatSats: 0 }),
     corridorLimits: corridorMap({ minSats: 1_000, maxSats: 100_000 }),
@@ -85,7 +87,11 @@ const fakeServices = (over: { balance?: unknown; assetManager?: unknown; vtxos?:
     assetRfqMarkets: [],
     ...stores,
     readers: readerSetFromDeps(stores as unknown as FlatCorridorDeps),
-    adminStore: { getOverrides: vi.fn().mockResolvedValue({}), listMarkets: vi.fn().mockResolvedValue([]) },
+    adminStore: {
+      getOverrides: vi.fn().mockResolvedValue({}),
+      listMarkets: vi.fn().mockResolvedValue([]),
+      repairedServing: [],
+    },
     bootOverrides: {},
     ln: { getBalance: vi.fn().mockResolvedValue({ availableSats: 500_000, incomingSats: 0 }) },
     arkade: {

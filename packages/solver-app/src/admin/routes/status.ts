@@ -18,6 +18,7 @@ import { assetMarketKey, type AssetMarketBounds } from '@arkade-os/solver-core/c
 import type { AssetMarketRow } from '../db.js'
 import { probeBackends } from '../probes.js'
 import { consoleBalance, type AssetDetailSource } from '../assets.js'
+import { marketServingDivergence } from '../../ops/marketDivergence.js'
 import { poolPlan } from '../../ops/pool.js'
 import { requireLn, requireOnchain } from '../../ops/rails.js'
 import {
@@ -190,6 +191,15 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       restartEnabled: services.config.adminRestartEnabled,
       providerPubkey: services.providerPubkey,
       markets: marketCards(storedMarkets, services),
+      servingDivergence: [
+        // The boot repairs first: a row this process REWROTE outranks a row it
+        // merely disagrees with the environment about.
+        ...services.adminStore.repairedServing,
+        ...marketServingDivergence(storedMarkets, {
+          offerMarkets: services.config.offerMarkets,
+          tokens: services.config.assetRfqTokens,
+        }),
+      ],
       corridors: CORRIDORS.map((corridor) => ({
         corridor,
         enabled: effective.corridorEnabled[corridor],
