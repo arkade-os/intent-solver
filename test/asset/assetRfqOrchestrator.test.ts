@@ -494,6 +494,19 @@ describe('the market mark', () => {
     expect(row.quoteImpliedMantissa).not.toBe(100_000n)
   })
 
+  it('records the same price whether or not the carrier is priced', async () => {
+    const struck = async (carrierSats: bigint) => {
+      const { service, store } = await harness({ carrierSats })
+      await service.quote(request({ amount: 50_000n }))
+      return store.get('swap-1')
+    }
+    const off = await struck(0n)
+    const on = await struck(330n)
+    expect(on.quoteImpliedMantissa).toBe(off.quoteImpliedMantissa)
+    expect(on.quoteImpliedMantissa).toBe(99_500n * 10n ** BigInt(IMPLIED_PRICE_HEADROOM))
+    expect(on.toAmount).not.toBe(off.toAmount)
+  })
+
   it('reads the feed again when the fill lands, and keeps that second number', async () => {
     let reads = 0
     const { service, store } = await harness({

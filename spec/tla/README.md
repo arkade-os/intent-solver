@@ -57,21 +57,38 @@ Every module ships one green cfg (`LightningSend.cfg`, …) — the corridor as
 shipped — plus scenario and mutation cfgs:
 
 - **Mutation cfgs** (`_Broken`, `_DoubleFund`, `_StaleIndexer`, `_ZeroConf`,
-  `_Censored`, `_Overexposed`, …) flip exactly one `Break<Guard>` constant to
-  delete one real guard. Each header names the src/ file:line the constant
-  abstracts and states the expected violated invariant. A spec that stays
-  green when a guard is deleted proves nothing; these runs are the evidence
-  the invariants have teeth.
+  `_Censored`, `_Overexposed`, …) flip one guard constant to delete one real
+  guard — usually a `Break<Guard>`, sometimes a behaviour flag such as
+  `FundIsIdempotent` or `IndexerNeverLies`. Each header names the src/
+  file:line the constant abstracts and states the expected violated
+  invariant. A spec that stays green when a guard is deleted proves nothing;
+  these runs are the evidence the invariants have teeth. The flip is the only
+  intended difference, but some cfgs also carry smaller bounds so the flip has
+  room to bite — every `LightningReceive` cfg but `_RecourseMargin` and its
+  control does, and `LightningReceive.cfg`'s header explains that bound set and
+  why it does not launder the results.
 - **Control cfgs** (`_BrokenControl`, `_OverexposedControl`) re-run the
   mutation with the guard restored and must be GREEN. The control is what
   makes the paired violation a proof about the guard rather than about the
   constants around it.
 
-Every mutation cfg carries an `EXPECTED RESULT` line; the per-module green
-cfgs say so in their first line instead. The full set is 58 cfgs — 21 green,
-37 expected violations — and the green modules' checkpoint comments record the
-per-cfg results. After touching a module or any of its cfgs, re-run the
-module's full set and confirm every result still matches its header.
+Every mutation cfg states its expected verdict in its header — normally an
+`EXPECTED RESULT` line, though `OnchainSend_RefundTiming.cfg` says `EXPECTED
+TO STAY GREEN` on its first line instead; the per-module green cfgs also say
+so in their first line. The full set is 58 cfgs — 17 green, 41 expected
+violations — and the green modules' checkpoint comments record the per-cfg
+results. That split is a count of the files as they stand, so re-count it from
+the headers rather than trusting this line after cfgs are added or removed.
+After touching a module or any of its cfgs, re-run the module's full set and
+confirm every result still matches its header.
+
+**A suffixed cfg is not automatically an expected violation.** Six carry
+neither the bare module name nor `Control` in the filename and are still
+documented GREEN — `OnchainSend_RefundTiming`, `OnchainSend_Liveness`,
+`LightningReceive_Censored`, `LightningReceive_SettleNotIdempotent`,
+`EvmSend_LostPatch` and `EvmReceive_LostSpend`. The last two are controls in
+everything but the name. Sweeping the set on the rule "suffix ⇒ must violate"
+raises a false alarm on all six; read the header, not the filename.
 
 ## Reading the results
 
@@ -83,6 +100,12 @@ module's full set and confirm every result still matches its header.
   dump). That early stop is the expected outcome for every cfg whose header
   says so — do not "fix" the spec until it goes away; fix the guard in the
   TypeScript, or accept the finding and track it.
+- **Compare the invariant NAME, not just green-vs-red.** Because TLC stops at
+  the first violated invariant, and 20 of the 21 cfgs whose header expects
+  `NoNetLoss` list `NoSilentLoss` above it in `INVARIANTS`, a regression can
+  change WHICH invariant fires while the verdict stays `VIOLATED` and the
+  sweep still looks healthy. `EvmSend_LateLock.cfg`'s header records that
+  having happened once, in the other direction.
 - A liveness violation prints as `Error: The following behavior violates
   property Liveness` with the infinite-cycle suffix marked `<Stuttering>`-free.
   No cfg in the current set violates liveness: the canonical example was

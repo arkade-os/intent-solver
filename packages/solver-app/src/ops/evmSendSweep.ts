@@ -1,6 +1,9 @@
+/**
+ * Armed on the SERVICE alone: `enabled` stops new business, but disabling is the
+ * incident response to a stuck row — gating this timer on it silenced the late-lock watch (#175).
+ */
 export const withEvmSendSweep = async (input: {
   service: { tickAll(): Promise<unknown> } | null
-  policies: readonly { enabled: boolean; direction: 'send' | 'receive' }[]
   intervalMs: number
   signal: AbortSignal
   run(startSweep: () => void): Promise<void>
@@ -14,14 +17,7 @@ export const withEvmSendSweep = async (input: {
   }
   const start = (): void => {
     const service = input.service
-    if (
-      timer !== undefined ||
-      input.signal.aborted ||
-      !service ||
-      !input.policies.some((policy) => policy.enabled && policy.direction === 'send')
-    ) {
-      return
-    }
+    if (timer !== undefined || input.signal.aborted || !service) return
     timer = setInterval(() => {
       if (inFlight) return
       inFlight = Promise.resolve()

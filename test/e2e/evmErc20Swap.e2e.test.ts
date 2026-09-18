@@ -399,6 +399,28 @@ describe('EVM ERC20Swap — against the deployed contract`s own bytecode', () =>
   )
 
   itOnChain(
+    'REVERTS a refund of a lock that is not there — what `refunded` rests on',
+    async () => {
+      // `refunded` is written on a success receipt alone (evmSendPlan.ts), so
+      // it entails the tokens came back only if this cannot mine successfully.
+      const preimage = hex.decode('ab'.repeat(32))
+      const tip = BigInt((await rpc('eth_blockNumber', [])) as string)
+      const lock = lockFor(preimage, tip + 5n)
+
+      expect(await backend.isLocked(lock)).toBe(false)
+      // Past the timelock, so the missing lock is the only refusal left.
+      await rpc('anvil_mine', ['0x10'])
+
+      const before = await balanceOf(rpc, WETH, solver)
+      const refund = await sendFrom(rpc, SOLVER_KEY, SWAP_ADDRESS, encodeRefund(lock))
+      expect(refund.status).toBe('0x0')
+      expect(await balanceOf(rpc, WETH, solver)).toBe(before)
+      expect(await backend.findRefund(lock, tip)).toBe(false)
+    },
+    180_000,
+  )
+
+  itOnChain(
     'REVERTS when the solver has not approved — the bug lockCalls exists for',
     async () => {
       // The reason the corridor could not complete a single send swap. Every

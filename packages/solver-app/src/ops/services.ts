@@ -1127,8 +1127,11 @@ export const createServices = async (
         orderMarginSeconds: evmChain.orderMarginSeconds,
       },
       peerStores: [store, onchainStore, receiveStore, onchainReceiveStore],
-      onTickError: (id, error) =>
-        log(`evm send tick ${id} failed:`, error instanceof Error ? error.message : String(error)),
+      // The late-lock watch reports here too; a bare log line gave it no dedup and no `failing` panel.
+      onTickError: (id, error) => {
+        const { line } = tickErrors.record(id, error)
+        if (line) log(`evm send tick ${id} failed:`, line)
+      },
     })
     const receiveMarkets = new Map(
       policy.evmCorridors
