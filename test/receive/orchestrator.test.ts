@@ -311,7 +311,7 @@ describe('ReceiveSwapService.quote', () => {
 
   it('refuses a hash live in ANOTHER corridor’s store BEFORE minting the hold invoice', async () => {
     // A hash a live send swap of ours is paying: minting a hold invoice on it
-    // would loop that payment back to ourselves (issue #41). The refusal must
+    // would loop that payment back to ourselves. The refusal must
     // precede the mint — the external side effect — not follow it.
     const crossChecked = new ReceiveSwapService({
       acceptUnilateralGap: false,
@@ -774,7 +774,7 @@ describe('ReceiveSwapService.tick — crash recovery: no double-funding', () => 
   })
 
   /**
-   * Issue #97. The pre-fund guard used to read `findLockups`, which is
+   * The pre-fund guard used to read `findLockups`, which is
    * `spendableOnly`: a first funding that had already been CLAIMED was
    * invisible to it, so a row still sitting at `armed` funded the same lockup a
    * second time — out of the provider's own pocket, into a script whose one
@@ -1255,7 +1255,7 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
   })
 
   /**
-   * The third corner, which arkana's review of #163 named as the one the other
+   * The third corner, which arkana's review named as the one the other
    * two miss: a REPEAT attempt that errors, the hold reading non-settled, and
    * `E` still in the future.
    *
@@ -1507,7 +1507,7 @@ describe('ReceiveSwapService.tick — refund path', () => {
    * script's outpoints rather than the one the row happens to record.
    *
    * A funding attempt that crashed after paying but before recording leaves a
-   * second output on the same script (#97). `whenArmed` adopts one of them and
+   * second output on the same script. `whenArmed` adopts one of them and
    * writes THAT outpoint to the row — so the row's recorded outpoint and the
    * outpoint a client's claim actually spends need not be the same one. Search
    * only the recorded outpoint and the claim is invisible: the refund is pushed
@@ -1586,7 +1586,7 @@ describe('ReceiveSwapService.tick — refund path', () => {
   })
 
   /**
-   * TLA+ finding F5 (#38). `LightningReceive_Censored.cfg` reports a Liveness
+   * TLA+ finding F5. `LightningReceive_Censored.cfg` reports a Liveness
    * violation for a row whose refund can never be co-signed: it retries for
    * ever and never reaches a terminal state, so nothing tells an operator the
    * server has stopped answering.
@@ -1990,7 +1990,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
 })
 
 /**
- * Gate (d) — the solver's own unilateral recourse against `E` (#69) — at the
+ * Gate (d) — the solver's own unilateral recourse against `E` — at the
  * ORCHESTRATOR level rather than the core level.
  *
  * `test/core/receive.test.ts` already pins the arithmetic at both boundaries.
@@ -2103,7 +2103,7 @@ describe("ReceiveSwapService — the solver's own recourse window", () => {
 })
 
 /**
- * Issue #99 — a minted hold invoice must not outlive the quote that minted it.
+ * A minted hold invoice must not outlive the quote that minted it.
  *
  * `createHoldInvoice` runs BEFORE the row is inserted, so a quote that fails
  * after the mint leaves an invoice on the backend that nothing on our side will

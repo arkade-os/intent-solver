@@ -312,7 +312,7 @@ describe('the EVM refund address', () => {
 })
 
 /**
- * THE #105 RACE, on this corridor.
+ * THE CAP RACE, on this corridor.
  *
  * A swap is invisible to `totalCommitted()` until its row lands, so a plain
  * read-then-check lets two concurrent quotes both see the same headroom and

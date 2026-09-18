@@ -1,6 +1,6 @@
 /**
  * A source-level guard that `createServices` constructs ONLY the enabled
- * corridors' services — the mechanism issue #43 asks for, in the one place a
+ * corridors' services — the mechanism a deployment's corridor choice needs, in the one place a
  * regression would reappear. Asserted against the source text because
  * constructing the stack needs live backends, which a unit test has none of.
  *

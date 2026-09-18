@@ -116,7 +116,7 @@ export interface EvmSendSwapRow {
 // SCHEMA HISTORY. `valid_until` and `refund_outcome` were added after these
 // tables first shipped on the feat/evm-corridors branch. CREATE TABLE IF NOT
 // EXISTS does not extend an already-created table, so an environment whose
-// database was created by the pre-#228 schema needs, once, before this code
+// database predates those two columns needs, once, before this code
 // deploys against it:
 //
 //   ALTER TABLE send_evm_swap ADD COLUMN valid_until INTEGER NOT NULL DEFAULT 0;
@@ -399,7 +399,7 @@ export class EvmSendSwapStore {
    * an unfunded row is a claim on the float, not free capacity. Counting only
    * the exposed states would let unlimited concurrent quotes slip past the cap
    * and all be paid at once — the invariant `src/db/swaps.ts` states on its
-   * own committedSats, and the one the #38 TLA+ admission guard asserts.
+   * own committedSats, and the one the TLA+ admission guard asserts.
    * One table backs every token, so a corridor asks for its own `token_address` and a
    * caller summing whole STORES omits it. Both callers exist.
    */

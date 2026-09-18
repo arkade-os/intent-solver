@@ -445,7 +445,7 @@ export class EvmReceiveSwapService {
     // RESERVED, not merely observed. The read-then-check this replaces let two
     // concurrent quotes both see the same headroom and both take it: a swap is
     // invisible to `totalCommitted()` until its row lands, so the window
-    // between check and insert admitted more than the cap allows (#105).
+    // between check and insert admitted more than the cap allows.
     //
     // The exposure is the PAYOUT, not what the client locked — the solver funds
     // this leg out of its own capital.

@@ -286,7 +286,7 @@ describe('runVtxoLifecycle — re-splitting after renewal', () => {
     // fatal the moment the float holds an Arkade asset, because settle carries
     // assets onto the wallet's own output and the entire float lands on one
     // asset-bearing coin no sats lockup may spend. Splitting is what makes it
-    // fundable again. @see #123
+    // fundable again.
     let called = 0
     const { deps: d } = deps({
       resplitFloat: async () => {

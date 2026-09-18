@@ -116,7 +116,7 @@ export const EMPTY_LOCKUP_GRACE = 120
 
 /**
  * How long a refund may keep failing before the row is handed to a human —
- * TLA+ finding F5 (#38), whose `LightningReceive_Censored.cfg` reports a
+ * TLA+ finding F5, whose `LightningReceive_Censored.cfg` reports a
  * Liveness violation for a row that retries for ever.
  *
  * Six hours has to ride out everything that resolves itself — an arkd restart, a
@@ -189,7 +189,7 @@ export interface ReceiveServiceDeps {
   covclaimd?: CovclaimdClient | null
   limits: Limits
   /**
-   * Whether this deployment accepts funding into the #69 window — see
+   * Whether this deployment accepts funding into the unilateral-gap window — see
    * `Config.lnReceiveAcceptUnilateralGap` for what that means and why mainnet
    * needs it. Threaded rather than read from config here so this service keeps
    * taking every policy input through its deps, and so a test can exercise both
@@ -201,7 +201,7 @@ export interface ReceiveServiceDeps {
   /** Sum of committed sats across every corridor, not just this notebook. */
   totalCommitted: () => Promise<number>
   /**
-   * Reserves cap headroom for a quote whose row has not landed yet (#105).
+   * Reserves cap headroom for a quote whose row has not landed yet.
    * SHARE one instance across every corridor: a per-corridor control bounds
    * only its own concurrency, which is the narrower half of the problem.
    */
@@ -480,7 +480,7 @@ export class ReceiveSwapService {
     // different question (is this hash spoken for) about the same request.
     // RESERVED, not merely observed: the row below is what makes this swap
     // visible to `totalCommitted()`, and until it lands a concurrent quote
-    // reads the same headroom and takes it too (#105). Handed back in the
+    // reads the same headroom and takes it too. Handed back in the
     // `finally`, by which point either the row counts instead or nothing
     // was committed at all.
     const reservation = await this.admission.admit({
@@ -540,7 +540,7 @@ export class ReceiveSwapService {
       // delta is the one part of the htlc's deadline that is ours to set, and it
       // has to be large enough that the solver's own unilateral recourse opens
       // before `E` — otherwise a trader can let the htlc fail back for free
-      // during an arkd outage and then claim the payout anyway (#69) — unless
+      // during an arkd outage and then claim the payout anyway — unless
       // the operator has accepted that window, in which case gates (b) and (c)
       // set the delta instead and this stays well inside the ceiling below.
       const minFinalCltvBlocks = minFinalCltvBlocksFor(
@@ -605,7 +605,7 @@ export class ReceiveSwapService {
         return { accepted: true, swap, validUntil }
       } catch (error) {
         // The invoice is minted and the row did not land, so nothing downstream will
-        // settle or expire it (#99). Every unpaid invoice counts against
+        // settle or expire it. Every unpaid invoice counts against
         // `maxpendinginvoices` (LND defaults to 1000) until its own expiry.
         //
         // NOT on `duplicate_swap`: a hold invoice is keyed BY PAYMENT HASH, so a
@@ -757,7 +757,7 @@ export class ReceiveSwapService {
     }
 
     if (this.now() >= row.invoiceExpiresAt) {
-      // Retire the invoice as well as the row (#99). The row is ours and the
+      // Retire the invoice as well as the row. The row is ours and the
       // invoice is the BACKEND's: failing one does not touch the other, so
       // without this the mint outlives the quote and sits on the node until
       // ITS own expiry. LND holds every unpaid invoice against
@@ -814,7 +814,7 @@ export class ReceiveSwapService {
     // funding again pays the same lockup twice out of the provider's pocket with only
     // ONE claim possible.
     //
-    // Spend-AWARE (#97): `findLockups` is `spendableOnly`, so a first funding already
+    // Spend-AWARE: `findLockups` is `spendableOnly`, so a first funding already
     // CLAIMED vanishes from it and the old guard read that as "not funded yet".
     // `findLockupOutpoints` reports spent outpoints too.
     //
@@ -1202,7 +1202,7 @@ export class ReceiveSwapService {
       const txid = await arkade.refund(receiveCovenantRowFor(row), outputs)
       return store.transition(row.id, 'refunding', 'refunded', { refund_ark_txid: txid })
     } catch (error) {
-      // TLA+ F5 (#38): the Arkade server stops co-signing and nothing ever gives up.
+      // TLA+ F5: the Arkade server stops co-signing and nothing ever gives up.
       //
       // MEASURED FROM ENTRY INTO `refunding`, not from `refundLocktime`: `whenFunded`
       // only moves a row here at or past its deadline, so `now >= refundLocktime` is

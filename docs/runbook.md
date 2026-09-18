@@ -557,8 +557,8 @@ the reasons to take one.
   could spend). Verify once by hand if you care about the txid.
 - **`claimed` carrying an `onchain_claim_txid`, or `refunding_onchain` carrying
   an `onchain_refund_txid`, is a row WAITING FOR A BLOCK** and needs nothing.
-  The spend is broadcast and the row stays non-terminal until it confirms
-  (#204), which is what makes `settled`/`refunded` mean the money actually
+  The spend is broadcast and the row stays non-terminal until it confirms,
+  which is what makes `settled`/`refunded` mean the money actually
   moved. If one sits for many blocks, look the txid up: still in the mempool is
   a fee-rate problem, and absent from the chain entirely means the broadcast
   never stuck — the next sweep rebuilds it at today's rate on its own.
@@ -1029,7 +1029,7 @@ before the solver's `unilateralRefundWithoutReceiver` — that ordering is
 mandatory and must not be "fixed", since a funder whose refund opened first
 could take the money from a claimant holding the preimage. So if `E` passes
 first, a trader can let the htlc fail back to the payer at no cost and only
-then claim the Arkade payout, taking both sides (issue #69).
+then claim the Arkade payout, taking both sides.
 
 Two things follow that an operator will meet in the wild.
 
@@ -1170,7 +1170,7 @@ settle window too little to use, and a committed refund deadline past `E`.
 What you accept, plainly: with the Arkade server **gone or censoring for longer
 than its exit delay** AND `E` already passed, a trader can let the htlc fail back
 to its payer at no cost and only then claim the Arkade payout unilaterally —
-both sides, one preimage (#69). It is bounded by `LN_RECEIVE_MAX_SATS` per swap
+both sides, one preimage. It is bounded by `LN_RECEIVE_MAX_SATS` per swap
 and `MAX_EXPOSED_SATS` in aggregate, which is why `bitcoin` refuses to accept the
 window unless you have set the former by hand.
 

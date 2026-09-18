@@ -43,7 +43,7 @@ describe('onchainRefundLocktimeFor', () => {
   })
 
   /**
-   * TLA+ finding F7 (#104). The client's L1 claim leaf carries no timelock, so
+   * TLA+ finding F7. The client's L1 claim leaf carries no timelock, so
    * a claim can arrive at the very last instant — `htlcLocktime` plus the MTP
    * margin the solver waits out. From there the solver must claim the Arkade
    * lockup before `refundLocktime`, or the client takes it back on the refund
@@ -161,7 +161,7 @@ describe('evaluateOnchainSendFunding', () => {
 })
 
 /**
- * TLA+ finding F2 (#38). Only the CEILING was applied, so a zero or negative
+ * TLA+ finding F2. Only the CEILING was applied, so a zero or negative
  * confirmation depth passed straight through — and zero means funding against
  * a transaction that is still replaceable. Unreachable from today's wire
  * schema, which is why it was ranked low; the clamp belongs at the domain

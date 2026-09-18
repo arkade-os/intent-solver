@@ -182,7 +182,7 @@ describe('route-hint CLTV', () => {
       throw new Error('should have thrown')
     } catch (e) {
       expect((e as InvalidInvoice).reason).toBe('cltv_too_large')
-      // #196's convention, and now also which of the two gates fired.
+      // The existing convention, and now also which of the two gates fired.
       expect((e as InvalidInvoice).message).toContain('best route hint 278')
       expect((e as InvalidInvoice).message).toContain('best-hint floor')
     }

@@ -756,7 +756,7 @@ describe('OnchainReceiveSwapService', () => {
      * — nothing here was consulted before — and that a refusal spends nothing.
      */
     /**
-     * TWO WORKERS, one row, one lockup — issue #103.
+     * TWO WORKERS, one row, one lockup.
      *
      * Two SERVICE INSTANCES on one store, which is the whole point. `tick()`'s
      * `inFlight` set makes a second tick on the SAME instance return before it
@@ -836,7 +836,7 @@ describe('OnchainReceiveSwapService', () => {
       expect(row.failureReason).toMatch(/^refused to fund: /)
       // `stuck`, not `refused`: `funding_arkade` is EXPOSED, and the read that
       // said "not funded yet" is `spendableOnly` and can be stale. Claiming no
-      // exposure on that evidence is exactly the mistake #102 tracks, so the
+      // exposure on that evidence is exactly the double-funding mistake, so the
       // conservative terminal state is the right one and a human looks.
       expect(row.state).toBe('stuck')
     })
@@ -1220,7 +1220,7 @@ describe('OnchainReceiveSwapService', () => {
 
     /**
      * `claimNow` — the operator's fee-dust retry (TLA+ finding F4). arkana's
-     * review of #172 raised two things about it, and this is the second: the
+     * review raised two things about it, and this is the second: the
      * tests added there asserted action-registry metadata only, so every
      * refuse branch below was new code that no test executed. The dust one in
      * particular IS the scenario the override exists for, and a regression

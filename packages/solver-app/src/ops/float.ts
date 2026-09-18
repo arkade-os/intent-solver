@@ -234,7 +234,7 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
     // A SAFETY NET rather than the mechanism: the renewal settles straight into the
     // pool's shape above, so the float does not come back as one coin. This covers what
     // that cannot reach — too little to carve, or a float reshaped by something other
-    // than a renewal. @see #123
+    // than a renewal.
     resplitFloat: async () => (await resplitFloat(services))?.txid ?? null,
     recoverVtxos: () => vtxoManager.recoverVtxos(),
     recoverableVtxos: () => recoverableVtxosFrom(wallet),

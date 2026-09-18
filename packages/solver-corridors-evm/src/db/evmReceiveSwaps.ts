@@ -98,7 +98,7 @@ export interface EvmReceiveSwapRow {
 
 // SCHEMA HISTORY. `valid_until` was added after this table first shipped on
 // the feat/evm-corridors branch; see the twin comment on send_evm_swap for the
-// why and the failure modes. For a database created by the pre-#228 schema:
+// why and the failure modes. For a database predating that column:
 //
 //   ALTER TABLE receive_evm_swap ADD COLUMN valid_until INTEGER NOT NULL DEFAULT 0;
 const COLUMNS = `

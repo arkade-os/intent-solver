@@ -242,7 +242,7 @@ export class EvmSendSwapService {
    * FROM THE LOCK, never back from the tip: a claim cannot precede the lock it
    * spends, so this holds however old the row gets, where a lookback window
    * stops covering the stuck rows the scan exists for. Genesis when no txid
-   * resolves - that patch lands after the broadcast (#243).
+   * resolves - that patch lands after the broadcast.
    *
    * The margin is ASYMMETRIC in its error direction - too large costs scan time,
    * too small misses a claim in silence - so it wants a defensible upper bound.
@@ -287,7 +287,7 @@ export class EvmSendSwapService {
     //
     // The ROW HAVING ENTERED `locking_evm` is the honest guard: its CAS
     // precedes the broadcast. Gating on `evmLockTxid` read one write too late —
-    // that patch lands AFTER it, so a crash between blinded the scan (#243).
+    // that patch lands AFTER it, so a crash between blinded the scan.
     let preimage = row.preimage
     if (preimage === null && (EVM_SEND_EXPOSED as readonly string[]).includes(row.state)) {
       // Reported and survived, as `provenDepth` treats its failed reads.
@@ -478,7 +478,7 @@ export class EvmSendSwapService {
     // exposes it to the client as the on-chain deadline, and the contract keys
     // the lock by exactly this timelock. Storing seconds here put a ~1.75e9
     // "height" into the contract — centuries at any real cadence — and the
-    // refund branch could never be reached (#223).
+    // refund branch could never be reached.
     const evmTimeoutHeight =
       (await this.deps.blockHeight()) + Number(blocksForDuration(acceptance.evmTimeout - nowSeconds, chain.cadence))
     // The quote binds for the configured window, NOT until the refund locktime:
@@ -512,8 +512,8 @@ export class EvmSendSwapService {
     // RESERVED, not merely observed. The read-then-check this replaces let two
     // concurrent quotes both see the same headroom and both take it: a swap is
     // invisible to `totalCommitted()` until its row lands, so the window
-    // between the check and the insert admitted more than the cap allows
-    // (#105). `reserve` does the comparison and the claim in one serialised
+    // between the check and the insert admitted more than the cap allows.
+    // `reserve` does the comparison and the claim in one serialised
     // step, so the second caller sees the first one's claim.
     //
     // Taken HERE rather than before the price fetch, deliberately: a

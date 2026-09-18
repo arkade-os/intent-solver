@@ -158,7 +158,7 @@ describe('OnchainSendSwapService', () => {
     expect((await service.quote(request(6, 'other-client'))).accepted).toBe(true)
   })
 
-  // Issue #105. `quote()` reads the committed total, compares it against the
+  // `quote()` reads the committed total, compares it against the
   // cap, and only then inserts. Both reads land before either insert, so both
   // quotes see the same headroom and both take it.
   //
@@ -198,7 +198,7 @@ describe('OnchainSendSwapService', () => {
     expect(await deps.store.committedSats()).toBeLessThanOrEqual(50_000)
   })
 
-  // The cap is GLOBAL (#96), so the reservation has to be too. This mirrors how
+  // The cap is GLOBAL, so the reservation has to be too. This mirrors how
   // `createServices` wires production: separate per-corridor stores, one
   // `totalCommitted` that sums across them, and — the part under test — a
   // single shared AdmissionControl. Give each corridor its own control instead
@@ -513,7 +513,7 @@ describe('OnchainSendSwapService', () => {
   })
 
   /**
-   * TWO WORKERS, one row, one broadcast — issue #103, send side.
+   * TWO WORKERS, one row, one broadcast — send side.
    *
    * Two SERVICE INSTANCES on one store, because that is the only way to reach
    * it: `tick()`'s `inFlight` set makes a second tick on the SAME instance
@@ -797,7 +797,7 @@ describe('OnchainSendSwapService', () => {
   })
 
   /**
-   * TLA+ finding F7 (#104), the half a locktime cannot fix.
+   * TLA+ finding F7, the half a locktime cannot fix.
    *
    * `onchainRefundLocktimeFor` reserves the budget at quote time, so the
    * geometry always leaves room. Elapsed time can still eat it: a solver down
@@ -1126,7 +1126,7 @@ describe('OnchainSendSwapService', () => {
     return row
   }
 
-  /** What our OWN refund leaves: no preimage, so shape alone cannot place it (#169). */
+  /** What our OWN refund leaves: no preimage, so shape alone cannot place it. */
   const plantRefundLeafWitness = (row: OnchainSendSwapRow): void =>
     deps.onchain.spendClaim(row.fundingTxid!, 0, [
       new Uint8Array([0xaa]),

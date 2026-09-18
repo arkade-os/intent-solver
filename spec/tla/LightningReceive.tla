@@ -242,7 +242,7 @@ CONSTANTS
     RecourseMargin,        \* UNILATERAL_RECOURSE_MARGIN (30 min): operator time to
                            \* run the solo exit between the leaf opening and E
     BreakSettleMargin,     \* MUTATION: drop gate (c) — the MANDATED mutation check
-    BreakRecourseMargin,   \* MUTATION: drop gate (d) — the #69 both-sides window
+    BreakRecourseMargin,   \* MUTATION: drop gate (d) — the both-sides window
     BreakEmptyGrace,       \* MUTATION: escalate to `stuck` on ONE empty read
     ArkadeHonoursFundKey,  \* MUTATION: arkade.fund is idempotent per swap key
     FundGateOneShot,       \* MUTATION: the funding gate is re-evaluated after funding
@@ -396,9 +396,9 @@ HtlcLost(s)    == HtlcExpired(s) /\ ~settled[s]
 \* states, 0 left on queue, no error) — at these constants gate (d) subsumes
 \* (b), so MIN_SETTLE_WINDOW is still carried by MAX_REFUND_HORIZON alone.
 \*
-\* GATE (d) ARRIVED LATER (2026-08, the #69 fix) and is modelled below as the
+\* GATE (d) ARRIVED LATER (2026-08) and is modelled below as the
 \* BreakRecourseMargin conjunct, together with the two solo leaves it prices:
-\* the trader's unilateral claim (the #69 attacker, modelled for the first
+\* the trader's unilateral claim (the both-sides attacker, modelled for the
 \* time — it needs NO server) and the solver's solo refund leaf (shipped in
 \* the covenant, spendable by NO src/ code yet — TODO(unilateral-exit) in
 \* src/arkade/covenant.ts — so the action below is the requirement the Go
@@ -411,12 +411,12 @@ FundGateOpen(s) ==
     /\ clock + MinSettleWindow <= htlcE[s]                \* (b) settle_window_too_short
     /\ ( BreakSettleMargin                                \* <<< THE MANDATED MUTATION
          \/ RefundLocktime + SettleSafetyMargin <= htlcE[s] )  \* (c) refund_deadline_too_late
-    /\ ( BreakRecourseMargin                              \* <<< MUTATION: the #69 window
+    /\ ( BreakRecourseMargin                              \* <<< MUTATION: the both-sides window
          \/ clock + UnilateralDelay + RecourseMargin <= htlcE[s] )  \* (d) unilateral_recourse_after_htlc
 
 \* The solver's SOLO refund leaf opened: fundedAt + UnilateralDelay has arrived.
 \* Shipped as gate (d) at src/core/receive.ts:188-195 with
-\* UNILATERAL_RECOURSE_MARGIN, after #69: with the Arkade server gone the
+\* UNILATERAL_RECOURSE_MARGIN: with the Arkade server gone the
 \* trader's unilateralClaim opens first, and a swap funded into the window
 \* where E passes before OUR leaf opens pays out and cannot be recovered —
 \* the counterparty takes the payout AND keeps their HTLC.  The shipped gate
@@ -486,7 +486,7 @@ ClientClaims(s) ==
     /\ UNCHANGED << clock, st, loc, serverUp >>
     /\ UNCHANGED LrVars
 
-\* The trader's SOLO claim leaf — the #69 attacker, modelled here for the
+\* The trader's SOLO claim leaf — the both-sides attacker, modelled here for the
 \* first time.  Standard Arkade client tooling spends the payout lockup
 \* ALONE once its own CSV matures, which the shipped covenant arranges to
 \* happen well before the solver's without-receiver leaf opens — that
@@ -540,7 +540,7 @@ Urgent(s) ==
     \* has work it could finish RIGHT NOW: with the server up that is the
     \* co-signed refund, with it down the solo leaf once matured.  If NEITHER
     \* exists — server censoring, solo leaf not open yet — no recovery action
-    \* is available at all, so real time passes: Tick must run, or the #69
+    \* is available at all, so real time passes: Tick must run, or the both-sides
     \* window this gate family exists for could never be reached.
     \/ (st[s] = "funded" /\ clock >= RefundLocktime /\ (serverUp \/ SoloMatured(s)))
     \/ (st[s] = "claimed" /\ ~settled[s])                   \* settle before E
@@ -1178,7 +1178,7 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*                                    BreakRecourseMargin = TRUE           *)
 (*                                    -> NoNetLoss violated,               *)
 (*                                       277,839 gen / 58,370 distinct at  *)
-(*                                       the violation.  The #69 shape:    *)
+(*                                       the violation.  The shape:        *)
 (*                                       fund an E=4 HTLC late in the      *)
 (*                                       window, censor, and the trader's  *)
 (*                                       timelock-free solo claim wins the *)

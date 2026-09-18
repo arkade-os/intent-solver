@@ -40,7 +40,7 @@ const MAX_DECIMALS = 18
 const LABEL_CHARS = 8
 
 // CAIP-19 ids, mirroring solver-registry's `discovery-client/src/validate.ts`
-// and `schema/card.schema.json` (`feat/evm-corridor-markets`, #23).
+// and `schema/card.schema.json` (`feat/evm-corridor-markets`, arkade-os/solver-registry#23).
 const ARKADE = 'arkade'
 const CHAIN_NAMESPACE = { arkade: ARKADE, lightning: 'bolt11', onchain: 'bitcoin' } as const
 type ChainNamespace = (typeof CHAIN_NAMESPACE)[keyof typeof CHAIN_NAMESPACE]

@@ -490,7 +490,7 @@ describe('quote', () => {
 
   it('refuses a hash that is live in ANOTHER corridor’s store — the self-payment blind spot', async () => {
     // The hash belongs to a live receive swap of ours: paying its invoice
-    // would be paying ourselves (issue #41). Each corridor's own store only
+    // would be paying ourselves. Each corridor's own store only
     // sees its own rows, so the check has to cross stores.
     const peer = {
       findLiveByPaymentHash: async (hash: string) => (hash === PAYMENT_HASH ? { id: 'receive-row' } : null),
@@ -931,7 +931,7 @@ describe('tick: refusals before money moves', () => {
     // backend is a delta from the moment we PAY. A long funding window makes the
     // two diverge, and an unclamped ceiling would authorise an HTLC that outlives
     // the client's refund — refund the lockup, then settle the invoice, both
-    // sides taken. A six-hour window is legal since #88 removed the cap.
+    // sides taken. A six-hour window is legal since the cap was removed.
     const svc = new SendSwapService({
       store,
       ln,
@@ -1293,10 +1293,10 @@ describe('tick: failure and recovery', () => {
 
   // The same terminal fact, discovered one tick later. A payment that goes in
   // flight before it dies leaves `submitPayment` behind, so only the poll ever
-  // sees the failure — and #46 wired the ordinary refund into the immediate
+  // sees the failure — and the ordinary refund was wired into the immediate
   // path alone. Without this the client waits out `refundLocktime` for a swap
-  // the solver already knows is dead, which is the exact case #46 set out to
-  // end.
+  // the solver already knows is dead, which is the exact case that refund set
+  // out to end.
   it('refunds a terminally failed payment the POLL discovered, exactly as the immediate one', async () => {
     const { swap } = await quoted()
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
@@ -1319,7 +1319,7 @@ describe('tick: failure and recovery', () => {
   })
 
   /**
-   * Issue #41: paying an invoice OUR OWN node minted. The payment fails
+   * Paying an invoice OUR OWN node minted. The payment fails
    * terminally (LND will not route to itself), and the one place the sats
    * could have ended up is ours — so when our own node says it was never
    * paid, the lockup is refunded immediately through the non-interactive

@@ -202,7 +202,7 @@
 (*       believe an empty spendableOnly read without a second, positive    *)
 (*       proof of the spend.                                               *)
 (*                                                                         *)
-(*  (A9) RefundNeedsConfirmation.  SHIPPED (#169, #204), not an open       *)
+(*  (A9) RefundNeedsConfirmation.  SHIPPED, not an open                    *)
 (*       assumption.  send/onchainOrchestrator.ts writes onchain_refund_txid*)
 (*       BEFORE broadcasting and holds the row in refunding_onchain until   *)
 (*       transactionOutcome on that id reports `confirmed`.  Two findings   *)
@@ -242,7 +242,7 @@
 (*  1. whenRefundingOnchain re-reads findSpendWitness IMMEDIATELY before   *)
 (*     broadcasting, and a hash-verified preimage takes the row to         *)
 (*     `claiming` instead.  See RefundSeesClaim and OnchainSend_Broken.cfg.*)
-(*  2. DONE (#204): `refunded` records a CONFIRMATION.  The row holds in    *)
+(*  2. DONE: `refunded` records a CONFIRMATION.  The row holds in           *)
 (*     refunding_onchain until transactionOutcome on its own pre-committed *)
 (*     txid says the spend mined, so RBF on the refund is no longer a way  *)
 (*     to lose money silently.  See (A9) and OnchainSend_MempoolRace.cfg,  *)
@@ -862,7 +862,7 @@ RefundSeesClaim(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OsVars
 
-\* PRE-#169 ONLY.  Spent by something that is not a recognisable claim, which
+\* WITHOUT (A9) ONLY.  Spent by something that is not a recognisable claim, which
 \* in this model is ALWAYS the solver's own refund — nothing else can write
 \* `refundSeen` — and that is the finding rather than a modelling shortcut:
 \* witness shape cannot tell the two apart, so a refund that succeeded was
@@ -895,7 +895,7 @@ BroadcastRefund(w, s) ==
     /\ UNCHANGED << clock, st, conf, serverUp >>
     /\ UNCHANGED << chainTime, lockup, fundOut, fundConf >>
 
-\* `refunded` RECORDS A CONFIRMATION (#204).  The txid is patched onto the row
+\* `refunded` RECORDS A CONFIRMATION.  The txid is patched onto the row
 \* BEFORE broadcastRaw, so the verdict is a LATER READ — `transactionOutcome`
 \* on our own id — and there is no pending write for a crash to lose, which is
 \* why BroadcastRefund above parks.  The FALSE arm is what shipped before:
@@ -1086,7 +1086,7 @@ RefusedUnreachableFromExposed ==
 \* table itself: a future edit that drops a -> stuck edge from an exposed
 \* row, or adds an exposed state without one, fails every cfg loudly.  (The
 \* `-coverage` argument proves actions were TAKEN, not that stuck is
-\* REACHABLE FROM every exposed state; see #218/#234.)
+\* REACHABLE FROM every exposed state.)
 StuckReachableFromEveryExposed ==
     \A x \in Exposed : "stuck" \in Edges[x]
 

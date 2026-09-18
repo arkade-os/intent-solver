@@ -67,7 +67,7 @@ export interface OnchainSendServiceDeps {
   /** Sum of committed sats across every corridor, not just this notebook. */
   totalCommitted: () => Promise<number>
   /**
-   * Reserves cap headroom for a quote that has not yet inserted its row (#105).
+   * Reserves cap headroom for a quote that has not yet inserted its row.
    * SHARE one instance across every corridor — a per-corridor control bounds
    * only its own concurrency, which is the narrower half of the problem.
    */
@@ -307,7 +307,7 @@ export class OnchainSendSwapService {
     }
     // RESERVED, not merely observed: the row below is what makes this swap
     // visible to `totalCommitted()`, and until it lands a concurrent quote
-    // would read the same headroom and take it too (#105). Held until the
+    // would read the same headroom and take it too. Held until the
     // insert succeeds, and handed back on every path that does not insert.
     const refusal: { ceiling?: 'exposure' | 'float' } = {}
     const reservation = await this.admission.admit({
@@ -628,7 +628,7 @@ export class OnchainSendSwapService {
     // did, and the operator reads which from the error.
 
     // The SAME slot `tick()` takes: each attempt re-reads the fee rate, so two
-    // interleaved pre-commit different txids and the row keeps the loser's (#169).
+    // interleaved pre-commit different txids and the row keeps the loser's.
     if (this.inFlight.has(id)) throw new Error(`swap ${id} is already being ticked; retry once that tick finishes`)
     this.inFlight.add(id)
     try {
@@ -849,7 +849,7 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'awaiting_claim', 'onchain HTLC spent by something other than a matching claim')
       return false
     }
-    // TLA+ FINDING F7 (#104), THE HALF NO LOCKTIME CAN FIX.
+    // TLA+ FINDING F7, THE HALF NO LOCKTIME CAN FIX.
     //
     // `onchainRefundLocktimeFor` reserves ARKADE_CLAIM_WINDOW_SECONDS past the
     // last instant a claim can arrive, so the GEOMETRY of a quote always leaves
@@ -915,7 +915,7 @@ export class OnchainSendSwapService {
       return false
     }
 
-    // OUR OWN EARLIER ATTEMPT, BY NAME (#169, #204): the pre-committed txid stops
+    // OUR OWN EARLIER ATTEMPT, BY NAME: the pre-committed txid stops
     // a refund that went out before a crash being written off as a foreign spend
     // below. Before the claim read, because a CONFIRMED refund of this outpoint
     // means no claim can exist; the reverse is not true.
@@ -1039,7 +1039,7 @@ export class OnchainSendSwapService {
 
     const unsigned = buildOnchainRefundTx({ ...sizingParams, payoutAmountSats })
     const signed = await signOnchainRefundTx(unsigned, signer)
-    // PRE-COMMITTED, here so both callers get it (#169). Holding the id of a
+    // PRE-COMMITTED, here so both callers get it. Holding the id of a
     // broadcast that threw is the safe direction: `unknown`, then rebuild.
     await this.deps.store.patch(row.id, { onchain_refund_txid: signed.id })
     await onchain.broadcastRaw(hex.encode(signed.extract()))

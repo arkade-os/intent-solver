@@ -103,7 +103,7 @@ export const openFleet = async (arkade: E2eArkade, size: number): Promise<Fleet>
         databasePath: `${FLEET_DIR}/wallet-${index}.sqlite`,
         isMainnet: arkade.profile.isMainnet,
         arkadeHrp: arkade.profile.arkadeHrp,
-        // Same guard the solver and the e2e stack use (#58): every wallet here
+        // Same guard the solver and the e2e stack use: every wallet here
         // refuses an arkd reporting a different network. A fleet is a hundred
         // chances to point at the wrong server by accident, so it is worth more
         // here than anywhere, not less.

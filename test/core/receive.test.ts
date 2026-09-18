@@ -47,7 +47,7 @@ describe('evaluateReceiveFunding', () => {
   })
 
   /**
-   * Issue #69: during a prolonged arkd outage the collaborative paths are all
+   * During a prolonged arkd outage the collaborative paths are all
    * unavailable, so the only live paths are the CSV ones. The trader's
    * `unilateralClaim` opens first (that ordering is mandatory — a funder whose
    * refund opened first could take the money from a claimant holding the
@@ -448,7 +448,7 @@ describe('maxServableExitDelay', () => {
 })
 
 /**
- * The operator-accepted #69 window (`Config.lnReceiveAcceptUnilateralGap`).
+ * The operator-accepted unilateral-gap window (`Config.lnReceiveAcceptUnilateralGap`).
  *
  * The knob exists because gate (d) does not degrade at a mainnet exit delay, it
  * forecloses: 605184s of Arkade exit delay needs 4074 blocks of final CLTV,
@@ -489,7 +489,7 @@ describe('accepting the unilateral gap', () => {
   })
 
   it('still refuses everything the other gates refuse', () => {
-    // The narrow claim, asserted rather than described: accepting the #69
+    // The narrow claim, asserted rather than described: accepting the
     // window buys exactly one gate. An expired invoice, an unarmed htlc, a
     // settle window too short to use, and a committed refund deadline past `E`
     // are all still refused with the same reasons — these are the cases where
@@ -516,13 +516,13 @@ describe('accepting the unilateral gap', () => {
 })
 
 /**
- * TLA+ finding F6 (#38): gate (b) `MIN_SETTLE_WINDOW` "has no independent
+ * TLA+ finding F6: gate (b) `MIN_SETTLE_WINDOW` "has no independent
  * teeth" — gate (c) always demands more, so gate (b) never decides an outcome.
  *
  * That arithmetic is correct, and the resolution is to STATE it rather than to
  * delete the gate. These tests pin both halves of that answer so the comment on
  * `MIN_SETTLE_WINDOW` cannot quietly stop being true — the same discipline as
- * #144's resolution, where a bound's documented reason was void while the
+ * an earlier bound whose documented reason was void while the
  * number still held an unnamed invariant.
  */
 describe('gate (b) MIN_SETTLE_WINDOW — what it is and is not', () => {

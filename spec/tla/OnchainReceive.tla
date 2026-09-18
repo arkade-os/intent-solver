@@ -181,7 +181,7 @@
 (*       (receive/onchainOrchestrator.ts:735-742): `settled` is written    *)
 (*       only for a claim whose own `transactionOutcome` reports CONFIRMED.*)
 (*       The mutation records on the broadcast alone, which is what this   *)
-(*       corridor shipped before #204, and NoSilentLoss then fails: the    *)
+(*       corridor shipped before the fix, and NoSilentLoss then fails: the *)
 (*       solver has PaidOut, the row is terminal, and nothing was          *)
 (*       collected.  See OnchainReceive_UnconfirmedSettle.cfg.             *)
 (*                                                                         *)
@@ -226,7 +226,7 @@
 (*     (:892-896).  refunding_arkade -> claimed is a RECOVERY, not a       *)
 (*     failure: it is what turns a lost Arkade race into a swap the solver *)
 (*     can still settle on L1.                                             *)
-(*  5. FIXED (#204).  `settled` used to record a BROADCAST and was          *)
+(*  5. FIXED.  `settled` used to record a BROADCAST and was                 *)
 (*     terminal, so a claim that never confirmed was invisible while the   *)
 (*     Arkade side was already funded.  It now records a CONFIRMATION: the *)
 (*     row holds in `claimed` until `transactionOutcome` on its own        *)
@@ -463,8 +463,8 @@ ClaimReadsNull(s) == ~ClaimReadable(s) \/ ~IndexerNeverLies
 \* predicates below, the model's rendering of whenClaimed's ourClaim match
 \* (src/receive/onchainOrchestrator.ts:725-727) — a spend through the claim
 \* leaf is the only one that carries the row's preimage, and on this leg the
-\* claim path is the solver's own.  (#176 shipped the discriminator in the
-\* code; #232 adds it here.)
+\* claim path is the solver's own.  (The code shipped the discriminator
+\* first; the model adds it here.)
 WitnessSeen(s)       == (bcast[s] \cup l1[s]) # {}
 OwnClaimSeen(s)      == "solverClaim"  \in (bcast[s] \cup l1[s])
 ClientRefundSeen(s)  == "clientRefund" \in (bcast[s] \cup l1[s])
@@ -490,13 +490,13 @@ ArkRefunded(s) == SpentBy(s, "solverRefund")
 \* it, and the outpoint is still there".  That was the model bending to fit a
 \* state machine that went TERMINAL on `broadcastRaw` — with it, a claim that
 \* never confirmed counted as collected and NoSilentLoss could not see the
-\* loss.  The code no longer settles on a broadcast (#204), so the model no
+\* loss.  The code no longer settles on a broadcast, so the model no
 \* longer has to pretend one collects.
 Collected(s) == L1Swept(s) \/ ArkRefunded(s)
 
 \* whenClaimed's own read of `transactionOutcome` on the txid it pre-committed
 \* (:735-742).  `confirmed` is the only answer that settles; `mempool` waits and
-\* `unknown` rebuilds.  The mutation is the shipped behaviour BEFORE #204.
+\* `unknown` rebuilds.  The mutation is the shipped behaviour BEFORE that fix.
 SettleReadable(s) ==
     /\ OwnClaimSeen(s)
     /\ (SettleNeedsConfirmation => "solverClaim" \in l1[s])
@@ -872,7 +872,7 @@ ArmRefund(w, s) ==
 \* passed and the client pulled its L1 HTLC back before the solver claimed
 \* it.  whenClaimed's fail() branch, src/receive/onchainOrchestrator.ts:736-740.
 \* `stuck` has no outgoing edge; the reason string names the client, and —
-\* unlike the pre-#176 code — that attribution is CORRECT, because the
+\* unlike the code before the discriminator — that attribution is CORRECT, because the
 \* own-claim flavour is handled first.  The ~OwnClaimSeen conjunct is that
 \* precedence: shipped code checks `if (ourClaim)` before anything else.
 ClaimSeesPriorSpend(w, s) ==
@@ -891,9 +891,9 @@ ClaimSeesPriorSpend(w, s) ==
 \* the row's preimage, which only the claim leaf reveals, so the swap is
 \* recovered as `settled` — with onchain_claim_txid honestly left null, as
 \* the shipped comment argues (:729-733; the spec has no txid column to
-\* model).  Before #176 this read as a false-negative `stuck`; the pre-#176
+\* model).  Without the discriminator this read as a false-negative `stuck`; the
 \* truthiness-only behaviour is what ClaimSeesPriorSpend modelled until the
-\* discriminator was added here (#232).
+\* discriminator was added here.
 ClaimSeesOwnClaim(w, s) ==
     /\ Saw(w, s, "claimed")
     /\ SettleReadable(s)
@@ -1124,7 +1124,7 @@ Init ==
 (* unsound with per-swap fairness) all apply; this is the same shape       *)
 (* LightningSend uses.                                                     *)
 (*                                                                         *)
-(* CHAIN PROGRESS IS NOW A LIVENESS ASSUMPTION, and #204 is what made it   *)
+(* CHAIN PROGRESS IS NOW A LIVENESS ASSUMPTION, and this is what made it   *)
 (* one.  `settled` used to be written on the broadcast, so no row needed a *)
 (* block to terminate and ConfirmL1 carried no fairness at all.  A row now *)
 (* holds in `claimed` until its own claim mines, so without this the model *)
@@ -1227,7 +1227,7 @@ RefusedUnreachableFromExposed ==
 \* that drops claimed -> stuck or refunding_arkade -> stuck, or adds an
 \* exposed state without one, fails every cfg loudly.  (This leg's older
 \* `-coverage` argument proves actions were TAKEN, not that stuck is
-\* REACHABLE FROM every exposed state; the issue #218 review caught exactly
+\* REACHABLE FROM every exposed state; a review caught exactly
 \* that gap in the LightningReceive argument.)
 StuckReachableFromEveryExposed ==
     \A x \in Exposed : "stuck" \in Edges[x]
@@ -1284,7 +1284,7 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (* StuckReachableFromEveryExposed, ChainTimeSane;                          *)
 (* properties ForwardOnly ([][...]_vars) and Liveness.                     *)
 (*                                                                         *)
-(* The witness-discriminator split (#232) shrank this run from 2764674 /   *)
+(* The witness-discriminator split shrank this run from 2764674 /          *)
 (* 408650 to the numbers above.  A `-coverage` run of the same model       *)
 (* confirms every action fires except two: ClaimDust — disabled by         *)
 (* ClaimFeeAffordable = TRUE and exercised by OnchainReceive_DustStuck.cfg *)

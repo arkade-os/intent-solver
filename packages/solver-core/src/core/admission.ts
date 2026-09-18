@@ -4,7 +4,7 @@
  * Every corridor's `quote()` reads the committed total, compares it to
  * `maxExposedSats`, and only LATER inserts the row. In that window the swap is
  * invisible to `committedSats()`, so two concurrent quotes both see headroom and both
- * take it (#105). A reservation makes headroom *reserved* rather than merely observed.
+ * take it. A reservation makes headroom *reserved* rather than merely observed.
  *
  * Not a lock across check→insert: the Lightning-receive leg mints a hold invoice in
  * that region, and holding a lock across a network round-trip would serialise every
