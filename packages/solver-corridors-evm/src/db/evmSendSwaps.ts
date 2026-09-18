@@ -450,6 +450,22 @@ export class EvmSendSwapStore {
     return rows.map(toRow)
   }
 
+  /** `stuck` rows that reached a lock call, while their refund window is open. */
+  async findStuckOverLock(nowSeconds: number): Promise<EvmSendSwapRow[]> {
+    // Keyed on the ENTRY into `locking_evm`, never on `evm_lock_txid`: that is
+    // patched after the broadcast, so a crash leaves it null over the very lock
+    // still in the mempool this must not skip.
+    const rows = (await this.driver.all(
+      `SELECT * FROM send_evm_swap AS s
+       WHERE s.state = 'stuck' AND s.refund_locktime > ?
+         AND EXISTS (SELECT 1 FROM send_evm_swap_event AS e
+                     WHERE e.swap_id = s.id AND e.to_state = 'locking_evm')
+       ORDER BY s.created_at`,
+      [nowSeconds],
+    )) as Raw[]
+    return rows.map(toRow)
+  }
+
   async history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]> {
     const rows = (await this.driver.all(
       'SELECT at, from_state, to_state, detail FROM send_evm_swap_event WHERE swap_id = ? ORDER BY id ASC',
