@@ -11,8 +11,9 @@
  * 1. Never fund the Arkade lockup until the client's ERC20 lock has met depth
  *    AND age. The solver's sats would be committed against a lock that can still
  *    vanish, and on a rollup depth alone does not settle that.
- * 2. Never fund when there is not enough of the client's `evm_timeout_block` left to
- *    claim in. The solver would pay sats for tokens the client can take back.
+ * 2. Never fund when there is not enough of the client's `evm_timeout_block` left
+ *    for the fund AND the claim to land in, measured when the sats actually
+ *    commit. The solver would pay sats for tokens the client can take back.
  * 3. A revealed preimage means CLAIM THE ERC20, and quickly. It is how the
  *    solver gets paid at all — the sats have already gone out.
  * 4. Past the client's `evm_timeout_block` with a preimage in hand and no claim, the
