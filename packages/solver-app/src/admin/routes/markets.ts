@@ -63,7 +63,7 @@ export const MARKETS_LIVE_NOTICE =
  * a bigint and `JSON.parse` has already destroyed anything past 2^53 by the time
  * a handler sees it — silently, and in the direction that widens a ceiling.
  */
-interface MarketBody {
+export interface MarketBody {
   base?: unknown
   quote?: unknown
   baseDecimals?: unknown
@@ -129,7 +129,7 @@ const bounds = (label: string, value: unknown): AssetMarketBounds | null => {
 }
 
 /** The request body as a market, or a `BadRequest` naming the field that was wrong. */
-const marketFrom = (body: MarketBody): AssetMarketConfig => ({
+export const marketFrom = (body: MarketBody): AssetMarketConfig => ({
   base: leg('base', body.base),
   quote: leg('quote', body.quote),
   baseDecimals: int('baseDecimals', body.baseDecimals),

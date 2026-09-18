@@ -25,6 +25,7 @@ import { registerStatusRoutes } from './routes/status.js'
 import { registerDiagnosticsRoutes } from './routes/diagnostics.js'
 import { registerSettingsRoutes } from './routes/settings.js'
 import { registerMarketRoutes } from './routes/markets.js'
+import { registerPricingRoutes } from './routes/pricing.js'
 import { registerPnlRoutes } from './routes/pnl.js'
 import { registerActionRoutes } from './routes/actions.js'
 import { registerCardRoutes } from './routes/card.js'
@@ -94,6 +95,7 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   const fetchPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
   const feeds = createFeedCache(fetchPrice)
   registerMarketRoutes(app, { ...deps, fetchPrice }, feeds)
+  registerPricingRoutes(app, deps, feeds)
   // BEFORE the actions route, for the reason the card route states below: that
   // route claims `/api/actions/:name` only, but registration order is what
   // keeps the `*` fallback at the very bottom from shadowing anything.
