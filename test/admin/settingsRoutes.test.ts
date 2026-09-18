@@ -41,11 +41,16 @@ const baseConfig = {
   assetRfqTokens: [],
 }
 
-const build = (overrides: Record<string, string> = {}) => {
+const build = (overrides: Record<string, string> = {}, over: Record<string, unknown> = {}) => {
   const setOverrideWithAudit = vi.fn().mockResolvedValue(undefined)
   const services = {
     config: structuredClone(baseConfig),
+    // What this process actually resolved its policy from. Defaulting both to
+    // "booted with nothing overridden" keeps every existing case unchanged.
+    policy: structuredClone(baseConfig),
+    bootOverrides: {},
     adminStore: { getOverrides: vi.fn().mockResolvedValue(overrides), setOverrideWithAudit },
+    ...over,
   } as never
   return { app: buildAdminApp({ services, startedAt: 1, mode: 'relay' }), setOverrideWithAudit }
 }
@@ -62,7 +67,12 @@ const patch = (app: ReturnType<typeof buildAdminApp>, body: unknown) =>
 const buildReal = async () => {
   const driver = betterSqliteDriver(':memory:')
   const adminStore = await AdminStore.open(driver, () => 1_000_000)
-  const services = { config: structuredClone(baseConfig), adminStore } as never
+  const services = {
+    config: structuredClone(baseConfig),
+    policy: structuredClone(baseConfig),
+    bootOverrides: {},
+    adminStore,
+  } as never
   return { app: buildAdminApp({ services, startedAt: 1, mode: 'relay' }), adminStore, driver }
 }
 
