@@ -180,6 +180,7 @@ const nowSeconds = (): number => Math.floor(Date.now() / 1000)
 
 export class EvmSendSwapService {
   private readonly inFlight = new Set<string>()
+  private readonly lateLockReported = new Set<string>()
   private sweepInFlight: Promise<EvmSendSwapRow[]> | undefined
   private lockSequence: Promise<void> = Promise.resolve()
   private readonly admission: AdmissionControl
@@ -678,7 +679,48 @@ export class EvmSendSwapService {
         }
       }
     }
+    await this.watchLateLocks()
     return rows
+  }
+
+  /**
+   * Keep reading the contract for a `stuck` row whose ERC20 may still be out: a
+   * lock still pending at the timeout refund can mine at ANY later height, by
+   * when the row has left `findLive()` and nothing asks again (#162). REPORTS,
+   * never re-drives; the preimage is kept because no later read recovers it.
+   */
+  private async watchLateLocks(): Promise<void> {
+    const { store } = this.deps
+    for (const row of await store.findStuckOverLock(this.now())) {
+      try {
+        const lock = this.deps.lockFor(row)
+        const present = await this.deps.evm.isLocked(lock)
+        const claimed =
+          row.preimage === null ? await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row)) : null
+        if (claimed !== null) {
+          await store.patch(row.id, { preimage: Buffer.from(claimed).toString('hex') })
+          this.deps.onTickError?.(
+            row.id,
+            new Error(
+              `the client claimed the ERC20 after this row was closed; its preimage is now on the row and the` +
+                ` Arkade lockup is claimable until ${row.refundLocktime}`,
+            ),
+          )
+        } else if (present && !this.lateLockReported.has(row.id)) {
+          // Once per row: a line per sweep for hours buries the one that matters.
+          this.lateLockReported.add(row.id)
+          this.deps.onTickError?.(
+            row.id,
+            new Error(
+              `the ERC20 lock is funded on a closed row; the solver may refund it from block ${row.evmTimeout}` +
+                ` and the client may claim it with the preimage at any height`,
+            ),
+          )
+        }
+      } catch (error) {
+        this.deps.onTickError?.(row.id, error)
+      }
+    }
   }
 
   /**

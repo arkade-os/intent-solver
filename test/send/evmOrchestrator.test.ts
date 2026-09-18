@@ -1181,3 +1181,81 @@ describe('refundSweep', () => {
     expect(await service.refundSweep()).toEqual([])
   })
 })
+
+describe('a lock that lands after the books closed', () => {
+  const PREIMAGE = new Uint8Array(32).fill(0x7b)
+
+  const closedOverLock = async (over: Partial<EvmSendServiceDeps> = {}) => {
+    const onTickError = vi.fn()
+    const evm = {
+      isLocked: vi.fn().mockResolvedValue(false),
+      findClaimPreimage: vi.fn().mockResolvedValue(null),
+      findRefund: vi.fn().mockResolvedValue(false),
+      transactionOutcome: vi.fn().mockResolvedValue('pending'),
+      ...((over.evm ?? {}) as object),
+    }
+    const built = await build({
+      blockHeight: vi.fn().mockResolvedValue(21_000_000),
+      onTickError,
+      ...over,
+      evm: evm as unknown as EvmSendServiceDeps['evm'],
+    })
+    await built.store.transition('swap-1', 'quoted', 'locking_evm')
+    await built.service.tickAll()
+    expect((await built.store.get('swap-1')).state).toBe('refunding_evm')
+
+    evm.transactionOutcome.mockResolvedValue('reverted')
+    evm.isLocked.mockResolvedValue(true)
+    await built.service.tickAll()
+    expect((await built.store.get('swap-1')).state).toBe('stuck')
+
+    return { ...built, evm, onTickError }
+  }
+
+  it('persists the preimage the client revealed and says so', async () => {
+    const { store, service, evm, onTickError } = await closedOverLock()
+    evm.isLocked.mockResolvedValue(false)
+    evm.findClaimPreimage.mockResolvedValue(PREIMAGE)
+
+    await service.tickAll()
+
+    expect((await store.get('swap-1')).preimage).toBe('7b'.repeat(32))
+    expect(onTickError.mock.calls.at(-1)?.[1].message).toContain('claimed the ERC20 after this row was closed')
+    await store.close()
+  })
+
+  it('reports a still-funded late lock once, not once per sweep', async () => {
+    const { store, service, onTickError } = await closedOverLock()
+
+    await service.tickAll()
+    await service.tickAll()
+
+    expect(onTickError).toHaveBeenCalledTimes(1)
+    expect(onTickError.mock.calls[0]?.[1].message).toContain('the ERC20 lock is funded on a closed row')
+    await store.close()
+  })
+
+  it('stops watching once the client can take its sats back', async () => {
+    const { store, service, evm, onTickError } = await closedOverLock({
+      now: () => NOW + 86_400,
+    })
+    evm.isLocked.mockClear()
+
+    await service.tickAll()
+
+    expect(evm.isLocked).not.toHaveBeenCalled()
+    expect(onTickError).not.toHaveBeenCalled()
+    await store.close()
+  })
+
+  it('leaves a row that never reached a lock call alone', async () => {
+    const isLocked = vi.fn().mockResolvedValue(true)
+    const { store, service } = await build({ evm: { isLocked } as unknown as EvmSendServiceDeps['evm'] })
+    await store.transition('swap-1', 'quoted', 'stuck')
+
+    await service.tickAll()
+
+    expect(isLocked).not.toHaveBeenCalled()
+    await store.close()
+  })
+})
