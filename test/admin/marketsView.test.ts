@@ -195,3 +195,214 @@ describe('the preview styles spend no new colour', () => {
     for (const cls of ['form-grid', 'tip']) expect(marketsBlock()).toContain(cls)
   })
 })
+
+describe('the preview panel', () => {
+  it('posts to the preview route rather than reloading the markets list', () => {
+    const block = marketsBlock()
+    expect(block).toContain("'/api/pricing/preview'")
+    expect(block).toContain("method: 'POST'")
+  })
+
+  it('never calls render() from the refresh path, which would eat the caret', () => {
+    const block = marketsBlock()
+    const start = block.indexOf('const refreshPreview')
+    const end = block.indexOf('const previewPanel')
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    expect(block.slice(start, end)).not.toContain('render()')
+  })
+
+  it('debounces, so a held-down key is one request', () => {
+    expect(marketsBlock()).toContain('clearTimeout(previewTimer)')
+  })
+
+  it('sends the saved key, which is how the server knows which feed to price against', () => {
+    expect(marketsBlock()).toContain('marketKey: marketDraft.marketKey')
+  })
+
+  it('spends the amber only on a row under the break-even', () => {
+    const block = marketsBlock()
+    expect(block).toContain("loss ? '.loss' : ''")
+    expect(block).toContain('const belowBreakEven =')
+  })
+
+  it('declares schedulePreview nowhere — Task 10 owns the binding', () => {
+    expect(marketsBlock().match(/(?:let|const|var)\s+schedulePreview\b/g)).toHaveLength(1)
+  })
+
+  it('shows the carrier policy the console could not previously see', () => {
+    const block = marketsBlock()
+    expect(block).toContain('c.rfqPriced')
+    expect(block).toContain('c.offerCharged')
+    expect(block).toContain('rfqDirections')
+  })
+
+  it('says the RFQ directions and the carrier are read-only until the live-policy slice', () => {
+    // Not /restart|environment/: `m.restartNotice` already matches that before
+    // this task adds anything, which is how this first went green for free.
+    expect(marketsBlock()).toContain('needs a restart')
+  })
+})
+
+/** Instances of StubNode so `h`'s two `instanceof Node` checks take the element path. */
+class StubNode {
+  className = ''
+  attrs: Record<string, string> = {}
+  listeners: Record<string, unknown> = {}
+  childNodes: StubNode[] = []
+  constructor(
+    readonly tagName: string,
+    readonly text = '',
+  ) {}
+  get firstChild(): StubNode | null {
+    return this.childNodes[0] ?? null
+  }
+  appendChild(child: StubNode): StubNode {
+    this.childNodes.push(child)
+    return child
+  }
+  removeChild(child: StubNode): StubNode {
+    this.childNodes.splice(this.childNodes.indexOf(child), 1)
+    return child
+  }
+  setAttribute(key: string, value: string): void {
+    this.attrs[key] = value
+  }
+  addEventListener(type: string, fn: unknown): void {
+    this.listeners[type] = fn
+  }
+}
+
+const stubDoc = () => ({
+  createElement: (tag: string) => new StubNode(tag),
+  createTextNode: (text: string) => new StubNode('#text', text),
+})
+
+const textOf = (node: StubNode): string => [node.text, ...node.childNodes.map(textOf)].join(' ')
+
+const helperBlock = (): string => {
+  const start = appSource.indexOf('/* ---- tiny element helper')
+  const end = appSource.indexOf('/* ---- api ---')
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error('the element helper moved out of the slice this guard reads')
+  }
+  return appSource.slice(start, end)
+}
+
+// Same new-Function + named-error pattern as marketRoutes.test.ts:33-46: run rather than grepped.
+const previewHarness = (response: unknown) => {
+  const pending: (() => void)[] = []
+  const params = [
+    'document',
+    'Node',
+    'api',
+    'shortId',
+    'ago',
+    'state',
+    'render',
+    'load',
+    'fail',
+    'setTimeout',
+    'clearTimeout',
+  ]
+  const body = `${helperBlock()}\n${marketsBlock()}
+    marketDraft = { ...blankMarket(), marketKey: 'k' }
+    return { previewPanel, refreshPreview, schedulePreview }`
+  const args = [
+    stubDoc(),
+    StubNode,
+    async () => response,
+    (value: unknown) => String(value),
+    () => '1m',
+    { data: { markets: { carrier: { sats: '330', rfqPriced: false, offerCharged: false }, markets: [] } } },
+    () => {
+      throw new Error('render() from the preview would eat the caret')
+    },
+    async () => {},
+    () => {},
+    (fn: () => void) => (pending.push(fn), pending.length),
+    () => pending.pop(),
+  ]
+  try {
+    const built = new Function(...params, body)(...args) as {
+      previewPanel: () => StubNode
+      refreshPreview: () => Promise<void>
+      schedulePreview: () => void
+    }
+    return { ...built, pending }
+  } catch (error) {
+    throw new Error('the preview moved out of the slice this guard reads', { cause: error })
+  }
+}
+
+const painted = async (response: unknown): Promise<string> => {
+  const panel = previewHarness(response)
+  const node = panel.previewPanel()
+  await panel.refreshPreview()
+  expect(node.childNodes.length).toBeGreaterThan(0)
+  return textOf(node)
+}
+
+const RESOLVED = {
+  invalid: [],
+  direction: 'sell_base',
+  side: 'from',
+  legs: { from: 'BTC', to: 'USDX', fromDecimals: 8, toDecimals: 6 },
+  carrier: { sats: '330', charged: '330', returned: '0', priced: true },
+  feed: { state: 'resolved', mantissa: '100000', scale: 0, readAt: 1_000 },
+  samples: [
+    {
+      ok: true,
+      amount: '100000000',
+      fromAmount: '100000000',
+      toAmount: '99500000000',
+      spreadFee: '500000000',
+      marginBps: 50,
+    },
+  ],
+  breakEven: { kind: 'none' },
+  offerCeiling: null,
+}
+
+describe('the preview panel, run rather than grepped', () => {
+  it('paints the amounts the server sent', async () => {
+    const text = await painted(RESOLVED)
+    expect(text).toContain('99,500')
+    expect(text).toContain('50 bps')
+  })
+
+  it('says feed-unresolved rather than showing a stale ladder', async () => {
+    const text = await painted({ invalid: [], samples: [], feed: { state: 'unresolved', reason: 'save this market' } })
+    expect(text).toMatch(/feed-unresolved|save this market/)
+    expect(text).not.toContain('99,500')
+  })
+
+  it('paints a break-even at a size, and none at all when there is none', async () => {
+    expect(await painted({ ...RESOLVED, breakEven: { kind: 'at', amountSats: '66000' } })).toContain('66,000')
+    expect(await painted(RESOLVED)).not.toMatch(/breaks even|loses money/)
+  })
+
+  it('says "never breaks even" instead of dividing by a zero spread', async () => {
+    expect(await painted({ ...RESOLVED, breakEven: { kind: 'never' } })).toContain('never breaks even')
+  })
+
+  it('names what it does NOT model, so a green ladder is not read as a promise to fill', async () => {
+    const text = await painted(RESOLVED)
+    expect(text).toContain('does not check')
+    for (const omission of ['inventory', 'rate limit', 'repeated request id']) {
+      expect(text.toLowerCase()).toContain(omission)
+    }
+  })
+
+  it('collapses a held-down key into one pending request', () => {
+    const panel = previewHarness(RESOLVED)
+    panel.previewPanel()
+    panel.schedulePreview()
+    panel.schedulePreview()
+    expect(panel.pending).toHaveLength(1)
+  })
+
+  it('carries the carrier sentence in plain language', () => {
+    expect(marketsBlock()).toContain('rides on a small amount of bitcoin called the carrier')
+  })
+})

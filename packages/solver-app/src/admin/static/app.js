@@ -1443,6 +1443,217 @@ const deleteMarket = async (key) => {
   }
 }
 
+/* ---- the preview -------------------------------------------------------- */
+
+const PREVIEW_DEBOUNCE_MS = 300
+
+/** The panel's own node: a refresh replaces its contents, never the whole console. */
+let previewNode = null
+let previewData = null
+let previewError = null
+let previewTimer = null
+let previewDirection = 'sell_base'
+let previewSide = 'from'
+
+// Assigned only: Task 10 declares `schedulePreview`, a second declaration is a load-time SyntaxError.
+schedulePreview = () => {
+  if (previewTimer) clearTimeout(previewTimer)
+  previewTimer = setTimeout(() => {
+    previewTimer = null
+    void refreshPreview()
+  }, PREVIEW_DEBOUNCE_MS)
+}
+
+const refreshPreview = async () => {
+  if (!marketDraft || !previewNode) return
+  try {
+    previewData = await api('/api/pricing/preview', {
+      method: 'POST',
+      body: JSON.stringify({
+        target: 'market',
+        market: marketBody(marketDraft),
+        marketKey: marketDraft.marketKey,
+        direction: previewDirection,
+        side: previewSide,
+      }),
+    })
+    previewError = null
+  } catch (error) {
+    previewData = null
+    previewError = error instanceof Error ? error.message : String(error)
+  }
+  paintPreview()
+}
+
+const paintPreview = () => {
+  if (!previewNode) return
+  clear(previewNode)
+  previewNode.appendChild(h('h2', 'preview — what a customer is quoted'))
+  previewNode.appendChild(previewBody())
+}
+
+const segment = (options, current, onPick) =>
+  h(
+    'span.seg',
+    { role: 'group' },
+    options.map(([value, label]) =>
+      h(
+        'button',
+        {
+          'aria-pressed': value === current ? 'true' : 'false',
+          onclick: () => (onPick(value), paintPreview(), void refreshPreview()),
+        },
+        label,
+      ),
+    ),
+  )
+
+const unit = (amount, decimals, label) => {
+  const digits = Number(decimals) || 0
+  if (digits === 0) return `${BigInt(amount).toLocaleString('en-US')} ${label}`
+  const negative = amount.startsWith('-')
+  const raw = (negative ? amount.slice(1) : amount).padStart(digits + 1, '0')
+  const whole = BigInt(raw.slice(0, -digits)).toLocaleString('en-US')
+  return `${negative ? '-' : ''}${whole}.${raw.slice(-digits)} ${label}`
+}
+
+const legLabelFor = (leg) => (leg === 'BTC' ? 'sats' : shortId(leg))
+
+const ladderRow = (sample, legs, loss) =>
+  sample.ok
+    ? h(
+        `tr${loss ? '.loss' : ''}`,
+        h('td', unit(sample.fromAmount, legs.fromDecimals, legLabelFor(legs.from))),
+        h('td.num', unit(sample.toAmount, legs.toDecimals, legLabelFor(legs.to))),
+        h('td.num', unit(sample.spreadFee, legs.toDecimals, legLabelFor(legs.to))),
+        h('td.num', sample.marginBps === null ? '—' : `${sample.marginBps} bps`),
+      )
+    : h(
+        'tr.refused',
+        h(
+          'td',
+          previewSide === 'from'
+            ? unit(sample.amount, legs.fromDecimals, legLabelFor(legs.from))
+            : unit(sample.amount, legs.toDecimals, legLabelFor(legs.to)),
+        ),
+        h('td.num', { colspan: 3 }, h('span.phase.phase-failed', sample.reason)),
+      )
+
+const breakEvenBlock = (breakEven, legs) => {
+  if (breakEven.kind === 'never') {
+    return h(
+      'div.breakeven',
+      h('b', 'At a zero spread this direction never breaks even.'),
+      ' We fund the carrier out of margin on every payout and earn nothing back.',
+    )
+  }
+  if (breakEven.kind !== 'at') return null
+  return h(
+    'div.breakeven',
+    h('b', `Below ${BigInt(breakEven.amountSats).toLocaleString('en-US')} sats this direction loses money.`),
+    ` The carrier is not priced into the quote, so we pay it out of margin. Turn carrier pricing on and it is` +
+      ' recovered in full — margin is then flat at every size and there is no loss-making range at all.',
+  )
+}
+
+/** `resolveAssetQuote` is the only refusal this previews; the orchestrator also
+ *  refuses on inventory, a per-requester rate limit and a reused rfq id, none of
+ *  which are properties of the draft being edited, so they are named, not simulated. */
+const scopeLine = () =>
+  h(
+    'p.faint',
+    'This preview prices the configuration only. It does not check inventory, the per-customer rate limit, ' +
+      'or a repeated request id — a real quote can still be turned down for any of those.',
+  )
+
+const previewBody = () => {
+  if (previewError) return h('p.muted', previewError)
+  if (!previewData) return h('p.muted', 'pricing…')
+  if (previewData.invalid.length > 0) {
+    return h(
+      'div',
+      h('p.muted', 'nothing is priced while a field is refused:'),
+      previewData.invalid.map((item) => h('p.faint', `${item.key} — ${item.reason}`)),
+    )
+  }
+  const feed = previewData.feed ?? { state: 'unresolved', reason: '' }
+  const controls = h(
+    'p.toolbar',
+    segment(
+      [
+        ['sell_base', 'customer gives base'],
+        ['buy_base', 'customer gives quote'],
+      ],
+      previewDirection,
+      (value) => (previewDirection = value),
+    ),
+    segment(
+      [
+        ['from', 'they name what they send'],
+        ['to', 'they name what they get'],
+      ],
+      previewSide,
+      (value) => (previewSide = value),
+    ),
+  )
+  if (feed.state === 'unresolved') {
+    return h('div', controls, h('p.notice', `feed-unresolved — ${feed.reason}`))
+  }
+
+  const { legs, samples, breakEven, carrier } = previewData
+  const lossUnder = breakEven.kind === 'at' ? BigInt(breakEven.amountSats) : null
+  const belowBreakEven = (sample) => sample.ok && lossUnder !== null && BigInt(sample.fromAmount) < lossUnder
+  return h(
+    'div',
+    controls,
+    h(
+      'table.ladder',
+      h(
+        'thead',
+        h('tr', h('th', 'they send'), h('th.num', 'they receive'), h('th.num', 'we keep'), h('th.num', 'margin')),
+      ),
+      h(
+        'tbody',
+        samples.map((sample) => ladderRow(sample, legs, belowBreakEven(sample))),
+      ),
+    ),
+    breakEvenBlock(breakEven, legs),
+    scopeLine(),
+    h(
+      'div.feedline',
+      h('span', `feed read ${ago(Math.floor(feed.readAt / 1000))} ago`),
+      h('span', `carrier ${carrier.sats} sats — ${carrier.priced ? 'priced into the quote' : 'paid out of margin'}`),
+      h('span.faint', 'preview only — nothing is quoted or stored'),
+    ),
+  )
+}
+
+const previewPanel = () => {
+  previewNode = h('section.panel.sticky')
+  paintPreview()
+  schedulePreview()
+  return previewNode
+}
+
+/** Read-only: both flags are deployment-wide and boot-read today; a control over
+ *  a value with nowhere to be stored is the over-report this console just removed. */
+const carrierPolicyLine = () => {
+  const c = state.data.markets?.carrier
+  if (!c) return '—'
+  const who = [c.rfqPriced ? 'rfq quotes' : null, c.offerCharged ? 'offers' : null].filter(Boolean)
+  return who.length === 0 ? `nobody — we fund ${c.sats} sats per asset payout` : `charged on ${who.join(' + ')}`
+}
+
+const rfqDirectionLine = () => {
+  const row = (state.data.markets?.markets ?? []).find((market) => market.marketKey === marketDraft.marketKey)
+  const open = row?.rfqDirections
+  if (!open) return 'not yet served — save the market first'
+  const names = [open.sellBase ? 'customer gives base' : null, open.buyBase ? 'customer gives quote' : null].filter(
+    Boolean,
+  )
+  return names.length === 0 ? 'both closed' : names.join(' + ')
+}
+
 const spreadHint =
   'Bounds on what we pay out in this direction, not on what the customer sends. A maximum of 0 closes this direction and leaves everything else set up.'
 
@@ -1552,6 +1763,31 @@ const marketForm = () =>
         ' ',
         h('span.faint', 'a disabled market is served by neither path'),
       ),
+      group('carrier sats'),
+      h(
+        'span.label',
+        'who pays it',
+        tip(
+          'An asset never moves alone — it rides on a small amount of bitcoin called the carrier, and with this ' +
+            'switched off we pay for it ourselves on every asset we send.',
+        ),
+      ),
+      h(
+        'span.span2',
+        h('span.muted', carrierPolicyLine()),
+        ' ',
+        h(
+          'span.faint',
+          'set by ASSET_CARRIER_PRICING and OFFER_CHARGE_CARRIER in the environment; changing it needs a restart',
+        ),
+      ),
+      h('span.label', 'RFQ directions'),
+      h(
+        'span.span2',
+        h('span.muted', rfqDirectionLine()),
+        ' ',
+        h('span.faint', 'closed by ASSET_<SYM>_<DIR>_ENABLED; changing it needs a restart'),
+      ),
     ),
     h(
       'p.toolbar',
@@ -1586,7 +1822,7 @@ const marketsView = () => {
     // Live on this process: a market added now is quoted on the next RFQ.
     h('p.notice', m.restartNotice),
     h('p.toolbar', h('button.act', { onclick: () => ((marketDraft = blankMarket()), render()) }, 'add market')),
-    marketDraft ? marketForm() : null,
+    marketDraft ? h('div.split', marketForm(), previewPanel()) : null,
     m.markets.length === 0
       ? h('p.muted', 'no markets configured — this solver trades no asset pairs and refuses every offer')
       : h(
