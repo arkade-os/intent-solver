@@ -4,24 +4,32 @@
 (*                                                                         *)
 (* WHICH TYPESCRIPT THIS SPECIFIES                                         *)
 (*                                                                         *)
-(*   src/db/swaps.ts           the durable row, LEGAL_EDGES, transition(), *)
-(*                             patch(), fail(), committedSats()            *)
-(*   src/send/orchestrator.ts  the whole state machine: step(), whenQuoted, *)
-(*                             whenFunded, whenPaying, submitPayment,      *)
-(*                             claimWithPreimage, whenPaid,                *)
-(*                             settleFromBackend, whenClaiming, tick(),    *)
-(*                             tickAll(), tickHot(), driveRows()           *)
-(*   src/core/send.ts          MIN_INVOICE_WINDOW, MIN_CLAIM_WINDOW,       *)
-(*                             DEFAULT_LOCKUP_TIMEOUT, evaluateSendPayment,*)
-(*                             refundLocktimeFor, worstCaseHtlcBlocks      *)
-(*   src/send/arkadeOps.ts     claim() and assertScriptMatchesRow          *)
-(*   src/ln/lnd/adapter.ts     FAILED_PAYMENT_REASONS — the terminal-failure*)
-(*                             ALLOWLIST that decides what "failed" means  *)
-(*   packages/solver-app/src/worker.ts             the queue fan-out and its safety claim      *)
+(*   packages/solver-corridors/src/                                        *)
+(*     db/swaps.ts           the durable row, LEGAL_EDGES, transition(),   *)
+(*                           patch(), fail(), committedSats()              *)
+(*     send/orchestrator.ts  the whole state machine: step(), whenQuoted,  *)
+(*                           whenFunded, whenPaying, submitPayment,        *)
+(*                           claimWithPreimage, whenPaid,                  *)
+(*                           settleFromBackend, whenClaiming, tick(),      *)
+(*                           tickAll(), tickHot(), driveRows()             *)
+(*     send/arkadeOps.ts     claim() and assertScriptMatchesRow            *)
+(*   packages/solver-core/src/                                             *)
+(*     core/send.ts          MIN_INVOICE_WINDOW, MIN_CLAIM_WINDOW,         *)
+(*                           DEFAULT_LOCKUP_TIMEOUT, evaluateSendPayment,  *)
+(*                           refundLocktimeFor, worstCaseHtlcBlocks        *)
+(*     core/timelocks.ts     absoluteLocktimeSeconds, the height-typed     *)
+(*                           deadline's conversion to wall seconds         *)
+(*   packages/solver-rails-lnd/src/                                        *)
+(*     ln/lnd/adapter.ts     FAILED_PAYMENT_REASONS — the terminal-failure *)
+(*                           ALLOWLIST that decides what "failed" means    *)
+(*   packages/solver-app/src/                                              *)
+(*     worker.ts             the queue fan-out and its safety claim        *)
+(*     ops/claims.ts         claimNow, the operator's stuck -> claiming    *)
+(*     ops/refunds.ts        refundNow, the operator's stuck -> refused    *)
 (*                                                                         *)
 (* AUTHORITY FOR THE EDGE TABLE                                            *)
 (*                                                                         *)
-(* src/db/swaps.ts:49-112, verbatim:                                       *)
+(* LEGAL_EDGES in db/swaps.ts, verbatim:                                   *)
 (*                                                                         *)
 (*   quoted:   ['funded', 'refused']                                       *)
 (*   funded:   ['paying', 'claiming', 'refused']                           *)
@@ -32,7 +40,7 @@
 (*   refused:  []                                                          *)
 (*   stuck:    ['claiming', 'refused']                                     *)
 (*                                                                         *)
-(* plus src/db/swaps.ts:38,41                                              *)
+(* plus NON_TERMINAL and EXPOSED, declared just above it                   *)
 (*   NON_TERMINAL = quoted funded paying paid claiming                     *)
 (*   EXPOSED      = paying paid claiming                                   *)
 (*                                                                         *)
@@ -45,14 +53,15 @@
 (* THE STRUCTURAL FACT THIS CORRIDOR IS DEFINED BY                         *)
 (*                                                                         *)
 (* There is no `refunding` state here, and that is not an omission.  The   *)
-(* solver never refunds a swap it has paid: findRefundable selects         *)
-(* state='refused' only (src/db/swaps.ts:804-815).  That used to be made   *)
-(* safe by the SHAPE of the table — `refused` was unreachable from every   *)
-(* EXPOSED state — and it is not any more.  swaps.ts:59-75 added           *)
-(* paying/paid -> refused behind PROOF that the sats never left, so what   *)
-(* keeps findRefundable safe is now the proof and not the shape.  It is    *)
-(* checked as `RefusedNeverPaid` over the payment variable rather than     *)
-(* asserted over `Edges`; see ProofSatsNeverLeft.                          *)
+(* solver never refunds a swap it has paid: findRefundable in db/swaps.ts  *)
+(* selects state='refused' only.  That used to be made safe by the SHAPE   *)
+(* of the table — `refused` was unreachable from every EXPOSED state — and *)
+(* it is not any more.  LEGAL_EDGES' `paying` and `paid` rows, and the     *)
+(* proof comment above them, added paying/paid -> refused behind PROOF     *)
+(* that the sats never left, so what keeps findRefundable safe is now the  *)
+(* proof and not the shape.  It is checked as `RefusedNeverPaid` over the  *)
+(* payment variable rather than asserted over `Edges`; see                 *)
+(* ProofSatsNeverLeft.                                                     *)
 (*                                                                         *)
 (* The competing spend is EXTERNALISED — the client's own                  *)
 (* refundWithoutReceiver leaf races the solver's claim leaf after          *)
@@ -185,7 +194,7 @@ LSResults    == { "none", "capOk", "capFull", "inflight", "failed" }
 LSSpendKinds == { "solverClaim", "clientRefund" }
 
 (***************************************************************************)
-(* THE EDGE TABLE.  Diff this against src/db/swaps.ts:49-112.              *)
+(* THE EDGE TABLE.  Diff this against LEGAL_EDGES in db/swaps.ts.          *)
 (*                                                                         *)
 (* Five of these are not the ordinary forward path, and each carries a     *)
 (* guard in the TypeScript that is modelled below rather than assumed:     *)
@@ -217,8 +226,9 @@ Exposed     == { "paying", "paid", "claiming" }
 \* WHERE THE AUTOMATIC MACHINE STOPS, which is what every property below
 \* means by terminal — not "has no outgoing edge".  `stuck` keeps its two
 \* operator edges and still belongs here, because it stays out of
-\* NON_TERMINAL (swaps.ts:38, 90-91) so no sweep ever walks a row a human
-\* parked.  Only a deliberate operator action moves one.
+\* NON_TERMINAL (db/swaps.ts, restated in LEGAL_EDGES' `stuck` row) so no
+\* sweep ever walks a row a human parked.  Only a deliberate operator action
+\* moves one.
 Terminal    == { "claimed", "refused", "stuck", "rejected" }
 Drivable    == NonTerminal \cup { "none" }   \* findRecoverable(), plus the quote handler
 
@@ -233,18 +243,19 @@ ClientTookLockup(s) == SpentBy(s, "clientRefund")    \* the client pulled it bac
 (***************************************************************************)
 (* THE PROOF THAT LICENSES paying/paid -> refused.                         *)
 (*                                                                         *)
-(* swaps.ts:59-75 permits those two edges only on PROOF the sats never     *)
-(* left, and names two facts that count.  Both read the BACKEND's own      *)
-(* record for the hash rather than one call's return value — which is      *)
-(* exactly what `pay` is here — so both land on the same two values:       *)
+(* The comment above LEGAL_EDGES' `paying` and `paid` rows in db/swaps.ts  *)
+(* permits those two edges only on PROOF the sats never left, and names    *)
+(* two facts that count.  Both read the BACKEND's own record for the hash  *)
+(* rather than one call's return value — which is exactly what `pay` is    *)
+(* here — so both land on the same two values:                             *)
 (*                                                                         *)
 (*   "none"    (2) the route-deadline refusal that never reached           *)
 (*             payInvoice, with getSendHtlcState answering that the        *)
 (*             backend holds nothing for the hash: submitPayment's         *)
-(*             `nothingCommitted` (orchestrator.ts:1344, 1354, 1405).  A   *)
+(*             `nothingCommitted` parameter, in send/orchestrator.ts.  A   *)
 (*             backend with no such probe has proved nothing and parks.    *)
-(*   "failed"  (1) the self-payment exception (refundProvenSelfPayment,    *)
-(*             orchestrator.ts:1513-1574).  The invoice is one our own     *)
+(*   "failed"  (1) the self-payment exception (refundProvenSelfPayment in  *)
+(*             send/orchestrator.ts).  The invoice is one our own          *)
 (*             node minted, and the payee — the one place the sats could   *)
 (*             have ended up — says it was never paid.  `pay` IS that      *)
 (*             payee record here, so "failed" is the probe's               *)
@@ -309,17 +320,17 @@ ResolvePayment(s) ==
 \* THE ADVERSARIAL SPEND.  The client's own refundWithoutReceiver leaf, open
 \* from refund_locktime and needing the Arkade server's co-signature.  This
 \* action also models refundSweep()'s push on a `refused` row, and refundNow's
-\* (ops/refunds.ts:52-58), because the covenant refund can only ever pay the
+\* push in ops/refunds.ts, because the covenant refund can only ever pay the
 \* client's committed address, so all three have the identical effect on the
 \* contested output.
 \*
 \* The DEADLINE is an under-approximation for those last two: the RFQ family's
 \* non-interactive leaf carries no timelock, so both can push the moment the
-\* row is refusable (src/db/swaps.ts:787-802).  Modelling the early push would
-\* mean modelling an operator refunding a row they can see is paid, and the
-\* code answers that with friction rather than with a guard, so the earliest
-\* legal client instant is kept as the one deadline here.  Recorded as a
-\* residual in the RESULTS block rather than left implicit.
+\* row is refusable (findRefundable in db/swaps.ts).  Modelling the early push
+\* would mean modelling an operator refunding a row they can see is paid, and
+\* the code answers that with friction rather than with a guard, so the
+\* earliest legal client instant is kept as the one deadline here.  Recorded
+\* as a residual in the RESULTS block rather than left implicit.
 ClientRefundLockup(s) ==
     /\ lockup[s]
     /\ serverUp
@@ -331,11 +342,11 @@ ClientRefundLockup(s) ==
 (***************************************************************************)
 (* OPERATOR RECOVERY OUT OF `stuck`.                                       *)
 (*                                                                         *)
-(* `stuck` is not absorbing in the shipped table (swaps.ts:81-111): a      *)
-(* human who has read a parked row can take it either way.  Both edges are *)
-(* DELIBERATELY UNFAIR — a person reading a queue is not a fairness        *)
-(* assumption — and neither is a worker action: the CLI and the console    *)
-(* CAS the row themselves, outside tick().                                 *)
+(* `stuck` is not absorbing in the shipped table (LEGAL_EDGES' `stuck` row *)
+(* in db/swaps.ts): a human who has read a parked row can take it either   *)
+(* way.  Both edges are DELIBERATELY UNFAIR — a person reading a queue is  *)
+(* not a fairness assumption — and neither is a worker action: the CLI and *)
+(* the console CAS the row themselves, outside tick().                     *)
 (*                                                                         *)
 (* This does NOT make `stuck` non-Terminal above.  Terminal here means the *)
 (* automatic machine has stopped, `stuck` stays out of NON_TERMINAL, and   *)
@@ -343,10 +354,10 @@ ClientRefundLockup(s) ==
 (* to raise — not the sweep walking the row on.                            *)
 (***************************************************************************)
 
-\* claimNow (ops/claims.ts:49-77).  THE PREIMAGE IS THE GUARD: possessing P
-\* for this invoice proves the payee revealed it, and only a settled payment
-\* reveals (ops/claims.ts:43-47), so the operator can hold one exactly when
-\* the payment succeeded.
+\* claimNow (ops/claims.ts).  THE PREIMAGE IS THE GUARD: possessing P for
+\* this invoice proves the payee revealed it, and only a settled payment
+\* reveals — the check is preimageOpens, in the same file — so the operator
+\* can hold one exactly when the payment succeeded.
 \*
 \* `~Spent(s)` is the model's own restriction, not the code's: claimNow does
 \* not look at the lockup.  The edge exists to put a row back on the ordinary
@@ -362,12 +373,12 @@ OperatorClaimStuck(s) ==
     /\ UNCHANGED << clock, loc, conf, serverUp >>
     /\ UNCHANGED LsVars
 
-\* refundNow (ops/refunds.ts:36-72).  It pushes the covenant refund FIRST,
-\* returns `skipped` when there is nothing at the script, and only then closes
-\* the row (ops/refunds.ts:43, 52-62, 69) — so this edge RECORDS a refund that
-\* has already landed rather than authorising one.  ClientTookLockup(s) is
-\* that landing, which is why the money question is settled before this fires
-\* and not by it.
+\* refundNow (ops/refunds.ts).  It pushes the covenant refund FIRST, returns
+\* `skipped` on its NOTHING_AT_SCRIPT early return when there is nothing at
+\* the script, and only then closes the row — so this edge RECORDS a refund
+\* that has already landed rather than authorising one.  ClientTookLockup(s)
+\* is that landing, which is why the money question is settled before this
+\* fires and not by it.
 OperatorRefundStuck(s) ==
     /\ st[s] = "stuck"
     /\ ClientTookLockup(s)
@@ -510,8 +521,8 @@ RefusePay(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LsVars
 
-\* THE COUPLED PATH, and nothing else (orchestrator.ts:1046-1067).  A swap
-\* whose hash belongs to our own live receive row can never be paid over
+\* THE COUPLED PATH, and nothing else (whenFunded, send/orchestrator.ts).  A
+\* swap whose hash belongs to our own live receive row can never be paid over
 \* Lightning — one node cannot pay its own invoice — so it skips `paying` and
 \* `paid` and claims on the preimage the client revealed by claiming our
 \* payout.  Answered BEFORE evaluateSendPayment, because every gate in there
@@ -586,28 +597,29 @@ SubmitPay(w, s) ==
 (***************************************************************************)
 (* PROOF (2) IS NOT MODELLED, AND THAT IS A DECISION, NOT AN OVERSIGHT.    *)
 (*                                                                         *)
-(* The `nothingCommitted` refusal (orchestrator.ts:1354, 1405, 1481) fires *)
-(* from inside submitPayment with payment_id still NULL, so whenPaying's   *)
-(* recovery branch is still open to every other worker.  Modelled as a     *)
-(* per-worker choice it yields a trace where one worker refuses while a    *)
-(* second pays, and TLC finds it at once.  Whether that trace is REAL      *)
-(* turns on whether two concurrent submitPayment calls on one row can      *)
-(* disagree, and the answer differs by deployment:                         *)
+(* The `nothingCommitted` refusal — submitPayment's two gated branches and *)
+(* refuseUnsubmittedPayment, in send/orchestrator.ts — fires from inside   *)
+(* submitPayment with payment_id still NULL, so whenPaying's recovery      *)
+(* branch is still open to every other worker.  Modelled as a per-worker   *)
+(* choice it yields a trace where one worker refuses while a second pays,  *)
+(* and TLC finds it at once.  Whether that trace is REAL turns on whether  *)
+(* two concurrent submitPayment calls on one row can disagree, and the     *)
+(* answer differs by deployment:                                           *)
 (*                                                                         *)
 (*   refund_locktime in SECONDS — they cannot.  refundDeadlineSeconds      *)
-(*   returns the row's own field unchanged (orchestrator.ts:410), so       *)
-(*   refundWithoutReceiverDelayCovers (core/send.ts:468-469) is a function *)
-(*   of row fields alone, and deadlineContainsHtlc (core/send.ts:309-310)  *)
-(*   only ever closes as `now` advances.  The later caller cannot pass a   *)
-(*   gate the earlier one failed.                                          *)
+(*   (send/orchestrator.ts) returns the row's own field unchanged, so      *)
+(*   refundWithoutReceiverDelayCovers (core/send.ts) is a function of row  *)
+(*   fields alone, and deadlineContainsHtlc (same file) only ever closes   *)
+(*   as `now` advances.  The later caller cannot pass a gate the earlier   *)
+(*   one failed.                                                           *)
 (*                                                                         *)
 (*   refund_locktime in BLOCK HEIGHTS — they can.  The deadline is         *)
 (*   recomputed per call as now + (locktime - tip) * NOMINAL_BLOCK_SECONDS *)
-(*   (core/timelocks.ts:305-306), so a block arriving between two callers  *)
-(*   drops it by about 600s while `now` moves by far less — which RELAXES  *)
-(*   refundWithoutReceiverDelayCovers for the LATER caller.  It could then *)
-(*   pay where the earlier one refused, leaving a `refused` row with a     *)
-(*   live payment for findRefundable to refund.                            *)
+(*   (absoluteLocktimeSeconds, core/timelocks.ts), so a block arriving     *)
+(*   between two callers drops it by about 600s while `now` moves by far   *)
+(*   less — which RELAXES refundWithoutReceiverDelayCovers for the LATER   *)
+(*   caller.  It could then pay where the earlier one refused, leaving a   *)
+(*   `refused` row with a live payment for findRefundable to refund.       *)
 (*                                                                         *)
 (* The second case is a real hazard and it is NOT modelled here: the chain *)
 (* tip is not a variable in this module.  It is (R1), and it wants a model *)
@@ -625,11 +637,11 @@ SubmitPay(w, s) ==
 \* same key rather than trying to poll.
 \*
 \* PROOF (1) LIVES HERE, on the failed branch.  refundProvenSelfPayment runs
-\* at orchestrator.ts:1454, AFTER the patch that puts payment_id on the row
-\* (1428) and before anything else touches it, so `refused` and `stuck` are
-\* the two outcomes of one step — the probe is the only thing that chooses
-\* between them.  `res = "failed"` already means pay[s] = "failed", which is
-\* the proof; see ProofSatsNeverLeft.
+\* inside submitPayment's terminal-failure arm, AFTER the patch() that puts
+\* payment_id on the row and before anything else touches it, so `refused` and
+\* `stuck` are the two outcomes of one step — the probe is the only thing that
+\* chooses between them.  `res = "failed"` already means pay[s] = "failed",
+\* which is the proof; see ProofSatsNeverLeft.
 \*
 \* That ordering is also WHY this is safe where proof (2) is delicate: the
 \* payment id lands in the same step, so whenPaying's `!row.paymentId`
@@ -676,8 +688,8 @@ PollFailed(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LsVars
 
-\* PROOF (1) on the polled side: settleFromBackend reaches the same probe for
-\* a row already in `paid` (orchestrator.ts:1659-1664), where the payment went
+\* PROOF (1) on the polled side: settleFromBackend (send/orchestrator.ts)
+\* reaches the same probe for a row already in `paid`, where the payment went
 \* in flight and died a tick later rather than inside payInvoice.
 \*
 \* Same enabling state as PollFailed and deliberately so: with the probe the
@@ -910,16 +922,17 @@ NoNetLoss == \A s \in Swaps : ~(PaidOut(s) /\ ClientTookLockup(s))
 \* WHAT RefusedUnreachableFromExposed BECAME, and why it had to move.
 \*
 \* That invariant read `\A x \in Exposed : "refused" \notin Edges[x]`.  It was
-\* a predicate over the table alone, and swaps.ts:59-75 has since added the
-\* two edges it forbids, so as written it is false of the shipped system by
-\* construction — it passed only because `Edges` lagged LEGAL_EDGES.  Deleting
-\* it would drop an assertion without adding a check, on the one thing in this
-\* corridor that decides whether a refund can land on a swap that paid.
+\* a predicate over the table alone, and LEGAL_EDGES' `paying` and `paid` rows
+\* have since added the two edges it forbids, so as written it is false of the
+\* shipped system by construction — it passed only because `Edges` lagged
+\* LEGAL_EDGES.  Deleting it would drop an assertion without adding a check,
+\* on the one thing in this corridor that decides whether a refund can land
+\* on a swap that paid.
 \*
 \* So it is restated over the variable the guarantee is actually about.
 \* findRefundable selects `refused` rows and the covenant refund pays the
 \* client, so what must hold is that a `refused` row is one the sats never
-\* left — which is exactly the proof swaps.ts demands for the new edges.
+\* left — which is exactly the proof db/swaps.ts demands for the new edges.
 \*
 \* "inflight" fails it deliberately.  A refused row whose payment is still
 \* live is already lost: the sweep can push the refund now and the payment can
@@ -1029,10 +1042,11 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*       block above RecordPay has the derivation.  Worth its own issue.   *)
 (*  (R2) The EARLY refund push is not modelled.  refundNow and             *)
 (*       findRefundable can both spend the non-interactive leaf before     *)
-(*       refund_locktime (swaps.ts:787-802), and ClientRefundLockup gates  *)
-(*       on the deadline.  Closing it means modelling an operator          *)
-(*       refunding a row they can see is paid, which the code answers with *)
-(*       friction rather than with a guard.                                *)
+(*       refund_locktime — findRefundable's own doc in db/swaps.ts sets    *)
+(*       out why — and ClientRefundLockup gates on the deadline.  Closing  *)
+(*       it means modelling an operator refunding a row they can see is    *)
+(*       paid, which the code answers with friction rather than with a     *)
+(*       guard.                                                            *)
 (*                                                                         *)
 (* THE MANDATED ONE, IN FULL.  LightningSend_Broken.cfg removes only the   *)
 (* MIN_CLAIM_WINDOW conjunct from evaluateSendPayment.  TLC finds it at    *)
