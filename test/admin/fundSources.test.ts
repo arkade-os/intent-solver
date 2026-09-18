@@ -774,6 +774,18 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     expect(reservations.reserved().size).toBe(0)
   })
 
+  it('releases the pin when the exit throws', async () => {
+    const reservations = createReservationLedger()
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], {
+      settle: vi.fn().mockRejectedValue(new Error('batch rejected')),
+    })
+
+    await expect(
+      withdraw(servicesWith(wallet, reservations), { address: REGTEST_ADDRESS, amount: '50000' }),
+    ).rejects.toThrow('batch rejected')
+    expect(reservations.reserved().size).toBe(0)
+  })
+
   it('refuses when every coin is pinned, and says who holds them', async () => {
     const reservations = createReservationLedger()
     reservations.reserve([coin(0x01, 100_000)])

@@ -226,6 +226,7 @@ const arkadeWithdraw = async (
   const route = withdrawRoute(address, services.config.network)
 
   const balance = await wallet.getBalance()
+  // Advisory: `available` still counts coins the reservation ledger has pinned, so the selection below is the gate.
   if (amountSats > balance.available) {
     throw new Error(
       `withdrawal of ${amountSats} sats exceeds the float's available balance ` +
@@ -233,7 +234,8 @@ const arkadeWithdraw = async (
     )
   }
 
-  // `available` counts no swept coins, so the selection must not either.
+  // `available` counts no swept coins, so the selection must not either — and so `offchainInputFeeParams`
+  // below never sees `isSwept` set, always pricing a coin as a plain vtxo.
   const [spendable, info] = await Promise.all([
     wallet.getSpendableVtxos({ withRecoverable: false }),
     wallet.arkProvider.getInfo(),
@@ -269,6 +271,7 @@ const arkadeWithdraw = async (
     }
     const release = services.arkade.reservations.reserve(selected)
     try {
+      // number, not bigint: `Recipient.amount` is a number, unlike the exit route's `settle` outputs below.
       const txid = await wallet.send({ recipients: [{ address, amount: amountSats }], selectedVtxos: [...selected] })
       return { reference: txid, address, amount: String(amountSats), detail: { route: 'arkade' } }
     } finally {
