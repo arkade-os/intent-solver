@@ -808,7 +808,7 @@ const lnReceiveAcceptUnilateralGapFromEnv = (network: SwapNetwork): boolean => {
   if (raw === 'true' && network === 'bitcoin' && !process.env.LN_RECEIVE_MAX_SATS?.trim()) {
     throw new Error(
       'LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true on bitcoin also needs LN_RECEIVE_MAX_SATS set explicitly: ' +
-        'it accepts a bounded loss (#69), and the bound is that cap. Set it to the most you are prepared ' +
+        'it accepts a bounded loss, and the bound is that cap. Set it to the most you are prepared ' +
         'to lose on one swap if the Arkade server censors for longer than its exit delay.',
     )
   }

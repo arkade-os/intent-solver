@@ -250,7 +250,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
       `lightning receive will refuse EVERY quote: this server's ${services.arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay}s ` +
         `solo recourse needs more final CLTV than a payer will route. Serve it by lowering the exit delay to ` +
         `${cliff}s or less (ARK_UNILATERAL_EXIT_DELAY, if the server enforces less than it advertises), ` +
-        `or by accepting the #69 window (LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true)`,
+        `or by accepting the gap where the trader's recourse opens first (LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true)`,
     )
   }
   // Said out loud at every boot, not just recorded in the console. This is the
@@ -259,8 +259,9 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // Only when it is ON: a line printed either way is a line nobody reads.
   if (services.config.lnReceiveAcceptUnilateralGap && services.config.corridorEnabled['lightning:BTC->arkade:BTC']) {
     log(
-      `LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true: funding lightning receive without a solo-recourse guarantee, ` +
-        `up to ${services.policy.corridorLimits['lightning:BTC->arkade:BTC'].maxSats} sats per swap (#69)`,
+      `LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true: funding lightning receive without a solo-recourse guarantee. ` +
+        `If the Arkade server censors past its exit delay a trader can take both sides, putting up to ` +
+        `${services.policy.corridorLimits['lightning:BTC->arkade:BTC'].maxSats} sats at risk per swap`,
     )
   }
 

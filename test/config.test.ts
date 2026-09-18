@@ -852,7 +852,7 @@ describe('ARK_UNILATERAL_EXIT_DELAY', () => {
  * number you are prepared to lose.
  */
 describe('LN_RECEIVE_ACCEPT_UNILATERAL_GAP', () => {
-  it('is off when unset, so no deployment accepts the #69 window by omission', () => {
+  it('is off when unset, so no deployment accepts the unilateral gap by omission', () => {
     expect(loadConfig().lnReceiveAcceptUnilateralGap).toBe(false)
   })
 

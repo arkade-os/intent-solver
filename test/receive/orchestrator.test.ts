@@ -2116,7 +2116,7 @@ describe("ReceiveSwapService — the solver's own recourse window", () => {
  * wrong: an invoice is keyed BY PAYMENT HASH, so a duplicate insert means
  * another LIVE row owns this hash and a cancel would close ITS invoice.
  */
-describe('retiring a hold invoice the quote never used (#99)', () => {
+describe('retiring a hold invoice the quote never used', () => {
   it('cancels the mint when the insert fails for any reason but uniqueness', async () => {
     const quoted = await service.quote(quoteRequest())
     expect(quoted.accepted).toBe(true)

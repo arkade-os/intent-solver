@@ -169,7 +169,7 @@ describe('FakeLightningBackend — getOwnInvoiceState (the self-payment probe)',
     await expect(backend.getOwnInvoiceState('ab'.repeat(32))).resolves.toBeNull()
   })
 
-  it('a hold it minted fails terminally when paid back to itself — the #41 repro shape', async () => {
+  it('a hold it minted fails terminally when paid back to itself — the self-payment repro shape', async () => {
     const paymentHash = hex.encode(sha256(new Uint8Array(32).fill(9)))
     const held = await backend.createHoldInvoice({ amountSats: 1000, paymentHash, expirySeconds: 600 })
     const result = await backend.payInvoice({
