@@ -22,10 +22,10 @@
  * - Corridor toggles go through `cli.ts`'s `enabled()` helper, which is
  *   evaluated ONCE when the ingress is built.
  *
- * So overrides are stored and take effect on next boot, and every response
- * carries `restartRequired: true`. Making them live means giving the services
- * a way to accept new policy — a change to money-path files, and a decision
- * for the operator rather than something to slip in behind a settings form.
+ * So overrides are stored and take effect on next boot. Making them live
+ * means giving the services a way to accept new policy — a change to
+ * money-path files, and a decision for the operator rather than something to
+ * slip in behind a settings form.
  *
  * Storing them is still worth doing on its own: it puts corridor pricing and
  * caps in one durable place an operator edits and reviews, instead of spread

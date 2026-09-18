@@ -44,14 +44,18 @@ const baseConfig = {
 }
 
 const build = (overrides: Record<string, string> = {}, over: Record<string, unknown> = {}) => {
-  const setOverrideWithAudit = vi.fn().mockResolvedValue(undefined)
+  const stored: Record<string, string> = { ...overrides }
+  const setOverrideWithAudit = vi.fn(async (key: string, value: string | null) => {
+    if (value === null) delete stored[key]
+    else stored[key] = value
+  })
   const services = {
     config: structuredClone(baseConfig),
     // What this process actually resolved its policy from. Defaulting both to
     // "booted with nothing overridden" keeps every existing case unchanged.
     policy: structuredClone(baseConfig),
     bootOverrides: {},
-    adminStore: { getOverrides: vi.fn().mockResolvedValue(overrides), setOverrideWithAudit },
+    adminStore: { getOverrides: vi.fn(async () => ({ ...stored })), setOverrideWithAudit },
     ...over,
   } as never
   return { app: buildAdminApp({ services, startedAt: 1, mode: 'relay' }), setOverrideWithAudit }
@@ -157,9 +161,8 @@ describe('PATCH /api/settings', () => {
     })
   })
 
-  it('always reports that a restart is needed, because nothing can apply live', async () => {
-    const alreadyStored = { LN_SEND_MAX_SATS: '50000' }
-    const { app } = build(alreadyStored)
+  it('reports a restart is needed for a value that differs from what booted', async () => {
+    const { app } = build()
     const body = await (await patch(app, { key: 'LN_SEND_MAX_SATS', value: '50000' })).json()
     expect(body).toMatchObject({ restartRequired: true })
     // The notice may only promise a restart applies the override because
@@ -168,6 +171,14 @@ describe('PATCH /api/settings', () => {
     // was false once; the pairing is what stops it being false again.
     const notice = (body as { restartNotice: string }).restartNotice
     expect(notice).toMatch(/read once at startup/i)
+  })
+
+  it('reports no restart needed for a value that already matches what booted', async () => {
+    const policy = structuredClone(baseConfig)
+    policy.corridorLimits['arkade:BTC->lightning:BTC'] = { minSats: 1_000, maxSats: 50_000 }
+    const { app } = build({ LN_SEND_MAX_SATS: '50000' }, { policy, bootOverrides: { LN_SEND_MAX_SATS: '50000' } })
+    const body = await (await patch(app, { key: 'LN_SEND_MAX_SATS', value: '50000' })).json()
+    expect(body).toMatchObject({ restartRequired: false })
   })
 
   it('persists a WIDENING value, which the narrowing guard used to refuse', async () => {
