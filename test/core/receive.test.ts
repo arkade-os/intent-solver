@@ -66,7 +66,7 @@ describe('evaluateReceiveFunding', () => {
     // which is every real network.
     const LADDER = 6 * 3600
 
-    it('refuses when the solo refund opens after E — the #69 outage timeline', () => {
+    it('refuses when the solo refund opens after E — the arkd outage timeline', () => {
       expect(
         evaluateReceiveFunding(input({ unilateralRefundWithoutReceiverDelay: LADDER, htlcExpiresAt: NOW + LADDER })),
       ).toEqual({ fund: false, reason: 'unilateral_recourse_after_htlc' })
