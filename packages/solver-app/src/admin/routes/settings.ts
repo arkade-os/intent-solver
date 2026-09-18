@@ -4,7 +4,7 @@
  * The layering rules live in `../settings.ts` and are pure; this module owns
  * the HTTP shape and persistence.
  *
- * ## Every override needs a restart, and the API says so
+ * ## Every override needs a restart to take effect, and the API says which ones are still waiting.
  *
  * This was checked against `src/cli.ts` and `src/send/orchestrator.ts` rather
  * than assumed, because a console that claims a change took effect when it did
@@ -44,8 +44,8 @@ import type { AdminDeps } from '../server.js'
  */
 export const RESTART_NOTICE =
   'Corridor fees, limits and caps are read once at startup: createServices resolves overrides and hands the result ' +
-  'to every service, and nothing re-reads it afterwards. A knob badged pending is one whose stored value this ' +
-  'process has not loaded; every other value here is what it is quoting right now. ASSET_MARKETS and OFFER_MARKETS ' +
+  'to every service, and nothing re-reads it afterwards. A knob badged pending is one whose override differs from ' +
+  'what this process loaded at boot; every other value here is what it is quoting right now. ASSET_MARKETS and OFFER_MARKETS ' +
   'below are read once at startup like everything else on this page, not an exception to it. The markets this ' +
   'solver actually trades are a separate, live list — edited with no restart on the markets screen.'
 
