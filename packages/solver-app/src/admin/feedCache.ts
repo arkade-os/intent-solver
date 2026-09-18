@@ -28,8 +28,8 @@ export const createFeedCache = (
   const now = opts.now ?? ((): number => Date.now())
   const entries = new Map<string, FeedRead>()
   const inFlight = new Map<string, Promise<FeedRead | null>>()
-  // Space-joined: a URL cannot contain one, so two feeds cannot collide onto one entry.
-  const keyFor = (feedUrl: string, pricePath: string): string => `${feedUrl} ${pricePath}`
+  // NUL-joined: neither a URL nor a pointer can contain one.
+  const keyFor = (feedUrl: string, pricePath: string): string => `${feedUrl}\0${pricePath}`
 
   return {
     prime(feedUrl, pricePath, price) {

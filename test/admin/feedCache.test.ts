@@ -27,6 +27,14 @@ describe('createFeedCache', () => {
     expect(fetchPrice).toHaveBeenCalledTimes(2)
   })
 
+  it('does not collide a URL/pointer pair across the join boundary', async () => {
+    const fetchPrice = vi.fn().mockResolvedValue(priceFrom('100000'))
+    const cache = createFeedCache(fetchPrice, { now: at(1_000) })
+    await cache.read('https://f.test/a /b', '/c')
+    await cache.read('https://f.test/a', '/b /c')
+    expect(fetchPrice).toHaveBeenCalledTimes(2)
+  })
+
   it('keys on the pointer as well as the URL', async () => {
     const fetchPrice = vi.fn().mockResolvedValue(priceFrom('100000'))
     const cache = createFeedCache(fetchPrice, { now: at(1_000) })
