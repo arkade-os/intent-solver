@@ -28,6 +28,7 @@ const market = (assetId: string, symbol: string) => ({
   buyBase: { min: 1n, max: 10n ** 24n },
   feedUrl: 'https://feed.example',
   pricePath: 'price',
+  carrierSats: 0n,
 })
 
 /**

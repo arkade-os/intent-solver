@@ -72,7 +72,6 @@ import {
   type AssetMarketPair,
   type AssetMarketPricingView,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
-import { offerDirectionOn } from '@arkade-os/solver-core/core/assetOfferPrice.js'
 import { applyOverrides } from '../admin/settings.js'
 import { createOfferRefusalTail, type OfferRefusalRecorder } from '../admin/offerRefusals.js'
 import { createRfqRefusalTail, type RfqRefusalRecorder } from '../admin/rfqRefusals.js'
@@ -91,7 +90,7 @@ import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import { assetRfqMarketsFrom, retainReadableMarkets } from './assetRfqMarkets.js'
+import { assetRfqMarketsFrom, offerMarketsFrom, retainReadableMarkets } from './assetRfqMarkets.js'
 import { marketServingDivergence } from './marketDivergence.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
@@ -395,7 +394,8 @@ export const openReportReaders = async (
 
     const policy = applyOverrides(config, await adminStore.getOverrides())
     const assetMarkets = assetMarketPolicy(await adminStore.listMarkets())
-    const assetRfqMarkets = assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)
+    // Zero dust, and no wallet asked for one: this set only ever READS rows.
+    const assetRfqMarkets = assetRfqMarketsFrom(assetMarkets.pricing, { dustSats: 0n, pricedByDefault: false })
     const assetRfqStore =
       assetRfqMarkets.length > 0 ? track('assetRfqStore', await AssetRfqSwapStore.open(swapFile)) : null
 
@@ -563,18 +563,11 @@ export const createServices = async (
    * two carry the same values — reading `policy` is what keeps that true if one
    * is ever added, rather than something to remember at that point.
    */
-  const servesOffers = policy.offerMarkets.length > 0
-  /**
-   * The environment permits offers; enabled console rows activate them. An env
-   * name the console does not price yet waits for its row instead of appearing
-   * live and refusing every offer at the price gate.
-   */
-  const offerMarketsPricedBy = (
-    declared: readonly AssetMarket[],
-    pricing: readonly AssetMarketPricingView[],
-  ): readonly AssetMarket[] =>
-    declared.filter((pair) => pricing.some((market) => offerDirectionOn(market, pair.a, pair.b) !== null))
-  const liveOfferMarkets = offerMarketsPricedBy(policy.offerMarkets, assetMarkets.pricing)
+  // The env opener is kept one release for a deployment that has not seeded yet.
+  // RESTART-GATED either way: a row flipped on a process that booted without
+  // either reaches `assetOffers?.replaceMarkets` on a NULL service and no-ops.
+  const servesOffers = policy.offerMarkets.length > 0 || marketRows.some((row) => row.enabled && row.servesOffer)
+  const liveOfferMarkets = offerMarketsFrom(assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
   const offerRefusals = createOfferRefusalTail()
   const rfqRefusals = createRfqRefusalTail()
@@ -624,7 +617,10 @@ export const createServices = async (
    * emulator key and the network prefix meet. Every guard on the spend lives in
    * `arkade/quotedOfferSettle.ts`.
    */
-  const assetRfqMarkets = assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)
+  const assetRfqMarkets = assetRfqMarketsFrom(assetMarkets.pricing, {
+    dustSats: arkade.dustSats,
+    pricedByDefault: policy.assetCarrierPricing,
+  })
   const assetRfqStore = await AssetRfqSwapStore.open(swapFile)
   const assetRfqDerivation = {
     serverPubkey: arkade.wallet.arkServerPublicKey,
@@ -1242,8 +1238,11 @@ export const createServices = async (
         // between two jobs cannot leave half this rebuild on the old value.
         const livePolicy = services.policy
         const next = assetMarketPolicy(await adminStore.listMarkets())
-        const rfq = assetRfqMarketsFrom(livePolicy.assetRfqTokens, next.pricing)
-        const offers = offerMarketsPricedBy(livePolicy.offerMarkets, next.pricing)
+        const rfq = assetRfqMarketsFrom(next.pricing, {
+          dustSats: arkade.dustSats,
+          pricedByDefault: livePolicy.assetCarrierPricing,
+        })
+        const offers = offerMarketsFrom(next.pricing)
         const live = await assetRfqStore.listNonTerminal()
         const readable = retainReadableMarkets(rfq, readableMarkets, live)
         const nextSets = setsFrom(livePolicy, rfq, readable)

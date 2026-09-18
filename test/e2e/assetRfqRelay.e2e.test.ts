@@ -196,6 +196,7 @@ const market = (over: Partial<AssetRfqMarket> = {}): AssetRfqMarket => ({
   buyBase: { min: 1n, max: 10n ** 12n },
   feedUrl,
   pricePath: '/price',
+  carrierSats: 0n,
   ...over,
 })
 

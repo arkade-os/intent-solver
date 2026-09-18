@@ -11,6 +11,8 @@ import {
 import { validateAssetMarket } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { assetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 
+const CARRIER = { dustSats: 330n, pricedByDefault: false }
+
 const USDA = 'aa'.repeat(34)
 const OTHER = 'bb'.repeat(34)
 const NAMED = [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } }]
@@ -255,7 +257,7 @@ describe('the one-shot serving seed', () => {
     const rows = await store.listMarkets()
     expect(() => assetMarketPolicy(rows)).not.toThrow()
     expect(rows[0]).toMatchObject({ symbol: rfqSymbolFor(USDA), servesRfq: true, rfqSellBase: true, rfqBuyBase: true })
-    expect(assetRfqMarketsFrom([], assetMarketPolicy(rows).pricing)).toMatchObject([
+    expect(assetRfqMarketsFrom(assetMarketPolicy(rows).pricing, CARRIER)).toMatchObject([
       {
         symbol: rfqSymbolFor(USDA),
         base: null,
@@ -347,7 +349,6 @@ describe('an incoherent serving row cannot brick startup', () => {
     expect((await store.listMarkets())[0]!.symbol).toBe('USDA')
   })
 
-  // Pins the stored row only: `assetRfqMarketsFrom` reads the env tokens, never the row.
   it('stores a NAMED asset under the token symbol, not the derived stem', async () => {
     const driver = await preUpgradeDriver()
     const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: NAMED })
@@ -357,7 +358,7 @@ describe('an incoherent serving row cannot brick startup', () => {
     expect(() => assetMarketPolicy(rows)).not.toThrow()
   })
 
-  it('leaves a fail-closed row still quoting under its env token, because nothing reads the field yet', async () => {
+  it('stops serving a fail-closed row, which an env token can no longer resurrect', async () => {
     const driver = betterSqliteDriver(':memory:')
     const store = await AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: NAMED })
     await store.putMarket({ ...marketFixture(), ...DEFAULT_SERVING, symbol: rfqSymbolFor(USDA) })
@@ -367,7 +368,8 @@ describe('an incoherent serving row cannot brick startup', () => {
     const rows = await reopened.listMarkets()
     const twin = rows.find((r) => r.quote === TWIN)!
     expect(twin).toMatchObject({ servesRfq: false, symbol: null })
-    expect(assetRfqMarketsFrom(TWIN_NAMED, assetMarketPolicy(rows).pricing).map((m) => m.symbol)).toContain('USDB')
+    // `TWIN_NAMED` calls this asset USDB and is no longer consulted at all.
+    expect(assetRfqMarketsFrom(assetMarketPolicy(rows).pricing, CARRIER).map((m) => m.quote)).not.toContain(TWIN)
   })
 
   it('never corrects a derived stem later: the marker is written, so no seed revisits the row', async () => {
@@ -414,16 +416,51 @@ describe('an incoherent serving row cannot brick startup', () => {
     expect(store.repairedServing).toEqual([])
   })
 
-  it('writes a derived stem on a rollback-window row even for a NAMED asset -- the repair is env-free', async () => {
+  // Both sides. Each case pins a row whose symbol only ONE candidate derivation
+  // produces, so a runtime that synthesised — or still read the env — reds here.
+  it('serves the seeded row under the env-given name a synthesising runtime could not invent', async () => {
+    const driver = await preUpgradeDriver()
+    const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: NAMED })
+    const rows = await store.listMarkets()
+    const [served] = assetRfqMarketsFrom(assetMarketPolicy(rows).pricing, CARRIER)
+    expect(rows[0]!.symbol).toBe('USDA')
+    expect(served!.symbol).toBe(rows[0]!.symbol)
+    expect(served!.symbol).not.toBe(rfqSymbolFor(USDA))
+  })
+
+  it('serves the repaired row under the derived stem the env does NOT name', async () => {
     const driver = betterSqliteDriver(':memory:')
     await AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: NAMED })
     await driver.run(OLD_BINARY_INSERT, [assetMarketKey(null, USDA), USDA])
     const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: NAMED })
     const rows = await store.listMarkets()
-    // The row takes the derived stem while the serve list is still built from the
-    // env token, so the two disagree without diverging until a later task reads the row.
+    expect(store.repairedServing[0]).toContain(`wrote symbol = ${rfqSymbolFor(USDA)}`)
+    const [served] = assetRfqMarketsFrom(assetMarketPolicy(rows).pricing, CARRIER)
     expect(rows[0]!.symbol).toBe(rfqSymbolFor(USDA))
-    expect(assetRfqMarketsFrom(NAMED, assetMarketPolicy(rows).pricing)[0]!.symbol).toBe('USDA')
+    expect(served!.symbol).toBe(rows[0]!.symbol)
+    expect(NAMED[0]!.symbol).toBe('USDA')
+    expect(served!.symbol).not.toBe('USDA')
+  })
+
+  it('serves exactly the directions the seed wrote, one open and one shut', async () => {
+    const driver = await preUpgradeDriver()
+    const store = await AdminStore.open(driver, () => 2_000, {
+      offerMarkets: [],
+      tokens: [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: false } }],
+    })
+    const rows = await store.listMarkets()
+    expect(rows[0]).toMatchObject({ rfqSellBase: true, rfqBuyBase: false })
+    const [served] = assetRfqMarketsFrom(assetMarketPolicy(rows).pricing, CARRIER)
+    expect(served!.sellBase.max > 0n).toBe(rows[0]!.rfqSellBase)
+    expect(served!.buyBase).toEqual({ min: 0n, max: 0n })
+  })
+
+  it('stops serving a row the repair failed closed', async () => {
+    const driver = await rolledBack(`, symbol = 'USDA', rfq_sell_base = 0, rfq_buy_base = 0`)
+    const store = await AdminStore.open(driver, () => 2_000)
+    const rows = await store.listMarkets()
+    expect(rows[0]!.servesRfq).toBe(false)
+    expect(assetRfqMarketsFrom(assetMarketPolicy(rows).pricing, CARRIER)).toEqual([])
   })
 
   it('names the column it wrote and the condition the derived stem stands in for', async () => {
@@ -456,7 +493,7 @@ describe('an incoherent serving row cannot brick startup', () => {
     const rows = await store.listMarkets()
     expect(() => assetMarketPolicy(rows)).not.toThrow()
     expect(rows[0]).toMatchObject({ symbol: rfqSymbolFor(USDA), servesRfq: true })
-    expect(assetRfqMarketsFrom([], assetMarketPolicy(rows).pricing)).toMatchObject([
+    expect(assetRfqMarketsFrom(assetMarketPolicy(rows).pricing, CARRIER)).toMatchObject([
       {
         symbol: rfqSymbolFor(USDA),
         base: null,

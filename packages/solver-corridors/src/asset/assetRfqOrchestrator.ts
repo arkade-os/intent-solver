@@ -76,6 +76,9 @@ export interface AssetRfqMarket extends Omit<AssetQuoteMarket, 'minPayout' | 'ma
   buyBase: { min: bigint; max: bigint }
   feedUrl: string
   pricePath: string
+  /** Resolved from the row's `carrier_mode`. DECLARED here, not yet read: the
+   * orchestrator still charges `AssetRfqDeps.carrierSats` deployment-wide. */
+  carrierSats: bigint
 }
 
 /** What the chain says is sitting at the offer's own script. */

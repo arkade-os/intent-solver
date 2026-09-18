@@ -48,6 +48,7 @@ const MARKET = {
   buyBase: { min: 1n, max: 10n ** 24n },
   feedUrl: 'https://feed.example/btc',
   pricePath: 'price',
+  carrierSats: 0n,
 }
 
 const harness = async (over: Partial<AssetRfqDeps> = {}) => {
