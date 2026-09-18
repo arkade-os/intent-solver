@@ -12,13 +12,38 @@
  *   is not the same as readable, and only the second claim is worth anything.
  */
 import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
-import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { assetMarketKey, assetMarketPolicy } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
 
 const USDT = 'aa'.repeat(34)
 const KEY = assetMarketKey(null, USDT)
+
+const appSource = readFileSync(
+  fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
+  'utf8',
+)
+
+/**
+ * Run, not grepped: a field can be named in `app.js` and still never be sent, which is how this shipped.
+ */
+const consoleForm = () => {
+  const start = appSource.indexOf('const blankMarket = ')
+  const end = appSource.indexOf('const field = (label, key, hint)')
+  if (start === -1 || end === -1) throw new Error('the market form moved out of the slice this guard reads')
+  return new Function(`${appSource.slice(start, end)}\nreturn { blankMarket, draftFrom, marketBody }`)() as {
+    blankMarket: () => Record<string, unknown>
+    draftFrom: (row: Record<string, unknown>) => Record<string, unknown>
+    marketBody: (draft: Record<string, unknown>) => Record<string, unknown>
+  }
+}
+
+const SERVER_DERIVED = ['marketKey', 'createdAt', 'updatedAt', 'servedBy']
+const editable = (row: Record<string, unknown>) =>
+  Object.fromEntries(Object.entries(row).filter(([key]) => !SERVER_DERIVED.includes(key)))
 
 const body = (over: Record<string, unknown> = {}) => ({
   base: 'BTC',
@@ -305,6 +330,48 @@ describe('DELETE /api/markets/:key', () => {
     await put(app, body())
     await app.fetch(new Request(`http://admin/api/markets/${encodeURIComponent(KEY)}`, { method: 'DELETE' }))
     expect((await adminStore.listActions())[0]).toMatchObject({ action: 'market-delete', target: KEY })
+    await adminStore.close()
+  })
+})
+
+describe('a console save round-trips what the API handed it', () => {
+  const saved = async () => {
+    const built = await build()
+    await put(built.app, body({ sellBaseFeeBps: 0, buyBaseFeeBps: 900 }))
+    return built
+  }
+
+  it('sends back every editable field the API returned', async () => {
+    const { app, adminStore } = await saved()
+    const [row] = (await list(app)).markets
+    const { draftFrom, marketBody } = consoleForm()
+    expect(Object.keys(marketBody(draftFrom(row!))).sort()).toEqual(Object.keys(editable(row!)).sort())
+    await adminStore.close()
+  })
+
+  it('offers a new market a slot for every editable field too', async () => {
+    const { app, adminStore } = await saved()
+    const [row] = (await list(app)).markets
+    const { blankMarket, marketBody } = consoleForm()
+    expect(Object.keys(marketBody(blankMarket())).sort()).toEqual(Object.keys(editable(row!)).sort())
+    await adminStore.close()
+  })
+
+  it('leaves the stored market unchanged, per-direction spread included', async () => {
+    const { app, adminStore } = await saved()
+    const [before] = (await list(app)).markets
+    const { draftFrom, marketBody } = consoleForm()
+    expect((await put(app, marketBody(draftFrom(before!)))).status).toBe(200)
+    expect(editable((await list(app)).markets[0]!)).toEqual(editable(before!))
+    await adminStore.close()
+  })
+
+  it('still quotes the spread the operator set', async () => {
+    const { app, adminStore } = await saved()
+    const { draftFrom, marketBody } = consoleForm()
+    await put(app, marketBody(draftFrom((await list(app)).markets[0]!)))
+    const [view] = assetMarketPolicy(await adminStore.listMarkets()).pricing
+    expect(view).toMatchObject({ sellBaseFeeBps: 0, buyBaseFeeBps: 900 })
     await adminStore.close()
   })
 })

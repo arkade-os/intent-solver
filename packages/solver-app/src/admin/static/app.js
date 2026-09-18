@@ -1324,6 +1324,8 @@ const blankMarket = () => ({
   feeBps: '0',
   sellBaseFeeFlat: '0',
   buyBaseFeeFlat: '0',
+  sellBaseFeeBps: '',
+  buyBaseFeeBps: '',
   sellBaseMin: '',
   sellBaseMax: '',
   buyBaseMin: '',
@@ -1331,6 +1333,13 @@ const blankMarket = () => ({
   enabled: true,
 })
 
+/** Unset is blank here and `null` on the wire — never `0`, which is a spread an operator sets deliberately. */
+const bpsFrom = (value) => (value === null || value === undefined ? '' : String(value))
+
+/**
+ * EVERY editable column, including the ones no field below renders: PUT is a
+ * full replace, so a column the draft drops is one that save deletes.
+ */
 const draftFrom = (market) => ({
   base: market.base ?? 'BTC',
   quote: market.quote ?? 'BTC',
@@ -1342,6 +1351,8 @@ const draftFrom = (market) => ({
   feeBps: String(market.feeBps),
   sellBaseFeeFlat: String(market.sellBaseFeeFlat),
   buyBaseFeeFlat: String(market.buyBaseFeeFlat),
+  sellBaseFeeBps: bpsFrom(market.sellBaseFeeBps),
+  buyBaseFeeBps: bpsFrom(market.buyBaseFeeBps),
   sellBaseMin: market.sellBase?.min ?? '',
   sellBaseMax: market.sellBase?.max ?? '',
   buyBaseMin: market.buyBase?.min ?? '',
@@ -1355,6 +1366,8 @@ const draftFrom = (market) => ({
  * means the direction inherits the deployment-wide pair.
  */
 const draftBounds = (min, max) => (min.trim() === '' && max.trim() === '' ? null : { min: min.trim(), max: max.trim() })
+
+const draftBps = (value) => (String(value ?? '').trim() === '' ? null : Number(value))
 
 /**
  * Decimals and bps go as JSON NUMBERS because they are small and the server
@@ -1372,6 +1385,8 @@ const marketBody = (d) => ({
   feeBps: Number(d.feeBps),
   sellBaseFeeFlat: d.sellBaseFeeFlat.trim(),
   buyBaseFeeFlat: d.buyBaseFeeFlat.trim(),
+  sellBaseFeeBps: draftBps(d.sellBaseFeeBps),
+  buyBaseFeeBps: draftBps(d.buyBaseFeeBps),
   sellBase: draftBounds(d.sellBaseMin, d.sellBaseMax),
   buyBase: draftBounds(d.buyBaseMin, d.buyBaseMax),
   enabled: d.enabled,
