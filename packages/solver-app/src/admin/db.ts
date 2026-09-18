@@ -279,15 +279,18 @@ export class AdminStore {
         const assetId = row.base !== null && row.quote !== null ? null : (row.base ?? row.quote)
         const token = assetId === null ? undefined : byAsset.get(assetId)
         const symbol = assetId === null ? null : (token?.symbol ?? rfqSymbolFor(assetId))
+        const sellBase = symbol !== null && (token?.enabled.sell_base ?? true)
+        const buyBase = symbol !== null && (token?.enabled.buy_base ?? true)
         await this.driver.run(
           'UPDATE admin_market SET symbol = ?, serves_offer = ?, serves_rfq = ?, rfq_sell_base = ?, ' +
             'rfq_buy_base = ? WHERE market_key = ?',
           [
             symbol,
             declaredForOffers(row) ? 1 : 0,
-            symbol === null ? 0 : 1,
-            symbol !== null && (token?.enabled.sell_base ?? true) ? 1 : 0,
-            symbol !== null && (token?.enabled.buy_base ?? true) ? 1 : 0,
+            // The DIRECTIONS, not the symbol: both closed is a row `checkServing` rejects.
+            sellBase || buyBase ? 1 : 0,
+            sellBase ? 1 : 0,
+            buyBase ? 1 : 0,
             row.marketKey,
           ],
         )

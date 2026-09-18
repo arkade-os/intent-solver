@@ -13,6 +13,10 @@ import { assetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.j
 const USDA = 'aa'.repeat(34)
 const OTHER = 'bb'.repeat(34)
 const NAMED = [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } }]
+const BOTH_CLOSED = [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: false, buy_base: false } }]
+// Shares USDA's derived stem: `rfqSymbolFor` reads only the first 7 and last 4 hex.
+const TWIN = 'aaaaaaa' + 'b'.repeat(57) + 'aaaa'
+const TWIN_NAMED = [{ symbol: 'USDB', assetId: TWIN, enabled: { sell_base: true, buy_base: true } }]
 
 // An INSERT from a binary predating the serving columns: it names none of them.
 const OLD_BINARY_INSERT = `INSERT INTO admin_market (market_key, base, quote, base_decimals, quote_decimals,
@@ -331,14 +335,49 @@ describe('an incoherent serving row cannot brick startup', () => {
     expect((await store.listMarkets())[0]!.symbol).toBe('USDA')
   })
 
-  it('serves a NAMED asset under the token symbol the older binary used, not a derived stem', async () => {
+  // Pins the stored row only: `assetRfqMarketsFrom` reads the env tokens, never the row.
+  it('stores a NAMED asset under the token symbol, not the derived stem', async () => {
     const driver = await preUpgradeDriver()
     const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: NAMED })
     const rows = await store.listMarkets()
     expect(rows[0]).toMatchObject({ symbol: 'USDA', servesRfq: true })
-    expect(assetRfqMarketsFrom(NAMED, assetMarketPolicy(rows).pricing)).toMatchObject([
-      { symbol: 'USDA', base: null, quote: USDA, sellBase: { min: 1_000n, max: 1_000_000n } },
-    ])
+    expect(rows[0]!.symbol).not.toBe(rfqSymbolFor(USDA))
+    expect(() => assetMarketPolicy(rows)).not.toThrow()
+  })
+
+  it('leaves a fail-closed row still quoting under its env token, because nothing reads the field yet', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    const store = await AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: NAMED })
+    await store.putMarket({ ...marketFixture(), ...DEFAULT_SERVING, symbol: rfqSymbolFor(USDA) })
+    await driver.run(OLD_BINARY_INSERT, [assetMarketKey(null, TWIN), TWIN])
+    const reopened = await AdminStore.open(driver, () => 2_000)
+    const rows = await reopened.listMarkets()
+    const twin = rows.find((r) => r.quote === TWIN)!
+    expect(twin).toMatchObject({ servesRfq: false, symbol: null })
+    expect(assetRfqMarketsFrom(TWIN_NAMED, assetMarketPolicy(rows).pricing).map((m) => m.symbol)).toContain('USDB')
+  })
+
+  it('never corrects a derived stem later: the marker is written, so no seed revisits the row', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    await AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: NAMED })
+    await driver.run(OLD_BINARY_INSERT, [assetMarketKey(null, USDA), USDA])
+    await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: NAMED })
+    const later = await AdminStore.open(driver, () => 3_000, { offerMarkets: [], tokens: NAMED })
+    expect((await later.listMarkets())[0]!.symbol).toBe(rfqSymbolFor(USDA))
+  })
+
+  it('boots a first upgrade whose env closes BOTH directions of a named asset', async () => {
+    const driver = await preUpgradeDriver()
+    const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: BOTH_CLOSED })
+    const rows = await store.listMarkets()
+    expect(() => assetMarketPolicy(rows)).not.toThrow()
+    expect(rows[0]).toMatchObject({ symbol: 'USDA', servesRfq: false, rfqSellBase: false, rfqBuyBase: false })
+  })
+
+  it('reports no repair for it: the seed writes serves_rfq = 0 rather than a row its own validator rejects', async () => {
+    const driver = await preUpgradeDriver()
+    const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: BOTH_CLOSED })
+    expect(store.repairedServing).toEqual([])
   })
 
   it('writes a derived stem on a rollback-window row even for a NAMED asset -- the repair is env-free', async () => {
