@@ -415,6 +415,11 @@ describe('the preview panel, run rather than grepped', () => {
     }
   })
 
+  it('says why a closed direction has nothing to price, instead of a blank table', async () => {
+    const text = await painted({ ...RESOLVED, samples: [], samplesReason: 'this direction is closed' })
+    expect(text).toContain('this direction is closed')
+  })
+
   it('collapses a held-down key into one pending request', () => {
     const panel = previewHarness(RESOLVED)
     panel.previewPanel()

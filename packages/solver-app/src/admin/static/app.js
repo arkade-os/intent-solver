@@ -1538,7 +1538,7 @@ const ladderRow = (sample, legs, loss) =>
         h('td.num', { colspan: 3 }, h('span.phase.phase-failed', sample.reason)),
       )
 
-const breakEvenBlock = (breakEven, legs) => {
+const breakEvenBlock = (breakEven) => {
   if (breakEven.kind === 'never') {
     return h(
       'div.breakeven',
@@ -1599,7 +1599,11 @@ const previewBody = () => {
     return h('div', controls, h('p.notice', `feed-unresolved — ${feed.reason}`))
   }
 
-  const { legs, samples, breakEven, carrier } = previewData
+  const { legs, samples, samplesReason, breakEven, carrier } = previewData
+  if (samples.length === 0) {
+    const reason = samplesReason ?? 'this direction admits no amount'
+    return h('div', controls, h('p.notice', `nothing to price for this direction — ${reason}`))
+  }
   const lossUnder = breakEven.kind === 'at' ? BigInt(breakEven.amountSats) : null
   const belowBreakEven = (sample) => sample.ok && lossUnder !== null && BigInt(sample.fromAmount) < lossUnder
   return h(
@@ -1616,7 +1620,7 @@ const previewBody = () => {
         samples.map((sample) => ladderRow(sample, legs, belowBreakEven(sample))),
       ),
     ),
-    breakEvenBlock(breakEven, legs),
+    breakEvenBlock(breakEven),
     scopeLine(),
     h(
       'div.feedline',
