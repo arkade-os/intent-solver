@@ -5,8 +5,10 @@
 import { describe, it, expect, vi } from 'vitest'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
+import { marketFrom } from '@arkade-os/solver-app/admin/routes/markets.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
 import { resolveAssetQuote } from '@arkade-os/solver-core/core/assetRfq.js'
+import { carrierBreakEven } from '@arkade-os/solver-core/core/pricingPreview.js'
 
 const USDX = 'dd'.repeat(34)
 const FEED = 'https://feed.test/price'
@@ -180,9 +182,32 @@ describe('POST /api/pricing/preview — asset markets', () => {
     await adminStore.close()
   })
 
-  it('does not refuse a grandfathered loopback feed, which it never fetches', async () => {
-    // Task 2 default-refuses this URL at the write, because the write fetches
-    // it. This route only ever reads a cached feed already on disk.
+  it('names pricePath for a pointer missing its leading slash', async () => {
+    const { app, adminStore } = await build()
+    const { body } = await preview(app, {
+      target: 'market',
+      market: marketBody({ pricePath: 'price' }),
+      direction: 'sell_base',
+      side: 'from',
+    })
+    expect(body.invalid).toMatchObject([{ key: 'pricePath' }])
+    await adminStore.close()
+  })
+
+  it('names pricePath for an unescaped tilde too', async () => {
+    // This message has a colon glued straight onto the field name, unlike every other refusal here.
+    const { app, adminStore } = await build()
+    const { body } = await preview(app, {
+      target: 'market',
+      market: marketBody({ pricePath: '/foo~x' }),
+      direction: 'sell_base',
+      side: 'from',
+    })
+    expect(body.invalid).toMatchObject([{ key: 'pricePath' }])
+    await adminStore.close()
+  })
+
+  it('refuses a brand-new loopback draft the same way the write would', async () => {
     const { app, adminStore } = await build()
     const { body } = await preview(app, {
       target: 'market',
@@ -190,8 +215,63 @@ describe('POST /api/pricing/preview — asset markets', () => {
       direction: 'sell_base',
       side: 'from',
     })
+    expect(body.invalid).toMatchObject([{ key: 'feedUrl' }])
+    expect(body.samples).toEqual([])
+    await adminStore.close()
+  })
+
+  it('does not refuse a grandfathered loopback feed already on disk', async () => {
+    // Simulates a row admitted under the old rule: written directly, bypassing
+    // the write route's own probe-and-refuse (which would reject this URL).
+    const { app, adminStore } = await build()
+    const loopback = marketBody({ feedUrl: 'http://127.0.0.1:8080/price' })
+    await adminStore.putMarket(marketFrom(loopback))
+    const { body } = await preview(app, { target: 'market', market: loopback, direction: 'sell_base', side: 'from' })
     expect(body.invalid).toEqual([])
-    expect(body.feed).toMatchObject({ state: 'unresolved' })
+    expect(body.feed).toMatchObject({ state: 'resolved' })
+    await adminStore.close()
+  })
+
+  it('says a closed direction is closed, not silently broken', async () => {
+    const { app, adminStore } = await build()
+    await save(app, marketBody())
+    const { body } = await preview(app, {
+      target: 'market',
+      market: marketBody({ sellBase: null }),
+      direction: 'sell_base',
+      side: 'from',
+    })
+    expect(body.samples).toEqual([])
+    expect(body.samplesReason).toMatch(/closed/)
+    await adminStore.close()
+  })
+
+  it('prices the ladder in the payout leg when the customer names what they get', async () => {
+    const { app, adminStore } = await build()
+    await save(app, marketBody())
+    const { body } = await preview(app, { target: 'market', market: marketBody(), direction: 'sell_base', side: 'to' })
+    expect(body.invalid).toEqual([])
+    const samples = body.samples as unknown as { ok: boolean; amount: string; toAmount?: string }[]
+    const priced = samples.find((sample) => sample.ok)!
+    expect(priced.toAmount).toBe(priced.amount)
+    await adminStore.close()
+  })
+
+  it('feeds the direction-specific spread into break-even, not the market default', async () => {
+    const { app, adminStore } = await build({
+      policy: { offerMarkets: [], assetRfqTokens: [], assetCarrierPricing: false, offerChargesDeliveredCarrier: false },
+    })
+    await save(app, marketBody({ sellBaseFeeBps: 100 }))
+    const { body } = await preview(app, {
+      target: 'market',
+      market: marketBody({ sellBaseFeeBps: 100 }),
+      direction: 'sell_base',
+      side: 'from',
+    })
+    const expected = carrierBreakEven({ carrierSats: 330n, flatSats: 0n, feeBps: 100 })
+    expect(body.breakEven).toEqual(
+      expected.kind === 'at' ? { kind: 'at', amountSats: expected.amountSats.toString() } : expected,
+    )
     await adminStore.close()
   })
 
@@ -298,6 +378,40 @@ describe('POST /api/pricing/preview — BTC corridors', () => {
     expect(samples[0]).toMatchObject({ ok: false, reason: 'below_min' })
     expect(samples.at(-1)).toMatchObject({ ok: false, reason: 'above_max' })
     expect(samples.filter((sample) => sample.ok).length).toBeGreaterThan(1)
+    await adminStore.close()
+  })
+
+  it('prices a corridor ladder in the payout leg when the customer names what they get', async () => {
+    // A zero fee makes give and payout identical regardless of which side the
+    // amount names, so this needs a real spread to tell the two apart.
+    const { app, adminStore } = await build()
+    const { body } = await preview(app, {
+      target: 'corridor',
+      corridor: 'arkade:BTC->lightning:BTC',
+      overrides: { LN_SEND_FEE_BPS: '500', LN_SEND_FEE_FLAT_SATS: '100' },
+      side: 'to',
+    })
+    expect(body.invalid).toEqual([])
+    const samples = body.samples as unknown as { ok: boolean; amountSats: number; payoutSats?: number }[]
+    const priced = samples.find((sample) => sample.ok)!
+    // `giveSatsFor` rounds up to the smallest give that clears the target, so
+    // the payout it produces may exceed what was asked for, never fall short.
+    expect(priced.payoutSats).toBeGreaterThanOrEqual(priced.amountSats)
+    await adminStore.close()
+  })
+
+  it('never renders a negative amount when a flat fee exceeds the corridor minimum', async () => {
+    const { app, adminStore } = await build()
+    const { body } = await preview(app, {
+      target: 'corridor',
+      corridor: 'arkade:BTC->lightning:BTC',
+      overrides: { LN_SEND_FEE_FLAT_SATS: '5000' },
+      side: 'to',
+    })
+    expect(body.invalid).toEqual([])
+    const samples = body.samples as unknown as { amountSats: number }[]
+    expect(samples.length).toBeGreaterThan(2)
+    expect(samples.every((sample) => sample.amountSats >= 0)).toBe(true)
     await adminStore.close()
   })
 

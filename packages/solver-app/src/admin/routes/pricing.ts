@@ -11,6 +11,9 @@ import {
   type AssetMarketConfig,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import {
+  assetFeeBpsFor,
+  assetFlatFeeFor,
+  assetQuoteGivesBase,
   carrierLegs,
   resolveAssetQuote,
   type AssetPair,
@@ -25,6 +28,7 @@ import {
 } from '@arkade-os/solver-core/core/pricingPreview.js'
 import type { Price } from '@arkade-os/solver-core/core/priceFeed.js'
 import type { AdminDeps } from '../server.js'
+import type { AssetMarketRow } from '../db.js'
 import type { FeedCache } from '../feedCache.js'
 import { resolveDraftPolicy, type DraftRefusal } from '../draftPolicy.js'
 import { marketFrom, type MarketBody } from './markets.js'
@@ -59,10 +63,14 @@ const FIELDS = new Set([
   'buyBase',
 ])
 
+/** `price_path`'s own errors spell it with an underscore; every other message matches a wire field name. */
+const ALIASES: Record<string, string> = { price_path: 'pricePath' }
+
 /** The refusal's first word if it names a field, else the pair as a whole. */
 const refusalFor = (error: unknown): DraftRefusal => {
   const reason = error instanceof Error ? error.message : String(error)
-  const first = reason.split(/[\s.]/)[0] ?? ''
+  const token = reason.split(/[\s.:]/)[0] ?? ''
+  const first = ALIASES[token] ?? token
   return { key: FIELDS.has(first) ? first : 'market', reason }
 }
 
@@ -102,8 +110,9 @@ const corridorPreview = (deps: AdminDeps, body: Record<string, unknown>, side: '
     ...decomposeCorridorQuote({ amountSats, amountSide: side, fee, limits }),
   })
   // Bounds are on the give leg; both ends of an exact-out ladder go through
-  // `payoutSatsFor` rather than being shifted here.
-  const lo = side === 'from' ? limits.minSats : payoutSatsFor(limits.minSats, fee)
+  // `payoutSatsFor` rather than being shifted here, floored at 1 so a flat fee
+  // past the minimum can't render as a negative sample amount.
+  const lo = side === 'from' ? limits.minSats : Math.max(1, payoutSatsFor(limits.minSats, fee))
   const hi = side === 'from' ? limits.maxSats : payoutSatsFor(limits.maxSats, fee)
   if (hi < lo || hi <= 0) {
     return {
@@ -129,16 +138,26 @@ const marketPreview = async (deps: AdminDeps, feeds: FeedCache, body: Record<str
   let market: AssetMarketConfig
   try {
     market = marketFrom((body.market ?? {}) as MarketBody)
-    // This route fetches no URL an operator typed — it only ever reads a feed
-    // already saved to disk — so a grandfathered loopback feed must not be
-    // refused here the way a fresh write refuses it.
-    validateAssetMarket(market, { allowPrivateFeedHost: true })
   } catch (error) {
     return { invalid: [refusalFor(error)], samples: [] }
   }
 
-  const key = assetMarketKey(market.base, market.quote)
-  const saved = await deps.services.adminStore.getMarket(key)
+  // Looked up before validating: grandfathering covers a row already saved
+  // under the old rule, not a brand-new draft the write would still refuse.
+  let lookup: AssetMarketRow | null = null
+  try {
+    lookup = await deps.services.adminStore.getMarket(assetMarketKey(market.base, market.quote))
+  } catch {
+    lookup = null
+  }
+  const saved = lookup
+
+  try {
+    validateAssetMarket(market, { allowPrivateFeedHost: saved !== null })
+  } catch (error) {
+    return { invalid: [refusalFor(error)], samples: [] }
+  }
+
   const resolvable = saved !== null && saved.feedUrl === market.feedUrl && saved.pricePath === market.pricePath
   const read = resolvable ? await feeds.read(saved.feedUrl, saved.pricePath) : null
   if (!read) {
@@ -183,13 +202,12 @@ const priceLadder = (
   // `resolveAssetQuote` returned rather than re-derived here. `+ returned`
   // matters: exact-out checks `amount - returnedCarrier` (assetRfq.ts:168), so
   // seeding at exactly `minPayout` would refuse on the asset->BTC direction.
-  const fromAt = (payout: bigint): bigint | null => {
-    const outcome = resolveAssetQuote({ ...shared, amount: payout + returned, amountSide: 'to' })
-    return outcome.ok ? outcome.fromAmount : null
-  }
+  const fromAt = (payout: bigint) => resolveAssetQuote({ ...shared, amount: payout + returned, amountSide: 'to' })
+  const loOutcome = fromAt(bounds.min)
+  const hiOutcome = fromAt(bounds.max)
 
-  const lo = side === 'to' ? bounds.min + returned : fromAt(bounds.min)
-  const hi = side === 'to' ? bounds.max + returned : fromAt(bounds.max)
+  const lo = side === 'to' ? bounds.min + returned : loOutcome.ok ? loOutcome.fromAmount : null
+  const hi = side === 'to' ? bounds.max + returned : hiOutcome.ok ? hiOutcome.fromAmount : null
   const at = (amount: bigint) => ({
     amount: str(amount),
     ...toWire(decomposeAssetQuote({ ...shared, amount, amountSide: side })),
@@ -199,8 +217,22 @@ const priceLadder = (
       ? []
       : [...(lo > 1n ? [lo > 10n ? lo / 10n : 1n] : []), ...decades(lo, hi), hi * 10n].map(at)
 
-  const flat = (direction === 'sell_base' ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
-  const feeBps = (direction === 'sell_base' ? market.sellBaseFeeBps : market.buyBaseFeeBps) ?? market.feeBps
+  // Distinguishes a direction an operator closed from one that failed to
+  // price — `offerCeiling` below goes silently null for the same two reasons.
+  const samplesReason: string | null =
+    points.length > 0
+      ? null
+      : bounds.max === 0n
+        ? 'this direction is closed'
+        : !loOutcome.ok
+          ? loOutcome.reason
+          : !hiOutcome.ok
+            ? hiOutcome.reason
+            : 'the bounds admit no amount at this feed'
+
+  const givesBase = assetQuoteGivesBase(pair, priced)!
+  const flat = assetFlatFeeFor(givesBase, priced)
+  const feeBps = assetFeeBpsFor(givesBase, priced)
   return {
     invalid: [],
     direction,
@@ -214,6 +246,7 @@ const priceLadder = (
     carrier: { sats: str(dustSats), charged: str(charged), returned: str(returned), priced: carrierSats > 0n },
     feed: { state: 'resolved', mantissa: str(feed.mantissa), scale: feed.scale, readAt },
     samples: points,
+    samplesReason,
     // The other path's question, and only where this deployment serves it —
     // found by searching the production gate rather than inverting it.
     offerCeiling: offerCeilingFor(deps, market, pair, direction, feed, side === 'from' ? hi : null),

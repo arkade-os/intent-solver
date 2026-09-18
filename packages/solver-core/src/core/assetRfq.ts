@@ -121,6 +121,10 @@ export const assetQuoteGivesBase = (pair: AssetPair, market: AssetQuoteMarket): 
 export const assetFlatFeeFor = (givesBase: boolean, market: AssetQuoteMarket): bigint =>
   (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
 
+/** The direction's spread, basis points. Shared for the same reason {@link assetFlatFeeFor} is. */
+export const assetFeeBpsFor = (givesBase: boolean, market: AssetQuoteMarket): number =>
+  (givesBase ? market.sellBaseFeeBps : market.buyBaseFeeBps) ?? market.feeBps
+
 export type AssetQuoteOutcome =
   { ok: true; fromAmount: bigint; toAmount: bigint } | { ok: false; reason: AssetQuoteRefusal }
 
@@ -180,8 +184,7 @@ export const resolveAssetQuote = (args: {
 
   const flatFee = assetFlatFeeFor(givesBase, market)
   if (flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
-  // Same selection as the flat fee: the direction decides the spread too.
-  const feeBps = (givesBase ? market.sellBaseFeeBps : market.buyBaseFeeBps) ?? market.feeBps
+  const feeBps = assetFeeBpsFor(givesBase, market)
   if (feeBps < 0 || feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
   const solverDelivers = pair.to !== null
   const { charged: chargedCarrier, returned: returnedCarrier } = carrierLegs(pair, carrierSats)
