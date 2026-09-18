@@ -226,10 +226,17 @@ const MIGRATIONS: ReadonlyArray<readonly [string, ReadonlyArray<readonly [string
 ]
 
 export class AdminStore {
+  private repaired: readonly string[] = []
+
   private constructor(
     private readonly driver: SqlDriver,
     private readonly now: () => number,
   ) {}
+
+  /** One operator-readable sentence per row the boot repair touched; empty on a healthy file. */
+  get repairedServing(): readonly string[] {
+    return this.repaired
+  }
 
   /**
    * `seed` absent means do not consult the ENVIRONMENT and do not mark. It does
@@ -297,6 +304,44 @@ export class AdminStore {
         }
       }
     }
+    await this.repairServing()
+  }
+
+  /**
+   * Make every row's serving fields internally coherent, whatever wrote them.
+   * NOT marker-gated and NOT env-gated, unlike `seedServing`: `serves_rfq = 1`
+   * beside a NULL symbol is unreachable through `validateAssetMarket`, so it
+   * means only that a binary predating these columns INSERTed the row, which a
+   * rollback allows long after the marker was written. Throwing instead would
+   * be a permanent boot failure fixable only by hand SQL. Each row's repair is
+   * independent and idempotent, so no transaction wraps them.
+   */
+  private async repairServing(): Promise<void> {
+    const rows = await this.listMarkets()
+    const taken = new Set(rows.flatMap((row) => (row.symbol === null ? [] : [row.symbol])))
+    const notes: string[] = []
+    for (const row of rows) {
+      if (!row.servesRfq) continue
+      const assetId = row.base !== null && row.quote !== null ? null : (row.base ?? row.quote)
+      const close = (why: string): void => void notes.push(`${row.marketKey}: ${why}; serves_rfq set to 0.`)
+      if (assetId === null) {
+        close('an asset on both legs cannot be expressed over RFQ')
+      } else if (row.symbol === null) {
+        const symbol = rfqSymbolFor(assetId)
+        // Fail-OPEN, and only here: this is the symbol `assetRfqMarketsFrom` already derives for an un-named asset.
+        if (taken.has(symbol)) close(`symbol ${symbol} is already carried by another market`)
+        else {
+          taken.add(symbol)
+          notes.push(`${row.marketKey}: no symbol stored; derived ${symbol}, as an older binary served it.`)
+          await this.driver.run('UPDATE admin_market SET symbol = ? WHERE market_key = ?', [symbol, row.marketKey])
+          continue
+        }
+      } else if (!row.rfqSellBase && !row.rfqBuyBase) {
+        close('both RFQ directions are closed')
+      } else continue
+      await this.driver.run('UPDATE admin_market SET serves_rfq = 0 WHERE market_key = ?', [row.marketKey])
+    }
+    this.repaired = notes
   }
 
   async close(): Promise<void> {

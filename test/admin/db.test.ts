@@ -11,6 +11,13 @@ import {
 import { assetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 
 const USDA = 'aa'.repeat(34)
+const OTHER = 'bb'.repeat(34)
+
+// An INSERT from a binary predating the serving columns: it names none of them.
+const OLD_BINARY_INSERT = `INSERT INTO admin_market (market_key, base, quote, base_decimals, quote_decimals,
+     feed_url, price_path, tolerance_bps, fee_bps, sell_base_min, sell_base_max, buy_base_min, buy_base_max,
+     enabled, created_at, updated_at)
+   VALUES (?, NULL, ?, 8, 6, 'https://feed.test/p', '/p', 10, 25, '1000', '1000000', '2000', '2000000', 1, 1, 1)`
 
 const marketFixture = (): AssetMarketConfig => ({
   ...DEFAULT_SERVING,
@@ -238,6 +245,98 @@ describe('the one-shot serving seed', () => {
         quote: USDA,
         feeBps: 25,
         feedUrl: 'https://feed.test/p',
+        sellBase: { min: 1_000n, max: 1_000_000n },
+        buyBase: { min: 2_000n, max: 2_000_000n },
+      },
+    ])
+  })
+})
+
+describe('an incoherent serving row cannot brick startup', () => {
+  // Written AFTER the seed marker, so `seedServing` returns before it sees the row.
+  const rolledBack = async (over = '') => {
+    const driver = betterSqliteDriver(':memory:')
+    const store = await AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: [] })
+    await store.putMarket({ ...marketFixture(), ...DEFAULT_SERVING, symbol: 'USDA' })
+    await driver.run(`UPDATE admin_market SET symbol = NULL, serves_rfq = 1 ${over}`)
+    return driver
+  }
+
+  it('gives the row a symbol rather than throwing for ever', async () => {
+    const driver = await rolledBack()
+    const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: [] })
+    const rows = await store.listMarkets()
+    expect(() => assetMarketPolicy(rows)).not.toThrow()
+    expect(rows[0]!.symbol).toBe(rfqSymbolFor(USDA))
+    expect(rows[0]!.servesRfq).toBe(true)
+    expect(store.repairedServing[0]).toMatch(/symbol/)
+  })
+
+  it('repairs with NO seed supplied, which is how `cli timeline` opens the file', async () => {
+    const driver = await rolledBack()
+    const store = await AdminStore.open(driver, () => 2_000)
+    expect((await store.listMarkets())[0]!.symbol).toBe(rfqSymbolFor(USDA))
+  })
+
+  it('does not re-run the env seed, and does not touch the marker', async () => {
+    const driver = await rolledBack()
+    await AdminStore.open(driver, () => 2_000, { offerMarkets: [{ a: null, b: USDA }], tokens: [] })
+    // `serves_offer` stays 0: the repair is env-free, marker or no marker.
+    expect((await driver.all<{ serves_offer: number }>('SELECT serves_offer FROM admin_market'))[0]!.serves_offer).toBe(
+      0,
+    )
+    expect((await driver.all('SELECT name FROM admin_migration')).length).toBe(1)
+  })
+
+  it('stops serving RFQ rather than colliding a symbol two rows would share', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    const store = await AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: [] })
+    await store.putMarket({ ...marketFixture(), ...DEFAULT_SERVING, symbol: rfqSymbolFor(USDA) })
+    await driver.run(OLD_BINARY_INSERT, ['pending-collision', USDA])
+    const reopened = await AdminStore.open(driver, () => 2_000)
+    const collided = (await reopened.listMarkets()).find((r) => r.marketKey === 'pending-collision')!
+    expect(collided.servesRfq).toBe(false)
+    expect(collided.symbol).toBeNull()
+    expect(reopened.repairedServing[0]).toMatch(/already/)
+  })
+
+  it('stops serving RFQ on a pair the covenant cannot express', async () => {
+    const driver = await rolledBack(`, base = '${OTHER}'`)
+    const store = await AdminStore.open(driver, () => 2_000)
+    expect((await store.listMarkets())[0]!.servesRfq).toBe(false)
+  })
+
+  it('stops serving RFQ when both directions are closed', async () => {
+    const driver = await rolledBack(`, symbol = 'USDA', rfq_sell_base = 0, rfq_buy_base = 0`)
+    const store = await AdminStore.open(driver, () => 2_000)
+    expect((await store.listMarkets())[0]!.servesRfq).toBe(false)
+    expect(store.repairedServing[0]).toMatch(/directions/)
+  })
+
+  it('is silent and writes nothing on a healthy file', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    const store = await AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: [] })
+    await store.putMarket({ ...marketFixture(), ...DEFAULT_SERVING, symbol: 'USDA' })
+    const before = (await store.listMarkets())[0]!
+    const reopened = await AdminStore.open(driver, () => 9_000)
+    expect(reopened.repairedServing).toEqual([])
+    expect((await reopened.listMarkets())[0]).toEqual(before)
+  })
+
+  it('boots a row an older binary INSERTed after the marker, serving what it served', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    await AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: [] })
+    await driver.run(OLD_BINARY_INSERT, [assetMarketKey(null, USDA), USDA])
+    const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: [] })
+    const rows = await store.listMarkets()
+    expect(() => assetMarketPolicy(rows)).not.toThrow()
+    expect(rows[0]).toMatchObject({ symbol: rfqSymbolFor(USDA), servesRfq: true })
+    expect(assetRfqMarketsFrom([], assetMarketPolicy(rows).pricing)).toMatchObject([
+      {
+        symbol: rfqSymbolFor(USDA),
+        base: null,
+        quote: USDA,
+        feeBps: 25,
         sellBase: { min: 1_000n, max: 1_000_000n },
         buyBase: { min: 2_000n, max: 2_000_000n },
       },

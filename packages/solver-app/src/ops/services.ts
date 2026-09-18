@@ -477,6 +477,7 @@ export const createServices = async (
     offerMarkets: config.offerMarkets,
     tokens: config.assetRfqTokens,
   })
+  for (const line of adminStore.repairedServing) log(`market serving repaired — ${line}`)
   // The READER set: a corridor an operator switched off still has in-flight
   // swaps, and those are still exposure the cap must count.
   const totalCommitted = () =>
