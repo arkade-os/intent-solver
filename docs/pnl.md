@@ -159,11 +159,17 @@ earlier attempt shipped exactly that and was withdrawn.
 market reads as roughly the margin; below zero the market has moved further than
 the margin covered and the fill is under water.
 
+**The flat parts are not inside it.** The dust carrier and any flat per-swap fee
+are netted off both amounts before the ratio is taken, so the mark reads the same
+whether or not an operator prices them. Left in, a fixed component biases a ratio
+by a term that grows as the swap shrinks — 330 carrier sats against a 50k-sat
+notional read as 66bp of a market move that never happened.
+
 "Roughly" is exact enough to rely on and is not an identity. At ordinary fees a
 flat market reads exactly `feeBps` on both legs, but the buying leg is really
-`feeBps / (1 − feeBps/10⁴)` — indistinguishable below 1%, `526` at `feeBps: 500`
-— and a flat per-trade fee adds to it. **The zero crossing is exact on both legs
-at every fee**, which is the part the screens actually lean on. On a 30bp market:
+`feeBps / (1 − feeBps/10⁴)` — indistinguishable below 1%, `526` at `feeBps: 500`.
+**The zero crossing is exact on both legs at every fee**, which is the part the
+screens actually lean on. On a 30bp market:
 
 | market at fill | mark |
 | --- | --- |
