@@ -253,6 +253,9 @@ export class AdminStore {
     // MUST stay: the symbol index names a column the ALTER loop adds, so SCHEMA cannot carry it.
     await store.driver.exec(MIGRATED_SCHEMA)
     if (seed) await store.seedServing(seed)
+    // AFTER the seed, and unconditional: a pre-upgrade row is old, not unhealthy,
+    // and judging one before the seed resolves it reports a repair it overwrites.
+    await store.repairServing()
     return store
   }
 
@@ -304,7 +307,6 @@ export class AdminStore {
         }
       }
     }
-    await this.repairServing()
   }
 
   /**
@@ -315,6 +317,8 @@ export class AdminStore {
    * rollback allows long after the marker was written. Throwing instead would
    * be a permanent boot failure fixable only by hand SQL. Each row's repair is
    * independent and idempotent, so no transaction wraps them.
+   * The notes say what was written to the ROW, not what is served: nothing reads
+   * `serves_rfq` at runtime yet, so a row this fails closed keeps quoting.
    */
   private async repairServing(): Promise<void> {
     const rows = await this.listMarkets()
@@ -323,7 +327,7 @@ export class AdminStore {
     for (const row of rows) {
       if (!row.servesRfq) continue
       const assetId = row.base !== null && row.quote !== null ? null : (row.base ?? row.quote)
-      const close = (why: string): void => void notes.push(`${row.marketKey}: ${why}; serves_rfq set to 0.`)
+      const close = (why: string): void => void notes.push(`${row.marketKey}: ${why}; wrote serves_rfq = 0 to the row.`)
       if (assetId === null) {
         close('an asset on both legs cannot be expressed over RFQ')
       } else if (row.symbol === null) {
@@ -332,7 +336,10 @@ export class AdminStore {
         if (taken.has(symbol)) close(`symbol ${symbol} is already carried by another market`)
         else {
           taken.add(symbol)
-          notes.push(`${row.marketKey}: no symbol stored; derived ${symbol}, as an older binary served it.`)
+          notes.push(
+            `${row.marketKey}: no symbol stored; wrote symbol = ${symbol} to the row, the stem an older binary ` +
+              `served when ASSET_MARKETS named no token for the asset.`,
+          )
           await this.driver.run('UPDATE admin_market SET symbol = ? WHERE market_key = ?', [symbol, row.marketKey])
           continue
         }

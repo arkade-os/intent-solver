@@ -12,6 +12,7 @@ import { assetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.j
 
 const USDA = 'aa'.repeat(34)
 const OTHER = 'bb'.repeat(34)
+const NAMED = [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } }]
 
 // An INSERT from a binary predating the serving columns: it names none of them.
 const OLD_BINARY_INSERT = `INSERT INTO admin_market (market_key, base, quote, base_decimals, quote_decimals,
@@ -321,6 +322,57 @@ describe('an incoherent serving row cannot brick startup', () => {
     const reopened = await AdminStore.open(driver, () => 9_000)
     expect(reopened.repairedServing).toEqual([])
     expect((await reopened.listMarkets())[0]).toEqual(before)
+  })
+
+  it('reports nothing on an ordinary first upgrade: the seed resolves a row before the repair judges it', async () => {
+    const driver = await preUpgradeDriver()
+    const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: NAMED })
+    expect(store.repairedServing).toEqual([])
+    expect((await store.listMarkets())[0]!.symbol).toBe('USDA')
+  })
+
+  it('serves a NAMED asset under the token symbol the older binary used, not a derived stem', async () => {
+    const driver = await preUpgradeDriver()
+    const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: NAMED })
+    const rows = await store.listMarkets()
+    expect(rows[0]).toMatchObject({ symbol: 'USDA', servesRfq: true })
+    expect(assetRfqMarketsFrom(NAMED, assetMarketPolicy(rows).pricing)).toMatchObject([
+      { symbol: 'USDA', base: null, quote: USDA, sellBase: { min: 1_000n, max: 1_000_000n } },
+    ])
+  })
+
+  it('writes a derived stem on a rollback-window row even for a NAMED asset -- the repair is env-free', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    await AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: NAMED })
+    await driver.run(OLD_BINARY_INSERT, [assetMarketKey(null, USDA), USDA])
+    const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: NAMED })
+    const rows = await store.listMarkets()
+    // The row takes the derived stem while the serve list is still built from the
+    // env token, so the two disagree without diverging until a later task reads the row.
+    expect(rows[0]!.symbol).toBe(rfqSymbolFor(USDA))
+    expect(assetRfqMarketsFrom(NAMED, assetMarketPolicy(rows).pricing)[0]!.symbol).toBe('USDA')
+  })
+
+  it('names the column it wrote and the condition the derived stem stands in for', async () => {
+    const driver = await rolledBack()
+    const store = await AdminStore.open(driver, () => 2_000)
+    expect(store.repairedServing[0]).toContain(`wrote symbol = ${rfqSymbolFor(USDA)}`)
+    expect(store.repairedServing[0]).toContain('ASSET_MARKETS named no token')
+  })
+
+  it('says what it wrote to the row when it fails closed, never that the market stopped quoting', async () => {
+    const driver = await rolledBack(`, symbol = 'USDA', rfq_sell_base = 0, rfq_buy_base = 0`)
+    const store = await AdminStore.open(driver, () => 2_000)
+    expect(store.repairedServing[0]).toContain('wrote serves_rfq = 0 to the row')
+    expect(store.repairedServing[0]).not.toMatch(/stopped|no longer|de-?listed/)
+  })
+
+  it('is silent on the second boot of an already-repaired file', async () => {
+    const driver = await rolledBack()
+    await AdminStore.open(driver, () => 2_000)
+    const again = await AdminStore.open(driver, () => 3_000)
+    expect(again.repairedServing).toEqual([])
+    expect((await again.listMarkets())[0]!.symbol).toBe(rfqSymbolFor(USDA))
   })
 
   it('boots a row an older binary INSERTed after the marker, serving what it served', async () => {
