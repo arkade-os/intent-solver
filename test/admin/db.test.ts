@@ -8,6 +8,7 @@ import {
   DEFAULT_SERVING,
   type AssetMarketConfig,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { validateAssetMarket } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { assetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 
 const USDA = 'aa'.repeat(34)
@@ -17,6 +18,23 @@ const BOTH_CLOSED = [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: fals
 // Shares USDA's derived stem: `rfqSymbolFor` reads only the first 7 and last 4 hex.
 const TWIN = 'aaaaaaa' + 'b'.repeat(57) + 'aaaa'
 const TWIN_NAMED = [{ symbol: 'USDB', assetId: TWIN, enabled: { sell_base: true, buy_base: true } }]
+
+const PRE_UPGRADE_TABLE = `CREATE TABLE admin_market (market_key TEXT PRIMARY KEY, base TEXT, quote TEXT,
+     base_decimals INTEGER NOT NULL, quote_decimals INTEGER NOT NULL, feed_url TEXT NOT NULL,
+     price_path TEXT NOT NULL, tolerance_bps INTEGER NOT NULL, fee_bps INTEGER NOT NULL,
+     sell_base_min TEXT, sell_base_max TEXT, buy_base_min TEXT, buy_base_max TEXT,
+     enabled INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`
+
+const ONE_CLOSED = 'cc'.repeat(34)
+const UNNAMED = 'dd'.repeat(34)
+const LEG_A = 'ee'.repeat(34)
+const LEG_B = 'ff'.repeat(34)
+// Named/unnamed x both-open/one-closed/both-closed, plus an asset on both legs.
+const SHAPES = [
+  { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } },
+  { symbol: 'USDB', assetId: ONE_CLOSED, enabled: { sell_base: true, buy_base: false } },
+  { symbol: 'USDC', assetId: OTHER, enabled: { sell_base: false, buy_base: false } },
+]
 
 // An INSERT from a binary predating the serving columns: it names none of them.
 const OLD_BINARY_INSERT = `INSERT INTO admin_market (market_key, base, quote, base_decimals, quote_decimals,
@@ -41,13 +59,7 @@ const marketFixture = (): AssetMarketConfig => ({
 
 const preUpgradeDriver = async (): Promise<SqlDriver> => {
   const driver = betterSqliteDriver(':memory:')
-  await driver.exec(
-    `CREATE TABLE admin_market (market_key TEXT PRIMARY KEY, base TEXT, quote TEXT,
-       base_decimals INTEGER NOT NULL, quote_decimals INTEGER NOT NULL, feed_url TEXT NOT NULL,
-       price_path TEXT NOT NULL, tolerance_bps INTEGER NOT NULL, fee_bps INTEGER NOT NULL,
-       sell_base_min TEXT, sell_base_max TEXT, buy_base_min TEXT, buy_base_max TEXT,
-       enabled INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
-  )
+  await driver.exec(PRE_UPGRADE_TABLE)
   await driver.run(
     `INSERT INTO admin_market VALUES (?, NULL, ?, 8, 6, 'https://feed.test/p', '/p', 10, 25,
        '1000', '1000000', '2000', '2000000', 1, 1, 1)`,
@@ -349,6 +361,7 @@ describe('an incoherent serving row cannot brick startup', () => {
     const driver = betterSqliteDriver(':memory:')
     const store = await AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: NAMED })
     await store.putMarket({ ...marketFixture(), ...DEFAULT_SERVING, symbol: rfqSymbolFor(USDA) })
+    expect(rfqSymbolFor(TWIN)).toBe(rfqSymbolFor(USDA))
     await driver.run(OLD_BINARY_INSERT, [assetMarketKey(null, TWIN), TWIN])
     const reopened = await AdminStore.open(driver, () => 2_000)
     const rows = await reopened.listMarkets()
@@ -364,6 +377,27 @@ describe('an incoherent serving row cannot brick startup', () => {
     await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: NAMED })
     const later = await AdminStore.open(driver, () => 3_000, { offerMarkets: [], tokens: NAMED })
     expect((await later.listMarkets())[0]!.symbol).toBe(rfqSymbolFor(USDA))
+  })
+
+  it('seeds only rows validateAssetMarket accepts, across every shape the env can name', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    await driver.exec(PRE_UPGRADE_TABLE)
+    for (const asset of [USDA, ONE_CLOSED, OTHER, UNNAMED]) {
+      await driver.run(OLD_BINARY_INSERT, [assetMarketKey(null, asset), asset])
+    }
+    await driver.run(
+      `INSERT INTO admin_market (market_key, base, quote, base_decimals, quote_decimals, feed_url, price_path,
+         tolerance_bps, fee_bps, enabled, created_at, updated_at)
+       VALUES ('both-legs', ?, ?, 8, 6, 'https://feed.test/p', '/p', 10, 25, 1, 1, 1)`,
+      [LEG_A, LEG_B],
+    )
+    const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: SHAPES })
+    const rows = await store.listMarkets()
+    expect(rows).toHaveLength(5)
+    // The repair staying silent is what makes this a claim about the SEED: had the seed
+    // emitted a row `checkServing` rejects, the repair would have corrected it and said so.
+    expect(store.repairedServing).toEqual([])
+    for (const row of rows) expect(() => validateAssetMarket(row), row.marketKey).not.toThrow()
   })
 
   it('boots a first upgrade whose env closes BOTH directions of a named asset', async () => {
