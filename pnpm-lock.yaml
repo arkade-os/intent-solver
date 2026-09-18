@@ -4,13 +4,16 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@arkade-os/sdk': file:./vendor/arkade-os-sdk-pr950-05458bb5.tgz
+
 importers:
 
   .:
     dependencies:
       '@arkade-os/sdk':
-        specifier: 0.4.73
-        version: 0.4.73
+        specifier: file:vendor/arkade-os-sdk-pr950-05458bb5.tgz
+        version: file:vendor/arkade-os-sdk-pr950-05458bb5.tgz
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:packages/solver-arkade
@@ -115,8 +118,8 @@ importers:
   packages/solver-app:
     dependencies:
       '@arkade-os/sdk':
-        specifier: 0.4.73
-        version: 0.4.73
+        specifier: file:../../vendor/arkade-os-sdk-pr950-05458bb5.tgz
+        version: file:vendor/arkade-os-sdk-pr950-05458bb5.tgz
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -179,8 +182,8 @@ importers:
   packages/solver-arkade:
     dependencies:
       '@arkade-os/sdk':
-        specifier: 0.4.73
-        version: 0.4.73
+        specifier: file:../../vendor/arkade-os-sdk-pr950-05458bb5.tgz
+        version: file:vendor/arkade-os-sdk-pr950-05458bb5.tgz
       '@arkade-os/solver-core':
         specifier: workspace:*
         version: link:../solver-core
@@ -222,8 +225,8 @@ importers:
   packages/solver-corridors:
     dependencies:
       '@arkade-os/sdk':
-        specifier: 0.4.73
-        version: 0.4.73
+        specifier: file:../../vendor/arkade-os-sdk-pr950-05458bb5.tgz
+        version: file:vendor/arkade-os-sdk-pr950-05458bb5.tgz
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -252,8 +255,8 @@ importers:
   packages/solver-corridors-evm:
     dependencies:
       '@arkade-os/sdk':
-        specifier: 0.4.73
-        version: 0.4.73
+        specifier: file:../../vendor/arkade-os-sdk-pr950-05458bb5.tgz
+        version: file:vendor/arkade-os-sdk-pr950-05458bb5.tgz
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -406,8 +409,9 @@ packages:
     resolution: {integrity: sha512-+90ob+ruUhb5RfdZhfryIb0H+G3BDtQ+IiQvNJwpwN/gMRcMm9jwJpUBAf5yqhPCWY8KsPNcKFzt5IzCmtqzxQ==}
     engines: {node: '>=20'}
 
-  '@arkade-os/sdk@0.4.73':
-    resolution: {integrity: sha512-OaWaAihB9IdvSTVO4hZPfWpfpeB1Czmx18nXkwq49oCPIqYCaagRnIEnVX5dF/Y3nPRrNeKcw94pNzTHI69Tsw==}
+  '@arkade-os/sdk@file:vendor/arkade-os-sdk-pr950-05458bb5.tgz':
+    resolution: {integrity: sha512-S5WAxgOK38fEI70KTqzUfF+klzpO0m1SWC6HXcvwbFw0jaHXPOWdVxZmCx+vXPO/thF6efQa1RiCRE8IYFBtcQ==, tarball: file:vendor/arkade-os-sdk-pr950-05458bb5.tgz}
+    version: 0.4.73
     engines: {node: '>=22.12.0 <27'}
     peerDependencies:
       '@react-native-async-storage/async-storage': '>=1.0.0'
@@ -1642,7 +1646,7 @@ snapshots:
 
   '@alexbosworth/blockchain@3.2.0': {}
 
-  '@arkade-os/sdk@0.4.73':
+  '@arkade-os/sdk@file:vendor/arkade-os-sdk-pr950-05458bb5.tgz':
     dependencies:
       '@bitcoinerlab/descriptors-scure': 3.1.7
       '@marcbachmann/cel-js': 8.0.0
@@ -1665,7 +1669,7 @@ snapshots:
 
   '@arkade-os/swap@0.0.19(nostr-tools@2.24.1(typescript@5.9.3))':
     dependencies:
-      '@arkade-os/sdk': 0.4.73
+      '@arkade-os/sdk': file:vendor/arkade-os-sdk-pr950-05458bb5.tgz
       '@arkade-os/solver-discovery': 0.2.5
       '@noble/ciphers': 2.1.1
       '@noble/curves': 2.0.1
