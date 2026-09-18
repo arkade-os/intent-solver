@@ -17,6 +17,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { corridorSetFromDeps, readerSetFromDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
+import { respondToRfqRequest } from '@arkade-os/solver-transport/ingress/rfq.js'
 import { endpointHost } from '@arkade-os/solver-app/ops/services.js'
 import { createServicesBody, servicesSource } from '../support/createServicesBody.js'
 import { evmCorridorFor } from '@arkade-os/solver-core/core/corridorPolicy.js'
@@ -113,6 +114,14 @@ describe('one broadcaster across both legs', () => {
   })
 })
 
+describe('the EVM send leg`s tick failures', () => {
+  it('go through the tracker the four BTC corridors share, not straight to the log', () => {
+    const body = createServices()
+    const send = body.slice(body.indexOf('new EvmSendSwapService('), body.indexOf('new EvmReceiveSwapService('))
+    expect(send).toContain('tickErrors.record(id, error)')
+  })
+})
+
 describe('the EVM receive leg shares the BTC receive ops', () => {
   it('derives them once rather than building a second identical object', () => {
     // Two derivations from one context work, and give the corridors two places
@@ -183,6 +192,22 @@ describe('both legs are actually driven', () => {
     })
     expect(corridors.get(SEND_PAIR)).toBeUndefined()
     expect(corridors.get(RECEIVE_PAIR)).toBeUndefined()
+  })
+
+  it('still refuses a disabled corridor`s quote, however the sweep is driven', async () => {
+    // Watching a disabled corridor's exposure is not serving it again.
+    const quote = vi.fn()
+    const corridors = corridorSetFromDeps({
+      store: {} as never,
+      onchainStore: {} as never,
+      evmSendService: { tickAll: async () => [], quote } as never,
+      evmSendStore: {} as never,
+      evmCorridors: [policy('send', false)],
+    })
+    const outcome = await respondToRfqRequest(corridors, { rfq_id: 'rfq-1', pair: SEND_PAIR, amount: 50_000 })
+    expect(outcome.kind).toBe('invalid')
+    expect(outcome.payload).toMatchObject({ type: 'rfq_refusal', reason: 'unsupported_pair' })
+    expect(quote).not.toHaveBeenCalled()
   })
 
   it('stops ticking a darkened leg while the enabled one beside it keeps going', async () => {
