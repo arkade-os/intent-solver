@@ -703,7 +703,8 @@ RefuseFund(w, s) ==
 \* `funding_txid IS NULL` needs no variable of its own: funding_txid and
 \* funding_vout are written in the SAME UPDATE as the move out of
 \* funding_onchain (submitFunding, recoverFunding), so the column is a pure
-\* the state — and that is itself the property that makes recoverFunding's
+\* function of the state — and that is itself the property that makes
+\* recoverFunding's
 \* branch selection sound.  A Go rewrite that writes the txid in a separate
 \* statement breaks this equivalence and needs the variable back.
 CanSubmitFunding(w, s) ==

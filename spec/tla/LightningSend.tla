@@ -649,8 +649,8 @@ SubmitPay(w, s) ==
 \* patch(payment_id) then the paying->paid CAS.  The patch is a BLIND write:
 \* `UPDATE ... WHERE id = ?`, no state predicate, no CAS, return value ignored
 \* (patch() in db/baseSwapStore.ts).  It runs even when the payment failed,
-\* and even
-\* when the row has already moved on.  A crash between SubmitPay and here is
+\* and even when the row has already moved on.  A crash between SubmitPay
+\* and here is
 \* THE UNKNOWN-RESULT CASE: the sats may or may not have left and the row
 \* cannot tell, which is exactly why the recovery path re-issues under the
 \* same key rather than trying to poll.

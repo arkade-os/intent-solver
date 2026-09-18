@@ -670,7 +670,8 @@ RecordLock(w, s) ==
 
 \* refund_evm.  From locking_evm (plan, case locking_evm) and from
 \* awaiting_claim (plan, case awaiting_claim) alike, the height timeout is
-\* condition - the two states agree.  (A7): requiring the lock ABSENT, as
+\* now the whole condition - the two states agree.  (A7): requiring the
+\* lock ABSENT, as
 \* locking_evm used to, defeats the whole margin whenever the lock is
 \* present but never proven deep, because the timeout exists to end the
 \* client's option and that branch withheld it exactly then.  The CAS, then

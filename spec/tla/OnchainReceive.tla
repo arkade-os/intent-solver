@@ -580,8 +580,9 @@ ConfirmHtlcFunding(s) ==
 
 \* A REORG EVICTS THE CLIENT'S FUNDING.  Only reachable while the output has
 \* not reached min_confirmations — which is the ENTIRE reorg policy of this
-\* corridor, checked once in whenAwaitingConfirmations and never re-validated
-\* paid out.  Any spend broadcast against the evicted outpoint dies with it.
+\* corridor, checked once in whenAwaitingConfirmations and never
+\* re-validated after the solver has paid out.  Any spend broadcast against
+\* the evicted outpoint dies with it.
 ReorgHtlcFunding(s) ==
     /\ htlc[s] = "seen"
     /\ l1[s] = {}

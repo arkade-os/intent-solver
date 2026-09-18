@@ -92,14 +92,14 @@
 (*       as the height clock refusing to advance while a claim is in       *)
 (*       flight against a still-locked contract.  The mutation lets the    *)
 (*       client's refund win the race and NoNetLoss fails.                 *)
-(*  (B3) `ClaimRecordsReceipt`.  SHIPPED, not an open assumption (plan     *)
-(*       RULE 6): `claimed` is written only for a claim whose own receipt  *)
-(*       says it MINED.  The row used to record it when the broadcast      *)
-(*       RETURNED a txid - send-only, no receipt (broadcast) - so the      *)
-(*       terminal word could stand over a claim that reverted, reporting   *)
-(*       the solver paid when the sats had gone out for nothing.  The      *)
-(*       mutation records at send time and NoSilentLoss fails.  Finding    *)
-(*       F2, fixed.                                                        *)
+(*  (B3) `ClaimRecordsReceipt`.  SHIPPED, not an open assumption (plan's   *)
+(*       record_claim arm): `claimed` is written only for a claim whose    *)
+(*       own receipt says it MINED.  The row used to record it when the    *)
+(*       broadcast RETURNED a txid - send-only, no receipt (broadcast) -   *)
+(*       so the terminal word could stand over a claim that reverted,      *)
+(*       reporting the solver paid when the sats had gone out for          *)
+(*       nothing.  The mutation records at send time and NoSilentLoss      *)
+(*       fails.  Finding F2, fixed.                                        *)
 (*  (B4) `FundLandsPromptly`.  fundArkade is one awaited call in the       *)
 (*       shell; RULE 2's margin is what makes "the fund landed quickly"    *)
 (*       safe to assume.  The mutation lets the accept land at or after    *)
@@ -483,7 +483,8 @@ RefuseQuoted(w, s) ==
 
 \* fund_arkade: the CAS FIRST (B1) - "exposed BEFORE the sats go out"
 \* (orchestrator, the fund_arkade arm) - then the broadcast is a separate
-\* crash can land between them: the parked funding_arkade with no sats
+\* step so a crash can land between them: the parked funding_arkade with
+\* no sats
 \* out, F1.  From `locked` the planner funds unconditionally (plan, case locked).
 FundArkade(w, s) ==
     /\ \/ /\ Saw(w, s, loc[w].seen)
@@ -531,7 +532,8 @@ AwaitClaim(w, s) ==
 \* THE PRE-SWITCH RULE, early arm (RULE 3): P seen before the client's
 \* timeout height.  CAS into claiming - persisting P with the state
 \* (orchestrator, the claim_evm arm) - then the claim broadcast is a
-\* then the recording CAS.  Enabled from ANY non-terminal state, claiming
+\* separate step, then the recording CAS.  Enabled from ANY non-terminal
+\* state, claiming
 \* included: the retry IS the pre-switch rule re-firing off the persisted
 \* preimage, and the shell skips the state CAS for it.
 ClaimEvm(w, s) ==
@@ -560,13 +562,14 @@ ClaimBroadcast(w, s) ==
     /\ UNCHANGED << clock, st, loc, conf, serverUp, evmHeight >>
     /\ UNCHANGED << arkFund, evm, evmConfirmed, fundSends >>
 
-\* The recording CAS, and (B3) its receipt.  SHIPPED (plan RULE 6): the row
-\* records `claimed` only once the claim is MINED, and the broadcast itself
-\* only patches evm_claim_txid (orchestrator, the claim_evm arm).  It USED
-\* terminal word when the broadcast RETURNED a txid - send-only, no receipt
-\* (broadcast) - so the word could stand over a claim that never
-\* landed while the solver's sats were already out.  The mutation restores
-\* the send-time record and NoSilentLoss names the lie.
+\* The recording CAS, and (B3) its receipt.  SHIPPED (plan's record_claim
+\* arm): the row records `claimed` only once the claim is MINED, and the
+\* broadcast itself only patches evm_claim_txid (orchestrator, the
+\* claim_evm arm).  It USED TO write the terminal word when the broadcast
+\* RETURNED a txid - send-only, no receipt (broadcast) - so the word could
+\* stand over a claim that never landed while the solver's sats were
+\* already out.  The mutation restores the send-time record and
+\* NoSilentLoss names the lie.
 RecordClaimed(w, s) ==
     /\ At(w, s, "sentClaim")
     /\ claimSent[s]
@@ -581,7 +584,8 @@ RecordClaimed(w, s) ==
 
 \* refund_arkade: no preimage and the Arkade window has closed
 \* (plan, case awaiting_claim).  The CAS, then the spend, then the
-\* steps in the shipped shell, and RefundSpendAtomic = FALSE is that shipped
+\* recording CAS - three steps in the shipped shell, and
+\* RefundSpendAtomic = FALSE is that shipped
 \* split.  What used to make the split cost money was that nothing re-drove
 \* refunding_arkade, so a crash between the CAS and the spend stranded the
 \* row with the covenant unspent (F4).  RedriveArkRefund below is the fix;
@@ -628,7 +632,8 @@ SubmitArkRefund(w, s) ==
 \* (B5) THE RE-DRIVE, and what closes F4.  planEvmReceive returns
 \* refund_arkade from refunding_arkade whenever the lockup is still funded
 \* (plan, case refunding_arkade), so the window the split opens is closed
-\* the NEXT SWEEP rather than by folding the spend into the CAS: the shell
+\* by the NEXT SWEEP rather than by folding the spend into the CAS: the
+\* shell
 \* skips the CAS it is already past and re-attempts the spend.  `conf = {}`
 \* is the unspent covenant the shipped planner sees as `arkadeLockupFunded`,
 \* and `res = "clear"` keeps the pre-switch rule's precedence - a preimage
@@ -799,7 +804,7 @@ ERSpendKinds == { "clientClaim", "solverRefund" }
 (*     when the claim broadcast returned a txid - send-only, no receipt    *)
 (*     (broadcast) - so the terminal word could stand over a claim that    *)
 (*     reverted while the solver's sats were already out.  The planner     *)
-(*     now reads the receipt (plan RULE 6) and sticks                      *)
+(*     now reads the receipt (plan's record_claim arm) and sticks          *)
 (*     on a revert, so EvmReceive_NoReceipt.cfg is a genuine mutation - it *)
 (*     deletes the shipped check - rather than a record of shipped         *)
 (*     behaviour.                                                          *)
