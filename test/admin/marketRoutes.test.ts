@@ -71,7 +71,9 @@ const build = async (opts: { active?: { base: string | null; quote: string | nul
   })
   const services = {
     config: {},
-    policy: { offerMarkets: [], assetRfqTokens: [] },
+    // Shipped default is false for both — config.ts:978-979.
+    policy: { offerMarkets: [], assetRfqTokens: [], assetCarrierPricing: false, offerChargesDeliveredCarrier: false },
+    arkade: { dustSats: 330n },
     adminStore,
     assetMarkets: opts.active ?? [],
     liveOfferMarkets: [] as { a: string | null; b: string | null }[],
@@ -83,7 +85,7 @@ const build = async (opts: { active?: { base: string | null; quote: string | nul
     },
   }
   const app = buildAdminApp({ services: services as never, startedAt: 1, mode: 'relay', fetchPrice })
-  return { app, adminStore, fetchPrice }
+  return { app, adminStore, fetchPrice, services }
 }
 
 const put = (app: ReturnType<typeof buildAdminApp>, payload: unknown) =>
@@ -396,6 +398,16 @@ describe('a console save round-trips what the API handed it', () => {
     draft.sellBaseFeeBps = 'abc'
     expect((await put(app, marketBody(draft))).status).toBe(400)
     expect(await adminStore.listMarkets()).toMatchObject([{ sellBaseFeeBps: 0, buyBaseFeeBps: 900 }])
+    await adminStore.close()
+  })
+})
+
+describe('the harness carries the deployment facts the real Services does', () => {
+  it('names the dust and both carrier flags, which the route is about to read', async () => {
+    // Absent, the route throws before Task 8's assertions ever run.
+    const { services, adminStore } = await build()
+    expect(services.arkade.dustSats).toBe(330n)
+    expect(services.policy).toMatchObject({ assetCarrierPricing: false, offerChargesDeliveredCarrier: false })
     await adminStore.close()
   })
 })
