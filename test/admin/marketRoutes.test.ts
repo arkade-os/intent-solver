@@ -45,7 +45,7 @@ const consoleForm = () => {
   }
 }
 
-const SERVER_DERIVED = ['marketKey', 'createdAt', 'updatedAt', 'servedBy']
+const SERVER_DERIVED = ['marketKey', 'createdAt', 'updatedAt', 'servedBy', 'rfqDirections']
 const editable = (row: Record<string, unknown>) =>
   Object.fromEntries(Object.entries(row).filter(([key]) => !SERVER_DERIVED.includes(key)))
 
@@ -63,7 +63,14 @@ const body = (over: Record<string, unknown> = {}) => ({
   ...over,
 })
 
-const build = async (opts: { active?: { base: string | null; quote: string | null }[]; feedFails?: boolean } = {}) => {
+const build = async (
+  opts: {
+    active?: { base: string | null; quote: string | null }[]
+    feedFails?: boolean
+    closed?: 'sell_base' | 'buy_base'
+    carrier?: { assetCarrierPricing: boolean; offerChargesDeliveredCarrier: boolean }
+  } = {},
+) => {
   const adminStore = await AdminStore.open(':memory:', () => 1_000_000)
   const fetchPrice = vi.fn(async () => {
     if (opts.feedFails) throw new Error('HTTP 503 Service Unavailable')
@@ -72,16 +79,31 @@ const build = async (opts: { active?: { base: string | null; quote: string | nul
   const services = {
     config: {},
     // Shipped default is false for both — config.ts:978-979.
-    policy: { offerMarkets: [], assetRfqTokens: [], assetCarrierPricing: false, offerChargesDeliveredCarrier: false },
+    policy: {
+      offerMarkets: [],
+      assetRfqTokens: [],
+      assetCarrierPricing: false,
+      offerChargesDeliveredCarrier: false,
+      ...opts.carrier,
+    },
     arkade: { dustSats: 330n },
     adminStore,
     assetMarkets: opts.active ?? [],
     liveOfferMarkets: [] as { a: string | null; b: string | null }[],
-    assetRfqMarkets: [] as { base: string | null; quote: string | null }[],
+    assetRfqMarkets: [] as {
+      base: string | null
+      quote: string | null
+      sellBase?: { min: bigint; max: bigint }
+      buyBase?: { min: bigint; max: bigint }
+    }[],
     replaceMarkets: async () => {
       const rows = await adminStore.listMarkets()
       services.assetMarkets = rows.filter((row) => row.enabled).map((row) => ({ base: row.base, quote: row.quote }))
-      services.assetRfqMarkets = services.assetMarkets
+      services.assetRfqMarkets = services.assetMarkets.map((market) => ({
+        ...market,
+        sellBase: opts.closed === 'sell_base' ? { min: 0n, max: 0n } : { min: 1n, max: 10n ** 12n },
+        buyBase: opts.closed === 'buy_base' ? { min: 0n, max: 0n } : { min: 1n, max: 10n ** 12n },
+      }))
     },
   }
   const app = buildAdminApp({ services: services as never, startedAt: 1, mode: 'relay', fetchPrice })
@@ -408,6 +430,46 @@ describe('the harness carries the deployment facts the real Services does', () =
     const { services, adminStore } = await build()
     expect(services.arkade.dustSats).toBe(330n)
     expect(services.policy).toMatchObject({ assetCarrierPricing: false, offerChargesDeliveredCarrier: false })
+    await adminStore.close()
+  })
+})
+
+describe('GET /api/markets — the policy an operator cannot otherwise see', () => {
+  it('reports the carrier, and that nobody is paying for it', async () => {
+    const { app, adminStore } = await build()
+    const seen = (await list(app)) as unknown as {
+      carrier: { sats: string; rfqPriced: boolean; offerCharged: boolean }
+    }
+    // Both false is the shipped default: the solver funds 330 sats per asset
+    // payout out of margin and no screen says so.
+    expect(seen.carrier).toEqual({ sats: '330', rfqPriced: false, offerCharged: false })
+    await adminStore.close()
+  })
+
+  it('reads rfqPriced and offerCharged from policy rather than shipping them hardcoded', async () => {
+    const { app, adminStore } = await build({
+      carrier: { assetCarrierPricing: true, offerChargesDeliveredCarrier: true },
+    })
+    const seen = (await list(app)) as unknown as { carrier: { rfqPriced: boolean; offerCharged: boolean } }
+    expect(seen.carrier).toMatchObject({ rfqPriced: true, offerCharged: true })
+    await adminStore.close()
+  })
+
+  it('reports which RFQ directions this process is actually open on', async () => {
+    const { app, adminStore } = await build()
+    await put(app, body())
+    const seen = (await list(app)).markets as unknown as {
+      rfqDirections: { sellBase: boolean; buyBase: boolean }
+    }[]
+    expect(seen[0]!.rfqDirections).toEqual({ sellBase: true, buyBase: true })
+    await adminStore.close()
+  })
+
+  it('reports a direction the running process closed, which the row cannot show', async () => {
+    const { app, adminStore } = await build({ closed: 'buy_base' })
+    await put(app, body())
+    const seen = (await list(app)).markets as unknown as { rfqDirections: { buyBase: boolean } }[]
+    expect(seen[0]!.rfqDirections.buyBase).toBe(false)
     await adminStore.close()
   })
 })

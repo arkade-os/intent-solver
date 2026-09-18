@@ -184,15 +184,33 @@ export const registerMarketRoutes = (app: Hono, deps: AdminDeps, feeds?: FeedCac
 
   app.get('/api/markets', async (c) => {
     const rows = await deps.services.adminStore.listMarkets()
+    const rfq = deps.services.assetRfqMarkets
+    // A direction the RUNNING process closed reads as `{min:0n,max:0n}`
+    // (ops/assetRfqMarkets.ts:31) — indistinguishable from an unset row bound.
+    const directionsFor = (row: AssetMarketRow) => {
+      const served = rfq.find((market) => market.base === row.base && market.quote === row.quote)
+      return { sellBase: (served?.sellBase?.max ?? 0n) > 0n, buyBase: (served?.buyBase?.max ?? 0n) > 0n }
+    }
     return c.json({
       // `servedBy` is a SECOND axis, beside the row's own `enabled`. A market can
       // be enabled and served by nothing, which is the state that cost an
       // operator an evening. @see admin/servedBy.ts
-      markets: rows.map((row) => ({ ...marketJson(row), servedBy: servedBy(row, deps.services) })),
+      markets: rows.map((row) => ({
+        ...marketJson(row),
+        servedBy: servedBy(row, deps.services),
+        rfqDirections: directionsFor(row),
+      })),
       /**
        * Which of these the RUNNING process is actually trading against.
        */
       active: deps.services.assetMarkets.map((market) => assetMarketKey(market.base, market.quote)),
+      // Deployment-wide today, read-only for that reason. Both false is the
+      // shipped default, so it pays the carrier out of margin.
+      carrier: {
+        sats: String(deps.services.arkade.dustSats),
+        rfqPriced: deps.services.policy.assetCarrierPricing,
+        offerCharged: deps.services.policy.offerChargesDeliveredCarrier,
+      },
       restartNotice: MARKETS_LIVE_NOTICE,
     })
   })
