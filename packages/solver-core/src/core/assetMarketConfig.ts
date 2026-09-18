@@ -200,7 +200,7 @@ export const isPrivateFeedHost = (hostname: string): boolean => {
   if (host === 'localhost' || host.endsWith('.localhost') || host === '' || host === '::' || host === '::1') return true
   // A parsed hostname never contains a raw colon; only a bracket-stripped IPv6 literal does.
   if (host.includes(':')) {
-    if (/^fe[89ab][0-9a-f]:/.test(host)) return true // fe80::/10, not just the fe80: literal
+    if (/^fe[89a-f][0-9a-f]:/.test(host)) return true // fe80::/9: link-local and site-local are adjacent /10s
     if (host.startsWith('fc') || host.startsWith('fd')) return true // fc00::/7
     const v6Mapped = /^::ffff:(.+)$/.exec(host)
     if (!v6Mapped) return false

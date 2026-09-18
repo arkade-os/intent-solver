@@ -350,4 +350,22 @@ describe('the predicate actually closes the class it names', () => {
       /private, loopback or link-local/,
     )
   })
+
+  it('refuses fec0::1, deprecated IPv6 site-local', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://[fec0::1]/price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  it('refuses feff::1, the last address of the merged fe80::/9', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://[feff::1]/price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  // Fails the moment someone rewrites the class as `startsWith('fe')` — the
+  // same over-refusal that blocked fcsapi.com.
+  it('admits fe7f::1, one group below the range', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://[fe7f::1]/price' }))).not.toThrow()
+  })
 })
