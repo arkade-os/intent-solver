@@ -76,7 +76,7 @@
 (*                                                                         *)
 (*  - Amounts and overfunding.  Every swap is `Amount` sats and a lockup   *)
 (*    is exactly right or absent.  The overfund refusal                    *)
-(*    (orchestrator's quote()) protects the CLIENT, not the solver's      *)
+(*    (orchestrator's quote()) protects the CLIENT, not the solver's       *)
 (*    money invariant, so it is out of scope here.                         *)
 (*  - The preimage column.  The code writes P in the SAME UPDATE as        *)
 (*    paid->claiming, so `st[s] = "claiming"` already means "P is on disk  *)
@@ -87,7 +87,7 @@
 (*    routes it to `stuck`.  Modelling it adds a paid-and-uncollected      *)
 (*    terminal that `stuck` already covers, and adds a loss no guard in    *)
 (*    this corridor addresses.  See the report.                            *)
-(*  - The payInvoice-response preimage shortcut (submitPayment).     *)
+(*  - The payInvoice-response preimage shortcut (submitPayment).           *)
 (*    It is a latency optimisation over the getPayment poll; both are      *)
 (*    LearnPreimage here.                                                  *)
 (*  - The event log, column allowlists, the idempotency-key STRING.  The   *)
@@ -100,9 +100,9 @@
 (*  (A1) HtlcMaxLifetime.  An in-flight Lightning payment must resolve     *)
 (*       within HtlcMaxLifetime ticks.  This is not charity: it is         *)
 (*       maxCltvBlocks = worstCaseHtlcBlocks(minFinalCltv) which LND       *)
-(*       ENFORCES as max_timeout_height (lnd adapter, payInvoice),   *)
-(*       and it is the same number refundLocktimeFor priced the deadline   *)
-(*       against (core/send.ts, refundLocktimeFor).  ASSUME below requires        *)
+(*       ENFORCES as max_timeout_height (lnd adapter, payInvoice), and     *)
+(*       it is the same number refundLocktimeFor priced the deadline       *)
+(*       against (core/send.ts).  ASSUME below requires                    *)
 (*       HtlcMaxLifetime < MinClaimWindow, which IS the design constraint. *)
 (*       On a backend with no way to express that ceiling, the assumption  *)
 (*       is only a hope, and that is a finding, not a model bug.           *)
@@ -125,8 +125,8 @@
 (*       client can only be LATER than this.  Modelling the earliest       *)
 (*       legal instant is the conservative direction for the solver.       *)
 (*       MIN_CLAIM_WINDOW is 90 minutes precisely to cover that lag        *)
-(*       (core/send.ts, MIN_CLAIM_WINDOW); the model collapses the lag into    *)
-(*       constant ordering HtlcMaxLifetime < MinClaimWindow.               *)
+(*       (core/send.ts); the model collapses the lag into the constant     *)
+(*       ordering HtlcMaxLifetime < MinClaimWindow.                        *)
 (*                                                                         *)
 (* WHAT A GO IMPLEMENTER MUST PRESERVE                                     *)
 (*                                                                         *)
@@ -650,8 +650,8 @@ SubmitPay(w, s) ==
 \* `UPDATE ... WHERE id = ?`, no state predicate, no CAS, return value ignored
 \* (patch() in db/baseSwapStore.ts).  It runs even when the payment failed,
 \* and even when the row has already moved on.  A crash between SubmitPay
-\* and here is
-\* THE UNKNOWN-RESULT CASE: the sats may or may not have left and the row
+\* and here is THE UNKNOWN-RESULT CASE: the sats may or may not have left
+\* and the row
 \* cannot tell, which is exactly why the recovery path re-issues under the
 \* same key rather than trying to poll.
 \*
