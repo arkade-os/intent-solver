@@ -10,6 +10,7 @@ const quote = (over: Partial<QuoteRecord> = {}): QuoteRecord => ({
   paymentHash: 'a'.repeat(64),
   amountSats: 500,
   invoiceExpiresAt: clock + 3600,
+  quotedRefundDeadline: clock + 7200,
   refundLocktime: clock + 7200,
   senderPubkey: '01'.repeat(32),
   receiverPubkey: '02'.repeat(32),

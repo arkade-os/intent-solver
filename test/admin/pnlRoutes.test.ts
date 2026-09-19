@@ -63,6 +63,7 @@ const sendQuote = (over: Partial<QuoteRecord> = {}): QuoteRecord => ({
   // `giveSatsFor(invoice, fee)` here, so this is the invoice plus the spread.
   amountSats: INVOICE_SATS + 300,
   invoiceExpiresAt: NOW + 3_600,
+  quotedRefundDeadline: NOW + 7_200,
   refundLocktime: NOW + 7_200,
   senderPubkey: '01'.repeat(32),
   receiverPubkey: '02'.repeat(32),

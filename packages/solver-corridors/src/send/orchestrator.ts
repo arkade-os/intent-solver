@@ -697,6 +697,7 @@ export class SendSwapService {
           // own invoice, which is authoritative for that.
           amountSats: lockupSats,
           invoiceExpiresAt: decoded.expiresAt,
+          quotedRefundDeadline: acceptance.refundLocktime,
           refundLocktime,
           // No sender key exists in the covenant script; the provider key fills
           // the legacy column so old rows and new rows read the same way.
@@ -1039,7 +1040,13 @@ export class SendSwapService {
       return false
     }
     const refundDeadline = await this.refundDeadlineSeconds(row.refundLocktime)
-    if (!refundWithoutReceiverDelayCovers(row.refundWithoutReceiverDelay, refundDeadline, row.createdAt)) {
+    if (
+      !refundWithoutReceiverDelayCovers(
+        row.refundWithoutReceiverDelay,
+        row.quotedRefundDeadline ?? refundDeadline,
+        row.createdAt,
+      )
+    ) {
       await store.fail(row.id, 'funded', 'refused to proceed: client solo refund opens before the quoted refund')
       return false
     }
@@ -1349,7 +1356,13 @@ export class SendSwapService {
       return false
     }
     const refundDeadlineForCltv = await this.refundDeadlineSeconds(row.refundLocktime)
-    if (!refundWithoutReceiverDelayCovers(row.refundWithoutReceiverDelay, refundDeadlineForCltv, row.createdAt)) {
+    if (
+      !refundWithoutReceiverDelayCovers(
+        row.refundWithoutReceiverDelay,
+        row.quotedRefundDeadline ?? refundDeadlineForCltv,
+        row.createdAt,
+      )
+    ) {
       const reason = 'refused to pay: client_solo_refund_too_soon'
       if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
       else await store.fail(row.id, row.state, reason)

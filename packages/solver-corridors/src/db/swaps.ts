@@ -154,6 +154,13 @@ export interface SendSwapRow {
   paymentHash: string
   amountSats: number
   invoiceExpiresAt: number
+  /**
+   * The unix-seconds deadline this quote was PRICED against, before `refundLocktime`
+   * was rewritten in the deployment's own unit. A height projected back from the live
+   * tip answers differently on every call, and `refundWithoutReceiverDelay` was sized
+   * against THIS value. Null on rows quoted before the column existed.
+   */
+  quotedRefundDeadline: number | null
   /** Everything below reconstructs the script. Losing any of it loses the funds. */
   refundLocktime: number
   senderPubkey: string
@@ -300,6 +307,7 @@ const SEND_SWAP_COLUMNS = `
   payment_hash                  TEXT NOT NULL,
   amount_sats                   INTEGER NOT NULL,
   invoice_expires_at            INTEGER NOT NULL,
+  quoted_refund_deadline        INTEGER,
   refund_locktime               INTEGER NOT NULL,
   sender_pubkey                 TEXT NOT NULL,
   receiver_pubkey               TEXT NOT NULL,
@@ -375,6 +383,10 @@ const toRow = (raw: Raw): SendSwapRow => ({
   paymentHash: String(raw.payment_hash),
   amountSats: Number(raw.amount_sats),
   invoiceExpiresAt: Number(raw.invoice_expires_at),
+  quotedRefundDeadline:
+    raw.quoted_refund_deadline === null || raw.quoted_refund_deadline === undefined
+      ? null
+      : Number(raw.quoted_refund_deadline),
   refundLocktime: Number(raw.refund_locktime),
   senderPubkey: String(raw.sender_pubkey),
   receiverPubkey: String(raw.receiver_pubkey),
@@ -436,6 +448,8 @@ export interface QuoteRecord {
   paymentHash: string
   amountSats: number
   invoiceExpiresAt: number
+  /** @see SendSwapRow.quotedRefundDeadline. Required: a new quote knows it. */
+  quotedRefundDeadline: number
   refundLocktime: number
   senderPubkey: string
   receiverPubkey: string
@@ -555,6 +569,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
       // store sats as strings, which reads back correctly through `Number()`
       // and sorts and sums wrongly the day anything asks SQLite to do either.
       ['routing_fee_paid_sats', 'INTEGER'],
+      ['quoted_refund_deadline', 'INTEGER'],
     ] as const) {
       if (!existing.has(column)) await this.driver.exec(`ALTER TABLE send_swap ADD COLUMN ${column} ${type}`)
     }
@@ -654,11 +669,11 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
     const inserted = await this.driver.run(
       `INSERT INTO send_swap (
         id, state, created_at, updated_at, invoice, payment_hash, amount_sats, invoice_expires_at,
-        refund_locktime, sender_pubkey, receiver_pubkey, server_pubkey,
+        quoted_refund_deadline, refund_locktime, sender_pubkey, receiver_pubkey, server_pubkey,
         claim_delay, refund_delay, refund_without_receiver_delay, pk_script, lockup_address,
         refund_pk_script, emulator_pubkey, client_refund_pubkey, receiver_pk_script,
         non_interactive_parameters, quoted_routing_fee_sats, fee_handle, rfq_id
-      ) SELECT ?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      ) SELECT ?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       WHERE NOT EXISTS (
         SELECT 1 FROM send_swap WHERE payment_hash = ?
         AND (state != 'refused' OR (COALESCE(lockup_value, 0) > 0 AND refund_outcome IS NULL))
@@ -671,6 +686,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
         quote.paymentHash,
         quote.amountSats,
         quote.invoiceExpiresAt,
+        quote.quotedRefundDeadline,
         quote.refundLocktime,
         quote.senderPubkey,
         quote.receiverPubkey,
