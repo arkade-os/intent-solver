@@ -84,8 +84,12 @@ export const assetRfqLegs = (
 ): { from: string | null; to: string | null } =>
   direction === 'sell_base' ? { from: market.base, to: market.quote } : { from: market.quote, to: market.base }
 
+/** Narrower than `AssetRfqMarket` on purpose: a market recovered from a live
+ * swap row has no configured pricing, and this leaves nowhere to invent any. */
+export type ReadableAssetRfqMarket = Pick<AssetRfqMarket, 'base' | 'quote' | 'symbol'>
+
 export const assetRfqDescriptor = (
-  market: Pick<AssetRfqMarket, 'base' | 'quote' | 'symbol'>,
+  market: ReadableAssetRfqMarket,
   direction: AssetRfqDirection,
 ): CorridorDescriptor<AssetRfqSwapState> => {
   const legs = assetRfqLegs(market, direction)

@@ -51,6 +51,7 @@ import {
   assetRfqDescriptor,
   assetRfqReader,
   type AssetRfqDirection,
+  type ReadableAssetRfqMarket,
 } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetRfqMarket, AssetRfqSwapService } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import type { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
@@ -96,6 +97,13 @@ export interface FlatCorridorDeps {
   assetRfqService?: AssetRfqSwapService | null
   assetRfqStore?: AssetRfqSwapStore | null
   assetRfqMarkets?: readonly AssetRfqMarket[]
+}
+
+/** The same deps, narrowed to what a READER uses. Its extra entries come from
+ * swap rows, which know a pair and no pricing: `AssetRfqMarket` here would make
+ * the caller invent a feed url and bounds to fill it. */
+export interface FlatReaderDeps extends Omit<FlatCorridorDeps, 'assetRfqMarkets'> {
+  assetRfqMarkets?: readonly ReadableAssetRfqMarket[]
 }
 
 /**
@@ -162,7 +170,7 @@ export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corr
  * negotiations answerable, or an operator who turned a corridor off would watch
  * its live swaps disappear from the only screen that shows them.
  */
-export const readerSetFromDeps = (deps: FlatCorridorDeps, extra: readonly CorridorReader[] = []): CorridorReaderSet => {
+export const readerSetFromDeps = (deps: FlatReaderDeps, extra: readonly CorridorReader[] = []): CorridorReaderSet => {
   const readers: CorridorReader[] = [lightningSendReader(deps.store), onchainSendReader(deps.onchainStore)]
   if (deps.receiveStore) readers.push(lightningReceiveReader(deps.receiveStore))
   if (deps.onchainReceiveStore) readers.push(onchainReceiveReader(deps.onchainReceiveStore))

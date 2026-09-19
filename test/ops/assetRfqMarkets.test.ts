@@ -13,6 +13,7 @@ import {
   carrierSatsFor,
   offerMarketsFrom,
   parseAssetRfqTokens,
+  recoverReadableMarkets,
   retainReadableMarkets,
 } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { assetRfqDescriptor, assetRfqEnvStem } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
@@ -301,5 +302,50 @@ describe('retainReadableMarkets', () => {
 
   it('drops it once nothing is in flight', () => {
     expect(retainReadableMarkets([], [served()], [])).toEqual([])
+  })
+
+  it('matches a serving market whichever way round the readable entry runs', () => {
+    const flipped = { base: USDA, quote: null, symbol: rfqSymbolFor(USDA) }
+    expect(retainReadableMarkets([served()], [flipped], [{ fromAssetId: USDA, toAssetId: null }])).toEqual([served()])
+  })
+})
+
+describe('recoverReadableMarkets', () => {
+  const served = () => assetRfqMarketsFrom([view()], CARRIER)[0]!
+  const row = (fromAssetId: string | null, toAssetId: string | null) => ({ fromAssetId, toAssetId })
+
+  it('recovers a pair no configured market covers, which is the boot-after-delete case', () => {
+    expect(recoverReadableMarkets([], [row(null, USDA)])).toEqual([
+      { base: null, quote: USDA, symbol: rfqSymbolFor(USDA) },
+    ])
+  })
+
+  it('recovers BOTH directions of that pair from the one row', () => {
+    const [recovered] = recoverReadableMarkets([], [row(USDA, null)])
+    expect(recovered).toBeDefined()
+    expect([assetRfqDescriptor(recovered!, 'sell_base').pair, assetRfqDescriptor(recovered!, 'buy_base').pair]).toEqual(
+      [`arkade:${USDA}->arkade:BTC`, `arkade:BTC->arkade:${USDA}`],
+    )
+  })
+
+  it('skips a pair the readable set already covers, whichever way round the row runs', () => {
+    expect(recoverReadableMarkets([served()], [row(null, USDA)])).toEqual([served()])
+    expect(recoverReadableMarkets([served()], [row(USDA, null)])).toEqual([served()])
+  })
+
+  it('recovers ONE entry from two rows on opposite legs of one pair', () => {
+    expect(recoverReadableMarkets([], [row(null, USDA), row(USDA, null)])).toHaveLength(1)
+  })
+
+  it('leaves the readable set alone when nothing is in flight', () => {
+    expect(recoverReadableMarkets([served()], [])).toEqual([served()])
+  })
+
+  it('has nowhere to put pricing, which is why the reader set took a narrower type', () => {
+    expect(Object.keys(recoverReadableMarkets([], [row(null, USDA)])[0]!).sort()).toEqual(['base', 'quote', 'symbol'])
+  })
+
+  it('ignores a row with BTC on both legs — no asset market ever served that pair', () => {
+    expect(recoverReadableMarkets([], [row(null, null)])).toEqual([])
   })
 })
