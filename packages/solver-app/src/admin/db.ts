@@ -320,8 +320,9 @@ export class AdminStore {
    * rollback allows long after the marker was written. Throwing instead would
    * be a permanent boot failure fixable only by hand SQL. Each row's repair is
    * independent and idempotent, so no transaction wraps them.
-   * The notes say what was written to the ROW, not what is served: nothing reads
-   * `serves_rfq` at runtime yet, so a row this fails closed keeps quoting.
+   * A row this fails closed STOPS quoting: `assetRfqMarketsFrom` drops it on
+   * `servesRfq`. The notes record what was written to the row, so an operator
+   * can see exactly what the boot touched.
    */
   private async repairServing(): Promise<void> {
     const rows = await this.listMarkets()
