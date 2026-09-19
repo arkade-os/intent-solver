@@ -126,9 +126,8 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
       try {
         await deps.services.replacePolicy(applyOverrides(deps.services.config, stored))
       } catch (error) {
-        // Named and split in two, because `pendingKeys` subtracts LIVE_KEYS: a later GET badges this key as
-        // needing no restart, which reads as in force. The generic 500 carries the reason but not which key,
-        // and nothing else in the API would say the process never took it.
+        // `pendingKeys` subtracts LIVE_KEYS, so a later GET badges this key as needing no restart, which reads
+        // as in force. The generic 500 carries the reason but neither the key nor whether anything was written.
         return c.json(
           {
             error: 'reload_failed',

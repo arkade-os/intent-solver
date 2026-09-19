@@ -349,7 +349,6 @@ describe('overrides travel in the same two passes', () => {
     expect(res.status).toBe(200)
     const seen = await answered(res)
     expect(seen.unapplied).toEqual([{ key: 'ASSET_CARRIER_PRICING', reason: 'policy reload refused' }])
-    // Not live, so stored-and-pending is the whole truth about it, and the badge already says so.
     expect(seen.applied).toEqual(['LOCKUP_TIMEOUT_SECONDS'])
     // A market with no stored row is created in the widening pass, so an empty table is pass 2 never running.
     expect(await adminStore.listMarkets()).toEqual([])

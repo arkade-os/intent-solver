@@ -240,11 +240,8 @@ export const registerPricingApplyRoutes = (app: Hono, deps: AdminDeps): void => 
       targets.push({ key, target, stored })
     }
 
-    /**
-     * The reload's failure, or `null`. A LIVE key counts as `applied` only once the process holds it — the
-     * same reading the widening markets below get — while every other key is stored, and badged pending,
-     * whatever the reload does.
-     */
+    /** The reload's failure, or `null`. A LIVE key is `applied` only once the process holds it, the reading the
+     * widening markets already get; every other key is stored, and badged pending, whatever the reload does. */
     const writeOverrides = async (pass: SavePass): Promise<string | null> => {
       const liveKeys: string[] = []
       for (const entry of overrides.filter((o) => o.pass === pass)) {
@@ -287,7 +284,6 @@ export const registerPricingApplyRoutes = (app: Hono, deps: AdminDeps): void => 
       })
     }
 
-    // Pass 1's restrictions are not in force, so pass 2 must not run — the same rule the reload below keeps.
     if ((await writeOverrides('narrowing')) !== null) return c.json({ revision, applied, unapplied })
     const survived: typeof targets = []
     for (const entry of targets) {
