@@ -422,7 +422,9 @@ describe('a live knob reaches the next quote without a restart', () => {
     const body = createServicesBody()
     const start = body.indexOf('replacePolicy: (next: Config)')
     const arrow = body.slice(start, body.indexOf('}),', start))
+    // Both pinned first: an absent needle indexes to -1, which is less than anything.
     expect(arrow).toContain('services.policy = next')
+    expect(arrow).toContain('await rebuild(next)')
     expect(arrow.indexOf('await rebuild(next)')).toBeLessThan(arrow.indexOf('services.policy = next'))
   })
 })
