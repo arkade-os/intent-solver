@@ -299,6 +299,38 @@ describe('PATCH /api/settings', () => {
     }
   })
 
+  it('distinguishes stored from applied when a live key is CLEARED, not only when it is set', async () => {
+    const { app, adminStore, services } = await buildReal()
+    try {
+      await adminStore.setOverride('ASSET_CARRIER_PRICING', 'true')
+      const svc = services as unknown as { replacePolicy: () => Promise<void> }
+      svc.replacePolicy = async () => {
+        throw new Error('rebuild refused')
+      }
+
+      const response = await patch(app, { key: 'ASSET_CARRIER_PRICING', value: null })
+
+      expect(response.status).toBe(500)
+      expect(await response.json()).toMatchObject({
+        error: 'reload_failed',
+        key: 'ASSET_CARRIER_PRICING',
+        stored: true,
+        applied: false,
+        message: 'rebuild refused',
+      })
+      expect(await adminStore.getOverrides()).toEqual({})
+    } finally {
+      await adminStore.close()
+    }
+  })
+
+  it('reloads nothing when the cleared key is not live', async () => {
+    const replacePolicy = vi.fn()
+    const { app } = build({ LN_SEND_FEE_BPS: '25' }, { replacePolicy })
+    expect((await patch(app, { key: 'LN_SEND_FEE_BPS', value: null })).status).toBe(200)
+    expect(replacePolicy).not.toHaveBeenCalled()
+  })
+
   it('rejects a malformed body rather than 500ing', async () => {
     const { app } = build()
     expect((await patch(app, { value: '1' })).status).toBe(400)
@@ -404,6 +436,25 @@ describe('a live knob reaches the next quote without a restart', () => {
     const after = await service.quote(quoteRequest(2))
     expect(after.accepted && after.carrierSats).toBe(330n)
     expect(after.accepted && before.accepted && BigInt(after.swap.toAmount) < BigInt(before.swap.toAmount)).toBe(true)
+    await swapStore.close()
+  })
+
+  it('takes a CLEARED live knob back out of the next quote, with no restart', async () => {
+    const { app, service, adminStore, swapStore, services } = await liveHarness()
+    await adminStore.putMarket(marketFixture())
+    await services.replaceMarkets()
+
+    expect((await patch(app, { key: 'ASSET_CARRIER_PRICING', value: 'true' })).status).toBe(200)
+    const priced = await service.quote(quoteRequest(1))
+    expect(priced.accepted && priced.carrierSats).toBe(330n)
+
+    const res = await patch(app, { key: 'ASSET_CARRIER_PRICING', value: null })
+    expect(res.status).toBe(200)
+    // Reported false because `pendingKeys` subtracts LIVE_KEYS — which is only honest if it really reloaded.
+    expect(((await res.json()) as { restartRequired: boolean }).restartRequired).toBe(false)
+
+    const cleared = await service.quote(quoteRequest(2))
+    expect(cleared.accepted && cleared.carrierSats).toBe(0n)
     await swapStore.close()
   })
 

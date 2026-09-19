@@ -32,7 +32,7 @@
  * across a `.env` file and a shell history.
  */
 
-import type { Hono } from 'hono'
+import type { Context, Hono } from 'hono'
 import {
   describeSettings,
   validateOverride,
@@ -98,7 +98,7 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
         outcome: 'ok',
         detail: null,
       })
-      return c.json(await snapshot(deps, key))
+      return applied(c, deps, key)
     }
     if (typeof value !== 'string') {
       return c.json({ error: 'bad_request', message: 'value must be a string or null' }, 400)
@@ -120,28 +120,37 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
       outcome: 'ok',
       detail: null,
     })
-    // Re-read the store rather than patch policy here: `applyOverrides` is the one definition of layering.
-    if (LIVE_KEYS.has(key)) {
-      const stored = await deps.services.adminStore.getOverrides()
-      try {
-        await deps.services.replacePolicy(applyOverrides(deps.services.config, stored))
-      } catch (error) {
-        // `pendingKeys` subtracts LIVE_KEYS, so a later GET badges this key as needing no restart, which reads
-        // as in force. The generic 500 carries the reason but neither the key nor whether anything was written.
-        return c.json(
-          {
-            error: 'reload_failed',
-            key,
-            stored: true,
-            applied: false,
-            message: error instanceof Error ? error.message : String(error),
-          },
-          500,
-        )
-      }
-    }
-    return c.json(await snapshot(deps, key))
+    return applied(c, deps, key)
   })
+}
+
+/**
+ * The one answer both a set and a CLEAR give. Shared because clearing is as much a change to a live
+ * knob as setting one, and a clear that skipped this left the running process on the old value while
+ * `pendingKeys` — which subtracts LIVE_KEYS — reported the console's own value as in force.
+ *
+ * Re-reads the store rather than patching policy here: `applyOverrides` is the one definition of layering.
+ */
+const applied = async (c: Context, deps: AdminDeps, key: string) => {
+  if (LIVE_KEYS.has(key)) {
+    const stored = await deps.services.adminStore.getOverrides()
+    try {
+      await deps.services.replacePolicy(applyOverrides(deps.services.config, stored))
+    } catch (error) {
+      // The generic 500 carries the reason but neither the key nor whether anything was written.
+      return c.json(
+        {
+          error: 'reload_failed',
+          key,
+          stored: true,
+          applied: false,
+          message: error instanceof Error ? error.message : String(error),
+        },
+        500,
+      )
+    }
+  }
+  return c.json(await snapshot(deps, key))
 }
 
 const snapshot = async (deps: AdminDeps, changedKey: string) => {
