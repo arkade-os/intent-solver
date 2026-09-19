@@ -1,6 +1,6 @@
 {
   "name": "@arkade-os/solver-app",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Part of the Arkade intent-solver: the reference solver daemon.",
   "license": "MIT",
   "repository": {
