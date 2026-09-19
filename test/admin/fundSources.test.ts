@@ -916,6 +916,81 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     expect(wallet.settle).not.toHaveBeenCalled()
   })
 
+  const ceilinged = (coins: unknown[], vtxoMaxAmount = 40_000n) =>
+    withdrawingWallet(coins, {
+      arkProvider: { getInfo: vi.fn().mockResolvedValue({ dust: 330n, vtxoMaxAmount, fees: { intentFee: {} } }) },
+    })
+
+  it('takes the subset that drains exactly rather than the prefix the ordering offered first', async () => {
+    // #173, verbatim: first-fit takes 50_200 (leftover 200, under dust), adds
+    // 50_000, and the 50_200 change breaks the ceiling — while 50_000 alone drains.
+    const wallet = ceilinged([coin(0x01, 50_200), coin(0x02, 50_000)])
+
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.settle).toHaveBeenCalledWith({
+      inputs: [expect.objectContaining({ value: 50_000 })],
+      outputs: [{ address: REGTEST_ADDRESS, amount: 50_000n }],
+    })
+  })
+
+  it('skips the subsets whose change would be below dust rather than shipping one', async () => {
+    const sooner = coin(0x01, 50_329, { expiresAt: new Date('2026-09-18T00:00:00Z') })
+    const next = coin(0x02, 50_100, { expiresAt: new Date('2026-09-19T00:00:00Z') })
+    const last = coin(0x03, 50_330, { expiresAt: new Date('2026-10-01T00:00:00Z') })
+    const wallet = ceilinged([sooner, next, last])
+
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.settle).toHaveBeenCalledWith({
+      inputs: [last],
+      outputs: [
+        { address: REGTEST_ADDRESS, amount: 50_000n },
+        { address: ARKADE_ADDRESS, amount: 330n },
+      ],
+    })
+  })
+
+  it('still spends the soonest-expiring coins when more than one subset fits', async () => {
+    // {sooner, alsoSooner} and {later} both fit; a search optimising for fit alone
+    // would take the single later coin and leave the renewal fee behind.
+    const sooner = coin(0x01, 30_000, { expiresAt: new Date('2026-09-18T00:00:00Z') })
+    const alsoSooner = coin(0x02, 50_500, { expiresAt: new Date('2026-09-19T00:00:00Z') })
+    const later = coin(0x03, 50_330, { expiresAt: new Date('2026-10-01T00:00:00Z') })
+    const wallet = ceilinged([sooner, alsoSooner, later])
+
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.settle).toHaveBeenCalledWith({
+      inputs: [sooner, alsoSooner],
+      outputs: [
+        { address: REGTEST_ADDRESS, amount: 50_000n },
+        { address: ARKADE_ADDRESS, amount: 30_500n },
+      ],
+    })
+  })
+
+  it('selects across a float deeper than a recursion could walk', async () => {
+    const coins = Array.from({ length: 8_000 }, (_, i) => coin(i + 1, 40))
+    const wallet = ceilinged(coins, -1n)
+
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '298990' })
+
+    const call = wallet.settle.mock.calls[0]![0]
+    expect(call.inputs).toHaveLength(7_483)
+    expect(call.outputs[1]).toEqual({ address: ARKADE_ADDRESS, amount: 330n })
+  })
+
+  it('refuses on the search bound rather than grinding through every combination', async () => {
+    const coins = Array.from({ length: 40 }, (_, i) => coin(i + 1, 100_000))
+    const wallet = ceilinged(coins)
+
+    await expect(withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })).rejects.toThrow(
+      /combinations/,
+    )
+    expect(wallet.settle).not.toHaveBeenCalled()
+  })
+
   it('pays out of the arkade float through the action once the typed address matches', async () => {
     const wallet = withdrawingWallet([coin(0x01, 100_000)])
 

@@ -56,6 +56,12 @@ import {
 
 export const ARKADE_FUND_SOURCE_ID = 'arkade'
 
+// Bounds on the fallback subset search: an unbounded one is a denial of service
+// the operator inflicts on themselves, and its recursion is as deep as the coins
+// it walks. 64 is `pool-mint`'s own piece ceiling, so it spans a whole float.
+const SUBSET_SEARCH_COINS = 64
+const SUBSET_SEARCH_LIMIT = 20_000
+
 /**
  * The funding-relevant split, not the whole balance object.
  *
@@ -301,34 +307,63 @@ const arkadeWithdraw = async (
     )
   }
 
-  const selected: typeof ordered = []
+  const economic = ordered.flatMap((coin) => {
+    const fee = BigInt(estimator.evalOffchainInput(offchainInputFeeParams(coin)).satoshis)
+    const value = BigInt(coin.value)
+    return fee >= value ? [] : [{ coin, fee, net: value - fee, asset: (coin.assets?.length ?? 0) > 0 }]
+  })
+  // The change must be an output the server accepts: exactly nothing — and then
+  // only when no asset rides it — or at least dust, under the per-output ceiling.
+  const changeOf = (gross: bigint, carriesAsset: boolean): bigint | null => {
+    const left = gross - needed
+    if (left === 0n && !carriesAsset) return 0n
+    const net = left > 0n ? changeAfterFee(left) : left
+    if (net < dust) return null
+    return info.vtxoMaxAmount >= 0n && net > info.vtxoMaxAmount ? null : net
+  }
+
+  // First-fit over the expiry order, unchanged: what selected before selects the
+  // same coins, and only a refusal goes on to look for another subset.
+  const selected: (typeof economic)[number][] = []
   let gross = 0n
-  let inputFees = 0n
   let carriesAsset = false
   let change: bigint | null = null
-  let changeFee = 0n
-  for (const coin of ordered) {
-    const value = BigInt(coin.value)
-    const inputFee = BigInt(estimator.evalOffchainInput(offchainInputFeeParams(coin)).satoshis)
-    if (inputFee >= value) continue
-    selected.push(coin)
-    gross += value - inputFee
-    inputFees += inputFee
-    carriesAsset = carriesAsset || (coin.assets?.length ?? 0) > 0
-    const left = gross - needed
-    // The change must be an output the server accepts: exactly nothing — and
-    // then only when no asset needs a ride home on it — or at least dust.
-    if (left === 0n && !carriesAsset) {
-      change = 0n
-      break
-    }
-    const net = left > 0n ? changeAfterFee(left) : left
-    if (net >= dust) {
-      change = net
-      changeFee = left - net
-      break
-    }
+  for (const candidate of economic) {
+    selected.push(candidate)
+    gross += candidate.net
+    carriesAsset = carriesAsset || candidate.asset
+    change = changeOf(gross, carriesAsset)
+    if (change !== null) break
   }
+
+  let exhausted = false
+  if (change === null && gross >= needed) {
+    // Depth-first from the soonest expiry, so a coin is dropped only once nothing
+    // containing it fits.
+    selected.length = 0
+    const searchable = Math.min(economic.length, SUBSET_SEARCH_COINS)
+    let examined = 0
+    const search = (from: number, sum: bigint, asset: boolean): bigint | null => {
+      if (examined >= SUBSET_SEARCH_LIMIT) {
+        exhausted = true
+        return null
+      }
+      examined += 1
+      const found = changeOf(sum, asset)
+      if (found !== null) return found
+      for (let i = from; i < searchable; i += 1) {
+        const candidate = economic[i]!
+        selected.push(candidate)
+        const deeper = search(i + 1, sum + candidate.net, asset || candidate.asset)
+        if (deeper !== null) return deeper
+        selected.pop()
+        if (exhausted) return null
+      }
+      return null
+    }
+    change = search(0, 0n, false)
+  }
+
   if (change === null) {
     if (gross < needed) {
       throw new Error(
@@ -337,25 +372,36 @@ const arkadeWithdraw = async (
           'needs topping up',
       )
     }
+    if (exhausted) {
+      throw new Error(
+        `no subset of the float's ${economic.length} unreserved coins funds ${amountSats} sats within the ` +
+          `${dust} sat dust floor and the ${info.vtxoMaxAmount} sat per-output ceiling — the search stopped at ` +
+          `${SUBSET_SEARCH_LIMIT} combinations; withdraw a different amount, or split the float first (pool-mint)`,
+      )
+    }
+    const whole = changeAfterFee(gross - needed)
+    if (whole < dust) {
+      throw new Error(
+        `withdrawing ${amountSats} sats leaves ${whole} sats of change, below the ${dust} ` +
+          `sat dust floor` +
+          (carriesAsset ? ' that the selection’s asset must ride on' : '') +
+          ' — withdraw a little less, so the change clears it',
+      )
+    }
     throw new Error(
-      `withdrawing ${amountSats} sats leaves ${changeAfterFee(gross - needed)} sats of change, below the ${dust} ` +
-        `sat dust floor` +
-        (carriesAsset ? ' that the selection’s asset must ride on' : '') +
-        ' — withdraw a little less, so the change clears it',
-    )
-  }
-  if (change > 0n && info.vtxoMaxAmount >= 0n && change > info.vtxoMaxAmount) {
-    throw new Error(
-      `the change of ${change} sats would come back as one coin above the server's ${info.vtxoMaxAmount} sat ` +
+      `the change of ${whole} sats would come back as one coin above the server's ${info.vtxoMaxAmount} sat ` +
         'per-output ceiling — withdraw more, or split the float first (pool-mint)',
     )
   }
 
-  const release = services.arkade.reservations.reserve(selected)
+  const inputs = selected.map((c) => c.coin)
+  const inputFees = selected.reduce((sum, c) => sum + c.fee, 0n)
+  const changeFee = selected.reduce((sum, c) => sum + c.net, 0n) - needed - change
+  const release = services.arkade.reservations.reserve(inputs)
   try {
     const outputs = [{ address, amount: BigInt(amountSats) }]
     if (change > 0n) outputs.push({ address: changeAddress, amount: change })
-    const txid = await wallet.settle({ inputs: [...selected], outputs })
+    const txid = await wallet.settle({ inputs, outputs })
     return {
       reference: txid,
       address,
