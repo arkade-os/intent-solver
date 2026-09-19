@@ -41,7 +41,7 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
  * reason instead of publishing it.
  */
 const deploymentCard = async (services: Services, assetMarkets: readonly AssetCardMarket[]): Promise<SolverCard> => {
-  const { config, policy } = services
+  const { config, bootPolicy } = services
   const name = process.env.SOLVER_NAME?.trim()
   // Guarded here rather than left to `buildSolverCard`: an absent variable
   // reaches its name rule as the string "undefined", which matches
@@ -57,21 +57,17 @@ const deploymentCard = async (services: Services, assetMarkets: readonly AssetCa
     .filter(Boolean)
   const relays = [...(config.relayUrl ? [config.relayUrl] : []), ...extra]
 
-  // Effective policy, not the raw environment: the card states terms, and a
-  // card quoting a corridor this process has overridden into silence is a
-  // listing that lies. Both the toggles AND the bounds come from `policy` now
-  // that the card publishes per-corridor limits — an override that narrows a
-  // corridor has to reach the listing, which reading `config.limits` would
-  // have hidden.
+  // BOOT, not live: the card is SIGNED, none of these three is in `LIVE_KEYS`, and each is snapshotted into a
+  // `private readonly` deps at construction — so boot is what the corridor will honour.
   //
   // The old hard refusal for a disabled LN_SEND is gone with the hardcoded
   // market it protected: an onchain-only deployment now has an honest card to
   // publish rather than none. `buildSolverCard` still refuses when NOTHING is
   // served.
   const served = Object.fromEntries(
-    CORRIDORS.filter((corridor) => policy.corridorEnabled[corridor]).map((corridor) => [
+    CORRIDORS.filter((corridor) => bootPolicy.corridorEnabled[corridor]).map((corridor) => [
       corridor,
-      { limits: policy.corridorLimits[corridor], fee: policy.corridorFees[corridor] },
+      { limits: bootPolicy.corridorLimits[corridor], fee: bootPolicy.corridorFees[corridor] },
     ]),
   )
 
@@ -98,12 +94,13 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
       assetCardMarketsFromPolicy({
         pricing: deps.services.assetMarkets,
         offerMarkets: deps.services.liveOfferMarkets,
+        // BOOT: `AssetOfferService` reads these off constructor deps. `rfqMarkets` below is LIVE by contrast.
         offerBounds: {
-          min: deps.services.policy.offerMinFillAmount,
-          max: deps.services.policy.offerMaxFillAmount,
+          min: deps.services.bootPolicy.offerMinFillAmount,
+          max: deps.services.bootPolicy.offerMaxFillAmount,
         },
         rfqMarkets: deps.services.assetRfqMarkets,
-        chargesDeliveredCarrier: deps.services.policy.offerChargesDeliveredCarrier,
+        chargesDeliveredCarrier: deps.services.bootPolicy.offerChargesDeliveredCarrier,
       }),
       deps.services.config.network,
     )
@@ -137,6 +134,7 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
       cardError,
       // Reported even when the card failed: it describes the deployment, not the card.
       cardOmitted: [
+        // LIVE unlike the corridor map: `rebuild` builds the corridor set from `livePolicy.evmCorridors`.
         ...unpublishableCorridors(
           deps.services.policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
         ),

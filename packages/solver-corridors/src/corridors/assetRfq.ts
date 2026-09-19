@@ -238,7 +238,9 @@ export const respondToAssetRfqRequest = async (
     requesterKey: options?.requesterKey,
   })
   if (outcome.accepted) {
-    return { kind: 'quote', payload: assetRfqQuotePayload(outcome.swap, request.rfq_id, service.carrierSats) }
+    // Off the OUTCOME, not the service: the serialiser wraps `quote` alone, and nothing revalidates this
+    // figure afterwards — `evaluateAssetFill` compares the asset leg only.
+    return { kind: 'quote', payload: assetRfqQuotePayload(outcome.swap, request.rfq_id, outcome.carrierSats) }
   }
   return {
     kind: 'refused',

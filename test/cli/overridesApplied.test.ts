@@ -82,7 +82,7 @@ describe('createServices resolves stored overrides', () => {
     // has no service object to enable. Handing them the already-layered policy
     // would lose the difference between "off in env" and "off by override".
     const body = createServices()
-    expect(body).toMatch(/const services: Services = \{\s*config,\s*policy,/)
+    expect(body).toMatch(/const services: Services = \{\s*config,\s*policy,\s*bootPolicy: policy,/)
   })
 })
 
@@ -141,7 +141,7 @@ describe('what must agree with the quoted terms reads policy, not env', () => {
     // The resolver does not constrain what is fed to it, so pin the source too.
     expect(body).toContain('assetMarketPolicy(await cardAdminStore.listMarkets()).pricing')
     expect(body).toContain('assetCardMarketsFromPolicy({')
-    expect(body).toContain('rfqMarkets: assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets)')
+    expect(body).toContain('rfqMarkets: assetRfqMarketsFrom(assetMarkets,')
     expect(body).toContain('policy.offerMinFillAmount')
     expect(body).toContain('policy.offerMaxFillAmount')
     expect(body).toContain('unpublishableCorridors(')

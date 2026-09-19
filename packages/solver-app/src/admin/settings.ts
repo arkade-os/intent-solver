@@ -83,7 +83,15 @@ const CORRIDOR_SUFFIXES = ['FEE_BPS', 'FEE_FLAT_SATS', 'MIN_SATS', 'MAX_SATS', '
  * deployment facts (which backend, which URL, which database) that a console
  * cannot meaningfully change.
  */
-const GLOBAL_KEYS = ['MAX_EXPOSED_SATS', 'LOCKUP_TIMEOUT_SECONDS'] as const
+const GLOBAL_KEYS = ['MAX_EXPOSED_SATS', 'LOCKUP_TIMEOUT_SECONDS', 'ASSET_CARRIER_PRICING'] as const
+
+/**
+ * Keys a running process can actually adopt. Narrow on purpose: `replacePolicy()` re-derives the ASSET MARKET
+ * lists and nothing else, and membership is a promise the knob applied — `pendingKeys` stops badging it at once.
+ * TRAP for whoever widens it: `services.ts`'s `float.fundingFeeSats` closes over the BOOT `const policy`, and
+ * `replacePolicy` ASSIGNS a field rather than rebinding a const, so such a reader stays FROZEN ON BOOT.
+ */
+export const LIVE_KEYS: ReadonlySet<string> = new Set(['ASSET_CARRIER_PRICING'])
 
 /** Every key the console may write. Derived from the corridor list so it cannot drift from it. */
 export const editableKeys = (): string[] => [
@@ -104,6 +112,7 @@ export const editableKnobValues = (config: Config): Record<string, string | numb
   }
   values.MAX_EXPOSED_SATS = config.maxExposedSats
   values.LOCKUP_TIMEOUT_SECONDS = config.lockupTimeoutSeconds
+  values.ASSET_CARRIER_PRICING = config.assetCarrierPricing
   return values
 }
 
@@ -137,6 +146,11 @@ export const validateOverride = (config: Config, key: string, value: string): vo
     // Free in both directions. Raising this raises the total the solver can
     // have in flight at once, above whatever the environment set.
     positiveInt(key, value)
+    return
+  }
+
+  if (key === 'ASSET_CARRIER_PRICING') {
+    if (value !== 'true' && value !== 'false') throw new Error(`${key} must be 'true' or 'false', got ${value}`)
     return
   }
 
@@ -218,6 +232,7 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
   const corridorEnabled = { ...config.corridorEnabled }
   let maxExposedSats = config.maxExposedSats
   let lockupTimeoutSeconds = config.lockupTimeoutSeconds
+  let assetCarrierPricing = config.assetCarrierPricing
 
   for (const [key, raw] of Object.entries(overrides)) {
     try {
@@ -232,6 +247,10 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
     }
     if (key === 'LOCKUP_TIMEOUT_SECONDS') {
       lockupTimeoutSeconds = Number(raw)
+      continue
+    }
+    if (key === 'ASSET_CARRIER_PRICING') {
+      assetCarrierPricing = raw === 'true'
       continue
     }
     const match = corridorForKey(key)
@@ -279,18 +298,25 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
     if (minSats > maxSats) corridorLimits[corridor] = config.corridorLimits[corridor]
   }
 
-  return { ...config, corridorLimits, corridorFees, corridorEnabled, maxExposedSats, lockupTimeoutSeconds }
+  return {
+    ...config,
+    corridorLimits,
+    corridorFees,
+    corridorEnabled,
+    maxExposedSats,
+    lockupTimeoutSeconds,
+    assetCarrierPricing,
+  }
 }
 
 /**
  * Every knob the console displays, with where its value came from.
  *
- * EVERY editable knob is `restartRequired`, and that is a fact about the
+ * Every editable knob but a {@link LIVE_KEYS} member is `restartRequired`, a fact about the
  * plumbing rather than a limitation of this module. `createServices` hands
  * each service its policy at construction — `maxExposedSats` by value, the
  * others as references it then never revisits — and the orchestrator's `deps`
- * is `private readonly`, so nothing outside can hand a running service new
- * policy. Corridor toggles are read once too, when the ingress is built.
+ * is `private readonly`. {@link LIVE_KEYS} names the one seam past that.
  *
  * Reported per knob anyway, rather than as one global flag, so that if the
  * plumbing ever grows a seam this becomes true incrementally instead of all at
@@ -310,7 +336,7 @@ export const describeSettings = (
     value: values[key]!,
     source: sourceOf(key),
     editable,
-    restartRequired: true,
+    restartRequired: !LIVE_KEYS.has(key),
     ...(waiting.has(key) ? { pending: true } : {}),
   })
 
@@ -331,6 +357,7 @@ export const describeSettings = (
   knobs.push(
     knob('MAX_EXPOSED_SATS'),
     knob('LOCKUP_TIMEOUT_SECONDS'),
+    knob('ASSET_CARRIER_PRICING'),
     // Read-only below: everything a restart would be needed for anyway, and
     // nothing carrying key material. Secrets are never surfaced at all — not
     // redacted, simply absent, so there is no field for a bug to un-redact.
@@ -375,7 +402,7 @@ export const describeSettings = (
     // Whether a configured market is filled by ANYTHING, and the only place an
     // operator can see it. Read-only like its neighbours: `createServices` reads
     // these once and builds or omits a whole path, so an edit box would promise
-    // a seam that does not exist. @see admin/servedBy.ts
+    // a seam that does not exist. @see admin/marketCapability.ts
     {
       key: 'OFFER_MARKETS',
       value: config.offerMarkets.map((market) => assetMarketKey(market.a, market.b)).join(', ') || '(empty)',
@@ -389,6 +416,9 @@ export const describeSettings = (
       source: 'env',
       editable: false,
     },
+    // READ-ONLY unlike its RFQ twin: the packet path RE-GATES an already-admitted intent
+    // (`tickAllInner` re-runs `withinTolerance` live), so a flip would fail fills already accepted.
+    { key: 'OFFER_CHARGE_CARRIER', value: config.offerChargesDeliveredCarrier, source: 'env', editable: false },
     { key: 'RELAY_URL', value: config.relayUrl ?? '(unset)', source: 'env', editable: false },
     { key: 'RELAY_PROTOCOL', value: config.relayProtocol, source: 'env', editable: false },
     { key: 'OPEN_RFQ_MAX_BIDS_PER_MIN', value: config.openRfqMaxBidsPerMinute, source: 'env', editable: false },

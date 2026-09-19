@@ -498,16 +498,18 @@ const marketCard = (market) =>
       h('dt', 'served by'),
       h(
         'dd',
-        market.servedBy.length === 0
+        market.serving.length === 0
           ? h(
               'span.phase.phase-failed',
               {
                 title:
-                  'No path fills this market. OFFER_MARKETS drives the offer path; RFQ follows enabled console rows with bounds.',
+                  'No path fills this market. RFQ follows an enabled row with serves_rfq, a symbol and a bound; ' +
+                  'the offer path needs serves_offer and a restart.',
               },
               'nothing',
             )
-          : h('span.muted', market.servedBy.join(' + ')),
+          : h('span.muted', market.serving.join(' + ')),
+        ...(market.gaps ?? []).map((gap) => h('span.phase.phase-failed', { title: gap.detail }, gap.kind)),
       ),
       h('dt', 'state'),
       h('dd', marketState(market)),
@@ -1339,6 +1341,12 @@ const blankMarket = () => ({
   buyBaseMin: '',
   buyBaseMax: '',
   enabled: true,
+  symbol: '',
+  servesOffer: false,
+  servesRfq: true,
+  rfqSellBase: true,
+  rfqBuyBase: true,
+  carrierMode: 'inherit',
   marketKey: null,
 })
 
@@ -1367,6 +1375,12 @@ const draftFrom = (market) => ({
   buyBaseMin: market.buyBase?.min ?? '',
   buyBaseMax: market.buyBase?.max ?? '',
   enabled: market.enabled,
+  symbol: market.symbol ?? '',
+  servesOffer: market.servesOffer,
+  servesRfq: market.servesRfq,
+  rfqSellBase: market.rfqSellBase,
+  rfqBuyBase: market.rfqBuyBase,
+  carrierMode: market.carrierMode,
   marketKey: market.marketKey,
 })
 
@@ -1406,6 +1420,12 @@ const marketBody = (d) => ({
   sellBase: draftBounds(d.sellBaseMin, d.sellBaseMax),
   buyBase: draftBounds(d.buyBaseMin, d.buyBaseMax),
   enabled: d.enabled,
+  symbol: String(d.symbol ?? '').trim(),
+  servesOffer: d.servesOffer,
+  servesRfq: d.servesRfq,
+  rfqSellBase: d.rfqSellBase,
+  rfqBuyBase: d.rfqBuyBase,
+  carrierMode: d.carrierMode,
 })
 
 const tip = (text) => h('span.tip', { tabindex: '0', role: 'note' }, '?', h('span.bubble', text))
@@ -1420,6 +1440,32 @@ const field = (label, key, hint, explain) => [
   }),
   h('span.hint', hint ?? ''),
 ]
+
+const checkbox = (label, key, hint) =>
+  h(
+    'p.toolbar',
+    h('span.muted', label),
+    h('input', {
+      type: 'checkbox',
+      ...(marketDraft[key] ? { checked: true } : {}),
+      oninput: (e) => ((marketDraft[key] = e.target.checked), schedulePreview()),
+    }),
+    hint ? h('span.faint', hint) : null,
+  )
+
+const CARRIER_MODES = ['inherit', 'off', 'priced']
+
+const carrierModeField = () =>
+  h(
+    'p.toolbar',
+    h('span.muted', 'carrier mode'),
+    h(
+      'select',
+      { onchange: (e) => ((marketDraft.carrierMode = e.target.value), schedulePreview()) },
+      ...CARRIER_MODES.map((mode) => h('option', { value: mode, selected: marketDraft.carrierMode === mode }, mode)),
+    ),
+    h('span.faint', 'whether an RFQ quote prices the carrier in; inherit follows ASSET_CARRIER_PRICING'),
+  )
 
 const saveMarket = async () => {
   try {
@@ -1667,6 +1713,13 @@ const marketForm = () =>
     // The key is derived from the legs, so re-submitting a pair edits it. Said
     // out loud because there is no id field to make that obvious.
     h('p.faint', 'A pair may be configured once. Submitting one that exists edits it.'),
+    // Said here as well as in the notice above the table, which is read after the save.
+    h(
+      'p.faint',
+      'Tightening the price, tolerance or bounds below also re-judges maker offers ' +
+        'already recorded as fillable: they are refused rather than filled at the old ' +
+        'terms, and the maker is not told why their offer went unfilled.',
+    ),
     h(
       'div.form-grid',
       group('identity'),
@@ -1681,6 +1734,12 @@ const marketForm = () =>
         'quote',
         'BTC, or a 68-character asset id',
         "The other side of the pair. The feed's number means: this many quote units buy one whole base unit.",
+      ),
+      field(
+        'symbol',
+        'symbol',
+        'the env stem and the label — USDA',
+        'The short name this market trades under, and the stem its settings take in the environment. Required to serve RFQ; an offer-only market may leave it blank.',
       ),
       group('how it is priced'),
       field(
@@ -1769,29 +1828,28 @@ const marketForm = () =>
       group('carrier sats'),
       h(
         'span.label',
-        'who pays it',
+        'deployment default',
         tip(
           'An asset never moves alone — it rides on a small amount of bitcoin called the carrier, and with this ' +
-            'switched off we pay for it ourselves on every asset we send.',
+            'switched off we pay for it ourselves on every asset we send. Each market may override it below.',
         ),
       ),
+      h('span.span2', h('span.muted', carrierPolicyLine())),
       h(
-        'span.span2',
-        h('span.muted', carrierPolicyLine()),
-        ' ',
-        h(
-          'span.faint',
-          'set by ASSET_CARRIER_PRICING and OFFER_CHARGE_CARRIER in the environment; changing it needs a restart',
+        'span.label',
+        'RFQ directions live',
+        tip(
+          'What the running process is open on right now. The boxes below set this, but a direction can also be ' +
+            'closed by ASSET_<SYM>_<DIR>_ENABLED in the environment without touching the market.',
         ),
       ),
-      h('span.label', 'RFQ directions'),
-      h(
-        'span.span2',
-        h('span.muted', rfqDirectionLine()),
-        ' ',
-        h('span.faint', 'closed by ASSET_<SYM>_<DIR>_ENABLED; changing it needs a restart'),
-      ),
+      h('span.span2', h('span.muted', rfqDirectionLine())),
     ),
+    checkbox('serves offer', 'servesOffer', 'takes maker offer packets — needs a restart to start or stop'),
+    checkbox('serves rfq', 'servesRfq', 'answers RFQ quote requests — live'),
+    checkbox('rfq sell base', 'rfqSellBase', 'open, per direction; false is CLOSED'),
+    checkbox('rfq buy base', 'rfqBuyBase'),
+    carrierModeField(),
     h(
       'p.toolbar',
       h('button.act', { onclick: saveMarket }, 'save'),
@@ -1799,21 +1857,20 @@ const marketForm = () =>
     ),
   )
 
+const NOTHING_TITLE =
+  'No path fills this market. RFQ follows an enabled row with serves_rfq, a symbol and a bound; ' +
+  'the offer path needs serves_offer and a restart.'
+
 // `nothing` gets the failure chip: the row says `trading`, the offer is
 // published, and nothing else in the console says the solver is not listening.
-const servedByCell = (paths) =>
+// A gap is louder still — the row asks for something this process cannot do.
+const capabilityCell = (paths, gaps) =>
   h(
     'td',
     paths.length === 0
-      ? h(
-          'span.phase.phase-failed',
-          {
-            title:
-              'No path fills this market. OFFER_MARKETS drives the offer path; RFQ follows enabled console rows with bounds.',
-          },
-          'nothing',
-        )
+      ? h('span.phase.phase-failed', { title: NOTHING_TITLE }, 'nothing')
       : h('span.muted', paths.join(' + ')),
+    ...gaps.map((gap) => h('span.phase.phase-failed', { title: gap.detail }, gap.kind)),
   )
 
 const marketsView = () => {
@@ -1868,7 +1925,7 @@ const marketsView = () => {
                 ),
                 // A SECOND axis, never folded into `state`: a market can read
                 // `trading` and be filled by nothing.
-                servedByCell(market.servedBy ?? []),
+                capabilityCell(market.serving ?? [], market.gaps ?? []),
                 h(
                   'td',
                   h('button.act', { onclick: () => ((marketDraft = draftFrom(market)), render()) }, 'edit'),

@@ -16,6 +16,7 @@ const FEED = 'https://feed.test/price'
 const marketBody = (over: Record<string, unknown> = {}) => ({
   base: 'BTC',
   quote: USDX,
+  symbol: 'USDX',
   baseDecimals: 8,
   quoteDecimals: 6,
   feedUrl: FEED,

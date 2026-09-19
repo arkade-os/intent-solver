@@ -11,7 +11,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { AdminStore, type AssetMarketRow } from '@arkade-os/solver-app/admin/db.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
-import { assetMarketKey, type AssetMarketConfig } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import {
+  assetMarketKey,
+  DEFAULT_SERVING,
+  type AssetMarketConfig,
+} from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
 const USDT = 'aa'.repeat(34)
 const OTHER = 'bb'.repeat(34)
@@ -21,6 +25,7 @@ const clock = () => now
 let store: AdminStore
 
 const market = (over: Partial<AssetMarketConfig> = {}): AssetMarketConfig => ({
+  ...DEFAULT_SERVING,
   base: null,
   quote: USDT,
   baseDecimals: 8,
@@ -52,11 +57,21 @@ describe('markets', () => {
   })
 
   it('round-trips every field', async () => {
+    // 26 placeholders, and SQLite takes a value in the wrong one. The two directions differ so a SWAP shows too.
+    const serving = {
+      symbol: 'USDT',
+      servesOffer: true,
+      servesRfq: false,
+      rfqSellBase: false,
+      rfqBuyBase: true,
+      carrierMode: 'priced',
+    } as const
     const written = await store.putMarket(
-      market({ sellBaseFeeFlat: 330n, buyBaseFeeFlat: 1_000_000n, sellBase: { min: 1n, max: 2n } }),
+      market({ sellBaseFeeFlat: 330n, buyBaseFeeFlat: 1_000_000n, sellBase: { min: 1n, max: 2n }, ...serving }),
     )
     const [read] = await store.listMarkets()
     expect(read).toEqual(written)
+    expect(read).toMatchObject(serving)
     expect(read).toMatchObject({
       base: null,
       quote: USDT,
@@ -109,6 +124,13 @@ describe('markets', () => {
 
     const edited = await store.putMarket(market({ sellBaseFeeFlat: 330n, buyBaseFeeFlat: 1_000_000n }))
     expect(edited).toMatchObject({ sellBaseFeeFlat: 330n, buyBaseFeeFlat: 1_000_000n })
+  })
+
+  it('refuses a second market under a symbol already taken, but not a second NULL', async () => {
+    await store.putMarket(market({ symbol: 'DUP' }))
+    await expect(store.putMarket(market({ base: USDT, quote: OTHER, symbol: 'DUP' }))).rejects.toThrow(/UNIQUE/)
+    await store.putMarket(market({ base: USDT, quote: OTHER }))
+    expect(await store.listMarkets()).toHaveLength(2)
   })
 
   it('files a market under the key its own legs derive', async () => {

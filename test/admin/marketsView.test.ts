@@ -292,6 +292,7 @@ const helperBlock = (): string => {
 // Same new-Function + named-error pattern as marketRoutes.test.ts:33-46: run rather than grepped.
 const previewHarness = (response: unknown) => {
   const pending: (() => void)[] = []
+  const sent: (string | undefined)[] = []
   const params = [
     'document',
     'Node',
@@ -311,7 +312,7 @@ const previewHarness = (response: unknown) => {
   const args = [
     stubDoc(),
     StubNode,
-    async () => response,
+    async (_path: string, init?: { body?: string }) => (sent.push(init?.body), response),
     (value: unknown) => String(value),
     () => '1m',
     { data: { markets: { carrier: { sats: '330', rfqPriced: false, offerCharged: false }, markets: [] } } },
@@ -330,11 +331,28 @@ const previewHarness = (response: unknown) => {
       schedulePreview: () => void
       marketsView: () => StubNode
     }
-    return { ...built, pending }
+    return { ...built, pending, sent }
   } catch (error) {
     throw new Error('the preview moved out of the slice this guard reads', { cause: error })
   }
 }
+
+const findAll = (node: StubNode, match: (node: StubNode) => boolean): StubNode[] => [
+  ...(match(node) ? [node] : []),
+  ...node.childNodes.flatMap((child) => findAll(child, match)),
+]
+
+/** The control inside the `p.toolbar` carrying `label`, with both halves pinned before either is indexed. */
+const control = (root: StubNode, label: string, tag: string): StubNode => {
+  const bars = findAll(root, (node) => node.className.split(' ').includes('toolbar') && textOf(node).includes(label))
+  expect(bars, label).toHaveLength(1)
+  const found = findAll(bars[0]!, (node) => node.tagName === tag)
+  expect(found.length, `${label} ${tag}`).toBeGreaterThan(0)
+  return found[0]!
+}
+
+const fire = (node: StubNode, type: string, target: unknown): void =>
+  (node.listeners[type] as (event: unknown) => void)({ target })
 
 /** First node in the tree whose class list contains `className`, DOM-order (self before children). */
 const findByClass = (node: StubNode, className: string): StubNode | null => {
@@ -453,5 +471,40 @@ describe('the markets view mounts what it builds', () => {
     expect(grid).not.toBeNull()
     const unexpected = grid!.childNodes.map(gridChildShape).filter((shape) => shape.startsWith('unexpected child:'))
     expect(unexpected).toEqual([])
+  })
+})
+
+describe('a serving control repaints the preview it sits beside', () => {
+  // These came from a branch with no preview and the merge parked them next to one.
+  const cases = [
+    { label: 'serves rfq', tag: 'input', event: 'input', target: { checked: false } },
+    { label: 'rfq buy base', tag: 'input', event: 'input', target: { checked: false } },
+    { label: 'carrier mode', tag: 'select', event: 'change', target: { value: 'priced' } },
+  ] as const
+
+  it.each(cases)('reschedules the preview when $label changes', ({ label, tag, event, target }) => {
+    const panel = previewHarness(RESOLVED)
+    const view = panel.marketsView()
+    const before = panel.pending[0]
+    expect(before).toBeTypeOf('function')
+
+    fire(control(view, label, tag), event, target)
+
+    expect(panel.pending).toHaveLength(1)
+    expect(panel.pending[0]).toBeTypeOf('function')
+    expect(panel.pending[0]).not.toBe(before)
+  })
+
+  it('reprices against the new carrier mode, which moves the margin and the break-even', async () => {
+    const panel = previewHarness(RESOLVED)
+    const view = panel.marketsView()
+    fire(control(view, 'carrier mode', 'select'), 'change', { value: 'priced' })
+    await panel.refreshPreview()
+    const body = JSON.parse(String(panel.sent.at(-1))) as { market: { carrierMode: string; servesRfq: boolean } }
+    expect(body.market.carrierMode).toBe('priced')
+
+    fire(control(view, 'serves rfq', 'input'), 'input', { checked: false })
+    await panel.refreshPreview()
+    expect((JSON.parse(String(panel.sent.at(-1))) as typeof body).market.servesRfq).toBe(false)
   })
 })

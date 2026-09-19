@@ -23,6 +23,7 @@ import {
 } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
+const ASSET_B = `${'ab'.repeat(32)}0100`
 const PK_SCRIPT = `5120${'c'.repeat(64)}`
 const XONLY = 'b'.repeat(64)
 const OFFER_SCRIPT = `5120${'d'.repeat(64)}`
@@ -48,6 +49,7 @@ const MARKET = {
   buyBase: { min: 1n, max: 10n ** 24n },
   feedUrl: 'https://feed.example/btc',
   pricePath: 'price',
+  carrierSats: 0n,
 }
 
 const harness = async (over: Partial<AssetRfqDeps> = {}) => {
@@ -59,9 +61,6 @@ const harness = async (over: Partial<AssetRfqDeps> = {}) => {
     markets: [MARKET],
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
-    // Matches the shipped default (ASSET_CARRIER_PRICING=false); the carrier
-    // itself is pinned in test/core/assetRfq.test.ts.
-    carrierSats: 0n,
     dustSats: 330n,
     now: () => clock,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
@@ -181,11 +180,34 @@ describe('quote', () => {
   })
 
   it('nets the carrier out of the payout when the operator prices it', async () => {
-    const { service } = await harness({ carrierSats: 330n })
+    const { service } = await harness({ markets: [{ ...MARKET, carrierSats: 330n }] })
     const outcome = await service.quote(request())
     expect(outcome).toMatchObject({ accepted: true })
     // 330 of the deposit's sats buy the carrier the asset payout rides on.
     expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(99_499_671_650n)
+  })
+
+  it('charges each market its own carrier, so no service-wide figure can stand in', async () => {
+    const { service } = await harness({
+      markets: [
+        { ...MARKET, carrierSats: 330n },
+        { ...MARKET, symbol: 'USDB', quote: ASSET_B, carrierSats: 0n },
+      ],
+      balance: async () =>
+        new Map([
+          [ASSET_A, 10n ** 18n],
+          [ASSET_B, 10n ** 18n],
+        ]),
+      newId: sequentialIds(),
+      deriveOffer: perClientOffer,
+    })
+    const priced = await service.quote(request())
+    const free = await service.quote(
+      request({ pair: `arkade:BTC->arkade:${ASSET_B}`, rfqId: 'f'.repeat(64), makerPublicKey: 'c'.repeat(64) }),
+    )
+    expect(priced.accepted && priced.carrierSats).toBe(330n)
+    expect(free.accepted && free.carrierSats).toBe(0n)
+    expect(priced.accepted && free.accepted && priced.swap.toAmount < free.swap.toAmount).toBe(true)
   })
 
   it('quotes exact-out, binding the payout the client named', async () => {
@@ -474,7 +496,7 @@ describe('the market mark', () => {
 
   it('records the same price whether or not the carrier is priced', async () => {
     const struck = async (carrierSats: bigint) => {
-      const { service, store } = await harness({ carrierSats })
+      const { service, store } = await harness({ markets: [{ ...MARKET, carrierSats }] })
       await service.quote(request({ amount: 50_000n }))
       return store.get('swap-1')
     }
@@ -628,6 +650,22 @@ describe('replaceMarkets', () => {
     await service.tick('swap-1')
     expect(settled).toEqual(['swap-1'])
     expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fromAmount, toAmount })
+  })
+
+  it('does not restate an issued outcome when the serve list is swapped behind it', async () => {
+    const { service } = await harness({
+      markets: [{ ...MARKET, carrierSats: 330n }],
+      newId: sequentialIds(),
+      deriveOffer: perClientOffer,
+    })
+    const quoted = service.quote(request())
+    const swapping = service.replaceMarkets([{ ...MARKET, carrierSats: 0n }])
+    const outcome = await quoted
+    expect(outcome.accepted && outcome.carrierSats).toBe(330n)
+    await swapping
+    // Premise: the swap really landed, so the 330n above is a captured figure and not a no-op.
+    const next = await service.quote(request({ rfqId: 'f'.repeat(64), makerPublicKey: 'c'.repeat(64) }))
+    expect(next.accepted && next.carrierSats).toBe(0n)
   })
 
   it('waits for an in-flight quote before swapping the list', async () => {

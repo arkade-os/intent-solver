@@ -480,6 +480,35 @@ describe('replaceMarkets', () => {
     expect(await store.findById('fill-1')).toMatchObject({ state: 'refused', fillTxid: null })
   })
 
+  // The console save, as `rebuild()` performs it (`ops/services.ts:1228`): the row is
+  // re-judged BEFORE the CAS, so it fails to `refused` and never reaches `filling`.
+  const edited = (toleranceBps: number) => [{ ...pricing[0]!, toleranceBps }]
+  const admittedUnder = async (toleranceBps: number) => {
+    const settle = vi.fn(async () => '0xfill')
+    const built = await build({ pricing: edited(toleranceBps), fetchPrice: async () => priceFrom('1'), settle })
+    expect(await built.service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+    expect(await built.store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+    return { ...built, settle }
+  }
+
+  it('refuses an already-fillable row after a market edit moves the tolerance', async () => {
+    const { store, service, settle } = await admittedUnder(9_999)
+    await service.replaceMarkets({ markets: [{ a: USDT, b: null }], pricing: edited(0) })
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    const row = await store.findById('fill-1')
+    expect(row).toMatchObject({ state: 'refused', fillTxid: null })
+    expect(row!.failureReason).toMatch(/price_out_of_tolerance/)
+  })
+
+  it('fills that same row when the save leaves the tolerance alone — the control', async () => {
+    const { store, service, settle } = await admittedUnder(9_999)
+    await service.replaceMarkets({ markets: [{ a: USDT, b: null }], pricing: edited(9_999) })
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled', fillTxid: '0xfill' })
+  })
+
   it('waits for an in-flight consider before swapping the list', async () => {
     let release!: () => void
     const blocked = new Promise<void>((resolve) => {

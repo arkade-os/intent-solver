@@ -44,6 +44,16 @@ const publisherWith = (mode: AdPublishMode, publish = vi.fn(async () => {})) =>
  * missing member surfaces there as a `cardError` or a failed probe rather than
  * as two routes cheerfully agreeing on nothing.
  */
+const bootPolicy = {
+  corridorLimits: allCorridors({ minSats: 1_000, maxSats: 50_000 }),
+  corridorFees: allCorridors({ bps: 0, flatSats: 0 }),
+  corridorEnabled: allCorridors(true),
+  maxExposedSats: 100_000,
+  evmCorridors: [],
+  offerMinFillAmount: 0n,
+  offerMaxFillAmount: 0n,
+}
+
 const makeDeps = (over: { nostrAdPublish?: AdPublishMode; adPublisher?: AdPublisher } = {}) =>
   ({
     services: {
@@ -60,15 +70,8 @@ const makeDeps = (over: { nostrAdPublish?: AdPublishMode; adPublisher?: AdPublis
         maxExposedSats: 100_000,
         nostrAdPublish: over.nostrAdPublish ?? 'off',
       },
-      policy: {
-        corridorLimits: allCorridors({ minSats: 1_000, maxSats: 50_000 }),
-        corridorFees: allCorridors({ bps: 0, flatSats: 0 }),
-        corridorEnabled: allCorridors(true),
-        maxExposedSats: 100_000,
-        evmCorridors: [],
-        offerMinFillAmount: 0n,
-        offerMaxFillAmount: 0n,
-      },
+      policy: bootPolicy,
+      bootPolicy,
       assetMarkets: [],
       liveOfferMarkets: [],
       assetRfqMarkets: [],

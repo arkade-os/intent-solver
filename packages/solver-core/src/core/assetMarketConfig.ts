@@ -43,6 +43,9 @@ export interface AssetMarketBounds {
   max: bigint
 }
 
+/** Whether an RFQ quote prices the carrier in. `inherit` follows the deployment's `ASSET_CARRIER_PRICING`. */
+export type CarrierMode = 'inherit' | 'off' | 'priced'
+
 /**
  * One market, as an operator states it.
  *
@@ -86,7 +89,29 @@ export interface AssetMarketConfig {
    * 68-character asset id to start it again.
    */
   enabled: boolean
+  /** The env stem and the console label — `USDA`. NULL only where RFQ cannot serve the pair at all. */
+  symbol: string | null
+  /** Declared for the offer-packet path (RESTART-GATED) and for RFQ (live, through `replaceMarkets()`). */
+  servesOffer: boolean
+  servesRfq: boolean
+  /** Open, per direction. False is CLOSED — a value, not an absence. */
+  rfqSellBase: boolean
+  rfqBuyBase: boolean
+  carrierMode: CarrierMode
 }
+
+/** Today's semantics, so an existing caller's literal keeps meaning what it meant. */
+export const DEFAULT_SERVING = {
+  symbol: null,
+  servesOffer: false,
+  servesRfq: true,
+  rfqSellBase: true,
+  rfqBuyBase: true,
+  carrierMode: 'inherit',
+} as const satisfies Pick<
+  AssetMarketConfig,
+  'symbol' | 'servesOffer' | 'servesRfq' | 'rfqSellBase' | 'rfqBuyBase' | 'carrierMode'
+>
 
 /**
  * The widest precision a leg may declare — the same bound `convertAmount`
@@ -189,6 +214,33 @@ const checkFlatFee = (label: string, value: bigint): void => {
   if (value < 0n) throw new Error(`${label} must be a non-negative integer of atomic units, got ${value}`)
 }
 
+/** § 2's stem rule, the same one `ops/assetRfqMarkets.ts` applied to `ASSET_MARKETS`. */
+const SYMBOL = /^[A-Z][A-Z0-9]{0,11}$/
+
+// 12-char stem: issuance prefix plus gidx. First-11-hex alone collides two
+// assets from the same tx with different group indexes.
+export const rfqSymbolFor = (assetId: string): string =>
+  `A${assetId.slice(0, 7).toUpperCase()}${assetId.slice(64).toUpperCase()}`
+
+const checkServing = (market: AssetMarketConfig): void => {
+  if (market.symbol !== null && !SYMBOL.test(market.symbol)) {
+    throw new Error(
+      `symbol must be 1-12 uppercase alphanumerics starting with a letter, got ${JSON.stringify(market.symbol)}`,
+    )
+  }
+  if (!market.servesRfq) return
+  if (market.symbol === null) throw new Error('symbol is required on a market declared for RFQ: it is the env stem')
+  // The refusal `assetRfqMarketsFrom` makes SILENTLY today. Still legal for OFFERS.
+  if (market.base !== null && market.quote !== null) {
+    throw new Error(
+      'a market declared for RFQ must have exactly one BTC leg; the covenant cannot express asset-to-asset',
+    )
+  }
+  if (!market.rfqSellBase && !market.rfqBuyBase) {
+    throw new Error('a market declared for RFQ must leave at least one direction open')
+  }
+}
+
 const V4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
 
 /** LITERALS ONLY: a hostname that resolves to one of these needs DNS, which this module has none of. */
@@ -258,6 +310,7 @@ export const validateAssetMarket = (market: AssetMarketConfig, options: AssetMar
   checkFlatFee('buyBaseFeeFlat', market.buyBaseFeeFlat ?? 0n)
   checkBounds('sellBase', market.sellBase)
   checkBounds('buyBase', market.buyBase)
+  checkServing(market)
 
   const feedUrl = market.feedUrl.trim()
   if (!feedUrl) throw new Error('feedUrl is required: a configured market without one cannot be priced')
@@ -317,6 +370,12 @@ export interface AssetMarketPricingView {
   readonly buyBaseFeeFlat: bigint
   readonly sellBase?: AssetMarketBounds
   readonly buyBase?: AssetMarketBounds
+  readonly symbol: string | null
+  readonly servesOffer: boolean
+  readonly servesRfq: boolean
+  readonly rfqSellBase: boolean
+  readonly rfqBuyBase: boolean
+  readonly carrierMode: CarrierMode
 }
 
 /**
@@ -342,6 +401,7 @@ export const assetMarketPolicy = (
   for (const market of markets) validateAssetMarket(market, { allowPrivateFeedHost: true })
 
   const seen = new Set<string>()
+  const symbols = new Set<string>()
   for (const market of markets) {
     const key = assetMarketKey(market.base, market.quote)
     // The store's primary key already forbids this. Re-checked because startup
@@ -350,6 +410,12 @@ export const assetMarketPolicy = (
     // hand-edited database must not be able to reach it.
     if (seen.has(key)) throw new Error(`two markets share the key ${key}; a pair may be configured only once`)
     seen.add(key)
+    if (market.symbol === null) continue
+    // Per-market validation cannot see a sibling; a repeated symbol collides the env stems AND the registry's keys.
+    if (symbols.has(market.symbol)) {
+      throw new Error(`two markets share the symbol ${market.symbol}; a symbol names one market`)
+    }
+    symbols.add(market.symbol)
   }
 
   const served = markets.filter((market) => market.enabled)
@@ -368,6 +434,12 @@ export const assetMarketPolicy = (
       buyBaseFeeBps: market.buyBaseFeeBps ?? market.feeBps,
       sellBaseFeeFlat: market.sellBaseFeeFlat ?? 0n,
       buyBaseFeeFlat: market.buyBaseFeeFlat ?? 0n,
+      symbol: market.symbol,
+      servesOffer: market.servesOffer,
+      servesRfq: market.servesRfq,
+      rfqSellBase: market.rfqSellBase,
+      rfqBuyBase: market.rfqBuyBase,
+      carrierMode: market.carrierMode,
       ...(market.sellBase === null ? {} : { sellBase: market.sellBase }),
       ...(market.buyBase === null ? {} : { buyBase: market.buyBase }),
     })),

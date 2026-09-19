@@ -14,7 +14,7 @@ import { corridorSetFromDeps, readerSetFromDeps } from '@arkade-os/solver-app/op
 import { assetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { resolveDbLayout } from '@arkade-os/solver-corridors/db/layout.js'
-import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { DEFAULT_SERVING, type AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { createServicesBody } from '../support/createServicesBody.js'
 
 const USDA = '1a'.repeat(34)
@@ -49,9 +49,10 @@ describe('createServices — the asset RFQ service', () => {
     expect(body().indexOf('assetRfqMarketsFrom(')).toBeLessThan(body().indexOf('AssetRfqSwapStore.open'))
   })
 
-  it('joins console rows to optional ASSET_MARKETS symbols, never to a second list', () => {
-    expect(body()).toContain('assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)')
-    expect(body()).toContain('assetRfqMarketsFrom(policy.assetRfqTokens, next.pricing)')
+  it('reads the serve list off the console row, never off a second env list', () => {
+    expect(body()).toContain('assetRfqMarketsFrom(assetMarkets.pricing,')
+    expect(body()).toContain('assetRfqMarketsFrom(next.pricing,')
+    expect(body()).not.toContain('policy.assetRfqTokens')
     expect(body().match(/assetRfqMarketsFrom\(/g)).toHaveLength(2)
   })
 })
@@ -121,12 +122,11 @@ describe('the corridors reach the registry and the console', () => {
     expect(body()).toContain("['assetRfqStore', () => assetRfqStore.close()]")
   })
 
-  it('hands the offer service the PRICED subset of OFFER_MARKETS, at boot and on swap', () => {
-    // An unpriced market fills at the maker's price, so the derivation is the
-    // guard: handing `policy.offerMarkets` over directly is what breaks it.
-    expect(body()).toContain('const liveOfferMarkets = offerMarketsPricedBy(assetMarkets.pricing)')
+  it('hands the offer service the rows declared for offers, at boot and on swap', () => {
+    // An unpriced market fills at the maker's price; the row IS the pricing.
+    expect(body()).toContain('const liveOfferMarkets = offerMarketsFrom(assetMarkets.pricing)')
     expect(body()).toContain('markets: liveOfferMarkets,')
-    expect(body()).toContain('const offers = offerMarketsPricedBy(next.pricing)')
+    expect(body()).toContain('const offers = offerMarketsFrom(next.pricing)')
     expect(body()).toContain('replaceMarkets({ markets: offers, pricing: next.pricing })')
     expect(body()).not.toContain('markets: policy.offerMarkets')
   })
@@ -134,7 +134,7 @@ describe('the corridors reach the registry and the console', () => {
   it('hot-swaps the captured corridor set in place after a console write', () => {
     expect(body()).toContain('retainReadableMarkets(rfq, readableMarkets, live)')
     expect(body()).toContain('replaceQueue(async () => {')
-    expect(body().indexOf('const nextSets = setsFrom(rfq, readable)')).toBeLessThan(
+    expect(body().indexOf('const nextSets = setsFrom(livePolicy, rfq, readable)')).toBeLessThan(
       body().indexOf('await assetRfqService.replaceMarkets(rfq)'),
     )
     expect(body()).toContain('services.corridors.replace')
@@ -153,6 +153,8 @@ describe('the swap-file layout names the table', () => {
 
 describe('a configured market really does become a served corridor', () => {
   const pricing: AssetMarketPricingView = {
+    ...DEFAULT_SERVING,
+    symbol: 'USDA',
     base: null,
     quote: USDA,
     baseDecimals: 8,
@@ -166,13 +168,12 @@ describe('a configured market really does become a served corridor', () => {
     sellBase: { min: 1n, max: 10n ** 12n },
     buyBase: { min: 1n, max: 10n ** 12n },
   }
-  const token = { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } }
   const deps = async () => ({
     store: null as never,
     onchainStore: null as never,
     assetRfqService: { tickAll: async () => [] } as never,
     assetRfqStore: await AssetRfqSwapStore.open(':memory:'),
-    assetRfqMarkets: assetRfqMarketsFrom([token], [pricing]),
+    assetRfqMarkets: assetRfqMarketsFrom([pricing], { dustSats: 0n, pricedByDefault: false }),
   })
 
   it('registers both directions under the pairs a client would ask for', async () => {
@@ -198,7 +199,7 @@ describe('a configured market really does become a served corridor', () => {
       onchainStore: null as never,
       assetRfqService: { tickAll: async () => [] } as never,
       assetRfqStore: store,
-      assetRfqMarkets: assetRfqMarketsFrom([], []),
+      assetRfqMarkets: assetRfqMarketsFrom([], { dustSats: 0n, pricedByDefault: false }),
     })
     expect([...corridors]).toHaveLength(0)
     await store.close()

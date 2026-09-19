@@ -13,8 +13,7 @@
  *
  * PUT/DELETE persist, then `replaceMarkets()` rebuilds the in-memory serve list
  * and swaps the running corridor set. Rails, mnemonic and relay URL still need
- * a restart; market CRUD does not. In-flight swaps keep the terms they were
- * quoted with.
+ * a restart; market CRUD does not. @see {@link MARKETS_LIVE_NOTICE}.
  *
  * ## Validated before it is stored, and again at startup
  *
@@ -37,12 +36,14 @@ import type { Hono } from 'hono'
 import {
   assetMarketKey,
   validateAssetMarket,
+  DEFAULT_SERVING,
   type AssetMarketBounds,
   type AssetMarketConfig,
+  type CarrierMode,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import type { AssetMarketRow } from '../db.js'
-import { servedBy } from '../servedBy.js'
+import { marketCapability } from '../marketCapability.js'
 import type { AdminDeps } from '../server.js'
 import type { FeedCache } from '../feedCache.js'
 
@@ -54,7 +55,11 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
  * established, and for the same reason.
  */
 export const MARKETS_LIVE_NOTICE =
-  'Live on this process. In-flight swaps keep the terms they were quoted with; only new quotes see the change.'
+  'Live on this process: the next quote uses these values. A saved change to price, tolerance or ' +
+  'bounds is also re-applied to maker offers this solver has already recorded as fillable but not ' +
+  'yet filled — a tightened market refuses them rather than filling at the old terms. That is ' +
+  'deliberate and no money moves, but the maker is not told why their offer went unfilled. ' +
+  'RFQ swaps already quoted are unaffected: they keep the amounts stored on the swap row.'
 
 /**
  * The wire shape. `null` is the BTC leg, matching the packet and the store.
@@ -79,6 +84,12 @@ export interface MarketBody {
   sellBase?: unknown
   buyBase?: unknown
   enabled?: unknown
+  symbol?: unknown
+  servesOffer?: unknown
+  servesRfq?: unknown
+  rfqSellBase?: unknown
+  rfqBuyBase?: unknown
+  carrierMode?: unknown
 }
 
 class BadRequest extends Error {}
@@ -102,6 +113,14 @@ const int = (label: string, value: unknown): number => {
 
 const optionalInt = (label: string, value: unknown): number | undefined =>
   value === undefined || value === null ? undefined : int(label, value)
+
+// ABSENT takes the default; anything else must be a real boolean. Coerced, the string "true" —
+// the truthiest spelling a client has — reads as false and silently CLOSES a direction.
+const bool = (label: string, value: unknown, fallback: boolean): boolean => {
+  if (value === undefined) return fallback
+  if (typeof value !== 'boolean') throw new BadRequest(`${label} must be true or false`)
+  return value
+}
 
 const atomic = (label: string, value: unknown): bigint => {
   if (value === undefined || value === null) return 0n
@@ -128,8 +147,26 @@ const bounds = (label: string, value: unknown): AssetMarketBounds | null => {
   return { min: BigInt(min), max: BigInt(max) }
 }
 
+const CARRIER_MODES: readonly CarrierMode[] = ['inherit', 'off', 'priced']
+
+const carrierMode = (value: unknown): CarrierMode => {
+  if (value === undefined || value === null) return 'inherit'
+  if (!CARRIER_MODES.includes(value as CarrierMode)) {
+    throw new BadRequest(`carrierMode must be one of ${CARRIER_MODES.join(', ')}`)
+  }
+  return value as CarrierMode
+}
+
 /** The request body as a market, or a `BadRequest` naming the field that was wrong. */
 export const marketFrom = (body: MarketBody): AssetMarketConfig => ({
+  ...DEFAULT_SERVING,
+  symbol: body.symbol === undefined || body.symbol === null ? null : String(body.symbol).trim().toUpperCase() || null,
+  servesOffer: bool('servesOffer', body.servesOffer, false),
+  // Enabled unless explicitly switched off, matching `enabled` below: configuring a market IS the opt-in.
+  servesRfq: bool('servesRfq', body.servesRfq, true),
+  rfqSellBase: bool('rfqSellBase', body.rfqSellBase, true),
+  rfqBuyBase: bool('rfqBuyBase', body.rfqBuyBase, true),
+  carrierMode: carrierMode(body.carrierMode),
   base: leg('base', body.base),
   quote: leg('quote', body.quote),
   baseDecimals: int('baseDecimals', body.baseDecimals),
@@ -156,7 +193,7 @@ export const marketFrom = (body: MarketBody): AssetMarketConfig => ({
  * Bigints do not survive `JSON.stringify`, which throws on them rather than
  * quietly narrowing — so every bound leaves as the decimal string it arrived as.
  */
-const marketJson = (row: AssetMarketRow) => ({
+export const marketJson = (row: AssetMarketRow) => ({
   marketKey: row.marketKey,
   base: row.base,
   quote: row.quote,
@@ -173,6 +210,12 @@ const marketJson = (row: AssetMarketRow) => ({
   sellBase: row.sellBase === null ? null : { min: String(row.sellBase.min), max: String(row.sellBase.max) },
   buyBase: row.buyBase === null ? null : { min: String(row.buyBase.min), max: String(row.buyBase.max) },
   enabled: row.enabled,
+  symbol: row.symbol,
+  servesOffer: row.servesOffer,
+  servesRfq: row.servesRfq,
+  rfqSellBase: row.rfqSellBase,
+  rfqBuyBase: row.rfqBuyBase,
+  carrierMode: row.carrierMode,
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
 })
@@ -184,22 +227,9 @@ export const registerMarketRoutes = (app: Hono, deps: AdminDeps, feeds?: FeedCac
 
   app.get('/api/markets', async (c) => {
     const rows = await deps.services.adminStore.listMarkets()
-    const rfq = deps.services.assetRfqMarkets
-    // A direction the RUNNING process closed reads as `{min:0n,max:0n}`
-    // (ops/assetRfqMarkets.ts:31) — indistinguishable from an unset row bound.
-    const directionsFor = (row: AssetMarketRow) => {
-      const served = rfq.find((market) => market.base === row.base && market.quote === row.quote)
-      return { sellBase: (served?.sellBase?.max ?? 0n) > 0n, buyBase: (served?.buyBase?.max ?? 0n) > 0n }
-    }
     return c.json({
-      // `servedBy` is a SECOND axis, beside the row's own `enabled`. A market can
-      // be enabled and served by nothing, which is the state that cost an
-      // operator an evening. @see admin/servedBy.ts
-      markets: rows.map((row) => ({
-        ...marketJson(row),
-        servedBy: servedBy(row, deps.services),
-        rfqDirections: directionsFor(row),
-      })),
+      // A SECOND axis beside `enabled`: a market can be enabled and served by nothing. @see marketCapability.ts
+      markets: rows.map((row) => ({ ...marketJson(row), ...marketCapability(row, deps.services) })),
       /**
        * Which of these the RUNNING process is actually trading against.
        */

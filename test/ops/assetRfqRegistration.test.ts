@@ -28,6 +28,7 @@ const market = (assetId: string, symbol: string) => ({
   buyBase: { min: 1n, max: 10n ** 24n },
   feedUrl: 'https://feed.example',
   pricePath: 'price',
+  carrierSats: 0n,
 })
 
 /**
@@ -44,7 +45,6 @@ const built = async () => {
     markets: [market(ASSET_A, 'USDA')],
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
-    carrierSats: 0n,
     dustSats: 0n,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
     deriveOffer: () => ({ pkScript: `5120${'d'.repeat(64)}`, address: 'ark1q' }),

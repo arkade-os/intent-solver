@@ -35,11 +35,11 @@ import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { poll } from '@arkade-os/solver-core/util/poll.js'
-import { assetMarketPolicy } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { assetMarketPolicy, DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { AssetOfferService, parseAssetMarkets } from '@arkade-os/solver-app/ops/assetOffers.js'
 import { createServices } from '@arkade-os/solver-app/ops/services.js'
 import { loadConfig } from '@arkade-os/solver-app/config.js'
-import { servedBy } from '@arkade-os/solver-app/admin/servedBy.js'
+import { marketCapability } from '@arkade-os/solver-app/admin/marketCapability.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
@@ -320,10 +320,12 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
     SWAP_TIMEOUT_MS,
   )
 
-  // The boot-time derivation over a REAL stored market row. `servedBy` is #71's;
+  // The boot-time derivation over a REAL stored market row. `marketCapability` is #71's;
   // this pins it against a stored row rather than a hand-built one.
   describe('what this deployment says it will fill', () => {
     const rowFor = (over: Record<string, unknown> = {}) => ({
+      ...DEFAULT_SERVING,
+      symbol: 'E2E',
       base: null,
       quote: assetId,
       baseDecimals: 8,
@@ -341,9 +343,9 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
     it('reports a configured market as served by NOTHING when OFFER_MARKETS is unset', async () => {
       const admin = await AdminStore.open(betterSqliteDriver(':memory:'))
       await admin.putMarket(rowFor())
-      const boot = { liveOfferMarkets: parseAssetMarkets(undefined), assetRfqMarkets: [] }
+      const boot = { assetOffers: null, liveOfferMarkets: parseAssetMarkets(undefined), assetRfqMarkets: [] }
       expect(boot.liveOfferMarkets).toEqual([])
-      expect(servedBy((await admin.listMarkets())[0]!, boot)).toEqual([])
+      expect(marketCapability((await admin.listMarkets())[0]!, boot).serving).toEqual([])
       await admin.close()
     })
 
@@ -404,6 +406,8 @@ describe('e2e arkade offers — what OFFER_MARKETS actually builds', () => {
     const swapDbPath = join(dir, `services-${randomBytes(6).toString('hex')}.sqlite`)
     const admin = await AdminStore.open(betterSqliteDriver(swapDbPath))
     await admin.putMarket({
+      ...DEFAULT_SERVING,
+      symbol: 'E2E',
       base: null,
       quote: assetId,
       baseDecimals: 8,

@@ -15,7 +15,7 @@ import {
   type AssetCardMarket,
   type SolverCardInputs,
 } from '@arkade-os/solver-core/core/registryCard.js'
-import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { DEFAULT_SERVING, type AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
 // BIP340 test vector 1 — the same key the registry's own fixtures sign with,
 // so a cross-repo canonicalization skew shows up as a verification failure
@@ -522,6 +522,7 @@ describe('assetCardMarkets', () => {
     const [resolved] = assetCardMarkets(
       [
         {
+          ...DEFAULT_SERVING,
           base: null,
           quote: ASSET,
           baseDecimals: 8,
@@ -549,6 +550,7 @@ describe('assetCardMarkets', () => {
     const [resolved] = assetCardMarkets(
       [
         {
+          ...DEFAULT_SERVING,
           base: null,
           quote: ASSET,
           baseDecimals: 8,
@@ -620,6 +622,7 @@ describe('markets no card can carry', () => {
 
 describe('a bound with nothing to inherit', () => {
   const view = (over: Partial<AssetMarketPricingView> = {}): AssetMarketPricingView => ({
+    ...DEFAULT_SERVING,
     base: null,
     quote: ASSET,
     baseDecimals: 8,

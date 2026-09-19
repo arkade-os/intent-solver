@@ -128,6 +128,7 @@ const market = (over: Partial<AssetRfqMarket> = {}): AssetRfqMarket => ({
   buyBase: { min: 1n, max: 10n ** 12n },
   feedUrl,
   pricePath: '/price',
+  carrierSats: arkade.ctx.dustSats,
   ...over,
 })
 
@@ -206,7 +207,6 @@ const harness = async (
     markets,
     solverPubkey: makerPublicKey,
     quoteValiditySeconds: over.quoteValiditySeconds ?? 600,
-    carrierSats: arkade.ctx.dustSats,
     dustSats: arkade.ctx.dustSats,
     deriveOffer,
     depositAt,
