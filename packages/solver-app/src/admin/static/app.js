@@ -1469,7 +1469,12 @@ const carrierModeField = () =>
 
 const saveMarket = async () => {
   try {
-    await api('/api/markets', { method: 'PUT', body: JSON.stringify(marketBody(marketDraft)) })
+    const body = JSON.stringify({ markets: [marketBody(marketDraft)] })
+    const seen = await api('/api/pricing/apply', { method: 'POST', body })
+    // The ordered save REPORTS a refusal inside a 200 rather than throwing, so a
+    // form reading the status alone would close on a market that never landed.
+    const refused = (seen?.unapplied ?? [])[0]
+    if (refused) return fail(new Error(refused.reason))
     marketDraft = null
     state.banner = null
     await load('markets')
