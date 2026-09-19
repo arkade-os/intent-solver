@@ -19,7 +19,6 @@ const NAMED = [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_
 const BOTH_CLOSED = [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: false, buy_base: false } }]
 // Shares USDA's derived stem: `rfqSymbolFor` reads only the first 7 and last 4 hex.
 const TWIN = 'aaaaaaa' + 'b'.repeat(57) + 'aaaa'
-const TWIN_NAMED = [{ symbol: 'USDB', assetId: TWIN, enabled: { sell_base: true, buy_base: true } }]
 
 const PRE_UPGRADE_TABLE = `CREATE TABLE admin_market (market_key TEXT PRIMARY KEY, base TEXT, quote TEXT,
      base_decimals INTEGER NOT NULL, quote_decimals INTEGER NOT NULL, feed_url TEXT NOT NULL,
@@ -407,7 +406,7 @@ describe('an incoherent serving row cannot brick startup', () => {
     const rows = await reopened.listMarkets()
     const twin = rows.find((r) => r.quote === TWIN)!
     expect(twin).toMatchObject({ servesRfq: false, symbol: null })
-    // `TWIN_NAMED` calls this asset USDB and is no longer consulted at all.
+    // The reopen passes no seed, so no env token can name this asset back into service.
     expect(assetRfqMarketsFrom(assetMarketPolicy(rows).pricing, CARRIER).map((m) => m.quote)).not.toContain(TWIN)
   })
 

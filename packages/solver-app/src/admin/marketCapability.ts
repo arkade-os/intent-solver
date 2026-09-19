@@ -67,8 +67,9 @@ export const marketCapability = (market: Market, runtime: ServingRuntime): Marke
     gaps.push({
       kind: 'offer_market_not_live',
       detail:
-        'the offer path is built but is not routing this pair, so the flag reaches nothing. Restart to ' +
-        'rebuild the offer serve list from the stored rows.',
+        'the offer path is built but is not routing this pair, so the flag reaches nothing. The serve list is ' +
+        'rebuilt from the stored rows on every market save, so a save whose reload failed leaves exactly this — ' +
+        're-save the market, or restart.',
     })
   }
   if (market.servesRfq && market.base !== null && market.quote !== null) {
