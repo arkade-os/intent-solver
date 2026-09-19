@@ -12,6 +12,7 @@
 import { describe, it, expect } from 'vitest'
 import { corridorSetFromDeps, readerSetFromDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 import { readableAssetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
+import { rfqSymbolFor } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 
@@ -224,6 +225,24 @@ describe('a market that stopped serving keeps the rows it already holds readable
     await store.fail('swap-1', 'quoted', 'lapsed')
     const { readers } = await setsWithout([], store, service)
     expect(readers.get(SELL)).toBeUndefined()
+    await store.close()
+  })
+
+  /** Derived stems CAN collide (7+4 hex), and a reader set that rejected that would fail a BOOT. */
+  it('composes two recovered markets whose derived symbols collide', async () => {
+    const twin = `${'a'.repeat(7)}${'c'.repeat(57)}0100`
+    expect(rfqSymbolFor(ASSET_A)).toBe(rfqSymbolFor(twin))
+    const { store } = await built()
+    const readableAssetRfqMarkets = readableAssetRfqMarketsFrom(
+      [],
+      [
+        { fromAssetId: null, toAssetId: ASSET_A },
+        { fromAssetId: null, toAssetId: twin },
+      ],
+    )
+    const readers = readerSetFromDeps({ ...base(), assetRfqStore: store, assetRfqMarkets: [], readableAssetRfqMarkets })
+    expect(readers.get(SELL)).toBeDefined()
+    expect(readers.get(`arkade:BTC->arkade:${twin}`)).toBeDefined()
     await store.close()
   })
 })
