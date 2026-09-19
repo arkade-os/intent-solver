@@ -916,6 +916,36 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     expect(wallet.settle).not.toHaveBeenCalled()
   })
 
+  it('skips a coin whose prefix cannot satisfy every constraint, when a later subset can', async () => {
+    // 50_200 alone leaves 200 sats — under dust; adding the next overshoots the 40_000
+    // ceiling; the 50_000 coin ALONE drains exactly. Refusing would refuse a fundable exit.
+    const info = { dust: 330n, vtxoMaxAmount: 40_000n, fees: { intentFee: {} } }
+    const wallet = withdrawingWallet([coin(0x01, 50_200), coin(0x02, 50_000)], {
+      arkProvider: { getInfo: vi.fn().mockResolvedValue(info) },
+    })
+
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.settle.mock.calls[0]![0]).toEqual({
+      inputs: [expect.objectContaining({ value: 50_000 })],
+      outputs: [{ address: REGTEST_ADDRESS, amount: 50_000n }],
+    })
+  })
+
+  it('still prefers the soonest-expiring coin when its own prefix works', async () => {
+    const sooner = coin(0x01, 60_000, { expiresAt: new Date('2026-09-18T00:00:00Z') })
+    const later = coin(0x02, 60_000, { expiresAt: new Date('2026-10-01T00:00:00Z') })
+    const wallet = withdrawingWallet([later, sooner], {
+      arkProvider: {
+        getInfo: vi.fn().mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee: {} } }),
+      },
+    })
+
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.settle.mock.calls[0]![0].inputs).toEqual([sooner])
+  })
+
   it('pays out of the arkade float through the action once the typed address matches', async () => {
     const wallet = withdrawingWallet([coin(0x01, 100_000)])
 

@@ -301,35 +301,51 @@ const arkadeWithdraw = async (
     )
   }
 
-  const selected: typeof ordered = []
-  let gross = 0n
-  let inputFees = 0n
-  let carriesAsset = false
-  let change: bigint | null = null
-  let changeFee = 0n
-  for (const coin of ordered) {
+  const netOf = (coin: (typeof ordered)[number]): { value: bigint; inputFee: bigint } => {
     const value = BigInt(coin.value)
-    const inputFee = BigInt(estimator.evalOffchainInput(offchainInputFeeParams(coin)).satoshis)
-    if (inputFee >= value) continue
-    selected.push(coin)
-    gross += value - inputFee
-    inputFees += inputFee
-    carriesAsset = carriesAsset || (coin.assets?.length ?? 0) > 0
-    const left = gross - needed
-    // The change must be an output the server accepts: exactly nothing — and
-    // then only when no asset needs a ride home on it — or at least dust.
-    if (left === 0n && !carriesAsset) {
-      change = 0n
-      break
-    }
-    const net = left > 0n ? changeAfterFee(left) : left
-    if (net >= dust) {
-      change = net
-      changeFee = left - net
-      break
-    }
+    return { value, inputFee: BigInt(estimator.evalOffchainInput(offchainInputFeeParams(coin)).satoshis) }
   }
-  if (change === null) {
+  const overCeiling = (net: bigint): boolean => info.vtxoMaxAmount >= 0n && net > info.vtxoMaxAmount
+
+  type Pick = { selected: typeof ordered; inputFees: bigint; change: bigint; changeFee: bigint }
+
+  const pickFrom = (start: number): Pick | null => {
+    const selected: typeof ordered = []
+    let gross = 0n
+    let inputFees = 0n
+    let carriesAsset = false
+    for (const coin of ordered.slice(start)) {
+      const { value, inputFee } = netOf(coin)
+      if (inputFee >= value) continue
+      selected.push(coin)
+      gross += value - inputFee
+      inputFees += inputFee
+      carriesAsset = carriesAsset || (coin.assets?.length ?? 0) > 0
+      const left = gross - needed
+      if (left < 0n) continue
+      // The change must be an output the server accepts: exactly nothing — and then only
+      // when no asset needs a ride home on it — or at least dust and under the ceiling.
+      if (left === 0n) {
+        if (carriesAsset) continue
+        return { selected, inputFees, change: 0n, changeFee: 0n }
+      }
+      const net = changeAfterFee(left)
+      if (net < dust || overCeiling(net)) continue
+      return { selected, inputFees, change: net, changeFee: left - net }
+    }
+    return null
+  }
+
+  // Each start in turn, earliest first: a prefix can leave sub-dust change while the coin
+  // fixing that overshoots the ceiling, where a later subset satisfies both. Biased to the
+  // earliest start, so the soonest-expiry preference survives.
+  let pick: Pick | null = null
+  for (let start = 0; start < ordered.length && pick === null; start += 1) pick = pickFrom(start)
+
+  if (pick === null) {
+    // Against EVERY economic coin: no subset working is a property of the whole float.
+    const economic = ordered.map((coin) => ({ coin, ...netOf(coin) })).filter(({ value, inputFee }) => inputFee < value)
+    const gross = economic.reduce((total, { value, inputFee }) => total + value - inputFee, 0n)
     if (gross < needed) {
       throw new Error(
         `the float's unreserved coins net ${gross} sats against the ${needed} needed ` +
@@ -337,19 +353,22 @@ const arkadeWithdraw = async (
           'needs topping up',
       )
     }
+    const net = changeAfterFee(gross - needed)
+    if (overCeiling(net)) {
+      throw new Error(
+        `the change of ${net} sats would come back as one coin above the server's ${info.vtxoMaxAmount} sat ` +
+          'per-output ceiling — withdraw more, or split the float first (pool-mint)',
+      )
+    }
     throw new Error(
-      `withdrawing ${amountSats} sats leaves ${changeAfterFee(gross - needed)} sats of change, below the ${dust} ` +
-        `sat dust floor` +
-        (carriesAsset ? ' that the selection’s asset must ride on' : '') +
+      `withdrawing ${amountSats} sats leaves ${net} sats of change, below the ${dust} sat dust floor` +
+        (economic.some(({ coin }) => (coin.assets?.length ?? 0) > 0)
+          ? ' that the selection’s asset must ride on'
+          : '') +
         ' — withdraw a little less, so the change clears it',
     )
   }
-  if (change > 0n && info.vtxoMaxAmount >= 0n && change > info.vtxoMaxAmount) {
-    throw new Error(
-      `the change of ${change} sats would come back as one coin above the server's ${info.vtxoMaxAmount} sat ` +
-        'per-output ceiling — withdraw more, or split the float first (pool-mint)',
-    )
-  }
+  const { selected, inputFees, change, changeFee } = pick
 
   const release = services.arkade.reservations.reserve(selected)
   try {
