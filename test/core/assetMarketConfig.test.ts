@@ -303,3 +303,103 @@ describe('the serving fields', () => {
     expect(() => assetMarketPolicy([offerOnly, { ...offerOnly, base: null, quote: OTHER }])).not.toThrow()
   })
 })
+
+describe('a feed URL the admin port must not be talked into fetching', () => {
+  const REFUSED = [
+    'http://127.0.0.1/price',
+    'http://localhost:8080/price',
+    'http://169.254.169.254/latest/meta-data/',
+    'http://10.1.2.3/price',
+    'http://192.168.0.5/price',
+    'http://172.16.9.9/price',
+    'http://[::1]/price',
+    'http://[fd00::1]/price',
+    'http://0.0.0.0/price',
+  ]
+
+  it.each(REFUSED)('refuses %s on a write', (feedUrl) => {
+    expect(() => validateAssetMarket(market({ feedUrl }))).toThrow(/private, loopback or link-local/)
+  })
+
+  it('admits a public feed', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'https://api.binance.com/api/v3/ticker/price' }))).not.toThrow()
+  })
+
+  it('still admits a stored row at startup, which was written under the old rule', () => {
+    // Refusing here would take four unrelated BTC corridors down on upgrade,
+    // for a deployment whose feed is a sidecar it deliberately runs on loopback.
+    expect(() =>
+      assetMarketPolicy([market({ feedUrl: 'http://127.0.0.1:8080/price', pricePath: '/price' })]),
+    ).not.toThrow()
+  })
+})
+
+describe('the predicate actually closes the class it names', () => {
+  it('refuses the metadata address in its IPv4-mapped-IPv6 form, which URL renders as hex', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://[::ffff:169.254.169.254]/latest/meta-data/' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  it('admits a real public vendor whose hostname happens to start with fc', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'https://fcsapi.com/api-v3/forex/latest' }))).not.toThrow()
+  })
+
+  it('refuses a trailing-dot FQDN for localhost', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://localhost./price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  it('refuses the rest of the fe80::/10 range, not just the fe80: literal', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://[febf::1]/price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  // RFC 6598 CGNAT, 100.64.0.0/10 — Fly.io routes it to internal Wireguard
+  // peers, and other providers use it for load-balancer health endpoints.
+  it('refuses 100.64.0.0, the CGNAT range’s first address', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://100.64.0.0/price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  it('refuses 100.127.255.255, the CGNAT range’s last address', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://100.127.255.255/price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  it('admits 100.63.255.255, one address below the CGNAT range', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://100.63.255.255/price' }))).not.toThrow()
+  })
+
+  it('admits 100.128.0.0, one address above the CGNAT range', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://100.128.0.0/price' }))).not.toThrow()
+  })
+
+  it('refuses a CGNAT address in its IPv4-mapped-IPv6 form, which URL renders as hex', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://[::ffff:100.64.0.1]/price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  it('refuses fec0::1, deprecated IPv6 site-local', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://[fec0::1]/price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  it('refuses feff::1, the last address of the merged fe80::/9', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://[feff::1]/price' }))).toThrow(
+      /private, loopback or link-local/,
+    )
+  })
+
+  // Fails the moment someone rewrites the class as `startsWith('fe')` — the
+  // same over-refusal that blocked fcsapi.com.
+  it('admits fe7f::1, one group below the range', () => {
+    expect(() => validateAssetMarket(market({ feedUrl: 'http://[fe7f::1]/price' }))).not.toThrow()
+  })
+})

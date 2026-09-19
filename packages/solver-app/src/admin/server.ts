@@ -25,6 +25,7 @@ import { registerStatusRoutes } from './routes/status.js'
 import { registerDiagnosticsRoutes } from './routes/diagnostics.js'
 import { registerSettingsRoutes } from './routes/settings.js'
 import { registerMarketRoutes } from './routes/markets.js'
+import { registerPricingRoutes } from './routes/pricing.js'
 import { registerPricingApplyRoutes } from './routes/pricingApply.js'
 import { registerPnlRoutes } from './routes/pnl.js'
 import { registerActionRoutes } from './routes/actions.js'
@@ -32,8 +33,9 @@ import { registerCardRoutes } from './routes/card.js'
 import { registerEventRoutes } from './routes/events.js'
 import type { ChangeFeed } from './events.js'
 import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
-import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
+import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import { readStaticFile } from './static.js'
+import { createFeedCache } from './feedCache.js'
 
 /** Which long-lived command the console is running inside. */
 export type AdminMode = 'serve' | 'relay' | 'watch'
@@ -90,9 +92,13 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   registerOfferRoutes(app, deps)
   app.get('/api/rfq-refusals', (c) => c.json(deps.services.rfqRefusals.recent()))
   registerSettingsRoutes(app, deps)
-  registerMarketRoutes(app, deps)
+  // Built once and shared: `feeds.read` is for the preview, never the write probe.
+  const fetchPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
+  const feeds = createFeedCache(fetchPrice)
+  registerMarketRoutes(app, { ...deps, fetchPrice }, feeds)
+  registerPricingRoutes(app, deps, feeds)
   // The ordered save across both of the two routes above. @see routes/pricingApply.ts
-  registerPricingApplyRoutes(app, deps)
+  registerPricingApplyRoutes(app, { ...deps, fetchPrice })
   // BEFORE the actions route, for the reason the card route states below: that
   // route claims `/api/actions/:name` only, but registration order is what
   // keeps the `*` fallback at the very bottom from shadowing anything.

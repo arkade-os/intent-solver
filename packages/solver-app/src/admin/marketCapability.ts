@@ -12,13 +12,27 @@ export type CapabilityGap = 'offer_path_not_built' | 'rfq_pair_unsupported' | 'r
 export interface MarketCapability {
   readonly serving: readonly ServingPath[]
   readonly gaps: readonly { readonly kind: CapabilityGap; readonly detail: string }[]
+  /**
+   * What the RUNNING process is open on, which `serving` cannot say: it reports
+   * `rfq` whether one direction is closed or neither. `ASSET_<SYM>_<DIR>_ENABLED`
+   * still closes a direction without touching the row, so this is the only place
+   * that divergence shows.
+   */
+  readonly rfqDirections: { readonly sellBase: boolean; readonly buyBase: boolean }
+}
+
+interface RfqRuntimeMarket {
+  readonly base: string | null
+  readonly quote: string | null
+  readonly sellBase?: { readonly max: bigint } | null
+  readonly buyBase?: { readonly max: bigint } | null
 }
 
 export interface ServingRuntime {
   /** `Services.assetOffers`: null when this process booted with no offer path at all. */
   readonly assetOffers: unknown | null
   readonly liveOfferMarkets: readonly { a: string | null; b: string | null }[]
-  readonly assetRfqMarkets: readonly { base: string | null; quote: string | null }[]
+  readonly assetRfqMarkets: readonly RfqRuntimeMarket[]
 }
 
 type Market = Pick<
@@ -30,10 +44,13 @@ export const marketCapability = (market: Market, runtime: ServingRuntime): Marke
   const key = assetMarketKey(market.base, market.quote)
   const serving: ServingPath[] = []
   if (runtime.liveOfferMarkets.some((pair) => assetMarketKey(pair.a, pair.b) === key)) serving.push('offer')
-  if (runtime.assetRfqMarkets.some((row) => row.base === market.base && row.quote === market.quote)) serving.push('rfq')
+  const live = runtime.assetRfqMarkets.find((row) => row.base === market.base && row.quote === market.quote)
+  if (live) serving.push('rfq')
+  // A direction the running process closed reads as `{min:0n,max:0n}` (ops/assetRfqMarkets.ts:31).
+  const rfqDirections = { sellBase: (live?.sellBase?.max ?? 0n) > 0n, buyBase: (live?.buyBase?.max ?? 0n) > 0n }
 
   // Disabled is serving nothing BY REQUEST; a gap spends the alarm on a state the operator chose.
-  if (!market.enabled) return { serving, gaps: [] }
+  if (!market.enabled) return { serving, gaps: [], rfqDirections }
 
   const gaps: { kind: CapabilityGap; detail: string }[] = []
   if (market.servesOffer && runtime.assetOffers === null) {
@@ -55,5 +72,5 @@ export const marketCapability = (market: Market, runtime: ServingRuntime): Marke
       detail: 'both directions are closed, so RFQ registers no corridor for this market.',
     })
   }
-  return { serving, gaps }
+  return { serving, gaps, rfqDirections }
 }

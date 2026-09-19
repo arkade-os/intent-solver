@@ -45,6 +45,7 @@ import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/f
 import type { AssetMarketRow } from '../db.js'
 import { marketCapability } from '../marketCapability.js'
 import type { AdminDeps } from '../server.js'
+import type { FeedCache } from '../feedCache.js'
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
@@ -211,7 +212,7 @@ export const marketJson = (row: AssetMarketRow) => ({
   updatedAt: row.updatedAt,
 })
 
-export const registerMarketRoutes = (app: Hono, deps: AdminDeps): void => {
+export const registerMarketRoutes = (app: Hono, deps: AdminDeps, feeds?: FeedCache): void => {
   // Built once per registration, not per request: `createPriceFeed` validates
   // its timeout eagerly, which is the whole point of that check.
   const fetchPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
@@ -225,6 +226,13 @@ export const registerMarketRoutes = (app: Hono, deps: AdminDeps): void => {
        * Which of these the RUNNING process is actually trading against.
        */
       active: deps.services.assetMarkets.map((market) => assetMarketKey(market.base, market.quote)),
+      // Deployment-wide today, read-only for that reason. Both false is the
+      // shipped default, so it pays the carrier out of margin.
+      carrier: {
+        sats: String(deps.services.arkade.dustSats),
+        rfqPriced: deps.services.policy.assetCarrierPricing,
+        offerCharged: deps.services.policy.offerChargesDeliveredCarrier,
+      },
       restartNotice: MARKETS_LIVE_NOTICE,
     })
   })
@@ -259,7 +267,9 @@ export const registerMarketRoutes = (app: Hono, deps: AdminDeps): void => {
     // offer at run time, so storing it would be storing a pair this solver
     // advertises and never fills — discovered days later, by its absence.
     try {
-      await fetchPrice(market.feedUrl, market.pricePath)
+      const price = await fetchPrice(market.feedUrl, market.pricePath)
+      // Seeds the cache with a live read, so the preview is usable right after a save.
+      feeds?.prime(market.feedUrl, market.pricePath, price)
     } catch (error) {
       return c.json(
         {

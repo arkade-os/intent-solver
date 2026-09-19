@@ -124,7 +124,14 @@ const market = (over: Record<string, unknown> = {}) => ({
 const marketsApp = (policy: Record<string, unknown>, rows: unknown[] = [market()]) =>
   buildAdminApp({
     services: {
-      policy: { offerMarkets: [], assetRfqTokens: [], ...policy },
+      policy: {
+        offerMarkets: [],
+        assetRfqTokens: [],
+        assetCarrierPricing: false,
+        offerChargesDeliveredCarrier: false,
+        ...policy,
+      },
+      arkade: { dustSats: 330n },
       assetMarkets: [],
       liveOfferMarkets: policy.liveOfferMarkets ?? [],
       assetRfqMarkets: policy.assetRfqMarkets ?? [],
