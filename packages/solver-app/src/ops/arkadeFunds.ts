@@ -58,7 +58,8 @@ export const ARKADE_FUND_SOURCE_ID = 'arkade'
 
 // Bounds on the fallback subset search: an unbounded one is a denial of service
 // the operator inflicts on themselves, and its recursion is as deep as the coins
-// it walks. 64 is `pool-mint`'s own piece ceiling, so it spans a whole float.
+// it walks. 64 is the piece count `pool-mint` keeps a float at; a coin past it is
+// still the first-fit scan's to take, and that scan is unbounded and iterative.
 const SUBSET_SEARCH_COINS = 64
 const SUBSET_SEARCH_LIMIT = 20_000
 
