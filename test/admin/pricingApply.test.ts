@@ -335,6 +335,43 @@ describe('overrides travel in the same two passes', () => {
     await off.adminStore.close()
   })
 
+  it('answers structurally when the pass-1 policy reload throws, and does not reach pass 2', async () => {
+    const { app, adminStore, services } = await build()
+    services.replacePolicy = async () => {
+      throw new Error('policy reload refused')
+    }
+
+    const res = await apply(app, {
+      markets: [body()],
+      overrides: { ASSET_CARRIER_PRICING: 'true', LOCKUP_TIMEOUT_SECONDS: '1800' },
+    })
+
+    expect(res.status).toBe(200)
+    const seen = await answered(res)
+    expect(seen.unapplied).toEqual([{ key: 'ASSET_CARRIER_PRICING', reason: 'policy reload refused' }])
+    // Not live, so stored-and-pending is the whole truth about it, and the badge already says so.
+    expect(seen.applied).toEqual(['LOCKUP_TIMEOUT_SECONDS'])
+    // A market with no stored row is created in the widening pass, so an empty table is pass 2 never running.
+    expect(await adminStore.listMarkets()).toEqual([])
+    await adminStore.close()
+  })
+
+  it('calls a live key that reached disk but not the process unapplied, in pass 2 as in pass 1', async () => {
+    const { app, adminStore, services } = await build({ assetCarrierPricing: true })
+    services.replacePolicy = async () => {
+      throw new Error('policy reload refused')
+    }
+
+    const res = await apply(app, { overrides: { ASSET_CARRIER_PRICING: 'false' } })
+
+    expect(res.status).toBe(200)
+    const seen = await answered(res)
+    expect(seen.applied).toEqual([])
+    expect(seen.unapplied).toEqual([{ key: 'ASSET_CARRIER_PRICING', reason: 'policy reload refused' }])
+    expect((await adminStore.getOverrides()).ASSET_CARRIER_PRICING).toBe('false')
+    await adminStore.close()
+  })
+
   it('reports a refused override as unapplied rather than answering 500', async () => {
     const { app, adminStore } = await build()
     const res = await apply(app, { overrides: { ASSET_CARRIER_PRICING: 'yes', NOT_A_KNOB: '1' } })

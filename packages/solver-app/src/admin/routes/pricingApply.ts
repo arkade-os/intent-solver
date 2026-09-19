@@ -240,8 +240,13 @@ export const registerPricingApplyRoutes = (app: Hono, deps: AdminDeps): void => 
       targets.push({ key, target, stored })
     }
 
-    const writeOverrides = async (pass: SavePass): Promise<void> => {
-      let touchedLive = false
+    /**
+     * The reload's failure, or `null`. A LIVE key counts as `applied` only once the process holds it — the
+     * same reading the widening markets below get — while every other key is stored, and badged pending,
+     * whatever the reload does.
+     */
+    const writeOverrides = async (pass: SavePass): Promise<string | null> => {
+      const liveKeys: string[] = []
       for (const entry of overrides.filter((o) => o.pass === pass)) {
         try {
           await store.setOverrideWithAudit(entry.key, entry.value, {
@@ -252,15 +257,22 @@ export const registerPricingApplyRoutes = (app: Hono, deps: AdminDeps): void => 
             detail: null,
             revision,
           })
-          applied.push(entry.key)
-          touchedLive ||= LIVE_KEYS.has(entry.key)
+          if (LIVE_KEYS.has(entry.key)) liveKeys.push(entry.key)
+          else applied.push(entry.key)
         } catch (error) {
           unapplied.push({ key: entry.key, reason: messageOf(error) })
         }
       }
-      if (touchedLive) {
+      if (liveKeys.length === 0) return null
+      try {
         await deps.services.replacePolicy(applyOverrides(deps.services.config, await store.getOverrides()))
+      } catch (error) {
+        const reason = messageOf(error)
+        for (const key of liveKeys) unapplied.push({ key, reason })
+        return reason
       }
+      applied.push(...liveKeys)
+      return null
     }
 
     const writeMarket = async (market: AssetMarketConfig): Promise<void> => {
@@ -275,7 +287,8 @@ export const registerPricingApplyRoutes = (app: Hono, deps: AdminDeps): void => 
       })
     }
 
-    await writeOverrides('narrowing')
+    // Pass 1's restrictions are not in force, so pass 2 must not run — the same rule the reload below keeps.
+    if ((await writeOverrides('narrowing')) !== null) return c.json({ revision, applied, unapplied })
     const survived: typeof targets = []
     for (const entry of targets) {
       if (entry.stored === null) {
@@ -298,7 +311,8 @@ export const registerPricingApplyRoutes = (app: Hono, deps: AdminDeps): void => 
       return c.json({ revision, applied, unapplied })
     }
 
-    await writeOverrides('widening')
+    // Stop rather than widen the markets too: quoting less than asked is the failure this route is allowed.
+    if ((await writeOverrides('widening')) !== null) return c.json({ revision, applied, unapplied })
     const widened: string[] = []
     for (const entry of survived) {
       try {
