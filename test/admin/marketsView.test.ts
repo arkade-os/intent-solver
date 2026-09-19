@@ -91,6 +91,58 @@ describe('the form does not fight the operator', () => {
     expect(block.slice(start, end)).not.toContain('render()')
   })
 
+  /** `saveMarket` with every seam injected, so the draft it keeps or clears is observable. */
+  const savedWith = async (response: unknown) => {
+    const block = marketsBlock()
+    const start = block.indexOf('const saveMarket')
+    if (start === -1) throw new Error('saveMarket is gone from the markets block')
+    const source = block.slice(start, block.indexOf('\n}', start) + 2)
+    const sent: { path: string; body: string }[] = []
+    const failures: string[] = []
+    const built = new Function(
+      'api',
+      'marketBody',
+      'state',
+      'load',
+      'fail',
+      `let marketDraft = { marketKey: 'k' }
+       ${source}
+       return async () => (await saveMarket(), marketDraft)`,
+    ) as (...args: unknown[]) => () => Promise<unknown>
+    const draft = await built(
+      async (path: string, init: { body: string }) => (sent.push({ path, body: init.body }), response),
+      (d: unknown) => d,
+      { banner: 'x' },
+      async () => {},
+      (error: Error) => failures.push(error.message),
+    )()
+    return { draft, sent, failures }
+  }
+
+  it('saves through the ordered endpoint, not the single-market write', async () => {
+    const { sent } = await savedWith({ revision: 'r', applied: ['k'], unapplied: [] })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.path).toBe('/api/pricing/apply')
+    expect(JSON.parse(sent[0]!.body)).toMatchObject({ markets: [{ marketKey: 'k' }] })
+  })
+
+  // A refusal arrives INSIDE a 200 here, so status alone is not success.
+  it('keeps the draft when the ordered save reports the market unapplied', async () => {
+    const { draft, failures } = await savedWith({
+      revision: 'r',
+      applied: [],
+      unapplied: [{ key: 'k', reason: 'the feed did not answer' }],
+    })
+    expect(draft).toEqual({ marketKey: 'k' })
+    expect(failures).toEqual(['the feed did not answer'])
+  })
+
+  it('clears the draft when nothing is unapplied', async () => {
+    const { draft, failures } = await savedWith({ revision: 'r', applied: ['k'], unapplied: [] })
+    expect(draft).toBeNull()
+    expect(failures).toEqual([])
+  })
+
   it('leaves the form open when a write is refused', () => {
     // Every refusal names one field. Closing the form would make the operator
     // retype the other ten to fix it.
