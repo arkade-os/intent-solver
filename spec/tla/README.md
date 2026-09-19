@@ -42,7 +42,16 @@ java -XX:+UseParallelGC -cp /path/to/tla2tools.jar tlc2.TLC -config LightningSen
   named with `-config`. Almost every cfg here has a different name from its
   module, so give both. Passing `Foo.cfg` positionally makes TLC look for
   `Foo.cfg.cfg`.
-- `-workers N` sets the worker count; the recorded checkpoint runs used 2.
+- `-workers N` sets the worker count. TLC defaults to **one**, and several of
+  these models do not finish there, so each checkpoint records the count and
+  the TLC version its figures came from: the older ones used 2, LightningSend's
+  use 16.
+- **Only a GREEN run has reproducible counts.** It explores the whole state
+  graph, so `distinct` and `depth` are properties of the graph (`generated` is
+  not — it moves with the worker count). A run that stops at the first
+  violation has none: the discovery order varies per run, so quote the
+  violated **invariant name**, not the numbers. `LightningSend.tla`'s
+  checkpoint comment shows the spread that measuring this produced.
 - `-coverage 1` after a green run prints how many times each action fired —
   the check that no action is dead spec. (`OnchainReceive.cfg`'s checkpoint
   comment records what its coverage run found.)
