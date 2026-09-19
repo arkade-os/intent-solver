@@ -7,9 +7,25 @@
 
 import Database from 'better-sqlite3'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
-import type { SqlDriver } from '@arkade-os/solver-core/core/driver.js'
+import { DuplicateKeyError, type SqlDriver } from '@arkade-os/solver-core/core/driver.js'
 
 export type { SqlDriver } from '@arkade-os/solver-core/core/driver.js'
+
+/** PRIMARYKEY belongs beside UNIQUE: SQLite words a key clash "UNIQUE constraint failed" too. */
+const SQLITE_DUPLICATE_CODES = new Set(['SQLITE_CONSTRAINT_UNIQUE', 'SQLITE_CONSTRAINT_PRIMARYKEY'])
+
+/** D1 exposes no error code, so its message is the only thing left to read. */
+const UNIQUE_CONSTRAINT_WORDING = /UNIQUE constraint failed/i
+
+/** Wraps `run` alone: the same refusal out of `exec` means a migration met duplicate rows. */
+const normalisingWrite = async <T>(write: () => Promise<T>, isDuplicate: (error: Error) => boolean): Promise<T> => {
+  try {
+    return await write()
+  } catch (error) {
+    if (error instanceof Error && isDuplicate(error)) throw new DuplicateKeyError(error.message, { cause: error })
+    throw error
+  }
+}
 
 /** Node driver: better-sqlite3 over a file path (or ':memory:' in tests). */
 export const betterSqliteDriver = (path: string): SqlDriver => {
@@ -26,7 +42,11 @@ export const betterSqliteDriver = (path: string): SqlDriver => {
     exec: async (sql) => {
       db.exec(sql)
     },
-    run: async (sql, params = []) => ({ changes: db.prepare(sql).run(...(params as never[])).changes }),
+    run: async (sql, params = []) =>
+      normalisingWrite(
+        async () => ({ changes: db.prepare(sql).run(...(params as never[])).changes }),
+        (error) => SQLITE_DUPLICATE_CODES.has((error as { code?: string }).code ?? ''),
+      ),
     get: async <T>(sql: string, params: unknown[] = []) => db.prepare(sql).get(...(params as never[])) as T | undefined,
     all: async <T>(sql: string, params: unknown[] = []) => db.prepare(sql).all(...(params as never[])) as T[],
     transaction: async <T>(fn: () => Promise<T>): Promise<T> => {
@@ -85,13 +105,17 @@ export const d1Driver = (db: D1Like): SqlDriver => ({
       .filter((statement) => statement.length > 0)
     for (const statement of statements) await db.exec(statement)
   },
-  run: async (sql, params = []) => {
-    const { meta } = await db
-      .prepare(sql)
-      .bind(...params)
-      .run()
-    return { changes: meta.changes }
-  },
+  run: async (sql, params = []) =>
+    normalisingWrite(
+      async () => {
+        const { meta } = await db
+          .prepare(sql)
+          .bind(...params)
+          .run()
+        return { changes: meta.changes }
+      },
+      (error) => UNIQUE_CONSTRAINT_WORDING.test(error.message),
+    ),
   get: async <T>(sql: string, params: unknown[] = []) => {
     // D1 says "no row" with null; the port says undefined, so both drivers
     // read identically to the store.

@@ -285,6 +285,12 @@ describe('quote', () => {
     await expect(service.quote(request())).rejects.toThrow(/quote construction is broken/)
   })
 
+  it('does not call a failure a duplicate merely because it says "unique"', async () => {
+    const { service, store } = await harness()
+    vi.spyOn(store, 'insertQuote').mockRejectedValueOnce(new TypeError('UNIQUE quote construction failed'))
+    await expect(service.quote(request())).rejects.toThrow(/UNIQUE quote construction failed/)
+  })
+
   it('answers a lost race without logging it as a failure', async () => {
     const failures: unknown[] = []
     const { service, store } = await harness({ onError: (_id, error) => failures.push(error) })

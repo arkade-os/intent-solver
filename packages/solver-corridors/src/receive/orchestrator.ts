@@ -66,6 +66,7 @@ import type { ReceiveSwapRow, ReceiveSwapStore } from '../db/receiveSwaps.js'
 import type { SendSwapRow } from '../db/swaps.js'
 import { nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
+import { isDuplicateKeyError } from '@arkade-os/solver-core/core/driver.js'
 
 /**
  * How long a minted hold invoice stays valid, seconds — DERIVED, never chosen.
@@ -612,7 +613,7 @@ export class ReceiveSwapService {
         // duplicate insert means another LIVE row owns this hash and its invoice is the
         // one a cancel here would close — breaking a legitimate open quote. On any
         // other failure the hash is exclusively ours and the mint is pure litter.
-        if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+        if (isDuplicateKeyError(error)) {
           return { accepted: false, reason: 'duplicate_swap' }
         }
         // `retireInvoice` swallows its own failures, so this cannot turn a

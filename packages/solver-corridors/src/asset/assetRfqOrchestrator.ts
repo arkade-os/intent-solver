@@ -48,6 +48,7 @@ import type { Price } from '@arkade-os/solver-core/core/priceFeed.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
+import { isDuplicateKeyError } from '@arkade-os/solver-core/core/driver.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow, type AssetRfqSwapState } from '../db/assetRfqSwaps.js'
 
@@ -326,7 +327,7 @@ export class AssetRfqSwapService {
       return { accepted: true, swap, carrierSats: market.carrierSats }
     } catch (error) {
       // Only the unique indexes mean duplicate — both onchain orchestrators narrow it so.
-      if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+      if (isDuplicateKeyError(error)) {
         return { accepted: false, reason: 'duplicate_swap', detail: 'a negotiation already holds this id or address' }
       }
       // Below the check: `onError` logs a failure to act on, and a lost race is neither.

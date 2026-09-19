@@ -32,3 +32,25 @@ export interface SqlDriver {
   transaction<T>(fn: () => Promise<T>): Promise<T>
   close(): Promise<void>
 }
+
+/**
+ * A write refused because it would duplicate a unique key — normalised BY THE
+ * DRIVER, the obligation `get` already carries for "no row". The runtime's own
+ * wording is preserved verbatim, because callers assert on it.
+ */
+export class DuplicateKeyError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = 'DuplicateKeyError'
+  }
+}
+
+const UNIQUE_CONSTRAINT_WORDING = /UNIQUE constraint failed/i
+
+/**
+ * The type is the primary signal; the wording is a FALLBACK for a refusal that
+ * reached here without passing a driver we wrap. Matching the whole phrase
+ * rather than the word is what stops an unrelated failure being called duplicate.
+ */
+export const isDuplicateKeyError = (error: unknown): boolean =>
+  error instanceof DuplicateKeyError || (error instanceof Error && UNIQUE_CONSTRAINT_WORDING.test(error.message))

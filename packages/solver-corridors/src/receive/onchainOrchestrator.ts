@@ -65,6 +65,7 @@ import type { CovclaimdClient } from './covclaimd.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
+import { isDuplicateKeyError } from '@arkade-os/solver-core/core/driver.js'
 
 const DEFAULT_RECOVERY_SWEEP_ROW_BUDGET = 25
 
@@ -451,7 +452,7 @@ export class OnchainReceiveSwapService {
         })
         return { accepted: true, swap, lockupDeadline: this.now() + DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT }
       } catch (error) {
-        if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+        if (isDuplicateKeyError(error)) {
           return { accepted: false, reason: 'duplicate_swap' }
         }
         throw error

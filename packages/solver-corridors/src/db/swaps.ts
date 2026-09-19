@@ -19,6 +19,7 @@
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { BaseSwapStore, type RawRow, type StoreShape } from './baseSwapStore.js'
+import { DuplicateKeyError } from '@arkade-os/solver-core/core/driver.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
 /**
@@ -696,7 +697,8 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
         quote.paymentHash,
       ],
     )
-    if (inserted.changes !== 1) throw new Error('UNIQUE constraint failed: send_swap.payment_hash')
+    // By hand: WHERE NOT EXISTS declines the write, so no driver sees an error to normalise.
+    if (inserted.changes !== 1) throw new DuplicateKeyError('UNIQUE constraint failed: send_swap.payment_hash')
     await this.recordEvent(quote.id, null, 'quoted', null)
     return this.get(quote.id)
   }

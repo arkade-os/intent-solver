@@ -40,6 +40,7 @@ import {
 } from '@arkade-os/solver-core/core/send.js'
 import { maxRoutingFeeSats, type Limits } from '@arkade-os/solver-core/core/limits.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
+import { isDuplicateKeyError } from '@arkade-os/solver-core/core/driver.js'
 import { FREE, giveSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import {
   absoluteLocktimeIn,
@@ -720,7 +721,7 @@ export class SendSwapService {
         return { accepted: true, swap, lockupDeadline: acceptance.lockupDeadline }
       } catch (error) {
         // The UNIQUE constraint is the racproof backstop behind the pre-check.
-        if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+        if (isDuplicateKeyError(error)) {
           return { accepted: false, reason: 'duplicate_swap' }
         }
         throw error
