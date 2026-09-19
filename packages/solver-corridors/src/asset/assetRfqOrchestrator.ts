@@ -325,11 +325,13 @@ export class AssetRfqSwapService {
       })
       return { accepted: true, swap, carrierSats: market.carrierSats }
     } catch (error) {
-      // The unique indexes are the race-loser's answer: another worker quoted
-      // this rfq_id, or already watches this offer address. Either way this
-      // request must not proceed to a second row.
+      // Only the unique indexes mean duplicate — both onchain orchestrators narrow it so.
+      if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+        return { accepted: false, reason: 'duplicate_swap', detail: 'a negotiation already holds this id or address' }
+      }
+      // Below the check: `onError` logs a failure to act on, and a lost race is neither.
       this.deps.onError?.(request.rfqId, error)
-      return { accepted: false, reason: 'duplicate_swap', detail: 'a negotiation already holds this id or address' }
+      throw error
     }
   }
 
