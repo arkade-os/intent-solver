@@ -274,11 +274,16 @@ export class AdminStore {
       seed.offerMarkets.some(
         (pair) => (pair.a === row.base && pair.b === row.quote) || (pair.a === row.quote && pair.b === row.base),
       )
+    const taken = new Set<string>()
     await this.driver.transaction(async () => {
       for (const row of rows) {
         const assetId = row.base !== null && row.quote !== null ? null : (row.base ?? row.quote)
         const token = assetId === null ? undefined : byAsset.get(assetId)
-        const symbol = assetId === null ? null : (token?.symbol ?? rfqSymbolFor(assetId))
+        const derived = assetId === null ? null : (token?.symbol ?? rfqSymbolFor(assetId))
+        // Fail CLOSED on a symbol an earlier row took, the answer `repairServing` gives: a second
+        // row carrying it violates idx_admin_market_symbol, and that throw is a boot nothing repairs.
+        const symbol = derived === null || taken.has(derived) ? null : derived
+        if (symbol !== null) taken.add(symbol)
         const sellBase = symbol !== null && (token?.enabled.sell_base ?? true)
         const buyBase = symbol !== null && (token?.enabled.buy_base ?? true)
         await this.driver.run(

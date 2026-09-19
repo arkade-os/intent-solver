@@ -269,6 +269,45 @@ describe('the one-shot serving seed', () => {
       },
     ])
   })
+
+  it('boots a first upgrade whose two rows derive ONE stem, rather than tripping the unique index', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    await driver.exec(PRE_UPGRADE_TABLE)
+    expect(rfqSymbolFor(TWIN)).toBe(rfqSymbolFor(USDA))
+    for (const asset of [USDA, TWIN]) await driver.run(OLD_BINARY_INSERT, [assetMarketKey(null, asset), asset])
+    const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: [] })
+    const rows = await store.listMarkets()
+    for (const row of rows) expect(() => validateAssetMarket(row), row.marketKey).not.toThrow()
+    // Ordered by market_key, so the loser is the one the seed reached second.
+    expect(rows.map((row) => row.symbol)).toEqual([rfqSymbolFor(USDA), null])
+    expect(rows[1]).toMatchObject({ servesRfq: false, rfqSellBase: false, rfqBuyBase: false })
+  })
+
+  it('boots a first upgrade where an ASSET_MARKETS symbol is another row’s derived stem', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    await driver.exec(PRE_UPGRADE_TABLE)
+    for (const asset of [USDA, OTHER]) await driver.run(OLD_BINARY_INSERT, [assetMarketKey(null, asset), asset])
+    const store = await AdminStore.open(driver, () => 2_000, {
+      offerMarkets: [],
+      tokens: [{ symbol: rfqSymbolFor(USDA), assetId: OTHER, enabled: { sell_base: true, buy_base: true } }],
+    })
+    const rows = await store.listMarkets()
+    for (const row of rows) expect(() => validateAssetMarket(row), row.marketKey).not.toThrow()
+    expect(rows.filter((row) => row.symbol === rfqSymbolFor(USDA))).toHaveLength(1)
+    expect(rows.filter((row) => row.servesRfq)).toHaveLength(1)
+  })
+
+  it('leaves the loser in the state the repair would have written, so the next boot is silent', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    await driver.exec(PRE_UPGRADE_TABLE)
+    for (const asset of [USDA, TWIN]) await driver.run(OLD_BINARY_INSERT, [assetMarketKey(null, asset), asset])
+    const store = await AdminStore.open(driver, () => 2_000, { offerMarkets: [], tokens: [] })
+    expect(store.repairedServing).toEqual([])
+    const again = await AdminStore.open(driver, () => 3_000)
+    expect(again.repairedServing).toEqual([])
+    const served = assetRfqMarketsFrom(assetMarketPolicy(await again.listMarkets()).pricing, CARRIER)
+    expect(served.map((market) => market.symbol)).toEqual([rfqSymbolFor(USDA)])
+  })
 })
 
 describe('an incoherent serving row cannot brick startup', () => {
