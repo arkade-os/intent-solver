@@ -393,6 +393,15 @@ describe('a live knob reaches the next quote without a restart', () => {
     // ASSIGNED once: a `services.bootPolicy =` makes this two, a deleted one zero.
     expect(body.match(/bootPolicy\s*[:=]/g)).toHaveLength(1)
   })
+
+  it('assigns policy only after the rebuild it has to survive', () => {
+    const body = createServicesBody()
+    const start = body.indexOf('replacePolicy: (next: Config)')
+    const arrow = body.slice(start, body.indexOf('}),', start))
+    expect(arrow).toContain('services.policy = next')
+    // Assigned first, a throwing rebuild leaves `policy` naming a config no runtime list was built from.
+    expect(arrow.indexOf('await rebuild(next)')).toBeLessThan(arrow.indexOf('services.policy = next'))
+  })
 })
 
 describe('the settings table renders the pending state', () => {

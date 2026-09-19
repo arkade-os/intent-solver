@@ -1259,12 +1259,14 @@ export const createServices = async (
     assetRfqService,
     assetRfqMarkets,
     replaceMarkets: (): Promise<void> => replaceQueue(() => rebuild(services.policy)),
-    /** Same queue as `replaceMarkets`, so the two cannot interleave. Assignment FIRST, so a caller reading
-     * `services.policy` after sees what the lists were built from; ASSIGNS, which is what keeps `bootPolicy`. */
+    /** Same queue as `replaceMarkets`, so the two cannot interleave. Assignment LAST, so a caller reading
+     * `services.policy` still sees what the lists were built from when `rebuild` throws and they were not
+     * rebuilt at all; `rebuild` takes the policy as a parameter, so it needs nothing from the field. ASSIGNS,
+     * which is what keeps `bootPolicy`. */
     replacePolicy: (next: Config): Promise<void> =>
       replaceQueue(async () => {
-        services.policy = next
         await rebuild(next)
+        services.policy = next
       }),
     adminStore,
     arkade,
