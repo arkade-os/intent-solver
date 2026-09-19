@@ -16,6 +16,7 @@
  */
 
 import { barsChart, categoryChart, cumulativeChart, decayChart } from './charts.js'
+import { applyPricing } from './pricingSave.js'
 
 /* ---- tiny element helper ------------------------------------------------ */
 
@@ -1323,6 +1324,17 @@ let schedulePreview = () => {}
  *  The preview's `legs.from/to` arrive pre-stringified to `'BTC'`, so they need only `shortId`, never this. */
 const legLabel = (leg) => (leg === null ? 'BTC' : shortId(leg))
 
+const carrierRfqPriced = () => state.data.markets?.carrier?.rfqPriced === true
+
+/** BESIDE the draft, never on it: `draftFrom` mirrors market COLUMNS, and a non-column there is one a PUT deletes. */
+let carrierDefaultDraft = false
+
+/** Sent only when the form moved it: an unchanged key stores an override row for a value the environment supplies. */
+const carrierDefaultOverride = () =>
+  carrierDefaultDraft === carrierRfqPriced() ? {} : { ASSET_CARRIER_PRICING: String(carrierDefaultDraft) }
+
+const openMarketForm = (draft) => ((marketDraft = draft), (carrierDefaultDraft = carrierRfqPriced()), render())
+
 const blankMarket = () => ({
   base: 'BTC',
   quote: '',
@@ -1455,6 +1467,20 @@ const checkbox = (label, key, hint) =>
 
 const CARRIER_MODES = ['inherit', 'off', 'priced']
 
+/** The default this market's `inherit` points at. Edited HERE as well as on settings because the pair is
+ *  the one save that spans both stores, and the ordered save has nothing to sequence until one exists. */
+const carrierDefaultField = () =>
+  h(
+    'p.toolbar',
+    h('span.muted', 'deployment default'),
+    h('input', {
+      type: 'checkbox',
+      ...(carrierDefaultDraft ? { checked: true } : {}),
+      oninput: (e) => (carrierDefaultDraft = e.target.checked),
+    }),
+    h('span.faint', 'ASSET_CARRIER_PRICING, deployment-wide — saved with this market, in one ordered save'),
+  )
+
 const carrierModeField = () =>
   h(
     'p.toolbar',
@@ -1467,13 +1493,17 @@ const carrierModeField = () =>
     h('span.faint', 'whether an RFQ quote prices the carrier in; inherit follows ASSET_CARRIER_PRICING'),
   )
 
+/** The carrier default rides the same request rather than a second one: the ordering this
+ *  route promises is a property of ONE save, so a form split across two has none of it. */
 const saveMarket = async () => {
   try {
-    await api('/api/markets', { method: 'PUT', body: JSON.stringify(marketBody(marketDraft)) })
+    await applyPricing(api, { markets: [marketBody(marketDraft)], overrides: carrierDefaultOverride() })
     marketDraft = null
     state.banner = null
     await load('markets')
   } catch (error) {
+    // Re-read first: an ordered save can land one half.
+    await load('markets')
     // Left OPEN on failure, deliberately. Every refusal here names one field,
     // and closing the form would make the operator retype ten others to fix it.
     fail(error)
@@ -1684,8 +1714,7 @@ const previewPanel = () => {
   return previewNode
 }
 
-/** Read-only: both flags are deployment-wide and boot-read today; a control over
- *  a value with nowhere to be stored is the over-report this console just removed. */
+/** What is IN FORCE, not what the form asks for. `offerCharged` stays read-only: in no `editableKeys()`, and boot-read. */
 const carrierPolicyLine = () => {
   const c = state.data.markets?.carrier
   if (!c) return '—'
@@ -1850,6 +1879,7 @@ const marketForm = () =>
     checkbox('rfq sell base', 'rfqSellBase', 'open, per direction; false is CLOSED'),
     checkbox('rfq buy base', 'rfqBuyBase'),
     carrierModeField(),
+    carrierDefaultField(),
     h(
       'p.toolbar',
       h('button.act', { onclick: saveMarket }, 'save'),
@@ -1881,7 +1911,7 @@ const marketsView = () => {
     'div',
     // Live on this process: a market added now is quoted on the next RFQ.
     h('p.notice', m.restartNotice),
-    h('p.toolbar', h('button.act', { onclick: () => ((marketDraft = blankMarket()), render()) }, 'add market')),
+    h('p.toolbar', h('button.act', { onclick: () => openMarketForm(blankMarket()) }, 'add market')),
     marketDraft ? h('div.split', marketForm(), previewPanel()) : null,
     m.markets.length === 0
       ? h('p.muted', 'no markets configured — this solver trades no asset pairs and refuses every offer')
@@ -1928,7 +1958,7 @@ const marketsView = () => {
                 capabilityCell(market.serving ?? [], market.gaps ?? []),
                 h(
                   'td',
-                  h('button.act', { onclick: () => ((marketDraft = draftFrom(market)), render()) }, 'edit'),
+                  h('button.act', { onclick: () => openMarketForm(draftFrom(market)) }, 'edit'),
                   ' ',
                   h('button.act', { onclick: () => deleteMarket(market.marketKey) }, 'delete'),
                 ),
@@ -2776,10 +2806,12 @@ const editKnob = (knob) => {
 
 const patchSetting = async (key, value) => {
   try {
-    await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ key, value }) })
+    await applyPricing(api, { overrides: { [key]: value } })
     state.banner = null
     await load('settings')
   } catch (error) {
+    // A LIVE key can be STORED and still refused by the reload, so the table is stale in the case the banner is about.
+    await load('settings')
     fail(error)
   }
 }
