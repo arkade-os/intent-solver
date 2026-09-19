@@ -325,11 +325,15 @@ export class AssetRfqSwapService {
       })
       return { accepted: true, swap, carrierSats: market.carrierSats }
     } catch (error) {
-      // The unique indexes are the race-loser's answer: another worker quoted
-      // this rfq_id, or already watches this offer address. Either way this
-      // request must not proceed to a second row.
       this.deps.onError?.(request.rfqId, error)
-      return { accepted: false, reason: 'duplicate_swap', detail: 'a negotiation already holds this id or address' }
+      // The unique indexes are the race-loser's answer: another worker quoted this
+      // rfq_id, or already watches this offer address. NOTHING ELSE is a duplicate —
+      // answering one for every failure told an operator a broken column was a
+      // reused id. Both onchain orchestrators already narrow it this way.
+      if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+        return { accepted: false, reason: 'duplicate_swap', detail: 'a negotiation already holds this id or address' }
+      }
+      throw error
     }
   }
 

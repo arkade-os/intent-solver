@@ -13,7 +13,7 @@
  * silently retries.
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import {
@@ -277,6 +277,13 @@ describe('quote', () => {
       accepted: false,
       reason: 'duplicate_swap',
     })
+  })
+
+  // The sibling onchain orchestrators already narrow this catch to UNIQUE and rethrow.
+  it('lets an unexpected write failure surface instead of calling it a duplicate', async () => {
+    const { service, store } = await harness()
+    vi.spyOn(store, 'insertQuote').mockRejectedValueOnce(new TypeError('quote construction is broken'))
+    await expect(service.quote(request())).rejects.toThrow(/quote construction is broken/)
   })
 
   it('does not record a row when it refuses', async () => {
