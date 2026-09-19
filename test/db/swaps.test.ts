@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { NON_TERMINAL, SwapStore, type QuoteRecord } from '@arkade-os/solver-corridors/db/swaps.js'
+import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 let store: SwapStore
 let clock = 1_800_000_000
@@ -70,6 +71,11 @@ describe('insertQuote', () => {
     // client that loses the race has its lockup claimed and cannot refund.
     await store.insertQuote(quote())
     await expect(store.insertQuote(quote({ id: 'swap-2' }))).rejects.toThrow(/UNIQUE/i)
+  })
+
+  it('refuses it with the type the orchestrators key on, not merely the wording', async () => {
+    await store.insertQuote(quote())
+    await expect(store.insertQuote(quote({ id: 'swap-2' }))).rejects.toBeInstanceOf(UniqueConstraintError)
   })
 
   it('allows re-quoting a hash whose only prior swap was refused', async () => {

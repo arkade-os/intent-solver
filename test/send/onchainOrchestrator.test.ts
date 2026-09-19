@@ -396,6 +396,21 @@ describe('OnchainSendSwapService', () => {
     expect(outcome).toEqual({ accepted: false, reason: 'duplicate_swap' })
   })
 
+  it('lets a non-constraint failure whose message says UNIQUE surface', async () => {
+    deps.store.insertQuote = async () => {
+      throw new TypeError('UNIQUE quote construction failed')
+    }
+    await expect(
+      service.quote({
+        paymentHash,
+        amountSats: 50_000,
+        payoutPubkey,
+        refundAddress: REFUND_ADDRESS,
+        clientRefundPubkey,
+      }),
+    ).rejects.toThrow(TypeError)
+  })
+
   it('observes the Arkade lockup and records its txid/vout/value on the funded transition', async () => {
     const outcome = await service.quote({
       paymentHash,

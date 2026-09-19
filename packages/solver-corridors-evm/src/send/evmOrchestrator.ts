@@ -35,6 +35,7 @@ import { evaluateEvmSendAcceptance, type EvmSendAcceptanceRefusal } from '@arkad
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { evmSendCovenantRowFor } from '../evm/covenantRow.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
+import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
 
@@ -640,7 +641,7 @@ export class EvmSendSwapService {
       })
       return { accepted: true, swap }
     } catch (error) {
-      if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+      if (error instanceof UniqueConstraintError) {
         return { accepted: false, reason: 'duplicate_swap' }
       }
       throw error

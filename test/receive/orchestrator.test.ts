@@ -17,6 +17,7 @@ import {
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { FakeLightningBackend } from '@arkade-os/solver-rails-fake/ln/fake/backend.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
@@ -2145,7 +2146,7 @@ describe('retiring a hold invoice the quote never used', () => {
     // Simulate the loser: past the pre-check, refused by the index.
     store.findLiveByPaymentHash = async () => null
     store.insertQuote = async () => {
-      throw new Error('UNIQUE constraint failed: receive_swap.payment_hash')
+      throw new UniqueConstraintError('UNIQUE constraint failed: receive_swap.payment_hash')
     }
     const loser = await service.quote(quoteRequest())
     expect(loser.accepted).toBe(false)
@@ -2154,6 +2155,17 @@ describe('retiring a hold invoice the quote never used', () => {
     // The winner's invoice is untouched.
     expect((await ln.getHoldState(paymentHash)).status).toBe('pending')
   })
+
+  it('cancels the mint when the failure only SAYS uniqueness', async () => {
+    const otherHash = hex.encode(sha256(new Uint8Array(32).fill(22)))
+    store.findLiveByPaymentHash = async () => null
+    store.insertQuote = async () => {
+      throw new TypeError('UNIQUE quote construction failed')
+    }
+    await expect(service.quote(quoteRequest({ paymentHash: otherHash }))).rejects.toThrow(TypeError)
+    expect((await ln.getHoldState(otherHash)).status).toBe('cancelled')
+  })
+
   it('cancels the mint when an unpaid quote expires', async () => {
     const quoted = await service.quote(quoteRequest())
     if (!quoted.accepted) throw new Error('quote refused')
