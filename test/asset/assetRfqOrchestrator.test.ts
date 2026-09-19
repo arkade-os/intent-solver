@@ -16,6 +16,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
+import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import {
   AssetRfqSwapService,
   type AssetRfqDeps,
@@ -288,9 +289,17 @@ describe('quote', () => {
   it('answers a lost race without logging it as a failure', async () => {
     const failures: unknown[] = []
     const { service, store } = await harness({ onError: (_id, error) => failures.push(error) })
-    vi.spyOn(store, 'insertQuote').mockRejectedValueOnce(new Error('UNIQUE constraint failed: asset_rfq_swap.rfq_id'))
+    vi.spyOn(store, 'insertQuote').mockRejectedValueOnce(
+      new UniqueConstraintError('UNIQUE constraint failed: asset_rfq_swap.rfq_id'),
+    )
     expect(await service.quote(request())).toMatchObject({ accepted: false, reason: 'duplicate_swap' })
     expect(failures).toEqual([])
+  })
+
+  it('lets a non-constraint failure whose message says UNIQUE surface', async () => {
+    const { service, store } = await harness()
+    vi.spyOn(store, 'insertQuote').mockRejectedValueOnce(new TypeError('UNIQUE quote construction failed'))
+    await expect(service.quote(request())).rejects.toThrow(TypeError)
   })
 
   it('does not record a row when it refuses', async () => {

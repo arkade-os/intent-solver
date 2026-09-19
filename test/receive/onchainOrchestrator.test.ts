@@ -427,6 +427,20 @@ describe('OnchainReceiveSwapService', () => {
       expect(outcome).toEqual({ accepted: false, reason: 'duplicate_swap' })
     })
 
+    it('lets a non-constraint failure whose message says UNIQUE surface', async () => {
+      store.insertQuote = async () => {
+        throw new TypeError('UNIQUE quote construction failed')
+      }
+      await expect(service.quote(quoteRequest())).rejects.toThrow(TypeError)
+    })
+
+    it('answers duplicate when the REAL index refuses a race the pre-check let through', async () => {
+      // An ordinary duplicate stops at the pre-check, so nothing else reaches the catch.
+      await service.quote(quoteRequest())
+      store.findLiveByPaymentHash = async () => null
+      expect(await service.quote(quoteRequest())).toEqual({ accepted: false, reason: 'duplicate_swap' })
+    })
+
     it('refuses once aggregate exposure would exceed the cap', async () => {
       const tightService = new OnchainReceiveSwapService({
         store,

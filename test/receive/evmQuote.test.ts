@@ -254,6 +254,12 @@ describe('refusals', () => {
     expect(await other.service.quote(request())).toEqual({ accepted: false, reason: 'duplicate_swap' })
   })
 
+  it('lets a non-constraint failure whose message says UNIQUE surface', async () => {
+    const { service, store } = await build()
+    vi.spyOn(store, 'insertQuote').mockRejectedValueOnce(new TypeError('UNIQUE quote construction failed'))
+    await expect(service.quote(request())).rejects.toThrow(TypeError)
+  })
+
   it('measures capacity against the PAYOUT, which is what the solver risks', async () => {
     // The headroom is chosen to sit BETWEEN the two figures: 99_500 fits the
     // 99_000 payout and not the 100_000 the client locked. A cap read against

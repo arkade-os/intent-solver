@@ -64,6 +64,7 @@ import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
 import type { SendSwapRow, SendSwapState, SwapStore } from '../db/swaps.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
 export type { CovenantScriptRow }
@@ -720,7 +721,7 @@ export class SendSwapService {
         return { accepted: true, swap, lockupDeadline: acceptance.lockupDeadline }
       } catch (error) {
         // The UNIQUE constraint is the racproof backstop behind the pre-check.
-        if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+        if (error instanceof UniqueConstraintError) {
           return { accepted: false, reason: 'duplicate_swap' }
         }
         throw error

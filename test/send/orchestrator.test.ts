@@ -488,6 +488,15 @@ describe('quote', () => {
     if (!second.accepted) expect(second.reason).toBe('duplicate_swap')
   })
 
+  it('lets a non-constraint failure whose message says UNIQUE surface', async () => {
+    store.insertQuote = async () => {
+      throw new TypeError('UNIQUE quote construction failed')
+    }
+    await expect(service.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })).rejects.toThrow(
+      TypeError,
+    )
+  })
+
   it('refuses a hash that is live in ANOTHER corridor’s store — the self-payment blind spot', async () => {
     // The hash belongs to a live receive swap of ours: paying its invoice
     // would be paying ourselves. Each corridor's own store only

@@ -20,6 +20,7 @@
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { BaseSwapStore, type RawRow, type StoreShape } from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 /**
  * Forward-only lifecycle.
@@ -696,7 +697,8 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
         quote.paymentHash,
       ],
     )
-    if (inserted.changes !== 1) throw new Error('UNIQUE constraint failed: send_swap.payment_hash')
+    // `WHERE NOT EXISTS`, not an index: a lost race is zero changes, never a driver error.
+    if (inserted.changes !== 1) throw new UniqueConstraintError('UNIQUE constraint failed: send_swap.payment_hash')
     await this.recordEvent(quote.id, null, 'quoted', null)
     return this.get(quote.id)
   }
