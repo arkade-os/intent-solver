@@ -275,6 +275,31 @@ describe('PATCH /api/settings', () => {
     }
   })
 
+  it('distinguishes stored from applied when a live key reaches disk but not the process', async () => {
+    const { app, adminStore, services } = await buildReal()
+    try {
+      const svc = services as unknown as { replacePolicy: () => Promise<void> }
+      svc.replacePolicy = async () => {
+        throw new Error('rebuild refused')
+      }
+
+      const response = await patch(app, { key: 'ASSET_CARRIER_PRICING', value: 'true' })
+
+      expect(response.status).toBe(500)
+      expect(await response.json()).toMatchObject({
+        error: 'reload_failed',
+        key: 'ASSET_CARRIER_PRICING',
+        stored: true,
+        applied: false,
+        message: 'rebuild refused',
+      })
+      // `stored: true` has to be the truth, not a guess about what the write did.
+      expect(await adminStore.getOverrides()).toEqual({ ASSET_CARRIER_PRICING: 'true' })
+    } finally {
+      await adminStore.close()
+    }
+  })
+
   it('rejects a malformed body rather than 500ing', async () => {
     const { app } = build()
     expect((await patch(app, { value: '1' })).status).toBe(400)

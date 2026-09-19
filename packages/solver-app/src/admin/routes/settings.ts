@@ -123,7 +123,23 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
     // Re-read the store rather than patch policy here: `applyOverrides` is the one definition of layering.
     if (LIVE_KEYS.has(key)) {
       const stored = await deps.services.adminStore.getOverrides()
-      await deps.services.replacePolicy(applyOverrides(deps.services.config, stored))
+      try {
+        await deps.services.replacePolicy(applyOverrides(deps.services.config, stored))
+      } catch (error) {
+        // Named and split in two, because `pendingKeys` subtracts LIVE_KEYS: a later GET badges this key as
+        // needing no restart, which reads as in force. The generic 500 carries the reason but not which key,
+        // and nothing else in the API would say the process never took it.
+        return c.json(
+          {
+            error: 'reload_failed',
+            key,
+            stored: true,
+            applied: false,
+            message: error instanceof Error ? error.message : String(error),
+          },
+          500,
+        )
+      }
     }
     return c.json(await snapshot(deps, key))
   })
