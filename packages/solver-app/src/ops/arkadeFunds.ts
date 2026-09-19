@@ -307,7 +307,7 @@ const arkadeWithdraw = async (
   }
   const overCeiling = (net: bigint): boolean => info.vtxoMaxAmount >= 0n && net > info.vtxoMaxAmount
 
-  type Pick = { selected: typeof ordered; gross: bigint; inputFees: bigint; change: bigint; changeFee: bigint }
+  type Pick = { selected: typeof ordered; inputFees: bigint; change: bigint; changeFee: bigint }
 
   const pickFrom = (start: number): Pick | null => {
     const selected: typeof ordered = []
@@ -327,11 +327,11 @@ const arkadeWithdraw = async (
       // when no asset needs a ride home on it — or at least dust and under the ceiling.
       if (left === 0n) {
         if (carriesAsset) continue
-        return { selected, gross, inputFees, change: 0n, changeFee: 0n }
+        return { selected, inputFees, change: 0n, changeFee: 0n }
       }
       const net = changeAfterFee(left)
       if (net < dust || overCeiling(net)) continue
-      return { selected, gross, inputFees, change: net, changeFee: left - net }
+      return { selected, inputFees, change: net, changeFee: left - net }
     }
     return null
   }
@@ -344,14 +344,8 @@ const arkadeWithdraw = async (
 
   if (pick === null) {
     // Against EVERY economic coin: no subset working is a property of the whole float.
-    const economic = ordered.filter((coin) => {
-      const { value, inputFee } = netOf(coin)
-      return inputFee < value
-    })
-    const gross = economic.reduce((total, coin) => {
-      const { value, inputFee } = netOf(coin)
-      return total + value - inputFee
-    }, 0n)
+    const economic = ordered.map((coin) => ({ coin, ...netOf(coin) })).filter(({ value, inputFee }) => inputFee < value)
+    const gross = economic.reduce((total, { value, inputFee }) => total + value - inputFee, 0n)
     if (gross < needed) {
       throw new Error(
         `the float's unreserved coins net ${gross} sats against the ${needed} needed ` +
@@ -368,7 +362,9 @@ const arkadeWithdraw = async (
     }
     throw new Error(
       `withdrawing ${amountSats} sats leaves ${net} sats of change, below the ${dust} sat dust floor` +
-        (economic.some((coin) => (coin.assets?.length ?? 0) > 0) ? ' that the selection’s asset must ride on' : '') +
+        (economic.some(({ coin }) => (coin.assets?.length ?? 0) > 0)
+          ? ' that the selection’s asset must ride on'
+          : '') +
         ' — withdraw a little less, so the change clears it',
     )
   }
