@@ -1448,7 +1448,7 @@ const checkbox = (label, key, hint) =>
     h('input', {
       type: 'checkbox',
       ...(marketDraft[key] ? { checked: true } : {}),
-      oninput: (e) => (marketDraft[key] = e.target.checked),
+      oninput: (e) => ((marketDraft[key] = e.target.checked), schedulePreview()),
     }),
     hint ? h('span.faint', hint) : null,
   )
@@ -1461,7 +1461,7 @@ const carrierModeField = () =>
     h('span.muted', 'carrier mode'),
     h(
       'select',
-      { onchange: (e) => (marketDraft.carrierMode = e.target.value) },
+      { onchange: (e) => ((marketDraft.carrierMode = e.target.value), schedulePreview()) },
       ...CARRIER_MODES.map((mode) => h('option', { value: mode, selected: marketDraft.carrierMode === mode }, mode)),
     ),
     h('span.faint', 'whether an RFQ quote prices the carrier in; inherit follows ASSET_CARRIER_PRICING'),
