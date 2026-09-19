@@ -231,7 +231,13 @@ export const registerPricingApplyRoutes = (app: Hono, deps: AdminDeps): void => 
         unapplied.push({ key, reason: `the feed did not answer with a price at that pointer: ${messageOf(error)}` })
         continue
       }
-      targets.push({ key, target, stored: await store.getMarket(key) })
+      const stored = await store.getMarket(key)
+      // Order-free key, base-denominated fields: a swapped body finds the row but has no comparable prior.
+      if (stored !== null && (stored.base !== target.base || stored.quote !== target.quote)) {
+        unapplied.push({ key, reason: 'stored with its legs the other way round; delete and recreate it to swap them' })
+        continue
+      }
+      targets.push({ key, target, stored })
     }
 
     const writeOverrides = async (pass: SavePass): Promise<void> => {

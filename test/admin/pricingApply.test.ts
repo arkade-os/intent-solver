@@ -109,6 +109,26 @@ describe('a save that dies midway lands conservative', () => {
     await adminStore.close()
   })
 
+  it('refuses a body whose legs are the other way round from the stored row', async () => {
+    const { app, adminStore } = await build()
+    await put(app, body({ sellBase: { min: '1000', max: '100000' }, buyBase: { min: '7', max: '9' } }))
+
+    // Same market by key, but `sellBase` is base-denominated: narrowing one orientation
+    // against the other compares sats to atoms.
+    const res = await apply(app, {
+      markets: [body({ base: USDT, quote: 'BTC', baseDecimals: 6, quoteDecimals: 8 })],
+    })
+
+    const seen = await answered(res)
+    expect(seen.applied).toEqual([])
+    expect(seen.unapplied).toEqual([{ key: KEY, reason: expect.stringContaining('legs') }])
+    const row = (await adminStore.listMarkets())[0]!
+    expect(row.base).toBeNull()
+    expect(row.sellBase).toEqual({ min: 1000n, max: 100000n })
+    expect(row.buyBase).toEqual({ min: 7n, max: 9n })
+    await adminStore.close()
+  })
+
   /** Fail the SECOND replaceMarkets: the reload that activates pass 2, not the gate before it. */
   const failFinalReload = (services: { replaceMarkets: () => Promise<void> }) => {
     const real = services.replaceMarkets
