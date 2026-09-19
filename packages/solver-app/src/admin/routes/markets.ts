@@ -44,6 +44,7 @@ import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/f
 import type { AssetMarketRow } from '../db.js'
 import { servedBy } from '../servedBy.js'
 import type { AdminDeps } from '../server.js'
+import type { FeedCache } from '../feedCache.js'
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
@@ -62,7 +63,7 @@ export const MARKETS_LIVE_NOTICE =
  * a bigint and `JSON.parse` has already destroyed anything past 2^53 by the time
  * a handler sees it — silently, and in the direction that widens a ceiling.
  */
-interface MarketBody {
+export interface MarketBody {
   base?: unknown
   quote?: unknown
   baseDecimals?: unknown
@@ -128,7 +129,7 @@ const bounds = (label: string, value: unknown): AssetMarketBounds | null => {
 }
 
 /** The request body as a market, or a `BadRequest` naming the field that was wrong. */
-const marketFrom = (body: MarketBody): AssetMarketConfig => ({
+export const marketFrom = (body: MarketBody): AssetMarketConfig => ({
   base: leg('base', body.base),
   quote: leg('quote', body.quote),
   baseDecimals: int('baseDecimals', body.baseDecimals),
@@ -176,22 +177,40 @@ const marketJson = (row: AssetMarketRow) => ({
   updatedAt: row.updatedAt,
 })
 
-export const registerMarketRoutes = (app: Hono, deps: AdminDeps): void => {
+export const registerMarketRoutes = (app: Hono, deps: AdminDeps, feeds?: FeedCache): void => {
   // Built once per registration, not per request: `createPriceFeed` validates
   // its timeout eagerly, which is the whole point of that check.
   const fetchPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
 
   app.get('/api/markets', async (c) => {
     const rows = await deps.services.adminStore.listMarkets()
+    const rfq = deps.services.assetRfqMarkets
+    // A direction the RUNNING process closed reads as `{min:0n,max:0n}`
+    // (ops/assetRfqMarkets.ts:31) — indistinguishable from an unset row bound.
+    const directionsFor = (row: AssetMarketRow) => {
+      const served = rfq.find((market) => market.base === row.base && market.quote === row.quote)
+      return { sellBase: (served?.sellBase?.max ?? 0n) > 0n, buyBase: (served?.buyBase?.max ?? 0n) > 0n }
+    }
     return c.json({
       // `servedBy` is a SECOND axis, beside the row's own `enabled`. A market can
       // be enabled and served by nothing, which is the state that cost an
       // operator an evening. @see admin/servedBy.ts
-      markets: rows.map((row) => ({ ...marketJson(row), servedBy: servedBy(row, deps.services) })),
+      markets: rows.map((row) => ({
+        ...marketJson(row),
+        servedBy: servedBy(row, deps.services),
+        rfqDirections: directionsFor(row),
+      })),
       /**
        * Which of these the RUNNING process is actually trading against.
        */
       active: deps.services.assetMarkets.map((market) => assetMarketKey(market.base, market.quote)),
+      // Deployment-wide today, read-only for that reason. Both false is the
+      // shipped default, so it pays the carrier out of margin.
+      carrier: {
+        sats: String(deps.services.arkade.dustSats),
+        rfqPriced: deps.services.policy.assetCarrierPricing,
+        offerCharged: deps.services.policy.offerChargesDeliveredCarrier,
+      },
       restartNotice: MARKETS_LIVE_NOTICE,
     })
   })
@@ -226,7 +245,9 @@ export const registerMarketRoutes = (app: Hono, deps: AdminDeps): void => {
     // offer at run time, so storing it would be storing a pair this solver
     // advertises and never fills — discovered days later, by its absence.
     try {
-      await fetchPrice(market.feedUrl, market.pricePath)
+      const price = await fetchPrice(market.feedUrl, market.pricePath)
+      // Seeds the cache with a live read, so the preview is usable right after a save.
+      feeds?.prime(market.feedUrl, market.pricePath, price)
     } catch (error) {
       return c.json(
         {

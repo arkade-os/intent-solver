@@ -189,6 +189,42 @@ const checkFlatFee = (label: string, value: bigint): void => {
   if (value < 0n) throw new Error(`${label} must be a non-negative integer of atomic units, got ${value}`)
 }
 
+const V4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
+
+/** LITERALS ONLY: a hostname that resolves to one of these needs DNS, which this module has none of. */
+export const isPrivateFeedHost = (hostname: string): boolean => {
+  const host = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
+  if (host === 'localhost' || host.endsWith('.localhost') || host === '' || host === '::' || host === '::1') return true
+  // A parsed hostname never contains a raw colon; only a bracket-stripped IPv6 literal does.
+  if (host.includes(':')) {
+    if (/^fe[89a-f][0-9a-f]:/.test(host)) return true // fe80::/9: link-local and site-local are adjacent /10s
+    if (host.startsWith('fc') || host.startsWith('fd')) return true // fc00::/7
+    const v6Mapped = /^::ffff:(.+)$/.exec(host)
+    if (!v6Mapped) return false
+    // WHATWG serializes a mapped IPv4 as two hex groups, not a dotted quad.
+    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(v6Mapped[1]!)
+    if (!hex) return isPrivateFeedHost(v6Mapped[1]!)
+    const [hi, lo] = [Number.parseInt(hex[1]!, 16), Number.parseInt(hex[2]!, 16)]
+    return isPrivateFeedHost([hi >> 8, hi & 0xff, lo >> 8, lo & 0xff].join('.'))
+  }
+  const v4 = V4.exec(host)
+  if (!v4) return false
+  const [a, b] = [Number(v4[1]), Number(v4[2])]
+  if (a === 0 || a === 10 || a === 127) return true
+  if (a === 169 && b === 254) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 100 && b >= 64 && b <= 127) return true // RFC 6598 CGNAT; 100.0.0.0/8 at large is not reserved
+  return a === 192 && b === 168
+}
+
+export interface AssetMarketValidation {
+  /** Startup only: refusing a row admitted under the old rule would down the whole solver, not just it. */
+  allowPrivateFeedHost?: boolean
+}
+
 /**
  * Refuse a market this solver must not act on, naming the reason. Throws;
  * returns nothing.
@@ -206,7 +242,7 @@ const checkFlatFee = (label: string, value: bigint): void => {
  * NO NETWORK. Whether the feed answers is a separate question with a separate
  * answer at each of those moments; see {@link assetMarketPolicy}.
  */
-export const validateAssetMarket = (market: AssetMarketConfig): void => {
+export const validateAssetMarket = (market: AssetMarketConfig, options: AssetMarketValidation = {}): void => {
   checkLeg('base', market.base)
   checkLeg('quote', market.quote)
   if (market.base === market.quote) {
@@ -236,6 +272,13 @@ export const validateAssetMarket = (market: AssetMarketConfig): void => {
   // that has no authentication of its own.
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     throw new Error(`feedUrl must be http or https, got ${JSON.stringify(parsed.protocol)}`)
+  }
+
+  if (!options.allowPrivateFeedHost && isPrivateFeedHost(parsed.hostname)) {
+    throw new Error(
+      `feedUrl ${JSON.stringify(feedUrl)} names a private, loopback or link-local host; the admin port has no ` +
+        'authentication of its own and fetches this URL before the market is stored',
+    )
   }
 
   // Shape first, so a pointer missing its leading slash is named as such rather
@@ -296,7 +339,7 @@ export const assetMarketPolicy = (
   // still reported. A market an operator paused is one they intend to resume,
   // and discovering on that morning that it never loaded is discovering it at
   // the worst moment.
-  for (const market of markets) validateAssetMarket(market)
+  for (const market of markets) validateAssetMarket(market, { allowPrivateFeedHost: true })
 
   const seen = new Set<string>()
   for (const market of markets) {
