@@ -84,8 +84,15 @@ export const assetRfqLegs = (
 ): { from: string | null; to: string | null } =>
   direction === 'sell_base' ? { from: market.base, to: market.quote } : { from: market.quote, to: market.base }
 
+/**
+ * A market's IDENTITY — all a descriptor reads, and so all a READER reads. Kept apart from
+ * {@link AssetRfqMarket} so a market recovered from live rows cannot carry invented pricing
+ * into a type that means configured pricing elsewhere.
+ */
+export type ReadableAssetRfqMarket = Pick<AssetRfqMarket, 'base' | 'quote' | 'symbol'>
+
 export const assetRfqDescriptor = (
-  market: Pick<AssetRfqMarket, 'base' | 'quote' | 'symbol'>,
+  market: ReadableAssetRfqMarket,
   direction: AssetRfqDirection,
 ): CorridorDescriptor<AssetRfqSwapState> => {
   const legs = assetRfqLegs(market, direction)

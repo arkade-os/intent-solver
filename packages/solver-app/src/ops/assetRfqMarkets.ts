@@ -6,9 +6,17 @@
  * parsed — it seeds those columns once — but nothing below reads it.
  */
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
-import { assetRfqEnvStem, type AssetRfqDirection } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import {
+  assetRfqEnvStem,
+  type AssetRfqDirection,
+  type ReadableAssetRfqMarket,
+} from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import type { AssetMarketPricingView, CarrierMode } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import {
+  rfqSymbolFor,
+  type AssetMarketPricingView,
+  type CarrierMode,
+} from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { assetCardMarkets, type AssetCardMarket } from '@arkade-os/solver-core/core/registryCard.js'
 import type { AssetMarket } from './assetOffers.js'
 
@@ -121,23 +129,31 @@ export const assetRfqMarketsFrom = (
 export const offerMarketsFrom = (pricing: readonly AssetMarketPricingView[]): readonly AssetMarket[] =>
   pricing.filter((market) => market.servesOffer).map((market) => ({ a: market.base, b: market.quote }))
 
-/** Serving list plus previous markets that still have a non-terminal row. */
-export const retainReadableMarkets = (
+/** A pair, however it is oriented — a market is one market in both directions. */
+const legsKey = (a: string | null, b: string | null): string => [a ?? 'BTC', b ?? 'BTC'].sort().join('|')
+
+/**
+ * Markets a live row still names that the serving list does not. From the ROWS: a market disabled or
+ * deleted before this process started was never in a list to carry forward, and a delete takes its
+ * `admin_market` row too. `symbol` is derived as the admin store derives an unnamed one — it feeds the
+ * env stem alone, which nothing reads off a reader.
+ */
+export const readableAssetRfqMarketsFrom = (
   serving: readonly AssetRfqMarket[],
-  previous: readonly AssetRfqMarket[],
   live: readonly { fromAssetId: string | null; toAssetId: string | null }[],
-): readonly AssetRfqMarket[] => [
-  ...serving,
-  ...previous.filter(
-    (market) =>
-      !serving.some((row) => row.base === market.base && row.quote === market.quote) &&
-      live.some(
-        (row) =>
-          (row.fromAssetId === market.base && row.toAssetId === market.quote) ||
-          (row.fromAssetId === market.quote && row.toAssetId === market.base),
-      ),
-  ),
-]
+): readonly ReadableAssetRfqMarket[] => {
+  const served = new Set(serving.map((market) => legsKey(market.base, market.quote)))
+  const recovered = new Map<string, ReadableAssetRfqMarket>()
+  for (const row of live) {
+    const key = legsKey(row.fromAssetId, row.toAssetId)
+    if (served.has(key) || recovered.has(key)) continue
+    // Either orientation registers BOTH directions; RFQ never serves asset-for-asset, so one leg is sats.
+    const assetId = row.fromAssetId ?? row.toAssetId
+    if (assetId === null) continue
+    recovered.set(key, { base: row.fromAssetId, quote: row.toAssetId, symbol: rfqSymbolFor(assetId) })
+  }
+  return [...recovered.values()]
+}
 
 type Bounds = { min: bigint; max: bigint }
 

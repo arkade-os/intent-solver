@@ -12,7 +12,12 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { AssetRfqSwapStore, type AssetRfqQuoteRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import {
+  AssetRfqSwapStore,
+  assetRfqTableExists,
+  type AssetRfqQuoteRecord,
+} from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
 const ASSET_B = `${'bb'.repeat(32)}0100`
@@ -308,6 +313,22 @@ describe('reads the sweep and the console depend on', () => {
   it('throws on an id it does not hold, which is how fall-through reads it', async () => {
     const store = await open()
     await expect(store.get('nope')).rejects.toThrow(/no asset rfq swap/)
+    await store.close()
+  })
+})
+
+describe('assetRfqTableExists', () => {
+  it('is false on a database the store has never opened, and does not create it', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    expect(await assetRfqTableExists(driver)).toBe(false)
+    expect(await assetRfqTableExists(driver)).toBe(false)
+    await driver.close()
+  })
+
+  it('is true once the store has opened it', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    const store = await AssetRfqSwapStore.open(driver, () => 1_000)
+    expect(await assetRfqTableExists(driver)).toBe(true)
     await store.close()
   })
 })

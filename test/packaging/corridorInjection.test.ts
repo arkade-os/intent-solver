@@ -94,6 +94,8 @@ describe('createServices exposes the extension point', () => {
     // status, or reports status it never served.
     expect(servicesSource).toContain('const extraCorridors = opts?.corridors ?? []')
     expect(servicesSource).toContain('corridorSetFromDeps({ ...shared, assetRfqMarkets: serving }, extraCorridors)')
-    expect(servicesSource).toContain('readerSetFromDeps({ ...shared, assetRfqMarkets: readable }, extraCorridors)')
+    expect(servicesSource).toContain(
+      'readerSetFromDeps(\n        { ...shared, assetRfqMarkets: serving, readableAssetRfqMarkets: readable },\n        extraCorridors,\n      )',
+    )
   })
 })

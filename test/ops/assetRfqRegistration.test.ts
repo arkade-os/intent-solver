@@ -11,8 +11,9 @@
 
 import { describe, it, expect } from 'vitest'
 import { corridorSetFromDeps, readerSetFromDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
+import { readableAssetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
-import { AssetRfqSwapService } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
 const ASSET_B = `${'bb'.repeat(32)}0000`
@@ -124,5 +125,105 @@ describe('readerSetFromDeps — wider than the serving set, on purpose', () => {
   it('reads nothing when there is no store at all', async () => {
     const readers = readerSetFromDeps({ ...base(), assetRfqMarkets: [market(ASSET_A, 'USDA')] })
     expect(readers.get(`arkade:BTC->arkade:${ASSET_A}`)).toBeUndefined()
+  })
+})
+
+describe('a market that stopped serving keeps the rows it already holds readable', () => {
+  const SELL = `arkade:BTC->arkade:${ASSET_A}`
+  const BUY = `arkade:${ASSET_A}->arkade:BTC`
+  const RFQ_ID = 'a'.repeat(64)
+
+  const withLiveRow = async () => {
+    const { store, service } = await built()
+    await store.insertQuote({
+      id: 'swap-1',
+      rfqId: RFQ_ID,
+      pair: SELL,
+      fromAssetId: null,
+      fromAmount: 100_000_000n,
+      toAssetId: ASSET_A,
+      toAmount: 99_500_000_000n,
+      makerPkScript: `5120${'c'.repeat(64)}`,
+      makerPublicKey: 'b'.repeat(64),
+      offerPkScript: `5120${'d'.repeat(64)}`,
+      offerAddress: 'ark1qoffer',
+      solverPubkey: 'e'.repeat(64),
+      validUntil: 2_000,
+    })
+    return { store, service }
+  }
+
+  const setsWithout = async (serving: readonly AssetRfqMarket[], store: AssetRfqSwapStore, service: unknown) => {
+    const readableAssetRfqMarkets = readableAssetRfqMarketsFrom(serving, await store.listNonTerminal())
+    return {
+      readers: readerSetFromDeps({
+        ...base(),
+        assetRfqStore: store,
+        assetRfqMarkets: serving,
+        readableAssetRfqMarkets,
+      }),
+      corridors: corridorSetFromDeps({
+        ...base(),
+        assetRfqService: service as never,
+        assetRfqStore: store,
+        assetRfqMarkets: serving,
+      }),
+    }
+  }
+
+  it('answers statusFor for a disabled market', async () => {
+    const { store, service } = await withLiveRow()
+    const { readers } = await setsWithout([], store, service)
+    const reader = readers.get(SELL)
+    expect(reader).toBeDefined()
+    expect(await reader!.statusFor(RFQ_ID)).not.toBeNull()
+    await store.close()
+  })
+
+  it('pages and prices the row of a disabled market', async () => {
+    const { store, service } = await withLiveRow()
+    const { readers } = await setsWithout([], store, service)
+    const reader = readers.get(SELL)!
+    expect((await reader.page!({ limit: 10 })).swaps.map((swap) => swap.id)).toEqual(['swap-1'])
+    // `ledgerRows` filters on `updated_at`, which `built()` stamps from the real clock.
+    const ledger = await reader.economics!({ since: 0, until: Math.floor(Date.now() / 1000) + 60, limit: 10 })
+    expect(ledger.records.map((record) => record.id)).toEqual(['swap-1'])
+    await store.close()
+  })
+
+  it('registers both directions, so the reverse pair is answerable too', async () => {
+    const { store, service } = await withLiveRow()
+    const { readers } = await setsWithout([], store, service)
+    expect(readers.get(BUY)).toBeDefined()
+    await store.close()
+  })
+
+  /** Readable is not servable — the constraint the recovery must not breach. */
+  it('still refuses a new quote on a disabled market', async () => {
+    const { store, service } = await withLiveRow()
+    const { corridors } = await setsWithout([], store, service)
+    expect(corridors.get(SELL)).toBeUndefined()
+    expect(corridors.get(BUY)).toBeUndefined()
+    expect(corridors.size).toBe(0)
+    await store.close()
+  })
+
+  /** DELETED, not merely disabled: no `admin_market` row survives, so the row's legs are all that is left. */
+  it('reads a deleted market, whose configuration is gone entirely', async () => {
+    const { store, service } = await withLiveRow()
+    const { readers, corridors } = await setsWithout([market(ASSET_B, 'USDB')], store, service)
+    const reader = readers.get(SELL)
+    expect(reader).toBeDefined()
+    expect(await reader!.statusFor(RFQ_ID)).not.toBeNull()
+    expect(corridors.get(SELL)).toBeUndefined()
+    await store.close()
+  })
+
+  it('stops reading it once the row reaches a terminal state', async () => {
+    const { store, service } = await withLiveRow()
+    await store.fail('swap-1', 'quoted', 'lapsed')
+    const { readers } = await setsWithout([], store, service)
+    expect(readers.get(SELL)).toBeUndefined()
+    await store.close()
   })
 })

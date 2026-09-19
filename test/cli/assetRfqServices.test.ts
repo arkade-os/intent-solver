@@ -115,7 +115,17 @@ describe('the corridors reach the registry and the console', () => {
     expect(shared).toContain('assetRfqService,')
     expect(shared).toContain('assetRfqStore,')
     expect(body()).toContain('assetRfqMarkets: serving')
-    expect(body()).toContain('assetRfqMarkets: readable')
+    expect(body()).toContain('readableAssetRfqMarkets: readable')
+  })
+
+  it('seeds the reader set from the live rows at boot, not from the serving list', () => {
+    expect(body()).toContain('readableAssetRfqMarketsFrom(assetRfqMarkets, await assetRfqStore.listNonTerminal())')
+    expect(body()).not.toContain('readable: readonly AssetRfqMarket[] = serving')
+  })
+
+  it('never lets a recovered market reach the SERVING set', () => {
+    expect(body()).toContain('corridorSetFromDeps({ ...shared, assetRfqMarkets: serving }, extraCorridors)')
+    expect(body()).not.toContain('corridorSetFromDeps({ ...shared, assetRfqMarkets: readable }')
   })
 
   it('closes the store, isolated like every other resource', () => {
@@ -132,11 +142,11 @@ describe('the corridors reach the registry and the console', () => {
   })
 
   it('hot-swaps the captured corridor set in place after a console write', () => {
-    expect(body()).toContain('retainReadableMarkets(rfq, readableMarkets, live)')
+    expect(body()).toContain('readableAssetRfqMarketsFrom(rfq, live)')
     expect(body()).toContain('replaceQueue(async () => {')
-    expect(body().indexOf('const nextSets = setsFrom(livePolicy, rfq, readable)')).toBeLessThan(
-      body().indexOf('await assetRfqService.replaceMarkets(rfq)'),
-    )
+    expect(
+      body().indexOf('const nextSets = setsFrom(livePolicy, rfq, readableAssetRfqMarketsFrom(rfq, live))'),
+    ).toBeLessThan(body().indexOf('await assetRfqService.replaceMarkets(rfq)'))
     expect(body()).toContain('services.corridors.replace')
     expect(body()).toContain('services.readers.replace')
   })

@@ -13,7 +13,7 @@ import {
   carrierSatsFor,
   offerMarketsFrom,
   parseAssetRfqTokens,
-  retainReadableMarkets,
+  readableAssetRfqMarketsFrom,
 } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { assetRfqDescriptor, assetRfqEnvStem } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import {
@@ -282,24 +282,39 @@ describe('auto-symbols', () => {
   })
 })
 
-describe('retainReadableMarkets', () => {
+describe('readableAssetRfqMarketsFrom', () => {
   const served = () => assetRfqMarketsFrom([view()], CARRIER)[0]!
   const other = () => assetRfqMarketsFrom([view({ quote: OTHER })], CARRIER)[0]!
+  const live = (from: string | null, to: string | null) => [{ fromAssetId: from, toAssetId: to }]
 
-  it('keeps a dropped market while a live row still names its pair', () => {
-    const dropped = served()
-    expect(retainReadableMarkets([], [dropped], [{ fromAssetId: null, toAssetId: USDA }])).toEqual([dropped])
+  it('recovers a market with a live row that nothing serves', () => {
+    expect(readableAssetRfqMarketsFrom([], live(null, USDA))).toEqual([
+      { base: null, quote: USDA, symbol: rfqSymbolFor(USDA) },
+    ])
   })
 
-  it('still keeps it after a later write whose serving list has forgotten it', () => {
-    const dropped = served()
-    const next = other()
-    const afterDelete = retainReadableMarkets([], [dropped], [{ fromAssetId: null, toAssetId: USDA }])
-    const afterOther = retainReadableMarkets([next], afterDelete, [{ fromAssetId: null, toAssetId: USDA }])
-    expect(afterOther).toEqual([next, dropped])
+  it('recovers it without ever being shown the market that was configured', () => {
+    expect(readableAssetRfqMarketsFrom([other()], live(null, USDA))).toHaveLength(1)
+    expect(readableAssetRfqMarketsFrom([other()], live(null, USDA))[0]!.quote).toBe(USDA)
   })
 
-  it('drops it once nothing is in flight', () => {
-    expect(retainReadableMarkets([], [served()], [])).toEqual([])
+  it('leaves a served market out, in either orientation, so no pair registers twice', () => {
+    expect(readableAssetRfqMarketsFrom([served()], live(null, USDA))).toEqual([])
+    expect(readableAssetRfqMarketsFrom([served()], live(USDA, null))).toEqual([])
+  })
+
+  it('recovers one entry for a pair however many rows name it, either way round', () => {
+    const rows = [...live(null, USDA), ...live(USDA, null), ...live(null, USDA)]
+    expect(readableAssetRfqMarketsFrom([], rows)).toHaveLength(1)
+  })
+
+  it('recovers nothing once nothing is in flight', () => {
+    expect(readableAssetRfqMarketsFrom([served()], [])).toEqual([])
+    expect(readableAssetRfqMarketsFrom([], [])).toEqual([])
+  })
+
+  it('carries no pricing at all, so a recovered market cannot be mistaken for a configured one', () => {
+    const recovered = readableAssetRfqMarketsFrom([], live(null, USDA))[0]!
+    expect(Object.keys(recovered).sort()).toEqual(['base', 'quote', 'symbol'])
   })
 })

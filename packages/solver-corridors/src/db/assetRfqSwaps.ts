@@ -270,6 +270,10 @@ const bigIntOrNull = (value: string | number | null | undefined): bigint | null 
 const numberOrNull = (value: string | number | null | undefined): number | null =>
   value === null || value === undefined ? null : Number(value)
 
+/** Whether the table is already there, WITHOUT creating it — `open()` runs `CREATE TABLE IF NOT EXISTS`. */
+export const assetRfqTableExists = async (driver: SqlDriver): Promise<boolean> =>
+  (await driver.get(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'asset_rfq_swap'`)) !== undefined
+
 export class AssetRfqSwapStore {
   private constructor(
     readonly driver: SqlDriver,

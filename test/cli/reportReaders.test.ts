@@ -27,6 +27,27 @@ describe('openReportReaders — no rail, no network', () => {
   })
 })
 
+describe('openReportReaders — an asset market that stopped serving', () => {
+  it('opens the store when the table exists, not only when something serves', () => {
+    expect(body()).toContain('assetRfqMarkets.length > 0 || (await assetRfqTableExists(swapFile))')
+  })
+
+  it('probes rather than opening blind, so a reporting command creates no table', () => {
+    const source = body()
+    const probe = source.indexOf('assetRfqTableExists(swapFile)')
+    const open = source.indexOf("track('assetRfqStore', await AssetRfqSwapStore.open(swapFile))")
+    // `indexOf` answers -1 for an absent needle, which would satisfy `<` on its own.
+    expect(probe).toBeGreaterThan(-1)
+    expect(open).toBeGreaterThan(-1)
+    expect(probe).toBeLessThan(open)
+  })
+
+  it('hands the recovered markets to the reader set', () => {
+    expect(body()).toContain('readableAssetRfqMarketsFrom(assetRfqMarkets, await assetRfqStore.listNonTerminal())')
+    expect(body()).toContain('readableAssetRfqMarkets,')
+  })
+})
+
 describe('openReportReaders — partial open', () => {
   /**
    * `ReceiveSwapStore.open` and `assetRfqMarketsFrom` both throw on inputs an

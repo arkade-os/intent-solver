@@ -51,6 +51,7 @@ import {
   assetRfqDescriptor,
   assetRfqReader,
   type AssetRfqDirection,
+  type ReadableAssetRfqMarket,
 } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetRfqMarket, AssetRfqSwapService } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import type { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
@@ -96,6 +97,8 @@ export interface FlatCorridorDeps {
   assetRfqService?: AssetRfqSwapService | null
   assetRfqStore?: AssetRfqSwapStore | null
   assetRfqMarkets?: readonly AssetRfqMarket[]
+  /** No longer serving but still holding a live row. Read by {@link readerSetFromDeps} ALONE, never by the serving set. */
+  readableAssetRfqMarkets?: readonly ReadableAssetRfqMarket[]
 }
 
 /**
@@ -180,8 +183,9 @@ export const readerSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corrid
   // A READER per asset market per direction wherever the STORE exists, service
   // or not — the same width argument as above: a market an operator switched
   // off keeps its in-flight negotiations listed and answerable.
+  // Recovered markets too: the serving list drops one that stopped serving with money still on it.
   if (deps.assetRfqStore) {
-    for (const market of deps.assetRfqMarkets ?? []) {
+    for (const market of [...(deps.assetRfqMarkets ?? []), ...(deps.readableAssetRfqMarkets ?? [])]) {
       for (const direction of ASSET_RFQ_DIRECTIONS) {
         readers.push(assetRfqReader(assetRfqDescriptor(market, direction), deps.assetRfqStore))
       }

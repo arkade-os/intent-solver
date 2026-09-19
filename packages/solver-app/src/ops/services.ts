@@ -88,9 +88,10 @@ import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { AssetOfferService, type AssetMarket } from './assetOffers.js'
 import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
-import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import { AssetRfqSwapStore, assetRfqTableExists } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import { assetRfqMarketsFrom, offerMarketsFrom, retainReadableMarkets } from './assetRfqMarkets.js'
+import type { ReadableAssetRfqMarket } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import { assetRfqMarketsFrom, offerMarketsFrom, readableAssetRfqMarketsFrom } from './assetRfqMarkets.js'
 import { marketServingDivergence } from './marketDivergence.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
@@ -400,8 +401,15 @@ export const openReportReaders = async (
     const assetMarkets = assetMarketPolicy(await adminStore.listMarkets())
     // Zero dust, and no wallet asked for one: this set only ever READS rows.
     const assetRfqMarkets = assetRfqMarketsFrom(assetMarkets.pricing, { dustSats: 0n, pricedByDefault: false })
+    // Opened when the table EXISTS, not only when something serves: with every market disabled there is
+    // otherwise no asset reader, and nothing rebuilds this set later. PROBED, so no empty table is left behind.
     const assetRfqStore =
-      assetRfqMarkets.length > 0 ? track('assetRfqStore', await AssetRfqSwapStore.open(swapFile)) : null
+      assetRfqMarkets.length > 0 || (await assetRfqTableExists(swapFile))
+        ? track('assetRfqStore', await AssetRfqSwapStore.open(swapFile))
+        : null
+    const readableAssetRfqMarkets = assetRfqStore
+      ? readableAssetRfqMarketsFrom(assetRfqMarkets, await assetRfqStore.listNonTerminal())
+      : []
 
     const readers = readerSetFromDeps({
       store,
@@ -413,6 +421,7 @@ export const openReportReaders = async (
       evmCorridors: policy.evmCorridors,
       ...(assetRfqStore ? { assetRfqStore } : {}),
       assetRfqMarkets,
+      readableAssetRfqMarkets,
     })
 
     return { readers, close }
@@ -1181,13 +1190,13 @@ export const createServices = async (
     })
   }
 
-  let readableMarkets: readonly AssetRfqMarket[] = assetRfqMarkets
   const replaceQueue = createSerialiser()
   const extraCorridors = opts?.corridors ?? []
+  /** REQUIRED, never defaulted to `serving`: that default is what once made the reader set forget a disabled market. */
   const setsFrom = (
     livePolicy: Config,
     serving: readonly AssetRfqMarket[],
-    readable: readonly AssetRfqMarket[] = serving,
+    readable: readonly ReadableAssetRfqMarket[],
   ) => {
     const shared = {
       service,
@@ -1209,10 +1218,18 @@ export const createServices = async (
     }
     return {
       corridors: corridorSetFromDeps({ ...shared, assetRfqMarkets: serving }, extraCorridors),
-      readers: readerSetFromDeps({ ...shared, assetRfqMarkets: readable }, extraCorridors),
+      readers: readerSetFromDeps(
+        { ...shared, assetRfqMarkets: serving, readableAssetRfqMarkets: readable },
+        extraCorridors,
+      ),
     }
   }
-  const { corridors, readers } = setsFrom(policy, assetRfqMarkets)
+  // AT BOOT, not only after the next console write, which is the gap that reopened on every restart.
+  const { corridors, readers } = setsFrom(
+    policy,
+    assetRfqMarkets,
+    readableAssetRfqMarketsFrom(assetRfqMarkets, await assetRfqStore.listNonTerminal()),
+  )
 
   const rebuild = async (livePolicy: Config): Promise<void> => {
     const next = assetMarketPolicy(await adminStore.listMarkets())
@@ -1222,8 +1239,7 @@ export const createServices = async (
     })
     const offers = offerMarketsFrom(next.pricing)
     const live = await assetRfqStore.listNonTerminal()
-    const readable = retainReadableMarkets(rfq, readableMarkets, live)
-    const nextSets = setsFrom(livePolicy, rfq, readable)
+    const nextSets = setsFrom(livePolicy, rfq, readableAssetRfqMarketsFrom(rfq, live))
     await assetRfqService.replaceMarkets(rfq)
     await assetOffers?.replaceMarkets({ markets: offers, pricing: next.pricing })
     services.corridors.replace([...nextSets.corridors])
@@ -1232,7 +1248,6 @@ export const createServices = async (
     services.assetMarketPairs = next.pairs
     services.assetRfqMarkets = rfq
     services.liveOfferMarkets = offers
-    readableMarkets = readable
   }
 
   const services: Services = {
