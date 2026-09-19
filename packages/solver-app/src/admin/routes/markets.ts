@@ -114,6 +114,14 @@ const int = (label: string, value: unknown): number => {
 const optionalInt = (label: string, value: unknown): number | undefined =>
   value === undefined || value === null ? undefined : int(label, value)
 
+// ABSENT takes the default; anything else must be a real boolean. Coerced, the string "true" —
+// the truthiest spelling a client has — reads as false and silently CLOSES a direction.
+const bool = (label: string, value: unknown, fallback: boolean): boolean => {
+  if (value === undefined) return fallback
+  if (typeof value !== 'boolean') throw new BadRequest(`${label} must be true or false`)
+  return value
+}
+
 const atomic = (label: string, value: unknown): bigint => {
   if (value === undefined || value === null) return 0n
   if (typeof value !== 'string' || !/^[0-9]+$/.test(value)) {
@@ -153,11 +161,11 @@ const carrierMode = (value: unknown): CarrierMode => {
 export const marketFrom = (body: MarketBody): AssetMarketConfig => ({
   ...DEFAULT_SERVING,
   symbol: body.symbol === undefined || body.symbol === null ? null : String(body.symbol).trim().toUpperCase() || null,
-  servesOffer: body.servesOffer === true,
+  servesOffer: bool('servesOffer', body.servesOffer, false),
   // Enabled unless explicitly switched off, matching `enabled` below: configuring a market IS the opt-in.
-  servesRfq: body.servesRfq === undefined ? true : body.servesRfq === true,
-  rfqSellBase: body.rfqSellBase === undefined ? true : body.rfqSellBase === true,
-  rfqBuyBase: body.rfqBuyBase === undefined ? true : body.rfqBuyBase === true,
+  servesRfq: bool('servesRfq', body.servesRfq, true),
+  rfqSellBase: bool('rfqSellBase', body.rfqSellBase, true),
+  rfqBuyBase: bool('rfqBuyBase', body.rfqBuyBase, true),
   carrierMode: carrierMode(body.carrierMode),
   base: leg('base', body.base),
   quote: leg('quote', body.quote),

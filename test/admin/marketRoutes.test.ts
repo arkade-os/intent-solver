@@ -418,6 +418,18 @@ describe('the serving fields an operator can only set from here', () => {
     await adminStore.close()
   })
 
+  it('refuses a non-boolean serving flag rather than reading it as a closed direction', async () => {
+    // `"true"` is not `true`: coerced, the truthiest spelling a client has SHUTS the direction.
+    const { app, adminStore } = await build()
+    for (const field of ['servesOffer', 'servesRfq', 'rfqSellBase', 'rfqBuyBase']) {
+      const res = await put(app, body({ symbol: 'USDA', [field]: 'true' }))
+      expect(res.status, field).toBe(400)
+      expect(((await res.json()) as { message: string }).message, field).toContain(field)
+    }
+    expect(await adminStore.listMarkets()).toEqual([])
+    await adminStore.close()
+  })
+
   it('defaults a new market to serving RFQ and not offers', async () => {
     const { app, adminStore } = await build()
     await put(app, body({ symbol: 'USDA' }))
