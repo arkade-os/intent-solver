@@ -245,9 +245,9 @@ ClientTookLockup(s) == SpentBy(s, "clientRefund")    \* the client pulled it bac
 (*                                                                         *)
 (* The comment above LEGAL_EDGES' `paying` and `paid` rows in db/swaps.ts  *)
 (* permits those two edges only on PROOF the sats never left, and names    *)
-(* two facts that count.  Both read the BACKEND's own record for the hash  *)
-(* rather than one call's return value — which is exactly what `pay` is    *)
-(* here — so both land on the same two values:                             *)
+(* two facts that count.  Each is a standing RECORD for the hash rather    *)
+(* than one call's return value, and this model carries exactly one such   *)
+(* record — `pay` — so both land on values of it:                          *)
 (*                                                                         *)
 (*   "none"    (2) the route-deadline refusal that never reached           *)
 (*             payInvoice, with getSendHtlcState answering that the        *)
@@ -255,12 +255,20 @@ ClientTookLockup(s) == SpentBy(s, "clientRefund")    \* the client pulled it bac
 (*             `nothingCommitted` parameter, in send/orchestrator.ts.  A   *)
 (*             backend with no such probe has proved nothing and parks.    *)
 (*   "failed"  (1) the self-payment exception (refundProvenSelfPayment in  *)
-(*             send/orchestrator.ts).  The invoice is one our own          *)
-(*             node minted, and the payee — the one place the sats could   *)
-(*             have ended up — says it was never paid.  `pay` IS that      *)
-(*             payee record here, so "failed" is the probe's               *)
-(*             pending/cancelled answer; an armed or settled htlc means    *)
-(*             money may still be in play and still goes to `stuck`.       *)
+(*             send/orchestrator.ts).  The invoice is one our own node     *)
+(*             minted, and the payee — the one place the sats could have   *)
+(*             ended up — says it was never paid.                          *)
+(*                                                                         *)
+(*             THE PAYEE PROBE IS FOLDED INTO `pay`, NOT CARRIED BESIDE    *)
+(*             IT.  ResolvePayment also writes "failed" for an ordinary    *)
+(*             payer-side failure, which the TypeScript sends to `stuck`,  *)
+(*             so this model refuses on strictly LESS evidence than the    *)
+(*             code demands.  That is the conservative direction for a     *)
+(*             safety check: it explores refusals the code would not       *)
+(*             take, so RefusedNeverPaid holding proves more than the      *)
+(*             code needs.  The price is that a violation reached through  *)
+(*             this arm reads as "reachable if the probe agrees", and the  *)
+(*             one recorded below says so.                                 *)
 (*                                                                         *)
 (* MODELLED AS THE RECORD FACT, NOT THE DEADLINE THAT OCCASIONS IT.  The   *)
 (* shipped gates in front of payInvoice are clock-bound, and (A2) freezes  *)
@@ -963,7 +971,9 @@ NoNetLoss == \A s \in Swaps : ~(PaidOut(s) /\ ClientTookLockup(s))
 \*   fires on `res = "failed"`, which is a snapshot, and only idempotency
 \*   keeps the snapshot equal to the live `pay[s]`.  With it FALSE the row
 \*   reaches `refused` while a concurrent submit is still inflight, at
-\*   depth 12.
+\*   depth 12.  This one goes through the folded payee probe, so read it
+\*   as "reachable if the probe agrees"; the divergence it turns on is
+\*   the snapshot's, not the probe's.
 \*
 \*   NoNetLoss carries OperatorRefundStuck.  That guard supplies only
 \*   ClientTookLockup, so `~PaidOut` has to come from NoNetLoss; with
