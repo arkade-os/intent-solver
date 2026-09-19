@@ -7,7 +7,8 @@ import { assetMarketKey, type AssetMarketConfig } from '@arkade-os/solver-core/c
 
 export type ServingPath = 'offer' | 'rfq'
 
-export type CapabilityGap = 'offer_path_not_built' | 'rfq_pair_unsupported' | 'rfq_both_directions_closed'
+export type CapabilityGap =
+  'offer_path_not_built' | 'offer_market_not_live' | 'rfq_pair_unsupported' | 'rfq_both_directions_closed'
 
 export interface MarketCapability {
   readonly serving: readonly ServingPath[]
@@ -59,6 +60,15 @@ export const marketCapability = (market: Market, runtime: ServingRuntime): Marke
       detail:
         'this process booted with no offer path, so the flag reaches nothing. Restart with OFFER_MARKETS set, ' +
         'or with at least one enabled market row declaring serves_offer.',
+    })
+    // Off `serving`, so the two cannot disagree: a built path that never took this pair is the
+    // silent half of the same flag, and reported as empty `gaps` it reads as nothing being wrong.
+  } else if (market.servesOffer && !serving.includes('offer')) {
+    gaps.push({
+      kind: 'offer_market_not_live',
+      detail:
+        'the offer path is built but is not routing this pair, so the flag reaches nothing. Restart to ' +
+        'rebuild the offer serve list from the stored rows.',
     })
   }
   if (market.servesRfq && market.base !== null && market.quote !== null) {

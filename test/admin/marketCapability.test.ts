@@ -83,6 +83,14 @@ describe('marketCapability — gaps between the row and the process', () => {
     expect(gaps).toEqual([])
   })
 
+  it('names an offer declaration a BUILT path is not routing to, which `serving` alone reports as nothing', () => {
+    const rt = serving({ assetOffers: {}, liveOfferMarkets: [{ a: null, b: OTHER }] })
+    const { serving: paths, gaps } = marketCapability(pair({ servesOffer: true }), rt)
+    expect(paths).toEqual([])
+    expect(gaps.map((g) => g.kind)).toEqual(['offer_market_not_live'])
+    expect(gaps[0]!.detail).toMatch(/restart/i)
+  })
+
   it('names an RFQ declaration the serve list dropped, and why', () => {
     const bothLegs = pair({ servesRfq: true, base: USDT, quote: OTHER })
     expect(marketCapability(bothLegs, serving()).gaps[0]!.kind).toBe('rfq_pair_unsupported')
