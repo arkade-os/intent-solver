@@ -379,6 +379,14 @@ OperatorClaimStuck(s) ==
 \* that has already landed rather than authorising one.  ClientTookLockup(s)
 \* is that landing, which is why the money question is settled before this
 \* fires and not by it.
+\*
+\* THE GUARD DOES NOT ESTABLISH RefusedNeverPaid ON ITS OWN.  Writing `refused`
+\* here needs ClientTookLockup(s) => ProofSatsNeverLeft(s), and neither
+\* conjunct above says that.  It comes from two places outside this action:
+\* NoNetLoss rules out "succeeded", and BackendHonoursIdempotency rules out
+\* "inflight" by keeping it out of `stuck` at all.  Break either and this
+\* action walks a paid-out row into `refused`; RefusedNeverPaid has both
+\* measurements.
 OperatorRefundStuck(s) ==
     /\ st[s] = "stuck"
     /\ ClientTookLockup(s)
@@ -640,13 +648,20 @@ SubmitPay(w, s) ==
 \* inside submitPayment's terminal-failure arm, AFTER the patch() that puts
 \* payment_id on the row and before anything else touches it, so `refused` and
 \* `stuck` are the two outcomes of one step — the probe is the only thing that
-\* chooses between them.  `res = "failed"` already means pay[s] = "failed",
-\* which is the proof; see ProofSatsNeverLeft.
+\* chooses between them.
 \*
-\* That ordering is also WHY this is safe where proof (2) is delicate: the
-\* payment id lands in the same step, so whenPaying's `!row.paymentId`
-\* recovery branch shuts for every other worker at the moment the row is
-\* refused.  Nothing can still be submitted against a hash refused here.
+\* `res = "failed"` IS A SNAPSHOT, NOT THE LIVE VERDICT, and that distinction
+\* is the whole safety argument.  It records what the backend told THIS worker
+\* back at SubmitPay; `pay[s]` can move between that step and this one, because
+\* a second worker holding the same row may submit in between.  What keeps the
+\* two agreeing is BackendHonoursIdempotency: a key that has once answered
+\* "failed" goes on answering it, so the snapshot is still the proof.
+\*
+\* Without idempotency they part, and this arm refuses on a stale verdict while
+\* the other worker's payment is live.  That is not hypothetical:
+\* LightningSend_DoublePay reaches `refused` with pay = "inflight" in twelve
+\* states.  RefusedNeverPaid below carries the measurement and the rest of the
+\* chain.
 RecordPay(w, s) ==
     /\ At(w, s, "payCalled")
     /\ payIdRec' = [payIdRec EXCEPT ![s] = TRUE]
@@ -940,6 +955,29 @@ NoNetLoss == \A s \in Swaps : ~(PaidOut(s) /\ ClientTookLockup(s))
 \* the invariant exists to catch.  Checked in EVERY state, so a payment that
 \* settles after the refusal fails it too.
 \*
+\* IT IS A CONDITIONAL INVARIANT, AND THE CONDITIONS ARE NOT LOCAL TO IT.
+\* No action that writes `refused` establishes it on its own; two assumptions
+\* elsewhere carry it, one per route in, and each is separately falsifiable:
+\*
+\*   BackendHonoursIdempotency carries RecordPay's refused arm.  That arm
+\*   fires on `res = "failed"`, which is a snapshot, and only idempotency
+\*   keeps the snapshot equal to the live `pay[s]`.  With it FALSE the row
+\*   reaches `refused` while a concurrent submit is still inflight, at
+\*   depth 12.
+\*
+\*   NoNetLoss carries OperatorRefundStuck.  That guard supplies only
+\*   ClientTookLockup, so `~PaidOut` has to come from NoNetLoss; with
+\*   NoNetLoss broken the operator edge walks a paid-out row into `refused`,
+\*   at depth 22 — in LightningSend_Broken and LightningSend_StaleIndexer
+\*   alike, neither of which mutates idempotency.
+\*
+\* So this invariant is FALSE in three of the four mutation cfgs.  Each still
+\* reports the invariant its own header names, because that one violates
+\* shallower; verified stable over five runs each (TLC 2.19, -workers 16).
+\* On a violating cfg only the invariant NAME and the depth reproduce, never
+\* the state counts.  LightningSend_Overexposed and the green cfg hold it over
+\* the complete state graph.
+\*
 \* The table-assertion discipline this replaces has not gone: it lives on in
 \* StuckReachableFromEveryExposed below, which is still a claim about `Edges`.
 RefusedNeverPaid ==
@@ -1003,6 +1041,11 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*   LightningSend_StaleIndexer.cfg  IndexerNeverLies=FALSE                *)
 (*                                   -> NoNetLoss violated, ~1s            *)
 (*                                                                         *)
+(* Three of those four ALSO break RefusedNeverPaid, deeper, so TLC never   *)
+(* reports it.  That is documented at the invariant, not here; the reason  *)
+(* it matters to a sweep is that the headers stay accurate only because    *)
+(* the named violation is the shallower one.                               *)
+(*                                                                         *)
 (* COVERAGE, from that same green run with -coverage 1 — the check that    *)
 (* the five reconciled edges are not dead spec.  The pair is TLC's         *)
 (* distinct:total successors; a leading 0 means the action was taken but   *)
@@ -1013,6 +1056,13 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*   stuck -> claiming    OperatorClaimStuck             0:2400            *)
 (*   stuck -> refused     OperatorRefundStuck            0:9664            *)
 (*   paying -> refused    RecordPay's refused arm, 36,232 firings          *)
+(*                                                                         *)
+(* The last row's format differs because TLC's output does: it prints one  *)
+(* distinct:total line per named ACTION, and `paying -> refused` is an arm *)
+(* inside RecordPay rather than an action of its own, so it gets only a    *)
+(* bare sub-expression count.  RecordPay's single action line covers all   *)
+(* three of its arms together, at 5249:120512.  Nothing is meant by the    *)
+(* difference.                                                             *)
 (*                                                                         *)
 (* THE EDGE RECONCILIATION, AND WHAT IT MOVED                              *)
 (*                                                                         *)
