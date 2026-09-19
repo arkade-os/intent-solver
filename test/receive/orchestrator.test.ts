@@ -399,6 +399,7 @@ describe('ReceiveSwapService.quote', () => {
         paymentHash: 'aa'.repeat(32),
         amountSats: 50_000,
         invoiceExpiresAt: now + 3600,
+        quotedRefundDeadline: now + 7200,
         refundLocktime: now + 7200,
         senderPubkey: '01'.repeat(32),
         receiverPubkey: '02'.repeat(32),

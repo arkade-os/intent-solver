@@ -12,6 +12,7 @@ const sendQuote = (id: string) => ({
   paymentHash: `0${id}`.repeat(32).slice(0, 64),
   amountSats: 10_000,
   invoiceExpiresAt: now + 3600,
+  quotedRefundDeadline: now + 7200,
   refundLocktime: now + 7200,
   senderPubkey: 'bb'.repeat(32),
   receiverPubkey: 'cc'.repeat(32),
