@@ -66,6 +66,7 @@ describe('the send store keeps the realized fee beside the quoted one', () => {
     paymentHash: 'a'.repeat(64),
     amountSats: 100_300,
     invoiceExpiresAt: clock + 3600,
+    quotedRefundDeadline: clock + 7200,
     refundLocktime: clock + 7200,
     senderPubkey: '01'.repeat(32),
     receiverPubkey: '02'.repeat(32),

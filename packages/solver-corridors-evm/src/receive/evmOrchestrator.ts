@@ -42,6 +42,7 @@ import {
 import { deadlineSecondsForBlock, type EvmBlockCadence } from '@arkade-os/solver-rails-evm/evm/blockTime.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
+import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 export type EvmBroadcaster = (call: EvmCall) => Promise<string>
 
@@ -486,7 +487,7 @@ export class EvmReceiveSwapService {
       })
       return { accepted: true, swap }
     } catch (error) {
-      if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+      if (error instanceof UniqueConstraintError) {
         return { accepted: false, reason: 'duplicate_swap' }
       }
       throw error

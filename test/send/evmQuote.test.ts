@@ -228,6 +228,12 @@ describe('refusals', () => {
     expect(await service.quote(request())).toEqual({ accepted: false, reason: 'duplicate_swap' })
   })
 
+  it('lets a non-constraint failure whose message says UNIQUE surface', async () => {
+    const { service, store } = await build()
+    vi.spyOn(store, 'insertQuote').mockRejectedValueOnce(new TypeError('UNIQUE quote construction failed'))
+    await expect(service.quote(request())).rejects.toThrow(TypeError)
+  })
+
   it('refuses the duplicate WITHOUT paying for a price first', async () => {
     // The row's UNIQUE constraint would catch a duplicate anyway, through the
     // insert's error path — so the explicit check is not what makes the ANSWER

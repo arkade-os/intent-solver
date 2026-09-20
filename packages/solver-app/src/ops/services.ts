@@ -90,7 +90,13 @@ import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import { assetRfqMarketsFrom, offerMarketsFrom, retainReadableMarkets } from './assetRfqMarkets.js'
+import type { ReadableAssetRfqMarket } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import {
+  assetRfqMarketsFrom,
+  offerMarketsFrom,
+  recoverReadableMarkets,
+  retainReadableMarkets,
+} from './assetRfqMarkets.js'
 import { marketServingDivergence } from './marketDivergence.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
@@ -400,8 +406,14 @@ export const openReportReaders = async (
     const assetMarkets = assetMarketPolicy(await adminStore.listMarkets())
     // Zero dust, and no wallet asked for one: this set only ever READS rows.
     const assetRfqMarkets = assetRfqMarketsFrom(assetMarkets.pricing, { dustSats: 0n, pricedByDefault: false })
-    const assetRfqStore =
-      assetRfqMarkets.length > 0 ? track('assetRfqStore', await AssetRfqSwapStore.open(swapFile)) : null
+    // Opened with an EMPTY market list too, or a negotiation a deleted market
+    // left live has no reader and no later `rebuild` to build one. Gated on the
+    // table rather than opened outright, because `open()` would create it.
+    const openAssetRfq = assetRfqMarkets.length > 0 || (await AssetRfqSwapStore.tableExists(swapFile))
+    const assetRfqStore = openAssetRfq ? track('assetRfqStore', await AssetRfqSwapStore.open(swapFile)) : null
+    const readableAssetRfqMarkets = assetRfqStore
+      ? recoverReadableMarkets(assetRfqMarkets, await assetRfqStore.listNonTerminal())
+      : assetRfqMarkets
 
     const readers = readerSetFromDeps({
       store,
@@ -412,7 +424,7 @@ export const openReportReaders = async (
       ...(evmReceiveStore ? { evmReceiveStore } : {}),
       evmCorridors: policy.evmCorridors,
       ...(assetRfqStore ? { assetRfqStore } : {}),
-      assetRfqMarkets,
+      assetRfqMarkets: readableAssetRfqMarkets,
     })
 
     return { readers, close }
@@ -1181,13 +1193,18 @@ export const createServices = async (
     })
   }
 
-  let readableMarkets: readonly AssetRfqMarket[] = assetRfqMarkets
+  // AT BOOT, because `retainReadableMarkets` is reached only from `rebuild` —
+  // so the gap reopened on every restart and closed only on the next save.
+  let readableMarkets: readonly ReadableAssetRfqMarket[] = recoverReadableMarkets(
+    assetRfqMarkets,
+    await assetRfqStore.listNonTerminal(),
+  )
   const replaceQueue = createSerialiser()
   const extraCorridors = opts?.corridors ?? []
   const setsFrom = (
     livePolicy: Config,
     serving: readonly AssetRfqMarket[],
-    readable: readonly AssetRfqMarket[] = serving,
+    readable: readonly ReadableAssetRfqMarket[] = serving,
   ) => {
     const shared = {
       service,
@@ -1212,7 +1229,7 @@ export const createServices = async (
       readers: readerSetFromDeps({ ...shared, assetRfqMarkets: readable }, extraCorridors),
     }
   }
-  const { corridors, readers } = setsFrom(policy, assetRfqMarkets)
+  const { corridors, readers } = setsFrom(policy, assetRfqMarkets, readableMarkets)
 
   const rebuild = async (livePolicy: Config): Promise<void> => {
     const next = assetMarketPolicy(await adminStore.listMarkets())

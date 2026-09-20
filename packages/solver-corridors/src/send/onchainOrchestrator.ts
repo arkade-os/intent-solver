@@ -48,6 +48,7 @@ import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { MINUTE } from '@arkade-os/solver-core/core/timelocks.js'
+import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 export type { ArkadeOps as OnchainArkadeOps } from './orchestrator.js'
 
@@ -399,7 +400,7 @@ export class OnchainSendSwapService {
         })
         return { accepted: true, swap, lockupDeadline: this.now() + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT }
       } catch (error) {
-        if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+        if (error instanceof UniqueConstraintError) {
           return { accepted: false, reason: 'duplicate_swap' }
         }
         throw error

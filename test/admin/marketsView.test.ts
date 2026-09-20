@@ -13,6 +13,9 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+// The REAL ordered-save client, not a stand-in: it is what turns the route's 200-carrying-`unapplied`
+// into a throw, so a harness that stubbed it would be measuring its own mock rather than the seam.
+import { applyPricing } from '../../packages/solver-app/src/admin/static/pricingSave.js'
 
 const appSource = readFileSync(
   fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
@@ -91,8 +94,11 @@ describe('the form does not fight the operator', () => {
     expect(block.slice(start, end)).not.toContain('render()')
   })
 
-  /** `saveMarket` with every seam injected, so the draft it keeps or clears is observable. */
-  const savedWith = async (response: unknown) => {
+  /** `saveMarket` with every seam injected, so the draft it keeps or clears is observable.
+   *
+   *  `applyPricing` is the REAL ordered-save client, not a stand-in: a refusal arrives as a 200 whose
+   *  body the client has to read, so a stubbed reader would assert the mock instead of the seam. */
+  const savedWith = async (response: unknown, overrides: Record<string, string> = {}) => {
     const block = marketsBlock()
     const start = block.indexOf('const saveMarket')
     if (start === -1) throw new Error('saveMarket is gone from the markets block')
@@ -102,9 +108,11 @@ describe('the form does not fight the operator', () => {
     const built = new Function(
       'api',
       'marketBody',
+      'carrierDefaultOverride',
       'state',
       'load',
       'fail',
+      'applyPricing',
       `let marketDraft = { marketKey: 'k' }
        ${source}
        return async () => (await saveMarket(), marketDraft)`,
@@ -112,18 +120,27 @@ describe('the form does not fight the operator', () => {
     const draft = await built(
       async (path: string, init: { body: string }) => (sent.push({ path, body: init.body }), response),
       (d: unknown) => d,
+      () => overrides,
       { banner: 'x' },
       async () => {},
       (error: Error) => failures.push(error.message),
+      applyPricing,
     )()
     return { draft, sent, failures }
   }
 
   it('saves through the ordered endpoint, not the single-market write', async () => {
-    const { sent } = await savedWith({ revision: 'r', applied: ['k'], unapplied: [] })
+    const { sent } = await savedWith(
+      { revision: 'r', applied: ['k'], unapplied: [] },
+      { ASSET_CARRIER_PRICING: 'true' },
+    )
     expect(sent).toHaveLength(1)
     expect(sent[0]!.path).toBe('/api/pricing/apply')
-    expect(JSON.parse(sent[0]!.body)).toMatchObject({ markets: [{ marketKey: 'k' }] })
+    // Both halves ride ONE request: the ordering the route promises is a property of one save.
+    expect(JSON.parse(sent[0]!.body)).toMatchObject({
+      markets: [{ marketKey: 'k' }],
+      overrides: { ASSET_CARRIER_PRICING: 'true' },
+    })
   })
 
   // A refusal arrives INSIDE a 200 here, so status alone is not success.
@@ -134,7 +151,10 @@ describe('the form does not fight the operator', () => {
       unapplied: [{ key: 'k', reason: 'the feed did not answer' }],
     })
     expect(draft).toEqual({ marketKey: 'k' })
-    expect(failures).toEqual(['the feed did not answer'])
+    // The operator has to see which key was refused as well as why.
+    expect(failures).toHaveLength(1)
+    expect(failures[0]).toContain('k')
+    expect(failures[0]).toContain('the feed did not answer')
   })
 
   it('clears the draft when nothing is unapplied', async () => {

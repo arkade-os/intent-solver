@@ -6,8 +6,13 @@
  * parsed — it seeds those columns once — but nothing below reads it.
  */
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
-import { assetRfqEnvStem, type AssetRfqDirection } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import {
+  assetRfqEnvStem,
+  type AssetRfqDirection,
+  type ReadableAssetRfqMarket,
+} from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import { rfqSymbolFor } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import type { AssetMarketPricingView, CarrierMode } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { assetCardMarkets, type AssetCardMarket } from '@arkade-os/solver-core/core/registryCard.js'
 import type { AssetMarket } from './assetOffers.js'
@@ -121,23 +126,48 @@ export const assetRfqMarketsFrom = (
 export const offerMarketsFrom = (pricing: readonly AssetMarketPricingView[]): readonly AssetMarket[] =>
   pricing.filter((market) => market.servesOffer).map((market) => ({ a: market.base, b: market.quote }))
 
+/**
+ * This market's pair, in EITHER order: a configured market is oriented by its
+ * console row and a recovered one by a swap row, so an ordered compare here
+ * registers one pair twice — which `createCorridorReaderSet` refuses.
+ */
+const covers = (market: ReadableAssetRfqMarket, from: string | null, to: string | null): boolean =>
+  (market.base === from && market.quote === to) || (market.base === to && market.quote === from)
+
 /** Serving list plus previous markets that still have a non-terminal row. */
 export const retainReadableMarkets = (
-  serving: readonly AssetRfqMarket[],
-  previous: readonly AssetRfqMarket[],
+  serving: readonly ReadableAssetRfqMarket[],
+  previous: readonly ReadableAssetRfqMarket[],
   live: readonly { fromAssetId: string | null; toAssetId: string | null }[],
-): readonly AssetRfqMarket[] => [
+): readonly ReadableAssetRfqMarket[] => [
   ...serving,
   ...previous.filter(
     (market) =>
-      !serving.some((row) => row.base === market.base && row.quote === market.quote) &&
-      live.some(
-        (row) =>
-          (row.fromAssetId === market.base && row.toAssetId === market.quote) ||
-          (row.fromAssetId === market.quote && row.toAssetId === market.base),
-      ),
+      !serving.some((row) => covers(row, market.base, market.quote)) &&
+      live.some((row) => covers(market, row.fromAssetId, row.toAssetId)),
   ),
 ]
+
+/**
+ * The readable list plus a market per live pair nothing in it covers — what a
+ * RESTART needs and {@link retainReadableMarkets} cannot give it, carrying a
+ * market forward from a previous list that at boot does not exist. The symbol
+ * is derived: a deleted market has no row to read one off, and it reaches only
+ * `descriptor.envStem`, which no reader path consults.
+ */
+export const recoverReadableMarkets = (
+  readable: readonly ReadableAssetRfqMarket[],
+  live: readonly { fromAssetId: string | null; toAssetId: string | null }[],
+): readonly ReadableAssetRfqMarket[] => {
+  const recovered: ReadableAssetRfqMarket[] = []
+  for (const row of live) {
+    const assetId = row.fromAssetId ?? row.toAssetId
+    if (assetId === null) continue
+    if ([...readable, ...recovered].some((market) => covers(market, row.fromAssetId, row.toAssetId))) continue
+    recovered.push({ base: row.fromAssetId, quote: row.toAssetId, symbol: rfqSymbolFor(assetId) })
+  }
+  return recovered.length === 0 ? readable : [...readable, ...recovered]
+}
 
 type Bounds = { min: bigint; max: bigint }
 
