@@ -54,6 +54,11 @@ const withdrawWith = (w: unknown, params: { address: string; amount: string }) =
 const outputsOf = (w: ReturnType<typeof wallet>) =>
   (w.settle.mock.calls[0]![0] as { outputs: { address: string; amount: bigint }[] }).outputs
 
+// Keyed by address, never by position: an SDK that reordered its outputs would
+// otherwise compare the wrong pair and pass on a divergence of zero.
+const destinationOf = (w: ReturnType<typeof wallet>) => outputsOf(w).find((o) => o.address === REGTEST_ADDRESS)!.amount
+const changeOf = (w: ReturnType<typeof wallet>) => outputsOf(w).find((o) => o.address === ARKADE_ADDRESS)!.amount
+
 const FLAT: Info = { dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee: {} } }
 const PROPORTIONAL: Info = {
   dust: 330n,
@@ -72,11 +77,10 @@ describe('the onchain rail cannot replace this file’s fee model', () => {
 
     const viaSdk = wallet(coins, info)
     await new Ramps(viaSdk as never).offboard(REGTEST_ADDRESS, info.fees as never, 30_000n, undefined, coins as never)
-    // Keyed by address, never by index: only the CHANGE is a vtxo, so only it meets the ceiling.
-    const change = outputsOf(viaSdk).find((o) => o.address === ARKADE_ADDRESS)!
-    expect(outputsOf(viaSdk).find((o) => o.address === REGTEST_ADDRESS)!.amount).toBe(30_000n)
-    expect(change.amount).toBe(70_000n)
-    expect(change.amount).toBeGreaterThan(info.vtxoMaxAmount)
+    // Only the CHANGE is a vtxo, so the destination stays under the ceiling and only it breaks.
+    expect(destinationOf(viaSdk)).toBe(30_000n)
+    expect(changeOf(viaSdk)).toBe(70_000n)
+    expect(changeOf(viaSdk)).toBeGreaterThan(info.vtxoMaxAmount)
   })
 
   it('short-pays the destination when handed this file’s `needed`, because offboard DEDUCTS its fee', async () => {
@@ -97,11 +101,11 @@ describe('the onchain rail cannot replace this file’s fee model', () => {
     )
 
     expect(outputFee).toBe(500n)
-    expect(outputsOf(viaSdk)[0]!.amount).toBe(49_995n)
+    expect(destinationOf(viaSdk)).toBe(49_995n)
 
     const ours = wallet(coins, PROPORTIONAL)
     await withdrawWith(ours, { address: REGTEST_ADDRESS, amount: '50000' })
-    expect(outputsOf(ours)[0]!.amount).toBe(50_000n)
+    expect(destinationOf(ours)).toBe(50_000n)
   })
 
   it('disagrees on the change with the rail’s gross-up, which only a flat schedule hides', async () => {
@@ -115,7 +119,7 @@ describe('the onchain rail cannot replace this file’s fee model', () => {
       )
       const quote = await router.route({ raw: REGTEST_ADDRESS, amount: 50_000, selectedVtxos: coins as never })
       await (await quote.send()).settled()
-      return [outputsOf(ours)[1]!.amount, outputsOf(routed)[1]!.amount]
+      return [changeOf(ours), changeOf(routed)]
     }
 
     const [oursFlat, routedFlat] = await changeVia({
