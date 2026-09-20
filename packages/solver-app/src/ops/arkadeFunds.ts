@@ -28,9 +28,22 @@
  *  - `withdraw` — BOTH ways out of the float, routed by the destination's form:
  *    an Arkade address is paid offchain (`wallet.send`), a bitcoin address by
  *    collaborative exit (`wallet.settle` with an onchain output). The coins are
- *    selected HERE and pinned in the reservation ledger for the spend: the SDK's
- *    own selection cannot be told "not that one" and could take a coin out from
- *    under an in-flight lockup funding — the hazard `arkade/reservations.ts` exists for.
+ *    selected HERE and pinned in the reservation ledger for the spend, so an
+ *    in-flight lockup funding cannot have a coin taken out from under it — the
+ *    hazard `arkade/reservations.ts` exists for.
+ *
+ *    NOT routed through the SDK's `PaymentRouter` — and no longer because the
+ *    selection is untellable: `PaymentRequest.selectedVtxos` (0.4.74) takes one
+ *    and never reads `getSpendableVtxos`, so the ledger would survive it. The
+ *    ONCHAIN rail is what keeps this code. `Ramps.offboard` checks dust and NOT
+ *    `vtxoMaxAmount`, so the change this file refuses on the ceiling it ships
+ *    for arkd to reject; and it DEDUCTS its output fee from the amount it is
+ *    handed where this ADDS it to what it sources, so the destination receives
+ *    `needed - fee(needed)` rather than the amount typed. The rail's gross-up
+ *    reconciles the two only for a FLAT fee schedule, and does not throw when it
+ *    fails to settle — while a live server answers `amount * 0.01` (`vtxoPool.ts`).
+ *    The `ark` rail is already exactly the `wallet.send` below, so routing that
+ *    half alone would buy indirection and a network-blind `withdrawRoute`.
  *
  * The absent half of that pair is the point of a capability seam rather than an
  * interface every source must satisfy: absent is a fact the console can render,
