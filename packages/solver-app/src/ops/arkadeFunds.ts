@@ -36,10 +36,11 @@
  *    selection is untellable: `PaymentRequest.selectedVtxos` (0.4.74) takes one
  *    and never reads `getSpendableVtxos`, so the ledger would survive it. The
  *    ONCHAIN rail is what keeps this code. `Ramps.offboard` checks dust and NOT
- *    `vtxoMaxAmount`, so the change this file refuses on the ceiling it ships
- *    for arkd to reject; and it DEDUCTS its output fee from the amount it is
- *    handed where this ADDS it to what it sources, so the destination receives
- *    `needed - fee(needed)` rather than the amount typed. The rail's gross-up
+ *    `vtxoMaxAmount`, so it ships the change output this file refuses — one
+ *    above the per-output ceiling — and arkd rejects the settlement instead. It
+ *    also DEDUCTS its output fee from the amount it is handed where this ADDS it
+ *    to what it sources, so the destination receives `needed - fee(needed)`
+ *    rather than the amount typed. The rail's gross-up
  *    reconciles the two only for a FLAT fee schedule, and does not throw when it
  *    fails to settle — while a live server answers `amount * 0.01` (`vtxoPool.ts`).
  *    The `ark` rail is already exactly the `wallet.send` below, so routing that

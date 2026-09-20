@@ -66,14 +66,17 @@ describe('the onchain rail cannot replace this file’s fee model', () => {
     const info: Info = { ...FLAT, vtxoMaxAmount: 40_000n }
     const coins = [coin(0x01, 100_000)]
 
-    await expect(withdrawWith(wallet(coins, info), { address: REGTEST_ADDRESS, amount: '50000' })).rejects.toThrow(
+    await expect(withdrawWith(wallet(coins, info), { address: REGTEST_ADDRESS, amount: '30000' })).rejects.toThrow(
       /per-output ceiling/,
     )
 
     const viaSdk = wallet(coins, info)
-    await new Ramps(viaSdk as never).offboard(REGTEST_ADDRESS, info.fees as never, 50_000n, undefined, coins as never)
-    expect(outputsOf(viaSdk)[1]!.amount).toBe(50_000n)
-    expect(outputsOf(viaSdk)[1]!.amount).toBeGreaterThan(info.vtxoMaxAmount)
+    await new Ramps(viaSdk as never).offboard(REGTEST_ADDRESS, info.fees as never, 30_000n, undefined, coins as never)
+    // Keyed by address, never by index: only the CHANGE is a vtxo, so only it meets the ceiling.
+    const change = outputsOf(viaSdk).find((o) => o.address === ARKADE_ADDRESS)!
+    expect(outputsOf(viaSdk).find((o) => o.address === REGTEST_ADDRESS)!.amount).toBe(30_000n)
+    expect(change.amount).toBe(70_000n)
+    expect(change.amount).toBeGreaterThan(info.vtxoMaxAmount)
   })
 
   it('short-pays the destination when handed this file’s `needed`, because offboard DEDUCTS its fee', async () => {
