@@ -722,7 +722,9 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
 
     const result = await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
 
-    expect(wallet.settle).toHaveBeenCalledWith({
+    // Params, not the whole call: the exit goes through the SDK's ramp now, which
+    // passes its (absent) settlement-event callback explicitly.
+    expect(wallet.settle.mock.calls[0]![0]).toEqual({
       inputs: [expect.objectContaining({ value: 100_000 })],
       outputs: [
         { address: REGTEST_ADDRESS, amount: 50_000n },
@@ -749,6 +751,26 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     ])
     expect(outputs.reduce((sum, o) => sum + o.amount, 157n)).toBe(100_000n)
     expect(result).toMatchObject({ detail: { route: 'onchain', feeSats: '157' } })
+  })
+
+  it('settles the change the selection budgeted, on a percentage exit fee too', async () => {
+    // The exit is charged on the DESTINATION output — 1% of the 50_000 the
+    // recipient is handed, not of the 50_500 the float gives up — so the change
+    // is the 49_500 the selection above budgeted for. Until ts-sdk#956 the SDK
+    // deducted its fee from its own grossed-up figure instead: measured against
+    // the released 0.4.74 this settles 49_495 of change and 49_999 to the
+    // recipient, so the exit kept five sats and short-paid the destination one.
+    const intentFee = { onchainOutput: 'amount * 0.01' }
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], {
+      arkProvider: { getInfo: vi.fn().mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee } }) },
+    })
+
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.settle.mock.calls[0]![0].outputs).toEqual([
+      { address: REGTEST_ADDRESS, amount: 50_000n },
+      { address: ARKADE_ADDRESS, amount: 49_500n },
+    ])
   })
 
   it('refuses a change fee that never settles, rather than underfunding the exit', async () => {
@@ -898,7 +920,7 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
 
     await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
 
-    expect(wallet.settle).toHaveBeenCalledWith({
+    expect(wallet.settle.mock.calls[0]![0]).toEqual({
       inputs: [expect.objectContaining({ value: 50_000 })],
       outputs: [{ address: REGTEST_ADDRESS, amount: 50_000n }],
     })
@@ -928,7 +950,7 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
 
     await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
 
-    expect(wallet.settle).toHaveBeenCalledWith({
+    expect(wallet.settle.mock.calls[0]![0]).toEqual({
       inputs: [expect.objectContaining({ value: 50_000 })],
       outputs: [{ address: REGTEST_ADDRESS, amount: 50_000n }],
     })
@@ -942,7 +964,7 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
 
     await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
 
-    expect(wallet.settle).toHaveBeenCalledWith({
+    expect(wallet.settle.mock.calls[0]![0]).toEqual({
       inputs: [last],
       outputs: [
         { address: REGTEST_ADDRESS, amount: 50_000n },
@@ -961,7 +983,7 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
 
     await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
 
-    expect(wallet.settle).toHaveBeenCalledWith({
+    expect(wallet.settle.mock.calls[0]![0]).toEqual({
       inputs: [sooner, alsoSooner],
       outputs: [
         { address: REGTEST_ADDRESS, amount: 50_000n },

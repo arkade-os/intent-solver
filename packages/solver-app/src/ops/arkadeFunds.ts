@@ -26,11 +26,19 @@
  *    count `pool-mint` exists to build. The deposit's `note` names the action to
  *    use instead.
  *  - `withdraw` — BOTH ways out of the float, routed by the destination's form:
- *    an Arkade address is paid offchain (`wallet.send`), a bitcoin address by
- *    collaborative exit (`wallet.settle` with an onchain output). The coins are
- *    selected HERE and pinned in the reservation ledger for the spend: the SDK's
- *    own selection cannot be told "not that one" and could take a coin out from
- *    under an in-flight lockup funding — the hazard `arkade/reservations.ts` exists for.
+ *    an Arkade address is paid offchain, a bitcoin address by collaborative
+ *    exit. The spend itself goes through the SDK's `PaymentRouter`, which owns
+ *    both executions and the classification between them. The coins are still
+ *    selected HERE and pinned in the reservation ledger for the spend: the
+ *    router's own selection cannot be told "not that one" and could take a coin
+ *    out from under an in-flight lockup funding — the hazard
+ *    `arkade/reservations.ts` exists for — so the chosen set is handed over as
+ *    `selectedVtxos` and the router spends exactly it.
+ *
+ *    The route is decided here as well as in the router, and that redundancy is
+ *    deliberate rather than leftover: the selection needs the destination's
+ *    output script to price the exit, and it needs to know which of the two
+ *    forms it is funding before any coin is chosen.
  *
  * The absent half of that pair is the point of a capability seam rather than an
  * interface every source must satisfy: absent is a fact the console can render,
@@ -38,7 +46,16 @@
  * ever fail.
  */
 
-import { ArkAddress, Estimator, networks } from '@arkade-os/sdk'
+import {
+  ArkAddress,
+  Estimator,
+  PaymentRouter,
+  arkRail,
+  networks,
+  onchainRail,
+  type FeeInfo,
+  type NormalizedExtendedVirtualCoin,
+} from '@arkade-os/sdk'
 import { Address, OutScript } from '@scure/btc-signer'
 import { hex } from '@scure/base'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
@@ -219,6 +236,37 @@ const withdrawRoute = (address: string, network: SwapNetwork): WithdrawRoute => 
 }
 
 /**
+ * Spend `selected` through the SDK's router and hand back the transaction id.
+ *
+ * `route()` classifies and prices, `send()` settles. Both exits are one call
+ * here: the router picks the rail the destination's form selects, which is the
+ * same decision `withdrawRoute` made above for the selection's sake.
+ *
+ * A settled handle without a txid is a rail contract violation rather than a
+ * payment, so it is surfaced instead of returned as an empty reference.
+ *
+ * `fees` is the schedule the selection above already priced against, not a fresh
+ * read: the two have to agree on what the exit costs, or a schedule that moved
+ * between them would size the change the selection never budgeted for.
+ */
+const routedWithdraw = async (
+  wallet: Services['arkade']['wallet'],
+  address: string,
+  amountSats: number,
+  selected: NormalizedExtendedVirtualCoin[],
+  fees: FeeInfo,
+): Promise<string> => {
+  // Built per call, not held: a rail outliving the wallet it was pointed at
+  // would price an exit against a wallet nobody is running.
+  const router = new PaymentRouter({ wallet, prefs: {} }).use(arkRail()).use(onchainRail({ feeInfo: async () => fees }))
+
+  const quote = await router.route({ raw: address, amount: amountSats, selectedVtxos: selected })
+  const settled = await (await quote.send()).settled()
+  if (!settled.txid) throw new Error(`the ${quote.railId} rail settled without a transaction id`)
+  return settled.txid
+}
+
+/**
  * Pay `amount` sats out of the float to an address the operator chose. The
  * destination receives EXACTLY `amount` on both routes: the exit's intent fees
  * are paid out of the change, never out of what the operator typed.
@@ -278,8 +326,7 @@ const arkadeWithdraw = async (
     }
     const release = services.arkade.reservations.reserve(selected)
     try {
-      // number, not bigint: `Recipient.amount` is a number, unlike the exit route's `settle` outputs below.
-      const txid = await wallet.send({ recipients: [{ address, amount: amountSats }], selectedVtxos: [...selected] })
+      const txid = await routedWithdraw(wallet, address, amountSats, [...selected], info.fees)
       return { reference: txid, address, amount: String(amountSats), detail: { route: 'arkade' } }
     } finally {
       release()
@@ -400,9 +447,7 @@ const arkadeWithdraw = async (
   const changeFee = selected.reduce((sum, c) => sum + c.net, 0n) - needed - change
   const release = services.arkade.reservations.reserve(inputs)
   try {
-    const outputs = [{ address, amount: BigInt(amountSats) }]
-    if (change > 0n) outputs.push({ address: changeAddress, amount: change })
-    const txid = await wallet.settle({ inputs, outputs })
+    const txid = await routedWithdraw(wallet, address, amountSats, inputs, info.fees)
     return {
       reference: txid,
       address,

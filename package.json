@@ -66,6 +66,9 @@
       "better-sqlite3",
       "esbuild",
       "protobufjs"
-    ]
+    ],
+    "overrides": {
+      "@arkade-os/sdk": "file:./vendor/arkade-os-sdk-956-94ce5876.tgz"
+    }
   }
 }

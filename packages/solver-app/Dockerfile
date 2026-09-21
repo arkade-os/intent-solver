@@ -60,6 +60,9 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # one workspace project among twelve, and there is deliberately no second copy
 # of it.
 COPY packages ./packages
+# The pnpm override resolves `@arkade-os/sdk` to a tarball under vendor/, so the
+# install cannot run without it. Goes away with the override; see vendor/README.md.
+COPY vendor ./vendor
 RUN pnpm install --frozen-lockfile
 # The root tsconfig, which every package's `tsconfig.build.json` extends — not
 # an emit config in its own right. The root emits nothing at all now.
