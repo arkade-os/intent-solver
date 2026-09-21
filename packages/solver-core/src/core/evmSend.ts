@@ -166,10 +166,27 @@ export type EvmSendAcceptance =
  * name rather than handed an unsafe pair.
  */
 export const evaluateEvmSendAcceptance = (params: EvmSendAcceptanceParams): EvmSendAcceptance => {
-  const { amountSats, limits, unilateralClaimDelay, nowSeconds } = params
+  const { amountSats, limits } = params
   if (amountSats < limits.minSats || amountSats > limits.maxSats) {
     return { accept: false, reason: 'amount_out_of_range' }
   }
+  return deriveEvmSendDeadlines(params)
+}
+
+/**
+ * The deadline half of {@link evaluateEvmSendAcceptance}, with no opinion about
+ * what the client locks.
+ *
+ * Extracted so the asset-funded leg (`arkade:<asset>->ethereum:<token>`) reuses
+ * this ordering rule rather than restating it — the amount's DENOMINATION
+ * differs there, the race between the two timeouts does not. A second copy of
+ * this derivation is the kind that drifts silently and only on the swaps where
+ * the margin actually mattered.
+ */
+export const deriveEvmSendDeadlines = (
+  params: Omit<EvmSendAcceptanceParams, 'amountSats' | 'limits'>,
+): EvmSendAcceptance => {
+  const { unilateralClaimDelay, nowSeconds } = params
   const orderMargin = params.orderMarginSeconds ?? EVM_ORDER_MARGIN_SECONDS
   const minClaimWindow = params.minClaimWindowSeconds ?? EVM_MIN_CLAIM_WINDOW_SECONDS
   // TWO INDEPENDENT CONSTRAINTS, and the anchor has to clear both.
