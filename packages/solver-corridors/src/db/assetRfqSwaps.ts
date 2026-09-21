@@ -283,6 +283,14 @@ export class AssetRfqSwapStore {
     return store
   }
 
+  /** A READ-ONLY caller's licence to open, since {@link open} CREATES the table
+   * and a report must add no DDL to a deployment that never served this
+   * corridor. `PRAGMA table_info` answers empty for a missing table rather than
+   * throwing, which `migrate` already relies on. */
+  static async tableExists(driver: SqlDriver): Promise<boolean> {
+    return (await driver.all<{ name: string }>(`PRAGMA table_info(asset_rfq_swap)`)).length > 0
+  }
+
   /**
    * Additive migration, for the reason the other stores state: `CREATE TABLE IF
    * NOT EXISTS` never alters an existing table, so a column added above must be

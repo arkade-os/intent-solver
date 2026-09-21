@@ -64,6 +64,7 @@ import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
 import type { SendSwapRow, SendSwapState, SwapStore } from '../db/swaps.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
 export type { CovenantScriptRow }
@@ -697,6 +698,7 @@ export class SendSwapService {
           // own invoice, which is authoritative for that.
           amountSats: lockupSats,
           invoiceExpiresAt: decoded.expiresAt,
+          quotedRefundDeadline: acceptance.refundLocktime,
           refundLocktime,
           // No sender key exists in the covenant script; the provider key fills
           // the legacy column so old rows and new rows read the same way.
@@ -720,7 +722,7 @@ export class SendSwapService {
         return { accepted: true, swap, lockupDeadline: acceptance.lockupDeadline }
       } catch (error) {
         // The UNIQUE constraint is the racproof backstop behind the pre-check.
-        if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+        if (error instanceof UniqueConstraintError) {
           return { accepted: false, reason: 'duplicate_swap' }
         }
         throw error
@@ -1039,7 +1041,13 @@ export class SendSwapService {
       return false
     }
     const refundDeadline = await this.refundDeadlineSeconds(row.refundLocktime)
-    if (!refundWithoutReceiverDelayCovers(row.refundWithoutReceiverDelay, refundDeadline, row.createdAt)) {
+    if (
+      !refundWithoutReceiverDelayCovers(
+        row.refundWithoutReceiverDelay,
+        row.quotedRefundDeadline ?? refundDeadline,
+        row.createdAt,
+      )
+    ) {
       await store.fail(row.id, 'funded', 'refused to proceed: client solo refund opens before the quoted refund')
       return false
     }
@@ -1349,7 +1357,13 @@ export class SendSwapService {
       return false
     }
     const refundDeadlineForCltv = await this.refundDeadlineSeconds(row.refundLocktime)
-    if (!refundWithoutReceiverDelayCovers(row.refundWithoutReceiverDelay, refundDeadlineForCltv, row.createdAt)) {
+    if (
+      !refundWithoutReceiverDelayCovers(
+        row.refundWithoutReceiverDelay,
+        row.quotedRefundDeadline ?? refundDeadlineForCltv,
+        row.createdAt,
+      )
+    ) {
       const reason = 'refused to pay: client_solo_refund_too_soon'
       if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
       else await store.fail(row.id, row.state, reason)

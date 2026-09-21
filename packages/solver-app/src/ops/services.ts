@@ -72,7 +72,6 @@ import {
   type AssetMarketPair,
   type AssetMarketPricingView,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
-import { offerDirectionOn } from '@arkade-os/solver-core/core/assetOfferPrice.js'
 import { applyOverrides } from '../admin/settings.js'
 import { createOfferRefusalTail, type OfferRefusalRecorder } from '../admin/offerRefusals.js'
 import { createRfqRefusalTail, type RfqRefusalRecorder } from '../admin/rfqRefusals.js'
@@ -91,7 +90,14 @@ import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import { assetRfqMarketsFrom, retainReadableMarkets } from './assetRfqMarkets.js'
+import type { ReadableAssetRfqMarket } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import {
+  assetRfqMarketsFrom,
+  offerMarketsFrom,
+  recoverReadableMarkets,
+  retainReadableMarkets,
+} from './assetRfqMarkets.js'
+import { marketServingDivergence } from './marketDivergence.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
@@ -108,16 +114,19 @@ export interface Services {
   config: Config
   /**
    * What this process actually quotes: {@link Services.config} narrowed by the
-   * console's stored overrides, resolved once at startup.
+   * console's stored overrides. {@link Services.replacePolicy} moves this.
    *
    * The services were constructed from these values and nothing re-reads them,
-   * which is why a settings change needs a restart. Anything that must AGREE
+   * which is why most settings changes need a restart. Anything that must AGREE
    * with what gets quoted — the ingress corridor gate, the open-RFQ bidder,
    * the registry card — reads this rather than `config`, or it would advertise
    * terms the corridor then refuses.
    */
   policy: Config
-  /** What {@link Services.policy} was resolved from, so `pendingRestartKeys` can
+  /** What `createServices` resolved at startup, NEVER reassigned: the baseline the restart-pending badge diffs
+   * against, since `replacePolicy` rewrites `policy` from ALL stored overrides at once. */
+  readonly bootPolicy: Config
+  /** What {@link Services.bootPolicy} was resolved from, so `pendingRestartKeys` can
    * tell an override already in force from one still waiting. */
   bootOverrides: Record<string, string>
   /**
@@ -206,6 +215,7 @@ export interface Services {
   assetRfqMarkets: readonly AssetRfqMarket[]
   /** Rebuild in-memory markets from the console store and swap the live corridor set. */
   replaceMarkets(): Promise<void>
+  replacePolicy(next: Config): Promise<void>
   /**
    * Settings overrides and the action audit log, in their own database. Open
    * whether or not the console is running: operator actions are auditable from
@@ -394,9 +404,16 @@ export const openReportReaders = async (
 
     const policy = applyOverrides(config, await adminStore.getOverrides())
     const assetMarkets = assetMarketPolicy(await adminStore.listMarkets())
-    const assetRfqMarkets = assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)
-    const assetRfqStore =
-      assetRfqMarkets.length > 0 ? track('assetRfqStore', await AssetRfqSwapStore.open(swapFile)) : null
+    // Zero dust, and no wallet asked for one: this set only ever READS rows.
+    const assetRfqMarkets = assetRfqMarketsFrom(assetMarkets.pricing, { dustSats: 0n, pricedByDefault: false })
+    // Opened with an EMPTY market list too, or a negotiation a deleted market
+    // left live has no reader and no later `rebuild` to build one. Gated on the
+    // table rather than opened outright, because `open()` would create it.
+    const openAssetRfq = assetRfqMarkets.length > 0 || (await AssetRfqSwapStore.tableExists(swapFile))
+    const assetRfqStore = openAssetRfq ? track('assetRfqStore', await AssetRfqSwapStore.open(swapFile)) : null
+    const readableAssetRfqMarkets = assetRfqStore
+      ? recoverReadableMarkets(assetRfqMarkets, await assetRfqStore.listNonTerminal())
+      : assetRfqMarkets
 
     const readers = readerSetFromDeps({
       store,
@@ -407,7 +424,7 @@ export const openReportReaders = async (
       ...(evmReceiveStore ? { evmReceiveStore } : {}),
       evmCorridors: policy.evmCorridors,
       ...(assetRfqStore ? { assetRfqStore } : {}),
-      assetRfqMarkets,
+      assetRfqMarkets: readableAssetRfqMarkets,
     })
 
     return { readers, close }
@@ -472,7 +489,12 @@ export const createServices = async (
   // Opened unconditionally, even when the console is off: the audit log is
   // written by operator actions the CLI can run too, and a store that exists
   // only sometimes is a branch every caller would have to think about.
-  const adminStore = await AdminStore.open(shared ?? layout.admin)
+  const adminStore = await AdminStore.open(shared ?? layout.admin, nowSeconds, {
+    // `config`, not `policy`: neither field is override-able, and `policy` is not resolved until below this.
+    offerMarkets: config.offerMarkets,
+    tokens: config.assetRfqTokens,
+  })
+  for (const line of adminStore.repairedServing) log(`market serving repaired — ${line}`)
   // The READER set: a corridor an operator switched off still has in-flight
   // swaps, and those are still exposure the cap must count.
   const totalCommitted = () =>
@@ -525,7 +547,14 @@ export const createServices = async (
    * third party's uptime would take four unrelated BTC corridors down with a
    * price API. @see admin/routes/markets.ts
    */
-  const assetMarkets = assetMarketPolicy(await adminStore.listMarkets())
+  const marketRows = await adminStore.listMarkets()
+  for (const line of marketServingDivergence(marketRows, {
+    offerMarkets: config.offerMarkets,
+    tokens: config.assetRfqTokens,
+  })) {
+    log(`market serving divergence — ${line}`)
+  }
+  const assetMarkets = assetMarketPolicy(marketRows)
   // NULL exactly when `config.lnBackend` is, which `loadConfig` permits only
   // while all four BTC corridors are disabled — a deployment serving EVM or
   // asset flow alone, which has no use for a Lightning node and is not made to
@@ -550,15 +579,11 @@ export const createServices = async (
    * two carry the same values — reading `policy` is what keeps that true if one
    * is ever added, rather than something to remember at that point.
    */
-  const servesOffers = policy.offerMarkets.length > 0
-  /**
-   * The environment permits offers; enabled console rows activate them. An env
-   * name the console does not price yet waits for its row instead of appearing
-   * live and refusing every offer at the price gate.
-   */
-  const offerMarketsPricedBy = (pricing: readonly AssetMarketPricingView[]): readonly AssetMarket[] =>
-    policy.offerMarkets.filter((pair) => pricing.some((market) => offerDirectionOn(market, pair.a, pair.b) !== null))
-  const liveOfferMarkets = offerMarketsPricedBy(assetMarkets.pricing)
+  // The env opener is kept one release for a deployment that has not seeded yet.
+  // RESTART-GATED either way: a row flipped on a process that booted without
+  // either reaches `assetOffers?.replaceMarkets` on a NULL service and no-ops.
+  const servesOffers = policy.offerMarkets.length > 0 || marketRows.some((row) => row.enabled && row.servesOffer)
+  const liveOfferMarkets = offerMarketsFrom(assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
   const offerRefusals = createOfferRefusalTail()
   const rfqRefusals = createRfqRefusalTail()
@@ -608,7 +633,8 @@ export const createServices = async (
    * emulator key and the network prefix meet. Every guard on the spend lives in
    * `arkade/quotedOfferSettle.ts`.
    */
-  const assetRfqMarkets = assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)
+  const rfqCarrier = { dustSats: arkade.dustSats, pricedByDefault: policy.assetCarrierPricing }
+  const assetRfqMarkets = assetRfqMarketsFrom(assetMarkets.pricing, rfqCarrier)
   const assetRfqStore = await AssetRfqSwapStore.open(swapFile)
   const assetRfqDerivation = {
     serverPubkey: arkade.wallet.arkServerPublicKey,
@@ -625,7 +651,6 @@ export const createServices = async (
     markets: assetRfqMarkets,
     solverPubkey: hex.encode(await arkade.identity.xOnlyPublicKey()),
     quoteValiditySeconds: policy.assetQuoteValiditySeconds,
-    carrierSats: policy.assetCarrierPricing ? arkade.dustSats : 0n,
     dustSats: arkade.dustSats,
     deriveOffer: offerScriptFrom(assetRfqDerivation),
     depositAt: async (offerPkScript, depositLeg) =>
@@ -1168,10 +1193,19 @@ export const createServices = async (
     })
   }
 
-  let readableMarkets: readonly AssetRfqMarket[] = assetRfqMarkets
+  // AT BOOT, because `retainReadableMarkets` is reached only from `rebuild` —
+  // so the gap reopened on every restart and closed only on the next save.
+  let readableMarkets: readonly ReadableAssetRfqMarket[] = recoverReadableMarkets(
+    assetRfqMarkets,
+    await assetRfqStore.listNonTerminal(),
+  )
   const replaceQueue = createSerialiser()
   const extraCorridors = opts?.corridors ?? []
-  const setsFrom = (serving: readonly AssetRfqMarket[], readable: readonly AssetRfqMarket[] = serving) => {
+  const setsFrom = (
+    livePolicy: Config,
+    serving: readonly AssetRfqMarket[],
+    readable: readonly ReadableAssetRfqMarket[] = serving,
+  ) => {
     const shared = {
       service,
       store,
@@ -1186,7 +1220,7 @@ export const createServices = async (
       evmSendStore,
       evmReceiveService,
       evmReceiveStore,
-      evmCorridors: policy.evmCorridors,
+      evmCorridors: livePolicy.evmCorridors,
       assetRfqService,
       assetRfqStore,
     }
@@ -1195,11 +1229,33 @@ export const createServices = async (
       readers: readerSetFromDeps({ ...shared, assetRfqMarkets: readable }, extraCorridors),
     }
   }
-  const { corridors, readers } = setsFrom(assetRfqMarkets)
+  const { corridors, readers } = setsFrom(policy, assetRfqMarkets, readableMarkets)
+
+  const rebuild = async (livePolicy: Config): Promise<void> => {
+    const next = assetMarketPolicy(await adminStore.listMarkets())
+    const rfq = assetRfqMarketsFrom(next.pricing, {
+      dustSats: arkade.dustSats,
+      pricedByDefault: livePolicy.assetCarrierPricing,
+    })
+    const offers = offerMarketsFrom(next.pricing)
+    const live = await assetRfqStore.listNonTerminal()
+    const readable = retainReadableMarkets(rfq, readableMarkets, live)
+    const nextSets = setsFrom(livePolicy, rfq, readable)
+    await assetRfqService.replaceMarkets(rfq)
+    await assetOffers?.replaceMarkets({ markets: offers, pricing: next.pricing })
+    services.corridors.replace([...nextSets.corridors])
+    services.readers.replace([...nextSets.readers])
+    services.assetMarkets = next.pricing
+    services.assetMarketPairs = next.pairs
+    services.assetRfqMarkets = rfq
+    services.liveOfferMarkets = offers
+    readableMarkets = readable
+  }
 
   const services: Services = {
     config,
     policy,
+    bootPolicy: policy,
     bootOverrides,
     assetMarkets: assetMarkets.pricing,
     assetMarketPairs: assetMarkets.pairs,
@@ -1219,23 +1275,14 @@ export const createServices = async (
     assetRfqStore,
     assetRfqService,
     assetRfqMarkets,
-    replaceMarkets: (): Promise<void> =>
+    replaceMarkets: (): Promise<void> => replaceQueue(() => rebuild(services.policy)),
+    /** Same queue as `replaceMarkets`, so the two cannot interleave. Assignment LAST, so a `rebuild` that throws
+     * leaves `services.policy` naming the config the lists really hold — it takes the policy as a parameter and
+     * needs nothing from the field. ASSIGNS, which is what keeps `bootPolicy`. */
+    replacePolicy: (next: Config): Promise<void> =>
       replaceQueue(async () => {
-        const next = assetMarketPolicy(await adminStore.listMarkets())
-        const rfq = assetRfqMarketsFrom(policy.assetRfqTokens, next.pricing)
-        const offers = offerMarketsPricedBy(next.pricing)
-        const live = await assetRfqStore.listNonTerminal()
-        const readable = retainReadableMarkets(rfq, readableMarkets, live)
-        const nextSets = setsFrom(rfq, readable)
-        await assetRfqService.replaceMarkets(rfq)
-        await assetOffers?.replaceMarkets({ markets: offers, pricing: next.pricing })
-        services.corridors.replace([...nextSets.corridors])
-        services.readers.replace([...nextSets.readers])
-        services.assetMarkets = next.pricing
-        services.assetMarketPairs = next.pairs
-        services.assetRfqMarkets = rfq
-        services.liveOfferMarkets = offers
-        readableMarkets = readable
+        await rebuild(next)
+        services.policy = next
       }),
     adminStore,
     arkade,

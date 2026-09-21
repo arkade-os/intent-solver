@@ -17,7 +17,10 @@
 export interface SqlDriver {
   /** Run one or more statements that return no rows (schema, ALTER TABLE). */
   exec(sql: string): Promise<void>
-  /** Run one write statement. `changes` is SQLite's changes() count — the compare-and-swap depends on it. */
+  /**
+   * Run one write statement. `changes` is SQLite's changes() count — the compare-and-swap depends on it.
+   * Drivers whose runtime spells a refused UNIQUE write differently must normalise to `UniqueConstraintError`.
+   */
   run(sql: string, params?: unknown[]): Promise<{ changes: number }>
   /** First row or undefined. Drivers whose runtime says "no row" differently must normalise to undefined. */
   get<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | undefined>
@@ -31,4 +34,15 @@ export interface SqlDriver {
    */
   transaction<T>(fn: () => Promise<T>): Promise<T>
   close(): Promise<void>
+}
+
+/**
+ * A write a UNIQUE index or primary key refused. A TYPE, not a wording, because
+ * an unrelated failure is free to contain the word and be answered as duplicate.
+ */
+export class UniqueConstraintError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'UniqueConstraintError'
+  }
 }

@@ -11,10 +11,11 @@
  */
 import { describe, it, expect } from 'vitest'
 import { corridorSetFromDeps, readerSetFromDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
-import { assetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
+import { assetRfqMarketsFrom, recoverReadableMarkets } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
+import type { ReadableAssetRfqMarket } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { resolveDbLayout } from '@arkade-os/solver-corridors/db/layout.js'
-import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { DEFAULT_SERVING, type AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { createServicesBody } from '../support/createServicesBody.js'
 
 const USDA = '1a'.repeat(34)
@@ -49,9 +50,10 @@ describe('createServices — the asset RFQ service', () => {
     expect(body().indexOf('assetRfqMarketsFrom(')).toBeLessThan(body().indexOf('AssetRfqSwapStore.open'))
   })
 
-  it('joins console rows to optional ASSET_MARKETS symbols, never to a second list', () => {
-    expect(body()).toContain('assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)')
-    expect(body()).toContain('assetRfqMarketsFrom(policy.assetRfqTokens, next.pricing)')
+  it('reads the serve list off the console row, never off a second env list', () => {
+    expect(body()).toContain('assetRfqMarketsFrom(assetMarkets.pricing,')
+    expect(body()).toContain('assetRfqMarketsFrom(next.pricing,')
+    expect(body()).not.toContain('policy.assetRfqTokens')
     expect(body().match(/assetRfqMarketsFrom\(/g)).toHaveLength(2)
   })
 })
@@ -121,12 +123,11 @@ describe('the corridors reach the registry and the console', () => {
     expect(body()).toContain("['assetRfqStore', () => assetRfqStore.close()]")
   })
 
-  it('hands the offer service the PRICED subset of OFFER_MARKETS, at boot and on swap', () => {
-    // An unpriced market fills at the maker's price, so the derivation is the
-    // guard: handing `policy.offerMarkets` over directly is what breaks it.
-    expect(body()).toContain('const liveOfferMarkets = offerMarketsPricedBy(assetMarkets.pricing)')
+  it('hands the offer service the rows declared for offers, at boot and on swap', () => {
+    // An unpriced market fills at the maker's price; the row IS the pricing.
+    expect(body()).toContain('const liveOfferMarkets = offerMarketsFrom(assetMarkets.pricing)')
     expect(body()).toContain('markets: liveOfferMarkets,')
-    expect(body()).toContain('const offers = offerMarketsPricedBy(next.pricing)')
+    expect(body()).toContain('const offers = offerMarketsFrom(next.pricing)')
     expect(body()).toContain('replaceMarkets({ markets: offers, pricing: next.pricing })')
     expect(body()).not.toContain('markets: policy.offerMarkets')
   })
@@ -134,7 +135,7 @@ describe('the corridors reach the registry and the console', () => {
   it('hot-swaps the captured corridor set in place after a console write', () => {
     expect(body()).toContain('retainReadableMarkets(rfq, readableMarkets, live)')
     expect(body()).toContain('replaceQueue(async () => {')
-    expect(body().indexOf('const nextSets = setsFrom(rfq, readable)')).toBeLessThan(
+    expect(body().indexOf('const nextSets = setsFrom(livePolicy, rfq, readable)')).toBeLessThan(
       body().indexOf('await assetRfqService.replaceMarkets(rfq)'),
     )
     expect(body()).toContain('services.corridors.replace')
@@ -153,6 +154,8 @@ describe('the swap-file layout names the table', () => {
 
 describe('a configured market really does become a served corridor', () => {
   const pricing: AssetMarketPricingView = {
+    ...DEFAULT_SERVING,
+    symbol: 'USDA',
     base: null,
     quote: USDA,
     baseDecimals: 8,
@@ -166,13 +169,12 @@ describe('a configured market really does become a served corridor', () => {
     sellBase: { min: 1n, max: 10n ** 12n },
     buyBase: { min: 1n, max: 10n ** 12n },
   }
-  const token = { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } }
   const deps = async () => ({
     store: null as never,
     onchainStore: null as never,
     assetRfqService: { tickAll: async () => [] } as never,
     assetRfqStore: await AssetRfqSwapStore.open(':memory:'),
-    assetRfqMarkets: assetRfqMarketsFrom([token], [pricing]),
+    assetRfqMarkets: assetRfqMarketsFrom([pricing], { dustSats: 0n, pricedByDefault: false }),
   })
 
   it('registers both directions under the pairs a client would ask for', async () => {
@@ -198,9 +200,82 @@ describe('a configured market really does become a served corridor', () => {
       onchainStore: null as never,
       assetRfqService: { tickAll: async () => [] } as never,
       assetRfqStore: store,
-      assetRfqMarkets: assetRfqMarketsFrom([], []),
+      assetRfqMarkets: assetRfqMarketsFrom([], { dustSats: 0n, pricedByDefault: false }),
     })
     expect([...corridors]).toHaveLength(0)
     await store.close()
+  })
+})
+
+describe('a market that stopped serving stays readable across a restart', () => {
+  const PAIR = `arkade:BTC->arkade:${USDA}`
+  const RFQ_ID = 'a'.repeat(64)
+  const servedPricing: AssetMarketPricingView = {
+    ...DEFAULT_SERVING,
+    symbol: 'USDA',
+    base: null,
+    quote: USDA,
+    baseDecimals: 8,
+    quoteDecimals: 6,
+    feedUrl: 'https://feed.test/price',
+    pricePath: '/price',
+    toleranceBps: 10,
+    feeBps: 25,
+    sellBaseFeeFlat: 0n,
+    buyBaseFeeFlat: 0n,
+    sellBase: { min: 1n, max: 10n ** 12n },
+    buyBase: { min: 1n, max: 10n ** 12n },
+  }
+
+  const storeWithLiveRow = async (): Promise<AssetRfqSwapStore> => {
+    const store = await AssetRfqSwapStore.open(':memory:', () => 1_000)
+    await store.insertQuote({
+      id: 'swap-1',
+      rfqId: RFQ_ID,
+      pair: PAIR,
+      fromAssetId: null,
+      fromAmount: 100_000_000n,
+      toAssetId: USDA,
+      toAmount: 99_500_000n,
+      makerPkScript: `5120${'c'.repeat(64)}`,
+      makerPublicKey: 'b'.repeat(64),
+      offerPkScript: `5120${'d'.repeat(64)}`,
+      offerAddress: 'ark1qoffer',
+      solverPubkey: 'e'.repeat(64),
+      validUntil: 2_000,
+    })
+    return store
+  }
+
+  const readersOver = (store: AssetRfqSwapStore, assetRfqMarkets: readonly ReadableAssetRfqMarket[]) =>
+    readerSetFromDeps({ store: null as never, onchainStore: null as never, assetRfqStore: store, assetRfqMarkets })
+
+  it('answers for its live negotiation with no console row left to derive it from', async () => {
+    const store = await storeWithLiveRow()
+    const readers = readersOver(store, recoverReadableMarkets([], await store.listNonTerminal()))
+    expect(readers.get(PAIR)).toBeDefined()
+    expect(await readers.get(PAIR)!.statusFor(RFQ_ID)).not.toBeNull()
+    await store.close()
+  })
+
+  it('registers no duplicate pair when that market is still served', async () => {
+    const store = await storeWithLiveRow()
+    const serving = assetRfqMarketsFrom([servedPricing], { dustSats: 0n, pricedByDefault: false })
+    const readable = recoverReadableMarkets(serving, await store.listNonTerminal())
+    expect(readable).toHaveLength(1)
+    expect(() => readersOver(store, readable)).not.toThrow()
+    await store.close()
+  })
+
+  it('seeds the boot reader set from the recovered list rather than the serving one', () => {
+    const source = body()
+    const seeded = 'recoverReadableMarkets('
+    const built = 'const { corridors, readers } = setsFrom(policy, assetRfqMarkets, readableMarkets)'
+    // Both needles pinned present before the ordering: `indexOf` answers -1 for
+    // an absent one, which is below any real index and passes vacuously.
+    expect(source).toContain('await assetRfqStore.listNonTerminal()')
+    expect(source).toContain(seeded)
+    expect(source).toContain(built)
+    expect(source.indexOf(seeded)).toBeLessThan(source.indexOf(built))
   })
 })

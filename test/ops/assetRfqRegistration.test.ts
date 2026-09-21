@@ -11,6 +11,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { corridorSetFromDeps, readerSetFromDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
+import { recoverReadableMarkets } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 
@@ -28,6 +29,7 @@ const market = (assetId: string, symbol: string) => ({
   buyBase: { min: 1n, max: 10n ** 24n },
   feedUrl: 'https://feed.example',
   pricePath: 'price',
+  carrierSats: 0n,
 })
 
 /**
@@ -44,7 +46,6 @@ const built = async () => {
     markets: [market(ASSET_A, 'USDA')],
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
-    carrierSats: 0n,
     dustSats: 0n,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
     deriveOffer: () => ({ pkScript: `5120${'d'.repeat(64)}`, address: 'ark1q' }),
@@ -124,5 +125,54 @@ describe('readerSetFromDeps — wider than the serving set, on purpose', () => {
   it('reads nothing when there is no store at all', async () => {
     const readers = readerSetFromDeps({ ...base(), assetRfqMarkets: [market(ASSET_A, 'USDA')] })
     expect(readers.get(`arkade:BTC->arkade:${ASSET_A}`)).toBeUndefined()
+  })
+})
+
+/**
+ * #193 widened the READER set so a live negotiation survives its market being
+ * switched off; widening the SERVING set too would re-open quoting on it.
+ */
+describe('a market that stopped serving keeps its readers, never its corridors', () => {
+  const withLiveRow = async () => {
+    const made = await built()
+    await made.store.insertQuote({
+      id: 'swap-1',
+      rfqId: 'a'.repeat(64),
+      pair: `arkade:BTC->arkade:${ASSET_A}`,
+      fromAssetId: null,
+      fromAmount: 100_000_000n,
+      toAssetId: ASSET_A,
+      toAmount: 99_500_000n,
+      makerPkScript: `5120${'c'.repeat(64)}`,
+      makerPublicKey: 'b'.repeat(64),
+      offerPkScript: `5120${'d'.repeat(64)}`,
+      offerAddress: 'ark1qoffer',
+      solverPubkey: 'e'.repeat(64),
+      validUntil: 2_000,
+    })
+    return made
+  }
+
+  /** The composition root's split, with the console row gone. */
+  const setsWithNothingServed = async (store: AssetRfqSwapStore, service: AssetRfqSwapService) => {
+    const shared = { ...base(), assetRfqService: service, assetRfqStore: store }
+    return {
+      corridors: corridorSetFromDeps({ ...shared, assetRfqMarkets: [] }),
+      readers: readerSetFromDeps({
+        ...shared,
+        assetRfqMarkets: recoverReadableMarkets([], await store.listNonTerminal()),
+      }),
+    }
+  }
+
+  it('still refuses a new quote on a disabled market', async () => {
+    const { store, service } = await withLiveRow()
+    const { corridors, readers } = await setsWithNothingServed(store, service)
+    expect(readers.get(`arkade:BTC->arkade:${ASSET_A}`)).toBeDefined()
+    expect(readers.get(`arkade:${ASSET_A}->arkade:BTC`)).toBeDefined()
+    expect(corridors.get(`arkade:BTC->arkade:${ASSET_A}`)).toBeUndefined()
+    expect(corridors.get(`arkade:${ASSET_A}->arkade:BTC`)).toBeUndefined()
+    expect(corridors.size).toBe(0)
+    await store.close()
   })
 })

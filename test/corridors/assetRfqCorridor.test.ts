@@ -36,21 +36,21 @@ const MARKET = {
   buyBase: { min: 1n, max: 10n ** 24n },
   feedUrl: 'https://feed.example/btc',
   pricePath: 'price',
+  carrierSats: 0n,
 }
 
 const BUY = assetRfqDescriptor(MARKET, 'sell_base')
 const SELL = assetRfqDescriptor(MARKET, 'buy_base')
 
-const harness = async () => {
+const harness = async (markets: (typeof MARKET)[] = [MARKET]) => {
   let clock = 1_000
   let sequence = 0
   const store = await AssetRfqSwapStore.open(':memory:', () => clock)
   const service = new AssetRfqSwapService({
     store,
-    markets: [MARKET],
+    markets,
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
-    carrierSats: 0n,
     dustSats: 0n,
     now: () => clock,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
@@ -195,6 +195,22 @@ describe('quote — the corridor RFQ arm', () => {
     const outcome = await corridor.quote(rfqRequest())
     expect(outcome.kind).toBe('quote')
     expect(outcome.payload).toMatchObject({ type: 'rfq_quote', from_amount: '100000000', to_amount: '99500000000' })
+  })
+
+  // Two markets, the served one SECOND: with only one, any service-wide read coincides with the right answer.
+  it('publishes the carrier the priced market charged, and the amounts to match', async () => {
+    const other = { ...MARKET, symbol: 'USDB', quote: `${'ab'.repeat(32)}0100`, carrierSats: 0n }
+    const free = await harness([other, MARKET])
+    const priced = await harness([other, { ...MARKET, carrierSats: 330n }])
+    const without = await free.corridor.quote(rfqRequest())
+    const with_ = await priced.corridor.quote(rfqRequest())
+    expect(without.payload).not.toHaveProperty('carrier_sats')
+    expect(with_.payload).toMatchObject({ carrier_sats: '330' })
+    expect(BigInt((with_.payload as { to_amount: string }).to_amount)).toBeLessThan(
+      BigInt((without.payload as { to_amount: string }).to_amount),
+    )
+    await free.store.close()
+    await priced.store.close()
   })
 
   it('refuses a malformed payload as unsupported_payload', async () => {

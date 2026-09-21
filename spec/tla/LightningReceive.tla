@@ -4,31 +4,40 @@
 (*                                                                         *)
 (* WHICH TYPESCRIPT THIS SPECIFIES                                         *)
 (*                                                                         *)
-(*   src/db/receiveSwaps.ts      the durable row, LEGAL_EDGES, transition(),*)
-(*                               patch(), fail(), committedSats()          *)
-(*   src/receive/orchestrator.ts the whole state machine: step(),          *)
-(*                               whenQuoted, whenArmed, whenFunded,        *)
-(*                               whenClaimed, whenRefunding, tick(),       *)
-(*                               tickAll(), EMPTY_LOCKUP_GRACE             *)
-(*   src/core/receive.ts         MIN_SETTLE_WINDOW, SETTLE_SAFETY_MARGIN,  *)
-(*                               UNILATERAL_RECOURSE_MARGIN (gate (d)),    *)
-(*                               MAX_REFUND_HORIZON, HTLC_SECONDS_PER_BLOCK,*)
-(*                               evaluateReceiveFunding                    *)
-(*   src/receive/arkadeOps.ts    refundWithoutReceiverSwapScript and       *)
-(*                               assertScriptMatchesRow                    *)
-(*   src/receive/fundLockup.ts   the funding send and its coin reservation *)
-(*   src/receive/covclaimd.ts    the optional autonomous claimer           *)
-(*   src/arkade/wallet.ts        findLockups (spendableOnly) and           *)
-(*                               findClaimPreimage (hash-verified)         *)
-(*   packages/solver-app/src/worker.ts               the queue fan-out and its safety claim    *)
+(*   packages/solver-corridors/src/                                        *)
+(*     db/receiveSwaps.ts      the durable row, LEGAL_EDGES, the SHAPE's   *)
+(*                             live/exposed lists.  transition(), patch(), *)
+(*                             fail() and committedSats() are inherited    *)
+(*                             from db/baseSwapStore.ts.                   *)
+(*     receive/orchestrator.ts the whole state machine: step(),            *)
+(*                             whenQuoted, whenArmed, whenFunded,          *)
+(*                             whenClaimed, whenRefunding, tick(),         *)
+(*                             tickAll(), EMPTY_LOCKUP_GRACE               *)
+(*     receive/arkadeOps.ts    refundWithoutReceiverSwapScript and         *)
+(*                             assertScriptMatchesRow                      *)
+(*     receive/fundLockup.ts   the funding send and its coin reservation   *)
+(*     receive/covclaimd.ts    the optional autonomous claimer             *)
+(*   packages/solver-core/src/                                             *)
+(*     core/receive.ts         MIN_SETTLE_WINDOW, SETTLE_SAFETY_MARGIN,    *)
+(*                             UNILATERAL_RECOURSE_MARGIN (gate (d)),      *)
+(*                             MAX_REFUND_HORIZON, HTLC_SECONDS_PER_BLOCK, *)
+(*                             evaluateReceiveFunding                      *)
+(*   packages/solver-arkade/src/                                           *)
+(*     arkade/wallet.ts        findLockups (spendableOnly) and             *)
+(*                             findClaimPreimage (hash-verified)           *)
+(*     arkade/covenant.ts      the vHTLC leaves, including the solo ones   *)
+(*     arkade/unilateralExit.ts  the server-independent spend of those     *)
+(*                             solo leaves, operator-driven                *)
+(*   packages/solver-app/src/                                              *)
+(*     worker.ts               the queue fan-out and its safety claim      *)
 (*                                                                         *)
 (* AUTHORITY FOR THE EDGE TABLE                                            *)
 (*                                                                         *)
-(* src/db/receiveSwaps.ts lines 40-50, verbatim:                           *)
+(* LEGAL_EDGES in packages/solver-corridors/src/db/receiveSwaps.ts:        *)
 (*                                                                         *)
 (*   quoted:    ['armed', 'refused']                                       *)
 (*   armed:     ['funded', 'refused']                                      *)
-(*   funded:    ['claimed', 'refunding', 'stuck']                          *)
+(*   funded:    ['claimed', 'refunding', 'refunded', 'stuck']              *)
 (*   claimed:   ['settled', 'stuck']                                       *)
 (*   refunding: ['refunded', 'claimed', 'stuck']                           *)
 (*   settled:   []                                                         *)
@@ -36,7 +45,7 @@
 (*   refused:   []                                                         *)
 (*   stuck:     []                                                         *)
 (*                                                                         *)
-(* plus src/db/receiveSwaps.ts:36-38                                       *)
+(* plus the SHAPE's live/exposed lists                                     *)
 (*   NON_TERMINAL = quoted armed funded claimed refunding                  *)
 (*   EXPOSED      = funded claimed refunding                               *)
 (*                                                                         *)
@@ -76,26 +85,26 @@
 (*     when the HTLC arms.  MIN_SETTLE_WINDOW bounds E from `now`;          *)
 (*     SETTLE_SAFETY_MARGIN bounds refund_locktime — fixed at QUOTE time —  *)
 (*     from E.  Gate (b) does not imply gate (c), which is exactly why both *)
-(*     exist (src/core/receive.ts:190-198), and why EChoices contains a     *)
+(*     exist (evaluateReceiveFunding), and why EChoices contains a          *)
 (*     value that passes (b) and fails (c).                                 *)
 (*                                                                         *)
 (* WHAT IS DELIBERATELY ABSTRACTED AWAY                                     *)
 (*                                                                         *)
 (*  - Amounts.  Every swap is `Amount` sats; a lockup output is exactly     *)
 (*    right or absent.  The exact-value adoption filter                     *)
-(*    (orchestrator.ts:379) protects against stray dust, which is a         *)
+(*    (whenFunded's findLockups read) protects against stray dust, a        *)
 (*    client-facing and grief concern, not the money invariant here.        *)
 (*  - The preimage column.  P is written in the SAME UPDATE as              *)
 (*    funded->claimed / refunding->claimed, so `st[s] = "claimed"` already  *)
 (*    means "a hash-verified P is on disk".  findClaimPreimage never        *)
-(*    returns an unverified witness (src/arkade/wallet.ts:188-227), so a    *)
+(*    returns an unverified witness (arkade/wallet.ts), so a                *)
 (*    separate variable could only disagree with the state.                 *)
 (*  - covclaimd.  `revealed_at` is a data fact, not a state, reveal() is    *)
 (*    idempotent, and the shipped cli.ts passes no covclaimd at all.        *)
 (*    WHO spent the lockup is invisible to whenFunded — it recovers P from  *)
 (*    whatever witness it finds — so covclaimd and the client's own claim   *)
 (*    are one action, `ClientClaims`.                                       *)
-(*  - The reservation ledger (src/arkade/reservations.ts) and the coin      *)
+(*  - The reservation ledger (arkade/reservations.ts) and the coin          *)
 (*    selection in fundLockup.ts.  Those are a liveness concern (a settle   *)
 (*    racing a funding fails one with VTXO_ALREADY_SPENT) and a second      *)
 (*    in-process guard the Go rewrite must replace; they do not change the  *)
@@ -115,14 +124,14 @@
 (* MODELLING DECISIONS THAT ARE ASSUMPTIONS, NOT FACTS                      *)
 (*                                                                         *)
 (*  (A1) E is written once, at quoted->armed, and the fresh re-poll at the  *)
-(*       funding edge (orchestrator.ts:356-359) returns the SAME value.  In *)
+(*       funding edge (whenArmed's funded CAS) sees the SAME value.  In     *)
 (*       reality there are TWO values: E_stored, written once and never     *)
 (*       refreshed, and E_fresh, re-derived on every read — for LND from a  *)
 (*       block HEIGHT via htlcDeadlineFromHeight, so it moves as the tip    *)
 (*       advances.  The funding gate uses E_fresh; whenClaimed's            *)
 (*       past-E escalation uses E_stored.  Collapsing them is safe here     *)
 (*       ONLY because HTLC_SECONDS_PER_BLOCK is deliberately a FLOOR        *)
-(*       (src/core/receive.ts:43-71), so E_fresh can only be an             *)
+(*       (core/receive.ts), so E_fresh can only be an                       *)
 (*       under-estimate.  A Go rewrite that changes that constant, or that  *)
 (*       caches E, breaks the assumption.  See the report.                  *)
 (*                                                                         *)
@@ -135,15 +144,16 @@
 (*       DELIBERATE HOLE IS LEFT IN IT: an `armed` row whose float is       *)
 (*       already out is urgent only AFTER one tick has passed.  That is not *)
 (*       a modelling convenience — it is the bug.  `armed` is NOT in        *)
-(*       EXPOSED (receiveSwaps.ts:38), so a row in that window is invisible *)
-(*       to every exposure-accounting read and the solver does not know it  *)
+(*       EXPOSED (the SHAPE's `exposed` list), so a row in that window is   *)
+(*       invisible to every exposure-accounting read and the solver does    *)
+(*       not know it                                                        *)
 (*       must hurry.  One tick is the recovery-sweep interval a crash       *)
 (*       costs.  See FundGateOneShot and LightningReceive_Stranded.cfg.     *)
 (*                                                                         *)
 (*       WHAT GATE (a) IS WORTH HERE, RECORDED BY AUDIT 2026-08-10.  The    *)
 (*       gap evaluateReceiveFunding exists for — "arming and funding can be *)
 (*       minutes apart, and every input here is a function of the clock"    *)
-(*       (src/core/receive.ts:156-159) — IS representable, but only through *)
+(*       (evaluateReceiveFunding's own doc) — IS representable, but only via*)
 (*       a LAGGING `quoted` ROW: `quoted` is not Urgent, so the clock can   *)
 (*       advance between ArmHtlc and SeeArmed.  Once a row is `armed` with  *)
 (*       funds = 0 the global clock freezes, so the gap is never exercised  *)
@@ -153,7 +163,7 @@
 (*       < InvoiceExpiry` from FundGateOpen grows the graph from 110,310 to *)
 (*       151,067 distinct states — and STILL produces no counterexample,    *)
 (*       because THE HAZARD IT GUARDS IS NOT MODELLED.  Per                 *)
-(*       src/core/receive.ts:170-172 an expired BOLT11 "can be failed back  *)
+(*       core/receive.ts an expired BOLT11 "can be failed back              *)
 (*       by the payer or any hop on the route"; this module has no action   *)
 (*       by which the held HTLC dies before E — HtlcExpired is `clock >=    *)
 (*       htlcE[s]` and nothing else.  Giving gate (a) teeth needs an unfair *)
@@ -171,7 +181,7 @@
 (*       modelled exactly: `ClientClaims` sets conf, `IndexerCatchUp` later *)
 (*       sets claimReadable.  `Tick` is disabled while the skew is          *)
 (*       outstanding, which is the formal content of "120 seconds of grace  *)
-(*       against seconds of read lag" (orchestrator.ts:76-94).  The skew is *)
+(*       against seconds of read lag" (EMPTY_LOCKUP_GRACE).  The skew is    *)
 (*       still fully explored WITHIN a frozen tick, which is where          *)
 (*       BreakEmptyGrace finds its counterexample.                          *)
 (*                                                                         *)
@@ -185,10 +195,13 @@
 (*       always carried: once fundedAt + UnilateralDelay arrives the        *)
 (*       solver can spend the lockup alone, and LightningReceive_Censored   *)
 (*       .cfg now reports GREEN (safety + Liveness) whenever gate (d)       *)
-(*       holds.  What is STILL true of the shipped TypeScript: no src/      *)
-(*       code spends the solo leaf yet (TODO(unilateral-exit) in            *)
-(*       src/arkade/covenant.ts), so the F5 finding survives as a           *)
-(*       statement about shipped code, not the covenant.                    *)
+(*       holds.  WHAT HAS CHANGED IN THE SHIPPED TYPESCRIPT since this was  *)
+(*       written: the solo leaf is now spendable, by                        *)
+(*       packages/solver-arkade/src/arkade/unilateralExit.ts,               *)
+(*       operator-driven.  receiveSwaps.ts's LEGAL_EDGES has since          *)
+(*       gained funded -> refunded (#184), so transition() can now          *)
+(*       record such an exit.  No sweep takes that edge, so F5 stays a      *)
+(*       requirement on the recovery software, not a description of it.     *)
 (*                                                                         *)
 (*  (A5) The refund's absolute CLTV matures against the chain tip's         *)
 (*       timestamp, not wall clock, so a push at exactly refund_locktime    *)
@@ -203,8 +216,8 @@
 (*                                                                         *)
 (*  1. arkade.fund() must be single-shot per swap NO MATTER HOW MANY        *)
 (*     GOROUTINES CALL IT.  Today nothing durable provides that: the CAS    *)
-(*     runs AFTER the money moves (orchestrator.ts:381 then :391), and only *)
-(*     the in-process `inFlight` Set at :291 serialises callers.  See        *)
+(*     runs AFTER the money moves (whenArmed sends, then CASes), and only   *)
+(*     the in-process `inFlight` Set serialises callers.  See              *)
 (*     ArkadeHonoursFundKey and LightningReceive_DoubleFund.cfg.            *)
 (*  2. The funding gate must be ONE-SHOT.  Re-running                       *)
 (*     evaluateReceiveFunding on a retry after the float is already out can *)
@@ -222,16 +235,17 @@
 (*     recovery path that survives an Arkade server outage once             *)
 (*     the co-signed refund is unavailable, and                             *)
 (*     LightningReceive_Censored.cfg's GREEN result applies to the          *)
-(*     covenant alone until it ships — the F5 finding is about the          *)
-(*     solver software.  See gate (d) and TODO(unilateral-exit) in          *)
-(*     src/arkade/covenant.ts.                                              *)
+(*     covenant plus the operator-driven exit in                            *)
+(*     packages/solver-arkade/src/arkade/unilateralExit.ts.  The F5         *)
+(*     finding is about the solver software; see gate (d) and the           *)
+(*     LEGAL_EDGES note under THE EDGE TABLE.                               *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC, SwapCore
 
 CONSTANTS
     RefundLocktime,        \* refund_locktime = quote time + MAX_REFUND_HORIZON.
                            \* Fixed at insert, IMMUTABLE: the covenant pkScript is
-                           \* derived from it (receiveSwaps.ts:52-63, 96-101).
+                           \* derived from it (the row shape in receiveSwaps.ts).
     InvoiceExpiry,         \* invoice_expires_at = quote time + DEFAULT_HOLD_INVOICE_WINDOW
     MinSettleWindow,       \* MIN_SETTLE_WINDOW      (90 min)  gate (b)
     SettleSafetyMargin,    \* SETTLE_SAFETY_MARGIN   (15 min)  gate (c)
@@ -287,7 +301,7 @@ VARIABLES
                     \* client claims one and the other is invisible to the row forever.
     htlcE,          \* [Swaps -> {0} \cup EChoices]  E, the held HTLC's settle deadline.
                     \* 0 == not armed.  Chosen by the ENVIRONMENT at arm time; written
-                    \* once by quoted->armed and never refreshed (orchestrator.ts:342).
+                    \* once by quoted->armed and never refreshed (whenQuoted).
     settled,        \* [Swaps -> BOOLEAN] ln.settleHold(P) succeeded — the solver COLLECTED
     claimReadable,  \* [Swaps -> BOOLEAN] findClaimPreimage can now recover P from the
                     \* spending virtual tx.  Trails conf; see (A3).
@@ -311,13 +325,20 @@ LRResults    == { "none", "capOk", "capFull", "sawFunded", "sawEmpty" }
 LRSpendKinds == { "clientClaim", "solverRefund" }
 
 (***************************************************************************)
-(* THE EDGE TABLE.  Diff this against src/db/receiveSwaps.ts:40-50 — with  *)
-(* ONE deliberate addition: funded -> refunded, the solo exit no shipped   *)
-(* code spends yet (TODO(unilateral-exit) in src/arkade/covenant.ts).  The *)
-(* edge exists here because gate (d)'s protection is unverifiable without  *)
+(* THE EDGE TABLE.  Diff this against LEGAL_EDGES in                       *)
+(* packages/solver-corridors/src/db/receiveSwaps.ts — it now matches line  *)
+(* for line, funded -> refunded included.  That edge was spec-only until   *)
+(* packages/solver-arkade/src/arkade/unilateralExit.ts shipped the leaf;   *)
+(* it exists here because gate (d)'s protection is unverifiable without    *)
 (* the leaf it prices — the same contract-first stance as                  *)
-(* ArkadeHonoursFundKey.  The shipped table gains this edge when the solo  *)
-(* exit ships; until then transition() would throw on it in production.    *)
+(* ArkadeHonoursFundKey.  The shipped table gained it in #184: the solo    *)
+(* exit needs neither the Arkade Service nor refund_locktime, so it lands  *)
+(* on a row still `funded`, and refunding -> refunded cannot record that.  *)
+(* The edge RECORDS an exit; it does not drive one.  startUnilateralExit   *)
+(* ships and spends the leaf, but only when an operator runs it            *)
+(* (cli unilateral-exit --go) and no sweep takes this edge, so             *)
+(* FundedSoloRefund stays a requirement on the recovery software rather    *)
+(* than a description of it.                                               *)
 (***************************************************************************)
 Row   == { "quoted", "armed", "funded", "claimed", "settled",
            "refunding", "refunded", "refused", "stuck" }
@@ -356,7 +377,7 @@ Collected(s)        == settled[s] \/ SpentBy(s, "solverRefund")
 ClientTookLockup(s) == SpentBy(s, "clientClaim")
 
 \* The inbound HTLC is dead.  There is deliberately no cancelHold: past E the
-\* backend fails a stale hold back on its own (orchestrator.ts:488-489), so
+\* backend fails a stale hold back on its own (whenClaimed), so
 \* this is a one-way door with no action of ours behind it.
 HtlcExpired(s) == htlcE[s] # 0 /\ clock >= htlcE[s]
 HtlcLost(s)    == HtlcExpired(s) /\ ~settled[s]
@@ -365,20 +386,20 @@ HtlcLost(s)    == HtlcExpired(s) /\ ~settled[s]
 (***************************************************************************)
 (* GUARDS.  Evaluated on the CURRENT clock, at the instant before the      *)
 (* money moves — evaluateReceiveFunding "MUST be called immediately before *)
-(* funding, never at arming time" (src/core/receive.ts:152-160), because   *)
+(* funding, never at arming time" (evaluateReceiveFunding), because        *)
 (* arming and funding can be minutes apart and every input is a function   *)
 (* of the clock.                                                           *)
 (***************************************************************************)
 
-\* evaluateReceiveFunding, src/core/receive.ts:167-201.  Subtraction is written
+\* evaluateReceiveFunding, in packages/solver-core/src/core/receive.ts.
 \* as addition throughout so Naturals never goes negative.
 \*
 \* AUDIT FINDING, 2026-08-10 — GATE (b) IS DEAD CODE, IN THE MODEL AND IN THE
 \* SHIPPED TYPESCRIPT.  Gate (a) and gate (c) together IMPLY gate (b), so
 \* `settle_window_too_short` is a refusal reason that can never be reached:
 \*
-\*   refund_locktime  = T + MAX_REFUND_HORIZON        (orchestrator.ts:234)
-\*   invoice_expires  = T + DEFAULT_HOLD_INVOICE_WINDOW (orchestrator.ts:249,262)
+\*   refund_locktime  = T + MAX_REFUND_HORIZON        (quote())
+\*   invoice_expires  = T + DEFAULT_HOLD_INVOICE_WINDOW (quote())
 \*   (a) holds  =>  now < T + 600
 \*   (c) holds  =>  E  >= refund_locktime + 900 = T + 8100
 \*   (b) needs  =>  E  >= now + 5400,  and now + 5400 < T + 6000 <= T + 8100 <= E
@@ -400,10 +421,10 @@ HtlcLost(s)    == HtlcExpired(s) /\ ~settled[s]
 \* BreakRecourseMargin conjunct, together with the two solo leaves it prices:
 \* the trader's unilateral claim (the both-sides attacker, modelled for the
 \* time — it needs NO server) and the solver's solo refund leaf (shipped in
-\* the covenant, spendable by NO src/ code yet — TODO(unilateral-exit) in
-\* src/arkade/covenant.ts — so the action below is the requirement the Go
-\* rewrite must meet, the same way ArkadeHonoursFundKey states a property the
-\* current process-level Set merely stands in for).
+\* the covenant, and now spendable by
+\* packages/solver-arkade/src/arkade/unilateralExit.ts — so the action below
+\* is what the Go rewrite must keep, the same way ArkadeHonoursFundKey
+\* states a property the current process-level Set merely stands in for).
 FundGateOpen(s) ==
     /\ clock < InvoiceExpiry                              \* (a) invoice_expired
     /\ htlcE[s] # 0                                       \*     htlc_not_armed
@@ -415,7 +436,7 @@ FundGateOpen(s) ==
          \/ clock + UnilateralDelay + RecourseMargin <= htlcE[s] )  \* (d) unilateral_recourse_after_htlc
 
 \* The solver's SOLO refund leaf opened: fundedAt + UnilateralDelay has arrived.
-\* Shipped as gate (d) at src/core/receive.ts:188-195 with
+\* Shipped as gate (d) in evaluateReceiveFunding with
 \* UNILATERAL_RECOURSE_MARGIN: with the Arkade server gone the
 \* trader's unilateralClaim opens first, and a swap funded into the window
 \* where E passes before OUR leaf opens pays out and cannot be recovered —
@@ -440,11 +461,11 @@ GateAdmits(s) == FundGateOpen(s) \/ (FundGateOneShot /\ funds[s] > 0)
 \* arkade.findLockups(pkScript) is getVtxos({spendableOnly: true}), so it goes
 \* empty the instant ANY spend lands.  "Empty" therefore conflates "never
 \* funded" with "already claimed" — which is exactly why the crash-recovery
-\* adoption read at orchestrator.ts:379 is incomplete.
+\* adoption read in whenFunded is incomplete.
 IndexerShowsFunded(s) == funds[s] > 0 /\ ~Spent(s)
 
 \* arkade.findClaimPreimage(outpoint, H) — returns a value ONLY when it hashes
-\* to the payment hash (src/arkade/wallet.ts:188-227).  Trails findLockups; see (A3).
+\* to the payment hash (arkade/wallet.ts findClaimPreimage).  Trails findLockups; see (A3).
 ClaimReadable(s) == SpentBy(s, "clientClaim") /\ claimReadable[s]
 
 \* EMPTY_LOCKUP_GRACE.  Realised as one tick; see the ASSUME above.
@@ -459,7 +480,7 @@ GraceElapsed(s) == BreakEmptyGrace \/ aged[s]      \* <<< MUTATION POINT
 \* service — picks E.  `evaluateReceiveFunding`'s own comment says it plainly:
 \* "The backend picks this value and may pick one shorter than its documented
 \* norm; a hardcoded guess that runs long is exactly the case where the
-\* provider pays out and cannot collect" (src/core/receive.ts:126-131).
+\* provider pays out and cannot collect" (ReceiveFundingInput.htlcExpiresAt).
 ArmHtlc(s, e) ==
     /\ htlcE[s] = 0
     /\ st[s] \notin { "none", "rejected" }      \* the invoice exists once the row does
@@ -573,7 +594,7 @@ Tick ==
 \* store.get(id) / findRecoverable(), and — in the same breath — whatever else
 \* the handler samples before it acts.  For a `none` row that is
 \* committedSats(); for an `armed` row it is whenArmed's `alreadyFunded` read
-\* (orchestrator.ts:379), which is THE snapshot two concurrent funders both
+\* (whenFunded's findLockups read), which is THE snapshot two funders both
 \* trust.  ALWAYS a separate step from the write that follows it.
 ReadSwap(w, s) ==
     /\ ReadRowWith(w, s, Drivable,
@@ -597,13 +618,13 @@ GiveUp(w) ==
 
 Crash(w) == CrashCore(w) /\ UNCHANGED LrVars
 
-(***** quote() : src/receive/orchestrator.ts:196-286 ***********************)
+(***** quote() *************************************************************)
 
 \* insertQuote().  The partial UNIQUE index on payment_hash
-\* (receiveSwaps.ts:136-138) makes the INSERT itself single-winner, modelled
+\* (the partial UNIQUE index in receiveSwaps.ts) makes the INSERT single-winner,
 \* by the CAS on "none".  There is NO equivalent backstop for the exposure
 \* cap: with AtomicAdmission = FALSE the insert trusts the snapshot verdict,
-\* which is today's TypeScript (orchestrator.ts:217-219 then :257).
+\* which is today's TypeScript (quote()).
 \*
 \* Note the corridor's own ordering quirk is invisible here on purpose:
 \* ln.createHoldInvoice is minted BEFORE the row is persisted, uniquely among
@@ -625,10 +646,10 @@ InsertQuote(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LrVars
 
-(***** whenQuoted : src/receive/orchestrator.ts:338-348 ********************)
+(***** whenQuoted **********************************************************)
 
 \* ln.getHoldState(H).status === 'armed'.  THE ONLY WRITE OF E ANYWHERE IN THE
-\* CORRIDOR (orchestrator.ts:342) — no later transition refreshes it.  The
+\* CORRIDOR (whenQuoted) — no later transition refreshes it.  The
 \* column lands in the SAME UPDATE as the state change, which is why `armed`
 \* always carries an E and whenClaimed's null-E guard is unreachable.
 SeeArmed(w, s) ==
@@ -656,11 +677,11 @@ RefuseQuoted(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LrVars
 
-(***** whenArmed : src/receive/orchestrator.ts:350-396 *********************)
+(***** whenArmed ***********************************************************)
 
 \* evaluateReceiveFunding declined.  THE CORRIDOR'S SHARPEST HOLE LIVES HERE.
 \* store.fail(id, 'armed', ...) routes to `refused` because `armed` is not in
-\* EXPOSED (receiveSwaps.ts:38) — and `refused` is terminal, has no outgoing
+\* EXPOSED (the SHAPE's `exposed` list) — and `refused` is terminal, has no
 \* edge, and this corridor has NO refundSweep.  If the solver's float is
 \* already in the lockup when this fires, it is stranded permanently.
 \* FundGateOneShot is what closes it: with the gate asked once, ~GateAdmits
@@ -676,7 +697,7 @@ RefuseArmed(w, s) ==
 
 \* THE IRREVERSIBLE ACT, AND IT HAPPENS BEFORE THE CAS.
 \* arkade.fund(lockupAddress, amountSats) -> fundLockup -> wallet.sendBitcoin,
-\* at orchestrator.ts:381; the compare-and-swap that records it is at :391.
+\* in whenArmed; the compare-and-swap that records it is the later statement.
 \* There is no intent-commit state and NO IDEMPOTENCY KEY OF ANY KIND — the
 \* send corridor's `funded -> paying` CAS-before-payInvoice has no counterpart
 \* here.  Two workers whose `alreadyFunded` snapshots both read empty both call
@@ -712,7 +733,7 @@ FundLockup(w, s) ==
     /\ UNCHANGED << clock, st, conf, serverUp >>
     /\ UNCHANGED << htlcE, settled, claimReadable, aged >>
 \* The crash-recovery adoption branch: an exact-value output is already at the
-\* script, so fund() is skipped entirely (orchestrator.ts:379-382).  This is
+\* script, so fund() is skipped entirely (whenArmed).  This is
 \* what makes a crash between the send and the CAS free — but only while the
 \* lockup is still SPENDABLE, which is why `sawEmpty` after a claim sends the
 \* solver back through FundLockup instead.  funds AND fundedAt both survive
@@ -728,7 +749,7 @@ FundAdopt(w, s) ==
     /\ UNCHANGED LrVars
 
 \* The armed->funded compare-and-swap, carrying the funded outpoint
-\* (orchestrator.ts:391-395).  A crash before this leaves the float out on a
+\* (whenArmed's funded CAS).  A crash before this leaves the float out on a
 \* row that reads `armed` — not EXPOSED, invisible to committedSats().
 \* fundedAt was already written by the fund ACT (see FundLockup); the record
 \* only lands the row state.
@@ -740,9 +761,9 @@ RecordFund(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED << funds, htlcE, settled, claimReadable, aged, fundedAt >>
 
-(***** whenFunded : src/receive/orchestrator.ts:398-444 ********************)
+(***** whenFunded **********************************************************)
 
-\* orchestrator.ts:411-412.  The refund-deadline check runs BEFORE the reveal
+\* whenFunded.  The refund-deadline check runs BEFORE the reveal
 \* attempt on purpose: revealToCovclaimd can throw, and a check placed after it
 \* would never be reached while covclaimd stays down, silently defeating the
 \* whole reason SETTLE_SAFETY_MARGIN exists.
@@ -759,7 +780,7 @@ FundedToRefunding(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED << funds, htlcE, settled, claimReadable, fundedAt >>
 
-\* orchestrator.ts:429-434.  Someone spent the lockup and findClaimPreimage
+\* whenFunded.  Someone spent the lockup and findClaimPreimage
 \* recovered a HASH-VERIFIED P.  This service does not care WHO — the client,
 \* covclaimd, or nobody at all — which is precisely why the corridor is correct
 \* with covclaimd absent.
@@ -773,7 +794,7 @@ FundedSeesClaim(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LrVars
 
-\* orchestrator.ts:436-442.  The lockup is gone and nothing is provable yet.
+\* whenFunded.  The lockup is gone and nothing is provable yet.
 \* Before the deadline this branch returns false and keeps waiting, because it
 \* is indistinguishable from ordinary read lag; `refunding`'s own recheck
 \* covers it resolving a moment later.
@@ -793,9 +814,9 @@ FundedEmptyToRefunding(w, s) ==
 
 \* THE SOLVER'S SOLO REFUND LEAF.  The covenant's unilateral exit
 \* (client=solver alone, no Arkade server) — the recourse gate (d) prices,
-\* and the ONLY one that survives censorship.  Nothing in src/ spends this
-\* leaf yet: TODO(unilateral-exit) in src/arkade/covenant.ts.  The action is
-\* therefore the requirement the Go rewrite must meet, exactly the way
+\* and the ONLY one that survives censorship.  The spend lives in
+\* packages/solver-arkade/src/arkade/unilateralExit.ts.  The action is
+\* therefore what the Go rewrite must keep, exactly the way
 \* ArkadeHonoursFundKey states a property the in-process inFlight Set merely
 \* stands in for today; restricting it to ~serverUp keeps the green model
 \* honest (with the server up the co-signed RefundAccepted is the shipped
@@ -854,9 +875,9 @@ RefundingSoloRefund(w, s) ==
     /\ UNCHANGED << clock, st, serverUp >>
     /\ UNCHANGED << funds, htlcE, settled, claimReadable, aged, fundedAt >>
 
-(***** whenClaimed : src/receive/orchestrator.ts:467-497 *******************)
+(***** whenClaimed *********************************************************)
 
-\* ln.settleHold(P).  IRREVERSIBLE AND PRE-CAS (orchestrator.ts:474-475):
+\* ln.settleHold(P).  IRREVERSIBLE AND PRE-CAS (whenClaimed):
 \* this is the instant the solver finally collects, and a crash between it and
 \* the transition leaves a row saying `claimed` on money already received.
 SettleHold(w, s) ==
@@ -888,7 +909,7 @@ RecordSettle(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LrVars
 
-\* orchestrator.ts:490-493.  Past E the held HTLC is gone regardless — there is
+\* whenClaimed.  Past E the held HTLC is gone regardless — there is
 \* no cancelHold and the backend fails a stale hold back on its own — so
 \* nothing could still succeed by retrying.  A settle failure BEFORE E is
 \* re-thrown instead (modelled by GiveUp), leaving the row `claimed`.
@@ -906,10 +927,10 @@ SettleGivesUp(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LrVars
 
-(***** whenRefunding : src/receive/orchestrator.ts:499-540 *****************)
+(***** whenRefunding *******************************************************)
 
 \* THE BACK-EDGE, AND THE REASON THIS CORRIDOR IS INTERESTING.
-\* orchestrator.ts:509-515: the late-claim recheck runs FIRST, before
+\* whenRefunding: the late-claim recheck runs FIRST, before
 \* findLockups and before any refund is pushed, because a late-but-valid claim
 \* can land right up until the refund races it and the refund could only ever
 \* lose that race.  Losing is a RECOVERY: the solver now holds P and can still
@@ -925,14 +946,14 @@ RefundingSeesClaim(w, s) ==
 
 \* arkade.refund() -> refundWithoutReceiverSwapScript: the solver's own
 \* absolute-CLTV leaf (client=solver + Arkade server), pushed back to
-\* solverRefundPkScript.  IRREVERSIBLE AND PRE-CAS (orchestrator.ts:538-539).
+\* solverRefundPkScript.  IRREVERSIBLE AND PRE-CAS (whenRefunding).
 \* SpendAccepted is the Arkade server arbitrating: it will co-sign exactly one
 \* spend of the vtxo, and it may already have accepted a claim — in which case
 \* this action is simply disabled and the next tick's recheck recovers the swap.
 \* AUDIT NOTE 2026-08-10: the `~ClaimReadable(s)` conjunct below is REDUNDANT —
 \* ClaimReadable(s) implies SpentBy(s, "clientClaim") implies Spent(s), which
 \* `~Spent(s)` already excludes.  It is kept because it mirrors the TypeScript's
-\* ordering (orchestrator.ts:509-515 runs the recheck before the push), but the
+\* ordering (whenRefunding runs the recheck before the push), but the
 \* model therefore does NOT demonstrate that ordering is necessary: SpendAccepted
 \* alone makes a refund unable to win after a claim.  What IS load-bearing is the
 \* RefundingSeesClaim action itself; delete that and NoNetLoss fails.
@@ -961,7 +982,7 @@ RecordRefund(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LrVars
 
-\* orchestrator.ts:517-535.  The lockup is empty and no claim is readable.
+\* whenRefunding.  The lockup is empty and no claim is readable.
 \* Ordinary read lag and a genuine anomaly look IDENTICAL from here and only
 \* TIME separates them, so the escalation is on a clock, not on a single
 \* observation.  Escalating early throws a COMPLETED swap into a state with no
@@ -1115,7 +1136,7 @@ ExposureBounded == ExposureBoundedBy(NonTerminal)
 NoSilentLoss == NoSilentLossShape(PaidOut, Collected, Terminal, "stuck")
 
 \* THE DISTINCTIVE INVARIANT OF THIS CORRIDOR, stated exactly as
-\* SETTLE_SAFETY_MARGIN's own comment states it (src/core/receive.ts:33-41):
+\* SETTLE_SAFETY_MARGIN's own comment states it (core/receive.ts):
 \* "the refund path must open before E, never after: once E passes the payment
 \* is gone, and Arkade funds still sitting in an unrefundable script would be
 \* lost outright."
@@ -1237,13 +1258,14 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*                                       state.  The trader's solo claim   *)
 (*                                       opens only at E, strictly later,  *)
 (*                                       so the exit is FAIR.  What is     *)
-(*                                       STILL true of the shipped         *)
-(*                                       TypeScript: no src/ code spends   *)
-(*                                       the solver's solo leaf yet        *)
-(*                                       (TODO(unilateral-exit) in         *)
-(*                                       src/arkade/covenant.ts), so a     *)
-(*                                       censoring server still parks the  *)
-(*                                       float in production — the F5      *)
+(*                                       true of the shipped TypeScript:   *)
+(*                                       the solo spend now exists         *)
+(*                                       (arkade/unilateralExit.ts) and    *)
+(*                                       its LEGAL_EDGES entry landed      *)
+(*                                       (#184), but it is operator-run,   *)
+(*                                       so a censoring server still       *)
+(*                                       parks the float in production —   *)
+(*                                       the F5                            *)
 (*                                       finding survives as a statement   *)
 (*                                       about shipped code, not about the *)
 (*                                       covenant.  This cfg is the        *)
@@ -1305,7 +1327,7 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*         and inserts)                                                    *)
 (*   7     ArmHtlc(s1, 2)     a payer's HTLC arms and THE BACKEND PICKS E. *)
 (*                            It picks 2 — a short-dated HTLC, which       *)
-(*                            src/core/receive.ts:126-131 warns is exactly *)
+(*                            ReceiveFundingInput.htlcExpiresAt warns is   *)
 (*                            the case a hardcoded guess would miss.       *)
 (*   8     SeeArmed(s1)       quoted -> armed; htlc_expires_at = 2 written *)
 (*                            in the same UPDATE, and never refreshed.     *)

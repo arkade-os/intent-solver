@@ -16,7 +16,8 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
-import { assetMarketKey, assetMarketPolicy } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { assetMarketKey, assetMarketPolicy, DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { assetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
 
 const USDT = 'aa'.repeat(34)
@@ -45,13 +46,25 @@ const consoleForm = () => {
   }
 }
 
-const SERVER_DERIVED = ['marketKey', 'createdAt', 'updatedAt', 'servedBy']
+// DERIVED from the running process, not stored: a round trip cannot echo them.
+const SERVER_DERIVED = ['marketKey', 'createdAt', 'updatedAt', 'serving', 'gaps', 'rfqDirections']
 const editable = (row: Record<string, unknown>) =>
   Object.fromEntries(Object.entries(row).filter(([key]) => !SERVER_DERIVED.includes(key)))
+
+/** Six columns, six NON-DEFAULT values. `servesRfq: false` is what makes the two directions expressible. */
+const SERVING = {
+  symbol: 'USDT',
+  servesOffer: true,
+  servesRfq: false,
+  rfqSellBase: false,
+  rfqBuyBase: false,
+  carrierMode: 'priced',
+} as const
 
 const body = (over: Record<string, unknown> = {}) => ({
   base: 'BTC',
   quote: USDT,
+  symbol: 'USDT',
   baseDecimals: 8,
   quoteDecimals: 6,
   feedUrl: 'https://feed.test/price',
@@ -63,7 +76,14 @@ const body = (over: Record<string, unknown> = {}) => ({
   ...over,
 })
 
-const build = async (opts: { active?: { base: string | null; quote: string | null }[]; feedFails?: boolean } = {}) => {
+const build = async (
+  opts: {
+    active?: { base: string | null; quote: string | null }[]
+    feedFails?: boolean
+    closed?: 'sell_base' | 'buy_base'
+    carrier?: { assetCarrierPricing: boolean; offerChargesDeliveredCarrier: boolean }
+  } = {},
+) => {
   const adminStore = await AdminStore.open(':memory:', () => 1_000_000)
   const fetchPrice = vi.fn(async () => {
     if (opts.feedFails) throw new Error('HTTP 503 Service Unavailable')
@@ -71,19 +91,36 @@ const build = async (opts: { active?: { base: string | null; quote: string | nul
   })
   const services = {
     config: {},
-    policy: { offerMarkets: [], assetRfqTokens: [] },
+    // Shipped default is false for both — config.ts:978-979.
+    policy: {
+      offerMarkets: [],
+      assetRfqTokens: [],
+      assetCarrierPricing: false,
+      offerChargesDeliveredCarrier: false,
+      ...opts.carrier,
+    },
+    arkade: { dustSats: 330n },
     adminStore,
     assetMarkets: opts.active ?? [],
     liveOfferMarkets: [] as { a: string | null; b: string | null }[],
-    assetRfqMarkets: [] as { base: string | null; quote: string | null }[],
+    assetRfqMarkets: [] as {
+      base: string | null
+      quote: string | null
+      sellBase?: { min: bigint; max: bigint }
+      buyBase?: { min: bigint; max: bigint }
+    }[],
     replaceMarkets: async () => {
       const rows = await adminStore.listMarkets()
       services.assetMarkets = rows.filter((row) => row.enabled).map((row) => ({ base: row.base, quote: row.quote }))
-      services.assetRfqMarkets = services.assetMarkets
+      services.assetRfqMarkets = services.assetMarkets.map((market) => ({
+        ...market,
+        sellBase: opts.closed === 'sell_base' ? { min: 0n, max: 0n } : { min: 1n, max: 10n ** 12n },
+        buyBase: opts.closed === 'buy_base' ? { min: 0n, max: 0n } : { min: 1n, max: 10n ** 12n },
+      }))
     },
   }
   const app = buildAdminApp({ services: services as never, startedAt: 1, mode: 'relay', fetchPrice })
-  return { app, adminStore, fetchPrice }
+  return { app, adminStore, fetchPrice, services }
 }
 
 const put = (app: ReturnType<typeof buildAdminApp>, payload: unknown) =>
@@ -117,7 +154,7 @@ describe('GET /api/markets', () => {
     const seen = await list(app)
     expect(seen.markets).toHaveLength(1)
     expect(seen.active).toEqual([KEY])
-    expect(seen.markets[0]).toMatchObject({ servedBy: ['rfq'] })
+    expect(seen.markets[0]).toMatchObject({ serving: ['rfq'] })
     expect(seen.restartNotice).toMatch(/Live on this process/)
     await adminStore.close()
   })
@@ -309,6 +346,16 @@ describe('the feed probe', () => {
   })
 })
 
+describe('the write probe is never served from the preview cache', () => {
+  it('fetches on every PUT, and the second PUT reads the feed again', async () => {
+    const { app, adminStore, fetchPrice } = await build()
+    await put(app, body())
+    await put(app, body({ feeBps: 30 }))
+    expect(fetchPrice).toHaveBeenCalledTimes(2)
+    await adminStore.close()
+  })
+})
+
 describe('DELETE /api/markets/:key', () => {
   it('removes a market and does not ask for a restart', async () => {
     const { app, adminStore } = await build()
@@ -338,10 +385,129 @@ describe('DELETE /api/markets/:key', () => {
   })
 })
 
+describe('the serving fields an operator can only set from here', () => {
+  it('carries a NON-DEFAULT for every serving column, or the round-trip guard proves nothing', () => {
+    // A console that hardcodes a default round-trips it perfectly while the operator can never change it.
+    expect(Object.keys(SERVING).sort()).toEqual(Object.keys(DEFAULT_SERVING).sort())
+    for (const [key, value] of Object.entries(SERVING)) {
+      expect(value, key).not.toEqual(DEFAULT_SERVING[key as keyof typeof DEFAULT_SERVING])
+    }
+  })
+
+  it('round-trips the serving fields', async () => {
+    const { app, adminStore } = await build()
+    expect((await put(app, body(SERVING))).status).toBe(200)
+    expect((await list(app)).markets[0]).toMatchObject(SERVING)
+    await adminStore.close()
+  })
+
+  it('round-trips a market that IS declared for RFQ, per direction', async () => {
+    // `servesRfq: false` above is what frees the two direction columns; this is the other side of the flag.
+    const { app, adminStore } = await build()
+    await put(app, body({ symbol: 'USDT', servesRfq: true, rfqSellBase: true, rfqBuyBase: false }))
+    expect((await list(app)).markets[0]).toMatchObject({ servesRfq: true, rfqSellBase: true, rfqBuyBase: false })
+    await adminStore.close()
+  })
+
+  it('refuses a carrier mode it does not recognise, naming the field', async () => {
+    const { app, adminStore } = await build()
+    const res = await put(app, body({ symbol: 'USDA', carrierMode: 'sometimes' }))
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { message: string }).message).toMatch(/carrierMode/)
+    expect(await adminStore.listMarkets()).toEqual([])
+    await adminStore.close()
+  })
+
+  it('refuses a non-boolean serving flag rather than reading it as a closed direction', async () => {
+    // `"true"` is not `true`: coerced, the truthiest spelling a client has SHUTS the direction.
+    const { app, adminStore } = await build()
+    for (const field of ['servesOffer', 'servesRfq', 'rfqSellBase', 'rfqBuyBase']) {
+      const res = await put(app, body({ symbol: 'USDA', [field]: 'true' }))
+      expect(res.status, field).toBe(400)
+      expect(((await res.json()) as { message: string }).message, field).toContain(field)
+    }
+    expect(await adminStore.listMarkets()).toEqual([])
+    await adminStore.close()
+  })
+
+  it('defaults a new market to serving RFQ and not offers', async () => {
+    const { app, adminStore } = await build()
+    await put(app, body({ symbol: 'USDA' }))
+    expect((await list(app)).markets[0]).toMatchObject({ servesRfq: true, servesOffer: false })
+    await adminStore.close()
+  })
+
+  it('refuses a pre-feature body that omits symbol, rather than storing a market nothing serves', async () => {
+    // The trade this makes: the old wire carried no symbol, so the route pinned servesRfq
+    // false and stored a live-looking market the runtime served on no path at all.
+    const { app, adminStore } = await build()
+    const res = await put(app, body({ symbol: undefined }))
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { message: string }).message).toMatch(/symbol/)
+    expect(await adminStore.listMarkets()).toEqual([])
+    await adminStore.close()
+  })
+
+  it('serves a market the console form itself creates over RFQ, with no flag for the operator to find', async () => {
+    // The gate, driven through the form rather than a hand-written body. The wire carried no
+    // `symbol`, so the route pinned servesRfq false and the runtime — which reads the row —
+    // registered nothing for a market the console listed as live.
+    const { app, adminStore } = await build()
+    const { blankMarket, marketBody } = consoleForm()
+    const draft = {
+      ...blankMarket(),
+      quote: USDT,
+      symbol: 'USDA',
+      feedUrl: 'https://feed.test/price',
+      pricePath: '/price',
+      sellBaseMin: '1',
+      sellBaseMax: '1000',
+    }
+    expect((await put(app, marketBody(draft))).status).toBe(200)
+    const rows = await adminStore.listMarkets()
+    expect(rows[0]).toMatchObject({ servesRfq: true, servesOffer: false })
+    const rfq = assetRfqMarketsFrom(assetMarketPolicy(rows).pricing, { dustSats: 330n, pricedByDefault: false })
+    expect(rfq.map((market) => market.symbol)).toEqual(['USDA'])
+    await adminStore.close()
+  })
+})
+
+describe('the notice a market save returns', () => {
+  // The OLD text said the opposite — "In-flight swaps keep the terms they were quoted
+  // with" — true of RFQ, false of a fillable offer row (`ops/assetOffers.ts:373-378`).
+  const ADMITTED = /already (recorded as )?fillable|already admitted/i
+  const UNTOLD = /maker is not told|no way to tell the maker/i
+
+  it('warns that a save can refuse offers already admitted, and that the maker is not told', async () => {
+    const { app, adminStore } = await build()
+    const notice = (await list(app)).restartNotice
+    expect(notice).toMatch(ADMITTED)
+    expect(notice).toMatch(UNTOLD)
+    expect(notice).not.toMatch(/In-flight swaps keep the terms they were quoted with/)
+    const written = (await (await put(app, body({ symbol: 'USDT' }))).json()) as { restartNotice: string }
+    expect(written.restartNotice).toBe(notice)
+    await adminStore.close()
+  })
+
+  it('keeps the RFQ half, which was the correct sentence in the old copy', async () => {
+    const { app, adminStore } = await build()
+    expect((await list(app)).restartNotice).toMatch(/RFQ/)
+    await adminStore.close()
+  })
+
+  it('makes both claims in the FORM too, against the same two regexes, not only after a save', async () => {
+    const start = appSource.indexOf('/* ==== asset markets — BEGIN')
+    const end = appSource.indexOf('/* ==== asset markets — END')
+    const form = appSource.slice(appSource.indexOf('const marketForm', start), end)
+    expect(form).toMatch(ADMITTED)
+    expect(form).toMatch(UNTOLD)
+  })
+})
+
 describe('a console save round-trips what the API handed it', () => {
   const saved = async () => {
     const built = await build()
-    await put(built.app, body({ sellBaseFeeBps: 0, buyBaseFeeBps: 900 }))
+    await put(built.app, body({ sellBaseFeeBps: 0, buyBaseFeeBps: 900, ...SERVING }))
     return built
   }
 
@@ -386,6 +552,56 @@ describe('a console save round-trips what the API handed it', () => {
     draft.sellBaseFeeBps = 'abc'
     expect((await put(app, marketBody(draft))).status).toBe(400)
     expect(await adminStore.listMarkets()).toMatchObject([{ sellBaseFeeBps: 0, buyBaseFeeBps: 900 }])
+    await adminStore.close()
+  })
+})
+
+describe('the harness carries the deployment facts the real Services does', () => {
+  it('names the dust and both carrier flags, which the route is about to read', async () => {
+    // Absent, the route throws before Task 8's assertions ever run.
+    const { services, adminStore } = await build()
+    expect(services.arkade.dustSats).toBe(330n)
+    expect(services.policy).toMatchObject({ assetCarrierPricing: false, offerChargesDeliveredCarrier: false })
+    await adminStore.close()
+  })
+})
+
+describe('GET /api/markets — the policy an operator cannot otherwise see', () => {
+  it('reports the carrier, and that nobody is paying for it', async () => {
+    const { app, adminStore } = await build()
+    const seen = (await list(app)) as unknown as {
+      carrier: { sats: string; rfqPriced: boolean; offerCharged: boolean }
+    }
+    // Both false is the shipped default: the solver funds 330 sats per asset
+    // payout out of margin and no screen says so.
+    expect(seen.carrier).toEqual({ sats: '330', rfqPriced: false, offerCharged: false })
+    await adminStore.close()
+  })
+
+  it('reads rfqPriced and offerCharged from policy rather than shipping them hardcoded', async () => {
+    const { app, adminStore } = await build({
+      carrier: { assetCarrierPricing: true, offerChargesDeliveredCarrier: true },
+    })
+    const seen = (await list(app)) as unknown as { carrier: { rfqPriced: boolean; offerCharged: boolean } }
+    expect(seen.carrier).toMatchObject({ rfqPriced: true, offerCharged: true })
+    await adminStore.close()
+  })
+
+  it('reports which RFQ directions this process is actually open on', async () => {
+    const { app, adminStore } = await build()
+    await put(app, body())
+    const seen = (await list(app)).markets as unknown as {
+      rfqDirections: { sellBase: boolean; buyBase: boolean }
+    }[]
+    expect(seen[0]!.rfqDirections).toEqual({ sellBase: true, buyBase: true })
+    await adminStore.close()
+  })
+
+  it('reports a direction the running process closed, which the row cannot show', async () => {
+    const { app, adminStore } = await build({ closed: 'buy_base' })
+    await put(app, body())
+    const seen = (await list(app)).markets as unknown as { rfqDirections: { buyBase: boolean } }[]
+    expect(seen[0]!.rfqDirections.buyBase).toBe(false)
     await adminStore.close()
   })
 })

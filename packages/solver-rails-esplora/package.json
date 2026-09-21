@@ -1,6 +1,6 @@
 {
   "name": "@arkade-os/solver-rails-esplora",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Part of the Arkade intent-solver: rails-esplora primitives.",
   "license": "MIT",
   "repository": {

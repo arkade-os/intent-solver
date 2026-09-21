@@ -110,8 +110,40 @@ export interface AssetQuoteMarket {
 
 export type AssetQuoteRefusal = 'unsupported_pair' | 'price_unavailable' | 'fee_consumes_swap' | 'amount_out_of_range'
 
+/** True if `pair`'s FROM leg is `market`'s base, false if the reverse, null if `pair` is not on `market` at all. */
+export const assetQuoteGivesBase = (pair: AssetPair, market: AssetQuoteMarket): boolean | null => {
+  if (pair.from === market.base && pair.to === market.quote) return true
+  if (pair.from === market.quote && pair.to === market.base) return false
+  return null
+}
+
+/** The direction's flat fee, atomic units of the FROM leg. Shared so a caller never restates the ternary. */
+export const assetFlatFeeFor = (givesBase: boolean, market: AssetQuoteMarket): bigint =>
+  (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
+
+/** The direction's spread, basis points. Shared for the same reason {@link assetFlatFeeFor} is. */
+export const assetFeeBpsFor = (givesBase: boolean, market: AssetQuoteMarket): number =>
+  (givesBase ? market.sellBaseFeeBps : market.buyBaseFeeBps) ?? market.feeBps
+
 export type AssetQuoteOutcome =
   { ok: true; fromAmount: bigint; toAmount: bigint } | { ok: false; reason: AssetQuoteRefusal }
+
+export interface CarrierLegs {
+  /** Netted OFF the deposit, when the solver delivers the asset. */
+  charged: bigint
+  /** Added TO the payout, when the client fronted it. */
+  returned: bigint
+}
+
+// BOTH legs counted: an asset deposit carries one, an asset payout needs one.
+export const carrierLegs = (pair: AssetPair, carrierSats: bigint): CarrierLegs => {
+  const clientFronts = pair.from !== null
+  const solverDelivers = pair.to !== null
+  return {
+    charged: solverDelivers && !clientFronts ? carrierSats : 0n,
+    returned: clientFronts && !solverDelivers ? carrierSats : 0n,
+  }
+}
 
 /** What the PRICE put on neither leg: `struckQuotePrice` takes these back off. */
 const flatPartsOf = (args: {
@@ -121,15 +153,9 @@ const flatPartsOf = (args: {
   carrierSats: bigint
 }): { flatFee: bigint; from: bigint; to: bigint } => {
   const { pair, market, givesBase, carrierSats } = args
-  const flatFee = (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
-  // BOTH legs counted: an asset deposit carries one, an asset payout needs one.
-  const clientFronts = pair.from !== null
-  const solverDelivers = pair.to !== null
-  return {
-    flatFee,
-    from: flatFee + (solverDelivers && !clientFronts ? carrierSats : 0n),
-    to: clientFronts && !solverDelivers ? carrierSats : 0n,
-  }
+  const flatFee = assetFlatFeeFor(givesBase, market)
+  const legs = carrierLegs(pair, carrierSats)
+  return { flatFee, from: flatFee + legs.charged, to: legs.returned }
 }
 
 /**
@@ -158,13 +184,11 @@ export const resolveAssetQuote = (args: {
   const { pair, amount, amountSide, market, feed, carrierSats, dustSats } = args
 
   // Which way round the client is trading across this market's two legs.
-  const givesBase = pair.from === market.base && pair.to === market.quote
-  const givesQuote = pair.from === market.quote && pair.to === market.base
-  if (!givesBase && !givesQuote) return { ok: false, reason: 'unsupported_pair' }
+  const givesBase = assetQuoteGivesBase(pair, market)
+  if (givesBase === null) return { ok: false, reason: 'unsupported_pair' }
 
-  // A non-positive price is not a cheap swap, it is an unusable feed. Left
-  // unchecked, `givesQuote` would divide by zero and `givesBase` would price
-  // everything at nothing.
+  // A non-positive price is not a cheap swap, it is an unusable feed — left
+  // unchecked, either direction divides by zero or prices everything free.
   if (feed.mantissa <= 0n) return { ok: false, reason: 'price_unavailable' }
   if (market.feeBps < 0 || market.feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
   if (amount <= 0n) return { ok: false, reason: 'amount_out_of_range' }
@@ -173,8 +197,7 @@ export const resolveAssetQuote = (args: {
 
   const flat = flatPartsOf({ pair, market, givesBase, carrierSats })
   if (flat.flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
-  // Same selection as the flat fee: the direction decides the spread too.
-  const feeBps = (givesBase ? market.sellBaseFeeBps : market.buyBaseFeeBps) ?? market.feeBps
+  const feeBps = assetFeeBpsFor(givesBase, market)
   if (feeBps < 0 || feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
   const solverDelivers = pair.to !== null
 

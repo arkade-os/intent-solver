@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { copyFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
@@ -488,6 +491,15 @@ describe('quote', () => {
     if (!second.accepted) expect(second.reason).toBe('duplicate_swap')
   })
 
+  it('lets a non-constraint failure whose message says UNIQUE surface', async () => {
+    store.insertQuote = async () => {
+      throw new TypeError('UNIQUE quote construction failed')
+    }
+    await expect(service.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })).rejects.toThrow(
+      TypeError,
+    )
+  })
+
   it('refuses a hash that is live in ANOTHER corridor’s store — the self-payment blind spot', async () => {
     // The hash belongs to a live receive swap of ours: paying its invoice
     // would be paying ourselves. Each corridor's own store only
@@ -521,6 +533,7 @@ describe('quote', () => {
       paymentHash: 'b'.repeat(64),
       amountSats: 3_000,
       invoiceExpiresAt: clock + 3600,
+      quotedRefundDeadline: clock + 7200,
       refundLocktime: clock + 7200,
       senderPubkey: key(1),
       receiverPubkey: key(1),
@@ -1036,6 +1049,7 @@ describe('tick: refusals before money moves', () => {
       paymentHash: 'f'.repeat(64),
       amountSats: AMOUNT,
       invoiceExpiresAt: clock + 5,
+      quotedRefundDeadline: clock + 100_000,
       refundLocktime: clock + 100_000,
       senderPubkey: key(1),
       receiverPubkey: key(1),
@@ -1066,6 +1080,7 @@ describe('tick: refusals before money moves', () => {
       paymentHash: 'd'.repeat(64),
       amountSats: AMOUNT,
       invoiceExpiresAt: clock + 3600,
+      quotedRefundDeadline: clock + MIN_CLAIM_WINDOW - 10,
       refundLocktime: clock + MIN_CLAIM_WINDOW - 10,
       senderPubkey: key(1),
       receiverPubkey: key(1),
@@ -1092,6 +1107,7 @@ describe('tick: refusals before money moves', () => {
       paymentHash: 'c'.repeat(64),
       amountSats: AMOUNT,
       invoiceExpiresAt: clock + 3600,
+      quotedRefundDeadline: clock + 100_000,
       refundLocktime: clock + 100_000,
       senderPubkey: key(1),
       receiverPubkey: key(1),
@@ -1123,6 +1139,7 @@ describe('tick: refusals before money moves', () => {
       paymentHash: 'e'.repeat(64),
       amountSats: AMOUNT,
       invoiceExpiresAt: clock + 3600,
+      quotedRefundDeadline: clock + 100_000,
       refundLocktime: clock + 100_000,
       senderPubkey: key(7),
       receiverPubkey: key(7),
@@ -2187,6 +2204,7 @@ describe('tickAll', () => {
       paymentHash: 'e'.repeat(64),
       amountSats: 500,
       invoiceExpiresAt: clock + 3600,
+      quotedRefundDeadline: clock + 7200,
       refundLocktime: clock + 7200,
       senderPubkey: key(1),
       receiverPubkey: key(1),
@@ -3061,15 +3079,15 @@ describe('SendSwapService — block-typed timelocks', () => {
   const TIP = 800
   const NOMINAL = 600
 
-  const blockService = (chainTip?: { height(): Promise<number> }) =>
+  const blockService = (chainTip?: { height(): Promise<number> }, over: SwapStore = store) =>
     new SendSwapService({
-      store,
+      store: over,
       ln,
       arkade: { ...arkade, delays: BLOCK_DELAYS },
       limits: { minSats: 500, maxSats: 10_000 },
       invoicePrefix: 'bc',
       maxExposedSats: 5_000,
-      totalCommitted: () => store.committedSats(),
+      totalCommitted: () => over.committedSats(),
       admission: new AdmissionControl(),
       chainTip,
       now: () => clock,
@@ -3135,6 +3153,42 @@ describe('SendSwapService — block-typed timelocks', () => {
     expect(hex.encode(covenantScriptFromRow(row).pkScript)).toBe(row.pkScript)
   })
 
+  it('gives ONE funded row the same verdict before and after a block lands', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'send-tip-'))
+    try {
+      const seedFile = join(dir, 'seed.db')
+      const seed = await SwapStore.open(seedFile, () => clock)
+      const outcome = await blockService(staticTip, seed).quote(FORGED.invoice, REFUND_ADDRESS, {
+        clientRefundPubkey: CLIENT_REFUND_PUBKEY,
+      })
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      await seed.transition(outcome.swap.id, 'quoted', 'funded', { lockup_value: outcome.swap.amountSats })
+      seed.close()
+      // Funding is not instant, and the gate's whole subject is the gap.
+      clock += 60
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+
+      const verdictAt = async (tip: number) => {
+        const file = join(dir, `tip-${tip}.db`)
+        copyFileSync(seedFile, file)
+        const copy = await SwapStore.open(file, () => clock)
+        try {
+          const row = await blockService({ height: async () => tip }, copy).tick(outcome.swap.id)
+          return { state: row.state, failureReason: row.failureReason }
+        } finally {
+          copy.close()
+        }
+      }
+
+      const before = await verdictAt(TIP)
+      expect(before).toEqual(await verdictAt(TIP + 1))
+      // Not vacuous: agreeing on a refusal would break the ladder's own guarantee.
+      expect(before).toEqual({ state: 'paid', failureReason: null })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('leaves a seconds-typed deployment writing a unix-seconds deadline, as it always did', async () => {
     // The additive claim at this level: the default service has no `chainTip`,
     // its ladder is seconds, and nothing about block mode reaches it.
@@ -3144,5 +3198,6 @@ describe('SendSwapService — block-typed timelocks', () => {
     // The unilateral bound, unconverted because a seconds delay converts to
     // itself — which is the whole additive claim, at the one term that changed.
     expect(row.refundLocktime).toBeGreaterThanOrEqual(clock + arkade.delays.unilateralClaimDelay + REFUND_SAFETY_MARGIN)
+    expect(row.quotedRefundDeadline).toBe(row.refundLocktime)
   })
 })

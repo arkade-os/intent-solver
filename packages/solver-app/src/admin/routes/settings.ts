@@ -32,8 +32,15 @@
  * across a `.env` file and a shell history.
  */
 
-import type { Hono } from 'hono'
-import { describeSettings, validateOverride, editableKeys, applyOverrides, pendingRestartKeys } from '../settings.js'
+import type { Context, Hono } from 'hono'
+import {
+  describeSettings,
+  validateOverride,
+  editableKeys,
+  applyOverrides,
+  pendingRestartKeys,
+  LIVE_KEYS,
+} from '../settings.js'
 import { settingsDrift } from '../drift.js'
 import type { AdminDeps } from '../server.js'
 
@@ -49,12 +56,15 @@ export const RESTART_NOTICE =
   'below are read once at startup like everything else on this page, not an exception to it. The markets this ' +
   'solver actually trades are a separate, live list — edited with no restart on the markets screen.'
 
-// The same derivation `/api/overview` uses, reduced to keys. An override equal
-// to what boot resolved is NOT pending — which `Object.keys` could never say.
+// The same derivation `/api/overview` uses, reduced to keys. `bootPolicy` NOT `policy`:
+// `replacePolicy` moves `policy` over EVERY stored override at once, so diffing that
+// would un-badge the ones that did not apply. A LIVE key is then subtracted.
 const pendingKeys = (deps: AdminDeps, overrides: Record<string, string>): string[] => {
   const effective = applyOverrides(deps.services.config, overrides)
   const moved = pendingRestartKeys(deps.services.bootOverrides, overrides)
-  return settingsDrift(deps.services.policy, effective, moved).map((item) => item.key)
+  return settingsDrift(deps.services.bootPolicy, effective, moved)
+    .map((item) => item.key)
+    .filter((key) => !LIVE_KEYS.has(key))
 }
 
 export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
@@ -88,7 +98,7 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
         outcome: 'ok',
         detail: null,
       })
-      return c.json(await snapshot(deps, key))
+      return applied(c, deps, key)
     }
     if (typeof value !== 'string') {
       return c.json({ error: 'bad_request', message: 'value must be a string or null' }, 400)
@@ -110,8 +120,37 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
       outcome: 'ok',
       detail: null,
     })
-    return c.json(await snapshot(deps, key))
+    return applied(c, deps, key)
   })
+}
+
+/**
+ * The one answer both a set and a CLEAR give. Shared because clearing is as much a change to a live
+ * knob as setting one, and a clear that skipped this left the running process on the old value while
+ * `pendingKeys` — which subtracts LIVE_KEYS — reported the console's own value as in force.
+ *
+ * Re-reads the store rather than patching policy here: `applyOverrides` is the one definition of layering.
+ */
+const applied = async (c: Context, deps: AdminDeps, key: string) => {
+  if (LIVE_KEYS.has(key)) {
+    const stored = await deps.services.adminStore.getOverrides()
+    try {
+      await deps.services.replacePolicy(applyOverrides(deps.services.config, stored))
+    } catch (error) {
+      // The generic 500 carries the reason but neither the key nor whether anything was written.
+      return c.json(
+        {
+          error: 'reload_failed',
+          key,
+          stored: true,
+          applied: false,
+          message: error instanceof Error ? error.message : String(error),
+        },
+        500,
+      )
+    }
+  }
+  return c.json(await snapshot(deps, key))
 }
 
 const snapshot = async (deps: AdminDeps, changedKey: string) => {

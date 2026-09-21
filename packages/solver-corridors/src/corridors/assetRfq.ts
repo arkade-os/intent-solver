@@ -84,8 +84,12 @@ export const assetRfqLegs = (
 ): { from: string | null; to: string | null } =>
   direction === 'sell_base' ? { from: market.base, to: market.quote } : { from: market.quote, to: market.base }
 
+/** Narrower than `AssetRfqMarket` on purpose: a market recovered from a live
+ * swap row has no configured pricing, and this leaves nowhere to invent any. */
+export type ReadableAssetRfqMarket = Pick<AssetRfqMarket, 'base' | 'quote' | 'symbol'>
+
 export const assetRfqDescriptor = (
-  market: Pick<AssetRfqMarket, 'base' | 'quote' | 'symbol'>,
+  market: ReadableAssetRfqMarket,
   direction: AssetRfqDirection,
 ): CorridorDescriptor<AssetRfqSwapState> => {
   const legs = assetRfqLegs(market, direction)
@@ -238,7 +242,9 @@ export const respondToAssetRfqRequest = async (
     requesterKey: options?.requesterKey,
   })
   if (outcome.accepted) {
-    return { kind: 'quote', payload: assetRfqQuotePayload(outcome.swap, request.rfq_id, service.carrierSats) }
+    // Off the OUTCOME, not the service: the serialiser wraps `quote` alone, and nothing revalidates this
+    // figure afterwards — `evaluateAssetFill` compares the asset leg only.
+    return { kind: 'quote', payload: assetRfqQuotePayload(outcome.swap, request.rfq_id, outcome.carrierSats) }
   }
   return {
     kind: 'refused',

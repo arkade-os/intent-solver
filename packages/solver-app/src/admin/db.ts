@@ -15,8 +15,14 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
-import { assetMarketKey, type AssetMarketConfig } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import {
+  assetMarketKey,
+  rfqSymbolFor,
+  type AssetMarketConfig,
+  type CarrierMode,
+} from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import type { AssetRfqToken } from '../ops/assetRfqMarkets.js'
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS admin_override (
@@ -76,10 +82,37 @@ CREATE TABLE IF NOT EXISTS admin_market (
   buy_base_min    TEXT,
   buy_base_max    TEXT,
   enabled         INTEGER NOT NULL,
+  symbol          TEXT,
+  serves_offer    INTEGER NOT NULL DEFAULT 0,
+  serves_rfq      INTEGER NOT NULL DEFAULT 1,
+  rfq_sell_base   INTEGER NOT NULL DEFAULT 1,
+  rfq_buy_base    INTEGER NOT NULL DEFAULT 1,
+  carrier_mode    TEXT NOT NULL DEFAULT 'inherit',
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
+
+-- One-shot DATA migrations, by name. NOT a schema version: the ALTER loop below
+-- is idempotent, so only a seed reading the ENVIRONMENT needs an explicit marker.
+CREATE TABLE IF NOT EXISTS admin_migration (
+  name TEXT PRIMARY KEY,
+  at   INTEGER NOT NULL
+);
 `
+
+// Exec'd AFTER migrate(): a table that shipped without `symbol` has no such
+// column when SCHEMA runs. Partial, so an offer-only deployment's NULLs survive.
+const MIGRATED_SCHEMA = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_market_symbol ON admin_market(symbol) WHERE symbol IS NOT NULL;
+`
+
+export const MARKET_SERVING_SEED = 'market-serving-seed-v1'
+
+/** The environment's answer, for the ONE boot that finds the marker absent. */
+export interface ServingSeed {
+  offerMarkets: readonly { a: string | null; b: string | null }[]
+  tokens: readonly AssetRfqToken[]
+}
 
 export interface AuditEntry {
   action: string
@@ -89,6 +122,8 @@ export interface AuditEntry {
   params: string
   outcome: 'ok' | 'error'
   detail: string | null
+  /** Groups every row one save wrote, so a partial save is legible. */
+  revision?: string | null
 }
 
 export interface AuditRow extends AuditEntry {
@@ -124,6 +159,10 @@ const boundsFrom = (
     ? null
     : { min: BigInt(String(min)), max: BigInt(String(max)) }
 
+// Unrecognised reads as `inherit`: a row nobody can read is a row nobody can delete.
+const carrierModeFrom = (raw: string | number | null | undefined): CarrierMode =>
+  raw === 'off' || raw === 'priced' ? raw : 'inherit'
+
 const marketFrom = (raw: MarketRaw): AssetMarketRow => ({
   marketKey: String(raw.market_key),
   // NULL is the BTC leg, and `String(null)` would turn it into the four-letter
@@ -146,6 +185,12 @@ const marketFrom = (raw: MarketRaw): AssetMarketRow => ({
     : { buyBaseFeeBps: Number(raw.buy_base_fee_bps) }),
   sellBase: boundsFrom(raw.sell_base_min, raw.sell_base_max),
   buyBase: boundsFrom(raw.buy_base_min, raw.buy_base_max),
+  symbol: raw.symbol === null || raw.symbol === undefined ? null : String(raw.symbol),
+  servesOffer: Number(raw.serves_offer ?? 0) === 1,
+  servesRfq: Number(raw.serves_rfq ?? 1) === 1,
+  rfqSellBase: Number(raw.rfq_sell_base ?? 1) === 1,
+  rfqBuyBase: Number(raw.rfq_buy_base ?? 1) === 1,
+  carrierMode: carrierModeFrom(raw.carrier_mode),
   enabled: Number(raw.enabled) === 1,
   createdAt: Number(raw.created_at),
   updatedAt: Number(raw.updated_at),
@@ -159,37 +204,160 @@ const marketFrom = (raw: MarketRaw): AssetMarketRow => ({
 export const adminDbPath = (swapDbPath: string): string =>
   swapDbPath.endsWith('.sqlite') ? swapDbPath.replace(/\.sqlite$/, '-admin.sqlite') : `${swapDbPath}-admin`
 
-/** Added after the table shipped. The bps pair is NULLABLE: absent must stay
- * distinguishable from "equals fee_bps", or widening fee_bps would skip that side. */
-const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
-  ['sell_base_fee_flat', "TEXT NOT NULL DEFAULT '0'"],
-  ['buy_base_fee_flat', "TEXT NOT NULL DEFAULT '0'"],
-  ['sell_base_fee_bps', 'INTEGER'],
-  ['buy_base_fee_bps', 'INTEGER'],
+const MIGRATIONS: ReadonlyArray<readonly [string, ReadonlyArray<readonly [string, string]>]> = [
+  [
+    'admin_market',
+    [
+      ['sell_base_fee_flat', "TEXT NOT NULL DEFAULT '0'"],
+      ['buy_base_fee_flat', "TEXT NOT NULL DEFAULT '0'"],
+      ['sell_base_fee_bps', 'INTEGER'],
+      ['buy_base_fee_bps', 'INTEGER'],
+      ['symbol', 'TEXT'],
+      // What a row an OLDER binary inserted means on roll-forward: offers have
+      // always needed declaring, RFQ has always served any enabled one-leg row.
+      ['serves_offer', 'INTEGER NOT NULL DEFAULT 0'],
+      ['serves_rfq', 'INTEGER NOT NULL DEFAULT 1'],
+      ['rfq_sell_base', 'INTEGER NOT NULL DEFAULT 1'],
+      ['rfq_buy_base', 'INTEGER NOT NULL DEFAULT 1'],
+      ['carrier_mode', "TEXT NOT NULL DEFAULT 'inherit'"],
+    ],
+  ],
+  ['admin_action', [['revision', 'TEXT']]],
 ]
 
 export class AdminStore {
+  private repaired: readonly string[] = []
+
   private constructor(
     private readonly driver: SqlDriver,
     private readonly now: () => number,
   ) {}
 
-  static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<AdminStore> {
+  /** One operator-readable sentence per row the boot repair touched; empty on a healthy file. */
+  get repairedServing(): readonly string[] {
+    return this.repaired
+  }
+
+  /**
+   * `seed` absent means do not consult the ENVIRONMENT and do not mark. It does
+   * NOT mean "no writes": `exec(SCHEMA)` and `migrate()` run on every opener.
+   */
+  static async open(
+    driver: SqlDriver | string,
+    now: () => number = nowSeconds,
+    seed?: ServingSeed,
+  ): Promise<AdminStore> {
     const store = new AdminStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
     await store.driver.exec(SCHEMA)
     await store.migrate()
+    // MUST stay: the symbol index names a column the ALTER loop adds, so SCHEMA cannot carry it.
+    await store.driver.exec(MIGRATED_SCHEMA)
+    if (seed) await store.seedServing(seed)
+    // AFTER the seed, and unconditional: a pre-upgrade row is old, not unhealthy,
+    // and judging one before the seed resolves it reports a repair it overwrites.
+    await store.repairServing()
     return store
   }
 
+  /**
+   * Read the environment into the rows, ONCE. The marker is explicit (every
+   * candidate signal in the data is a supported state) and written in the SAME
+   * transaction, so no crash half-seeds rows beneath a marker saying they are
+   * done. `carrier_mode` is left out: `inherit` IS the environment's answer.
+   */
+  private async seedServing(seed: ServingSeed): Promise<void> {
+    const done = await this.driver.get('SELECT name FROM admin_migration WHERE name = ?', [MARKET_SERVING_SEED])
+    if (done) return
+    const rows = await this.listMarkets()
+    const byAsset = new Map(seed.tokens.map((token) => [token.assetId, token]))
+    const declaredForOffers = (row: AssetMarketRow): boolean =>
+      seed.offerMarkets.some(
+        (pair) => (pair.a === row.base && pair.b === row.quote) || (pair.a === row.quote && pair.b === row.base),
+      )
+    const taken = new Set<string>()
+    await this.driver.transaction(async () => {
+      for (const row of rows) {
+        const assetId = row.base !== null && row.quote !== null ? null : (row.base ?? row.quote)
+        const token = assetId === null ? undefined : byAsset.get(assetId)
+        const derived = assetId === null ? null : (token?.symbol ?? rfqSymbolFor(assetId))
+        // Fail CLOSED on a symbol an earlier row took, the answer `repairServing` gives: a second
+        // row carrying it violates idx_admin_market_symbol, and that throw is a boot nothing repairs.
+        const symbol = derived === null || taken.has(derived) ? null : derived
+        if (symbol !== null) taken.add(symbol)
+        const sellBase = symbol !== null && (token?.enabled.sell_base ?? true)
+        const buyBase = symbol !== null && (token?.enabled.buy_base ?? true)
+        await this.driver.run(
+          'UPDATE admin_market SET symbol = ?, serves_offer = ?, serves_rfq = ?, rfq_sell_base = ?, ' +
+            'rfq_buy_base = ? WHERE market_key = ?',
+          [
+            symbol,
+            declaredForOffers(row) ? 1 : 0,
+            // The DIRECTIONS, not the symbol: both closed is a row `checkServing` rejects.
+            sellBase || buyBase ? 1 : 0,
+            sellBase ? 1 : 0,
+            buyBase ? 1 : 0,
+            row.marketKey,
+          ],
+        )
+      }
+      await this.driver.run('INSERT INTO admin_migration (name, at) VALUES (?, ?)', [MARKET_SERVING_SEED, this.now()])
+    })
+  }
+
   private async migrate(): Promise<void> {
-    const columns = new Set(
-      (await this.driver.all<{ name: string }>('PRAGMA table_info(admin_market)')).map((c) => c.name),
-    )
-    for (const [column, type] of ADDED_COLUMNS) {
-      if (!columns.has(column)) {
-        await this.driver.exec(`ALTER TABLE admin_market ADD COLUMN ${column} ${type}`)
+    for (const [table, columns] of MIGRATIONS) {
+      const present = new Set(
+        (await this.driver.all<{ name: string }>(`PRAGMA table_info(${table})`)).map((c) => c.name),
+      )
+      for (const [column, type] of columns) {
+        if (!present.has(column)) {
+          await this.driver.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`)
+        }
       }
     }
+  }
+
+  /**
+   * Make every row's serving fields internally coherent, whatever wrote them.
+   * NOT marker-gated and NOT env-gated, unlike `seedServing`: `serves_rfq = 1`
+   * beside a NULL symbol is unreachable through `validateAssetMarket`, so it
+   * means only that a binary predating these columns INSERTed the row, which a
+   * rollback allows long after the marker was written. Throwing instead would
+   * be a permanent boot failure fixable only by hand SQL. Each row's repair is
+   * independent and idempotent, so no transaction wraps them.
+   * A row this fails closed STOPS quoting: `assetRfqMarketsFrom` drops it on
+   * `servesRfq`. The notes record what was written to the row, so an operator
+   * can see exactly what the boot touched.
+   */
+  private async repairServing(): Promise<void> {
+    const rows = await this.listMarkets()
+    const taken = new Set(rows.flatMap((row) => (row.symbol === null ? [] : [row.symbol])))
+    const notes: string[] = []
+    for (const row of rows) {
+      if (!row.servesRfq) continue
+      const assetId = row.base !== null && row.quote !== null ? null : (row.base ?? row.quote)
+      const close = (why: string): void => void notes.push(`${row.marketKey}: ${why}; wrote serves_rfq = 0 to the row.`)
+      if (assetId === null) {
+        close('an asset on both legs cannot be expressed over RFQ')
+      } else if (row.symbol === null) {
+        const symbol = rfqSymbolFor(assetId)
+        // Fail-OPEN, and only here: this is the symbol `assetRfqMarketsFrom` already derives for an un-named asset.
+        if (taken.has(symbol)) close(`symbol ${symbol} is already carried by another market`)
+        else {
+          taken.add(symbol)
+          notes.push(
+            `${row.marketKey}: no symbol stored; wrote symbol = ${symbol} to the row, the stem an older binary ` +
+              `served when ASSET_MARKETS named no token for the asset.`,
+          )
+          await this.driver.run('UPDATE admin_market SET symbol = ? WHERE market_key = ?', [symbol, row.marketKey])
+          continue
+        }
+      } else if (!row.rfqSellBase && !row.rfqBuyBase) {
+        close('both RFQ directions are closed')
+      } else continue
+      await this.driver.run('UPDATE admin_market SET serves_rfq = 0 WHERE market_key = ?', [row.marketKey])
+    }
+    this.repaired = notes
   }
 
   async close(): Promise<void> {
@@ -264,8 +432,9 @@ export class AdminStore {
     await this.driver.run(
       'INSERT INTO admin_market (market_key, base, quote, base_decimals, quote_decimals, feed_url, price_path, ' +
         'tolerance_bps, fee_bps, sell_base_fee_flat, buy_base_fee_flat, sell_base_fee_bps, buy_base_fee_bps, ' +
-        'sell_base_min, sell_base_max, buy_base_min, buy_base_max, enabled, created_at, updated_at) ' +
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+        'sell_base_min, sell_base_max, buy_base_min, buy_base_max, enabled, symbol, serves_offer, serves_rfq, ' +
+        'rfq_sell_base, rfq_buy_base, carrier_mode, created_at, updated_at) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
         'ON CONFLICT(market_key) DO UPDATE SET base = excluded.base, quote = excluded.quote, ' +
         'base_decimals = excluded.base_decimals, quote_decimals = excluded.quote_decimals, ' +
         'feed_url = excluded.feed_url, price_path = excluded.price_path, ' +
@@ -274,6 +443,9 @@ export class AdminStore {
         'sell_base_fee_bps = excluded.sell_base_fee_bps, buy_base_fee_bps = excluded.buy_base_fee_bps, ' +
         'sell_base_min = excluded.sell_base_min, sell_base_max = excluded.sell_base_max, ' +
         'buy_base_min = excluded.buy_base_min, buy_base_max = excluded.buy_base_max, ' +
+        'symbol = excluded.symbol, serves_offer = excluded.serves_offer, serves_rfq = excluded.serves_rfq, ' +
+        'rfq_sell_base = excluded.rfq_sell_base, rfq_buy_base = excluded.rfq_buy_base, ' +
+        'carrier_mode = excluded.carrier_mode, ' +
         'enabled = excluded.enabled, updated_at = excluded.updated_at',
       [
         key,
@@ -296,6 +468,12 @@ export class AdminStore {
         market.buyBase === null ? null : String(market.buyBase.min),
         market.buyBase === null ? null : String(market.buyBase.max),
         market.enabled ? 1 : 0,
+        market.symbol ?? null,
+        market.servesOffer ? 1 : 0,
+        market.servesRfq ? 1 : 0,
+        market.rfqSellBase ? 1 : 0,
+        market.rfqBuyBase ? 1 : 0,
+        market.carrierMode,
         at,
         at,
       ],
@@ -318,8 +496,8 @@ export class AdminStore {
 
   async recordAction(entry: AuditEntry): Promise<void> {
     await this.driver.run(
-      'INSERT INTO admin_action (at, action, target, params, outcome, detail) VALUES (?, ?, ?, ?, ?, ?)',
-      [this.now(), entry.action, entry.target, entry.params, entry.outcome, entry.detail],
+      'INSERT INTO admin_action (at, action, target, params, outcome, detail, revision) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [this.now(), entry.action, entry.target, entry.params, entry.outcome, entry.detail, entry.revision ?? null],
     )
   }
 
@@ -341,6 +519,7 @@ export class AdminStore {
       params: String(row.params),
       outcome: String(row.outcome) as 'ok' | 'error',
       detail: row.detail === null ? null : String(row.detail),
+      revision: row.revision === null ? null : String(row.revision),
     }))
   }
 }

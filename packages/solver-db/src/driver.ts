@@ -7,9 +7,12 @@
 
 import Database from 'better-sqlite3'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
-import type { SqlDriver } from '@arkade-os/solver-core/core/driver.js'
+import { UniqueConstraintError, type SqlDriver } from '@arkade-os/solver-core/core/driver.js'
 
 export type { SqlDriver } from '@arkade-os/solver-core/core/driver.js'
+
+// Two codes, one condition: SQLite words a primary-key violation as UNIQUE too.
+const SQLITE_UNIQUE_CODES = new Set(['SQLITE_CONSTRAINT_UNIQUE', 'SQLITE_CONSTRAINT_PRIMARYKEY'])
 
 /** Node driver: better-sqlite3 over a file path (or ':memory:' in tests). */
 export const betterSqliteDriver = (path: string): SqlDriver => {
@@ -26,7 +29,17 @@ export const betterSqliteDriver = (path: string): SqlDriver => {
     exec: async (sql) => {
       db.exec(sql)
     },
-    run: async (sql, params = []) => ({ changes: db.prepare(sql).run(...(params as never[])).changes }),
+    run: async (sql, params = []) => {
+      try {
+        return { changes: db.prepare(sql).run(...(params as never[])).changes }
+      } catch (error) {
+        const code = (error as { code?: unknown }).code
+        if (typeof code === 'string' && SQLITE_UNIQUE_CODES.has(code)) {
+          throw new UniqueConstraintError((error as Error).message, { cause: error })
+        }
+        throw error
+      }
+    },
     get: async <T>(sql: string, params: unknown[] = []) => db.prepare(sql).get(...(params as never[])) as T | undefined,
     all: async <T>(sql: string, params: unknown[] = []) => db.prepare(sql).all(...(params as never[])) as T[],
     transaction: async <T>(fn: () => Promise<T>): Promise<T> => {
@@ -71,6 +84,17 @@ export interface D1Like {
   exec(sql: string): Promise<unknown>
 }
 
+// Unlike better-sqlite3 above this half IS message matching and cannot honestly be
+// anything else: D1 throws a plain Error with no code, and buries the SQLite text in
+// `cause` on some versions — hence the walk. Its whole phrase, not the bare word, is
+// as narrow as the runtime lets this get.
+const d1SaysUnique = (error: unknown): boolean => {
+  for (let at: unknown = error, depth = 0; at instanceof Error && depth < 4; at = at.cause, depth++) {
+    if (/UNIQUE constraint failed/i.test(at.message)) return true
+  }
+  return false
+}
+
 /** Cloudflare Workers driver over a D1 binding. */
 export const d1Driver = (db: D1Like): SqlDriver => ({
   // D1's exec() dislikes multi-statement strings with comments, and it treats
@@ -86,11 +110,16 @@ export const d1Driver = (db: D1Like): SqlDriver => ({
     for (const statement of statements) await db.exec(statement)
   },
   run: async (sql, params = []) => {
-    const { meta } = await db
-      .prepare(sql)
-      .bind(...params)
-      .run()
-    return { changes: meta.changes }
+    try {
+      const { meta } = await db
+        .prepare(sql)
+        .bind(...params)
+        .run()
+      return { changes: meta.changes }
+    } catch (error) {
+      if (d1SaysUnique(error)) throw new UniqueConstraintError((error as Error).message, { cause: error })
+      throw error
+    }
   },
   get: async <T>(sql: string, params: unknown[] = []) => {
     // D1 says "no row" with null; the port says undefined, so both drivers

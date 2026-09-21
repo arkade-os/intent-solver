@@ -11,13 +11,14 @@
 import type { Hono } from 'hono'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
-import { applyOverrides, pendingRestartKeys } from '../settings.js'
+import { applyOverrides, pendingRestartKeys, LIVE_KEYS } from '../settings.js'
 import { settingsDrift } from '../drift.js'
-import { servedBy } from '../servedBy.js'
+import { marketCapability } from '../marketCapability.js'
 import { assetMarketKey, type AssetMarketBounds } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import type { AssetMarketRow } from '../db.js'
 import { probeBackends } from '../probes.js'
 import { consoleBalance, type AssetDetailSource } from '../assets.js'
+import { marketServingDivergence } from '../../ops/marketDivergence.js'
 import { poolPlan } from '../../ops/pool.js'
 import { requireLn, requireOnchain } from '../../ops/rails.js'
 import {
@@ -103,7 +104,7 @@ const marketCards = (rows: readonly AssetMarketRow[], services: AdminDeps['servi
     toleranceBps: row.toleranceBps,
     enabled: row.enabled,
     active: active.has(row.marketKey),
-    servedBy: servedBy(row, services),
+    ...marketCapability(row, services),
     sellBase: boundsJson(row.sellBase),
     buyBase: boundsJson(row.buyBase),
   }))
@@ -185,11 +186,24 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       // copy that will eventually point a mainnet swap at a signet explorer.
       explorers: NETWORKS[services.config.network].explorers,
       uptimeSeconds: Math.max(0, (deps.now?.() ?? Math.floor(Date.now() / 1000)) - deps.startedAt),
-      /** Settings overrides still need a restart. Market CRUD is live on this process. */
-      pendingRestart: settingsDrift(services.policy, effective, pendingRestartKeys(services.bootOverrides, overrides)),
+      /** What `routes/settings.ts`'s `pendingKeys` derives, independently — and for the reasons stated there. */
+      pendingRestart: settingsDrift(
+        services.bootPolicy,
+        effective,
+        pendingRestartKeys(services.bootOverrides, overrides),
+      ).filter((item) => !LIVE_KEYS.has(item.key)),
       restartEnabled: services.config.adminRestartEnabled,
       providerPubkey: services.providerPubkey,
       markets: marketCards(storedMarkets, services),
+      servingDivergence: [
+        // The boot repairs first: a row this process REWROTE outranks a row it
+        // merely disagrees with the environment about.
+        ...services.adminStore.repairedServing,
+        ...marketServingDivergence(storedMarkets, {
+          offerMarkets: services.config.offerMarkets,
+          tokens: services.config.assetRfqTokens,
+        }),
+      ],
       corridors: CORRIDORS.map((corridor) => ({
         corridor,
         enabled: effective.corridorEnabled[corridor],

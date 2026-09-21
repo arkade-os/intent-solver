@@ -2,15 +2,18 @@
  * Which asset markets this deployment serves over RFQ, and under which env
  * stems.
  *
- * Console rows are the live serve list. `ASSET_MARKETS` still names a symbol
- * (so env stems stay typeable) and can close a direction; it is not required
- * to quote. Unset still serves every enabled console market that RFQ can
- * express — one asset leg, at least one open direction.
+ * Console rows are the serve list, symbol included. `ASSET_MARKETS` is still
+ * parsed — it seeds those columns once — but nothing below reads it.
  */
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
-import { assetRfqEnvStem, type AssetRfqDirection } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import {
+  assetRfqEnvStem,
+  type AssetRfqDirection,
+  type ReadableAssetRfqMarket,
+} from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { rfqSymbolFor } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import type { AssetMarketPricingView, CarrierMode } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { assetCardMarkets, type AssetCardMarket } from '@arkade-os/solver-core/core/registryCard.js'
 import type { AssetMarket } from './assetOffers.js'
 
@@ -71,43 +74,38 @@ export const parseAssetRfqTokens = (
   })
 }
 
-// 12-char stem: issuance prefix plus gidx. First-11-hex alone collides two
-// assets from the same tx with different group indexes.
-const rfqSymbolFor = (assetId: string): string =>
-  `A${assetId.slice(0, 7).toUpperCase()}${assetId.slice(64).toUpperCase()}`
+/** What `carrier_mode` resolves against: the chain's dust floor and the deployment default. */
+export interface AssetRfqCarrier {
+  dustSats: bigint
+  /** `ASSET_CARRIER_PRICING`, which `'inherit'` follows. */
+  pricedByDefault: boolean
+}
+
+export const carrierSatsFor = (mode: CarrierMode, carrier: AssetRfqCarrier): bigint => {
+  const priced = mode === 'inherit' ? carrier.pricedByDefault : mode === 'priced'
+  return priced ? carrier.dustSats : 0n
+}
 
 /**
- * Console rows as RFQ markets. `tokens` supply a typeable symbol and can close
- * a direction; a named asset with no console row is omitted rather than taking
- * the process down — the row is what the dashboard adds next.
- *
- * Unbounded or env-closed directions become `{ min: 0n, max: 0n }` (refuse by
- * amount) rather than an unbounded payout. Both directions closed, or an
- * asset-to-asset pair the covenant cannot express, drops the market.
+ * A closed direction becomes `{ min: 0n, max: 0n }` — registered, refusing by
+ * amount — not an unbounded payout. The reader for a hand-edited database:
+ * `validateAssetMarket` already refuses an incoherent row at write time.
  */
 export const assetRfqMarketsFrom = (
-  tokens: readonly AssetRfqToken[],
   pricing: readonly AssetMarketPricingView[],
-): readonly AssetRfqMarket[] => {
-  const byAsset = new Map(tokens.map((token) => [token.assetId, token]))
-  return pricing.flatMap((market) => {
+  carrier: AssetRfqCarrier,
+): readonly AssetRfqMarket[] =>
+  pricing.flatMap((market) => {
+    if (!market.servesRfq || market.symbol === null) return []
     if (market.base !== null && market.quote !== null) return []
-    const assetId = market.base ?? market.quote
-    if (!assetId) return []
-    const token = byAsset.get(assetId)
-    const symbol = token?.symbol ?? rfqSymbolFor(assetId)
-    const boundsFor = (direction: AssetRfqDirection) => {
-      if (token && !token.enabled[direction]) return CLOSED
-      return (direction === 'sell_base' ? market.sellBase : market.buyBase) ?? CLOSED
-    }
-    const sellBase = boundsFor('sell_base')
-    const buyBase = boundsFor('buy_base')
+    const sellBase = market.rfqSellBase ? (market.sellBase ?? CLOSED) : CLOSED
+    const buyBase = market.rfqBuyBase ? (market.buyBase ?? CLOSED) : CLOSED
     if (sellBase.max === 0n && buyBase.max === 0n) return []
     return [
       {
         base: market.base,
         quote: market.quote,
-        symbol,
+        symbol: market.symbol,
         baseDecimals: market.baseDecimals,
         quoteDecimals: market.quoteDecimals,
         feeBps: market.feeBps,
@@ -119,28 +117,57 @@ export const assetRfqMarketsFrom = (
         buyBase,
         feedUrl: market.feedUrl,
         pricePath: market.pricePath,
+        carrierSats: carrierSatsFor(market.carrierMode, carrier),
       },
     ]
   })
-}
+
+/** The offer path's serve list: the row IS the pricing, so the declaration is the whole filter. */
+export const offerMarketsFrom = (pricing: readonly AssetMarketPricingView[]): readonly AssetMarket[] =>
+  pricing.filter((market) => market.servesOffer).map((market) => ({ a: market.base, b: market.quote }))
+
+/**
+ * This market's pair, in EITHER order: a configured market is oriented by its
+ * console row and a recovered one by a swap row, so an ordered compare here
+ * registers one pair twice — which `createCorridorReaderSet` refuses.
+ */
+const covers = (market: ReadableAssetRfqMarket, from: string | null, to: string | null): boolean =>
+  (market.base === from && market.quote === to) || (market.base === to && market.quote === from)
 
 /** Serving list plus previous markets that still have a non-terminal row. */
 export const retainReadableMarkets = (
-  serving: readonly AssetRfqMarket[],
-  previous: readonly AssetRfqMarket[],
+  serving: readonly ReadableAssetRfqMarket[],
+  previous: readonly ReadableAssetRfqMarket[],
   live: readonly { fromAssetId: string | null; toAssetId: string | null }[],
-): readonly AssetRfqMarket[] => [
+): readonly ReadableAssetRfqMarket[] => [
   ...serving,
   ...previous.filter(
     (market) =>
-      !serving.some((row) => row.base === market.base && row.quote === market.quote) &&
-      live.some(
-        (row) =>
-          (row.fromAssetId === market.base && row.toAssetId === market.quote) ||
-          (row.fromAssetId === market.quote && row.toAssetId === market.base),
-      ),
+      !serving.some((row) => covers(row, market.base, market.quote)) &&
+      live.some((row) => covers(market, row.fromAssetId, row.toAssetId)),
   ),
 ]
+
+/**
+ * The readable list plus a market per live pair nothing in it covers — what a
+ * RESTART needs and {@link retainReadableMarkets} cannot give it, carrying a
+ * market forward from a previous list that at boot does not exist. The symbol
+ * is derived: a deleted market has no row to read one off, and it reaches only
+ * `descriptor.envStem`, which no reader path consults.
+ */
+export const recoverReadableMarkets = (
+  readable: readonly ReadableAssetRfqMarket[],
+  live: readonly { fromAssetId: string | null; toAssetId: string | null }[],
+): readonly ReadableAssetRfqMarket[] => {
+  const recovered: ReadableAssetRfqMarket[] = []
+  for (const row of live) {
+    const assetId = row.fromAssetId ?? row.toAssetId
+    if (assetId === null) continue
+    if ([...readable, ...recovered].some((market) => covers(market, row.fromAssetId, row.toAssetId))) continue
+    recovered.push({ base: row.fromAssetId, quote: row.toAssetId, symbol: rfqSymbolFor(assetId) })
+  }
+  return recovered.length === 0 ? readable : [...readable, ...recovered]
+}
 
 type Bounds = { min: bigint; max: bigint }
 

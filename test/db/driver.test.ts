@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest'
 import Database from 'better-sqlite3'
-import { d1Driver, type D1Like } from '@arkade-os/solver-corridors/db/driver.js'
+import { betterSqliteDriver, d1Driver, type D1Like } from '@arkade-os/solver-corridors/db/driver.js'
+import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { SwapStore, type QuoteRecord } from '@arkade-os/solver-corridors/db/swaps.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 
@@ -52,6 +53,7 @@ const quote = (over: Partial<QuoteRecord> = {}): QuoteRecord => ({
   paymentHash: 'a'.repeat(64),
   amountSats: 500,
   invoiceExpiresAt: clock + 3600,
+  quotedRefundDeadline: clock + 7200,
   refundLocktime: clock + 7200,
   senderPubkey: '01'.repeat(32),
   receiverPubkey: '02'.repeat(32),
@@ -73,6 +75,28 @@ beforeEach(async () => {
   // open() runs the multi-statement SCHEMA through the driver's exec, which is
   // exactly the split-and-run-one-at-a-time path a real D1 needs.
   store = await SwapStore.open(d1Driver(fakeD1(db)), () => clock)
+})
+
+describe('SqlDriver.run normalises a refused UNIQUE write', () => {
+  const drivers = [
+    ['betterSqliteDriver', () => betterSqliteDriver(':memory:')],
+    ['d1Driver', () => d1Driver(fakeD1(openDb()))],
+  ] as const
+
+  it.each(drivers)('%s', async (_name, make) => {
+    const driver = make()
+    await driver.exec(`CREATE TABLE t (id TEXT PRIMARY KEY, h TEXT UNIQUE, note TEXT NOT NULL)`)
+    const insert = (id: string, h: string, note: string | null) =>
+      driver.run(`INSERT INTO t (id, h, note) VALUES (?, ?, ?)`, [id, h, note])
+    await insert('1', 'a', 'x')
+
+    const refused = await insert('2', 'a', 'x').catch((e: unknown) => e)
+    expect(refused).toBeInstanceOf(UniqueConstraintError)
+    expect((refused as Error).message).toMatch(/UNIQUE constraint failed: t\.h/)
+    await expect(insert('1', 'b', 'x')).rejects.toBeInstanceOf(UniqueConstraintError) // primary key
+    await expect(insert('3', 'c', null)).rejects.not.toBeInstanceOf(UniqueConstraintError) // not null
+    await driver.close()
+  })
 })
 
 describe('the same store behaviour through the D1 driver', () => {
