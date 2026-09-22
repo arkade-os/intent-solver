@@ -23,7 +23,9 @@
  *              NOTHING submitted, and no solver capital is committed yet
  * - `filling`  `fulfill` submitted — the one EXPOSED state
  * - `filled`   the fill landed; the client is paid and the deposit is ours
- * - `refused`  declined, or the quote lapsed unfunded; no exposure ever existed
+ * - `refused`  declined, the quote lapsed unfunded, or (only via
+ *              `refuseNeverSubmittedCarrierAttempt`) a carrier fill durably
+ *              proven never submitted; no exposure ever existed
  * - `stuck`    `fulfill` failed or its outcome is unknown; needs a human
  *
  * THERE IS NO `refunded` STATE, and its absence is the point. § 7.2's refund is
@@ -36,6 +38,13 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
+import {
+  decodeCarrierAttempt,
+  decodeCarrierAttemptOrNull,
+  detachJsonObject,
+  encodeCarrierAttempt,
+  type CarrierAttempt,
+} from './carrierAttempt.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
@@ -81,7 +90,8 @@ const LEGAL_EDGES: Record<AssetRfqSwapState, readonly AssetRfqSwapState[]> = {
   funded: ['filling', 'refused'],
   // No edge back to `funded`. Once `fulfill` is submitted its outcome is either
   // known or unknown, and "unknown" is `stuck` — never a retry, which is how a
-  // solver double-spends its own float.
+  // solver double-spends its own float. `refused` is absent too: it is reached
+  // only through the one method that durably proves nothing was sent.
   filling: ['filled', 'stuck'],
   filled: [],
   refused: [],
@@ -187,6 +197,11 @@ export interface AssetRfqQuoteRecord {
   quotePrice?: { impliedMantissa: bigint; scale: number; givesBase: boolean }
   /** Spread at the call site; omitted means the market's own pass-through. */
   carrierTerms?: AssetRfqCarrierTerms
+}
+
+export interface CarrierAttemptRecord {
+  row: AssetRfqSwapRow
+  attempt: CarrierAttempt
 }
 
 const decimal = (value: unknown, field: string): bigint => {
@@ -316,7 +331,8 @@ const COLUMNS = `
   quote_gives_base       INTEGER,
   fill_price_mantissa    TEXT,
   fill_price_scale       INTEGER,
-  carrier_terms          TEXT
+  carrier_terms          TEXT,
+  carrier_attempt        TEXT
 `
 
 const SCHEMA = `
@@ -444,6 +460,7 @@ export class AssetRfqSwapStore {
       ['fill_price_mantissa', 'TEXT'],
       ['fill_price_scale', 'INTEGER'],
       ['carrier_terms', 'TEXT'],
+      ['carrier_attempt', 'TEXT'],
     ] as const) {
       if (!existing.has(column)) await this.driver.exec(`ALTER TABLE asset_rfq_swap ADD COLUMN ${column} ${type}`)
     }
@@ -679,6 +696,118 @@ export class AssetRfqSwapStore {
     }
     const to: AssetRfqSwapState = EXPOSED.includes(from) ? 'stuck' : 'refused'
     await this.transition(id, from, to, { failure_reason: reason })
+  }
+
+  /** Its own read, because {@link AssetRfqSwapRow} is projected to the client. */
+  async readCarrierAttempt(id: string): Promise<CarrierAttempt | null> {
+    const raw = await this.driver.get<Raw>(`SELECT carrier_attempt FROM asset_rfq_swap WHERE id = ?`, [id])
+    if (!raw) throw new Error(`no asset rfq swap ${id}`)
+    return decodeCarrierAttemptOrNull(raw.carrier_attempt)
+  }
+
+  /**
+   * Pin the attempt BEFORE the first carrier quote is asked for. Null ->
+   * `prepared`, once, and only while this row's own fill is in flight.
+   *
+   * The recycle check reads `carrier_terms` separately and the predicate does
+   * not: the terms are fixed at insert and no method can move them, so that
+   * read cannot go stale — while the two things that CAN move underneath this
+   * caller, the parent state and the checkpoint, are in the one predicate.
+   */
+  async prepareCarrierAttempt(id: string, snapshot: unknown): Promise<boolean> {
+    const attempt: CarrierAttempt = { phase: 'prepared', snapshot: detachJsonObject(snapshot, 'snapshot') }
+    const terms = (await this.get(id)).carrierTerms
+    if (terms?.mode !== 'recycle') {
+      throw new Error(`asset rfq swap ${id} was not quoted as a recycle, so it has no carrier attempt to make`)
+    }
+    const result = await this.driver.run(
+      `UPDATE asset_rfq_swap SET carrier_attempt = ? WHERE id = ? AND state = 'filling' AND carrier_attempt IS NULL`,
+      [encodeCarrierAttempt(attempt), id],
+    )
+    return result.changes === 1
+  }
+
+  async bindCarrierAttempt(id: string, expected: CarrierAttempt, binding: unknown): Promise<boolean> {
+    const bound = detachJsonObject(binding, 'binding')
+    if (expected.phase !== 'prepared') {
+      throw new Error(`carrier attempt ${id} is '${expected.phase}', not prepared: its binding is already fixed`)
+    }
+    return this.casCarrierAttempt(id, expected, { phase: 'quoted', snapshot: expected.snapshot, binding: bound })
+  }
+
+  async markCarrierAttemptSubmitting(id: string, expected: CarrierAttempt): Promise<boolean> {
+    if (expected.phase !== 'quoted') {
+      throw new Error(`carrier attempt ${id} is '${expected.phase}', not quoted: there is no verified quote to submit`)
+    }
+    return this.casCarrierAttempt(id, expected, { ...expected, phase: 'submitting' })
+  }
+
+  /** Records WHICH transaction the caller proved; it proves nothing itself. */
+  async settleCarrierAttempt(id: string, expected: CarrierAttempt, fillTxid: string): Promise<boolean> {
+    if (expected.phase !== 'submitting') {
+      throw new Error(`carrier attempt ${id} is '${expected.phase}', not submitting: nothing was sent to settle`)
+    }
+    return this.casCarrierAttempt(id, expected, { ...expected, phase: 'settled', fillTxid })
+  }
+
+  /**
+   * The one `filling` -> `refused` this lifecycle has, and it is not an edge:
+   * `LEGAL_EDGES` still forbids the generic move, because a row that MAY have
+   * submitted keeps its liability and ends `stuck`.
+   *
+   * ONE statement. The terminal checkpoint and the parent row move together or
+   * not at all: `SqlDriver.transaction` is best effort on D1, and a half-applied
+   * refusal would either lose the proof or leave a live attempt behind it.
+   */
+  async refuseNeverSubmittedCarrierAttempt(id: string, expected: CarrierAttempt, reason: string): Promise<boolean> {
+    if (expected.phase !== 'prepared' && expected.phase !== 'quoted') {
+      throw new Error(`carrier attempt ${id} is '${expected.phase}', which is not proven never-submitted`)
+    }
+    const result = await this.driver.run(
+      `UPDATE asset_rfq_swap SET carrier_attempt = ?, state = 'refused', failure_reason = ?, updated_at = ?
+         WHERE id = ? AND state = 'filling' AND carrier_attempt = ?`,
+      [
+        encodeCarrierAttempt({ ...expected, phase: 'not_submitted' }),
+        reason,
+        this.now(),
+        id,
+        encodeCarrierAttempt(expected),
+      ],
+    )
+    if (result.changes !== 1) return false
+    // After the fact it records, so a failure here is loud and leaves the
+    // terminal state standing — it can neither undo it nor reopen the attempt.
+    await this.recordEvent(id, 'filling', 'refused', null)
+    return true
+  }
+
+  /**
+   * Every attempt that can still hold ambiguous liability. NOT `NON_TERMINAL`:
+   * a `stuck` parent is precisely the row whose outcome is unknown, and a
+   * `settled` attempt on a parent that never reached `filled` is the window
+   * between those two writes. Nothing here expires.
+   */
+  async listUnresolvedCarrierAttempts(): Promise<CarrierAttemptRecord[]> {
+    const raws = await this.driver.all<Raw>(
+      `SELECT * FROM asset_rfq_swap WHERE carrier_attempt IS NOT NULL ORDER BY created_at ASC, id ASC`,
+    )
+    const records: CarrierAttemptRecord[] = []
+    for (const raw of raws) {
+      const attempt = decodeCarrierAttempt(raw.carrier_attempt)
+      if (attempt.phase === 'not_submitted') continue
+      const row = toRow(raw)
+      if (attempt.phase === 'settled' && row.state === 'filled') continue
+      records.push({ row, attempt })
+    }
+    return records
+  }
+
+  private async casCarrierAttempt(id: string, expected: CarrierAttempt, next: CarrierAttempt): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE asset_rfq_swap SET carrier_attempt = ? WHERE id = ? AND state = 'filling' AND carrier_attempt = ?`,
+      [encodeCarrierAttempt(next), id, encodeCarrierAttempt(expected)],
+    )
+    return result.changes === 1
   }
 
   private async recordEvent(
