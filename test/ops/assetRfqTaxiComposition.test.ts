@@ -297,6 +297,11 @@ describe('createServices reaches Taxi through exactly one guarded seam', () => {
     expect(body()).toContain('inputExpiryMargin: BigInt(arkade.advertisedExitDelay)')
   })
 
+  it('anchors the floor on the UNCACHED tip, never the reader the LN services share', () => {
+    expect(body()).toContain('carrierChainTip(createEsploraClient(config.chainTipEsploraUrl)).height')
+    expect(body()).not.toMatch(/tipHeight:[^\n]*\bchainTip\b/)
+  })
+
   it('restores the pins before the service that ticks them exists', () => {
     const restore = 'await restoreCarrierAttemptPins('
     const service = 'new AssetRfqSwapService('
