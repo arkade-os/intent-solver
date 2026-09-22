@@ -783,6 +783,7 @@ const RECEIVER_QUOTE: ReceiveCarrierQuote = {
   loanSats: 329n,
   receiptSats: 1n,
   serviceFareSats: 0n,
+  inputExpiryFloor: { kind: 'height', value: 1_000_000n },
   expiresAt: 5_000,
 }
 
@@ -798,12 +799,13 @@ const RAGGED_RECEIVER_QUOTE: ReceiveCarrierQuote = {
 const adapter = (
   over: Partial<ReceiveCarrierQuote> = {},
   calls?: unknown[],
-  actions: Partial<Pick<ReceiveCarrierQuotes, 'settle' | 'reconcile'>> = {},
+  actions: Partial<Pick<ReceiveCarrierQuotes, 'available' | 'settle' | 'reconcile'>> = {},
 ) => ({
   resolve: async (request: unknown) => {
     calls?.push(request)
     return { ...RECEIVER_QUOTE, ...over }
   },
+  available: actions.available ?? (async () => new Map([[ASSET_A, 10n ** 18n]])),
   settle: actions.settle ?? (async () => 'fb'.repeat(32)),
   reconcile: actions.reconcile ?? (async () => ({ status: 'pending' as const })),
 })
@@ -861,6 +863,83 @@ describe('profile.carrier — explicit modes', () => {
       pricedSats: 5n,
       expiresAt: 5_000,
     })
+  })
+
+  it.each([
+    ['height', { kind: 'height', value: 499_999_999n }],
+    ['time', { kind: 'time', value: 500_000_000n }],
+    ['maximum time', { kind: 'time', value: 4_294_967_295n }],
+  ] as const)('accepts a recycle with a valid %s input expiry floor', async (_why, inputExpiryFloor) => {
+    const { service } = await harness({ receiveCarrierQuotes: adapter({ inputExpiryFloor }) })
+    expect(await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))).toMatchObject({
+      accepted: true,
+    })
+  })
+
+  it('uses request-bound carrier inventory after pricing without reading generic balance', async () => {
+    let clock = 1_000
+    const asks: unknown[] = []
+    const available = vi.fn(async (ask: unknown) => {
+      asks.push(ask)
+      return new Map([[ASSET_A, 10n ** 18n]])
+    })
+    const balance = vi.fn(async () => new Map([[ASSET_A, 0n]]))
+    const { service } = await harness({
+      now: () => clock,
+      fetchPrice: async () => {
+        clock = 1_005
+        return { mantissa: 100_000n, scale: 0 }
+      },
+      balance,
+      receiveCarrierQuotes: adapter({}, undefined, { available }),
+    })
+
+    expect(await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))).toMatchObject({
+      accepted: true,
+    })
+    expect(asks).toEqual([
+      {
+        quoteId: 'q-1',
+        makerPkScript: PK_SCRIPT,
+        makerPublicKey: XONLY,
+        assetId: ASSET_A,
+        now: 1_005,
+      },
+    ])
+    expect(balance).not.toHaveBeenCalled()
+  })
+
+  it('refuses a recycle when carrier inventory is empty despite a rich generic balance', async () => {
+    const balance = vi.fn(async () => new Map([[ASSET_A, 10n ** 18n]]))
+    const { service, store } = await harness({
+      balance,
+      receiveCarrierQuotes: adapter({}, undefined, { available: async () => new Map() }),
+    })
+
+    expect(await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))).toMatchObject({
+      accepted: false,
+      reason: 'insufficient_inventory',
+    })
+    expect(balance).not.toHaveBeenCalled()
+    expect(await store.listNonTerminal()).toHaveLength(0)
+  })
+
+  it('refuses and reports a carrier inventory read failure at quote admission', async () => {
+    const errors: { id: string; error: unknown }[] = []
+    const failure = new Error('carrier inventory unavailable')
+    const { service, store } = await harness({
+      receiveCarrierQuotes: adapter({}, undefined, {
+        available: async () => Promise.reject(failure),
+      }),
+      onError: (id, error) => errors.push({ id, error }),
+    })
+
+    expect(await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))).toMatchObject({
+      accepted: false,
+      reason: 'price_unavailable',
+    })
+    expect(errors).toEqual([{ id: 'carrier', error: failure }])
+    expect(await store.listNonTerminal()).toHaveLength(0)
   })
 
   it.each([
@@ -1024,13 +1103,14 @@ describe('profile.carrier — explicit modes', () => {
     expect(await store.listNonTerminal()).toHaveLength(0)
   })
 
-  it('fails an expired recycle that the float read outlived', async () => {
+  it('fails an expired recycle that the carrier inventory read outlived', async () => {
     const { service, store, tick } = await harness({
-      receiveCarrierQuotes: adapter({ expiresAt: 1_004 }),
-      balance: async () => {
-        tick(1_004)
-        return new Map([[ASSET_A, 10n ** 18n]])
-      },
+      receiveCarrierQuotes: adapter({ expiresAt: 1_004 }, undefined, {
+        available: async () => {
+          tick(1_004)
+          return new Map([[ASSET_A, 10n ** 18n]])
+        },
+      }),
     })
     const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
     expect(outcome).toMatchObject({ accepted: false, reason: 'price_unavailable' })
@@ -1080,18 +1160,49 @@ describe('profile.carrier — explicit modes', () => {
 describe('profile.carrier — persisted settlement mode', () => {
   const recycleRequest = () => request({ carrier: { mode: 'recycle', quoteId: 'q-1' } })
 
-  it('settles a persisted recycle exactly once through the carrier adapter', async () => {
+  it('settles a persisted recycle from request-bound carrier inventory without reading generic balance', async () => {
+    let clock = 1_000
     const direct = vi.fn(async () => 'fa'.repeat(32))
     const settle = vi.fn<ReceiveCarrierQuotes['settle']>(async () => 'fb'.repeat(32))
-    const receiveCarrierQuotes = adapter({}, undefined, { settle })
-    const { service, store } = await harness({ depositAt: async () => deposit(), settle: direct, receiveCarrierQuotes })
+    const asks: unknown[] = []
+    const available = vi.fn(async (ask: unknown) => {
+      asks.push(ask)
+      return new Map([[ASSET_A, 10n ** 18n]])
+    })
+    const balance = vi.fn(async () => new Map([[ASSET_A, 0n]]))
+    const receiveCarrierQuotes = adapter({}, undefined, { available, settle })
+    const { service, store } = await harness({
+      now: () => clock,
+      depositAt: async () => deposit(),
+      balance,
+      settle: direct,
+      receiveCarrierQuotes,
+    })
     const mark = vi.spyOn(store, 'recordFillMark')
 
     await service.quote(recycleRequest())
     await service.tick('swap-1')
+    clock = 1_010
     await service.tick('swap-1')
     await service.tick('swap-1')
 
+    expect(asks).toEqual([
+      {
+        quoteId: 'q-1',
+        makerPkScript: PK_SCRIPT,
+        makerPublicKey: XONLY,
+        assetId: ASSET_A,
+        now: 1_000,
+      },
+      {
+        quoteId: 'q-1',
+        makerPkScript: PK_SCRIPT,
+        makerPublicKey: XONLY,
+        assetId: ASSET_A,
+        now: 1_010,
+      },
+    ])
+    expect(balance).not.toHaveBeenCalled()
     expect(settle).toHaveBeenCalledTimes(1)
     expect(settle.mock.calls[0]![0].carrierTerms?.mode).toBe('recycle')
     expect(direct).not.toHaveBeenCalled()
@@ -1103,9 +1214,12 @@ describe('profile.carrier — persisted settlement mode', () => {
     for (const carrier of [undefined, { mode: 'purchase' as const }]) {
       const direct = vi.fn(async () => 'fa'.repeat(32))
       const dedicated = vi.fn(async () => 'fb'.repeat(32))
-      const receiveCarrierQuotes = adapter({}, undefined, { settle: dedicated })
+      const available = vi.fn(async () => new Map([[ASSET_A, 10n ** 18n]]))
+      const balance = vi.fn(async () => new Map([[ASSET_A, 10n ** 18n]]))
+      const receiveCarrierQuotes = adapter({}, undefined, { available, settle: dedicated })
       const { service, store } = await harness({
         depositAt: async () => deposit(),
+        balance,
         settle: direct,
         receiveCarrierQuotes,
       })
@@ -1116,8 +1230,117 @@ describe('profile.carrier — persisted settlement mode', () => {
 
       expect(direct).toHaveBeenCalledTimes(1)
       expect(dedicated).not.toHaveBeenCalled()
+      expect(balance).toHaveBeenCalledTimes(2)
+      expect(available).not.toHaveBeenCalled()
       expect((await store.get('swap-1')).state).toBe('filled')
     }
+  })
+
+  it('refuses a funded recycle when carrier inventory drained despite a rich generic balance', async () => {
+    const direct = vi.fn(async () => 'fa'.repeat(32))
+    const dedicated = vi.fn(async () => 'fb'.repeat(32))
+    const available = vi
+      .fn<ReceiveCarrierQuotes['available']>()
+      .mockResolvedValueOnce(new Map([[ASSET_A, 10n ** 18n]]))
+      .mockResolvedValue(new Map())
+    const balance = vi.fn(async () => new Map([[ASSET_A, 10n ** 18n]]))
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      balance,
+      settle: direct,
+      receiveCarrierQuotes: adapter({}, undefined, { available, settle: dedicated }),
+    })
+
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(balance).not.toHaveBeenCalled()
+    expect(direct).not.toHaveBeenCalled()
+    expect(dedicated).not.toHaveBeenCalled()
+    expect(await store.get('swap-1')).toMatchObject({
+      state: 'refused',
+      failureReason: 'not filled: insufficient_inventory',
+    })
+  })
+
+  it('refuses and reports a carrier inventory read failure before filling', async () => {
+    const failure = new Error('carrier inventory unavailable')
+    const available = vi
+      .fn<ReceiveCarrierQuotes['available']>()
+      .mockResolvedValueOnce(new Map([[ASSET_A, 10n ** 18n]]))
+      .mockRejectedValue(failure)
+    const direct = vi.fn(async () => 'fa'.repeat(32))
+    const dedicated = vi.fn(async () => 'fb'.repeat(32))
+    const errors: { id: string; error: unknown }[] = []
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      settle: direct,
+      receiveCarrierQuotes: adapter({}, undefined, { available, settle: dedicated }),
+      onError: (id, error) => errors.push({ id, error }),
+    })
+
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(errors).toEqual([{ id: 'swap-1', error: failure }])
+    expect(direct).not.toHaveBeenCalled()
+    expect(dedicated).not.toHaveBeenCalled()
+    expect(await store.get('swap-1')).toMatchObject({ state: 'refused' })
+  })
+
+  it('refuses before filling when the deadline passes inside carrier inventory admission', async () => {
+    let clock = 1_000
+    const available = vi
+      .fn<ReceiveCarrierQuotes['available']>()
+      .mockResolvedValueOnce(new Map([[ASSET_A, 10n ** 18n]]))
+      .mockImplementationOnce(async () => {
+        clock = 1_031
+        return new Map([[ASSET_A, 10n ** 18n]])
+      })
+    const direct = vi.fn(async () => 'fa'.repeat(32))
+    const dedicated = vi.fn(async () => 'fb'.repeat(32))
+    const { service, store } = await harness({
+      now: () => clock,
+      depositAt: async () => deposit(),
+      settle: direct,
+      receiveCarrierQuotes: adapter({}, undefined, { available, settle: dedicated }),
+    })
+
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(direct).not.toHaveBeenCalled()
+    expect(dedicated).not.toHaveBeenCalled()
+    expect(await store.get('swap-1')).toMatchObject({
+      state: 'refused',
+      failureReason: 'not filled: quote_expired',
+    })
+  })
+
+  it('refuses a funded recycle when the adapter has only the former three methods', async () => {
+    const direct = vi.fn(async () => 'fa'.repeat(32))
+    const dedicated = vi.fn(async () => 'fb'.repeat(32))
+    const complete = adapter({}, undefined, { settle: dedicated })
+    const { service, store, deps } = await harness({
+      depositAt: async () => deposit(),
+      settle: direct,
+      receiveCarrierQuotes: complete,
+    })
+
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    const { available: _available, ...threeMethods } = complete
+    await new AssetRfqSwapService({
+      ...deps,
+      receiveCarrierQuotes: threeMethods as unknown as ReceiveCarrierQuotes,
+    }).tick('swap-1')
+
+    expect(direct).not.toHaveBeenCalled()
+    expect(dedicated).not.toHaveBeenCalled()
+    expect(await store.get('swap-1')).toMatchObject({ state: 'refused' })
   })
 
   it('refuses a funded recycle when the adapter disappeared before spending', async () => {
@@ -1294,6 +1517,14 @@ describe('profile.carrier — refusals', () => {
       'resolve and settle only',
       (resolve: ReceiveCarrierQuotes['resolve']) => ({ resolve, settle: async () => 'fb'.repeat(32) }),
     ],
+    [
+      'resolve, settle, and reconcile only',
+      (resolve: ReceiveCarrierQuotes['resolve']) => ({
+        resolve,
+        settle: async () => 'fb'.repeat(32),
+        reconcile: async () => ({ status: 'pending' as const }),
+      }),
+    ],
   ])('refuses a %s adapter before any quote dependency is called', async (_why, partial) => {
     const resolve = vi.fn<ReceiveCarrierQuotes['resolve']>(async () => RECEIVER_QUOTE)
     const fetchPrice = vi.fn(async () => ({ mantissa: 100_000n, scale: 0 }))
@@ -1372,6 +1603,25 @@ describe('profile.carrier — refusals', () => {
     expect(await store.listNonTerminal()).toHaveLength(0)
   })
 
+  it.each([
+    ['missing', undefined],
+    ['unknown kind', { kind: 'blocks', value: 1n }],
+    ['non-bigint value', { kind: 'height', value: 1 }],
+    ['zero height', { kind: 'height', value: 0n }],
+    ['height in the time domain', { kind: 'height', value: 500_000_000n }],
+    ['time in the height domain', { kind: 'time', value: 499_999_999n }],
+    ['time above uint32', { kind: 'time', value: 4_294_967_296n }],
+  ])('refuses a recycle with a %s input expiry floor', async (_why, inputExpiryFloor) => {
+    const { service, store } = await harness({
+      receiveCarrierQuotes: adapter({ inputExpiryFloor } as Partial<ReceiveCarrierQuote>),
+    })
+    expect(await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))).toMatchObject({
+      accepted: false,
+      reason: 'price_unavailable',
+    })
+    expect(await store.listNonTerminal()).toHaveLength(0)
+  })
+
   it('calls the adapter only after the pair and market are known', async () => {
     const calls: unknown[] = []
     const { service } = await harness({ receiveCarrierQuotes: adapter({}, calls) })
@@ -1415,6 +1665,7 @@ describe('profile.carrier — no per-market bleed', () => {
           assetId: ask.assetId,
           makerPublicKey: ask.makerPublicKey,
         }),
+        available: async (ask: { assetId: string }) => new Map([[ask.assetId, 10n ** 18n]]),
       },
     })
     const purchased = await service.quote(request({ carrier: { mode: 'purchase' } }))

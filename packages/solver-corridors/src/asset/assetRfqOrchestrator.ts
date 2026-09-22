@@ -117,6 +117,8 @@ export interface ReceiveCarrierQuote {
   loanSats: bigint
   receiptSats: bigint
   serviceFareSats: bigint
+  /** Immutable Bitcoin locktime domain and minimum expiry for eligible inputs. */
+  inputExpiryFloor: Readonly<{ kind: 'height' | 'time'; value: bigint }>
   /** Unix seconds. Read against `now`, so a stale quote cannot be priced. */
   expiresAt: number
 }
@@ -133,6 +135,11 @@ export type ReceiveCarrierReconcileOutcome = { status: 'pending' } | { status: '
 
 export interface ReceiveCarrierQuotes {
   resolve: (request: ReceiveCarrierQuoteRequest) => Promise<ReceiveCarrierQuote>
+  /** Rereads and verifies the named quote, then returns fresh synchronized
+   * ContractManager spendable inventory with known same-domain expiry at least
+   * its input floor, excluding reservations. Admission only: selection,
+   * pinning, and rechecks belong to settlement. */
+  available: (request: ReceiveCarrierQuoteRequest) => Promise<ReadonlyMap<AssetLeg, bigint>>
   settle: (row: AssetRfqSwapRow) => Promise<string>
   /** Read-only observation. Settled requires independently verified transaction, deposit, and quote evidence. */
   reconcile: (row: AssetRfqSwapRow) => Promise<ReceiveCarrierReconcileOutcome>
@@ -142,10 +149,22 @@ const completeReceiveCarrierQuotes = (value: unknown): ReceiveCarrierQuotes | nu
   if (typeof value !== 'object' || value === null) return null
   const candidate = value as Record<string, unknown>
   return typeof candidate.resolve === 'function' &&
+    typeof candidate.available === 'function' &&
     typeof candidate.settle === 'function' &&
     typeof candidate.reconcile === 'function'
     ? (value as ReceiveCarrierQuotes)
     : null
+}
+
+const snapshotInputExpiryFloor = (value: unknown): Readonly<{ kind: 'height' | 'time'; value: bigint }> | null => {
+  if (typeof value !== 'object' || value === null) return null
+  const candidate = value as { kind?: unknown; value?: unknown }
+  const kind = candidate.kind
+  const floor = candidate.value
+  if ((kind !== 'height' && kind !== 'time') || typeof floor !== 'bigint' || floor <= 0n) return null
+  if (kind === 'height' && floor >= 500_000_000n) return null
+  if (kind === 'time' && (floor < 500_000_000n || floor > 4_294_967_295n)) return null
+  return { kind, value: floor }
 }
 
 const isCanonicalTxid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
@@ -341,6 +360,14 @@ export class AssetRfqSwapService {
       return { ok: false, reason: 'price_unavailable', detail: 'the receive-carrier quote could not be read' }
     }
 
+    const inputExpiryFloor = snapshotInputExpiryFloor(
+      (quote as ReceiveCarrierQuote & { inputExpiryFloor?: unknown }).inputExpiryFloor,
+    )
+    if (inputExpiryFloor === null) {
+      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote input expiry floor is invalid' }
+    }
+    quote = { ...quote, inputExpiryFloor }
+
     const rejected = this.validateCarrierQuote({ quote, request, assetId, now })
     if (rejected) return rejected
 
@@ -490,7 +517,31 @@ export class AssetRfqSwapService {
     // `tick` runs the same gate again immediately before spending. Quoting a
     // payout the float already cannot cover would commit this solver to a price
     // it knows it cannot honour.
-    const available = await this.deps.balance()
+    let available: ReadonlyMap<AssetLeg, bigint>
+    if (terms?.mode === 'recycle') {
+      const adapter = completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes)
+      if (adapter === null) {
+        return {
+          accepted: false,
+          reason: 'price_unavailable',
+          detail: 'recycle requested but the receive-carrier adapter became unavailable',
+        }
+      }
+      try {
+        available = await adapter.available({
+          quoteId: terms.quoteId!,
+          makerPkScript: request.makerPkScript,
+          makerPublicKey: request.makerPublicKey,
+          assetId: pair.to as string,
+          now: this.now(),
+        })
+      } catch (error) {
+        this.deps.onError?.('carrier', error)
+        return { accepted: false, reason: 'price_unavailable', detail: 'carrier inventory could not be read' }
+      }
+    } else {
+      available = await this.deps.balance()
+    }
     if ((available.get(pair.to) ?? 0n) < resolved.toAmount) {
       return { accepted: false, reason: 'insufficient_inventory' }
     }
@@ -637,20 +688,38 @@ export class AssetRfqSwapService {
    * spend it — § 9's action-time gate.
    */
   private async whenFunded(row: AssetRfqSwapRow): Promise<void> {
-    const recycle = row.carrierTerms?.mode === 'recycle'
-    const receiveCarrier = recycle ? completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes) : null
-    if (recycle && receiveCarrier === null) {
-      await this.deps.store.fail(row.id, 'funded', 'not filled: receive-carrier adapter unavailable')
-      return
-    }
-
+    const carrierTerms = row.carrierTerms
+    const receiveCarrier =
+      carrierTerms?.mode === 'recycle' ? completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes) : null
     const deposit = await this.deps.depositAt(row.offerPkScript, row.fromAssetId)
+    let available: ReadonlyMap<AssetLeg, bigint>
+    if (carrierTerms?.mode === 'recycle') {
+      if (receiveCarrier === null) {
+        await this.deps.store.fail(row.id, 'funded', 'not filled: receive-carrier adapter unavailable')
+        return
+      }
+      try {
+        available = await receiveCarrier.available({
+          quoteId: carrierTerms.quoteId!,
+          makerPkScript: row.makerPkScript,
+          makerPublicKey: row.makerPublicKey,
+          assetId: row.toAssetId as string,
+          now: this.now(),
+        })
+      } catch (error) {
+        this.deps.onError?.(row.id, error)
+        await this.deps.store.fail(row.id, 'funded', 'not filled: receive-carrier inventory unavailable')
+        return
+      }
+    } else {
+      available = await this.deps.balance()
+    }
     const decision = evaluateAssetFill({
       toAmount: row.toAmount,
       toAssetId: row.toAssetId,
       fromAmount: row.fromAmount,
       depositedAmount: deposit ? heldOf(deposit, row.fromAssetId) : 0n,
-      available: await this.deps.balance(),
+      available,
       now: this.now(),
       validUntil: row.validUntil,
     })
