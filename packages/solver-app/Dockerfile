@@ -60,6 +60,12 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # one workspace project among twelve, and there is deliberately no second copy
 # of it.
 COPY packages ./packages
+# The frozen candidate archives ride in with `packages/` above — the reason
+# they live under `packages/solver-app/vendor/` and not at the root. Checked
+# BEFORE the install they feed, since a missing one would otherwise resolve to
+# a REGISTRY build of the identical version rather than fail.
+COPY scripts/carrier-artifacts ./scripts/carrier-artifacts
+RUN node scripts/carrier-artifacts/verify.mjs
 RUN pnpm install --frozen-lockfile
 # The root tsconfig, which every package's `tsconfig.build.json` extends — not
 # an emit config in its own right. The root emits nothing at all now.

@@ -83,6 +83,11 @@ jobs:
 
       - uses: pnpm/action-setup@v4
 
+      # Before the install it protects: the overridden versions ALSO exist on
+      # the registry, so an altered archive resolves to the wrong bytes.
+      - name: Carrier artifacts
+        run: node scripts/carrier-artifacts/verify.mjs
+
       # Retried, because one dependency's install script has a fallback that
       # cannot work here. better-sqlite3 runs
       # `prebuild-install || node-gyp rebuild --release`, and `node:*-slim`
@@ -183,6 +188,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+      - name: Carrier artifacts
+        run: node scripts/carrier-artifacts/verify.mjs
       # Same retry, same reason as the build job above: this container is
       # `node:22-slim` too, and this install is UNFILTERED — the filters below
       # scope what is listed and built, not what is installed — so it fetches
