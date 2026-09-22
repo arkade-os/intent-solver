@@ -312,11 +312,8 @@ describe('AssetRfqSwapStore.migrate', () => {
     }
   })
 
-  /**
-   * The carrier column on the same legacy table, and the two things a migration
-   * on a money table has to leave alone: rows that predate it, and every row
-   * that predates the NEXT reopen.
-   */
+  /** The carrier column on the same legacy table: a migration on a money table
+   * must leave rows that predate it alone. */
   it('adds carrier_terms to a database that predates it, leaving old rows unbackfilled', async () => {
     const legacy = openDb()
     legacy.exec(LEGACY)

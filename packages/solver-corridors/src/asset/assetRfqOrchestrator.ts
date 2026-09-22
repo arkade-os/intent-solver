@@ -106,15 +106,8 @@ export interface OfferTerms {
   makerPublicKey: string
 }
 
-/**
- * What the internal Taxi adapter answers for ONE recycle quote id.
- *
- * THIS IS A TRUSTED SERVICE ADAPTER, NOT CALLER JSON. It is reached only after
- * the request has been validated and the market resolved, and its answer is the
- * only source of a recycle's economic terms — never a client-supplied flag.
- * `makerPkScript`/`makerPublicKey`/`assetId` are echoed back so the solver can
- * refuse a quote that is not the one this request would bind.
- */
+/** What the internal Taxi adapter answers for ONE recycle quote id. A TRUSTED
+ * SERVICE ADAPTER, not caller JSON. */
 export interface ReceiveCarrierQuote {
   quoteId: string
   makerPkScript: string
@@ -165,14 +158,8 @@ export interface AssetRfqDeps {
   fetchPrice: (feedUrl: string, pricePath: string) => Promise<Price>
   /** Spend the deposit through `fulfill`, paying the client. Returns the txid. */
   settle: (row: AssetRfqSwapRow) => Promise<string>
-  /**
-   * The internal Taxi adapter, reached only for an explicit `recycle`.
-   *
-   * OPTIONAL, and its absence is a REFUSAL rather than a default: an
-   * unconfigured deployment must not price a carrier it cannot fund. The real
-   * configured-Taxi adapter is a later task, so today absence is the honest
-   * answer everywhere.
-   */
+  /** The internal Taxi adapter, reached only for an explicit `recycle`.
+   * OPTIONAL, and its absence is a REFUSAL rather than a default. */
   receiveCarrierQuotes?: {
     resolve: (request: ReceiveCarrierQuoteRequest) => Promise<ReceiveCarrierQuote>
   }
@@ -268,27 +255,8 @@ export class AssetRfqSwapService {
     })
   }
 
-  /**
-   * The carrier this quote will price, from the client's named mode.
-   *
-   * THREE ANSWERS, and the difference between them is money:
-   *
-   * - `purchase` buys the PHYSICAL dust with the existing arithmetic, even on a
-   *   market whose operator waived the carrier. The mode is the client's
-   *   explicit authorization to acquire sats, so no operator policy can make it
-   *   free — and no callback is needed, because nothing is being borrowed.
-   * - `recycle` prices `receiptSats + serviceFareSats`: the buyer purchases the
-   *   tiny receipt reserve and the service, NOT the returnable loan. The loan is
-   *   Taxi's principal, delivered at claim, and pricing it would make the client
-   *   buy back sats it is about to be advanced.
-   * - absent leaves the market's own pass-through exactly as it was.
-   *
-   * `publishedSats` is what `carrier_sats` reports, and it is the PHYSICAL
-   * carrier on an explicit mode — a client funding an asset payout attaches
-   * that many sats to the deposit whatever the price netted (the SDK does
-   * exactly this at `requestArkadeSwap`), so publishing the net price term
-   * would under-fund the covenant.
-   */
+  /** `priceTerm` is what the arithmetic nets; `publishedSats` is the PHYSICAL
+   * dust `carrier_sats` reports on an explicit mode. */
   private async resolveCarrier(args: {
     carrier: AssetRfqCarrierChoice | undefined
     market: AssetRfqMarket
@@ -315,7 +283,8 @@ export class AssetRfqSwapService {
         terms: {
           mode: 'purchase',
           physicalSats: physical,
-          loanSats: physical,
+          // Bought, not advanced: no returnable loan and no receipt reserve.
+          loanSats: 0n,
           receiptSats: 0n,
           serviceFareSats: 0n,
           pricedSats: physical,
@@ -326,9 +295,8 @@ export class AssetRfqSwapService {
       }
     }
 
-    // A recycle without the adapter is refused BEFORE anything is priced. The
-    // alternative — falling through to the market's carrier — would quote a
-    // free carrier the deployment has no way to fund.
+    // Refused BEFORE anything is priced, so an unconfigured deployment cannot
+    // quote the market's free carrier.
     const adapter = this.deps.receiveCarrierQuotes
     if (!adapter) {
       return {
@@ -375,14 +343,8 @@ export class AssetRfqSwapService {
     }
   }
 
-  /**
-   * Every request-bound field of a receiver quote, matched INDEPENDENTLY.
-   *
-   * Independent rather than one equality over the whole shape so the refusal
-   * says which field disagreed — an adapter answering for the wrong client or
-   * the wrong asset is a bug someone has to find, and "the quote did not match"
-   * sends them looking at all five.
-   */
+  /** Each request-bound field matched independently, so a refusal names the
+   * field that disagreed. */
   private validateCarrierQuote(args: {
     quote: ReceiveCarrierQuote
     request: AssetRfqQuoteRequest
@@ -457,11 +419,8 @@ export class AssetRfqSwapService {
     const bounds = pair.from === market.base ? market.sellBase : market.buyBase
     const priced: AssetQuoteMarket = { ...market, minPayout: bounds.min, maxPayout: bounds.max }
 
-    // A named mode is applicable ONLY to an asset payout, and this is answered
-    // before the price or the network is touched: the mode is a statement about
-    // which carrier the client wants, and a BTC payout has no carrier to want.
-    // § 1 puts an inapplicable field on the payload, so the refusal is
-    // `unsupported_payload` rather than a pricing one.
+    // An inapplicable FIELD (§ 1), not a pricing refusal: a BTC payout has no
+    // carrier to want, so this is answered before the network.
     const carrier = request.carrier
     if (carrier !== undefined && pair.to === null) {
       return {
@@ -482,10 +441,8 @@ export class AssetRfqSwapService {
     }
 
     const now = this.now()
-    // The carrier decided BEFORE the feed read, because the feed read is the
-    // expensive gate and the client's mode is answerable without it. A recycle
-    // whose adapter is unavailable is refused here, so it can never be priced
-    // off the market's pass-through as a free carrier.
+    // BEFORE the expensive feed read, so an unavailable adapter cannot fall
+    // through to a free market carrier.
     const resolvedCarrier = await this.resolveCarrier({ carrier, market, pair, request, now })
     if (!resolvedCarrier.ok) return { accepted: false, reason: resolvedCarrier.reason, detail: resolvedCarrier.detail }
     const { terms, priceTerm, publishedSats } = resolvedCarrier
@@ -519,6 +476,17 @@ export class AssetRfqSwapService {
       return { accepted: false, reason: 'insufficient_inventory' }
     }
 
+    // AFTER every await above: `now` predates them, so a quote that expired
+    // during any must not insert a row already in the past.
+    const nowAtInsert = this.now()
+    if (terms !== undefined && terms.expiresAt <= nowAtInsert) {
+      return {
+        accepted: false,
+        reason: 'price_unavailable',
+        detail: 'the carrier quote expired before it was recorded',
+      }
+    }
+
     const offer = this.deps.deriveOffer({
       wantAmount: resolved.toAmount,
       wantAssetId: pair.to,
@@ -543,19 +511,17 @@ export class AssetRfqSwapService {
         offerPkScript: offer.pkScript,
         offerAddress: offer.address,
         solverPubkey: this.deps.solverPubkey,
-        // Capped at the carrier quote's own expiry, so a recycle can never
-        // outlive the Taxi terms its economic split came from.
+        // Capped at the quote's own expiry, so a recycle cannot outlive it.
         validUntil:
           terms === undefined
-            ? now + this.deps.quoteValiditySeconds
-            : Math.min(now + this.deps.quoteValiditySeconds, terms.expiresAt),
+            ? nowAtInsert + this.deps.quoteValiditySeconds
+            : Math.min(nowAtInsert + this.deps.quoteValiditySeconds, terms.expiresAt),
         // The price this quote FIXED — not the feed it was derived from.
         // Against a feed read at fill time it measures how far the market moved
         // while the quote was outstanding; against its own feed it would measure
         // the configured spread and nothing else.
-        // The snapshot is struck against what the PRICE netted, not the
-        // physical carrier: an explicit mode publishes the dust while pricing
-        // only the receipt and service, and the mark has to match the amounts.
+        // Struck against what the PRICE netted, so the mark matches the
+        // amounts an explicit mode actually quoted.
         ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: priceTerm }),
         ...(terms === undefined ? {} : { carrierTerms: terms }),
       })

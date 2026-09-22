@@ -29,19 +29,12 @@ import { z } from 'zod'
 import { WIRE_ASSET_AMOUNT } from '@arkade-os/solver-core/core/wireAmount.js'
 import { MAX_PAIR_LENGTH } from '@arkade-os/solver-core/core/marketKey.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
-import type { AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
+import { carrierTermsToJson, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 import { type RfqState } from './payloads.js'
 
 export type AssetRfqCarrierMode = 'purchase' | 'recycle'
 
-/**
- * The client's OPTIONAL carrier choice, as parsed off the wire.
- *
- * An ABSENT `carrier` is the legacy request, and the legacy request is not a
- * third mode: it is the absence of an instruction, answered by whatever the
- * operator priced on the market. Nothing about a legacy request's bytes or its
- * quote changes.
- */
+/** The client's carrier choice, as parsed off the wire. Absent means legacy. */
 export type AssetRfqCarrierChoice = { mode: 'purchase' } | { mode: 'recycle'; quoteId: string }
 
 const RFQ_ID = z
@@ -103,23 +96,15 @@ export const AssetRfqRequest = z
         maker_pk_script: PK_SCRIPT_HEX,
         /** The client's x-only key: the `cancel` path's `user` signer. */
         maker_public_key: XONLY_HEX,
-        /**
-         * OPTIONAL carrier choice. ABSENT is the legacy request and the only
-         * shape a client that predates this field sends, so its absence must
-         * stay byte-identical on the wire.
-         *
-         * `purchase` buys the physical carrier out of the deposit's quote.
-         * `recycle` names a quote the internal Taxi adapter issued, whose
-         * returnable loan is delivered later at claim — never priced here.
-         */
+        /** OPTIONAL; absent stays byte-identical. `recycle` names a quote whose
+         * returnable loan is delivered at claim and priced nowhere here. */
         carrier: z
           .discriminatedUnion('mode', [
             z.object({ mode: z.literal('purchase') }).strict(),
             z
               .object({
                 mode: z.literal('recycle'),
-                // Non-empty and bounded: an empty id names no quote, and an
-                // unbounded one is a way to make the solver read a huge string.
+                // An empty id names no quote; unbounded is a huge read.
                 quote_id: z.string().min(1).max(128),
               })
               .strict(),
@@ -130,13 +115,8 @@ export const AssetRfqRequest = z
   })
   .strict()
 
-/**
- * The parsed request's carrier field, in the internal spelling.
- *
- * The wire uses snake_case because § 2's profile does; everything downstream
- * uses the camelCase type above. Kept here beside the schema so the two
- * spellings cannot drift apart in a second place.
- */
+/** The parsed request's carrier field in the internal spelling: the wire is
+ * snake_case, everything downstream camelCase, so both live beside the schema. */
 export const assetRfqCarrierChoice = (profile: {
   carrier?: { mode: 'purchase' } | { mode: 'recycle'; quote_id: string }
 }): AssetRfqCarrierChoice | undefined => {
@@ -187,16 +167,9 @@ export const assetRfqQuotePayload = (
   profile: {
     offer_address: row.offerAddress,
     offer_pk_script: row.offerPkScript,
-    // Echoed only when the negotiation carries terms. A legacy row has none, so
-    // its quote keeps exactly the profile it had before this field existed.
-    ...(row.carrierTerms === null
-      ? {}
-      : {
-          carrier:
-            row.carrierTerms.mode === 'recycle'
-              ? { mode: 'recycle' as const, quote_id: row.carrierTerms.quoteId as string }
-              : { mode: 'purchase' as const },
-        }),
+    // The full decimal-string terms, so the client can verify the pinned Taxi
+    // split. Absent on a legacy row, whose profile shape is unchanged.
+    ...(row.carrierTerms === null ? {} : { carrier: carrierTermsToJson(row.carrierTerms) }),
   },
 })
 

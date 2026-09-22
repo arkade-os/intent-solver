@@ -42,24 +42,15 @@ import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/anal
 
 export type AssetRfqSwapState = 'quoted' | 'funded' | 'filling' | 'filled' | 'refused' | 'stuck'
 
-/**
- * The carrier terms a NEGOTIATION was issued under, when the client named a
- * mode. Absent on every legacy row, and on every row whose carrier was the
- * market's own pass-through.
- *
- * IMMUTABLE, and that is the whole reason it is a separate column rather than
- * four: these terms are the Taxi obligation the fill adapter has to honour
- * later. `loanSats` is the returnable principal Taxi advances at claim, and the
- * solver never prices it — losing it would leave a fill able to pay a carrier
- * whose loan nobody can settle.
- *
- * All amounts are sats, exactly as the quote's own carrier figures are.
- */
+/** The carrier terms a NEGOTIATION was issued under, when the client named a
+ * mode. Absent on every legacy row. IMMUTABLE: these are the Taxi obligation
+ * the fill adapter must honour, and `loanSats` is never in the price. */
 export interface AssetRfqCarrierTerms {
   mode: 'purchase' | 'recycle'
   /** Present on `recycle` only: the Taxi quote these terms were read from. */
   quoteId?: string
   physicalSats: bigint
+  /** Always `0` on a purchase: bought sats are owned outright, not advanced. */
   loanSats: bigint
   receiptSats: bigint
   serviceFareSats: bigint
@@ -166,11 +157,8 @@ export interface AssetRfqSwapRow {
    */
   fillPriceMantissa: bigint | null
   fillPriceScale: number | null
-  /**
-   * The carrier terms this negotiation was issued under, or null for legacy.
-   *
-   * Written once at insert and never moved: see {@link AssetRfqCarrierTerms}.
-   */
+  /** The terms this negotiation was issued under, or null for legacy.
+   * Written once at insert and never moved. */
   carrierTerms: AssetRfqCarrierTerms | null
 }
 
@@ -201,26 +189,27 @@ export interface AssetRfqQuoteRecord {
   carrierTerms?: AssetRfqCarrierTerms
 }
 
-/**
- * The columns the carrier terms are folded into, and the only shape that may
- * ever reach them.
- *
- * A SINGLE nullable JSON column rather than five, because the five are one
- * indivisible fact and a half-written set would describe a carrier nobody
- * issued. Amounts travel as canonical decimal STRINGS inside the JSON, for the
- * same reason the amount columns beside them are TEXT: these are sats today but
- * the shape is shared with asset units upstream.
- *
- * Reading is STRICT. A corrupted blob is refused here rather than half-read,
- * because a guessed term is one the fill adapter would settle against.
- */
-const CARRIER_TERMS_COLUMN = 'carrier_terms'
-
 const decimal = (value: unknown, field: string): bigint => {
   if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value)) {
     throw new Error(`carrier terms ${field} is not a canonical decimal string`)
   }
   return BigInt(value)
+}
+
+const rejectUnknown = (raw: Record<string, unknown>, mode: 'purchase' | 'recycle'): void => {
+  const allowed = new Set([
+    'mode',
+    'physical_sats',
+    'loan_sats',
+    'receipt_sats',
+    'service_fare_sats',
+    'priced_sats',
+    'expires_at',
+    ...(mode === 'recycle' ? ['quote_id'] : []),
+  ])
+  for (const key of Object.keys(raw)) {
+    if (!allowed.has(key)) throw new Error(`carrier terms has unknown key '${key}'`)
+  }
 }
 
 const positiveDecimal = (value: unknown, field: string): bigint => {
@@ -248,6 +237,8 @@ export const carrierTermsFromJson = (value: unknown): AssetRfqCarrierTerms => {
   const raw = value as Record<string, unknown>
   const mode = raw.mode
   if (mode !== 'purchase' && mode !== 'recycle') throw new Error(`carrier terms mode '${String(mode)}' is unknown`)
+  // An unknown key in a money blob is a shape this build never wrote.
+  rejectUnknown(raw, mode)
   const quoteId = raw.quote_id
   if (mode === 'recycle') {
     if (typeof quoteId !== 'string' || quoteId.length === 0 || quoteId.length > 128) {
@@ -261,16 +252,32 @@ export const carrierTermsFromJson = (value: unknown): AssetRfqCarrierTerms => {
     throw new Error('carrier terms expires_at is not a safe positive unix second')
   }
   const physicalSats = positiveDecimal(raw.physical_sats, 'physical_sats')
-  // A PURCHASE buys the physical carrier whole: it has no loan to repay and no
-  // receipt reserve, so its split is trivially the dust. A RECYCLE is a real
-  // split, and both halves have to be positive — a zero half is a carrier
-  // nobody can settle.
-  const loanSats = mode === 'recycle' ? positiveDecimal(raw.loan_sats, 'loan_sats') : physicalSats
-  const receiptSats = mode === 'recycle' ? positiveDecimal(raw.receipt_sats, 'receipt_sats') : 0n
-  if (loanSats + receiptSats !== physicalSats) {
-    throw new Error('carrier terms split does not sum to the physical carrier')
-  }
+  // From the ACTUAL serialized values, never substituted constants. A purchase
+  // is not a loan: it buys the carrier outright, so loan and receipt are zero
+  // and physical + service is the price. A recycle splits the dust into a
+  // returnable loan and a receipt, and prices the receipt plus service.
+  const loanSats = decimal(raw.loan_sats, 'loan_sats')
+  const receiptSats = decimal(raw.receipt_sats, 'receipt_sats')
   const serviceFareSats = decimal(raw.service_fare_sats, 'service_fare_sats')
+  const pricedSats = decimal(raw.priced_sats, 'priced_sats')
+  if (mode === 'recycle') {
+    positiveDecimal(raw.loan_sats, 'loan_sats')
+    positiveDecimal(raw.receipt_sats, 'receipt_sats')
+    if (loanSats + receiptSats !== physicalSats) {
+      throw new Error('carrier terms split does not sum to the physical carrier')
+    }
+    if (serviceFareSats < 0n) throw new Error('carrier terms service_fare_sats must not be negative')
+    if (pricedSats !== receiptSats + serviceFareSats) {
+      throw new Error('carrier terms priced sats is not the receipt plus the service fare')
+    }
+  } else {
+    if (loanSats !== 0n) throw new Error('carrier terms loan_sats must be zero on a purchase')
+    if (receiptSats !== 0n) throw new Error('carrier terms receipt_sats must be zero on a purchase')
+    if (serviceFareSats < 0n) throw new Error('carrier terms service_fare_sats must not be negative')
+    if (pricedSats !== physicalSats + serviceFareSats) {
+      throw new Error('carrier terms priced sats is not the physical carrier plus the service fare')
+    }
+  }
   return {
     mode,
     ...(mode === 'recycle' ? { quoteId: quoteId as string } : {}),
@@ -278,7 +285,7 @@ export const carrierTermsFromJson = (value: unknown): AssetRfqCarrierTerms => {
     loanSats,
     receiptSats,
     serviceFareSats,
-    pricedSats: decimal(raw.priced_sats, 'priced_sats'),
+    pricedSats,
     expiresAt,
   }
 }
@@ -390,7 +397,7 @@ const numberOrNull = (value: string | number | null | undefined): number | null 
 
 /** A stored blob is JSON we wrote; anything else is corruption and is refused. */
 const carrierTermsOrNull = (value: unknown): AssetRfqCarrierTerms | null => {
-  if (value === null || value === undefined || value === '') return null
+  if (value === null || value === undefined) return null
   if (typeof value !== 'string') throw new Error('carrier terms column is not text')
   return carrierTermsFromJson(JSON.parse(value))
 }

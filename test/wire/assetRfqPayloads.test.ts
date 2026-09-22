@@ -94,11 +94,8 @@ describe('AssetRfqRequest', () => {
     expect(AssetRfqRequest.safeParse(request({}, { maker_pubkey: XONLY })).success).toBe(false)
   })
 
-  /**
-   * The carrier union, pinned at the SCHEMA rather than only through the
-   * orchestrator: a shape that parses here is one a client can send, and the
-   * orchestrator's own refusals are answers about a request it understood.
-   */
+  /** The carrier union, pinned at the SCHEMA: a shape that parses here is one a
+   * client can send. */
   it('leaves the profile alone when no carrier is named, so a legacy request is unchanged', () => {
     const parsed = AssetRfqRequest.safeParse(request())
     expect(parsed.success && parsed.data.profile).not.toHaveProperty('carrier')
@@ -202,12 +199,9 @@ describe('assetRfqQuotePayload', () => {
     expect(assetRfqQuotePayload(row(), RFQ_ID)).toMatchObject({ pair: `arkade:BTC->arkade:${ASSET_A}` })
   })
 
-  /**
-   * The mode echo. A quote for a named mode has to say WHICH one, because the
-   * client funds against the same profile it sent and the receipt/loan split
-   * below is what tells the Taxi adapter what to advance at claim.
-   */
-  it('echoes a recycle carrier with its quote id', () => {
+  /** The terms echo: the WHOLE pinned split as decimal strings, so a client can
+   * verify the terms and tell bought from borrowed. */
+  it('echoes a recycle carrier with its full decimal-string terms', () => {
     const quote = assetRfqQuotePayload(
       row({
         carrierTerms: {
@@ -222,20 +216,26 @@ describe('assetRfqQuotePayload', () => {
         },
       }),
       RFQ_ID,
-    ) as { profile: Record<string, unknown> }
-    expect(quote.profile.carrier).toEqual({ mode: 'recycle', quote_id: 'q-1' })
-    // The split is what must persist, so it is asserted here rather than only
-    // in the store: this is the payload the fill adapter reads.
-    expect(quote.profile).not.toHaveProperty('loan_sats')
+    ) as { profile: { carrier: Record<string, unknown> } }
+    expect(quote.profile.carrier).toEqual({
+      mode: 'recycle',
+      quote_id: 'q-1',
+      physical_sats: '330',
+      loan_sats: '329',
+      receipt_sats: '1',
+      service_fare_sats: '4',
+      priced_sats: '5',
+      expires_at: 5_000,
+    })
   })
 
-  it('echoes a purchase carrier with no quote id', () => {
+  it('echoes a purchase as a zero loan and no quote id', () => {
     const quote = assetRfqQuotePayload(
       row({
         carrierTerms: {
           mode: 'purchase',
           physicalSats: 330n,
-          loanSats: 330n,
+          loanSats: 0n,
           receiptSats: 0n,
           serviceFareSats: 0n,
           pricedSats: 330n,
@@ -243,8 +243,16 @@ describe('assetRfqQuotePayload', () => {
         },
       }),
       RFQ_ID,
-    ) as { profile: Record<string, unknown> }
-    expect(quote.profile.carrier).toEqual({ mode: 'purchase' })
+    ) as { profile: { carrier: Record<string, unknown> } }
+    expect(quote.profile.carrier).toEqual({
+      mode: 'purchase',
+      physical_sats: '330',
+      loan_sats: '0',
+      receipt_sats: '0',
+      service_fare_sats: '0',
+      priced_sats: '330',
+      expires_at: 2_000,
+    })
   })
 
   it('carries no carrier on a legacy quote, so its profile is unchanged', () => {

@@ -340,7 +340,9 @@ const RECYCLE_TERMS: AssetRfqCarrierTerms = {
 const PURCHASE_TERMS: AssetRfqCarrierTerms = {
   mode: 'purchase',
   physicalSats: 330n,
-  loanSats: 330n,
+  // Bought, not advanced: no loan and no receipt reserve, so only the service
+  // fare can lift the price above the dust.
+  loanSats: 0n,
   receiptSats: 0n,
   serviceFareSats: 0n,
   pricedSats: 330n,
@@ -382,6 +384,18 @@ describe('carrier terms', () => {
     })
   })
 
+  it('serializes a purchase as a zero loan, never as a split', () => {
+    expect(carrierTermsToJson(PURCHASE_TERMS)).toEqual({
+      mode: 'purchase',
+      physical_sats: '330',
+      loan_sats: '0',
+      receipt_sats: '0',
+      service_fare_sats: '0',
+      priced_sats: '330',
+      expires_at: 2_000,
+    })
+  })
+
   it('keeps the terms across a transition, so a settled fill can still read them', async () => {
     const store = await open()
     await store.insertQuote(quote({ carrierTerms: RECYCLE_TERMS }))
@@ -397,6 +411,68 @@ describe('carrier terms', () => {
     ['an unknown mode', { mode: 'recycled', physical_sats: '330' }],
     ['a recycle with no quote id', { mode: 'recycle', physical_sats: '330', loan_sats: '329', receipt_sats: '1' }],
     ['a purchase carrying a quote id', { mode: 'purchase', quote_id: 'q-1', physical_sats: '330' }],
+    [
+      'a purchase with an unknown key',
+      {
+        mode: 'purchase',
+        physical_sats: '330',
+        loan_sats: '0',
+        receipt_sats: '0',
+        service_fare_sats: '0',
+        priced_sats: '330',
+        expires_at: 9,
+        carrier: 'x',
+      },
+    ],
+    [
+      'a purchase claiming a loan',
+      {
+        mode: 'purchase',
+        physical_sats: '330',
+        loan_sats: '330',
+        receipt_sats: '0',
+        service_fare_sats: '0',
+        priced_sats: '330',
+        expires_at: 9,
+      },
+    ],
+    [
+      'a purchase claiming a receipt',
+      {
+        mode: 'purchase',
+        physical_sats: '330',
+        loan_sats: '0',
+        receipt_sats: '1',
+        service_fare_sats: '0',
+        priced_sats: '1',
+        expires_at: 9,
+      },
+    ],
+    [
+      'a purchase whose price omits the physical carrier',
+      {
+        mode: 'purchase',
+        physical_sats: '330',
+        loan_sats: '0',
+        receipt_sats: '0',
+        service_fare_sats: '0',
+        priced_sats: '0',
+        expires_at: 9,
+      },
+    ],
+    [
+      'a recycle priced off the loan rather than the receipt',
+      {
+        mode: 'recycle',
+        quote_id: 'q',
+        physical_sats: '330',
+        loan_sats: '329',
+        receipt_sats: '1',
+        service_fare_sats: '4',
+        priced_sats: '333',
+        expires_at: 9,
+      },
+    ],
     [
       'a split that does not sum',
       {
@@ -441,7 +517,7 @@ describe('carrier terms', () => {
       {
         mode: 'purchase',
         physical_sats: '0330',
-        loan_sats: '330',
+        loan_sats: '0',
         receipt_sats: '0',
         service_fare_sats: '0',
         priced_sats: '330',
@@ -453,7 +529,7 @@ describe('carrier terms', () => {
       {
         mode: 'purchase',
         physical_sats: '330.5',
-        loan_sats: '330',
+        loan_sats: '0',
         receipt_sats: '0',
         service_fare_sats: '0',
         priced_sats: '330',
@@ -465,7 +541,7 @@ describe('carrier terms', () => {
       {
         mode: 'purchase',
         physical_sats: '330',
-        loan_sats: '330',
+        loan_sats: '0',
         receipt_sats: '0',
         service_fare_sats: '0',
         priced_sats: '330',
@@ -476,6 +552,11 @@ describe('carrier terms', () => {
     expect(() => carrierTermsFromJson(value)).toThrow()
   })
 
+  it('round-trips the exact JSON form it wrote, including a purchase', () => {
+    expect(carrierTermsFromJson(carrierTermsToJson(PURCHASE_TERMS))).toEqual(PURCHASE_TERMS)
+    expect(carrierTermsFromJson(carrierTermsToJson(RECYCLE_TERMS))).toEqual(RECYCLE_TERMS)
+  })
+
   /** Corruption must be refused at the READ, not silently reported as "no terms". */
   it('refuses a corrupted blob on read instead of reading it as absent', async () => {
     const store = await open()
@@ -483,10 +564,24 @@ describe('carrier terms', () => {
       `INSERT INTO asset_rfq_swap (
       id, state, created_at, updated_at, rfq_id, pair, from_amount, to_amount,
       maker_pk_script, maker_public_key, offer_pk_script, offer_address, solver_pubkey, valid_until, carrier_terms
-    ) VALUES ('bad', 'quoted', 1, 1, ?, 'arkade:BTC->arkade:USDA', '1', '2', '3', '4', '5', 'ark1q', '6', 9, '{"mode":"recycle"}')`,
-      ['a'.repeat(64)],
+    ) VALUES ('bad', 'quoted', 1, 1, ?, 'arkade:BTC->arkade:USDA', '1', '2', '3', '4', '5', 'ark1q', '6', 9, ?)`,
+      ['a'.repeat(64), '{"mode":"recycle"}'],
     )
     await expect(store.get('bad')).rejects.toThrow()
+    await store.close()
+  })
+
+  /** Empty string is corruption on a money column, not an absent term. */
+  it('refuses an empty terms blob rather than reading it as legacy', async () => {
+    const store = await open()
+    await store.driver.run(
+      `INSERT INTO asset_rfq_swap (
+      id, state, created_at, updated_at, rfq_id, pair, from_amount, to_amount,
+      maker_pk_script, maker_public_key, offer_pk_script, offer_address, solver_pubkey, valid_until, carrier_terms
+    ) VALUES ('blank', 'quoted', 1, 1, ?, 'arkade:BTC->arkade:USDA', '1', '2', '3', '4', '5', 'ark1q', '6', 9, '')`,
+      ['b'.repeat(64)],
+    )
+    await expect(store.get('blank')).rejects.toThrow()
     await store.close()
   })
 })

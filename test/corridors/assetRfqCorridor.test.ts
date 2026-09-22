@@ -385,27 +385,30 @@ describe('the read half', () => {
   })
 })
 
-/**
- * `profile.carrier` through the corridor, which is where the schema, the
- * orchestrator and the refusal mapping meet.
- *
- * The load-bearing assertion is the LAST one: an internal reason the closed RFQ
- * set has no name for must still reach a client as `unsupported_payload`
- * rather than leaking a non-spec string.
- */
+/** `profile.carrier` through the corridor: schema, orchestrator and refusal
+ * mapping. An internal reason the closed set cannot name must reach a client as
+ * `unsupported_payload` rather than leaking a non-spec string. */
 describe('profile.carrier through the corridor', () => {
   const carrierRequest = (carrier: unknown) =>
     rfqRequest({ profile: { maker_pk_script: PK_SCRIPT, maker_public_key: XONLY, carrier } })
 
-  it('echoes the mode back on a purchase quote', async () => {
+  it('echoes the full pinned purchase terms, a zero loan included', async () => {
     const { corridor } = await harness()
     const outcome = await corridor.quote(carrierRequest({ mode: 'purchase' }))
     expect(outcome.kind).toBe('quote')
     if (outcome.kind !== 'quote') throw new Error('expected a quote')
-    expect((outcome.payload as { profile: Record<string, unknown> }).profile.carrier).toEqual({ mode: 'purchase' })
+    expect((outcome.payload as { profile: Record<string, unknown> }).profile.carrier).toEqual({
+      mode: 'purchase',
+      physical_sats: '330',
+      loan_sats: '0',
+      receipt_sats: '0',
+      service_fare_sats: '0',
+      priced_sats: '330',
+      expires_at: 1_030,
+    })
   })
 
-  it('echoes the mode and quote id back on a recycle quote', async () => {
+  it('echoes the full pinned recycle terms, the split included', async () => {
     const { corridor } = await harness(undefined, { carrier: true })
     const outcome = await corridor.quote(carrierRequest({ mode: 'recycle', quote_id: 'q-1' }))
     expect(outcome.kind).toBe('quote')
@@ -413,6 +416,12 @@ describe('profile.carrier through the corridor', () => {
     expect((outcome.payload as { profile: Record<string, unknown> }).profile.carrier).toEqual({
       mode: 'recycle',
       quote_id: 'q-1',
+      physical_sats: '330',
+      loan_sats: '329',
+      receipt_sats: '1',
+      service_fare_sats: '0',
+      priced_sats: '1',
+      expires_at: 5_000,
     })
   })
 

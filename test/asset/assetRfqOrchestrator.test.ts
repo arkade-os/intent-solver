@@ -189,6 +189,52 @@ describe('quote', () => {
     expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(99_499_671_650n)
   })
 
+  /**
+   * Where the carrier lands, per direction. `carrierLegs` CHARGES it only when
+   * the solver delivers the asset and the client is not already fronting one,
+   * so a BTC->asset sale NETS the deposit while the asset->BTC payout is
+   * CREDITED. The 330 therefore bounds the exact-out payout, and on exact-in it
+   * is a floor on what the input must leave behind.
+   */
+  it.each([['an input the carrier consumes', 330n, 'from', 'fee_consumes_swap', '1'.repeat(64)]] as const)(
+    'refuses a BTC->asset sale with %s',
+    async (_why, amount, side, reason, signer) => {
+      const { service } = await harness({ markets: [{ ...MARKET, carrierSats: 330n }] })
+      const ask = request({ amount, amountSide: side, rfqId: signer, makerPublicKey: signer })
+      expect(await service.quote(ask)).toMatchObject({ accepted: false, reason })
+    },
+  )
+
+  it.each([
+    ['exact-in', 331n, 'from', 995n],
+    ['exact-out', 331n, 'to', 331n],
+  ] as const)('prices a BTC->asset sale on the sat above the carrier on %s', async (_why, amount, side, toAmount) => {
+    const { service } = await harness({ markets: [{ ...MARKET, carrierSats: 330n }], newId: sequentialIds() })
+    const outcome = await service.quote(request({ amount, amountSide: side }))
+    expect(outcome).toMatchObject({ accepted: true })
+    expect(outcome.accepted && outcome.carrierSats).toBe(330n)
+    expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(toAmount)
+  })
+
+  it('credits the carrier back on an asset->BTC payout rather than netting it', async () => {
+    const { service } = await harness({
+      markets: [{ ...MARKET, carrierSats: 330n }],
+      balance: async () =>
+        new Map([
+          [ASSET_A, 10n ** 18n],
+          [null, 10n ** 12n],
+        ]),
+    })
+    const outcome = await service.quote(
+      request({ pair: `arkade:${ASSET_A}->arkade:BTC`, amount: 331n, amountSide: 'to' }),
+    )
+    expect(outcome).toMatchObject({ accepted: true })
+    // Credited, not charged: `carrierLegs` puts the 330 on the payout leg, which
+    // is exactly the sat the named payout above could not go below.
+    expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(331n)
+    expect(outcome.accepted && outcome.carrierSats).toBe(330n)
+  })
+
   it('charges each market its own carrier, so no service-wide figure can stand in', async () => {
     const { service } = await harness({
       markets: [
@@ -738,6 +784,15 @@ const RECEIVER_QUOTE: ReceiveCarrierQuote = {
   expiresAt: 5_000,
 }
 
+/** A recycle whose receipt and service do NOT divide the dust evenly. */
+const RAGGED_RECEIVER_QUOTE: ReceiveCarrierQuote = {
+  ...RECEIVER_QUOTE,
+  loanSats: 325n,
+  receiptSats: 5n,
+  serviceFareSats: 7n,
+  expiresAt: 6_000,
+}
+
 const adapter = (over: Partial<ReceiveCarrierQuote> = {}, calls?: unknown[]) => ({
   resolve: async (request: unknown) => {
     calls?.push(request)
@@ -756,6 +811,8 @@ describe('profile.carrier — explicit modes', () => {
     expect((await store.get('swap-1')).carrierTerms).toMatchObject({
       mode: 'purchase',
       physicalSats: 330n,
+      // Bought, not borrowed: no returnable principal is recorded.
+      loanSats: 0n,
       pricedSats: 330n,
     })
   })
@@ -798,10 +855,102 @@ describe('profile.carrier — explicit modes', () => {
     expect((await store.get('swap-1')).carrierTerms).toMatchObject({ mode: 'recycle', pricedSats: 5n })
   })
 
+  it.each([
+    ['exact-in', 1_000_000n, 'from', 994_988_060n],
+    ['exact-out', 1_000_000n, 'to', 1_000_000n],
+  ] as const)('prices a recycle with an odd receipt split on %s', async (_why, amount, side, toAmount) => {
+    const { service, store } = await harness({
+      receiveCarrierQuotes: adapter(RAGGED_RECEIVER_QUOTE),
+      newId: sequentialIds(),
+    })
+    const outcome = await service.quote(
+      request({ amount, amountSide: side, carrier: { mode: 'recycle', quoteId: 'q-1' } }),
+    )
+    expect(outcome).toMatchObject({ accepted: true })
+    expect(outcome.accepted && outcome.carrierSats).toBe(330n)
+    expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(toAmount)
+    expect((await store.get('swap-1')).carrierTerms).toMatchObject({
+      physicalSats: 330n,
+      loanSats: 325n,
+      receiptSats: 5n,
+      serviceFareSats: 7n,
+      pricedSats: 12n,
+    })
+  })
+
   it('caps valid_until at the carrier quote expiry', async () => {
     const { service } = await harness({ receiveCarrierQuotes: adapter({ expiresAt: 1_010 }) })
     const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
     expect(outcome.accepted && outcome.swap.validUntil).toBe(1_010)
+  })
+
+  it('re-reads the clock after the adapter answers, and refuses terms that expired meanwhile', async () => {
+    const { service, store, tick } = await harness({
+      receiveCarrierQuotes: {
+        resolve: async () => {
+          tick(1_005)
+          return RECEIVER_QUOTE
+        },
+      },
+    })
+    // The adapter reported 5_000 at the OLD clock; by the time it answered the
+    // quote was still live, so this must quote and cap against the NEW clock.
+    const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    expect(outcome.accepted && outcome.swap.validUntil).toBe(1_035)
+    expect((await store.get('swap-1')).carrierTerms?.expiresAt).toBe(5_000)
+  })
+
+  it('fails an expired recycle before creating a row', async () => {
+    const { service, store, tick } = await harness({
+      receiveCarrierQuotes: {
+        resolve: async () => {
+          tick(5_001)
+          return RECEIVER_QUOTE
+        },
+      },
+    })
+    const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    expect(outcome).toMatchObject({ accepted: false, reason: 'price_unavailable' })
+    expect(await store.listNonTerminal()).toHaveLength(0)
+  })
+
+  it('fails a recycle the clock expired while the feed was read', async () => {
+    const { service, store, tick } = await harness({
+      receiveCarrierQuotes: adapter({ expiresAt: 1_004 }),
+      fetchPrice: async () => {
+        tick(1_004)
+        return { mantissa: 100_000n, scale: 0 }
+      },
+    })
+    const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    expect(outcome).toMatchObject({ accepted: false, reason: 'price_unavailable' })
+    expect(await store.listNonTerminal()).toHaveLength(0)
+  })
+
+  it('fails an expired recycle that the float read outlived', async () => {
+    const { service, store, tick } = await harness({
+      receiveCarrierQuotes: adapter({ expiresAt: 1_004 }),
+      balance: async () => {
+        tick(1_004)
+        return new Map([[ASSET_A, 10n ** 18n]])
+      },
+    })
+    const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    expect(outcome).toMatchObject({ accepted: false, reason: 'price_unavailable' })
+    expect(await store.listNonTerminal()).toHaveLength(0)
+  })
+
+  it('keeps a purchase valid on the clock it was priced at', async () => {
+    const { service, tick } = await harness({
+      markets: [{ ...MARKET, carrierSats: 0n }],
+      quoteValiditySeconds: 60,
+      fetchPrice: async () => {
+        tick(1_040)
+        return { mantissa: 100_000n, scale: 0 }
+      },
+    })
+    const outcome = await service.quote(request({ carrier: { mode: 'purchase' } }))
+    expect(outcome.accepted && outcome.swap.validUntil).toBe(1_060)
   })
 
   it('leaves valid_until at the configured window when the quote outlives it', async () => {
