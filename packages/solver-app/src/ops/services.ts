@@ -102,6 +102,7 @@ import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInvento
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
+import { restoreCarrierAttemptPins, taxiReceiveCarrier } from './assetRfqTaxi.js'
 
 export interface Services {
   /**
@@ -624,6 +625,18 @@ export const createServices = async (
     : null
 
   /**
+   * Where to read the chain tip, for a deployment whose timelocks count blocks.
+   * Built once and shared by both Lightning services and the receive-carrier rail, so
+   * every swap in a tick resolves its deadlines against ONE height — two swaps in a
+   * tick deciding against different heights is how one refund gets pushed and its
+   * neighbour does not. Undefined on a seconds-typed deployment, which never asks for
+   * a height, and every consumer refuses by name rather than guessing without one.
+   */
+  const chainTip = config.chainTipEsploraUrl
+    ? esploraChainTip(createEsploraClient(config.chainTipEsploraUrl))
+    : undefined
+
+  /**
    * The atomic class over RFQ. Always constructed, even with an empty list, so
    * a first dashboard market has a service to attach to. In the swap file for
    * the reason the EVM tables are: no previous release, so no legacy split file
@@ -645,6 +658,38 @@ export const createServices = async (
     // Boot-captured beside the two keys above, all three from one `getInfo()`.
     exitDelay: offerExitDelay(arkade.advertisedExitDelay),
   }
+  /**
+   * The receive-carrier rail, off unless `TAXI_URL` names an operator, and the
+   * READ half even then — the service refuses a recycle against an adapter
+   * missing `settle`/`reconcile` rather than degrading. Every identity a quote
+   * is verified against comes from the context above, never from the URL; `trust`
+   * is a THUNK so an unconfigured startup does not pay for the arkd call in it.
+   */
+  const taxiCarrier = await taxiReceiveCarrier({
+    taxiUrl: config.taxiUrl,
+    trust: async () => ({
+      serverKey: arkade.wallet.arkServerPublicKey,
+      emulatorKey: assetRfqDerivation.emulatorPubkey,
+      dustSats: arkade.dustSats,
+      vtxoMinAmount: BigInt((await arkade.wallet.arkProvider.getInfo()).vtxoMinAmount),
+      hrp: arkade.hrp,
+      locktimeDomain: arkade.timelockUnit === 'blocks' ? 'height' : 'time',
+      inputExpiryMargin: BigInt(arkade.advertisedExitDelay),
+    }),
+    // What the carrier itself is worth: no more than one dust to recycle one.
+    maxServiceFareSats: arkade.dustSats,
+    contracts: () => arkade.wallet.getContractManager(),
+    reserved: () => arkade.reservations.reserved(),
+    tipHeight: chainTip && (() => chainTip.height()),
+  })
+  if (taxiCarrier !== undefined) {
+    // BEFORE any service exists to tick it.
+    const pins = await restoreCarrierAttemptPins({
+      attempts: () => assetRfqStore.listUnresolvedCarrierAttempts(),
+      reserve: arkade.reservations.reserve,
+    })
+    if (pins.length > 0) log(`receive carrier: re-pinned the inputs of ${pins.length} unresolved attempt(s)`)
+  }
   const assetRfqService = new AssetRfqSwapService({
     quoteLimiter,
     store: assetRfqStore,
@@ -663,6 +708,7 @@ export const createServices = async (
       emulatorUrl: config.emulatorUrl,
       derivation: assetRfqDerivation,
     }),
+    receiveCarrierQuotes: taxiCarrier,
     onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
   })
 
@@ -738,21 +784,6 @@ export const createServices = async (
       feeRate: onchainFeeRate,
       vsize,
     })
-
-  /**
-   * Where to read the chain tip, for a deployment whose timelocks count blocks.
-   *
-   * Built once and shared by both Lightning services so every swap in a tick resolves
-   * its deadlines against ONE height — two swaps in a tick deciding against different
-   * heights is how one refund gets pushed and its neighbour does not.
-   *
-   * Undefined on a seconds-typed deployment, which never asks for a height. The
-   * orchestrators throw a named error rather than guessing if a block-typed row ever
-   * reaches them without one.
-   */
-  const chainTip = config.chainTipEsploraUrl
-    ? esploraChainTip(createEsploraClient(config.chainTipEsploraUrl))
-    : undefined
 
   const service = enabled('arkade:BTC->lightning:BTC')
     ? new SendSwapService({

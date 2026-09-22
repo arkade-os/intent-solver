@@ -72,6 +72,9 @@ const assetWire = (id: string): { txid: string; groupIndex: number } => {
   return { txid: hex.encode(Uint8Array.from(parsed.txid).reverse()), groupIndex: parsed.groupIndex }
 }
 
+const TIP = 1_000_000
+const EXIT_DELAY = 5n
+
 const TRUST = {
   serverKey: SERVER_KEY,
   emulatorKey: EMULATOR_KEY,
@@ -79,6 +82,7 @@ const TRUST = {
   vtxoMinAmount: VTXO_MIN,
   hrp: HRP,
   locktimeDomain: 'height' as const,
+  inputExpiryMargin: EXIT_DELAY,
 }
 
 type Tagged = { kind: 'height' | 'time'; value: string }
@@ -195,6 +199,7 @@ const reader = (
     maxServiceFareSats: 10n,
     coins: async () => [],
     reserved: () => new Set<string>(),
+    tipHeight: async () => TIP,
     ...over,
   }
   return { asked, deps, read: createTaxiReceiveCarrierReader(deps) }
@@ -298,7 +303,74 @@ describe('resolving one receive-carrier quote', () => {
   })
 })
 
+/** `recovery < floor <= batch` is an ORDERING: `recovery=1 / floor=2` satisfies
+ * it and admits a coin expiring next block. */
+describe('the input expiry floor is anchored, not merely ordered', () => {
+  it('refuses a floor that clears the tip by less than one exit delay', async () => {
+    const { read } = reader({
+      quote: quoteFixture({ recovery: 1n, floor: 2n, batch: BigInt(TIP) + 100n }),
+    })
+    await expect(read.resolve(request())).rejects.toThrow(/input expiry floor is below the caller minimum/)
+  })
+
+  it('admits a floor exactly one exit delay past the tip', async () => {
+    const floor = BigInt(TIP) + EXIT_DELAY
+    const { read } = reader({ quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }) })
+    await expect(read.resolve(request())).resolves.toMatchObject({
+      inputExpiryFloor: { kind: 'height', value: floor },
+    })
+  })
+
+  it('refuses the same floor one short of that, on both entry points', async () => {
+    const floor = BigInt(TIP) + EXIT_DELAY - 1n
+    const { read } = reader({ quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }) })
+    await expect(read.resolve(request())).rejects.toThrow(/below the caller minimum/)
+    await expect(read.available(request())).rejects.toThrow(/below the caller minimum/)
+  })
+
+  it('anchors a seconds-typed deployment on the request clock, with no tip to read', async () => {
+    const now = 1_700_000_000
+    const floor = BigInt(now) + EXIT_DELAY
+    const { read } = reader({
+      trust: { ...TRUST, locktimeDomain: 'time' },
+      tipHeight: undefined,
+      quote: quoteFixture({ domain: 'time', recovery: floor - 1n, floor, batch: floor, expiresAt: now + 100 }),
+    })
+    await expect(read.resolve(request({ now }))).resolves.toMatchObject({
+      inputExpiryFloor: { kind: 'time', value: floor },
+    })
+    await expect(read.resolve(request({ now: now + 1 }))).rejects.toThrow(/below the caller minimum/)
+  })
+
+  it('refuses to build a height-typed reader with no tip to anchor on', () => {
+    expect(() =>
+      createTaxiReceiveCarrierReader({
+        quotes: { info: async () => infoFixture() as never, getReceiveQuote: async () => quoteFixture() as never },
+        trust: TRUST,
+        maxServiceFareSats: 10n,
+        coins: async () => [],
+        reserved: () => new Set<string>(),
+      }),
+    ).toThrow(/chain tip/)
+  })
+})
+
 describe('inventory against the quote’s own input expiry floor', () => {
+  it('reads the reservation ledger after the coin read, not before it', async () => {
+    // A pin taken while the coin read was in flight is still a pin.
+    const pinned = new Set<string>()
+    const { read } = reader({
+      coins: async () => {
+        pinned.add(`${'a'.repeat(64)}:0`)
+        return [coin({ txid: 'a'.repeat(64), assets: [{ assetId: ASSET, amount: 9n }] })]
+      },
+      // A fresh copy per read, as the real ledger answers: a shared Set would
+      // let an early read pick up the later mutation and pass either way.
+      reserved: () => new Set(pinned),
+    })
+    expect(await read.available(request())).toEqual(new Map([[null, 0n]]))
+  })
+
   it('counts only coins whose known expiry clears the floor', async () => {
     const { read } = reader({
       coins: async () => [

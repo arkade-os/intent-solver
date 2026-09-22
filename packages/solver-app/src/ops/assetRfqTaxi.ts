@@ -6,9 +6,11 @@
 
 import { ArkAddress, asset, type IContractManager } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
-import { verifyReceiveQuote, type TaxiClient, type VerifiedReceiveQuote } from '@arkade-taxi/client'
+import { TaxiClient, verifyReceiveQuote, type VerifiedReceiveQuote } from '@arkade-taxi/client'
 import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
+import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
+import type { CarrierAttemptRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type {
   ReceiveCarrierQuote,
   ReceiveCarrierQuoteRequest,
@@ -24,6 +26,10 @@ export interface TaxiCarrierTrust {
   hrp: string
   /** @see resolveTimelockUnit */
   locktimeDomain: 'height' | 'time'
+  /** How far past the anchor the operator's input expiry floor must sit, in this
+   * domain's units — arkd's advertised exit delay. Verification only ORDERS the
+   * quote's deadlines, which `recovery=1 / floor=2` satisfies. */
+  inputExpiryMargin: bigint
 }
 
 export interface CarrierCoin {
@@ -41,6 +47,8 @@ export interface TaxiReceiveCarrierDeps {
   maxServiceFareSats: bigint
   coins: () => Promise<readonly CarrierCoin[]>
   reserved: () => ReadonlySet<string>
+  /** Required on a height-typed deployment: the clock cannot anchor a height. */
+  tipHeight?: () => Promise<number>
 }
 
 const TAPROOT_PK_SCRIPT = /^5120([0-9a-f]{64})$/
@@ -78,6 +86,7 @@ const locktimeOf = (
 const verifiedQuoteFor = async (
   deps: TaxiReceiveCarrierDeps,
   request: ReceiveCarrierQuoteRequest,
+  minInputExpiryFloor: { kind: 'height' | 'time'; value: bigint },
 ): Promise<VerifiedReceiveQuote> => {
   const receiverAddress = payoutAddressOf(request.makerPkScript, deps.trust)
   if (!XONLY_HEX.test(request.makerPublicKey)) {
@@ -90,7 +99,6 @@ const verifiedQuoteFor = async (
   if (quote.quoteId !== request.quoteId)
     throw new Error(`carrier quote ${request.quoteId} answered as ${quote.quoteId}`)
   const floor = locktimeOf(quote.inputExpiryFloor, 'inputExpiryFloor')
-  const domain = { kind: deps.trust.locktimeDomain, value: 1n } as const
   return verifyReceiveQuote({
     quote,
     info,
@@ -104,13 +112,11 @@ const verifiedQuoteFor = async (
       receiverAddress,
       makerPublicKey: hex.decode(request.makerPublicKey),
       assetId,
-      // ECHOED, and the minimums below assert only the DOMAIN: the client made
-      // this quote, so its funding expiry is not ours to know. What guards the
-      // floor is `recovery < floor <= batch`, and the inventory filter below.
+      // ECHOED, so this sub-check collapses: the CLIENT made the quote.
       fundingExpiry: floor,
       maxServiceFareSats: deps.maxServiceFareSats,
-      minRecoveryLocktime: domain,
-      minInputExpiryFloor: domain,
+      minRecoveryLocktime: { kind: deps.trust.locktimeDomain, value: 1n },
+      minInputExpiryFloor,
     },
   })
 }
@@ -142,24 +148,102 @@ const clearsFloor = (coin: CarrierCoin, floor: { kind: 'height' | 'time'; value:
 
 export const createTaxiReceiveCarrierReader = (
   deps: TaxiReceiveCarrierDeps,
-): Pick<ReceiveCarrierQuotes, 'resolve' | 'available'> => ({
-  resolve: async (request) => carrierQuoteFrom(await verifiedQuoteFor(deps, request)),
+): Pick<ReceiveCarrierQuotes, 'resolve' | 'available'> => {
+  const tip = deps.trust.locktimeDomain === 'height' ? deps.tipHeight : undefined
+  if (deps.trust.locktimeDomain === 'height' && tip === undefined) {
+    throw new Error('a height-typed deployment needs a chain tip to anchor the carrier input expiry floor on')
+  }
+  const anchoredFloor = async (now: number) => ({
+    kind: deps.trust.locktimeDomain,
+    value: (tip === undefined ? BigInt(now) : BigInt(await tip())) + deps.trust.inputExpiryMargin,
+  })
+  const quoteFor = async (request: ReceiveCarrierQuoteRequest): Promise<ReceiveCarrierQuote> =>
+    carrierQuoteFrom(await verifiedQuoteFor(deps, request, await anchoredFloor(request.now)))
 
-  available: async (request) => {
-    const floor = carrierQuoteFrom(await verifiedQuoteFor(deps, request)).inputExpiryFloor
-    const reserved = deps.reserved()
-    const dust = Number(deps.trust.dustSats)
-    const inventory = new Map<AssetLeg, bigint>([[null, 0n]])
-    for (const coin of await deps.coins()) {
-      if (reserved.has(outpointKey(coin.txid, coin.vout))) continue
-      if (!clearsFloor(coin, floor)) continue
-      const sats = usableSatsOf(coin, dust)
-      if (sats > 0) inventory.set(null, (inventory.get(null) ?? 0n) + BigInt(sats))
-      for (const held of coin.assets ?? []) {
-        const amount = BigInt(held.amount)
-        if (amount > 0n) inventory.set(held.assetId, (inventory.get(held.assetId) ?? 0n) + amount)
+  return {
+    resolve: quoteFor,
+
+    available: async (request) => {
+      const floor = (await quoteFor(request)).inputExpiryFloor
+      const coins = await deps.coins()
+      // AFTER every await above: a pin taken during one is still a pin.
+      const reserved = deps.reserved()
+      const dust = Number(deps.trust.dustSats)
+      const inventory = new Map<AssetLeg, bigint>([[null, 0n]])
+      for (const coin of coins) {
+        if (reserved.has(outpointKey(coin.txid, coin.vout))) continue
+        if (!clearsFloor(coin, floor)) continue
+        const sats = usableSatsOf(coin, dust)
+        if (sats > 0) inventory.set(null, (inventory.get(null) ?? 0n) + BigInt(sats))
+        for (const held of coin.assets ?? []) {
+          const amount = BigInt(held.amount)
+          if (amount > 0n) inventory.set(held.assetId, (inventory.get(held.assetId) ?? 0n) + amount)
+        }
       }
+      return inventory
+    },
+  }
+}
+
+/** The whole of the runtime switch. Unset, nothing below is reached — not the
+ * operator, not the tip, not the extra arkd round-trip `trust` costs. */
+export interface TaxiCarrierComposition {
+  taxiUrl?: string
+  trust: () => Promise<TaxiCarrierTrust>
+  maxServiceFareSats: bigint
+  contracts: () => Promise<Pick<IContractManager, 'getContractsWithVtxos'>>
+  reserved: () => ReadonlySet<string>
+  tipHeight?: () => Promise<number>
+  fetch?: typeof fetch
+}
+
+export const taxiReceiveCarrier = async (
+  deps: TaxiCarrierComposition,
+): Promise<Pick<ReceiveCarrierQuotes, 'resolve' | 'available'> | undefined> => {
+  const baseUrl = deps.taxiUrl
+  if (baseUrl === undefined) return undefined
+  return createTaxiReceiveCarrierReader({
+    quotes: new TaxiClient({ baseUrl, fetch: deps.fetch }),
+    trust: await deps.trust(),
+    maxServiceFareSats: deps.maxServiceFareSats,
+    coins: async () => spendableCarrierCoins(await deps.contracts()),
+    reserved: deps.reserved,
+    tipHeight: deps.tipHeight,
+  })
+}
+
+export interface CarrierAttemptPin {
+  id: string
+  release: ReleaseReservation
+}
+
+const CANONICAL_TXID = /^[0-9a-f]{64}$/
+
+const pinnedInputsOf = ({ row, attempt }: CarrierAttemptRecord): readonly { txid: string; vout: number }[] => {
+  const inputs = attempt.snapshot.inputs
+  if (!Array.isArray(inputs) || inputs.length === 0) {
+    throw new Error(`carrier attempt ${row.id} names no inputs to re-pin`)
+  }
+  return inputs.map((raw) => {
+    const input = raw as { txid?: unknown; vout?: unknown }
+    if (typeof input?.txid !== 'string' || !CANONICAL_TXID.test(input.txid)) {
+      throw new Error(`carrier attempt ${row.id} names a non-canonical input txid`)
     }
-    return inventory
-  },
-})
+    if (!Number.isInteger(input.vout) || (input.vout as number) < 0) {
+      throw new Error(`carrier attempt ${row.id} names a non-canonical input vout`)
+    }
+    return { txid: input.txid, vout: input.vout as number }
+  })
+}
+
+/** Re-pin what an unresolved attempt still owns, before anything can tick: a
+ * reservation is process-local, so a restart drops it while the liability
+ * survives. REFUSES rather than skips. Releasing is the reconcile slice's. */
+export const restoreCarrierAttemptPins = async (deps: {
+  attempts: () => Promise<readonly CarrierAttemptRecord[]>
+  reserve: (outpoints: readonly { txid: string; vout: number }[]) => ReleaseReservation
+}): Promise<readonly CarrierAttemptPin[]> => {
+  const records = await deps.attempts()
+  const pinned = records.map((record) => ({ id: record.row.id, inputs: pinnedInputsOf(record) }))
+  return pinned.map(({ id, inputs }) => ({ id, release: deps.reserve(inputs) }))
+}

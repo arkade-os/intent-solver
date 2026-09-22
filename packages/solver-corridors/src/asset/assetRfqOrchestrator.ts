@@ -199,8 +199,9 @@ export interface AssetRfqDeps {
   /** Spend the deposit through `fulfill`, paying the client. Returns the txid. */
   settle: (row: AssetRfqSwapRow) => Promise<string>
   /** The internal Taxi adapter, reached only for an explicit `recycle`.
-   * OPTIONAL, and its absence is a REFUSAL rather than a default. */
-  receiveCarrierQuotes?: ReceiveCarrierQuotes
+   * OPTIONAL, and its absence is a REFUSAL rather than a default. `Partial`
+   * because the gate below refuses a half-built one on its own. */
+  receiveCarrierQuotes?: Partial<ReceiveCarrierQuotes>
   onError?: (id: string, error: unknown) => void
   now?: () => number
   newId?: () => string

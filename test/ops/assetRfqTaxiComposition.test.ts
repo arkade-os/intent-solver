@@ -1,0 +1,252 @@
+/**
+ * Turning the Taxi adapter on, and — the half that matters more — leaving it
+ * off: an operator who sets no `TAXI_URL` must get the solver they had before
+ * this existed. Asserted by watching every seam the composition is given and
+ * requiring that none is touched, rather than by reading the code.
+ */
+
+import { describe, it, expect } from 'vitest'
+import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import { AssetRfqSwapService, type AssetRfqDeps } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
+import type { CarrierAttemptRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import {
+  restoreCarrierAttemptPins,
+  taxiReceiveCarrier,
+  type TaxiCarrierComposition,
+  type TaxiCarrierTrust,
+} from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
+import { createServicesBody } from '../support/createServicesBody.js'
+
+const ASSET = `${'aa'.repeat(31)}bb0100`
+const MAKER_PK_SCRIPT = `5120${'c'.repeat(64)}`
+const MAKER_KEY = 'b'.repeat(64)
+
+const TRUST: TaxiCarrierTrust = {
+  serverKey: Uint8Array.from({ length: 32 }, () => 1),
+  emulatorKey: Uint8Array.from({ length: 32 }, () => 2),
+  dustSats: 330n,
+  vtxoMinAmount: 1n,
+  hrp: 'tark',
+  locktimeDomain: 'height',
+  inputExpiryMargin: 5n,
+}
+
+const watched = (over: Partial<TaxiCarrierComposition> = {}) => {
+  const touched: string[] = []
+  const urls: string[] = []
+  const deps: TaxiCarrierComposition = {
+    trust: async () => {
+      touched.push('trust')
+      return TRUST
+    },
+    maxServiceFareSats: 330n,
+    contracts: async () => {
+      touched.push('contracts')
+      return { getContractsWithVtxos: async () => [] }
+    },
+    reserved: () => {
+      touched.push('reserved')
+      return new Set<string>()
+    },
+    tipHeight: async () => {
+      touched.push('tipHeight')
+      return 1_000_000
+    },
+    fetch: (async (input: unknown) => {
+      urls.push(String(input))
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch,
+    ...over,
+  }
+  return { touched, urls, deps }
+}
+
+describe('an unconfigured solver composes no Taxi at all', () => {
+  it('returns no adapter and touches not one seam', async () => {
+    const { deps, touched, urls } = watched()
+    expect(await taxiReceiveCarrier(deps)).toBeUndefined()
+    // Not merely "no HTTP": no trust resolution either.
+    expect(touched).toEqual([])
+    expect(urls).toEqual([])
+  })
+
+  it('composes nothing for a set-but-empty value, the way every other knob reads one', async () => {
+    const { deps, touched } = watched({ taxiUrl: undefined })
+    expect(await taxiReceiveCarrier(deps)).toBeUndefined()
+    expect(touched).toEqual([])
+  })
+})
+
+describe('a configured solver is pointable by that URL alone', () => {
+  it('reads the operator named by the knob, and no other host', async () => {
+    const { deps, urls } = watched({ taxiUrl: 'http://taxi.example:7080' })
+    const carrier = await taxiReceiveCarrier(deps)
+    await expect(
+      carrier!.resolve({
+        quoteId: 'q-1',
+        makerPkScript: MAKER_PK_SCRIPT,
+        makerPublicKey: MAKER_KEY,
+        assetId: ASSET,
+        now: 2_000,
+      }),
+    ).rejects.toThrow()
+    expect(urls.sort()).toEqual(['http://taxi.example:7080/v1/info', 'http://taxi.example:7080/v1/receive-quotes/q-1'])
+  })
+
+  it('resolves the trusted identity once, from the running context rather than the URL', async () => {
+    const { deps, touched } = watched({ taxiUrl: 'http://taxi.example:7080' })
+    await taxiReceiveCarrier(deps)
+    expect(touched).toEqual(['trust'])
+  })
+
+  it('refuses to compose a height-typed deployment with no chain tip wired', async () => {
+    const { deps } = watched({ taxiUrl: 'http://taxi.example:7080', tipHeight: undefined })
+    await expect(taxiReceiveCarrier(deps)).rejects.toThrow(/chain tip/)
+  })
+})
+
+describe('the composed adapter is refused, never degraded', () => {
+  it('carries the read half only, so the completeness gate can see it is partial', async () => {
+    const { deps } = watched({ taxiUrl: 'http://taxi.example:7080' })
+    expect(Object.keys((await taxiReceiveCarrier(deps))!).sort()).toEqual(['available', 'resolve'])
+  })
+
+  it('makes the real orchestrator refuse a recycle rather than price one', async () => {
+    const { deps, urls } = watched({ taxiUrl: 'http://taxi.example:7080' })
+    let clock = 1_000
+    const store = await AssetRfqSwapStore.open(':memory:', () => clock)
+    const orchestrator: AssetRfqDeps = {
+      store,
+      markets: [
+        {
+          base: null,
+          quote: ASSET,
+          symbol: 'USDA',
+          baseDecimals: 8,
+          quoteDecimals: 6,
+          feeBps: 50,
+          sellBase: { min: 1n, max: 10n ** 24n },
+          buyBase: { min: 1n, max: 10n ** 24n },
+          feedUrl: 'https://feed.example/btc',
+          pricePath: 'price',
+          carrierSats: 0n,
+        },
+      ],
+      solverPubkey: 'e'.repeat(64),
+      quoteValiditySeconds: 30,
+      dustSats: 330n,
+      now: () => clock,
+      fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
+      deriveOffer: () => ({ pkScript: `5120${'d'.repeat(64)}`, address: 'ark1qoffer' }),
+      depositAt: async () => null,
+      balance: async () => new Map([[ASSET, 10n ** 18n]]),
+      settle: async () => 'fa'.repeat(32),
+      newId: () => 'swap-1',
+      receiveCarrierQuotes: await taxiReceiveCarrier(deps),
+    }
+    expect(
+      await new AssetRfqSwapService(orchestrator).quote({
+        rfqId: 'a'.repeat(64),
+        pair: `arkade:BTC->arkade:${ASSET}`,
+        amount: 100_000_000n,
+        amountSide: 'from',
+        makerPkScript: MAKER_PK_SCRIPT,
+        makerPublicKey: MAKER_KEY,
+        carrier: { mode: 'recycle', quoteId: 'q-1' },
+      }),
+    ).toMatchObject({ accepted: false, reason: 'price_unavailable' })
+    // The refusal precedes the boundary: a degraded one would have asked.
+    expect(urls).toEqual([])
+    await store.close()
+  })
+})
+
+/** Nothing writes an attempt yet — the checkpoint writes are the settle slice —
+ * so this restores nothing today; what it pins is the call and the shape. */
+describe('restoring the pins an unresolved attempt still owns', () => {
+  const record = (id: string, inputs: unknown): CarrierAttemptRecord =>
+    ({ row: { id }, attempt: { phase: 'prepared', snapshot: { inputs } } }) as unknown as CarrierAttemptRecord
+
+  it('pins nothing when no attempt is outstanding', async () => {
+    const ledger = createReservationLedger()
+    expect(await restoreCarrierAttemptPins({ attempts: async () => [], reserve: ledger.reserve })).toHaveLength(0)
+    expect(ledger.reserved().size).toBe(0)
+  })
+
+  it('re-pins every outpoint an unresolved attempt named', async () => {
+    const ledger = createReservationLedger()
+    const pins = await restoreCarrierAttemptPins({
+      attempts: async () => [
+        record('swap-1', [
+          { txid: 'a'.repeat(64), vout: 0 },
+          { txid: 'b'.repeat(64), vout: 3 },
+        ]),
+      ],
+      reserve: ledger.reserve,
+    })
+    expect(pins.map((pin) => pin.id)).toEqual(['swap-1'])
+    expect([...ledger.reserved()].sort()).toEqual([`${'a'.repeat(64)}:0`, `${'b'.repeat(64)}:3`])
+  })
+
+  it('refuses to start on an attempt whose snapshot names no inputs', async () => {
+    // Skipping would free a coin an in-flight fill may already have spent.
+    const ledger = createReservationLedger()
+    await expect(
+      restoreCarrierAttemptPins({ attempts: async () => [record('swap-2', undefined)], reserve: ledger.reserve }),
+    ).rejects.toThrow(/swap-2/)
+    expect(ledger.reserved().size).toBe(0)
+  })
+
+  it('refuses an outpoint that is not canonical rather than pinning the wrong coin', async () => {
+    const ledger = createReservationLedger()
+    await expect(
+      restoreCarrierAttemptPins({
+        attempts: async () => [record('swap-3', [{ txid: 'A'.repeat(64), vout: 0 }])],
+        reserve: ledger.reserve,
+      }),
+    ).rejects.toThrow(/swap-3/)
+  })
+})
+
+/** Asserted against source for the reason `createServicesBody` gives. Only the
+ * ORDER and the guard — both halves are exercised behaviourally above. */
+describe('createServices reaches Taxi through exactly one guarded seam', () => {
+  const body = () => createServicesBody()
+
+  it('passes the knob straight through, and builds no client itself', () => {
+    expect(body().match(/taxiReceiveCarrier\(/g)).toHaveLength(1)
+    expect(body()).toContain('taxiUrl: config.taxiUrl')
+    expect(body()).not.toContain('new TaxiClient(')
+  })
+
+  it('hands it to the RFQ service, which is the only thing that can reach it', () => {
+    expect(body()).toContain('receiveCarrierQuotes: taxiCarrier')
+  })
+
+  it('takes the trusted identity from the running context, never from the URL', () => {
+    expect(body()).toContain('serverKey: arkade.wallet.arkServerPublicKey')
+    expect(body()).toContain('emulatorKey: assetRfqDerivation.emulatorPubkey')
+    expect(body()).toContain('inputExpiryMargin: BigInt(arkade.advertisedExitDelay)')
+  })
+
+  it('restores the pins before the service that ticks them exists', () => {
+    const restore = 'await restoreCarrierAttemptPins('
+    const service = 'new AssetRfqSwapService('
+    expect(body()).toContain(restore)
+    expect(body()).toContain(service)
+    expect(body().indexOf(restore)).toBeLessThan(body().indexOf(service))
+  })
+
+  it('restores nothing when no Taxi is configured', () => {
+    // With no adapter there is no fill to protect, and the store read would be
+    // a behaviour an unconfigured solver gained.
+    const guard = 'if (taxiCarrier !== undefined) {'
+    const source = body()
+    expect(source).toContain(guard)
+    expect(source.match(/restoreCarrierAttemptPins\(/g)).toHaveLength(1)
+    expect(source.slice(source.indexOf(guard), source.indexOf('const assetRfqService'))).toContain(
+      'restoreCarrierAttemptPins(',
+    )
+  })
+})
