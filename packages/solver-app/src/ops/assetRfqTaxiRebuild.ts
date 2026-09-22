@@ -75,6 +75,7 @@ export const sponsorLegFrom = (
   wire: SwapFillGraphWire,
   funding: readonly CarrierJointFunding[],
   label: string,
+  contributionSats?: bigint,
 ): CarrierSponsorLeg | undefined => {
   const fund = wire.inputs.flatMap((input, i) => (input.owner === 'sponsor' ? [funding[i]!] : []))
   if (fund.length === 0) return undefined
@@ -84,13 +85,43 @@ export const sponsorLegFrom = (
   // the quote label two outputs that are otherwise identical.
   const script = change?.script ?? fare?.script
   if (script === undefined) throw new Error(`${label} quotes a sponsor leg that keeps neither a fare nor change`)
-  const contribution = fund.reduce((total, coin) => total + BigInt(coin.value), 0n) - BigInt(change?.sats ?? '0')
-  if (contribution <= 0n) throw new Error(`${label} quotes a sponsor contributing ${contribution} sats`)
+  const quoted = fund.reduce((total, coin) => total + BigInt(coin.value), 0n) - BigInt(change?.sats ?? '0')
+  if (quoted <= 0n) throw new Error(`${label} quotes a sponsor contributing ${quoted} sats`)
+  // The AUTHORISED number is what gets built; the quote's own is only compared
+  // to it, so a leg priced differently refuses legibly rather than as a digest.
+  if (contributionSats !== undefined && quoted !== contributionSats) {
+    throw new Error(`${label} quotes a sponsor contributing ${quoted} sats, not the ${contributionSats} it authorised`)
+  }
   return {
     fund,
-    netContributionSats: contribution,
+    netContributionSats: contributionSats ?? quoted,
     changeScript: hex.decode(script),
     ...(fare === undefined ? {} : { fare: fareFrom(fare, label) }),
+  }
+}
+
+export interface CarrierAuthorisedSats {
+  physicalSats: bigint
+  contributionSats: bigint
+  maxFareSats: bigint
+}
+
+/**
+ * `assembleOfferFill` pays the solver `inputs - maker - fare - sponsorChange`
+ * over `sponsorChange = sponsorInputs - netContribution`, so its net is exactly
+ * `deposit + netContribution - maker - fare`. Measuring that net rather than
+ * reading a role label means an inflated carrier, a short contribution and a
+ * fare hidden in change all move ONE number.
+ */
+export const assertSolverSatsFloor = (
+  flow: { depositValue: bigint; solverInputsSum: bigint; solverPayout: bigint },
+  authorised: CarrierAuthorisedSats,
+  label: string,
+): void => {
+  const net = flow.solverPayout - flow.solverInputsSum
+  const floor = flow.depositValue + authorised.contributionSats - authorised.physicalSats - authorised.maxFareSats
+  if (net < floor) {
+    throw new Error(`${label} nets the solver ${net} sats, under the ${floor} its authorised terms guarantee`)
   }
 }
 
@@ -163,14 +194,36 @@ export const createCarrierFillRebuilder =
     assertQuotedOwnership(wire, request, label)
     const receiver = wire.outputs[0]
     if (receiver?.role !== 'receiver') throw new Error(`${label} was quoted no receiver output to pay the maker`)
-    const sponsor = sponsorLegFrom(wire, recoverJointFunding(wire, label), label)
+    if (BigInt(receiver.sats) !== request.physicalSats) {
+      throw new Error(
+        `${label} was quoted a ${receiver.sats} sat carrier, not the ${request.physicalSats} it authorised`,
+      )
+    }
+    const funding = recoverJointFunding(wire, label)
+    const sponsor = sponsorLegFrom(wire, funding, label, request.contributionSats)
+    assertSolverSatsFloor(quotedSatsFlow(wire, funding), request, label)
     return await (deps.build ?? buildOfferFillPlan)(deps.wallet, deps.arkServerUrl, request.offerHex, {
       fund: request.inputs.map((coin) => solverFunding(coin, label)),
       payoutScript: request.proceedsScript,
       fundingOutpoint: { txid: request.row.depositTxid!, vout: request.row.depositVout! },
-      // The maker's output IS the carrier when the offer wants an asset, so the
-      // quote states this rather than the default being assumed to match.
-      assetCarrierSats: BigInt(receiver.sats),
+      // The solver's own number sizes the carrier the maker is paid on.
+      assetCarrierSats: request.physicalSats,
       ...(sponsor === undefined ? {} : { sponsor }),
     })
   }
+
+/** Values come from the checkpoints: only those bytes are in the digest. */
+const quotedSatsFlow = (
+  wire: SwapFillGraphWire,
+  funding: readonly CarrierJointFunding[],
+): { depositValue: bigint; solverInputsSum: bigint; solverPayout: bigint } => ({
+  depositValue: BigInt(funding[0]!.value),
+  solverInputsSum: wire.inputs.reduce(
+    (total, input, i) => (input.owner === 'solver' ? total + BigInt(funding[i]!.value) : total),
+    0n,
+  ),
+  solverPayout: wire.outputs.reduce(
+    (total, output) => (output.role === 'solver' ? total + BigInt(output.sats) : total),
+    0n,
+  ),
+})

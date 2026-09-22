@@ -115,15 +115,31 @@ const solverCoin = (over: Partial<CarrierCoin> = {}): CarrierCoin => ({
   ...over,
 })
 
+/** `solverNet` = 6170 - 2000 = 4170 = 1000 + 3500 - 330 - fare, so the quote's
+ * implied fare is zero and it clears a 4 sat cap. */
 const rebuildRequest = (over: Record<string, unknown> = {}) => ({
   row: row(),
   offerHex: 'abcd',
   inputs: [solverCoin()],
   proceedsScript: PROCEEDS,
-  contributionSats: 329n,
+  physicalSats: 330n,
+  contributionSats: 3_500n,
+  maxFareSats: 4n,
   quotedGraph: wire(),
   ...over,
 })
+
+const priced = (over: { carrier?: string; fare?: string; change?: string; payout?: string }): Partial<Wire> =>
+  ({
+    outputs: [
+      { role: 'receiver', vout: 0, script: hex.encode(MAKER), sats: over.carrier ?? '330', assets: [] },
+      ...(over.fare === undefined
+        ? []
+        : [{ role: 'sponsor-fare', vout: 1, script: hex.encode(SPONSOR_SCRIPT), sats: over.fare, assets: [] }]),
+      { role: 'sponsor-change', vout: 2, script: hex.encode(SPONSOR_SCRIPT), sats: over.change ?? '1500', assets: [] },
+      { role: 'solver', vout: 3, script: hex.encode(PROCEEDS), sats: over.payout ?? '6170', assets: [] },
+    ],
+  }) as Partial<Wire>
 
 describe('recovering the sponsor leg from the quoted graph itself', () => {
   it('reads every input back out of the checkpoint that spends it, byte for byte', () => {
@@ -284,5 +300,85 @@ describe('the rebuild takes the operator only for what it cannot know', () => {
     const blind = solverCoin({ tapTree: undefined, forfeitTapLeafScript: undefined })
 
     await expect(rebuild(rebuildRequest({ inputs: [blind] }) as never)).rejects.toThrow(/taproot evidence/)
+  })
+
+  it('builds with the sats it authorised, never the ones the quote priced itself at', async () => {
+    const { seen, build } = capture()
+    const rebuild = createCarrierFillRebuilder({ wallet: {} as never, arkServerUrl: 'http://ark', build })
+
+    await rebuild(rebuildRequest({ physicalSats: 330n, contributionSats: 3_500n }) as never)
+
+    // Both come from the request; an agreeing quote is consistent, not a source.
+    expect(seen[0]!.assetCarrierSats).toBe(330n)
+    expect((seen[0]!.sponsor as { netContributionSats: bigint }).netContributionSats).toBe(3_500n)
+  })
+})
+
+/** Every quote here names the right parties and would hash to its own id, and
+ * moves the wrong sats. */
+describe('the rebuild refuses a quote priced against the solver', () => {
+  const rebuilder = () =>
+    createCarrierFillRebuilder({
+      wallet: {} as never,
+      arkServerUrl: 'http://ark',
+      build: (async () => ({
+        arkTx: ARK_TX,
+        checkpoints: [...CHECKPOINTS],
+        graphId: GRAPH_ID,
+        inputOwners: [...INPUT_OWNERS],
+      })) as never,
+    })
+
+  it('refuses a carrier the operator sized for itself', async () => {
+    const quote = wire(priced({ carrier: '331', payout: '6169' }))
+
+    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(/sat carrier/)
+  })
+
+  it('refuses a sponsor contributing less than the quote it was authorised for', async () => {
+    const quote = wire(priced({ change: '1510', payout: '6160' }))
+
+    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(/contributing 3490/)
+  })
+
+  it('refuses a fare over the cap taken straight out of the payout', async () => {
+    // Contribution untouched at 3500: the ten sats come from the solver alone.
+    const quote = wire(priced({ fare: '10', payout: '6160' }))
+
+    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(/nets the solver/)
+  })
+
+  it('admits a fare inside the cap, which is what the cap is for', async () => {
+    const quote = wire(priced({ fare: '4', payout: '6166' }))
+
+    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).resolves.toMatchObject({
+      graphId: GRAPH_ID,
+    })
+  })
+
+  it('refuses a quote that pays the solver nothing at all', async () => {
+    const quote = wire(priced({ payout: '0' }))
+
+    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(/nets the solver/)
+  })
+})
+
+describe('a rebuild over tampered funding cannot reach the quoted digest', () => {
+  it('produces a different graph id when one sponsor value is moved by a sat', () => {
+    const recovered = recoverJointFunding(wire(), 'carrier fill swap-1')
+    const tampered = recovered.map((coin, i) => (i === 2 ? { ...coin, value: coin.value + 1 } : coin))
+    const again = buildOffchainTx(
+      tampered.map(({ txid, vout, value, tapLeafScript, tapTree }) => ({ txid, vout, value, tapLeafScript, tapTree })),
+      [
+        { script: MAKER, amount: 330n },
+        { script: SPONSOR_SCRIPT, amount: 1_500n },
+        { script: PROCEEDS, amount: 6_170n },
+      ],
+      SERVER_UNROLL,
+    )
+    const arkTx = base64.encode(again.arkTx.toPSBT())
+    const checkpoints = again.checkpoints.map((c) => base64.encode(c.toPSBT()))
+
+    expect(digestJointGraph({ arkTx, checkpoints, inputOwners: INPUT_OWNERS }, OFFER_FILL_TEMPLATE)).not.toBe(GRAPH_ID)
   })
 })

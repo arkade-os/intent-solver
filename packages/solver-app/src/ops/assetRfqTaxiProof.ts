@@ -10,8 +10,9 @@
  */
 
 import { base64, hex } from '@scure/base'
-import { Extension, Transaction } from '@arkade-os/sdk'
-import { unsignedPsbtBytes, verifyOfferFillPlan } from '@arkade-taxi/client'
+import { Extension, getArkPsbtFields, Transaction, VtxoTaprootTree } from '@arkade-os/sdk'
+import { verifyOfferFillPlan } from '@arkade-taxi/client'
+import { assertSolverSatsFloor, type CarrierAuthorisedSats } from './assetRfqTaxiRebuild.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierAttempt, JsonObject, JsonValue } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 import type {
@@ -68,6 +69,12 @@ const outpointOf = (value: JsonValue | undefined, label: string): CarrierOutpoin
 const stringField = (value: JsonValue | undefined, label: string): string => {
   if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} is not recorded`)
   return value
+}
+
+const satsField = (value: JsonValue | undefined, label: string): bigint => {
+  const raw = stringField(value, label)
+  if (!/^(0|[1-9][0-9]*)$/.test(raw)) throw new Error(`${label} is not a canonical decimal`)
+  return BigInt(raw)
 }
 
 interface BoundGraph {
@@ -148,20 +155,51 @@ const reconstruct = (row: AssetRfqSwapRow, attempt: CarrierAttempt, label: strin
     )
   }
 
+  const authorised: CarrierAuthorisedSats = {
+    physicalSats: satsField(attempt.snapshot.physical_sats, `${label} snapshot physical sats`),
+    contributionSats: satsField(attempt.snapshot.contribution_sats, `${label} snapshot contribution sats`),
+    maxFareSats: satsField(attempt.snapshot.max_fare_sats, `${label} snapshot max fare sats`),
+  }
   const receiver = finalTx.getOutput(0)
   if (receiver?.script === undefined || hex.encode(receiver.script) !== row.makerPkScript.toLowerCase()) {
     throw new Error(`${label} bound graph output 0 does not pay the maker the row named`)
   }
+  if (receiver.amount !== authorised.physicalSats) {
+    throw new Error(
+      `${label} bound graph carries the maker ${receiver.amount} sats, not the authorised ${authorised.physicalSats}`,
+    )
+  }
   const proceeds = stringField(attempt.snapshot.proceeds_script, `${label} snapshot proceeds script`).toLowerCase()
-  const pays = Array.from({ length: finalTx.outputsLength }, (_, i) => finalTx.getOutput(i)).some(
-    (output) => output?.script !== undefined && hex.encode(output.script) === proceeds,
+  const outputs = Array.from({ length: finalTx.outputsLength }, (_, i) => finalTx.getOutput(i))
+  const paid = outputs.filter((output) => output?.script !== undefined && hex.encode(output.script) === proceeds)
+  if (paid.length === 0) throw new Error(`${label} bound graph pays the solver proceeds nowhere`)
+  assertSolverSatsFloor(
+    {
+      depositValue: valueSpentBy(checkpoints[depositIndex]!, `${label} deposit checkpoint`),
+      solverInputsSum: graph.inputOwners.reduce(
+        (total, owner, i) =>
+          owner === 'solver' ? total + valueSpentBy(checkpoints[i]!, `${label} checkpoint ${i}`) : total,
+        0n,
+      ),
+      solverPayout: paid.reduce((total, output) => total + (output?.amount ?? 0n), 0n),
+    },
+    authorised,
+    `${label} bound graph`,
   )
-  if (!pays) throw new Error(`${label} bound graph pays the solver proceeds nowhere`)
-  if (row.toAssetId !== null && assetPaidTo(finalTx, row.toAssetId, 0) !== row.toAmount) {
+  // A recycle with no asset leg cannot exist — `settle` refuses one before any
+  // attempt is written — so this is a contradiction, never a case to skip.
+  if (row.toAssetId === null) throw new Error(`${label} reconciles a recycle row that names no asset leg`)
+  if (assetPaidTo(finalTx, row.toAssetId, 0) !== row.toAmount) {
     throw new Error(`${label} bound graph does not pay the maker ${row.toAmount} of ${row.toAssetId}`)
   }
 
   return { finalTx, txid: finalTx.id, checkpoints, checkpointTxids, depositIndex, deposit }
+}
+
+const valueSpentBy = (checkpoint: Transaction, label: string): bigint => {
+  const amount = checkpoint.getInput(0).witnessUtxo?.amount
+  if (amount === undefined) throw new Error(`${label} declares no witness utxo to value its input`)
+  return amount
 }
 
 /** Null is "the chain has not shown me enough", never "it is not settled". */
@@ -200,10 +238,53 @@ export const proveCarrierFill = async (
   ])
   for (const id of wanted) {
     const onChain = served.get(id)
+    // Not served yet is ordinary. Served under this id while committing to
+    // something else is not, and must not read as "not confirmed yet": an
+    // attempt that pends forever holds its coins forever.
     if (onChain === undefined) return null
-    if (hex.encode(unsignedPsbtBytes(onChain)) !== hex.encode(unsignedPsbtBytes(expected.get(id)!))) return null
+    assertSameSpendCommitment(onChain, expected.get(id)!, `${label} transaction ${id}`)
   }
   return { txid: built.txid, depositCheckpointTxid }
+}
+
+const sameBytes = (a: Uint8Array | undefined, b: Uint8Array | undefined): boolean =>
+  a === undefined || b === undefined ? a === b : hex.encode(a) === hex.encode(b)
+
+/** NOT whole-PSBT bytes: `unsignedPsbtBytes` strips `tapScriptSig` and nothing
+ * else, so one extra field from arkd would fail a byte compare forever on a
+ * correct transaction. Compared instead: all that decides what the money does. */
+const assertSameSpendCommitment = (candidate: Transaction, trusted: Transaction, label: string): void => {
+  const differs = (what: string): never => {
+    throw new Error(`${label} is served with a different ${what} than the one this solver signed`)
+  }
+  if (candidate.version !== trusted.version || candidate.lockTime !== trusted.lockTime) differs('transaction envelope')
+  if (candidate.inputsLength !== trusted.inputsLength) differs('input count')
+  if (candidate.outputsLength !== trusted.outputsLength) differs('output count')
+  for (let i = 0; i < trusted.inputsLength; i += 1) {
+    const got = candidate.getInput(i)
+    const want = trusted.getInput(i)
+    if (!sameBytes(got.txid, want.txid) || got.index !== want.index) differs(`input ${i} outpoint`)
+    if (got.sequence !== want.sequence) differs(`input ${i} sequence`)
+    if (!sameBytes(got.witnessUtxo?.script, want.witnessUtxo?.script)) differs(`input ${i} prevout script`)
+    if (got.witnessUtxo?.amount !== want.witnessUtxo?.amount) differs(`input ${i} prevout value`)
+    const leaves = (list: Transaction, at: number): string =>
+      (list.getInput(at).tapLeafScript ?? [])
+        .map(
+          ([control, script]) =>
+            `${control.version}:${hex.encode(control.internalKey)}:${control.merklePath.map(hex.encode).join('/')}:${hex.encode(script)}`,
+        )
+        .sort()
+        .join(',')
+    if (leaves(candidate, i) !== leaves(trusted, i)) differs(`input ${i} tap leaves`)
+    const trees = (of: Transaction): string => getArkPsbtFields(of, i, VtxoTaprootTree).map(hex.encode).sort().join(',')
+    if (trees(candidate) !== trees(trusted)) differs(`input ${i} taptree`)
+  }
+  for (let i = 0; i < trusted.outputsLength; i += 1) {
+    const got = candidate.getOutput(i)
+    const want = trusted.getOutput(i)
+    if (!sameBytes(got?.script, want?.script)) differs(`output ${i} script`)
+    if (got?.amount !== want?.amount) differs(`output ${i} value`)
+  }
 }
 
 const releaseEveryPin = (pins: CarrierPinLedger, id: string): void => {
@@ -224,8 +305,12 @@ export const createTaxiReceiveCarrierObserver = (
       releaseEveryPin(deps.pins, row.id)
       return { status: 'settled', txid }
     }
-    // Already terminal: its own winner released, and this row is `refused`.
-    if (attempt.phase === 'not_submitted') return { status: 'pending' }
+    // Durable proof nothing was sent: the refusal CAS writes this only over a
+    // `prepared`/`quoted` envelope. Any other holder's pin is `settle`'s leak.
+    if (attempt.phase === 'not_submitted') {
+      releaseEveryPin(deps.pins, row.id)
+      return { status: 'pending' }
+    }
     if (attempt.phase !== 'submitting') {
       // The submitting marker is committed BEFORE the submit POST, so a durable
       // phase short of it is proof nothing was ever sent.

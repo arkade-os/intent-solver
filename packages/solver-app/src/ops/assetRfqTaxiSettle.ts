@@ -51,7 +51,11 @@ export interface CarrierFillRebuildRequest {
   offerHex: string
   inputs: readonly CarrierCoin[]
   proceedsScript: Uint8Array
+  /** The three sats the solver AUTHORISED. The rebuild builds with these rather
+   * than the quote's, and refuses a quote that priced itself differently. */
+  physicalSats: bigint
   contributionSats: bigint
+  maxFareSats: bigint
   quotedGraph: SwapFillGraphWire
 }
 
@@ -137,6 +141,7 @@ const carrierAttemptSnapshotFor = (parts: {
   offerHex: string
   provider: string
   proceedsScript: Uint8Array
+  physicalSats: bigint
   contributionSats: bigint
   maxFareSats: bigint
   validUntil: number
@@ -151,6 +156,7 @@ const carrierAttemptSnapshotFor = (parts: {
     quote: { id: parts.quoteId, expires_at: parts.quoteExpiresAt },
     input_expiry_floor: locktimeJson(parts.floor),
     proceeds_script: hex.encode(parts.proceedsScript),
+    physical_sats: parts.physicalSats.toString(),
     contribution_sats: parts.contributionSats.toString(),
     max_fare_sats: parts.maxFareSats.toString(),
     valid_until: parts.validUntil,
@@ -235,6 +241,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       offerHex,
       provider: deps.provider,
       proceedsScript: deps.proceedsScript,
+      physicalSats: terms.physicalSats,
       contributionSats: terms.loanSats,
       maxFareSats: terms.serviceFareSats,
       validUntil,
@@ -285,7 +292,9 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         offerHex,
         inputs,
         proceedsScript: deps.proceedsScript,
+        physicalSats: terms.physicalSats,
         contributionSats: terms.loanSats,
+        maxFareSats: terms.serviceFareSats,
         quotedGraph: quoted,
       })
       if (!verifyOfferFillPlan(expected)) throw new Error(`carrier fill ${row.id} rebuilt a graph off its own template`)

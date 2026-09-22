@@ -16,9 +16,12 @@ import {
   CSVMultisigTapscript,
   DefaultVtxo,
   Extension,
+  getArkPsbtFields,
+  setArkPsbtField,
   Transaction,
+  VtxoTaprootTree,
 } from '@arkade-os/sdk'
-import { digestJointGraph, OFFER_FILL_TEMPLATE } from '@arkade-taxi/client'
+import { digestJointGraph, OFFER_FILL_TEMPLATE, setTapScriptSigEntries } from '@arkade-taxi/client'
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import { createCarrierPinLedger } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
@@ -31,6 +34,7 @@ import {
 const ASSET = `${'aa'.repeat(31)}bb0100`
 const DEPOSIT_TXID = '1'.repeat(64)
 const COIN_A = '2'.repeat(64)
+const SPONSOR_TXID = '3'.repeat(64)
 const SOLVER_KEY = 'd'.repeat(64)
 
 const xonly = (seed: number): string => hex.encode(schnorr.getPublicKey(new Uint8Array(32).fill(seed)))
@@ -56,8 +60,11 @@ const coinInput = (seed: number, txid: string, vout: number, value: number) => {
   return { txid, vout, value, tapLeafScript: s.forfeit(), tapTree: s.encode() }
 }
 
+const SPONSOR_SCRIPT = vtxoScript(5).pkScript
+
 const DEPOSIT = coinInput(1, DEPOSIT_TXID, 1, 1_000)
 const SOLVER = coinInput(2, COIN_A, 0, 2_000)
+const SPONSOR = coinInput(3, SPONSOR_TXID, 7, 500)
 
 /** Input 1 (the solver coin) carries the asset; output 0 pays it to the maker. */
 const ASSET_EXT = Extension.create([
@@ -66,11 +73,19 @@ const ASSET_EXT = Extension.create([
   ]),
 ]).txOut()
 
-const buildGraph = (outputs: { script: Uint8Array; amount: bigint }[]) => {
-  const built = buildOffchainTx([DEPOSIT, SOLVER], [...outputs, ASSET_EXT], SERVER_UNROLL)
+/** `solverNet = 1000 + 329 - 330 - 4` = 995 = payout 2995 less the 2000 solver
+ * input, so the default fixture sits EXACTLY on the floor: one sat moved away
+ * from the solver fails, and a smaller fare passes. */
+const AUTHORISED = { physical: 330n, contribution: 329n, maxFare: 4n }
+
+const buildGraph = (
+  outputs: { script: Uint8Array; amount: bigint }[],
+  inputs: readonly (typeof DEPOSIT)[] = [DEPOSIT, SOLVER, SPONSOR],
+) => {
+  const built = buildOffchainTx([...inputs], [...outputs, ASSET_EXT], SERVER_UNROLL)
   const arkTx = base64.encode(built.arkTx.toPSBT())
   const checkpoints = built.checkpoints.map((c) => base64.encode(c.toPSBT()))
-  const inputOwners: readonly (string | null)[] = [null, 'solver']
+  const inputOwners: readonly (string | null)[] = [null, 'solver', 'sponsor'].slice(0, inputs.length)
   return {
     arkTx,
     checkpoints,
@@ -81,20 +96,28 @@ const buildGraph = (outputs: { script: Uint8Array; amount: bigint }[]) => {
   }
 }
 
-const GRAPH = buildGraph([
-  { script: MAKER, amount: 330n },
-  { script: PROCEEDS, amount: 2_670n },
-])
+const payments = (over: { carrier?: bigint; fare?: bigint; change?: bigint; payout?: bigint } = {}) => [
+  { script: MAKER, amount: over.carrier ?? AUTHORISED.physical },
+  { script: SPONSOR_SCRIPT, amount: over.fare ?? AUTHORISED.maxFare },
+  { script: SPONSOR_SCRIPT, amount: over.change ?? 171n },
+  { script: PROCEEDS, amount: over.payout ?? 2_995n },
+]
+
+const GRAPH = buildGraph(payments())
+
+const boundTo = (graph: typeof GRAPH) => ({
+  graph: {
+    id: graph.graphId,
+    ark_tx: graph.arkTx,
+    checkpoints: [...graph.checkpoints],
+    input_owners: [...graph.inputOwners],
+  },
+})
 
 const bindingJson = (over: Record<string, unknown> = {}) => ({
   fill_id: 'fill-1',
   expires_at: 8_000,
-  graph: {
-    id: GRAPH.graphId,
-    ark_tx: GRAPH.arkTx,
-    checkpoints: [...GRAPH.checkpoints],
-    input_owners: [...GRAPH.inputOwners],
-  },
+  ...boundTo(GRAPH),
   ...over,
 })
 
@@ -107,8 +130,9 @@ const snapshotJson = () => ({
   quote: { id: 'q-1', expires_at: 9_000 },
   input_expiry_floor: { kind: 'height', value: '1100000' },
   proceeds_script: hex.encode(PROCEEDS),
-  contribution_sats: '329',
-  max_fare_sats: '4',
+  physical_sats: AUTHORISED.physical.toString(),
+  contribution_sats: AUTHORISED.contribution.toString(),
+  max_fare_sats: AUTHORISED.maxFare.toString(),
   valid_until: 9_000,
 })
 
@@ -169,14 +193,16 @@ const chainOf = (
       asked.push([...txids])
       const known = new Map<string, string>([
         [GRAPH.finalTxid, GRAPH.arkTx],
-        [GRAPH.checkpointTxids[0]!, GRAPH.checkpoints[0]!],
-        [GRAPH.checkpointTxids[1]!, GRAPH.checkpoints[1]!],
+        ...GRAPH.checkpointTxids.map((id, i): [string, string] => [id, GRAPH.checkpoints[i]!]),
       ])
       if (over.txs !== undefined) return { txs: [...over.txs] }
       return { txs: txids.flatMap((id) => (known.has(id) ? [known.get(id)!] : [])) }
     },
   }
 }
+
+const servedFrom = (graph: typeof GRAPH): CarrierChainReader & { asked: string[][] } =>
+  chainOf({ spentBy: graph.checkpointTxids[0]!, txs: [graph.arkTx, graph.checkpoints[0]!] })
 
 const harness = async (
   over: {
@@ -205,7 +231,8 @@ const harness = async (
   const deps: TaxiCarrierProofDeps = { store, chain: over.chain ?? chainOf(), pins }
   const { reconcile } = createTaxiReceiveCarrierObserver(deps)
   return {
-    reconcile: () => reconcile(row(store)),
+    reconcile: () => reconcile(rowOf()),
+    reconcileAs: (as: AssetRfqSwapRow) => reconcile(as),
     store,
     pins,
     ledger,
@@ -214,7 +241,7 @@ const harness = async (
   }
 }
 
-const row = (_store: AssetRfqSwapStore): AssetRfqSwapRow =>
+const rowOf = (): AssetRfqSwapRow =>
   ({
     id: 'swap-1',
     state: 'filling',
@@ -261,6 +288,15 @@ describe('the observer settles only on the whole evidence chain', () => {
     expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
   })
 
+  it('stays pending when the spender is one of this graph’s ids but the WRONG one', async () => {
+    // Checkpoint 1 is the solver coin's, byte-derived from this very graph: an
+    // "is it an id I built" check would admit it.
+    const h = await harness({ chain: chainOf({ spentBy: GRAPH.checkpointTxids[1]! }) })
+
+    await expect(h.reconcile()).resolves.toEqual({ status: 'pending' })
+    expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
+  })
+
   it('stays pending when the indexer serves no transaction for the id it derived', async () => {
     const h = await harness({ chain: chainOf({ txs: [] }) })
 
@@ -268,9 +304,8 @@ describe('the observer settles only on the whole evidence chain', () => {
     expect((await h.attempt())?.phase).toBe('submitting')
   })
 
-  it('stays pending when the served transaction shares its id but not its bytes', async () => {
-    // Same inputs, outputs, version and locktime — so the same txid — with the
-    // tap leaves and the taptree the solver committed to stripped out.
+  it('surfaces a transaction served under its id but committing to something else', async () => {
+    // Same body, so the same txid, with the tap leaves and taptree stripped.
     const trusted = Transaction.fromPSBT(base64.decode(GRAPH.arkTx))
     const bare = new Transaction({
       version: trusted.version,
@@ -288,15 +323,86 @@ describe('the observer settles only on the whole evidence chain', () => {
 
     const h = await harness({ chain: chainOf({ txs: [base64.encode(bare.toPSBT()), GRAPH.checkpoints[0]!] }) })
 
-    await expect(h.reconcile()).resolves.toEqual({ status: 'pending' })
+    await expect(h.reconcile()).rejects.toThrow(/tap leaves|taptree|prevout/)
     expect((await h.attempt())?.phase).toBe('submitting')
+    expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
+  })
+
+  it('surfaces a transaction whose inputs may be spent under a leaf it never signed', async () => {
+    // Same taptree and id, one input re-pointed at the UNILATERAL EXIT leaf.
+    const trusted = Transaction.fromPSBT(base64.decode(GRAPH.arkTx))
+    const swapped = new Transaction({
+      version: trusted.version,
+      lockTime: trusted.lockTime,
+      allowUnknownInputs: true,
+      allowUnknownOutputs: true,
+      disableScriptCheck: true,
+    })
+    for (let i = 0; i < trusted.inputsLength; i += 1) {
+      const from = trusted.getInput(i)
+      swapped.addInput({
+        txid: from.txid!,
+        index: from.index!,
+        sequence: from.sequence,
+        witnessUtxo: from.witnessUtxo,
+        tapLeafScript: i === 1 ? [vtxoScript(2).exit()] : from.tapLeafScript,
+      })
+      setArkPsbtField(swapped, i, VtxoTaprootTree, getArkPsbtFields(trusted, i, VtxoTaprootTree)[0]!)
+    }
+    for (let i = 0; i < trusted.outputsLength; i += 1) swapped.addOutput(trusted.getOutput(i) as never)
+    expect(swapped.id).toBe(GRAPH.finalTxid)
+
+    const h = await harness({ chain: chainOf({ txs: [base64.encode(swapped.toPSBT()), GRAPH.checkpoints[0]!] }) })
+
+    await expect(h.reconcile()).rejects.toThrow(/tap leaves/)
+    expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
+  })
+
+  it('surfaces a transaction proved against a taptree it never signed', async () => {
+    // Same leaves and id, one taptree replaced — what the leaf check cannot see.
+    const trusted = Transaction.fromPSBT(base64.decode(GRAPH.arkTx))
+    const retreed = new Transaction({
+      version: trusted.version,
+      lockTime: trusted.lockTime,
+      allowUnknownInputs: true,
+      allowUnknownOutputs: true,
+      disableScriptCheck: true,
+    })
+    for (let i = 0; i < trusted.inputsLength; i += 1) {
+      const from = trusted.getInput(i)
+      retreed.addInput({
+        txid: from.txid!,
+        index: from.index!,
+        sequence: from.sequence,
+        witnessUtxo: from.witnessUtxo,
+        tapLeafScript: from.tapLeafScript,
+      })
+      const tree = i === 1 ? vtxoScript(7).encode() : getArkPsbtFields(trusted, i, VtxoTaprootTree)[0]!
+      setArkPsbtField(retreed, i, VtxoTaprootTree, tree)
+    }
+    for (let i = 0; i < trusted.outputsLength; i += 1) retreed.addOutput(trusted.getOutput(i) as never)
+    expect(retreed.id).toBe(GRAPH.finalTxid)
+
+    const h = await harness({ chain: chainOf({ txs: [base64.encode(retreed.toPSBT()), GRAPH.checkpoints[0]!] }) })
+
+    await expect(h.reconcile()).rejects.toThrow(/taptree/)
+  })
+
+  it('accepts a transaction the chain signed, since a signature carries no consensus weight', async () => {
+    // What arkd serves back is the SIGNED transaction: witness data only.
+    const signed = Transaction.fromPSBT(base64.decode(GRAPH.arkTx))
+    setTapScriptSigEntries(signed, 1, [
+      { pubKey: hex.decode(xonly(2)), leafHash: new Uint8Array(32).fill(3), signature: new Uint8Array(64).fill(4) },
+    ])
+    const h = await harness({
+      chain: chainOf({ txs: [base64.encode(signed.toPSBT()), GRAPH.checkpoints[0]!] }),
+    })
+
+    await expect(h.reconcile()).resolves.toEqual({ status: 'settled', txid: GRAPH.finalTxid })
   })
 
   it('stays pending when the indexer serves a different transaction entirely', async () => {
-    const other = buildGraph([
-      { script: MAKER, amount: 330n },
-      { script: PROCEEDS, amount: 2_600n },
-    ])
+    const other = buildGraph(payments({ payout: 2_900n }))
     const h = await harness({ chain: chainOf({ txs: [other.arkTx, GRAPH.checkpoints[0]!] }) })
 
     await expect(h.reconcile()).resolves.toEqual({ status: 'pending' })
@@ -304,15 +410,7 @@ describe('the observer settles only on the whole evidence chain', () => {
   })
 
   it('refuses a stored graph whose bytes do not hash to the id beside them', async () => {
-    const tampered = bindingJson({
-      graph: {
-        id: '0'.repeat(64),
-        ark_tx: GRAPH.arkTx,
-        checkpoints: [...GRAPH.checkpoints],
-        input_owners: [null, 'solver'],
-      },
-    })
-    const h = await harness({ binding: tampered })
+    const h = await harness({ binding: bindingJson({ graph: { ...boundTo(GRAPH).graph, id: '0'.repeat(64) } }) })
 
     await expect(h.reconcile()).rejects.toThrow(/graph/)
     expect((await h.attempt())?.phase).toBe('submitting')
@@ -320,43 +418,88 @@ describe('the observer settles only on the whole evidence chain', () => {
   })
 
   it('refuses a bound graph that pays a maker the row never named', async () => {
-    const elsewhere = buildGraph([
-      { script: vtxoScript(7).pkScript, amount: 330n },
-      { script: PROCEEDS, amount: 2_670n },
-    ])
-    const h = await harness({
-      binding: bindingJson({
-        graph: {
-          id: elsewhere.graphId,
-          ark_tx: elsewhere.arkTx,
-          checkpoints: [...elsewhere.checkpoints],
-          input_owners: [null, 'solver'],
-        },
-      }),
-      chain: chainOf({ spentBy: elsewhere.checkpointTxids[0]!, txs: [elsewhere.arkTx, elsewhere.checkpoints[0]!] }),
-    })
+    const elsewhere = buildGraph([{ script: vtxoScript(7).pkScript, amount: 330n }, ...payments().slice(1)])
+    const h = await harness({ binding: bindingJson(boundTo(elsewhere)), chain: servedFrom(elsewhere) })
 
     await expect(h.reconcile()).rejects.toThrow(/maker|receiver/)
   })
 
   it('refuses a bound graph that pays the solver somewhere the snapshot never approved', async () => {
-    const elsewhere = buildGraph([
-      { script: MAKER, amount: 330n },
-      { script: vtxoScript(8).pkScript, amount: 2_670n },
-    ])
-    const h = await harness({
-      binding: bindingJson({
-        graph: {
-          id: elsewhere.graphId,
-          ark_tx: elsewhere.arkTx,
-          checkpoints: [...elsewhere.checkpoints],
-          input_owners: [null, 'solver'],
-        },
-      }),
-      chain: chainOf({ spentBy: elsewhere.checkpointTxids[0]!, txs: [elsewhere.arkTx, elsewhere.checkpoints[0]!] }),
-    })
+    const elsewhere = buildGraph([...payments().slice(0, 3), { script: vtxoScript(8).pkScript, amount: 2_995n }])
+    const h = await harness({ binding: bindingJson(boundTo(elsewhere)), chain: servedFrom(elsewhere) })
 
     await expect(h.reconcile()).rejects.toThrow(/proceeds/)
+  })
+})
+
+/** A graph can name every right party and hash to its own id while moving the
+ * wrong sats, so these drive QUANTITY through a perfect identity chain. */
+describe('the observer measures the sats, not only who they went to', () => {
+  const settledOn = async (graph: typeof GRAPH) =>
+    harness({ binding: bindingJson(boundTo(graph)), chain: servedFrom(graph) })
+
+  it('refuses a carrier sized for the operator rather than the quote', async () => {
+    const h = await settledOn(buildGraph(payments({ carrier: 331n, payout: 2_994n })))
+
+    await expect(h.reconcile()).rejects.toThrow(/carries the maker/)
+    expect((await h.attempt())?.phase).toBe('submitting')
+  })
+
+  it('refuses a fare over the cap, wherever the graph spells it', async () => {
+    // Contribution untouched at 329: the ten sats come out of the payout, which
+    // is where every fare comes from however it is labelled.
+    const h = await settledOn(buildGraph(payments({ fare: 14n, payout: 2_985n })))
+
+    await expect(h.reconcile()).rejects.toThrow(/nets the solver/)
+    expect((await h.attempt())?.phase).toBe('submitting')
+  })
+
+  it('refuses a fare hidden in the sponsor change rather than the fare output', async () => {
+    const h = await settledOn(buildGraph(payments({ change: 181n, payout: 2_985n })))
+
+    await expect(h.reconcile()).rejects.toThrow(/nets the solver/)
+  })
+
+  it('refuses a sponsor that contributed less than the quote it was authorised for', async () => {
+    // 10 sats of the 329 never arrived: the solver's net falls by exactly that.
+    const h = await settledOn(buildGraph(payments({ payout: 2_985n })))
+
+    await expect(h.reconcile()).rejects.toThrow(/nets the solver/)
+  })
+
+  it('settles a fill that pays a smaller fare than the cap, which is not adverse', async () => {
+    const h = await settledOn(buildGraph(payments({ fare: 1n, payout: 2_998n })))
+
+    await expect(h.reconcile()).resolves.toMatchObject({ status: 'settled' })
+  })
+
+  it('refuses a graph that shorts the maker the asset it was quoted', async () => {
+    const short = Extension.create([
+      createAssetPacket(new Map([[1, [{ assetId: ASSET, amount: 10n }]]]), [
+        { address: '', assets: [{ assetId: ASSET, amount: 9n }] },
+      ]),
+    ]).txOut()
+    const built = buildOffchainTx([DEPOSIT, SOLVER, SPONSOR], [...payments(), short], SERVER_UNROLL)
+    const arkTx = base64.encode(built.arkTx.toPSBT())
+    const checkpoints = built.checkpoints.map((c) => base64.encode(c.toPSBT()))
+    const inputOwners: readonly (string | null)[] = [null, 'solver', 'sponsor']
+    const graph = {
+      arkTx,
+      checkpoints,
+      inputOwners,
+      graphId: digestJointGraph({ arkTx, checkpoints, inputOwners }, OFFER_FILL_TEMPLATE),
+      finalTxid: built.arkTx.id,
+      checkpointTxids: built.checkpoints.map((c) => c.id),
+    }
+    const h = await settledOn(graph)
+
+    await expect(h.reconcile()).rejects.toThrow(/does not pay the maker 10/)
+  })
+
+  it('refuses a recycle row with no asset leg rather than skipping the check', async () => {
+    const h = await harness()
+
+    await expect(h.reconcileAs({ ...rowOf(), toAssetId: null })).rejects.toThrow(/names no asset leg/)
   })
 })
 
@@ -377,6 +520,20 @@ describe('the observer never releases a reservation it cannot prove idle', () =>
     await expect(h.reconcile()).resolves.toEqual({ status: 'pending' })
     expect((await h.attempt())?.phase).toBe('not_submitted')
     expect(h.ledger.reserved().size).toBe(0)
+  })
+
+  it('frees the pins of an attempt another caller already proved never-submitted', async () => {
+    // The same leak `settle` closes, in the one other place the pattern is live.
+    const h = await harness({ phase: 'quoted' })
+    const quoted = (await h.attempt())!
+    await h.store.refuseNeverSubmittedCarrierAttempt('swap-1', quoted, 'not filled: another caller got there')
+    expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
+
+    await expect(h.reconcile()).resolves.toEqual({ status: 'pending' })
+
+    expect((await h.attempt())?.phase).toBe('not_submitted')
+    expect(h.ledger.reserved().size).toBe(0)
+    expect(h.pins.heldFor('swap-1')).toHaveLength(0)
   })
 
   it('keeps every pin while a submitted fill has no proof yet', async () => {
@@ -404,7 +561,7 @@ describe('the observer never releases a reservation it cannot prove idle', () =>
     const chain = chainOf()
     const { reconcile } = createTaxiReceiveCarrierObserver({ store: h.store, chain, pins: h.pins })
 
-    await expect(reconcile(row(h.store))).resolves.toEqual({ status: 'settled', txid: GRAPH.finalTxid })
+    await expect(reconcile(rowOf())).resolves.toEqual({ status: 'settled', txid: GRAPH.finalTxid })
     expect(chain.asked).toEqual([])
   })
 
@@ -413,7 +570,7 @@ describe('the observer never releases a reservation it cannot prove idle', () =>
     const pins = createCarrierPinLedger()
     const { reconcile } = createTaxiReceiveCarrierObserver({ store, chain: chainOf(), pins })
 
-    await expect(reconcile(row(store))).resolves.toEqual({ status: 'pending' })
+    await expect(reconcile(rowOf())).resolves.toEqual({ status: 'pending' })
   })
 })
 
@@ -425,43 +582,61 @@ describe('the final transaction must spend the checkpoints it was built over', (
       allowUnknownOutputs: true,
       disableScriptCheck: true,
     })
+    // Input 0 spends checkpoint 0 at vout 1 rather than the only output it has.
     forged.addInput({ txid: GRAPH.checkpointTxids[0]!, index: 1 })
-    forged.addInput({ txid: GRAPH.checkpointTxids[1]!, index: 0 })
-    forged.addOutput({ script: MAKER, amount: 330n })
-    forged.addOutput({ script: PROCEEDS, amount: 2_670n })
+    for (const id of GRAPH.checkpointTxids.slice(1)) forged.addInput({ txid: id, index: 0 })
+    for (const payment of payments()) forged.addOutput(payment)
     forged.addOutput(ASSET_EXT)
     const arkTx = base64.encode(forged.toPSBT())
+    const owners = [...GRAPH.inputOwners]
     const graphId = digestJointGraph(
-      { arkTx, checkpoints: [...GRAPH.checkpoints], inputOwners: [null, 'solver'] },
+      { arkTx, checkpoints: [...GRAPH.checkpoints], inputOwners: owners },
       OFFER_FILL_TEMPLATE,
     )
     const h = await harness({
       binding: bindingJson({
-        graph: { id: graphId, ark_tx: arkTx, checkpoints: [...GRAPH.checkpoints], input_owners: [null, 'solver'] },
+        graph: { id: graphId, ark_tx: arkTx, checkpoints: [...GRAPH.checkpoints], input_owners: owners },
       }),
     })
 
     await expect(h.reconcile()).rejects.toThrow(/checkpoint/)
   })
 
-  it('refuses a graph whose covenant checkpoint spends a deposit the row never recorded', async () => {
-    const elsewhere = buildOffchainTx(
-      [coinInput(1, '8'.repeat(64), 3, 1_000), SOLVER],
-      [{ script: MAKER, amount: 330n }, { script: PROCEEDS, amount: 2_670n }, ASSET_EXT],
-      SERVER_UNROLL,
-    )
-    const arkTx = base64.encode(elsewhere.arkTx.toPSBT())
-    const checkpoints = elsewhere.checkpoints.map((c) => base64.encode(c.toPSBT()))
+  it('refuses a final transaction that spends the right checkpoints in the wrong order', async () => {
+    const forged = new Transaction({
+      version: 3,
+      allowUnknownInputs: true,
+      allowUnknownOutputs: true,
+      disableScriptCheck: true,
+    })
+    // Every input IS a `checkpoint:0` of this graph — just not input i's.
+    for (const id of [GRAPH.checkpointTxids[1]!, GRAPH.checkpointTxids[0]!, GRAPH.checkpointTxids[2]!]) {
+      forged.addInput({ txid: id, index: 0 })
+    }
+    for (const payment of payments()) forged.addOutput(payment)
+    forged.addOutput(ASSET_EXT)
+    const arkTx = base64.encode(forged.toPSBT())
+    const owners = [...GRAPH.inputOwners]
     const h = await harness({
       binding: bindingJson({
         graph: {
-          id: digestJointGraph({ arkTx, checkpoints, inputOwners: [null, 'solver'] }, OFFER_FILL_TEMPLATE),
+          id: digestJointGraph(
+            { arkTx, checkpoints: [...GRAPH.checkpoints], inputOwners: owners },
+            OFFER_FILL_TEMPLATE,
+          ),
           ark_tx: arkTx,
-          checkpoints,
-          input_owners: [null, 'solver'],
+          checkpoints: [...GRAPH.checkpoints],
+          input_owners: owners,
         },
       }),
     })
+
+    await expect(h.reconcile()).rejects.toThrow(/does not spend checkpoint/)
+  })
+
+  it('refuses a graph whose covenant checkpoint spends a deposit the row never recorded', async () => {
+    const elsewhere = buildGraph(payments(), [coinInput(1, '8'.repeat(64), 3, 1_000), SOLVER, SPONSOR])
+    const h = await harness({ binding: bindingJson(boundTo(elsewhere)) })
 
     await expect(h.reconcile()).rejects.toThrow(/deposit/)
   })
