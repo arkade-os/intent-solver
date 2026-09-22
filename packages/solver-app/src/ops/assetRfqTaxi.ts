@@ -220,24 +220,41 @@ export const taxiReceiveCarrier = async (
   })
 }
 
+/** ONE caller's reservation on one row. Scoped rather than row-keyed: a settle
+ * that lost a CAS must not free the coins of the one that won it. */
+export interface CarrierPin {
+  readonly id: string
+  /** Frees this reservation and no other. Idempotent. */
+  release(): void
+}
+
 /** A pin is only given up against durable proof that nothing was submitted, so
  * its release has to outlive the call that took it. */
 export interface CarrierPinLedger {
-  adopt(id: string, release: ReleaseReservation): void
-  release(id: string): void
+  adopt(id: string, release: ReleaseReservation): CarrierPin
+  /** Every pin a row still owes — the seam reconciliation resolves through. */
+  heldFor(id: string): readonly CarrierPin[]
   held(): readonly string[]
 }
 
 export const createCarrierPinLedger = (): CarrierPinLedger => {
-  const held = new Map<string, ReleaseReservation[]>()
+  const held = new Map<string, Set<CarrierPin>>()
   return {
     adopt(id, release) {
-      held.set(id, [...(held.get(id) ?? []), release])
+      const owed = held.get(id) ?? new Set<CarrierPin>()
+      held.set(id, owed)
+      const pin: CarrierPin = {
+        id,
+        release() {
+          if (!owed.delete(pin)) return
+          if (owed.size === 0) held.delete(id)
+          release()
+        },
+      }
+      owed.add(pin)
+      return pin
     },
-    release(id) {
-      for (const release of held.get(id) ?? []) release()
-      held.delete(id)
-    },
+    heldFor: (id) => [...(held.get(id) ?? [])],
     held: () => [...held.keys()],
   }
 }

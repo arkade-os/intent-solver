@@ -205,7 +205,7 @@ describe('restoring the pins an unresolved attempt still owns', () => {
       pins,
     })
     expect(pins.held()).toEqual(['swap-1'])
-    pins.release('swap-1')
+    for (const pin of pins.heldFor('swap-1')) pin.release()
     expect(ledger.reserved().size).toBe(0)
   })
 

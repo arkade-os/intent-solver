@@ -2,12 +2,10 @@
  * Settling one recycle fill: durable intent before every external effect.
  *
  * Three checkpoints, each committed before the boundary it guards. A reply
- * lost after one is recoverable because the row already says what was
- * intended; a reply lost before one cannot have moved money.
- *
- * Each CAS is given the envelope THIS call knows it wrote, never a re-read,
- * which would let a racing worker's checkpoint become the base of this one's.
- * Nothing here returns a txid: only chain evidence resolves a submitted fill.
+ * lost after one is recoverable; a reply lost before one cannot have moved
+ * money. Each CAS is given the envelope THIS call knows it wrote, never a
+ * re-read, which would let a racing worker's checkpoint base this one's.
+ * Nothing returns a txid: only chain evidence resolves a submitted fill.
  */
 
 import { hex } from '@scure/base'
@@ -24,6 +22,7 @@ import {
   encodeCarrierAttemptInputs,
   type CarrierCoin,
   type CarrierOutpoint,
+  type CarrierPin,
   type CarrierPinLedger,
 } from './assetRfqTaxi.js'
 import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
@@ -33,11 +32,11 @@ type SwapFillGraphWire = Parameters<TaxiClient['submitSwapFill']>[1]
 
 declare const carrierSnapshot: unique symbol
 
-/** Only {@link carrierAttemptSnapshotFor} mints one, so the store seam below
- * cannot be handed a snapshot that skipped the shared input codec. */
-export type CarrierAttemptSnapshot = JsonObject & { readonly [carrierSnapshot]?: true }
+/** REQUIRED, not optional: the compiler refuses a snapshot that skipped the
+ * shared input codec. The symbol has no runtime existence to serialize. */
+export type CarrierAttemptSnapshot = JsonObject & { readonly [carrierSnapshot]: true }
 
-/** Methods, not arrow properties: bivariance is what lets the real store's
+/** Methods, not arrow properties: bivariance lets the real store's
  * `snapshot: unknown` satisfy the narrowed parameter above. */
 export interface CarrierAttemptStore {
   readCarrierAttempt(id: string): Promise<CarrierAttempt | null>
@@ -141,19 +140,23 @@ const carrierAttemptSnapshotFor = (parts: {
   contributionSats: bigint
   maxFareSats: bigint
   validUntil: number
-}): CarrierAttemptSnapshot => ({
-  ...encodeCarrierAttemptInputs(parts.inputs),
-  operation: parts.row.id,
-  provider: parts.provider,
-  offer: parts.offerHex,
-  deposit: { txid: parts.deposit.txid, vout: parts.deposit.vout },
-  quote: { id: parts.quoteId, expires_at: parts.quoteExpiresAt },
-  input_expiry_floor: locktimeJson(parts.floor),
-  proceeds_script: hex.encode(parts.proceedsScript),
-  contribution_sats: parts.contributionSats.toString(),
-  max_fare_sats: parts.maxFareSats.toString(),
-  valid_until: parts.validUntil,
-})
+}): CarrierAttemptSnapshot =>
+  // The ONE mint of the brand, reachable only through the codec below.
+  mintSnapshot({
+    ...encodeCarrierAttemptInputs(parts.inputs),
+    operation: parts.row.id,
+    provider: parts.provider,
+    offer: parts.offerHex,
+    deposit: { txid: parts.deposit.txid, vout: parts.deposit.vout },
+    quote: { id: parts.quoteId, expires_at: parts.quoteExpiresAt },
+    input_expiry_floor: locktimeJson(parts.floor),
+    proceeds_script: hex.encode(parts.proceedsScript),
+    contribution_sats: parts.contributionSats.toString(),
+    max_fare_sats: parts.maxFareSats.toString(),
+    valid_until: parts.validUntil,
+  })
+
+const mintSnapshot = (fields: JsonObject): CarrierAttemptSnapshot => fields as unknown as CarrierAttemptSnapshot
 
 /** `offer-covenant` is the provider-signed deposit, which the fill template
  * spells as a null owner. */
@@ -217,7 +220,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
     // Pinned BEFORE the write that names them: no window where the row claims
     // coins another spender still believes are free.
     const outpoints = inputs.map(({ txid, vout }) => ({ txid, vout }))
-    deps.pins.adopt(row.id, deps.reserve(outpoints))
+    const pin = deps.pins.adopt(row.id, deps.reserve(outpoints))
 
     const deposit = { txid: row.depositTxid, vout: row.depositVout }
     const validUntil = Math.min(row.validUntil, terms.expiresAt)
@@ -243,9 +246,10 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
     try {
       wrote = true
       if (!(await deps.store.prepareCarrierAttempt(row.id, snapshot))) {
-        // The CAS LOST: this row's attempt is not this caller's to end.
+        // The CAS LOST: the attempt is not this caller's to end, and only
+        // the pin above is its to free.
         wrote = false
-        deps.pins.release(row.id)
+        pin.release()
         throw new Error(`carrier fill ${row.id} could not prepare its attempt; the operator was asked nothing`)
       }
       const { verified } = await deps.swapFills.requestVerifiedSwapFillQuote({
@@ -313,12 +317,15 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
           `carrier fill ${row.id} pinned an input expiry floor of ${floor.value} and the operator now serves ${now.value}`,
         )
       }
-      const stillHeld = new Set((await deps.coins()).map((coin) => outpointKey(coin.txid, coin.vout)))
+      // The coin AS IT IS NOW: re-testing the object selected before the
+      // boundary could not fail, whatever had changed.
+      const live = new Map((await deps.coins()).map((coin) => [outpointKey(coin.txid, coin.vout), coin]))
       for (const input of inputs) {
-        if (!stillHeld.has(outpointKey(input.txid, input.vout))) {
-          throw new Error(`carrier fill ${row.id} no longer holds ${input.txid}:${input.vout}`)
+        const fresh = live.get(outpointKey(input.txid, input.vout))
+        if (fresh === undefined) throw new Error(`carrier fill ${row.id} no longer holds ${input.txid}:${input.vout}`)
+        if (!clearsFloor(fresh, floor)) {
+          throw new Error(`carrier fill ${row.id} input ${input.txid}:${input.vout} no longer clears its floor`)
         }
-        if (!clearsFloor(input, floor)) throw new Error(`carrier fill ${row.id} selected a coin short of its floor`)
       }
 
       const bound: CarrierAttempt = { phase: 'quoted', snapshot, binding }
@@ -328,7 +335,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       liable = true
       await deps.swapFills.submitSwapFill(verified, solverGraphWire(quoted, signed))
     } catch (error) {
-      if (wrote && !liable) await releaseIfProvenNeverSubmitted(deps, row.id, messageOf(error))
+      if (wrote && !liable) await releaseIfProvenNeverSubmitted(deps, pin, messageOf(error))
       throw error
     }
     throw new CarrierFillAwaitingProofError(row.id)
@@ -342,16 +349,16 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
  * thing that knows. */
 const releaseIfProvenNeverSubmitted = async (
   deps: TaxiCarrierSettleDeps,
-  id: string,
+  pin: CarrierPin,
   reason: string,
 ): Promise<void> => {
-  const current = await deps.store.readCarrierAttempt(id)
+  const current = await deps.store.readCarrierAttempt(pin.id)
   // No attempt means the write that precedes the first POST never landed.
-  if (current === null) return deps.pins.release(id)
+  if (current === null) return pin.release()
   // Anything past `quoted` may have been submitted, and keeps its pin for good.
   if (current.phase !== 'prepared' && current.phase !== 'quoted') return
-  // Only the caller that WINS the terminal CAS may release.
-  if (await deps.store.refuseNeverSubmittedCarrierAttempt(id, current, `not filled: ${reason}`)) {
-    deps.pins.release(id)
+  // Only the caller that WINS the terminal CAS may release, and only its own.
+  if (await deps.store.refuseNeverSubmittedCarrierAttempt(pin.id, current, `not filled: ${reason}`)) {
+    pin.release()
   }
 }

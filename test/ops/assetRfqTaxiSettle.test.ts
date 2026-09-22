@@ -2,28 +2,26 @@
  * Settling one recycle fill: the three durable checkpoints and the three
  * external boundaries they precede.
  *
- * The property under test is ORDER, and it is asserted from inside each
- * boundary — the injected `fetch` and the injected signer read the real store
- * at the moment the request arrives and record the phase already committed. A
- * write moved to after its boundary therefore reddens a real read of the
- * durable row rather than a call-order tally.
- *
- * The store, the `TaxiClient`, its quote verification and its submit
- * pre-flight are all the production ones; only the graph rebuild and the
- * signature are seams, because neither has a boundary this slice owns.
+ * ORDER is the property, asserted from inside each boundary — the injected
+ * `fetch` and signer read the real store as the request arrives and record the
+ * phase already committed, so a write moved after its boundary reddens a real
+ * read rather than a call-order tally. The store, the `TaxiClient` and its two
+ * verifications are the production ones.
  */
 
 import { describe, it, expect } from 'vitest'
 import { base64, hex } from '@scure/base'
-import { Transaction } from '@arkade-os/sdk'
+import { SingleKey, Transaction } from '@arkade-os/sdk'
 import { digestJointGraph, OFFER_FILL_TEMPLATE } from '@arkade-taxi/client'
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { ReceiveCarrierQuote } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import { createCarrierPinLedger, type CarrierCoin } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
 import {
+  carrierFillSigner,
   createTaxiReceiveCarrierSettler,
   selectCarrierInputs,
+  type CarrierAttemptStore,
   type CarrierFillSeams,
   type TaxiCarrierSettleDeps,
 } from '@arkade-os/solver-app/ops/assetRfqTaxiSettle.js'
@@ -286,6 +284,29 @@ describe('every checkpoint is committed before the boundary it guards', () => {
     await h.store.close()
   })
 
+  it('holds the reservation before the checkpoint that names it', async () => {
+    // A write naming coins nothing has pinned leaves them free for the float.
+    const store = await openStore()
+    const ledger = createReservationLedger()
+    let pinnedAtWrite: string[] = []
+    const h = await harness({
+      deps: {
+        store: Object.assign(Object.create(store) as typeof store, {
+          prepareCarrierAttempt: async (id: string, snapshot: never) => {
+            pinnedAtWrite = [...ledger.reserved()]
+            return store.prepareCarrierAttempt(id, snapshot)
+          },
+        }),
+        reserve: ledger.reserve,
+        reserved: () => ledger.reserved(),
+      },
+    })
+    await expect(h.settle(await store.get('swap-1'))).rejects.toThrow()
+    expect(pinnedAtWrite).toEqual([`${COIN_A}:0`])
+    await store.close()
+    await h.store.close()
+  })
+
   it('asks the operator nothing when the first checkpoint cannot be written', async () => {
     const h = await harness()
     // The row leaves `filling` under the caller, so the CAS finds nothing to pin.
@@ -298,6 +319,16 @@ describe('every checkpoint is committed before the boundary it guards', () => {
 })
 
 describe('the snapshot is the attempt authority, written through the one codec', () => {
+  it('will not compile a store call that skipped the codec', async () => {
+    const store = await openStore()
+    const narrowed: CarrierAttemptStore = store
+    // @ts-expect-error a plain JsonObject is not a minted snapshot. Removing
+    // the brand removes this error, and `pnpm typecheck` fails on the unused
+    // directive — which is what makes this enforcement rather than convention.
+    await expect(narrowed.prepareCarrierAttempt('swap-1', { inputs: [] })).resolves.toBeDefined()
+    await store.close()
+  })
+
   it('names the exact inputs it reserved, and the ceiling it will resend', async () => {
     const h = await harness()
     await expect(h.settle(await h.row())).rejects.toThrow()
@@ -357,6 +388,39 @@ describe('the pinned floor is what the fill is measured against', () => {
       quotes: [() => carrierQuote(), () => carrierQuote({ inputExpiryFloor: { kind: 'height', value: 1_100_001n } })],
     })
     await expect(h.settle(await h.row())).rejects.toThrow(/floor/)
+    await h.store.close()
+  })
+
+  it('refuses when a selected coin stops clearing the floor while the fill is in flight', async () => {
+    // The coin AS IT IS AT SPEND, not the object selected before the boundary:
+    // re-testing the latter could not fail, whatever had changed.
+    let reads = 0
+    const h = await harness({
+      deps: {
+        coins: async () => {
+          reads += 1
+          return [coin({ txid: COIN_A, expiresAtHeight: reads === 1 ? 1_200_000 : 1_000_001 })]
+        },
+      },
+    })
+    await expect(h.settle(await h.row())).rejects.toThrow(/no longer clears its floor/)
+    expect(h.requests.some((r) => r.endsWith('/submit'))).toBe(false)
+    expect((await h.row()).state).toBe('refused')
+    await h.store.close()
+  })
+
+  it('refuses when a selected coin is gone by the time it would be spent', async () => {
+    let reads = 0
+    const h = await harness({
+      deps: {
+        coins: async () => {
+          reads += 1
+          return reads === 1 ? [coin({ txid: COIN_A })] : []
+        },
+      },
+    })
+    await expect(h.settle(await h.row())).rejects.toThrow(/no longer holds/)
+    expect(h.requests.some((r) => r.endsWith('/submit'))).toBe(false)
     await h.store.close()
   })
 
@@ -522,24 +586,91 @@ describe('nothing an operator says is taken as proof of a fill', () => {
   })
 })
 
+/** Against the REAL `signJointGraphForOwner`, which refuses any binding naming
+ * an input the graph does not assign to `solver`. */
+describe('the solver signer claims its own inputs and no others', () => {
+  const IDENTITY = SingleKey.fromHex('11'.repeat(32))
+  const THREE_OWNERS = (() => {
+    const arkTx = psbtOf([
+      [DEPOSIT_TXID, 1],
+      [COIN_A, 0],
+      [COIN_B, 2],
+    ])
+    const checkpoints = [psbtOf([[DEPOSIT_TXID, 1]]), psbtOf([[COIN_A, 0]]), psbtOf([[COIN_B, 2]])]
+    const inputOwners: readonly (string | null)[] = [null, 'solver', 'sponsor']
+    return {
+      arkTx,
+      checkpoints,
+      inputOwners,
+      graphId: digestJointGraph({ arkTx, checkpoints, inputOwners }, OFFER_FILL_TEMPLATE),
+    }
+  })()
+
+  it('refuses a graph that assigns it no input at all', async () => {
+    const none = { ...THREE_OWNERS, inputOwners: [null, 'sponsor', 'sponsor'] as readonly (string | null)[] }
+    await expect(carrierFillSigner(IDENTITY)(none)).rejects.toThrow(/assigns no input/)
+  })
+
+  it('passes the library ownership gate, so it bound the solver index alone', async () => {
+    // The gate runs before the graph's edges do. Binding index 0 or 2 fails as
+    // "not assigned to solver", and binding all three fails on the count; only
+    // the solver index alone reaches the edge check the fixture cannot satisfy.
+    await expect(carrierFillSigner(IDENTITY)(THREE_OWNERS)).rejects.toThrow(/ark input 0 does not spend/)
+    await expect(carrierFillSigner(IDENTITY)(THREE_OWNERS)).rejects.not.toThrow(/not assigned to solver/)
+  })
+})
+
 describe('the pin ledger holds a release until something proves it may go', () => {
   it('releases exactly the adopted outpoints, once', () => {
     const ledger = createReservationLedger()
     const pins = createCarrierPinLedger()
-    pins.adopt('swap-1', ledger.reserve([{ txid: COIN_A, vout: 0 }]))
+    const first = pins.adopt('swap-1', ledger.reserve([{ txid: COIN_A, vout: 0 }]))
     pins.adopt('swap-2', ledger.reserve([{ txid: COIN_B, vout: 1 }]))
-    pins.release('swap-1')
-    pins.release('swap-1')
+    first.release()
+    first.release()
     expect([...ledger.reserved()]).toEqual([`${COIN_B}:1`])
     expect(pins.held()).toEqual(['swap-2'])
   })
 
-  it('keeps both releases when one row is adopted twice', () => {
+  it('will not let one holder of a row free another holder of it', () => {
+    // The CAS loser releasing the winner's coins is the never-submitted split
+    // defeated through the ledger rather than through a state transition.
     const ledger = createReservationLedger()
     const pins = createCarrierPinLedger()
-    pins.adopt('swap-1', ledger.reserve([{ txid: COIN_A, vout: 0 }]))
-    pins.adopt('swap-1', ledger.reserve([{ txid: COIN_A, vout: 0 }]))
-    pins.release('swap-1')
+    const winner = pins.adopt('swap-1', ledger.reserve([{ txid: COIN_A, vout: 0 }]))
+    const loser = pins.adopt('swap-1', ledger.reserve([{ txid: COIN_B, vout: 1 }]))
+    loser.release()
+    expect([...ledger.reserved()]).toEqual([`${COIN_A}:0`])
+    expect(pins.heldFor('swap-1')).toEqual([winner])
+    winner.release()
     expect(ledger.reserved().size).toBe(0)
+    expect(pins.held()).toEqual([])
+  })
+})
+
+describe('two settles racing one row cannot free each other', () => {
+  it('leaves the winner of the prepare CAS pinned when the loser gives its own up', async () => {
+    const store = await openStore()
+    const pins = createCarrierPinLedger()
+    const ledger = createReservationLedger()
+    // Both read the attempt before either writes one, and neither sees the
+    // other's pin — `available` is admission-only, so both pick the same coin.
+    const shared = {
+      submitStatus: 502,
+      deps: { store, pins, reserve: ledger.reserve, reserved: () => new Set<string>() },
+    }
+    const first = await harness(shared)
+    const second = await harness(shared)
+    const row = await store.get('swap-1')
+
+    const outcomes = await Promise.allSettled([first.settle(row), second.settle(row)])
+    const reasons = outcomes.map((o) => (o.status === 'rejected' ? String(o.reason) : 'resolved'))
+    expect(reasons.filter((r) => /could not prepare its attempt/.test(r))).toHaveLength(1)
+    expect(await store.readCarrierAttempt('swap-1')).toMatchObject({ phase: 'submitting' })
+    // The winner is liable, so its coin stays pinned however the loser exits.
+    expect([...ledger.reserved()]).toEqual([`${COIN_A}:0`])
+    expect(pins.heldFor('swap-1')).toHaveLength(1)
+    await store.close()
+    for (const h of [first, second]) await h.store.close()
   })
 })
