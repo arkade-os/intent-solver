@@ -25,7 +25,10 @@ import {
   type AssetRfqDeps,
   type ReceiveCarrierQuotes,
 } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import { esploraChainTip } from '@arkade-os/solver-rails/onchain/chainTip.js'
+import type { EsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
 import {
+  carrierChainTip,
   createTaxiReceiveCarrierReader,
   spendableCarrierCoins,
   type CarrierCoin,
@@ -340,6 +343,27 @@ describe('the input expiry floor is anchored, not merely ordered', () => {
       inputExpiryFloor: { kind: 'time', value: floor },
     })
     await expect(read.resolve(request({ now: now + 1 }))).rejects.toThrow(/below the caller minimum/)
+  })
+
+  it('follows a block mined inside the shared tip cache window, so the floor never trails the chain', async () => {
+    let height = TIP
+    const client = { getText: async () => String(height) } as unknown as EsploraClient
+    // The hazard, demonstrated first: the shared reader still answers the
+    // pre-mine height, and a floor computed from it sits behind the chain.
+    const shared = esploraChainTip(client, { now: () => 0 })
+    expect(await shared.height()).toBe(TIP)
+
+    const floor = BigInt(TIP) + EXIT_DELAY
+    const tip = carrierChainTip(client)
+    const { read } = reader({
+      tipHeight: tip.height,
+      quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }),
+    })
+    await expect(read.resolve(request())).resolves.toMatchObject({ inputExpiryFloor: { value: floor } })
+
+    height = TIP + 1
+    expect(await shared.height()).toBe(TIP)
+    await expect(read.resolve(request())).rejects.toThrow(/below the caller minimum/)
   })
 
   it('refuses to build a height-typed reader with no tip to anchor on', () => {

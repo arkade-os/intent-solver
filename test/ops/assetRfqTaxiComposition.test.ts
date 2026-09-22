@@ -11,6 +11,8 @@ import { AssetRfqSwapService, type AssetRfqDeps } from '@arkade-os/solver-corrid
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { CarrierAttemptRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import {
+  decodeCarrierAttemptInputs,
+  encodeCarrierAttemptInputs,
   restoreCarrierAttemptPins,
   taxiReceiveCarrier,
   type TaxiCarrierComposition,
@@ -71,10 +73,12 @@ describe('an unconfigured solver composes no Taxi at all', () => {
     expect(urls).toEqual([])
   })
 
-  it('composes nothing for a set-but-empty value, the way every other knob reads one', async () => {
-    const { deps, touched } = watched({ taxiUrl: undefined })
-    expect(await taxiReceiveCarrier(deps)).toBeUndefined()
-    expect(touched).toEqual([])
+  it('refuses a blank URL rather than turning the rail on pointed nowhere', async () => {
+    for (const taxiUrl of ['', '   ']) {
+      const { deps, touched } = watched({ taxiUrl })
+      expect(await taxiReceiveCarrier(deps)).toBeUndefined()
+      expect(touched).toEqual([])
+    }
   })
 })
 
@@ -206,6 +210,69 @@ describe('restoring the pins an unresolved attempt still owns', () => {
         reserve: ledger.reserve,
       }),
     ).rejects.toThrow(/swap-3/)
+  })
+})
+
+/** The store treats the snapshot as opaque JSON, so a key chosen independently
+ * at either end would brick boot with nothing to catch it. One codec, and a
+ * round trip through the REAL store that fails if the two ends drift. */
+describe('the snapshot input shape has one definition, exercised end to end', () => {
+  const OUTPOINTS = [
+    { txid: 'a'.repeat(64), vout: 0 },
+    { txid: 'b'.repeat(64), vout: 7 },
+  ]
+
+  it('reads back exactly what it wrote', () => {
+    expect(decodeCarrierAttemptInputs(encodeCarrierAttemptInputs(OUTPOINTS), 'swap-1')).toEqual(OUTPOINTS)
+  })
+
+  it('refuses to write an outpoint it would refuse to read', () => {
+    expect(() => encodeCarrierAttemptInputs([{ txid: 'A'.repeat(64), vout: 0 }])).toThrow(/non-canonical/)
+    expect(() => encodeCarrierAttemptInputs([])).toThrow(/names no inputs/)
+  })
+
+  it('survives the store the settle slice will write it through', async () => {
+    let clock = 1_000
+    const store = await AssetRfqSwapStore.open(':memory:', () => clock)
+    await store.insertQuote({
+      id: 'swap-1',
+      rfqId: 'a'.repeat(64),
+      pair: `arkade:BTC->arkade:${ASSET}`,
+      fromAssetId: null,
+      toAssetId: ASSET,
+      fromAmount: 1_000n,
+      toAmount: 10n,
+      makerPkScript: MAKER_PK_SCRIPT,
+      makerPublicKey: MAKER_KEY,
+      offerPkScript: `5120${'d'.repeat(64)}`,
+      offerAddress: 'ark1qoffer',
+      solverPubkey: 'e'.repeat(64),
+      validUntil: 9_000,
+      carrierTerms: {
+        mode: 'recycle',
+        quoteId: 'q-1',
+        physicalSats: 330n,
+        loanSats: 329n,
+        receiptSats: 1n,
+        serviceFareSats: 4n,
+        pricedSats: 5n,
+        expiresAt: 9_000,
+      },
+    })
+    await store.transition('swap-1', 'quoted', 'funded', {})
+    await store.transition('swap-1', 'funded', 'filling', {})
+    expect(
+      await store.prepareCarrierAttempt('swap-1', { ...encodeCarrierAttemptInputs(OUTPOINTS), operation: 'op-1' }),
+    ).toBe(true)
+
+    const ledger = createReservationLedger()
+    const pins = await restoreCarrierAttemptPins({
+      attempts: () => store.listUnresolvedCarrierAttempts(),
+      reserve: ledger.reserve,
+    })
+    expect(pins.map((pin) => pin.id)).toEqual(['swap-1'])
+    expect([...ledger.reserved()].sort()).toEqual([`${'a'.repeat(64)}:0`, `${'b'.repeat(64)}:7`])
+    await store.close()
   })
 })
 

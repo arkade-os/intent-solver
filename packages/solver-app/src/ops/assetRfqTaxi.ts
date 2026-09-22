@@ -9,8 +9,11 @@ import { hex } from '@scure/base'
 import { TaxiClient, verifyReceiveQuote, type VerifiedReceiveQuote } from '@arkade-taxi/client'
 import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
+import { esploraChainTip, type ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
+import type { EsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import type { CarrierAttemptRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import type { JsonObject } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 import type {
   ReceiveCarrierQuote,
   ReceiveCarrierQuoteRequest,
@@ -197,11 +200,16 @@ export interface TaxiCarrierComposition {
   fetch?: typeof fetch
 }
 
+/** UNCACHED, unlike the shared reader: one block mined inside its 15s window
+ * puts the floor behind the chain, admitting an already-expired coin. */
+export const carrierChainTip = (client: EsploraClient): ChainTipProvider => esploraChainTip(client, { cacheMs: 0 })
+
 export const taxiReceiveCarrier = async (
   deps: TaxiCarrierComposition,
 ): Promise<Pick<ReceiveCarrierQuotes, 'resolve' | 'available'> | undefined> => {
-  const baseUrl = deps.taxiUrl
-  if (baseUrl === undefined) return undefined
+  // Blank is NOT configured: an operator pointed nowhere must leave the rail off.
+  const baseUrl = deps.taxiUrl?.trim()
+  if (!baseUrl) return undefined
   return createTaxiReceiveCarrierReader({
     quotes: new TaxiClient({ baseUrl, fetch: deps.fetch }),
     trust: await deps.trust(),
@@ -219,18 +227,30 @@ export interface CarrierAttemptPin {
 
 const CANONICAL_TXID = /^[0-9a-f]{64}$/
 
-const pinnedInputsOf = ({ row, attempt }: CarrierAttemptRecord): readonly { txid: string; vout: number }[] => {
-  const inputs = attempt.snapshot.inputs
-  if (!Array.isArray(inputs) || inputs.length === 0) {
-    throw new Error(`carrier attempt ${row.id} names no inputs to re-pin`)
-  }
-  return inputs.map((raw) => {
+export interface CarrierOutpoint {
+  txid: string
+  vout: number
+}
+
+/** THE shape of `snapshot.inputs`, in one place: the settle slice writes through
+ * this, {@link decodeCarrierAttemptInputs} is the only reader, and a key chosen
+ * independently at either end silently un-pins a coin a fill may have spent. */
+export const encodeCarrierAttemptInputs = (outpoints: readonly CarrierOutpoint[]): JsonObject => ({
+  inputs: checkedOutpoints(outpoints, 'carrier attempt inputs').map(({ txid, vout }) => ({ txid, vout })),
+})
+
+export const decodeCarrierAttemptInputs = (snapshot: JsonObject, id: string): readonly CarrierOutpoint[] =>
+  checkedOutpoints(snapshot.inputs, `carrier attempt ${id} inputs`)
+
+const checkedOutpoints = (value: unknown, label: string): CarrierOutpoint[] => {
+  if (!Array.isArray(value) || value.length === 0) throw new Error(`${label}: names no inputs`)
+  return value.map((raw) => {
     const input = raw as { txid?: unknown; vout?: unknown }
     if (typeof input?.txid !== 'string' || !CANONICAL_TXID.test(input.txid)) {
-      throw new Error(`carrier attempt ${row.id} names a non-canonical input txid`)
+      throw new Error(`${label}: non-canonical input txid`)
     }
     if (!Number.isInteger(input.vout) || (input.vout as number) < 0) {
-      throw new Error(`carrier attempt ${row.id} names a non-canonical input vout`)
+      throw new Error(`${label}: non-canonical input vout`)
     }
     return { txid: input.txid, vout: input.vout as number }
   })
@@ -241,9 +261,12 @@ const pinnedInputsOf = ({ row, attempt }: CarrierAttemptRecord): readonly { txid
  * survives. REFUSES rather than skips. Releasing is the reconcile slice's. */
 export const restoreCarrierAttemptPins = async (deps: {
   attempts: () => Promise<readonly CarrierAttemptRecord[]>
-  reserve: (outpoints: readonly { txid: string; vout: number }[]) => ReleaseReservation
+  reserve: (outpoints: readonly CarrierOutpoint[]) => ReleaseReservation
 }): Promise<readonly CarrierAttemptPin[]> => {
   const records = await deps.attempts()
-  const pinned = records.map((record) => ({ id: record.row.id, inputs: pinnedInputsOf(record) }))
+  const pinned = records.map(({ row, attempt }) => ({
+    id: row.id,
+    inputs: decodeCarrierAttemptInputs(attempt.snapshot, row.id),
+  }))
   return pinned.map(({ id, inputs }) => ({ id, release: deps.reserve(inputs) }))
 }
