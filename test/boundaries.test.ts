@@ -236,11 +236,9 @@ const LAYER_OF_SPECIFIER: Record<string, Layer> = {
  * The second one is the dangerous direction. A guard that invents violations
  * gets its list treated as noise, and the real entry is then read past.
  */
-const workspaceSources = (): string[] =>
-  compiledFilesUnder(PACKAGES).filter((file) => {
-    const segments = file.split(/[\\/]/)
-    return !segments.includes('dist') && !segments.includes('node_modules')
-  })
+const WORKSPACE_SOURCE_EXCLUSIONS = new Set(['dist', 'node_modules'])
+
+const workspaceSources = (): string[] => compiledFilesUnder(PACKAGES, WORKSPACE_SOURCE_EXCLUSIONS)
 
 const layerOf = (file: string): Layer | null => {
   // The app first, because it is under PACKAGES and is NOT one layer — see
