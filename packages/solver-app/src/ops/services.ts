@@ -102,7 +102,12 @@ import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInvento
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
-import { carrierChainTip, restoreCarrierAttemptPins, taxiReceiveCarrier } from './assetRfqTaxi.js'
+import {
+  carrierChainTip,
+  createCarrierPinLedger,
+  restoreCarrierAttemptPins,
+  taxiReceiveCarrier,
+} from './assetRfqTaxi.js'
 
 export interface Services {
   /**
@@ -673,13 +678,20 @@ export const createServices = async (
       ? carrierChainTip(createEsploraClient(config.chainTipEsploraUrl)).height
       : undefined,
   })
-  if (taxiCarrier !== undefined) {
-    // BEFORE any service exists to tick it.
-    const pins = await restoreCarrierAttemptPins({
-      attempts: () => assetRfqStore.listUnresolvedCarrierAttempts(),
-      reserve: arkade.reservations.reserve,
-    })
-    if (pins.length > 0) log(`receive carrier: re-pinned the inputs of ${pins.length} unresolved attempt(s)`)
+  /**
+   * BEFORE any service exists to tick it, and gated on ROWS rather than on the
+   * knob: an operator who unsets `TAXI_URL` with an attempt outstanding would
+   * otherwise leave its coins free for the float to spend. A never-configured
+   * solver finds none — one `SELECT` on a handle that is already open.
+   */
+  const carrierPins = createCarrierPinLedger()
+  const restoredPins = await restoreCarrierAttemptPins({
+    attempts: () => assetRfqStore.listUnresolvedCarrierAttempts(),
+    reserve: (outpoints) => arkade.reservations.reserve(outpoints),
+    pins: carrierPins,
+  })
+  if (restoredPins.length > 0) {
+    log(`receive carrier: re-pinned the inputs of ${restoredPins.length} unresolved attempt(s)`)
   }
   const assetRfqService = new AssetRfqSwapService({
     quoteLimiter,

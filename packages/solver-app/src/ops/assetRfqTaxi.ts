@@ -72,7 +72,7 @@ const payoutAddressOf = (makerPkScript: string, trust: TaxiCarrierTrust): string
   return new ArkAddress(trust.serverKey, hex.decode(program), trust.hrp).encode()
 }
 
-const assetIdValue = (assetId: string): { txid: Uint8Array; groupIndex: number } => {
+export const assetIdValue = (assetId: string): { txid: Uint8Array; groupIndex: number } => {
   const parsed = asset.AssetId.fromString(assetId)
   // Taxi carries the genesis txid in INTERNAL byte order; `AssetId` holds display order.
   return { txid: Uint8Array.from(parsed.txid).reverse(), groupIndex: parsed.groupIndex }
@@ -141,7 +141,7 @@ const carrierQuoteFrom = (verified: VerifiedReceiveQuote): ReceiveCarrierQuote =
 /** KNOWN same-domain expiry only — the other unit, neither, and both are all
  * excluded: an unknown expiry is not a distant one, and comparing a height to a
  * clock needs a chain tip this layer does not take. */
-const clearsFloor = (coin: CarrierCoin, floor: { kind: 'height' | 'time'; value: bigint }): boolean => {
+export const clearsFloor = (coin: CarrierCoin, floor: { kind: 'height' | 'time'; value: bigint }): boolean => {
   const height = coin.expiresAtHeight
   const time = coin.expiresAt
   if ((height === undefined) === (time === undefined)) return false
@@ -220,9 +220,26 @@ export const taxiReceiveCarrier = async (
   })
 }
 
-export interface CarrierAttemptPin {
-  id: string
-  release: ReleaseReservation
+/** A pin is only given up against durable proof that nothing was submitted, so
+ * its release has to outlive the call that took it. */
+export interface CarrierPinLedger {
+  adopt(id: string, release: ReleaseReservation): void
+  release(id: string): void
+  held(): readonly string[]
+}
+
+export const createCarrierPinLedger = (): CarrierPinLedger => {
+  const held = new Map<string, ReleaseReservation[]>()
+  return {
+    adopt(id, release) {
+      held.set(id, [...(held.get(id) ?? []), release])
+    },
+    release(id) {
+      for (const release of held.get(id) ?? []) release()
+      held.delete(id)
+    },
+    held: () => [...held.keys()],
+  }
 }
 
 const CANONICAL_TXID = /^[0-9a-f]{64}$/
@@ -256,17 +273,22 @@ const checkedOutpoints = (value: unknown, label: string): CarrierOutpoint[] => {
   })
 }
 
-/** Re-pin what an unresolved attempt still owns, before anything can tick: a
+/**
+ * Re-pin what an unresolved attempt still owns, before anything can tick: a
  * reservation is process-local, so a restart drops it while the liability
- * survives. REFUSES rather than skips. Releasing is the reconcile slice's. */
+ * survives. REFUSES rather than skips, and the releases go into the ledger
+ * rather than back to the caller, so there is no way to drop one.
+ */
 export const restoreCarrierAttemptPins = async (deps: {
   attempts: () => Promise<readonly CarrierAttemptRecord[]>
   reserve: (outpoints: readonly CarrierOutpoint[]) => ReleaseReservation
-}): Promise<readonly CarrierAttemptPin[]> => {
+  pins: CarrierPinLedger
+}): Promise<readonly string[]> => {
   const records = await deps.attempts()
   const pinned = records.map(({ row, attempt }) => ({
     id: row.id,
     inputs: decodeCarrierAttemptInputs(attempt.snapshot, row.id),
   }))
-  return pinned.map(({ id, inputs }) => ({ id, release: deps.reserve(inputs) }))
+  for (const { id, inputs } of pinned) deps.pins.adopt(id, deps.reserve(inputs))
+  return pinned.map(({ id }) => id)
 }

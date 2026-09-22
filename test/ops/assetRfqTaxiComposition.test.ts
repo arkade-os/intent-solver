@@ -11,6 +11,7 @@ import { AssetRfqSwapService, type AssetRfqDeps } from '@arkade-os/solver-corrid
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { CarrierAttemptRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import {
+  createCarrierPinLedger,
   decodeCarrierAttemptInputs,
   encodeCarrierAttemptInputs,
   restoreCarrierAttemptPins,
@@ -166,21 +167,22 @@ describe('the composed adapter is refused, never degraded', () => {
   })
 })
 
-/** Nothing writes an attempt yet — the checkpoint writes are the settle slice —
- * so this restores nothing today; what it pins is the call and the shape. */
 describe('restoring the pins an unresolved attempt still owns', () => {
   const record = (id: string, inputs: unknown): CarrierAttemptRecord =>
     ({ row: { id }, attempt: { phase: 'prepared', snapshot: { inputs } } }) as unknown as CarrierAttemptRecord
 
   it('pins nothing when no attempt is outstanding', async () => {
     const ledger = createReservationLedger()
-    expect(await restoreCarrierAttemptPins({ attempts: async () => [], reserve: ledger.reserve })).toHaveLength(0)
+    const pins = createCarrierPinLedger()
+    expect(await restoreCarrierAttemptPins({ attempts: async () => [], reserve: ledger.reserve, pins })).toHaveLength(0)
     expect(ledger.reserved().size).toBe(0)
+    expect(pins.held()).toEqual([])
   })
 
   it('re-pins every outpoint an unresolved attempt named', async () => {
     const ledger = createReservationLedger()
-    const pins = await restoreCarrierAttemptPins({
+    const pins = createCarrierPinLedger()
+    const restored = await restoreCarrierAttemptPins({
       attempts: async () => [
         record('swap-1', [
           { txid: 'a'.repeat(64), vout: 0 },
@@ -188,16 +190,34 @@ describe('restoring the pins an unresolved attempt still owns', () => {
         ]),
       ],
       reserve: ledger.reserve,
+      pins,
     })
-    expect(pins.map((pin) => pin.id)).toEqual(['swap-1'])
+    expect(restored).toEqual(['swap-1'])
     expect([...ledger.reserved()].sort()).toEqual([`${'a'.repeat(64)}:0`, `${'b'.repeat(64)}:3`])
+  })
+
+  it('hands every release to the ledger, leaving none to drop', async () => {
+    const ledger = createReservationLedger()
+    const pins = createCarrierPinLedger()
+    await restoreCarrierAttemptPins({
+      attempts: async () => [record('swap-1', [{ txid: 'a'.repeat(64), vout: 0 }])],
+      reserve: ledger.reserve,
+      pins,
+    })
+    expect(pins.held()).toEqual(['swap-1'])
+    pins.release('swap-1')
+    expect(ledger.reserved().size).toBe(0)
   })
 
   it('refuses to start on an attempt whose snapshot names no inputs', async () => {
     // Skipping would free a coin an in-flight fill may already have spent.
     const ledger = createReservationLedger()
     await expect(
-      restoreCarrierAttemptPins({ attempts: async () => [record('swap-2', undefined)], reserve: ledger.reserve }),
+      restoreCarrierAttemptPins({
+        attempts: async () => [record('swap-2', undefined)],
+        reserve: ledger.reserve,
+        pins: createCarrierPinLedger(),
+      }),
     ).rejects.toThrow(/swap-2/)
     expect(ledger.reserved().size).toBe(0)
   })
@@ -208,6 +228,7 @@ describe('restoring the pins an unresolved attempt still owns', () => {
       restoreCarrierAttemptPins({
         attempts: async () => [record('swap-3', [{ txid: 'A'.repeat(64), vout: 0 }])],
         reserve: ledger.reserve,
+        pins: createCarrierPinLedger(),
       }),
     ).rejects.toThrow(/swap-3/)
   })
@@ -266,11 +287,12 @@ describe('the snapshot input shape has one definition, exercised end to end', ()
     ).toBe(true)
 
     const ledger = createReservationLedger()
-    const pins = await restoreCarrierAttemptPins({
+    const restored = await restoreCarrierAttemptPins({
       attempts: () => store.listUnresolvedCarrierAttempts(),
       reserve: ledger.reserve,
+      pins: createCarrierPinLedger(),
     })
-    expect(pins.map((pin) => pin.id)).toEqual(['swap-1'])
+    expect(restored).toEqual(['swap-1'])
     expect([...ledger.reserved()].sort()).toEqual([`${'a'.repeat(64)}:0`, `${'b'.repeat(64)}:7`])
     await store.close()
   })
@@ -310,15 +332,20 @@ describe('createServices reaches Taxi through exactly one guarded seam', () => {
     expect(body().indexOf(restore)).toBeLessThan(body().indexOf(service))
   })
 
-  it('restores nothing when no Taxi is configured', () => {
-    // With no adapter there is no fill to protect, and the store read would be
-    // a behaviour an unconfigured solver gained.
-    const guard = 'if (taxiCarrier !== undefined) {'
+  it('gates the restore on rows found, never on the knob', () => {
+    // An operator who unsets `TAXI_URL` with an attempt outstanding still owes
+    // its coins. The store is already open, so a never-configured solver pays
+    // one SELECT that returns nothing.
     const source = body()
-    expect(source).toContain(guard)
     expect(source.match(/restoreCarrierAttemptPins\(/g)).toHaveLength(1)
-    expect(source.slice(source.indexOf(guard), source.indexOf('const assetRfqService'))).toContain(
-      'restoreCarrierAttemptPins(',
-    )
+    expect(source).not.toMatch(/if \(taxiCarrier[^\n]*\n[\s\S]{0,400}?restoreCarrierAttemptPins\(/)
+    expect(source).toContain('attempts: () => assetRfqStore.listUnresolvedCarrierAttempts()')
+  })
+
+  it('hands the restored releases to a ledger instead of dropping them', () => {
+    const source = body()
+    expect(source).toContain('const carrierPins = createCarrierPinLedger()')
+    expect(source).toContain('pins: carrierPins')
+    expect(source.indexOf('createCarrierPinLedger()')).toBeLessThan(source.indexOf('restoreCarrierAttemptPins('))
   })
 })

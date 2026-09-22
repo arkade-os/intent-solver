@@ -1,0 +1,357 @@
+/**
+ * Settling one recycle fill: durable intent before every external effect.
+ *
+ * Three checkpoints, each committed before the boundary it guards. A reply
+ * lost after one is recoverable because the row already says what was
+ * intended; a reply lost before one cannot have moved money.
+ *
+ * Each CAS is given the envelope THIS call knows it wrote, never a re-read,
+ * which would let a racing worker's checkpoint become the base of this one's.
+ * Nothing here returns a txid: only chain evidence resolves a submitted fill.
+ */
+
+import { hex } from '@scure/base'
+import { signJointGraphForOwner, verifyOfferFillPlan, type JointGraph, type TaxiClient } from '@arkade-taxi/client'
+import type { Identity } from '@arkade-os/sdk'
+import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
+import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
+import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import type { CarrierAttempt, JsonObject } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
+import type { ReceiveCarrierQuotes } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import {
+  assetIdValue,
+  clearsFloor,
+  encodeCarrierAttemptInputs,
+  type CarrierCoin,
+  type CarrierOutpoint,
+  type CarrierPinLedger,
+} from './assetRfqTaxi.js'
+import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
+
+type Locktime = Readonly<{ kind: 'height' | 'time'; value: bigint }>
+type SwapFillGraphWire = Parameters<TaxiClient['submitSwapFill']>[1]
+
+declare const carrierSnapshot: unique symbol
+
+/** Only {@link carrierAttemptSnapshotFor} mints one, so the store seam below
+ * cannot be handed a snapshot that skipped the shared input codec. */
+export type CarrierAttemptSnapshot = JsonObject & { readonly [carrierSnapshot]?: true }
+
+/** Methods, not arrow properties: bivariance is what lets the real store's
+ * `snapshot: unknown` satisfy the narrowed parameter above. */
+export interface CarrierAttemptStore {
+  readCarrierAttempt(id: string): Promise<CarrierAttempt | null>
+  prepareCarrierAttempt(id: string, snapshot: CarrierAttemptSnapshot): Promise<boolean>
+  bindCarrierAttempt(id: string, expected: CarrierAttempt, binding: JsonObject): Promise<boolean>
+  markCarrierAttemptSubmitting(id: string, expected: CarrierAttempt): Promise<boolean>
+  refuseNeverSubmittedCarrierAttempt(id: string, expected: CarrierAttempt, reason: string): Promise<boolean>
+}
+
+export interface CarrierFillRebuildRequest {
+  row: AssetRfqSwapRow
+  offerHex: string
+  inputs: readonly CarrierCoin[]
+  proceedsScript: Uint8Array
+  contributionSats: bigint
+  quotedGraph: SwapFillGraphWire
+}
+
+/** `rebuild` must derive the graph from the solver's own inputs and the offer,
+ * never from the operator's bytes; `sign` touches only solver-owned inputs. */
+export interface CarrierFillSeams {
+  rebuild: (request: CarrierFillRebuildRequest) => Promise<JointGraph>
+  sign: (expected: JointGraph) => Promise<JointGraph>
+}
+
+export interface TaxiCarrierSettleDeps {
+  store: CarrierAttemptStore
+  swapFills: Pick<TaxiClient, 'requestVerifiedSwapFillQuote' | 'submitSwapFill'>
+  resolve: ReceiveCarrierQuotes['resolve']
+  coins: () => Promise<readonly CarrierCoin[]>
+  reserved: () => ReadonlySet<string>
+  reserve: (outpoints: readonly CarrierOutpoint[]) => ReleaseReservation
+  pins: CarrierPinLedger
+  dustSats: bigint
+  offerHex: (row: AssetRfqSwapRow) => string
+  proceedsScript: Uint8Array
+  solverKeys: readonly string[]
+  /** Recorded so a re-pointed solver cannot reconcile one operator's fill
+   * against another's. */
+  provider: string
+  fill: CarrierFillSeams
+  now: () => number
+}
+
+/** Submitted, outcome unproven. NOT a failure of the fill and never retryable:
+ * the row stays `filling` and reconciliation owns it from here. */
+export class CarrierFillAwaitingProofError extends Error {
+  override readonly name = 'CarrierFillAwaitingProofError'
+  constructor(readonly swapId: string) {
+    super(`carrier fill ${swapId} was submitted; awaiting chain proof before it is called filled`)
+  }
+}
+
+const contributionOf = (coin: CarrierCoin, leg: AssetLeg, dustSats: bigint): bigint => {
+  if (leg === null) return BigInt(Math.max(usableSatsOf(coin, Number(dustSats)), 0))
+  return (coin.assets ?? [])
+    .filter((held) => held.assetId === leg)
+    .reduce((total, held) => total + BigInt(held.amount), 0n)
+}
+
+/** Ordered by outpoint rather than by value or expiry: the set has to be a
+ * function of the inventory alone, so a reconciler re-deriving it after a
+ * restart gets the same answer this call got. */
+export const selectCarrierInputs = (args: {
+  coins: readonly CarrierCoin[]
+  reserved: ReadonlySet<string>
+  floor: Locktime
+  dustSats: bigint
+  leg: AssetLeg
+  amount: bigint
+}): readonly CarrierCoin[] => {
+  const eligible = args.coins
+    .filter((coin) => !args.reserved.has(outpointKey(coin.txid, coin.vout)))
+    .filter((coin) => clearsFloor(coin, args.floor))
+    .filter((coin) => contributionOf(coin, args.leg, args.dustSats) > 0n)
+    .sort((a, b) => outpointKey(a.txid, a.vout).localeCompare(outpointKey(b.txid, b.vout)))
+  const picked: CarrierCoin[] = []
+  let total = 0n
+  for (const coin of eligible) {
+    picked.push(coin)
+    total += contributionOf(coin, args.leg, args.dustSats)
+    if (total >= args.amount) return picked
+  }
+  throw new Error(`carrier fill inventory holds ${total} of the ${args.amount} it must pay on ${args.leg ?? 'sats'}`)
+}
+
+const locktimeJson = (floor: Locktime): JsonObject => ({ kind: floor.kind, value: floor.value.toString() })
+
+const sameLocktime = (a: Locktime, b: Locktime): boolean => a.kind === b.kind && a.value === b.value
+
+const carrierAttemptSnapshotFor = (parts: {
+  row: AssetRfqSwapRow
+  quoteId: string
+  quoteExpiresAt: number
+  floor: Locktime
+  inputs: readonly CarrierOutpoint[]
+  deposit: CarrierOutpoint
+  offerHex: string
+  provider: string
+  proceedsScript: Uint8Array
+  contributionSats: bigint
+  maxFareSats: bigint
+  validUntil: number
+}): CarrierAttemptSnapshot => ({
+  ...encodeCarrierAttemptInputs(parts.inputs),
+  operation: parts.row.id,
+  provider: parts.provider,
+  offer: parts.offerHex,
+  deposit: { txid: parts.deposit.txid, vout: parts.deposit.vout },
+  quote: { id: parts.quoteId, expires_at: parts.quoteExpiresAt },
+  input_expiry_floor: locktimeJson(parts.floor),
+  proceeds_script: hex.encode(parts.proceedsScript),
+  contribution_sats: parts.contributionSats.toString(),
+  max_fare_sats: parts.maxFareSats.toString(),
+  valid_until: parts.validUntil,
+})
+
+/** `offer-covenant` is the provider-signed deposit, which the fill template
+ * spells as a null owner. */
+const quotedInputOwners = (wire: SwapFillGraphWire): readonly (string | null)[] =>
+  wire.inputs.map((input) => (input.owner === 'offer-covenant' ? null : input.owner))
+
+/** Only the signed transactions are replaced: every economic field the submit
+ * pre-flight compares stays the operator's own bytes. */
+const solverGraphWire = (quoted: SwapFillGraphWire, signed: JointGraph): SwapFillGraphWire => ({
+  ...quoted,
+  arkTx: signed.arkTx,
+  checkpoints: [...signed.checkpoints],
+})
+
+/** Owner-restricted by construction: the bindings come from the graph the
+ * solver built itself, so a relabelled owner cannot steer what gets signed. */
+export const carrierFillSigner =
+  (identity: Identity) =>
+  async (expected: JointGraph): Promise<JointGraph> => {
+    const owned = expected.inputOwners.flatMap((owner, inputIndex) => (owner === 'solver' ? [inputIndex] : []))
+    if (owned.length === 0) throw new Error('carrier fill assigns no input to this solver')
+    return signJointGraphForOwner({
+      expected,
+      owner: 'solver',
+      bindings: owned.map((inputIndex) => ({ inputIndex, identity })),
+    })
+  }
+
+export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pick<ReceiveCarrierQuotes, 'settle'> => ({
+  settle: async (row) => {
+    const terms = row.carrierTerms
+    if (terms?.mode !== 'recycle' || terms.quoteId === undefined) {
+      throw new Error(`asset rfq swap ${row.id} is not a recycle, so it has no carrier fill to settle`)
+    }
+    if (row.toAssetId === null) throw new Error(`carrier fill ${row.id} pays no asset leg to recycle a carrier for`)
+    if (row.depositTxid === null || row.depositVout === null) {
+      throw new Error(`carrier fill ${row.id} records no deposit outpoint to spend`)
+    }
+    if ((await deps.store.readCarrierAttempt(row.id)) !== null) {
+      throw new Error(`carrier fill ${row.id} already has an attempt; reconciliation owns it, never a second submit`)
+    }
+
+    const request = {
+      quoteId: terms.quoteId,
+      makerPkScript: row.makerPkScript,
+      makerPublicKey: row.makerPublicKey,
+      assetId: row.toAssetId,
+      now: deps.now(),
+    }
+    const floor = (await deps.resolve(request)).inputExpiryFloor
+    const coins = await deps.coins()
+    const inputs = selectCarrierInputs({
+      coins,
+      reserved: deps.reserved(),
+      floor,
+      dustSats: deps.dustSats,
+      leg: row.toAssetId,
+      amount: row.toAmount,
+    })
+
+    // Pinned BEFORE the write that names them: no window where the row claims
+    // coins another spender still believes are free.
+    const outpoints = inputs.map(({ txid, vout }) => ({ txid, vout }))
+    deps.pins.adopt(row.id, deps.reserve(outpoints))
+
+    const deposit = { txid: row.depositTxid, vout: row.depositVout }
+    const validUntil = Math.min(row.validUntil, terms.expiresAt)
+    const offerHex = deps.offerHex(row)
+    const snapshot = carrierAttemptSnapshotFor({
+      row,
+      quoteId: terms.quoteId,
+      quoteExpiresAt: terms.expiresAt,
+      floor,
+      inputs: outpoints,
+      deposit,
+      offerHex,
+      provider: deps.provider,
+      proceedsScript: deps.proceedsScript,
+      contributionSats: terms.loanSats,
+      maxFareSats: terms.serviceFareSats,
+      validUntil,
+    })
+
+    const prepared: CarrierAttempt = { phase: 'prepared', snapshot }
+    let wrote = false
+    let liable = false
+    try {
+      wrote = true
+      if (!(await deps.store.prepareCarrierAttempt(row.id, snapshot))) {
+        // The CAS LOST: this row's attempt is not this caller's to end.
+        wrote = false
+        deps.pins.release(row.id)
+        throw new Error(`carrier fill ${row.id} could not prepare its attempt; the operator was asked nothing`)
+      }
+      const { verified } = await deps.swapFills.requestVerifiedSwapFillQuote({
+        operationId: row.id,
+        receiveQuoteId: terms.quoteId,
+        offerHex,
+        solverInputs: inputs.map((coin) => ({
+          txid: coin.txid,
+          vout: coin.vout,
+          value: BigInt(coin.value),
+          // EVERY asset the coin owns: arkd refuses a spend whose packet omits
+          // one an input carries.
+          assets: (coin.assets ?? []).map((held) => ({
+            assetId: assetIdValue(held.assetId),
+            amount: BigInt(held.amount),
+          })),
+        })),
+        solverProceedsScript: deps.proceedsScript,
+        solverKeys: [...deps.solverKeys],
+        contributionSats: terms.loanSats,
+        maxFare: { currency: 'sats', units: terms.serviceFareSats },
+        fundingTxid: deposit.txid,
+        fundingVout: deposit.vout,
+        // PINNED: it participates in request identity, so a recomputed value
+        // is a conflict rather than the same request.
+        validUntil,
+        now: deps.now(),
+      })
+
+      const quoted = verified.quote.graph
+      const expected = await deps.fill.rebuild({
+        row,
+        offerHex,
+        inputs,
+        proceedsScript: deps.proceedsScript,
+        contributionSats: terms.loanSats,
+        quotedGraph: quoted,
+      })
+      if (!verifyOfferFillPlan(expected)) throw new Error(`carrier fill ${row.id} rebuilt a graph off its own template`)
+      if (JSON.stringify(expected.inputOwners) !== JSON.stringify(quotedInputOwners(quoted))) {
+        throw new Error(`carrier fill ${row.id} was quoted input owners it did not build`)
+      }
+      // The digest binds bytes, owners and template together: an equal one is
+      // the whole graph re-derived, not a field-by-field echo.
+      if (expected.graphId !== quoted.graphId) {
+        throw new Error(`carrier fill ${row.id} rebuilt ${expected.graphId}, not the quoted ${quoted.graphId}`)
+      }
+
+      const binding: JsonObject = {
+        fill_id: verified.fillId,
+        expires_at: verified.expiresAt,
+        graph: { id: expected.graphId, ark_tx: expected.arkTx, checkpoints: [...expected.checkpoints] },
+      }
+      if (!(await deps.store.bindCarrierAttempt(row.id, prepared, binding))) {
+        throw new Error(`carrier fill ${row.id} could not bind its graph; nothing has been signed`)
+      }
+
+      const signed = await deps.fill.sign(expected)
+
+      // The last gate: the authority this attempt was admitted under must
+      // still be the one the operator serves.
+      const now = (await deps.resolve({ ...request, now: deps.now() })).inputExpiryFloor
+      if (!sameLocktime(now, floor)) {
+        throw new Error(
+          `carrier fill ${row.id} pinned an input expiry floor of ${floor.value} and the operator now serves ${now.value}`,
+        )
+      }
+      const stillHeld = new Set((await deps.coins()).map((coin) => outpointKey(coin.txid, coin.vout)))
+      for (const input of inputs) {
+        if (!stillHeld.has(outpointKey(input.txid, input.vout))) {
+          throw new Error(`carrier fill ${row.id} no longer holds ${input.txid}:${input.vout}`)
+        }
+        if (!clearsFloor(input, floor)) throw new Error(`carrier fill ${row.id} selected a coin short of its floor`)
+      }
+
+      const bound: CarrierAttempt = { phase: 'quoted', snapshot, binding }
+      if (!(await deps.store.markCarrierAttemptSubmitting(row.id, bound))) {
+        throw new Error(`carrier fill ${row.id} could not mark itself submitting; nothing has been sent`)
+      }
+      liable = true
+      await deps.swapFills.submitSwapFill(verified, solverGraphWire(quoted, signed))
+    } catch (error) {
+      if (wrote && !liable) await releaseIfProvenNeverSubmitted(deps, row.id, messageOf(error))
+      throw error
+    }
+    throw new CarrierFillAwaitingProofError(row.id)
+  },
+})
+
+const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+/** Routed on the DURABLE phase, never on what this call believes it did: a
+ * checkpoint write that threw may still have landed, and the row is the only
+ * thing that knows. */
+const releaseIfProvenNeverSubmitted = async (
+  deps: TaxiCarrierSettleDeps,
+  id: string,
+  reason: string,
+): Promise<void> => {
+  const current = await deps.store.readCarrierAttempt(id)
+  // No attempt means the write that precedes the first POST never landed.
+  if (current === null) return deps.pins.release(id)
+  // Anything past `quoted` may have been submitted, and keeps its pin for good.
+  if (current.phase !== 'prepared' && current.phase !== 'quoted') return
+  // Only the caller that WINS the terminal CAS may release.
+  if (await deps.store.refuseNeverSubmittedCarrierAttempt(id, current, `not filled: ${reason}`)) {
+    deps.pins.release(id)
+  }
+}
