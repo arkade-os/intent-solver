@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { ArkAddress } from '@arkade-os/sdk'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService, type AssetRfqDeps } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
@@ -19,9 +20,16 @@ import {
   type TaxiCarrierComposition,
   type TaxiCarrierTrust,
 } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
+import { completeTaxiReceiveCarrier } from '@arkade-os/solver-app/ops/assetRfqTaxiAdapter.js'
 import { createServicesBody } from '../support/createServicesBody.js'
 
 const ASSET = `${'aa'.repeat(31)}bb0100`
+/** A real Arkade address, because the fill half decodes it to a pkScript. */
+const PROCEEDS_ADDRESS = new ArkAddress(
+  Uint8Array.from({ length: 32 }, () => 1),
+  Uint8Array.from({ length: 32 }, () => 7),
+  'tark',
+).encode()
 const MAKER_PK_SCRIPT = `5120${'c'.repeat(64)}`
 const MAKER_KEY = 'b'.repeat(64)
 
@@ -115,6 +123,32 @@ describe('the composed adapter is refused, never degraded', () => {
   it('carries the read half only, so the completeness gate can see it is partial', async () => {
     const { deps } = watched({ taxiUrl: 'http://taxi.example:7080' })
     expect(Object.keys((await taxiReceiveCarrier(deps))!).sort()).toEqual(['available', 'resolve'])
+  })
+
+  it('carries all four once the fill half is composed over it', async () => {
+    const { deps } = watched({ taxiUrl: 'http://taxi.example:7080' })
+    const store = await AssetRfqSwapStore.open(':memory:', () => 1_000)
+
+    const whole = completeTaxiReceiveCarrier((await taxiReceiveCarrier(deps))!, {
+      taxiUrl: 'http://taxi.example:7080',
+      store,
+      chain: { getVtxos: async () => ({ vtxos: [] }), getVirtualTxs: async () => ({ txs: [] }) } as never,
+      pins: createCarrierPinLedger(),
+      coins: async () => [],
+      reserved: () => new Set<string>(),
+      reserve: () => () => {},
+      wallet: {} as never,
+      identity: {} as never,
+      arkServerUrl: 'http://ark',
+      dustSats: 330n,
+      offerHex: () => 'abcd',
+      proceedsAddress: PROCEEDS_ADDRESS,
+      solverKeys: ['e'.repeat(64)],
+      now: () => 1_000,
+    })
+
+    expect(Object.keys(whole).sort()).toEqual(['available', 'reconcile', 'resolve', 'settle'])
+    await store.close()
   })
 
   it('makes the real orchestrator refuse a recycle rather than price one', async () => {
@@ -310,7 +344,19 @@ describe('createServices reaches Taxi through exactly one guarded seam', () => {
   })
 
   it('hands it to the RFQ service, which is the only thing that can reach it', () => {
-    expect(body()).toContain('receiveCarrierQuotes: taxiCarrier')
+    expect(body()).toContain('receiveCarrierQuotes: receiveCarrier')
+  })
+
+  it('completes the adapter only where the read half exists, on the SAME pin ledger', () => {
+    const source = body()
+    expect(source.match(/completeTaxiReceiveCarrier\(/g)).toHaveLength(1)
+    expect(source).toMatch(/taxiCarrier === undefined[\s\S]{0,120}?\? undefined/)
+    // Both halves resolve through one ledger, or a reconcile would free nothing.
+    expect(source).toMatch(/completeTaxiReceiveCarrier\(taxiCarrier, \{[\s\S]{0,600}?pins: carrierPins,/)
+  })
+
+  it('pays a fill into an address this wallet owns, never one the quote names', () => {
+    expect(body()).toContain('proceedsAddress: await arkade.wallet.getAddress()')
   })
 
   it('takes the trusted identity from the running context, never from the URL', () => {

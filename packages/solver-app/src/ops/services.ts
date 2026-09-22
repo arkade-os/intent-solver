@@ -99,15 +99,22 @@ import {
 } from './assetRfqMarkets.js'
 import { marketServingDivergence } from './marketDivergence.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
-import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import {
+  offerExitDelay,
+  offerHexFrom,
+  offerScriptFrom,
+  xOnlyPubkey,
+} from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import {
   carrierChainTip,
   createCarrierPinLedger,
   restoreCarrierAttemptPins,
+  spendableCarrierCoins,
   taxiReceiveCarrier,
 } from './assetRfqTaxi.js'
+import { completeTaxiReceiveCarrier } from './assetRfqTaxiAdapter.js'
 
 export interface Services {
   /**
@@ -693,6 +700,42 @@ export const createServices = async (
   if (restoredPins.length > 0) {
     log(`receive carrier: re-pinned the inputs of ${restoredPins.length} unresolved attempt(s)`)
   }
+  /**
+   * The fill half, composed only where the read half exists. Its declared type
+   * is the complete port, so a method left out is a compile error here rather
+   * than a `price_unavailable` a live taker discovers.
+   */
+  const carrierOfferHex = offerHexFrom(assetRfqDerivation)
+  const receiveCarrier =
+    taxiCarrier === undefined || config.taxiUrl === undefined
+      ? undefined
+      : completeTaxiReceiveCarrier(taxiCarrier, {
+          taxiUrl: config.taxiUrl,
+          store: assetRfqStore,
+          chain: arkade.wallet.indexerProvider,
+          pins: carrierPins,
+          coins: async () => spendableCarrierCoins(await arkade.wallet.getContractManager()),
+          reserved: () => arkade.reservations.reserved(),
+          reserve: (outpoints) => arkade.reservations.reserve(outpoints),
+          wallet: arkade.wallet,
+          identity: arkade.identity,
+          arkServerUrl: arkade.arkServerUrl,
+          dustSats: arkade.dustSats,
+          offerHex: (row) =>
+            carrierOfferHex(
+              {
+                wantAmount: row.toAmount,
+                wantAssetId: row.toAssetId,
+                offerAssetId: row.fromAssetId,
+                makerPkScript: row.makerPkScript,
+                makerPublicKey: row.makerPublicKey,
+              },
+              row.offerPkScript,
+            ),
+          proceedsAddress: await arkade.wallet.getAddress(),
+          solverKeys: [hex.encode(await arkade.identity.xOnlyPublicKey())],
+          now: () => Math.floor(Date.now() / 1000),
+        })
   const assetRfqService = new AssetRfqSwapService({
     quoteLimiter,
     store: assetRfqStore,
@@ -711,7 +754,7 @@ export const createServices = async (
       emulatorUrl: config.emulatorUrl,
       derivation: assetRfqDerivation,
     }),
-    receiveCarrierQuotes: taxiCarrier,
+    receiveCarrierQuotes: receiveCarrier,
     onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
   })
 

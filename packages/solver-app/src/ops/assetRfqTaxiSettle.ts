@@ -301,7 +301,14 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       const binding: JsonObject = {
         fill_id: verified.fillId,
         expires_at: verified.expiresAt,
-        graph: { id: expected.graphId, ark_tx: expected.arkTx, checkpoints: [...expected.checkpoints] },
+        graph: {
+          id: expected.graphId,
+          ark_tx: expected.arkTx,
+          checkpoints: [...expected.checkpoints],
+          // Carried because the digest commits to them: without the owners
+          // reconciliation cannot re-hash the bytes it is handed.
+          input_owners: [...expected.inputOwners],
+        },
       }
       if (!(await deps.store.bindCarrierAttempt(row.id, prepared, binding))) {
         throw new Error(`carrier fill ${row.id} could not bind its graph; nothing has been signed`)
@@ -355,6 +362,12 @@ const releaseIfProvenNeverSubmitted = async (
   const current = await deps.store.readCarrierAttempt(pin.id)
   // No attempt means the write that precedes the first POST never landed.
   if (current === null) return pin.release()
+  // `not_submitted` is somebody's WON terminal CAS, and that CAS refuses any
+  // prior phase but `prepared`/`quoted` — so it is durable proof this row never
+  // submitted. The winner freed its own pin; this one is the loser's, over
+  // coins nothing spent, and no later caller can ever reach it: the row is
+  // `refused`, which reconciliation never visits.
+  if (current.phase === 'not_submitted') return pin.release()
   // Anything past `quoted` may have been submitted, and keeps its pin for good.
   if (current.phase !== 'prepared' && current.phase !== 'quoted') return
   // Only the caller that WINS the terminal CAS may release, and only its own.

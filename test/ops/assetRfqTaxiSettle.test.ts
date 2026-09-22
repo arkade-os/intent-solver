@@ -567,6 +567,36 @@ describe('a reservation outlives every outcome that may have submitted', () => {
     await h.store.close()
   })
 
+  it('releases the pin when another caller already proved the attempt never submitted', async () => {
+    // The terminal CAS loses because the row is ALREADY `not_submitted`, which
+    // that CAS only ever writes over a `prepared`/`quoted` envelope. So it is
+    // durable proof nothing was sent, the loser's pin is dead weight, and
+    // nothing else can reach it: the row is `refused`, which reconcile never visits.
+    const store = await openStore()
+    const h = await harness({
+      deps: {
+        store: Object.assign(Object.create(store) as typeof store, {
+          bindCarrierAttempt: async (id: string, expected: never, binding: never) => {
+            await store.bindCarrierAttempt(id, expected, binding)
+            throw new Error('connection reset')
+          },
+          readCarrierAttempt: async (id: string) => {
+            const current = await store.readCarrierAttempt(id)
+            if (current?.phase === 'quoted') {
+              await store.refuseNeverSubmittedCarrierAttempt(id, current, 'not filled: another caller got there')
+            }
+            return store.readCarrierAttempt(id)
+          },
+        }),
+      },
+    })
+    await expect(h.settle(await store.get('swap-1'))).rejects.toThrow(/connection reset/)
+    expect(await store.readCarrierAttempt('swap-1')).toMatchObject({ phase: 'not_submitted' })
+    expect(h.ledger.reserved().size).toBe(0)
+    await store.close()
+    await h.store.close()
+  })
+
   it('refuses a second attempt on a row that already has one', async () => {
     const h = await harness({ submitStatus: 502 })
     await expect(h.settle(await h.row())).rejects.toThrow()

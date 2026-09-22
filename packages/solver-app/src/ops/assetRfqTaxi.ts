@@ -4,7 +4,7 @@
  * the orchestrator's completeness gate refuses a recycle rather than degrading.
  */
 
-import { ArkAddress, asset, type IContractManager } from '@arkade-os/sdk'
+import { ArkAddress, asset, type IContractManager, type TapLeafScript } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { TaxiClient, verifyReceiveQuote, type VerifiedReceiveQuote } from '@arkade-taxi/client'
 import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
@@ -42,6 +42,10 @@ export interface CarrierCoin {
   expiresAt?: Date
   expiresAtHeight?: number
   assets?: readonly { assetId: string; amount: bigint | string }[]
+  /** Carried by every real ContractManager coin; the rebuild refuses without
+   * them rather than spending a coin it cannot prove a path into. */
+  tapTree?: Uint8Array
+  forfeitTapLeafScript?: TapLeafScript
 }
 
 export interface TaxiReceiveCarrierDeps {
