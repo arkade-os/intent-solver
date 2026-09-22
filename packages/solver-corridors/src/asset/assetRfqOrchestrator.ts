@@ -51,6 +51,8 @@ import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkad
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow, type AssetRfqSwapState } from '../db/assetRfqSwaps.js'
+import type { AssetRfqCarrierTerms } from '../db/assetRfqSwaps.js'
+import type { AssetRfqCarrierChoice } from '../wire/assetRfqPayloads.js'
 
 /**
  * A market this deployment serves, plus where its price comes from.
@@ -104,6 +106,36 @@ export interface OfferTerms {
   makerPublicKey: string
 }
 
+/**
+ * What the internal Taxi adapter answers for ONE recycle quote id.
+ *
+ * THIS IS A TRUSTED SERVICE ADAPTER, NOT CALLER JSON. It is reached only after
+ * the request has been validated and the market resolved, and its answer is the
+ * only source of a recycle's economic terms — never a client-supplied flag.
+ * `makerPkScript`/`makerPublicKey`/`assetId` are echoed back so the solver can
+ * refuse a quote that is not the one this request would bind.
+ */
+export interface ReceiveCarrierQuote {
+  quoteId: string
+  makerPkScript: string
+  makerPublicKey: string
+  assetId: string
+  physicalSats: bigint
+  loanSats: bigint
+  receiptSats: bigint
+  serviceFareSats: bigint
+  /** Unix seconds. Read against `now`, so a stale quote cannot be priced. */
+  expiresAt: number
+}
+
+export interface ReceiveCarrierQuoteRequest {
+  quoteId: string
+  makerPkScript: string
+  makerPublicKey: string
+  assetId: string
+  now: number
+}
+
 export interface AssetRfqDeps {
   quoteLimiter?: RateLimiter
   store: AssetRfqSwapStore
@@ -133,6 +165,17 @@ export interface AssetRfqDeps {
   fetchPrice: (feedUrl: string, pricePath: string) => Promise<Price>
   /** Spend the deposit through `fulfill`, paying the client. Returns the txid. */
   settle: (row: AssetRfqSwapRow) => Promise<string>
+  /**
+   * The internal Taxi adapter, reached only for an explicit `recycle`.
+   *
+   * OPTIONAL, and its absence is a REFUSAL rather than a default: an
+   * unconfigured deployment must not price a carrier it cannot fund. The real
+   * configured-Taxi adapter is a later task, so today absence is the honest
+   * answer everywhere.
+   */
+  receiveCarrierQuotes?: {
+    resolve: (request: ReceiveCarrierQuoteRequest) => Promise<ReceiveCarrierQuote>
+  }
   onError?: (id: string, error: unknown) => void
   now?: () => number
   newId?: () => string
@@ -141,6 +184,7 @@ export interface AssetRfqDeps {
 export type AssetRfqQuoteRefusal =
   | 'rate_limited'
   | 'unsupported_pair'
+  | 'unsupported_payload'
   | 'exact_out_unsupported'
   | 'price_unavailable'
   | 'fee_consumes_swap'
@@ -160,6 +204,8 @@ export interface AssetRfqQuoteRequest {
   amountSide: 'from' | 'to'
   makerPkScript: string
   makerPublicKey: string
+  /** Absent is the legacy request; explicit modes apply to an asset payout only. */
+  carrier?: AssetRfqCarrierChoice
 }
 
 /** How much of one leg a deposit holds — sats when the leg is BTC. */
@@ -223,6 +269,163 @@ export class AssetRfqSwapService {
   }
 
   /**
+   * The carrier this quote will price, from the client's named mode.
+   *
+   * THREE ANSWERS, and the difference between them is money:
+   *
+   * - `purchase` buys the PHYSICAL dust with the existing arithmetic, even on a
+   *   market whose operator waived the carrier. The mode is the client's
+   *   explicit authorization to acquire sats, so no operator policy can make it
+   *   free — and no callback is needed, because nothing is being borrowed.
+   * - `recycle` prices `receiptSats + serviceFareSats`: the buyer purchases the
+   *   tiny receipt reserve and the service, NOT the returnable loan. The loan is
+   *   Taxi's principal, delivered at claim, and pricing it would make the client
+   *   buy back sats it is about to be advanced.
+   * - absent leaves the market's own pass-through exactly as it was.
+   *
+   * `publishedSats` is what `carrier_sats` reports, and it is the PHYSICAL
+   * carrier on an explicit mode — a client funding an asset payout attaches
+   * that many sats to the deposit whatever the price netted (the SDK does
+   * exactly this at `requestArkadeSwap`), so publishing the net price term
+   * would under-fund the covenant.
+   */
+  private async resolveCarrier(args: {
+    carrier: AssetRfqCarrierChoice | undefined
+    market: AssetRfqMarket
+    pair: { from: AssetLeg; to: AssetLeg }
+    request: AssetRfqQuoteRequest
+    now: number
+  }): Promise<
+    | {
+        ok: true
+        terms: AssetRfqCarrierTerms | undefined
+        priceTerm: bigint
+        publishedSats: bigint
+      }
+    | { ok: false; reason: AssetRfqQuoteRefusal; detail: string }
+  > {
+    const { carrier, market, pair, request, now } = args
+    if (carrier === undefined) {
+      return { ok: true, terms: undefined, priceTerm: market.carrierSats, publishedSats: market.carrierSats }
+    }
+    if (carrier.mode === 'purchase') {
+      const physical = this.deps.dustSats
+      return {
+        ok: true,
+        terms: {
+          mode: 'purchase',
+          physicalSats: physical,
+          loanSats: physical,
+          receiptSats: 0n,
+          serviceFareSats: 0n,
+          pricedSats: physical,
+          expiresAt: now + this.deps.quoteValiditySeconds,
+        },
+        priceTerm: physical,
+        publishedSats: physical,
+      }
+    }
+
+    // A recycle without the adapter is refused BEFORE anything is priced. The
+    // alternative — falling through to the market's carrier — would quote a
+    // free carrier the deployment has no way to fund.
+    const adapter = this.deps.receiveCarrierQuotes
+    if (!adapter) {
+      return {
+        ok: false,
+        reason: 'price_unavailable',
+        detail: 'recycle requested but this deployment has no receive-carrier adapter configured',
+      }
+    }
+    // `pair.to` is non-null here: a BTC payout was refused before we got here.
+    const assetId = pair.to as string
+    let quote: ReceiveCarrierQuote
+    try {
+      quote = await adapter.resolve({
+        quoteId: carrier.quoteId,
+        makerPkScript: request.makerPkScript,
+        makerPublicKey: request.makerPublicKey,
+        assetId,
+        now,
+      })
+    } catch (error) {
+      // An adapter that threw is an unavailable quote, never a free carrier.
+      this.deps.onError?.('carrier', error)
+      return { ok: false, reason: 'price_unavailable', detail: 'the receive-carrier quote could not be read' }
+    }
+
+    const rejected = this.validateCarrierQuote({ quote, request, assetId, now })
+    if (rejected) return rejected
+
+    const priceTerm = quote.receiptSats + quote.serviceFareSats
+    return {
+      ok: true,
+      terms: {
+        mode: 'recycle',
+        quoteId: quote.quoteId,
+        physicalSats: quote.physicalSats,
+        loanSats: quote.loanSats,
+        receiptSats: quote.receiptSats,
+        serviceFareSats: quote.serviceFareSats,
+        pricedSats: priceTerm,
+        expiresAt: quote.expiresAt,
+      },
+      priceTerm,
+      publishedSats: quote.physicalSats,
+    }
+  }
+
+  /**
+   * Every request-bound field of a receiver quote, matched INDEPENDENTLY.
+   *
+   * Independent rather than one equality over the whole shape so the refusal
+   * says which field disagreed — an adapter answering for the wrong client or
+   * the wrong asset is a bug someone has to find, and "the quote did not match"
+   * sends them looking at all five.
+   */
+  private validateCarrierQuote(args: {
+    quote: ReceiveCarrierQuote
+    request: AssetRfqQuoteRequest
+    assetId: string
+    now: number
+  }): { ok: false; reason: AssetRfqQuoteRefusal; detail: string } | undefined {
+    const { quote, request, assetId, now } = args
+    // Only meaningful when a recycle actually named an id; `purchase` has none.
+    const expectedQuoteId = request.carrier?.mode === 'recycle' ? request.carrier.quoteId : undefined
+    if (expectedQuoteId === undefined || quote.quoteId !== expectedQuoteId) {
+      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote id does not match the request' }
+    }
+    if (quote.makerPkScript !== request.makerPkScript) {
+      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote is for a different payout script' }
+    }
+    if (quote.makerPublicKey !== request.makerPublicKey) {
+      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote is for a different signer key' }
+    }
+    if (quote.assetId !== assetId) {
+      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote is for a different asset' }
+    }
+    if (quote.physicalSats !== this.deps.dustSats) {
+      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote physical sats are not this dust floor' }
+    }
+    if (quote.receiptSats <= 0n) {
+      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote receipt sats must be positive' }
+    }
+    if (quote.loanSats <= 0n) {
+      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote loan sats must be positive' }
+    }
+    if (quote.loanSats + quote.receiptSats !== quote.physicalSats) {
+      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote split does not sum to physical sats' }
+    }
+    if (quote.serviceFareSats < 0n) {
+      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote service fare must not be negative' }
+    }
+    if (!Number.isSafeInteger(quote.expiresAt) || quote.expiresAt <= now) {
+      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote is already expired' }
+    }
+    return undefined
+  }
+
+  /**
    * Issue or refuse terms for one request.
    *
    * Ordered so a refusal is the most specific true statement, and so the
@@ -254,6 +457,20 @@ export class AssetRfqSwapService {
     const bounds = pair.from === market.base ? market.sellBase : market.buyBase
     const priced: AssetQuoteMarket = { ...market, minPayout: bounds.min, maxPayout: bounds.max }
 
+    // A named mode is applicable ONLY to an asset payout, and this is answered
+    // before the price or the network is touched: the mode is a statement about
+    // which carrier the client wants, and a BTC payout has no carrier to want.
+    // § 1 puts an inapplicable field on the payload, so the refusal is
+    // `unsupported_payload` rather than a pricing one.
+    const carrier = request.carrier
+    if (carrier !== undefined && pair.to === null) {
+      return {
+        accepted: false,
+        reason: 'unsupported_payload',
+        detail: 'profile.carrier applies to an asset payout only',
+      }
+    }
+
     // § 4.5: an rfq_id already bound to a negotiation is a conflict, whatever
     // became of that one. Checked BEFORE the feed read so a retry storm on one
     // id cannot drive traffic to the price source.
@@ -263,6 +480,15 @@ export class AssetRfqSwapService {
     if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
       return { accepted: false, reason: 'rate_limited' }
     }
+
+    const now = this.now()
+    // The carrier decided BEFORE the feed read, because the feed read is the
+    // expensive gate and the client's mode is answerable without it. A recycle
+    // whose adapter is unavailable is refused here, so it can never be priced
+    // off the market's pass-through as a free carrier.
+    const resolvedCarrier = await this.resolveCarrier({ carrier, market, pair, request, now })
+    if (!resolvedCarrier.ok) return { accepted: false, reason: resolvedCarrier.reason, detail: resolvedCarrier.detail }
+    const { terms, priceTerm, publishedSats } = resolvedCarrier
 
     let feed: Price
     try {
@@ -279,7 +505,7 @@ export class AssetRfqSwapService {
       amountSide: request.amountSide,
       market: priced,
       feed,
-      carrierSats: market.carrierSats,
+      carrierSats: priceTerm,
       dustSats: this.deps.dustSats,
     })
     if (!resolved.ok) return { accepted: false, reason: resolved.reason }
@@ -317,14 +543,23 @@ export class AssetRfqSwapService {
         offerPkScript: offer.pkScript,
         offerAddress: offer.address,
         solverPubkey: this.deps.solverPubkey,
-        validUntil: this.now() + this.deps.quoteValiditySeconds,
+        // Capped at the carrier quote's own expiry, so a recycle can never
+        // outlive the Taxi terms its economic split came from.
+        validUntil:
+          terms === undefined
+            ? now + this.deps.quoteValiditySeconds
+            : Math.min(now + this.deps.quoteValiditySeconds, terms.expiresAt),
         // The price this quote FIXED — not the feed it was derived from.
         // Against a feed read at fill time it measures how far the market moved
         // while the quote was outstanding; against its own feed it would measure
         // the configured spread and nothing else.
-        ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: market.carrierSats }),
+        // The snapshot is struck against what the PRICE netted, not the
+        // physical carrier: an explicit mode publishes the dust while pricing
+        // only the receipt and service, and the mark has to match the amounts.
+        ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: priceTerm }),
+        ...(terms === undefined ? {} : { carrierTerms: terms }),
       })
-      return { accepted: true, swap, carrierSats: market.carrierSats }
+      return { accepted: true, swap, carrierSats: publishedSats }
     } catch (error) {
       // Only the unique indexes mean duplicate — both onchain orchestrators narrow it so.
       if (error instanceof UniqueConstraintError) {

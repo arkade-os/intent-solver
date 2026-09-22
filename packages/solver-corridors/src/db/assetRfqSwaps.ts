@@ -42,6 +42,32 @@ import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/anal
 
 export type AssetRfqSwapState = 'quoted' | 'funded' | 'filling' | 'filled' | 'refused' | 'stuck'
 
+/**
+ * The carrier terms a NEGOTIATION was issued under, when the client named a
+ * mode. Absent on every legacy row, and on every row whose carrier was the
+ * market's own pass-through.
+ *
+ * IMMUTABLE, and that is the whole reason it is a separate column rather than
+ * four: these terms are the Taxi obligation the fill adapter has to honour
+ * later. `loanSats` is the returnable principal Taxi advances at claim, and the
+ * solver never prices it — losing it would leave a fill able to pay a carrier
+ * whose loan nobody can settle.
+ *
+ * All amounts are sats, exactly as the quote's own carrier figures are.
+ */
+export interface AssetRfqCarrierTerms {
+  mode: 'purchase' | 'recycle'
+  /** Present on `recycle` only: the Taxi quote these terms were read from. */
+  quoteId?: string
+  physicalSats: bigint
+  loanSats: bigint
+  receiptSats: bigint
+  serviceFareSats: bigint
+  /** What the PRICE actually netted for this carrier — not `physicalSats`. */
+  pricedSats: bigint
+  expiresAt: number
+}
+
 export const NON_TERMINAL: readonly AssetRfqSwapState[] = ['quoted', 'funded', 'filling']
 
 /**
@@ -140,6 +166,12 @@ export interface AssetRfqSwapRow {
    */
   fillPriceMantissa: bigint | null
   fillPriceScale: number | null
+  /**
+   * The carrier terms this negotiation was issued under, or null for legacy.
+   *
+   * Written once at insert and never moved: see {@link AssetRfqCarrierTerms}.
+   */
+  carrierTerms: AssetRfqCarrierTerms | null
 }
 
 export interface AssetRfqQuoteRecord {
@@ -165,6 +197,90 @@ export interface AssetRfqQuoteRecord {
    * @see AssetRfqSwapRow.quoteImpliedMantissa
    */
   quotePrice?: { impliedMantissa: bigint; scale: number; givesBase: boolean }
+  /** Spread at the call site; omitted means the market's own pass-through. */
+  carrierTerms?: AssetRfqCarrierTerms
+}
+
+/**
+ * The columns the carrier terms are folded into, and the only shape that may
+ * ever reach them.
+ *
+ * A SINGLE nullable JSON column rather than five, because the five are one
+ * indivisible fact and a half-written set would describe a carrier nobody
+ * issued. Amounts travel as canonical decimal STRINGS inside the JSON, for the
+ * same reason the amount columns beside them are TEXT: these are sats today but
+ * the shape is shared with asset units upstream.
+ *
+ * Reading is STRICT. A corrupted blob is refused here rather than half-read,
+ * because a guessed term is one the fill adapter would settle against.
+ */
+const CARRIER_TERMS_COLUMN = 'carrier_terms'
+
+const decimal = (value: unknown, field: string): bigint => {
+  if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new Error(`carrier terms ${field} is not a canonical decimal string`)
+  }
+  return BigInt(value)
+}
+
+const positiveDecimal = (value: unknown, field: string): bigint => {
+  const parsed = decimal(value, field)
+  if (parsed <= 0n) throw new Error(`carrier terms ${field} must be positive`)
+  return parsed
+}
+
+/** The wire form: snake_case decimal strings, exactly as the profile carries them. */
+export const carrierTermsToJson = (terms: AssetRfqCarrierTerms): Record<string, unknown> => ({
+  mode: terms.mode,
+  ...(terms.quoteId === undefined ? {} : { quote_id: terms.quoteId }),
+  physical_sats: terms.physicalSats.toString(),
+  loan_sats: terms.loanSats.toString(),
+  receipt_sats: terms.receiptSats.toString(),
+  service_fare_sats: terms.serviceFareSats.toString(),
+  priced_sats: terms.pricedSats.toString(),
+  expires_at: terms.expiresAt,
+})
+
+export const carrierTermsFromJson = (value: unknown): AssetRfqCarrierTerms => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('carrier terms is not an object')
+  }
+  const raw = value as Record<string, unknown>
+  const mode = raw.mode
+  if (mode !== 'purchase' && mode !== 'recycle') throw new Error(`carrier terms mode '${String(mode)}' is unknown`)
+  const quoteId = raw.quote_id
+  if (mode === 'recycle') {
+    if (typeof quoteId !== 'string' || quoteId.length === 0 || quoteId.length > 128) {
+      throw new Error('carrier terms quote_id must be a non-empty bounded string on a recycle')
+    }
+  } else if (quoteId !== undefined) {
+    throw new Error('carrier terms quote_id is only meaningful on a recycle')
+  }
+  const expiresAt = raw.expires_at
+  if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt) || expiresAt <= 0) {
+    throw new Error('carrier terms expires_at is not a safe positive unix second')
+  }
+  const physicalSats = positiveDecimal(raw.physical_sats, 'physical_sats')
+  // A PURCHASE buys the physical carrier whole: it has no loan to repay and no
+  // receipt reserve, so its split is trivially the dust. A RECYCLE is a real
+  // split, and both halves have to be positive — a zero half is a carrier
+  // nobody can settle.
+  const loanSats = mode === 'recycle' ? positiveDecimal(raw.loan_sats, 'loan_sats') : physicalSats
+  const receiptSats = mode === 'recycle' ? positiveDecimal(raw.receipt_sats, 'receipt_sats') : 0n
+  if (loanSats + receiptSats !== physicalSats) {
+    throw new Error('carrier terms split does not sum to the physical carrier')
+  }
+  const serviceFareSats = decimal(raw.service_fare_sats, 'service_fare_sats')
+  return {
+    mode,
+    ...(mode === 'recycle' ? { quoteId: quoteId as string } : {}),
+    physicalSats,
+    loanSats,
+    receiptSats,
+    serviceFareSats,
+    pricedSats: decimal(raw.priced_sats, 'priced_sats'),
+    expiresAt,
+  }
 }
 
 const COLUMNS = `
@@ -192,7 +308,8 @@ const COLUMNS = `
   quote_implied_scale    INTEGER,
   quote_gives_base       INTEGER,
   fill_price_mantissa    TEXT,
-  fill_price_scale       INTEGER
+  fill_price_scale       INTEGER,
+  carrier_terms          TEXT
 `
 
 const SCHEMA = `
@@ -262,6 +379,7 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
     raw.quote_gives_base === null || raw.quote_gives_base === undefined ? null : Number(raw.quote_gives_base) === 1,
   fillPriceMantissa: bigIntOrNull(raw.fill_price_mantissa),
   fillPriceScale: numberOrNull(raw.fill_price_scale),
+  carrierTerms: carrierTermsOrNull(raw.carrier_terms),
 })
 
 const bigIntOrNull = (value: string | number | null | undefined): bigint | null =>
@@ -269,6 +387,13 @@ const bigIntOrNull = (value: string | number | null | undefined): bigint | null 
 
 const numberOrNull = (value: string | number | null | undefined): number | null =>
   value === null || value === undefined ? null : Number(value)
+
+/** A stored blob is JSON we wrote; anything else is corruption and is refused. */
+const carrierTermsOrNull = (value: unknown): AssetRfqCarrierTerms | null => {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value !== 'string') throw new Error('carrier terms column is not text')
+  return carrierTermsFromJson(JSON.parse(value))
+}
 
 export class AssetRfqSwapStore {
   private constructor(
@@ -311,6 +436,7 @@ export class AssetRfqSwapStore {
       ['quote_gives_base', 'INTEGER'],
       ['fill_price_mantissa', 'TEXT'],
       ['fill_price_scale', 'INTEGER'],
+      ['carrier_terms', 'TEXT'],
     ] as const) {
       if (!existing.has(column)) await this.driver.exec(`ALTER TABLE asset_rfq_swap ADD COLUMN ${column} ${type}`)
     }
@@ -355,8 +481,8 @@ export class AssetRfqSwapStore {
          id, state, created_at, updated_at, rfq_id, pair, from_asset_id, from_amount,
          to_asset_id, to_amount, maker_pk_script, maker_public_key, offer_pk_script,
          offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason,
-         quote_implied_mantissa, quote_implied_scale, quote_gives_base
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?)`,
+         quote_implied_mantissa, quote_implied_scale, quote_gives_base, carrier_terms
+       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?)`,
       [
         record.id,
         at,
@@ -378,6 +504,7 @@ export class AssetRfqSwapStore {
         record.quotePrice?.impliedMantissa.toString() ?? null,
         record.quotePrice?.scale ?? null,
         record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
+        record.carrierTerms === undefined ? null : JSON.stringify(carrierTermsToJson(record.carrierTerms)),
       ],
     )
     await this.recordEvent(record.id, null, 'quoted', null)

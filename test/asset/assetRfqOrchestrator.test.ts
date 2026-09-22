@@ -21,6 +21,7 @@ import {
   AssetRfqSwapService,
   type AssetRfqDeps,
   type ObservedDeposit,
+  type ReceiveCarrierQuote,
 } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
@@ -712,5 +713,238 @@ describe('replaceMarkets', () => {
       accepted: false,
       reason: 'unsupported_pair',
     })
+  })
+})
+
+/**
+ * The OPTIONAL `profile.carrier` mode, and the internal Taxi adapter behind
+ * `recycle`.
+ *
+ * The mode is a statement about WHICH carrier the client wants, so it is
+ * answered before the price is read and its own terms are never derived from a
+ * client-supplied flag. `recycle` is priced off the internal adapter alone —
+ * an absent one refuses rather than quoting the market pass-through, which
+ * would price a carrier nothing can fund.
+ */
+const RECEIVER_QUOTE: ReceiveCarrierQuote = {
+  quoteId: 'q-1',
+  makerPkScript: PK_SCRIPT,
+  makerPublicKey: XONLY,
+  assetId: ASSET_A,
+  physicalSats: 330n,
+  loanSats: 329n,
+  receiptSats: 1n,
+  serviceFareSats: 0n,
+  expiresAt: 5_000,
+}
+
+const adapter = (over: Partial<ReceiveCarrierQuote> = {}, calls?: unknown[]) => ({
+  resolve: async (request: unknown) => {
+    calls?.push(request)
+    return { ...RECEIVER_QUOTE, ...over }
+  },
+})
+
+describe('profile.carrier — explicit modes', () => {
+  it('prices the physical dust on a purchase, even where the market waived it', async () => {
+    const { service, store } = await harness({ markets: [{ ...MARKET, carrierSats: 0n }] })
+    const outcome = await service.quote(request({ carrier: { mode: 'purchase' } }))
+    expect(outcome.accepted && outcome.carrierSats).toBe(330n)
+    expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(99_499_671_650n)
+    // The terms ARE persisted: a purchase still acquires sats, and the fill
+    // adapter needs to know which carrier it was authorized to buy.
+    expect((await store.get('swap-1')).carrierTerms).toMatchObject({
+      mode: 'purchase',
+      physicalSats: 330n,
+      pricedSats: 330n,
+    })
+  })
+
+  it('prices the receipt and service, not the returnable loan, on a recycle', async () => {
+    const { service, store } = await harness({
+      markets: [{ ...MARKET, carrierSats: 0n }],
+      receiveCarrierQuotes: adapter({ serviceFareSats: 4n }),
+    })
+    const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    expect(outcome).toMatchObject({ accepted: true })
+    // 5 sats bought (1 receipt + 4 service), NOT 330 — the loan is Taxi's
+    // principal and arrives at claim. The published carrier_sats is still the
+    // PHYSICAL dust, because that is what the client attaches to the deposit.
+    expect(outcome.accepted && outcome.carrierSats).toBe(330n)
+    expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(99_499_995_025n)
+    expect((await store.get('swap-1')).carrierTerms).toMatchObject({
+      mode: 'recycle',
+      quoteId: 'q-1',
+      physicalSats: 330n,
+      loanSats: 329n,
+      receiptSats: 1n,
+      serviceFareSats: 4n,
+      pricedSats: 5n,
+      expiresAt: 5_000,
+    })
+  })
+
+  it('prices a recycle on exact-out, binding the payout the client named', async () => {
+    const { service, store } = await harness({
+      markets: [{ ...MARKET, carrierSats: 0n }],
+      receiveCarrierQuotes: adapter({ serviceFareSats: 4n }),
+    })
+    const outcome = await service.quote(
+      request({ amount: 1_000_000n, amountSide: 'to', carrier: { mode: 'recycle', quoteId: 'q-1' } }),
+    )
+    expect(outcome).toMatchObject({ accepted: true })
+    expect(outcome.accepted && outcome.carrierSats).toBe(330n)
+    expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(1_000_000n)
+    expect((await store.get('swap-1')).carrierTerms).toMatchObject({ mode: 'recycle', pricedSats: 5n })
+  })
+
+  it('caps valid_until at the carrier quote expiry', async () => {
+    const { service } = await harness({ receiveCarrierQuotes: adapter({ expiresAt: 1_010 }) })
+    const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    expect(outcome.accepted && outcome.swap.validUntil).toBe(1_010)
+  })
+
+  it('leaves valid_until at the configured window when the quote outlives it', async () => {
+    const { service } = await harness({ receiveCarrierQuotes: adapter({ expiresAt: 9_999 }) })
+    const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    expect(outcome.accepted && outcome.swap.validUntil).toBe(1_030)
+  })
+
+  it('does not touch the adapter for a purchase, which buys rather than borrows', async () => {
+    const calls: unknown[] = []
+    const { service } = await harness({ receiveCarrierQuotes: adapter({}, calls) })
+    await service.quote(request({ carrier: { mode: 'purchase' } }))
+    expect(calls).toEqual([])
+  })
+
+  it('leaves a legacy quote byte-identical, with no terms and no adapter call', async () => {
+    const calls: unknown[] = []
+    const { service, store } = await harness({
+      markets: [{ ...MARKET, carrierSats: 330n }],
+      receiveCarrierQuotes: adapter({}, calls),
+    })
+    const outcome = await service.quote(request())
+    expect(outcome.accepted && outcome.carrierSats).toBe(330n)
+    expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(99_499_671_650n)
+    expect((await store.get('swap-1')).carrierTerms).toBeNull()
+    expect(calls).toEqual([])
+  })
+})
+
+describe('profile.carrier — refusals', () => {
+  it.each([
+    ['a purchase on a BTC payout, which has no carrier', { mode: 'purchase' }],
+    ['a recycle on a BTC payout', { mode: 'recycle', quoteId: 'q-1' }],
+  ])('refuses %s before pricing or reading the float', async (_why, carrier) => {
+    const balance = vi.fn(async () => new Map([[ASSET_A, 10n ** 18n]]))
+    const { service, store } = await harness({ balance })
+    const outcome = await service.quote(request({ pair: `arkade:${ASSET_A}->arkade:BTC`, carrier, amount: 10n ** 12n }))
+    expect(outcome).toMatchObject({ accepted: false, reason: 'unsupported_payload' })
+    expect(balance).not.toHaveBeenCalled()
+    expect(await store.listNonTerminal()).toHaveLength(0)
+  })
+
+  it('refuses a recycle when no adapter is configured, and never prices the market carrier', async () => {
+    const { service, store } = await harness({ markets: [{ ...MARKET, carrierSats: 0n }] })
+    const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    expect(outcome).toMatchObject({ accepted: false, reason: 'price_unavailable' })
+    expect(await store.listNonTerminal()).toHaveLength(0)
+  })
+
+  it('refuses a recycle the adapter could not answer for', async () => {
+    const { service } = await harness({
+      receiveCarrierQuotes: {
+        resolve: async () => {
+          throw new Error('taxi down')
+        },
+      },
+    })
+    expect(await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))).toMatchObject({
+      accepted: false,
+      reason: 'price_unavailable',
+    })
+  })
+
+  it.each<[string, Partial<ReceiveCarrierQuote>]>([
+    ['the quote id', { quoteId: 'other' }],
+    ['the payout script', { makerPkScript: `5120${'9'.repeat(64)}` }],
+    ['the signer key', { makerPublicKey: '9'.repeat(64) }],
+    ['the asset', { assetId: ASSET_B }],
+    ['the physical dust', { physicalSats: 331n, loanSats: 330n }],
+    ['a zero receipt', { receiptSats: 0n, loanSats: 330n }],
+    ['a zero loan', { loanSats: 0n, receiptSats: 330n }],
+    ['a split that does not sum', { loanSats: 300n, receiptSats: 1n }],
+    ['a negative service fare', { serviceFareSats: -1n }],
+    ['an expiry at the current second', { expiresAt: 1_000 }],
+  ])('refuses a recycle whose %s does not match the request', async (_why, over) => {
+    const { service, store } = await harness({ receiveCarrierQuotes: adapter(over) })
+    expect(await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))).toMatchObject({
+      accepted: false,
+      reason: 'price_unavailable',
+    })
+    expect(await store.listNonTerminal()).toHaveLength(0)
+  })
+
+  it('calls the adapter only after the pair and market are known', async () => {
+    const calls: unknown[] = []
+    const { service } = await harness({ receiveCarrierQuotes: adapter({}, calls) })
+    await service.quote(request({ pair: 'arkade:BTC->arkade:BTC', carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    await service.quote(
+      request({ pair: `arkade:BTC->arkade:${'ee'.repeat(34)}`, carrier: { mode: 'recycle', quoteId: 'q-1' } }),
+    )
+    expect(calls).toEqual([])
+    await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({
+      quoteId: 'q-1',
+      makerPkScript: PK_SCRIPT,
+      makerPublicKey: XONLY,
+      assetId: ASSET_A,
+      now: 1_000,
+    })
+  })
+})
+
+describe('profile.carrier — no per-market bleed', () => {
+  it('quotes each market its own explicit mode', async () => {
+    const { service } = await harness({
+      markets: [
+        { ...MARKET, carrierSats: 0n },
+        { ...MARKET, symbol: 'USDB', quote: ASSET_B, carrierSats: 0n },
+      ],
+      balance: async () =>
+        new Map([
+          [ASSET_A, 10n ** 18n],
+          [ASSET_B, 10n ** 18n],
+        ]),
+      newId: sequentialIds(),
+      deriveOffer: perClientOffer,
+      // Answers for whichever asset and signer the request names, so this test
+      // measures the per-market price term rather than tripping a mismatch.
+      receiveCarrierQuotes: {
+        resolve: async (ask: { assetId: string; makerPublicKey: string }) => ({
+          ...RECEIVER_QUOTE,
+          assetId: ask.assetId,
+          makerPublicKey: ask.makerPublicKey,
+        }),
+      },
+    })
+    const purchased = await service.quote(request({ carrier: { mode: 'purchase' } }))
+    const recycled = await service.quote(
+      request({
+        pair: `arkade:BTC->arkade:${ASSET_B}`,
+        rfqId: 'f'.repeat(64),
+        // Distinct signer, so the second negotiation derives its own offer
+        // address rather than colliding on the live-offer index.
+        makerPublicKey: 'c'.repeat(64),
+        carrier: { mode: 'recycle', quoteId: 'q-1' },
+      }),
+    )
+    expect(purchased.accepted && purchased.carrierSats).toBe(330n)
+    expect(recycled.accepted && recycled.carrierSats).toBe(330n)
+    // The purchase buys 330; the recycle buys 1 receipt. Different markets,
+    // different priced terms, neither bleeding into the other.
+    expect((purchased as { swap: { toAmount: bigint } }).swap.toAmount).toBe(99_499_671_650n)
+    expect((recycled as { swap: { toAmount: bigint } }).swap.toAmount).toBe(99_499_999_005n)
   })
 })

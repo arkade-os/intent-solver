@@ -306,9 +306,58 @@ describe('AssetRfqSwapStore.migrate', () => {
       'quote_gives_base',
       'fill_price_mantissa',
       'fill_price_scale',
+      'carrier_terms',
     ]) {
       expect(columns).toContain(added)
     }
+  })
+
+  /**
+   * The carrier column on the same legacy table, and the two things a migration
+   * on a money table has to leave alone: rows that predate it, and every row
+   * that predates the NEXT reopen.
+   */
+  it('adds carrier_terms to a database that predates it, leaving old rows unbackfilled', async () => {
+    const legacy = openDb()
+    legacy.exec(LEGACY)
+    legacy.exec(
+      `INSERT INTO asset_rfq_swap (
+        id, state, created_at, updated_at, rfq_id, pair, from_asset_id, from_amount, to_asset_id, to_amount,
+        maker_pk_script, maker_public_key, offer_pk_script, offer_address, solver_pubkey, valid_until
+      ) VALUES ('pre-existing', 'quoted', 1, 1, 'c${'c'.repeat(63)}', 'arkade:BTC->arkade:USDA', NULL, '100', '${'b'.repeat(68)}', '200',
+        '3', '4', '5', 'ark1q', '6', 9)`,
+    )
+
+    const store = await AssetRfqSwapStore.open(d1Driver(fakeD1(legacy)), () => 1_000)
+    // Read as absent, never as an invented quote: nothing was ever issued.
+    expect((await store.get('pre-existing')).carrierTerms).toBeNull()
+    // And the column round-trips for rows quoted after the migration.
+    await store.insertQuote({
+      id: 'swap-2',
+      rfqId: 'd'.repeat(64),
+      pair: 'arkade:BTC->arkade:USDA',
+      fromAssetId: null,
+      fromAmount: 100n,
+      toAssetId: 'b'.repeat(68),
+      toAmount: 200n,
+      makerPkScript: `5120${'c'.repeat(64)}`,
+      makerPublicKey: 'd'.repeat(64),
+      offerPkScript: `5120${'e'.repeat(64)}`,
+      offerAddress: 'ark1qoffer',
+      solverPubkey: 'f'.repeat(64),
+      validUntil: 2_000,
+      carrierTerms: {
+        mode: 'recycle',
+        quoteId: 'q-1',
+        physicalSats: 330n,
+        loanSats: 329n,
+        receiptSats: 1n,
+        serviceFareSats: 0n,
+        pricedSats: 1n,
+        expiresAt: 5_000,
+      },
+    })
+    expect((await store.get('swap-2')).carrierTerms?.loanSats).toBe(329n)
   })
 
   it('can quote against the migrated table, which is what a missing ALTER breaks', async () => {

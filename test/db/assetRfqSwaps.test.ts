@@ -12,7 +12,13 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { AssetRfqSwapStore, type AssetRfqQuoteRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import {
+  AssetRfqSwapStore,
+  carrierTermsFromJson,
+  carrierTermsToJson,
+  type AssetRfqCarrierTerms,
+  type AssetRfqQuoteRecord,
+} from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
 const ASSET_B = `${'bb'.repeat(32)}0100`
@@ -308,6 +314,179 @@ describe('reads the sweep and the console depend on', () => {
   it('throws on an id it does not hold, which is how fall-through reads it', async () => {
     const store = await open()
     await expect(store.get('nope')).rejects.toThrow(/no asset rfq swap/)
+    await store.close()
+  })
+})
+
+/**
+ * The immutable carrier terms an explicit mode records.
+ *
+ * Their job is to survive until the fill adapter settles them: `loanSats` is
+ * Taxi's returnable principal and is never in the price, so a row that lost it
+ * would describe a carrier nobody can repay. They are written once and never
+ * moved, including across a reopen.
+ */
+const RECYCLE_TERMS: AssetRfqCarrierTerms = {
+  mode: 'recycle',
+  quoteId: 'q-1',
+  physicalSats: 330n,
+  loanSats: 329n,
+  receiptSats: 1n,
+  serviceFareSats: 4n,
+  pricedSats: 5n,
+  expiresAt: 5_000,
+}
+
+const PURCHASE_TERMS: AssetRfqCarrierTerms = {
+  mode: 'purchase',
+  physicalSats: 330n,
+  loanSats: 330n,
+  receiptSats: 0n,
+  serviceFareSats: 0n,
+  pricedSats: 330n,
+  expiresAt: 2_000,
+}
+
+describe('carrier terms', () => {
+  it('round-trips a recycle exactly, amounts included', async () => {
+    const store = await open()
+    const row = await store.insertQuote(quote({ carrierTerms: RECYCLE_TERMS }))
+    expect(row.carrierTerms).toEqual(RECYCLE_TERMS)
+    expect((await store.findById('swap-1'))?.carrierTerms).toEqual(RECYCLE_TERMS)
+    await store.close()
+  })
+
+  it('round-trips a purchase, which is whole dust rather than a split', async () => {
+    const store = await open()
+    const row = await store.insertQuote(quote({ carrierTerms: PURCHASE_TERMS }))
+    expect(row.carrierTerms).toEqual(PURCHASE_TERMS)
+    await store.close()
+  })
+
+  it('leaves the column null for a row that named no mode', async () => {
+    const store = await open()
+    expect((await store.insertQuote(quote())).carrierTerms).toBeNull()
+    await store.close()
+  })
+
+  it('carries amounts as canonical decimal strings on the wire form', () => {
+    expect(carrierTermsToJson(RECYCLE_TERMS)).toEqual({
+      mode: 'recycle',
+      quote_id: 'q-1',
+      physical_sats: '330',
+      loan_sats: '329',
+      receipt_sats: '1',
+      service_fare_sats: '4',
+      priced_sats: '5',
+      expires_at: 5_000,
+    })
+  })
+
+  it('keeps the terms across a transition, so a settled fill can still read them', async () => {
+    const store = await open()
+    await store.insertQuote(quote({ carrierTerms: RECYCLE_TERMS }))
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'filling')
+    expect((await store.get('swap-1')).carrierTerms).toEqual(RECYCLE_TERMS)
+    await store.close()
+  })
+
+  it.each([
+    ['a non-object', 7],
+    ['a missing mode', { physical_sats: '330' }],
+    ['an unknown mode', { mode: 'recycled', physical_sats: '330' }],
+    ['a recycle with no quote id', { mode: 'recycle', physical_sats: '330', loan_sats: '329', receipt_sats: '1' }],
+    ['a purchase carrying a quote id', { mode: 'purchase', quote_id: 'q-1', physical_sats: '330' }],
+    [
+      'a split that does not sum',
+      {
+        mode: 'recycle',
+        quote_id: 'q',
+        physical_sats: '330',
+        loan_sats: '300',
+        receipt_sats: '1',
+        service_fare_sats: '0',
+        priced_sats: '1',
+        expires_at: 9,
+      },
+    ],
+    [
+      'a zero receipt',
+      {
+        mode: 'recycle',
+        quote_id: 'q',
+        physical_sats: '330',
+        loan_sats: '330',
+        receipt_sats: '0',
+        service_fare_sats: '0',
+        priced_sats: '0',
+        expires_at: 9,
+      },
+    ],
+    [
+      'a negative service fare',
+      {
+        mode: 'recycle',
+        quote_id: 'q',
+        physical_sats: '330',
+        loan_sats: '329',
+        receipt_sats: '1',
+        service_fare_sats: '-1',
+        priced_sats: '0',
+        expires_at: 9,
+      },
+    ],
+    [
+      'a non-canonical amount',
+      {
+        mode: 'purchase',
+        physical_sats: '0330',
+        loan_sats: '330',
+        receipt_sats: '0',
+        service_fare_sats: '0',
+        priced_sats: '330',
+        expires_at: 9,
+      },
+    ],
+    [
+      'a fractional amount',
+      {
+        mode: 'purchase',
+        physical_sats: '330.5',
+        loan_sats: '330',
+        receipt_sats: '0',
+        service_fare_sats: '0',
+        priced_sats: '330',
+        expires_at: 9,
+      },
+    ],
+    [
+      'an expiry that is not a positive unix second',
+      {
+        mode: 'purchase',
+        physical_sats: '330',
+        loan_sats: '330',
+        receipt_sats: '0',
+        service_fare_sats: '0',
+        priced_sats: '330',
+        expires_at: 0,
+      },
+    ],
+  ])('refuses to parse %s rather than half-read it', (_why, value) => {
+    expect(() => carrierTermsFromJson(value)).toThrow()
+  })
+
+  /** Corruption must be refused at the READ, not silently reported as "no terms". */
+  it('refuses a corrupted blob on read instead of reading it as absent', async () => {
+    const store = await open()
+    await store.driver.run(
+      `INSERT INTO asset_rfq_swap (
+      id, state, created_at, updated_at, rfq_id, pair, from_amount, to_amount,
+      maker_pk_script, maker_public_key, offer_pk_script, offer_address, solver_pubkey, valid_until, carrier_terms
+    ) VALUES ('bad', 'quoted', 1, 1, ?, 'arkade:BTC->arkade:USDA', '1', '2', '3', '4', '5', 'ark1q', '6', 9, '{"mode":"recycle"}')`,
+      ['a'.repeat(64)],
+    )
+    await expect(store.get('bad')).rejects.toThrow()
     await store.close()
   })
 })

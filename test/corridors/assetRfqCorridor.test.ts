@@ -42,7 +42,7 @@ const MARKET = {
 const BUY = assetRfqDescriptor(MARKET, 'sell_base')
 const SELL = assetRfqDescriptor(MARKET, 'buy_base')
 
-const harness = async (markets: (typeof MARKET)[] = [MARKET]) => {
+const harness = async (markets: (typeof MARKET)[] = [MARKET], options: { carrier?: boolean } = {}) => {
   let clock = 1_000
   let sequence = 0
   const store = await AssetRfqSwapStore.open(':memory:', () => clock)
@@ -51,7 +51,7 @@ const harness = async (markets: (typeof MARKET)[] = [MARKET]) => {
     markets,
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
-    dustSats: 0n,
+    dustSats: 330n,
     now: () => clock,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
     deriveOffer: (terms) => ({
@@ -66,6 +66,25 @@ const harness = async (markets: (typeof MARKET)[] = [MARKET]) => {
       ]),
     settle: async () => 'fa'.repeat(32),
     newId: () => `swap-${++sequence}`,
+    // Off by default, so the absent-adapter refusal is what the base harness
+    // exercises rather than a stubbed success.
+    ...(options.carrier === true
+      ? {
+          receiveCarrierQuotes: {
+            resolve: async () => ({
+              quoteId: 'q-1',
+              makerPkScript: PK_SCRIPT,
+              makerPublicKey: XONLY,
+              assetId: ASSET_A,
+              physicalSats: 330n,
+              loanSats: 329n,
+              receiptSats: 1n,
+              serviceFareSats: 0n,
+              expiresAt: 5_000,
+            }),
+          },
+        }
+      : {}),
   })
   return { store, service, corridor: assetRfqCorridor(BUY, service, store), tick: (n: number) => (clock = n) }
 }
@@ -363,5 +382,61 @@ describe('the read half', () => {
     const { corridor } = await harness()
     await corridor.quote(rfqRequest())
     expect(await corridor.findRecoverable()).toEqual([{ id: 'swap-1', pkScript: `5120${XONLY}` }])
+  })
+})
+
+/**
+ * `profile.carrier` through the corridor, which is where the schema, the
+ * orchestrator and the refusal mapping meet.
+ *
+ * The load-bearing assertion is the LAST one: an internal reason the closed RFQ
+ * set has no name for must still reach a client as `unsupported_payload`
+ * rather than leaking a non-spec string.
+ */
+describe('profile.carrier through the corridor', () => {
+  const carrierRequest = (carrier: unknown) =>
+    rfqRequest({ profile: { maker_pk_script: PK_SCRIPT, maker_public_key: XONLY, carrier } })
+
+  it('echoes the mode back on a purchase quote', async () => {
+    const { corridor } = await harness()
+    const outcome = await corridor.quote(carrierRequest({ mode: 'purchase' }))
+    expect(outcome.kind).toBe('quote')
+    if (outcome.kind !== 'quote') throw new Error('expected a quote')
+    expect((outcome.payload as { profile: Record<string, unknown> }).profile.carrier).toEqual({ mode: 'purchase' })
+  })
+
+  it('echoes the mode and quote id back on a recycle quote', async () => {
+    const { corridor } = await harness(undefined, { carrier: true })
+    const outcome = await corridor.quote(carrierRequest({ mode: 'recycle', quote_id: 'q-1' }))
+    expect(outcome.kind).toBe('quote')
+    if (outcome.kind !== 'quote') throw new Error('expected a quote')
+    expect((outcome.payload as { profile: Record<string, unknown> }).profile.carrier).toEqual({
+      mode: 'recycle',
+      quote_id: 'q-1',
+    })
+  })
+
+  it('answers an unknown mode with unsupported_payload', async () => {
+    const { corridor } = await harness()
+    const outcome = await corridor.quote(carrierRequest({ mode: 'fronted' }))
+    expect(outcome).toMatchObject({ kind: 'invalid', payload: { reason: 'unsupported_payload' } })
+  })
+
+  it('answers a recycle with no adapter as a refusal the closed set can name', async () => {
+    const { corridor } = await harness()
+    const outcome = await corridor.quote(carrierRequest({ mode: 'recycle', quote_id: 'q-1' }))
+    expect(outcome).toMatchObject({ kind: 'refused', payload: { reason: 'pricing_unavailable' } })
+  })
+
+  it('answers a mode on a BTC payout as unsupported_payload', async () => {
+    const { service, store } = await harness()
+    const outcome = await assetRfqCorridor(SELL, service, store).quote(
+      rfqRequest({
+        pair: SELL.pair,
+        amount: '1000000',
+        profile: { maker_pk_script: PK_SCRIPT, maker_public_key: XONLY, carrier: { mode: 'purchase' } },
+      }),
+    )
+    expect(outcome).toMatchObject({ kind: 'refused', payload: { reason: 'unsupported_payload' } })
   })
 })
