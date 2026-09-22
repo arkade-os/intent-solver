@@ -800,6 +800,20 @@ const adapter = (over: Partial<ReceiveCarrierQuote> = {}, calls?: unknown[]) => 
   },
 })
 
+const ONE_SAT_RECEIVE: ReceiveCarrierQuote = {
+  ...RECEIVER_QUOTE,
+  loanSats: 329n,
+  receiptSats: 1n,
+  serviceFareSats: 0n,
+}
+
+const BOUNDARY_MARKET = {
+  ...MARKET,
+  feeBps: 0,
+  sellBase: { min: 1_000n, max: 10n ** 24n },
+  buyBase: { min: 1n, max: 10n ** 24n },
+}
+
 describe('profile.carrier — explicit modes', () => {
   it('prices the physical dust on a purchase, even where the market waived it', async () => {
     const { service, store } = await harness({ markets: [{ ...MARKET, carrierSats: 0n }] })
@@ -837,6 +851,79 @@ describe('profile.carrier — explicit modes', () => {
       receiptSats: 1n,
       serviceFareSats: 4n,
       pricedSats: 5n,
+      expiresAt: 5_000,
+    })
+  })
+
+  it.each([
+    ['purchase exact-in consumed by the 330-sat carrier', { mode: 'purchase' }, 330n, 'from', 'fee_consumes_swap'],
+    ['purchase exact-out below the 1,000-unit asset minimum', { mode: 'purchase' }, 999n, 'to', 'amount_out_of_range'],
+    [
+      'recycle exact-in consumed by its 1-sat receipt price',
+      { mode: 'recycle', quoteId: 'q-1' },
+      1n,
+      'from',
+      'fee_consumes_swap',
+    ],
+    [
+      'recycle exact-out below the 1,000-unit asset minimum',
+      { mode: 'recycle', quoteId: 'q-1' },
+      999n,
+      'to',
+      'amount_out_of_range',
+    ],
+  ] as const)('refuses %s', async (_why, carrier, amount, amountSide, reason) => {
+    const { service } = await harness({
+      markets: [{ ...BOUNDARY_MARKET, carrierSats: 0n }],
+      receiveCarrierQuotes: adapter(ONE_SAT_RECEIVE),
+    })
+    expect(await service.quote(request({ amount, amountSide, carrier }))).toMatchObject({ accepted: false, reason })
+  })
+
+  it.each([
+    ['purchase exact-in', { mode: 'purchase' }, 331n, 'from', 331n],
+    ['purchase exact-out', { mode: 'purchase' }, 1_000n, 'to', 331n],
+  ] as const)('prices %s at the asset minimum', async (_why, carrier, amount, amountSide, fromAmount) => {
+    const { service, store } = await harness({ markets: [{ ...BOUNDARY_MARKET, carrierSats: 0n }] })
+    const outcome = await service.quote(request({ amount, amountSide, carrier }))
+    expect(outcome).toMatchObject({ accepted: true, carrierSats: 330n })
+    expect((outcome as { swap: { fromAmount: bigint; toAmount: bigint } }).swap).toMatchObject({
+      fromAmount,
+      toAmount: 1_000n,
+    })
+    expect((await store.get('swap-1')).carrierTerms).toEqual({
+      mode: 'purchase',
+      physicalSats: 330n,
+      loanSats: 0n,
+      receiptSats: 0n,
+      serviceFareSats: 0n,
+      pricedSats: 330n,
+      expiresAt: 1_030,
+    })
+  })
+
+  it.each([
+    ['recycle exact-in', 2n, 'from'],
+    ['recycle exact-out', 1_000n, 'to'],
+  ] as const)('prices %s at the asset minimum', async (_why, amount, amountSide) => {
+    const { service, store } = await harness({
+      markets: [{ ...BOUNDARY_MARKET, carrierSats: 0n }],
+      receiveCarrierQuotes: adapter(ONE_SAT_RECEIVE),
+    })
+    const outcome = await service.quote(request({ amount, amountSide, carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    expect(outcome).toMatchObject({ accepted: true, carrierSats: 330n })
+    expect((outcome as { swap: { fromAmount: bigint; toAmount: bigint } }).swap).toMatchObject({
+      fromAmount: 2n,
+      toAmount: 1_000n,
+    })
+    expect((await store.get('swap-1')).carrierTerms).toEqual({
+      mode: 'recycle',
+      quoteId: 'q-1',
+      physicalSats: 330n,
+      loanSats: 329n,
+      receiptSats: 1n,
+      serviceFareSats: 0n,
+      pricedSats: 1n,
       expiresAt: 5_000,
     })
   })
