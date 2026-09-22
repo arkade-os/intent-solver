@@ -22,6 +22,7 @@ import {
   type AssetRfqDeps,
   type ObservedDeposit,
   type ReceiveCarrierQuote,
+  type ReceiveCarrierQuotes,
 } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
@@ -77,6 +78,7 @@ const harness = async (over: Partial<AssetRfqDeps> = {}) => {
     ...over,
   }
   return {
+    deps,
     store,
     settled,
     service: new AssetRfqSwapService(deps),
@@ -793,11 +795,17 @@ const RAGGED_RECEIVER_QUOTE: ReceiveCarrierQuote = {
   expiresAt: 6_000,
 }
 
-const adapter = (over: Partial<ReceiveCarrierQuote> = {}, calls?: unknown[]) => ({
+const adapter = (
+  over: Partial<ReceiveCarrierQuote> = {},
+  calls?: unknown[],
+  actions: Partial<Pick<ReceiveCarrierQuotes, 'settle' | 'reconcile'>> = {},
+) => ({
   resolve: async (request: unknown) => {
     calls?.push(request)
     return { ...RECEIVER_QUOTE, ...over }
   },
+  settle: actions.settle ?? (async () => 'fb'.repeat(32)),
+  reconcile: actions.reconcile ?? (async () => ({ status: 'pending' as const })),
 })
 
 const ONE_SAT_RECEIVE: ReceiveCarrierQuote = {
@@ -974,6 +982,7 @@ describe('profile.carrier — explicit modes', () => {
   it('re-reads the clock after the adapter answers, and refuses terms that expired meanwhile', async () => {
     const { service, store, tick } = await harness({
       receiveCarrierQuotes: {
+        ...adapter(),
         resolve: async () => {
           tick(1_005)
           return RECEIVER_QUOTE
@@ -990,6 +999,7 @@ describe('profile.carrier — explicit modes', () => {
   it('fails an expired recycle before creating a row', async () => {
     const { service, store, tick } = await harness({
       receiveCarrierQuotes: {
+        ...adapter(),
         resolve: async () => {
           tick(5_001)
           return RECEIVER_QUOTE
@@ -1067,7 +1077,247 @@ describe('profile.carrier — explicit modes', () => {
   })
 })
 
+describe('profile.carrier — persisted settlement mode', () => {
+  const recycleRequest = () => request({ carrier: { mode: 'recycle', quoteId: 'q-1' } })
+
+  it('settles a persisted recycle exactly once through the carrier adapter', async () => {
+    const direct = vi.fn(async () => 'fa'.repeat(32))
+    const settle = vi.fn<ReceiveCarrierQuotes['settle']>(async () => 'fb'.repeat(32))
+    const receiveCarrierQuotes = adapter({}, undefined, { settle })
+    const { service, store } = await harness({ depositAt: async () => deposit(), settle: direct, receiveCarrierQuotes })
+    const mark = vi.spyOn(store, 'recordFillMark')
+
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(settle.mock.calls[0]![0].carrierTerms?.mode).toBe('recycle')
+    expect(direct).not.toHaveBeenCalled()
+    expect(mark).toHaveBeenCalledTimes(1)
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillTxid: 'fb'.repeat(32) })
+  })
+
+  it('keeps purchase and legacy rows on direct settlement', async () => {
+    for (const carrier of [undefined, { mode: 'purchase' as const }]) {
+      const direct = vi.fn(async () => 'fa'.repeat(32))
+      const dedicated = vi.fn(async () => 'fb'.repeat(32))
+      const receiveCarrierQuotes = adapter({}, undefined, { settle: dedicated })
+      const { service, store } = await harness({
+        depositAt: async () => deposit(),
+        settle: direct,
+        receiveCarrierQuotes,
+      })
+
+      await service.quote(request(carrier === undefined ? {} : { carrier }))
+      await service.tick('swap-1')
+      await service.tick('swap-1')
+
+      expect(direct).toHaveBeenCalledTimes(1)
+      expect(dedicated).not.toHaveBeenCalled()
+      expect((await store.get('swap-1')).state).toBe('filled')
+    }
+  })
+
+  it('refuses a funded recycle when the adapter disappeared before spending', async () => {
+    const direct = vi.fn(async () => 'fa'.repeat(32))
+    const dedicated = vi.fn(async () => 'fb'.repeat(32))
+    const receiveCarrierQuotes = adapter({}, undefined, { settle: dedicated })
+    const { service, store, deps } = await harness({
+      depositAt: async () => deposit(),
+      settle: direct,
+      receiveCarrierQuotes,
+    })
+
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    await new AssetRfqSwapService({ ...deps, receiveCarrierQuotes: undefined }).tick('swap-1')
+
+    expect(direct).not.toHaveBeenCalled()
+    expect(dedicated).not.toHaveBeenCalled()
+    expect(await store.get('swap-1')).toMatchObject({ state: 'refused' })
+  })
+
+  it('recreates the service on a submitted recycle and only observes pending outcomes', async () => {
+    const direct = vi.fn(async () => 'fa'.repeat(32))
+    const settle = vi.fn(async () => {
+      throw new Error('submit outcome unknown')
+    })
+    const reconcile = vi.fn(async () => ({ status: 'pending' as const }))
+    const errors: unknown[] = []
+    const receiveCarrierQuotes = adapter({}, undefined, { settle, reconcile })
+    const { service, store, deps } = await harness({
+      depositAt: async () => deposit(),
+      settle: direct,
+      receiveCarrierQuotes,
+      onError: (_id, error) => errors.push(error),
+    })
+
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    const restarted = new AssetRfqSwapService(deps)
+    await restarted.tick('swap-1')
+    await restarted.tick('swap-1')
+
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(reconcile).toHaveBeenCalledTimes(2)
+    expect(direct).not.toHaveBeenCalled()
+    expect(errors).toHaveLength(1)
+    expect((await store.get('swap-1')).state).toBe('filling')
+  })
+
+  it('observes an expired filling recycle until exact proof completes and marks it once', async () => {
+    const settle = vi.fn(async () => {
+      throw new Error('submit outcome unknown')
+    })
+    const reconcile = vi
+      .fn<ReceiveCarrierQuotes['reconcile']>()
+      .mockResolvedValueOnce({ status: 'pending' })
+      .mockResolvedValue({ status: 'settled', txid: 'fc'.repeat(32) })
+    const receiveCarrierQuotes = adapter({}, undefined, { settle, reconcile })
+    const { service, store, tick } = await harness({ depositAt: async () => deposit(), receiveCarrierQuotes })
+    const mark = vi.spyOn(store, 'recordFillMark')
+
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    tick(9_999)
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(reconcile).toHaveBeenCalledTimes(2)
+    expect(mark).toHaveBeenCalledTimes(1)
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillTxid: 'fc'.repeat(32) })
+  })
+
+  it.each([
+    ['a read failure', async () => Promise.reject(new Error('indexer down'))],
+    ['a malformed outcome', async () => ({ status: 'unknown' })],
+    ['a non-canonical proof txid', async () => ({ status: 'settled', txid: 'FC'.repeat(32) })],
+  ])('leaves filling on %s', async (_why, result) => {
+    const reconcile = vi.fn(result) as unknown as ReceiveCarrierQuotes['reconcile']
+    const receiveCarrierQuotes = adapter({}, undefined, { reconcile })
+    const errors: unknown[] = []
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      receiveCarrierQuotes,
+      onError: (_id, error) => errors.push(error),
+    })
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    await store.transition('swap-1', 'funded', 'filling')
+
+    await service.tick('swap-1')
+
+    expect((await store.get('swap-1')).state).toBe('filling')
+    expect(errors).toHaveLength(1)
+  })
+
+  it('leaves an invalid settle txid unknown and never submits it again', async () => {
+    const settle = vi.fn(async () => 'not-a-txid')
+    const reconcile = vi.fn(async () => ({ status: 'pending' as const }))
+    const errors: unknown[] = []
+    const receiveCarrierQuotes = adapter({}, undefined, { settle, reconcile })
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      receiveCarrierQuotes,
+      onError: (_id, error) => errors.push(error),
+    })
+
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(reconcile).toHaveBeenCalledTimes(1)
+    expect(errors).toHaveLength(1)
+    expect((await store.get('swap-1')).state).toBe('filling')
+  })
+
+  it('keeps filling when the post-submit transition cannot be persisted', async () => {
+    const settle = vi.fn(async () => 'fb'.repeat(32))
+    const reconcile = vi.fn(async () => ({ status: 'pending' as const }))
+    const errors: unknown[] = []
+    const receiveCarrierQuotes = adapter({}, undefined, { settle, reconcile })
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      receiveCarrierQuotes,
+      onError: (_id, error) => errors.push(error),
+    })
+    const transition = store.transition.bind(store)
+    vi.spyOn(store, 'transition').mockImplementation(async (id, from, to, fields) => {
+      if (from === 'filling' && to === 'filled') throw new Error('disk write failed')
+      return transition(id, from, to, fields)
+    })
+
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(reconcile).toHaveBeenCalledTimes(1)
+    expect(errors).toHaveLength(1)
+    expect((await store.get('swap-1')).state).toBe('filling')
+  })
+
+  it('keeps a persisted filling recycle unknown when its adapter is missing', async () => {
+    const direct = vi.fn(async () => 'fa'.repeat(32))
+    const errors: unknown[] = []
+    const { service, store, deps } = await harness({
+      depositAt: async () => deposit(),
+      settle: direct,
+      receiveCarrierQuotes: adapter(),
+      onError: (_id, error) => errors.push(error),
+    })
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    await store.transition('swap-1', 'funded', 'filling')
+
+    await new AssetRfqSwapService({ ...deps, receiveCarrierQuotes: undefined }).tick('swap-1')
+
+    expect(direct).not.toHaveBeenCalled()
+    expect(errors).toHaveLength(1)
+    expect((await store.get('swap-1')).state).toBe('filling')
+  })
+})
+
 describe('profile.carrier — refusals', () => {
+  it.each([
+    ['resolve only', (resolve: ReceiveCarrierQuotes['resolve']) => ({ resolve })],
+    [
+      'resolve and settle only',
+      (resolve: ReceiveCarrierQuotes['resolve']) => ({ resolve, settle: async () => 'fb'.repeat(32) }),
+    ],
+  ])('refuses a %s adapter before any quote dependency is called', async (_why, partial) => {
+    const resolve = vi.fn<ReceiveCarrierQuotes['resolve']>(async () => RECEIVER_QUOTE)
+    const fetchPrice = vi.fn(async () => ({ mantissa: 100_000n, scale: 0 }))
+    const balance = vi.fn(async () => new Map([[ASSET_A, 10n ** 18n]]))
+    const deriveOffer = vi.fn(() => ({ pkScript: OFFER_SCRIPT, address: 'ark1qoffer' }))
+    const { service, store } = await harness({
+      receiveCarrierQuotes: partial(resolve) as unknown as ReceiveCarrierQuotes,
+      fetchPrice,
+      balance,
+      deriveOffer,
+    })
+    const insert = vi.spyOn(store, 'insertQuote')
+
+    expect(await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))).toMatchObject({
+      accepted: false,
+      reason: 'price_unavailable',
+    })
+    expect(resolve).not.toHaveBeenCalled()
+    expect(fetchPrice).not.toHaveBeenCalled()
+    expect(balance).not.toHaveBeenCalled()
+    expect(deriveOffer).not.toHaveBeenCalled()
+    expect(insert).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['a purchase on a BTC payout, which has no carrier', { mode: 'purchase' }],
     ['a recycle on a BTC payout', { mode: 'recycle', quoteId: 'q-1' }],
@@ -1090,6 +1340,7 @@ describe('profile.carrier — refusals', () => {
   it('refuses a recycle the adapter could not answer for', async () => {
     const { service } = await harness({
       receiveCarrierQuotes: {
+        ...adapter(),
         resolve: async () => {
           throw new Error('taxi down')
         },
@@ -1158,6 +1409,7 @@ describe('profile.carrier — no per-market bleed', () => {
       // Answers for whichever asset and signer the request names, so this test
       // measures the per-market price term rather than tripping a mismatch.
       receiveCarrierQuotes: {
+        ...adapter(),
         resolve: async (ask: { assetId: string; makerPublicKey: string }) => ({
           ...RECEIVER_QUOTE,
           assetId: ask.assetId,

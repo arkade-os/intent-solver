@@ -82,6 +82,8 @@ const harness = async (markets: (typeof MARKET)[] = [MARKET], options: { carrier
               serviceFareSats: 0n,
               expiresAt: 5_000,
             }),
+            settle: async () => 'fb'.repeat(32),
+            reconcile: async () => ({ status: 'pending' as const }),
           },
         }
       : {}),

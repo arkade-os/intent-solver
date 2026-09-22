@@ -40,6 +40,7 @@ export interface QuotedOfferIntent {
   makerPublicKey: string
   depositTxid: string | null
   depositVout: number | null
+  carrierTerms?: { mode: 'purchase' | 'recycle' } | null
 }
 
 export interface QuotedOfferSettleDeps {
@@ -68,6 +69,9 @@ export const quotedOfferSettleFor = (deps: QuotedOfferSettleDeps): ((intent: Quo
   const emulatorPubkey = xOnlyPubkey(deps.derivation.emulatorPubkey)
 
   return async (intent) => {
+    if (intent.carrierTerms?.mode === 'recycle') {
+      throw new Error('recycle settlement requires the dedicated receive-carrier adapter')
+    }
     if (intent.depositTxid === null || intent.depositVout === null) {
       throw new Error(`the negotiation at ${intent.offerPkScript} records no deposit outpoint to spend`)
     }

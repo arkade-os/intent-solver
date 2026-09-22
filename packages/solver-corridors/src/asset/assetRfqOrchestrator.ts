@@ -129,6 +129,27 @@ export interface ReceiveCarrierQuoteRequest {
   now: number
 }
 
+export type ReceiveCarrierReconcileOutcome = { status: 'pending' } | { status: 'settled'; txid: string }
+
+export interface ReceiveCarrierQuotes {
+  resolve: (request: ReceiveCarrierQuoteRequest) => Promise<ReceiveCarrierQuote>
+  settle: (row: AssetRfqSwapRow) => Promise<string>
+  /** Read-only observation. Settled requires independently verified transaction, deposit, and quote evidence. */
+  reconcile: (row: AssetRfqSwapRow) => Promise<ReceiveCarrierReconcileOutcome>
+}
+
+const completeReceiveCarrierQuotes = (value: unknown): ReceiveCarrierQuotes | null => {
+  if (typeof value !== 'object' || value === null) return null
+  const candidate = value as Record<string, unknown>
+  return typeof candidate.resolve === 'function' &&
+    typeof candidate.settle === 'function' &&
+    typeof candidate.reconcile === 'function'
+    ? (value as ReceiveCarrierQuotes)
+    : null
+}
+
+const isCanonicalTxid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
+
 export interface AssetRfqDeps {
   quoteLimiter?: RateLimiter
   store: AssetRfqSwapStore
@@ -160,9 +181,7 @@ export interface AssetRfqDeps {
   settle: (row: AssetRfqSwapRow) => Promise<string>
   /** The internal Taxi adapter, reached only for an explicit `recycle`.
    * OPTIONAL, and its absence is a REFUSAL rather than a default. */
-  receiveCarrierQuotes?: {
-    resolve: (request: ReceiveCarrierQuoteRequest) => Promise<ReceiveCarrierQuote>
-  }
+  receiveCarrierQuotes?: ReceiveCarrierQuotes
   onError?: (id: string, error: unknown) => void
   now?: () => number
   newId?: () => string
@@ -297,7 +316,7 @@ export class AssetRfqSwapService {
 
     // Refused BEFORE anything is priced, so an unconfigured deployment cannot
     // quote the market's free carrier.
-    const adapter = this.deps.receiveCarrierQuotes
+    const adapter = completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes)
     if (!adapter) {
       return {
         ok: false,
@@ -618,6 +637,13 @@ export class AssetRfqSwapService {
    * spend it — § 9's action-time gate.
    */
   private async whenFunded(row: AssetRfqSwapRow): Promise<void> {
+    const recycle = row.carrierTerms?.mode === 'recycle'
+    const receiveCarrier = recycle ? completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes) : null
+    if (recycle && receiveCarrier === null) {
+      await this.deps.store.fail(row.id, 'funded', 'not filled: receive-carrier adapter unavailable')
+      return
+    }
+
     const deposit = await this.deps.depositAt(row.offerPkScript, row.fromAssetId)
     const decision = evaluateAssetFill({
       toAmount: row.toAmount,
@@ -642,6 +668,18 @@ export class AssetRfqSwapService {
     // Carrying the outpoint the decision was made ABOUT: the settle spends the RECORDED one.
     const seen = deposit ? { deposit_txid: deposit.txid, deposit_vout: deposit.vout } : undefined
     if (!(await this.deps.store.transition(row.id, 'funded', 'filling', seen))) return
+    if (receiveCarrier !== null) {
+      try {
+        const filling = await this.deps.store.get(row.id)
+        const txid = await receiveCarrier.settle(filling)
+        if (!isCanonicalTxid(txid)) throw new Error(`receive-carrier settlement returned invalid txid '${txid}'`)
+        await this.completeReceiveCarrierFill(filling, txid)
+      } catch (error) {
+        this.deps.onError?.(row.id, error)
+      }
+      return
+    }
+
     try {
       const txid = await this.deps.settle(await this.deps.store.get(row.id))
       const filled = await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
@@ -698,16 +736,39 @@ export class AssetRfqSwapService {
     }
   }
 
-  /**
-   * A row found still `filling` is one whose submission outcome is unknown —
-   * this process restarted mid-fill.
-   *
-   * Escalated to `stuck` rather than resubmitted. Whether the earlier
-   * `fulfill` landed is not answerable from here, and guessing "it did not"
-   * pays the client twice out of this solver's float. § 8's stuck-over-silence
-   * is exactly this case: exposure exists and progress needs a human.
-   */
+  private async completeReceiveCarrierFill(row: AssetRfqSwapRow, txid: string): Promise<void> {
+    const filled = await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
+    if (filled) await this.recordFillMark(row)
+  }
+
+  /** A recovered `filling` row is never resubmitted. Recycles have a dedicated
+   * observer; legacy rows retain the existing stuck-over-silence policy. */
   private async whenFilling(row: AssetRfqSwapRow): Promise<void> {
+    if (row.carrierTerms?.mode === 'recycle') {
+      const adapter = completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes)
+      if (adapter === null) {
+        this.deps.onError?.(row.id, new Error('receive-carrier adapter unavailable while fill outcome is unknown'))
+        return
+      }
+      try {
+        const outcome: unknown = await adapter.reconcile(row)
+        if (typeof outcome === 'object' && outcome !== null && (outcome as { status?: unknown }).status === 'pending') {
+          return
+        }
+        if (
+          typeof outcome !== 'object' ||
+          outcome === null ||
+          (outcome as { status?: unknown }).status !== 'settled' ||
+          !isCanonicalTxid((outcome as { txid?: unknown }).txid)
+        ) {
+          throw new Error('receive-carrier reconciliation returned a malformed outcome')
+        }
+        await this.completeReceiveCarrierFill(row, (outcome as { txid: string }).txid)
+      } catch (error) {
+        this.deps.onError?.(row.id, error)
+      }
+      return
+    }
     await this.deps.store.fail(row.id, 'filling', 'fill outcome unknown after restart; check the offer address')
   }
 }
