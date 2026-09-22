@@ -11,19 +11,17 @@ import {
   PINNED_PACKAGES,
   TAXI_CONSUMER,
   packageRootFrom,
+  pinnedSourceMismatch,
+  type CarrierArtifact,
   type CarrierManifest,
 } from '../../scripts/carrier-artifacts/lib.mjs'
 
 const REPO = fileURLToPath(new URL('../../', import.meta.url))
 const manifest = JSON.parse(readFileSync(join(REPO, MANIFEST_PATH), 'utf8')) as CarrierManifest
 
-/**
- * `@arkade-os/sdk@0.4.74` and `@arkade-os/swap@0.0.20` exist on the registry
- * AND as candidate builds from `adc6b329` — same version specifier, different
- * bytes. An install that resolves the registry copy imports perfectly well and
- * is silently missing the candidate's changes, so these two names are the whole
- * test: each was added in `adc6b329` and neither registry build exports it.
- */
+// Both versions exist on the registry as well, built from different source, so
+// an install can silently take the wrong bytes and still import cleanly. Each
+// symbol was added in `adc6b329`; neither registry build exports one.
 const CANDIDATE_ONLY = {
   '@arkade-os/sdk': 'SendDeadlineExceededError',
   '@arkade-os/swap': 'FundingOutputMismatchError',
@@ -56,6 +54,21 @@ describe('carrier artifacts', () => {
       expect(artifact.file, 'the source commit belongs in the filename, not only in a semver').toContain(
         artifact.source.commit.slice(0, 8),
       )
+    }
+  })
+
+  // A well-formed commit that is not the PINNED one is the mismatch class a
+  // shape check cannot see, and what a wrong-tree pack looks like.
+  it('refuse an archive whose manifest names anything but the pinned source', () => {
+    expect(manifest.artifacts).toHaveLength(PINNED_PACKAGES.length)
+    for (const artifact of manifest.artifacts) {
+      expect(pinnedSourceMismatch(artifact), artifact.file).toBeUndefined()
+      const wrong = (source: Partial<CarrierArtifact['source']>) =>
+        pinnedSourceMismatch({ ...artifact, source: { ...artifact.source, ...source } })
+      expect(wrong({ commit: 'f'.repeat(40) })).toContain('not the pinned')
+      expect(wrong({ directory: 'packages/somewhere-else' })).toContain('not the pinned')
+      expect(wrong({ repository: 'https://example.invalid/fork.git' })).toContain('not the pinned')
+      expect(pinnedSourceMismatch({ ...artifact, package: '@arkade-os/unpinned' })).toContain('not a pinned package')
     }
   })
 

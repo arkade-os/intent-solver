@@ -11,17 +11,38 @@ import { gunzipSync } from 'node:zlib'
 export const VENDOR_DIR = 'packages/solver-app/vendor/carrier'
 export const MANIFEST_PATH = `${VENDOR_DIR}/manifest.json`
 
-/** Every package whose resolution must come from a frozen archive. */
-export const PINNED_PACKAGES = [
-  '@arkade-os/sdk',
-  '@arkade-os/swap',
-  '@arkade-taxi/client',
-  '@arkade-taxi/covenant',
-  '@arkade-taxi/protocol',
-]
+const TS_SDK = 'https://github.com/arkade-os/ts-sdk.git'
+const ARKADE_TAXI = 'https://github.com/ArkLabsHQ/arkade-taxi.git'
+const SDK_COMMIT = 'adc6b32958c36a7f9c39d6e30efdd945af874f84'
+const TAXI_COMMIT = '0763128a74a26e05a7a138f762efee08073eb799'
+
+// Every package whose resolution must come from a frozen archive, and the exact
+// source each was packed from. Moving to a new candidate is an edit HERE, so a
+// re-pack is an auditable act and `verify.mjs` can refuse an archive whose
+// manifest names any other commit.
+export const PINNED_SOURCES = {
+  '@arkade-os/sdk': { repository: TS_SDK, commit: SDK_COMMIT, directory: 'packages/ts-sdk' },
+  '@arkade-os/swap': { repository: TS_SDK, commit: SDK_COMMIT, directory: 'packages/swap' },
+  '@arkade-taxi/covenant': { repository: ARKADE_TAXI, commit: TAXI_COMMIT, directory: 'packages/covenant' },
+  '@arkade-taxi/protocol': { repository: ARKADE_TAXI, commit: TAXI_COMMIT, directory: 'packages/protocol' },
+  '@arkade-taxi/client': { repository: ARKADE_TAXI, commit: TAXI_COMMIT, directory: 'packages/client' },
+}
+
+export const PINNED_PACKAGES = Object.keys(PINNED_SOURCES)
 
 /** The one workspace package permitted to declare a `@arkade-taxi/*` dependency. */
 export const TAXI_CONSUMER = 'packages/solver-app'
+
+/** Why this archive is not the pinned source, or `undefined` when it is. */
+export function pinnedSourceMismatch(artifact) {
+  const pinned = PINNED_SOURCES[artifact?.package]
+  const name = artifact?.file ?? 'an unnamed archive'
+  if (!pinned) return `${name} records ${artifact?.package}, which is not a pinned package`
+  for (const field of ['repository', 'commit', 'directory'])
+    if (artifact.source?.[field] !== pinned[field])
+      return `${name} records ${field} ${artifact.source?.[field]}, not the pinned ${pinned[field]}`
+  return undefined
+}
 
 export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 

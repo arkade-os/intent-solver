@@ -22,6 +22,7 @@ import {
   assertCandidateExport,
   fileSpec,
   packageRootFrom,
+  pinnedSourceMismatch,
   readJson,
   sha256,
 } from './lib.mjs'
@@ -60,12 +61,12 @@ for (const artifact of manifest.artifacts ?? []) {
     declared.name === artifact.package && declared.version === artifact.version,
     `${artifact.file} contains ${declared.name}@${declared.version}, manifest says ${artifact.package}@${artifact.version}`,
   )
-  check(/^[0-9a-f]{40}$/.test(artifact.source?.commit ?? ''), `${artifact.file} records no 40-character source commit`)
+  const mismatch = pinnedSourceMismatch(artifact)
+  check(mismatch === undefined, mismatch ?? '')
   check(
     artifact.file.endsWith(`-${artifact.version}-${artifact.source?.commit?.slice(0, 8)}.tgz`),
     `${artifact.file} does not carry its version and source commit in its name`,
   )
-  check(Boolean(artifact.source?.repository), `${artifact.file} records no source repository`)
   check(Boolean(artifact.license), `${artifact.file} records no license`)
   check(
     Boolean(artifact.toolchain?.node && artifact.toolchain?.pnpm && artifact.toolchain?.command),

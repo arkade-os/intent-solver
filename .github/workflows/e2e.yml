@@ -176,6 +176,9 @@ jobs:
 
       - uses: pnpm/action-setup@v4
 
+      - name: Carrier artifacts
+        run: node scripts/carrier-artifacts/verify.mjs
+
       # Retried for the reason ci.yml's build job gives at length.
       - name: Install
         timeout-minutes: 20

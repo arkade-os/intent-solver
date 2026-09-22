@@ -22,9 +22,17 @@ export interface CarrierManifest {
   readonly artifacts: readonly CarrierArtifact[]
 }
 
+export interface PinnedSource {
+  readonly repository: string
+  readonly commit: string
+  readonly directory: string
+}
+
 export declare const VENDOR_DIR: string
 export declare const MANIFEST_PATH: string
+export declare const PINNED_SOURCES: Readonly<Record<string, PinnedSource>>
 export declare const PINNED_PACKAGES: readonly string[]
+export declare const pinnedSourceMismatch: (artifact: unknown) => string | undefined
 export declare const TAXI_CONSUMER: string
 export declare const CANDIDATE_SWAP_SYMBOL: string
 export declare const CANDIDATE_SDK_SYMBOL: string
