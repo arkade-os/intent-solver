@@ -904,6 +904,7 @@ describe('profile.carrier — explicit modes', () => {
         makerPublicKey: XONLY,
         assetId: ASSET_A,
         now: 1_005,
+        admission: true,
       },
     ])
     expect(balance).not.toHaveBeenCalled()
@@ -1186,6 +1187,7 @@ describe('profile.carrier — persisted settlement mode', () => {
     await service.tick('swap-1')
     await service.tick('swap-1')
 
+    // Admission on the quote, the exact anchored floor on the funded row's read.
     expect(asks).toEqual([
       {
         quoteId: 'q-1',
@@ -1193,6 +1195,7 @@ describe('profile.carrier — persisted settlement mode', () => {
         makerPublicKey: XONLY,
         assetId: ASSET_A,
         now: 1_000,
+        admission: true,
       },
       {
         quoteId: 'q-1',

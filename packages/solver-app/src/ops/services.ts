@@ -680,6 +680,8 @@ export const createServices = async (
     maxServiceFareSats: arkade.dustSats,
     contracts: () => arkade.wallet.getContractManager(),
     reserved: () => arkade.reservations.reserved(),
+    // The SAME number the service binds a quote for.
+    quoteValiditySeconds: policy.assetQuoteValiditySeconds,
     // NOT the shared `chainTip` below, which holds a reading for 15s.
     tipHeight: config.chainTipEsploraUrl
       ? carrierChainTip(createEsploraClient(config.chainTipEsploraUrl)).height

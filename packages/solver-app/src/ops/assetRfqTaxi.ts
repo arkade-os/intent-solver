@@ -54,6 +54,8 @@ export interface TaxiReceiveCarrierDeps {
   maxServiceFareSats: bigint
   coins: () => Promise<readonly CarrierCoin[]>
   reserved: () => ReadonlySet<string>
+  /** How long a quote binds — the window an admission read must also clear. */
+  quoteValiditySeconds: number
   /** Required on a height-typed deployment: the clock cannot anchor a height. */
   tipHeight?: () => Promise<number>
 }
@@ -153,6 +155,17 @@ export const clearsFloor = (coin: CarrierCoin, floor: { kind: 'height' | 'time';
   return time !== undefined && BigInt(Math.floor(time.getTime() / 1000)) >= floor.value
 }
 
+/** A FLOOR on block production, not an estimate: over-stating the slack only
+ * costs a quote that had no room anyway. @see HTLC_SECONDS_PER_BLOCK. */
+const CARRIER_SECONDS_PER_BLOCK = 150
+
+/** Never zero on heights: a block can land the second after admission. */
+export const carrierAdmissionSlack = (domain: 'height' | 'time', quoteValiditySeconds: number): bigint => {
+  const window = Math.max(0, Math.ceil(quoteValiditySeconds))
+  if (domain === 'time') return BigInt(window)
+  return BigInt(Math.max(1, Math.ceil(window / CARRIER_SECONDS_PER_BLOCK)))
+}
+
 export const createTaxiReceiveCarrierReader = (
   deps: TaxiReceiveCarrierDeps,
 ): Pick<ReceiveCarrierQuotes, 'resolve' | 'available'> => {
@@ -160,12 +173,16 @@ export const createTaxiReceiveCarrierReader = (
   if (deps.trust.locktimeDomain === 'height' && tip === undefined) {
     throw new Error('a height-typed deployment needs a chain tip to anchor the carrier input expiry floor on')
   }
-  const anchoredFloor = async (now: number) => ({
+  const slack = carrierAdmissionSlack(deps.trust.locktimeDomain, deps.quoteValiditySeconds)
+  const anchoredFloor = async (now: number, admission: boolean) => ({
     kind: deps.trust.locktimeDomain,
-    value: (tip === undefined ? BigInt(now) : BigInt(await tip())) + deps.trust.inputExpiryMargin,
+    value:
+      (tip === undefined ? BigInt(now) : BigInt(await tip())) + deps.trust.inputExpiryMargin + (admission ? slack : 0n),
   })
   const quoteFor = async (request: ReceiveCarrierQuoteRequest): Promise<ReceiveCarrierQuote> =>
-    carrierQuoteFrom(await verifiedQuoteFor(deps, request, await anchoredFloor(request.now)))
+    carrierQuoteFrom(
+      await verifiedQuoteFor(deps, request, await anchoredFloor(request.now, request.admission === true)),
+    )
 
   return {
     resolve: quoteFor,
@@ -200,6 +217,7 @@ export interface TaxiCarrierComposition {
   maxServiceFareSats: bigint
   contracts: () => Promise<Pick<IContractManager, 'getContractsWithVtxos'>>
   reserved: () => ReadonlySet<string>
+  quoteValiditySeconds: number
   tipHeight?: () => Promise<number>
   fetch?: typeof fetch
 }
@@ -220,6 +238,7 @@ export const taxiReceiveCarrier = async (
     maxServiceFareSats: deps.maxServiceFareSats,
     coins: async () => spendableCarrierCoins(await deps.contracts()),
     reserved: deps.reserved,
+    quoteValiditySeconds: deps.quoteValiditySeconds,
     tipHeight: deps.tipHeight,
   })
 }

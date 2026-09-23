@@ -77,6 +77,7 @@ const assetWire = (id: string): { txid: string; groupIndex: number } => {
 
 const TIP = 1_000_000
 const EXIT_DELAY = 5n
+const VALIDITY_SECONDS = 30
 
 const TRUST = {
   serverKey: SERVER_KEY,
@@ -202,6 +203,7 @@ const reader = (
     maxServiceFareSats: 10n,
     coins: async () => [],
     reserved: () => new Set<string>(),
+    quoteValiditySeconds: VALIDITY_SECONDS,
     tipHeight: async () => TIP,
     ...over,
   }
@@ -374,8 +376,66 @@ describe('the input expiry floor is anchored, not merely ordered', () => {
         maxServiceFareSats: 10n,
         coins: async () => [],
         reserved: () => new Set<string>(),
+        quoteValiditySeconds: VALIDITY_SECONDS,
       }),
     ).toThrow(/chain tip/)
+  })
+})
+
+describe('admission demands the slack the quote can outlive', () => {
+  it('refuses at admission the height-domain floor one mined block would strand', async () => {
+    let height = TIP
+    const floor = BigInt(TIP) + EXIT_DELAY
+    const { read } = reader({
+      tipHeight: async () => height,
+      quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }),
+    })
+
+    await expect(read.resolve(request({ admission: true }))).rejects.toThrow(/below the caller minimum/)
+
+    await expect(read.resolve(request())).resolves.toMatchObject({ inputExpiryFloor: { value: floor } })
+    height = TIP + 1
+    await expect(read.available(request())).rejects.toThrow(/below the caller minimum/)
+  })
+
+  it('admits one with the window’s slack, and it still fills a block later', async () => {
+    let height = TIP
+    const floor = BigInt(TIP) + EXIT_DELAY + 1n
+    const { read } = reader({
+      tipHeight: async () => height,
+      quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }),
+    })
+
+    await expect(read.resolve(request({ admission: true }))).resolves.toMatchObject({
+      inputExpiryFloor: { value: floor },
+    })
+    height = TIP + 1
+    await expect(read.available(request())).resolves.toEqual(new Map([[null, 0n]]))
+  })
+
+  it('raises a seconds-typed admission by the whole validity window', async () => {
+    const now = 1_700_000_000
+    const short = BigInt(now) + EXIT_DELAY
+    const trust = { ...TRUST, locktimeDomain: 'time' as const }
+    const seconds = (floor: bigint) =>
+      quoteFixture({ domain: 'time', recovery: floor - 1n, floor, batch: floor, expiresAt: now + 1_000 })
+
+    const { read: tight } = reader({ trust, tipHeight: undefined, quote: seconds(short) })
+    await expect(tight.resolve(request({ now, admission: true }))).rejects.toThrow(/below the caller minimum/)
+
+    const roomy = short + BigInt(VALIDITY_SECONDS)
+    const { read } = reader({ trust, tipHeight: undefined, quote: seconds(roomy) })
+    await expect(read.resolve(request({ now, admission: true }))).resolves.toMatchObject({
+      inputExpiryFloor: { kind: 'time', value: roomy },
+    })
+    await expect(read.available(request({ now: now + VALIDITY_SECONDS }))).resolves.toEqual(new Map([[null, 0n]]))
+  })
+
+  it('leaves the fill-time reads at the exact anchored floor', async () => {
+    const floor = BigInt(TIP) + EXIT_DELAY
+    const { read } = reader({ quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }) })
+    await expect(read.resolve(request())).resolves.toMatchObject({ inputExpiryFloor: { value: floor } })
+    await expect(read.available(request())).resolves.toEqual(new Map([[null, 0n]]))
   })
 })
 

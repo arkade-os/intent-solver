@@ -60,6 +60,7 @@ const watched = (over: Partial<TaxiCarrierComposition> = {}) => {
       touched.push('reserved')
       return new Set<string>()
     },
+    quoteValiditySeconds: 30,
     tipHeight: async () => {
       touched.push('tipHeight')
       return 1_000_000

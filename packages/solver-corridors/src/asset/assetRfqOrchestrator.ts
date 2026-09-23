@@ -129,6 +129,10 @@ export interface ReceiveCarrierQuoteRequest {
   makerPublicKey: string
   assetId: string
   now: number
+  /** Quote ADMISSION rather than a fill. The fill re-anchors on a later clock
+   * or tip, so a floor admitted with no room to spare refuses the client that
+   * funded it; only set here, never on the fill-time reads. */
+  admission?: boolean
 }
 
 export type ReceiveCarrierReconcileOutcome = { status: 'pending' } | { status: 'settled'; txid: string }
@@ -354,6 +358,7 @@ export class AssetRfqSwapService {
         makerPublicKey: request.makerPublicKey,
         assetId,
         now,
+        admission: true,
       })
     } catch (error) {
       // An adapter that threw is an unavailable quote, never a free carrier.
@@ -535,6 +540,7 @@ export class AssetRfqSwapService {
           makerPublicKey: request.makerPublicKey,
           assetId: pair.to as string,
           now: this.now(),
+          admission: true,
         })
       } catch (error) {
         this.deps.onError?.('carrier', error)
