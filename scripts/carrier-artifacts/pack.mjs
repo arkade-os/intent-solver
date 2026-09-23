@@ -22,6 +22,7 @@ import {
   PINNED_SOURCES,
   VENDOR_DIR,
   archiveManifest,
+  artifactLicense,
   assertCandidateExport,
   packageRootFrom,
   pinnedSourceMismatch,
@@ -84,15 +85,6 @@ const scratch = mkdtempSync(join(tmpdir(), 'carrier-pack-'))
 const shortCommit = (commit) => commit.slice(0, 8)
 const archiveName = (name, version, commit) =>
   `${name.replace('@', '').replace('/', '-')}-${version}-${shortCommit(commit)}.tgz`
-
-/** The repository LICENSE, for packages carrying no `license` field of their own. */
-const repositoryLicense = (root) => {
-  const headline = readFileSync(join(root, 'LICENSE'), 'utf8')
-    .split(/\r?\n/)
-    .find((line) => line.trim())
-  if (!headline?.includes('MIT')) throw new Error(`${root}/LICENSE is not the MIT text this manifest would claim`)
-  return 'MIT'
-}
 
 try {
   assertPinnedSource(sdkRoot, SDK_SOURCE, 'ts-sdk checkout')
@@ -167,7 +159,6 @@ try {
   if (JSON.stringify(packed.map((entry) => entry.name).sort()) !== JSON.stringify([...PINNED_PACKAGES].sort()))
     throw new Error('packed set does not match the pinned set')
 
-  const taxiLicense = repositoryLicense(taxiRoot)
   // Corepack resolves pnpm per repo, so one number for both would be wrong.
   const pnpmVersion = Object.fromEntries(
     [sdkRoot, taxiRoot].map((root) => [root, runPnpm(root, ['--version'], npmUserConfig).trim()]),
@@ -186,8 +177,7 @@ try {
       file,
       package: manifest.name,
       version: manifest.version,
-      license: manifest.license ?? taxiLicense,
-      licenseFrom: manifest.license ? 'the package manifest' : 'the LICENSE file of the source repository',
+      ...artifactLicense(manifest, sourceRoot),
       sha256: sha256(bytes),
       bytes: bytes.length,
       source: { ...source },

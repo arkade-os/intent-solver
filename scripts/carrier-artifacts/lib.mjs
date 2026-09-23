@@ -44,6 +44,18 @@ export function pinnedSourceMismatch(artifact) {
   return undefined
 }
 
+/** The license to record and where it honestly came from. `sourceRoot` is the
+ * checkout THIS package was packed from: another repository's LICENSE would put
+ * its terms on the archive while the manifest named the source. */
+export function artifactLicense(manifest, sourceRoot) {
+  if (manifest.license) return { license: manifest.license, licenseFrom: 'the package manifest' }
+  const headline = readFileSync(join(sourceRoot, 'LICENSE'), 'utf8')
+    .split(/\r?\n/)
+    .find((line) => line.trim())
+  if (!headline?.includes('MIT')) throw new Error(`${sourceRoot}/LICENSE is not the MIT text this manifest would claim`)
+  return { license: 'MIT', licenseFrom: 'the LICENSE file of the source repository' }
+}
+
 export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 
 // What separates each candidate from the REGISTRY build of the identical

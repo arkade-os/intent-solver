@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { readFileSync, readdirSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
@@ -10,6 +11,7 @@ import {
   MANIFEST_PATH,
   PINNED_PACKAGES,
   TAXI_CONSUMER,
+  artifactLicense,
   packageRootFrom,
   pinnedSourceMismatch,
   type CarrierArtifact,
@@ -55,6 +57,27 @@ describe('carrier artifacts', () => {
         artifact.source.commit.slice(0, 8),
       )
     }
+  })
+
+  it('take a missing license from the package’s own repository, and say so truthfully', () => {
+    const root = (license: string) => {
+      const dir = mkdtempSync(join(tmpdir(), 'carrier-license-'))
+      writeFileSync(join(dir, 'LICENSE'), license)
+      return dir
+    }
+    const sdkRoot = root('MIT License\n\nCopyright (c) ts-sdk\n')
+    const taxiRoot = root('Apache License 2.0\n')
+
+    expect(artifactLicense({ license: 'ISC' }, sdkRoot)).toEqual({
+      license: 'ISC',
+      licenseFrom: 'the package manifest',
+    })
+    expect(artifactLicense({}, sdkRoot)).toEqual({
+      license: 'MIT',
+      licenseFrom: 'the LICENSE file of the source repository',
+    })
+    // The other repository's text is never what an SDK archive falls back to.
+    expect(() => artifactLicense({}, taxiRoot)).toThrow(/not the MIT text/)
   })
 
   // A well-formed commit that is not the PINNED one is the mismatch class a

@@ -36,6 +36,10 @@ export declare const pinnedSourceMismatch: (artifact: unknown) => string | undef
 export declare const TAXI_CONSUMER: string
 export declare const CANDIDATE_SWAP_SYMBOL: string
 export declare const CANDIDATE_SDK_SYMBOL: string
+export declare const artifactLicense: (
+  manifest: { license?: string },
+  sourceRoot: string,
+) => { license: string; licenseFrom: string }
 export declare const sha256: (bytes: Uint8Array) => string
 export declare const readTarMember: (archivePath: string, member: string) => string | undefined
 export declare const archiveManifest: (archivePath: string) => Record<string, unknown>
