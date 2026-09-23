@@ -14,7 +14,7 @@ export const MANIFEST_PATH = `${VENDOR_DIR}/manifest.json`
 const TS_SDK = 'https://github.com/arkade-os/ts-sdk.git'
 const ARKADE_TAXI = 'https://github.com/ArkLabsHQ/arkade-taxi.git'
 const SDK_COMMIT = 'adc6b32958c36a7f9c39d6e30efdd945af874f84'
-const TAXI_COMMIT = '0763128a74a26e05a7a138f762efee08073eb799'
+const TAXI_COMMIT = '88ca652aec73650c80caa49ecbdad098788968c6'
 
 // Every package whose resolution must come from a frozen archive, and the exact
 // source each was packed from. Moving to a new candidate is an edit HERE, so a
