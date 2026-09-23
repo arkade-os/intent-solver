@@ -482,6 +482,31 @@ describe('a reservation outlives every outcome that may have submitted', () => {
     await h.store.close()
   })
 
+  it('holds no reservation when the offer refuses before any attempt exists', async () => {
+    const h = await harness({
+      deps: {
+        offerHex: () => {
+          throw new Error('the recorded terms derive another offer script')
+        },
+      },
+    })
+    await expect(h.settle(await h.row())).rejects.toThrow(/derive another offer script/)
+    expect(h.requests).toEqual([])
+    expect(await h.attempt()).toBeNull()
+    expect(h.ledger.reserved().size).toBe(0)
+    expect(h.pins.held()).toEqual([])
+    await h.store.close()
+  })
+
+  it('holds no reservation when the snapshot cannot be encoded', async () => {
+    const h = await harness({ deps: { proceedsScript: undefined as never } })
+    await expect(h.settle(await h.row())).rejects.toThrow()
+    expect(h.requests).toEqual([])
+    expect(await h.attempt()).toBeNull()
+    expect(h.ledger.reserved().size).toBe(0)
+    await h.store.close()
+  })
+
   it('releases the pin when the first checkpoint was written and its answer was lost', async () => {
     const store = await openStore()
     const h = await harness({

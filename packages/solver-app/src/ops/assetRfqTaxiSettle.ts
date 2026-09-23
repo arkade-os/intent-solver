@@ -223,11 +223,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       amount: row.toAmount,
     })
 
-    // Pinned BEFORE the write that names them: no window where the row claims
-    // coins another spender still believes are free.
     const outpoints = inputs.map(({ txid, vout }) => ({ txid, vout }))
-    const pin = deps.pins.adopt(row.id, deps.reserve(outpoints))
-
     const deposit = { txid: row.depositTxid, vout: row.depositVout }
     const validUntil = Math.min(row.validUntil, terms.expiresAt)
     const offerHex = deps.offerHex(row)
@@ -246,6 +242,11 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       maxFareSats: terms.serviceFareSats,
       validUntil,
     })
+
+    // Still before the write that names them, and after the last refusal that
+    // would leave no attempt for reconciliation to release this pin from.
+    // Everything between is synchronous, so nothing can interleave here.
+    const pin = deps.pins.adopt(row.id, deps.reserve(outpoints))
 
     const prepared: CarrierAttempt = { phase: 'prepared', snapshot }
     let wrote = false
