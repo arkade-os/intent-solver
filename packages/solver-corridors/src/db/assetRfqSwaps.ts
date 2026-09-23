@@ -499,6 +499,9 @@ export class AssetRfqSwapStore {
    * against — the client would fund an address nothing is watching.
    */
   async insertQuote(record: AssetRfqQuoteRecord): Promise<AssetRfqSwapRow> {
+    // Checked here because the codec is not: a row the read refuses poisons every later `listNonTerminal`.
+    const carrierTerms = record.carrierTerms === undefined ? null : carrierTermsToJson(record.carrierTerms)
+    if (carrierTerms !== null) carrierTermsFromJson(carrierTerms)
     const at = this.now()
     await this.driver.run(
       `INSERT INTO asset_rfq_swap (
@@ -528,7 +531,7 @@ export class AssetRfqSwapStore {
         record.quotePrice?.impliedMantissa.toString() ?? null,
         record.quotePrice?.scale ?? null,
         record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
-        record.carrierTerms === undefined ? null : JSON.stringify(carrierTermsToJson(record.carrierTerms)),
+        carrierTerms === null ? null : JSON.stringify(carrierTerms),
       ],
     )
     await this.recordEvent(record.id, null, 'quoted', null)

@@ -571,6 +571,19 @@ describe('carrier terms', () => {
     await store.close()
   })
 
+  it.each([
+    ['a split that does not sum to the physical carrier', { loanSats: 300n }],
+    ['an expiry that is not a whole unix second', { expiresAt: 9_000.5 }],
+    ['a quote id no bound admits', { quoteId: 'q'.repeat(129) }],
+  ])('refuses to insert %s', async (_why, over) => {
+    const store = await open()
+    const carrierTerms: AssetRfqCarrierTerms = { ...RECYCLE_TERMS, ...over }
+
+    await expect(store.insertQuote(quote({ carrierTerms }))).rejects.toThrow(/carrier terms/)
+    expect(await store.listNonTerminal()).toEqual([])
+    await store.close()
+  })
+
   /** Empty string is corruption on a money column, not an absent term. */
   it('refuses an empty terms blob rather than reading it as legacy', async () => {
     const store = await open()
