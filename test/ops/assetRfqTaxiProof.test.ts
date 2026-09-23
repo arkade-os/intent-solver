@@ -394,7 +394,7 @@ describe('the observer settles only on the whole evidence chain', () => {
     expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
   })
 
-  it('raises a contradiction ONCE per row, then holds quietly rather than every tick', async () => {
+  it('raises a contradiction ONCE per row per adapter, then holds quietly rather than every tick', async () => {
     const h = await harness({
       chain: chainOf({ txs: [reserialised(1, { witnessUtxo: undefined }), GRAPH.checkpoints[0]!] }),
     })
