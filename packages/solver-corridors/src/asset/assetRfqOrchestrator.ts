@@ -135,7 +135,11 @@ export interface ReceiveCarrierQuoteRequest {
   admission?: boolean
 }
 
-export type ReceiveCarrierReconcileOutcome = { status: 'pending' } | { status: 'settled'; txid: string }
+export type ReceiveCarrierReconcileOutcome =
+  | { status: 'pending' }
+  /** Unobservable: escalated rather than watched forever. */
+  | { status: 'stuck'; reason: string }
+  | { status: 'settled'; txid: string }
 
 export interface ReceiveCarrierQuotes {
   resolve: (request: ReceiveCarrierQuoteRequest) => Promise<ReceiveCarrierQuote>
@@ -829,6 +833,16 @@ export class AssetRfqSwapService {
       try {
         const outcome: unknown = await adapter.reconcile(row)
         if (typeof outcome === 'object' && outcome !== null && (outcome as { status?: unknown }).status === 'pending') {
+          return
+        }
+        if (typeof outcome === 'object' && outcome !== null && (outcome as { status?: unknown }).status === 'stuck') {
+          // `fail` from `filling` is `stuck`: unobservable is not never-sent.
+          const reason = (outcome as { reason?: unknown }).reason
+          await this.deps.store.fail(
+            row.id,
+            'filling',
+            typeof reason === 'string' && reason.length > 0 ? reason : 'receive-carrier fill outcome is unobservable',
+          )
           return
         }
         if (

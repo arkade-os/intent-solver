@@ -1394,6 +1394,52 @@ describe('profile.carrier — persisted settlement mode', () => {
     expect((await store.get('swap-1')).state).toBe('filling')
   })
 
+  it('escalates a filling recycle that never reached an attempt, with the reason given', async () => {
+    const settle = vi.fn(async () => {
+      throw new Error('the recorded terms derive another offer script')
+    })
+    const reason = 'receive-carrier settlement stopped before preparing an attempt'
+    const reconcile = vi.fn(async () => ({ status: 'stuck' as const, reason }))
+    const receiveCarrierQuotes = adapter({}, undefined, { settle, reconcile })
+    const errors: unknown[] = []
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      receiveCarrierQuotes,
+      onError: (_id, error) => errors.push(error),
+    })
+
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('filling')
+
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'stuck', failureReason: reason })
+    await service.tick('swap-1')
+    expect(reconcile).toHaveBeenCalledTimes(1)
+    expect(errors).toHaveLength(1)
+  })
+
+  it('escalates on a stuck outcome that names no usable reason', async () => {
+    const settle = vi.fn(async () => {
+      throw new Error('gone')
+    })
+    const reconcile = vi.fn(async () => ({ status: 'stuck' })) as unknown as ReceiveCarrierQuotes['reconcile']
+    const receiveCarrierQuotes = adapter({}, undefined, { settle, reconcile })
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      receiveCarrierQuotes,
+      onError: () => {},
+    })
+
+    await service.quote(recycleRequest())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect((await store.get('swap-1')).state).toBe('stuck')
+  })
+
   it('observes an expired filling recycle until exact proof completes and marks it once', async () => {
     const settle = vi.fn(async () => {
       throw new Error('submit outcome unknown')

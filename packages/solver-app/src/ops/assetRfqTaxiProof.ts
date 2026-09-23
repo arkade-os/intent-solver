@@ -274,9 +274,13 @@ const observeWith =
   (deps: TaxiCarrierProofDeps, raised: Set<string>) =>
   async (row: AssetRfqSwapRow): Promise<ReceiveCarrierReconcileOutcome> => {
     const attempt = await deps.store.readCarrierAttempt(row.id)
-    // No attempt at all: the write that precedes the first POST has not landed,
-    // so nothing was asked of the operator and there is nothing to observe yet.
-    if (attempt === null) return { status: 'pending' }
+    // The write that precedes the first POST never landed, so there is nothing
+    // to observe and nothing that ever will be. NOT a refusal and NOT a release:
+    // a null attempt also spells a settle short of its first checkpoint, which
+    // escalating fences off anyway — every attempt write CASes on `filling`.
+    if (attempt === null) {
+      return { status: 'stuck', reason: 'receive-carrier settlement stopped before preparing an attempt' }
+    }
     if (attempt.phase === 'settled') {
       const txid = attempt.fillTxid
       if (txid === undefined) throw new Error(`carrier fill ${row.id} is settled against no transaction`)
