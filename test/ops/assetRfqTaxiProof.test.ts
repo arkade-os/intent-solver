@@ -388,9 +388,7 @@ describe('the observer settles only on the whole evidence chain', () => {
     await expect(h.reconcile()).rejects.toThrow(/taptree/)
   })
 
-  it('surfaces a transaction served with no taptree, which finalization never drops', async () => {
-    // `unknown` IS in `PSBTInputFinalKeys`, so absence here is a real
-    // disagreement rather than the leaves' benign one.
+  it('settles on an answer served with no taptree, because the id already pinned the body', async () => {
     const trusted = Transaction.fromPSBT(base64.decode(GRAPH.arkTx))
     const treeless = new Transaction({
       version: trusted.version,
@@ -414,7 +412,8 @@ describe('the observer settles only on the whole evidence chain', () => {
 
     const h = await harness({ chain: chainOf({ txs: [base64.encode(treeless.toPSBT()), GRAPH.checkpoints[0]!] }) })
 
-    await expect(h.reconcile()).rejects.toThrow(/taptree/)
+    await expect(h.reconcile()).resolves.toEqual({ status: 'settled', txid: GRAPH.finalTxid })
+    expect(h.ledger.reserved().size).toBe(0)
   })
 
   it('accepts a FINALIZED transaction, whose tap leaves finalization drops by design', async () => {

@@ -85,6 +85,7 @@ export const sponsorLegFrom = (
   funding: readonly CarrierJointFunding[],
   label: string,
   authorised: Pick<CarrierAuthorisedSats, 'contributionSats' | 'maxFareSats'>,
+  fallbackChangeScript: Uint8Array,
 ): CarrierSponsorLeg | undefined => {
   const fund = wire.inputs.flatMap((input, i) => (input.owner === 'sponsor' ? [funding[i]!] : []))
   if (fund.length === 0) return undefined
@@ -93,12 +94,11 @@ export const sponsorLegFrom = (
   // The sponsor pays its fare and its change to one script, which is what lets
   // the quote label two outputs that are otherwise identical.
   const script = change?.script ?? fare?.script
-  if (script === undefined) throw new Error(`${label} quotes a sponsor leg that keeps neither a fare nor change`)
   const quoted =
     fund.reduce((total, coin) => total + BigInt(coin.value), 0n) -
     (change === undefined ? 0n : wireSats(change.sats, `${label} sponsor change`))
   if (quoted <= 0n) throw new Error(`${label} quotes a sponsor contributing ${quoted} sats`)
-  const changeScript = hex.decode(script)
+  const changeScript = script === undefined ? fallbackChangeScript : hex.decode(script)
   // The AUTHORISED number is what gets built; the quote's own is only compared
   // to it, so a leg priced differently refuses legibly rather than as a digest.
   if (fare !== undefined) {
@@ -110,13 +110,9 @@ export const sponsorLegFrom = (
       fare: fareFrom(fare, label, authorised.maxFareSats),
     }
   }
-  /**
-   * The FOLDED shape, the only one a receive quote produces: Taxi passes
-   * `combineSatsFareWithChange`, so the assembler emits no fare output and sets
-   * `sponsorChange = sponsorInputs - contribution + fare`. The fare is not
-   * missing, it is inside the change — exactly the shortfall against the
-   * authorised contribution, and capped like any other fare.
-   */
+  // FOLDED: the fare is inside the change, so this is
+  // `fare + (authorised - Taxi's contribution)`, NOT the fare alone. Bounded
+  // anyway (`net - floor == maxFareSats - folded`); only TAXI zeroes the rest.
   const folded = authorised.contributionSats - quoted
   if (folded < 0n) throw shortContribution(quoted, authorised, label)
   if (folded === 0n) return { fund, netContributionSats: authorised.contributionSats, changeScript }
@@ -246,7 +242,7 @@ export const createCarrierFillRebuilder =
         `${label} was quoted a ${receiver.sats} sat carrier, not the ${request.physicalSats} it authorised`,
       )
     }
-    const sponsor = sponsorLegFrom(wire, recoverJointFunding(wire, label), label, request)
+    const sponsor = sponsorLegFrom(wire, recoverJointFunding(wire, label), label, request, request.proceedsScript)
     const built = await (deps.build ?? buildOfferFillPlan)(deps.wallet, deps.arkServerUrl, request.offerHex, {
       fund: request.inputs.map((coin) => solverFunding(coin, label)),
       payoutScript: request.proceedsScript,
@@ -271,6 +267,8 @@ export const assertAssetPayouts = (
   row: Pick<AssetRfqSwapRow, 'toAssetId' | 'toAmount'>,
   label: string,
 ): void => {
+  // Without this, `paid === 0n === toAmount` makes everything below unfalsifiable.
+  if (row.toAmount <= 0n) throw new Error(`${label} sells ${row.toAmount} of ${row.toAssetId}, which is nothing to pay`)
   const outputs = Array.from({ length: finalTx.outputsLength }, (_, i) => finalTx.getOutput(i))
   const groups = assetGroupsOf(finalTx)
   for (const group of groups) {

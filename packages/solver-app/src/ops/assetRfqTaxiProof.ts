@@ -234,13 +234,7 @@ const tapLeavesOf = (tx: Transaction, at: number): readonly string[] =>
     )
     .sort()
 
-/**
- * Absent is not different. `cleanFinalInput` keeps only `PSBTInputFinalKeys`,
- * which excludes `tapLeafScript` and includes `unknown` (the taptree), so a
- * finalized answer legitimately arrives with its leaves gone. Requiring them
- * would wedge a CORRECT fill forever with its coins pinned — the trap this
- * comparison removes rather than relocates. Present-and-different still fails.
- */
+/** The txid is recomputed from the served bytes: absent metadata is weaker evidence, not contradiction. */
 const sameOrAbsent = (got: readonly string[], want: readonly string[]): boolean =>
   got.length === 0 || got.join(',') === want.join(',')
 
@@ -262,10 +256,9 @@ const assertSameSpendCommitment = (candidate: Transaction, trusted: Transaction,
     if (!sameBytes(got.witnessUtxo?.script, want.witnessUtxo?.script)) differs(`input ${i} prevout script`)
     if (got.witnessUtxo?.amount !== want.witnessUtxo?.amount) differs(`input ${i} prevout value`)
     if (!sameOrAbsent(tapLeavesOf(candidate, i), tapLeavesOf(trusted, i))) differs(`input ${i} tap leaves`)
-    // Strict, for the same reason `witnessUtxo` is: the taptree rides in
-    // `unknown`, which `cleanFinalInput` keeps, so nothing known drops one.
-    const trees = (of: Transaction): string => getArkPsbtFields(of, i, VtxoTaprootTree).map(hex.encode).sort().join(',')
-    if (trees(candidate) !== trees(trusted)) differs(`input ${i} taptree`)
+    const trees = (of: Transaction): readonly string[] =>
+      getArkPsbtFields(of, i, VtxoTaprootTree).map(hex.encode).sort()
+    if (!sameOrAbsent(trees(candidate), trees(trusted))) differs(`input ${i} taptree`)
   }
   for (let i = 0; i < trusted.outputsLength; i += 1) {
     const got = candidate.getOutput(i)

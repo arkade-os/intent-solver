@@ -212,7 +212,7 @@ describe('recovering the sponsor leg from the quoted graph itself', () => {
   })
 
   it('builds the leg on the authorised contribution, having compared the quote to it', () => {
-    const leg = sponsorLegFrom(wire(), recoverJointFunding(wire(), 'x'), 'x', AUTHORISED)
+    const leg = sponsorLegFrom(wire(), recoverJointFunding(wire(), 'x'), 'x', AUTHORISED, PROCEEDS)
 
     expect(leg?.netContributionSats).toBe(3_500n)
     expect(leg?.fund.map((c) => c.txid)).toEqual([SPONSOR_TXID])
@@ -236,13 +236,37 @@ describe('recovering the sponsor leg from the quoted graph itself', () => {
       ],
     } as Partial<Wire>)
 
-    expect(() => sponsorLegFrom(fared, recoverJointFunding(fared, 'x'), 'x', AUTHORISED)).toThrow(/carrying assets/)
+    expect(() => sponsorLegFrom(fared, recoverJointFunding(fared, 'x'), 'x', AUTHORISED, PROCEEDS)).toThrow(
+      /carrying assets/,
+    )
   })
 
   it('refuses a fare over the cap before it can be built with', () => {
     const greedy = wire(priced({ fare: '10', payout: '6160' }))
 
-    expect(() => sponsorLegFrom(greedy, recoverJointFunding(greedy, 'x'), 'x', AUTHORISED)).toThrow(/over the 4/)
+    expect(() => sponsorLegFrom(greedy, recoverJointFunding(greedy, 'x'), 'x', AUTHORISED, PROCEEDS)).toThrow(
+      /over the 4/,
+    )
+  })
+
+  it('accepts a sponsor that keeps nothing back, which is a shape the assembler emits', () => {
+    const exact = wire({
+      outputs: [
+        { role: 'receiver', vout: 0, script: hex.encode(MAKER), sats: '330', assets: [] },
+        { role: 'solver', vout: 1, script: hex.encode(PROCEEDS), sats: '7670', assets: [] },
+      ],
+    } as Partial<Wire>)
+    const leg = sponsorLegFrom(
+      exact,
+      recoverJointFunding(exact, 'x'),
+      'x',
+      { ...AUTHORISED, contributionSats: 5_000n },
+      PROCEEDS,
+    )
+
+    expect(leg?.netContributionSats).toBe(5_000n)
+    expect(leg?.fare).toBeUndefined()
+    expect(hex.encode(leg!.changeScript)).toBe(hex.encode(PROCEEDS))
   })
 
   it('answers no sponsor leg at all when the operator funds none', () => {
@@ -254,7 +278,7 @@ describe('recovering the sponsor leg from the quoted graph itself', () => {
       checkpoints: [CHECKPOINTS[0]!, CHECKPOINTS[1]!],
     } as Partial<Wire>)
 
-    expect(sponsorLegFrom(alone, recoverJointFunding(alone, 'x'), 'x', AUTHORISED)).toBeUndefined()
+    expect(sponsorLegFrom(alone, recoverJointFunding(alone, 'x'), 'x', AUTHORISED, PROCEEDS)).toBeUndefined()
   })
 })
 
@@ -398,6 +422,12 @@ describe('the rebuild refuses a quote priced against the solver', () => {
     await expect(rebuild(rebuildRequest() as never)).rejects.toThrow(/which is not ours/)
   })
 
+  it('refuses a row that sells nothing, which every asset assertion would satisfy', async () => {
+    await expect(rebuilder()(rebuildRequest({ row: row({ toAmount: 0n }) }) as never)).rejects.toThrow(
+      /which is nothing to pay/,
+    )
+  })
+
   it('refuses a sponsor contributing MORE than authorised, which it cannot rebuild', async () => {
     const quote = wire(priced({ change: '1400', payout: '6270' }))
 
@@ -511,7 +541,7 @@ describe('the folded shape, which is the only one a receive quote produces', () 
 
   it('recovers the folded fare as the shortfall against the authorised contribution', () => {
     const quote = liveWire()
-    const leg = sponsorLegFrom(quote, recoverJointFunding(quote, 'x'), 'x', live)
+    const leg = sponsorLegFrom(quote, recoverJointFunding(quote, 'x'), 'x', live, PROCEEDS)
 
     // 20000 - 19675 = 325 quoted against 329 authorised: the 4 IS the fare.
     expect(leg?.netContributionSats).toBe(329n)
@@ -523,7 +553,7 @@ describe('the folded shape, which is the only one a receive quote produces', () 
   it('caps the folded fare exactly as it caps an explicit one', () => {
     const quote = liveWire({ change: '19680' })
 
-    expect(() => sponsorLegFrom(quote, recoverJointFunding(quote, 'x'), 'x', live)).toThrow(
+    expect(() => sponsorLegFrom(quote, recoverJointFunding(quote, 'x'), 'x', live, PROCEEDS)).toThrow(
       /folds a fare of 9 sats into change, over the 4/,
     )
   })
@@ -531,12 +561,14 @@ describe('the folded shape, which is the only one a receive quote produces', () 
   it('still refuses a sponsor contributing more than it was authorised for', () => {
     const quote = liveWire({ change: '19600' })
 
-    expect(() => sponsorLegFrom(quote, recoverJointFunding(quote, 'x'), 'x', live)).toThrow(/contributing 400/)
+    expect(() => sponsorLegFrom(quote, recoverJointFunding(quote, 'x'), 'x', live, PROCEEDS)).toThrow(
+      /contributing 400/,
+    )
   })
 
   it('folds nothing when the quote keeps exactly the authorised contribution', () => {
     const quote = liveWire({ change: '19671' })
-    const leg = sponsorLegFrom(quote, recoverJointFunding(quote, 'x'), 'x', live)
+    const leg = sponsorLegFrom(quote, recoverJointFunding(quote, 'x'), 'x', live, PROCEEDS)
 
     expect(leg?.fare).toBeUndefined()
     expect(leg?.combineSatsFareWithChange).toBeUndefined()
