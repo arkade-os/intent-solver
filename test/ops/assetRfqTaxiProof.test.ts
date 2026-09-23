@@ -388,6 +388,35 @@ describe('the observer settles only on the whole evidence chain', () => {
     await expect(h.reconcile()).rejects.toThrow(/taptree/)
   })
 
+  it('surfaces a transaction served with no taptree, which finalization never drops', async () => {
+    // `unknown` IS in `PSBTInputFinalKeys`, so absence here is a real
+    // disagreement rather than the leaves' benign one.
+    const trusted = Transaction.fromPSBT(base64.decode(GRAPH.arkTx))
+    const treeless = new Transaction({
+      version: trusted.version,
+      lockTime: trusted.lockTime,
+      allowUnknownInputs: true,
+      allowUnknownOutputs: true,
+      disableScriptCheck: true,
+    })
+    for (let i = 0; i < trusted.inputsLength; i += 1) {
+      const from = trusted.getInput(i)
+      treeless.addInput({
+        txid: from.txid!,
+        index: from.index!,
+        sequence: from.sequence,
+        witnessUtxo: from.witnessUtxo,
+        tapLeafScript: from.tapLeafScript,
+      })
+    }
+    for (let i = 0; i < trusted.outputsLength; i += 1) treeless.addOutput(trusted.getOutput(i) as never)
+    expect(treeless.id).toBe(GRAPH.finalTxid)
+
+    const h = await harness({ chain: chainOf({ txs: [base64.encode(treeless.toPSBT()), GRAPH.checkpoints[0]!] }) })
+
+    await expect(h.reconcile()).rejects.toThrow(/taptree/)
+  })
+
   it('accepts a FINALIZED transaction, whose tap leaves finalization drops by design', async () => {
     // `witnessUtxo` and `unknown` (the taptree) survive `cleanFinalInput`;
     // `tapLeafScript` does not. Requiring it would wedge a CORRECT fill.

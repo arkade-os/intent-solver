@@ -12,7 +12,12 @@
 import { base64, hex } from '@scure/base'
 import { Extension, getArkPsbtFields, Transaction, VtxoTaprootTree } from '@arkade-os/sdk'
 import { verifyOfferFillPlan } from '@arkade-taxi/client'
-import { assertSolverSatsFloor, solverSatsFlow, type CarrierAuthorisedSats } from './assetRfqTaxiRebuild.js'
+import {
+  assertAssetPayouts,
+  assertSolverSatsFloor,
+  solverSatsFlow,
+  type CarrierAuthorisedSats,
+} from './assetRfqTaxiRebuild.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierAttempt, JsonObject, JsonValue } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 import type {
@@ -102,14 +107,6 @@ const boundGraphOf = (attempt: CarrierAttempt, label: string): BoundGraph => {
   return graph
 }
 
-const assetGroupsOf = (tx: Transaction) => {
-  try {
-    return Extension.fromTx(tx).getAssetPacket()?.groups ?? []
-  } catch {
-    return []
-  }
-}
-
 /**
  * The whole of what the solver built, re-derived from its own committed bytes.
  * Every failure in here is a contradiction between two things the SOLVER owns —
@@ -169,47 +166,16 @@ const reconstruct = (row: AssetRfqSwapRow, attempt: CarrierAttempt, label: strin
     throw new Error(`${label} bound graph pays the solver proceeds nowhere`)
   }
   assertSolverSatsFloor(
-    solverSatsFlow(finalTx, checkpoints, graph.inputOwners, hex.decode(proceeds), `${label} bound graph`),
+    solverSatsFlow(finalTx, checkpoints, graph.inputOwners, depositIndex, hex.decode(proceeds), `${label} bound graph`),
     authorised,
     `${label} bound graph`,
   )
   // A recycle with no asset leg cannot exist — `settle` refuses one before any
   // attempt is written — so this is a contradiction, never a case to skip.
   if (row.toAssetId === null) throw new Error(`${label} reconciles a recycle row that names no asset leg`)
-  assertAssetPayouts(finalTx, outputs, proceeds, row, label)
+  assertAssetPayouts(finalTx, proceeds, row, `${label} bound graph`)
 
   return { finalTx, txid: finalTx.id, checkpoints, checkpointTxids, depositIndex, deposit }
-}
-
-/** An asset paid to a third script moves no sats, so the floor cannot see it:
- * every unit must land on the maker's output — exactly what the row sold — or
- * come back to the solver's proceeds. */
-const assertAssetPayouts = (
-  finalTx: Transaction,
-  outputs: readonly (ReturnType<Transaction['getOutput']> | undefined)[],
-  proceeds: string,
-  row: AssetRfqSwapRow,
-  label: string,
-): void => {
-  for (const group of assetGroupsOf(finalTx)) {
-    const assetId = group.assetId?.toString() ?? 'an issuance'
-    for (const output of group.outputs) {
-      if (output.amount <= 0n) continue
-      const script = outputs[output.vout]?.script
-      const where = script === undefined ? 'nowhere' : hex.encode(script)
-      if (output.vout !== 0 && where !== proceeds) {
-        throw new Error(`${label} bound graph pays ${output.amount} of ${assetId} to ${where}, which is not ours`)
-      }
-    }
-  }
-  const toMaker = assetGroupsOf(finalTx)
-    .flatMap((group) => group.outputs.map((output) => ({ assetId: group.assetId?.toString(), output })))
-    .filter((entry) => entry.output.vout === 0 && entry.output.amount > 0n)
-  const wanted = toMaker.filter((entry) => entry.assetId === row.toAssetId)
-  const paid = wanted.reduce((total, entry) => total + entry.output.amount, 0n)
-  if (paid !== row.toAmount || toMaker.length !== wanted.length) {
-    throw new Error(`${label} bound graph does not pay the maker ${row.toAmount} of ${row.toAssetId} and nothing else`)
-  }
 }
 
 /** Null is "the chain has not shown me enough", never "it is not settled". */
@@ -296,9 +262,10 @@ const assertSameSpendCommitment = (candidate: Transaction, trusted: Transaction,
     if (!sameBytes(got.witnessUtxo?.script, want.witnessUtxo?.script)) differs(`input ${i} prevout script`)
     if (got.witnessUtxo?.amount !== want.witnessUtxo?.amount) differs(`input ${i} prevout value`)
     if (!sameOrAbsent(tapLeavesOf(candidate, i), tapLeavesOf(trusted, i))) differs(`input ${i} tap leaves`)
-    const trees = (of: Transaction): readonly string[] =>
-      getArkPsbtFields(of, i, VtxoTaprootTree).map(hex.encode).sort()
-    if (!sameOrAbsent(trees(candidate), trees(trusted))) differs(`input ${i} taptree`)
+    // Strict, for the same reason `witnessUtxo` is: the taptree rides in
+    // `unknown`, which `cleanFinalInput` keeps, so nothing known drops one.
+    const trees = (of: Transaction): string => getArkPsbtFields(of, i, VtxoTaprootTree).map(hex.encode).sort().join(',')
+    if (trees(candidate) !== trees(trusted)) differs(`input ${i} taptree`)
   }
   for (let i = 0; i < trusted.outputsLength; i += 1) {
     const got = candidate.getOutput(i)

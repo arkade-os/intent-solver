@@ -11,8 +11,16 @@
  */
 
 import { base64, hex } from '@scure/base'
-import { getArkPsbtFields, Transaction, VtxoTaprootTree, type IWallet, type TapLeafScript } from '@arkade-os/sdk'
+import {
+  Extension,
+  getArkPsbtFields,
+  Transaction,
+  VtxoTaprootTree,
+  type IWallet,
+  type TapLeafScript,
+} from '@arkade-os/sdk'
 import { buildOfferFillPlan, type JointGraph, type TaxiClient } from '@arkade-taxi/client'
+import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierFillRebuildRequest } from './assetRfqTaxiSettle.js'
 import type { CarrierCoin } from './assetRfqTaxi.js'
 
@@ -34,6 +42,7 @@ export interface CarrierSponsorLeg {
   changeScript: Uint8Array
   /** Sats only: the type is the guard against a fare in the offered asset. */
   fare?: { script: Uint8Array; sats: bigint }
+  combineSatsFareWithChange?: boolean
 }
 
 const MAX_SATS = BigInt(Number.MAX_SAFE_INTEGER)
@@ -89,20 +98,46 @@ export const sponsorLegFrom = (
     fund.reduce((total, coin) => total + BigInt(coin.value), 0n) -
     (change === undefined ? 0n : wireSats(change.sats, `${label} sponsor change`))
   if (quoted <= 0n) throw new Error(`${label} quotes a sponsor contributing ${quoted} sats`)
+  const changeScript = hex.decode(script)
   // The AUTHORISED number is what gets built; the quote's own is only compared
   // to it, so a leg priced differently refuses legibly rather than as a digest.
-  if (quoted !== authorised.contributionSats) {
+  if (fare !== undefined) {
+    if (quoted !== authorised.contributionSats) throw shortContribution(quoted, authorised, label)
+    return {
+      fund,
+      netContributionSats: authorised.contributionSats,
+      changeScript,
+      fare: fareFrom(fare, label, authorised.maxFareSats),
+    }
+  }
+  /**
+   * The FOLDED shape, the only one a receive quote produces: Taxi passes
+   * `combineSatsFareWithChange`, so the assembler emits no fare output and sets
+   * `sponsorChange = sponsorInputs - contribution + fare`. The fare is not
+   * missing, it is inside the change — exactly the shortfall against the
+   * authorised contribution, and capped like any other fare.
+   */
+  const folded = authorised.contributionSats - quoted
+  if (folded < 0n) throw shortContribution(quoted, authorised, label)
+  if (folded === 0n) return { fund, netContributionSats: authorised.contributionSats, changeScript }
+  if (folded > authorised.maxFareSats) {
     throw new Error(
-      `${label} quotes a sponsor contributing ${quoted} sats, not the ${authorised.contributionSats} it authorised`,
+      `${label} folds a fare of ${folded} sats into change, over the ${authorised.maxFareSats} authorised`,
     )
   }
   return {
     fund,
     netContributionSats: authorised.contributionSats,
-    changeScript: hex.decode(script),
-    ...(fare === undefined ? {} : { fare: fareFrom(fare, label, authorised.maxFareSats) }),
+    changeScript,
+    fare: { script: changeScript, sats: folded },
+    combineSatsFareWithChange: true,
   }
 }
+
+const shortContribution = (quoted: bigint, authorised: { contributionSats: bigint }, label: string): Error =>
+  new Error(
+    `${label} quotes a sponsor contributing ${quoted} sats, not the ${authorised.contributionSats} it authorised`,
+  )
 
 export interface CarrierAuthorisedSats {
   physicalSats: bigint
@@ -125,7 +160,11 @@ export const assertSolverSatsFloor = (
   const net = flow.solverPayout - flow.solverInputsSum
   const floor = flow.depositValue + authorised.contributionSats - authorised.physicalSats - authorised.maxFareSats
   if (net < floor) {
-    throw new Error(`${label} nets the solver ${net} sats, under the ${floor} its authorised terms guarantee`)
+    throw new Error(
+      `${label} nets the solver ${net} sats, under the ${floor} its authorised terms guarantee ` +
+        `(deposit ${flow.depositValue} + contribution ${authorised.contributionSats} ` +
+        `- carrier ${authorised.physicalSats} - fare cap ${authorised.maxFareSats})`,
+    )
   }
 }
 
@@ -143,6 +182,9 @@ const fareFrom = (
   }
   const sats = wireSats(output.sats, `${label} fare`)
   if (sats > maxFareSats) throw new Error(`${label} quotes a fare of ${sats} sats over the ${maxFareSats} authorised`)
+  // Refused here rather than by the assembler's `min: 1`, so the vocabulary of
+  // the refusal is this adapter's.
+  if (sats === 0n) throw new Error(`${label} quotes a fare output of no sats at all`)
   return { script: hex.decode(output.script), sats }
 }
 
@@ -216,9 +258,49 @@ export const createCarrierFillRebuilder =
     // Measured on what was BUILT: `outputs[].sats` is in no digest and checked
     // against no bytes, so a floor over it is an inequality over the operator's
     // own term, which proves nothing.
-    assertSolverSatsFloor(satsFlowOf(built, request.proceedsScript, label), request, label)
+    assertBuiltGraph(built, request, label)
     return built
   }
+
+/** An asset paid to a third script moves no sats, so no floor can see it: every
+ * unit must land on the maker's output — exactly what the row sold and nothing
+ * else — or come back to the solver's own proceeds. */
+export const assertAssetPayouts = (
+  finalTx: Transaction,
+  proceeds: string,
+  row: Pick<AssetRfqSwapRow, 'toAssetId' | 'toAmount'>,
+  label: string,
+): void => {
+  const outputs = Array.from({ length: finalTx.outputsLength }, (_, i) => finalTx.getOutput(i))
+  const groups = assetGroupsOf(finalTx)
+  for (const group of groups) {
+    const assetId = group.assetId?.toString() ?? 'an issuance'
+    for (const output of group.outputs) {
+      if (output.amount <= 0n) continue
+      const script = outputs[output.vout]?.script
+      const where = script === undefined ? 'nowhere' : hex.encode(script)
+      if (output.vout !== 0 && where !== proceeds) {
+        throw new Error(`${label} pays ${output.amount} of ${assetId} to ${where}, which is not ours`)
+      }
+    }
+  }
+  const toMaker = groups
+    .flatMap((group) => group.outputs.map((output) => ({ assetId: group.assetId?.toString(), output })))
+    .filter((entry) => entry.output.vout === 0 && entry.output.amount > 0n)
+  const wanted = toMaker.filter((entry) => entry.assetId === row.toAssetId)
+  const paid = wanted.reduce((total, entry) => total + entry.output.amount, 0n)
+  if (paid !== row.toAmount || toMaker.length !== wanted.length) {
+    throw new Error(`${label} does not pay the maker ${row.toAmount} of ${row.toAssetId} and nothing else`)
+  }
+}
+
+const assetGroupsOf = (tx: Transaction) => {
+  try {
+    return Extension.fromTx(tx).getAssetPacket()?.groups ?? []
+  } catch {
+    return []
+  }
+}
 
 const valueSpentBy = (checkpoint: Transaction, label: string): bigint => {
   const amount = checkpoint.getInput(0).witnessUtxo?.amount
@@ -226,19 +308,20 @@ const valueSpentBy = (checkpoint: Transaction, label: string): bigint => {
   return amount
 }
 
-/** Shared with the observer, so the two ends cannot measure a fill differently. */
+/** Shared with the observer, so the two ends cannot measure a fill differently.
+ * The deposit index is the CALLER's: a second derivation here could disagree. */
 export const solverSatsFlow = (
   finalTx: Transaction,
   checkpoints: readonly Transaction[],
   inputOwners: readonly (string | null)[],
+  depositIndex: number,
   proceedsScript: Uint8Array,
   label: string,
 ): { depositValue: bigint; solverInputsSum: bigint; solverPayout: bigint } => {
-  const deposit = inputOwners.indexOf(null)
-  if (deposit < 0) throw new Error(`${label} names no offer deposit among its inputs`)
+  if (inputOwners[depositIndex] !== null) throw new Error(`${label} names no offer deposit at input ${depositIndex}`)
   const proceeds = hex.encode(proceedsScript).toLowerCase()
   return {
-    depositValue: valueSpentBy(checkpoints[deposit]!, `${label} deposit checkpoint`),
+    depositValue: valueSpentBy(checkpoints[depositIndex]!, `${label} deposit checkpoint`),
     solverInputsSum: inputOwners.reduce(
       (total, owner, i) =>
         owner === 'solver' ? total + valueSpentBy(checkpoints[i]!, `${label} checkpoint ${i}`) : total,
@@ -252,15 +335,17 @@ export const solverSatsFlow = (
   }
 }
 
-const satsFlowOf = (
-  graph: JointGraph,
-  proceedsScript: Uint8Array,
-  label: string,
-): { depositValue: bigint; solverInputsSum: bigint; solverPayout: bigint } =>
-  solverSatsFlow(
-    Transaction.fromPSBT(base64.decode(graph.arkTx)),
-    graph.checkpoints.map((psbt) => Transaction.fromPSBT(base64.decode(psbt))),
-    graph.inputOwners,
-    proceedsScript,
+/** The assembler lays the deposit at input 0 with the only null owner, so a
+ * graph shaped otherwise is not one this builder produced. */
+const assertBuiltGraph = (graph: JointGraph, request: CarrierFillRebuildRequest, label: string): void => {
+  const finalTx = Transaction.fromPSBT(base64.decode(graph.arkTx))
+  const checkpoints = graph.checkpoints.map((psbt) => Transaction.fromPSBT(base64.decode(psbt)))
+  assertSolverSatsFloor(
+    solverSatsFlow(finalTx, checkpoints, graph.inputOwners, 0, request.proceedsScript, label),
+    request,
     label,
   )
+  // The asset counterpart of the floor, on the same bytes before the same
+  // signature: a diverted unit moves no sats for the floor to see.
+  assertAssetPayouts(finalTx, hex.encode(request.proceedsScript).toLowerCase(), request.row, label)
+}

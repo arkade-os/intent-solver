@@ -10,7 +10,14 @@
 import { describe, it, expect } from 'vitest'
 import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { buildOffchainTx, CSVMultisigTapscript, DefaultVtxo, Transaction } from '@arkade-os/sdk'
+import {
+  buildOffchainTx,
+  createAssetPacket,
+  CSVMultisigTapscript,
+  DefaultVtxo,
+  Extension,
+  Transaction,
+} from '@arkade-os/sdk'
 import { digestJointGraph, OFFER_FILL_TEMPLATE, verifyOfferFillPlan } from '@arkade-taxi/client'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierCoin } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
@@ -53,6 +60,13 @@ const DEPOSIT = input(1, DEPOSIT_TXID, 1, 1_000)
 const SOLVER = input(2, COIN_A, 0, 2_000)
 const SPONSOR = input(3, SPONSOR_TXID, 7, 5_000)
 
+/** Input 1 carries the asset; output 0 pays the maker its 10. */
+const ASSET_EXT = Extension.create([
+  createAssetPacket(new Map([[1, [{ assetId: ASSET, amount: 10n }]]]), [
+    { address: '', assets: [{ assetId: ASSET, amount: 10n }] },
+  ]),
+]).txOut()
+
 /** `[receiver 330, sponsor-change 1500, solver 6170]` over the three inputs. */
 const built = buildOffchainTx(
   [DEPOSIT, SOLVER, SPONSOR],
@@ -60,6 +74,7 @@ const built = buildOffchainTx(
     { script: MAKER, amount: 330n },
     { script: SPONSOR_SCRIPT, amount: 1_500n },
     { script: PROCEEDS, amount: 6_170n },
+    ASSET_EXT,
   ],
   SERVER_UNROLL,
 )
@@ -162,6 +177,7 @@ describe('recovering the sponsor leg from the quoted graph itself', () => {
         { script: MAKER, amount: 330n },
         { script: SPONSOR_SCRIPT, amount: 1_500n },
         { script: PROCEEDS, amount: 6_170n },
+        ASSET_EXT,
       ],
       SERVER_UNROLL,
     )
@@ -335,10 +351,57 @@ describe('the rebuild refuses a quote priced against the solver', () => {
     await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(/sat carrier/)
   })
 
-  it('refuses a sponsor contributing less than the quote it was authorised for', async () => {
+  it('refuses a sponsor whose shortfall against the authorised contribution is over the cap', async () => {
+    // No fare output, so the 10 it kept back reads as a folded fare of 10.
     const quote = wire(priced({ change: '1510', payout: '6160' }))
 
-    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(/contributing 3490/)
+    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(
+      /folds a fare of 10 sats into change, over the 4/,
+    )
+  })
+
+  it('refuses a fare output that prices itself at nothing, in its own words', async () => {
+    const quote = wire(priced({ fare: '0' }))
+
+    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(/no sats at all/)
+  })
+
+  it('refuses a BUILT graph that routes the asset away, which no sats floor can see', async () => {
+    // Same sats everywhere; the packet pays the maker's 10 to the sponsor.
+    const diverted = Extension.create([
+      createAssetPacket(new Map([[1, [{ assetId: ASSET, amount: 10n }]]]), [
+        { address: '' },
+        { address: '', assets: [{ assetId: ASSET, amount: 10n }] },
+      ]),
+    ]).txOut()
+    const graph = buildOffchainTx(
+      [DEPOSIT, SOLVER, SPONSOR],
+      [
+        { script: MAKER, amount: 330n },
+        { script: SPONSOR_SCRIPT, amount: 1_500n },
+        { script: PROCEEDS, amount: 6_170n },
+        diverted,
+      ],
+      SERVER_UNROLL,
+    )
+    const rebuild = createCarrierFillRebuilder({
+      wallet: {} as never,
+      arkServerUrl: 'http://ark',
+      build: (async () => ({
+        arkTx: base64.encode(graph.arkTx.toPSBT()),
+        checkpoints: graph.checkpoints.map((c) => base64.encode(c.toPSBT())),
+        graphId: GRAPH_ID,
+        inputOwners: [...INPUT_OWNERS],
+      })) as never,
+    })
+
+    await expect(rebuild(rebuildRequest() as never)).rejects.toThrow(/which is not ours/)
+  })
+
+  it('refuses a sponsor contributing MORE than authorised, which it cannot rebuild', async () => {
+    const quote = wire(priced({ change: '1400', payout: '6270' }))
+
+    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(/contributing 3600/)
   })
 
   it('refuses a fare over the cap taken straight out of the payout', async () => {
@@ -390,6 +453,7 @@ describe('the rebuild refuses a quote priced against the solver', () => {
         { script: MAKER, amount: 330n },
         { script: SPONSOR_SCRIPT, amount: 1_500n },
         { script: PROCEEDS, amount: 6_160n },
+        ASSET_EXT,
       ],
       SERVER_UNROLL,
     )
@@ -405,6 +469,101 @@ describe('the rebuild refuses a quote priced against the solver', () => {
     })
 
     await expect(rebuild(rebuildRequest() as never)).rejects.toThrow(/nets the solver 4160/)
+  })
+})
+
+/** Taxi passes `combineSatsFareWithChange: true` whenever a receive quote is
+ * bound (`swapFillQuotes.ts:568`) and `expectSatsFare` is then false (`:581`),
+ * so the graph carries NO `sponsor-fare` output. */
+describe('the folded shape, which is the only one a receive quote produces', () => {
+  // Taxi's own numbers, from `app/test/swapFillQuotes.test.ts:307-317`.
+  const LIVE = { inputs: 20_000, change: '19675', contribution: 329n, fare: 4n }
+  const live = { contributionSats: LIVE.contribution, maxFareSats: LIVE.fare }
+
+  const liveWire = (over: { change?: string } = {}) => {
+    const sponsorCoin = input(3, SPONSOR_TXID, 7, LIVE.inputs)
+    const graph = buildOffchainTx(
+      [DEPOSIT, SOLVER, sponsorCoin],
+      [
+        { script: MAKER, amount: 330n },
+        { script: SPONSOR_SCRIPT, amount: BigInt(over.change ?? LIVE.change) },
+        { script: PROCEEDS, amount: 2_320n },
+        ASSET_EXT,
+      ],
+      SERVER_UNROLL,
+    )
+    return wire({
+      arkTx: base64.encode(graph.arkTx.toPSBT()),
+      checkpoints: graph.checkpoints.map((c) => base64.encode(c.toPSBT())),
+      outputs: [
+        { role: 'receiver', vout: 0, script: hex.encode(MAKER), sats: '330', assets: [] },
+        {
+          role: 'sponsor-change',
+          vout: 1,
+          script: hex.encode(SPONSOR_SCRIPT),
+          sats: over.change ?? LIVE.change,
+          assets: [],
+        },
+        { role: 'solver', vout: 2, script: hex.encode(PROCEEDS), sats: '2320', assets: [] },
+      ],
+    } as Partial<Wire>)
+  }
+
+  it('recovers the folded fare as the shortfall against the authorised contribution', () => {
+    const quote = liveWire()
+    const leg = sponsorLegFrom(quote, recoverJointFunding(quote, 'x'), 'x', live)
+
+    // 20000 - 19675 = 325 quoted against 329 authorised: the 4 IS the fare.
+    expect(leg?.netContributionSats).toBe(329n)
+    expect(leg?.fare?.sats).toBe(4n)
+    expect(hex.encode(leg!.fare!.script)).toBe(hex.encode(SPONSOR_SCRIPT))
+    expect(leg?.combineSatsFareWithChange).toBe(true)
+  })
+
+  it('caps the folded fare exactly as it caps an explicit one', () => {
+    const quote = liveWire({ change: '19680' })
+
+    expect(() => sponsorLegFrom(quote, recoverJointFunding(quote, 'x'), 'x', live)).toThrow(
+      /folds a fare of 9 sats into change, over the 4/,
+    )
+  })
+
+  it('still refuses a sponsor contributing more than it was authorised for', () => {
+    const quote = liveWire({ change: '19600' })
+
+    expect(() => sponsorLegFrom(quote, recoverJointFunding(quote, 'x'), 'x', live)).toThrow(/contributing 400/)
+  })
+
+  it('folds nothing when the quote keeps exactly the authorised contribution', () => {
+    const quote = liveWire({ change: '19671' })
+    const leg = sponsorLegFrom(quote, recoverJointFunding(quote, 'x'), 'x', live)
+
+    expect(leg?.fare).toBeUndefined()
+    expect(leg?.combineSatsFareWithChange).toBeUndefined()
+  })
+
+  it('builds with the flag, or the assembler emits a fourth output and misses the digest', async () => {
+    const seen: Record<string, unknown>[] = []
+    const rebuild = createCarrierFillRebuilder({
+      wallet: {} as never,
+      arkServerUrl: 'http://ark',
+      build: (async (_w: unknown, _u: unknown, _o: unknown, opts: Record<string, unknown>) => {
+        seen.push(opts)
+        return { arkTx: ARK_TX, checkpoints: [...CHECKPOINTS], graphId: GRAPH_ID, inputOwners: [...INPUT_OWNERS] }
+      }) as never,
+    })
+
+    await rebuild(
+      rebuildRequest({
+        quotedGraph: liveWire(),
+        contributionSats: LIVE.contribution,
+        maxFareSats: LIVE.fare,
+      }) as never,
+    )
+
+    const sponsor = seen[0]!.sponsor as { combineSatsFareWithChange?: boolean; fare?: { sats: bigint } }
+    expect(sponsor.combineSatsFareWithChange).toBe(true)
+    expect(sponsor.fare?.sats).toBe(4n)
   })
 })
 
