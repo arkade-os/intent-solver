@@ -115,16 +115,15 @@ const solverCoin = (over: Partial<CarrierCoin> = {}): CarrierCoin => ({
   ...over,
 })
 
-/** `solverNet` = 6170 - 2000 = 4170 = 1000 + 3500 - 330 - fare, so the quote's
- * implied fare is zero and it clears a 4 sat cap. */
+/** The BUILT graph nets 4170 against a floor of 1000 + 3500 - 330 - 4 = 4166. */
+const AUTHORISED = { physicalSats: 330n, contributionSats: 3_500n, maxFareSats: 4n }
+
 const rebuildRequest = (over: Record<string, unknown> = {}) => ({
   row: row(),
   offerHex: 'abcd',
   inputs: [solverCoin()],
   proceedsScript: PROCEEDS,
-  physicalSats: 330n,
-  contributionSats: 3_500n,
-  maxFareSats: 4n,
+  ...AUTHORISED,
   quotedGraph: wire(),
   ...over,
 })
@@ -196,8 +195,8 @@ describe('recovering the sponsor leg from the quoted graph itself', () => {
     expect(() => recoverJointFunding(stripped, 'carrier fill swap-1')).toThrow(/taptree|tap leaves|witness utxo/)
   })
 
-  it('derives the contribution as the sponsor inputs less the change it is quoted', () => {
-    const leg = sponsorLegFrom(wire(), recoverJointFunding(wire(), 'x'), 'x')
+  it('builds the leg on the authorised contribution, having compared the quote to it', () => {
+    const leg = sponsorLegFrom(wire(), recoverJointFunding(wire(), 'x'), 'x', AUTHORISED)
 
     expect(leg?.netContributionSats).toBe(3_500n)
     expect(leg?.fund.map((c) => c.txid)).toEqual([SPONSOR_TXID])
@@ -205,7 +204,7 @@ describe('recovering the sponsor leg from the quoted graph itself', () => {
     expect(leg?.fare).toBeUndefined()
   })
 
-  it('carries an asset fare across, in the id form the builder takes', () => {
+  it('refuses a fare carrying an asset, which is the whole offered leg to take', () => {
     const fared = wire({
       outputs: [
         { role: 'receiver', vout: 0, script: hex.encode(MAKER), sats: '330', assets: [] },
@@ -213,20 +212,21 @@ describe('recovering the sponsor leg from the quoted graph itself', () => {
           role: 'sponsor-fare',
           vout: 1,
           script: hex.encode(SPONSOR_SCRIPT),
-          sats: '330',
-          assets: [{ assetId: { txid: `${'bb'.repeat(1)}${'aa'.repeat(31)}`, groupIndex: 1 }, units: '4' }],
+          sats: '4',
+          assets: [{ assetId: { txid: `${'bb'.repeat(1)}${'aa'.repeat(31)}`, groupIndex: 1 }, units: '10' }],
         },
-        { role: 'sponsor-change', vout: 2, script: hex.encode(SPONSOR_SCRIPT), sats: '1170', assets: [] },
-        { role: 'solver', vout: 3, script: hex.encode(PROCEEDS), sats: '6170', assets: [] },
+        { role: 'sponsor-change', vout: 2, script: hex.encode(SPONSOR_SCRIPT), sats: '1500', assets: [] },
+        { role: 'solver', vout: 3, script: hex.encode(PROCEEDS), sats: '6166', assets: [] },
       ],
     } as Partial<Wire>)
 
-    const leg = sponsorLegFrom(fared, recoverJointFunding(fared, 'x'), 'x')
+    expect(() => sponsorLegFrom(fared, recoverJointFunding(fared, 'x'), 'x', AUTHORISED)).toThrow(/carrying assets/)
+  })
 
-    expect(leg?.netContributionSats).toBe(3_830n)
-    expect(leg?.fare?.assetId).toBe(ASSET)
-    expect(leg?.fare?.amount).toBe(4n)
-    expect(leg?.fare?.sats).toBe(330n)
+  it('refuses a fare over the cap before it can be built with', () => {
+    const greedy = wire(priced({ fare: '10', payout: '6160' }))
+
+    expect(() => sponsorLegFrom(greedy, recoverJointFunding(greedy, 'x'), 'x', AUTHORISED)).toThrow(/over the 4/)
   })
 
   it('answers no sponsor leg at all when the operator funds none', () => {
@@ -238,7 +238,7 @@ describe('recovering the sponsor leg from the quoted graph itself', () => {
       checkpoints: [CHECKPOINTS[0]!, CHECKPOINTS[1]!],
     } as Partial<Wire>)
 
-    expect(sponsorLegFrom(alone, recoverJointFunding(alone, 'x'), 'x')).toBeUndefined()
+    expect(sponsorLegFrom(alone, recoverJointFunding(alone, 'x'), 'x', AUTHORISED)).toBeUndefined()
   })
 })
 
@@ -345,7 +345,33 @@ describe('the rebuild refuses a quote priced against the solver', () => {
     // Contribution untouched at 3500: the ten sats come from the solver alone.
     const quote = wire(priced({ fare: '10', payout: '6160' }))
 
-    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(/nets the solver/)
+    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(/over the 4/)
+  })
+
+  it('refuses an inflated fare that declares a payout to match, which no byte checks', async () => {
+    // A floor measured on the WIRE passes here while the built graph pays 10.
+    const quote = wire(priced({ fare: '10' }))
+
+    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(/nets the solver|fare/)
+  })
+
+  it('refuses a fare carrying an asset, which moves no sats for a floor to see', async () => {
+    const quote = wire({
+      outputs: [
+        { role: 'receiver', vout: 0, script: hex.encode(MAKER), sats: '330', assets: [] },
+        {
+          role: 'sponsor-fare',
+          vout: 1,
+          script: hex.encode(SPONSOR_SCRIPT),
+          sats: '4',
+          assets: [{ assetId: { txid: `${'bb'.repeat(1)}${'aa'.repeat(31)}`, groupIndex: 1 }, units: '10' }],
+        },
+        { role: 'sponsor-change', vout: 2, script: hex.encode(SPONSOR_SCRIPT), sats: '1500', assets: [] },
+        { role: 'solver', vout: 3, script: hex.encode(PROCEEDS), sats: '6166', assets: [] },
+      ],
+    } as Partial<Wire>)
+
+    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(/carrying assets/)
   })
 
   it('admits a fare inside the cap, which is what the cap is for', async () => {
@@ -356,10 +382,29 @@ describe('the rebuild refuses a quote priced against the solver', () => {
     })
   })
 
-  it('refuses a quote that pays the solver nothing at all', async () => {
-    const quote = wire(priced({ payout: '0' }))
+  it('measures the graph it BUILT, so a short payout fails even with a clean quote', async () => {
+    // The quote passes every wire comparison; only the built bytes are short.
+    const short = buildOffchainTx(
+      [DEPOSIT, SOLVER, SPONSOR],
+      [
+        { script: MAKER, amount: 330n },
+        { script: SPONSOR_SCRIPT, amount: 1_500n },
+        { script: PROCEEDS, amount: 6_160n },
+      ],
+      SERVER_UNROLL,
+    )
+    const rebuild = createCarrierFillRebuilder({
+      wallet: {} as never,
+      arkServerUrl: 'http://ark',
+      build: (async () => ({
+        arkTx: base64.encode(short.arkTx.toPSBT()),
+        checkpoints: short.checkpoints.map((c) => base64.encode(c.toPSBT())),
+        graphId: GRAPH_ID,
+        inputOwners: [...INPUT_OWNERS],
+      })) as never,
+    })
 
-    await expect(rebuilder()(rebuildRequest({ quotedGraph: quote }) as never)).rejects.toThrow(/nets the solver/)
+    await expect(rebuild(rebuildRequest() as never)).rejects.toThrow(/nets the solver 4160/)
   })
 })
 

@@ -388,6 +388,36 @@ describe('the observer settles only on the whole evidence chain', () => {
     await expect(h.reconcile()).rejects.toThrow(/taptree/)
   })
 
+  it('accepts a FINALIZED transaction, whose tap leaves finalization drops by design', async () => {
+    // `witnessUtxo` and `unknown` (the taptree) survive `cleanFinalInput`;
+    // `tapLeafScript` does not. Requiring it would wedge a CORRECT fill.
+    const trusted = Transaction.fromPSBT(base64.decode(GRAPH.arkTx))
+    const finalized = new Transaction({
+      version: trusted.version,
+      lockTime: trusted.lockTime,
+      allowUnknownInputs: true,
+      allowUnknownOutputs: true,
+      disableScriptCheck: true,
+    })
+    for (let i = 0; i < trusted.inputsLength; i += 1) {
+      const from = trusted.getInput(i)
+      finalized.addInput({
+        txid: from.txid!,
+        index: from.index!,
+        sequence: from.sequence,
+        witnessUtxo: from.witnessUtxo,
+      })
+      setArkPsbtField(finalized, i, VtxoTaprootTree, getArkPsbtFields(trusted, i, VtxoTaprootTree)[0]!)
+    }
+    for (let i = 0; i < trusted.outputsLength; i += 1) finalized.addOutput(trusted.getOutput(i) as never)
+    expect(finalized.getInput(1).tapLeafScript).toBeUndefined()
+
+    const h = await harness({ chain: chainOf({ txs: [base64.encode(finalized.toPSBT()), GRAPH.checkpoints[0]!] }) })
+
+    await expect(h.reconcile()).resolves.toEqual({ status: 'settled', txid: GRAPH.finalTxid })
+    expect(h.ledger.reserved().size).toBe(0)
+  })
+
   it('accepts a transaction the chain signed, since a signature carries no consensus weight', async () => {
     // What arkd serves back is the SIGNED transaction: witness data only.
     const signed = Transaction.fromPSBT(base64.decode(GRAPH.arkTx))
@@ -500,6 +530,84 @@ describe('the observer measures the sats, not only who they went to', () => {
     const h = await harness()
 
     await expect(h.reconcileAs({ ...rowOf(), toAssetId: null })).rejects.toThrow(/names no asset leg/)
+  })
+})
+
+/** The lever no sats floor can see: an asset routed to the operator moves no
+ * sats, so only reading WHERE the packet pays catches it. */
+describe('the observer checks where the assets went, not only how many', () => {
+  const withPacket = async (packetOut: ReturnType<Extension['txOut']>) => {
+    const built = buildOffchainTx([DEPOSIT, SOLVER, SPONSOR], [...payments(), packetOut], SERVER_UNROLL)
+    const arkTx = base64.encode(built.arkTx.toPSBT())
+    const checkpoints = built.checkpoints.map((c) => base64.encode(c.toPSBT()))
+    const inputOwners: readonly (string | null)[] = [null, 'solver', 'sponsor']
+    const graph = {
+      arkTx,
+      checkpoints,
+      inputOwners,
+      graphId: digestJointGraph({ arkTx, checkpoints, inputOwners }, OFFER_FILL_TEMPLATE),
+      finalTxid: built.arkTx.id,
+      checkpointTxids: built.checkpoints.map((c) => c.id),
+    }
+    return harness({ binding: bindingJson(boundTo(graph)), chain: servedFrom(graph) })
+  }
+
+  it('refuses a packet that pays the asset to the sponsor fare output', async () => {
+    const h = await withPacket(
+      Extension.create([
+        createAssetPacket(new Map([[1, [{ assetId: ASSET, amount: 20n }]]]), [
+          { address: '', assets: [{ assetId: ASSET, amount: 10n }] },
+          { address: '', assets: [{ assetId: ASSET, amount: 10n }] },
+        ]),
+      ]).txOut(),
+    )
+
+    await expect(h.reconcile()).rejects.toThrow(/which is not ours/)
+  })
+
+  it('admits the surplus the solver pays back to itself', async () => {
+    const h = await withPacket(
+      Extension.create([
+        createAssetPacket(new Map([[1, [{ assetId: ASSET, amount: 20n }]]]), [
+          { address: '', assets: [{ assetId: ASSET, amount: 10n }] },
+          { address: '' },
+          { address: '' },
+          { address: '', assets: [{ assetId: ASSET, amount: 10n }] },
+        ]),
+      ]).txOut(),
+    )
+
+    await expect(h.reconcile()).resolves.toMatchObject({ status: 'settled' })
+  })
+
+  it('refuses a packet that slips a second asset onto the maker output', async () => {
+    const other = `${'cc'.repeat(31)}dd0100`
+    const h = await withPacket(
+      Extension.create([
+        createAssetPacket(
+          new Map([
+            [
+              1,
+              [
+                { assetId: ASSET, amount: 10n },
+                { assetId: other, amount: 5n },
+              ],
+            ],
+          ]),
+          [
+            {
+              address: '',
+              assets: [
+                { assetId: ASSET, amount: 10n },
+                { assetId: other, amount: 5n },
+              ],
+            },
+          ],
+        ),
+      ]).txOut(),
+    )
+
+    await expect(h.reconcile()).rejects.toThrow(/and nothing else/)
   })
 })
 

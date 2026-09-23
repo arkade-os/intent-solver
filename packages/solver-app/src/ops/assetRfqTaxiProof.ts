@@ -12,7 +12,7 @@
 import { base64, hex } from '@scure/base'
 import { Extension, getArkPsbtFields, Transaction, VtxoTaprootTree } from '@arkade-os/sdk'
 import { verifyOfferFillPlan } from '@arkade-taxi/client'
-import { assertSolverSatsFloor, type CarrierAuthorisedSats } from './assetRfqTaxiRebuild.js'
+import { assertSolverSatsFloor, solverSatsFlow, type CarrierAuthorisedSats } from './assetRfqTaxiRebuild.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierAttempt, JsonObject, JsonValue } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 import type {
@@ -102,18 +102,12 @@ const boundGraphOf = (attempt: CarrierAttempt, label: string): BoundGraph => {
   return graph
 }
 
-const assetPaidTo = (tx: Transaction, assetId: string, vout: number): bigint => {
-  let packet
+const assetGroupsOf = (tx: Transaction) => {
   try {
-    packet = Extension.fromTx(tx).getAssetPacket()
+    return Extension.fromTx(tx).getAssetPacket()?.groups ?? []
   } catch {
-    return 0n
+    return []
   }
-  return (packet?.groups ?? [])
-    .filter((group) => group.assetId?.toString() === assetId)
-    .flatMap((group) => group.outputs)
-    .filter((output) => output.vout === vout)
-    .reduce((total, output) => total + output.amount, 0n)
 }
 
 /**
@@ -171,35 +165,51 @@ const reconstruct = (row: AssetRfqSwapRow, attempt: CarrierAttempt, label: strin
   }
   const proceeds = stringField(attempt.snapshot.proceeds_script, `${label} snapshot proceeds script`).toLowerCase()
   const outputs = Array.from({ length: finalTx.outputsLength }, (_, i) => finalTx.getOutput(i))
-  const paid = outputs.filter((output) => output?.script !== undefined && hex.encode(output.script) === proceeds)
-  if (paid.length === 0) throw new Error(`${label} bound graph pays the solver proceeds nowhere`)
+  if (!outputs.some((output) => output?.script !== undefined && hex.encode(output.script) === proceeds)) {
+    throw new Error(`${label} bound graph pays the solver proceeds nowhere`)
+  }
   assertSolverSatsFloor(
-    {
-      depositValue: valueSpentBy(checkpoints[depositIndex]!, `${label} deposit checkpoint`),
-      solverInputsSum: graph.inputOwners.reduce(
-        (total, owner, i) =>
-          owner === 'solver' ? total + valueSpentBy(checkpoints[i]!, `${label} checkpoint ${i}`) : total,
-        0n,
-      ),
-      solverPayout: paid.reduce((total, output) => total + (output?.amount ?? 0n), 0n),
-    },
+    solverSatsFlow(finalTx, checkpoints, graph.inputOwners, hex.decode(proceeds), `${label} bound graph`),
     authorised,
     `${label} bound graph`,
   )
   // A recycle with no asset leg cannot exist — `settle` refuses one before any
   // attempt is written — so this is a contradiction, never a case to skip.
   if (row.toAssetId === null) throw new Error(`${label} reconciles a recycle row that names no asset leg`)
-  if (assetPaidTo(finalTx, row.toAssetId, 0) !== row.toAmount) {
-    throw new Error(`${label} bound graph does not pay the maker ${row.toAmount} of ${row.toAssetId}`)
-  }
+  assertAssetPayouts(finalTx, outputs, proceeds, row, label)
 
   return { finalTx, txid: finalTx.id, checkpoints, checkpointTxids, depositIndex, deposit }
 }
 
-const valueSpentBy = (checkpoint: Transaction, label: string): bigint => {
-  const amount = checkpoint.getInput(0).witnessUtxo?.amount
-  if (amount === undefined) throw new Error(`${label} declares no witness utxo to value its input`)
-  return amount
+/** An asset paid to a third script moves no sats, so the floor cannot see it:
+ * every unit must land on the maker's output — exactly what the row sold — or
+ * come back to the solver's proceeds. */
+const assertAssetPayouts = (
+  finalTx: Transaction,
+  outputs: readonly (ReturnType<Transaction['getOutput']> | undefined)[],
+  proceeds: string,
+  row: AssetRfqSwapRow,
+  label: string,
+): void => {
+  for (const group of assetGroupsOf(finalTx)) {
+    const assetId = group.assetId?.toString() ?? 'an issuance'
+    for (const output of group.outputs) {
+      if (output.amount <= 0n) continue
+      const script = outputs[output.vout]?.script
+      const where = script === undefined ? 'nowhere' : hex.encode(script)
+      if (output.vout !== 0 && where !== proceeds) {
+        throw new Error(`${label} bound graph pays ${output.amount} of ${assetId} to ${where}, which is not ours`)
+      }
+    }
+  }
+  const toMaker = assetGroupsOf(finalTx)
+    .flatMap((group) => group.outputs.map((output) => ({ assetId: group.assetId?.toString(), output })))
+    .filter((entry) => entry.output.vout === 0 && entry.output.amount > 0n)
+  const wanted = toMaker.filter((entry) => entry.assetId === row.toAssetId)
+  const paid = wanted.reduce((total, entry) => total + entry.output.amount, 0n)
+  if (paid !== row.toAmount || toMaker.length !== wanted.length) {
+    throw new Error(`${label} bound graph does not pay the maker ${row.toAmount} of ${row.toAssetId} and nothing else`)
+  }
 }
 
 /** Null is "the chain has not shown me enough", never "it is not settled". */
@@ -250,9 +260,26 @@ export const proveCarrierFill = async (
 const sameBytes = (a: Uint8Array | undefined, b: Uint8Array | undefined): boolean =>
   a === undefined || b === undefined ? a === b : hex.encode(a) === hex.encode(b)
 
-/** NOT whole-PSBT bytes: `unsignedPsbtBytes` strips `tapScriptSig` and nothing
- * else, so one extra field from arkd would fail a byte compare forever on a
- * correct transaction. Compared instead: all that decides what the money does. */
+const tapLeavesOf = (tx: Transaction, at: number): readonly string[] =>
+  (tx.getInput(at).tapLeafScript ?? [])
+    .map(
+      ([control, script]) =>
+        `${control.version}:${hex.encode(control.internalKey)}:${control.merklePath.map(hex.encode).join('/')}:${hex.encode(script)}`,
+    )
+    .sort()
+
+/**
+ * Absent is not different. `cleanFinalInput` keeps only `PSBTInputFinalKeys`,
+ * which excludes `tapLeafScript` and includes `unknown` (the taptree), so a
+ * finalized answer legitimately arrives with its leaves gone. Requiring them
+ * would wedge a CORRECT fill forever with its coins pinned — the trap this
+ * comparison removes rather than relocates. Present-and-different still fails.
+ */
+const sameOrAbsent = (got: readonly string[], want: readonly string[]): boolean =>
+  got.length === 0 || got.join(',') === want.join(',')
+
+/** NOT whole-PSBT bytes, which one added or dropped field would break forever:
+ * all that decides what the money does, and only that. */
 const assertSameSpendCommitment = (candidate: Transaction, trusted: Transaction, label: string): void => {
   const differs = (what: string): never => {
     throw new Error(`${label} is served with a different ${what} than the one this solver signed`)
@@ -265,19 +292,13 @@ const assertSameSpendCommitment = (candidate: Transaction, trusted: Transaction,
     const want = trusted.getInput(i)
     if (!sameBytes(got.txid, want.txid) || got.index !== want.index) differs(`input ${i} outpoint`)
     if (got.sequence !== want.sequence) differs(`input ${i} sequence`)
+    // Strict: `witnessUtxo` IS in `PSBTInputFinalKeys`, so absence is real.
     if (!sameBytes(got.witnessUtxo?.script, want.witnessUtxo?.script)) differs(`input ${i} prevout script`)
     if (got.witnessUtxo?.amount !== want.witnessUtxo?.amount) differs(`input ${i} prevout value`)
-    const leaves = (list: Transaction, at: number): string =>
-      (list.getInput(at).tapLeafScript ?? [])
-        .map(
-          ([control, script]) =>
-            `${control.version}:${hex.encode(control.internalKey)}:${control.merklePath.map(hex.encode).join('/')}:${hex.encode(script)}`,
-        )
-        .sort()
-        .join(',')
-    if (leaves(candidate, i) !== leaves(trusted, i)) differs(`input ${i} tap leaves`)
-    const trees = (of: Transaction): string => getArkPsbtFields(of, i, VtxoTaprootTree).map(hex.encode).sort().join(',')
-    if (trees(candidate) !== trees(trusted)) differs(`input ${i} taptree`)
+    if (!sameOrAbsent(tapLeavesOf(candidate, i), tapLeavesOf(trusted, i))) differs(`input ${i} tap leaves`)
+    const trees = (of: Transaction): readonly string[] =>
+      getArkPsbtFields(of, i, VtxoTaprootTree).map(hex.encode).sort()
+    if (!sameOrAbsent(trees(candidate), trees(trusted))) differs(`input ${i} taptree`)
   }
   for (let i = 0; i < trusted.outputsLength; i += 1) {
     const got = candidate.getOutput(i)

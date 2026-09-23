@@ -11,7 +11,7 @@
  */
 
 import { base64, hex } from '@scure/base'
-import { asset, getArkPsbtFields, Transaction, VtxoTaprootTree, type IWallet, type TapLeafScript } from '@arkade-os/sdk'
+import { getArkPsbtFields, Transaction, VtxoTaprootTree, type IWallet, type TapLeafScript } from '@arkade-os/sdk'
 import { buildOfferFillPlan, type JointGraph, type TaxiClient } from '@arkade-taxi/client'
 import type { CarrierFillRebuildRequest } from './assetRfqTaxiSettle.js'
 import type { CarrierCoin } from './assetRfqTaxi.js'
@@ -32,7 +32,8 @@ export interface CarrierSponsorLeg {
   fund: CarrierJointFunding[]
   netContributionSats: bigint
   changeScript: Uint8Array
-  fare?: { assetId?: string; amount?: bigint; script: Uint8Array; sats: bigint }
+  /** Sats only: the type is the guard against a fare in the offered asset. */
+  fare?: { script: Uint8Array; sats: bigint }
 }
 
 const MAX_SATS = BigInt(Number.MAX_SAFE_INTEGER)
@@ -64,18 +65,17 @@ export const recoverJointFunding = (wire: SwapFillGraphWire, label: string): rea
   return wire.inputs.map((claimed, i) => fundingFromCheckpoint(wire.checkpoints[i]!, claimed, `${label} input ${i}`))
 }
 
-/** Taxi carries the genesis txid in INTERNAL byte order; the swap builder takes
- * the display-order string. */
-const swapAssetIdFrom = (id: { txid: string; groupIndex: number }, label: string): string => {
-  if (!/^[0-9a-f]{64}$/.test(id.txid)) throw new Error(`${label} names a non-canonical asset genesis`)
-  return asset.AssetId.create(hex.encode(Uint8Array.from(hex.decode(id.txid)).reverse()), id.groupIndex).toString()
+/** Strict, matching the observer's decimal-only reader. */
+const wireSats = (value: string, label: string): bigint => {
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new Error(`${label} is not a canonical decimal`)
+  return BigInt(value)
 }
 
 export const sponsorLegFrom = (
   wire: SwapFillGraphWire,
   funding: readonly CarrierJointFunding[],
   label: string,
-  contributionSats?: bigint,
+  authorised: Pick<CarrierAuthorisedSats, 'contributionSats' | 'maxFareSats'>,
 ): CarrierSponsorLeg | undefined => {
   const fund = wire.inputs.flatMap((input, i) => (input.owner === 'sponsor' ? [funding[i]!] : []))
   if (fund.length === 0) return undefined
@@ -85,18 +85,22 @@ export const sponsorLegFrom = (
   // the quote label two outputs that are otherwise identical.
   const script = change?.script ?? fare?.script
   if (script === undefined) throw new Error(`${label} quotes a sponsor leg that keeps neither a fare nor change`)
-  const quoted = fund.reduce((total, coin) => total + BigInt(coin.value), 0n) - BigInt(change?.sats ?? '0')
+  const quoted =
+    fund.reduce((total, coin) => total + BigInt(coin.value), 0n) -
+    (change === undefined ? 0n : wireSats(change.sats, `${label} sponsor change`))
   if (quoted <= 0n) throw new Error(`${label} quotes a sponsor contributing ${quoted} sats`)
   // The AUTHORISED number is what gets built; the quote's own is only compared
   // to it, so a leg priced differently refuses legibly rather than as a digest.
-  if (contributionSats !== undefined && quoted !== contributionSats) {
-    throw new Error(`${label} quotes a sponsor contributing ${quoted} sats, not the ${contributionSats} it authorised`)
+  if (quoted !== authorised.contributionSats) {
+    throw new Error(
+      `${label} quotes a sponsor contributing ${quoted} sats, not the ${authorised.contributionSats} it authorised`,
+    )
   }
   return {
     fund,
-    netContributionSats: contributionSats ?? quoted,
+    netContributionSats: authorised.contributionSats,
     changeScript: hex.decode(script),
-    ...(fare === undefined ? {} : { fare: fareFrom(fare, label) }),
+    ...(fare === undefined ? {} : { fare: fareFrom(fare, label, authorised.maxFareSats) }),
   }
 }
 
@@ -125,20 +129,21 @@ export const assertSolverSatsFloor = (
   }
 }
 
+/** The one quantity the operator legitimately picks, so it is read from the
+ * quote and bounded here before it is built with. An ASSET fare is refused
+ * outright: `assembleOfferFill` pays one out of the INPUTS' own holdings, so an
+ * unbounded one takes the whole offered leg while moving no sats. */
 const fareFrom = (
   output: SwapFillGraphWire['outputs'][number],
   label: string,
+  maxFareSats: bigint,
 ): NonNullable<CarrierSponsorLeg['fare']> => {
-  const assets = output.assets ?? []
-  if (assets.length > 1) throw new Error(`${label} quotes a fare in ${assets.length} assets at once`)
-  const held = assets[0]
-  return {
-    ...(held === undefined
-      ? {}
-      : { assetId: swapAssetIdFrom(held.assetId, `${label} fare`), amount: BigInt(held.units) }),
-    script: hex.decode(output.script),
-    sats: BigInt(output.sats),
+  if ((output.assets ?? []).length > 0) {
+    throw new Error(`${label} quotes a fare carrying assets; only a sats fare was authorised`)
   }
+  const sats = wireSats(output.sats, `${label} fare`)
+  if (sats > maxFareSats) throw new Error(`${label} quotes a fare of ${sats} sats over the ${maxFareSats} authorised`)
+  return { script: hex.decode(output.script), sats }
 }
 
 export interface CarrierFillRebuildDeps {
@@ -194,15 +199,13 @@ export const createCarrierFillRebuilder =
     assertQuotedOwnership(wire, request, label)
     const receiver = wire.outputs[0]
     if (receiver?.role !== 'receiver') throw new Error(`${label} was quoted no receiver output to pay the maker`)
-    if (BigInt(receiver.sats) !== request.physicalSats) {
+    if (wireSats(receiver.sats, `${label} carrier`) !== request.physicalSats) {
       throw new Error(
         `${label} was quoted a ${receiver.sats} sat carrier, not the ${request.physicalSats} it authorised`,
       )
     }
-    const funding = recoverJointFunding(wire, label)
-    const sponsor = sponsorLegFrom(wire, funding, label, request.contributionSats)
-    assertSolverSatsFloor(quotedSatsFlow(wire, funding), request, label)
-    return await (deps.build ?? buildOfferFillPlan)(deps.wallet, deps.arkServerUrl, request.offerHex, {
+    const sponsor = sponsorLegFrom(wire, recoverJointFunding(wire, label), label, request)
+    const built = await (deps.build ?? buildOfferFillPlan)(deps.wallet, deps.arkServerUrl, request.offerHex, {
       fund: request.inputs.map((coin) => solverFunding(coin, label)),
       payoutScript: request.proceedsScript,
       fundingOutpoint: { txid: request.row.depositTxid!, vout: request.row.depositVout! },
@@ -210,20 +213,54 @@ export const createCarrierFillRebuilder =
       assetCarrierSats: request.physicalSats,
       ...(sponsor === undefined ? {} : { sponsor }),
     })
+    // Measured on what was BUILT: `outputs[].sats` is in no digest and checked
+    // against no bytes, so a floor over it is an inequality over the operator's
+    // own term, which proves nothing.
+    assertSolverSatsFloor(satsFlowOf(built, request.proceedsScript, label), request, label)
+    return built
   }
 
-/** Values come from the checkpoints: only those bytes are in the digest. */
-const quotedSatsFlow = (
-  wire: SwapFillGraphWire,
-  funding: readonly CarrierJointFunding[],
-): { depositValue: bigint; solverInputsSum: bigint; solverPayout: bigint } => ({
-  depositValue: BigInt(funding[0]!.value),
-  solverInputsSum: wire.inputs.reduce(
-    (total, input, i) => (input.owner === 'solver' ? total + BigInt(funding[i]!.value) : total),
-    0n,
-  ),
-  solverPayout: wire.outputs.reduce(
-    (total, output) => (output.role === 'solver' ? total + BigInt(output.sats) : total),
-    0n,
-  ),
-})
+const valueSpentBy = (checkpoint: Transaction, label: string): bigint => {
+  const amount = checkpoint.getInput(0).witnessUtxo?.amount
+  if (amount === undefined) throw new Error(`${label} declares no witness utxo to value its input`)
+  return amount
+}
+
+/** Shared with the observer, so the two ends cannot measure a fill differently. */
+export const solverSatsFlow = (
+  finalTx: Transaction,
+  checkpoints: readonly Transaction[],
+  inputOwners: readonly (string | null)[],
+  proceedsScript: Uint8Array,
+  label: string,
+): { depositValue: bigint; solverInputsSum: bigint; solverPayout: bigint } => {
+  const deposit = inputOwners.indexOf(null)
+  if (deposit < 0) throw new Error(`${label} names no offer deposit among its inputs`)
+  const proceeds = hex.encode(proceedsScript).toLowerCase()
+  return {
+    depositValue: valueSpentBy(checkpoints[deposit]!, `${label} deposit checkpoint`),
+    solverInputsSum: inputOwners.reduce(
+      (total, owner, i) =>
+        owner === 'solver' ? total + valueSpentBy(checkpoints[i]!, `${label} checkpoint ${i}`) : total,
+      0n,
+    ),
+    solverPayout: Array.from({ length: finalTx.outputsLength }, (_, i) => finalTx.getOutput(i)).reduce(
+      (total, output) =>
+        output?.script !== undefined && hex.encode(output.script) === proceeds ? total + (output.amount ?? 0n) : total,
+      0n,
+    ),
+  }
+}
+
+const satsFlowOf = (
+  graph: JointGraph,
+  proceedsScript: Uint8Array,
+  label: string,
+): { depositValue: bigint; solverInputsSum: bigint; solverPayout: bigint } =>
+  solverSatsFlow(
+    Transaction.fromPSBT(base64.decode(graph.arkTx)),
+    graph.checkpoints.map((psbt) => Transaction.fromPSBT(base64.decode(psbt))),
+    graph.inputOwners,
+    proceedsScript,
+    label,
+  )
