@@ -22,6 +22,7 @@ import { digestJointGraph, OFFER_FILL_TEMPLATE, verifyOfferFillPlan } from '@ark
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierCoin } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
 import {
+  assertAssetPayouts,
   createCarrierFillRebuilder,
   recoverJointFunding,
   sponsorLegFrom,
@@ -648,5 +649,38 @@ describe('a rebuild over tampered funding cannot reach the quoted digest', () =>
 
     expect(digestOver(recovered)).toBe(GRAPH_ID)
     expect(digestOver(tampered)).not.toBe(GRAPH_ID)
+  })
+})
+
+describe('an asset packet that will not decode is named as such, not as an unpaid maker', () => {
+  const LABEL = 'carrier fill swap-1'
+  const txPaying = (...extra: { script: Uint8Array; amount: bigint }[]) => {
+    const tx = new Transaction({ allowUnknownOutputs: true })
+    tx.addOutput({ script: MAKER, amount: 330n })
+    for (const output of extra) tx.addOutput(output)
+    return tx
+  }
+  const thrownBy = (tx: Transaction): Error => {
+    try {
+      assertAssetPayouts(tx, hex.encode(PROCEEDS), row(), LABEL)
+    } catch (error) {
+      return error as Error
+    }
+    throw new Error('assertAssetPayouts accepted the transaction')
+  }
+
+  it('names a malformed packet, carrying the decoder’s own error', () => {
+    // OP_RETURN, then "ARK" and a packet type byte with no length after it.
+    const error = thrownBy(txPaying({ script: hex.decode('6a0441524b00'), amount: 0n }))
+    expect(error.message).toBe(`${LABEL} could not decode its asset packet: missing packet data`)
+    expect((error.cause as Error).message).toBe('missing packet data')
+  })
+
+  it('still reads a transaction with no extension as paying the maker nothing', () => {
+    expect(thrownBy(txPaying()).message).toMatch(/does not pay the maker 10/)
+  })
+
+  it('passes a packet that pays the maker exactly what the row sold', () => {
+    expect(() => assertAssetPayouts(txPaying(ASSET_EXT), hex.encode(PROCEEDS), row(), LABEL)).not.toThrow()
   })
 })

@@ -13,6 +13,7 @@
 import { base64, hex } from '@scure/base'
 import {
   Extension,
+  ExtensionNotFoundError,
   getArkPsbtFields,
   Transaction,
   VtxoTaprootTree,
@@ -271,7 +272,7 @@ export const assertAssetPayouts = (
   // Without this, `paid === 0n === toAmount` makes everything below unfalsifiable.
   if (row.toAmount <= 0n) throw new Error(`${label} sells ${row.toAmount} of ${row.toAssetId}, which is nothing to pay`)
   const outputs = Array.from({ length: finalTx.outputsLength }, (_, i) => finalTx.getOutput(i))
-  const groups = assetGroupsOf(finalTx)
+  const groups = assetGroupsOf(finalTx, label)
   for (const group of groups) {
     const assetId = group.assetId?.toString() ?? 'an issuance'
     for (const output of group.outputs) {
@@ -293,11 +294,14 @@ export const assertAssetPayouts = (
   }
 }
 
-const assetGroupsOf = (tx: Transaction) => {
+const assetGroupsOf = (tx: Transaction, label: string) => {
   try {
     return Extension.fromTx(tx).getAssetPacket()?.groups ?? []
-  } catch {
-    return []
+  } catch (error) {
+    // No extension output at all moves no asset; a malformed one says nothing.
+    if (error instanceof ExtensionNotFoundError) return []
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`${label} could not decode its asset packet: ${message}`, { cause: error })
   }
 }
 
