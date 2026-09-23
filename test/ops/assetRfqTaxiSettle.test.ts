@@ -24,6 +24,7 @@ import { createCarrierPinLedger, type CarrierCoin } from '@arkade-os/solver-app/
 import {
   carrierFillSigner,
   createTaxiReceiveCarrierSettler,
+  sameInputOwners,
   selectCarrierInputs,
   type CarrierAttemptStore,
   type CarrierFillSeams,
@@ -632,6 +633,25 @@ describe('a reservation outlives every outcome that may have submitted', () => {
     await expect(h.settle(await h.row())).rejects.toThrow(/already/)
     expect(h.requests.filter((r) => r.endsWith('/submit'))).toHaveLength(1)
     await h.store.close()
+  })
+})
+
+describe('the input owner comparison is exact, element for element', () => {
+  // Every pair below serialises to the same JSON; none names the same owners.
+  const holed = new Array<string | null>(2)
+  holed[1] = 'solver'
+
+  it.each([
+    ['an undefined owner where the covenant is null', [undefined as unknown as null, 'solver'], [null, 'solver']],
+    ['a hole on the rebuilt side', holed, [null, 'solver']],
+    ['a hole on the quoted side', [null, 'solver'], holed],
+  ])('refuses %s', (_why, rebuilt, quoted) => {
+    expect(sameInputOwners(rebuilt, quoted)).toBe(false)
+  })
+
+  it('accepts the same owners, and refuses a different count', () => {
+    expect(sameInputOwners([null, 'solver'], [null, 'solver'])).toBe(true)
+    expect(sameInputOwners([null, 'solver'], [null, 'solver', 'solver'])).toBe(false)
   })
 })
 

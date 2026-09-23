@@ -160,6 +160,13 @@ const mintSnapshot = (fields: JsonObject): CarrierAttemptSnapshot => fields as u
 const quotedInputOwners = (wire: SwapFillGraphWire): readonly (string | null)[] =>
   wire.inputs.map((input) => (input.owner === 'offer-covenant' ? null : input.owner))
 
+/** An index loop: JSON reads a hole or `undefined` as the covenant's `null`, and `every` skips holes. */
+export const sameInputOwners = (a: readonly (string | null)[], b: readonly (string | null)[]): boolean => {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
 /** Only the signed transactions are replaced: every economic field the submit
  * pre-flight compares stays the operator's own bytes. */
 const solverGraphWire = (quoted: SwapFillGraphWire, signed: JointGraph): SwapFillGraphWire => ({
@@ -290,7 +297,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         quotedGraph: quoted,
       })
       if (!verifyOfferFillPlan(expected)) throw new Error(`carrier fill ${row.id} rebuilt a graph off its own template`)
-      if (JSON.stringify(expected.inputOwners) !== JSON.stringify(quotedInputOwners(quoted))) {
+      if (!sameInputOwners(expected.inputOwners, quotedInputOwners(quoted))) {
         throw new Error(`carrier fill ${row.id} was quoted input owners it did not build`)
       }
       // The digest binds bytes, owners and template together: an equal one is
