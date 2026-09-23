@@ -85,6 +85,7 @@ export const sponsorLegFrom = (
   funding: readonly CarrierJointFunding[],
   label: string,
   authorised: Pick<CarrierAuthorisedSats, 'contributionSats' | 'maxFareSats'>,
+  /** The SOLVER's own script: `solverSatsFlow` sums BY SCRIPT, so this is free. */
   fallbackChangeScript: Uint8Array,
 ): CarrierSponsorLeg | undefined => {
   const fund = wire.inputs.flatMap((input, i) => (input.owner === 'sponsor' ? [funding[i]!] : []))

@@ -204,6 +204,32 @@ const chainOf = (
 const servedFrom = (graph: typeof GRAPH): CarrierChainReader & { asked: string[][] } =>
   chainOf({ spentBy: graph.checkpointTxids[0]!, txs: [graph.arkTx, graph.checkpoints[0]!] })
 
+const reserialised = (at: number, over: Partial<ReturnType<Transaction['getInput']>>): string => {
+  const trusted = Transaction.fromPSBT(base64.decode(GRAPH.arkTx))
+  const copy = new Transaction({
+    version: trusted.version,
+    lockTime: trusted.lockTime,
+    allowUnknownInputs: true,
+    allowUnknownOutputs: true,
+    disableScriptCheck: true,
+  })
+  for (let i = 0; i < trusted.inputsLength; i += 1) {
+    const from = trusted.getInput(i)
+    copy.addInput({
+      txid: from.txid!,
+      index: from.index!,
+      sequence: from.sequence,
+      witnessUtxo: from.witnessUtxo,
+      tapLeafScript: from.tapLeafScript,
+      ...(i === at ? over : {}),
+    })
+    setArkPsbtField(copy, i, VtxoTaprootTree, getArkPsbtFields(trusted, i, VtxoTaprootTree)[0]!)
+  }
+  for (let i = 0; i < trusted.outputsLength; i += 1) copy.addOutput(trusted.getOutput(i) as never)
+  expect(copy.id).toBe(GRAPH.finalTxid)
+  return base64.encode(copy.toPSBT())
+}
+
 const harness = async (
   over: {
     phase?: 'prepared' | 'quoted' | 'submitting'
@@ -356,6 +382,26 @@ describe('the observer settles only on the whole evidence chain', () => {
 
     await expect(h.reconcile()).rejects.toThrow(/tap leaves/)
     expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
+  })
+
+  it('surfaces a transaction that declares a prevout script it never signed', async () => {
+    const h = await harness({
+      chain: chainOf({ txs: [reserialised(1, { witnessUtxo: undefined }), GRAPH.checkpoints[0]!] }),
+    })
+
+    await expect(h.reconcile()).rejects.toThrow(/prevout script/)
+    expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
+  })
+
+  it('surfaces a transaction that misdeclares what an input was worth', async () => {
+    const at = Transaction.fromPSBT(base64.decode(GRAPH.arkTx)).getInput(1).witnessUtxo!
+    const h = await harness({
+      chain: chainOf({
+        txs: [reserialised(1, { witnessUtxo: { script: at.script, amount: at.amount + 1n } }), GRAPH.checkpoints[0]!],
+      }),
+    })
+
+    await expect(h.reconcile()).rejects.toThrow(/prevout value/)
   })
 
   it('surfaces a transaction proved against a taptree it never signed', async () => {

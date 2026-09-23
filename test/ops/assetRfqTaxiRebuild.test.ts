@@ -423,7 +423,28 @@ describe('the rebuild refuses a quote priced against the solver', () => {
   })
 
   it('refuses a row that sells nothing, which every asset assertion would satisfy', async () => {
-    await expect(rebuilder()(rebuildRequest({ row: row({ toAmount: 0n }) }) as never)).rejects.toThrow(
+    // BOTH halves, or it pins the message: no packet AND 0n. Else it resolves.
+    const packetless = buildOffchainTx(
+      [DEPOSIT, SOLVER, SPONSOR],
+      [
+        { script: MAKER, amount: 330n },
+        { script: SPONSOR_SCRIPT, amount: 1_500n },
+        { script: PROCEEDS, amount: 6_170n },
+      ],
+      SERVER_UNROLL,
+    )
+    const rebuild = createCarrierFillRebuilder({
+      wallet: {} as never,
+      arkServerUrl: 'http://ark',
+      build: (async () => ({
+        arkTx: base64.encode(packetless.arkTx.toPSBT()),
+        checkpoints: packetless.checkpoints.map((c) => base64.encode(c.toPSBT())),
+        graphId: GRAPH_ID,
+        inputOwners: [...INPUT_OWNERS],
+      })) as never,
+    })
+
+    await expect(rebuild(rebuildRequest({ row: row({ toAmount: 0n }) }) as never)).rejects.toThrow(
       /which is nothing to pay/,
     )
   })

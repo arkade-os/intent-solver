@@ -234,37 +234,28 @@ const tapLeavesOf = (tx: Transaction, at: number): readonly string[] =>
     )
     .sort()
 
-/** The txid is recomputed from the served bytes: absent metadata is weaker evidence, not contradiction. */
+/** TAP METADATA ONLY, and only while these bytes are EVIDENCE: nothing spends
+ * them, so a missing leaf is a thinner answer. Never widen to `witnessUtxo`. */
 const sameOrAbsent = (got: readonly string[], want: readonly string[]): boolean =>
   got.length === 0 || got.join(',') === want.join(',')
 
-/** NOT whole-PSBT bytes, which one added or dropped field would break forever:
- * all that decides what the money does, and only that. */
+/** Only what the txid leaves out — both sides are keyed on an id recomputed from
+ * their own bytes. `witnessUtxo.script` is the live one: the taproot output key. */
 const assertSameSpendCommitment = (candidate: Transaction, trusted: Transaction, label: string): void => {
   const differs = (what: string): never => {
     throw new Error(`${label} is served with a different ${what} than the one this solver signed`)
   }
-  if (candidate.version !== trusted.version || candidate.lockTime !== trusted.lockTime) differs('transaction envelope')
-  if (candidate.inputsLength !== trusted.inputsLength) differs('input count')
-  if (candidate.outputsLength !== trusted.outputsLength) differs('output count')
+  // Asserted, not assumed: a caller keying by label would unmake the rest.
+  if (candidate.id !== trusted.id) differs('transaction')
   for (let i = 0; i < trusted.inputsLength; i += 1) {
     const got = candidate.getInput(i)
     const want = trusted.getInput(i)
-    if (!sameBytes(got.txid, want.txid) || got.index !== want.index) differs(`input ${i} outpoint`)
-    if (got.sequence !== want.sequence) differs(`input ${i} sequence`)
-    // Strict: `witnessUtxo` IS in `PSBTInputFinalKeys`, so absence is real.
     if (!sameBytes(got.witnessUtxo?.script, want.witnessUtxo?.script)) differs(`input ${i} prevout script`)
     if (got.witnessUtxo?.amount !== want.witnessUtxo?.amount) differs(`input ${i} prevout value`)
     if (!sameOrAbsent(tapLeavesOf(candidate, i), tapLeavesOf(trusted, i))) differs(`input ${i} tap leaves`)
     const trees = (of: Transaction): readonly string[] =>
       getArkPsbtFields(of, i, VtxoTaprootTree).map(hex.encode).sort()
     if (!sameOrAbsent(trees(candidate), trees(trusted))) differs(`input ${i} taptree`)
-  }
-  for (let i = 0; i < trusted.outputsLength; i += 1) {
-    const got = candidate.getOutput(i)
-    const want = trusted.getOutput(i)
-    if (!sameBytes(got?.script, want?.script)) differs(`output ${i} script`)
-    if (got?.amount !== want?.amount) differs(`output ${i} value`)
   }
 }
 
