@@ -67,6 +67,7 @@ COPY packages ./packages
 COPY scripts/carrier-artifacts ./scripts/carrier-artifacts
 RUN node scripts/carrier-artifacts/verify.mjs
 RUN pnpm install --frozen-lockfile
+RUN node scripts/carrier-artifacts/verify.mjs --installed
 # The root tsconfig, which every package's `tsconfig.build.json` extends — not
 # an emit config in its own right. The root emits nothing at all now.
 COPY tsconfig.json ./

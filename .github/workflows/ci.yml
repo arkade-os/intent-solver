@@ -110,6 +110,10 @@ jobs:
           done
           exit 1
 
+      # Only an install shows WHICH build resolved; `--installed` fails rather than skip.
+      - name: Carrier artifacts, as installed
+        run: node scripts/carrier-artifacts/verify.mjs --installed
+
       - name: Format check
         run: pnpm format:check
 
@@ -204,6 +208,9 @@ jobs:
             sleep 5
           done
           exit 1
+
+      - name: Carrier artifacts, as installed
+        run: node scripts/carrier-artifacts/verify.mjs --installed
 
       - name: The ${{ matrix.name }} set resolves to exactly its own packages
         # `set -eu`, not `-o pipefail`: the container's /bin/sh is dash, which

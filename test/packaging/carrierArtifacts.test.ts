@@ -35,7 +35,7 @@ const resolveFrom = (packageDir: string, name: string) =>
 describe('carrier artifacts', () => {
   it('pass the built-in-Node verification command', () => {
     try {
-      execFileSync(process.execPath, [join(REPO, 'scripts', 'carrier-artifacts', 'verify.mjs')], {
+      execFileSync(process.execPath, [join(REPO, 'scripts', 'carrier-artifacts', 'verify.mjs'), '--installed'], {
         cwd: REPO,
         encoding: 'utf8',
       })

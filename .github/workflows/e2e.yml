@@ -191,6 +191,9 @@ jobs:
           done
           exit 1
 
+      - name: Carrier artifacts, as installed
+        run: node scripts/carrier-artifacts/verify.mjs --installed
+
       - name: Build
         timeout-minutes: 20
         run: pnpm build

@@ -28,6 +28,7 @@ import {
 } from './lib.mjs'
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+const INSTALLED = process.argv.includes('--installed')
 const at = (...parts) => join(REPO, ...parts)
 const failures = []
 const check = (condition, message) => {
@@ -171,6 +172,10 @@ if (entry) {
       failures.push(error.message)
     }
   }
+} else if (INSTALLED) {
+  failures.push(
+    `--installed, and ${TAXI_CONSUMER} resolves no @arkade-taxi/client: the candidate exports went uninspected`,
+  )
 }
 
 if (failures.length) {
