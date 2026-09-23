@@ -28,6 +28,7 @@ import {
 import { esploraChainTip } from '@arkade-os/solver-rails/onchain/chainTip.js'
 import type { EsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
 import {
+  carrierAdmissionSlack,
   carrierChainTip,
   createTaxiReceiveCarrierReader,
   spendableCarrierCoins,
@@ -398,9 +399,33 @@ describe('admission demands the slack the quote can outlive', () => {
     await expect(read.available(request())).rejects.toThrow(/below the caller minimum/)
   })
 
+  const tightestAdmissible = () => BigInt(TIP) + EXIT_DELAY + carrierAdmissionSlack('height', VALIDITY_SECONDS)
+
+  it('admits no floor that two blocks mined inside the window would strand', async () => {
+    let height = TIP
+    const floor = tightestAdmissible()
+    const { read } = reader({
+      tipHeight: async () => height,
+      quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }),
+    })
+
+    await expect(read.resolve(request({ admission: true }))).resolves.toMatchObject({
+      inputExpiryFloor: { value: floor },
+    })
+    height = TIP + 2
+    await expect(read.available(request())).resolves.toEqual(new Map([[null, 0n]]))
+  })
+
+  it('sizes the height slack for a fast-block network, not a ten-minute one', () => {
+    expect(carrierAdmissionSlack('height', 30)).toBe(8n)
+    expect(carrierAdmissionSlack('height', 300)).toBe(26n)
+    expect(carrierAdmissionSlack('height', 900)).toBe(66n)
+    expect(carrierAdmissionSlack('time', 30)).toBe(30n)
+  })
+
   it('admits one with the window’s slack, and it still fills a block later', async () => {
     let height = TIP
-    const floor = BigInt(TIP) + EXIT_DELAY + 1n
+    const floor = BigInt(TIP) + EXIT_DELAY + carrierAdmissionSlack('height', VALIDITY_SECONDS)
     const { read } = reader({
       tipHeight: async () => height,
       quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }),

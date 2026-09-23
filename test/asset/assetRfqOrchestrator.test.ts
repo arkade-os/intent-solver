@@ -1076,6 +1076,19 @@ describe('profile.carrier — explicit modes', () => {
     expect((await store.get('swap-1')).carrierTerms?.expiresAt).toBe(5_000)
   })
 
+  it('strikes valid_until from the clock the floor was admitted against', async () => {
+    const { service, tick } = await harness({
+      receiveCarrierQuotes: adapter({}, undefined, {
+        available: async () => {
+          tick(1_009)
+          return new Map([[ASSET_A, 10n ** 18n]])
+        },
+      }),
+    })
+    const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    expect(outcome.accepted && outcome.swap.validUntil).toBe(1_030)
+  })
+
   it('fails an expired recycle before creating a row', async () => {
     const { service, store, tick } = await harness({
       receiveCarrierQuotes: {

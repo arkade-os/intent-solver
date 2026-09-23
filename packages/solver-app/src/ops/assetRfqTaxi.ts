@@ -155,15 +155,18 @@ export const clearsFloor = (coin: CarrierCoin, floor: { kind: 'height' | 'time';
   return time !== undefined && BigInt(Math.floor(time.getTime() / 1000)) >= floor.value
 }
 
-/** A FLOOR on block production, not an estimate: over-stating the slack only
- * costs a quote that had no room anyway. @see HTLC_SECONDS_PER_BLOCK. */
-const CARRIER_SECONDS_PER_BLOCK = 150
+/** Mutinynet's rate, and a DIVISOR: assuming blocks are fast over-states the
+ * slack, which is the safe side and the opposite of `HTLC_SECONDS_PER_BLOCK`. */
+const CARRIER_FAST_BLOCK_SECONDS = 30
 
-/** Never zero on heights: a block can land the second after admission. */
+/** Headroom over an expected count that is only a mean — arrivals are Poisson. */
+const CARRIER_SLACK_FLOOR_BLOCKS = 6
+
+/** How far the anchor may move between admitting a quote and filling it. */
 export const carrierAdmissionSlack = (domain: 'height' | 'time', quoteValiditySeconds: number): bigint => {
   const window = Math.max(0, Math.ceil(quoteValiditySeconds))
   if (domain === 'time') return BigInt(window)
-  return BigInt(Math.max(1, Math.ceil(window / CARRIER_SECONDS_PER_BLOCK)))
+  return BigInt(2 * Math.ceil(window / CARRIER_FAST_BLOCK_SECONDS) + CARRIER_SLACK_FLOOR_BLOCKS)
 }
 
 export const createTaxiReceiveCarrierReader = (

@@ -528,6 +528,8 @@ export class AssetRfqSwapService {
     // payout the float already cannot cover would commit this solver to a price
     // it knows it cannot honour.
     let available: ReadonlyMap<AssetLeg, bigint>
+    // ONE clock for the admission read and the window it admits.
+    const admittedAt = this.now()
     if (terms?.mode === 'recycle') {
       const adapter = completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes)
       if (adapter === null) {
@@ -543,7 +545,7 @@ export class AssetRfqSwapService {
           makerPkScript: request.makerPkScript,
           makerPublicKey: request.makerPublicKey,
           assetId: pair.to as string,
-          now: this.now(),
+          now: admittedAt,
           admission: true,
         })
       } catch (error) {
@@ -560,7 +562,11 @@ export class AssetRfqSwapService {
     // AFTER every await above: `now` predates them, so a quote that expired
     // during any must not insert a row already in the past.
     const nowAtInsert = this.now()
-    if (terms !== undefined && terms.expiresAt <= nowAtInsert) {
+    const validUntil =
+      terms === undefined
+        ? nowAtInsert + this.deps.quoteValiditySeconds
+        : Math.min(admittedAt + this.deps.quoteValiditySeconds, terms.expiresAt)
+    if (terms !== undefined && validUntil <= nowAtInsert) {
       return {
         accepted: false,
         reason: 'price_unavailable',
@@ -592,11 +598,7 @@ export class AssetRfqSwapService {
         offerPkScript: offer.pkScript,
         offerAddress: offer.address,
         solverPubkey: this.deps.solverPubkey,
-        // Capped at the quote's own expiry, so a recycle cannot outlive it.
-        validUntil:
-          terms === undefined
-            ? nowAtInsert + this.deps.quoteValiditySeconds
-            : Math.min(nowAtInsert + this.deps.quoteValiditySeconds, terms.expiresAt),
+        validUntil,
         // The price this quote FIXED — not the feed it was derived from.
         // Against a feed read at fill time it measures how far the market moved
         // while the quote was outstanding; against its own feed it would measure
