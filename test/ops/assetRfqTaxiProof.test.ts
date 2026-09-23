@@ -226,6 +226,7 @@ const reserialised = (at: number, over: Partial<ReturnType<Transaction['getInput
     setArkPsbtField(copy, i, VtxoTaprootTree, getArkPsbtFields(trusted, i, VtxoTaprootTree)[0]!)
   }
   for (let i = 0; i < trusted.outputsLength; i += 1) copy.addOutput(trusted.getOutput(i) as never)
+  // Vacuous for today's two `over` values; kept for the parameter.
   expect(copy.id).toBe(GRAPH.finalTxid)
   return base64.encode(copy.toPSBT())
 }
@@ -391,6 +392,37 @@ describe('the observer settles only on the whole evidence chain', () => {
 
     await expect(h.reconcile()).rejects.toThrow(/prevout script/)
     expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
+  })
+
+  it('raises a contradiction ONCE per row, then holds quietly rather than every tick', async () => {
+    const h = await harness({
+      chain: chainOf({ txs: [reserialised(1, { witnessUtxo: undefined }), GRAPH.checkpoints[0]!] }),
+    })
+
+    await expect(h.reconcile()).rejects.toThrow(/prevout script/)
+    await expect(h.reconcile()).resolves.toEqual({ status: 'pending' })
+    await expect(h.reconcile()).resolves.toEqual({ status: 'pending' })
+
+    expect((await h.attempt())?.phase).toBe('submitting')
+    expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
+  })
+
+  it('still settles a contradiction that was transient, having already raised it', async () => {
+    let served = reserialised(1, { witnessUtxo: undefined })
+    const h = await harness({
+      chain: {
+        ...chainOf(),
+        getVirtualTxs: async (txids) => ({
+          txs: txids.map((id) => (id === GRAPH.finalTxid ? served : GRAPH.checkpoints[0]!)),
+        }),
+      },
+    })
+
+    await expect(h.reconcile()).rejects.toThrow(/prevout script/)
+    served = GRAPH.arkTx
+
+    await expect(h.reconcile()).resolves.toEqual({ status: 'settled', txid: GRAPH.finalTxid })
+    expect(h.ledger.reserved().size).toBe(0)
   })
 
   it('surfaces a transaction that misdeclares what an input was worth', async () => {

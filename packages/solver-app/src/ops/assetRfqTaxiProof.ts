@@ -250,6 +250,8 @@ const assertSameSpendCommitment = (candidate: Transaction, trusted: Transaction,
   for (let i = 0; i < trusted.inputsLength; i += 1) {
     const got = candidate.getInput(i)
     const want = trusted.getInput(i)
+    // Strict where finalization KEEPS a field (`PSBTInputFinalKeys`), tolerant
+    // below where it drops one: missing this wedges, missing a taptree settles.
     if (!sameBytes(got.witnessUtxo?.script, want.witnessUtxo?.script)) differs(`input ${i} prevout script`)
     if (got.witnessUtxo?.amount !== want.witnessUtxo?.amount) differs(`input ${i} prevout value`)
     if (!sameOrAbsent(tapLeavesOf(candidate, i), tapLeavesOf(trusted, i))) differs(`input ${i} tap leaves`)
@@ -265,8 +267,12 @@ const releaseEveryPin = (pins: CarrierPinLedger, id: string): void => {
 
 export const createTaxiReceiveCarrierObserver = (
   deps: TaxiCarrierProofDeps,
-): Pick<ReceiveCarrierQuotes, 'reconcile'> => ({
-  reconcile: async (row): Promise<ReceiveCarrierReconcileOutcome> => {
+): Pick<ReceiveCarrierQuotes, 'reconcile'> => ({ reconcile: observeWith(deps, new Set<string>()) })
+
+/** The hold is the invariant; the silence is not. `raised` is PER ADAPTER. */
+const observeWith =
+  (deps: TaxiCarrierProofDeps, raised: Set<string>) =>
+  async (row: AssetRfqSwapRow): Promise<ReceiveCarrierReconcileOutcome> => {
     const attempt = await deps.store.readCarrierAttempt(row.id)
     // No attempt at all: the write that precedes the first POST has not landed,
     // so nothing was asked of the operator and there is nothing to observe yet.
@@ -293,11 +299,17 @@ export const createTaxiReceiveCarrierObserver = (
       return { status: 'pending' }
     }
 
-    const proof = await proveCarrierFill(row, attempt, deps.chain)
+    let proof: CarrierFillProof | null
+    try {
+      proof = await proveCarrierFill(row, attempt, deps.chain)
+    } catch (error) {
+      if (raised.has(row.id)) return { status: 'pending' }
+      raised.add(row.id)
+      throw error
+    }
     if (proof === null) return { status: 'pending' }
     // The coins are spent by a transaction this call just proved, so the
     // reservation over them is the one thing that is now certainly stale.
     if (await deps.store.settleCarrierAttempt(row.id, attempt, proof.txid)) releaseEveryPin(deps.pins, row.id)
     return { status: 'settled', txid: proof.txid }
-  },
-})
+  }
