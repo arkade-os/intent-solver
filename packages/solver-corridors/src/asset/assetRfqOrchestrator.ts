@@ -141,6 +141,9 @@ export type ReceiveCarrierReconcileOutcome =
   | { status: 'stuck'; reason: string }
   | { status: 'settled'; txid: string }
 
+/** `submitted` is not a failure: the row stays `filling` until `reconcile` proves it. */
+export type ReceiveCarrierSettleOutcome = { status: 'submitted' } | { status: 'settled'; txid: string }
+
 export interface ReceiveCarrierQuotes {
   resolve: (request: ReceiveCarrierQuoteRequest) => Promise<ReceiveCarrierQuote>
   /** Rereads and verifies the named quote, then returns fresh synchronized
@@ -148,7 +151,7 @@ export interface ReceiveCarrierQuotes {
    * its input floor, excluding reservations. Admission only: selection,
    * pinning, and rechecks belong to settlement. */
   available: (request: ReceiveCarrierQuoteRequest) => Promise<ReadonlyMap<AssetLeg, bigint>>
-  settle: (row: AssetRfqSwapRow) => Promise<string>
+  settle: (row: AssetRfqSwapRow) => Promise<ReceiveCarrierSettleOutcome>
   /** Read-only observation. Settled requires independently verified transaction, deposit, and quote evidence. */
   reconcile: (row: AssetRfqSwapRow) => Promise<ReceiveCarrierReconcileOutcome>
 }
@@ -753,8 +756,16 @@ export class AssetRfqSwapService {
     if (receiveCarrier !== null) {
       try {
         const filling = await this.deps.store.get(row.id)
-        const txid = await receiveCarrier.settle(filling)
-        if (!isCanonicalTxid(txid)) throw new Error(`receive-carrier settlement returned invalid txid '${txid}'`)
+        const outcome: unknown = await receiveCarrier.settle(filling)
+        const { status, txid } = (typeof outcome === 'object' && outcome !== null ? outcome : {}) as {
+          status?: unknown
+          txid?: unknown
+        }
+        if (status === 'submitted') return
+        if (status !== 'settled') throw new Error('receive-carrier settlement returned a malformed outcome')
+        if (!isCanonicalTxid(txid)) {
+          throw new Error(`receive-carrier settlement returned invalid txid '${String(txid)}'`)
+        }
         await this.completeReceiveCarrierFill(filling, txid)
       } catch (error) {
         this.deps.onError?.(row.id, error)

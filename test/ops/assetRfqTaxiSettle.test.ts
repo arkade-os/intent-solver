@@ -9,13 +9,17 @@
  * verifications are the production ones.
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { base64, hex } from '@scure/base'
 import { SingleKey, Transaction } from '@arkade-os/sdk'
 import { digestJointGraph, OFFER_FILL_TEMPLATE } from '@arkade-taxi/client'
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
-import type { ReceiveCarrierQuote } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import {
+  AssetRfqSwapService,
+  type ReceiveCarrierQuote,
+  type ReceiveCarrierQuotes,
+} from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import { createCarrierPinLedger, type CarrierCoin } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
 import {
   carrierFillSigner,
@@ -116,7 +120,7 @@ const statusBody = (over: Record<string, unknown> = {}): Record<string, unknown>
   ...over,
 })
 
-const openStore = async (over: { validUntil?: number; toAmount?: bigint } = {}) => {
+const openStore = async (over: { validUntil?: number; toAmount?: bigint; state?: 'funded' } = {}) => {
   const store = await AssetRfqSwapStore.open(':memory:', () => 1_000)
   await store.insertQuote({
     id: 'swap-1',
@@ -144,12 +148,12 @@ const openStore = async (over: { validUntil?: number; toAmount?: bigint } = {}) 
     },
   })
   await store.transition('swap-1', 'quoted', 'funded', { deposit_txid: DEPOSIT_TXID, deposit_vout: 1 })
-  await store.transition('swap-1', 'funded', 'filling', {})
+  if (over.state !== 'funded') await store.transition('swap-1', 'funded', 'filling', {})
   return store
 }
 
 interface Harness {
-  settle: (row: AssetRfqSwapRow) => Promise<string>
+  settle: ReceiveCarrierQuotes['settle']
   store: AssetRfqSwapStore
   row: () => Promise<AssetRfqSwapRow>
   seen: Map<string, unknown>
@@ -255,7 +259,7 @@ const harness = async (
 describe('every checkpoint is committed before the boundary it guards', () => {
   it('has the attempt prepared before one byte is asked of the operator', async () => {
     const h = await harness()
-    await expect(h.settle(await h.row())).rejects.toThrow()
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
     expect(h.seen.get('quote-post')).toMatchObject({ phase: 'prepared' })
     expect((h.seen.get('quote-post') as { binding?: unknown }).binding).toBeUndefined()
     await h.store.close()
@@ -263,7 +267,7 @@ describe('every checkpoint is committed before the boundary it guards', () => {
 
   it('has the rebuilt graph bound before the first signature exists', async () => {
     const h = await harness()
-    await expect(h.settle(await h.row())).rejects.toThrow()
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
     expect(h.seen.get('sign')).toMatchObject({ phase: 'quoted' })
     expect((h.seen.get('sign') as { binding: { fill_id: string } }).binding.fill_id).toBe('fill-1')
     await h.store.close()
@@ -271,14 +275,14 @@ describe('every checkpoint is committed before the boundary it guards', () => {
 
   it('has the submitting marker committed before the submit is sent', async () => {
     const h = await harness()
-    await expect(h.settle(await h.row())).rejects.toThrow()
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
     expect(h.seen.get('submit-post')).toMatchObject({ phase: 'submitting' })
     await h.store.close()
   })
 
   it('reaches the boundaries in the one order the checkpoints allow', async () => {
     const h = await harness()
-    await expect(h.settle(await h.row())).rejects.toThrow(/awaiting/)
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
     expect(h.requests).toEqual([`POST ${TAXI}/v1/swap-fills`, `POST ${TAXI}/v1/swap-fills/fill-1/submit`])
     expect([...h.seen.keys()]).toEqual(['quote-post', 'sign', 'submit-post'])
     await h.store.close()
@@ -301,7 +305,7 @@ describe('every checkpoint is committed before the boundary it guards', () => {
         reserved: () => ledger.reserved(),
       },
     })
-    await expect(h.settle(await store.get('swap-1'))).rejects.toThrow()
+    await expect(h.settle(await store.get('swap-1'))).resolves.toEqual({ status: 'submitted' })
     expect(pinnedAtWrite).toEqual([`${COIN_A}:0`])
     await store.close()
     await h.store.close()
@@ -331,7 +335,7 @@ describe('the snapshot is the attempt authority, written through the one codec',
 
   it('names the exact inputs it reserved, and the ceiling it will resend', async () => {
     const h = await harness()
-    await expect(h.settle(await h.row())).rejects.toThrow()
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
     const attempt = (await h.attempt()) as { snapshot: Record<string, unknown> }
     expect(attempt.snapshot.inputs).toEqual([{ txid: COIN_A, vout: 0 }])
     expect(attempt.snapshot.operation).toBe('swap-1')
@@ -343,7 +347,7 @@ describe('the snapshot is the attempt authority, written through the one codec',
 
   it('pins the operator floor it admitted inventory against', async () => {
     const h = await harness()
-    await expect(h.settle(await h.row())).rejects.toThrow()
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
     const attempt = (await h.attempt()) as { snapshot: { input_expiry_floor: unknown } }
     expect(attempt.snapshot.input_expiry_floor).toEqual({ kind: 'height', value: '1100000' })
     await h.store.close()
@@ -361,7 +365,7 @@ describe('the snapshot is the attempt authority, written through the one codec',
 
   it('names the row as the operation, so a restart cannot mint a second one', async () => {
     const h = await harness()
-    await expect(h.settle(await h.row())).rejects.toThrow()
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
     const attempt = (await h.attempt()) as { snapshot: { operation: string } }
     expect(h.bodies[0]!.operationId).toBe(attempt.snapshot.operation)
     expect(h.bodies[0]).toMatchObject({ offerHex: OFFER_HEX, fundingTxid: DEPOSIT_TXID, fundingVout: 1 })
@@ -476,7 +480,7 @@ describe('a reservation outlives every outcome that may have submitted', () => {
 
   it('keeps the pin when the fill was submitted and its proof is not in yet', async () => {
     const h = await harness()
-    await expect(h.settle(await h.row())).rejects.toThrow(/awaiting/)
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
     expect((await h.row()).state).toBe('filling')
     expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
     await h.store.close()
@@ -634,7 +638,7 @@ describe('a reservation outlives every outcome that may have submitted', () => {
 describe('nothing an operator says is taken as proof of a fill', () => {
   it('reports no txid of its own, whatever the submit answers', async () => {
     const h = await harness({ status: statusBody({ state: 'settled', txid: '9'.repeat(64) }) })
-    await expect(h.settle(await h.row())).rejects.toThrow(/awaiting/)
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
     expect((await h.row()).fillTxid).toBeNull()
     expect((await h.row()).state).toBe('filling')
     await h.store.close()
@@ -700,6 +704,79 @@ describe('the pin ledger holds a release until something proves it may go', () =
     winner.release()
     expect(ledger.reserved().size).toBe(0)
     expect(pins.held()).toEqual([])
+  })
+})
+
+// The REAL orchestrator over the REAL settler, so nothing between them can
+// re-shape what a submission reports.
+describe('the orchestrator hands a submitted fill to the proof observer, not to onError', () => {
+  const drive = async (over: Parameters<typeof harness>[0] = {}) => {
+    const store = await openStore({ state: 'funded' })
+    const h = await harness({ ...over, deps: { store, ...over.deps } })
+    const errors: unknown[] = []
+    const reconcile = vi.fn(async () => ({ status: 'pending' as const }))
+    const service = new AssetRfqSwapService({
+      store,
+      markets: [],
+      solverPubkey: SOLVER_KEY,
+      quoteValiditySeconds: 30,
+      dustSats: 330n,
+      now: () => NOW,
+      fetchPrice: async () => ({ mantissa: 1n, scale: 0 }),
+      deriveOffer: () => ({ pkScript: `5120${'d'.repeat(64)}`, address: 'ark1qoffer' }),
+      depositAt: async () => ({ txid: DEPOSIT_TXID, vout: 1, sats: 1_000n, assets: [] }),
+      balance: async () => {
+        throw new Error('a recycle never reads the generic balance')
+      },
+      settle: async () => {
+        throw new Error('a recycle never settles directly')
+      },
+      receiveCarrierQuotes: {
+        resolve: async () => carrierQuote(),
+        available: async () => new Map([[ASSET, 10n]]),
+        settle: h.settle,
+        reconcile,
+      },
+      onError: (_id, error) => errors.push(error),
+    })
+    const close = async () => {
+      await store.close()
+      await h.store.close()
+    }
+    return { h, store, service, errors, reconcile, close }
+  }
+
+  it('reports nothing for a normal submission, and the observer takes the row from there', async () => {
+    const { h, store, service, errors, reconcile, close } = await drive()
+    await service.tick('swap-1')
+    expect(errors).toEqual([])
+    expect(h.requests.at(-1)).toBe(`POST ${TAXI}/v1/swap-fills/fill-1/submit`)
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filling', fillTxid: null })
+    expect(await store.readCarrierAttempt('swap-1')).toMatchObject({ phase: 'submitting' })
+
+    await service.tick('swap-1')
+    expect(reconcile).toHaveBeenCalledTimes(1)
+    expect(errors).toEqual([])
+    await close()
+  })
+
+  it('still reports a submission whose outcome is unknown', async () => {
+    const { store, service, errors, reconcile, close } = await drive({ submitStatus: 502 })
+    await service.tick('swap-1')
+    expect(errors).toHaveLength(1)
+    expect((await store.get('swap-1')).state).toBe('filling')
+    await service.tick('swap-1')
+    expect(reconcile).toHaveBeenCalledTimes(1)
+    await close()
+  })
+
+  it('still reports a fill refused before anything was sent', async () => {
+    const { h, store, service, errors, close } = await drive({ quoteStatus: 409 })
+    await service.tick('swap-1')
+    expect(errors).toHaveLength(1)
+    expect((await store.get('swap-1')).state).toBe('refused')
+    expect(h.requests.some((r) => r.endsWith('/submit'))).toBe(false)
+    await close()
   })
 })
 

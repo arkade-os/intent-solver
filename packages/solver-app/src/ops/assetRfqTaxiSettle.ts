@@ -85,15 +85,6 @@ export interface TaxiCarrierSettleDeps {
   now: () => number
 }
 
-/** Submitted, outcome unproven. NOT a failure of the fill and never retryable:
- * the row stays `filling` and reconciliation owns it from here. */
-export class CarrierFillAwaitingProofError extends Error {
-  override readonly name = 'CarrierFillAwaitingProofError'
-  constructor(readonly swapId: string) {
-    super(`carrier fill ${swapId} was submitted; awaiting chain proof before it is called filled`)
-  }
-}
-
 const contributionOf = (coin: CarrierCoin, leg: AssetLeg, dustSats: bigint): bigint => {
   if (leg === null) return BigInt(Math.max(usableSatsOf(coin, Number(dustSats)), 0))
   return (coin.assets ?? [])
@@ -355,7 +346,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       if (wrote && !liable) await releaseIfProvenNeverSubmitted(deps, pin, messageOf(error))
       throw error
     }
-    throw new CarrierFillAwaitingProofError(row.id)
+    return { status: 'submitted' }
   },
 })
 

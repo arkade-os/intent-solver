@@ -796,6 +796,8 @@ const RAGGED_RECEIVER_QUOTE: ReceiveCarrierQuote = {
   expiresAt: 6_000,
 }
 
+const SETTLED = { status: 'settled' as const, txid: 'fb'.repeat(32) }
+
 const adapter = (
   over: Partial<ReceiveCarrierQuote> = {},
   calls?: unknown[],
@@ -806,7 +808,7 @@ const adapter = (
     return { ...RECEIVER_QUOTE, ...over }
   },
   available: actions.available ?? (async () => new Map([[ASSET_A, 10n ** 18n]])),
-  settle: actions.settle ?? (async () => 'fb'.repeat(32)),
+  settle: actions.settle ?? (async () => SETTLED),
   reconcile: actions.reconcile ?? (async () => ({ status: 'pending' as const })),
 })
 
@@ -1177,7 +1179,7 @@ describe('profile.carrier — persisted settlement mode', () => {
   it('settles a persisted recycle from request-bound carrier inventory without reading generic balance', async () => {
     let clock = 1_000
     const direct = vi.fn(async () => 'fa'.repeat(32))
-    const settle = vi.fn<ReceiveCarrierQuotes['settle']>(async () => 'fb'.repeat(32))
+    const settle = vi.fn<ReceiveCarrierQuotes['settle']>(async () => SETTLED)
     const asks: unknown[] = []
     const available = vi.fn(async (ask: unknown) => {
       asks.push(ask)
@@ -1229,7 +1231,7 @@ describe('profile.carrier — persisted settlement mode', () => {
   it('keeps purchase and legacy rows on direct settlement', async () => {
     for (const carrier of [undefined, { mode: 'purchase' as const }]) {
       const direct = vi.fn(async () => 'fa'.repeat(32))
-      const dedicated = vi.fn(async () => 'fb'.repeat(32))
+      const dedicated = vi.fn(async () => SETTLED)
       const available = vi.fn(async () => new Map([[ASSET_A, 10n ** 18n]]))
       const balance = vi.fn(async () => new Map([[ASSET_A, 10n ** 18n]]))
       const receiveCarrierQuotes = adapter({}, undefined, { available, settle: dedicated })
@@ -1254,7 +1256,7 @@ describe('profile.carrier — persisted settlement mode', () => {
 
   it('refuses a funded recycle when carrier inventory drained despite a rich generic balance', async () => {
     const direct = vi.fn(async () => 'fa'.repeat(32))
-    const dedicated = vi.fn(async () => 'fb'.repeat(32))
+    const dedicated = vi.fn(async () => SETTLED)
     const available = vi
       .fn<ReceiveCarrierQuotes['available']>()
       .mockResolvedValueOnce(new Map([[ASSET_A, 10n ** 18n]]))
@@ -1287,7 +1289,7 @@ describe('profile.carrier — persisted settlement mode', () => {
       .mockResolvedValueOnce(new Map([[ASSET_A, 10n ** 18n]]))
       .mockRejectedValue(failure)
     const direct = vi.fn(async () => 'fa'.repeat(32))
-    const dedicated = vi.fn(async () => 'fb'.repeat(32))
+    const dedicated = vi.fn(async () => SETTLED)
     const errors: { id: string; error: unknown }[] = []
     const { service, store } = await harness({
       depositAt: async () => deposit(),
@@ -1316,7 +1318,7 @@ describe('profile.carrier — persisted settlement mode', () => {
         return new Map([[ASSET_A, 10n ** 18n]])
       })
     const direct = vi.fn(async () => 'fa'.repeat(32))
-    const dedicated = vi.fn(async () => 'fb'.repeat(32))
+    const dedicated = vi.fn(async () => SETTLED)
     const { service, store } = await harness({
       now: () => clock,
       depositAt: async () => deposit(),
@@ -1338,7 +1340,7 @@ describe('profile.carrier — persisted settlement mode', () => {
 
   it('refuses a funded recycle when the adapter has only the former three methods', async () => {
     const direct = vi.fn(async () => 'fa'.repeat(32))
-    const dedicated = vi.fn(async () => 'fb'.repeat(32))
+    const dedicated = vi.fn(async () => SETTLED)
     const complete = adapter({}, undefined, { settle: dedicated })
     const { service, store, deps } = await harness({
       depositAt: async () => deposit(),
@@ -1361,7 +1363,7 @@ describe('profile.carrier — persisted settlement mode', () => {
 
   it('refuses a funded recycle when the adapter disappeared before spending', async () => {
     const direct = vi.fn(async () => 'fa'.repeat(32))
-    const dedicated = vi.fn(async () => 'fb'.repeat(32))
+    const dedicated = vi.fn(async () => SETTLED)
     const receiveCarrierQuotes = adapter({}, undefined, { settle: dedicated })
     const { service, store, deps } = await harness({
       depositAt: async () => deposit(),
@@ -1503,7 +1505,7 @@ describe('profile.carrier — persisted settlement mode', () => {
   })
 
   it('leaves an invalid settle txid unknown and never submits it again', async () => {
-    const settle = vi.fn(async () => 'not-a-txid')
+    const settle = vi.fn(async () => ({ status: 'settled' as const, txid: 'not-a-txid' }))
     const reconcile = vi.fn(async () => ({ status: 'pending' as const }))
     const errors: unknown[] = []
     const receiveCarrierQuotes = adapter({}, undefined, { settle, reconcile })
@@ -1525,7 +1527,7 @@ describe('profile.carrier — persisted settlement mode', () => {
   })
 
   it('keeps filling when the post-submit transition cannot be persisted', async () => {
-    const settle = vi.fn(async () => 'fb'.repeat(32))
+    const settle = vi.fn(async () => SETTLED)
     const reconcile = vi.fn(async () => ({ status: 'pending' as const }))
     const errors: unknown[] = []
     const receiveCarrierQuotes = adapter({}, undefined, { settle, reconcile })
@@ -1577,13 +1579,13 @@ describe('profile.carrier — refusals', () => {
     ['resolve only', (resolve: ReceiveCarrierQuotes['resolve']) => ({ resolve })],
     [
       'resolve and settle only',
-      (resolve: ReceiveCarrierQuotes['resolve']) => ({ resolve, settle: async () => 'fb'.repeat(32) }),
+      (resolve: ReceiveCarrierQuotes['resolve']) => ({ resolve, settle: async () => SETTLED }),
     ],
     [
       'resolve, settle, and reconcile only',
       (resolve: ReceiveCarrierQuotes['resolve']) => ({
         resolve,
-        settle: async () => 'fb'.repeat(32),
+        settle: async () => SETTLED,
         reconcile: async () => ({ status: 'pending' as const }),
       }),
     ],

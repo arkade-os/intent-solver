@@ -84,7 +84,7 @@ const harness = async (markets: (typeof MARKET)[] = [MARKET], options: { carrier
               expiresAt: 5_000,
             }),
             available: async () => new Map([[ASSET_A, 10n ** 18n]]),
-            settle: async () => 'fb'.repeat(32),
+            settle: async () => ({ status: 'settled' as const, txid: 'fb'.repeat(32) }),
             reconcile: async () => ({ status: 'pending' as const }),
           },
         }
