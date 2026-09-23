@@ -621,21 +621,32 @@ describe('the folded shape, which is the only one a receive quote produces', () 
 })
 
 describe('a rebuild over tampered funding cannot reach the quoted digest', () => {
-  it('produces a different graph id when one sponsor value is moved by a sat', () => {
-    const recovered = recoverJointFunding(wire(), 'carrier fill swap-1')
-    const tampered = recovered.map((coin, i) => (i === 2 ? { ...coin, value: coin.value + 1 } : coin))
+  const digestOver = (inputs: ReturnType<typeof recoverJointFunding>): string => {
     const again = buildOffchainTx(
-      tampered.map(({ txid, vout, value, tapLeafScript, tapTree }) => ({ txid, vout, value, tapLeafScript, tapTree })),
+      inputs.map(({ txid, vout, value, tapLeafScript, tapTree }) => ({ txid, vout, value, tapLeafScript, tapTree })),
       [
         { script: MAKER, amount: 330n },
         { script: SPONSOR_SCRIPT, amount: 1_500n },
         { script: PROCEEDS, amount: 6_170n },
+        ASSET_EXT,
       ],
       SERVER_UNROLL,
     )
-    const arkTx = base64.encode(again.arkTx.toPSBT())
-    const checkpoints = again.checkpoints.map((c) => base64.encode(c.toPSBT()))
+    return digestJointGraph(
+      {
+        arkTx: base64.encode(again.arkTx.toPSBT()),
+        checkpoints: again.checkpoints.map((c) => base64.encode(c.toPSBT())),
+        inputOwners: INPUT_OWNERS,
+      },
+      OFFER_FILL_TEMPLATE,
+    )
+  }
 
-    expect(digestJointGraph({ arkTx, checkpoints, inputOwners: INPUT_OWNERS }, OFFER_FILL_TEMPLATE)).not.toBe(GRAPH_ID)
+  it('produces a different graph id when one sponsor value is moved by a sat', () => {
+    const recovered = recoverJointFunding(wire(), 'carrier fill swap-1')
+    const tampered = recovered.map((coin, i) => (i === 2 ? { ...coin, value: coin.value + 1 } : coin))
+
+    expect(digestOver(recovered)).toBe(GRAPH_ID)
+    expect(digestOver(tampered)).not.toBe(GRAPH_ID)
   })
 })
