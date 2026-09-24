@@ -92,6 +92,10 @@ export const normalizeTaxiUrl = (raw: string, policy: TaxiUrlPolicy): string => 
   if (policy.isMainnet && isIpLiteral(url.hostname)) {
     throw new Error(`taxi url host must be a DNS name on mainnet, got "${url.hostname}"`)
   }
+  // Only ONE root dot is stripped below, so "localhost.." would otherwise dodge every name check.
+  if (stripRootDot(url.hostname).split('.').includes('')) {
+    throw new Error(`taxi url host has an empty label, got "${url.hostname}"`)
+  }
   if (!policy.allowPrivate && isPrivate(url.hostname)) {
     throw new Error(`taxi url host must not be private, got "${url.hostname}"`)
   }

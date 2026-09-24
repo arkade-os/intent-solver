@@ -75,6 +75,17 @@ describe('normalizeTaxiUrl', () => {
     expect(normalizeTaxiUrl('https://localhost.example', main)).toBe('https://localhost.example')
   })
 
+  it.each([
+    ['repeated trailing dots on localhost', 'http://localhost..', regtest],
+    ['repeated trailing dots on a service name', 'http://arkd..:7070', regtest],
+    ['repeated trailing dots on a public name', 'https://taxi.example..', main],
+    ['a leading dot', 'https://.taxi.example', main],
+    ['an empty inner label', 'https://taxi..example', main],
+  ])('refuses %s, whatever the policy', (_why, url, policy) => {
+    expect(() => normalizeTaxiUrl(url, policy)).toThrow(/empty label/)
+    expect(() => normalizeTaxiUrl(url, { isMainnet: false, allowPrivate: false })).toThrow(/empty label/)
+  })
+
   it('refuses an IPv6 loopback literal off mainnet unless allowed (rule 5)', () => {
     expect(() => normalizeTaxiUrl('https://[::1]', { isMainnet: false, allowPrivate: false })).toThrow(/private/)
   })
