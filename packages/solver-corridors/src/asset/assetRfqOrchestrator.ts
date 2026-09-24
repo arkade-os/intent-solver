@@ -167,6 +167,11 @@ export interface ReceiveCarrierQuotes {
   reconcile: (row: AssetRfqSwapRow) => Promise<ReceiveCarrierReconcileOutcome>
 }
 
+/** How long before its receive quote expires a carrier fill must still be requestable, since the Taxi refuses a
+ * swap fill on an expired one: two 3s sweeps to see the deposit and fund the row, three 5s-bounded Taxi round trips to
+ * reach the swap-fill request, and 9s for clock skew against the Taxi. */
+export const CARRIER_FILL_MARGIN_SECONDS = 30
+
 /** Settled through the carrier adapter rather than the generic spend. */
 const carrierSettled = (terms: AssetRfqCarrierTerms | null | undefined): terms is AssetRfqCarrierTerms =>
   terms?.mode === 'recycle' || terms?.mode === 'recycle_receiver'
@@ -672,15 +677,19 @@ export class AssetRfqSwapService {
     // AFTER every await above: `now` predates them, so a quote that expired
     // during any must not insert a row already in the past.
     const nowAtInsert = this.now()
+    const margin = carrierSettled(terms) ? CARRIER_FILL_MARGIN_SECONDS : 0
     const validUntil =
       terms === undefined
         ? nowAtInsert + this.deps.quoteValiditySeconds
-        : Math.min(admittedAt + this.deps.quoteValiditySeconds, terms.expiresAt)
+        : Math.min(admittedAt + this.deps.quoteValiditySeconds, terms.expiresAt - margin)
     if (terms !== undefined && validUntil <= nowAtInsert) {
       return {
         accepted: false,
         reason: 'price_unavailable',
-        detail: 'the carrier quote expired before it was recorded',
+        detail:
+          margin > 0
+            ? 'the carrier quote expires too soon to fill after funding'
+            : 'the carrier quote expired before it was recorded',
       }
     }
 

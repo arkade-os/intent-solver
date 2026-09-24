@@ -20,6 +20,7 @@ import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { assetRfqQuotePayload } from '@arkade-os/solver-corridors/wire/assetRfqPayloads.js'
 import {
   AssetRfqSwapService,
+  CARRIER_FILL_MARGIN_SECONDS,
   type AssetRfqDeps,
   type ObservedDeposit,
   type ReceiveCarrierQuote,
@@ -1057,10 +1058,45 @@ describe('profile.carrier — explicit modes', () => {
     })
   })
 
-  it('caps valid_until at the carrier quote expiry', async () => {
-    const { service } = await harness({ receiveCarrierQuotes: adapter({ expiresAt: 1_010 }) })
-    const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
-    expect(outcome.accepted && outcome.swap.validUntil).toBe(1_010)
+  /** The Taxi refuses a swap fill once its receive quote has expired, and the fill is requested only after funding. */
+  describe('a fill margin before the carrier quote expires', () => {
+    const CARRIERS = [
+      ['recycle', { mode: 'recycle', quoteId: 'q-1' }, {}],
+      [
+        'recycle_receiver',
+        { mode: 'recycle_receiver', quoteId: 'q-1', taxiUrl: 'https://taxi.example', taxiKey: TAXI_KEY },
+        { loanSats: 330n, receiptSats: 0n, serviceFareSats: 0n, taxiKey: TAXI_KEY },
+      ],
+    ] as const
+
+    it.each(CARRIERS)('caps a %s valid_until that margin before the quote expires', async (_mode, carrier, over) => {
+      const { service } = await harness({
+        receiveCarrierQuotes: adapter({ ...over, expiresAt: 1_010 + CARRIER_FILL_MARGIN_SECONDS }),
+      })
+      const outcome = await service.quote(request({ carrier }))
+      expect(outcome.accepted && outcome.swap.validUntil).toBe(1_010)
+    })
+
+    it.each(CARRIERS)(
+      'refuses a %s quote that leaves no time to fill, before a row exists',
+      async (_mode, carrier, over) => {
+        const { service, store } = await harness({
+          receiveCarrierQuotes: adapter({ ...over, expiresAt: 1_000 + CARRIER_FILL_MARGIN_SECONDS }),
+        })
+        expect(await service.quote(request({ carrier }))).toMatchObject({
+          accepted: false,
+          reason: 'price_unavailable',
+          detail: 'the carrier quote expires too soon to fill after funding',
+        })
+        expect(await store.listNonTerminal()).toHaveLength(0)
+
+        const later = await harness({
+          receiveCarrierQuotes: adapter({ ...over, expiresAt: 1_001 + CARRIER_FILL_MARGIN_SECONDS }),
+        })
+        const outcome = await later.service.quote(request({ carrier }))
+        expect(outcome.accepted && outcome.swap.validUntil).toBe(1_001)
+      },
+    )
   })
 
   it('re-reads the clock after the adapter answers, and refuses terms that expired meanwhile', async () => {
