@@ -33,7 +33,7 @@ export interface TaxiCarrierFillComposition {
   /** Where a fill pays this solver back — its own address, never the quote's. */
   proceedsAddress: string
   solverKeys: readonly string[]
-  serverKey: Uint8Array
+  serverKey: () => Uint8Array
   now: () => number
 }
 

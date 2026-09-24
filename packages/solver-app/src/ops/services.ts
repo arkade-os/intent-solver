@@ -736,7 +736,7 @@ export const createServices = async (
             ),
           proceedsAddress: await arkade.wallet.getAddress(),
           solverKeys: [hex.encode(await arkade.identity.xOnlyPublicKey())],
-          serverKey: arkade.wallet.arkServerPublicKey,
+          serverKey: () => arkade.wallet.arkServerPublicKey,
           now: () => Math.floor(Date.now() / 1000),
         })
   const assetRfqService = new AssetRfqSwapService({

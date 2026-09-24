@@ -11,7 +11,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { base64, hex } from '@scure/base'
-import { DefaultVtxo, scriptFromTapLeafScript, SingleKey, Transaction } from '@arkade-os/sdk'
+import { DefaultVtxo, DelegateVtxo, scriptFromTapLeafScript, SingleKey, Transaction } from '@arkade-os/sdk'
 import { digestJointGraph, OFFER_FILL_TEMPLATE } from '@arkade-taxi/client'
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
@@ -20,7 +20,11 @@ import {
   type ReceiveCarrierQuote,
   type ReceiveCarrierQuotes,
 } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import { createCarrierPinLedger, type CarrierCoin } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
+import {
+  carrierTaprootEvidence,
+  createCarrierPinLedger,
+  type CarrierCoin,
+} from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
 import {
   carrierFillSigner,
   createTaxiReceiveCarrierSettler,
@@ -44,6 +48,9 @@ const OTHER_KEY = hex.encode(await SingleKey.fromHex('23'.repeat(32)).xOnlyPubli
 const DEPOSIT_TXID = '1'.repeat(64)
 const COIN_A = '2'.repeat(64)
 const COIN_B = '3'.repeat(64)
+/** Sorts before `COIN_A`, unlike `COIN_B` — so a filter that let an ineligible
+ * coin through would pick it FIRST, rather than passing either way. */
+const INELIGIBLE_TXID = '0'.repeat(64)
 const OFFER_HEX = 'abcd'
 const TAXI = 'http://taxi.example:7080'
 const NOW = 2_000
@@ -66,6 +73,15 @@ const OTHER_SCRIPT = new DefaultVtxo.Script({
   serverPubKey: hex.decode(SERVER_KEY),
   csvTimelock: DefaultVtxo.Script.DEFAULT_TIMELOCK,
 })
+/** A second qualifying shape: same forfeit leaf, plus a 3-key delegate leaf
+ * that must never pass as one. */
+const DELEGATE_SCRIPT = new DelegateVtxo.Script({
+  pubKey: hex.decode(SOLVER_KEY),
+  serverPubKey: hex.decode(SERVER_KEY),
+  delegatePubKey: hex.decode(OTHER_KEY),
+  csvTimelock: DefaultVtxo.Script.DEFAULT_TIMELOCK,
+})
+const SERVER_KEY_BYTES = hex.decode(SERVER_KEY)
 
 const carrierQuote = (over: Partial<ReceiveCarrierQuote> = {}): ReceiveCarrierQuote => ({
   quoteId: 'q-1',
@@ -88,6 +104,7 @@ const coin = (over: Partial<CarrierCoin> & { txid: string }): CarrierCoin => ({
   assets: [{ assetId: ASSET, amount: 10n }],
   tapTree: TAP_TREE,
   forfeitTapLeafScript: FORFEIT_LEAF,
+  script: hex.encode(SOLVER_SCRIPT.pkScript),
   ...over,
 })
 
@@ -254,7 +271,7 @@ const harness = async (
     offerHex: () => OFFER_HEX,
     proceedsScript: hex.decode(PROCEEDS),
     solverKeys: [SOLVER_KEY],
-    serverKey: hex.decode(SERVER_KEY),
+    serverKey: () => SERVER_KEY_BYTES,
     provider: TAXI,
     now: () => NOW,
     fill: {
@@ -467,9 +484,9 @@ describe('the pinned floor is what the fill is measured against', () => {
       leg: ASSET,
       amount: 10n,
       solverKeys: [SOLVER_KEY],
-      serverKey: hex.decode(SERVER_KEY),
+      serverKey: SERVER_KEY_BYTES,
     })
-    expect(picked.map((c) => c.txid)).toEqual([COIN_A, COIN_B])
+    expect(picked.map(({ coin }) => coin.txid)).toEqual([COIN_A, COIN_B])
   })
 
   it('refuses rather than picking a coin another operation pinned', () => {
@@ -482,43 +499,15 @@ describe('the pinned floor is what the fill is measured against', () => {
         leg: ASSET,
         amount: 10n,
         solverKeys: [SOLVER_KEY],
-        serverKey: hex.decode(SERVER_KEY),
+        serverKey: SERVER_KEY_BYTES,
       }),
     ).toThrow(/inventory/)
   })
 
   it('excludes a coin with no taproot evidence at all, deterministically ordered', () => {
     const picked = selectCarrierInputs({
-      coins: [coin({ txid: COIN_B, tapTree: undefined, forfeitTapLeafScript: undefined }), coin({ txid: COIN_A })],
-      reserved: new Set<string>(),
-      floor: FLOOR,
-      dustSats: 330n,
-      leg: ASSET,
-      amount: 10n,
-      solverKeys: [SOLVER_KEY],
-      serverKey: hex.decode(SERVER_KEY),
-    })
-    expect(picked.map((c) => c.txid)).toEqual([COIN_A])
-  })
-
-  it('excludes a coin whose forfeit leaf is a CSV exit rather than a collaborative multisig', () => {
-    const picked = selectCarrierInputs({
-      coins: [coin({ txid: COIN_B, forfeitTapLeafScript: EXIT_LEAF }), coin({ txid: COIN_A })],
-      reserved: new Set<string>(),
-      floor: FLOOR,
-      dustSats: 330n,
-      leg: ASSET,
-      amount: 10n,
-      solverKeys: [SOLVER_KEY],
-      serverKey: hex.decode(SERVER_KEY),
-    })
-    expect(picked.map((c) => c.txid)).toEqual([COIN_A])
-  })
-
-  it('excludes a coin whose collaborative leaf names a different owner key', () => {
-    const picked = selectCarrierInputs({
       coins: [
-        coin({ txid: COIN_B, tapTree: OTHER_SCRIPT.encode(), forfeitTapLeafScript: OTHER_SCRIPT.forfeit() }),
+        coin({ txid: INELIGIBLE_TXID, tapTree: undefined, forfeitTapLeafScript: undefined }),
         coin({ txid: COIN_A }),
       ],
       reserved: new Set<string>(),
@@ -527,9 +516,59 @@ describe('the pinned floor is what the fill is measured against', () => {
       leg: ASSET,
       amount: 10n,
       solverKeys: [SOLVER_KEY],
-      serverKey: hex.decode(SERVER_KEY),
+      serverKey: SERVER_KEY_BYTES,
     })
-    expect(picked.map((c) => c.txid)).toEqual([COIN_A])
+    expect(picked.map(({ coin }) => coin.txid)).toEqual([COIN_A])
+  })
+
+  it('excludes a coin whose forfeit leaf is a CSV exit rather than a collaborative multisig', () => {
+    const picked = selectCarrierInputs({
+      coins: [coin({ txid: INELIGIBLE_TXID, forfeitTapLeafScript: EXIT_LEAF }), coin({ txid: COIN_A })],
+      reserved: new Set<string>(),
+      floor: FLOOR,
+      dustSats: 330n,
+      leg: ASSET,
+      amount: 10n,
+      solverKeys: [SOLVER_KEY],
+      serverKey: SERVER_KEY_BYTES,
+    })
+    expect(picked.map(({ coin }) => coin.txid)).toEqual([COIN_A])
+  })
+
+  it('excludes a coin whose collaborative leaf names a different owner key', () => {
+    const picked = selectCarrierInputs({
+      coins: [
+        coin({
+          txid: INELIGIBLE_TXID,
+          tapTree: OTHER_SCRIPT.encode(),
+          forfeitTapLeafScript: OTHER_SCRIPT.forfeit(),
+          script: hex.encode(OTHER_SCRIPT.pkScript),
+        }),
+        coin({ txid: COIN_A }),
+      ],
+      reserved: new Set<string>(),
+      floor: FLOOR,
+      dustSats: 330n,
+      leg: ASSET,
+      amount: 10n,
+      solverKeys: [SOLVER_KEY],
+      serverKey: SERVER_KEY_BYTES,
+    })
+    expect(picked.map(({ coin }) => coin.txid)).toEqual([COIN_A])
+  })
+
+  it("excludes a coin whose tree doesn't rebuild its own script", () => {
+    const picked = selectCarrierInputs({
+      coins: [coin({ txid: INELIGIBLE_TXID, script: hex.encode(OTHER_SCRIPT.pkScript) }), coin({ txid: COIN_A })],
+      reserved: new Set<string>(),
+      floor: FLOOR,
+      dustSats: 330n,
+      leg: ASSET,
+      amount: 10n,
+      solverKeys: [SOLVER_KEY],
+      serverKey: SERVER_KEY_BYTES,
+    })
+    expect(picked.map(({ coin }) => coin.txid)).toEqual([COIN_A])
   })
 
   it('refuses when every candidate lacks a collaborative forfeit leaf', () => {
@@ -542,9 +581,63 @@ describe('the pinned floor is what the fill is measured against', () => {
         leg: ASSET,
         amount: 10n,
         solverKeys: [SOLVER_KEY],
-        serverKey: hex.decode(SERVER_KEY),
+        serverKey: SERVER_KEY_BYTES,
       }),
     ).toThrow(/inventory/)
+  })
+})
+
+describe('carrierTaprootEvidence accepts only a coin whose tree, script and forfeit leaf all agree', () => {
+  it('accepts the default two-leaf forfeit', () => {
+    expect(carrierTaprootEvidence(coin({ txid: COIN_A }), [SOLVER_KEY], SERVER_KEY_BYTES)).toEqual({
+      tapTree: TAP_TREE,
+      spendLeaf: scriptFromTapLeafScript(FORFEIT_LEAF),
+    })
+  })
+
+  it('accepts a delegate coin: the same two-key forfeit, in its own three-leaf tree', () => {
+    const delegateCoin = coin({
+      txid: COIN_A,
+      tapTree: DELEGATE_SCRIPT.encode(),
+      forfeitTapLeafScript: DELEGATE_SCRIPT.forfeit(),
+      script: hex.encode(DELEGATE_SCRIPT.pkScript),
+    })
+    expect(carrierTaprootEvidence(delegateCoin, [SOLVER_KEY], SERVER_KEY_BYTES)).toEqual({
+      tapTree: DELEGATE_SCRIPT.encode(),
+      spendLeaf: scriptFromTapLeafScript(DELEGATE_SCRIPT.forfeit()),
+    })
+  })
+
+  it.each<[string, CarrierCoin, readonly string[]]>([
+    ['a CSV exit leaf', coin({ txid: COIN_A, forfeitTapLeafScript: EXIT_LEAF }), [SOLVER_KEY]],
+    [
+      "a stranger's multisig",
+      coin({
+        txid: COIN_A,
+        tapTree: OTHER_SCRIPT.encode(),
+        forfeitTapLeafScript: OTHER_SCRIPT.forfeit(),
+        script: hex.encode(OTHER_SCRIPT.pkScript),
+      }),
+      [SOLVER_KEY],
+    ],
+    ['a leaf outside its own tree', coin({ txid: COIN_A, forfeitTapLeafScript: OTHER_SCRIPT.forfeit() }), [SOLVER_KEY]],
+    [
+      "a tree that rebuilds a different coin's script",
+      coin({ txid: COIN_A, script: hex.encode(OTHER_SCRIPT.pkScript) }),
+      [SOLVER_KEY],
+    ],
+    [
+      'the 3-key delegate leaf, even with the delegate key listed as a solver key',
+      coin({
+        txid: COIN_A,
+        tapTree: DELEGATE_SCRIPT.encode(),
+        forfeitTapLeafScript: DELEGATE_SCRIPT.delegate(),
+        script: hex.encode(DELEGATE_SCRIPT.pkScript),
+      }),
+      [SOLVER_KEY, OTHER_KEY],
+    ],
+  ])('rejects %s', (_why, badCoin, solverKeys) => {
+    expect(carrierTaprootEvidence(badCoin, solverKeys, SERVER_KEY_BYTES)).toBeUndefined()
   })
 })
 
@@ -573,7 +666,7 @@ describe('a solver input carries the taproot evidence the Taxi will check', () =
 
   it('picks the eligible coin over one an ineligible leaf would have covered the amount with', async () => {
     const h = await harness({
-      coins: [coin({ txid: COIN_B, forfeitTapLeafScript: EXIT_LEAF }), coin({ txid: COIN_A })],
+      coins: [coin({ txid: INELIGIBLE_TXID, forfeitTapLeafScript: EXIT_LEAF }), coin({ txid: COIN_A })],
     })
     await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
     expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])

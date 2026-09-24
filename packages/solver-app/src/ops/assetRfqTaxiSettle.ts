@@ -25,6 +25,7 @@ import {
   type CarrierOutpoint,
   type CarrierPin,
   type CarrierPinLedger,
+  type CarrierTaprootEvidence,
 } from './assetRfqTaxi.js'
 import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 
@@ -79,9 +80,9 @@ export interface TaxiCarrierSettleDeps {
   offerHex: (row: AssetRfqSwapRow) => string
   proceedsScript: Uint8Array
   solverKeys: readonly string[]
-  /** What a solver input's forfeit leaf must be collaborative with — this
-   * deployment's own key, never an operator's claim. */
-  serverKey: Uint8Array
+  /** What a solver input's forfeit leaf must be collaborative with — a getter
+   * so a signer rotation is live without a restart. */
+  serverKey: () => Uint8Array
   /** Recorded so a re-pointed solver cannot reconcile one operator's fill
    * against another's. */
   provider: string
@@ -96,6 +97,13 @@ const contributionOf = (coin: CarrierCoin, leg: AssetLeg, dustSats: bigint): big
     .reduce((total, held) => total + BigInt(held.amount), 0n)
 }
 
+/** A selected coin paired with the evidence that qualified it, so the request
+ * builder uses selection's own answer rather than deriving a second one. */
+export interface CarrierSelectedInput {
+  coin: CarrierCoin
+  evidence: CarrierTaprootEvidence
+}
+
 /** Ordered by outpoint rather than by value or expiry: the set has to be a
  * function of the inventory alone, so a reconciler re-deriving it after a
  * restart gets the same answer this call got. */
@@ -108,18 +116,19 @@ export const selectCarrierInputs = (args: {
   amount: bigint
   solverKeys: readonly string[]
   serverKey: Uint8Array
-}): readonly CarrierCoin[] => {
+}): readonly CarrierSelectedInput[] => {
   const eligible = args.coins
     .filter((coin) => !args.reserved.has(outpointKey(coin.txid, coin.vout)))
     .filter((coin) => clearsFloor(coin, args.floor))
-    .filter((coin) => carrierTaprootEvidence(coin, args.solverKeys, args.serverKey) !== undefined)
-    .filter((coin) => contributionOf(coin, args.leg, args.dustSats) > 0n)
-    .sort((a, b) => outpointKey(a.txid, a.vout).localeCompare(outpointKey(b.txid, b.vout)))
-  const picked: CarrierCoin[] = []
+    .map((coin) => ({ coin, evidence: carrierTaprootEvidence(coin, args.solverKeys, args.serverKey) }))
+    .filter((entry): entry is CarrierSelectedInput => entry.evidence !== undefined)
+    .filter((entry) => contributionOf(entry.coin, args.leg, args.dustSats) > 0n)
+    .sort((a, b) => outpointKey(a.coin.txid, a.coin.vout).localeCompare(outpointKey(b.coin.txid, b.coin.vout)))
+  const picked: CarrierSelectedInput[] = []
   let total = 0n
-  for (const coin of eligible) {
-    picked.push(coin)
-    total += contributionOf(coin, args.leg, args.dustSats)
+  for (const entry of eligible) {
+    picked.push(entry)
+    total += contributionOf(entry.coin, args.leg, args.dustSats)
     if (total >= args.amount) return picked
   }
   throw new Error(`carrier fill inventory holds ${total} of the ${args.amount} it must pay on ${args.leg ?? 'sats'}`)
@@ -219,6 +228,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
     }
     const floor = (await deps.resolve(request)).inputExpiryFloor
     const coins = await deps.coins()
+    const serverKey = deps.serverKey()
     const inputs = selectCarrierInputs({
       coins,
       reserved: deps.reserved(),
@@ -227,10 +237,10 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       leg: row.toAssetId,
       amount: row.toAmount,
       solverKeys: deps.solverKeys,
-      serverKey: deps.serverKey,
+      serverKey,
     })
 
-    const outpoints = inputs.map(({ txid, vout }) => ({ txid, vout }))
+    const outpoints = inputs.map(({ coin }) => ({ txid: coin.txid, vout: coin.vout }))
     const deposit = { txid: row.depositTxid, vout: row.depositVout }
     const validUntil = Math.min(row.validUntil, terms.expiresAt)
     const offerHex = deps.offerHex(row)
@@ -271,26 +281,19 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         operationId: row.id,
         receiveQuoteId: terms.quoteId,
         offerHex,
-        solverInputs: inputs.map((coin) => {
-          // Selection already excludes this; a miss here means the two disagree.
-          const evidence = carrierTaprootEvidence(coin, deps.solverKeys, deps.serverKey)
-          if (evidence === undefined) {
-            throw new Error(`carrier fill ${row.id} selected ${coin.txid}:${coin.vout} without its taproot evidence`)
-          }
-          return {
-            txid: coin.txid,
-            vout: coin.vout,
-            value: BigInt(coin.value),
-            tapTree: evidence.tapTree,
-            spendLeaf: evidence.spendLeaf,
-            // EVERY asset the coin owns: arkd refuses a spend whose packet omits
-            // one an input carries.
-            assets: (coin.assets ?? []).map((held) => ({
-              assetId: assetIdValue(held.assetId),
-              amount: BigInt(held.amount),
-            })),
-          }
-        }),
+        solverInputs: inputs.map(({ coin, evidence }) => ({
+          txid: coin.txid,
+          vout: coin.vout,
+          value: BigInt(coin.value),
+          tapTree: evidence.tapTree,
+          spendLeaf: evidence.spendLeaf,
+          // EVERY asset the coin owns: arkd refuses a spend whose packet omits
+          // one an input carries.
+          assets: (coin.assets ?? []).map((held) => ({
+            assetId: assetIdValue(held.assetId),
+            amount: BigInt(held.amount),
+          })),
+        })),
         solverProceedsScript: deps.proceedsScript,
         solverKeys: [...deps.solverKeys],
         contributionSats: terms.loanSats,
@@ -307,7 +310,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       const expected = await deps.fill.rebuild({
         row,
         offerHex,
-        inputs,
+        inputs: inputs.map(({ coin }) => coin),
         proceedsScript: deps.proceedsScript,
         physicalSats: terms.physicalSats,
         contributionSats: terms.loanSats,
@@ -353,11 +356,11 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       // The coin AS IT IS NOW: re-testing the object selected before the
       // boundary could not fail, whatever had changed.
       const live = new Map((await deps.coins()).map((coin) => [outpointKey(coin.txid, coin.vout), coin]))
-      for (const input of inputs) {
-        const fresh = live.get(outpointKey(input.txid, input.vout))
-        if (fresh === undefined) throw new Error(`carrier fill ${row.id} no longer holds ${input.txid}:${input.vout}`)
+      for (const { coin } of inputs) {
+        const fresh = live.get(outpointKey(coin.txid, coin.vout))
+        if (fresh === undefined) throw new Error(`carrier fill ${row.id} no longer holds ${coin.txid}:${coin.vout}`)
         if (!clearsFloor(fresh, floor)) {
-          throw new Error(`carrier fill ${row.id} input ${input.txid}:${input.vout} no longer clears its floor`)
+          throw new Error(`carrier fill ${row.id} input ${coin.txid}:${coin.vout} no longer clears its floor`)
         }
       }
 

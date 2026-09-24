@@ -54,6 +54,8 @@ export interface CarrierCoin {
    * them rather than spending a coin it cannot prove a path into. */
   tapTree?: Uint8Array
   forfeitTapLeafScript?: TapLeafScript
+  /** The indexer's scriptPubKey — what `tapTree` must actually rebuild. */
+  script?: string
 }
 
 export interface TaxiReceiveCarrierDeps {
@@ -168,19 +170,21 @@ export interface CarrierTaprootEvidence {
   spendLeaf: Uint8Array
 }
 
-/** The coin's own tree and forfeit leaf, wire-shaped — but only when that leaf
- * is a collaborative multisig of one of `solverKeys` and `serverKey`, the one
- * shape the Taxi accepts. `undefined` otherwise (missing data, a leaf outside
- * the tree, a CSV exit, a stranger's multisig), so callers exclude the coin at
- * selection rather than pin it toward a refusal. */
+/** The coin's own tree and forfeit leaf, wire-shaped — but only when the tree
+ * rebuilds the coin's own script and the leaf is a collaborative multisig of
+ * one of `solverKeys` and `serverKey`. `undefined` for anything else, so
+ * callers exclude the coin at selection rather than pin it toward a refusal. */
 export const carrierTaprootEvidence = (
   coin: CarrierCoin,
   solverKeys: readonly string[],
   serverKey: Uint8Array,
 ): CarrierTaprootEvidence | undefined => {
-  if (coin.tapTree === undefined || coin.forfeitTapLeafScript === undefined) return undefined
+  if (coin.tapTree === undefined || coin.forfeitTapLeafScript === undefined || coin.script === undefined) {
+    return undefined
+  }
   try {
     const tree = VtxoScript.decode(coin.tapTree)
+    if (hex.encode(tree.pkScript) !== coin.script.toLowerCase()) return undefined
     const spendLeaf = scriptFromTapLeafScript(coin.forfeitTapLeafScript)
     if (!tree.scripts.some((script) => hex.encode(script) === hex.encode(spendLeaf))) return undefined
     const keys = MultisigTapscript.decode(spendLeaf)
