@@ -70,7 +70,7 @@ export const carrierTaxiFor = (
       } catch (cause) {
         throw new CarrierTaxiRefusedError(row.id, String(terms.taxiUrl), cause)
       }
-      return { provider, providerKey: terms.taxiKey, swapFills: clientFor(provider) }
+      return { provider, providerKey: terms.taxiKey, swapFills: clientFor(provider, 'fill') }
     }
     // Throws first when no Taxi is configured, so `configured` is set below.
     const swapFills = clientFor(undefined)

@@ -625,7 +625,7 @@ export class AssetRfqSwapService {
     let available: ReadonlyMap<AssetLeg, bigint>
     // ONE clock for the admission read and the window it admits.
     const admittedAt = this.now()
-    if (terms?.mode === 'recycle') {
+    if (carrierSettled(terms)) {
       const adapter = completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes)
       if (adapter === null) {
         return {
@@ -642,6 +642,7 @@ export class AssetRfqSwapService {
           assetId: pair.to as string,
           now: admittedAt,
           admission: true,
+          ...receiveCarrierTaxiOf(terms),
         })
       } catch (error) {
         this.deps.onError?.('carrier', error)

@@ -33,6 +33,8 @@ import {
   carrierChainTip,
   createTaxiReceiveCarrierReader,
   spendableCarrierCoins,
+  TAXI_FILL_RATE_LIMIT,
+  TAXI_QUOTE_RATE_LIMIT,
   taxiClientCache,
   taxiReceiveCarrier,
   type CarrierCoin,
@@ -473,7 +475,11 @@ describe('a recycle_receiver RFQ through the real reader (Ruling 4)', () => {
   const receiverPaidQuote = () => quoteFixture({ topup: DUST, fareUnits: '0', payer: 'receiver' })
 
   it('accepts a receiver-paid quote, priced at zero with carrier_sats absent', async () => {
-    const { read } = reader({ quote: receiverPaidQuote(), info: infoFixture({ fareUnits: '0' }) })
+    const { read } = reader({
+      quote: receiverPaidQuote(),
+      info: infoFixture({ fareUnits: '0' }),
+      coins: async () => [coin({ txid: 'c'.repeat(64), assets: [{ assetId: ASSET, amount: 10n ** 18n }] })],
+    })
     const service = await harness(read)
     const outcome = await service.quote(rfqRequest())
     expect(outcome).toMatchObject({ accepted: true, carrierSats: 0n })
@@ -519,6 +525,41 @@ describe('the per-URL client cache', () => {
     expect(clientFor('https://taxi-0.example')).not.toBe(first)
     const last = clientFor('https://taxi-39.example')
     expect(clientFor('https://taxi-39.example')).toBe(last)
+  })
+
+  it('gives fill-time requests their own bounded budget per host, which quote traffic cannot spend', async () => {
+    let reached = 0
+    const clientFor = taxiClientCache({
+      policy: POLICY,
+      fetch: async () => {
+        reached += 1
+        return new Response(JSON.stringify(infoFixture()), { status: 200 })
+      },
+    })
+    const spend = async (budget: 'quote' | 'fill', times: number) => {
+      for (let i = 0; i < times; i++)
+        await clientFor('https://taxi.example', budget)
+          .info()
+          .catch(() => undefined)
+    }
+    await spend('quote', TAXI_QUOTE_RATE_LIMIT + 5)
+    expect(reached).toBe(TAXI_QUOTE_RATE_LIMIT)
+    await spend('fill', TAXI_FILL_RATE_LIMIT + 5)
+    expect(reached).toBe(TAXI_QUOTE_RATE_LIMIT + TAXI_FILL_RATE_LIMIT)
+  })
+
+  it('still lets a fill read a named Taxi after a storm of quotes naming it has spent the quote budget', async () => {
+    const fetchStub: typeof fetch = async (input) =>
+      new Response(JSON.stringify(String(input).endsWith('/v1/info') ? infoFixture() : quoteFixture()), {
+        status: 200,
+      })
+    const { read } = reader({ clientFor: taxiClientCache({ policy: POLICY, fetch: fetchStub }) })
+    const named = { taxi: { url: 'https://taxi.example', operatorKey: hex.encode(OPERATOR_KEY) } }
+    for (let i = 0; i < TAXI_QUOTE_RATE_LIMIT / 2; i++) await read.resolve(request({ ...named, admission: true }))
+    await expect(read.resolve(request({ ...named, admission: true }))).rejects.toThrow()
+
+    await expect(read.resolve(request(named))).resolves.toMatchObject({ quoteId: 'q-1' })
+    await expect(read.available(request(named))).resolves.toBeInstanceOf(Map)
   })
 
   it('falls back to the configured Taxi for a request naming none, and refuses when none is configured', () => {

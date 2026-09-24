@@ -179,7 +179,7 @@ const carrierAttemptSnapshotFor = (parts: {
   mintSnapshot({
     ...encodeCarrierAttemptInputs(parts.inputs),
     operation: parts.row.id,
-    // Recorded so a re-pointed solver cannot reconcile one operator's fill against another's.
+    // A record of which Taxi holds this graph; nothing reads it back yet, and a reader must use it, not config.
     provider: parts.taxi.provider,
     ...(parts.taxi.providerKey === undefined ? {} : { provider_key: parts.taxi.providerKey }),
     offer: parts.offerHex,
@@ -420,6 +420,7 @@ const submitWhileNotReady = async (
       return
     } catch (error) {
       if (!(error instanceof TaxiError && error.code === 'not_ready') || delay === undefined) throw error
+      if (deps.now() + Math.ceil(delay / 1000) >= verified.expiresAt) throw error
       await deps.sleep(delay)
       if (deps.now() >= verified.expiresAt) throw error
     }

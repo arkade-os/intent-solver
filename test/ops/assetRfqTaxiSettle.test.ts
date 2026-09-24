@@ -762,6 +762,8 @@ describe("a receiver-paid fill settles against the row's own Taxi", () => {
     expect(h.resolves.length).toBeGreaterThanOrEqual(2)
     for (const ask of h.resolves) {
       expect(ask).toMatchObject({ taxi: { url: RECEIVER_PAID.taxiUrl, operatorKey: KEY }, receiverPaid: true })
+      // `admission` marks quote traffic; a fill's reads must spend the fill budget.
+      expect(ask).not.toHaveProperty('admission')
     }
     await h.store.close()
   })
@@ -820,8 +822,18 @@ describe("a Taxi's not_ready is answered with the same bytes again, never with a
   }
 
   it('re-posts the identical signed graph after two not_ready answers, then submits', async () => {
-    const h = await receiverPaid({ submits: [notReady, notReady] })
+    let signs = 0
+    const h = await receiverPaid({
+      submits: [notReady, notReady],
+      fill: {
+        sign: async (expected) => {
+          signs += 1
+          return expected
+        },
+      },
+    })
     await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
+    expect(signs).toBe(1)
     expect(h.submitted).toHaveLength(3)
     expect(new Set(h.submitted).size).toBe(1)
     expect(h.sleeps).toHaveLength(2)
@@ -834,6 +846,18 @@ describe("a Taxi's not_ready is answered with the same bytes again, never with a
     const h = await receiverPaid({ submits: Array(9).fill(notReady), sleepAdvances: 3_000 })
     await expect(h.settle(await h.row())).rejects.toMatchObject({ code: 'not_ready' })
     expect(h.submitted).toHaveLength(2)
+    await expectLiable(h)
+    await h.store.close()
+  })
+
+  it('never sleeps into a quote with less time left than the backoff', async () => {
+    const h = await receiverPaid({
+      body: fillQuoteBody({ contributionSats: '330', fare: { currency: 'sats', units: '0' }, expiresAt: NOW + 1 }),
+      submits: [notReady],
+    })
+    await expect(h.settle(await h.row())).rejects.toMatchObject({ code: 'not_ready' })
+    expect(h.sleeps).toEqual([])
+    expect(h.submitted).toHaveLength(1)
     await expectLiable(h)
     await h.store.close()
   })

@@ -68,8 +68,8 @@ export type TaxiCarrierClient = Pick<
 >
 
 export interface TaxiReceiveCarrierDeps {
-  /** Absent resolves the configured Taxi; throws when none is configured. */
-  clientFor: (url?: string) => TaxiCarrierClient
+  /** Absent resolves the configured Taxi, which no budget limits; throws when none is configured. */
+  clientFor: (url?: string, budget?: TaxiBudget) => TaxiCarrierClient
   trust: TaxiCarrierTrust
   maxServiceFareSats: bigint
   coins: () => Promise<readonly CarrierCoin[]>
@@ -122,7 +122,7 @@ const verifiedQuoteFor = async (
     throw new Error(`carrier maker key ${request.makerPublicKey} is not an x-only public key`)
   }
   const assetId = assetIdValue(request.assetId)
-  const client = deps.clientFor(request.taxi?.url)
+  const client = deps.clientFor(request.taxi?.url, request.admission === true ? 'quote' : 'fill')
   const [info, quote] = await Promise.all([client.info(), client.getReceiveQuote(request.quoteId)])
   // Verification binds every other field but not the id, and `available` reads
   // this quote's floor without the orchestrator's own id check beside it.
@@ -302,37 +302,46 @@ export interface TaxiCarrierComposition {
  * puts the floor behind the chain, admitting an already-expired coin. */
 export const carrierChainTip = (client: EsploraClient): ChainTipProvider => esploraChainTip(client, { cacheMs: 0 })
 
-/** A named Taxi's own budget: generous for real traffic, tight enough to cap a hostile URL's round-trip storm. */
-const TAXI_CLIENT_RATE_LIMIT = 20
+/** Which per-host budget a named-Taxi request spends. Quote traffic costs nothing to generate, so it has its own. */
+export type TaxiBudget = 'quote' | 'fill'
+
+/** A named Taxi's quote budget: generous for real traffic, tight enough to cap a hostile URL's round-trip storm. */
+export const TAXI_QUOTE_RATE_LIMIT = 20
+/** Spent only behind a funded deposit, at most 6 requests a fill per host, so ten concurrent fills a minute. */
+export const TAXI_FILL_RATE_LIMIT = 60
 const TAXI_CLIENT_RATE_WINDOW_SECONDS = 60
 /** Ruling 3's cap on the client cache below. */
 const TAXI_CLIENT_CACHE_SIZE = 32
 
-/** One client per normalized URL, built lazily in a FIFO cache — evicted oldest-INSERTED first, a hit
+/** One client per budget and normalized URL, built lazily in a FIFO cache — evicted oldest-INSERTED first, a hit
  * refreshes nothing — so distinct attacker URLs cannot grow it unbounded; `configuredUrl` skips
  * `normalizeTaxiUrl`/`guardedTaxiFetch` entirely — that is `taxiUrl`'s own plain client. */
 export const taxiClientCache = (deps: {
   configuredUrl?: string
   policy: TaxiUrlPolicy
   fetch?: typeof fetch
-}): ((url?: string) => TaxiCarrierClient) => {
+}): ((url?: string, budget?: TaxiBudget) => TaxiCarrierClient) => {
   const baseFetch = deps.fetch ?? fetch
   const configured = deps.configuredUrl ? new TaxiClient({ baseUrl: deps.configuredUrl, fetch: baseFetch }) : undefined
-  const limiter = new RateLimiter(TAXI_CLIENT_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds)
+  const limiters: Record<TaxiBudget, RateLimiter> = {
+    quote: new RateLimiter(TAXI_QUOTE_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
+    fill: new RateLimiter(TAXI_FILL_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
+  }
   const cache = new Map<string, TaxiCarrierClient>()
-  return (url) => {
+  return (url, budget = 'quote') => {
     if (url === undefined) {
       if (!configured) throw new Error('no receive-carrier Taxi is configured for this request')
       return configured
     }
-    const key = normalizeTaxiUrl(url, deps.policy)
+    const normalized = normalizeTaxiUrl(url, deps.policy)
+    const key = `${budget} ${normalized}`
     const cached = cache.get(key)
     if (cached) return cached
     if (cache.size >= TAXI_CLIENT_CACHE_SIZE) {
       const oldest = cache.keys().next().value
       if (oldest !== undefined) cache.delete(oldest)
     }
-    const client = new TaxiClient({ baseUrl: key, fetch: guardedTaxiFetch(baseFetch, limiter) })
+    const client = new TaxiClient({ baseUrl: normalized, fetch: guardedTaxiFetch(baseFetch, limiters[budget]) })
     cache.set(key, client)
     return client
   }

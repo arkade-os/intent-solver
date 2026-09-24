@@ -1314,7 +1314,31 @@ describe('profile.carrier — receiver-paid mode', () => {
       taxi: { url: 'https://taxi.example', operatorKey: TAXI_KEY },
       receiverPaid: true,
     })
+    expect(asks.at(-1)).not.toHaveProperty('admission')
     expect((await store.get('swap-1')).state).toBe('filling')
+  })
+
+  it('admits a receiver-paid quote against carrier inventory, never the generic balance', async () => {
+    const asks: unknown[] = []
+    const available = vi.fn(async (ask: unknown) => {
+      asks.push(ask)
+      return new Map([[ASSET_A, 1n]])
+    })
+    const balance = vi.fn(async () => new Map([[ASSET_A, 10n ** 18n]]))
+    const { service } = await harness({ balance, receiveCarrierQuotes: receiverPaidAdapter({}, { available }) })
+
+    expect(await service.quote(request({ carrier: receiverPaid() }))).toMatchObject({
+      accepted: false,
+      reason: 'insufficient_inventory',
+    })
+    expect(balance).not.toHaveBeenCalled()
+    expect(asks).toEqual([
+      expect.objectContaining({
+        admission: true,
+        taxi: { url: 'https://taxi.example', operatorKey: TAXI_KEY },
+        receiverPaid: true,
+      }),
+    ])
   })
 
   it('reconciles a filling receiver-paid row through the carrier observer rather than escalating it', async () => {
