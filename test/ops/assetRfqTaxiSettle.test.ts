@@ -13,11 +13,16 @@ import { describe, it, expect, vi } from 'vitest'
 import { base64, hex } from '@scure/base'
 import { DefaultVtxo, DelegateVtxo, scriptFromTapLeafScript, SingleKey, Transaction } from '@arkade-os/sdk'
 import { digestJointGraph, OFFER_FILL_TEMPLATE } from '@arkade-taxi/client'
-import { AssetRfqSwapStore, type AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import {
+  AssetRfqSwapStore,
+  type AssetRfqCarrierTerms,
+  type AssetRfqSwapRow,
+} from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import {
   AssetRfqSwapService,
   type ReceiveCarrierQuote,
+  type ReceiveCarrierQuoteRequest,
   type ReceiveCarrierQuotes,
 } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
@@ -34,7 +39,8 @@ import {
   type CarrierFillSeams,
   type TaxiCarrierSettleDeps,
 } from '@arkade-os/solver-app/ops/assetRfqTaxiSettle.js'
-import { TaxiClient } from '@arkade-taxi/client'
+import { carrierTaxiFor, CarrierTaxiRefusedError } from '@arkade-os/solver-app/ops/assetRfqTaxiAdapter.js'
+import type { TaxiUrlPolicy } from '@arkade-os/solver-app/ops/taxiUrlGuard.js'
 
 const ASSET = `${'aa'.repeat(31)}bb0100`
 const MAKER_PK_SCRIPT = `5120${'c'.repeat(64)}`
@@ -53,6 +59,9 @@ const COIN_B = '3'.repeat(64)
 const INELIGIBLE_TXID = '0'.repeat(64)
 const OFFER_HEX = 'abcd'
 const TAXI = 'http://taxi.example:7080'
+const NAMED = 'https://taxi.example'
+const KEY = 'a1'.repeat(32)
+const POLICY: TaxiUrlPolicy = { isMainnet: false, allowPrivate: false }
 const NOW = 2_000
 const FLOOR = { kind: 'height' as const, value: 1_100_000n }
 
@@ -162,7 +171,34 @@ const statusBody = (over: Record<string, unknown> = {}): Record<string, unknown>
   ...over,
 })
 
-const openStore = async (over: { validUntil?: number; toAmount?: bigint; state?: 'funded' } = {}) => {
+const RECYCLE: AssetRfqCarrierTerms = {
+  mode: 'recycle',
+  quoteId: 'q-1',
+  physicalSats: 330n,
+  loanSats: 329n,
+  receiptSats: 1n,
+  serviceFareSats: 4n,
+  pricedSats: 5n,
+  expiresAt: 9_000,
+}
+
+/** Spelled un-normalised on purpose: the attempt must record the guard's form. */
+const RECEIVER_PAID: AssetRfqCarrierTerms = {
+  mode: 'recycle_receiver',
+  quoteId: 'q-1',
+  physicalSats: 330n,
+  loanSats: 330n,
+  receiptSats: 0n,
+  serviceFareSats: 0n,
+  pricedSats: 0n,
+  expiresAt: 9_000,
+  taxiUrl: 'https://Taxi.Example/',
+  taxiKey: KEY,
+}
+
+const openStore = async (
+  over: { validUntil?: number; toAmount?: bigint; state?: 'funded'; terms?: AssetRfqCarrierTerms } = {},
+) => {
   const store = await AssetRfqSwapStore.open(':memory:', () => 1_000)
   await store.insertQuote({
     id: 'swap-1',
@@ -178,16 +214,7 @@ const openStore = async (over: { validUntil?: number; toAmount?: bigint; state?:
     offerAddress: 'ark1qoffer',
     solverPubkey: SOLVER_KEY,
     validUntil: over.validUntil ?? 9_000,
-    carrierTerms: {
-      mode: 'recycle',
-      quoteId: 'q-1',
-      physicalSats: 330n,
-      loanSats: 329n,
-      receiptSats: 1n,
-      serviceFareSats: 4n,
-      pricedSats: 5n,
-      expiresAt: 9_000,
-    },
+    carrierTerms: over.terms ?? RECYCLE,
   })
   await store.transition('swap-1', 'quoted', 'funded', { deposit_txid: DEPOSIT_TXID, deposit_vout: 1 })
   if (over.state !== 'funded') await store.transition('swap-1', 'funded', 'filling', {})
@@ -204,6 +231,7 @@ interface Harness {
   ledger: ReturnType<typeof createReservationLedger>
   pins: ReturnType<typeof createCarrierPinLedger>
   attempt: () => Promise<unknown>
+  resolves: ReceiveCarrierQuoteRequest[]
 }
 
 const harness = async (
@@ -218,13 +246,16 @@ const harness = async (
     submitStatus?: number
     validUntil?: number
     toAmount?: bigint
+    terms?: AssetRfqCarrierTerms
+    policy?: TaxiUrlPolicy
     deps?: Partial<TaxiCarrierSettleDeps>
   } = {},
 ): Promise<Harness> => {
-  const store = await openStore({ validUntil: over.validUntil, toAmount: over.toAmount })
+  const store = await openStore({ validUntil: over.validUntil, toAmount: over.toAmount, terms: over.terms })
   const seen = new Map<string, unknown>()
   const requests: string[] = []
   const bodies: Record<string, unknown>[] = []
+  const resolves: ReceiveCarrierQuoteRequest[] = []
   const record = async (label: string) => {
     seen.set(label, await store.readCarrierAttempt('swap-1'))
   }
@@ -257,8 +288,9 @@ const harness = async (
   const pins = createCarrierPinLedger()
   const deps: TaxiCarrierSettleDeps = {
     store,
-    swapFills: new TaxiClient({ baseUrl: TAXI, fetch: fetchImpl }),
-    resolve: async () => {
+    taxiFor: carrierTaxiFor({ taxiUrl: TAXI, policy: over.policy ?? POLICY, fetch: fetchImpl }),
+    resolve: async (request) => {
+      resolves.push(request)
       const answer = answers[Math.min(asked, answers.length - 1)]!
       asked += 1
       return answer()
@@ -272,7 +304,6 @@ const harness = async (
     proceedsScript: hex.decode(PROCEEDS),
     solverKeys: [SOLVER_KEY],
     serverKey: () => SERVER_KEY_BYTES,
-    provider: TAXI,
     now: () => NOW,
     fill: {
       rebuild: over.fill?.rebuild ?? (async () => REBUILT),
@@ -294,6 +325,7 @@ const harness = async (
     ledger,
     pins,
     attempt: () => store.readCarrierAttempt('swap-1'),
+    resolves,
   }
 }
 
@@ -670,6 +702,87 @@ describe('a solver input carries the taproot evidence the Taxi will check', () =
     })
     await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
     expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
+    await h.store.close()
+  })
+})
+
+describe("a receiver-paid fill settles against the row's own Taxi", () => {
+  const receiverPaid = (over: Parameters<typeof harness>[0] = {}) =>
+    harness({
+      terms: RECEIVER_PAID,
+      body: fillQuoteBody({ contributionSats: '330', fare: { currency: 'sats', units: '0' } }),
+      ...over,
+    })
+
+  it('contributes the whole dust and caps the fare at zero', async () => {
+    const h = await receiverPaid()
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
+    expect(h.bodies[0]).toMatchObject({ contributionSats: '330', maxFare: { currency: 'sats', units: '0' } })
+    await h.store.close()
+  })
+
+  it('asks the row own Taxi for the fill, not the configured one', async () => {
+    const h = await receiverPaid()
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
+    expect(h.requests).toEqual([`POST ${NAMED}/v1/swap-fills`, `POST ${NAMED}/v1/swap-fills/fill-1/submit`])
+    await h.store.close()
+  })
+
+  it('records the row own Taxi, normalised, and its key on the attempt', async () => {
+    const h = await receiverPaid()
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
+    expect(((await h.attempt()) as { snapshot: unknown }).snapshot).toMatchObject({
+      provider: NAMED,
+      provider_key: KEY,
+    })
+    await h.store.close()
+  })
+
+  it('carries the Taxi into every resolve the settle makes', async () => {
+    const h = await receiverPaid()
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
+    expect(h.resolves.length).toBeGreaterThanOrEqual(2)
+    for (const ask of h.resolves) {
+      expect(ask).toMatchObject({ taxi: { url: RECEIVER_PAID.taxiUrl, operatorKey: KEY }, receiverPaid: true })
+    }
+    await h.store.close()
+  })
+
+  it('refuses a named Taxi the URL policy refuses, before pinning or asking anything', async () => {
+    const h = await receiverPaid({ terms: { ...RECEIVER_PAID, taxiUrl: 'https://taxi.internal' } })
+    await expect(h.settle(await h.row())).rejects.toBeInstanceOf(CarrierTaxiRefusedError)
+    expect(h.requests).toEqual([])
+    expect(h.resolves).toEqual([])
+    expect(await h.attempt()).toBeNull()
+    expect(h.pins.held()).toEqual([])
+    await h.store.close()
+  })
+
+  it('guards a named Taxi even where it spells the configured URL, and never the configured one (G3)', async () => {
+    const mainnet: TaxiUrlPolicy = { isMainnet: true, allowPrivate: false }
+    const named = await receiverPaid({ policy: mainnet, terms: { ...RECEIVER_PAID, taxiUrl: TAXI } })
+    await expect(named.settle(await named.row())).rejects.toBeInstanceOf(CarrierTaxiRefusedError)
+    expect(named.requests).toEqual([])
+    const configured = await harness({ policy: mainnet })
+    await expect(configured.settle(await configured.row())).resolves.toEqual({ status: 'submitted' })
+    expect(configured.requests[0]).toBe(`POST ${TAXI}/v1/swap-fills`)
+    await named.store.close()
+    await configured.store.close()
+  })
+
+  it('leaves the sender-paid settle on the configured Taxi', async () => {
+    const h = await harness()
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
+    expect(h.bodies[0]).toMatchObject({ contributionSats: '329', maxFare: { currency: 'sats', units: '4' } })
+    expect(h.requests).toEqual([`POST ${TAXI}/v1/swap-fills`, `POST ${TAXI}/v1/swap-fills/fill-1/submit`])
+    const { snapshot } = (await h.attempt()) as { snapshot: Record<string, unknown> }
+    expect(snapshot.provider).toBe(TAXI)
+    expect(snapshot).not.toHaveProperty('provider_key')
+    expect(h.resolves.length).toBeGreaterThanOrEqual(2)
+    for (const ask of h.resolves) {
+      expect(ask).not.toHaveProperty('taxi')
+      expect(ask).not.toHaveProperty('receiverPaid')
+    }
     await h.store.close()
   })
 })

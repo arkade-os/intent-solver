@@ -1224,8 +1224,8 @@ describe('profile.carrier — receiver-paid mode', () => {
   })
 
   /** The whole dust fronted, nothing bought or reserved. */
-  const receiverPaidAdapter = (over: Partial<ReceiveCarrierQuote> = {}) =>
-    adapter({ loanSats: 330n, receiptSats: 0n, serviceFareSats: 0n, taxiKey: TAXI_KEY, ...over })
+  const receiverPaidAdapter = (over: Partial<ReceiveCarrierQuote> = {}, actions: Parameters<typeof adapter>[2] = {}) =>
+    adapter({ loanSats: 330n, receiptSats: 0n, serviceFareSats: 0n, taxiKey: TAXI_KEY, ...over }, undefined, actions)
 
   it('prices a receiver-paid carrier at zero and publishes no carrier_sats', async () => {
     const { service } = await harness({ receiveCarrierQuotes: receiverPaidAdapter() })
@@ -1287,6 +1287,50 @@ describe('profile.carrier — receiver-paid mode', () => {
     const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
     expect(outcome).toMatchObject({ accepted: true, carrierSats: 330n })
     expect(outcome.accepted && outcome.swap.carrierTerms?.pricedSats).toBe(6n)
+  })
+
+  it('routes a funded receiver-paid row to the carrier settle with its own Taxi, never the generic one', async () => {
+    const direct = vi.fn(async () => 'fa'.repeat(32))
+    const settle = vi.fn<ReceiveCarrierQuotes['settle']>(async () => ({ status: 'submitted' }))
+    const asks: unknown[] = []
+    const available = vi.fn(async (ask: unknown) => {
+      asks.push(ask)
+      return new Map([[ASSET_A, 10n ** 18n]])
+    })
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      settle: direct,
+      receiveCarrierQuotes: receiverPaidAdapter({}, { available, settle }),
+    })
+
+    await service.quote(request({ carrier: receiverPaid() }))
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+
+    expect(direct).not.toHaveBeenCalled()
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(settle.mock.calls[0]![0].carrierTerms?.mode).toBe('recycle_receiver')
+    expect(asks.at(-1)).toMatchObject({
+      taxi: { url: 'https://taxi.example', operatorKey: TAXI_KEY },
+      receiverPaid: true,
+    })
+    expect((await store.get('swap-1')).state).toBe('filling')
+  })
+
+  it('reconciles a filling receiver-paid row through the carrier observer rather than escalating it', async () => {
+    const reconcile = vi.fn(async () => ({ status: 'pending' as const }))
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      receiveCarrierQuotes: receiverPaidAdapter({}, { reconcile }),
+    })
+    await service.quote(request({ carrier: receiverPaid() }))
+    await service.tick('swap-1')
+    await store.transition('swap-1', 'funded', 'filling')
+
+    await service.tick('swap-1')
+
+    expect(reconcile).toHaveBeenCalledTimes(1)
+    expect((await store.get('swap-1')).state).toBe('filling')
   })
 })
 

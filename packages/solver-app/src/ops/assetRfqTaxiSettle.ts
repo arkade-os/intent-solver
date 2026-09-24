@@ -15,7 +15,10 @@ import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reserva
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierAttempt, JsonObject } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
-import type { ReceiveCarrierQuotes } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import {
+  receiveCarrierTaxiOf,
+  type ReceiveCarrierQuotes,
+} from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
   assetIdValue,
   carrierTaprootEvidence,
@@ -68,9 +71,19 @@ export interface CarrierFillSeams {
   sign: (expected: JointGraph) => Promise<JointGraph>
 }
 
+/** The Taxi one row's fill goes to, and what its attempt records about it. */
+export interface CarrierTaxi {
+  /** The guard's normalised form for a Taxi the row named; `TAXI_URL` verbatim otherwise. */
+  provider: string
+  /** Only a Taxi the row named carries one: the key its quote was verified against. */
+  providerKey?: string
+  swapFills: Pick<TaxiClient, 'requestVerifiedSwapFillQuote' | 'submitSwapFill'>
+}
+
 export interface TaxiCarrierSettleDeps {
   store: CarrierAttemptStore
-  swapFills: Pick<TaxiClient, 'requestVerifiedSwapFillQuote' | 'submitSwapFill'>
+  /** Throws, before anything is pinned, for a Taxi this solver cannot or may not reach. */
+  taxiFor: (row: AssetRfqSwapRow) => CarrierTaxi
   resolve: ReceiveCarrierQuotes['resolve']
   coins: () => Promise<readonly CarrierCoin[]>
   reserved: () => ReadonlySet<string>
@@ -83,9 +96,6 @@ export interface TaxiCarrierSettleDeps {
   /** What a solver input's forfeit leaf must be collaborative with — a getter
    * so a signer rotation is live without a restart. */
   serverKey: () => Uint8Array
-  /** Recorded so a re-pointed solver cannot reconcile one operator's fill
-   * against another's. */
-  provider: string
   fill: CarrierFillSeams
   now: () => number
 }
@@ -146,7 +156,7 @@ const carrierAttemptSnapshotFor = (parts: {
   inputs: readonly CarrierOutpoint[]
   deposit: CarrierOutpoint
   offerHex: string
-  provider: string
+  taxi: CarrierTaxi
   proceedsScript: Uint8Array
   physicalSats: bigint
   contributionSats: bigint
@@ -157,7 +167,9 @@ const carrierAttemptSnapshotFor = (parts: {
   mintSnapshot({
     ...encodeCarrierAttemptInputs(parts.inputs),
     operation: parts.row.id,
-    provider: parts.provider,
+    // Recorded so a re-pointed solver cannot reconcile one operator's fill against another's.
+    provider: parts.taxi.provider,
+    ...(parts.taxi.providerKey === undefined ? {} : { provider_key: parts.taxi.providerKey }),
     offer: parts.offerHex,
     deposit: { txid: parts.deposit.txid, vout: parts.deposit.vout },
     quote: { id: parts.quoteId, expires_at: parts.quoteExpiresAt },
@@ -208,7 +220,7 @@ export const carrierFillSigner =
 export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pick<ReceiveCarrierQuotes, 'settle'> => ({
   settle: async (row) => {
     const terms = row.carrierTerms
-    if (terms?.mode !== 'recycle' || terms.quoteId === undefined) {
+    if ((terms?.mode !== 'recycle' && terms?.mode !== 'recycle_receiver') || terms.quoteId === undefined) {
       throw new Error(`asset rfq swap ${row.id} is not a recycle, so it has no carrier fill to settle`)
     }
     if (row.toAssetId === null) throw new Error(`carrier fill ${row.id} pays no asset leg to recycle a carrier for`)
@@ -218,6 +230,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
     if ((await deps.store.readCarrierAttempt(row.id)) !== null) {
       throw new Error(`carrier fill ${row.id} already has an attempt; reconciliation owns it, never a second submit`)
     }
+    const taxi = deps.taxiFor(row)
 
     const request = {
       quoteId: terms.quoteId,
@@ -225,6 +238,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       makerPublicKey: row.makerPublicKey,
       assetId: row.toAssetId,
       now: deps.now(),
+      ...receiveCarrierTaxiOf(terms),
     }
     const floor = (await deps.resolve(request)).inputExpiryFloor
     const coins = await deps.coins()
@@ -252,7 +266,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       inputs: outpoints,
       deposit,
       offerHex,
-      provider: deps.provider,
+      taxi,
       proceedsScript: deps.proceedsScript,
       physicalSats: terms.physicalSats,
       contributionSats: terms.loanSats,
@@ -277,7 +291,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         pin.release()
         throw new Error(`carrier fill ${row.id} could not prepare its attempt; the operator was asked nothing`)
       }
-      const { verified } = await deps.swapFills.requestVerifiedSwapFillQuote({
+      const { verified } = await taxi.swapFills.requestVerifiedSwapFillQuote({
         operationId: row.id,
         receiveQuoteId: terms.quoteId,
         offerHex,
@@ -369,7 +383,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         throw new Error(`carrier fill ${row.id} could not mark itself submitting; nothing has been sent`)
       }
       liable = true
-      await deps.swapFills.submitSwapFill(verified, solverGraphWire(quoted, signed))
+      await taxi.swapFills.submitSwapFill(verified, solverGraphWire(quoted, signed))
     } catch (error) {
       if (wrote && !liable) await releaseIfProvenNeverSubmitted(deps, pin, messageOf(error))
       throw error

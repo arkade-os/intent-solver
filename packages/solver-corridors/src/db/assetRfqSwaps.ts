@@ -748,7 +748,7 @@ export class AssetRfqSwapStore {
   async prepareCarrierAttempt(id: string, snapshot: unknown): Promise<boolean> {
     const attempt: CarrierAttempt = { phase: 'prepared', snapshot: detachJsonObject(snapshot, 'snapshot') }
     const terms = (await this.get(id)).carrierTerms
-    if (terms?.mode !== 'recycle') {
+    if (terms?.mode !== 'recycle' && terms?.mode !== 'recycle_receiver') {
       throw new Error(`asset rfq swap ${id} was not quoted as a recycle, so it has no carrier attempt to make`)
     }
     const result = await this.driver.run(

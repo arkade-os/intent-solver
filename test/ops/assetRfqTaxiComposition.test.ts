@@ -1,13 +1,18 @@
 /**
  * Turning the Taxi adapter on, and — since G4 — what changed about leaving
- * `TAXI_URL` off: the READ half composes either way now; only the fallback for
- * a request naming none, and the fill half's `settle`/`reconcile`, still need it.
+ * `TAXI_URL` off: both halves compose either way; only a row naming no Taxi of
+ * its own, at quote or at fill, still needs it.
  */
 
 import { describe, it, expect } from 'vitest'
-import { ArkAddress } from '@arkade-os/sdk'
-import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
-import { AssetRfqSwapService, type AssetRfqDeps } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import { hex } from '@scure/base'
+import { ArkAddress, DefaultVtxo, SingleKey } from '@arkade-os/sdk'
+import { AssetRfqSwapStore, type AssetRfqCarrierTerms } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import {
+  AssetRfqSwapService,
+  type AssetRfqDeps,
+  type ReceiveCarrierQuotes,
+} from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { CarrierAttemptRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import {
@@ -16,10 +21,14 @@ import {
   encodeCarrierAttemptInputs,
   restoreCarrierAttemptPins,
   taxiReceiveCarrier,
+  type CarrierCoin,
   type TaxiCarrierComposition,
   type TaxiCarrierTrust,
 } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
-import { completeTaxiReceiveCarrier } from '@arkade-os/solver-app/ops/assetRfqTaxiAdapter.js'
+import {
+  completeTaxiReceiveCarrier,
+  type TaxiCarrierFillComposition,
+} from '@arkade-os/solver-app/ops/assetRfqTaxiAdapter.js'
 import type { TaxiUrlPolicy } from '@arkade-os/solver-app/ops/taxiUrlGuard.js'
 import { createServicesBody } from '../support/createServicesBody.js'
 
@@ -44,6 +53,119 @@ const TRUST: TaxiCarrierTrust = {
 }
 
 const POLICY: TaxiUrlPolicy = { isMainnet: false, allowPrivate: true }
+
+const NAMED = 'https://taxi.example'
+const CONFIGURED = 'http://taxi.example:7080'
+const TAXI_KEY = 'a1'.repeat(32)
+const SOLVER_KEY = hex.encode(await SingleKey.fromHex('21'.repeat(32)).xOnlyPublicKey())
+const SERVER_KEY = await SingleKey.fromHex('22'.repeat(32)).xOnlyPublicKey()
+const SOLVER_SCRIPT = new DefaultVtxo.Script({
+  pubKey: hex.decode(SOLVER_KEY),
+  serverPubKey: SERVER_KEY,
+  csvTimelock: DefaultVtxo.Script.DEFAULT_TIMELOCK,
+})
+const COIN: CarrierCoin = {
+  txid: '2'.repeat(64),
+  vout: 0,
+  value: 10_000,
+  expiresAtHeight: 1_200_000,
+  assets: [{ assetId: ASSET, amount: 10n }],
+  tapTree: SOLVER_SCRIPT.encode(),
+  forfeitTapLeafScript: SOLVER_SCRIPT.forfeit(),
+  script: hex.encode(SOLVER_SCRIPT.pkScript),
+}
+
+const RECYCLE: AssetRfqCarrierTerms = {
+  mode: 'recycle',
+  quoteId: 'q-1',
+  physicalSats: 330n,
+  loanSats: 329n,
+  receiptSats: 1n,
+  serviceFareSats: 4n,
+  pricedSats: 5n,
+  expiresAt: 9_000,
+}
+
+const RECEIVER_PAID: AssetRfqCarrierTerms = {
+  ...RECYCLE,
+  mode: 'recycle_receiver',
+  loanSats: 330n,
+  receiptSats: 0n,
+  serviceFareSats: 0n,
+  pricedSats: 0n,
+  taxiUrl: NAMED,
+  taxiKey: TAXI_KEY,
+}
+
+/** Every Taxi answer is a refusal, so a settle stops at the first boundary it reaches. */
+const fillHalf = async (over: {
+  taxiUrl?: string
+  terms: AssetRfqCarrierTerms
+  reader?: Pick<ReceiveCarrierQuotes, 'resolve' | 'available'>
+}) => {
+  const store = await AssetRfqSwapStore.open(':memory:', () => 1_000)
+  await store.insertQuote({
+    id: 'swap-1',
+    rfqId: 'a'.repeat(64),
+    pair: `arkade:BTC->arkade:${ASSET}`,
+    fromAssetId: null,
+    toAssetId: ASSET,
+    fromAmount: 1_000n,
+    toAmount: 10n,
+    makerPkScript: MAKER_PK_SCRIPT,
+    makerPublicKey: MAKER_KEY,
+    offerPkScript: `5120${'d'.repeat(64)}`,
+    offerAddress: 'ark1qoffer',
+    solverPubkey: SOLVER_KEY,
+    validUntil: 9_000,
+    carrierTerms: over.terms,
+  })
+  await store.transition('swap-1', 'quoted', 'funded', { deposit_txid: '1'.repeat(64), deposit_vout: 1 })
+  await store.transition('swap-1', 'funded', 'filling', {})
+  const requests: string[] = []
+  const pins = createCarrierPinLedger()
+  const ledger = createReservationLedger()
+  const deps: TaxiCarrierFillComposition = {
+    taxiUrl: over.taxiUrl,
+    policy: { isMainnet: false, allowPrivate: false },
+    fetch: (async (input: unknown, init?: { method?: string }) => {
+      requests.push(`${init?.method ?? 'GET'} ${String(input)}`)
+      return new Response(JSON.stringify({ code: 'operation_conflict', error: 'refused' }), { status: 409 })
+    }) as typeof fetch,
+    store,
+    chain: { getVtxos: async () => ({ vtxos: [] }), getVirtualTxs: async () => ({ txs: [] }) } as never,
+    pins,
+    coins: async () => [COIN],
+    reserved: () => ledger.reserved(),
+    reserve: ledger.reserve,
+    wallet: {} as never,
+    identity: {} as never,
+    arkServerUrl: 'http://ark',
+    dustSats: 330n,
+    offerHex: () => 'abcd',
+    proceedsAddress: PROCEEDS_ADDRESS,
+    solverKeys: [SOLVER_KEY],
+    serverKey: () => SERVER_KEY,
+    now: () => 2_000,
+  }
+  const reader: Pick<ReceiveCarrierQuotes, 'resolve' | 'available'> = {
+    resolve: async () => ({
+      quoteId: 'q-1',
+      makerPkScript: MAKER_PK_SCRIPT,
+      makerPublicKey: MAKER_KEY,
+      assetId: ASSET,
+      physicalSats: 330n,
+      loanSats: 330n,
+      receiptSats: 0n,
+      serviceFareSats: 0n,
+      inputExpiryFloor: { kind: 'height', value: 1_100_000n },
+      expiresAt: 9_000,
+    }),
+    available: async () => new Map(),
+  }
+  const whole = completeTaxiReceiveCarrier(over.reader ?? reader, deps)
+  return { store, whole, requests, pins, ledger, settle: async () => whole.settle(await store.get('swap-1')) }
+}
 
 const watched = (over: Partial<TaxiCarrierComposition> = {}) => {
   const touched: string[] = []
@@ -151,6 +273,7 @@ describe('the composed adapter is refused, never degraded', () => {
 
     const whole = completeTaxiReceiveCarrier(await taxiReceiveCarrier(deps), {
       taxiUrl: 'http://taxi.example:7080',
+      policy: POLICY,
       store,
       chain: { getVtxos: async () => ({ vtxos: [] }), getVirtualTxs: async () => ({ txs: [] }) } as never,
       pins: createCarrierPinLedger(),
@@ -174,51 +297,89 @@ describe('the composed adapter is refused, never degraded', () => {
 
   it('makes the real orchestrator refuse a recycle rather than price one', async () => {
     const { deps, urls } = watched({ taxiUrl: 'http://taxi.example:7080' })
-    let clock = 1_000
-    const store = await AssetRfqSwapStore.open(':memory:', () => clock)
-    const orchestrator: AssetRfqDeps = {
-      store,
-      markets: [
-        {
-          base: null,
-          quote: ASSET,
-          symbol: 'USDA',
-          baseDecimals: 8,
-          quoteDecimals: 6,
-          feeBps: 50,
-          sellBase: { min: 1n, max: 10n ** 24n },
-          buyBase: { min: 1n, max: 10n ** 24n },
-          feedUrl: 'https://feed.example/btc',
-          pricePath: 'price',
-          carrierSats: 0n,
-        },
-      ],
-      solverPubkey: 'e'.repeat(64),
-      quoteValiditySeconds: 30,
-      dustSats: 330n,
-      now: () => clock,
-      fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
-      deriveOffer: () => ({ pkScript: `5120${'d'.repeat(64)}`, address: 'ark1qoffer' }),
-      depositAt: async () => null,
-      balance: async () => new Map([[ASSET, 10n ** 18n]]),
-      settle: async () => 'fa'.repeat(32),
-      newId: () => 'swap-1',
-      receiveCarrierQuotes: await taxiReceiveCarrier(deps),
-    }
-    expect(
-      await new AssetRfqSwapService(orchestrator).quote({
-        rfqId: 'a'.repeat(64),
-        pair: `arkade:BTC->arkade:${ASSET}`,
-        amount: 100_000_000n,
-        amountSide: 'from',
-        makerPkScript: MAKER_PK_SCRIPT,
-        makerPublicKey: MAKER_KEY,
-        carrier: { mode: 'recycle', quoteId: 'q-1' },
-      }),
-    ).toMatchObject({ accepted: false, reason: 'price_unavailable' })
+    const store = await AssetRfqSwapStore.open(':memory:', () => 1_000)
+    expect(await quoteRecycle(store, await taxiReceiveCarrier(deps))).toMatchObject({
+      accepted: false,
+      reason: 'price_unavailable',
+    })
     // The refusal precedes the boundary: a degraded one would have asked.
     expect(urls).toEqual([])
     await store.close()
+  })
+})
+
+const quoteRecycle = (store: AssetRfqSwapStore, receiveCarrierQuotes: AssetRfqDeps['receiveCarrierQuotes']) =>
+  new AssetRfqSwapService({
+    store,
+    markets: [
+      {
+        base: null,
+        quote: ASSET,
+        symbol: 'USDA',
+        baseDecimals: 8,
+        quoteDecimals: 6,
+        feeBps: 50,
+        sellBase: { min: 1n, max: 10n ** 24n },
+        buyBase: { min: 1n, max: 10n ** 24n },
+        feedUrl: 'https://feed.example/btc',
+        pricePath: 'price',
+        carrierSats: 0n,
+      },
+    ],
+    solverPubkey: 'e'.repeat(64),
+    quoteValiditySeconds: 30,
+    dustSats: 330n,
+    now: () => 1_000,
+    fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
+    deriveOffer: () => ({ pkScript: `5120${'d'.repeat(64)}`, address: 'ark1qoffer' }),
+    depositAt: async () => null,
+    balance: async () => new Map([[ASSET, 10n ** 18n]]),
+    settle: async () => 'fa'.repeat(32),
+    newId: () => 'swap-1',
+    receiveCarrierQuotes,
+  }).quote({
+    rfqId: 'a'.repeat(64),
+    pair: `arkade:BTC->arkade:${ASSET}`,
+    amount: 100_000_000n,
+    amountSide: 'from',
+    makerPkScript: MAKER_PK_SCRIPT,
+    makerPublicKey: MAKER_KEY,
+    carrier: { mode: 'recycle', quoteId: 'q-1' },
+  })
+
+describe('the fill half composes with no TAXI_URL, and serves only a row naming its own Taxi (G4)', () => {
+  it.each([
+    ['no TAXI_URL', undefined],
+    ['a different TAXI_URL', CONFIGURED],
+  ])("asks a receiver-paid row's own Taxi for the fill with %s configured", async (_why, taxiUrl) => {
+    const f = await fillHalf({ taxiUrl, terms: RECEIVER_PAID })
+    await expect(f.settle()).rejects.toThrow(/refused/)
+    expect(f.requests).toEqual([`POST ${NAMED}/v1/swap-fills`])
+    expect((await f.store.readCarrierAttempt('swap-1'))?.snapshot).toMatchObject({
+      provider: NAMED,
+      provider_key: TAXI_KEY,
+    })
+    await f.store.close()
+  })
+
+  it('refuses a sender-paid recycle with no TAXI_URL, as before: nothing asked, written or pinned', async () => {
+    const f = await fillHalf({ taxiUrl: undefined, terms: RECYCLE })
+    await expect(f.settle()).rejects.toThrow(/no receive-carrier Taxi is configured/)
+    expect(f.requests).toEqual([])
+    expect(await f.store.readCarrierAttempt('swap-1')).toBeNull()
+    expect(f.pins.held()).toEqual([])
+    expect(f.ledger.reserved().size).toBe(0)
+    await f.store.close()
+  })
+
+  it('still refuses to quote a sender-paid recycle with no TAXI_URL, asking no Taxi', async () => {
+    const { deps, urls } = watched({ taxiUrl: undefined })
+    const f = await fillHalf({ taxiUrl: undefined, terms: RECYCLE, reader: await taxiReceiveCarrier(deps) })
+    const store = await AssetRfqSwapStore.open(':memory:', () => 1_000)
+    expect(await quoteRecycle(store, f.whole)).toMatchObject({ accepted: false, reason: 'price_unavailable' })
+    expect([...urls, ...f.requests]).toEqual([])
+    await store.close()
+    await f.store.close()
   })
 })
 
@@ -368,10 +529,13 @@ describe('createServices reaches Taxi through exactly one guarded seam', () => {
     expect(body()).toContain('receiveCarrierQuotes: receiveCarrier')
   })
 
-  it('completes the adapter only where TAXI_URL is configured, on the SAME pin ledger', () => {
+  it('completes the adapter whether or not TAXI_URL is configured (G4), on the SAME pin ledger', () => {
     const source = body()
     expect(source.match(/completeTaxiReceiveCarrier\(/g)).toHaveLength(1)
-    expect(source).toMatch(/config\.taxiUrl === undefined[\s\S]{0,120}?\? undefined/)
+    expect(source).not.toMatch(/config\.taxiUrl === undefined/)
+    expect(source).toMatch(
+      /completeTaxiReceiveCarrier\(taxiCarrier, \{\s*taxiUrl: config\.taxiUrl,\s*policy: taxiUrlPolicy,/,
+    )
     // Both halves resolve through one ledger, or a reconcile would free nothing.
     expect(source).toMatch(/completeTaxiReceiveCarrier\(taxiCarrier, \{[\s\S]{0,600}?pins: carrierPins,/)
   })

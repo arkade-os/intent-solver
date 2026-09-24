@@ -299,6 +299,24 @@ describe('prepared — the checkpoint written before the first quote POST', () =
     expect(await store.readCarrierAttempt(id)).toBeNull()
   })
 
+  it("writes one on a receiver-paid row, whose fill the payee's own Taxi funds", async () => {
+    const store = await open()
+    const id = await rowIn(store, 'filling', {
+      carrierTerms: {
+        ...RECYCLE,
+        mode: 'recycle_receiver',
+        loanSats: 330n,
+        receiptSats: 0n,
+        serviceFareSats: 0n,
+        pricedSats: 0n,
+        taxiUrl: 'https://taxi.example',
+        taxiKey: 'a1'.repeat(32),
+      },
+    })
+    expect(await store.prepareCarrierAttempt(id, SNAPSHOT)).toBe(true)
+    expect(await store.readCarrierAttempt(id)).toEqual({ phase: 'prepared', snapshot: SNAPSHOT })
+  })
+
   it('refuses a legacy row that named no mode', async () => {
     const store = await open()
     const id = await rowIn(store, 'filling', { carrierTerms: undefined })
@@ -568,6 +586,23 @@ describe('restart enumeration — every attempt that can still hold liability', 
     expect(unresolved.map((r) => r.attempt.phase)).toEqual(['submitting', 'quoted', 'settled'])
     expect(unresolved[0]!.attempt.snapshot).toEqual(SNAPSHOT)
     expect(Object.keys(unresolved[0]!.row)).not.toContain('carrierAttempt')
+  })
+
+  it('reads an attempt recording provider_key, and one stored before provider_key existed', async () => {
+    const store = await open()
+    const legacy = await rowIn(store, 'filling', other(1))
+    const stored = `{"v":1,"phase":"submitting","snapshot":{"inputs":[{"txid":"${'b'.repeat(64)}","vout":1}],"provider":"http://taxi.example:7080"},"binding":{"fill_id":"fill-1"}}`
+    await store.driver.run(`UPDATE asset_rfq_swap SET carrier_attempt = ? WHERE id = ?`, [stored, legacy])
+    const keyed = { ...SNAPSHOT, provider: 'https://taxi.example', provider_key: 'a1'.repeat(32) }
+    const named = await rowIn(store, 'filling', other(2))
+    await store.prepareCarrierAttempt(named, keyed)
+
+    expect((await store.readCarrierAttempt(legacy))?.snapshot).toEqual({
+      inputs: [{ txid: 'b'.repeat(64), vout: 1 }],
+      provider: 'http://taxi.example:7080',
+    })
+    expect((await store.readCarrierAttempt(named))?.snapshot).toEqual(keyed)
+    expect((await store.listUnresolvedCarrierAttempts()).map((r) => r.row.id)).toEqual([legacy, named])
   })
 
   it('releases nothing of its own accord when the quote and the terms have long expired', async () => {

@@ -662,11 +662,10 @@ export const createServices = async (
   /**
    * The receive-carrier READ half (Ruling 3/G4): exists regardless of
    * `TAXI_URL`, since a request naming its own Taxi resolves against that one
-   * either way. `receiveCarrier` below stays the FULL adapter, gated on
-   * `TAXI_URL`, since the service refuses a recycle missing `settle`/`reconcile`
-   * rather than degrading. Every identity a quote is verified against comes
-   * from the context above, never from a URL. TAXI_RECEIVER_ALLOW_PRIVATE is
-   * read here, at the composition root, never inside the guard module.
+   * either way — and so does the fill half below. Every identity a quote is
+   * verified against comes from the context above, never from a URL.
+   * TAXI_RECEIVER_ALLOW_PRIVATE is read here, at the composition root, never
+   * inside the guard module.
    */
   const taxiUrlPolicy: TaxiUrlPolicy = {
     isMainnet: config.arkade.isMainnet,
@@ -711,42 +710,41 @@ export const createServices = async (
     log(`receive carrier: re-pinned the inputs of ${restoredPins.length} unresolved attempt(s)`)
   }
   /**
-   * The fill half, composed only where the read half exists. Its declared type
-   * is the complete port, so a method left out is a compile error here rather
-   * than a `price_unavailable` a live taker discovers.
+   * The fill half. Its declared type is the complete port, so a method left out
+   * is a compile error here rather than a `price_unavailable` a live taker
+   * discovers. With no `TAXI_URL` a sender-paid recycle is still refused, by
+   * the resolve and the settle that find no configured Taxi.
    */
   const carrierOfferHex = offerHexFrom(assetRfqDerivation)
-  const receiveCarrier =
-    config.taxiUrl === undefined
-      ? undefined
-      : completeTaxiReceiveCarrier(taxiCarrier, {
-          taxiUrl: config.taxiUrl,
-          store: assetRfqStore,
-          chain: arkade.wallet.indexerProvider,
-          pins: carrierPins,
-          coins: async () => spendableCarrierCoins(await arkade.wallet.getContractManager()),
-          reserved: () => arkade.reservations.reserved(),
-          reserve: (outpoints) => arkade.reservations.reserve(outpoints),
-          wallet: arkade.wallet,
-          identity: arkade.identity,
-          arkServerUrl: arkade.arkServerUrl,
-          dustSats: arkade.dustSats,
-          offerHex: (row) =>
-            carrierOfferHex(
-              {
-                wantAmount: row.toAmount,
-                wantAssetId: row.toAssetId,
-                offerAssetId: row.fromAssetId,
-                makerPkScript: row.makerPkScript,
-                makerPublicKey: row.makerPublicKey,
-              },
-              row.offerPkScript,
-            ),
-          proceedsAddress: await arkade.wallet.getAddress(),
-          solverKeys: [hex.encode(await arkade.identity.xOnlyPublicKey())],
-          serverKey: () => arkade.wallet.arkServerPublicKey,
-          now: () => Math.floor(Date.now() / 1000),
-        })
+  const receiveCarrier = completeTaxiReceiveCarrier(taxiCarrier, {
+    taxiUrl: config.taxiUrl,
+    policy: taxiUrlPolicy,
+    store: assetRfqStore,
+    chain: arkade.wallet.indexerProvider,
+    pins: carrierPins,
+    coins: async () => spendableCarrierCoins(await arkade.wallet.getContractManager()),
+    reserved: () => arkade.reservations.reserved(),
+    reserve: (outpoints) => arkade.reservations.reserve(outpoints),
+    wallet: arkade.wallet,
+    identity: arkade.identity,
+    arkServerUrl: arkade.arkServerUrl,
+    dustSats: arkade.dustSats,
+    offerHex: (row) =>
+      carrierOfferHex(
+        {
+          wantAmount: row.toAmount,
+          wantAssetId: row.toAssetId,
+          offerAssetId: row.fromAssetId,
+          makerPkScript: row.makerPkScript,
+          makerPublicKey: row.makerPublicKey,
+        },
+        row.offerPkScript,
+      ),
+    proceedsAddress: await arkade.wallet.getAddress(),
+    solverKeys: [hex.encode(await arkade.identity.xOnlyPublicKey())],
+    serverKey: () => arkade.wallet.arkServerPublicKey,
+    now: () => Math.floor(Date.now() / 1000),
+  })
   const assetRfqService = new AssetRfqSwapService({
     quoteLimiter,
     store: assetRfqStore,

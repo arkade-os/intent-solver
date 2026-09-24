@@ -163,6 +163,21 @@ export interface ReceiveCarrierQuotes {
   reconcile: (row: AssetRfqSwapRow) => Promise<ReceiveCarrierReconcileOutcome>
 }
 
+/** Settled through the carrier adapter rather than the generic spend. */
+const carrierSettled = (terms: AssetRfqCarrierTerms | null | undefined): terms is AssetRfqCarrierTerms =>
+  terms?.mode === 'recycle' || terms?.mode === 'recycle_receiver'
+
+/** What every fill-time read of a persisted row must carry, so it verifies the same Taxi and payer the quote did. */
+export const receiveCarrierTaxiOf = (
+  terms: AssetRfqCarrierTerms | null | undefined,
+): Pick<ReceiveCarrierQuoteRequest, 'taxi' | 'receiverPaid'> => {
+  if (terms?.mode !== 'recycle_receiver') return {}
+  if (terms.taxiUrl === undefined || terms.taxiKey === undefined) {
+    throw new Error('a recycle_receiver carrier names no Taxi to resolve against')
+  }
+  return { taxi: { url: terms.taxiUrl, operatorKey: terms.taxiKey }, receiverPaid: true }
+}
+
 const completeReceiveCarrierQuotes = (value: unknown): ReceiveCarrierQuotes | null => {
   if (typeof value !== 'object' || value === null) return null
   const candidate = value as Record<string, unknown>
@@ -782,11 +797,12 @@ export class AssetRfqSwapService {
    */
   private async whenFunded(row: AssetRfqSwapRow): Promise<void> {
     const carrierTerms = row.carrierTerms
-    const receiveCarrier =
-      carrierTerms?.mode === 'recycle' ? completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes) : null
+    const receiveCarrier = carrierSettled(carrierTerms)
+      ? completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes)
+      : null
     const deposit = await this.deps.depositAt(row.offerPkScript, row.fromAssetId)
     let available: ReadonlyMap<AssetLeg, bigint>
-    if (carrierTerms?.mode === 'recycle') {
+    if (carrierSettled(carrierTerms)) {
       if (receiveCarrier === null) {
         await this.deps.store.fail(row.id, 'funded', 'not filled: receive-carrier adapter unavailable')
         return
@@ -798,6 +814,7 @@ export class AssetRfqSwapService {
           makerPublicKey: row.makerPublicKey,
           assetId: row.toAssetId as string,
           now: this.now(),
+          ...receiveCarrierTaxiOf(carrierTerms),
         })
       } catch (error) {
         this.deps.onError?.(row.id, error)
@@ -914,7 +931,7 @@ export class AssetRfqSwapService {
   /** A recovered `filling` row is never resubmitted. Recycles have a dedicated
    * observer; legacy rows retain the existing stuck-over-silence policy. */
   private async whenFilling(row: AssetRfqSwapRow): Promise<void> {
-    if (row.carrierTerms?.mode === 'recycle') {
+    if (carrierSettled(row.carrierTerms)) {
       const adapter = completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes)
       if (adapter === null) {
         this.deps.onError?.(row.id, new Error('receive-carrier adapter unavailable while fill outcome is unknown'))

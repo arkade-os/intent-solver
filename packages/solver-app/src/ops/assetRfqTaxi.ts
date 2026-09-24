@@ -308,8 +308,8 @@ const TAXI_CLIENT_RATE_WINDOW_SECONDS = 60
 /** Ruling 3's cap on the client cache below. */
 const TAXI_CLIENT_CACHE_SIZE = 32
 
-/** One client per normalized URL, an LRU built lazily and evicted oldest-first
- * so distinct attacker URLs cannot grow it unbounded; `configuredUrl` skips
+/** One client per normalized URL, built lazily in a FIFO cache — evicted oldest-INSERTED first, a hit
+ * refreshes nothing — so distinct attacker URLs cannot grow it unbounded; `configuredUrl` skips
  * `normalizeTaxiUrl`/`guardedTaxiFetch` entirely — that is `taxiUrl`'s own plain client. */
 export const taxiClientCache = (deps: {
   configuredUrl?: string

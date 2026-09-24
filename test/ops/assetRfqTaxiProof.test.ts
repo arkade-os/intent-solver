@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest'
 import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import {
+  ArkAddress,
   buildOffchainTx,
   createAssetPacket,
   CSVMultisigTapscript,
@@ -22,9 +23,15 @@ import {
   VtxoTaprootTree,
 } from '@arkade-os/sdk'
 import { digestJointGraph, OFFER_FILL_TEMPLATE, setTapScriptSigEntries } from '@arkade-taxi/client'
-import { AssetRfqSwapStore, type AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import {
+  AssetRfqSwapStore,
+  type AssetRfqCarrierTerms,
+  type AssetRfqSwapRow,
+} from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
-import { createCarrierPinLedger } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
+import { createCarrierPinLedger, restoreCarrierAttemptPins } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
+import { completeTaxiReceiveCarrier } from '@arkade-os/solver-app/ops/assetRfqTaxiAdapter.js'
+import { normalizeTaxiUrl } from '@arkade-os/solver-app/ops/taxiUrlGuard.js'
 import {
   createTaxiReceiveCarrierObserver,
   type CarrierChainReader,
@@ -136,7 +143,18 @@ const snapshotJson = () => ({
   valid_until: 9_000,
 })
 
-const openStore = async () => {
+const RECYCLE: AssetRfqCarrierTerms = {
+  mode: 'recycle',
+  quoteId: 'q-1',
+  physicalSats: 330n,
+  loanSats: 329n,
+  receiptSats: 1n,
+  serviceFareSats: 4n,
+  pricedSats: 5n,
+  expiresAt: 9_000,
+}
+
+const openStore = async (carrierTerms: AssetRfqCarrierTerms = RECYCLE) => {
   const store = await AssetRfqSwapStore.open(':memory:', () => 1_000)
   await store.insertQuote({
     id: 'swap-1',
@@ -152,16 +170,7 @@ const openStore = async () => {
     offerAddress: 'ark1qoffer',
     solverPubkey: SOLVER_KEY,
     validUntil: 9_000,
-    carrierTerms: {
-      mode: 'recycle',
-      quoteId: 'q-1',
-      physicalSats: 330n,
-      loanSats: 329n,
-      receiptSats: 1n,
-      serviceFareSats: 4n,
-      pricedSats: 5n,
-      expiresAt: 9_000,
-    },
+    carrierTerms,
   })
   await store.transition('swap-1', 'quoted', 'funded', { deposit_txid: DEPOSIT_TXID, deposit_vout: 1 })
   await store.transition('swap-1', 'funded', 'filling', {})
@@ -857,5 +866,79 @@ describe('the final transaction must spend the checkpoints it was built over', (
     const h = await harness({ binding: bindingJson(boundTo(elsewhere)) })
 
     await expect(h.reconcile()).rejects.toThrow(/deposit/)
+  })
+})
+
+describe('a receiver-paid attempt is reconciled after a restart without asking any Taxi', () => {
+  const RECORDED = 'http://taxi.internal:7080'
+  const KEY = 'a1'.repeat(32)
+  const REFUSING = { isMainnet: false, allowPrivate: false }
+  /** The payee's Taxi fronts the whole dust, so no fare leaves and the solver nets the deposit exactly. */
+  const RECEIVER_GRAPH = buildGraph([
+    { script: MAKER, amount: 330n },
+    { script: SPONSOR_SCRIPT, amount: 170n },
+    { script: PROCEEDS, amount: 3_000n },
+  ])
+
+  it('keeps the pin, with no TAXI_URL and a policy that now refuses the Taxi it recorded', async () => {
+    expect(() => normalizeTaxiUrl(RECORDED, REFUSING)).toThrow(/private/)
+    const store = await openStore({
+      ...RECYCLE,
+      mode: 'recycle_receiver',
+      loanSats: 330n,
+      receiptSats: 0n,
+      serviceFareSats: 0n,
+      pricedSats: 0n,
+      taxiUrl: RECORDED,
+      taxiKey: KEY,
+    })
+    const snapshot = { ...snapshotJson(), provider: RECORDED, provider_key: KEY }
+    await store.prepareCarrierAttempt('swap-1', { ...snapshot, contribution_sats: '330', max_fare_sats: '0' })
+    await store.bindCarrierAttempt(
+      'swap-1',
+      (await store.readCarrierAttempt('swap-1'))!,
+      bindingJson(boundTo(RECEIVER_GRAPH)),
+    )
+    await store.markCarrierAttemptSubmitting('swap-1', (await store.readCarrierAttempt('swap-1'))!)
+
+    const ledger = createReservationLedger()
+    const pins = createCarrierPinLedger()
+    await restoreCarrierAttemptPins({
+      attempts: () => store.listUnresolvedCarrierAttempts(),
+      reserve: ledger.reserve,
+      pins,
+    })
+    const fetched: string[] = []
+    const { reconcile } = completeTaxiReceiveCarrier(
+      { resolve: async () => Promise.reject(new Error('unused')), available: async () => new Map() },
+      {
+        policy: REFUSING,
+        fetch: (async (input: unknown) => {
+          fetched.push(String(input))
+          throw new Error('no Taxi is reachable')
+        }) as typeof fetch,
+        store,
+        chain: chainOf({ vtxos: [{ txid: DEPOSIT_TXID, vout: 1 }] }) as never,
+        pins,
+        coins: async () => [],
+        reserved: () => ledger.reserved(),
+        reserve: ledger.reserve,
+        wallet: {} as never,
+        identity: {} as never,
+        arkServerUrl: 'http://ark',
+        dustSats: 330n,
+        offerHex: () => 'abcd',
+        proceedsAddress: new ArkAddress(hex.decode(SERVER), hex.decode(xonly(6)), 'tark').encode(),
+        solverKeys: [SOLVER_KEY],
+        serverKey: () => hex.decode(SERVER),
+        now: () => 1_000,
+      },
+    )
+
+    await expect(reconcile(await store.get('swap-1'))).resolves.toEqual({ status: 'pending' })
+    expect(fetched).toEqual([])
+    expect([...ledger.reserved()]).toEqual([`${COIN_A}:0`])
+    expect(await store.readCarrierAttempt('swap-1')).toMatchObject({ phase: 'submitting' })
+    await store.close()
   })
 })
