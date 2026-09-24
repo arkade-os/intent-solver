@@ -420,10 +420,12 @@ sats is `float-lifecycle`'s job (it carries the CLTV guard, and a bare
 `settle()` would merge the whole float into one coin). It does withdraw, and the
 destination's form picks the rail — an Arkade address is paid offchain at once,
 a bitcoin address by collaborative exit at the server's next batch. Either way
-the coins are selected in-process, filtered against the reservation ledger and
-pinned for the spend, because the SDK's own selection cannot be told "not that
-one" and could take a coin out from under an in-flight lockup funding. The
-destination receives exactly the typed amount; the exit's intent fees come out
+the withdrawal spends **every coin no live swap's funding has pinned** and
+returns the rest as one change coin, so the float's piece count drops to one
+until `pool-mint` splits it again — on its own only with `POOL_AUTO_MINT=true`,
+otherwise at the next renewal or by hand. The pinned coins are left alone, because
+the SDK's own selection cannot be told "not that one". The destination receives
+exactly the typed amount; the exit's intent fees — one per coin spent — come out
 of the change back to the float.
 
 **Nothing here opens Lightning channels.** Neither port has a channel primitive,

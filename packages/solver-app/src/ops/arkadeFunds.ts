@@ -27,18 +27,9 @@
  *    use instead.
  *  - `withdraw` — BOTH ways out of the float, routed by the destination's form:
  *    an Arkade address is paid offchain, a bitcoin address by collaborative
- *    exit. The spend itself goes through the SDK's `PaymentRouter`, which owns
- *    both executions and the classification between them. The coins are still
- *    selected HERE and pinned in the reservation ledger for the spend: the
- *    router's own selection cannot be told "not that one" and could take a coin
- *    out from under an in-flight lockup funding — the hazard
- *    `arkade/reservations.ts` exists for — so the chosen set is handed over as
- *    `selectedVtxos` and the router spends exactly it.
- *
- *    The route is decided here as well as in the router, and that redundancy is
- *    deliberate rather than leftover: the selection needs the destination's
- *    output script to price the exit, and it needs to know which of the two
- *    forms it is funding before any coin is chosen.
+ *    exit. The SDK's `PaymentRouter` prices, settles and refuses; this file only
+ *    hands it, as `selectedVtxos`, every coin no live swap's funding has pinned,
+ *    because the router's own selection cannot be told "not that one".
  *
  * The absent half of that pair is the point of a capability seam rather than an
  * interface every source must satisfy: absent is a fact the console can render,
@@ -46,21 +37,10 @@
  * ever fail.
  */
 
-import {
-  ArkAddress,
-  Estimator,
-  PaymentRouter,
-  arkRail,
-  networks,
-  onchainRail,
-  type FeeInfo,
-  type NormalizedExtendedVirtualCoin,
-} from '@arkade-os/sdk'
-import { Address, OutScript } from '@scure/btc-signer'
-import { hex } from '@scure/base'
+import { PaymentRouter, arkRail, isBtcAddress, networks, onchainRail } from '@arkade-os/sdk'
+import { Address } from '@scure/btc-signer'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
-import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
-import { offchainInputFeeParams } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
+import { outpointKey } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { Services } from './services.js'
 import {
@@ -72,13 +52,6 @@ import {
 } from './fundSources.js'
 
 export const ARKADE_FUND_SOURCE_ID = 'arkade'
-
-// Bounds on the fallback subset search: an unbounded one is a denial of service
-// the operator inflicts on themselves, and its recursion is as deep as the coins
-// it walks. 64 is the piece count `pool-mint` keeps a float at; a coin past it is
-// still the first-fit scan's to take, and that scan is unbounded and iterative.
-const SUBSET_SEARCH_COINS = 64
-const SUBSET_SEARCH_LIMIT = 20_000
 
 /**
  * The funding-relevant split, not the whole balance object.
@@ -205,65 +178,14 @@ const arkadeOffchainDeposit = async (services: Services): Promise<FundDeposit> =
   }
 }
 
-type WithdrawRoute = { kind: 'arkade' } | { kind: 'onchain'; script: Uint8Array }
-
-/** An Arkade address for ANOTHER network must not fall through to the onchain attempt: it decodes as Arkade, so the refusal gets to name the real mistake. */
-const withdrawRoute = (address: string, network: SwapNetwork): WithdrawRoute => {
-  let arkade: ArkAddress | null = null
+/** The SDK's exit decodes a destination on any network, and `isBtcAddress` is format-only — so this check stays here. */
+const assertOnchainNetwork = (address: string, network: SwapNetwork): void => {
+  if (!isBtcAddress(address)) return
   try {
-    arkade = ArkAddress.decode(address)
+    Address(ONCHAIN_NETWORKS[network]).decode(address)
   } catch {
-    arkade = null
+    throw new Error(`${address} is a bitcoin address for another network, not ${network} — nothing was sent`)
   }
-  if (arkade !== null) {
-    const hrp = networks[network].hrp
-    if (arkade.hrp !== hrp) {
-      throw new Error(
-        `${address} is an Arkade address for another network (its prefix is ${arkade.hrp}1…, this deployment is ` +
-          `${hrp}1…) — nothing was sent`,
-      )
-    }
-    return { kind: 'arkade' }
-  }
-  try {
-    return { kind: 'onchain', script: OutScript.encode(Address(ONCHAIN_NETWORKS[network]).decode(address)) }
-  } catch {
-    throw new Error(
-      `${address} is neither a ${network} Arkade address (${networks[network].hrp}1…) nor a ${network} bitcoin ` +
-        'address — nothing was sent',
-    )
-  }
-}
-
-/**
- * Spend `selected` through the SDK's router and hand back the transaction id.
- *
- * `route()` classifies and prices, `send()` settles. Both exits are one call
- * here: the router picks the rail the destination's form selects, which is the
- * same decision `withdrawRoute` made above for the selection's sake.
- *
- * A settled handle without a txid is a rail contract violation rather than a
- * payment, so it is surfaced instead of returned as an empty reference.
- *
- * `fees` is the schedule the selection above already priced against, not a fresh
- * read: the two have to agree on what the exit costs, or a schedule that moved
- * between them would size the change the selection never budgeted for.
- */
-const routedWithdraw = async (
-  wallet: Services['arkade']['wallet'],
-  address: string,
-  amountSats: number,
-  selected: NormalizedExtendedVirtualCoin[],
-  fees: FeeInfo,
-): Promise<string> => {
-  // Built per call, not held: a rail outliving the wallet it was pointed at
-  // would price an exit against a wallet nobody is running.
-  const router = new PaymentRouter({ wallet, prefs: {} }).use(arkRail()).use(onchainRail({ feeInfo: async () => fees }))
-
-  const quote = await router.route({ raw: address, amount: amountSats, selectedVtxos: selected })
-  const settled = await (await quote.send()).settled()
-  if (!settled.txid) throw new Error(`the ${quote.railId} rail settled without a transaction id`)
-  return settled.txid
 }
 
 /**
@@ -275,184 +197,33 @@ const arkadeWithdraw = async (
   services: Services,
   params: { address: string; amount: string },
 ): Promise<FundWithdrawal> => {
-  const { wallet } = services.arkade
+  const { wallet, reservations } = services.arkade
   const { address } = params
   const amountSats = parseWholeSats(params.amount)
-  const route = withdrawRoute(address, services.config.network)
+  assertOnchainNetwork(address, services.config.network)
 
-  const balance = await wallet.getBalance()
-  // Advisory: `available` still counts coins the reservation ledger has pinned, so the selection below is the gate.
-  if (amountSats > balance.available) {
-    throw new Error(
-      `withdrawal of ${amountSats} sats exceeds the float's available balance ` +
-        `[requested: ${amountSats}, available: ${balance.available}, total: ${balance.total} sats]`,
-    )
-  }
-
-  // `available` counts no swept coins, so neither does the selection — so `offchainInputFeeParams` never sees `isSwept`.
-  const [spendable, info, changeAddress] = await Promise.all([
-    wallet.getSpendableVtxos({ withRecoverable: false }),
-    wallet.arkProvider.getInfo(),
-    wallet.getAddress(),
-  ])
-  const dust = BigInt(info.dust)
-
+  // Swept coins fund nothing until recovery runs.
+  const spendable = await wallet.getSpendableVtxos({ withRecoverable: false })
   // No await between this read and the `reserve` below: the filter and the pin
   // are one synchronous section, or the ledger arbitrates nothing.
-  const reserved = services.arkade.reservations.reserved()
-  const candidates = spendable.filter((vtxo) => !reserved.has(outpointKey(vtxo.txid, vtxo.vout)))
-  // Soonest-expiry first, the inverse of lockup funding's rule: a coin spent here
-  // is a renewal fee nobody has to pay.
-  const ordered = [...candidates].sort((a, b) => {
-    const byExpiry = (a.expiresAt?.getTime() ?? Infinity) - (b.expiresAt?.getTime() ?? Infinity)
-    return byExpiry !== 0 ? byExpiry : b.value - a.value
-  })
-
-  if (route.kind === 'arkade') {
-    const selected: typeof ordered = []
-    let covered = 0
-    for (const coin of ordered) {
-      const usable = usableSatsOf(coin, Number(dust))
-      if (usable <= 0) continue
-      selected.push(coin)
-      covered += usable
-      if (covered >= amountSats) break
-    }
-    if (covered < amountSats) {
-      throw new Error(
-        `the float's unreserved coins cover ${covered} of ${amountSats} sats — a live swap's funding pins the ` +
-          'rest, or the float needs topping up',
-      )
-    }
-    const release = services.arkade.reservations.reserve(selected)
-    try {
-      const txid = await routedWithdraw(wallet, address, amountSats, [...selected], info.fees)
-      return { reference: txid, address, amount: String(amountSats), detail: { route: 'arkade' } }
-    } finally {
-      release()
-    }
+  const pinned = reservations.reserved()
+  const candidates = spendable.filter((vtxo) => !pinned.has(outpointKey(vtxo.txid, vtxo.vout)))
+  if (candidates.length === 0) {
+    throw new Error("every coin in the float is pinned by a live swap's funding — nothing was sent")
   }
-
-  if (BigInt(amountSats) < dust) {
-    throw new Error(`amount ${amountSats} is below the ${dust} sat dust floor — an onchain output cannot carry it`)
-  }
-  const estimator = new Estimator(info.fees.intentFee)
-  const outputFee = BigInt(
-    estimator.evalOnchainOutput({ amount: BigInt(amountSats), script: hex.encode(route.script) }).satoshis,
-  )
-  const needed = BigInt(amountSats) + outputFee
-  const changeScript = hex.encode(ArkAddress.decode(changeAddress).pkScript)
-  // Fee and amount define each other; unsettled underfunds the exit, so refuse rather than ship one.
-  const changeAfterFee = (left: bigint): bigint => {
-    let net = left
-    for (let i = 0; i < 8; i += 1) {
-      const next = left - BigInt(estimator.evalOffchainOutput({ amount: net, script: changeScript }).satoshis)
-      if (next === net) return net
-      net = next
-    }
-    throw new Error(
-      `the change fee does not settle after 8 rounds on ${left} sats of change — withdraw the whole float instead`,
-    )
-  }
-
-  const economic = ordered.flatMap((coin) => {
-    const fee = BigInt(estimator.evalOffchainInput(offchainInputFeeParams(coin)).satoshis)
-    const value = BigInt(coin.value)
-    return fee >= value ? [] : [{ coin, fee, net: value - fee, asset: (coin.assets?.length ?? 0) > 0 }]
-  })
-  // The change must be an output the server accepts: exactly nothing — and then
-  // only when no asset rides it — or at least dust, under the per-output ceiling.
-  const changeOf = (gross: bigint, carriesAsset: boolean): bigint | null => {
-    const left = gross - needed
-    if (left === 0n && !carriesAsset) return 0n
-    const net = left > 0n ? changeAfterFee(left) : left
-    if (net < dust) return null
-    return info.vtxoMaxAmount >= 0n && net > info.vtxoMaxAmount ? null : net
-  }
-
-  // First-fit over the expiry order, unchanged: what selected before selects the
-  // same coins, and only a refusal goes on to look for another subset.
-  const selected: (typeof economic)[number][] = []
-  let gross = 0n
-  let carriesAsset = false
-  let change: bigint | null = null
-  for (const candidate of economic) {
-    selected.push(candidate)
-    gross += candidate.net
-    carriesAsset = carriesAsset || candidate.asset
-    change = changeOf(gross, carriesAsset)
-    if (change !== null) break
-  }
-
-  let exhausted = false
-  if (change === null && gross >= needed) {
-    // Depth-first from the soonest expiry, so a coin is dropped only once nothing
-    // containing it fits.
-    selected.length = 0
-    const searchable = Math.min(economic.length, SUBSET_SEARCH_COINS)
-    let examined = 0
-    const search = (from: number, sum: bigint, asset: boolean): bigint | null => {
-      if (examined >= SUBSET_SEARCH_LIMIT) {
-        exhausted = true
-        return null
-      }
-      examined += 1
-      const found = changeOf(sum, asset)
-      if (found !== null) return found
-      for (let i = from; i < searchable; i += 1) {
-        const candidate = economic[i]!
-        selected.push(candidate)
-        const deeper = search(i + 1, sum + candidate.net, asset || candidate.asset)
-        if (deeper !== null) return deeper
-        selected.pop()
-        if (exhausted) return null
-      }
-      return null
-    }
-    change = search(0, 0n, false)
-  }
-
-  if (change === null) {
-    if (gross < needed) {
-      throw new Error(
-        `the float's unreserved coins net ${gross} sats against the ${needed} needed ` +
-          `(${amountSats} + a ${outputFee} sat exit fee) — a live swap's funding pins the rest, or the float ` +
-          'needs topping up',
-      )
-    }
-    if (exhausted) {
-      throw new Error(
-        `no subset of the float's ${economic.length} unreserved coins funds ${amountSats} sats within the ` +
-          `${dust} sat dust floor and the ${info.vtxoMaxAmount} sat per-output ceiling — the search stopped at ` +
-          `${SUBSET_SEARCH_LIMIT} combinations; withdraw a different amount, or split the float first (pool-mint)`,
-      )
-    }
-    const whole = changeAfterFee(gross - needed)
-    if (whole < dust) {
-      throw new Error(
-        `withdrawing ${amountSats} sats leaves ${whole} sats of change, below the ${dust} ` +
-          `sat dust floor` +
-          (carriesAsset ? ' that the selection’s asset must ride on' : '') +
-          ' — withdraw a little less, so the change clears it',
-      )
-    }
-    throw new Error(
-      `the change of ${whole} sats would come back as one coin above the server's ${info.vtxoMaxAmount} sat ` +
-        'per-output ceiling — withdraw more, or split the float first (pool-mint)',
-    )
-  }
-
-  const inputs = selected.map((c) => c.coin)
-  const inputFees = selected.reduce((sum, c) => sum + c.fee, 0n)
-  const changeFee = selected.reduce((sum, c) => sum + c.net, 0n) - needed - change
-  const release = services.arkade.reservations.reserve(inputs)
+  const release = reservations.reserve(candidates)
   try {
-    const txid = await routedWithdraw(wallet, address, amountSats, inputs, info.fees)
+    const router = new PaymentRouter({ wallet, prefs: {} })
+      .use(arkRail())
+      .use(onchainRail({ feeInfo: async () => (await wallet.arkProvider.getInfo()).fees }))
+    const quote = await router.route({ raw: address, amount: amountSats, selectedVtxos: candidates })
+    const { txid } = await (await quote.send()).settled()
+    if (!txid) throw new Error(`the ${quote.railId} rail settled without a transaction id`)
     return {
       reference: txid,
       address,
       amount: String(amountSats),
-      detail: { route: 'onchain', feeSats: (inputFees + outputFee + changeFee).toString() },
+      detail: quote.railId === 'onchain' ? { route: 'onchain', feeSats: String(quote.fee) } : { route: 'arkade' },
     }
   } finally {
     release()
