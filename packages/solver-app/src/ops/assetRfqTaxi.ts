@@ -4,7 +4,15 @@
  * the orchestrator's completeness gate refuses a recycle rather than degrading.
  */
 
-import { ArkAddress, asset, type IContractManager, type TapLeafScript } from '@arkade-os/sdk'
+import {
+  ArkAddress,
+  asset,
+  MultisigTapscript,
+  scriptFromTapLeafScript,
+  VtxoScript,
+  type IContractManager,
+  type TapLeafScript,
+} from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { TaxiClient, verifyReceiveQuote, type VerifiedReceiveQuote } from '@arkade-taxi/client'
 import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
@@ -153,6 +161,39 @@ export const clearsFloor = (coin: CarrierCoin, floor: { kind: 'height' | 'time';
   if ((height === undefined) === (time === undefined)) return false
   if (floor.kind === 'height') return height !== undefined && BigInt(height) >= floor.value
   return time !== undefined && BigInt(Math.floor(time.getTime() / 1000)) >= floor.value
+}
+
+export interface CarrierTaprootEvidence {
+  tapTree: Uint8Array
+  spendLeaf: Uint8Array
+}
+
+/** The coin's own tree and forfeit leaf, wire-shaped — but only when that leaf
+ * is a collaborative multisig of one of `solverKeys` and `serverKey`, the one
+ * shape the Taxi accepts. `undefined` otherwise (missing data, a leaf outside
+ * the tree, a CSV exit, a stranger's multisig), so callers exclude the coin at
+ * selection rather than pin it toward a refusal. */
+export const carrierTaprootEvidence = (
+  coin: CarrierCoin,
+  solverKeys: readonly string[],
+  serverKey: Uint8Array,
+): CarrierTaprootEvidence | undefined => {
+  if (coin.tapTree === undefined || coin.forfeitTapLeafScript === undefined) return undefined
+  try {
+    const tree = VtxoScript.decode(coin.tapTree)
+    const spendLeaf = scriptFromTapLeafScript(coin.forfeitTapLeafScript)
+    if (!tree.scripts.some((script) => hex.encode(script) === hex.encode(spendLeaf))) return undefined
+    const keys = MultisigTapscript.decode(spendLeaf)
+      .params.pubkeys.map((key) => hex.encode(key))
+      .sort()
+    const server = hex.encode(serverKey)
+    const collaborative = solverKeys.some(
+      (solverKey) => JSON.stringify(keys) === JSON.stringify([solverKey.toLowerCase(), server].sort()),
+    )
+    return collaborative ? { tapTree: tree.encode(), spendLeaf } : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** Mutinynet's rate, and a DIVISOR: assuming blocks are fast over-states the

@@ -18,6 +18,7 @@ import type { CarrierAttempt, JsonObject } from '@arkade-os/solver-corridors/db/
 import type { ReceiveCarrierQuotes } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
   assetIdValue,
+  carrierTaprootEvidence,
   clearsFloor,
   encodeCarrierAttemptInputs,
   type CarrierCoin,
@@ -78,6 +79,9 @@ export interface TaxiCarrierSettleDeps {
   offerHex: (row: AssetRfqSwapRow) => string
   proceedsScript: Uint8Array
   solverKeys: readonly string[]
+  /** What a solver input's forfeit leaf must be collaborative with — this
+   * deployment's own key, never an operator's claim. */
+  serverKey: Uint8Array
   /** Recorded so a re-pointed solver cannot reconcile one operator's fill
    * against another's. */
   provider: string
@@ -102,10 +106,13 @@ export const selectCarrierInputs = (args: {
   dustSats: bigint
   leg: AssetLeg
   amount: bigint
+  solverKeys: readonly string[]
+  serverKey: Uint8Array
 }): readonly CarrierCoin[] => {
   const eligible = args.coins
     .filter((coin) => !args.reserved.has(outpointKey(coin.txid, coin.vout)))
     .filter((coin) => clearsFloor(coin, args.floor))
+    .filter((coin) => carrierTaprootEvidence(coin, args.solverKeys, args.serverKey) !== undefined)
     .filter((coin) => contributionOf(coin, args.leg, args.dustSats) > 0n)
     .sort((a, b) => outpointKey(a.txid, a.vout).localeCompare(outpointKey(b.txid, b.vout)))
   const picked: CarrierCoin[] = []
@@ -219,6 +226,8 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       dustSats: deps.dustSats,
       leg: row.toAssetId,
       amount: row.toAmount,
+      solverKeys: deps.solverKeys,
+      serverKey: deps.serverKey,
     })
 
     const outpoints = inputs.map(({ txid, vout }) => ({ txid, vout }))
@@ -262,17 +271,26 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         operationId: row.id,
         receiveQuoteId: terms.quoteId,
         offerHex,
-        solverInputs: inputs.map((coin) => ({
-          txid: coin.txid,
-          vout: coin.vout,
-          value: BigInt(coin.value),
-          // EVERY asset the coin owns: arkd refuses a spend whose packet omits
-          // one an input carries.
-          assets: (coin.assets ?? []).map((held) => ({
-            assetId: assetIdValue(held.assetId),
-            amount: BigInt(held.amount),
-          })),
-        })),
+        solverInputs: inputs.map((coin) => {
+          // Selection already excludes this; a miss here means the two disagree.
+          const evidence = carrierTaprootEvidence(coin, deps.solverKeys, deps.serverKey)
+          if (evidence === undefined) {
+            throw new Error(`carrier fill ${row.id} selected ${coin.txid}:${coin.vout} without its taproot evidence`)
+          }
+          return {
+            txid: coin.txid,
+            vout: coin.vout,
+            value: BigInt(coin.value),
+            tapTree: evidence.tapTree,
+            spendLeaf: evidence.spendLeaf,
+            // EVERY asset the coin owns: arkd refuses a spend whose packet omits
+            // one an input carries.
+            assets: (coin.assets ?? []).map((held) => ({
+              assetId: assetIdValue(held.assetId),
+              amount: BigInt(held.amount),
+            })),
+          }
+        }),
         solverProceedsScript: deps.proceedsScript,
         solverKeys: [...deps.solverKeys],
         contributionSats: terms.loanSats,

@@ -11,7 +11,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { base64, hex } from '@scure/base'
-import { SingleKey, Transaction } from '@arkade-os/sdk'
+import { DefaultVtxo, scriptFromTapLeafScript, SingleKey, Transaction } from '@arkade-os/sdk'
 import { digestJointGraph, OFFER_FILL_TEMPLATE } from '@arkade-taxi/client'
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
@@ -36,7 +36,11 @@ const ASSET = `${'aa'.repeat(31)}bb0100`
 const MAKER_PK_SCRIPT = `5120${'c'.repeat(64)}`
 const MAKER_KEY = 'b'.repeat(64)
 const PROCEEDS = `5120${'e'.repeat(64)}`
-const SOLVER_KEY = 'd'.repeat(64)
+// Real x-only keys, not arbitrary bytes: `DefaultVtxo.Script` builds a real
+// taproot tree, and a repeated-byte "pubkey" is not a point on the curve.
+const SOLVER_KEY = hex.encode(await SingleKey.fromHex('21'.repeat(32)).xOnlyPublicKey())
+const SERVER_KEY = hex.encode(await SingleKey.fromHex('22'.repeat(32)).xOnlyPublicKey())
+const OTHER_KEY = hex.encode(await SingleKey.fromHex('23'.repeat(32)).xOnlyPublicKey())
 const DEPOSIT_TXID = '1'.repeat(64)
 const COIN_A = '2'.repeat(64)
 const COIN_B = '3'.repeat(64)
@@ -44,6 +48,24 @@ const OFFER_HEX = 'abcd'
 const TAXI = 'http://taxi.example:7080'
 const NOW = 2_000
 const FLOOR = { kind: 'height' as const, value: 1_100_000n }
+
+/** A real default-wallet script for the solver key: forfeit is the
+ * collaborative leaf the Taxi requires; exit is the CSV leaf it must reject. */
+const SOLVER_SCRIPT = new DefaultVtxo.Script({
+  pubKey: hex.decode(SOLVER_KEY),
+  serverPubKey: hex.decode(SERVER_KEY),
+  csvTimelock: DefaultVtxo.Script.DEFAULT_TIMELOCK,
+})
+const TAP_TREE = SOLVER_SCRIPT.encode()
+const FORFEIT_LEAF = SOLVER_SCRIPT.forfeit()
+const EXIT_LEAF = SOLVER_SCRIPT.exit()
+/** Collaborative, but with someone else's key: excluded for the wrong owner,
+ * not for the wrong shape. */
+const OTHER_SCRIPT = new DefaultVtxo.Script({
+  pubKey: hex.decode(OTHER_KEY),
+  serverPubKey: hex.decode(SERVER_KEY),
+  csvTimelock: DefaultVtxo.Script.DEFAULT_TIMELOCK,
+})
 
 const carrierQuote = (over: Partial<ReceiveCarrierQuote> = {}): ReceiveCarrierQuote => ({
   quoteId: 'q-1',
@@ -64,6 +86,8 @@ const coin = (over: Partial<CarrierCoin> & { txid: string }): CarrierCoin => ({
   value: 10_000,
   expiresAtHeight: 1_200_000,
   assets: [{ assetId: ASSET, amount: 10n }],
+  tapTree: TAP_TREE,
+  forfeitTapLeafScript: FORFEIT_LEAF,
   ...over,
 })
 
@@ -230,6 +254,7 @@ const harness = async (
     offerHex: () => OFFER_HEX,
     proceedsScript: hex.decode(PROCEEDS),
     solverKeys: [SOLVER_KEY],
+    serverKey: hex.decode(SERVER_KEY),
     provider: TAXI,
     now: () => NOW,
     fill: {
@@ -441,6 +466,8 @@ describe('the pinned floor is what the fill is measured against', () => {
       dustSats: 330n,
       leg: ASSET,
       amount: 10n,
+      solverKeys: [SOLVER_KEY],
+      serverKey: hex.decode(SERVER_KEY),
     })
     expect(picked.map((c) => c.txid)).toEqual([COIN_A, COIN_B])
   })
@@ -454,8 +481,103 @@ describe('the pinned floor is what the fill is measured against', () => {
         dustSats: 330n,
         leg: ASSET,
         amount: 10n,
+        solverKeys: [SOLVER_KEY],
+        serverKey: hex.decode(SERVER_KEY),
       }),
     ).toThrow(/inventory/)
+  })
+
+  it('excludes a coin with no taproot evidence at all, deterministically ordered', () => {
+    const picked = selectCarrierInputs({
+      coins: [coin({ txid: COIN_B, tapTree: undefined, forfeitTapLeafScript: undefined }), coin({ txid: COIN_A })],
+      reserved: new Set<string>(),
+      floor: FLOOR,
+      dustSats: 330n,
+      leg: ASSET,
+      amount: 10n,
+      solverKeys: [SOLVER_KEY],
+      serverKey: hex.decode(SERVER_KEY),
+    })
+    expect(picked.map((c) => c.txid)).toEqual([COIN_A])
+  })
+
+  it('excludes a coin whose forfeit leaf is a CSV exit rather than a collaborative multisig', () => {
+    const picked = selectCarrierInputs({
+      coins: [coin({ txid: COIN_B, forfeitTapLeafScript: EXIT_LEAF }), coin({ txid: COIN_A })],
+      reserved: new Set<string>(),
+      floor: FLOOR,
+      dustSats: 330n,
+      leg: ASSET,
+      amount: 10n,
+      solverKeys: [SOLVER_KEY],
+      serverKey: hex.decode(SERVER_KEY),
+    })
+    expect(picked.map((c) => c.txid)).toEqual([COIN_A])
+  })
+
+  it('excludes a coin whose collaborative leaf names a different owner key', () => {
+    const picked = selectCarrierInputs({
+      coins: [
+        coin({ txid: COIN_B, tapTree: OTHER_SCRIPT.encode(), forfeitTapLeafScript: OTHER_SCRIPT.forfeit() }),
+        coin({ txid: COIN_A }),
+      ],
+      reserved: new Set<string>(),
+      floor: FLOOR,
+      dustSats: 330n,
+      leg: ASSET,
+      amount: 10n,
+      solverKeys: [SOLVER_KEY],
+      serverKey: hex.decode(SERVER_KEY),
+    })
+    expect(picked.map((c) => c.txid)).toEqual([COIN_A])
+  })
+
+  it('refuses when every candidate lacks a collaborative forfeit leaf', () => {
+    expect(() =>
+      selectCarrierInputs({
+        coins: [coin({ txid: COIN_A, tapTree: undefined, forfeitTapLeafScript: undefined })],
+        reserved: new Set<string>(),
+        floor: FLOOR,
+        dustSats: 330n,
+        leg: ASSET,
+        amount: 10n,
+        solverKeys: [SOLVER_KEY],
+        serverKey: hex.decode(SERVER_KEY),
+      }),
+    ).toThrow(/inventory/)
+  })
+})
+
+describe('a solver input carries the taproot evidence the Taxi will check', () => {
+  it("sends the coin's own tree and forfeit leaf, byte-equal to what it holds", async () => {
+    const h = await harness()
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
+    const body = h.bodies[0] as { solverInputs: { tapTree: string; spendLeaf: string }[] }
+    expect(body.solverInputs).toEqual([
+      expect.objectContaining({
+        tapTree: hex.encode(TAP_TREE),
+        spendLeaf: hex.encode(scriptFromTapLeafScript(FORFEIT_LEAF)),
+      }),
+    ])
+    await h.store.close()
+  })
+
+  it('never pins or asks the operator when inventory holds only excluded coins', async () => {
+    const h = await harness({ coins: [coin({ txid: COIN_A, tapTree: undefined, forfeitTapLeafScript: undefined })] })
+    await expect(h.settle(await h.row())).rejects.toThrow(/inventory/)
+    expect(h.requests).toEqual([])
+    expect(h.ledger.reserved().size).toBe(0)
+    expect(h.pins.held()).toEqual([])
+    await h.store.close()
+  })
+
+  it('picks the eligible coin over one an ineligible leaf would have covered the amount with', async () => {
+    const h = await harness({
+      coins: [coin({ txid: COIN_B, forfeitTapLeafScript: EXIT_LEAF }), coin({ txid: COIN_A })],
+    })
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
+    expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
+    await h.store.close()
   })
 })
 

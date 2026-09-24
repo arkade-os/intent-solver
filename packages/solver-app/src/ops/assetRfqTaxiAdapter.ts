@@ -33,6 +33,7 @@ export interface TaxiCarrierFillComposition {
   /** Where a fill pays this solver back — its own address, never the quote's. */
   proceedsAddress: string
   solverKeys: readonly string[]
+  serverKey: Uint8Array
   now: () => number
 }
 
@@ -55,6 +56,7 @@ export const completeTaxiReceiveCarrier = (
       offerHex: deps.offerHex,
       proceedsScript,
       solverKeys: deps.solverKeys,
+      serverKey: deps.serverKey,
       provider: deps.taxiUrl,
       fill: {
         rebuild: createCarrierFillRebuilder({ wallet: deps.wallet, arkServerUrl: deps.arkServerUrl }),

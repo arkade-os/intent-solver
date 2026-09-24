@@ -145,6 +145,7 @@ describe('the composed adapter is refused, never degraded', () => {
       offerHex: () => 'abcd',
       proceedsAddress: PROCEEDS_ADDRESS,
       solverKeys: ['e'.repeat(64)],
+      serverKey: TRUST.serverKey,
       now: () => 1_000,
     })
 
