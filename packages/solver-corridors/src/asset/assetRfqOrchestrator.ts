@@ -320,7 +320,10 @@ export class AssetRfqSwapService {
   private readonly quoteLimiter: RateLimiter
   private readonly newId: () => string
   private markets: readonly AssetRfqMarket[]
-  private readonly serialise: Serialiser = createSerialiser()
+  /** Quotes and the serve list they read, apart from fills: a quote's reads of a payer-named Taxi must never hold up
+   * a funded fill. Fills touch rows only through CAS writes, and read the list once, so neither needs the other. */
+  private readonly serialiseQuotes: Serialiser = createSerialiser()
+  private readonly serialiseFills: Serialiser = createSerialiser()
 
   constructor(private readonly deps: AssetRfqDeps) {
     this.now = deps.now ?? nowSeconds
@@ -331,7 +334,7 @@ export class AssetRfqSwapService {
 
   /** Swap the live serve list. In-flight rows keep the terms already recorded. */
   replaceMarkets(markets: readonly AssetRfqMarket[]): Promise<void> {
-    return this.serialise(async () => {
+    return this.serialiseQuotes(async () => {
       this.markets = markets
     })
   }
@@ -557,7 +560,7 @@ export class AssetRfqSwapService {
    * touching the network, and only then is a price fetched.
    */
   quote(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
-    return this.serialise(() => this.quoteInner(request))
+    return this.serialiseQuotes(() => this.quoteInner(request))
   }
 
   private async quoteInner(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
@@ -746,7 +749,7 @@ export class AssetRfqSwapService {
    * both act.
    */
   tick(id: string): Promise<void> {
-    return this.serialise(() => this.drive(id))
+    return this.serialiseFills(() => this.drive(id))
   }
 
   private async drive(id: string): Promise<void> {
@@ -776,7 +779,7 @@ export class AssetRfqSwapService {
    * negotiation must not stop the second from being driven.
    */
   tickAll(): Promise<string[]> {
-    return this.serialise(async () => {
+    return this.serialiseFills(async () => {
       const driven: string[] = []
       for (const row of await this.deps.store.listNonTerminal()) {
         try {

@@ -1396,6 +1396,53 @@ describe('profile.carrier — receiver-paid mode', () => {
     ])
   })
 
+  it('fills a funded row while quotes naming slow Taxis are still waiting on them', async () => {
+    let stall = false
+    let release!: () => void
+    const stalled = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const settle = vi.fn<ReceiveCarrierQuotes['settle']>(async () => ({ status: 'submitted' }))
+    const receiverPaidQuote = {
+      ...RECEIVER_QUOTE,
+      loanSats: 330n,
+      receiptSats: 0n,
+      serviceFareSats: 0n,
+      taxiKey: TAXI_KEY,
+    }
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      newId: sequentialIds(),
+      deriveOffer: perClientOffer,
+      receiveCarrierQuotes: {
+        ...receiverPaidAdapter({}, { settle }),
+        resolve: async () => {
+          if (stall) await stalled
+          return receiverPaidQuote
+        },
+      },
+    })
+    await service.quote(request({ carrier: receiverPaid() }))
+    await service.tick('swap-1')
+    stall = true
+    const slow = [1, 2, 3, 4, 5].map((n) =>
+      service.quote(
+        request({
+          rfqId: String(n).repeat(64),
+          makerPublicKey: String(n).repeat(64),
+          carrier: receiverPaid({ taxiUrl: `https://slow-${n}.example` }),
+        }),
+      ),
+    )
+
+    const timedOut = new Promise<'stalled'>((resolve) => setTimeout(() => resolve('stalled'), 1_000))
+    expect(await Promise.race([service.tick('swap-1').then(() => 'filled'), timedOut])).toBe('filled')
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect((await store.get('swap-1')).state).toBe('filling')
+    release()
+    await Promise.all(slow)
+  })
+
   it('reconciles a filling receiver-paid row through the carrier observer rather than escalating it', async () => {
     const reconcile = vi.fn(async () => ({ status: 'pending' as const }))
     const { service, store } = await harness({

@@ -34,7 +34,9 @@ import {
   createTaxiReceiveCarrierReader,
   spendableCarrierCoins,
   TAXI_FILL_RATE_LIMIT,
+  TAXI_QUOTE_GLOBAL_RATE_LIMIT,
   TAXI_QUOTE_RATE_LIMIT,
+  TAXI_QUOTE_TIMEOUT_MS,
   taxiClientCache,
   taxiReceiveCarrier,
   type CarrierCoin,
@@ -639,6 +641,42 @@ describe('the per-URL client cache', () => {
     expect(reached).toBe(TAXI_QUOTE_RATE_LIMIT)
     await spend('fill', TAXI_FILL_RATE_LIMIT + 5)
     expect(reached).toBe(TAXI_QUOTE_RATE_LIMIT + TAXI_FILL_RATE_LIMIT)
+  })
+
+  it('caps quote reads across every host, so fresh subdomains cannot outrun it, and leaves fills their own budget', async () => {
+    let reached = 0
+    const clientFor = taxiClientCache({
+      policy: POLICY,
+      fetch: async () => {
+        reached += 1
+        return new Response(JSON.stringify(infoFixture()), { status: 200 })
+      },
+    })
+    for (let i = 0; i < TAXI_QUOTE_GLOBAL_RATE_LIMIT; i++) await clientFor(`https://t${i}.taxi.example`, 'quote').info()
+    expect(reached).toBe(TAXI_QUOTE_GLOBAL_RATE_LIMIT)
+
+    await expect(clientFor('https://fresh.taxi.example', 'quote').info()).rejects.toMatchObject({
+      cause: { message: 'taxi quote reads are rate-limited across every host' },
+    })
+    expect(reached).toBe(TAXI_QUOTE_GLOBAL_RATE_LIMIT)
+    await expect(clientFor('https://fresh.taxi.example', 'fill').info()).resolves.toBeDefined()
+  })
+
+  it('gives quote reads a shorter timeout than fill reads', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout')
+    try {
+      const clientFor = taxiClientCache({
+        policy: POLICY,
+        fetch: async () => new Response(JSON.stringify(infoFixture()), { status: 200 }),
+      })
+      await clientFor('https://taxi.example', 'quote').info()
+      expect(timeout).toHaveBeenLastCalledWith(TAXI_QUOTE_TIMEOUT_MS)
+      await clientFor('https://taxi.example', 'fill').info()
+      expect(timeout).toHaveBeenLastCalledWith(5_000)
+      expect(TAXI_QUOTE_TIMEOUT_MS).toBeLessThan(5_000)
+    } finally {
+      timeout.mockRestore()
+    }
   })
 
   it('still lets a fill read a named Taxi after a storm of quotes naming it has spent the quote budget', async () => {

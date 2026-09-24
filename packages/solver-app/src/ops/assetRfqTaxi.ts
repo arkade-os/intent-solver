@@ -374,6 +374,10 @@ export type TaxiBudget = 'quote' | 'fill'
 export const TAXI_QUOTE_RATE_LIMIT = 20
 /** Spent only behind a funded deposit, at most 6 requests a fill per host, so ten concurrent fills a minute. */
 export const TAXI_FILL_RATE_LIMIT = 60
+/** Shared by every named host, so fresh subdomains cannot multiply it: ten receiver-paid quotes a minute, 4 reads each. */
+export const TAXI_QUOTE_GLOBAL_RATE_LIMIT = 40
+/** One small GET: an honest Taxi answers well inside it, and a tarpit holds a quote at most two parallel rounds. */
+export const TAXI_QUOTE_TIMEOUT_MS = 2_000
 const TAXI_CLIENT_RATE_WINDOW_SECONDS = 60
 /** Ruling 3's cap on the client cache below. */
 const TAXI_CLIENT_CACHE_SIZE = 32
@@ -392,6 +396,13 @@ export const taxiClientCache = (deps: {
     quote: new RateLimiter(TAXI_QUOTE_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
     fill: new RateLimiter(TAXI_FILL_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
   }
+  const guards: Record<TaxiBudget, Parameters<typeof guardedTaxiFetch>[2]> = {
+    quote: {
+      timeoutMs: TAXI_QUOTE_TIMEOUT_MS,
+      global: new RateLimiter(TAXI_QUOTE_GLOBAL_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
+    },
+    fill: {},
+  }
   const cache = new Map<string, TaxiCarrierClient>()
   return (url, budget = 'quote') => {
     if (url === undefined) {
@@ -406,7 +417,10 @@ export const taxiClientCache = (deps: {
       const oldest = cache.keys().next().value
       if (oldest !== undefined) cache.delete(oldest)
     }
-    const client = new TaxiClient({ baseUrl: normalized, fetch: guardedTaxiFetch(baseFetch, limiters[budget]) })
+    const client = new TaxiClient({
+      baseUrl: normalized,
+      fetch: guardedTaxiFetch(baseFetch, limiters[budget], guards[budget]),
+    })
     cache.set(key, client)
     return client
   }

@@ -44,7 +44,7 @@ type VerifiedSwapFill = Parameters<TaxiClient['submitSwapFill']>[0]
 type SwapFillGraphWire = Parameters<TaxiClient['submitSwapFill']>[1]
 
 /** Backoff before each re-POST on `not_ready`: the Taxi's runtime check takes seconds, and this settle holds the
- * orchestrator's serial queue while it waits. */
+ * orchestrator's fill queue while it waits. */
 export const CARRIER_NOT_READY_RETRY_MS: readonly number[] = [1_000, 2_000, 4_000]
 
 declare const carrierSnapshot: unique symbol

@@ -132,13 +132,22 @@ const readCapped = async (body: ReadableStream<Uint8Array> | null): Promise<Uint
  * keyed per host, so an exhausted host never reaches the network.
  */
 export const guardedTaxiFetch =
-  (base: typeof fetch, limiter: RateLimiter): typeof fetch =>
+  (
+    base: typeof fetch,
+    limiter: RateLimiter,
+    /** `global` is one budget across every host, spent only once the host's own allowed the request. */
+    options: { timeoutMs?: number; global?: RateLimiter } = {},
+  ): typeof fetch =>
   async (input, init) => {
     const target = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     const host = stripRootDot(new URL(target).hostname)
     if (!limiter.take(host)) throw new Error(`taxi host is rate-limited: ${host}`)
+    if (options.global && !options.global.take('*')) {
+      throw new Error('taxi quote reads are rate-limited across every host')
+    }
 
-    const response = await base(input, { ...init, redirect: 'error', signal: AbortSignal.timeout(TIMEOUT_MS) })
+    const signal = AbortSignal.timeout(options.timeoutMs ?? TIMEOUT_MS)
+    const response = await base(input, { ...init, redirect: 'error', signal })
     if (response.status >= 300 && response.status < 400) {
       throw new Error(`taxi response was a redirect: HTTP ${response.status}`)
     }
