@@ -358,6 +358,16 @@ describe('resolving one receive-carrier quote', () => {
     await expect(read.resolve(request())).rejects.toThrow(/not usable/)
   })
 
+  it('re-reads a quote bound to the named fill, and refuses one bound elsewhere or still quoted', async () => {
+    const bound = (boundFillId: string) => ({ ...quoteFixture({ state: 'bound' }), boundFillId })
+    const fill = request({ boundFillId: 'fill-1' })
+    await expect(reader({ quote: bound('fill-1') }).read.resolve(fill)).resolves.toMatchObject({ quoteId: 'q-1' })
+    await expect(reader({ quote: bound('fill-2') }).read.resolve(fill)).rejects.toThrow(
+      /q-1 is bound to fill-2, not bound to fill fill-1/,
+    )
+    await expect(reader().read.resolve(fill)).rejects.toThrow(/q-1 is quoted, not bound to fill fill-1/)
+  })
+
   it('refuses a body answering under another quote id, on both entry points', async () => {
     const { read } = reader({ quote: quoteFixture({ quoteId: 'q-2' }) })
     await expect(read.resolve(request())).rejects.toThrow(/answered as q-2/)

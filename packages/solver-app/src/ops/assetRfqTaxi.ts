@@ -105,6 +105,20 @@ const locktimeOf = (
   return { kind: tagged.kind, value: BigInt(tagged.value) }
 }
 
+type ReceiveQuoteWire = Awaited<ReturnType<TaxiClient['getReceiveQuote']>>
+
+/** The Taxi's bind moves only `state` and `boundFillId`, so a quote bound to THIS fill re-verifies as the quoted one
+ * it was. Bound to another fill, or not bound at all, is refused. */
+const boundTo = (quote: ReceiveQuoteWire, fillId: string): ReceiveQuoteWire => {
+  if (quote.state !== 'bound' || quote.boundFillId !== fillId) {
+    const to = quote.boundFillId === undefined ? '' : ` to ${quote.boundFillId}`
+    throw new Error(`carrier quote ${quote.quoteId} is ${quote.state}${to}, not bound to fill ${fillId}`)
+  }
+  const quoted: ReceiveQuoteWire = { ...quote, state: 'quoted' }
+  delete quoted.boundFillId
+  return quoted
+}
+
 const verifiedQuoteFor = async (
   deps: TaxiReceiveCarrierDeps,
   request: ReceiveCarrierQuoteRequest,
@@ -118,11 +132,12 @@ const verifiedQuoteFor = async (
   }
   const assetId = assetIdValue(request.assetId)
   const client = deps.clientFor(request.taxi?.url, request.admission === true ? 'quote' : 'fill')
-  const [info, quote] = await Promise.all([client.info(), client.getReceiveQuote(request.quoteId)])
+  const [info, served] = await Promise.all([client.info(), client.getReceiveQuote(request.quoteId)])
   // Verification binds every other field but not the id, and `available` reads
   // this quote's floor without the orchestrator's own id check beside it.
-  if (quote.quoteId !== request.quoteId)
-    throw new Error(`carrier quote ${request.quoteId} answered as ${quote.quoteId}`)
+  if (served.quoteId !== request.quoteId)
+    throw new Error(`carrier quote ${request.quoteId} answered as ${served.quoteId}`)
+  const quote = request.boundFillId === undefined ? served : boundTo(served, request.boundFillId)
   const operatorKey = info.operatorKey.toLowerCase()
   // The ONLY identity read off a request-named Taxi. `deps.trust` below is
   // shared and singular regardless — see the module comment on `TaxiCarrierTrust`.

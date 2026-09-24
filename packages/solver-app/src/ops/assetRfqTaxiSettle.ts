@@ -372,11 +372,11 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       const signed = await deps.fill.sign(expected)
 
       // The last gate: the authority this attempt was admitted under must
-      // still be the one the operator serves.
-      const now = (await deps.resolve({ ...request, now: deps.now() })).inputExpiryFloor
-      if (!sameLocktime(now, floor)) {
+      // still be the one the operator serves, now bound to this fill.
+      const current = await deps.resolve({ ...request, now: deps.now(), boundFillId: verified.fillId })
+      if (!sameLocktime(current.inputExpiryFloor, floor)) {
         throw new Error(
-          `carrier fill ${row.id} pinned an input expiry floor of ${floor.value} and the operator now serves ${now.value}`,
+          `carrier fill ${row.id} pinned an input expiry floor of ${floor.value} and the operator now serves ${current.inputExpiryFloor.value}`,
         )
       }
       // The coin AS IT IS NOW: re-testing the object selected before the

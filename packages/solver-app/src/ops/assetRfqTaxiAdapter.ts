@@ -15,6 +15,7 @@ import {
   carrierFillSigner,
   createTaxiReceiveCarrierSettler,
   type CarrierAttemptStore,
+  type CarrierFillSeams,
   type CarrierTaxi,
 } from './assetRfqTaxiSettle.js'
 import { createTaxiReceiveCarrierObserver, type CarrierProofStore } from './assetRfqTaxiProof.js'
@@ -44,6 +45,8 @@ export interface TaxiCarrierFillComposition {
   solverKeys: readonly string[]
   serverKey: () => Uint8Array
   now: () => number
+  /** Tests only: a stub Taxi's graph is nothing a real arkd could rebuild or sign. */
+  fill?: CarrierFillSeams
 }
 
 export class CarrierTaxiRefusedError extends Error {
@@ -100,7 +103,7 @@ export const completeTaxiReceiveCarrier = (
       proceedsScript,
       solverKeys: deps.solverKeys,
       serverKey: deps.serverKey,
-      fill: {
+      fill: deps.fill ?? {
         rebuild: createCarrierFillRebuilder({ wallet: deps.wallet, arkServerUrl: deps.arkServerUrl }),
         sign: carrierFillSigner(deps.identity),
       },

@@ -140,6 +140,8 @@ export interface ReceiveCarrierQuoteRequest {
   taxi?: { url: string; operatorKey: string }
   /** Ruling 4, decoupled from `taxi`: opts the adapter into the SDK's own `payer: 'receiver'` check. */
   receiverPaid?: boolean
+  /** Settle's post-sign re-read only: requesting the swap fill BOUND the quote, so it must be bound to this fill. */
+  boundFillId?: string
 }
 
 export type ReceiveCarrierReconcileOutcome =

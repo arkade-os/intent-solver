@@ -1,7 +1,8 @@
 /**
  * The receiver-paid contract against a Taxi's real wire: a loopback HTTP stub serving `/v1/info`,
  * `/v1/receive-quotes/:id` and `/v1/swap-fills`, read by the shipped adapter through the vendored
- * client, with no TAXI_URL. It stops before a signed graph: that handshake is arkade-taxi's to prove.
+ * client, with no TAXI_URL. The stub binds the receive quote when it quotes a fill, as the Taxi does;
+ * only the graph's rebuild and signature are faked, since no arkd here serves the deposit.
  * The SDK-built cases also run sender-paid `recycle`, which needs the stub configured as TAXI_URL.
  */
 
@@ -10,11 +11,17 @@ import type { AddressInfo } from 'node:net'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { hex } from '@scure/base'
+import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { ArkAddress, asset, CSVMultisigTapscript, DefaultVtxo, SingleKey } from '@arkade-os/sdk'
-import { requestArkadeSwap, type RfqQuote, type RfqTransport } from '@arkade-os/swap'
-import { TaxiClient, verifyReceiveQuote } from '@arkade-taxi/client'
+import { ArkAddress, asset, CSVMultisigTapscript, DefaultVtxo, SingleKey, Transaction } from '@arkade-os/sdk'
+import { decodeOffer, requestArkadeSwap, type RfqQuote, type RfqTransport } from '@arkade-os/swap'
+import {
+  digestJointGraph,
+  OFFER_FILL_TEMPLATE,
+  TaxiClient,
+  verifyReceiveQuote,
+  type JointGraph,
+} from '@arkade-taxi/client'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import {
   AssetRfqSwapService,
@@ -148,7 +155,7 @@ type Payer = 'receiver' | 'sender'
 const QUOTE_ID: Record<Payer, string> = { receiver: 'q-1', sender: 'q-2' }
 
 /** `receiveQuotes.ts` `toResponse`: receiver-paid loans the whole dust at a zero fill fare, sender-paid all but the receipt. */
-const receiveQuoteWire = (id: TaxiIdentity, payer: Payer = 'receiver') => {
+const receiveQuoteWire = (id: TaxiIdentity, payer: Payer = 'receiver', floor = 1_100_000) => {
   const receiverPaid = payer === 'receiver'
   const topup = receiverPaid ? DUST : DUST - 1n
   const covenant = new DustCovenantScript({
@@ -192,7 +199,7 @@ const receiveQuoteWire = (id: TaxiIdentity, payer: Payer = 'receiver') => {
       ? { payer: 'receiver', receiverFare: { currency: 'sats', units: FLAT_FARE }, unclaimedMode: 'reclaim' }
       : {}),
     batchExpiry: height(1_200_000),
-    inputExpiryFloor: height(1_100_000),
+    inputExpiryFloor: height(floor),
     recoveryLocktime: height(1_000_000),
     createdAt: 1_000,
     expiresAt: 5_000,
@@ -206,10 +213,99 @@ const covenantScriptOf = (payer: Payer): string =>
 
 const MAKER_PK_SCRIPT = covenantScriptOf('receiver')
 
+interface SwapFillRequestWire {
+  operationId: string
+  receiveQuoteId: string
+  offerHex: string
+  solverInputs: { txid: string; vout: number }[]
+  contributionSats: string
+  maxFare: { currency: string; units: string }
+  fundingTxid: string
+  fundingVout: number
+  validUntil: number
+}
+
 interface StubTaxi {
   url: string
   requests: string[]
-  swapFills: Record<string, unknown>[]
+  swapFills: SwapFillRequestWire[]
+}
+
+/** What the Taxi serves once the swap-fill quote has bound the receive quote. */
+interface AfterBind {
+  bindTo?: string
+  floor?: number
+  operator?: Uint8Array
+}
+
+const FILL_ID = 'fill-1'
+
+const psbtOf = (ins: readonly (readonly [string, number])[]): string => {
+  const tx = new Transaction({ allowUnknownOutputs: true, allowUnknownInputs: true, disableScriptCheck: true })
+  for (const [txid, index] of ins) tx.addInput({ txid, index })
+  tx.addOutput({ script: ArkAddress.decode(PROCEEDS_ADDRESS).pkScript, amount: 1_000n })
+  return base64.encode(tx.toPSBT())
+}
+
+/** The deposit, then each solver coin: what the client's plan check parses and digests. */
+const fillGraph = (deposit: { txid: string; vout: number }, solver: readonly { txid: string; vout: number }[]) => {
+  const ins = [deposit, ...solver].map(({ txid, vout }) => [txid, vout] as const)
+  const plan = {
+    arkTx: psbtOf(ins),
+    checkpoints: ins.map((input) => psbtOf([input])),
+    inputOwners: [null, ...solver.map(() => 'solver')],
+  }
+  return { ...plan, graphId: digestJointGraph(plan, OFFER_FILL_TEMPLATE) } satisfies JointGraph
+}
+
+const swapFillQuoteWire = (fill: SwapFillRequestWire, covenant: string) => {
+  const graph = fillGraph({ txid: fill.fundingTxid, vout: fill.fundingVout }, fill.solverInputs)
+  return {
+    fillId: FILL_ID,
+    operationId: fill.operationId,
+    expiresAt: fill.validUntil,
+    template: 'taxi-fill/1',
+    contributionSats: fill.contributionSats,
+    fare: { currency: 'sats', units: '0' },
+    graph: {
+      arkTx: graph.arkTx,
+      checkpoints: graph.checkpoints,
+      graphId: graph.graphId,
+      template: 'taxi-fill/1',
+      inputs: [
+        { owner: 'offer-covenant', txid: fill.fundingTxid, vout: fill.fundingVout },
+        ...fill.solverInputs.map(({ txid, vout }) => ({ owner: 'solver', txid, vout })),
+      ],
+      outputs: [
+        { role: 'receiver', vout: 0, script: covenant, sats: String(DUST), assets: [] },
+        {
+          role: 'solver',
+          vout: 1,
+          script: hex.encode(ArkAddress.decode(PROCEEDS_ADDRESS).pkScript),
+          sats: '1000',
+          assets: [],
+        },
+      ],
+    },
+  }
+}
+
+/** `swapFillQuotes.ts` ~:336-409: an unbound receive quote, and an offer paying its covenant on its terms. */
+const receiveQuoteRefusal = (quote: ReturnType<typeof receiveQuoteWire>, fill: SwapFillRequestWire) => {
+  const offer = decodeOffer(hex.decode(fill.offerHex))
+  const covenant = hex.encode(ArkAddress.decode(quote.covenantAddress).pkScript)
+  if (
+    hex.encode(offer.makerPublicKey) !== quote.makerPublicKey ||
+    hex.encode(offer.makerPkScript) !== covenant ||
+    offer.wantAsset?.toString() !== ASSET ||
+    offer.wantAmount <= 0n ||
+    fill.contributionSats !== quote.params.topup ||
+    fill.maxFare.currency !== 'sats' ||
+    BigInt(fill.maxFare.units) < BigInt(quote.fare.units)
+  ) {
+    return { code: 'receive_quote_mismatch', error: 'offer, contribution, or fare cap differs from the receive quote' }
+  }
+  return undefined
 }
 
 const open: (() => Promise<void>)[] = []
@@ -217,8 +313,17 @@ afterEach(async () => {
   for (const close of open.splice(0)) await close()
 })
 
-const startTaxi = async (id: TaxiIdentity): Promise<StubTaxi> => {
+const startTaxi = async (
+  id: TaxiIdentity,
+  options: { notReady?: boolean; afterBind?: AfterBind } = {},
+): Promise<StubTaxi> => {
   const stub: Omit<StubTaxi, 'url'> = { requests: [], swapFills: [] }
+  const bound = new Map<string, string>()
+  const served = (payer: Payer) => {
+    const boundFillId = bound.get(QUOTE_ID[payer])
+    if (boundFillId === undefined) return receiveQuoteWire(id, payer)
+    return { ...receiveQuoteWire(id, payer, options.afterBind?.floor), state: 'bound', boundFillId }
+  }
   const server = createServer(async (request, response) => {
     let body = ''
     for await (const chunk of request) body += chunk
@@ -228,13 +333,34 @@ const startTaxi = async (id: TaxiIdentity): Promise<StubTaxi> => {
       response.writeHead(status, { 'content-type': 'application/json' })
       response.end(JSON.stringify(payload))
     }
-    if (route === 'GET /v1/info') return reply(200, infoWire(id))
-    if (route === 'GET /v1/receive-quotes/q-1') return reply(200, receiveQuoteWire(id, 'receiver'))
-    if (route === 'GET /v1/receive-quotes/q-2') return reply(200, receiveQuoteWire(id, 'sender'))
+    const operator = bound.size > 0 ? (options.afterBind?.operator ?? id.operator) : id.operator
+    if (route === 'GET /v1/info') return reply(200, infoWire({ ...id, operator }))
+    if (route === 'GET /v1/receive-quotes/q-1') return reply(200, served('receiver'))
+    if (route === 'GET /v1/receive-quotes/q-2') return reply(200, served('sender'))
     if (route === 'POST /v1/swap-fills') {
-      stub.swapFills.push(JSON.parse(body) as Record<string, unknown>)
+      const fill = JSON.parse(body) as SwapFillRequestWire
+      stub.swapFills.push(fill)
       // `routes.ts` `assertFinancialMutationReady`: refused before any graph exists.
-      return reply(503, { error: 'service is not ready', code: 'not_ready' })
+      if (options.notReady) return reply(503, { error: 'service is not ready', code: 'not_ready' })
+      if (bound.has(fill.receiveQuoteId)) {
+        return reply(409, { error: 'receive quote is bound', code: 'receive_quote_unavailable' })
+      }
+      const quote = receiveQuoteWire(id, fill.receiveQuoteId === QUOTE_ID.receiver ? 'receiver' : 'sender')
+      const refusal = receiveQuoteRefusal(quote, fill)
+      if (refusal) return reply(400, refusal)
+      // `swapFillQuotes.ts` ~:814: quoting the fill binds the receive quote to it.
+      bound.set(fill.receiveQuoteId, options.afterBind?.bindTo ?? FILL_ID)
+      return reply(200, swapFillQuoteWire(fill, hex.encode(ArkAddress.decode(quote.covenantAddress).pkScript)))
+    }
+    if (route === `POST /v1/swap-fills/${FILL_ID}/submit`) {
+      const fill = stub.swapFills.at(-1)!
+      return reply(200, {
+        fillId: FILL_ID,
+        operationId: fill.operationId,
+        state: 'submitting',
+        updatedAt: NOW,
+        expiresAt: fill.validUntil,
+      })
     }
     return reply(404, { error: `${route} not found`, code: 'not_found' })
   })
@@ -289,6 +415,10 @@ const solver = async (taxiUrl?: string) => {
     solverKeys: [hex.encode(SOLVER)],
     serverKey: () => SERVER,
     now: () => NOW,
+    fill: {
+      rebuild: async ({ row, inputs }) => fillGraph({ txid: row.depositTxid!, vout: row.depositVout! }, inputs),
+      sign: async (graph) => graph,
+    },
   })
   const service = new AssetRfqSwapService({
     store,
@@ -314,19 +444,38 @@ const solver = async (taxiUrl?: string) => {
   return { store, ledger, pins, errors, corridor, fund }
 }
 
-const rfq = (taxi: StubTaxi, taxiKey: Uint8Array, makerPkScript = MAKER_PK_SCRIPT, rfqId = 'c'.repeat(64)) => ({
+const receiverPaid = (taxi: StubTaxi, taxiKey: Uint8Array) => ({
+  mode: 'recycle_receiver',
+  quote_id: 'q-1',
+  taxi_url: taxi.url,
+  taxi_key: hex.encode(taxiKey),
+})
+
+const rfqWith = (carrier: Record<string, unknown>, makerPkScript: string, rfqId = 'c'.repeat(64)) => ({
   v: 1,
   type: 'rfq_request',
   rfq_id: rfqId,
   pair: `arkade:BTC->arkade:${ASSET}`,
   amount_side: 'from',
   amount: AMOUNT.toString(),
-  profile: {
-    maker_pk_script: makerPkScript,
-    maker_public_key: hex.encode(MAKER),
-    carrier: { mode: 'recycle_receiver', quote_id: 'q-1', taxi_url: taxi.url, taxi_key: hex.encode(taxiKey) },
-  },
+  profile: { maker_pk_script: makerPkScript, maker_public_key: hex.encode(MAKER), carrier },
 })
+
+const rfq = (taxi: StubTaxi, taxiKey: Uint8Array, makerPkScript = MAKER_PK_SCRIPT) =>
+  rfqWith(receiverPaid(taxi, taxiKey), makerPkScript)
+
+/** Quote, fund, and drive the row to its fill: one pass sees the deposit, the next settles. */
+const quoteAndFill = async (s: Awaited<ReturnType<typeof solver>>, request: Record<string, unknown>) => {
+  const outcome = await s.corridor.quote(request)
+  expect(outcome.kind, JSON.stringify(outcome)).toBe('quote')
+  const row = (await s.store.findByRfqId(request.rfq_id as string))!
+  s.fund()
+  await s.corridor.tickAll()
+  await s.corridor.tickAll()
+  return row
+}
+
+const submitRoute = `POST /v1/swap-fills/${FILL_ID}/submit`
 
 describe('the receiver-paid carrier against a stub Taxi on the real wire', () => {
   it('resolves a receiver-paid quote, prices it at zero, and fills against the Taxi and key it named', async () => {
@@ -366,10 +515,23 @@ describe('the receiver-paid carrier against a stub Taxi on the real wire', () =>
         solverInputs: [expect.objectContaining({ txid: COIN.txid, vout: COIN.vout })],
       }),
     ])
+    expect(taxi.requests.filter((route) => route === submitRoute)).toHaveLength(1)
     expect(await s.store.readCarrierAttempt(row.id)).toMatchObject({
-      phase: 'not_submitted',
+      phase: 'submitting',
       snapshot: { provider: taxi.url, provider_key: hex.encode(OPERATOR) },
     })
+    expect((await s.store.get(row.id)).state).toBe('filling')
+    expect(s.pins.held()).toEqual([row.id])
+    expect(s.errors).toEqual([])
+  })
+
+  it('refuses the row and frees its pins when the Taxi is not ready before any graph exists', async () => {
+    const taxi = await startTaxi({ operator: OPERATOR, server: SERVER }, { notReady: true })
+    const s = await solver()
+
+    const row = await quoteAndFill(s, rfq(taxi, OPERATOR))
+    expect(taxi.requests).not.toContain(submitRoute)
+    expect(await s.store.readCarrierAttempt(row.id)).toMatchObject({ phase: 'not_submitted' })
     expect((await s.store.get(row.id)).state).toBe('refused')
     expect(s.pins.held()).toEqual([])
     expect([...s.ledger.reserved()]).toEqual([])
@@ -411,6 +573,50 @@ describe('the receiver-paid carrier against a stub Taxi on the real wire', () =>
     expect(taxi.swapFills).toEqual([])
     expect(s.errors).toEqual([expect.objectContaining({ message: expect.stringMatching(/untrusted server/) })])
   })
+})
+
+describe('a fill through a Taxi that binds its receive quote when it quotes the fill', () => {
+  const MODES = {
+    recycle: {
+      carrier: () => ({ mode: 'recycle', quote_id: QUOTE_ID.sender }),
+      makerPkScript: covenantScriptOf('sender'),
+    },
+    recycle_receiver: { carrier: (taxi: StubTaxi) => receiverPaid(taxi, OPERATOR), makerPkScript: MAKER_PK_SCRIPT },
+  }
+  const start = async (mode: keyof typeof MODES, afterBind?: AfterBind) => {
+    const taxi = await startTaxi({ operator: OPERATOR, server: SERVER }, { afterBind })
+    const s = await solver(mode === 'recycle' ? taxi.url : undefined)
+    const row = await quoteAndFill(s, rfqWith(MODES[mode].carrier(taxi), MODES[mode].makerPkScript))
+    return { taxi, s, row }
+  }
+
+  it.each(['recycle', 'recycle_receiver'] as const)('submits a %s fill once the quote is bound to it', async (mode) => {
+    const { taxi, s, row } = await start(mode)
+    expect(taxi.requests.filter((route) => route === submitRoute)).toHaveLength(1)
+    expect(await s.store.readCarrierAttempt(row.id)).toMatchObject({ phase: 'submitting' })
+    expect(s.pins.held()).toEqual([row.id])
+    expect(s.errors).toEqual([])
+  })
+
+  it.each([
+    ['recycle_receiver', 'bound to another fill', { bindTo: 'fill-2' }, /not bound to fill fill-1/],
+    ['recycle', 'bound to another fill', { bindTo: 'fill-2' }, /not bound to fill fill-1/],
+    ['recycle_receiver', 'serving another input expiry floor', { floor: 1_150_000 }, /pinned an input expiry floor/],
+    ['recycle_receiver', 'naming another operator', { operator: key(9) }, /operator key differs/],
+    ['recycle', 'naming another operator', { operator: key(9) }, /substituted the operator key/],
+  ] as const)(
+    'refuses a %s fill before submitting when the quote is %s, and frees the pins',
+    async (mode, _why, afterBind, why) => {
+      const { taxi, s, row } = await start(mode, afterBind)
+      expect(taxi.swapFills).toHaveLength(1)
+      expect(taxi.requests).not.toContain(submitRoute)
+      expect(await s.store.readCarrierAttempt(row.id)).toMatchObject({ phase: 'not_submitted' })
+      expect((await s.store.get(row.id)).state).toBe('refused')
+      expect(s.pins.held()).toEqual([])
+      expect([...s.ledger.reserved()]).toEqual([])
+      expect(s.errors).toEqual([expect.objectContaining({ message: expect.stringMatching(why) })])
+    },
+  )
 })
 
 const startArkd = async (): Promise<string> => {
