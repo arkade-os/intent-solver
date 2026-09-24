@@ -833,6 +833,19 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     expect(reservations.reserved().size).toBe(0)
   })
 
+  it.each([
+    { rail: 'ark', spend: 'send', address: TARK_ADDRESS },
+    { rail: 'onchain', spend: 'settle', address: REGTEST_ADDRESS },
+  ])('refuses a $rail spend that settles without a transaction id', async ({ rail, spend, address }) => {
+    const reservations = createReservationLedger()
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], { [spend]: vi.fn().mockResolvedValue('') })
+
+    await expect(withdraw(servicesWith(wallet, reservations), { address, amount: '50000' })).rejects.toThrow(
+      `the ${rail} rail settled without a transaction id`,
+    )
+    expect(reservations.reserved().size).toBe(0)
+  })
+
   it('refuses when every coin is pinned, and says who holds them', async () => {
     const reservations = createReservationLedger()
     reservations.reserve([coin(0x01, 100_000)])
