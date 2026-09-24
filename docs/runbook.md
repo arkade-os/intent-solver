@@ -420,7 +420,9 @@ sats is `float-lifecycle`'s job (it carries the CLTV guard, and a bare
 `settle()` would merge the whole float into one coin). It does withdraw, and the
 destination's form picks the rail — an Arkade address is paid offchain at once,
 a bitcoin address by collaborative exit at the server's next batch. Either way
-the withdrawal spends **every coin no live swap's funding has pinned** and
+the withdrawal spends **every asset-free coin no live swap's funding has pinned**,
+holding all of them until it settles — for a bitcoin address that is the next
+batch, and until then no swap can be funded from the float — and
 returns the rest as one change coin, so the float's piece count drops to one
 until `pool-mint` splits it again — on its own only with `POOL_AUTO_MINT=true`,
 otherwise at the next renewal or by hand. The pinned coins are left alone, because

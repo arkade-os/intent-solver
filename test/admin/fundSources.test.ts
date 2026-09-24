@@ -802,6 +802,21 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     })
   })
 
+  it('leaves an asset-bearing coin out of both routes, and refuses when nothing else is free', async () => {
+    const assetCoin = coin(0x01, 60_000, { assets: [{ assetId: 'aa'.repeat(32), amount: 5n }] })
+    const plain = coin(0x02, 60_000)
+    const wallet = withdrawingWallet([assetCoin, plain])
+
+    await withdraw(servicesWith(wallet), { address: TARK_ADDRESS, amount: '50000' })
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.send).toHaveBeenCalledWith(expect.objectContaining({ selectedVtxos: [plain] }))
+    expect(wallet.settle.mock.calls[0]![0].inputs).toEqual([plain])
+    await expect(
+      withdraw(servicesWith(withdrawingWallet([assetCoin])), { address: TARK_ADDRESS, amount: '1000' }),
+    ).rejects.toThrow(/asset-free coin/)
+  })
+
   it('never selects a coin a funding has pinned, and releases its own pin afterwards', async () => {
     const reservations = createReservationLedger()
     const pinned = coin(0x01, 100_000)

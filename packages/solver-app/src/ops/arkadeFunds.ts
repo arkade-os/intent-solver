@@ -202,14 +202,16 @@ const arkadeWithdraw = async (
   const amountSats = parseWholeSats(params.amount)
   assertOnchainNetwork(address, services.config.network)
 
-  // Swept coins fund nothing until recovery runs.
-  const spendable = await wallet.getSpendableVtxos({ withRecoverable: false })
+  // Swept coins fund nothing; an asset coin would move its asset onto the one change coin, which no sats swap can fund from.
+  const spendable = (await wallet.getSpendableVtxos({ withRecoverable: false })).filter((v) => !v.assets?.length)
   // No await between this read and the `reserve` below: the filter and the pin
   // are one synchronous section, or the ledger arbitrates nothing.
   const pinned = reservations.reserved()
   const candidates = spendable.filter((vtxo) => !pinned.has(outpointKey(vtxo.txid, vtxo.vout)))
   if (candidates.length === 0) {
-    throw new Error("every coin in the float is pinned by a live swap's funding — nothing was sent")
+    throw new Error(
+      "every asset-free coin in the float is pinned by a live swap's funding, or there are none — nothing was sent",
+    )
   }
   const release = reservations.reserve(candidates)
   try {
@@ -218,7 +220,12 @@ const arkadeWithdraw = async (
       .use(onchainRail({ feeInfo: async () => (await wallet.arkProvider.getInfo()).fees }))
     const quote = await router.route({ raw: address, amount: amountSats, selectedVtxos: candidates })
     const { txid } = await (await quote.send()).settled()
-    if (!txid) throw new Error(`the ${quote.railId} rail settled without a transaction id`)
+    if (!txid) {
+      throw new Error(
+        `the ${quote.railId} rail settled without a transaction id — the payment may still have gone out; ` +
+          'check the wallet and chain before retrying',
+      )
+    }
     return {
       reference: txid,
       address,
