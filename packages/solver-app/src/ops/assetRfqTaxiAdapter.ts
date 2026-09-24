@@ -103,6 +103,7 @@ export const completeTaxiReceiveCarrier = (
         sign: carrierFillSigner(deps.identity),
       },
       now: deps.now,
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     }),
     ...createTaxiReceiveCarrierObserver({ store: deps.store, chain: deps.chain, pins: deps.pins }),
   }

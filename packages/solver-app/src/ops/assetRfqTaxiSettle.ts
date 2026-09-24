@@ -9,7 +9,13 @@
  */
 
 import { hex } from '@scure/base'
-import { signJointGraphForOwner, verifyOfferFillPlan, type JointGraph, type TaxiClient } from '@arkade-taxi/client'
+import {
+  signJointGraphForOwner,
+  TaxiError,
+  verifyOfferFillPlan,
+  type JointGraph,
+  type TaxiClient,
+} from '@arkade-taxi/client'
 import type { Identity } from '@arkade-os/sdk'
 import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
@@ -33,7 +39,12 @@ import {
 import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 
 type Locktime = Readonly<{ kind: 'height' | 'time'; value: bigint }>
+type VerifiedSwapFill = Parameters<TaxiClient['submitSwapFill']>[0]
 type SwapFillGraphWire = Parameters<TaxiClient['submitSwapFill']>[1]
+
+/** Backoff before each re-POST on `not_ready`: the Taxi's runtime check takes seconds, and this settle holds the
+ * orchestrator's serial queue while it waits. */
+export const CARRIER_NOT_READY_RETRY_MS: readonly number[] = [1_000, 2_000, 4_000]
 
 declare const carrierSnapshot: unique symbol
 
@@ -98,6 +109,7 @@ export interface TaxiCarrierSettleDeps {
   serverKey: () => Uint8Array
   fill: CarrierFillSeams
   now: () => number
+  sleep: (ms: number) => Promise<void>
 }
 
 const contributionOf = (coin: CarrierCoin, leg: AssetLeg, dustSats: bigint): bigint => {
@@ -383,7 +395,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         throw new Error(`carrier fill ${row.id} could not mark itself submitting; nothing has been sent`)
       }
       liable = true
-      await taxi.swapFills.submitSwapFill(verified, solverGraphWire(quoted, signed))
+      await submitWhileNotReady(deps, taxi, verified, solverGraphWire(quoted, signed))
     } catch (error) {
       if (wrote && !liable) await releaseIfProvenNeverSubmitted(deps, pin, messageOf(error))
       throw error
@@ -393,6 +405,26 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
 })
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+/** Runs past `submitting`, so no exit here releases. The Taxi already holds the signatures, and a named one is
+ * untrusted: its `not_ready` is no proof it will never submit, so the SAME bytes are re-sent, never rebuilt. */
+const submitWhileNotReady = async (
+  deps: Pick<TaxiCarrierSettleDeps, 'now' | 'sleep'>,
+  taxi: CarrierTaxi,
+  verified: VerifiedSwapFill,
+  graph: SwapFillGraphWire,
+): Promise<void> => {
+  for (const delay of [...CARRIER_NOT_READY_RETRY_MS, undefined]) {
+    try {
+      await taxi.swapFills.submitSwapFill(verified, graph)
+      return
+    } catch (error) {
+      if (!(error instanceof TaxiError && error.code === 'not_ready') || delay === undefined) throw error
+      await deps.sleep(delay)
+      if (deps.now() >= verified.expiresAt) throw error
+    }
+  }
+}
 
 /** Routed on the DURABLE phase, never on what this call believes it did: a
  * checkpoint write that threw may still have landed, and the row is the only

@@ -232,6 +232,8 @@ interface Harness {
   pins: ReturnType<typeof createCarrierPinLedger>
   attempt: () => Promise<unknown>
   resolves: ReceiveCarrierQuoteRequest[]
+  submitted: string[]
+  sleeps: number[]
 }
 
 const harness = async (
@@ -248,6 +250,10 @@ const harness = async (
     toAmount?: bigint
     terms?: AssetRfqCarrierTerms
     policy?: TaxiUrlPolicy
+    /** The first submits' answers, in order; later ones answer `status`. */
+    submits?: (() => Response)[]
+    /** Seconds each backoff moves the clock. */
+    sleepAdvances?: number
     deps?: Partial<TaxiCarrierSettleDeps>
   } = {},
 ): Promise<Harness> => {
@@ -256,6 +262,9 @@ const harness = async (
   const requests: string[] = []
   const bodies: Record<string, unknown>[] = []
   const resolves: ReceiveCarrierQuoteRequest[] = []
+  const submitted: string[] = []
+  const sleeps: number[] = []
+  let clock = NOW
   const record = async (label: string) => {
     seen.set(label, await store.readCarrierAttempt('swap-1'))
   }
@@ -276,6 +285,9 @@ const harness = async (
     }
     if (url.endsWith('/submit')) {
       await record('submit-post')
+      const answer = over.submits?.[submitted.length]
+      submitted.push(init?.body ?? '')
+      if (answer !== undefined) return answer()
       if (over.submitStatus !== undefined) {
         return json({ code: 'swap_fill_submission_ambiguous', message: 'unknown' }, over.submitStatus)
       }
@@ -304,7 +316,11 @@ const harness = async (
     proceedsScript: hex.decode(PROCEEDS),
     solverKeys: [SOLVER_KEY],
     serverKey: () => SERVER_KEY_BYTES,
-    now: () => NOW,
+    now: () => clock,
+    sleep: async (ms) => {
+      sleeps.push(ms)
+      clock += over.sleepAdvances ?? 0
+    },
     fill: {
       rebuild: over.fill?.rebuild ?? (async () => REBUILT),
       sign: async (expected) => {
@@ -326,6 +342,8 @@ const harness = async (
     pins,
     attempt: () => store.readCarrierAttempt('swap-1'),
     resolves,
+    submitted,
+    sleeps,
   }
 }
 
@@ -706,14 +724,14 @@ describe('a solver input carries the taproot evidence the Taxi will check', () =
   })
 })
 
-describe("a receiver-paid fill settles against the row's own Taxi", () => {
-  const receiverPaid = (over: Parameters<typeof harness>[0] = {}) =>
-    harness({
-      terms: RECEIVER_PAID,
-      body: fillQuoteBody({ contributionSats: '330', fare: { currency: 'sats', units: '0' } }),
-      ...over,
-    })
+const receiverPaid = (over: Parameters<typeof harness>[0] = {}) =>
+  harness({
+    terms: RECEIVER_PAID,
+    body: fillQuoteBody({ contributionSats: '330', fare: { currency: 'sats', units: '0' } }),
+    ...over,
+  })
 
+describe("a receiver-paid fill settles against the row's own Taxi", () => {
   it('contributes the whole dust and caps the fare at zero', async () => {
     const h = await receiverPaid()
     await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
@@ -783,6 +801,66 @@ describe("a receiver-paid fill settles against the row's own Taxi", () => {
       expect(ask).not.toHaveProperty('taxi')
       expect(ask).not.toHaveProperty('receiverPaid')
     }
+    await h.store.close()
+  })
+})
+
+describe("a Taxi's not_ready is answered with the same bytes again, never with a release", () => {
+  const notReady = () =>
+    new Response(JSON.stringify({ code: 'not_ready', error: 'runtime_checking' }), {
+      status: 503,
+      headers: { 'content-type': 'application/json' },
+    })
+
+  const expectLiable = async (h: Harness) => {
+    expect((await h.row()).state).toBe('filling')
+    expect(await h.attempt()).toMatchObject({ phase: 'submitting' })
+    expect(h.pins.heldFor('swap-1')).toHaveLength(1)
+    expect([...h.ledger.reserved()]).toEqual([`${COIN_A}:0`])
+  }
+
+  it('re-posts the identical signed graph after two not_ready answers, then submits', async () => {
+    const h = await receiverPaid({ submits: [notReady, notReady] })
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
+    expect(h.submitted).toHaveLength(3)
+    expect(new Set(h.submitted).size).toBe(1)
+    expect(h.sleeps).toHaveLength(2)
+    await expectLiable(h)
+    await h.store.close()
+  })
+
+  it('stops once the swap-fill quote has expired, still submitting and still pinned', async () => {
+    // NOW + 2 x 3000 lands exactly on the quote's expiresAt, before the retry cap.
+    const h = await receiverPaid({ submits: Array(9).fill(notReady), sleepAdvances: 3_000 })
+    await expect(h.settle(await h.row())).rejects.toMatchObject({ code: 'not_ready' })
+    expect(h.submitted).toHaveLength(2)
+    await expectLiable(h)
+    await h.store.close()
+  })
+
+  it('stops at its retry cap even when the clock stands still', async () => {
+    const h = await receiverPaid({ submits: Array(9).fill(notReady) })
+    await expect(h.settle(await h.row())).rejects.toMatchObject({ code: 'not_ready' })
+    expect(h.submitted).toHaveLength(4)
+    await expectLiable(h)
+    await h.store.close()
+  })
+
+  it.each([
+    [
+      'a network error',
+      () => {
+        throw new Error('socket hang up')
+      },
+      'NETWORK_ERROR',
+    ],
+    ['an HTTP error with no readable code', () => new Response('bad gateway', { status: 503 }), 'HTTP_ERROR'],
+  ])('never retries %s: the Taxi may already hold the graph', async (_why, answer, code) => {
+    const h = await receiverPaid({ submits: [answer] })
+    await expect(h.settle(await h.row())).rejects.toMatchObject({ code })
+    expect(h.submitted).toHaveLength(1)
+    expect(h.sleeps).toEqual([])
+    await expectLiable(h)
     await h.store.close()
   })
 })
