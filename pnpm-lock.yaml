@@ -4,16 +4,13 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  '@arkade-os/sdk': file:./vendor/arkade-os-sdk-956-94ce5876.tgz
-
 importers:
 
   .:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:vendor/arkade-os-sdk-956-94ce5876.tgz
-        version: file:vendor/arkade-os-sdk-956-94ce5876.tgz
+        specifier: 0.4.75
+        version: 0.4.75
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:packages/solver-arkade
@@ -91,8 +88,8 @@ importers:
         version: 3.25.76
     devDependencies:
       '@arkade-os/swap':
-        specifier: 0.0.20
-        version: 0.0.20(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.0.21
+        version: 0.0.21(nostr-tools@2.24.1(typescript@5.9.3))
       '@types/better-sqlite3':
         specifier: ^7.6.12
         version: 7.6.13
@@ -118,8 +115,8 @@ importers:
   packages/solver-app:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:../../vendor/arkade-os-sdk-956-94ce5876.tgz
-        version: file:vendor/arkade-os-sdk-956-94ce5876.tgz
+        specifier: 0.4.75
+        version: 0.4.75
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -176,20 +173,20 @@ importers:
         version: 4.13.0
     devDependencies:
       '@arkade-os/swap':
-        specifier: 0.0.20
-        version: 0.0.20(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.0.21
+        version: 0.0.21(nostr-tools@2.24.1(typescript@5.9.3))
 
   packages/solver-arkade:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:../../vendor/arkade-os-sdk-956-94ce5876.tgz
-        version: file:vendor/arkade-os-sdk-956-94ce5876.tgz
+        specifier: 0.4.75
+        version: 0.4.75
       '@arkade-os/solver-core':
         specifier: workspace:*
         version: link:../solver-core
       '@arkade-os/swap':
-        specifier: 0.0.20
-        version: 0.0.20(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.0.21
+        version: 0.0.21(nostr-tools@2.24.1(typescript@5.9.3))
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.2.0
@@ -225,8 +222,8 @@ importers:
   packages/solver-corridors:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:../../vendor/arkade-os-sdk-956-94ce5876.tgz
-        version: file:vendor/arkade-os-sdk-956-94ce5876.tgz
+        specifier: 0.4.75
+        version: 0.4.75
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -240,8 +237,8 @@ importers:
         specifier: workspace:*
         version: link:../solver-rails
       '@arkade-os/swap':
-        specifier: 0.0.20
-        version: 0.0.20(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.0.21
+        version: 0.0.21(nostr-tools@2.24.1(typescript@5.9.3))
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.2.0
@@ -255,8 +252,8 @@ importers:
   packages/solver-corridors-evm:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:../../vendor/arkade-os-sdk-956-94ce5876.tgz
-        version: file:vendor/arkade-os-sdk-956-94ce5876.tgz
+        specifier: 0.4.75
+        version: 0.4.75
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -409,9 +406,8 @@ packages:
     resolution: {integrity: sha512-+90ob+ruUhb5RfdZhfryIb0H+G3BDtQ+IiQvNJwpwN/gMRcMm9jwJpUBAf5yqhPCWY8KsPNcKFzt5IzCmtqzxQ==}
     engines: {node: '>=20'}
 
-  '@arkade-os/sdk@file:vendor/arkade-os-sdk-956-94ce5876.tgz':
-    resolution: {integrity: sha512-7bl8MdXW7s8lGuKhqEJ2W7V8OFHSfVJEFSIPGIyvEovEdXEcigTvCBlJlvqtZ3IdyvAHEswwg9VNmXwKrmRYcw==, tarball: file:vendor/arkade-os-sdk-956-94ce5876.tgz}
-    version: 0.4.74
+  '@arkade-os/sdk@0.4.75':
+    resolution: {integrity: sha512-D9wDOj2evuhYQOdsxNA06n5ws3RjWIiF/b09cmiQSxCFMLyZBAnSelWrTMK+ir140e+Swl7odWGwzxs4RKvlug==}
     engines: {node: '>=22.12.0 <27'}
     peerDependencies:
       '@react-native-async-storage/async-storage': '>=1.0.0'
@@ -435,8 +431,8 @@ packages:
     resolution: {integrity: sha512-T5dfiezUG5YKtzOmX1Z2E0LePF3bx6unsqq7UPgha0Zp9PQFcodYMYl6T1i0AbruaGup5XWq8Die5wusiA5qUA==}
     engines: {node: '>=18'}
 
-  '@arkade-os/swap@0.0.20':
-    resolution: {integrity: sha512-MPg/1sCTCuwr/Errvc2FtfssV8/kfrK9wT/+fnaXLLYgYT7Vaex7Xe9bwA6NDn8qjcMgT1NEPPpRYuNHCFEgBA==}
+  '@arkade-os/swap@0.0.21':
+    resolution: {integrity: sha512-o6nzOMbhsSAzviR/RWHf7dpwlURz2/3kGpFfjFHXMLIrRDLX48eVtyZsq5j5wZ3nwvrrr3ZTc+PS9G+kLXHjXg==}
     peerDependencies:
       nostr-tools: ^2.12.0
     peerDependenciesMeta:
@@ -1646,7 +1642,7 @@ snapshots:
 
   '@alexbosworth/blockchain@3.2.0': {}
 
-  '@arkade-os/sdk@file:vendor/arkade-os-sdk-956-94ce5876.tgz':
+  '@arkade-os/sdk@0.4.75':
     dependencies:
       '@bitcoinerlab/descriptors-scure': 3.1.7
       '@marcbachmann/cel-js': 8.0.0
@@ -1667,9 +1663,9 @@ snapshots:
 
   '@arkade-os/solver-discovery@0.2.7': {}
 
-  '@arkade-os/swap@0.0.20(nostr-tools@2.24.1(typescript@5.9.3))':
+  '@arkade-os/swap@0.0.21(nostr-tools@2.24.1(typescript@5.9.3))':
     dependencies:
-      '@arkade-os/sdk': file:vendor/arkade-os-sdk-956-94ce5876.tgz
+      '@arkade-os/sdk': 0.4.75
       '@arkade-os/solver-discovery': 0.2.7
       '@noble/ciphers': 2.1.1
       '@noble/curves': 2.0.1
