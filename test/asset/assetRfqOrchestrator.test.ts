@@ -1159,6 +1159,19 @@ describe('profile.carrier — explicit modes', () => {
     expect(calls).toEqual([])
   })
 
+  it('passes the request Taxi into the carrier resolve at quote time', async () => {
+    const calls: unknown[] = []
+    const { service } = await harness({ receiveCarrierQuotes: adapter({}, calls) })
+    const KEY = 'b'.repeat(64)
+    await service.quote(
+      request({
+        carrier: { mode: 'recycle_receiver', quoteId: 'q-1', taxiUrl: 'https://taxi.example', taxiKey: KEY },
+      }),
+    )
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ taxi: { url: 'https://taxi.example', operatorKey: KEY } })
+  })
+
   it('leaves a legacy quote byte-identical, with no terms and no adapter call', async () => {
     const calls: unknown[] = []
     const { service, store } = await harness({

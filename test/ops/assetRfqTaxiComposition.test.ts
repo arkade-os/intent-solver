@@ -1,8 +1,7 @@
 /**
- * Turning the Taxi adapter on, and — the half that matters more — leaving it
- * off: an operator who sets no `TAXI_URL` must get the solver they had before
- * this existed. Asserted by watching every seam the composition is given and
- * requiring that none is touched, rather than by reading the code.
+ * Turning the Taxi adapter on, and — since G4 — what changed about leaving
+ * `TAXI_URL` off: the READ half composes either way now; only the fallback for
+ * a request naming none, and the fill half's `settle`/`reconcile`, still need it.
  */
 
 import { describe, it, expect } from 'vitest'
@@ -21,6 +20,7 @@ import {
   type TaxiCarrierTrust,
 } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
 import { completeTaxiReceiveCarrier } from '@arkade-os/solver-app/ops/assetRfqTaxiAdapter.js'
+import type { TaxiUrlPolicy } from '@arkade-os/solver-app/ops/taxiUrlGuard.js'
 import { createServicesBody } from '../support/createServicesBody.js'
 
 const ASSET = `${'aa'.repeat(31)}bb0100`
@@ -43,10 +43,13 @@ const TRUST: TaxiCarrierTrust = {
   inputExpiryMargin: 5n,
 }
 
+const POLICY: TaxiUrlPolicy = { isMainnet: false, allowPrivate: true }
+
 const watched = (over: Partial<TaxiCarrierComposition> = {}) => {
   const touched: string[] = []
   const urls: string[] = []
   const deps: TaxiCarrierComposition = {
+    policy: POLICY,
     trust: async () => {
       touched.push('trust')
       return TRUST
@@ -74,21 +77,37 @@ const watched = (over: Partial<TaxiCarrierComposition> = {}) => {
   return { touched, urls, deps }
 }
 
-describe('an unconfigured solver composes no Taxi at all', () => {
-  it('returns no adapter and touches not one seam', async () => {
+describe('an unconfigured solver still composes the read half (G4)', () => {
+  const unnamed = () => ({
+    quoteId: 'q-1',
+    makerPkScript: MAKER_PK_SCRIPT,
+    makerPublicKey: MAKER_KEY,
+    assetId: ASSET,
+    now: 2_000,
+  })
+
+  it('returns a reader, reading trust but touching no network', async () => {
     const { deps, touched, urls } = watched()
-    expect(await taxiReceiveCarrier(deps)).toBeUndefined()
-    // Not merely "no HTTP": no trust resolution either.
-    expect(touched).toEqual([])
+    expect(await taxiReceiveCarrier(deps)).toBeDefined()
+    expect(touched).toEqual(['trust'])
     expect(urls).toEqual([])
   })
 
-  it('refuses a blank URL rather than turning the rail on pointed nowhere', async () => {
-    for (const taxiUrl of ['', '   ']) {
-      const { deps, touched } = watched({ taxiUrl })
-      expect(await taxiReceiveCarrier(deps)).toBeUndefined()
-      expect(touched).toEqual([])
+  it('refuses a request naming no Taxi when none is configured — blank or absent alike', async () => {
+    for (const taxiUrl of [undefined, '', '   ']) {
+      const { deps } = watched({ taxiUrl })
+      const read = await taxiReceiveCarrier(deps)
+      await expect(read.resolve(unnamed())).rejects.toThrow(/no receive-carrier Taxi is configured/)
     }
+  })
+
+  it('resolves a request-named Taxi anyway — the rail is independent of TAXI_URL', async () => {
+    const { deps, urls } = watched({ taxiUrl: undefined })
+    const read = await taxiReceiveCarrier(deps)
+    await expect(
+      read.resolve({ ...unnamed(), taxi: { url: 'https://other.example', operatorKey: 'a'.repeat(64) } }),
+    ).rejects.toThrow()
+    expect(urls.sort()).toEqual(['https://other.example/v1/info', 'https://other.example/v1/receive-quotes/q-1'])
   })
 })
 
@@ -97,7 +116,7 @@ describe('a configured solver is pointable by that URL alone', () => {
     const { deps, urls } = watched({ taxiUrl: 'http://taxi.example:7080' })
     const carrier = await taxiReceiveCarrier(deps)
     await expect(
-      carrier!.resolve({
+      carrier.resolve({
         quoteId: 'q-1',
         makerPkScript: MAKER_PK_SCRIPT,
         makerPublicKey: MAKER_KEY,
@@ -123,14 +142,14 @@ describe('a configured solver is pointable by that URL alone', () => {
 describe('the composed adapter is refused, never degraded', () => {
   it('carries the read half only, so the completeness gate can see it is partial', async () => {
     const { deps } = watched({ taxiUrl: 'http://taxi.example:7080' })
-    expect(Object.keys((await taxiReceiveCarrier(deps))!).sort()).toEqual(['available', 'resolve'])
+    expect(Object.keys(await taxiReceiveCarrier(deps)).sort()).toEqual(['available', 'resolve'])
   })
 
   it('carries all four once the fill half is composed over it', async () => {
     const { deps } = watched({ taxiUrl: 'http://taxi.example:7080' })
     const store = await AssetRfqSwapStore.open(':memory:', () => 1_000)
 
-    const whole = completeTaxiReceiveCarrier((await taxiReceiveCarrier(deps))!, {
+    const whole = completeTaxiReceiveCarrier(await taxiReceiveCarrier(deps), {
       taxiUrl: 'http://taxi.example:7080',
       store,
       chain: { getVtxos: async () => ({ vtxos: [] }), getVirtualTxs: async () => ({ txs: [] }) } as never,
@@ -349,10 +368,10 @@ describe('createServices reaches Taxi through exactly one guarded seam', () => {
     expect(body()).toContain('receiveCarrierQuotes: receiveCarrier')
   })
 
-  it('completes the adapter only where the read half exists, on the SAME pin ledger', () => {
+  it('completes the adapter only where TAXI_URL is configured, on the SAME pin ledger', () => {
     const source = body()
     expect(source.match(/completeTaxiReceiveCarrier\(/g)).toHaveLength(1)
-    expect(source).toMatch(/taxiCarrier === undefined[\s\S]{0,120}?\? undefined/)
+    expect(source).toMatch(/config\.taxiUrl === undefined[\s\S]{0,120}?\? undefined/)
     // Both halves resolve through one ledger, or a reconcile would free nothing.
     expect(source).toMatch(/completeTaxiReceiveCarrier\(taxiCarrier, \{[\s\S]{0,600}?pins: carrierPins,/)
   })

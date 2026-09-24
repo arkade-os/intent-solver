@@ -20,6 +20,9 @@ import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reserva
 import { esploraChainTip, type ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
 import type { EsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
+import { RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { guardedTaxiFetch, normalizeTaxiUrl, type TaxiUrlPolicy } from './taxiUrlGuard.js'
 import type { CarrierAttemptRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { JsonObject } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 import type {
@@ -58,8 +61,15 @@ export interface CarrierCoin {
   script?: string
 }
 
+/** T21 routes settle/reconcile through this same client, so it is typed for that now, not narrowed to today's two reads. */
+export type TaxiCarrierClient = Pick<
+  TaxiClient,
+  'info' | 'getReceiveQuote' | 'requestVerifiedSwapFillQuote' | 'submitSwapFill'
+>
+
 export interface TaxiReceiveCarrierDeps {
-  quotes: Pick<TaxiClient, 'info' | 'getReceiveQuote'>
+  /** Absent resolves the configured Taxi; throws when none is configured. */
+  clientFor: (url?: string) => TaxiCarrierClient
   trust: TaxiCarrierTrust
   maxServiceFareSats: bigint
   coins: () => Promise<readonly CarrierCoin[]>
@@ -112,11 +122,17 @@ const verifiedQuoteFor = async (
     throw new Error(`carrier maker key ${request.makerPublicKey} is not an x-only public key`)
   }
   const assetId = assetIdValue(request.assetId)
-  const [info, quote] = await Promise.all([deps.quotes.info(), deps.quotes.getReceiveQuote(request.quoteId)])
+  const client = deps.clientFor(request.taxi?.url)
+  const [info, quote] = await Promise.all([client.info(), client.getReceiveQuote(request.quoteId)])
   // Verification binds every other field but not the id, and `available` reads
   // this quote's floor without the orchestrator's own id check beside it.
   if (quote.quoteId !== request.quoteId)
     throw new Error(`carrier quote ${request.quoteId} answered as ${quote.quoteId}`)
+  // The ONLY identity read off a request-named Taxi. `deps.trust` below is
+  // shared and singular regardless — see the module comment on `TaxiCarrierTrust`.
+  if (request.taxi && info.operatorKey.toLowerCase() !== request.taxi.operatorKey.toLowerCase()) {
+    throw new Error('carrier quote operator key differs from the one the request named')
+  }
   const floor = locktimeOf(quote.inputExpiryFloor, 'inputExpiryFloor')
   return verifyReceiveQuote({
     quote,
@@ -257,8 +273,8 @@ export const createTaxiReceiveCarrierReader = (
   }
 }
 
-/** The whole of the runtime switch. Unset, nothing below is reached — not the
- * operator, not the tip, not the extra arkd round-trip `trust` costs. */
+/** G4: runs regardless of `taxiUrl` — only the fallback for a request naming
+ * none still needs it, so `trust`/the tip are now always paid for. */
 export interface TaxiCarrierComposition {
   taxiUrl?: string
   trust: () => Promise<TaxiCarrierTrust>
@@ -268,20 +284,59 @@ export interface TaxiCarrierComposition {
   quoteValiditySeconds: number
   tipHeight?: () => Promise<number>
   fetch?: typeof fetch
+  /** Ruling 3's SSRF gate for a request-named URL; `taxiUrl` above never routes through it. */
+  policy: TaxiUrlPolicy
 }
 
 /** UNCACHED, unlike the shared reader: one block mined inside its 15s window
  * puts the floor behind the chain, admitting an already-expired coin. */
 export const carrierChainTip = (client: EsploraClient): ChainTipProvider => esploraChainTip(client, { cacheMs: 0 })
 
+/** A named Taxi's own budget: generous for real traffic, tight enough to cap a hostile URL's round-trip storm. */
+const TAXI_CLIENT_RATE_LIMIT = 20
+const TAXI_CLIENT_RATE_WINDOW_SECONDS = 60
+/** Ruling 3's cap on the client cache below. */
+const TAXI_CLIENT_CACHE_SIZE = 32
+
+/** One client per normalized URL, an LRU built lazily and evicted oldest-first
+ * so distinct attacker URLs cannot grow it unbounded; `configuredUrl` skips
+ * `normalizeTaxiUrl`/`guardedTaxiFetch` entirely — that is `taxiUrl`'s own plain client. */
+export const taxiClientCache = (deps: {
+  configuredUrl?: string
+  policy: TaxiUrlPolicy
+  fetch?: typeof fetch
+}): ((url?: string) => TaxiCarrierClient) => {
+  const baseFetch = deps.fetch ?? fetch
+  const configured = deps.configuredUrl ? new TaxiClient({ baseUrl: deps.configuredUrl, fetch: baseFetch }) : undefined
+  const limiter = new RateLimiter(TAXI_CLIENT_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds)
+  const cache = new Map<string, TaxiCarrierClient>()
+  return (url) => {
+    if (url === undefined) {
+      if (!configured) throw new Error('no receive-carrier Taxi is configured for this request')
+      return configured
+    }
+    const key = normalizeTaxiUrl(url, deps.policy)
+    const cached = cache.get(key)
+    if (cached) return cached
+    if (cache.size >= TAXI_CLIENT_CACHE_SIZE) {
+      const oldest = cache.keys().next().value
+      if (oldest !== undefined) cache.delete(oldest)
+    }
+    const client = new TaxiClient({ baseUrl: key, fetch: guardedTaxiFetch(baseFetch, limiter) })
+    cache.set(key, client)
+    return client
+  }
+}
+
 export const taxiReceiveCarrier = async (
   deps: TaxiCarrierComposition,
-): Promise<Pick<ReceiveCarrierQuotes, 'resolve' | 'available'> | undefined> => {
-  // Blank is NOT configured: an operator pointed nowhere must leave the rail off.
-  const baseUrl = deps.taxiUrl?.trim()
-  if (!baseUrl) return undefined
-  return createTaxiReceiveCarrierReader({
-    quotes: new TaxiClient({ baseUrl, fetch: deps.fetch }),
+): Promise<Pick<ReceiveCarrierQuotes, 'resolve' | 'available'>> =>
+  createTaxiReceiveCarrierReader({
+    clientFor: taxiClientCache({
+      configuredUrl: deps.taxiUrl?.trim() || undefined,
+      policy: deps.policy,
+      fetch: deps.fetch,
+    }),
     trust: await deps.trust(),
     maxServiceFareSats: deps.maxServiceFareSats,
     coins: async () => spendableCarrierCoins(await deps.contracts()),
@@ -289,7 +344,6 @@ export const taxiReceiveCarrier = async (
     quoteValiditySeconds: deps.quoteValiditySeconds,
     tipHeight: deps.tipHeight,
   })
-}
 
 /** ONE caller's reservation on one row. Scoped rather than row-keyed: a settle
  * that lost a CAS must not free the coins of the one that won it. */

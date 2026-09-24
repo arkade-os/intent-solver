@@ -32,9 +32,14 @@ import {
   carrierChainTip,
   createTaxiReceiveCarrierReader,
   spendableCarrierCoins,
+  taxiClientCache,
+  taxiReceiveCarrier,
   type CarrierCoin,
+  type TaxiCarrierClient,
+  type TaxiCarrierComposition,
   type TaxiReceiveCarrierDeps,
 } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
+import type { TaxiUrlPolicy } from '@arkade-os/solver-app/ops/taxiUrlGuard.js'
 
 /**
  * The covenant package is reachable only THROUGH the frozen client, which is
@@ -188,18 +193,35 @@ const coin = (over: Partial<CarrierCoin> & { txid: string }): CarrierCoin => ({
   ...over,
 })
 
+/** A `TaxiCarrierClient` stand-in; `requestVerifiedSwapFillQuote`/`submitSwapFill` are T21's, unused here. */
+const taxiClient = (
+  info: () => Promise<unknown> = async () => infoFixture(),
+  getReceiveQuote: (id: string) => Promise<unknown> = async () => quoteFixture(),
+): TaxiCarrierClient =>
+  ({
+    info,
+    getReceiveQuote,
+    requestVerifiedSwapFillQuote: async () => {
+      throw new Error('not wired in this fixture')
+    },
+    submitSwapFill: async () => {
+      throw new Error('not wired in this fixture')
+    },
+  }) as never
+
 const reader = (
   over: Partial<TaxiReceiveCarrierDeps> & { quote?: Record<string, unknown>; info?: Record<string, unknown> } = {},
 ) => {
   const asked: string[] = []
-  const deps: TaxiReceiveCarrierDeps = {
-    quotes: {
-      info: async () => (over.info ?? infoFixture()) as never,
-      getReceiveQuote: async (id: string) => {
-        asked.push(id)
-        return (over.quote ?? quoteFixture()) as never
-      },
+  const client = taxiClient(
+    async () => over.info ?? infoFixture(),
+    async (id) => {
+      asked.push(id)
+      return over.quote ?? quoteFixture()
     },
+  )
+  const deps: TaxiReceiveCarrierDeps = {
+    clientFor: () => client,
     trust: TRUST,
     maxServiceFareSats: 10n,
     coins: async () => [],
@@ -296,16 +318,149 @@ describe('resolving one receive-carrier quote', () => {
 
   it('refuses a payout script that is not a taproot output, without asking Taxi', async () => {
     const getReceiveQuote = vi.fn(async () => quoteFixture() as never)
-    const { read } = reader({ quotes: { info: async () => infoFixture() as never, getReceiveQuote } })
+    const { read } = reader({ clientFor: () => taxiClient(async () => infoFixture(), getReceiveQuote) })
     await expect(read.resolve(request({ makerPkScript: '0014' + 'a'.repeat(40) }))).rejects.toThrow(/taproot/)
     expect(getReceiveQuote).not.toHaveBeenCalled()
   })
 
   it('refuses an asset id this chain cannot name, without asking Taxi', async () => {
     const getReceiveQuote = vi.fn(async () => quoteFixture() as never)
-    const { read } = reader({ quotes: { info: async () => infoFixture() as never, getReceiveQuote } })
+    const { read } = reader({ clientFor: () => taxiClient(async () => infoFixture(), getReceiveQuote) })
     await expect(read.resolve(request({ assetId: 'not-an-asset' }))).rejects.toThrow()
     expect(getReceiveQuote).not.toHaveBeenCalled()
+  })
+})
+
+/** Ruling 3: the only new read off a named Taxi is `info.operatorKey`; `deps.trust` stays shared either way. */
+describe('a request-named Taxi (Ruling 3)', () => {
+  const NAMED = { url: 'https://other.example', operatorKey: hex.encode(OPERATOR_KEY) }
+
+  it('resolves a request-named Taxi rather than the configured one', async () => {
+    const seen: (string | undefined)[] = []
+    const client = taxiClient()
+    const { read } = reader({
+      clientFor: (url) => {
+        seen.push(url)
+        return client
+      },
+    })
+    await read.resolve(request({ taxi: NAMED }))
+    expect(seen).toEqual([NAMED.url])
+  })
+
+  it('falls back to the configured Taxi when the request names none', async () => {
+    const seen: (string | undefined)[] = []
+    const client = taxiClient()
+    const { read } = reader({
+      clientFor: (url) => {
+        seen.push(url)
+        return client
+      },
+    })
+    await read.resolve(request())
+    expect(seen).toEqual([undefined])
+  })
+
+  it('refuses a Taxi whose info names a different operator key', async () => {
+    const { read } = reader()
+    await expect(read.resolve(request({ taxi: { url: NAMED.url, operatorKey: hex.encode(key(9)) } }))).rejects.toThrow(
+      /operator key/,
+    )
+  })
+
+  it('verifies against the running context, never the named Taxi', async () => {
+    const { read } = reader({ info: infoFixture({ serverKey: key(9) }) })
+    await expect(read.resolve(request({ taxi: NAMED }))).rejects.toThrow(/untrusted server/)
+  })
+})
+
+describe('the per-URL client cache', () => {
+  const POLICY: TaxiUrlPolicy = { isMainnet: false, allowPrivate: true }
+
+  it('reuses one client across repeated calls to the same URL', () => {
+    const clientFor = taxiClientCache({ policy: POLICY })
+    const first = clientFor('https://taxi.example')
+    for (let i = 0; i < 4; i++) expect(clientFor('https://taxi.example')).toBe(first)
+  })
+
+  it('shares one client across case and trailing-dot variants of the same host', () => {
+    const clientFor = taxiClientCache({ policy: POLICY })
+    expect(clientFor('https://Taxi.example')).toBe(clientFor('https://taxi.example.'))
+  })
+
+  it('bounds the cache at 32 entries, evicting the oldest first', () => {
+    const clientFor = taxiClientCache({ policy: POLICY })
+    const first = clientFor('https://taxi-0.example')
+    for (let i = 1; i < 40; i++) clientFor(`https://taxi-${i}.example`)
+    expect(clientFor('https://taxi-0.example')).not.toBe(first)
+    const last = clientFor('https://taxi-39.example')
+    expect(clientFor('https://taxi-39.example')).toBe(last)
+  })
+
+  it('falls back to the configured Taxi for a request naming none, and refuses when none is configured', () => {
+    const configured = taxiClientCache({ configuredUrl: 'https://configured.example', policy: POLICY })
+    const first = configured(undefined)
+    expect(configured(undefined)).toBe(first)
+    expect(configured('https://other.example')).not.toBe(first)
+
+    const unconfigured = taxiClientCache({ policy: POLICY })
+    expect(() => unconfigured(undefined)).toThrow(/no receive-carrier Taxi is configured/)
+  })
+})
+
+/** G4: the composed reader exists whether or not `TAXI_URL` is configured. */
+describe('composing the receive-carrier reader is independent of TAXI_URL (G4)', () => {
+  const POLICY: TaxiUrlPolicy = { isMainnet: false, allowPrivate: true }
+
+  const composition = (over: Partial<TaxiCarrierComposition> = {}): TaxiCarrierComposition => ({
+    trust: async () => TRUST,
+    maxServiceFareSats: 10n,
+    contracts: async () => ({ getContractsWithVtxos: async () => [] }),
+    reserved: () => new Set<string>(),
+    quoteValiditySeconds: VALIDITY_SECONDS,
+    tipHeight: async () => TIP,
+    policy: POLICY,
+    ...over,
+  })
+
+  it('always returns a reader, even with no TAXI_URL configured', async () => {
+    expect(await taxiReceiveCarrier(composition({ taxiUrl: undefined }))).toBeDefined()
+  })
+
+  it('refuses a request naming no Taxi when none is configured', async () => {
+    const read = await taxiReceiveCarrier(composition({ taxiUrl: undefined }))
+    await expect(read.resolve(request())).rejects.toThrow(/no receive-carrier Taxi is configured/)
+    await expect(read.available(request())).rejects.toThrow(/no receive-carrier Taxi is configured/)
+  })
+
+  it('resolves a request-named Taxi even with no TAXI_URL configured', async () => {
+    const calls: string[] = []
+    const fetchStub: typeof fetch = async (input) => {
+      calls.push(String(input))
+      throw new Error('reached the network')
+    }
+    const read = await taxiReceiveCarrier(composition({ taxiUrl: undefined, fetch: fetchStub }))
+    await expect(
+      read.resolve(request({ taxi: { url: 'https://other.example', operatorKey: hex.encode(OPERATOR_KEY) } })),
+    ).rejects.toThrow()
+    expect(calls[0]).toBe('https://other.example/v1/info')
+  })
+
+  it('never guards the configured Taxi: a mainnet policy does not gate it (G3)', async () => {
+    const calls: string[] = []
+    const fetchStub: typeof fetch = async (input) => {
+      calls.push(String(input))
+      throw new Error('reached the network')
+    }
+    const read = await taxiReceiveCarrier(
+      composition({
+        taxiUrl: 'http://127.0.0.1:9',
+        policy: { isMainnet: true, allowPrivate: false },
+        fetch: fetchStub,
+      }),
+    )
+    await expect(read.resolve(request())).rejects.toThrow(/could not be sent/)
+    expect(calls[0]).toBe('http://127.0.0.1:9/v1/info')
   })
 })
 
@@ -372,7 +527,7 @@ describe('the input expiry floor is anchored, not merely ordered', () => {
   it('refuses to build a height-typed reader with no tip to anchor on', () => {
     expect(() =>
       createTaxiReceiveCarrierReader({
-        quotes: { info: async () => infoFixture() as never, getReceiveQuote: async () => quoteFixture() as never },
+        clientFor: () => taxiClient(),
         trust: TRUST,
         maxServiceFareSats: 10n,
         coins: async () => [],

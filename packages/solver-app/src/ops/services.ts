@@ -115,6 +115,7 @@ import {
   taxiReceiveCarrier,
 } from './assetRfqTaxi.js'
 import { completeTaxiReceiveCarrier } from './assetRfqTaxiAdapter.js'
+import type { TaxiUrlPolicy } from './taxiUrlGuard.js'
 
 export interface Services {
   /**
@@ -659,14 +660,21 @@ export const createServices = async (
     exitDelay: offerExitDelay(arkade.advertisedExitDelay),
   }
   /**
-   * The receive-carrier rail, off unless `TAXI_URL` names an operator, and the
-   * READ half even then — the service refuses a recycle against an adapter
-   * missing `settle`/`reconcile` rather than degrading. Every identity a quote
-   * is verified against comes from the context above, never from the URL; `trust`
-   * is a THUNK so an unconfigured startup does not pay for the arkd call in it.
+   * The receive-carrier READ half (Ruling 3/G4): exists regardless of
+   * `TAXI_URL`, since a request naming its own Taxi resolves against that one
+   * either way. `receiveCarrier` below stays the FULL adapter, gated on
+   * `TAXI_URL`, since the service refuses a recycle missing `settle`/`reconcile`
+   * rather than degrading. Every identity a quote is verified against comes
+   * from the context above, never from a URL. TAXI_RECEIVER_ALLOW_PRIVATE is
+   * read here, at the composition root, never inside the guard module.
    */
+  const taxiUrlPolicy: TaxiUrlPolicy = {
+    isMainnet: config.arkade.isMainnet,
+    allowPrivate: process.env.TAXI_RECEIVER_ALLOW_PRIVATE === '1',
+  }
   const taxiCarrier = await taxiReceiveCarrier({
     taxiUrl: config.taxiUrl,
+    policy: taxiUrlPolicy,
     trust: async () => ({
       serverKey: arkade.wallet.arkServerPublicKey,
       emulatorKey: assetRfqDerivation.emulatorPubkey,
@@ -709,7 +717,7 @@ export const createServices = async (
    */
   const carrierOfferHex = offerHexFrom(assetRfqDerivation)
   const receiveCarrier =
-    taxiCarrier === undefined || config.taxiUrl === undefined
+    config.taxiUrl === undefined
       ? undefined
       : completeTaxiReceiveCarrier(taxiCarrier, {
           taxiUrl: config.taxiUrl,

@@ -133,6 +133,8 @@ export interface ReceiveCarrierQuoteRequest {
    * or tip, so a floor admitted with no room to spare refuses the client that
    * funded it; only set here, never on the fill-time reads. */
   admission?: boolean
+  /** Absent resolves against the configured Taxi, as today (Ruling 3). */
+  taxi?: { url: string; operatorKey: string }
 }
 
 export type ReceiveCarrierReconcileOutcome =
@@ -366,6 +368,7 @@ export class AssetRfqSwapService {
         assetId,
         now,
         admission: true,
+        taxi: carrier.mode === 'recycle_receiver' ? { url: carrier.taxiUrl, operatorKey: carrier.taxiKey } : undefined,
       })
     } catch (error) {
       // An adapter that threw is an unavailable quote, never a free carrier.
@@ -412,7 +415,10 @@ export class AssetRfqSwapService {
   }): { ok: false; reason: AssetRfqQuoteRefusal; detail: string } | undefined {
     const { quote, request, assetId, now } = args
     // Only meaningful when a recycle actually named an id; `purchase` has none.
-    const expectedQuoteId = request.carrier?.mode === 'recycle' ? request.carrier.quoteId : undefined
+    const expectedQuoteId =
+      request.carrier?.mode === 'recycle' || request.carrier?.mode === 'recycle_receiver'
+        ? request.carrier.quoteId
+        : undefined
     if (expectedQuoteId === undefined || quote.quoteId !== expectedQuoteId) {
       return { ok: false, reason: 'price_unavailable', detail: 'carrier quote id does not match the request' }
     }

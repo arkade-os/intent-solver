@@ -34,8 +34,12 @@ import { type RfqState } from './payloads.js'
 
 export type AssetRfqCarrierMode = 'purchase' | 'recycle'
 
-/** The client's carrier choice, as parsed off the wire. Absent means legacy. */
-export type AssetRfqCarrierChoice = { mode: 'purchase' } | { mode: 'recycle'; quoteId: string }
+/** The client's carrier choice, as parsed off the wire. Absent means legacy.
+ * `recycle_receiver` is TYPES ONLY (Task 19); its wire schema and pricing land later. */
+export type AssetRfqCarrierChoice =
+  | { mode: 'purchase' }
+  | { mode: 'recycle'; quoteId: string }
+  | { mode: 'recycle_receiver'; quoteId: string; taxiUrl: string; taxiKey: string }
 
 const RFQ_ID = z
   .string()
