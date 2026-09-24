@@ -349,6 +349,21 @@ const PURCHASE_TERMS: AssetRfqCarrierTerms = {
   expiresAt: 2_000,
 }
 
+/** The payee's own Taxi fronts the whole dust and is repaid at claim: no
+ * receipt, no fare, nothing netted into the price. */
+const RECEIVER_PAID_TERMS: AssetRfqCarrierTerms = {
+  mode: 'recycle_receiver',
+  quoteId: 'q1',
+  physicalSats: 330n,
+  loanSats: 330n,
+  receiptSats: 0n,
+  serviceFareSats: 0n,
+  pricedSats: 0n,
+  expiresAt: 5_000,
+  taxiUrl: 'https://taxi.example',
+  taxiKey: 'b'.repeat(64),
+}
+
 describe('carrier terms', () => {
   it('round-trips a recycle exactly, amounts included', async () => {
     const store = await open()
@@ -362,6 +377,14 @@ describe('carrier terms', () => {
     const store = await open()
     const row = await store.insertQuote(quote({ carrierTerms: PURCHASE_TERMS }))
     expect(row.carrierTerms).toEqual(PURCHASE_TERMS)
+    await store.close()
+  })
+
+  it('round-trips a receiver-paid carrier, taxi identity included', async () => {
+    const store = await open()
+    const row = await store.insertQuote(quote({ carrierTerms: RECEIVER_PAID_TERMS }))
+    expect(row.carrierTerms).toEqual(RECEIVER_PAID_TERMS)
+    expect((await store.findById('swap-1'))?.carrierTerms).toEqual(RECEIVER_PAID_TERMS)
     await store.close()
   })
 
@@ -394,6 +417,34 @@ describe('carrier terms', () => {
       priced_sats: '330',
       expires_at: 2_000,
     })
+  })
+
+  it('persists and reads back the Taxi identity with the quote id', () => {
+    const json = carrierTermsToJson(RECEIVER_PAID_TERMS)
+    expect(json).toMatchObject({
+      mode: 'recycle_receiver',
+      quote_id: 'q1',
+      taxi_url: 'https://taxi.example',
+      taxi_key: 'b'.repeat(64),
+      loan_sats: '330',
+      receipt_sats: '0',
+      service_fare_sats: '0',
+      priced_sats: '0',
+    })
+    expect(carrierTermsFromJson(json)).toEqual(RECEIVER_PAID_TERMS)
+  })
+
+  it('rejects an unknown key in persisted receiver-paid terms', () => {
+    expect(() => carrierTermsFromJson({ ...carrierTermsToJson(RECEIVER_PAID_TERMS), surprise: 1 })).toThrow(
+      /unknown key/,
+    )
+  })
+
+  /** `taxi_url` names no field on an ordinary recycle. */
+  it('rejects a recycle row carrying a taxi url', () => {
+    expect(() =>
+      carrierTermsFromJson({ ...carrierTermsToJson(RECYCLE_TERMS), taxi_url: 'https://taxi.example' }),
+    ).toThrow(/unknown key/)
   })
 
   it('keeps the terms across a transition, so a settled fill can still read them', async () => {
@@ -548,6 +599,21 @@ describe('carrier terms', () => {
         expires_at: 0,
       },
     ],
+    ['a receiver-paid carrier with no quote id', { ...carrierTermsToJson(RECEIVER_PAID_TERMS), quote_id: undefined }],
+    ['a receiver-paid carrier with no taxi url', { ...carrierTermsToJson(RECEIVER_PAID_TERMS), taxi_url: undefined }],
+    [
+      'a receiver-paid carrier whose taxi key is not 64 lowercase hex',
+      { ...carrierTermsToJson(RECEIVER_PAID_TERMS), taxi_key: 'B'.repeat(64) },
+    ],
+    [
+      'a receiver-paid carrier charging a receipt',
+      { ...carrierTermsToJson(RECEIVER_PAID_TERMS), receipt_sats: '1', priced_sats: '1' },
+    ],
+    [
+      'a receiver-paid carrier whose loan is not the whole dust',
+      { ...carrierTermsToJson(RECEIVER_PAID_TERMS), loan_sats: '329' },
+    ],
+    ['a purchase carrying a taxi url', { ...carrierTermsToJson(PURCHASE_TERMS), taxi_url: 'https://taxi.example' }],
   ])('refuses to parse %s rather than half-read it', (_why, value) => {
     expect(() => carrierTermsFromJson(value)).toThrow()
   })
@@ -555,6 +621,7 @@ describe('carrier terms', () => {
   it('round-trips the exact JSON form it wrote, including a purchase', () => {
     expect(carrierTermsFromJson(carrierTermsToJson(PURCHASE_TERMS))).toEqual(PURCHASE_TERMS)
     expect(carrierTermsFromJson(carrierTermsToJson(RECYCLE_TERMS))).toEqual(RECYCLE_TERMS)
+    expect(carrierTermsFromJson(carrierTermsToJson(RECEIVER_PAID_TERMS))).toEqual(RECEIVER_PAID_TERMS)
   })
 
   /** Corruption must be refused at the READ, not silently reported as "no terms". */
@@ -578,6 +645,15 @@ describe('carrier terms', () => {
   ])('refuses to insert %s', async (_why, over) => {
     const store = await open()
     const carrierTerms: AssetRfqCarrierTerms = { ...RECYCLE_TERMS, ...over }
+
+    await expect(store.insertQuote(quote({ carrierTerms }))).rejects.toThrow(/carrier terms/)
+    expect(await store.listNonTerminal()).toEqual([])
+    await store.close()
+  })
+
+  it('refuses to insert a receiver-paid carrier whose loan is not the whole dust', async () => {
+    const store = await open()
+    const carrierTerms: AssetRfqCarrierTerms = { ...RECEIVER_PAID_TERMS, loanSats: 329n }
 
     await expect(store.insertQuote(quote({ carrierTerms }))).rejects.toThrow(/carrier terms/)
     expect(await store.listNonTerminal()).toEqual([])

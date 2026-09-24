@@ -111,6 +111,13 @@ describe('AssetRfqRequest', () => {
     expect(parsed.success && parsed.data.profile.carrier).toEqual({ mode: 'recycle', quote_id: 'q-1' })
   })
 
+  /** Ruling 4: the payee's own Taxi, named on the wire rather than configured. */
+  it('accepts a recycle_receiver mode carrying a quote id, a taxi url and its key', () => {
+    const carrier = { mode: 'recycle_receiver', quote_id: 'q-1', taxi_url: 'https://taxi.example', taxi_key: XONLY }
+    const parsed = AssetRfqRequest.safeParse(request({}, { carrier }))
+    expect(parsed.success && parsed.data.profile.carrier).toEqual(carrier)
+  })
+
   it.each([
     ['an unknown mode', { mode: 'fronted' }],
     ['purchase with a quote id, which authorizes no such quote', { mode: 'purchase', quote_id: 'q-1' }],
@@ -120,6 +127,29 @@ describe('AssetRfqRequest', () => {
     ['a mode that is not the discriminator', { quote_id: 'q-1' }],
     ['an unknown field beside the mode', { mode: 'purchase', price: '1' }],
     ['a bare string in place of the union', 'purchase'],
+    ['recycle_receiver naming no taxi url', { mode: 'recycle_receiver', quote_id: 'q-1', taxi_key: XONLY }],
+    [
+      'recycle_receiver naming an empty taxi url',
+      { mode: 'recycle_receiver', quote_id: 'q-1', taxi_url: '', taxi_key: XONLY },
+    ],
+    [
+      'recycle_receiver naming an upper-case taxi key',
+      { mode: 'recycle_receiver', quote_id: 'q-1', taxi_url: 'https://taxi.example', taxi_key: XONLY.toUpperCase() },
+    ],
+    [
+      'recycle_receiver naming a taxi key that is not 32 bytes',
+      { mode: 'recycle_receiver', quote_id: 'q-1', taxi_url: 'https://taxi.example', taxi_key: XONLY.slice(2) },
+    ],
+    [
+      'recycle_receiver with an unknown field beside its own',
+      {
+        mode: 'recycle_receiver',
+        quote_id: 'q-1',
+        taxi_url: 'https://taxi.example',
+        taxi_key: XONLY,
+        price: '1',
+      },
+    ],
   ])('refuses %s', (_why, carrier) => {
     expect(AssetRfqRequest.safeParse(request({}, { carrier })).success).toBe(false)
   })

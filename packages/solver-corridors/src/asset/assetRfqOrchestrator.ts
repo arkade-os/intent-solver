@@ -117,6 +117,9 @@ export interface ReceiveCarrierQuote {
   loanSats: bigint
   receiptSats: bigint
   serviceFareSats: bigint
+  /** `recycle_receiver` only: which Taxi answered, re-checked against the
+   * request's `taxi_key` rather than trusted from the adapter alone. */
+  taxiKey?: string
   /** Immutable Bitcoin locktime domain and minimum expiry for eligible inputs. */
   inputExpiryFloor: Readonly<{ kind: 'height' | 'time'; value: bigint }>
   /** Unix seconds. Read against `now`, so a stale quote cannot be priced. */
@@ -346,6 +349,15 @@ export class AssetRfqSwapService {
         publishedSats: physical,
       }
     }
+    // Reachable only past a caller that bypassed the wire schema — named here
+    // rather than falling through to the recycle path below.
+    if (carrier.mode !== 'recycle' && carrier.mode !== 'recycle_receiver') {
+      return {
+        ok: false,
+        reason: 'unsupported_payload',
+        detail: `profile.carrier names an unsupported mode '${String((carrier as { mode: unknown }).mode)}'`,
+      }
+    }
 
     // Refused BEFORE anything is priced, so an unconfigured deployment cannot
     // quote the market's free carrier.
@@ -386,6 +398,29 @@ export class AssetRfqSwapService {
 
     const rejected = this.validateCarrierQuote({ quote, request, assetId, now })
     if (rejected) return rejected
+
+    // Ruling 4: nothing is netted here; `physicalSats`/`loanSats` are THIS
+    // solver's own dust, never a Taxi-supplied figure.
+    if (carrier.mode === 'recycle_receiver') {
+      const dust = this.deps.dustSats
+      return {
+        ok: true,
+        terms: {
+          mode: 'recycle_receiver',
+          quoteId: quote.quoteId,
+          physicalSats: dust,
+          loanSats: dust,
+          receiptSats: 0n,
+          serviceFareSats: 0n,
+          pricedSats: 0n,
+          expiresAt: quote.expiresAt,
+          taxiUrl: carrier.taxiUrl,
+          taxiKey: carrier.taxiKey,
+        },
+        priceTerm: 0n,
+        publishedSats: 0n,
+      }
+    }
 
     const priceTerm = quote.receiptSats + quote.serviceFareSats
     return {
@@ -434,17 +469,50 @@ export class AssetRfqSwapService {
     if (quote.physicalSats !== this.deps.dustSats) {
       return { ok: false, reason: 'price_unavailable', detail: 'carrier quote physical sats are not this dust floor' }
     }
-    if (quote.receiptSats <= 0n) {
-      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote receipt sats must be positive' }
-    }
-    if (quote.loanSats <= 0n) {
-      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote loan sats must be positive' }
-    }
-    if (quote.loanSats + quote.receiptSats !== quote.physicalSats) {
-      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote split does not sum to physical sats' }
-    }
-    if (quote.serviceFareSats < 0n) {
-      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote service fare must not be negative' }
+    // Ruling 4: the payee's Taxi fronted the whole dust, so the ordinary
+    // `receiptSats <= 0n` refusal below is exactly what this mode must fail.
+    if (request.carrier?.mode === 'recycle_receiver') {
+      if (quote.receiptSats !== 0n) {
+        return {
+          ok: false,
+          reason: 'price_unavailable',
+          detail: 'carrier quote receipt sats must be zero on recycle_receiver',
+        }
+      }
+      if (quote.serviceFareSats !== 0n) {
+        return {
+          ok: false,
+          reason: 'price_unavailable',
+          detail: 'carrier quote service fare must be zero on recycle_receiver',
+        }
+      }
+      if (quote.loanSats !== quote.physicalSats) {
+        return {
+          ok: false,
+          reason: 'price_unavailable',
+          detail: 'carrier quote loan sats must equal the whole dust on recycle_receiver',
+        }
+      }
+      if (quote.taxiKey !== request.carrier.taxiKey) {
+        return {
+          ok: false,
+          reason: 'price_unavailable',
+          detail: 'carrier quote taxi key differs from the one the request named',
+        }
+      }
+    } else {
+      if (quote.receiptSats <= 0n) {
+        return { ok: false, reason: 'price_unavailable', detail: 'carrier quote receipt sats must be positive' }
+      }
+      if (quote.loanSats <= 0n) {
+        return { ok: false, reason: 'price_unavailable', detail: 'carrier quote loan sats must be positive' }
+      }
+      if (quote.loanSats + quote.receiptSats !== quote.physicalSats) {
+        return { ok: false, reason: 'price_unavailable', detail: 'carrier quote split does not sum to physical sats' }
+      }
+      if (quote.serviceFareSats < 0n) {
+        return { ok: false, reason: 'price_unavailable', detail: 'carrier quote service fare must not be negative' }
+      }
     }
     if (!Number.isSafeInteger(quote.expiresAt) || quote.expiresAt <= now) {
       return { ok: false, reason: 'price_unavailable', detail: 'carrier quote is already expired' }

@@ -17,6 +17,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { assetRfqQuotePayload } from '@arkade-os/solver-corridors/wire/assetRfqPayloads.js'
 import {
   AssetRfqSwapService,
   type AssetRfqDeps,
@@ -31,6 +32,7 @@ const PK_SCRIPT = `5120${'c'.repeat(64)}`
 const XONLY = 'b'.repeat(64)
 const OFFER_SCRIPT = `5120${'d'.repeat(64)}`
 const RFQ_ID = 'a'.repeat(64)
+const TAXI_KEY = 'b'.repeat(64)
 
 /**
  * Bounds are PER DIRECTION and in the PAYOUT leg's units, matching
@@ -1183,6 +1185,108 @@ describe('profile.carrier — explicit modes', () => {
     expect((outcome as { swap: { toAmount: bigint } }).swap.toAmount).toBe(99_499_671_650n)
     expect((await store.get('swap-1')).carrierTerms).toBeNull()
     expect(calls).toEqual([])
+  })
+
+  /** M19-3: only `recycle_receiver` threads a Taxi into the resolve. */
+  it('passes no taxi into the carrier resolve for a plain recycle', async () => {
+    const calls: unknown[] = []
+    const { service } = await harness({ receiveCarrierQuotes: adapter({}, calls) })
+    await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    expect(calls).toHaveLength(1)
+    expect((calls[0] as { taxi?: unknown }).taxi).toBeUndefined()
+  })
+
+  it('passes no taxi into the carrier resolve for a purchase', async () => {
+    const calls: unknown[] = []
+    const { service } = await harness({ receiveCarrierQuotes: adapter({}, calls) })
+    await service.quote(request({ carrier: { mode: 'purchase' } }))
+    expect(calls).toHaveLength(0)
+  })
+
+  /** Reachable only past a caller that bypassed the wire schema, which
+   * already refuses this — the service must not silently treat it as a recycle. */
+  it('refuses an unknown carrier mode with unsupported_payload', async () => {
+    const { service } = await harness()
+    const outcome = await service.quote(request({ carrier: { mode: 'recycle_pool' } }))
+    expect(outcome).toMatchObject({ accepted: false, reason: 'unsupported_payload' })
+  })
+})
+
+/** `recycle_receiver` — the payee's own Taxi fronts the WHOLE carrier dust and
+ * is repaid at claim, so the price term and `carrier_sats` are both zero. */
+describe('profile.carrier — receiver-paid mode', () => {
+  const receiverPaid = (over: Record<string, unknown> = {}) => ({
+    mode: 'recycle_receiver' as const,
+    quoteId: 'q-1',
+    taxiUrl: 'https://taxi.example',
+    taxiKey: TAXI_KEY,
+    ...over,
+  })
+
+  /** The whole dust fronted, nothing bought or reserved. */
+  const receiverPaidAdapter = (over: Partial<ReceiveCarrierQuote> = {}) =>
+    adapter({ loanSats: 330n, receiptSats: 0n, serviceFareSats: 0n, taxiKey: TAXI_KEY, ...over })
+
+  it('prices a receiver-paid carrier at zero and publishes no carrier_sats', async () => {
+    const { service } = await harness({ receiveCarrierQuotes: receiverPaidAdapter() })
+    const outcome = await service.quote(request({ carrier: receiverPaid() }))
+    expect(outcome).toMatchObject({ accepted: true, carrierSats: 0n })
+    if (!outcome.accepted) throw new Error('expected a quote')
+    expect(assetRfqQuotePayload(outcome.swap, RFQ_ID, outcome.carrierSats)).not.toHaveProperty('carrier_sats')
+  })
+
+  it('persists the whole dust as both loan and physical, priced at zero, with the taxi identity', async () => {
+    const { service, store } = await harness({ receiveCarrierQuotes: receiverPaidAdapter() })
+    const outcome = await service.quote(request({ carrier: receiverPaid() }))
+    expect(outcome).toMatchObject({ accepted: true })
+    expect((await store.get('swap-1')).carrierTerms).toEqual({
+      mode: 'recycle_receiver',
+      quoteId: 'q-1',
+      physicalSats: 330n,
+      loanSats: 330n,
+      receiptSats: 0n,
+      serviceFareSats: 0n,
+      pricedSats: 0n,
+      expiresAt: 5_000,
+      taxiUrl: 'https://taxi.example',
+      taxiKey: TAXI_KEY,
+    })
+  })
+
+  it('refuses a receiver-paid quote that charges a receipt or a fare', async () => {
+    const receipt = await harness({ receiveCarrierQuotes: receiverPaidAdapter({ receiptSats: 1n }) })
+    expect(await receipt.service.quote(request({ carrier: receiverPaid() }))).toMatchObject({
+      accepted: false,
+      reason: 'price_unavailable',
+    })
+    const fare = await harness({ receiveCarrierQuotes: receiverPaidAdapter({ serviceFareSats: 1n }) })
+    expect(await fare.service.quote(request({ carrier: receiverPaid() }))).toMatchObject({
+      accepted: false,
+      reason: 'price_unavailable',
+    })
+  })
+
+  it('refuses a receiver-paid quote whose loan is not the whole dust', async () => {
+    const { service } = await harness({ receiveCarrierQuotes: receiverPaidAdapter({ loanSats: 329n }) })
+    expect(await service.quote(request({ carrier: receiverPaid() }))).toMatchObject({
+      accepted: false,
+      reason: 'price_unavailable',
+    })
+  })
+
+  it('refuses a receiver-paid quote whose resolved taxi key differs from the request', async () => {
+    const { service } = await harness({ receiveCarrierQuotes: receiverPaidAdapter({ taxiKey: 'c'.repeat(64) }) })
+    expect(await service.quote(request({ carrier: receiverPaid() }))).toMatchObject({
+      accepted: false,
+      reason: 'price_unavailable',
+    })
+  })
+
+  it('still charges receipt plus fare on an ordinary recycle', async () => {
+    const { service } = await harness({ receiveCarrierQuotes: adapter({ serviceFareSats: 5n }) })
+    const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))
+    expect(outcome).toMatchObject({ accepted: true, carrierSats: 330n })
+    expect(outcome.accepted && outcome.swap.carrierTerms?.pricedSats).toBe(6n)
   })
 })
 

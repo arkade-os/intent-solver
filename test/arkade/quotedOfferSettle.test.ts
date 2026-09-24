@@ -93,6 +93,26 @@ describe('quotedOfferSettleFor', () => {
     expect(fulfill).not.toHaveBeenCalled()
   })
 
+  /** Task 21 wires this mode's own settle; until then it must go `stuck`
+   * here, never a silent fulfill that never repaid the payee's Taxi. */
+  it('refuses persisted receiver-paid terms before reading or spending an outpoint', async () => {
+    const outpointsAt = vi.fn(async () => [funded()])
+    const fulfill = vi.fn<typeof fulfillOffer>(async () => 'fill'.padEnd(64, '0'))
+    const settle = quotedOfferSettleFor({
+      ctx: {} as never,
+      emulatorUrl: 'http://emulator.test',
+      derivation,
+      outpointsAt,
+      fulfill,
+    })
+
+    await expect(settle({ ...intent(), carrierTerms: { mode: 'recycle_receiver' } })).rejects.toThrow(
+      /recycle_receiver/,
+    )
+    expect(outpointsAt).not.toHaveBeenCalled()
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
   it('keeps persisted purchase terms on direct settlement', async () => {
     const { settle, fulfill } = settleWith([funded()])
     await settle({ ...intent(), carrierTerms: { mode: 'purchase' } })

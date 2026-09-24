@@ -55,17 +55,21 @@ export type AssetRfqSwapState = 'quoted' | 'funded' | 'filling' | 'filled' | 're
  * mode. Absent on every legacy row. IMMUTABLE: these are the Taxi obligation
  * the fill adapter must honour, and `loanSats` is never in the price. */
 export interface AssetRfqCarrierTerms {
-  mode: 'purchase' | 'recycle'
-  /** Present on `recycle` only: the Taxi quote these terms were read from. */
+  mode: 'purchase' | 'recycle' | 'recycle_receiver'
+  /** Present on `recycle` and `recycle_receiver`: the Taxi quote these terms were read from. */
   quoteId?: string
   physicalSats: bigint
-  /** Always `0` on a purchase: bought sats are owned outright, not advanced. */
+  /** Always `0` on a purchase. Equal to `physicalSats` on `recycle_receiver`:
+   * the payee's own Taxi fronts the whole dust, not this solver. */
   loanSats: bigint
   receiptSats: bigint
   serviceFareSats: bigint
-  /** What the PRICE actually netted for this carrier — not `physicalSats`. */
+  /** What the PRICE actually netted — not `physicalSats`. Always `0` on `recycle_receiver`. */
   pricedSats: bigint
   expiresAt: number
+  /** `recycle_receiver` only: the Taxi the payee named. */
+  taxiUrl?: string
+  taxiKey?: string
 }
 
 export const NON_TERMINAL: readonly AssetRfqSwapState[] = ['quoted', 'funded', 'filling']
@@ -211,7 +215,7 @@ const decimal = (value: unknown, field: string): bigint => {
   return BigInt(value)
 }
 
-const rejectUnknown = (raw: Record<string, unknown>, mode: 'purchase' | 'recycle'): void => {
+const rejectUnknown = (raw: Record<string, unknown>, mode: 'purchase' | 'recycle' | 'recycle_receiver'): void => {
   const allowed = new Set([
     'mode',
     'physical_sats',
@@ -220,7 +224,8 @@ const rejectUnknown = (raw: Record<string, unknown>, mode: 'purchase' | 'recycle
     'service_fare_sats',
     'priced_sats',
     'expires_at',
-    ...(mode === 'recycle' ? ['quote_id'] : []),
+    ...(mode === 'recycle' || mode === 'recycle_receiver' ? ['quote_id'] : []),
+    ...(mode === 'recycle_receiver' ? ['taxi_url', 'taxi_key'] : []),
   ])
   for (const key of Object.keys(raw)) {
     if (!allowed.has(key)) throw new Error(`carrier terms has unknown key '${key}'`)
@@ -243,6 +248,8 @@ export const carrierTermsToJson = (terms: AssetRfqCarrierTerms): Record<string, 
   service_fare_sats: terms.serviceFareSats.toString(),
   priced_sats: terms.pricedSats.toString(),
   expires_at: terms.expiresAt,
+  ...(terms.taxiUrl === undefined ? {} : { taxi_url: terms.taxiUrl }),
+  ...(terms.taxiKey === undefined ? {} : { taxi_key: terms.taxiKey }),
 })
 
 export const carrierTermsFromJson = (value: unknown): AssetRfqCarrierTerms => {
@@ -251,11 +258,14 @@ export const carrierTermsFromJson = (value: unknown): AssetRfqCarrierTerms => {
   }
   const raw = value as Record<string, unknown>
   const mode = raw.mode
-  if (mode !== 'purchase' && mode !== 'recycle') throw new Error(`carrier terms mode '${String(mode)}' is unknown`)
-  // An unknown key in a money blob is a shape this build never wrote.
+  if (mode !== 'purchase' && mode !== 'recycle' && mode !== 'recycle_receiver') {
+    throw new Error(`carrier terms mode '${String(mode)}' is unknown`)
+  }
+  // An unknown key in a money blob is a shape this build never wrote — refuses
+  // a `recycle` row carrying `taxi_url`/`taxi_key` before either is read.
   rejectUnknown(raw, mode)
   const quoteId = raw.quote_id
-  if (mode === 'recycle') {
+  if (mode === 'recycle' || mode === 'recycle_receiver') {
     if (typeof quoteId !== 'string' || quoteId.length === 0 || quoteId.length > 128) {
       throw new Error('carrier terms quote_id must be a non-empty bounded string on a recycle')
     }
@@ -270,7 +280,8 @@ export const carrierTermsFromJson = (value: unknown): AssetRfqCarrierTerms => {
   // From the ACTUAL serialized values, never substituted constants. A purchase
   // is not a loan: it buys the carrier outright, so loan and receipt are zero
   // and physical + service is the price. A recycle splits the dust into a
-  // returnable loan and a receipt, and prices the receipt plus service.
+  // returnable loan and a receipt, and prices the receipt plus service. A
+  // receiver-paid carrier loans the WHOLE dust, priced at zero.
   const loanSats = decimal(raw.loan_sats, 'loan_sats')
   const receiptSats = decimal(raw.receipt_sats, 'receipt_sats')
   const serviceFareSats = decimal(raw.service_fare_sats, 'service_fare_sats')
@@ -285,6 +296,12 @@ export const carrierTermsFromJson = (value: unknown): AssetRfqCarrierTerms => {
     if (pricedSats !== receiptSats + serviceFareSats) {
       throw new Error('carrier terms priced sats is not the receipt plus the service fare')
     }
+  } else if (mode === 'recycle_receiver') {
+    if (loanSats !== physicalSats)
+      throw new Error('carrier terms loan_sats must equal physical_sats on a recycle_receiver')
+    if (receiptSats !== 0n) throw new Error('carrier terms receipt_sats must be zero on a recycle_receiver')
+    if (serviceFareSats !== 0n) throw new Error('carrier terms service_fare_sats must be zero on a recycle_receiver')
+    if (pricedSats !== 0n) throw new Error('carrier terms priced_sats must be zero on a recycle_receiver')
   } else {
     if (loanSats !== 0n) throw new Error('carrier terms loan_sats must be zero on a purchase')
     if (receiptSats !== 0n) throw new Error('carrier terms receipt_sats must be zero on a purchase')
@@ -293,15 +310,26 @@ export const carrierTermsFromJson = (value: unknown): AssetRfqCarrierTerms => {
       throw new Error('carrier terms priced sats is not the physical carrier plus the service fare')
     }
   }
+  const taxiUrl = raw.taxi_url
+  const taxiKey = raw.taxi_key
+  if (mode === 'recycle_receiver') {
+    if (typeof taxiUrl !== 'string' || taxiUrl.length === 0 || taxiUrl.length > 512) {
+      throw new Error('carrier terms taxi_url must be a non-empty bounded string on a recycle_receiver')
+    }
+    if (typeof taxiKey !== 'string' || !/^[0-9a-f]{64}$/.test(taxiKey)) {
+      throw new Error('carrier terms taxi_key must be 64 lowercase hex on a recycle_receiver')
+    }
+  }
   return {
     mode,
-    ...(mode === 'recycle' ? { quoteId: quoteId as string } : {}),
+    ...(mode === 'recycle' || mode === 'recycle_receiver' ? { quoteId: quoteId as string } : {}),
     physicalSats,
     loanSats,
     receiptSats,
     serviceFareSats,
     pricedSats,
     expiresAt,
+    ...(mode === 'recycle_receiver' ? { taxiUrl: taxiUrl as string, taxiKey: taxiKey as string } : {}),
   }
 }
 

@@ -32,10 +32,10 @@ import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import { carrierTermsToJson, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 import { type RfqState } from './payloads.js'
 
-export type AssetRfqCarrierMode = 'purchase' | 'recycle'
+export type AssetRfqCarrierMode = 'purchase' | 'recycle' | 'recycle_receiver'
 
 /** The client's carrier choice, as parsed off the wire. Absent means legacy.
- * `recycle_receiver` is TYPES ONLY (Task 19); its wire schema and pricing land later. */
+ * `recycle_receiver` (Ruling 4) names the payee's own Taxi, priced at zero below. */
 export type AssetRfqCarrierChoice =
   | { mode: 'purchase' }
   | { mode: 'recycle'; quoteId: string }
@@ -69,6 +69,27 @@ const PK_SCRIPT_HEX = z
   .length(68)
   .regex(/^[0-9a-f]{68}$/)
 
+/** An empty id names no quote; unbounded is a huge read. */
+const CARRIER_QUOTE_ID = z.string().min(1).max(128)
+
+/** Named separately so the mapper below can type its parameter from it,
+ * forcing a compile error on a variant left unhandled there. */
+const AssetRfqCarrierField = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('purchase') }).strict(),
+  z.object({ mode: z.literal('recycle'), quote_id: CARRIER_QUOTE_ID }).strict(),
+  // `taxi_key` is x-only hex, the same shape `TaxiClient` publishes as `info().operatorKey`.
+  z
+    .object({
+      mode: z.literal('recycle_receiver'),
+      quote_id: CARRIER_QUOTE_ID,
+      taxi_url: z.string().min(1).max(512),
+      taxi_key: XONLY_HEX,
+    })
+    .strict(),
+])
+
+type AssetRfqCarrierFieldWire = z.infer<typeof AssetRfqCarrierField>
+
 /**
  * The directed request. Strict at BOTH levels per § 1 — "a directed request
  * containing unknown fields MUST be rejected with `unsupported_payload`".
@@ -101,32 +122,35 @@ export const AssetRfqRequest = z
         /** The client's x-only key: the `cancel` path's `user` signer. */
         maker_public_key: XONLY_HEX,
         /** OPTIONAL; absent stays byte-identical. `recycle` names a quote whose
-         * returnable loan is delivered at claim and priced nowhere here. */
-        carrier: z
-          .discriminatedUnion('mode', [
-            z.object({ mode: z.literal('purchase') }).strict(),
-            z
-              .object({
-                mode: z.literal('recycle'),
-                // An empty id names no quote; unbounded is a huge read.
-                quote_id: z.string().min(1).max(128),
-              })
-              .strict(),
-          ])
-          .optional(),
+         * returnable loan is delivered at claim and priced nowhere here.
+         * `recycle_receiver` prices at zero instead (Ruling 4). */
+        carrier: AssetRfqCarrierField.optional(),
       })
       .strict(),
   })
   .strict()
 
 /** The parsed request's carrier field in the internal spelling: the wire is
- * snake_case, everything downstream camelCase, so both live beside the schema. */
+ * snake_case, everything downstream camelCase, so both live beside the schema.
+ * `default` assigns the remainder to `never`, so an unhandled variant is a
+ * compile error rather than a silent drop. */
 export const assetRfqCarrierChoice = (profile: {
-  carrier?: { mode: 'purchase' } | { mode: 'recycle'; quote_id: string }
+  carrier?: AssetRfqCarrierFieldWire
 }): AssetRfqCarrierChoice | undefined => {
   const choice = profile.carrier
   if (choice === undefined) return undefined
-  return choice.mode === 'purchase' ? { mode: 'purchase' } : { mode: 'recycle', quoteId: choice.quote_id }
+  switch (choice.mode) {
+    case 'purchase':
+      return { mode: 'purchase' }
+    case 'recycle':
+      return { mode: 'recycle', quoteId: choice.quote_id }
+    case 'recycle_receiver':
+      return { mode: 'recycle_receiver', quoteId: choice.quote_id, taxiUrl: choice.taxi_url, taxiKey: choice.taxi_key }
+    default: {
+      const unhandled: never = choice
+      throw new Error(`carrier field names an unhandled mode '${JSON.stringify(unhandled)}'`)
+    }
+  }
 }
 
 /** The § 2 pair string for two legs, `null` being BTC as everywhere else. */
