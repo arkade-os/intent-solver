@@ -271,7 +271,8 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
 
     const outpoints = inputs.map(({ coin }) => ({ txid: coin.txid, vout: coin.vout }))
     const deposit = { txid: row.depositTxid, vout: row.depositVout }
-    const validUntil = Math.min(row.validUntil, terms.expiresAt)
+    // Not `row.validUntil`: that bounds the decision to fill, and the quote stopped short of this to leave time to act.
+    const validUntil = terms.expiresAt
     const offerHex = deps.offerHex(row)
     const snapshot = carrierAttemptSnapshotFor({
       row,
@@ -393,6 +394,10 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         }
       }
 
+      // The Taxi refuses an expired fill at submit, and by then this attempt would be liable.
+      if (deps.now() >= verified.expiresAt) {
+        throw new Error(`carrier fill ${row.id} expired before it was sent, at ${verified.expiresAt}`)
+      }
       const bound: CarrierAttempt = { phase: 'quoted', snapshot, binding }
       if (!(await deps.store.markCarrierAttemptSubmitting(row.id, bound))) {
         throw new Error(`carrier fill ${row.id} could not mark itself submitting; nothing has been sent`)

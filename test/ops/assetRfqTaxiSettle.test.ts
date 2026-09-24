@@ -446,13 +446,37 @@ describe('the snapshot is the attempt authority, written through the one codec',
     await h.store.close()
   })
 
-  it('sends the ceiling it pinned, never one recomputed at the boundary', async () => {
+  it("sends and pins the receive quote's own expiry as the ceiling, not the row's earlier valid_until", async () => {
     // `validUntil` participates in request identity: a recomputed value is a 409.
     const h = await harness({ validUntil: 7_000 })
-    await expect(h.settle(await h.row())).rejects.toThrow()
+    await expect(h.settle(await h.row())).resolves.toEqual({ status: 'submitted' })
     const attempt = (await h.attempt()) as { snapshot: { valid_until: number } }
-    expect(attempt.snapshot.valid_until).toBe(7_000)
-    expect(h.bodies[0]).toMatchObject({ validUntil: 7_000, operationId: 'swap-1', receiveQuoteId: 'q-1' })
+    expect(attempt.snapshot.valid_until).toBe(RECYCLE.expiresAt)
+    expect(h.bodies[0]).toMatchObject({ validUntil: RECYCLE.expiresAt, operationId: 'swap-1', receiveQuoteId: 'q-1' })
+    await h.store.close()
+  })
+
+  it('refuses a fill quoted to run past that ceiling, before anything is signed', async () => {
+    const h = await harness({ body: fillQuoteBody({ expiresAt: RECYCLE.expiresAt + 1 }) })
+    await expect(h.settle(await h.row())).rejects.toThrow(/past your authorised ceiling/)
+    expect(h.seen.has('sign')).toBe(false)
+    expect((await h.row()).state).toBe('refused')
+    expect(h.ledger.reserved().size).toBe(0)
+    await h.store.close()
+  })
+
+  it('refuses before submitting once the post-sign read lands at the fill expiry, and frees the pin', async () => {
+    let now = NOW
+    let reads = 0
+    const resolve = async () => {
+      if (++reads === 2) now = 8_000
+      return carrierQuote()
+    }
+    const h = await harness({ deps: { now: () => now, resolve } })
+    await expect(h.settle(await h.row())).rejects.toThrow(/expired before it was sent/)
+    expect(h.submitted).toEqual([])
+    expect(await h.attempt()).toMatchObject({ phase: 'not_submitted' })
+    expect(h.ledger.reserved().size).toBe(0)
     await h.store.close()
   })
 

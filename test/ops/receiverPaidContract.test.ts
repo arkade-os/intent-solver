@@ -229,7 +229,11 @@ interface StubTaxi {
   url: string
   requests: string[]
   swapFills: SwapFillRequestWire[]
+  accepted: string[]
 }
+
+/** The one clock the solver and the stub share; each stub request first moves it by `latency` seconds. */
+const clock = { now: NOW, latency: 0 }
 
 /** What the Taxi serves once the swap-fill quote has bound the receive quote. */
 interface AfterBind {
@@ -258,12 +262,12 @@ const fillGraph = (deposit: { txid: string; vout: number }, solver: readonly { t
   return { ...plan, graphId: digestJointGraph(plan, OFFER_FILL_TEMPLATE) } satisfies JointGraph
 }
 
-const swapFillQuoteWire = (fill: SwapFillRequestWire, covenant: string) => {
+const swapFillQuoteWire = (fill: SwapFillRequestWire, covenant: string, expiresAt: number) => {
   const graph = fillGraph({ txid: fill.fundingTxid, vout: fill.fundingVout }, fill.solverInputs)
   return {
     fillId: FILL_ID,
     operationId: fill.operationId,
-    expiresAt: fill.validUntil,
+    expiresAt,
     template: 'taxi-fill/1',
     contributionSats: fill.contributionSats,
     fare: { currency: 'sats', units: '0' },
@@ -311,6 +315,7 @@ const receiveQuoteRefusal = (quote: ReturnType<typeof receiveQuoteWire>, fill: S
 const open: (() => Promise<void>)[] = []
 afterEach(async () => {
   for (const close of open.splice(0)) await close()
+  Object.assign(clock, { now: NOW, latency: 0 })
 })
 
 interface StubOptions {
@@ -319,22 +324,32 @@ interface StubOptions {
   /** From this read of `q-1` on, the Taxi is unreachable, refuses, or serves a quote that fails verification. */
   failReadsFrom?: { read: number; how: 'unreachable' | 'refusing' | 'hostile' }
   submitFails?: boolean
+  /** The receive quotes' own expiry; the Taxi's default lifetime is 60s. */
+  quoteExpiresAt?: number
 }
 
 const startTaxi = async (id: TaxiIdentity, options: StubOptions = {}): Promise<StubTaxi> => {
-  const stub: Omit<StubTaxi, 'url'> = { requests: [], swapFills: [] }
+  const stub: Omit<StubTaxi, 'url'> = { requests: [], swapFills: [], accepted: [] }
   const bound = new Map<string, string>()
+  const quoteExpiresAt = options.quoteExpiresAt ?? 5_000
+  let fillExpiresAt = 0
   let reads = 0
+  // `getReceiveQuote` expires an unbound quote past its expiry; a bound one lives on with its fill.
   const served = (payer: Payer) => {
     const boundFillId = bound.get(QUOTE_ID[payer])
-    if (boundFillId === undefined) return receiveQuoteWire(id, payer)
-    return { ...receiveQuoteWire(id, payer, options.afterBind?.floor), state: 'bound', boundFillId }
+    if (boundFillId !== undefined) {
+      const quote = receiveQuoteWire(id, payer, options.afterBind?.floor)
+      return { ...quote, expiresAt: quoteExpiresAt, state: 'bound', boundFillId }
+    }
+    const state = clock.now >= quoteExpiresAt ? 'expired' : 'quoted'
+    return { ...receiveQuoteWire(id, payer), expiresAt: quoteExpiresAt, state }
   }
   const server = createServer(async (request, response) => {
     let body = ''
     for await (const chunk of request) body += chunk
     const route = `${request.method} ${request.url}`
     stub.requests.push(route)
+    clock.now += clock.latency
     const reply = (status: number, payload: unknown) => {
       response.writeHead(status, { 'content-type': 'application/json' })
       response.end(JSON.stringify(payload))
@@ -354,25 +369,36 @@ const startTaxi = async (id: TaxiIdentity, options: StubOptions = {}): Promise<S
       stub.swapFills.push(fill)
       // `routes.ts` `assertFinancialMutationReady`: refused before any graph exists.
       if (options.notReady) return reply(503, { error: 'service is not ready', code: 'not_ready' })
-      if (bound.has(fill.receiveQuoteId)) {
-        return reply(409, { error: 'receive quote is bound', code: 'receive_quote_unavailable' })
+      // `swapFillQuotes.ts` `assertDeadlineLive`, then the receive quote must be unbound and unexpired.
+      if (fill.validUntil <= clock.now) {
+        return reply(409, { error: 'caller deadline has passed', code: 'swap_fill_deadline_expired' })
+      }
+      if (bound.has(fill.receiveQuoteId) || quoteExpiresAt <= clock.now) {
+        return reply(409, { error: 'receive quote is missing, expired, bound', code: 'receive_quote_unavailable' })
       }
       const quote = receiveQuoteWire(id, fill.receiveQuoteId === QUOTE_ID.receiver ? 'receiver' : 'sender')
       const refusal = receiveQuoteRefusal(quote, fill)
       if (refusal) return reply(400, refusal)
       // `swapFillQuotes.ts` ~:814: quoting the fill binds the receive quote to it.
       bound.set(fill.receiveQuoteId, options.afterBind?.bindTo ?? FILL_ID)
-      return reply(200, swapFillQuoteWire(fill, hex.encode(ArkAddress.decode(quote.covenantAddress).pkScript)))
+      fillExpiresAt = Math.min(fill.validUntil, quoteExpiresAt)
+      const covenant = hex.encode(ArkAddress.decode(quote.covenantAddress).pkScript)
+      return reply(200, swapFillQuoteWire(fill, covenant, fillExpiresAt))
     }
     if (route === `POST /v1/swap-fills/${FILL_ID}/submit`) {
       if (options.submitFails) return reply(500, { error: 'internal error', code: 'internal' })
+      // `swapFillSubmit.ts` ~:358.
+      if (fillExpiresAt <= clock.now) {
+        return reply(409, { error: `swap fill ${FILL_ID} quote expired`, code: 'quote_expired' })
+      }
+      stub.accepted.push(FILL_ID)
       const fill = stub.swapFills.at(-1)!
       return reply(200, {
         fillId: FILL_ID,
         operationId: fill.operationId,
         state: 'submitting',
-        updatedAt: NOW,
-        expiresAt: fill.validUntil,
+        updatedAt: clock.now,
+        expiresAt: fillExpiresAt,
       })
     }
     return reply(404, { error: `${route} not found`, code: 'not_found' })
@@ -384,7 +410,7 @@ const startTaxi = async (id: TaxiIdentity, options: StubOptions = {}): Promise<S
 
 /** `taxiUrl` is the configured Taxi a sender-paid `recycle` resolves against; receiver-paid names its own. */
 const solver = async (taxiUrl?: string) => {
-  const store = await AssetRfqSwapStore.open(':memory:', () => NOW)
+  const store = await AssetRfqSwapStore.open(':memory:', () => clock.now)
   const ledger = createReservationLedger()
   const pins = createCarrierPinLedger()
   const errors: unknown[] = []
@@ -427,7 +453,7 @@ const solver = async (taxiUrl?: string) => {
     proceedsAddress: PROCEEDS_ADDRESS,
     solverKeys: [hex.encode(SOLVER)],
     serverKey: () => SERVER,
-    now: () => NOW,
+    now: () => clock.now,
     fill: {
       rebuild: async ({ row, inputs }) => fillGraph({ txid: row.depositTxid!, vout: row.depositVout! }, inputs),
       sign: async (graph) => graph,
@@ -439,7 +465,7 @@ const solver = async (taxiUrl?: string) => {
     solverPubkey: hex.encode(SOLVER),
     quoteValiditySeconds: 30,
     dustSats: DUST,
-    now: () => NOW,
+    now: () => clock.now,
     deriveOffer: offerScriptFrom(DERIVATION),
     depositAt: async () => deposit,
     balance: async () => new Map([[ASSET, 10n ** 12n]]),
@@ -478,10 +504,11 @@ const rfq = (taxi: StubTaxi, taxiKey: Uint8Array, makerPkScript = MAKER_PK_SCRIP
   rfqWith(receiverPaid(taxi, taxiKey), makerPkScript)
 
 /** Quote, fund, and drive the row to its fill: one pass sees the deposit, the next settles. */
-const quoteAndFill = async (s: Awaited<ReturnType<typeof solver>>, request: Record<string, unknown>) => {
+const quoteAndFill = async (s: Awaited<ReturnType<typeof solver>>, request: Record<string, unknown>, latency = 0) => {
   const outcome = await s.corridor.quote(request)
   expect(outcome.kind, JSON.stringify(outcome)).toBe('quote')
   const row = (await s.store.findByRfqId(request.rfq_id as string))!
+  clock.latency = latency
   s.fund()
   await s.corridor.tickAll()
   await s.corridor.tickAll()
@@ -630,6 +657,47 @@ describe('a fill through a Taxi that binds its receive quote when it quotes the 
       expect(s.errors).toEqual([expect.objectContaining({ message: expect.stringMatching(why) })])
     },
   )
+})
+
+/** A 60s receive quote leaves `valid_until` at NOW + 30. Each Taxi round trip below moves the clock `latency` seconds,
+ * so the funded fill's own reads carry it past `valid_until`, and at 9s past the receive quote's expiry too. */
+describe("a fill decided by valid_until runs on to the receive quote's own expiry, and no further", () => {
+  const QUOTE_EXPIRES_AT = NOW + 60
+
+  it.each(['recycle_receiver', 'recycle'] as const)(
+    'fills a %s row whose Taxi round trips outlast valid_until, inside the margin',
+    async (mode) => {
+      const taxi = await startTaxi({ operator: OPERATOR, server: SERVER }, { quoteExpiresAt: QUOTE_EXPIRES_AT })
+      const s = await solver(mode === 'recycle' ? taxi.url : undefined)
+      const request =
+        mode === 'recycle'
+          ? rfqWith({ mode: 'recycle', quote_id: QUOTE_ID.sender }, covenantScriptOf('sender'))
+          : rfq(taxi, OPERATOR)
+
+      const row = await quoteAndFill(s, request, 5)
+      expect(s.errors).toEqual([])
+      expect(taxi.accepted).toEqual([FILL_ID])
+      expect(row.validUntil).toBe(NOW + 30)
+      expect(clock.now).toBeGreaterThan(row.validUntil)
+      expect(taxi.swapFills).toEqual([expect.objectContaining({ validUntil: QUOTE_EXPIRES_AT })])
+    },
+  )
+
+  it('refuses before submitting, freeing the pins, a fill whose reads carry it past the receive quote', async () => {
+    const taxi = await startTaxi({ operator: OPERATOR, server: SERVER }, { quoteExpiresAt: QUOTE_EXPIRES_AT })
+    const s = await solver()
+
+    const row = await quoteAndFill(s, rfq(taxi, OPERATOR), 9)
+    expect(taxi.swapFills).toHaveLength(1)
+    expect(taxi.requests).not.toContain(submitRoute)
+    expect(await s.store.readCarrierAttempt(row.id)).toMatchObject({ phase: 'not_submitted' })
+    expect((await s.store.get(row.id)).state).toBe('refused')
+    expect(s.pins.held()).toEqual([])
+    expect([...s.ledger.reserved()]).toEqual([])
+    expect(s.errors).toEqual([
+      expect.objectContaining({ message: expect.stringMatching(/expired before it was sent/) }),
+    ])
+  })
 })
 
 describe('a named Taxi that fails the fill: refused before any attempt, kept after a submit', () => {

@@ -167,9 +167,9 @@ export interface ReceiveCarrierQuotes {
   reconcile: (row: AssetRfqSwapRow) => Promise<ReceiveCarrierReconcileOutcome>
 }
 
-/** How long before its receive quote expires a carrier fill must still be requestable, since the Taxi refuses a
- * swap fill on an expired one: two 3s sweeps to see the deposit and fund the row, three 5s-bounded Taxi round trips to
- * reach the swap-fill request, and 9s for clock skew against the Taxi. */
+/** Fill time kept between `valid_until`, the last moment a fill can be decided, and the receive quote's expiry, which
+ * the Taxi enforces through submit: four 5s-bounded round trips (settle's read, the swap-fill request, the post-sign
+ * read, the submit) and 10s for clock skew against the Taxi. */
 export const CARRIER_FILL_MARGIN_SECONDS = 30
 
 /** Settled through the carrier adapter rather than the generic spend. */
