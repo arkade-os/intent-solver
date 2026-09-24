@@ -62,7 +62,8 @@ export class CarrierConflictStalledError extends Error {
   }
 }
 
-/** The stored conflict was not accepted. Pins held; the next pass re-sends the same bytes and raises this again. */
+/** The stored conflict was not confirmed accepted: a refusal, or a failure after arkd may have taken it. Pins held;
+ * the next pass re-sends the same bytes, and an accepted one then shows as a duplicate or on chain. */
 export class CarrierConflictRejectedError extends Error {
   readonly txid: string
   constructor(label: string, txid: string, cause: unknown) {
@@ -119,6 +120,14 @@ const storedConflictOf = (
   })
   if (spends.join() !== pinned.map((coin) => outpointKey(coin.txid, coin.vout)).join()) {
     throw new Error(`${label} conflict spends ${spends.join()}, not the inputs it pinned`)
+  }
+  // Release reads only this transaction's txid:0, so it must be what spends every checkpoint above.
+  const links = Array.from({ length: arkTx.inputsLength }, (_, i) => {
+    const input = arkTx.getInput(i)
+    return outpointKey(input.txid === undefined ? '' : hex.encode(input.txid), input.index ?? -1)
+  })
+  if (links.join() !== checkpoints.map((tx) => outpointKey(tx.id, 0)).join()) {
+    throw new Error(`${label} conflict does not spend exactly its own checkpoints`)
   }
   const proceeds = stringOf(attempt.snapshot.proceeds_script, `${label} snapshot proceeds script`).toLowerCase()
   const paid = arkTx.getOutput(0)?.script

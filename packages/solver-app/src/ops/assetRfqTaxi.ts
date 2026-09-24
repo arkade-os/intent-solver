@@ -176,7 +176,7 @@ const verifiedQuoteFor = async (
     throw new Error(`carrier maker key ${request.makerPublicKey} is not an x-only public key`)
   }
   const assetId = assetIdValue(request.assetId)
-  const client = deps.clientFor(request.taxi?.url, request.admission === true ? 'quote' : 'fill')
+  const client = deps.clientFor(request.taxi?.url, request.admission ? 'quote' : 'fill')
   const [info, served] = await Promise.all([client.info(), client.getReceiveQuote(request.quoteId)])
   // Verification binds every other field but not the id, and `available` reads
   // this quote's floor without the orchestrator's own id check beside it.
@@ -215,7 +215,7 @@ const verifiedQuoteFor = async (
       minInputExpiryFloor,
     },
   })
-  // The covenant REBUILT from params, which commits to the receiver, the maker, the asset and the fare.
+  // The covenant REBUILT from params: receiver, maker and operator keys, asset, split and, receiver-paid, the fare.
   if (hex.encode(verified.script.pkScript) !== request.makerPkScript) {
     throw new Error(`carrier payout script ${request.makerPkScript} is not the verified quote's receive covenant`)
   }
@@ -319,9 +319,7 @@ export const createTaxiReceiveCarrierReader = (
       (tip === undefined ? BigInt(now) : BigInt(await tip())) + deps.trust.inputExpiryMargin + (admission ? slack : 0n),
   })
   const quoteFor = async (request: ReceiveCarrierQuoteRequest): Promise<ReceiveCarrierQuote> =>
-    carrierQuoteFrom(
-      await verifiedQuoteFor(deps, request, await anchoredFloor(request.now, request.admission === true)),
-    )
+    carrierQuoteFrom(await verifiedQuoteFor(deps, request, await anchoredFloor(request.now, request.admission)))
 
   return {
     resolve: quoteFor,

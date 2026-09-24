@@ -14,7 +14,7 @@ export interface TaxiUrlPolicy {
 
 const BODY_CAP_BYTES = 256 * 1024
 const TIMEOUT_MS = 5000
-const PRIVATE_SUFFIXES = ['.local', '.internal', '.home.arpa']
+const PRIVATE_SUFFIXES = ['.local', '.internal', '.home.arpa', '.localhost']
 
 const IPV4_LITERAL = /^\d{1,3}(\.\d{1,3}){3}$/
 
@@ -62,6 +62,8 @@ const isPrivate = (host: string): boolean => {
   if (bare.startsWith('[')) return isPrivateIPv6(bare.slice(1, -1))
   const octets = ipv4Octets(bare)
   if (octets && isPrivateIPv4(octets)) return true
+  // A dotless name only ever resolves inside a search domain or cluster DNS.
+  if (!bare.includes('.')) return true
   return PRIVATE_SUFFIXES.some((suffix) => bare.endsWith(suffix))
 }
 

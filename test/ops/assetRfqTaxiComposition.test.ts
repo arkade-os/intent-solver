@@ -206,6 +206,7 @@ describe('an unconfigured solver still composes the read half (G4)', () => {
     makerPublicKey: MAKER_KEY,
     assetId: ASSET,
     now: 2_000,
+    admission: false,
   })
 
   it('returns a reader, reading trust but touching no network', async () => {
@@ -244,6 +245,7 @@ describe('a configured solver is pointable by that URL alone', () => {
         makerPublicKey: MAKER_KEY,
         assetId: ASSET,
         now: 2_000,
+        admission: false,
       }),
     ).rejects.toThrow()
     expect(urls.sort()).toEqual(['http://taxi.example:7080/v1/info', 'http://taxi.example:7080/v1/receive-quotes/q-1'])

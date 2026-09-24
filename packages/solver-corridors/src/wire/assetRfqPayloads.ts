@@ -22,7 +22,8 @@
  * (§ 7.2's table: `makerWP` is "the client's witness program — `makerPkScript`
  * minus its 2-byte prefix", and `user` is the cancel path's signer). They come
  * from the client because they ARE the client — the covenant pins the fill's
- * output to that script, which is what makes the swap trustless for it.
+ * output to that script, which is what makes the swap trustless for it. On a
+ * carrier RFQ the script is the Taxi's receive covenant, which pays the payee.
  */
 
 import { z } from 'zod'

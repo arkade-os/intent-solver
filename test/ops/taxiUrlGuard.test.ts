@@ -57,6 +57,25 @@ describe('normalizeTaxiUrl', () => {
     expect(() => normalizeTaxiUrl('http://localhost', { isMainnet: false, allowPrivate: false })).toThrow(/private/)
   })
 
+  // Both resolve privately: `*.localhost` to loopback, a dotless name through a search domain or cluster DNS.
+  it.each([
+    ['a *.localhost name', 'http://taxi.localhost', 'http://taxi.localhost'],
+    ['a deeper *.localhost name', 'http://a.b.localhost.', 'http://a.b.localhost'],
+    ['a single-label service name', 'http://arkd:7070', 'http://arkd:7070'],
+    ['a single-label name with a root dot', 'http://taxi.', 'http://taxi'],
+  ])('refuses %s unless allowed', (_why, url, normalized) => {
+    expect(() => normalizeTaxiUrl(url, { isMainnet: false, allowPrivate: false })).toThrow(/private/)
+    expect(normalizeTaxiUrl(url, regtest)).toBe(normalized)
+  })
+
+  it('refuses a *.localhost name on mainnet too', () => {
+    expect(() => normalizeTaxiUrl('https://taxi.localhost', main)).toThrow(/private/)
+  })
+
+  it('still accepts a dotted public name that merely contains "localhost"', () => {
+    expect(normalizeTaxiUrl('https://localhost.example', main)).toBe('https://localhost.example')
+  })
+
   it('refuses an IPv6 loopback literal off mainnet unless allowed (rule 5)', () => {
     expect(() => normalizeTaxiUrl('https://[::1]', { isMainnet: false, allowPrivate: false })).toThrow(/private/)
   })

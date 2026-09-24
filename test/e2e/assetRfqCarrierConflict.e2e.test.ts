@@ -269,7 +269,7 @@ const cancelByConflict = async (coin: CarrierCoin) => {
 
 describe('e2e cancel-by-conflict against a real arkd', () => {
   it(
-    'spends a pinned sats coin back to the solver, and frees the pin only once txid:0 is indexed',
+    'spends a pinned sats coin back to the solver, and frees the pin on the pass after txid:0 is indexed',
     async () => {
       await cancelByConflict(await freshCoin())
     },

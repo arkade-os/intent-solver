@@ -283,6 +283,7 @@ const request = (over: Record<string, unknown> = {}) => ({
   makerPublicKey: hex.encode(MAKER_KEY),
   assetId: ASSET,
   now: 2_000,
+  admission: false,
   ...over,
 })
 
@@ -341,9 +342,23 @@ describe('resolving one receive-carrier quote', () => {
     )
   })
 
+  // The covenant does not commit to the payee's server or network, so this client check is the only guard on them.
+  it.each([
+    ['another Arkade server', new ArkAddress(key(9), PAYOUT_KEY, HRP).encode()],
+    ['another network', new ArkAddress(SERVER_KEY, PAYOUT_KEY, 'ark').encode()],
+  ])('refuses a quote whose payee address is on %s', async (_why, receiverAddress) => {
+    const { read } = reader({ quote: quoteFixture({ receiverAddress }) })
+    await expect(read.resolve(request())).rejects.toThrow(/receiver address is not trusted and canonical/)
+  })
+
+  it("refuses a self-consistent quote for another receiver against the payer's covenant", async () => {
+    const { read } = reader({ quote: quoteFixture({ receiverKey: key(7) }) })
+    await expect(read.resolve(request())).rejects.toThrow(/is not the verified quote's receive covenant/)
+  })
+
   it('refuses a quote for a different asset', async () => {
     const { read } = reader({ quote: quoteFixture({ assetId: `${'cc'.repeat(32)}0100` }) })
-    await expect(read.resolve(request())).rejects.toThrow()
+    await expect(read.resolve(request())).rejects.toThrow(/substituted the asset/)
   })
 
   it('refuses a fare above the ceiling this deployment authorised', async () => {

@@ -763,7 +763,7 @@ describe("a receiver-paid fill settles against the row's own Taxi", () => {
     for (const ask of h.resolves) {
       expect(ask).toMatchObject({ taxi: { url: RECEIVER_PAID.taxiUrl, operatorKey: KEY }, receiverPaid: true })
       // `admission` marks quote traffic; a fill's reads must spend the fill budget.
-      expect(ask).not.toHaveProperty('admission')
+      expect(ask).toMatchObject({ admission: false })
     }
     await h.store.close()
   })

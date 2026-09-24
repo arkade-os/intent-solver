@@ -136,8 +136,8 @@ export interface ReceiveCarrierQuoteRequest {
   now: number
   /** Quote ADMISSION rather than a fill. The fill re-anchors on a later clock
    * or tip, so a floor admitted with no room to spare refuses the client that
-   * funded it; only set here, never on the fill-time reads. */
-  admission?: boolean
+   * funded it. Required: it also picks which Taxi budget the read spends. */
+  admission: boolean
   /** Absent resolves against the configured Taxi, as today (Ruling 3). */
   taxi?: { url: string; operatorKey: string }
   /** Ruling 4, decoupled from `taxi`: opts the adapter into the SDK's own `payer: 'receiver'` check. */
@@ -836,6 +836,7 @@ export class AssetRfqSwapService {
       }
       try {
         available = await receiveCarrier.available({
+          admission: false,
           quoteId: carrierTerms.quoteId!,
           makerPkScript: row.makerPkScript,
           makerPublicKey: row.makerPublicKey,

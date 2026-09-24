@@ -1369,7 +1369,7 @@ describe('profile.carrier — receiver-paid mode', () => {
       taxi: { url: 'https://taxi.example', operatorKey: TAXI_KEY },
       receiverPaid: true,
     })
-    expect(asks.at(-1)).not.toHaveProperty('admission')
+    expect(asks.at(-1)).toMatchObject({ admission: false })
     expect((await store.get('swap-1')).state).toBe('filling')
   })
 
@@ -1505,6 +1505,7 @@ describe('profile.carrier — persisted settlement mode', () => {
         makerPublicKey: XONLY,
         assetId: ASSET_A,
         now: 1_010,
+        admission: false,
       },
     ])
     expect(balance).not.toHaveBeenCalled()

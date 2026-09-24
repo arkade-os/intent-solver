@@ -406,6 +406,23 @@ describe('the conflict spend', () => {
     expect(restarted.submitted).toEqual([])
   })
 
+  it('refuses stored bytes whose transaction does not spend exactly the stored checkpoints', async () => {
+    const h = await harness()
+    h.ark.submitError = new Error('connection reset')
+    await expect(h.cancel()).rejects.toThrow()
+    const recorded = await h.conflict()
+    // Self-consistent bytes: the fill's own transaction, hashing to the id recorded beside it.
+    const forged = { ...recorded, ark_tx: FILL.arkTx, txid: FILL.finalTxid }
+    const tampered = { ...(await h.attempt()) }
+    tampered.binding = { ...tampered.binding, conflict: forged }
+    const restarted = arkFake(h.log)
+
+    await expect(createCarrierConflictCanceller(h.depsWith(restarted))(ROW, tampered)).rejects.toThrow(
+      /does not spend exactly its own checkpoints/,
+    )
+    expect(restarted.submitted).toEqual([])
+  })
+
   it('never builds over an input the wallet no longer lists', async () => {
     const h = await harness({ inputs: [PIN_A, PIN_B] })
     h.wallet.coins = async () => [LIVE[0]!]
@@ -426,7 +443,9 @@ describe('the conflict spend', () => {
     h.wallet.coins = async () => [liveCoin(PIN_A, 2_000, undefined, 7)]
     const deps = { ...h.depsWith(h.ark), solverKeys: [SOLVER_KEY, xonly(7)] }
 
-    await expect(createCarrierConflictCanceller(deps)(ROW, await h.attempt())).rejects.toThrow()
+    await expect(createCarrierConflictCanceller(deps)(ROW, await h.attempt())).rejects.toThrow(
+      /No taproot scripts signed/,
+    )
     expect(h.log).toEqual([])
     expect((await h.attempt()).phase).toBe('submitting')
     expect((await h.attempt()).binding?.conflict).toBeUndefined()
@@ -478,6 +497,9 @@ describe('what releases the pin', () => {
     h.chain.spendPinned(recorded.checkpoint_txids[0]!)
 
     await expect(h.cancel()).resolves.toEqual({ status: 'pending' })
+    // Re-sent, not looked up as a pending copy: a shared checkpoint is not the conflict's acceptance.
+    expect(h.ark.submitted).toHaveLength(2)
+    expect(h.ark.intents).toEqual([])
     expect(h.pins.heldFor('swap-1')).toHaveLength(1)
     expect((await h.attempt()).phase).toBe('cancelling')
     expect((await h.store.get('swap-1')).state).toBe('filling')
@@ -552,6 +574,7 @@ describe('a restart between submitTx and finalizeTx', () => {
     const proof = restarted.intents[0]!.getInput(1)
     expect(restarted.intents[0]!.inputsLength).toBe(2)
     expect(key({ txid: hex.encode(proof.txid!), vout: proof.index! })).toBe(key(PIN_A))
+    for (let i = 0; i < 2; i++) expect(restarted.intents[0]!.getInput(i).tapScriptSig).toHaveLength(1)
     expect(h.pins.heldFor('swap-1')).toHaveLength(1)
     expect((await h.attempt()).phase).toBe('cancelling')
   })
