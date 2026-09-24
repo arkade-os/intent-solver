@@ -124,8 +124,8 @@ const RECYCLE: AssetRfqCarrierTerms = {
 const PIN_A: CarrierOutpoint = { txid: COIN_A, vout: 0 }
 const PIN_B: CarrierOutpoint = { txid: COIN_B, vout: 3 }
 
-const liveCoin = (pin: CarrierOutpoint, value: number, assets?: CarrierCoin['assets']): CarrierCoin => {
-  const s = vtxoScript(2)
+const liveCoin = (pin: CarrierOutpoint, value: number, assets?: CarrierCoin['assets'], seed = 2): CarrierCoin => {
+  const s = vtxoScript(seed)
   return {
     ...pin,
     value,
@@ -267,6 +267,7 @@ const harness = async (over: { inputs?: readonly CarrierOutpoint[]; quoteExpires
       },
       refuseCancelledCarrierAttempt: (id, expected, reason) =>
         store.refuseCancelledCarrierAttempt(id, expected, reason),
+      readCarrierAttempt: (id) => store.readCarrierAttempt(id),
     },
     chain: chain.reader,
     pins,
@@ -418,6 +419,26 @@ describe('the conflict spend', () => {
     await expect(h.cancel()).resolves.toEqual({ status: 'pending' })
     expect(h.log).toEqual([])
   })
+
+  it('throws before the cancelling CAS when the signer cannot sign every input, recording no conflict', async () => {
+    const h = await harness()
+    h.wallet.coins = async () => [liveCoin(PIN_A, 2_000, undefined, 7)]
+    const deps = { ...h.depsWith(h.ark), solverKeys: [SOLVER_KEY, xonly(7)] }
+
+    await expect(createCarrierConflictCanceller(deps)(ROW, await h.attempt())).rejects.toThrow()
+    expect(h.log).toEqual([])
+    expect((await h.attempt()).phase).toBe('submitting')
+    expect((await h.attempt()).binding?.conflict).toBeUndefined()
+  })
+
+  it('submits nothing, and pends, when it loses the cancelling CAS', async () => {
+    const h = await harness()
+    const deps = h.depsWith(h.ark)
+    const lost = { ...deps, store: { ...deps.store, cancelCarrierAttempt: async () => false } }
+
+    await expect(createCarrierConflictCanceller(lost)(ROW, await h.attempt())).resolves.toEqual({ status: 'pending' })
+    expect(h.ark.submitted).toEqual([])
+  })
 })
 
 describe('what releases the pin', () => {
@@ -454,11 +475,38 @@ describe('what releases the pin', () => {
     const recorded = await inFlight(h)
     expect(recorded.checkpoint_txids[0]).toBe(FILL.checkpointTxids[1])
     h.chain.spendPinned(recorded.checkpoint_txids[0]!)
-    h.chain.finalize(recorded.txid)
 
     await expect(h.cancel()).resolves.toEqual({ status: 'pending' })
     expect(h.pins.heldFor('swap-1')).toHaveLength(1)
     expect((await h.attempt()).phase).toBe('cancelling')
+    expect((await h.store.get('swap-1')).state).toBe('filling')
+  })
+
+  it("releases on the conflict's own txid:0, re-sending nothing, while spentBy names only the shared checkpoint", async () => {
+    const h = await harness()
+    const recorded = await inFlight(h)
+    h.chain.spendPinned(recorded.checkpoint_txids[0]!)
+    h.chain.finalize(recorded.txid)
+    const restarted = arkFake(h.log)
+
+    await expect(h.cancel(restarted)).resolves.toEqual({ status: 'pending' })
+    expect(restarted.submitted).toEqual([])
+    expect(restarted.intents).toEqual([])
+    expect(h.pins.heldFor('swap-1')).toHaveLength(0)
+    expect((await h.store.get('swap-1')).state).toBe('refused')
+    expect((await h.attempt()).phase).toBe('cancelled')
+  })
+
+  it("pends, never stuck, when the 'third' spender is a sibling's conflict that won the CAS", async () => {
+    const h = await harness()
+    const stale = await h.attempt()
+    const sibling = await inFlight(h)
+    h.chain.spendPinned(sibling.checkpoint_txids[0]!, sibling.txid)
+    const late = arkFake(h.log)
+
+    await expect(createCarrierConflictCanceller(h.depsWith(late))(ROW, stale)).resolves.toEqual({ status: 'pending' })
+    expect(late.submitted).toEqual([])
+    expect(h.pins.heldFor('swap-1')).toHaveLength(1)
     expect((await h.store.get('swap-1')).state).toBe('filling')
   })
 
@@ -537,6 +585,27 @@ describe('a restart between submitTx and finalizeTx', () => {
     restarted.submitError = new Error(`VTXO_ALREADY_SPENT: ${COIN_A}:0 already spent`)
 
     await expect(h.cancel(restarted)).rejects.toThrow(/already spent/)
+    expect(restarted.finalized).toEqual([])
+    expect(h.pins.heldFor('swap-1')).toHaveLength(1)
+    expect((await h.attempt()).phase).toBe('cancelling')
+  })
+
+  it('names every rejection arkd gives the stored conflict, on every pass, keeping every pin', async () => {
+    const h = await harness()
+    const recorded = await inFlight(h)
+    const restarted = arkFake(h.log)
+    const refusal = new Error('INVALID_VTXO_SCRIPT (7): exit delay is too short')
+    restarted.submitError = refusal
+
+    for (let pass = 0; pass < 2; pass += 1) {
+      await expect(h.cancel(restarted)).rejects.toMatchObject({
+        name: 'CarrierConflictRejectedError',
+        message: expect.stringContaining(`${recorded.txid}: ${refusal.message}`),
+        cause: refusal,
+      })
+    }
+    const sent = { arkTx: recorded.ark_tx, checkpoints: recorded.checkpoints }
+    expect(restarted.submitted).toEqual([sent, sent])
     expect(restarted.finalized).toEqual([])
     expect(h.pins.heldFor('swap-1')).toHaveLength(1)
     expect((await h.attempt()).phase).toBe('cancelling')

@@ -35,6 +35,7 @@ export const CARRIER_CONFLICT_AFTER_SECONDS = 900
 export interface CarrierConflictStore {
   cancelCarrierAttempt(id: string, expected: CarrierAttempt, next: CarrierAttempt): Promise<boolean>
   refuseCancelledCarrierAttempt(id: string, expected: CarrierAttempt, reason: string): Promise<boolean>
+  readCarrierAttempt(id: string): Promise<CarrierAttempt | null>
 }
 
 export type CarrierConflictArk = Pick<ArkProvider, 'submitTx' | 'finalizeTx' | 'getPendingTxs'>
@@ -58,6 +59,16 @@ export class CarrierConflictStalledError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'CarrierConflictStalledError'
+  }
+}
+
+/** The stored conflict was not accepted. Pins held; the next pass re-sends the same bytes and raises this again. */
+export class CarrierConflictRejectedError extends Error {
+  readonly txid: string
+  constructor(label: string, txid: string, cause: unknown) {
+    super(`${label}: conflict ${txid}: ${cause instanceof Error ? cause.message : String(cause)}`, { cause })
+    this.name = 'CarrierConflictRejectedError'
+    this.txid = txid
   }
 }
 
@@ -118,12 +129,9 @@ const storedConflictOf = (
 
 type Evidence = { kind: 'unspent' | 'fill' | 'conflict' } | { kind: 'stuck'; reason: string }
 
-/**
- * A checkpoint is a function of the coin, its leaf and the unroll script alone,
- * so the conflict's checkpoint over a pinned coin IS the fill's: only an id one
- * side does not share decides. `unspent` also covers "spent via a shared
- * checkpoint, by nobody named yet". Truthiness: the wire spells unspent as "".
- */
+/** An id counts only if one side alone produces it. The conflict's checkpoint over a pinned
+ * coin IS the fill's (same coin, leaf, unroll script), so in practice only its ark txid reads
+ * `conflict`; nothing here releases. Truthiness: the wire spells unspent as "". */
 const evidenceOf = async (
   chain: CarrierChainReader,
   pinned: readonly CarrierOutpoint[],
@@ -187,7 +195,11 @@ const buildConflict = async (
     'aggregate',
   )
   if (packet) attachEmulatorPackets(arkTx, [packet])
-  const signed = await deps.signer.sign(arkTx)
+  // Indexed: unindexed signing returns an input it cannot sign unsigned, and this is never rebuilt.
+  const signed = await deps.signer.sign(
+    arkTx,
+    spent.map((_, i) => i),
+  )
   const conflict: JsonObject = {
     txid: signed.id,
     ark_tx: base64.encode(signed.toPSBT()),
@@ -220,6 +232,7 @@ const finalizePending = async (deps: CarrierConflictDeps, conflict: StoredConfli
       message,
       conflict.checkpoints.map((tx) => tx.getInput(0)),
     ),
+    Array.from({ length: conflict.checkpoints.length + 1 }, (_, i) => i),
   )
   const held = await deps.ark().getPendingTxs({ proof: base64.encode(proof.toPSBT()), message })
   const pending = held.find((tx) => tx.arkTxid === conflict.txid)
@@ -238,7 +251,9 @@ const submitStored = async (deps: CarrierConflictDeps, conflict: StoredConflict,
   } catch (error) {
     // An identical resubmit of an accepted tx is refused by id, never re-accepted.
     const text = error instanceof Error ? error.message : String(error)
-    if (!text.includes(`duplicated offchain tx ${conflict.txid}`)) throw error
+    if (!text.includes(`duplicated offchain tx ${conflict.txid}`)) {
+      throw new CarrierConflictRejectedError(label, conflict.txid, error)
+    }
     return finalizePending(deps, conflict, label)
   }
   assertSubmittedArkTxid(submitted, conflict.arkTx, label)
@@ -246,6 +261,8 @@ const submitStored = async (deps: CarrierConflictDeps, conflict: StoredConflict,
   return PENDING
 }
 
+/** arkd indexes an offchain output only on finalize, and the outpoint lookup reads that store
+ * alone: any vtxo at txid:0 is the landed conflict (`isPreconfirmed` on it is normal). */
 const finalizedOnChain = async (chain: CarrierChainReader, conflict: StoredConflict): Promise<boolean> => {
   const { vtxos } = await chain.getVtxos({ outpoints: [{ txid: conflict.txid, vout: 0 }] })
   return vtxos.some((vtxo) => vtxo.txid === conflict.txid && vtxo.vout === 0)
@@ -262,7 +279,11 @@ export const createCarrierConflictCanceller =
     if (attempt.phase === 'submitting') {
       if (deps.now() <= conflictDeadline(attempt.snapshot, label)) return PENDING
       const seen = await evidenceOf(deps.chain, pinned, new Set(), fillIds)
-      if (seen.kind === 'stuck') return { status: 'stuck', reason: seen.reason }
+      if (seen.kind === 'stuck') {
+        // A sibling that won the cancelling CAS reads as foreign from this stale envelope.
+        const now = await deps.store.readCarrierAttempt(row.id)
+        return now?.phase === 'submitting' ? { status: 'stuck', reason: seen.reason } : PENDING
+      }
       if (seen.kind !== 'unspent') return PENDING
       const next = await buildConflict(deps, attempt, pinned, label)
       if (!(await deps.store.cancelCarrierAttempt(row.id, attempt, next))) return PENDING
@@ -271,14 +292,16 @@ export const createCarrierConflictCanceller =
     if (attempt.phase !== 'cancelling') throw new Error(`${label} is '${attempt.phase}', which has no conflict to make`)
 
     const conflict = storedConflictOf(attempt, pinned, label)
+    if (await finalizedOnChain(deps.chain, conflict)) {
+      const reason = `not filled: conflict ${conflict.txid} spent the inputs the fill needed`
+      if (await deps.store.refuseCancelledCarrierAttempt(row.id, attempt, reason)) {
+        for (const pin of deps.pins.heldFor(row.id)) pin.release()
+      }
+      return PENDING
+    }
     const seen = await evidenceOf(deps.chain, pinned, conflict.ids, fillIds)
     if (seen.kind === 'stuck') return { status: 'stuck', reason: seen.reason }
     if (seen.kind === 'unspent') return submitStored(deps, conflict, label)
     if (seen.kind === 'fill') return PENDING
-    if (!(await finalizedOnChain(deps.chain, conflict))) return finalizePending(deps, conflict, label)
-    const reason = `not filled: conflict ${conflict.txid} spent the inputs the fill needed`
-    if (await deps.store.refuseCancelledCarrierAttempt(row.id, attempt, reason)) {
-      for (const pin of deps.pins.heldFor(row.id)) pin.release()
-    }
-    return PENDING
+    return finalizePending(deps, conflict, label)
   }
