@@ -191,6 +191,9 @@ const carrierQuoteFrom = (from: { verified: VerifiedReceiveQuote; operatorKey: s
     serviceFareSats: verified.descriptor.serviceFareSats,
     taxiKey: operatorKey,
     inputExpiryFloor: locktimeOf(verified.quote.inputExpiryFloor, 'inputExpiryFloor'),
+    ...(verified.receiverFare === undefined
+      ? {}
+      : { receiverFare: { currency: verified.receiverFare.currency, units: verified.receiverFare.units } }),
     expiresAt: verified.descriptor.expiresAt,
   }
 }

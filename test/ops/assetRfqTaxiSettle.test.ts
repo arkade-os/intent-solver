@@ -807,6 +807,70 @@ describe("a receiver-paid fill settles against the row's own Taxi", () => {
   })
 })
 
+describe('a failure before any attempt is written ends the row refused, never stuck', () => {
+  const expectRefused = async (h: Harness, why: RegExp) => {
+    const row = await h.row()
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toMatch(why)
+    expect(await h.attempt()).toBeNull()
+    expect(h.requests).toEqual([])
+    expect(h.pins.held()).toEqual([])
+    expect(h.ledger.reserved().size).toBe(0)
+  }
+
+  it('refuses a row whose named Taxi the URL policy refuses', async () => {
+    const h = await receiverPaid({ terms: { ...RECEIVER_PAID, taxiUrl: 'https://taxi.internal' } })
+    await expect(h.settle(await h.row())).rejects.toBeInstanceOf(CarrierTaxiRefusedError)
+    await expectRefused(h, /^not filled: carrier fill swap-1 names Taxi https:\/\/taxi\.internal/)
+    await h.store.close()
+  })
+
+  it.each([
+    ['cannot be reached', 'fetch failed'],
+    ['refuses the read', 'taxi: service is not ready'],
+    ['serves a quote that does not verify', 'taxi: receive covenant address does not match its terms'],
+  ])('refuses a row whose named Taxi %s at the fill-time read', async (_why, message) => {
+    const failure = new Error(message)
+    const h = await receiverPaid({
+      deps: {
+        resolve: async () => {
+          throw failure
+        },
+      },
+    })
+    await expect(h.settle(await h.row())).rejects.toBe(failure)
+    await expectRefused(h, new RegExp(`^not filled: ${message}$`))
+    await h.store.close()
+  })
+
+  it('refuses a row whose inventory no longer covers it', async () => {
+    const h = await receiverPaid({ coins: [] })
+    await expect(h.settle(await h.row())).rejects.toThrow(/inventory holds 0/)
+    await expectRefused(h, /inventory holds 0/)
+    await h.store.close()
+  })
+
+  it('refuses a row whose attempt write threw before landing, freeing the pin it took', async () => {
+    const store = await openStore({ terms: RECEIVER_PAID })
+    const h = await receiverPaid({
+      deps: {
+        store: Object.assign(Object.create(store) as typeof store, {
+          prepareCarrierAttempt: async () => {
+            throw new Error('database is locked')
+          },
+        }),
+      },
+    })
+    await expect(h.settle(await store.get('swap-1'))).rejects.toThrow(/database is locked/)
+    expect((await store.get('swap-1')).state).toBe('refused')
+    expect(await store.readCarrierAttempt('swap-1')).toBeNull()
+    expect(h.pins.held()).toEqual([])
+    expect(h.ledger.reserved().size).toBe(0)
+    await store.close()
+    await h.store.close()
+  })
+})
+
 describe("a Taxi's not_ready is answered with the same bytes again, never with a release", () => {
   const notReady = () =>
     new Response(JSON.stringify({ code: 'not_ready', error: 'runtime_checking' }), {

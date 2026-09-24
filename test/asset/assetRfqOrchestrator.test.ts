@@ -1282,6 +1282,25 @@ describe('profile.carrier — receiver-paid mode', () => {
     })
   })
 
+  it.each([
+    ['refuses an asset fare equal to', { currency: 'asset', units: 1_000_000n }, false],
+    ['admits an asset fare one under', { currency: 'asset', units: 999_999n }, true],
+    ['admits a sats fare above', { currency: 'sats', units: 2_000_000n }, true],
+  ] as const)('%s the delivered amount, at quote time', async (_why, receiverFare, accepted) => {
+    const { service, store } = await harness({ receiveCarrierQuotes: receiverPaidAdapter({ receiverFare }) })
+    const outcome = await service.quote(request({ amount: 1_000_000n, amountSide: 'to', carrier: receiverPaid() }))
+    if (accepted) {
+      expect(outcome).toMatchObject({ accepted: true, swap: { toAmount: 1_000_000n } })
+      return
+    }
+    expect(outcome).toMatchObject({
+      accepted: false,
+      reason: 'price_unavailable',
+      detail: 'the receiver fare of 1000000 asset units is not smaller than the 1000000 delivered',
+    })
+    expect(await store.listNonTerminal()).toHaveLength(0)
+  })
+
   it('still charges receipt plus fare on an ordinary recycle', async () => {
     const { service } = await harness({ receiveCarrierQuotes: adapter({ serviceFareSats: 5n }) })
     const outcome = await service.quote(request({ carrier: { mode: 'recycle', quoteId: 'q-1' } }))

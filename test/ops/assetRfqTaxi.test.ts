@@ -515,6 +515,15 @@ describe('a recycle_receiver RFQ through the real reader (Ruling 4)', () => {
   /** The whole dust as loan, no receipt, no fare. */
   const receiverPaidQuote = () => quoteFixture({ topup: DUST, fareUnits: '0', payer: 'receiver' })
 
+  it('carries the verified receiver fare, so the orchestrator can weigh it against the delivery', async () => {
+    const { read } = reader({ quote: receiverPaidQuote(), info: infoFixture({ fareUnits: '0' }) })
+    const quote = await read.resolve(
+      request({ makerPkScript: covenantScriptOf(receiverPaidQuote()), receiverPaid: true }),
+    )
+    expect(quote.receiverFare).toEqual({ currency: 'sats', units: 0n })
+    expect(await reader().read.resolve(request())).not.toHaveProperty('receiverFare')
+  })
+
   it('accepts a receiver-paid quote, priced at zero with carrier_sats absent', async () => {
     const { read } = reader({
       quote: receiverPaidQuote(),

@@ -570,6 +570,45 @@ describe('the never-submitted terminal — the only filling -> refused there is'
   })
 })
 
+describe('the unattempted terminal — filling -> refused while no attempt was ever written', () => {
+  it('refuses a filling carrier row with no attempt, and fences off a late prepare', async () => {
+    const store = await open()
+    const id = await rowIn(store, 'filling')
+    clock = 9_000
+
+    expect(await store.refuseUnattemptedCarrierFill(id, 'not filled: taxi unreachable')).toBe(true)
+    expect(await store.get(id)).toMatchObject({
+      state: 'refused',
+      failureReason: 'not filled: taxi unreachable',
+      updatedAt: 9_000,
+    })
+    expect(await store.readCarrierAttempt(id)).toBeNull()
+    expect((await store.history(id)).map((e) => e.to)).toEqual(['quoted', 'funded', 'filling', 'refused'])
+    expect(await store.prepareCarrierAttempt(id, SNAPSHOT)).toBe(false)
+  })
+
+  it.each(['prepared', 'quoted', 'submitting', 'settled'] as const)('leaves a row with a %s attempt', async (phase) => {
+    const store = await open()
+    const id = await attemptAt(store, phase)
+    expect(await store.refuseUnattemptedCarrierFill(id, 'not filled')).toBe(false)
+    expect((await store.get(id)).state).toBe('filling')
+    expect((await store.readCarrierAttempt(id))?.phase).toBe(phase)
+  })
+
+  it('leaves a row that is not filling, or not a carrier fill', async () => {
+    const store = await open()
+    const stuck = await rowIn(store, 'stuck')
+    expect(await store.refuseUnattemptedCarrierFill(stuck, 'not filled')).toBe(false)
+    const legacy = await rowIn(store, 'filling', { ...other(2), carrierTerms: undefined })
+    expect(await store.refuseUnattemptedCarrierFill(legacy, 'not filled')).toBe(false)
+    const purchase = await rowIn(store, 'filling', { ...other(3), carrierTerms: PURCHASE })
+    expect(await store.refuseUnattemptedCarrierFill(purchase, 'not filled')).toBe(false)
+    expect((await store.get(stuck)).state).toBe('stuck')
+    expect((await store.get(legacy)).state).toBe('filling')
+    expect((await store.get(purchase)).state).toBe('filling')
+  })
+})
+
 describe('cancel-by-conflict — the conflict spend recorded before it is sent', () => {
   it('accepts the two new phases through the codec', () => {
     for (const phase of ['cancelling', 'cancelled'] as const)

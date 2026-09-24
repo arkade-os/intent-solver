@@ -313,12 +313,18 @@ afterEach(async () => {
   for (const close of open.splice(0)) await close()
 })
 
-const startTaxi = async (
-  id: TaxiIdentity,
-  options: { notReady?: boolean; afterBind?: AfterBind } = {},
-): Promise<StubTaxi> => {
+interface StubOptions {
+  notReady?: boolean
+  afterBind?: AfterBind
+  /** From this read of `q-1` on, the Taxi is unreachable, refuses, or serves a quote that fails verification. */
+  failReadsFrom?: { read: number; how: 'unreachable' | 'refusing' | 'hostile' }
+  submitFails?: boolean
+}
+
+const startTaxi = async (id: TaxiIdentity, options: StubOptions = {}): Promise<StubTaxi> => {
   const stub: Omit<StubTaxi, 'url'> = { requests: [], swapFills: [] }
   const bound = new Map<string, string>()
+  let reads = 0
   const served = (payer: Payer) => {
     const boundFillId = bound.get(QUOTE_ID[payer])
     if (boundFillId === undefined) return receiveQuoteWire(id, payer)
@@ -335,6 +341,12 @@ const startTaxi = async (
     }
     const operator = bound.size > 0 ? (options.afterBind?.operator ?? id.operator) : id.operator
     if (route === 'GET /v1/info') return reply(200, infoWire({ ...id, operator }))
+    const fail = options.failReadsFrom
+    if (route === 'GET /v1/receive-quotes/q-1' && fail !== undefined && ++reads >= fail.read) {
+      if (fail.how === 'unreachable') return void request.socket.destroy()
+      if (fail.how === 'refusing') return reply(503, { error: 'service is not ready', code: 'not_ready' })
+      return reply(200, { ...served('receiver'), covenantAddress: receiveQuoteWire(id, 'sender').covenantAddress })
+    }
     if (route === 'GET /v1/receive-quotes/q-1') return reply(200, served('receiver'))
     if (route === 'GET /v1/receive-quotes/q-2') return reply(200, served('sender'))
     if (route === 'POST /v1/swap-fills') {
@@ -353,6 +365,7 @@ const startTaxi = async (
       return reply(200, swapFillQuoteWire(fill, hex.encode(ArkAddress.decode(quote.covenantAddress).pkScript)))
     }
     if (route === `POST /v1/swap-fills/${FILL_ID}/submit`) {
+      if (options.submitFails) return reply(500, { error: 'internal error', code: 'internal' })
       const fill = stub.swapFills.at(-1)!
       return reply(200, {
         fillId: FILL_ID,
@@ -617,6 +630,40 @@ describe('a fill through a Taxi that binds its receive quote when it quotes the 
       expect(s.errors).toEqual([expect.objectContaining({ message: expect.stringMatching(why) })])
     },
   )
+})
+
+describe('a named Taxi that fails the fill: refused before any attempt, kept after a submit', () => {
+  // Quote time reads `q-1` twice and the funded row's inventory once, so the settle's own read is the fourth.
+  it.each(['unreachable', 'refusing', 'hostile'] as const)(
+    'refuses the row, never escalating it, when the Taxi is %s at the settle',
+    async (how) => {
+      const taxi = await startTaxi({ operator: OPERATOR, server: SERVER }, { failReadsFrom: { read: 4, how } })
+      const s = await solver()
+
+      const row = await quoteAndFill(s, rfq(taxi, OPERATOR))
+      await s.corridor.tickAll()
+      expect(taxi.swapFills).toEqual([])
+      expect(await s.store.readCarrierAttempt(row.id)).toBeNull()
+      expect(await s.store.get(row.id)).toMatchObject({
+        state: 'refused',
+        failureReason: expect.stringMatching(/^not filled: /),
+      })
+      expect(s.pins.held()).toEqual([])
+      expect([...s.ledger.reserved()]).toEqual([])
+    },
+  )
+
+  it('keeps the row and its pins when the submit itself fails', async () => {
+    const taxi = await startTaxi({ operator: OPERATOR, server: SERVER }, { submitFails: true })
+    const s = await solver()
+
+    const row = await quoteAndFill(s, rfq(taxi, OPERATOR))
+    await s.corridor.tickAll()
+    expect(taxi.requests.filter((route) => route === submitRoute)).toHaveLength(1)
+    expect(await s.store.readCarrierAttempt(row.id)).toMatchObject({ phase: 'submitting' })
+    expect((await s.store.get(row.id)).state).toBe('filling')
+    expect(s.pins.held()).toEqual([row.id])
+  })
 })
 
 const startArkd = async (): Promise<string> => {

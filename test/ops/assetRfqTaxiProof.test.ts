@@ -788,15 +788,19 @@ describe('the observer never releases a reservation it cannot prove idle', () =>
     expect(chain.asked).toEqual([])
   })
 
-  it('escalates a row whose attempt was never written, and frees nothing', async () => {
+  it('refuses a row whose attempt was never written, and frees nothing', async () => {
     const store = await openStore()
     const pins = createCarrierPinLedger()
     const ledger = createReservationLedger()
     pins.adopt('swap-1', ledger.reserve([{ txid: COIN_A, vout: 0 }]))
     const { reconcile } = createTaxiReceiveCarrierObserver({ store, chain: chainOf(), pins })
 
-    await expect(reconcile(rowOf())).resolves.toMatchObject({ status: 'stuck' })
-    // Nothing here is proof a reservation may go.
+    await expect(reconcile(rowOf())).resolves.toEqual({ status: 'pending' })
+    expect(await store.get('swap-1')).toMatchObject({
+      state: 'refused',
+      failureReason: 'not filled: receive-carrier settlement stopped before preparing an attempt',
+    })
+    // The pin is an in-flight settle's, which its own lost prepare frees.
     expect([...ledger.reserved()]).toEqual([`${COIN_A}:0`])
   })
 })

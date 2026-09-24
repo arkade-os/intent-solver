@@ -24,6 +24,7 @@ import type { CarrierAttempt, JsonObject } from '@arkade-os/solver-corridors/db/
 import {
   receiveCarrierTaxiOf,
   type ReceiveCarrierQuotes,
+  type ReceiveCarrierSettleOutcome,
 } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
   assetIdValue,
@@ -60,6 +61,7 @@ export interface CarrierAttemptStore {
   bindCarrierAttempt(id: string, expected: CarrierAttempt, binding: JsonObject): Promise<boolean>
   markCarrierAttemptSubmitting(id: string, expected: CarrierAttempt): Promise<boolean>
   refuseNeverSubmittedCarrierAttempt(id: string, expected: CarrierAttempt, reason: string): Promise<boolean>
+  refuseUnattemptedCarrierFill(id: string, reason: string): Promise<boolean>
 }
 
 export interface CarrierFillRebuildRequest {
@@ -229,8 +231,8 @@ export const carrierFillSigner =
     })
   }
 
-export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pick<ReceiveCarrierQuotes, 'settle'> => ({
-  settle: async (row) => {
+export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pick<ReceiveCarrierQuotes, 'settle'> => {
+  const settleOnce = async (row: AssetRfqSwapRow): Promise<ReceiveCarrierSettleOutcome> => {
     const terms = row.carrierTerms
     if ((terms?.mode !== 'recycle' && terms?.mode !== 'recycle_receiver') || terms.quoteId === undefined) {
       throw new Error(`asset rfq swap ${row.id} is not a recycle, so it has no carrier fill to settle`)
@@ -401,8 +403,19 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       throw error
     }
     return { status: 'submitted' }
-  },
-})
+  }
+  return {
+    settle: async (row) => {
+      try {
+        return await settleOnce(row)
+      } catch (error) {
+        // Refuses only a row still holding no attempt; one this cannot write is left to reconciliation's own.
+        await deps.store.refuseUnattemptedCarrierFill(row.id, `not filled: ${messageOf(error)}`).catch(() => false)
+        throw error
+      }
+    },
+  }
+}
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 

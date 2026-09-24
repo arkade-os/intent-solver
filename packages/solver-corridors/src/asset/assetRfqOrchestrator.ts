@@ -122,6 +122,8 @@ export interface ReceiveCarrierQuote {
   taxiKey?: string
   /** Immutable Bitcoin locktime domain and minimum expiry for eligible inputs. */
   inputExpiryFloor: Readonly<{ kind: 'height' | 'time'; value: bigint }>
+  /** Receiver-paid only: what the payee pays the Taxi at claim; an asset fare comes out of the delivery. */
+  receiverFare?: Readonly<{ currency: 'sats' | 'asset'; units: bigint }>
   /** Unix seconds. Read against `now`, so a stale quote cannot be priced. */
   expiresAt: number
 }
@@ -343,6 +345,7 @@ export class AssetRfqSwapService {
         terms: AssetRfqCarrierTerms | undefined
         priceTerm: bigint
         publishedSats: bigint
+        receiverFare?: ReceiveCarrierQuote['receiverFare']
       }
     | { ok: false; reason: AssetRfqQuoteRefusal; detail: string }
   > {
@@ -439,6 +442,7 @@ export class AssetRfqSwapService {
         },
         priceTerm: 0n,
         publishedSats: 0n,
+        receiverFare: quote.receiverFare,
       }
     }
 
@@ -598,7 +602,7 @@ export class AssetRfqSwapService {
     // through to a free market carrier.
     const resolvedCarrier = await this.resolveCarrier({ carrier, market, pair, request, now })
     if (!resolvedCarrier.ok) return { accepted: false, reason: resolvedCarrier.reason, detail: resolvedCarrier.detail }
-    const { terms, priceTerm, publishedSats } = resolvedCarrier
+    const { terms, priceTerm, publishedSats, receiverFare } = resolvedCarrier
 
     let feed: Price
     try {
@@ -619,6 +623,14 @@ export class AssetRfqSwapService {
       dustSats: this.deps.dustSats,
     })
     if (!resolved.ok) return { accepted: false, reason: resolved.reason }
+    // The Taxi's own swap-fill rule (`fare_exceeds_delivery`), refused here before a payer funds what it would refuse.
+    if (receiverFare?.currency === 'asset' && receiverFare.units >= resolved.toAmount) {
+      return {
+        accepted: false,
+        reason: 'price_unavailable',
+        detail: `the receiver fare of ${receiverFare.units} asset units is not smaller than the ${resolved.toAmount} delivered`,
+      }
+    }
 
     // § 9 permits a quote-time pre-check and does not accept it as sufficient —
     // `tick` runs the same gate again immediately before spending. Quoting a

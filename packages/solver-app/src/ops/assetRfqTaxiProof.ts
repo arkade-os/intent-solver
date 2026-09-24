@@ -47,6 +47,7 @@ export interface CarrierProofStore {
   readCarrierAttempt(id: string): Promise<CarrierAttempt | null>
   settleCarrierAttempt(id: string, expected: CarrierAttempt, fillTxid: string): Promise<boolean>
   refuseNeverSubmittedCarrierAttempt(id: string, expected: CarrierAttempt, reason: string): Promise<boolean>
+  refuseUnattemptedCarrierFill(id: string, reason: string): Promise<boolean>
 }
 
 export interface TaxiCarrierProofDeps {
@@ -283,12 +284,14 @@ const observeWith =
   (deps: TaxiCarrierProofDeps, raised: Set<string>) =>
   async (row: AssetRfqSwapRow): Promise<ReceiveCarrierReconcileOutcome> => {
     const attempt = await deps.store.readCarrierAttempt(row.id)
-    // The write that precedes the first POST never landed, so there is nothing
-    // to observe and nothing that ever will be. NOT a refusal and NOT a release:
-    // a null attempt also spells a settle short of its first checkpoint, which
-    // escalating fences off anyway — every attempt write CASes on `filling`.
+    // The write that precedes the first POST never landed, so nothing was sent
+    // and nothing ever will be. Refused but NOT released: a null attempt also
+    // spells a settle short of its first checkpoint, whose pin its own lost
+    // prepare frees — every attempt write CASes on `filling`.
     if (attempt === null) {
-      return { status: 'stuck', reason: 'receive-carrier settlement stopped before preparing an attempt' }
+      const reason = 'not filled: receive-carrier settlement stopped before preparing an attempt'
+      await deps.store.refuseUnattemptedCarrierFill(row.id, reason)
+      return { status: 'pending' }
     }
     if (attempt.phase === 'settled') {
       const txid = attempt.fillTxid

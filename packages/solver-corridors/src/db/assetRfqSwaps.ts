@@ -804,7 +804,24 @@ export class AssetRfqSwapStore {
   }
 
   /**
-   * One of the two `filling` -> `refused` moves this lifecycle has, neither an edge:
+   * `filling` -> `refused` for a carrier fill that never wrote an attempt: that write precedes every request naming a
+   * coin, so its absence is durable proof nothing was sent. The predicate fences off a prepare racing it.
+   */
+  async refuseUnattemptedCarrierFill(id: string, reason: string): Promise<boolean> {
+    const terms = (await this.get(id)).carrierTerms
+    if (terms?.mode !== 'recycle' && terms?.mode !== 'recycle_receiver') return false
+    const result = await this.driver.run(
+      `UPDATE asset_rfq_swap SET state = 'refused', failure_reason = ?, updated_at = ?
+         WHERE id = ? AND state = 'filling' AND carrier_attempt IS NULL`,
+      [reason, this.now(), id],
+    )
+    if (result.changes !== 1) return false
+    await this.recordEvent(id, 'filling', 'refused', null)
+    return true
+  }
+
+  /**
+   * One of the `filling` -> `refused` moves this lifecycle has, none an edge:
    * `LEGAL_EDGES` still forbids the generic move, because a row that MAY have
    * submitted keeps its liability and ends `stuck`.
    *

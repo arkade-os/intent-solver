@@ -316,6 +316,7 @@ const wrapStore = (store: AssetRfqSwapStore) => ({
     store.settleCarrierAttempt(id, expected, txid),
   refuseNeverSubmittedCarrierAttempt: (id: string, expected: CarrierAttempt, reason: string) =>
     store.refuseNeverSubmittedCarrierAttempt(id, expected, reason),
+  refuseUnattemptedCarrierFill: (id: string, reason: string) => store.refuseUnattemptedCarrierFill(id, reason),
 })
 
 /** One due pass: the attempt is `cancelling`, its conflict submitted and finalized. */
