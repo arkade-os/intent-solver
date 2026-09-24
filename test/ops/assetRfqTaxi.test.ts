@@ -20,6 +20,7 @@ import { hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { ArkAddress, asset } from '@arkade-os/sdk'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import { assetRfqQuotePayload } from '@arkade-os/solver-corridors/wire/assetRfqPayloads.js'
 import {
   AssetRfqSwapService,
   type AssetRfqDeps,
@@ -110,6 +111,10 @@ const quoteFixture = (
     covenantAddress?: string
     expiresAt?: number
     quoteId?: string
+    /** The returnable loan, in sats. `DUST` makes the whole dust a loan. */
+    topup?: bigint
+    /** Opt-in per the SDK wire shape: present only when asked for. */
+    payer?: 'receiver'
   } = {},
 ): Record<string, unknown> => {
   const domain = over.domain ?? 'height'
@@ -117,9 +122,12 @@ const quoteFixture = (
   const floor = over.floor ?? FLOOR
   const batch = over.batch ?? BATCH
   const id = over.assetId ?? ASSET
+  const topup = over.topup ?? DUST - VTXO_MIN
   const wire = assetWire(id)
   const parsed = asset.AssetId.fromString(id)
   const tagged = (value: bigint): Tagged => ({ kind: domain, value: String(value) })
+  // Covenant-bound, so the address commits to it, unlike `params.fare`.
+  const receiverFare = over.payer ? { currency: 'sats' as const, units: 0n } : undefined
   const covenant = new DustCovenantScript({
     serverKey: SERVER_KEY,
     emulatorKey: EMULATOR_KEY,
@@ -129,11 +137,12 @@ const quoteFixture = (
       senderKey: MAKER_KEY,
       operatorKey: OPERATOR_KEY,
       dust: DUST,
-      topup: DUST - VTXO_MIN,
+      topup,
       assetId: { txid: Uint8Array.from(parsed.txid).reverse(), groupIndex: parsed.groupIndex },
       locktime: recovery,
       recoveryRecipient: 'receiver',
       claimMode: 'recycle',
+      ...(receiverFare ? { receiverFare } : {}),
     },
   })
   return {
@@ -146,14 +155,19 @@ const quoteFixture = (
       senderKey: hex.encode(MAKER_KEY),
       operatorKey: hex.encode(OPERATOR_KEY),
       dust: String(DUST),
-      topup: String(DUST - VTXO_MIN),
+      topup: String(topup),
       assetId: wire,
       locktime: String(recovery),
       recoveryRecipient: 'receiver',
       claimMode: 'recycle',
+      ...(receiverFare ? { receiverFare: { currency: 'sats', units: '0' } } : {}),
     },
     covenantAddress: over.covenantAddress ?? covenant.address(HRP, SERVER_KEY).encode(),
     fare: { currency: 'sats', units: over.fareUnits ?? '4' },
+    // The wire decoder requires these three together, or none.
+    ...(over.payer
+      ? { payer: over.payer, receiverFare: { currency: 'sats', units: '0' }, unclaimedMode: 'reclaim' }
+      : {}),
     batchExpiry: tagged(batch),
     inputExpiryFloor: tagged(floor),
     recoveryLocktime: tagged(recovery),
@@ -163,7 +177,7 @@ const quoteFixture = (
 }
 
 const infoFixture = (
-  over: { serverKey?: Uint8Array; emulatorKey?: Uint8Array; assetId?: string } = {},
+  over: { serverKey?: Uint8Array; emulatorKey?: Uint8Array; assetId?: string; fareUnits?: string } = {},
 ): Record<string, unknown> => ({
   protocolVersion: 1,
   operatorKey: hex.encode(OPERATOR_KEY),
@@ -179,7 +193,7 @@ const infoFixture = (
       enabled: true,
       claim: 'either',
       maxTopupSats: null,
-      fares: [{ id: 'flat', currency: 'sats', pricing: { kind: 'flat', units: '4' } }],
+      fares: [{ id: 'flat', currency: 'sats', pricing: { kind: 'flat', units: over.fareUnits ?? '4' } }],
     },
   ],
   maxPerPaymentTopupSats: '10000',
@@ -254,6 +268,7 @@ describe('resolving one receive-carrier quote', () => {
       loanSats: 329n,
       receiptSats: 1n,
       serviceFareSats: 4n,
+      taxiKey: hex.encode(OPERATOR_KEY),
       inputExpiryFloor: { kind: 'height', value: FLOOR },
       expiresAt: 5_000,
     })
@@ -371,6 +386,115 @@ describe('a request-named Taxi (Ruling 3)', () => {
   it('verifies against the running context, never the named Taxi', async () => {
     const { read } = reader({ info: infoFixture({ serverKey: key(9) }) })
     await expect(read.resolve(request({ taxi: NAMED }))).rejects.toThrow(/untrusted server/)
+  })
+})
+
+/** Ruling 4: `taxiKey` is the VERIFIED `info.operatorKey`, never copied off the request. */
+describe('the resolved quote carries the verified operator key (Ruling 4)', () => {
+  it('sets taxiKey from info for a request-named Taxi', async () => {
+    const { read } = reader()
+    const quote = await read.resolve(
+      request({ taxi: { url: 'https://other.example', operatorKey: hex.encode(OPERATOR_KEY) } }),
+    )
+    expect(quote.taxiKey).toBe(hex.encode(OPERATOR_KEY))
+  })
+
+  // Catches a "copied off the request" bug: no `request.taxi` here at all.
+  it('sets taxiKey from info even when the request names no Taxi', async () => {
+    const { read } = reader()
+    const quote = await read.resolve(request())
+    expect(quote.taxiKey).toBe(hex.encode(OPERATOR_KEY))
+  })
+})
+
+/** Ruling 4 end to end: the REAL reader through `AssetRfqSwapService.quote()`. */
+describe('a recycle_receiver RFQ through the real reader (Ruling 4)', () => {
+  const harness = async (read: Pick<ReceiveCarrierQuotes, 'resolve' | 'available'>) => {
+    const store = await AssetRfqSwapStore.open(':memory:')
+    const deps: AssetRfqDeps = {
+      store,
+      markets: [
+        {
+          base: null,
+          quote: ASSET,
+          symbol: 'USDA',
+          baseDecimals: 8,
+          quoteDecimals: 6,
+          feeBps: 50,
+          sellBase: { min: 1n, max: 10n ** 24n },
+          buyBase: { min: 1n, max: 10n ** 24n },
+          feedUrl: 'https://feed.example/btc',
+          pricePath: 'price',
+          carrierSats: 0n,
+        },
+      ],
+      solverPubkey: 'e'.repeat(64),
+      quoteValiditySeconds: VALIDITY_SECONDS,
+      dustSats: DUST,
+      // The fixture's own clock scale, matching `request()`'s default `now`.
+      now: () => 2_000,
+      fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
+      deriveOffer: () => ({ pkScript: `5120${'d'.repeat(64)}`, address: 'ark1qoffer' }),
+      depositAt: async () => null,
+      balance: async () => new Map([[ASSET, 10n ** 18n]]),
+      settle: async () => 'fa'.repeat(32),
+      newId: () => 'swap-1',
+      // COMPLETE: a half-adapter is refused before it prices anything (above).
+      receiveCarrierQuotes: {
+        ...read,
+        settle: async () => {
+          throw new Error('not exercised by a quote-only test')
+        },
+        reconcile: async () => {
+          throw new Error('not exercised by a quote-only test')
+        },
+      },
+    }
+    return new AssetRfqSwapService(deps)
+  }
+
+  const rfqRequest = (over: Record<string, unknown> = {}) => ({
+    rfqId: 'a'.repeat(64),
+    pair: `arkade:BTC->arkade:${ASSET}`,
+    amount: 100_000_000n,
+    amountSide: 'from' as const,
+    makerPkScript: MAKER_PK_SCRIPT,
+    makerPublicKey: hex.encode(MAKER_KEY),
+    carrier: {
+      mode: 'recycle_receiver' as const,
+      quoteId: 'q-1',
+      taxiUrl: 'https://taxi.example',
+      taxiKey: hex.encode(OPERATOR_KEY),
+    },
+    ...over,
+  })
+
+  /** The whole dust as loan, no receipt, no fare. */
+  const receiverPaidQuote = () => quoteFixture({ topup: DUST, fareUnits: '0', payer: 'receiver' })
+
+  it('accepts a receiver-paid quote, priced at zero with carrier_sats absent', async () => {
+    const { read } = reader({ quote: receiverPaidQuote(), info: infoFixture({ fareUnits: '0' }) })
+    const service = await harness(read)
+    const outcome = await service.quote(rfqRequest())
+    expect(outcome).toMatchObject({ accepted: true, carrierSats: 0n })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    expect(assetRfqQuotePayload(outcome.swap, 'a'.repeat(64), outcome.carrierSats)).not.toHaveProperty('carrier_sats')
+  })
+
+  it('refuses a request naming a taxi key the Taxi does not answer to', async () => {
+    const { read } = reader()
+    const service = await harness(read)
+    const outcome = await service.quote(
+      rfqRequest({
+        carrier: {
+          mode: 'recycle_receiver',
+          quoteId: 'q-1',
+          taxiUrl: 'https://taxi.example',
+          taxiKey: hex.encode(key(9)),
+        },
+      }),
+    )
+    expect(outcome).toMatchObject({ accepted: false, reason: 'price_unavailable' })
   })
 })
 

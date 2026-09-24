@@ -116,7 +116,7 @@ const verifiedQuoteFor = async (
   deps: TaxiReceiveCarrierDeps,
   request: ReceiveCarrierQuoteRequest,
   minInputExpiryFloor: { kind: 'height' | 'time'; value: bigint },
-): Promise<VerifiedReceiveQuote> => {
+): Promise<{ verified: VerifiedReceiveQuote; operatorKey: string }> => {
   const receiverAddress = payoutAddressOf(request.makerPkScript, deps.trust)
   if (!XONLY_HEX.test(request.makerPublicKey)) {
     throw new Error(`carrier maker key ${request.makerPublicKey} is not an x-only public key`)
@@ -128,13 +128,14 @@ const verifiedQuoteFor = async (
   // this quote's floor without the orchestrator's own id check beside it.
   if (quote.quoteId !== request.quoteId)
     throw new Error(`carrier quote ${request.quoteId} answered as ${quote.quoteId}`)
+  const operatorKey = info.operatorKey.toLowerCase()
   // The ONLY identity read off a request-named Taxi. `deps.trust` below is
   // shared and singular regardless — see the module comment on `TaxiCarrierTrust`.
-  if (request.taxi && info.operatorKey.toLowerCase() !== request.taxi.operatorKey.toLowerCase()) {
+  if (request.taxi && operatorKey !== request.taxi.operatorKey.toLowerCase()) {
     throw new Error('carrier quote operator key differs from the one the request named')
   }
   const floor = locktimeOf(quote.inputExpiryFloor, 'inputExpiryFloor')
-  return verifyReceiveQuote({
+  const verified = await verifyReceiveQuote({
     quote,
     info,
     trustedServerKey: deps.trust.serverKey,
@@ -149,26 +150,35 @@ const verifiedQuoteFor = async (
       assetId,
       // ECHOED, so this sub-check collapses: the CLIENT made the quote.
       fundingExpiry: floor,
+      // Keyed on `receiverPaid`, NOT `taxi`: WHICH Taxi vs who pays it.
+      ...(request.receiverPaid ? { payer: 'receiver' as const } : {}),
       maxServiceFareSats: deps.maxServiceFareSats,
       minRecoveryLocktime: { kind: deps.trust.locktimeDomain, value: 1n },
       minInputExpiryFloor,
     },
   })
+  return { verified, operatorKey }
 }
 
-const carrierQuoteFrom = (verified: VerifiedReceiveQuote): ReceiveCarrierQuote => ({
-  quoteId: verified.descriptor.quoteId,
-  // From the VERIFIED address, never echoed back off the request.
-  makerPkScript: hex.encode(ArkAddress.decode(verified.quote.receiverAddress).pkScript),
-  makerPublicKey: verified.descriptor.makerPublicKey,
-  assetId: verified.descriptor.assetId,
-  physicalSats: verified.descriptor.physicalSats,
-  loanSats: verified.descriptor.loanSats,
-  receiptSats: verified.descriptor.receiptSats,
-  serviceFareSats: verified.descriptor.serviceFareSats,
-  inputExpiryFloor: locktimeOf(verified.quote.inputExpiryFloor, 'inputExpiryFloor'),
-  expiresAt: verified.descriptor.expiresAt,
-})
+/** `taxiKey` is the SAME `info` already fetched above, never copied off the
+ * request — set on every resolve, since `recycle` never reads it anyway. */
+const carrierQuoteFrom = (from: { verified: VerifiedReceiveQuote; operatorKey: string }): ReceiveCarrierQuote => {
+  const { verified, operatorKey } = from
+  return {
+    quoteId: verified.descriptor.quoteId,
+    // From the VERIFIED address, never echoed back off the request.
+    makerPkScript: hex.encode(ArkAddress.decode(verified.quote.receiverAddress).pkScript),
+    makerPublicKey: verified.descriptor.makerPublicKey,
+    assetId: verified.descriptor.assetId,
+    physicalSats: verified.descriptor.physicalSats,
+    loanSats: verified.descriptor.loanSats,
+    receiptSats: verified.descriptor.receiptSats,
+    serviceFareSats: verified.descriptor.serviceFareSats,
+    taxiKey: operatorKey,
+    inputExpiryFloor: locktimeOf(verified.quote.inputExpiryFloor, 'inputExpiryFloor'),
+    expiresAt: verified.descriptor.expiresAt,
+  }
+}
 
 /** KNOWN same-domain expiry only — the other unit, neither, and both are all
  * excluded: an unknown expiry is not a distant one, and comparing a height to a

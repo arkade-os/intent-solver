@@ -138,6 +138,8 @@ export interface ReceiveCarrierQuoteRequest {
   admission?: boolean
   /** Absent resolves against the configured Taxi, as today (Ruling 3). */
   taxi?: { url: string; operatorKey: string }
+  /** Ruling 4, decoupled from `taxi`: opts the adapter into the SDK's own `payer: 'receiver'` check. */
+  receiverPaid?: boolean
 }
 
 export type ReceiveCarrierReconcileOutcome =
@@ -381,6 +383,7 @@ export class AssetRfqSwapService {
         now,
         admission: true,
         taxi: carrier.mode === 'recycle_receiver' ? { url: carrier.taxiUrl, operatorKey: carrier.taxiKey } : undefined,
+        receiverPaid: carrier.mode === 'recycle_receiver' ? true : undefined,
       })
     } catch (error) {
       // An adapter that threw is an unavailable quote, never a free carrier.
