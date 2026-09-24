@@ -53,6 +53,8 @@ export interface TaxiCarrierProofDeps {
   store: CarrierProofStore
   chain: CarrierChainReader
   pins: CarrierPinLedger
+  /** Ruling 5's canceller, reached only on a pass that proved nothing. Absent, an unproven fill pends forever. */
+  cancel?: (row: AssetRfqSwapRow, attempt: CarrierAttempt) => Promise<ReceiveCarrierReconcileOutcome>
 }
 
 export interface CarrierFillProof {
@@ -105,6 +107,13 @@ const boundGraphOf = (attempt: CarrierAttempt, label: string): BoundGraph => {
   // back or edited row cannot hand this observer a graph it never built.
   if (!verifyOfferFillPlan(graph)) throw new Error(`${label} bound graph does not hash to the id beside it`)
   return graph
+}
+
+/** Every id the bound fill produces, from re-hashed bytes: a pinned coin spent by
+ * one of these is the fill landing, never a third party. */
+export const carrierFillIds = (attempt: CarrierAttempt, label: string): ReadonlySet<string> => {
+  const graph = boundGraphOf(attempt, label)
+  return new Set([graph.arkTx, ...graph.checkpoints].map((psbt) => Transaction.fromPSBT(base64.decode(psbt)).id))
 }
 
 /**
@@ -287,13 +296,14 @@ const observeWith =
       releaseEveryPin(deps.pins, row.id)
       return { status: 'settled', txid }
     }
-    // Durable proof nothing was sent: the refusal CAS writes this only over a
-    // `prepared`/`quoted` envelope. Any other holder's pin is `settle`'s leak.
-    if (attempt.phase === 'not_submitted') {
+    // Durable proof nothing can land: the refusal CAS writes `not_submitted` only
+    // over `prepared`/`quoted`, and `cancelled` only once the chain showed the
+    // conflict spend. Any other holder's pin is `settle`'s leak.
+    if (attempt.phase === 'not_submitted' || attempt.phase === 'cancelled') {
       releaseEveryPin(deps.pins, row.id)
       return { status: 'pending' }
     }
-    if (attempt.phase !== 'submitting') {
+    if (attempt.phase !== 'submitting' && attempt.phase !== 'cancelling') {
       // The submitting marker is committed BEFORE the submit POST, so a durable
       // phase short of it is proof nothing was ever sent.
       const reason = `not filled: reconciliation found the attempt still '${attempt.phase}', so it never submitted`
@@ -311,7 +321,7 @@ const observeWith =
       raised.add(row.id)
       throw error
     }
-    if (proof === null) return { status: 'pending' }
+    if (proof === null) return deps.cancel === undefined ? { status: 'pending' } : deps.cancel(row, attempt)
     // The coins are spent by a transaction this call just proved, so the
     // reservation over them is the one thing that is now certainly stale.
     if (await deps.store.settleCarrierAttempt(row.id, attempt, proof.txid)) releaseEveryPin(deps.pins, row.id)

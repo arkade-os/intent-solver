@@ -11,7 +11,8 @@
  * match the exact previous checkpoint.
  */
 
-export type CarrierAttemptPhase = 'prepared' | 'quoted' | 'submitting' | 'settled' | 'not_submitted'
+export type CarrierAttemptPhase =
+  'prepared' | 'quoted' | 'submitting' | 'settled' | 'not_submitted' | 'cancelling' | 'cancelled'
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject
 export interface JsonObject {
@@ -35,10 +36,18 @@ const PHASES: ReadonlySet<string> = new Set<CarrierAttemptPhase>([
   'submitting',
   'settled',
   'not_submitted',
+  'cancelling',
+  'cancelled',
 ])
 
 /** Phases a binding MADE, so one that reached them without it is corruption. */
-const BOUND: ReadonlySet<string> = new Set<CarrierAttemptPhase>(['quoted', 'submitting', 'settled'])
+const BOUND: ReadonlySet<string> = new Set<CarrierAttemptPhase>([
+  'quoted',
+  'submitting',
+  'settled',
+  'cancelling',
+  'cancelled',
+])
 
 const ENVELOPE_KEYS: ReadonlySet<string> = new Set(['v', 'phase', 'snapshot', 'binding', 'fill_txid'])
 

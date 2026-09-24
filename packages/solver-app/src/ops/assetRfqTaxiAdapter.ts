@@ -6,7 +6,7 @@
  * complete. The gate still stands behind it for anything else handed in.
  */
 
-import { ArkAddress, type Identity, type IndexerProvider, type IWallet } from '@arkade-os/sdk'
+import { ArkAddress, type Identity, type IndexerProvider, type IWallet, type Wallet } from '@arkade-os/sdk'
 import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { ReceiveCarrierQuotes } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
@@ -18,6 +18,7 @@ import {
   type CarrierTaxi,
 } from './assetRfqTaxiSettle.js'
 import { createTaxiReceiveCarrierObserver, type CarrierProofStore } from './assetRfqTaxiProof.js'
+import { createCarrierConflictCanceller, type CarrierConflictStore } from './assetRfqTaxiCancel.js'
 import { createCarrierFillRebuilder } from './assetRfqTaxiRebuild.js'
 import { normalizeTaxiUrl, type TaxiUrlPolicy } from './taxiUrlGuard.js'
 
@@ -26,13 +27,14 @@ export interface TaxiCarrierFillComposition {
   taxiUrl?: string
   policy: TaxiUrlPolicy
   fetch?: typeof fetch
-  store: CarrierAttemptStore & CarrierProofStore
+  store: CarrierAttemptStore & CarrierProofStore & CarrierConflictStore
   chain: Pick<IndexerProvider, 'getVtxos' | 'getVirtualTxs'>
   pins: CarrierPinLedger
   coins: () => Promise<readonly CarrierCoin[]>
   reserved: () => ReadonlySet<string>
   reserve: (outpoints: readonly CarrierOutpoint[]) => ReleaseReservation
-  wallet: IWallet
+  /** The two `Wallet` members are the conflict spend's (Ruling 5), read only once one is due. */
+  wallet: IWallet & Pick<Wallet, 'arkProvider' | 'serverUnrollScript'>
   identity: Identity
   arkServerUrl: string
   dustSats: bigint
@@ -105,6 +107,22 @@ export const completeTaxiReceiveCarrier = (
       now: deps.now,
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     }),
-    ...createTaxiReceiveCarrierObserver({ store: deps.store, chain: deps.chain, pins: deps.pins }),
+    ...createTaxiReceiveCarrierObserver({
+      store: deps.store,
+      chain: deps.chain,
+      pins: deps.pins,
+      cancel: createCarrierConflictCanceller({
+        store: deps.store,
+        chain: deps.chain,
+        pins: deps.pins,
+        ark: () => deps.wallet.arkProvider,
+        serverUnrollScript: () => deps.wallet.serverUnrollScript,
+        signer: deps.identity,
+        coins: deps.coins,
+        solverKeys: deps.solverKeys,
+        serverKey: deps.serverKey,
+        now: deps.now,
+      }),
+    }),
   }
 }

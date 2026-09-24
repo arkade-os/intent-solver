@@ -20,6 +20,11 @@ import {
   type AssetRfqQuoteRecord,
   type AssetRfqSwapState,
 } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import {
+  decodeCarrierAttempt,
+  encodeCarrierAttempt,
+  type CarrierAttempt,
+} from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 import { assetRfqQuotePayload, assetRfqStatusPayload } from '@arkade-os/solver-corridors/wire/assetRfqPayloads.js'
 import { projectAssetRfq } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 
@@ -215,6 +220,8 @@ describe('the private column', () => {
     ['a quoted attempt with no binding', '{"v":1,"phase":"quoted","snapshot":{}}'],
     ['a submitting attempt with no binding', '{"v":1,"phase":"submitting","snapshot":{}}'],
     ['a settled attempt with no fill txid', '{"v":1,"phase":"settled","snapshot":{},"binding":{}}'],
+    ['a cancelling attempt with no binding', '{"v":1,"phase":"cancelling","snapshot":{}}'],
+    ['a cancelled attempt with no binding', '{"v":1,"phase":"cancelled","snapshot":{}}'],
     [
       'a fill txid on an unsettled attempt',
       `{"v":1,"phase":"quoted","snapshot":{},"binding":{},"fill_txid":"${FILL_TXID}"}`,
@@ -560,6 +567,125 @@ describe('the never-submitted terminal — the only filling -> refused there is'
     expect(await store.get(id)).toMatchObject({ state: 'refused', failureReason: 'taxi refused' })
     expect((await store.readCarrierAttempt(id))?.phase).toBe('not_submitted')
     expect(await store.bindCarrierAttempt(id, prepared, BINDING)).toBe(false)
+  })
+})
+
+describe('cancel-by-conflict — the conflict spend recorded before it is sent', () => {
+  it('accepts the two new phases through the codec', () => {
+    for (const phase of ['cancelling', 'cancelled'] as const)
+      expect(decodeCarrierAttempt(encodeCarrierAttempt({ phase, snapshot: SNAPSHOT, binding: BINDING })).phase).toBe(
+        phase,
+      )
+  })
+
+  const CONFLICT = { txid: 'e'.repeat(64), ark_tx: 'cHNidP8=' }
+  const cancelling = (attempt: CarrierAttempt): CarrierAttempt => ({
+    ...attempt,
+    phase: 'cancelling',
+    binding: { ...attempt.binding, conflict: CONFLICT },
+  })
+  const cancellingAt = async (store: AssetRfqSwapStore, over: Partial<AssetRfqQuoteRecord> = {}) => {
+    const id = await attemptAt(store, 'submitting', over)
+    const submitting = (await store.readCarrierAttempt(id))!
+    expect(await store.cancelCarrierAttempt(id, submitting, cancelling(submitting))).toBe(true)
+    return { id, attempt: (await store.readCarrierAttempt(id))! }
+  }
+
+  it('moves a submitting attempt to cancelling, extending its binding and leaving the row filling', async () => {
+    const store = await open()
+    const { id, attempt } = await cancellingAt(store)
+    expect(attempt).toEqual({ phase: 'cancelling', snapshot: SNAPSHOT, binding: { ...BINDING, conflict: CONFLICT } })
+    expect((await store.get(id)).state).toBe('filling')
+  })
+
+  it.each(['prepared', 'quoted', 'settled'] as const)('refuses to cancel a %s attempt', async (phase) => {
+    const store = await open()
+    const id = await attemptAt(store, phase)
+    const attempt = (await store.readCarrierAttempt(id))!
+    await expect(store.cancelCarrierAttempt(id, attempt, cancelling(attempt))).rejects.toThrow(/only a submit/)
+    expect((await store.readCarrierAttempt(id))?.phase).toBe(phase)
+  })
+
+  it.each([
+    ['replaces the snapshot', (a: CarrierAttempt) => ({ ...cancelling(a), snapshot: { operationId: 'op-2' } })],
+    ['drops the fill binding', (a: CarrierAttempt) => ({ ...cancelling(a), binding: { conflict: CONFLICT } })],
+  ])('refuses a cancelling write that %s', async (_why, next) => {
+    const store = await open()
+    const id = await attemptAt(store, 'submitting')
+    const submitting = (await store.readCarrierAttempt(id))!
+    await expect(store.cancelCarrierAttempt(id, submitting, next(submitting))).rejects.toThrow(/cancelling/)
+    expect((await store.readCarrierAttempt(id))?.phase).toBe('submitting')
+  })
+
+  it('refuses a stale checkpoint, so two workers cannot record two conflicts', async () => {
+    const store = await open()
+    const id = await attemptAt(store, 'submitting')
+    const submitting = (await store.readCarrierAttempt(id))!
+    await store.cancelCarrierAttempt(id, submitting, cancelling(submitting))
+    const second = { ...cancelling(submitting), binding: { ...BINDING, conflict: { txid: '9'.repeat(64) } } }
+    expect(await store.cancelCarrierAttempt(id, submitting, second)).toBe(false)
+    expect((await store.readCarrierAttempt(id))?.binding?.conflict).toEqual(CONFLICT)
+  })
+
+  it('commits cancelled and the refused parent together', async () => {
+    const store = await open()
+    const { id, attempt } = await cancellingAt(store)
+    clock = 9_000
+
+    expect(await store.refuseCancelledCarrierAttempt(id, attempt, 'conflict landed')).toBe(true)
+    expect(await store.get(id)).toMatchObject({ state: 'refused', failureReason: 'conflict landed', updatedAt: 9_000 })
+    expect(await store.readCarrierAttempt(id)).toEqual({ ...attempt, phase: 'cancelled' })
+    expect((await store.history(id)).map((e) => e.to)).toEqual(['quoted', 'funded', 'filling', 'refused'])
+    expect(await store.refuseCancelledCarrierAttempt(id, attempt, 'again')).toBe(false)
+  })
+
+  it.each(['prepared', 'quoted', 'submitting', 'settled'] as const)(
+    'refuses the cancelled terminal for a %s attempt',
+    async (phase) => {
+      const store = await open()
+      const id = await attemptAt(store, phase)
+      const attempt = (await store.readCarrierAttempt(id))!
+      await expect(store.refuseCancelledCarrierAttempt(id, attempt, 'x')).rejects.toThrow(/not cancelling/)
+      expect((await store.get(id)).state).toBe('filling')
+    },
+  )
+
+  it('will not refuse a parent that has already gone stuck', async () => {
+    const store = await open()
+    const { id, attempt } = await cancellingAt(store)
+    await store.fail(id, 'filling', 'outcome unknown')
+
+    expect(await store.refuseCancelledCarrierAttempt(id, attempt, 'conflict landed')).toBe(false)
+    expect((await store.readCarrierAttempt(id))?.phase).toBe('cancelling')
+  })
+
+  it('settles a cancelling attempt whose fill won the race', async () => {
+    const store = await open()
+    const { id, attempt } = await cancellingAt(store)
+    expect(await store.settleCarrierAttempt(id, attempt, FILL_TXID)).toBe(true)
+    expect(await store.readCarrierAttempt(id)).toEqual({ ...attempt, phase: 'settled', fillTxid: FILL_TXID })
+  })
+
+  it('never re-pins a cancelled attempt after a restart, and still re-pins a cancelling one', async () => {
+    const store = await open()
+    const live = await cancellingAt(store, other(1))
+    const done = await cancellingAt(store, other(2))
+    await store.refuseCancelledCarrierAttempt(done.id, done.attempt, 'conflict landed')
+
+    expect((await store.listUnresolvedCarrierAttempts()).map((r) => r.row.id)).toEqual([live.id])
+  })
+
+  it('lets exactly one of two connections win the cancelled terminal', async () => {
+    const file = tempDb()
+    const a = await open(file)
+    const b = await open(file)
+    const { id, attempt } = await cancellingAt(a)
+
+    const won = await Promise.all([
+      a.refuseCancelledCarrierAttempt(id, attempt, 'conflict landed'),
+      b.refuseCancelledCarrierAttempt(id, attempt, 'conflict landed'),
+    ])
+    expect(won.filter(Boolean)).toHaveLength(1)
   })
 })
 

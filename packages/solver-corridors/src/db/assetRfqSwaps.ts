@@ -24,8 +24,8 @@
  * - `filling`  `fulfill` submitted — the one EXPOSED state
  * - `filled`   the fill landed; the client is paid and the deposit is ours
  * - `refused`  declined, the quote lapsed unfunded, or (only via
- *              `refuseNeverSubmittedCarrierAttempt`) a carrier fill durably
- *              proven never submitted; no exposure ever existed
+ *              `refuseNeverSubmittedCarrierAttempt` / `refuseCancelledCarrierAttempt`)
+ *              a carrier fill durably proven never submitted, or never to land
  * - `stuck`    `fulfill` failed or its outcome is unknown; needs a human
  *
  * THERE IS NO `refunded` STATE, and its absence is the point. § 7.2's refund is
@@ -95,7 +95,7 @@ const LEGAL_EDGES: Record<AssetRfqSwapState, readonly AssetRfqSwapState[]> = {
   // No edge back to `funded`. Once `fulfill` is submitted its outcome is either
   // known or unknown, and "unknown" is `stuck` — never a retry, which is how a
   // solver double-spends its own float. `refused` is absent too: it is reached
-  // only through the one method that durably proves nothing was sent.
+  // only through the two methods that durably prove the fill cannot land.
   filling: ['filled', 'stuck'],
   filled: [],
   refused: [],
@@ -773,16 +773,38 @@ export class AssetRfqSwapStore {
     return this.casCarrierAttempt(id, expected, { ...expected, phase: 'submitting' })
   }
 
-  /** Records WHICH transaction the caller proved; it proves nothing itself. */
+  /** Records WHICH transaction the caller proved; it proves nothing itself. A
+   * `cancelling` attempt settles too: the fill can still beat its conflict. */
   async settleCarrierAttempt(id: string, expected: CarrierAttempt, fillTxid: string): Promise<boolean> {
-    if (expected.phase !== 'submitting') {
+    if (expected.phase !== 'submitting' && expected.phase !== 'cancelling') {
       throw new Error(`carrier attempt ${id} is '${expected.phase}', not submitting: nothing was sent to settle`)
     }
     return this.casCarrierAttempt(id, expected, { ...expected, phase: 'settled', fillTxid })
   }
 
+  /** `submitting` -> `cancelling`, carrying the conflict spend's bytes in `next`
+   * BEFORE they are sent. It may only extend the binding: the fill graph must
+   * survive, or nothing could still prove the fill won. */
+  async cancelCarrierAttempt(id: string, expected: CarrierAttempt, next: CarrierAttempt): Promise<boolean> {
+    if (expected.phase !== 'submitting' || next.phase !== 'cancelling') {
+      throw new Error(
+        `carrier attempt ${id} cannot go '${expected.phase}' -> '${next.phase}': only a submit is cancelled`,
+      )
+    }
+    const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
+    const before = detachJsonObject(expected.binding ?? {}, 'binding')
+    const after = detachJsonObject(next.binding ?? {}, 'binding')
+    if (!same(detachJsonObject(next.snapshot, 'snapshot'), detachJsonObject(expected.snapshot, 'snapshot'))) {
+      throw new Error(`carrier attempt ${id} cannot replace its snapshot while cancelling`)
+    }
+    if (Object.keys(before).some((key) => !same(after[key], before[key]))) {
+      throw new Error(`carrier attempt ${id} cannot rewrite its binding while cancelling, only extend it`)
+    }
+    return this.casCarrierAttempt(id, expected, next)
+  }
+
   /**
-   * The one `filling` -> `refused` this lifecycle has, and it is not an edge:
+   * One of the two `filling` -> `refused` moves this lifecycle has, neither an edge:
    * `LEGAL_EDGES` still forbids the generic move, because a row that MAY have
    * submitted keeps its liability and ends `stuck`.
    *
@@ -794,22 +816,16 @@ export class AssetRfqSwapStore {
     if (expected.phase !== 'prepared' && expected.phase !== 'quoted') {
       throw new Error(`carrier attempt ${id} is '${expected.phase}', which is not proven never-submitted`)
     }
-    const result = await this.driver.run(
-      `UPDATE asset_rfq_swap SET carrier_attempt = ?, state = 'refused', failure_reason = ?, updated_at = ?
-         WHERE id = ? AND state = 'filling' AND carrier_attempt = ?`,
-      [
-        encodeCarrierAttempt({ ...expected, phase: 'not_submitted' }),
-        reason,
-        this.now(),
-        id,
-        encodeCarrierAttempt(expected),
-      ],
-    )
-    if (result.changes !== 1) return false
-    // After the fact it records, so a failure here is loud and leaves the
-    // terminal state standing — it can neither undo it nor reopen the attempt.
-    await this.recordEvent(id, 'filling', 'refused', null)
-    return true
+    return this.refuseCarrierAttempt(id, expected, { ...expected, phase: 'not_submitted' }, reason)
+  }
+
+  /** `cancelling` -> `cancelled` and `filling` -> `refused`, as one statement:
+   * only for a caller the chain has shown the conflict spend to. */
+  async refuseCancelledCarrierAttempt(id: string, expected: CarrierAttempt, reason: string): Promise<boolean> {
+    if (expected.phase !== 'cancelling') {
+      throw new Error(`carrier attempt ${id} is '${expected.phase}', not cancelling: no conflict spend was recorded`)
+    }
+    return this.refuseCarrierAttempt(id, expected, { ...expected, phase: 'cancelled' }, reason)
   }
 
   /**
@@ -825,7 +841,7 @@ export class AssetRfqSwapStore {
     const records: CarrierAttemptRecord[] = []
     for (const raw of raws) {
       const attempt = decodeCarrierAttempt(raw.carrier_attempt)
-      if (attempt.phase === 'not_submitted') continue
+      if (attempt.phase === 'not_submitted' || attempt.phase === 'cancelled') continue
       const row = toRow(raw)
       if (attempt.phase === 'settled' && row.state === 'filled') continue
       records.push({ row, attempt })
@@ -839,6 +855,24 @@ export class AssetRfqSwapStore {
       [encodeCarrierAttempt(next), id, encodeCarrierAttempt(expected)],
     )
     return result.changes === 1
+  }
+
+  private async refuseCarrierAttempt(
+    id: string,
+    expected: CarrierAttempt,
+    next: CarrierAttempt,
+    reason: string,
+  ): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE asset_rfq_swap SET carrier_attempt = ?, state = 'refused', failure_reason = ?, updated_at = ?
+         WHERE id = ? AND state = 'filling' AND carrier_attempt = ?`,
+      [encodeCarrierAttempt(next), reason, this.now(), id, encodeCarrierAttempt(expected)],
+    )
+    if (result.changes !== 1) return false
+    // After the fact it records, so a failure here is loud and leaves the
+    // terminal state standing — it can neither undo it nor reopen the attempt.
+    await this.recordEvent(id, 'filling', 'refused', null)
+    return true
   }
 
   private async recordEvent(
