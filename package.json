@@ -25,7 +25,7 @@
     "verify:artifacts": "node scripts/carrier-artifacts/verify.mjs"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.4.74",
+    "@arkade-os/sdk": "0.4.75",
     "@hono/node-server": "^2.1.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.0.0",
@@ -54,7 +54,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@arkade-os/swap": "0.0.20",
+    "@arkade-os/swap": "0.0.21",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^24.13.3",
     "@types/ws": "^8.18.1",

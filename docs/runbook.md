@@ -420,10 +420,14 @@ sats is `float-lifecycle`'s job (it carries the CLTV guard, and a bare
 `settle()` would merge the whole float into one coin). It does withdraw, and the
 destination's form picks the rail — an Arkade address is paid offchain at once,
 a bitcoin address by collaborative exit at the server's next batch. Either way
-the coins are selected in-process, filtered against the reservation ledger and
-pinned for the spend, because the SDK's own selection cannot be told "not that
-one" and could take a coin out from under an in-flight lockup funding. The
-destination receives exactly the typed amount; the exit's intent fees come out
+the withdrawal spends **every asset-free coin no live swap's funding has pinned**,
+holding all of them until it settles — for a bitcoin address that is the next
+batch, and until then no swap can be funded from the float — and
+returns the rest as one change coin, so the float's piece count drops to one
+until `pool-mint` splits it again — on its own only with `POOL_AUTO_MINT=true`,
+otherwise at the next renewal or by hand. The pinned coins are left alone, because
+the SDK's own selection cannot be told "not that one". The destination receives
+exactly the typed amount; the exit's intent fees — one per coin spent — come out
 of the change back to the float.
 
 **Nothing here opens Lightning channels.** Neither port has a channel primitive,
@@ -436,14 +440,15 @@ the entrypoint — same shape and same reasoning as `registerLightningRail`.
 `fund-withdraw` is the only action in the console whose destination is not fixed
 by a swap, which is why it is confirmed with the destination address rather than
 a fixed word: a literal becomes muscle memory, and a confirmation that differs
-per request cannot. The source then applies its own checks before touching a
-backend — each decodes the address against this deployment's network (the one
-mistake retyping cannot catch, since an operator confirming a wrong-chain
-address types the same wrong string twice), the rail refuses an amount above the
-**confirmed** balance, and the float refuses one above the **available** one or
-its unreserved coins. It is **not safe to repeat**: nothing persists or
-re-drives it, so each attempt is a separate payment and a withdrawal that timed
-out must be checked against the chain before retrying.
+per request cannot. Each source checks the address against this deployment's
+network before any money moves (the one mistake retyping cannot catch, since an
+operator confirming a wrong-chain address types the same wrong string twice) —
+the float's Arkade addresses inside the SDK's `wallet.send`, everything else in
+the source. The rail refuses an amount above the **confirmed** balance; the float
+refuses when a live swap's funding pins every coin, or when the unpinned coins
+cannot cover the amount and the exit fee. It is **not safe to repeat**: nothing
+persists or re-drives it, so each attempt is a separate payment and a withdrawal
+that timed out must be checked against the chain before retrying.
 
 Remember what `ADMIN_HOST` is: with the console reachable, `fund-withdraw` lets
 anything that can reach the port send a source's balance to an address of its
