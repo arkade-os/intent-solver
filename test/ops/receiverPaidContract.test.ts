@@ -324,7 +324,6 @@ interface StubOptions {
   /** From this read of `q-1` on, the Taxi is unreachable, refuses, or serves a quote that fails verification. */
   failReadsFrom?: { read: number; how: 'unreachable' | 'refusing' | 'hostile' }
   submitFails?: boolean
-  /** The receive quotes' own expiry; the Taxi's default lifetime is 60s. */
   quoteExpiresAt?: number
 }
 
@@ -387,7 +386,6 @@ const startTaxi = async (id: TaxiIdentity, options: StubOptions = {}): Promise<S
     }
     if (route === `POST /v1/swap-fills/${FILL_ID}/submit`) {
       if (options.submitFails) return reply(500, { error: 'internal error', code: 'internal' })
-      // `swapFillSubmit.ts` ~:358.
       if (fillExpiresAt <= clock.now) {
         return reply(409, { error: `swap fill ${FILL_ID} quote expired`, code: 'quote_expired' })
       }
