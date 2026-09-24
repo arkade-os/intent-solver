@@ -53,12 +53,55 @@ describe('normalizeTaxiUrl', () => {
     expect(normalizeTaxiUrl('http://taxi.internal', regtest)).toBe('http://taxi.internal')
   })
 
+  it('refuses localhost by name (rule 5)', () => {
+    expect(() => normalizeTaxiUrl('http://localhost', { isMainnet: false, allowPrivate: false })).toThrow(/private/)
+  })
+
   it('refuses an IPv6 loopback literal off mainnet unless allowed (rule 5)', () => {
     expect(() => normalizeTaxiUrl('https://[::1]', { isMainnet: false, allowPrivate: false })).toThrow(/private/)
   })
 
   it('refuses the whole 127.0.0.0/8 range, not just 127.0.0.1 (rule 5)', () => {
     expect(() => normalizeTaxiUrl('http://127.5.5.5', { isMainnet: false, allowPrivate: false })).toThrow(/private/)
+  })
+
+  // Rule 5's intent is "no private destination"; its literal list is narrower
+  // than that. Each range below is refused unless allowed, off mainnet.
+  it.each([
+    ['0.0.0.0/8', 'http://0.1.2.3'],
+    ['10/8', 'http://10.0.0.5'],
+    ['100.64/10 (CGN)', 'http://100.64.0.1'],
+    ['169.254/16', 'http://169.254.1.1'],
+    ['172.16/12', 'http://172.20.5.5'],
+    ['192.168/16', 'http://192.168.1.1'],
+  ])('refuses IPv4 %s unless allowed (rule 5 extension)', (_range, url) => {
+    expect(() => normalizeTaxiUrl(url, { isMainnet: false, allowPrivate: false })).toThrow(/private/)
+    expect(normalizeTaxiUrl(url, { isMainnet: false, allowPrivate: true })).toBe(url)
+  })
+
+  it.each([
+    ['::', 'https://[::]'],
+    ['fc00::/7', 'https://[fd12:3456::1]'],
+    ['fe80::/10', 'https://[fe80::1]'],
+  ])('refuses IPv6 %s unless allowed (rule 5 extension)', (_range, url) => {
+    expect(() => normalizeTaxiUrl(url, { isMainnet: false, allowPrivate: false })).toThrow(/private/)
+    expect(() => normalizeTaxiUrl(url, { isMainnet: false, allowPrivate: true })).not.toThrow()
+  })
+
+  it('refuses an IPv4-mapped IPv6 loopback, dotted or hex form (rule 5 extension, Critical #1)', () => {
+    const policy = { isMainnet: false, allowPrivate: false }
+    expect(() => normalizeTaxiUrl('https://[::ffff:127.0.0.1]/v1/info', policy)).toThrow(/private/)
+    expect(() => normalizeTaxiUrl('https://[::ffff:7f00:1]', policy)).toThrow(/private/)
+    expect(normalizeTaxiUrl('https://[::ffff:127.0.0.1]/v1/info', { ...policy, allowPrivate: true })).toBe(
+      'https://[::ffff:7f00:1]/v1/info',
+    )
+  })
+
+  it('refuses a decimal or hex loopback literal the same as dotted-decimal (rule 5)', () => {
+    const policy = { isMainnet: false, allowPrivate: false }
+    expect(() => normalizeTaxiUrl('https://2130706433', policy)).toThrow(/private/)
+    expect(() => normalizeTaxiUrl('https://0x7f.1', policy)).toThrow(/private/)
+    expect(normalizeTaxiUrl('https://2130706433', { ...policy, allowPrivate: true })).toBe('https://127.0.0.1')
   })
 
   it('a trailing root dot does not evade the private-suffix check (rule 5)', () => {
@@ -91,9 +134,42 @@ describe('guardedTaxiFetch', () => {
     await expect(f('https://taxi.example/v1/info')).rejects.toThrow(/redirect/)
   })
 
+  it('does not let a caller-supplied init override redirect or the guard signal (Important #4)', async () => {
+    let seen: RequestInit | undefined
+    const f = guardedTaxiFetch(async (_input, init) => {
+      seen = init
+      return new Response('{}')
+    }, limiter())
+    const callerSignal = new AbortController().signal
+    await f('https://taxi.example/v1/info', { redirect: 'follow', signal: callerSignal })
+    expect(seen?.redirect).toBe('error')
+    expect(seen?.signal).not.toBe(callerSignal)
+  })
+
   it('refuses a body past the cap', async () => {
     const f = guardedTaxiFetch(async () => new Response('x'.repeat(256 * 1024 + 1)), limiter())
     await expect(f('https://taxi.example/v1/info')).rejects.toThrow(/too large/)
+  })
+
+  it('cancels a streamed body with no content-length once it crosses the cap (Important #3)', async () => {
+    let cancelled = false
+    let pulls = 0
+    const chunk = new Uint8Array(200 * 1024)
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1
+        if (pulls > 3) return controller.close()
+        controller.enqueue(chunk)
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const f = guardedTaxiFetch(async () => new Response(stream), limiter())
+    await expect(f('https://taxi.example/v1/info')).rejects.toThrow(/too large/)
+    // Crosses the cap on the 2nd chunk (400 KiB); the reader must stop there.
+    expect(pulls).toBeLessThan(4)
+    expect(cancelled).toBe(true)
   })
 
   it('rate-limits per host and lets a different host through', async () => {
@@ -111,5 +187,12 @@ describe('guardedTaxiFetch', () => {
     expect(calls).toBe(2)
     await expect(f('https://b.example/v1/info')).resolves.toBeDefined()
     expect(calls).toBe(3)
+  })
+
+  it('keys the limiter on the trailing-dot-stripped host, same as normalizeTaxiUrl (Critical #2)', async () => {
+    const lim = new RateLimiter(1, 60, () => 0)
+    const f = guardedTaxiFetch(async () => new Response('{}'), lim)
+    await f('https://taxi.example./v1/info')
+    await expect(f('https://taxi.example/v1/info')).rejects.toThrow(/rate/)
   })
 })
