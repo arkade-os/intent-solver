@@ -2,6 +2,7 @@
  * The receiver-paid contract against a Taxi's real wire: a loopback HTTP stub serving `/v1/info`,
  * `/v1/receive-quotes/:id` and `/v1/swap-fills`, read by the shipped adapter through the vendored
  * client, with no TAXI_URL. It stops before a signed graph: that handshake is arkade-taxi's to prove.
+ * The SDK-built cases also run sender-paid `recycle`, which needs the stub configured as TAXI_URL.
  */
 
 import { createServer } from 'node:http'
@@ -11,7 +12,9 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { ArkAddress, asset, DefaultVtxo, SingleKey } from '@arkade-os/sdk'
+import { ArkAddress, asset, CSVMultisigTapscript, DefaultVtxo, SingleKey } from '@arkade-os/sdk'
+import { requestArkadeSwap, type RfqQuote, type RfqTransport } from '@arkade-os/swap'
+import { TaxiClient, verifyReceiveQuote } from '@arkade-taxi/client'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import {
   AssetRfqSwapService,
@@ -52,7 +55,7 @@ const MAKER = key(5)
 const SOLVER = key(6)
 const HRP = 'tark'
 const DUST = 330n
-const RECEIVER_FARE = '25'
+const FLAT_FARE = '25'
 const ASSET = `${'aa'.repeat(31)}bb0100`
 const NOW = 2_000
 const TIP = 1_000_000
@@ -72,13 +75,14 @@ const TRUST: TaxiCarrierTrust = {
   inputExpiryMargin: 5n,
 }
 
-const MAKER_PK_SCRIPT = hex.encode(new ArkAddress(SERVER, PAYOUT, HRP).pkScript)
+const PAYOUT_ADDRESS = new ArkAddress(SERVER, PAYOUT, HRP).encode()
 const PROCEEDS_ADDRESS = new ArkAddress(SERVER, SOLVER, HRP).encode()
 
-const assetWire = () => {
+const assetValue = () => {
   const parsed = asset.AssetId.fromString(ASSET)
-  return { txid: hex.encode(Uint8Array.from(parsed.txid).reverse()), groupIndex: parsed.groupIndex }
+  return { txid: Uint8Array.from(parsed.txid).reverse(), groupIndex: parsed.groupIndex }
 }
+const assetWire = () => ({ txid: hex.encode(assetValue().txid), groupIndex: assetValue().groupIndex })
 
 const SOLVER_SCRIPT = new DefaultVtxo.Script({
   pubKey: SOLVER,
@@ -133,16 +137,20 @@ const infoWire = (id: TaxiIdentity) => ({
       enabled: true,
       claim: 'either',
       maxTopupSats: null,
-      fares: [{ id: 'flat', currency: 'sats', pricing: { kind: 'flat', units: RECEIVER_FARE } }],
+      fares: [{ id: 'flat', currency: 'sats', pricing: { kind: 'flat', units: FLAT_FARE } }],
     },
   ],
   maxPerPaymentTopupSats: '10000',
   paused: false,
 })
 
-/** `receiveQuotes.ts` `toResponse` for `payer: 'receiver'`: the whole dust as loan, a zero fill fare. */
-const receiveQuoteWire = (id: TaxiIdentity) => {
-  const parsed = asset.AssetId.fromString(ASSET)
+type Payer = 'receiver' | 'sender'
+const QUOTE_ID: Record<Payer, string> = { receiver: 'q-1', sender: 'q-2' }
+
+/** `receiveQuotes.ts` `toResponse`: receiver-paid loans the whole dust at a zero fill fare, sender-paid all but the receipt. */
+const receiveQuoteWire = (id: TaxiIdentity, payer: Payer = 'receiver') => {
+  const receiverPaid = payer === 'receiver'
+  const topup = receiverPaid ? DUST : DUST - 1n
   const covenant = new DustCovenantScript({
     serverKey: id.server,
     emulatorKey: EMULATOR,
@@ -152,37 +160,37 @@ const receiveQuoteWire = (id: TaxiIdentity) => {
       senderKey: MAKER,
       operatorKey: id.operator,
       dust: DUST,
-      topup: DUST,
-      assetId: { txid: Uint8Array.from(parsed.txid).reverse(), groupIndex: parsed.groupIndex },
+      topup,
+      assetId: assetValue(),
       locktime: 1_000_000n,
       recoveryRecipient: 'receiver',
       claimMode: 'recycle',
-      receiverFare: { currency: 'sats', units: BigInt(RECEIVER_FARE) },
+      ...(receiverPaid ? { receiverFare: { currency: 'sats', units: BigInt(FLAT_FARE) } } : {}),
     },
   })
   const height = (value: number) => ({ kind: 'height', value: String(value) })
   return {
-    quoteId: 'q-1',
+    quoteId: QUOTE_ID[payer],
     state: 'quoted',
-    receiverAddress: new ArkAddress(SERVER, PAYOUT, HRP).encode(),
+    receiverAddress: PAYOUT_ADDRESS,
     makerPublicKey: hex.encode(MAKER),
     params: {
       receiverKey: hex.encode(PAYOUT),
       senderKey: hex.encode(MAKER),
       operatorKey: hex.encode(id.operator),
       dust: String(DUST),
-      topup: String(DUST),
+      topup: String(topup),
       assetId: assetWire(),
       locktime: '1000000',
       recoveryRecipient: 'receiver',
       claimMode: 'recycle',
-      receiverFare: { currency: 'sats', units: RECEIVER_FARE },
+      ...(receiverPaid ? { receiverFare: { currency: 'sats', units: FLAT_FARE } } : {}),
     },
     covenantAddress: covenant.address(HRP, id.server).encode(),
-    fare: { currency: 'sats', units: '0' },
-    payer: 'receiver',
-    receiverFare: { currency: 'sats', units: RECEIVER_FARE },
-    unclaimedMode: 'reclaim',
+    fare: { currency: 'sats', units: receiverPaid ? '0' : FLAT_FARE },
+    ...(receiverPaid
+      ? { payer: 'receiver', receiverFare: { currency: 'sats', units: FLAT_FARE }, unclaimedMode: 'reclaim' }
+      : {}),
     batchExpiry: height(1_200_000),
     inputExpiryFloor: height(1_100_000),
     recoveryLocktime: height(1_000_000),
@@ -190,6 +198,13 @@ const receiveQuoteWire = (id: TaxiIdentity) => {
     expiresAt: 5_000,
   }
 }
+
+const covenantScriptOf = (payer: Payer): string =>
+  hex.encode(
+    ArkAddress.decode(receiveQuoteWire({ operator: OPERATOR, server: SERVER }, payer).covenantAddress).pkScript,
+  )
+
+const MAKER_PK_SCRIPT = covenantScriptOf('receiver')
 
 interface StubTaxi {
   url: string
@@ -214,7 +229,8 @@ const startTaxi = async (id: TaxiIdentity): Promise<StubTaxi> => {
       response.end(JSON.stringify(payload))
     }
     if (route === 'GET /v1/info') return reply(200, infoWire(id))
-    if (route === 'GET /v1/receive-quotes/q-1') return reply(200, receiveQuoteWire(id))
+    if (route === 'GET /v1/receive-quotes/q-1') return reply(200, receiveQuoteWire(id, 'receiver'))
+    if (route === 'GET /v1/receive-quotes/q-2') return reply(200, receiveQuoteWire(id, 'sender'))
     if (route === 'POST /v1/swap-fills') {
       stub.swapFills.push(JSON.parse(body) as Record<string, unknown>)
       // `routes.ts` `assertFinancialMutationReady`: refused before any graph exists.
@@ -227,14 +243,15 @@ const startTaxi = async (id: TaxiIdentity): Promise<StubTaxi> => {
   return { ...stub, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}` }
 }
 
-const solver = async () => {
+/** `taxiUrl` is the configured Taxi a sender-paid `recycle` resolves against; receiver-paid names its own. */
+const solver = async (taxiUrl?: string) => {
   const store = await AssetRfqSwapStore.open(':memory:', () => NOW)
   const ledger = createReservationLedger()
   const pins = createCarrierPinLedger()
   const errors: unknown[] = []
   let deposit: ObservedDeposit | null = null
   const reader = await taxiReceiveCarrier({
-    taxiUrl: undefined,
+    taxiUrl,
     policy: POLICY,
     trust: async () => TRUST,
     maxServiceFareSats: DUST,
@@ -245,7 +262,7 @@ const solver = async () => {
   })
   const offerHex = offerHexFrom(DERIVATION)
   const carrier = completeTaxiReceiveCarrier(reader, {
-    taxiUrl: undefined,
+    taxiUrl,
     policy: POLICY,
     store,
     chain: { getVtxos: async () => ({ vtxos: [] }), getVirtualTxs: async () => ({ txs: [] }) },
@@ -297,7 +314,7 @@ const solver = async () => {
   return { store, ledger, pins, errors, corridor, fund }
 }
 
-const rfq = (taxi: StubTaxi, taxiKey: Uint8Array, rfqId = 'c'.repeat(64)) => ({
+const rfq = (taxi: StubTaxi, taxiKey: Uint8Array, makerPkScript = MAKER_PK_SCRIPT, rfqId = 'c'.repeat(64)) => ({
   v: 1,
   type: 'rfq_request',
   rfq_id: rfqId,
@@ -305,7 +322,7 @@ const rfq = (taxi: StubTaxi, taxiKey: Uint8Array, rfqId = 'c'.repeat(64)) => ({
   amount_side: 'from',
   amount: AMOUNT.toString(),
   profile: {
-    maker_pk_script: MAKER_PK_SCRIPT,
+    maker_pk_script: makerPkScript,
     maker_public_key: hex.encode(MAKER),
     carrier: { mode: 'recycle_receiver', quote_id: 'q-1', taxi_url: taxi.url, taxi_key: hex.encode(taxiKey) },
   },
@@ -359,6 +376,19 @@ describe('the receiver-paid carrier against a stub Taxi on the real wire', () =>
     expect(s.errors).toEqual([expect.objectContaining({ name: 'TaxiError', code: 'not_ready' })])
   })
 
+  it("refuses an offer paying the payee's own address, which the Taxi would refuse at fill", async () => {
+    const taxi = await startTaxi({ operator: OPERATOR, server: SERVER })
+    const s = await solver()
+
+    const plain = hex.encode(ArkAddress.decode(PAYOUT_ADDRESS).pkScript)
+    const outcome = await s.corridor.quote(rfq(taxi, OPERATOR, plain))
+    expect(outcome).toMatchObject({ kind: 'refused', payload: { reason: 'pricing_unavailable' } })
+    expect(await s.store.findByRfqId('c'.repeat(64))).toBeUndefined()
+    expect(s.errors).toEqual([
+      expect.objectContaining({ message: expect.stringMatching(/not the verified quote's receive covenant/) }),
+    ])
+  })
+
   it('refuses a Taxi answering to a different operator key than the request named', async () => {
     const taxi = await startTaxi({ operator: key(9), server: SERVER })
     const s = await solver()
@@ -380,5 +410,114 @@ describe('the receiver-paid carrier against a stub Taxi on the real wire', () =>
     expect(await s.store.findByRfqId('c'.repeat(64))).toBeUndefined()
     expect(taxi.swapFills).toEqual([])
     expect(s.errors).toEqual([expect.objectContaining({ message: expect.stringMatching(/untrusted server/) })])
+  })
+})
+
+const startArkd = async (): Promise<string> => {
+  const info = {
+    signerPubkey: hex.encode(SERVER),
+    network: 'regtest',
+    unilateralExitDelay: '144',
+    dust: String(DUST),
+    vtxoMinAmount: '1',
+    checkpointTapscript: hex.encode(
+      CSVMultisigTapscript.encode({ timelock: { type: 'blocks', value: 10n }, pubkeys: [SERVER] }).script,
+    ),
+  }
+  const server = createServer((request, response) => {
+    const found = `${request.method} ${request.url}` === 'GET /v1/info'
+    response.writeHead(found ? 200 : 404, { 'content-type': 'application/json' })
+    response.end(JSON.stringify(found ? info : {}))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  open.push(() => new Promise<void>((resolve) => server.close(() => resolve())))
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+}
+
+/** The payer: its key is the offer's maker key, and its own address never reaches the offer. */
+const payerWallet = {
+  getAddress: async () => new ArkAddress(SERVER, MAKER, HRP).encode(),
+  identity: { xOnlyPublicKey: async () => MAKER },
+  getContractManager: async () =>
+    new Proxy({}, { get: (_target, prop) => (prop === 'then' ? undefined : async () => undefined) }),
+}
+
+/** What a wallet hands `requestArkadeSwap`: the stub's quote, verified by the Taxi's own client. */
+const walletCarrierQuote = async (taxi: StubTaxi, payer: Payer) => {
+  const client = new TaxiClient({ baseUrl: taxi.url })
+  const [info, quote] = await Promise.all([client.info(), client.getReceiveQuote(QUOTE_ID[payer])])
+  return verifyReceiveQuote({
+    quote,
+    info,
+    trustedServerKey: SERVER,
+    trustedEmulatorKey: EMULATOR,
+    dust: DUST,
+    vtxoMinAmount: 1n,
+    hrp: HRP,
+    now: NOW,
+    expect: {
+      receiverAddress: PAYOUT_ADDRESS,
+      makerPublicKey: MAKER,
+      assetId: assetValue(),
+      fundingExpiry: { kind: 'height', value: 1_100_000n },
+      ...(payer === 'receiver' ? { payer: 'receiver' as const } : {}),
+      maxServiceFareSats: DUST,
+      minRecoveryLocktime: { kind: 'height', value: 1n },
+      minInputExpiryFloor: { kind: 'height', value: 1n },
+    },
+  }).descriptor
+}
+
+/** The solver's corridor behind the SDK's transport seam, JSON both ways as on the wire. */
+const solverTransport = (s: Awaited<ReturnType<typeof solver>>) => {
+  const sent: Record<string, unknown>[] = []
+  const transport: RfqTransport = {
+    requestQuote: async (payload) => {
+      const request = JSON.parse(JSON.stringify(payload)) as Record<string, unknown>
+      sent.push(request)
+      const outcome = await s.corridor.quote(request)
+      if (outcome.kind !== 'quote') {
+        const causes = s.errors.map((error) => (error instanceof Error ? error.message : String(error)))
+        throw new Error(`solver ${outcome.detail ?? outcome.kind}: ${causes.join('; ')}`)
+      }
+      return JSON.parse(JSON.stringify(outcome.payload)) as RfqQuote
+    },
+    status: async () => null,
+    close: async () => {},
+  }
+  return { sent, transport }
+}
+
+describe('an RFQ the wallet SDK builds from a Taxi-verified receive quote', () => {
+  it.each(['receiver', 'sender'] as const)('is accepted end to end when the %s pays the carrier', async (payer) => {
+    const taxi = await startTaxi({ operator: OPERATOR, server: SERVER })
+    const arkd = await startArkd()
+    const s = await solver(payer === 'sender' ? taxi.url : undefined)
+    const quote = await walletCarrierQuote(taxi, payer)
+    const { sent, transport } = solverTransport(s)
+    const rfqId = 'd'.repeat(64)
+
+    const swap = await requestArkadeSwap(payerWallet as never, arkd, transport, {
+      wantAsset: asset.AssetId.fromString(ASSET),
+      amount: AMOUNT,
+      rfqId,
+      emulatorPubkey: '02' + hex.encode(EMULATOR),
+      now: NOW,
+      carrier:
+        payer === 'receiver'
+          ? { mode: 'recycleReceiver', quote, taxi: { url: taxi.url, operatorKey: hex.encode(OPERATOR) } }
+          : { mode: 'recycle', quote },
+    })
+
+    const covenant = hex.encode(ArkAddress.decode(quote.receiveAddress).pkScript)
+    expect(covenant).toBe(covenantScriptOf(payer))
+    expect(sent).toEqual([expect.objectContaining({ profile: expect.objectContaining({ maker_pk_script: covenant }) })])
+    const row = (await s.store.findByRfqId(rfqId))!
+    expect(row).toMatchObject({
+      makerPkScript: covenant,
+      carrierTerms: { mode: payer === 'receiver' ? 'recycle_receiver' : 'recycle', quoteId: QUOTE_ID[payer] },
+    })
+    expect(swap.address).toBe(row.offerAddress)
+    expect(s.errors).toEqual([])
   })
 })

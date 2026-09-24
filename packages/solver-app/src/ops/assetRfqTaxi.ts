@@ -5,7 +5,6 @@
  */
 
 import {
-  ArkAddress,
   asset,
   MultisigTapscript,
   scriptFromTapLeafScript,
@@ -92,12 +91,6 @@ export const spendableCarrierCoins = async (
     vtxos.filter((vtxo) => !vtxo.isSwept && !(vtxo.isSpent || vtxo.spentBy || vtxo.settledBy)),
   )
 
-const payoutAddressOf = (makerPkScript: string, trust: TaxiCarrierTrust): string => {
-  const program = TAPROOT_PK_SCRIPT.exec(makerPkScript)?.[1]
-  if (program === undefined) throw new Error(`carrier payout script ${makerPkScript} is not a taproot output`)
-  return new ArkAddress(trust.serverKey, hex.decode(program), trust.hrp).encode()
-}
-
 export const assetIdValue = (assetId: string): { txid: Uint8Array; groupIndex: number } => {
   const parsed = asset.AssetId.fromString(assetId)
   // Taxi carries the genesis txid in INTERNAL byte order; `AssetId` holds display order.
@@ -117,7 +110,9 @@ const verifiedQuoteFor = async (
   request: ReceiveCarrierQuoteRequest,
   minInputExpiryFloor: { kind: 'height' | 'time'; value: bigint },
 ): Promise<{ verified: VerifiedReceiveQuote; operatorKey: string }> => {
-  const receiverAddress = payoutAddressOf(request.makerPkScript, deps.trust)
+  if (!TAPROOT_PK_SCRIPT.test(request.makerPkScript)) {
+    throw new Error(`carrier payout script ${request.makerPkScript} is not a taproot output`)
+  }
   if (!XONLY_HEX.test(request.makerPublicKey)) {
     throw new Error(`carrier maker key ${request.makerPublicKey} is not an x-only public key`)
   }
@@ -145,7 +140,8 @@ const verifiedQuoteFor = async (
     hrp: deps.trust.hrp,
     now: request.now,
     expect: {
-      receiverAddress,
+      // The offer pays the covenant, not this address; still pinned to the trusted server and `params.receiverKey`.
+      receiverAddress: quote.receiverAddress,
       makerPublicKey: hex.decode(request.makerPublicKey),
       assetId,
       // ECHOED, so this sub-check collapses: the CLIENT made the quote.
@@ -157,6 +153,10 @@ const verifiedQuoteFor = async (
       minInputExpiryFloor,
     },
   })
+  // The covenant REBUILT from params, which commits to the receiver, the maker, the asset and the fare.
+  if (hex.encode(verified.script.pkScript) !== request.makerPkScript) {
+    throw new Error(`carrier payout script ${request.makerPkScript} is not the verified quote's receive covenant`)
+  }
   return { verified, operatorKey }
 }
 
@@ -166,8 +166,8 @@ const carrierQuoteFrom = (from: { verified: VerifiedReceiveQuote; operatorKey: s
   const { verified, operatorKey } = from
   return {
     quoteId: verified.descriptor.quoteId,
-    // From the VERIFIED address, never echoed back off the request.
-    makerPkScript: hex.encode(ArkAddress.decode(verified.quote.receiverAddress).pkScript),
+    // From the VERIFIED covenant, never echoed back off the request.
+    makerPkScript: hex.encode(verified.script.pkScript),
     makerPublicKey: verified.descriptor.makerPublicKey,
     assetId: verified.descriptor.assetId,
     physicalSats: verified.descriptor.physicalSats,

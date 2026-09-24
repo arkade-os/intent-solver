@@ -76,7 +76,6 @@ const RECOVERY = 1_000_000n
 const FLOOR = 1_100_000n
 const BATCH = 1_200_000n
 
-const MAKER_PK_SCRIPT = hex.encode(new ArkAddress(SERVER_KEY, PAYOUT_KEY, HRP).pkScript)
 const RECEIVER_ADDRESS = new ArkAddress(SERVER_KEY, PAYOUT_KEY, HRP).encode()
 
 const assetWire = (id: string): { txid: string; groupIndex: number } => {
@@ -110,6 +109,7 @@ const quoteFixture = (
     domain?: 'height' | 'time'
     assetId?: string
     receiverAddress?: string
+    receiverKey?: Uint8Array
     covenantAddress?: string
     expiresAt?: number
     quoteId?: string
@@ -125,6 +125,7 @@ const quoteFixture = (
   const batch = over.batch ?? BATCH
   const id = over.assetId ?? ASSET
   const topup = over.topup ?? DUST - VTXO_MIN
+  const receiverKey = over.receiverKey ?? PAYOUT_KEY
   const wire = assetWire(id)
   const parsed = asset.AssetId.fromString(id)
   const tagged = (value: bigint): Tagged => ({ kind: domain, value: String(value) })
@@ -135,7 +136,7 @@ const quoteFixture = (
     emulatorKey: EMULATOR_KEY,
     vtxoMinAmount: VTXO_MIN,
     params: {
-      receiverKey: PAYOUT_KEY,
+      receiverKey,
       senderKey: MAKER_KEY,
       operatorKey: OPERATOR_KEY,
       dust: DUST,
@@ -150,10 +151,10 @@ const quoteFixture = (
   return {
     quoteId: over.quoteId ?? 'q-1',
     state: over.state ?? 'quoted',
-    receiverAddress: over.receiverAddress ?? RECEIVER_ADDRESS,
+    receiverAddress: over.receiverAddress ?? new ArkAddress(SERVER_KEY, receiverKey, HRP).encode(),
     makerPublicKey: hex.encode(MAKER_KEY),
     params: {
-      receiverKey: hex.encode(PAYOUT_KEY),
+      receiverKey: hex.encode(receiverKey),
       senderKey: hex.encode(MAKER_KEY),
       operatorKey: hex.encode(OPERATOR_KEY),
       dust: String(DUST),
@@ -177,6 +178,12 @@ const quoteFixture = (
     expiresAt: over.expiresAt ?? 5_000,
   }
 }
+
+const covenantScriptOf = (quote: Record<string, unknown>): string =>
+  hex.encode(ArkAddress.decode(quote.covenantAddress as string).pkScript)
+
+const MAKER_PK_SCRIPT = covenantScriptOf(quoteFixture())
+const RECEIVER_PK_SCRIPT = hex.encode(ArkAddress.decode(RECEIVER_ADDRESS).pkScript)
 
 const infoFixture = (
   over: { serverKey?: Uint8Array; emulatorKey?: Uint8Array; assetId?: string; fareUnits?: string } = {},
@@ -229,11 +236,12 @@ const reader = (
   over: Partial<TaxiReceiveCarrierDeps> & { quote?: Record<string, unknown>; info?: Record<string, unknown> } = {},
 ) => {
   const asked: string[] = []
+  const quote = over.quote ?? quoteFixture()
   const client = taxiClient(
     async () => over.info ?? infoFixture(),
     async (id) => {
       asked.push(id)
-      return over.quote ?? quoteFixture()
+      return quote
     },
   )
   const deps: TaxiReceiveCarrierDeps = {
@@ -246,7 +254,12 @@ const reader = (
     tipHeight: async () => TIP,
     ...over,
   }
-  return { asked, deps, read: createTaxiReceiveCarrierReader(deps) }
+  return {
+    asked,
+    deps,
+    read: createTaxiReceiveCarrierReader(deps),
+    request: (fields: Record<string, unknown> = {}) => request({ makerPkScript: covenantScriptOf(quote), ...fields }),
+  }
 }
 
 const request = (over: Record<string, unknown> = {}) => ({
@@ -289,10 +302,28 @@ describe('resolving one receive-carrier quote', () => {
     await expect(read.resolve(request())).rejects.toThrow(/untrusted emulator/)
   })
 
-  it('refuses a quote that pays out to a different script', async () => {
+  it('refuses a quote naming a receiver address its covenant does not commit to', async () => {
     const substituted = new ArkAddress(SERVER_KEY, key(7), HRP).encode()
     const { read } = reader({ quote: quoteFixture({ receiverAddress: substituted }) })
-    await expect(read.resolve(request())).rejects.toThrow(/receiver address/)
+    await expect(read.resolve(request())).rejects.toThrow(/substituted the receiver key/)
+  })
+
+  it("refuses a request paying the receiver's own address, which the Taxi refuses at fill, on both entry points", async () => {
+    const { read } = reader()
+    await expect(read.resolve(request({ makerPkScript: RECEIVER_PK_SCRIPT }))).rejects.toThrow(
+      /is not the verified quote's receive covenant/,
+    )
+    await expect(read.available(request({ makerPkScript: RECEIVER_PK_SCRIPT }))).rejects.toThrow(
+      /is not the verified quote's receive covenant/,
+    )
+  })
+
+  it("refuses a request paying another receiver's covenant", async () => {
+    const stranger = covenantScriptOf(quoteFixture({ receiverKey: key(7) }))
+    const { read } = reader()
+    await expect(read.resolve(request({ makerPkScript: stranger }))).rejects.toThrow(
+      /is not the verified quote's receive covenant/,
+    )
   })
 
   it('refuses a quote for a different asset', async () => {
@@ -460,7 +491,7 @@ describe('a recycle_receiver RFQ through the real reader (Ruling 4)', () => {
     pair: `arkade:BTC->arkade:${ASSET}`,
     amount: 100_000_000n,
     amountSide: 'from' as const,
-    makerPkScript: MAKER_PK_SCRIPT,
+    makerPkScript: covenantScriptOf(receiverPaidQuote()),
     makerPublicKey: hex.encode(MAKER_KEY),
     carrier: {
       mode: 'recycle_receiver' as const,
@@ -641,7 +672,7 @@ describe('the input expiry floor is anchored, not merely ordered', () => {
 
   it('admits a floor exactly one exit delay past the tip', async () => {
     const floor = BigInt(TIP) + EXIT_DELAY
-    const { read } = reader({ quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }) })
+    const { read, request } = reader({ quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }) })
     await expect(read.resolve(request())).resolves.toMatchObject({
       inputExpiryFloor: { kind: 'height', value: floor },
     })
@@ -657,7 +688,7 @@ describe('the input expiry floor is anchored, not merely ordered', () => {
   it('anchors a seconds-typed deployment on the request clock, with no tip to read', async () => {
     const now = 1_700_000_000
     const floor = BigInt(now) + EXIT_DELAY
-    const { read } = reader({
+    const { read, request } = reader({
       trust: { ...TRUST, locktimeDomain: 'time' },
       tipHeight: undefined,
       quote: quoteFixture({ domain: 'time', recovery: floor - 1n, floor, batch: floor, expiresAt: now + 100 }),
@@ -678,7 +709,7 @@ describe('the input expiry floor is anchored, not merely ordered', () => {
 
     const floor = BigInt(TIP) + EXIT_DELAY
     const tip = carrierChainTip(client)
-    const { read } = reader({
+    const { read, request } = reader({
       tipHeight: tip.height,
       quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }),
     })
@@ -707,7 +738,7 @@ describe('admission demands the slack the quote can outlive', () => {
   it('refuses at admission the height-domain floor one mined block would strand', async () => {
     let height = TIP
     const floor = BigInt(TIP) + EXIT_DELAY
-    const { read } = reader({
+    const { read, request } = reader({
       tipHeight: async () => height,
       quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }),
     })
@@ -724,7 +755,7 @@ describe('admission demands the slack the quote can outlive', () => {
   it('admits no floor that two blocks mined inside the window would strand', async () => {
     let height = TIP
     const floor = tightestAdmissible()
-    const { read } = reader({
+    const { read, request } = reader({
       tipHeight: async () => height,
       quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }),
     })
@@ -746,7 +777,7 @@ describe('admission demands the slack the quote can outlive', () => {
   it('admits one with the window’s slack, and it still fills a block later', async () => {
     let height = TIP
     const floor = BigInt(TIP) + EXIT_DELAY + carrierAdmissionSlack('height', VALIDITY_SECONDS)
-    const { read } = reader({
+    const { read, request } = reader({
       tipHeight: async () => height,
       quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }),
     })
@@ -765,20 +796,20 @@ describe('admission demands the slack the quote can outlive', () => {
     const seconds = (floor: bigint) =>
       quoteFixture({ domain: 'time', recovery: floor - 1n, floor, batch: floor, expiresAt: now + 1_000 })
 
-    const { read: tight } = reader({ trust, tipHeight: undefined, quote: seconds(short) })
-    await expect(tight.resolve(request({ now, admission: true }))).rejects.toThrow(/below the caller minimum/)
+    const { read: tight, request: tightRequest } = reader({ trust, tipHeight: undefined, quote: seconds(short) })
+    await expect(tight.resolve(tightRequest({ now, admission: true }))).rejects.toThrow(/below the caller minimum/)
 
     const roomy = short + BigInt(VALIDITY_SECONDS)
-    const { read } = reader({ trust, tipHeight: undefined, quote: seconds(roomy) })
-    await expect(read.resolve(request({ now, admission: true }))).resolves.toMatchObject({
+    const { read, request: roomyRequest } = reader({ trust, tipHeight: undefined, quote: seconds(roomy) })
+    await expect(read.resolve(roomyRequest({ now, admission: true }))).resolves.toMatchObject({
       inputExpiryFloor: { kind: 'time', value: roomy },
     })
-    await expect(read.available(request({ now: now + VALIDITY_SECONDS }))).resolves.toEqual(new Map([[null, 0n]]))
+    await expect(read.available(roomyRequest({ now: now + VALIDITY_SECONDS }))).resolves.toEqual(new Map([[null, 0n]]))
   })
 
   it('leaves the fill-time reads at the exact anchored floor', async () => {
     const floor = BigInt(TIP) + EXIT_DELAY
-    const { read } = reader({ quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }) })
+    const { read, request } = reader({ quote: quoteFixture({ recovery: floor - 1n, floor, batch: floor }) })
     await expect(read.resolve(request())).resolves.toMatchObject({ inputExpiryFloor: { value: floor } })
     await expect(read.available(request())).resolves.toEqual(new Map([[null, 0n]]))
   })
