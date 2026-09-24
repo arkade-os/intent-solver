@@ -57,7 +57,6 @@ describe('normalizeTaxiUrl', () => {
     expect(() => normalizeTaxiUrl('http://localhost', { isMainnet: false, allowPrivate: false })).toThrow(/private/)
   })
 
-  // Both resolve privately: `*.localhost` to loopback, a dotless name through a search domain or cluster DNS.
   it.each([
     ['a *.localhost name', 'http://taxi.localhost', 'http://taxi.localhost'],
     ['a deeper *.localhost name', 'http://a.b.localhost.', 'http://a.b.localhost'],

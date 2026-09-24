@@ -411,7 +411,6 @@ describe('the conflict spend', () => {
     h.ark.submitError = new Error('connection reset')
     await expect(h.cancel()).rejects.toThrow()
     const recorded = await h.conflict()
-    // Self-consistent bytes: the fill's own transaction, hashing to the id recorded beside it.
     const forged = { ...recorded, ark_tx: FILL.arkTx, txid: FILL.finalTxid }
     const tampered = { ...(await h.attempt()) }
     tampered.binding = { ...tampered.binding, conflict: forged }
@@ -497,7 +496,6 @@ describe('what releases the pin', () => {
     h.chain.spendPinned(recorded.checkpoint_txids[0]!)
 
     await expect(h.cancel()).resolves.toEqual({ status: 'pending' })
-    // Re-sent, not looked up as a pending copy: a shared checkpoint is not the conflict's acceptance.
     expect(h.ark.submitted).toHaveLength(2)
     expect(h.ark.intents).toEqual([])
     expect(h.pins.heldFor('swap-1')).toHaveLength(1)

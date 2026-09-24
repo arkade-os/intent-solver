@@ -62,8 +62,7 @@ export class CarrierConflictStalledError extends Error {
   }
 }
 
-/** The stored conflict was not confirmed accepted: a refusal, or a failure after arkd may have taken it. Pins held;
- * the next pass re-sends the same bytes, and an accepted one then shows as a duplicate or on chain. */
+/** Not confirmed accepted: refused, or lost after arkd may have taken it. Pins held; the next pass re-sends it. */
 export class CarrierConflictRejectedError extends Error {
   readonly txid: string
   constructor(label: string, txid: string, cause: unknown) {
