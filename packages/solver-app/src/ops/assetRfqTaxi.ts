@@ -119,6 +119,51 @@ const boundTo = (quote: ReceiveQuoteWire, fillId: string): ReceiveQuoteWire => {
   return quoted
 }
 
+type InfoWire = Awaited<ReturnType<TaxiClient['info']>>
+type FarePricing = InfoWire['assetRules'][number]['fares'][number]['pricing']
+
+const decimal = (value: unknown): bigint | undefined =>
+  typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value) ? BigInt(value) : undefined
+
+/** The client's own `verifyPolicy` arithmetic, used only to pick an id: the client re-verifies against it. */
+const pricedAt = (pricing: FarePricing, loan: bigint): bigint | undefined => {
+  if (pricing.kind === 'flat') return decimal(pricing.units)
+  const min = decimal(pricing.minUnits)
+  const max = pricing.maxUnits === null ? null : decimal(pricing.maxUnits)
+  if (min === undefined || max === undefined || !Number.isInteger(pricing.bps)) return undefined
+  const fare = (loan * BigInt(pricing.bps)) / 10_000n
+  const floored = fare < min ? min : fare
+  return max !== null && floored > max ? max : floored
+}
+
+/** A token fare is never a receiver's to pay, so it names no currency here. */
+const RECEIVER_FARE_CURRENCY: Readonly<Record<string, 'sats' | 'asset'>> = { sats: 'sats', sameAsset: 'asset' }
+
+/** The advertised fare a receiver-paid quote was priced at. The RFQ names none, and without one the client checks the
+ * first listed, refusing every payee who picked another. */
+const receiverFareId = (
+  info: InfoWire,
+  quote: ReceiveQuoteWire,
+  assetId: ReturnType<typeof assetIdValue>,
+  loan: bigint,
+): string => {
+  const fare = quote.receiverFare
+  const units = decimal(fare?.units)
+  const rule = info.assetRules.find(
+    (candidate) =>
+      candidate.assetId?.txid.toLowerCase() === hex.encode(assetId.txid) &&
+      candidate.assetId.groupIndex === assetId.groupIndex,
+  )
+  const option = rule?.fares.find(
+    (offered) =>
+      RECEIVER_FARE_CURRENCY[offered.currency] === fare?.currency &&
+      units !== undefined &&
+      pricedAt(offered.pricing, loan) === units,
+  )
+  if (option === undefined) throw new Error(`carrier quote ${quote.quoteId} is priced at no fare the Taxi advertises`)
+  return option.id
+}
+
 const verifiedQuoteFor = async (
   deps: TaxiReceiveCarrierDeps,
   request: ReceiveCarrierQuoteRequest,
@@ -162,7 +207,9 @@ const verifiedQuoteFor = async (
       // ECHOED, so this sub-check collapses: the CLIENT made the quote.
       fundingExpiry: floor,
       // Keyed on `receiverPaid`, NOT `taxi`: WHICH Taxi vs who pays it.
-      ...(request.receiverPaid ? { payer: 'receiver' as const } : {}),
+      ...(request.receiverPaid
+        ? { payer: 'receiver' as const, fareId: receiverFareId(info, quote, assetId, deps.trust.dustSats) }
+        : {}),
       maxServiceFareSats: deps.maxServiceFareSats,
       minRecoveryLocktime: { kind: deps.trust.locktimeDomain, value: 1n },
       minInputExpiryFloor,

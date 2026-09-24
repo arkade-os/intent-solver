@@ -117,6 +117,8 @@ const quoteFixture = (
     topup?: bigint
     /** Opt-in per the SDK wire shape: present only when asked for. */
     payer?: 'receiver'
+    /** Receiver-paid only; zero sats unless named. */
+    receiverFare?: { currency: 'sats' | 'asset'; units: bigint }
   } = {},
 ): Record<string, unknown> => {
   const domain = over.domain ?? 'height'
@@ -130,7 +132,8 @@ const quoteFixture = (
   const parsed = asset.AssetId.fromString(id)
   const tagged = (value: bigint): Tagged => ({ kind: domain, value: String(value) })
   // Covenant-bound, so the address commits to it, unlike `params.fare`.
-  const receiverFare = over.payer ? { currency: 'sats' as const, units: 0n } : undefined
+  const receiverFare = over.payer ? (over.receiverFare ?? { currency: 'sats' as const, units: 0n }) : undefined
+  const fareWire = receiverFare && { currency: receiverFare.currency, units: String(receiverFare.units) }
   const covenant = new DustCovenantScript({
     serverKey: SERVER_KEY,
     emulatorKey: EMULATOR_KEY,
@@ -163,13 +166,17 @@ const quoteFixture = (
       locktime: String(recovery),
       recoveryRecipient: 'receiver',
       claimMode: 'recycle',
-      ...(receiverFare ? { receiverFare: { currency: 'sats', units: '0' } } : {}),
+      ...(fareWire ? { receiverFare: fareWire } : {}),
     },
     covenantAddress: over.covenantAddress ?? covenant.address(HRP, SERVER_KEY).encode(),
     fare: { currency: 'sats', units: over.fareUnits ?? '4' },
-    // The wire decoder requires these three together, or none.
-    ...(over.payer
-      ? { payer: over.payer, receiverFare: { currency: 'sats', units: '0' }, unclaimedMode: 'reclaim' }
+    // The wire decoder requires these three together, or none; an asset fare names its asset.
+    ...(fareWire
+      ? {
+          payer: over.payer,
+          receiverFare: fareWire.currency === 'asset' ? { ...fareWire, assetId: wire } : fareWire,
+          unclaimedMode: 'reclaim',
+        }
       : {}),
     batchExpiry: tagged(batch),
     inputExpiryFloor: tagged(floor),
@@ -186,7 +193,13 @@ const MAKER_PK_SCRIPT = covenantScriptOf(quoteFixture())
 const RECEIVER_PK_SCRIPT = hex.encode(ArkAddress.decode(RECEIVER_ADDRESS).pkScript)
 
 const infoFixture = (
-  over: { serverKey?: Uint8Array; emulatorKey?: Uint8Array; assetId?: string; fareUnits?: string } = {},
+  over: {
+    serverKey?: Uint8Array
+    emulatorKey?: Uint8Array
+    assetId?: string
+    fareUnits?: string
+    fares?: readonly Record<string, unknown>[]
+  } = {},
 ): Record<string, unknown> => ({
   protocolVersion: 1,
   operatorKey: hex.encode(OPERATOR_KEY),
@@ -202,7 +215,7 @@ const infoFixture = (
       enabled: true,
       claim: 'either',
       maxTopupSats: null,
-      fares: [{ id: 'flat', currency: 'sats', pricing: { kind: 'flat', units: over.fareUnits ?? '4' } }],
+      fares: over.fares ?? [{ id: 'flat', currency: 'sats', pricing: { kind: 'flat', units: over.fareUnits ?? '4' } }],
     },
   ],
   maxPerPaymentTopupSats: '10000',
@@ -551,6 +564,36 @@ describe('a recycle_receiver RFQ through the real reader (Ruling 4)', () => {
       }),
     )
     expect(outcome).toMatchObject({ accepted: false, reason: 'price_unavailable' })
+  })
+})
+
+/** The RFQ names no fare, and without an id the client checks the Taxi's first-listed one. */
+describe('a receiver-paid quote is checked against the fare it was priced at', () => {
+  const FARES = [
+    { id: 'cheap', currency: 'sats', pricing: { kind: 'flat', units: '7' } },
+    { id: 'fast', currency: 'sats', pricing: { kind: 'flat', units: '9' } },
+    { id: 'share', currency: 'sats', pricing: { kind: 'proportional', bps: 100, minUnits: '1', maxUnits: null } },
+    { id: 'in-kind', currency: 'sameAsset', pricing: { kind: 'flat', units: '50' } },
+  ]
+  const resolveAt = (receiverFare: { currency: 'sats' | 'asset'; units: bigint }) => {
+    const quote = quoteFixture({ topup: DUST, fareUnits: '0', payer: 'receiver', receiverFare })
+    const { read } = reader({ quote, info: infoFixture({ fares: FARES }) })
+    return read.resolve(request({ makerPkScript: covenantScriptOf(quote), receiverPaid: true }))
+  }
+
+  it.each([
+    ['a later flat fare', { currency: 'sats', units: 9n }],
+    ['a proportional fare, 1% of the whole-dust loan', { currency: 'sats', units: 3n }],
+    ['a fare in the delivered asset', { currency: 'asset', units: 50n }],
+  ] as const)('verifies a quote priced at %s', async (_why, receiverFare) => {
+    await expect(resolveAt(receiverFare)).resolves.toMatchObject({ receiverFare })
+  })
+
+  it.each([
+    ['sats units no fare prices', { currency: 'sats', units: 8n }],
+    ['asset units only a sats fare prices', { currency: 'asset', units: 7n }],
+  ] as const)('refuses a quote at %s', async (_why, receiverFare) => {
+    await expect(resolveAt(receiverFare)).rejects.toThrow(/q-1 is priced at no fare the Taxi advertises/)
   })
 })
 
