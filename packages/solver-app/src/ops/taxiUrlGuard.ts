@@ -4,6 +4,8 @@
  * loopback and plaintext for a value the operator typed rather than a payer.
  */
 
+import { lookup } from 'node:dns/promises'
+import { Agent, fetch as undiciFetch } from 'undici'
 import { RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 
 export interface TaxiUrlPolicy {
@@ -74,6 +76,36 @@ const isPrivate = (host: string): boolean => {
   // A dotless name only ever resolves inside a search domain or cluster DNS.
   if (!bare.includes('.')) return true
   return PRIVATE_SUFFIXES.some((suffix) => bare.endsWith(suffix))
+}
+
+export const publicTaxiAddress = async (host: string, resolve: typeof lookup = lookup) => {
+  const addresses = await resolve(host, { all: true, order: 'verbatim' })
+  if (addresses.length === 0) throw new Error(`taxi DNS returned no addresses for ${host}`)
+  for (const { address, family } of addresses) {
+    if (family !== 4 && family !== 6) throw new Error(`taxi DNS returned an unknown address family for ${host}`)
+    const canonical = family === 6 ? new URL(`http://[${address}]`).hostname : address
+    if (isPrivate(canonical)) throw new Error(`taxi DNS resolved to a private address for ${host}`)
+  }
+  return addresses[0]!
+}
+
+export const createPinnedTaxiFetch = (resolve: typeof lookup = lookup): typeof fetch => {
+  const dispatcher = new Agent({
+    autoSelectFamily: false,
+    connect: {
+      lookup(host, _options, callback) {
+        publicTaxiAddress(host, resolve).then(
+          ({ address, family }) => callback(null, address, family),
+          (error) => callback(error instanceof Error ? error : new Error(String(error)), '', 4),
+        )
+      },
+    },
+  })
+  return (input, init) =>
+    undiciFetch(input as Parameters<typeof undiciFetch>[0], {
+      ...(init as Parameters<typeof undiciFetch>[1]),
+      dispatcher,
+    }) as unknown as Promise<Response>
 }
 
 /** Ruling 3, rules 1-5. Throws on any violation; never used for `config.ts`'s TAXI_URL. */

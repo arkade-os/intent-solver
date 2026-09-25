@@ -21,7 +21,7 @@ import type { EsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import { RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
-import { guardedTaxiFetch, normalizeTaxiUrl, type TaxiUrlPolicy } from './taxiUrlGuard.js'
+import { createPinnedTaxiFetch, guardedTaxiFetch, normalizeTaxiUrl, type TaxiUrlPolicy } from './taxiUrlGuard.js'
 import type { CarrierAttemptRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { JsonObject } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 import type {
@@ -390,6 +390,7 @@ export const taxiClientCache = (deps: {
 }): ((url?: string, budget?: TaxiBudget) => TaxiCarrierClient) => {
   const baseFetch = deps.fetch ?? fetch
   const configured = deps.configuredUrl ? new TaxiClient({ baseUrl: deps.configuredUrl, fetch: baseFetch }) : undefined
+  const requestFetch = deps.fetch ?? (deps.policy.allowPrivate ? fetch : createPinnedTaxiFetch())
   const limiters: Record<TaxiBudget, RateLimiter> = {
     quote: new RateLimiter(TAXI_QUOTE_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
     fill: new RateLimiter(TAXI_FILL_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
@@ -417,7 +418,7 @@ export const taxiClientCache = (deps: {
     }
     const client = new TaxiClient({
       baseUrl: normalized,
-      fetch: guardedTaxiFetch(baseFetch, limiters[budget], guards[budget]),
+      fetch: guardedTaxiFetch(requestFetch, limiters[budget], guards[budget]),
     })
     cache.set(key, client)
     return client

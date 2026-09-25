@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest'
 import { RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
-import { normalizeTaxiUrl, guardedTaxiFetch, type TaxiUrlPolicy } from '@arkade-os/solver-app/ops/taxiUrlGuard.js'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import {
+  normalizeTaxiUrl,
+  guardedTaxiFetch,
+  publicTaxiAddress,
+  createPinnedTaxiFetch,
+  type TaxiUrlPolicy,
+} from '@arkade-os/solver-app/ops/taxiUrlGuard.js'
 
 const main: TaxiUrlPolicy = { isMainnet: true, allowPrivate: false }
 const regtest: TaxiUrlPolicy = { isMainnet: false, allowPrivate: true }
@@ -236,5 +244,46 @@ describe('guardedTaxiFetch', () => {
     const f = guardedTaxiFetch(async () => new Response('{}'), lim)
     await f('https://taxi.example./v1/info')
     await expect(f('https://taxi.example/v1/info')).rejects.toThrow(/rate/)
+  })
+})
+
+describe('request-named Taxi DNS', () => {
+  const resolver = (addresses: { address: string; family: number }[]) =>
+    (async () => addresses) as unknown as typeof import('node:dns/promises').lookup
+
+  it('rejects a mixed public/private answer and embedded private IPv4', async () => {
+    await expect(
+      publicTaxiAddress(
+        'taxi.example',
+        resolver([
+          { address: '8.8.8.8', family: 4 },
+          { address: '127.0.0.1', family: 4 },
+        ]),
+      ),
+    ).rejects.toThrow(/private address/)
+    await expect(
+      publicTaxiAddress('taxi.example', resolver([{ address: '64:ff9b::7f00:1', family: 6 }])),
+    ).rejects.toThrow(/private address/)
+    await expect(publicTaxiAddress('taxi.example', resolver([{ address: '8.8.8.8', family: 4 }]))).resolves.toEqual({
+      address: '8.8.8.8',
+      family: 4,
+    })
+  })
+
+  it('rejects a DNS name resolving to loopback before opening a socket', async () => {
+    let calls = 0
+    const server = createServer((_request, response) => {
+      calls++
+      response.end('unexpected')
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const port = (server.address() as AddressInfo).port
+      const pinned = createPinnedTaxiFetch(resolver([{ address: '127.0.0.1', family: 4 }]))
+      await expect(pinned(`http://taxi.example:${port}/v1/info`)).rejects.toThrow()
+      expect(calls).toBe(0)
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+    }
   })
 })

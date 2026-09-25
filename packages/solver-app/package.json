@@ -37,7 +37,8 @@
     "@scure/base": "^2.0.0",
     "@scure/bip39": "^2.2.0",
     "@scure/btc-signer": "^2.0.1",
-    "hono": "^4.13.0"
+    "hono": "^4.13.0",
+    "undici": "7.29.1"
   },
   "devDependencies": {
     "@arkade-os/swap": "0.0.21"
