@@ -64,7 +64,7 @@ import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveSwapRow, ReceiveSwapStore } from '../db/receiveSwaps.js'
 import type { SendSwapRow } from '../db/swaps.js'
-import { GiveUp, nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
+import { GiveUp, json, log, nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
@@ -964,14 +964,28 @@ export class ReceiveSwapService {
     // Nothing was funded before — create the exposure now. The txid this
     // returns is what the confirmation below keys off.
     let fundTxid: string
+    const stampStarted = performance.now()
     const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
+    const stampMs = Math.round(performance.now() - stampStarted)
+    const fundStarted = performance.now()
     try {
       fundTxid = await arkade.fund(row.lockupAddress, row.payoutSats, stamp)
     } catch (error) {
+      log(
+        'receive_fund_call_timing',
+        json({
+          swapId: row.id,
+          rfqRef: row.rfqId?.slice(0, 12),
+          stampMs,
+          fundMs: Math.round(performance.now() - fundStarted),
+          outcome: 'failed',
+        }),
+      )
       // Retained on an ambiguous failure: stuck for a human, on purpose.
       if (error instanceof FundNotSubmittedError) await store.releaseFundLease(row.id)
       throw error
     }
+    const fundMs = Math.round(performance.now() - fundStarted)
     // After the broadcast: a crash between leaves it unset and the next pass reveals, which is the safe direction.
     if (stamp) await store.patch(row.id, { stamped_at: this.now() })
     // Keyed to THIS row's own broadcast, and spend-aware for the same reason
@@ -985,6 +999,7 @@ export class ReceiveSwapService {
     // the throw is self-healing: the next tick re-enters `whenArmed` and the
     // adoption above finds the exact-value outpoint one round-trip later.
     const exhausted = `swap ${row.id}: funded output never appeared at the indexer`
+    const confirmStarted = performance.now()
     const giveUpAt = Date.now() + FUND_CONFIRM_BUDGET_MS
     const funded = await poll(
       async () => {
@@ -994,15 +1009,29 @@ export class ReceiveSwapService {
       },
       { attempts: Number.POSITIVE_INFINITY, intervalMs: FUND_CONFIRM_INTERVAL_MS, whenExhausted: exhausted },
     )
-    return store.transition(row.id, 'armed', 'funded', {
+    const transitioned = await store.transition(row.id, 'armed', 'funded', {
       arkade_lockup_txid: funded.txid,
       arkade_lockup_vout: funded.vout,
       arkade_lockup_value: funded.value,
     })
+    log(
+      'receive_fund_call_timing',
+      json({
+        swapId: row.id,
+        rfqRef: row.rfqId?.slice(0, 12),
+        txRef: fundTxid.slice(0, 12),
+        stampMs,
+        fundMs,
+        confirmMs: Math.round(performance.now() - confirmStarted),
+        outcome: transitioned ? 'funded' : 'transition_lost',
+      }),
+    )
+    return transitioned
   }
 
   private async whenFunded(row: ReceiveSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
+    const observeStarted = performance.now()
     const outputs = await arkade.findLockups(row.pkScript)
 
     if (outputs.length > 0) {
@@ -1045,7 +1074,17 @@ export class ReceiveSwapService {
     const searchable = historical.length > 0 ? historical : [{ txid: row.arkadeLockupTxid, vout: row.arkadeLockupVout }]
     const preimage = await arkade.findClaimPreimage(searchable, row.paymentHash)
     if (preimage) {
-      return store.transition(row.id, 'funded', 'claimed', { preimage: hex.encode(preimage) })
+      const transitioned = await store.transition(row.id, 'funded', 'claimed', { preimage: hex.encode(preimage) })
+      log(
+        'receive_claim_observe_timing',
+        json({
+          swapId: row.id,
+          rfqRef: row.rfqId?.slice(0, 12),
+          observeMs: Math.round(performance.now() - observeStarted),
+          outcome: transitioned ? 'claimed' : 'transition_lost',
+        }),
+      )
+      return transitioned
     }
     // Nothing provable yet — could be ordinary read lag between findLockups
     // seeing the output gone and findClaimPreimage's own read of what spent
