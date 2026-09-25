@@ -147,6 +147,13 @@ describe('normalizeTaxiUrl', () => {
     expect(normalizeTaxiUrl('https://[64:ff9b::808:808]', policy)).toBe('https://[64:ff9b::808:808]')
   })
 
+  it('refuses IPv4-compatible and transition addresses that can reach private IPv4', () => {
+    const policy = { isMainnet: false, allowPrivate: false }
+    for (const host of ['::7f00:1', '64:ff9b:1::7f00:1', '2002:7f00:1::', '2001:0:7f00:1::']) {
+      expect(() => normalizeTaxiUrl(`https://[${host}]`, policy)).toThrow(/private/)
+    }
+  })
+
   it('refuses a decimal or hex loopback literal the same as dotted-decimal (rule 5)', () => {
     const policy = { isMainnet: false, allowPrivate: false }
     expect(() => normalizeTaxiUrl('https://2130706433', policy)).toThrow(/private/)
@@ -264,6 +271,9 @@ describe('request-named Taxi DNS', () => {
     await expect(
       publicTaxiAddress('taxi.example', resolver([{ address: '64:ff9b::7f00:1', family: 6 }])),
     ).rejects.toThrow(/private address/)
+    await expect(publicTaxiAddress('taxi.example', resolver([{ address: '::7f00:1', family: 6 }]))).rejects.toThrow(
+      /private address/,
+    )
     await expect(publicTaxiAddress('taxi.example', resolver([{ address: '8.8.8.8', family: 4 }]))).resolves.toEqual({
       address: '8.8.8.8',
       family: 4,
