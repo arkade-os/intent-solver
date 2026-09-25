@@ -169,7 +169,7 @@ export interface ReceiveServiceDeps {
    */
   pricing?: PricingStrategy
   store: ReceiveSwapStore
-  ln: Pick<LightningBackend, 'createHoldInvoice' | 'getHoldState' | 'settleHold' | 'cancelHold'>
+  ln: Pick<LightningBackend, 'createHoldInvoice' | 'getHoldState' | 'settleHold' | 'cancelHold' | 'onHoldAccepted'>
   arkade: ReceiveArkadeOps
   /**
    * OPTIONAL. When set, the solver hands covclaimd the sealed packet so the
@@ -602,6 +602,10 @@ export class ReceiveSwapService {
           solverRefundPkScript: arkade.solverRefundPkScript,
           nonInteractiveParameters: true,
           rfqId: request.rfqId,
+        })
+        // Fund on the HTLC's arrival rather than the next sweep.
+        this.deps.ln.onHoldAccepted?.(request.paymentHash, () => {
+          void this.tick(swap.id).catch((error) => this.onTickError?.(swap.id, error))
         })
         return { accepted: true, swap, validUntil }
       } catch (error) {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -672,6 +672,42 @@ describe('ReceiveSwapService.quote', () => {
     const rebuilt = covenantScriptFromRow(receiveCovenantRowFor(funded))
     expect(hex.encode(rebuilt.pkScript)).toBe(funded.pkScript)
     expect(funded.refundLocktime).toBe(quoted.refundLocktime)
+  })
+})
+
+describe('ReceiveSwapService — an arriving HTLC drives its row', () => {
+  it('funds as soon as the backend reports the hold accepted, with no sweep', async () => {
+    let onHeld: (() => void) | undefined
+    const notifying = {
+      createHoldInvoice: ln.createHoldInvoice.bind(ln),
+      getHoldState: ln.getHoldState.bind(ln),
+      settleHold: ln.settleHold.bind(ln),
+      onHoldAccepted: (hash: string, callback: () => void) => {
+        if (hash === paymentHash) onHeld = callback
+        return () => {}
+      },
+    }
+    const svc = new ReceiveSwapService({
+      acceptUnilateralGap: false,
+      store,
+      ln: notifying,
+      arkade: arkade.ops,
+      covclaimd: covclaimd.client,
+      limits: LIMITS,
+      maxExposedSats: 1_000_000,
+      totalCommitted: () => store.committedSats(),
+      admission: new AdmissionControl(),
+      now: clock,
+    })
+    const outcome = await svc.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+    expect(onHeld).toBeDefined()
+
+    ln.armHold(paymentHash, now + 4 * 3600)
+    onHeld?.()
+
+    await vi.waitFor(async () => expect((await store.get(outcome.swap.id)).state).toBe('funded'))
+    expect(arkade.state.fundCalls).toHaveLength(1)
   })
 })
 
