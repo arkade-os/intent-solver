@@ -627,7 +627,10 @@ export class ReceiveSwapService {
     }
   }
 
-  /** Fund on the HTLC's arrival rather than the next sweep. Never throws: the row is already persisted. */
+  /**
+   * Fund on the HTLC's arrival rather than the next sweep. Never throws: the row is already persisted.
+   * Quote-time only; rows recovered after a restart are not re-subscribed and the sweep drives them.
+   */
   private tickOnHold(swap: ReceiveSwapRow): void {
     try {
       this.deps.ln.onHoldAccepted?.(swap.paymentHash, () => {

@@ -280,7 +280,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   const contractEvents = lazyContractSource({
     getContractManager: async () => {
       const manager = await services.arkade.wallet.getContractManager()
-      // One spender, and the event stream keeps the repository current: a send may reuse its select's sync.
+      // Process-wide on the shared manager. Safe: one spender, and the event stream keeps the repository current.
       manager.setVtxoSyncMaxAge(VTXO_SYNC_MAX_AGE_MS)
       return manager
     },

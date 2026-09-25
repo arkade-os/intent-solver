@@ -20,11 +20,16 @@ export const driveCoupledPeers = (legs: {
   const drive = (peer: Promise<{ id: string } | null>, tick: (id: string) => Promise<unknown>): void => {
     void peer.then((row) => (row ? tick(row.id) : undefined)).catch(legs.onError)
   }
-  legs.send.onStateChange = (row) => {
+  const priorSend = legs.send.onStateChange
+  legs.send.onStateChange = (row, from) => {
+    priorSend?.(row, from)
     if (row.state !== 'funded') return
     drive(legs.receiveStore.findLiveByPaymentHash(row.paymentHash), (id) => legs.receive.tick(id))
   }
-  legs.receive.onStateChange = (row) => {
+  const priorReceive = legs.receive.onStateChange
+  legs.receive.onStateChange = (row, from) => {
+    priorReceive?.(row, from)
+    // Not only `claimed`: a coupled receive crosses claimed -> settled in one tick and reports once.
     if (row.state !== 'claimed' && row.state !== 'settled') return
     drive(legs.sendStore.findLiveByPaymentHash(row.paymentHash), (id) => legs.send.tick(id))
   }
