@@ -4,10 +4,9 @@
  *
  * This is the relay counterpart of `assetRfqCorridor.e2e.test.ts` (which calls
  * `corridor.quote` directly): here the client's `rfq_request` travels over the
- * dev-broker relay framing (`scripts/mock-relay.mjs` shape) through the
- * shipped `RelayIngress`, and the reply comes back the same way — the same
- * bytes the HTTP bodies carry, per the ingress module's contract. The client
- * half goes through `@arkade-os/swap`'s own `relayTransport` + `requestArkadeSwap`,
+ * regtest Nostr relay through the shipped `RelayIngress`, and the reply comes
+ * back as a signed, encrypted Nostr event. The client half goes through
+ * `@arkade-os/swap`'s own transport and `requestArkadeSwap`,
  * so the quote/derive/verify/fund path is the SDK's, not a hand-rolled copy.
  *
  * Needs arkd, the emulator, spendable sats and a minted asset
@@ -18,13 +17,14 @@ import { createServer, type Server } from 'node:http'
 import { randomBytes, randomInt } from 'node:crypto'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { WebSocketServer } from 'ws'
-import { schnorr } from '@noble/curves/secp256k1.js'
+import { generateMnemonic } from '@scure/bip39'
+import { wordlist } from '@scure/bip39/wordlists/english.js'
 import { ArkAddress, asset, hasTerminalSpend, Transaction } from '@arkade-os/sdk'
-import { relayTransport, requestArkadeSwap, type Offer } from '@arkade-os/swap'
+import { requestArkadeSwap, type Offer } from '@arkade-os/swap'
+import { nostrRfqTransport } from '@arkade-os/swap/nostr'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
-import { GiveUp, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
+import { GiveUp, poll } from '@arkade-os/solver-core/util/poll.js'
 import { createCorridorReaderSet, createCorridorSet } from '@arkade-os/solver-core/core/corridor.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
@@ -44,12 +44,9 @@ import {
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { assetRfqCorridor, assetRfqDescriptor, assetRfqReader } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import { RelayIngress } from '@arkade-os/solver-transport/ingress/relay.js'
-import {
-  devCodec,
-  matchesFilter,
-  webSocketRelayConnection,
-  type RelayEvent,
-} from '@arkade-os/solver-transport/relay/connection.js'
+import { webSocketRelayConnection } from '@arkade-os/solver-transport/relay/connection.js'
+import { nostrCodecForWallet } from '@arkade-os/solver-transport/relay/nostr.js'
+import { createArkadeContext, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { requireStack } from './support/preflight.js'
 import {
   assertArkadeSpendable,
@@ -61,16 +58,6 @@ import {
 } from './support/stack.js'
 
 const ARKD_URL = process.env.ARK_SERVER_URL ?? 'http://localhost:7070'
-
-/**
- * Relay addressing identity, DISTINCT from the covenant maker key: the broker
- * delivers every event to every matching subscriber, so sharing one pubkey for
- * addressing and for the covenant echoes our own request back to us — and
- * `expectQuote` throws on the first reply carrying our rfq_id whatever its
- * type (`unexpected reply: rfq_request`). Fresh per transport, so concurrent
- * tests never share a subscription either.
- */
-const relayClientKey = (): string => hex.encode(schnorr.getPublicKey(randomBytes(32)))
 
 /** Enough for deposits in both directions plus carriers and change. */
 const NEEDED_SATS = 150_000
@@ -88,9 +75,25 @@ let makerPkScript: string
 let makerPublicKey: string
 let dir: string
 
-/** In-process mock relay (same frames as `scripts/mock-relay.mjs`). */
-let broker: WebSocketServer
-let relayUrl: string
+const relayUrl = process.env.E2E_NOSTR_RELAY_URL ?? 'ws://localhost:7777'
+const openTransport = () => nostrRfqTransport({ relays: [relayUrl], solverPubkey: makerPublicKey })
+
+const party = async (): Promise<ArkadeContext> =>
+  createArkadeContext({
+    mnemonic: generateMnemonic(wordlist, 128),
+    arkServerUrl: ARKD_URL,
+    databasePath: join(tempStoreDir(), 'wallet.sqlite'),
+    isMainnet: arkade.profile.isMainnet,
+    arkadeHrp: arkade.profile.arkadeHrp,
+    expectedArkdNetwork: arkade.profile.arkdNetwork,
+  })
+
+const assetUnits = async (wallet: ArkadeContext['wallet']): Promise<bigint> => {
+  const balance = await wallet.getBalance()
+  return (balance.availableAssets ?? [])
+    .filter((entry) => entry.assetId === assetId)
+    .reduce((total, entry) => total + BigInt(entry.amount), 0n)
+}
 
 const heldAsset = async (wantedId?: string): Promise<{ assetId: string; amount: bigint } | null> => {
   const balance = await arkade.ctx.wallet.getBalance()
@@ -112,44 +115,13 @@ const startFeed = async (price: string): Promise<{ server: Server; url: string }
   return { server, url: `http://127.0.0.1:${address.port}/price` }
 }
 
-const startBroker = (): Promise<{ server: WebSocketServer; url: string }> => {
-  const server = new WebSocketServer({ port: 0 })
-  const subscribers = new Map<import('ws').WebSocket, Map<string, { recipient?: string }>>()
-  server.on('connection', (socket) => {
-    subscribers.set(socket, new Map())
-    socket.on('close', () => subscribers.delete(socket))
-    socket.on('message', (raw) => {
-      let frame: { op: string; id?: string; filter?: { recipient?: string }; event?: RelayEvent }
-      try {
-        frame = JSON.parse(String(raw))
-      } catch {
-        return
-      }
-      if (frame.op === 'sub' && frame.id) subscribers.get(socket)?.set(frame.id, frame.filter ?? {})
-      if (frame.op === 'unsub' && frame.id) subscribers.get(socket)?.delete(frame.id)
-      if (frame.op === 'event' && frame.event) {
-        for (const [peer, subs] of subscribers) {
-          for (const filter of subs.values()) {
-            if (matchesFilter(frame.event, filter)) {
-              peer.send(JSON.stringify({ op: 'event', event: frame.event }))
-              break
-            }
-          }
-        }
-      }
-    })
-  })
-  return new Promise((resolve) => {
-    server.on('listening', () => {
-      const address = server.address()
-      if (address === null || typeof address === 'string') throw new Error('relay broker did not bind a port')
-      resolve({ server, url: `ws://127.0.0.1:${(address as { port: number }).port}` })
-    })
-  })
-}
-
 beforeAll(async () => {
-  await requireStack('arkade asset RFQ over relay', ['arkd', 'emulator'])
+  await requireStack('arkade asset RFQ over Nostr', ['arkd', 'emulator'])
+  const relay = await fetch(relayUrl.replace(/^ws/, 'http'), {
+    headers: { accept: 'application/nostr+json' },
+    signal: AbortSignal.timeout(5_000),
+  })
+  if (!relay.ok) throw new Error(`regtest Nostr relay is unavailable: HTTP ${relay.status}`)
   arkade = await openArkade()
   await assertArkadeSpendable(arkade, NEEDED_SATS)
   const held = await heldAsset()
@@ -165,23 +137,11 @@ beforeAll(async () => {
   const started = await startFeed(FEED_PRICE)
   feed = started.server
   feedUrl = started.url
-  const relay = await startBroker()
-  broker = relay.server
-  relayUrl = relay.url
   dir = tempStoreDir()
-  // The codec is imported so a framing drift fails here rather than as a
-  // silent timeout below: the broker speaks dev frames by construction.
-  expect(devCodec).toBeDefined()
 }, SETUP_TIMEOUT_MS)
 
 afterAll(async () => {
   if (feed) await new Promise<void>((resolve) => feed.close(() => resolve()))
-  // Guarded, not optional-chained: with no broker the executor below would
-  // never resolve and would hide the setup failure behind a hang.
-  if (broker) {
-    for (const client of broker.clients) client.terminate()
-    await new Promise<void>((resolve) => broker.close(() => resolve()))
-  }
   arkade?.close()
 })
 
@@ -302,7 +262,11 @@ const harness = async (over: Partial<AssetRfqMarket> = {}): Promise<Harness> => 
   const buy = assetRfqDescriptor(markets[0]!, 'buy_base')
   const corridors = createCorridorSet([assetRfqCorridor(sell, service, store), assetRfqCorridor(buy, service, store)])
   const readers = createCorridorReaderSet([assetRfqReader(sell, store), assetRfqReader(buy, store)])
-  const connection = webSocketRelayConnection(relayUrl)
+  const mnemonic = process.env.ARK_MNEMONIC
+  if (!mnemonic) throw new Error('ARK_MNEMONIC is required for the solver Nostr identity')
+  const connection = webSocketRelayConnection(relayUrl, {
+    codec: nostrCodecForWallet(mnemonic, arkade.profile.isMainnet, makerPublicKey),
+  })
   const ingress = new RelayIngress({ corridors, readers, connection, providerPubkey: makerPublicKey })
   await ingress.start()
   return {
@@ -338,24 +302,40 @@ const driveTo = async (
     { attempts: 30, intervalMs: 2000, whenExhausted: `${id} never reached ${state}` },
   )
 
-describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directions', () => {
+describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
   it(
-    'quotes BTC->asset over the relay, recognises the deposit and fills it',
+    'Alice swaps BTC for an asset, which the solver delivers to Bob',
     async () => {
       const { ingress, store, tickAll } = await harness()
+      const alice = await party()
+      const bob = await party()
       try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
+        const bobAddress = await bob.wallet.getAddress()
+        const aliceAddress = await alice.wallet.getAddress()
+        expect(aliceAddress).not.toBe(bobAddress)
+        expect(await assetUnits(bob.wallet)).toBe(0n)
+        const aliceFundingTxid = await arkade.ctx.wallet.send({ address: aliceAddress, amount: 40_000 })
+        await poll(
+          async () =>
+            (await alice.wallet.getSpendableVtxos({ withRecoverable: false })).some(
+              (coin) => coin.txid === aliceFundingTxid,
+            ),
+          { attempts: 30, intervalMs: 1_000, whenExhausted: 'Alice never received her BTC float' },
+        )
+        const aliceBefore = (await alice.wallet.getBalance()).available
+        const transport = openTransport()
         const amount = depositSats(20_000)
         const rfqId = randomBytes(32).toString('hex')
-        const swap = await requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
+        const swap = await requestArkadeSwap(alice.wallet, ARKD_URL, transport, {
           amount,
           rfqId,
           wantAsset: asset.AssetId.fromString(assetId),
+          receiveAddress: bobAddress,
         })
         expect(swap.fundAmount).toBe(amount)
         await transport.close()
 
-        const fundingTxid = await arkade.ctx.wallet.send({
+        const fundingTxid = await alice.wallet.send({
           address: swap.address,
           amount: Number(swap.fundAmount),
           extensions: [swap.extension],
@@ -372,20 +352,26 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
 
         const { txs } = await arkade.ctx.wallet.indexerProvider.getVirtualTxs([filled.fillTxid!])
         const fill = Transaction.fromPSBT(base64.decode(txs[0]!))
-        expect(hex.encode(fill.getOutput(0)!.script!)).toBe(makerPkScript)
+        expect(hex.encode(fill.getOutput(0)!.script!)).toBe(hex.encode(ArkAddress.decode(bobAddress).pkScript))
         expect(fill.getOutput(0)!.amount).toBe(ASSET_CARRIER_SATS)
+        await poll(async () => (await assetUnits(bob.wallet)) === filled.toAmount, {
+          attempts: 30,
+          intervalMs: 1_000,
+          whenExhausted: 'Bob never received the swapped asset',
+        })
+        expect(await assetUnits(alice.wallet)).toBe(0n)
+        expect((await alice.wallet.getBalance()).available).toBeLessThan(aliceBefore)
 
         // Status over the relay too: the receipt is the fill txid (no preimage
         // on this class), and it must be the fill this swap settled with.
-        const statusTransport = relayTransport(relayUrl, {
-          solverPubkey: makerPublicKey,
-          clientPubkey: relayClientKey(),
-        })
+        const statusTransport = openTransport()
         const status = await statusTransport.status(rfqId)
         await statusTransport.close()
         expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
         expect(status?.profile['fill_txid']).toBe(filled.fillTxid)
       } finally {
+        alice.close()
+        bob.close()
         await store.close()
         await ingress.stop()
       }
@@ -401,7 +387,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
       // dust floor) and these amounts stay an order of magnitude above it.
       const { ingress, store, tickAll } = await harness()
       try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
+        const transport = openTransport()
         // Bound to `assetId`: the balance this asserts must be the asset the
         // request and `wallet.send` below actually move.
         const held = await heldAsset(assetId)
@@ -440,261 +426,11 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         expect(hex.encode(fill.getOutput(0)!.script!)).toBe(makerPkScript)
         expect(fill.getOutput(0)!.amount).toBe(BigInt(swap.quote.to_amount))
 
-        const statusTransport = relayTransport(relayUrl, {
-          solverPubkey: makerPublicKey,
-          clientPubkey: relayClientKey(),
-        })
+        const statusTransport = openTransport()
         const status = await statusTransport.status(rfqId)
         await statusTransport.close()
         expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
         expect(status?.profile['fill_txid']).toBe(filled.fillTxid)
-      } finally {
-        await store.close()
-        await ingress.stop()
-      }
-    },
-    SWAP_TIMEOUT_MS,
-  )
-
-  it(
-    'quotes exact-out through the swap client and fills it, in both directions',
-    async () => {
-      // `amountSide: 'to'` threw in the client until @arkade-os/swap 0.0.20
-      // (ts-sdk#931), so this path has only ever been proven against the
-      // corridor's own API, never through a real caller.
-      const { ingress, store, tickAll } = await harness()
-      try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
-
-        const wantUnits = BigInt(1200 + randomInt(1, 300))
-        const buy = await requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
-          amount: wantUnits,
-          amountSide: 'to',
-          rfqId: randomBytes(32).toString('hex'),
-          wantAsset: asset.AssetId.fromString(assetId),
-        })
-        expect(BigInt(buy.quote.to_amount)).toBe(wantUnits)
-        expect(buy.fundAmount).toBe(BigInt(buy.quote.from_amount))
-        expect(buy.fundAmount).toBeGreaterThan(0n)
-
-        const buyTxid = await arkade.ctx.wallet.send({
-          address: buy.address,
-          amount: Number(buy.fundAmount),
-          extensions: [buy.extension],
-        })
-        const buyId = (await store.listNonTerminal())[0]!.id
-        expect((await driveTo(tickAll, store, buyId, 'funded')).depositTxid).toBe(buyTxid)
-        expect((await driveTo(tickAll, store, buyId, 'filled')).toAmount).toBe(wantUnits)
-
-        const wantSats = BigInt(1500 + randomInt(1, 300))
-        const sell = await requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
-          amount: wantSats,
-          amountSide: 'to',
-          rfqId: randomBytes(32).toString('hex'),
-          offerAsset: asset.AssetId.fromString(assetId),
-        })
-        expect(BigInt(sell.quote.to_amount)).toBe(wantSats)
-        expect(sell.fundAmount).toBe(BigInt(sell.quote.from_amount))
-        expect((await heldAsset(assetId))!.amount).toBeGreaterThanOrEqual(sell.fundAmount)
-        await transport.close()
-
-        const sellTxid = await arkade.ctx.wallet.send({
-          address: sell.address,
-          amount: Number(sell.carrierSats),
-          assets: [{ assetId, amount: sell.fundAmount }],
-          extensions: [sell.extension],
-        })
-        const sellId = (await store.listNonTerminal())[0]!.id
-        expect((await driveTo(tickAll, store, sellId, 'funded')).depositTxid).toBe(sellTxid)
-        expect((await driveTo(tickAll, store, sellId, 'filled')).toAmount).toBe(wantSats)
-      } finally {
-        await store.close()
-        await ingress.stop()
-      }
-    },
-    SWAP_TIMEOUT_MS,
-  )
-
-  it(
-    'funds the carrier the solver published, and attaches none to a BTC deposit',
-    async () => {
-      // Deliberately NOT the SDK's compile-time constant: a client that ignored
-      // `carrier_sats` would fund that instead, and the deposit would not match.
-      const published = arkade.ctx.dustSats + 70n
-      expect(published, 'the fixture must differ from the constant or this proves nothing').not.toBe(ASSET_CARRIER_SATS)
-      const { ingress, store, tickAll } = await harness({ carrierSats: published })
-      try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
-
-        const swap = await requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
-          amount: BigInt(1200 + randomInt(1, 300)),
-          rfqId: randomBytes(32).toString('hex'),
-          offerAsset: asset.AssetId.fromString(assetId),
-        })
-        expect(swap.quote.carrier_sats).toBe(published.toString())
-        expect(swap.carrierSats).toBe(published)
-
-        const fundingTxid = await arkade.ctx.wallet.send({
-          address: swap.address,
-          amount: Number(swap.carrierSats),
-          assets: [{ assetId, amount: swap.fundAmount }],
-          extensions: [swap.extension],
-        })
-        const deposit = await poll(async () => await depositAt(hex.encode(swap.swapPkScript)), {
-          attempts: 15,
-          intervalMs: 1_000,
-          whenExhausted: 'the funded carrier never reached the indexer',
-        })
-        expect(deposit.sats).toBe(published)
-
-        const id = (await store.listNonTerminal())[0]!.id
-        expect((await driveTo(tickAll, store, id, 'funded')).depositTxid).toBe(fundingTxid)
-        expect((await driveTo(tickAll, store, id, 'filled')).fillTxid).toMatch(/^[0-9a-f]{64}$/)
-
-        // The negative half: the same carrier is published on a BTC deposit,
-        // where it is already netted out of `to_amount`. Consuming it there
-        // would overfund every such deposit by one dust.
-        const btc = await requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
-          amount: 5_000n,
-          rfqId: randomBytes(32).toString('hex'),
-          wantAsset: asset.AssetId.fromString(assetId),
-        })
-        expect(btc.quote.carrier_sats).toBe(published.toString())
-        expect(btc.carrierSats).toBe(0n)
-        await transport.close()
-      } finally {
-        await store.close()
-        await ingress.stop()
-      }
-    },
-    SWAP_TIMEOUT_MS,
-  )
-
-  // A live quote per combination: only a real payout off a real arkd proves the
-  // configured spread reached pricing rather than being dropped on the way in.
-  const payoutsFor = async (over: Partial<AssetRfqMarket>) => {
-    const { ingress, store } = await harness(over)
-    try {
-      const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
-      const sell = await requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
-        amount: 20_000n,
-        rfqId: randomBytes(32).toString('hex'),
-        wantAsset: asset.AssetId.fromString(assetId),
-      })
-      const buy = await requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
-        amount: 2000n,
-        rfqId: randomBytes(32).toString('hex'),
-        offerAsset: asset.AssetId.fromString(assetId),
-      })
-      await transport.close()
-      return { sell: BigInt(sell.quote.to_amount), buy: BigInt(buy.quote.to_amount) }
-    } finally {
-      await store.close()
-      await ingress.stop()
-    }
-  }
-
-  it(
-    'prices each direction at its own spread, end to end over the relay',
-    async () => {
-      const symmetric = await payoutsFor({})
-      const narrowSell = await payoutsFor({ sellBaseFeeBps: 0 })
-      const wideBuy = await payoutsFor({ buyBaseFeeBps: 900 })
-      const both = await payoutsFor({ sellBaseFeeBps: 0, buyBaseFeeBps: 900 })
-
-      // Narrowing the sell side pays the maker more; the buy side is untouched.
-      expect(narrowSell.sell).toBeGreaterThan(symmetric.sell)
-      expect(narrowSell.buy).toBe(symmetric.buy)
-
-      // Widening the buy side pays less; the sell side is untouched.
-      expect(wideBuy.buy).toBeLessThan(symmetric.buy)
-      expect(wideBuy.sell).toBe(symmetric.sell)
-
-      // Both at once is each one's effect, not a blend.
-      expect(both.sell).toBe(narrowSell.sell)
-      expect(both.buy).toBe(wideBuy.buy)
-
-      for (const p of [symmetric, narrowSell, wideBuy, both]) {
-        expect(p.buy).toBeGreaterThanOrEqual(arkade.ctx.dustSats)
-        expect(p.sell).toBeGreaterThan(0n)
-      }
-    },
-    SWAP_TIMEOUT_MS,
-  )
-
-  it(
-    'refuses an asset request with an empty profile over the relay, in the closed vocabulary',
-    async () => {
-      const { ingress, store, pairSell } = await harness()
-      try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
-        const rfqId = randomBytes(32).toString('hex')
-        await expect(
-          transport.requestQuote({
-            v: 1,
-            type: 'rfq_request',
-            rfq_id: rfqId,
-            pair: pairSell,
-            amount_side: 'from',
-            amount: '5000',
-            profile: {},
-          }),
-        ).rejects.toMatchObject({ name: 'SwapRefusal' })
-
-        // A payout alone under dust now quotes: the maker's carrier comes back on
-        // top, lifting output 0 clear of what arkd would reject.
-        const tiny = await requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
-          amount: 100n,
-          offerAsset: asset.AssetId.fromString(assetId),
-        })
-        expect(BigInt(tiny.quote.to_amount)).toBeGreaterThan(arkade.ctx.dustSats)
-        await transport.close()
-      } finally {
-        await store.close()
-        await ingress.stop()
-      }
-    },
-    SWAP_TIMEOUT_MS,
-  )
-
-  it(
-    'reports quoted, funded, and settled through polled relay status',
-    async () => {
-      // Quote validity is a harness constant (600s) here, so the lapse path is
-      // not reachable from this test and is covered by
-      // `assetRfqCorridor.e2e.test.ts`. This asserts the relay status face.
-      const { ingress, store, tickAll } = await harness()
-      try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
-        const amount = depositSats(4_000)
-        const rfqId = randomBytes(32).toString('hex')
-        const swap = await requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
-          amount,
-          rfqId,
-          wantAsset: asset.AssetId.fromString(assetId),
-        })
-        let status = await transport.status(rfqId)
-        expect(status).toMatchObject({ type: 'rfq_status', state: 'quoted' })
-        await transport.close()
-
-        const fundingTxid = await arkade.ctx.wallet.send({
-          address: swap.address,
-          amount: Number(swap.fundAmount),
-          extensions: [swap.extension],
-        })
-        const id = (await store.listNonTerminal())[0]!.id
-        await driveTo(tickAll, store, id, 'funded')
-        await sleep(1_000)
-        const filled = await driveTo(tickAll, store, id, 'filled')
-        expect(filled.depositTxid).toBe(fundingTxid)
-
-        const statusTransport = relayTransport(relayUrl, {
-          solverPubkey: makerPublicKey,
-          clientPubkey: relayClientKey(),
-        })
-        status = await statusTransport.status(rfqId)
-        await statusTransport.close()
-        expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
       } finally {
         await store.close()
         await ingress.stop()

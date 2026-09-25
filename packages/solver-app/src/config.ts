@@ -351,6 +351,10 @@ export interface Config {
    *  sealed claim packets to the claim daemon (offline clients). Unset = the
    *  client claims its own lockup. */
   covclaimdUrl?: string
+  /** Taxi operator base URL — the receive-carrier rail, off unless set, and the
+   *  ONLY knob it adds: every identity a quote is verified against comes from
+   *  the context this process already trusts, never from here. */
+  taxiUrl?: string
   /**
    * Which BTC rail this deployment moves money on — the Lightning AND the
    * onchain leg, since both come out of one wallet (@see ops/rails.ts).
@@ -1098,6 +1102,26 @@ export const loadConfig = (): Config => {
       // Mainnet-gated, not loopback-only: regtest stacks reach covclaimd over a container network.
       if (loopback || !profile.isMainnet) return raw
       throw new Error(`COVCLAIMD_URL must use https on mainnet, got "${url.protocol}//${url.host}"`)
+    })(),
+    // Gated exactly as covclaimd is: a plaintext operator on mainnet is a
+    // quote anyone on the path can rewrite.
+    taxiUrl: (() => {
+      const raw = process.env.TAXI_URL?.trim()
+      if (!raw) return undefined
+      let url: URL
+      try {
+        url = new URL(raw)
+      } catch {
+        throw new Error(`TAXI_URL must be an absolute URL, got "${raw}"`)
+      }
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new Error(`TAXI_URL must be http or https, got "${url.protocol}"`)
+      }
+      if (url.protocol === 'https:') return raw
+      const host = url.hostname.replace(/^\[|\]$/g, '')
+      const loopback = host === 'localhost' || host === '::1' || /^127(\.\d{1,3}){3}$/.test(host)
+      if (loopback || !profile.isMainnet) return raw
+      throw new Error(`TAXI_URL must use https on mainnet, got "${url.protocol}//${url.host}"`)
     })(),
     arkade: {
       mnemonic: required('ARK_MNEMONIC'),

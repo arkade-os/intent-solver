@@ -30,13 +30,15 @@
     "@arkade-os/solver-rails-fake": "workspace:*",
     "@arkade-os/solver-rails-lnd": "workspace:*",
     "@arkade-os/solver-transport": "workspace:*",
+    "@arkade-taxi/client": "file:./vendor/carrier/arkade-taxi-client-0.0.0-dd8b03a1.tgz",
     "@hono/node-server": "^2.1.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
     "@scure/bip39": "^2.2.0",
     "@scure/btc-signer": "^2.0.1",
-    "hono": "^4.13.0"
+    "hono": "^4.13.0",
+    "undici": "7.29.1"
   },
   "devDependencies": {
     "@arkade-os/swap": "0.0.22"

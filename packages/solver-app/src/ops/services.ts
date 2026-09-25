@@ -100,9 +100,23 @@ import {
 } from './assetRfqMarkets.js'
 import { marketServingDivergence } from './marketDivergence.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
-import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import {
+  offerExitDelay,
+  offerHexFrom,
+  offerScriptFrom,
+  xOnlyPubkey,
+} from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
+import {
+  carrierChainTip,
+  createCarrierPinLedger,
+  restoreCarrierAttemptPins,
+  spendableCarrierCoins,
+  taxiReceiveCarrier,
+} from './assetRfqTaxi.js'
+import { completeTaxiReceiveCarrier } from './assetRfqTaxiAdapter.js'
+import type { TaxiUrlPolicy } from './taxiUrlGuard.js'
 
 export interface Services {
   /**
@@ -646,6 +660,92 @@ export const createServices = async (
     // Boot-captured beside the two keys above, all three from one `getInfo()`.
     exitDelay: offerExitDelay(arkade.advertisedExitDelay),
   }
+  /**
+   * The receive-carrier READ half (Ruling 3/G4): exists regardless of
+   * `TAXI_URL`, since a request naming its own Taxi resolves against that one
+   * either way — and so does the fill half below. Every identity a quote is
+   * verified against comes from the context above, never from a URL.
+   * TAXI_RECEIVER_ALLOW_PRIVATE is read here, at the composition root, never
+   * inside the guard module.
+   */
+  const taxiUrlPolicy: TaxiUrlPolicy = {
+    isMainnet: config.arkade.isMainnet,
+    allowPrivate: process.env.TAXI_RECEIVER_ALLOW_PRIVATE === '1',
+  }
+  const taxiCarrier = await taxiReceiveCarrier({
+    taxiUrl: config.taxiUrl,
+    policy: taxiUrlPolicy,
+    trust: async () => ({
+      serverKey: arkade.wallet.arkServerPublicKey,
+      emulatorKey: assetRfqDerivation.emulatorPubkey,
+      dustSats: arkade.dustSats,
+      vtxoMinAmount: BigInt((await arkade.wallet.arkProvider.getInfo()).vtxoMinAmount),
+      hrp: arkade.hrp,
+      locktimeDomain: arkade.timelockUnit === 'blocks' ? 'height' : 'time',
+      inputExpiryMargin: BigInt(arkade.advertisedExitDelay),
+    }),
+    // What the carrier itself is worth: no more than one dust to recycle one.
+    maxServiceFareSats: arkade.dustSats,
+    contracts: () => arkade.wallet.getContractManager(),
+    reserved: () => arkade.reservations.reserved(),
+    // The SAME number the service binds a quote for.
+    quoteValiditySeconds: policy.assetQuoteValiditySeconds,
+    // NOT the shared `chainTip` below, which holds a reading for 15s.
+    tipHeight: config.chainTipEsploraUrl
+      ? carrierChainTip(createEsploraClient(config.chainTipEsploraUrl)).height
+      : undefined,
+  })
+  /**
+   * BEFORE any service exists to tick it, and gated on ROWS rather than on the
+   * knob: an operator who unsets `TAXI_URL` with an attempt outstanding would
+   * otherwise leave its coins free for the float to spend. A never-configured
+   * solver finds none — one `SELECT` on a handle that is already open.
+   */
+  const carrierPins = createCarrierPinLedger()
+  const restoredPins = await restoreCarrierAttemptPins({
+    attempts: () => assetRfqStore.listUnresolvedCarrierAttempts(),
+    reserve: (outpoints) => arkade.reservations.reserve(outpoints),
+    pins: carrierPins,
+  })
+  if (restoredPins.length > 0) {
+    log(`receive carrier: re-pinned the inputs of ${restoredPins.length} unresolved attempt(s)`)
+  }
+  /**
+   * The fill half. Its declared type is the complete port, so a method left out
+   * is a compile error here rather than a `price_unavailable` a live taker
+   * discovers. With no `TAXI_URL` a sender-paid recycle is still refused, by
+   * the resolve and the settle that find no configured Taxi.
+   */
+  const carrierOfferHex = offerHexFrom(assetRfqDerivation)
+  const receiveCarrier = completeTaxiReceiveCarrier(taxiCarrier, {
+    taxiUrl: config.taxiUrl,
+    policy: taxiUrlPolicy,
+    store: assetRfqStore,
+    chain: arkade.wallet.indexerProvider,
+    pins: carrierPins,
+    coins: async () => spendableCarrierCoins(await arkade.wallet.getContractManager()),
+    reserved: () => arkade.reservations.reserved(),
+    reserve: (outpoints) => arkade.reservations.reserve(outpoints),
+    wallet: arkade.wallet,
+    identity: arkade.identity,
+    arkServerUrl: arkade.arkServerUrl,
+    dustSats: arkade.dustSats,
+    offerHex: (row) =>
+      carrierOfferHex(
+        {
+          wantAmount: row.toAmount,
+          wantAssetId: row.toAssetId,
+          offerAssetId: row.fromAssetId,
+          makerPkScript: row.makerPkScript,
+          makerPublicKey: row.makerPublicKey,
+        },
+        row.offerPkScript,
+      ),
+    proceedsAddress: await arkade.wallet.getAddress(),
+    solverKeys: [hex.encode(await arkade.identity.xOnlyPublicKey())],
+    serverKey: () => arkade.wallet.arkServerPublicKey,
+    now: () => Math.floor(Date.now() / 1000),
+  })
   const assetRfqService = new AssetRfqSwapService({
     quoteLimiter,
     store: assetRfqStore,
@@ -664,6 +764,7 @@ export const createServices = async (
       emulatorUrl: config.emulatorUrl,
       derivation: assetRfqDerivation,
     }),
+    receiveCarrierQuotes: receiveCarrier,
     onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
   })
 
