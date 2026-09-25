@@ -320,9 +320,9 @@ export class AssetRfqSwapService {
   private readonly quoteLimiter: RateLimiter
   private readonly newId: () => string
   private markets: readonly AssetRfqMarket[]
-  /** Quotes and the serve list they read, apart from fills: a quote's reads of a payer-named Taxi must never hold up
-   * a funded fill. Fills touch rows only through CAS writes, and read the list once, so neither needs the other. */
+  /** Quote admission and insertion share the serve list; external reads run between them. */
   private readonly serialiseQuotes: Serialiser = createSerialiser()
+  private readonly serialiseTrustedReads: Serialiser = createSerialiser()
   private readonly serialiseFills: Serialiser = createSerialiser()
 
   constructor(private readonly deps: AssetRfqDeps) {
@@ -560,7 +560,7 @@ export class AssetRfqSwapService {
    * touching the network, and only then is a price fetched.
    */
   quote(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
-    return this.serialiseQuotes(() => this.quoteInner(request))
+    return this.quoteInner(request)
   }
 
   private async quoteInner(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
@@ -598,23 +598,32 @@ export class AssetRfqSwapService {
     // § 4.5: an rfq_id already bound to a negotiation is a conflict, whatever
     // became of that one. Checked BEFORE the feed read so a retry storm on one
     // id cannot drive traffic to the price source.
-    if (await this.deps.store.findByRfqId(request.rfqId)) {
-      return { accepted: false, reason: 'duplicate_swap', detail: 'rfq_id already names a negotiation' }
-    }
-    if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
-      return { accepted: false, reason: 'rate_limited' }
-    }
+    const admission = await this.serialiseQuotes(async (): Promise<AssetRfqQuoteOutcome | null> => {
+      if (!this.markets.includes(market)) {
+        return { accepted: false, reason: 'unsupported_pair', detail: 'market changed before quote admission' }
+      }
+      if (await this.deps.store.findByRfqId(request.rfqId)) {
+        return { accepted: false, reason: 'duplicate_swap', detail: 'rfq_id already names a negotiation' }
+      }
+      if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
+        return { accepted: false, reason: 'rate_limited' }
+      }
+      return null
+    })
+    if (admission) return admission
 
     const now = this.now()
     // BEFORE the expensive feed read, so an unavailable adapter cannot fall
     // through to a free market carrier.
-    const resolvedCarrier = await this.resolveCarrier({ carrier, market, pair, request, now })
+    const carrierRead = () => this.resolveCarrier({ carrier, market, pair, request, now })
+    const resolvedCarrier =
+      carrier?.mode === 'recycle_receiver' ? await carrierRead() : await this.serialiseTrustedReads(carrierRead)
     if (!resolvedCarrier.ok) return { accepted: false, reason: resolvedCarrier.reason, detail: resolvedCarrier.detail }
     const { terms, priceTerm, publishedSats, receiverFare } = resolvedCarrier
 
     let feed: Price
     try {
-      feed = await this.deps.fetchPrice(market.feedUrl, market.pricePath)
+      feed = await this.serialiseTrustedReads(() => this.deps.fetchPrice(market.feedUrl, market.pricePath))
     } catch (error) {
       // An unreadable feed must never become a free fill.
       this.deps.onError?.('price', error)
@@ -657,89 +666,98 @@ export class AssetRfqSwapService {
         }
       }
       try {
-        available = await adapter.available({
-          quoteId: terms.quoteId!,
-          makerPkScript: request.makerPkScript,
-          makerPublicKey: request.makerPublicKey,
-          assetId: pair.to as string,
-          now: admittedAt,
-          admission: true,
-          ...receiveCarrierTaxiOf(terms),
-        })
+        const read = () =>
+          adapter.available({
+            quoteId: terms.quoteId!,
+            makerPkScript: request.makerPkScript,
+            makerPublicKey: request.makerPublicKey,
+            assetId: pair.to as string,
+            now: admittedAt,
+            admission: true,
+            ...receiveCarrierTaxiOf(terms),
+          })
+        available = terms.mode === 'recycle_receiver' ? await read() : await this.serialiseTrustedReads(read)
       } catch (error) {
         this.deps.onError?.('carrier', error)
         return { accepted: false, reason: 'price_unavailable', detail: 'carrier inventory could not be read' }
       }
     } else {
-      available = await this.deps.balance()
+      available = await this.serialiseTrustedReads(() => this.deps.balance())
     }
     if ((available.get(pair.to) ?? 0n) < resolved.toAmount) {
       return { accepted: false, reason: 'insufficient_inventory' }
     }
 
-    // AFTER every await above: `now` predates them, so a quote that expired
-    // during any must not insert a row already in the past.
-    const nowAtInsert = this.now()
-    const margin = carrierSettled(terms) ? CARRIER_FILL_MARGIN_SECONDS : 0
-    const validUntil =
-      terms === undefined
-        ? nowAtInsert + this.deps.quoteValiditySeconds
-        : Math.min(admittedAt + this.deps.quoteValiditySeconds, terms.expiresAt - margin)
-    if (terms !== undefined && validUntil <= nowAtInsert) {
-      return {
-        accepted: false,
-        reason: 'price_unavailable',
-        detail:
-          margin > 0
-            ? 'the carrier quote expires too soon to fill after funding'
-            : 'the carrier quote expired before it was recorded',
+    return this.serialiseQuotes(async (): Promise<AssetRfqQuoteOutcome> => {
+      if (!this.markets.includes(market)) {
+        return { accepted: false, reason: 'unsupported_pair', detail: 'market changed before quote insertion' }
       }
-    }
+      if (await this.deps.store.findByRfqId(request.rfqId)) {
+        return { accepted: false, reason: 'duplicate_swap', detail: 'rfq_id already names a negotiation' }
+      }
+      // Recheck expiry after every external read and after waiting for the commit queue.
+      const nowAtInsert = this.now()
+      const margin = carrierSettled(terms) ? CARRIER_FILL_MARGIN_SECONDS : 0
+      const validUntil =
+        terms === undefined
+          ? nowAtInsert + this.deps.quoteValiditySeconds
+          : Math.min(admittedAt + this.deps.quoteValiditySeconds, terms.expiresAt - margin)
+      if (terms !== undefined && validUntil <= nowAtInsert) {
+        return {
+          accepted: false,
+          reason: 'price_unavailable',
+          detail:
+            margin > 0
+              ? 'the carrier quote expires too soon to fill after funding'
+              : 'the carrier quote expired before it was recorded',
+        }
+      }
 
-    const offer = this.deps.deriveOffer({
-      wantAmount: resolved.toAmount,
-      wantAssetId: pair.to,
-      offerAssetId: pair.from,
-      makerPkScript: request.makerPkScript,
-      makerPublicKey: request.makerPublicKey,
-    })
-
-    try {
-      const swap = await this.deps.store.insertQuote({
-        id: this.newId(),
-        rfqId: request.rfqId,
-        // Re-derived rather than echoed, so the row records the pair this
-        // solver actually priced rather than the client's spelling of it.
-        pair: assetRfqPairFor(pair.from, pair.to),
-        fromAssetId: pair.from,
-        fromAmount: resolved.fromAmount,
-        toAssetId: pair.to,
-        toAmount: resolved.toAmount,
+      const offer = this.deps.deriveOffer({
+        wantAmount: resolved.toAmount,
+        wantAssetId: pair.to,
+        offerAssetId: pair.from,
         makerPkScript: request.makerPkScript,
         makerPublicKey: request.makerPublicKey,
-        offerPkScript: offer.pkScript,
-        offerAddress: offer.address,
-        solverPubkey: this.deps.solverPubkey,
-        validUntil,
-        // The price this quote FIXED — not the feed it was derived from.
-        // Against a feed read at fill time it measures how far the market moved
-        // while the quote was outstanding; against its own feed it would measure
-        // the configured spread and nothing else.
-        // Struck against what the PRICE netted, so the mark matches the
-        // amounts an explicit mode actually quoted.
-        ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: priceTerm }),
-        ...(terms === undefined ? {} : { carrierTerms: terms }),
       })
-      return { accepted: true, swap, carrierSats: publishedSats }
-    } catch (error) {
-      // Only the unique indexes mean duplicate — both onchain orchestrators narrow it so.
-      if (error instanceof UniqueConstraintError) {
-        return { accepted: false, reason: 'duplicate_swap', detail: 'a negotiation already holds this id or address' }
+
+      try {
+        const swap = await this.deps.store.insertQuote({
+          id: this.newId(),
+          rfqId: request.rfqId,
+          // Re-derived rather than echoed, so the row records the pair this
+          // solver actually priced rather than the client's spelling of it.
+          pair: assetRfqPairFor(pair.from, pair.to),
+          fromAssetId: pair.from,
+          fromAmount: resolved.fromAmount,
+          toAssetId: pair.to,
+          toAmount: resolved.toAmount,
+          makerPkScript: request.makerPkScript,
+          makerPublicKey: request.makerPublicKey,
+          offerPkScript: offer.pkScript,
+          offerAddress: offer.address,
+          solverPubkey: this.deps.solverPubkey,
+          validUntil,
+          // The price this quote FIXED — not the feed it was derived from.
+          // Against a feed read at fill time it measures how far the market moved
+          // while the quote was outstanding; against its own feed it would measure
+          // the configured spread and nothing else.
+          // Struck against what the PRICE netted, so the mark matches the
+          // amounts an explicit mode actually quoted.
+          ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: priceTerm }),
+          ...(terms === undefined ? {} : { carrierTerms: terms }),
+        })
+        return { accepted: true, swap, carrierSats: publishedSats }
+      } catch (error) {
+        // Only the unique indexes mean duplicate — both onchain orchestrators narrow it so.
+        if (error instanceof UniqueConstraintError) {
+          return { accepted: false, reason: 'duplicate_swap', detail: 'a negotiation already holds this id or address' }
+        }
+        // Below the check: `onError` logs a failure to act on, and a lost race is neither.
+        this.deps.onError?.(request.rfqId, error)
+        throw error
       }
-      // Below the check: `onError` logs a failure to act on, and a lost race is neither.
-      this.deps.onError?.(request.rfqId, error)
-      throw error
-    }
+    })
   }
 
   /**

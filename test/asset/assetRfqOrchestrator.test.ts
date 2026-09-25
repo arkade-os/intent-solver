@@ -332,6 +332,33 @@ describe('quote', () => {
     })
   })
 
+  it('rechecks a duplicate rfq_id when two admitted quotes race to insert', async () => {
+    let release!: () => void
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { service, store } = await harness({
+      newId: sequentialIds(),
+      deriveOffer: perClientOffer,
+      fetchPrice: async () => {
+        await blocked
+        return { mantissa: 100_000n, scale: 0 }
+      },
+    })
+    const reads = vi.spyOn(store, 'findByRfqId')
+    const first = service.quote(request())
+    const second = service.quote(request({ makerPublicKey: 'c'.repeat(64) }))
+    try {
+      await vi.waitFor(() => expect(reads).toHaveBeenCalledTimes(2))
+    } finally {
+      release()
+    }
+    const outcomes = await Promise.all([first, second])
+    expect(outcomes.filter((outcome) => outcome.accepted)).toHaveLength(1)
+    expect(outcomes.filter((outcome) => !outcome.accepted)).toMatchObject([{ reason: 'duplicate_swap' }])
+    expect(await store.listNonTerminal()).toHaveLength(1)
+  })
+
   it('lets an unexpected write failure surface instead of calling it a duplicate', async () => {
     const { service, store } = await harness()
     vi.spyOn(store, 'insertQuote').mockRejectedValueOnce(new TypeError('quote construction is broken'))
@@ -727,7 +754,7 @@ describe('replaceMarkets', () => {
     expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fromAmount, toAmount })
   })
 
-  it('does not restate an issued outcome when the serve list is swapped behind it', async () => {
+  it('refuses a quote when its market is replaced before insertion', async () => {
     const { service } = await harness({
       markets: [{ ...MARKET, carrierSats: 330n }],
       newId: sequentialIds(),
@@ -736,14 +763,13 @@ describe('replaceMarkets', () => {
     const quoted = service.quote(request())
     const swapping = service.replaceMarkets([{ ...MARKET, carrierSats: 0n }])
     const outcome = await quoted
-    expect(outcome.accepted && outcome.carrierSats).toBe(330n)
+    expect(outcome).toMatchObject({ accepted: false, reason: 'unsupported_pair' })
     await swapping
-    // Premise: the swap really landed, so the 330n above is a captured figure and not a no-op.
     const next = await service.quote(request({ rfqId: 'f'.repeat(64), makerPublicKey: 'c'.repeat(64) }))
     expect(next.accepted && next.carrierSats).toBe(0n)
   })
 
-  it('waits for an in-flight quote before swapping the list', async () => {
+  it('swaps the serve list while an admitted quote waits for its price feed', async () => {
     let release!: (price: { mantissa: bigint; scale: number }) => void
     const blocked = new Promise<{ mantissa: bigint; scale: number }>((resolve) => {
       release = resolve
@@ -755,11 +781,10 @@ describe('replaceMarkets', () => {
       replaced = true
     })
     await Promise.resolve()
-    expect(replaced).toBe(false)
-    release({ mantissa: 100_000n, scale: 0 })
-    expect(await quoting).toMatchObject({ accepted: true })
     await replacing
     expect(replaced).toBe(true)
+    release({ mantissa: 100_000n, scale: 0 })
+    expect(await quoting).toMatchObject({ accepted: false, reason: 'unsupported_pair' })
     expect(await service.quote(request({ rfqId: 'f'.repeat(64) }))).toMatchObject({
       accepted: false,
       reason: 'unsupported_pair',
@@ -1441,6 +1466,42 @@ describe('profile.carrier — receiver-paid mode', () => {
     expect((await store.get('swap-1')).state).toBe('filling')
     release()
     await Promise.all(slow)
+  })
+
+  it('lets another quote complete while a payer-named Taxi stalls', async () => {
+    let release!: () => void
+    let entered!: () => void
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const resolving = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const { service } = await harness({
+      newId: sequentialIds(),
+      deriveOffer: perClientOffer,
+      receiveCarrierQuotes: {
+        ...receiverPaidAdapter(),
+        resolve: async () => {
+          entered()
+          await blocked
+          return { ...RECEIVER_QUOTE, loanSats: 330n, receiptSats: 0n, serviceFareSats: 0n, taxiKey: TAXI_KEY }
+        },
+      },
+    })
+    const slow = service.quote(request({ carrier: receiverPaid() }))
+    await resolving
+    try {
+      const fast = service.quote(request({ rfqId: 'f'.repeat(64), makerPublicKey: 'c'.repeat(64) }))
+      expect(
+        await Promise.race([fast, new Promise((resolve) => setTimeout(() => resolve('blocked'), 100))]),
+      ).toMatchObject({
+        accepted: true,
+      })
+    } finally {
+      release()
+    }
+    expect(await slow).toMatchObject({ accepted: true })
   })
 
   it('reconciles a filling receiver-paid row through the carrier observer rather than escalating it', async () => {
