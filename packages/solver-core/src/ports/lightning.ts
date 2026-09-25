@@ -553,6 +553,9 @@ export interface ReceiveBackend {
   /** Read the hold's status and, once armed, its settle deadline `E`. */
   getHoldState(paymentHash: string): Promise<HoldState>
 
+  /** `onHeld` once an HTLC for this hold is accepted: a nudge, never evidence. Returns an unsubscribe. */
+  onHoldAccepted?(paymentHash: string, onHeld: () => void): () => void
+
   /** Settle a held HTLC by revealing the preimage. `preimage` is hex. */
   settleHold(preimage: string): Promise<void>
 

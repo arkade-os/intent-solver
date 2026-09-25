@@ -12,7 +12,7 @@
  * needs a live regtest stack. The point of this test is that it runs every
  * time.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -23,6 +23,7 @@ import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
 import { SendSwapService, type ArkadeOps } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
+import { driveCoupledPeers } from '@arkade-os/solver-corridors/coupledHandoff.js'
 import type { ReceiveArkadeOps } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
 import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
@@ -332,6 +333,46 @@ describe('self-payment refresh, both legs', () => {
     // bolt11 the client is still holding cannot be paid by anyone — including
     // a third party they hand it to.
     await expect(ln.getHoldState(paymentHash)).resolves.toMatchObject({ status: 'cancelled' })
+  })
+
+  it('drives each leg on the transition the other waits for, with no sweep in between', async () => {
+    const errors: unknown[] = []
+    driveCoupledPeers({
+      send: sendService,
+      receive: receiveService,
+      sendStore,
+      receiveStore,
+      onError: (error) => errors.push(error),
+    })
+    const receiveQuote = await receiveService.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutAddress: CLIENT_PAYOUT_ADDRESS,
+      payoutPubkey: clientPayoutPubkey,
+      claimPacket: CLAIM_PACKET,
+    })
+    if (!receiveQuote.accepted) throw new Error(`receive quote refused: ${receiveQuote.reason}`)
+    const sendQuote = await sendService.quote(receiveQuote.swap.invoice, CLIENT_REFUND_ADDRESS, {
+      clientRefundPubkey: CLIENT_REFUND_PUBKEY,
+    })
+    if (!sendQuote.accepted) throw new Error(`send quote refused: ${sendQuote.reason}`)
+    const receiveRow = receiveQuote.swap
+    const sendRow = sendQuote.swap
+
+    // Only the send leg is ticked, as its lockup event would; the receive leg pays out unprompted.
+    credit(sendRow.pkScript, { txid: 'client-lockup', vout: 0, value: sendRow.amountSats })
+    expect((await sendService.tick(sendRow.id)).state).toBe('funded')
+    await vi.waitFor(async () => expect((await receiveStore.get(receiveRow.id)).state).toBe('funded'))
+    expect(chain.fundCalls).toHaveLength(1)
+
+    // Only the receive leg is ticked, as the claim's spend event would; the send leg collects unprompted.
+    const payoutTxid = chain.outputs.get(receiveRow.pkScript)?.[0]?.txid
+    if (!payoutTxid) throw new Error('the payout lockup is missing from the chain')
+    chain.revealed.set(payoutTxid, P)
+    spend(receiveRow.pkScript)
+    await receiveService.tick(receiveRow.id)
+    await vi.waitFor(async () => expect((await sendStore.get(sendRow.id)).state).toBe('claimed'))
+    expect(errors).toEqual([])
   })
 
   it('never pays out when the client abandons their lockup', async () => {

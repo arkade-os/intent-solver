@@ -156,9 +156,11 @@ describe('e2e covclaimd claims the receive lockup non-interactively', () => {
       expect(held.settled).toBe(false)
       expect(held.r_preimage).toBe('')
 
-      // The solver funds its lockup and hands covclaimd the sealed packet.
-      const funded = await driveUntil(service, swap.id, new Set(['funded', ...TERMINAL]))
-      expect(funded.state).toBe('funded')
+      // The solver funds on the HTLC's arrival and hands covclaimd the sealed packet;
+      // covclaimd may claim before this first looks, so any state past `funded` counts.
+      const fundedOrLater = ['funded', 'claimed', 'settled']
+      const funded = await driveUntil(service, swap.id, new Set([...fundedOrLater, ...TERMINAL]))
+      expect(fundedOrLater).toContain(funded.state)
       expect(funded.arkadeLockupTxid).toBeTruthy()
       // The reveal is the handoff. Without it covclaimd has nothing to open.
       expect(funded.revealedAt).not.toBeNull()

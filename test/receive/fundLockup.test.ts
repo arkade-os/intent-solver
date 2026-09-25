@@ -24,8 +24,13 @@ const harness = (over: { spendable?: unknown; send?: () => Promise<string> } = {
   const state = { sendCalls: 0 }
   const ctx = {
     reservations,
+    dustSats: 330n,
     wallet: {
-      arkProvider: { getInfo: async () => ({ dust: 330n }) },
+      arkProvider: {
+        getInfo: async () => {
+          throw new Error('funding must not refetch server info: dust is read at boot')
+        },
+      },
       getSpendableVtxos: async () => {
         if (typeof over.spendable === 'function') return (over.spendable as () => unknown[])()
         return over.spendable ?? [coin(50_000)]
