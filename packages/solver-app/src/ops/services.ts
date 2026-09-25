@@ -76,6 +76,7 @@ import { applyOverrides } from '../admin/settings.js'
 import { createOfferRefusalTail, type OfferRefusalRecorder } from '../admin/offerRefusals.js'
 import { createRfqRefusalTail, type RfqRefusalRecorder } from '../admin/rfqRefusals.js'
 import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
+import { driveCoupledPeers } from '@arkade-os/solver-corridors/coupledHandoff.js'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
@@ -944,6 +945,15 @@ export const createServices = async (
     }
     receiveService.onTickSuccess = (id) => tickErrors.clear(id)
     receiveService.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
+  }
+  if (service && receiveService && selfPaymentCoupling) {
+    driveCoupledPeers({
+      send: service,
+      receive: receiveService,
+      sendStore: store,
+      receiveStore,
+      onError: (error) => log('coupled peer tick failed:', error instanceof Error ? error.message : String(error)),
+    })
   }
 
   // Its own address, not the send leg's refund destination. The two are the

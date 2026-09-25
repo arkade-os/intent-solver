@@ -775,14 +775,22 @@ export class SendSwapService {
     if (this.inFlight.has(id)) return store.get(id)
     this.inFlight.add(id)
     try {
-      while (await this.step(await store.get(id))) {
+      let row = await store.get(id)
+      const from = row.state
+      while (await this.step(row)) {
         // each successful step re-reads the row and tries the next
+        row = await store.get(id)
       }
-      return await store.get(id)
+      row = await store.get(id)
+      if (row.state !== from) this.onStateChange?.(row, from)
+      return row
     } finally {
       this.inFlight.delete(id)
     }
   }
+
+  /** Fired after a tick moved a row. @see driveCoupledPeers */
+  onStateChange?: (row: SendSwapRow, from: SendSwapRow['state']) => void
 
   /** Drive every non-terminal swap once. The recovery sweep and the interval loop. */
   async tickAll(): Promise<SendSwapRow[]> {

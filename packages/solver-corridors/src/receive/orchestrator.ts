@@ -64,7 +64,7 @@ import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveSwapRow, ReceiveSwapStore } from '../db/receiveSwaps.js'
 import type { SendSwapRow } from '../db/swaps.js'
-import { nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
+import { GiveUp, nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
@@ -91,14 +91,14 @@ import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 export const DEFAULT_HOLD_INVOICE_WINDOW = MAX_REFUND_HORIZON - MIN_CLAIM_WINDOW
 
 /**
- * How many times (1s apart) to poll the indexer for the provider's own
- * just-broadcast Arkade funding to become visible before giving up.
+ * How long (polling 100ms apart) to wait for the provider's own just-broadcast
+ * Arkade funding to become visible at the indexer before giving up.
  *
  * Arkade funding is server-confirmed synchronously, so this absorbs indexer read-lag
  * only — not a confirmation delay.
  */
-const FUND_CONFIRM_ATTEMPTS = 8
-const FUND_CONFIRM_INTERVAL_MS = 1000
+const FUND_CONFIRM_BUDGET_MS = 8_000
+const FUND_CONFIRM_INTERVAL_MS = 100
 
 /**
  * How long `refunding` tolerates "the lockup is empty and no claim is readable"
@@ -169,7 +169,7 @@ export interface ReceiveServiceDeps {
    */
   pricing?: PricingStrategy
   store: ReceiveSwapStore
-  ln: Pick<LightningBackend, 'createHoldInvoice' | 'getHoldState' | 'settleHold' | 'cancelHold'>
+  ln: Pick<LightningBackend, 'createHoldInvoice' | 'getHoldState' | 'settleHold' | 'cancelHold' | 'onHoldAccepted'>
   arkade: ReceiveArkadeOps
   /**
    * OPTIONAL. When set, the solver hands covclaimd the sealed packet so the
@@ -603,6 +603,7 @@ export class ReceiveSwapService {
           nonInteractiveParameters: true,
           rfqId: request.rfqId,
         })
+        this.tickOnHold(swap)
         return { accepted: true, swap, validUntil }
       } catch (error) {
         // The invoice is minted and the row did not land, so nothing downstream will
@@ -626,20 +627,42 @@ export class ReceiveSwapService {
     }
   }
 
+  /**
+   * Fund on the HTLC's arrival rather than the next sweep. Never throws: the row is already persisted.
+   * Quote-time only; rows recovered after a restart are not re-subscribed and the sweep drives them.
+   */
+  private tickOnHold(swap: ReceiveSwapRow): void {
+    try {
+      this.deps.ln.onHoldAccepted?.(swap.paymentHash, () => {
+        void this.tick(swap.id).catch((error) => this.onTickError?.(swap.id, error))
+      })
+    } catch (error) {
+      this.onTickError?.(swap.id, error)
+    }
+  }
+
   /** Advance one swap as far as it can go right now, and return its row. Non-blocking, same contract as the send legs' `tick`. */
   async tick(id: string): Promise<ReceiveSwapRow> {
     const { store } = this.deps
     if (this.inFlight.has(id)) return store.get(id)
     this.inFlight.add(id)
     try {
-      while (await this.step(await store.get(id))) {
+      let row = await store.get(id)
+      const from = row.state
+      while (await this.step(row)) {
         // each successful step re-reads the row and tries the next
+        row = await store.get(id)
       }
-      return await store.get(id)
+      row = await store.get(id)
+      if (row.state !== from) this.onStateChange?.(row, from)
+      return row
     } finally {
       this.inFlight.delete(id)
     }
   }
+
+  /** Fired after a tick moved a row. @see driveCoupledPeers */
+  onStateChange?: (row: ReceiveSwapRow, from: ReceiveSwapRow['state']) => void
 
   /** Drive every non-terminal swap once. The recovery sweep and the interval loop. */
   async tickAll(): Promise<ReceiveSwapRow[]> {
@@ -958,16 +981,18 @@ export class ReceiveSwapService {
     // path left that has to infer ownership from the value is the txid-less
     // crash recovery above.
     //
-    // If the poll exhausts anyway (indexer lag beyond FUND_CONFIRM_ATTEMPTS),
+    // If the poll exhausts anyway (indexer lag beyond FUND_CONFIRM_BUDGET_MS),
     // the throw is self-healing: the next tick re-enters `whenArmed` and the
     // adoption above finds the exact-value outpoint one round-trip later.
+    const exhausted = `swap ${row.id}: funded output never appeared at the indexer`
+    const giveUpAt = Date.now() + FUND_CONFIRM_BUDGET_MS
     const funded = await poll(
-      async () => (await arkade.findLockupOutpoints(row.pkScript)).find((o) => o.txid === fundTxid) ?? null,
-      {
-        attempts: FUND_CONFIRM_ATTEMPTS,
-        intervalMs: FUND_CONFIRM_INTERVAL_MS,
-        whenExhausted: `swap ${row.id}: funded output never appeared at the indexer`,
+      async () => {
+        // A clock, not an attempt count: at 100ms apart, a count multiplies every slow read.
+        if (Date.now() >= giveUpAt) throw new GiveUp(exhausted)
+        return (await arkade.findLockupOutpoints(row.pkScript)).find((o) => o.txid === fundTxid) ?? null
       },
+      { attempts: Number.POSITIVE_INFINITY, intervalMs: FUND_CONFIRM_INTERVAL_MS, whenExhausted: exhausted },
     )
     return store.transition(row.id, 'armed', 'funded', {
       arkade_lockup_txid: funded.txid,

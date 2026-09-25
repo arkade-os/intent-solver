@@ -117,7 +117,10 @@ export class LockupWatcher {
         this.asked.add(script)
       } catch (error) {
         this.deps.onError?.(error)
+        continue
       }
+      // Catch-up: a funding from before the watch landed produces no event.
+      if (this.unsubscribe && this.watched.includes(script)) this.nudge([script])
     }
     for (const script of [...this.asked]) {
       if (wanted.has(script)) continue
@@ -136,6 +139,9 @@ export class LockupWatcher {
   start(): void {
     if (this.unsubscribe) return
     this.unsubscribe = this.deps.contracts.onContractEvent((event) => this.handle(event))
+    // Watches that landed while nothing listened: a funding in that gap produced no event.
+    const unheard = this.watched.filter((script) => this.asked.has(script))
+    if (unheard.length > 0) this.nudge(unheard)
   }
 
   /** Stop listening. Safe to call twice. */
@@ -156,6 +162,10 @@ export class LockupWatcher {
           ? [event.contractScript]
           : []
     if (scripts.length === 0) return
+    this.nudge(scripts)
+  }
+
+  private nudge(scripts: string[]): void {
     try {
       // Scripts only. The event's `vtxos` are deliberately not passed on.
       this.deps.onScripts(scripts)

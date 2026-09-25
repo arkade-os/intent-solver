@@ -120,14 +120,14 @@ const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number) => {
   // The network's own threshold, not a constant: it is what an asset change
   // output must carry, and `selectLockupFunding` discounts an asset-bearing
   // coin by exactly this much. @see arkade/lockupFunding.ts
-  const { dust } = await ctx.wallet.arkProvider.getInfo()
+  // Read at boot (as quote pricing does) rather than a round trip per funding.
   const selection = selectLockupFunding({
     candidates: spendable,
     amountSats,
     horizonSeconds: MAX_REFUND_HORIZON,
     nowSeconds: Math.floor(Date.now() / 1000),
     reserved: ctx.reservations.reserved(),
-    dustSats: Number(dust),
+    dustSats: Number(ctx.dustSats),
   })
   if (!selection.ok) {
     throw new FundNotSubmittedError(`refusing to fund lockup of ${amountSats} sats: ${selection.reason}`)

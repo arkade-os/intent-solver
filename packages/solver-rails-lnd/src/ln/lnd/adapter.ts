@@ -18,6 +18,7 @@ import {
   getWalletInfo as lndGetWalletInfo,
   payViaPaymentRequest,
   settleHodlInvoice,
+  subscribeToInvoice,
   type AuthenticatedLnd,
 } from 'lightning'
 import { deadlined, LND_READ_TIMEOUT_MS } from '../../deadline.js'
@@ -593,6 +594,21 @@ export class LndLightningBackendAdapter implements LightningBackend {
       expiresAt: status === 'armed' ? await this.heldHtlcDeadline(invoice.payments) : null,
       amountSats: invoice.tokens,
     }
+  }
+
+  /** Per-invoice stream: only LND's single-invoice subscription reports ACCEPTED for a hold. */
+  onHoldAccepted(paymentHash: string, onHeld: () => void): () => void {
+    const sub = subscribeToInvoice({ lnd: this.lnd, id: paymentHash })
+    const stop = (): void => {
+      sub.removeAllListeners()
+    }
+    sub.on('invoice_updated', (invoice: { is_held?: boolean; is_confirmed?: boolean; is_canceled?: boolean }) => {
+      if (invoice.is_held) onHeld()
+      if (invoice.is_held || invoice.is_confirmed || invoice.is_canceled) stop()
+    })
+    // A dropped stream only loses the fast path; the sweep still finds the hold.
+    sub.on('error', stop)
+    return stop
   }
 
   /**
