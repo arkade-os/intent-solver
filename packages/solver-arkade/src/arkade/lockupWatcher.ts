@@ -139,6 +139,9 @@ export class LockupWatcher {
   start(): void {
     if (this.unsubscribe) return
     this.unsubscribe = this.deps.contracts.onContractEvent((event) => this.handle(event))
+    // Watches that landed while nothing listened: a funding in that gap produced no event.
+    const unheard = this.watched.filter((script) => this.asked.has(script))
+    if (unheard.length > 0) this.nudge(unheard)
   }
 
   /** Stop listening. Safe to call twice. */

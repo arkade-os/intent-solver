@@ -277,6 +277,18 @@ describe('LockupWatcher — asking is watching', () => {
     expect(onScripts).not.toHaveBeenCalled()
   })
 
+  it('nudges what it already watches once it starts listening, including after a restart', async () => {
+    const { onScripts, watcher } = build()
+    watcher.sync(['aa'])
+    await watcher.reconcile()
+    watcher.start()
+    expect(onScripts).toHaveBeenCalledTimes(1)
+    await watcher.stop()
+    watcher.start()
+    expect(onScripts).toHaveBeenCalledTimes(2)
+    expect(onScripts).toHaveBeenLastCalledWith(['aa'])
+  })
+
   it('keeps delivering events when the watch call fails', async () => {
     const { contracts, onScripts, onError, watcher } = build()
     contracts.failNextWatch = new Error('repository closed')
