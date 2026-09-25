@@ -123,7 +123,7 @@ for (const entry of readdirSync(at('packages'), { withFileTypes: true })) {
   if (!existsSync(src) || !statSync(src).isDirectory()) continue
   for (const file of sourceFiles(src))
     check(
-      !/from\s+['"]@arkade-taxi\/|require\(\s*['"]@arkade-taxi\/|import\s*\(\s*['"]@arkade-taxi\//.test(
+      !/from\s+['"]@arkade-taxi\/|require\(\s*['"]@arkade-taxi\/|import\s*\(?\s*['"]@arkade-taxi\//.test(
         readFileSync(file, 'utf8'),
       ),
       `${file.slice(REPO.length + 1).replaceAll('\\', '/')} imports @arkade-taxi; only ${TAXI_CONSUMER} may`,
