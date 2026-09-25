@@ -126,6 +126,19 @@ describe('normalizeTaxiUrl', () => {
     )
   })
 
+  it('refuses a NAT64-embedded private IPv4 but not a public one (RFC 6052)', () => {
+    const policy = { isMainnet: false, allowPrivate: false }
+    expect(() => normalizeTaxiUrl('https://[64:ff9b::7f00:1]', policy)).toThrow(/private/)
+    expect(() => normalizeTaxiUrl('https://[64:ff9b::a00:1]', policy)).toThrow(/private/)
+    expect(normalizeTaxiUrl('https://[64:ff9b::7f00:1]', { ...policy, allowPrivate: true })).toBe(
+      'https://[64:ff9b::7f00:1]',
+    )
+    expect(normalizeTaxiUrl('https://[64:ff9b::a00:1]', { ...policy, allowPrivate: true })).toBe(
+      'https://[64:ff9b::a00:1]',
+    )
+    expect(normalizeTaxiUrl('https://[64:ff9b::808:808]', policy)).toBe('https://[64:ff9b::808:808]')
+  })
+
   it('refuses a decimal or hex loopback literal the same as dotted-decimal (rule 5)', () => {
     const policy = { isMainnet: false, allowPrivate: false }
     expect(() => normalizeTaxiUrl('https://2130706433', policy)).toThrow(/private/)

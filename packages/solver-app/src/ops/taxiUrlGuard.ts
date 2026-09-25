@@ -41,19 +41,28 @@ const isPrivateIPv4 = ([a, b]: [number, number, number, number]): boolean =>
   (a === 172 && b >= 16 && b <= 31) ||
   (a === 192 && b === 168)
 
+// Both embed a full IPv4 in the trailing two hextets; 64:ff9b:1::/48 (RFC 8215)
+// splits its v4 bits around a reserved octet instead, so it's not handled here.
+const EMBEDDED_V4_PREFIXES = ['::ffff:', '64:ff9b::']
+
+const embeddedIPv4 = (rest: string): [number, number, number, number] => {
+  const [hiRaw, loRaw] = rest.split(':')
+  const hi = parseInt(hiRaw ?? '0', 16)
+  const lo = parseInt(loRaw ?? '0', 16)
+  return [hi >> 8, hi & 0xff, lo >> 8, lo & 0xff]
+}
+
 // WHATWG always serializes a bracket-stripped IPv6 literal in canonical
 // compressed form, so only the first group (for the fc00::/7 and fe80::/10
-// masks) and a literal "::ffff:" prefix (for a mapped IPv4) need reading.
+// masks) and the embedded-v4 prefixes above need reading.
 const isPrivateIPv6 = (bare: string): boolean => {
   if (bare === '::' || bare === '::1') return true
   const first = parseInt(bare.startsWith('::') ? '0' : (bare.split(':', 1)[0] ?? '0'), 16)
   if ((first & 0xfe00) === 0xfc00) return true // fc00::/7
   if ((first & 0xffc0) === 0xfe80) return true // fe80::/10
-  if (!bare.startsWith('::ffff:')) return false
-  const [hiRaw, loRaw] = bare.slice('::ffff:'.length).split(':')
-  const hi = parseInt(hiRaw ?? '0', 16)
-  const lo = parseInt(loRaw ?? '0', 16)
-  return isPrivateIPv4([hi >> 8, hi & 0xff, lo >> 8, lo & 0xff])
+  const prefix = EMBEDDED_V4_PREFIXES.find((p) => bare.startsWith(p))
+  if (!prefix) return false
+  return isPrivateIPv4(embeddedIPv4(bare.slice(prefix.length)))
 }
 
 const isPrivate = (host: string): boolean => {
