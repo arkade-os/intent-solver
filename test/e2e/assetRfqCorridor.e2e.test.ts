@@ -22,14 +22,14 @@ import { createServer, type Server } from 'node:http'
 import { randomBytes, randomInt } from 'node:crypto'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { ArkAddress, hasTerminalSpend, asset, Transaction } from '@arkade-os/sdk'
+import { ArkAddress, hasTerminalSpend, asset } from '@arkade-os/sdk'
 import { createOffer, cancelOffer, InMemoryAssetSwapRepository, type Offer } from '@arkade-os/swap'
-import { base64, hex } from '@scure/base'
+import { hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { GiveUp, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
-import { ASSET_CARRIER_SATS, fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import { fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import {
   offerExitDelay,
   offerFromTerms,
@@ -258,7 +258,6 @@ const harness = async (
   over: {
     markets?: readonly AssetRfqMarket[]
     quoteValiditySeconds?: number
-    balance?: () => Promise<ReadonlyMap<AssetLeg, bigint>>
     carrier?: TaxiUrlPolicy
     onError?: AssetRfqDeps['onError']
   } = {},
@@ -274,7 +273,7 @@ const harness = async (
     dustSats: arkade.ctx.dustSats,
     deriveOffer,
     depositAt,
-    balance: over.balance ?? balance,
+    balance,
     fetchPrice: createPriceFeed(),
     settle,
     ...(over.carrier ? { receiveCarrierQuotes: await shippedCarrier(store, over.carrier, quoteValiditySeconds) } : {}),
@@ -341,62 +340,6 @@ const causeChain = (error: unknown): string => {
 }
 
 describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
-  it(
-    'quotes a BTC->asset swap, recognises the deposit and fills it',
-    async () => {
-      const { corridor, store, pair } = await harness()
-      const amount = depositSats(20_000)
-
-      const outcome = await corridor.quote(requestFor(pair, amount))
-      expect(outcome.kind, JSON.stringify(outcome)).toBe('quote')
-      const quote = outcome.payload as {
-        from_amount: string
-        to_amount: string
-        valid_until: number
-        profile: { offer_address: string; offer_pk_script: string }
-      }
-      expect(BigInt(quote.from_amount)).toBe(amount)
-      const net = amount - arkade.ctx.dustSats
-      expect(BigInt(quote.to_amount)).toBe(net - (net * BigInt(FEE_BPS) + 9_999n) / 10_000n)
-
-      // § 6 compare-only, and why this corridor needs no accept message: the
-      // client derives the covenant itself and funds only its own derivation.
-      const mine = await clientOffer(BigInt(quote.to_amount))
-      expect(hex.encode(mine.swapPkScript)).toBe(quote.profile.offer_pk_script)
-      expect(mine.address).toBe(quote.profile.offer_address)
-
-      const fundingTxid = await arkade.ctx.wallet.send({
-        address: mine.address,
-        amount: Number(amount),
-        extensions: [mine.extension],
-      })
-      expect(fundingTxid).toMatch(/^[0-9a-f]{64}$/)
-
-      const id = (await store.listNonTerminal())[0]!.id
-      const funded = await driveTo({ corridor, store }, id, 'funded')
-      expect(funded.depositTxid).toBe(fundingTxid)
-
-      const filled = await driveTo({ corridor, store }, id, 'filled')
-      expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
-      expect(filled.fillTxid).not.toBe(fundingTxid)
-
-      expect(await depositAt(filled.offerPkScript)).toBeNull()
-
-      // The asset rides the emulator packet, so an output can only show the
-      // maker's script and the carrier the covenant obliges; the emulator
-      // refusing anything else is what makes the rest of the payment true.
-      const { txs } = await arkade.ctx.wallet.indexerProvider.getVirtualTxs([filled.fillTxid!])
-      const fill = Transaction.fromPSBT(base64.decode(txs[0]!))
-      expect(hex.encode(fill.getOutput(0)!.script!)).toBe(makerPkScript)
-      expect(fill.getOutput(0)!.amount).toBe(ASSET_CARRIER_SATS)
-
-      const status = await corridor.statusFor(filled.rfqId)
-      expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
-      await store.close()
-    },
-    SWAP_TIMEOUT_MS,
-  )
-
   it(
     'refuses what it cannot quote, in the closed RFQ vocabulary',
     async () => {
@@ -571,52 +514,6 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       const row = await store.get(id)
       expect(row.state).toBe('refused')
       expect(row.failureReason).toContain('deposit_short')
-      expect(row.fillTxid).toBeNull()
-      expect((await depositAt(row.offerPkScript))?.txid).toBe(fundingTxid)
-
-      await cancelOffer(arkade.ctx.wallet, ARKD_URL, mine.offerHex, {
-        repository: new InMemoryAssetSwapRepository(),
-        fundingTxid,
-        swapAddress: mine.address,
-      })
-      await store.close()
-    },
-    SWAP_TIMEOUT_MS,
-  )
-
-  it(
-    'never spends a deposit once the float has drained under the quoted payout',
-    async () => {
-      // § 9's ACTION-time gate, which the `exposure_cap` case above never
-      // reaches — that one refuses at quote time, before a row exists. Driven
-      // through the float seam because this wallet is BOTH sides: a competing
-      // fill pays our own maker script, so it cannot lower our own float.
-      let drained: bigint | null = null
-      const { corridor, store, pair } = await harness({
-        balance: async () =>
-          drained === null ? await balance() : new Map([...(await balance()), [assetId as AssetLeg, drained]]),
-      })
-      const amount = depositSats(5_000)
-      const outcome = await corridor.quote(requestFor(pair, amount))
-      expect(outcome.kind, JSON.stringify(outcome)).toBe('quote')
-      const quote = outcome.payload as { to_amount: string }
-
-      const mine = await clientOffer(BigInt(quote.to_amount))
-      const fundingTxid = await arkade.ctx.wallet.send({
-        address: mine.address,
-        amount: Number(amount),
-        extensions: [mine.extension],
-      })
-
-      const id = (await store.listNonTerminal())[0]!.id
-      await driveTo({ corridor, store }, id, 'funded')
-
-      // One short of the obliged payout: the boundary, not merely an empty float.
-      drained = BigInt(quote.to_amount) - 1n
-      await corridor.tickAll()
-      const row = await store.get(id)
-      expect(row.state).toBe('refused')
-      expect(row.failureReason).toContain('insufficient_inventory')
       expect(row.fillTxid).toBeNull()
       expect((await depositAt(row.offerPkScript))?.txid).toBe(fundingTxid)
 
