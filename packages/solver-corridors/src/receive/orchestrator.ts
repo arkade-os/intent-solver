@@ -91,14 +91,14 @@ import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 export const DEFAULT_HOLD_INVOICE_WINDOW = MAX_REFUND_HORIZON - MIN_CLAIM_WINDOW
 
 /**
- * How many times (1s apart) to poll the indexer for the provider's own
- * just-broadcast Arkade funding to become visible before giving up.
+ * How many times (100ms apart, the same ~8s budget) to poll the indexer for the
+ * provider's own just-broadcast Arkade funding to become visible before giving up.
  *
  * Arkade funding is server-confirmed synchronously, so this absorbs indexer read-lag
  * only — not a confirmation delay.
  */
-const FUND_CONFIRM_ATTEMPTS = 8
-const FUND_CONFIRM_INTERVAL_MS = 1000
+const FUND_CONFIRM_ATTEMPTS = 80
+const FUND_CONFIRM_INTERVAL_MS = 100
 
 /**
  * How long `refunding` tolerates "the lockup is empty and no claim is readable"
