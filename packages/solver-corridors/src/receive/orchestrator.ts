@@ -64,7 +64,7 @@ import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveSwapRow, ReceiveSwapStore } from '../db/receiveSwaps.js'
 import type { SendSwapRow } from '../db/swaps.js'
-import { nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
+import { GiveUp, nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
@@ -91,13 +91,13 @@ import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 export const DEFAULT_HOLD_INVOICE_WINDOW = MAX_REFUND_HORIZON - MIN_CLAIM_WINDOW
 
 /**
- * How many times (100ms apart, the same ~8s budget) to poll the indexer for the
- * provider's own just-broadcast Arkade funding to become visible before giving up.
+ * How long (polling 100ms apart) to wait for the provider's own just-broadcast
+ * Arkade funding to become visible at the indexer before giving up.
  *
  * Arkade funding is server-confirmed synchronously, so this absorbs indexer read-lag
  * only — not a confirmation delay.
  */
-const FUND_CONFIRM_ATTEMPTS = 80
+const FUND_CONFIRM_BUDGET_MS = 8_000
 const FUND_CONFIRM_INTERVAL_MS = 100
 
 /**
@@ -970,16 +970,18 @@ export class ReceiveSwapService {
     // path left that has to infer ownership from the value is the txid-less
     // crash recovery above.
     //
-    // If the poll exhausts anyway (indexer lag beyond FUND_CONFIRM_ATTEMPTS),
+    // If the poll exhausts anyway (indexer lag beyond FUND_CONFIRM_BUDGET_MS),
     // the throw is self-healing: the next tick re-enters `whenArmed` and the
     // adoption above finds the exact-value outpoint one round-trip later.
+    const exhausted = `swap ${row.id}: funded output never appeared at the indexer`
+    const giveUpAt = Date.now() + FUND_CONFIRM_BUDGET_MS
     const funded = await poll(
-      async () => (await arkade.findLockupOutpoints(row.pkScript)).find((o) => o.txid === fundTxid) ?? null,
-      {
-        attempts: FUND_CONFIRM_ATTEMPTS,
-        intervalMs: FUND_CONFIRM_INTERVAL_MS,
-        whenExhausted: `swap ${row.id}: funded output never appeared at the indexer`,
+      async () => {
+        // A clock, not an attempt count: at 100ms apart, a count multiplies every slow read.
+        if (Date.now() >= giveUpAt) throw new GiveUp(exhausted)
+        return (await arkade.findLockupOutpoints(row.pkScript)).find((o) => o.txid === fundTxid) ?? null
       },
+      { attempts: Number.POSITIVE_INFINITY, intervalMs: FUND_CONFIRM_INTERVAL_MS, whenExhausted: exhausted },
     )
     return store.transition(row.id, 'armed', 'funded', {
       arkade_lockup_txid: funded.txid,

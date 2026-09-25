@@ -711,6 +711,31 @@ describe('ReceiveSwapService — an arriving HTLC drives its row', () => {
   })
 })
 
+describe('ReceiveSwapService.tick — confirming its own funding', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('gives up within the time budget however slow each indexer read is', async () => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    let reads = 0
+    arkade.ops.findLockupOutpoints = async () => {
+      reads += 1
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      return []
+    }
+    vi.useFakeTimers()
+
+    const failed = expect(service.tick(outcome.swap.id)).rejects.toThrow('funded output never appeared at the indexer')
+    await vi.advanceTimersByTimeAsync(12_000)
+    await failed
+    expect(arkade.state.fundCalls).toHaveLength(1)
+    expect(reads).toBeLessThanOrEqual(10)
+  })
+})
+
 describe('ReceiveSwapService.tick — funding gate reuse (evaluateReceiveFunding)', () => {
   it('does not fund when armed with too short a settle window — settle_window_too_short', async () => {
     const outcome = await service.quote(quoteRequest())
