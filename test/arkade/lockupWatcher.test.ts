@@ -250,6 +250,33 @@ describe('LockupWatcher — asking is watching', () => {
     await watcher.reconcile()
   })
 
+  it('nudges a newly watched script once, catching a funding from before the watch', async () => {
+    const { onScripts, watcher } = build()
+    watcher.start()
+    watcher.sync(['aa'])
+    await watcher.reconcile()
+    watcher.sync(['aa'])
+    await watcher.reconcile()
+    expect(onScripts).toHaveBeenCalledTimes(1)
+    expect(onScripts).toHaveBeenCalledWith(['aa'])
+  })
+
+  it('does not nudge a script whose watch failed', async () => {
+    const { contracts, onScripts, watcher } = build()
+    contracts.failNextWatch = new Error('manager unavailable')
+    watcher.start()
+    watcher.sync(['aa'])
+    await watcher.reconcile()
+    expect(onScripts).not.toHaveBeenCalled()
+  })
+
+  it('does not nudge while it is not listening', async () => {
+    const { onScripts, watcher } = build()
+    watcher.sync(['aa'])
+    await watcher.reconcile()
+    expect(onScripts).not.toHaveBeenCalled()
+  })
+
   it('keeps delivering events when the watch call fails', async () => {
     const { contracts, onScripts, onError, watcher } = build()
     contracts.failNextWatch = new Error('repository closed')
