@@ -179,6 +179,8 @@ const REFUND_SWEEP_MS = 60_000
  */
 const VTXO_LIFECYCLE_MS = 300_000
 
+const VTXO_SYNC_MAX_AGE_MS = 2_000
+
 /** Recover, then drive every swap and sweep refunds until SIGINT/SIGTERM. */
 const watchUntilStopped = async (services: Services): Promise<void> => {
   const controller = new AbortController()
@@ -276,7 +278,12 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // documents: obtaining the manager reconciles against the indexer, and the
   // money path does not wait on that. @see arkade/lazyContractSource.ts
   const contractEvents = lazyContractSource({
-    getContractManager: () => services.arkade.wallet.getContractManager(),
+    getContractManager: async () => {
+      const manager = await services.arkade.wallet.getContractManager()
+      // One spender, and the event stream keeps the repository current: a send may reuse its select's sync.
+      manager.setVtxoSyncMaxAge(VTXO_SYNC_MAX_AGE_MS)
+      return manager
+    },
     onError: (error, retryInMs) =>
       log(
         `lockup watcher: contract stream unavailable, retrying in ${retryInMs}ms:`,
