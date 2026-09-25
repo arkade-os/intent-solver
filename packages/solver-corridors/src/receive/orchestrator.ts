@@ -603,10 +603,7 @@ export class ReceiveSwapService {
           nonInteractiveParameters: true,
           rfqId: request.rfqId,
         })
-        // Fund on the HTLC's arrival rather than the next sweep.
-        this.deps.ln.onHoldAccepted?.(request.paymentHash, () => {
-          void this.tick(swap.id).catch((error) => this.onTickError?.(swap.id, error))
-        })
+        this.tickOnHold(swap)
         return { accepted: true, swap, validUntil }
       } catch (error) {
         // The invoice is minted and the row did not land, so nothing downstream will
@@ -627,6 +624,17 @@ export class ReceiveSwapService {
       }
     } finally {
       reservation.release()
+    }
+  }
+
+  /** Fund on the HTLC's arrival rather than the next sweep. Never throws: the row is already persisted. */
+  private tickOnHold(swap: ReceiveSwapRow): void {
+    try {
+      this.deps.ln.onHoldAccepted?.(swap.paymentHash, () => {
+        void this.tick(swap.id).catch((error) => this.onTickError?.(swap.id, error))
+      })
+    } catch (error) {
+      this.onTickError?.(swap.id, error)
     }
   }
 

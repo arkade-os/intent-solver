@@ -709,6 +709,41 @@ describe('ReceiveSwapService — an arriving HTLC drives its row', () => {
     await vi.waitFor(async () => expect((await store.get(outcome.swap.id)).state).toBe('funded'))
     expect(arkade.state.fundCalls).toHaveLength(1)
   })
+
+  it('keeps a persisted quote and its invoice when subscribing to the hold throws', async () => {
+    const failing = {
+      createHoldInvoice: ln.createHoldInvoice.bind(ln),
+      getHoldState: ln.getHoldState.bind(ln),
+      settleHold: ln.settleHold.bind(ln),
+      cancelHold: ln.cancelHold.bind(ln),
+      onHoldAccepted: (): (() => void) => {
+        throw new Error('subscription refused')
+      },
+    }
+    const svc = new ReceiveSwapService({
+      acceptUnilateralGap: false,
+      store,
+      ln: failing,
+      arkade: arkade.ops,
+      covclaimd: covclaimd.client,
+      limits: LIMITS,
+      maxExposedSats: 1_000_000,
+      totalCommitted: () => store.committedSats(),
+      admission: new AdmissionControl(),
+      now: clock,
+    })
+    const onTickError = vi.fn()
+    svc.onTickError = onTickError
+
+    const outcome = await svc.quote(quoteRequest())
+
+    expect(outcome.accepted).toBe(true)
+    expect((await ln.getHoldState(paymentHash)).status).not.toBe('cancelled')
+    expect(onTickError).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ message: 'subscription refused' }),
+    )
+  })
 })
 
 describe('ReceiveSwapService.tick — confirming its own funding', () => {
