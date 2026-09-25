@@ -24,6 +24,7 @@ import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { createPinnedTaxiFetch, guardedTaxiFetch, normalizeTaxiUrl, type TaxiUrlPolicy } from './taxiUrlGuard.js'
 import type { CarrierAttemptRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { JsonObject } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
+import { CARRIER_FILL_MARGIN_SECONDS } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import type {
   ReceiveCarrierQuote,
   ReceiveCarrierQuoteRequest,
@@ -301,7 +302,7 @@ const CARRIER_SLACK_FLOOR_BLOCKS = 6
 /** How far the anchor may move between admitting a quote and filling it. */
 export const carrierAdmissionSlack = (domain: 'height' | 'time', quoteValiditySeconds: number): bigint => {
   const window = Math.max(0, Math.ceil(quoteValiditySeconds))
-  if (domain === 'time') return BigInt(window)
+  if (domain === 'time') return BigInt(window + CARRIER_FILL_MARGIN_SECONDS)
   return BigInt(2 * Math.ceil(window / CARRIER_FAST_BLOCK_SECONDS) + CARRIER_SLACK_FLOOR_BLOCKS)
 }
 
@@ -381,15 +382,23 @@ const TAXI_CLIENT_RATE_WINDOW_SECONDS = 60
 const TAXI_CLIENT_CACHE_SIZE = 32
 
 /** One client per budget and normalized URL, built lazily in a FIFO cache — evicted oldest-INSERTED first, a hit
- * refreshes nothing — so distinct attacker URLs cannot grow it unbounded; `configuredUrl` skips
- * `normalizeTaxiUrl`/`guardedTaxiFetch` entirely — that is `taxiUrl`'s own plain client. */
+ * refreshes nothing — so distinct attacker URLs cannot grow it unbounded. The configured URL
+ * skips untrusted URL normalization, but its responses still need bounded reads. */
 export const taxiClientCache = (deps: {
   configuredUrl?: string
   policy: TaxiUrlPolicy
   fetch?: typeof fetch
 }): ((url?: string, budget?: TaxiBudget) => TaxiCarrierClient) => {
   const baseFetch = deps.fetch ?? fetch
-  const configured = deps.configuredUrl ? new TaxiClient({ baseUrl: deps.configuredUrl, fetch: baseFetch }) : undefined
+  const configured = deps.configuredUrl
+    ? new TaxiClient({
+        baseUrl: deps.configuredUrl,
+        fetch: guardedTaxiFetch(
+          baseFetch,
+          new RateLimiter(Number.MAX_SAFE_INTEGER, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
+        ),
+      })
+    : undefined
   const requestFetch = deps.fetch ?? (deps.policy.allowPrivate ? fetch : createPinnedTaxiFetch())
   const limiters: Record<TaxiBudget, RateLimiter> = {
     quote: new RateLimiter(TAXI_QUOTE_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),

@@ -23,6 +23,7 @@ import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.
 import { assetRfqQuotePayload } from '@arkade-os/solver-corridors/wire/assetRfqPayloads.js'
 import {
   AssetRfqSwapService,
+  CARRIER_FILL_MARGIN_SECONDS,
   type AssetRfqDeps,
   type ReceiveCarrierQuotes,
 } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
@@ -717,6 +718,24 @@ describe('the per-URL client cache', () => {
     const unconfigured = taxiClientCache({ policy: POLICY })
     expect(() => unconfigured(undefined)).toThrow(/no receive-carrier Taxi is configured/)
   })
+
+  it('bounds reads from the configured Taxi too', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout')
+    const fetchStub: typeof fetch = async () => new Response(null, { status: 302, headers: { location: '/elsewhere' } })
+    try {
+      const clientFor = taxiClientCache({
+        configuredUrl: 'https://configured.example',
+        policy: POLICY,
+        fetch: fetchStub,
+      })
+      await expect(clientFor().info()).rejects.toMatchObject({
+        cause: { message: expect.stringMatching(/response was a redirect/) },
+      })
+      expect(timeout).toHaveBeenLastCalledWith(5_000)
+    } finally {
+      timeout.mockRestore()
+    }
+  })
 })
 
 /** G4: the composed reader exists whether or not `TAXI_URL` is configured. */
@@ -886,7 +905,7 @@ describe('admission demands the slack the quote can outlive', () => {
     expect(carrierAdmissionSlack('height', 30)).toBe(8n)
     expect(carrierAdmissionSlack('height', 300)).toBe(26n)
     expect(carrierAdmissionSlack('height', 900)).toBe(66n)
-    expect(carrierAdmissionSlack('time', 30)).toBe(30n)
+    expect(carrierAdmissionSlack('time', 30)).toBe(60n)
   })
 
   it('admits one with the window’s slack, and it still fills a block later', async () => {
@@ -904,7 +923,7 @@ describe('admission demands the slack the quote can outlive', () => {
     await expect(read.available(request())).resolves.toEqual(new Map([[null, 0n]]))
   })
 
-  it('raises a seconds-typed admission by the whole validity window', async () => {
+  it('raises a seconds-typed admission past the validity window and fill margin', async () => {
     const now = 1_700_000_000
     const short = BigInt(now) + EXIT_DELAY
     const trust = { ...TRUST, locktimeDomain: 'time' as const }
@@ -914,12 +933,19 @@ describe('admission demands the slack the quote can outlive', () => {
     const { read: tight, request: tightRequest } = reader({ trust, tipHeight: undefined, quote: seconds(short) })
     await expect(tight.resolve(tightRequest({ now, admission: true }))).rejects.toThrow(/below the caller minimum/)
 
-    const roomy = short + BigInt(VALIDITY_SECONDS)
+    const tooTight = short + BigInt(VALIDITY_SECONDS)
+    const { read: unsafe, request: unsafeRequest } = reader({ trust, tipHeight: undefined, quote: seconds(tooTight) })
+    await expect(unsafe.resolve(unsafeRequest({ now, admission: true }))).rejects.toThrow(/below the caller minimum/)
+
+    const roomy = short + carrierAdmissionSlack('time', VALIDITY_SECONDS)
     const { read, request: roomyRequest } = reader({ trust, tipHeight: undefined, quote: seconds(roomy) })
     await expect(read.resolve(roomyRequest({ now, admission: true }))).resolves.toMatchObject({
       inputExpiryFloor: { kind: 'time', value: roomy },
     })
     await expect(read.available(roomyRequest({ now: now + VALIDITY_SECONDS }))).resolves.toEqual(new Map([[null, 0n]]))
+    await expect(
+      read.available(roomyRequest({ now: now + VALIDITY_SECONDS + CARRIER_FILL_MARGIN_SECONDS })),
+    ).resolves.toEqual(new Map([[null, 0n]]))
   })
 
   it('leaves the fill-time reads at the exact anchored floor', async () => {
