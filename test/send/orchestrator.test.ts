@@ -2332,6 +2332,7 @@ describe('coupling a self-payment at quote time', () => {
             consulted.push(hash)
             return hash === PAYMENT_HASH ? row : null
           },
+          findByPaymentHash: async (hash) => (hash === PAYMENT_HASH ? row : null),
         },
         findLockupOutpoints: async () => arkade.receiveOutpoints,
         findClaimPreimage: async () => arkade.receivePreimage,
@@ -2348,6 +2349,7 @@ describe('coupling a self-payment at quote time', () => {
     refundLocktime: sendRefundLocktime() - MIN_CLAIM_WINDOW,
     pkScript: hex.encode(Uint8Array.from([0x51, 0x20, ...keyBytes(7)])),
     htlcExpiresAt: null,
+    fundStartedAt: null,
     ...over,
   })
 
@@ -2473,7 +2475,7 @@ describe('coupling a self-payment at quote time', () => {
       admission: new AdmissionControl(),
       now: () => clock,
       coupling: {
-        receiveStore: { findLiveByPaymentHash: async () => null },
+        receiveStore: { findLiveByPaymentHash: async () => null, findByPaymentHash: async () => null },
         findLockupOutpoints: async () => arkade.receiveOutpoints,
         findClaimPreimage: async () => arkade.receivePreimage,
       },
@@ -2513,6 +2515,7 @@ describe('claiming a coupled self-payment', () => {
       refundLocktime: refundLocktimeFor(cltvOf(FORGED_DECODED.minFinalCltvBlocks), 4096, clock) - MIN_CLAIM_WINDOW,
       pkScript: RECEIVE_PKSCRIPT,
       htlcExpiresAt: null,
+      fundStartedAt: null,
     }
   })
 
@@ -2528,7 +2531,10 @@ describe('claiming a coupled self-payment', () => {
       admission: new AdmissionControl(),
       now: () => clock,
       coupling: {
-        receiveStore: { findLiveByPaymentHash: async () => receiveRow },
+        receiveStore: {
+          findLiveByPaymentHash: async () => (receiveRow.state === 'refused' ? null : receiveRow),
+          findByPaymentHash: async () => receiveRow,
+        },
         findLockupOutpoints: async () => arkade.receiveOutpoints,
         findClaimPreimage: async () => arkade.receivePreimage,
       },
@@ -2543,6 +2549,79 @@ describe('claiming a coupled self-payment', () => {
     receiveRow = { ...receiveRow, state: 'funded' }
     return outcome.swap.id
   }
+
+  it('refunds the client when its coupled payout was refused before any funding attempt', async () => {
+    const svc = coupledService()
+    const id = await fundedCoupledSwap(svc)
+    receiveRow = { ...receiveRow, state: 'refused' }
+    ln.ownInvoiceState = { status: 'cancelled', expiresAt: null, amountSats: AMOUNT }
+
+    const row = await svc.tick(id)
+
+    expect(row.state).toBe('refused')
+    expect(row.refundOutcome).toBe('pushed')
+    expect(arkade.refundCalls).toHaveLength(1)
+    expect(ln.payCalls).toHaveLength(0)
+  })
+
+  it('retries a coupled refund on the ordinary sweep when the first push fails', async () => {
+    const svc = coupledService()
+    const id = await fundedCoupledSwap(svc)
+    receiveRow = { ...receiveRow, state: 'refused' }
+    ln.ownInvoiceState = { status: 'cancelled', expiresAt: null, amountSats: AMOUNT }
+    arkade.refund = async () => {
+      throw new Error('emulator unavailable')
+    }
+
+    const row = await svc.tick(id)
+    expect(row.state).toBe('refused')
+    expect(row.refundOutcome).toBeNull()
+
+    arkade.refund = async () => 'retried-refund'
+    expect(await svc.refundSweep()).toEqual([id])
+    expect((await store.get(id)).refundArkTxid).toBe('retried-refund')
+  })
+
+  it('withholds the coupled refund after an ambiguous payout attempt', async () => {
+    const svc = coupledService()
+    const id = await fundedCoupledSwap(svc)
+    receiveRow = { ...receiveRow, state: 'refused', fundStartedAt: clock }
+    ln.ownInvoiceState = { status: 'cancelled', expiresAt: null, amountSats: AMOUNT }
+
+    const row = await svc.tick(id)
+
+    expect(row.state).toBe('funded')
+    expect(arkade.refundCalls).toHaveLength(0)
+    expect(ln.payCalls).toHaveLength(0)
+  })
+
+  it('withholds the coupled refund while its own invoice has an armed htlc', async () => {
+    const svc = coupledService()
+    const id = await fundedCoupledSwap(svc)
+    receiveRow = { ...receiveRow, state: 'refused' }
+    ln.ownInvoiceState = { status: 'armed', expiresAt: clock + 3600, amountSats: AMOUNT }
+
+    const row = await svc.tick(id)
+
+    expect(row.state).toBe('funded')
+    expect(arkade.refundCalls).toHaveLength(0)
+    expect(ln.payCalls).toHaveLength(0)
+  })
+
+  it('reports when the backend cannot prove its own invoice safe to refund', async () => {
+    const svc = coupledService()
+    const id = await fundedCoupledSwap(svc)
+    receiveRow = { ...receiveRow, state: 'refused' }
+    Object.defineProperty(ln, 'getOwnInvoiceState', { value: undefined })
+    const errors: string[] = []
+    svc.onTickError = (_id, error) => errors.push(String(error))
+
+    const row = await svc.tick(id)
+
+    expect(row.state).toBe('funded')
+    expect(arkade.refundCalls).toHaveLength(0)
+    expect(errors).toEqual([expect.stringContaining('cannot probe its own invoice')])
+  })
 
   it('claims the send lockup with the preimage revealed on our payout', async () => {
     const svc = coupledService()

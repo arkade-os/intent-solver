@@ -61,6 +61,7 @@ const TRANSITION_COLUMNS = new Set([
   'preimage',
   'refund_ark_txid',
   'failure_reason',
+  'fund_started_at',
 ])
 /**
  * `refund_ark_txid` is deliberately in BOTH sets, and the sibling store's own

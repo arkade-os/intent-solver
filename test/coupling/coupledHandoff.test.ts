@@ -29,5 +29,8 @@ describe('driveCoupledPeers', () => {
       expect(receive.tick).toHaveBeenCalledWith('peer')
       expect(send.tick).toHaveBeenCalledWith('peer')
     })
+
+    receive.onStateChange({ state: 'refused', paymentHash: 'h' }, 'armed')
+    await vi.waitFor(() => expect(send.tick).toHaveBeenCalledTimes(2))
   })
 })

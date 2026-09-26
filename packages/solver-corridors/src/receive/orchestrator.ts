@@ -869,6 +869,8 @@ export class ReceiveSwapService {
         arkade_lockup_value: alreadyFunded.value,
       })
     }
+    // A lost funding response cannot be turned into a clean refusal by invoice expiry.
+    if (row.fundStartedAt !== null) return false
 
     // Re-polled HERE, immediately before funding — not trusted from whenQuoted's
     // observation, which can be minutes stale. Only 'armed' status's E is
@@ -982,7 +984,17 @@ export class ReceiveSwapService {
         }),
       )
       // Retained on an ambiguous failure: stuck for a human, on purpose.
-      if (error instanceof FundNotSubmittedError) await store.releaseFundLease(row.id)
+      if (error instanceof FundNotSubmittedError) {
+        if (coupled) {
+          await this.retireInvoice(row.paymentHash)
+          await store.transition(row.id, 'armed', 'refused', {
+            fund_started_at: null,
+            failure_reason: `refused to fund coupled payout: ${error.message}`,
+          })
+          return false
+        }
+        await store.releaseFundLease(row.id)
+      }
       throw error
     }
     const fundMs = Math.round(performance.now() - fundStarted)

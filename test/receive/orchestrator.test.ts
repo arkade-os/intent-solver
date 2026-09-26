@@ -1056,6 +1056,9 @@ describe('ReceiveSwapService.tick — concurrent workers: no double-funding', ()
     await service.tick(outcome.swap.id)
     expect(arkade.state.fundCalls).toHaveLength(1)
 
+    now = outcome.swap.invoiceExpiresAt + 1
+    expect((await service.tick(outcome.swap.id)).state).toBe('armed')
+
     arkade.state.outputs = landed
     const row = await service.tick(outcome.swap.id)
     expect(row.state).toBe('funded')
@@ -1820,9 +1823,10 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     sendLockups = []
   })
 
-  const coupledService = (): ReceiveSwapService => {
+  const coupledService = (fund: ReceiveArkadeOps['fund'] = arkade.ops.fund): ReceiveSwapService => {
     const ops: ReceiveArkadeOps = {
       ...arkade.ops,
+      fund,
       // Script-aware: this path reads the OTHER leg's lockup, so the fake has
       // to tell the two scripts apart rather than answering the same list.
       findLockups: async (pkScriptHex) => (pkScriptHex === SEND_PKSCRIPT ? sendLockups : arkade.state.outputs),
@@ -1862,6 +1866,45 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
 
     expect(row.state).toBe('quoted')
     expect(arkade.state.fundCalls).toHaveLength(0)
+  })
+
+  it('refuses a coupled payout when funding was provably never submitted', async () => {
+    let fundFailed = false
+    const svc = coupledService(async () => {
+      fundFailed = true
+      throw new FundNotSubmittedError('no valid funding inputs')
+    })
+    const swap = await quotedCoupled(svc)
+    sendRow = coupledSendRow('funded')
+    sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
+    const cancelHold = ln.cancelHold.bind(ln)
+    let competingClaim: boolean | undefined
+    ln.cancelHold = async (hash) => {
+      if (fundFailed) competingClaim = await store.claimFundLease(swap.id, 'armed')
+      await cancelHold(hash)
+    }
+
+    const row = await svc.tick(swap.id)
+
+    expect(competingClaim).toBe(false)
+    expect(row.state).toBe('refused')
+    expect(row.fundStartedAt).toBeNull()
+    expect(row.arkadeLockupTxid).toBeNull()
+    expect(row.failureReason).toContain('no valid funding inputs')
+  })
+
+  it('keeps a coupled payout armed when funding submission is ambiguous', async () => {
+    const svc = coupledService(async () => {
+      throw new Error('funding response lost')
+    })
+    const swap = await quotedCoupled(svc)
+    sendRow = coupledSendRow('funded')
+    sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
+
+    await expect(svc.tick(swap.id)).rejects.toThrow('funding response lost')
+    const row = await store.get(swap.id)
+    expect(row.state).toBe('armed')
+    expect(row.fundStartedAt).not.toBeNull()
   })
 
   it('refuses to fund when the coupled send lockup cannot cover the payout', async () => {
