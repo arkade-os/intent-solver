@@ -70,13 +70,7 @@ export interface RelayIngressDeps {
    * long before this is called.
    */
   onRefusal?: RfqRefusalObserver
-  onQuoteTiming?: (sample: {
-    rfqRef?: string
-    pair?: string
-    quoteMs: number
-    publishMs: number
-    outcome: string
-  }) => void
+  onQuoteTiming?: (sample: { rfqRef?: string; quoteMs: number; publishMs: number; outcome: string }) => void
   now?: () => number
 }
 
@@ -260,7 +254,17 @@ export class RelayIngress implements SwapIngress {
         } catch (error) {
           this.deps.onError?.('relay quote', error)
           if (typeof rfqId === 'string') {
+            const quoteMs = Math.round(performance.now() - quoteStarted)
+            const publishStarted = performance.now()
             await this.reply(event.author, rfqRefusalPayload(rfqId, 'pricing_unavailable'))
+            try {
+              this.deps.onQuoteTiming?.({
+                rfqRef: rfqId.slice(0, 12),
+                quoteMs,
+                publishMs: Math.round(performance.now() - publishStarted),
+                outcome: 'pricing_unavailable',
+              })
+            } catch {}
           }
           return
         }
@@ -271,10 +275,6 @@ export class RelayIngress implements SwapIngress {
         try {
           this.deps.onQuoteTiming?.({
             rfqRef: typeof rfqId === 'string' ? rfqId.slice(0, 12) : undefined,
-            pair:
-              typeof (event.payload as { pair?: unknown }).pair === 'string'
-                ? (event.payload as { pair: string }).pair
-                : undefined,
             quoteMs,
             publishMs: Math.round(performance.now() - publishStarted),
             outcome: outcome.kind,
