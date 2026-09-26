@@ -1869,15 +1869,24 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
   })
 
   it('refuses a coupled payout when funding was provably never submitted', async () => {
+    let fundFailed = false
     const svc = coupledService(async () => {
+      fundFailed = true
       throw new FundNotSubmittedError('no valid funding inputs')
     })
     const swap = await quotedCoupled(svc)
     sendRow = coupledSendRow('funded')
     sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
+    const cancelHold = ln.cancelHold.bind(ln)
+    let competingClaim: boolean | undefined
+    ln.cancelHold = async (hash) => {
+      if (fundFailed) competingClaim = await store.claimFundLease(swap.id, 'armed')
+      await cancelHold(hash)
+    }
 
     const row = await svc.tick(swap.id)
 
+    expect(competingClaim).toBe(false)
     expect(row.state).toBe('refused')
     expect(row.fundStartedAt).toBeNull()
     expect(row.arkadeLockupTxid).toBeNull()

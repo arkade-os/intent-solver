@@ -985,12 +985,15 @@ export class ReceiveSwapService {
       )
       // Retained on an ambiguous failure: stuck for a human, on purpose.
       if (error instanceof FundNotSubmittedError) {
-        await store.releaseFundLease(row.id)
         if (coupled) {
           await this.retireInvoice(row.paymentHash)
-          await store.fail(row.id, 'armed', `refused to fund coupled payout: ${error.message}`)
+          await store.transition(row.id, 'armed', 'refused', {
+            fund_started_at: null,
+            failure_reason: `refused to fund coupled payout: ${error.message}`,
+          })
           return false
         }
+        await store.releaseFundLease(row.id)
       }
       throw error
     }

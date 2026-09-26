@@ -2608,6 +2608,21 @@ describe('claiming a coupled self-payment', () => {
     expect(ln.payCalls).toHaveLength(0)
   })
 
+  it('reports when the backend cannot prove its own invoice safe to refund', async () => {
+    const svc = coupledService()
+    const id = await fundedCoupledSwap(svc)
+    receiveRow = { ...receiveRow, state: 'refused' }
+    Object.defineProperty(ln, 'getOwnInvoiceState', { value: undefined })
+    const errors: string[] = []
+    svc.onTickError = (_id, error) => errors.push(String(error))
+
+    const row = await svc.tick(id)
+
+    expect(row.state).toBe('funded')
+    expect(arkade.refundCalls).toHaveLength(0)
+    expect(errors).toEqual([expect.stringContaining('cannot probe its own invoice')])
+  })
+
   it('claims the send lockup with the preimage revealed on our payout', async () => {
     const svc = coupledService()
     const id = await fundedCoupledSwap(svc)
