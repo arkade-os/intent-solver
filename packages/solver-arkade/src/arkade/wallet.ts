@@ -44,6 +44,7 @@ import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import { claimIdentity } from './claimIdentity.js'
 import type { CovenantSwapScript } from './covenant.js'
 import { vtxoPages } from './indexerPaging.js'
+import { TimedArkProvider, TimedIndexerProvider } from './latencyProviders.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
 
 /** The two views any spend below needs; CovenantSwapScript satisfies it (as would any VtxoScript wrapper). */
@@ -257,10 +258,13 @@ export const resolveTimelockUnit = (params: {
 export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<ArkadeContext> => {
   const identity = MnemonicIdentity.fromMnemonic(config.mnemonic, { isMainnet: config.isMainnet })
   const executor = sqliteExecutor(config.databasePath)
+  const latencyDiagnostics = process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
 
   const wallet = await Wallet.create({
     identity,
     arkServerUrl: config.arkServerUrl,
+    arkProvider: latencyDiagnostics ? new TimedArkProvider(config.arkServerUrl) : undefined,
+    indexerProvider: latencyDiagnostics ? new TimedIndexerProvider(config.arkServerUrl) : undefined,
     storage: {
       walletRepository: new SQLiteWalletRepository(executor),
       contractRepository: new SQLiteContractRepository(executor),
