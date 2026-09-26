@@ -1820,9 +1820,10 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     sendLockups = []
   })
 
-  const coupledService = (): ReceiveSwapService => {
+  const coupledService = (fund: ReceiveArkadeOps['fund'] = arkade.ops.fund): ReceiveSwapService => {
     const ops: ReceiveArkadeOps = {
       ...arkade.ops,
+      fund,
       // Script-aware: this path reads the OTHER leg's lockup, so the fake has
       // to tell the two scripts apart rather than answering the same list.
       findLockups: async (pkScriptHex) => (pkScriptHex === SEND_PKSCRIPT ? sendLockups : arkade.state.outputs),
@@ -1862,6 +1863,36 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
 
     expect(row.state).toBe('quoted')
     expect(arkade.state.fundCalls).toHaveLength(0)
+  })
+
+  it('refuses a coupled payout when funding was provably never submitted', async () => {
+    const svc = coupledService(async () => {
+      throw new FundNotSubmittedError('no valid funding inputs')
+    })
+    const swap = await quotedCoupled(svc)
+    sendRow = coupledSendRow('funded')
+    sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
+
+    const row = await svc.tick(swap.id)
+
+    expect(row.state).toBe('refused')
+    expect(row.fundStartedAt).toBeNull()
+    expect(row.arkadeLockupTxid).toBeNull()
+    expect(row.failureReason).toContain('no valid funding inputs')
+  })
+
+  it('keeps a coupled payout armed when funding submission is ambiguous', async () => {
+    const svc = coupledService(async () => {
+      throw new Error('funding response lost')
+    })
+    const swap = await quotedCoupled(svc)
+    sendRow = coupledSendRow('funded')
+    sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
+
+    await expect(svc.tick(swap.id)).rejects.toThrow('funding response lost')
+    const row = await store.get(swap.id)
+    expect(row.state).toBe('armed')
+    expect(row.fundStartedAt).not.toBeNull()
   })
 
   it('refuses to fund when the coupled send lockup cannot cover the payout', async () => {

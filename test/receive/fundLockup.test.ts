@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { fundLockup, FundNotSubmittedError } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
+import { ArkError } from '@arkade-os/sdk'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const ADDRESS = 'tark1lockup'
@@ -120,6 +121,22 @@ describe('fundLockup — what it proves about submission', () => {
     expect((error as Error).message).toBe('ark server response lost')
     expect(h.sendCalls).toBe(1)
     // The pin is still released on the ambiguous path.
+    expect(h.reservations.reserved().size).toBe(0)
+  })
+
+  it('treats arkd AMOUNT_TOO_LOW as a rejected transaction', async () => {
+    const rejected = new ArkError(15, 'output #1 amount is lower than min vtxo amount: 330', 'AMOUNT_TOO_LOW')
+    const h = harness({
+      send: async () => {
+        throw rejected
+      },
+    })
+
+    const error = await fundLockup(h.ctx, ADDRESS, 50_000).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(FundNotSubmittedError)
+    expect((error as Error).cause).toBe(rejected)
+    expect(h.sendCalls).toBe(1)
     expect(h.reservations.reserved().size).toBe(0)
   })
 

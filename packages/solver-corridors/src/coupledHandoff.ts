@@ -30,7 +30,7 @@ export const driveCoupledPeers = (legs: {
   legs.receive.onStateChange = (row, from) => {
     priorReceive?.(row, from)
     // Not only `claimed`: a coupled receive crosses claimed -> settled in one tick and reports once.
-    if (row.state !== 'claimed' && row.state !== 'settled') return
+    if (row.state !== 'claimed' && row.state !== 'settled' && row.state !== 'refused') return
     drive(legs.sendStore.findLiveByPaymentHash(row.paymentHash), (id) => legs.send.tick(id))
   }
 }

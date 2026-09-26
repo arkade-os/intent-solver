@@ -16,6 +16,7 @@
  */
 
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { ArkError } from '@arkade-os/sdk'
 import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { selectLockupFunding } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 import { CLAIM_PACKET_TYPE } from '@arkade-os/swap'
@@ -24,7 +25,7 @@ import { json, log } from '@arkade-os/solver-core/util/poll.js'
 
 /**
  * A funding failure that provably submitted nothing. The boundary is
- * `ctx.wallet.send()`, which throws UNWRAPPED because a lost response cannot be
+ * `ctx.wallet.send()`, whose ambiguous errors stay unwrapped because a lost response cannot be
  * told from a rejection — so a lease-holding caller that releases on an
  * ambiguous failure lets a second worker fund the same lockup, while the first
  * funding is still invisible to the indexer.
@@ -117,6 +118,11 @@ export const fundLockup = async (
     })
     outcome = 'submitted'
     return txid
+  } catch (error) {
+    if (error instanceof ArkError && error.code === 15 && error.name === 'AMOUNT_TOO_LOW') {
+      throw new FundNotSubmittedError('arkd rejected a sub-minimum funding output before submission', { cause: error })
+    }
+    throw error
   } finally {
     // Released whether the send landed or threw: a pin outliving its operation
     // shrinks the spendable float with nothing left to free it. If the send
