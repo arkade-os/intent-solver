@@ -152,6 +152,7 @@ export interface ArkadeContext {
    * offer's exit leaf from this, so that covenant follows the server. */
   advertisedExitDelay: number
   dustSats: bigint
+  vtxoMinSats: bigint
   /**
    * Which clock this deployment's covenant timelocks count on, INFERRED from the
    * server's own advertised exit delay rather than configured beside it.
@@ -324,6 +325,10 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   if (dustSats <= 0n) {
     throw new Error(`Arkade server at ${config.arkServerUrl} reports dust=${info.dust}, which no asset can ride on`)
   }
+  const vtxoMinSats = BigInt(info.vtxoMinAmount ?? 0)
+  if (vtxoMinSats < 0n || vtxoMinSats > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`Arkade server at ${config.arkServerUrl} reports invalid vtxoMinAmount=${info.vtxoMinAmount}`)
+  }
 
   const advertisedExitDelay = Number(info.unilateralExitDelay)
   const { unit: advertisedUnit, notices } = resolveTimelockUnit({
@@ -340,6 +345,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     unilateralDelays: deriveUnilateralDelays(config.unilateralExitDelayOverride ?? advertisedExitDelay),
     advertisedExitDelay,
     dustSats,
+    vtxoMinSats,
     timelockUnit: advertisedUnit,
     hrp: config.arkadeHrp,
     reservations: createReservationLedger(),

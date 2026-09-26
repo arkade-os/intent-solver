@@ -166,6 +166,7 @@ const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number) => {
     nowSeconds: Math.floor(Date.now() / 1000),
     reserved: ctx.reservations.reserved(),
     dustSats: Number(ctx.dustSats),
+    vtxoMinSats: Number(ctx.vtxoMinSats),
   })
   if (!selection.ok) {
     throw new FundNotSubmittedError(`refusing to fund lockup of ${amountSats} sats: ${selection.reason}`)

@@ -16,15 +16,17 @@ const coin = (value: number) => ({
 interface Harness {
   ctx: ArkadeContext
   sendCalls: number
+  selectedInputs: number
   reservations: ReturnType<typeof createReservationLedger>
 }
 
 const harness = (over: { spendable?: unknown; send?: () => Promise<string> } = {}): Harness => {
   const reservations = createReservationLedger()
-  const state = { sendCalls: 0 }
+  const state = { sendCalls: 0, selectedInputs: 0 }
   const ctx = {
     reservations,
     dustSats: 330n,
+    vtxoMinSats: 330n,
     wallet: {
       arkProvider: {
         getInfo: async () => {
@@ -35,8 +37,9 @@ const harness = (over: { spendable?: unknown; send?: () => Promise<string> } = {
         if (typeof over.spendable === 'function') return (over.spendable as () => unknown[])()
         return over.spendable ?? [coin(50_000)]
       },
-      send: async () => {
+      send: async (request: { selectedVtxos?: unknown[] }) => {
         state.sendCalls += 1
+        state.selectedInputs = request.selectedVtxos?.length ?? 0
         return over.send ? over.send() : 'ark-txid'
       },
     },
@@ -46,6 +49,9 @@ const harness = (over: { spendable?: unknown; send?: () => Promise<string> } = {
     reservations,
     get sendCalls() {
       return state.sendCalls
+    },
+    get selectedInputs() {
+      return state.selectedInputs
     },
   } as Harness
 }
@@ -64,6 +70,25 @@ describe('fundLockup — what it proves about submission', () => {
     expect(error).toBeInstanceOf(FundNotSubmittedError)
     expect((error as Error).message).toMatch(/refusing to fund lockup of 50000 sats/)
     expect(h.sendCalls).toBe(0)
+  })
+
+  it('refuses sub-minimum change before submission', async () => {
+    const h = harness({ spendable: [coin(50_111)] })
+
+    const error = await fundLockup(h.ctx, ADDRESS, 50_000).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(FundNotSubmittedError)
+    expect((error as Error).message).toContain('minimum_change_unavailable')
+    expect(h.sendCalls).toBe(0)
+  })
+
+  it('submits an additional input when change needs topping up', async () => {
+    const h = harness({ spendable: [coin(50_111), { ...coin(500), vout: 1 }] })
+
+    await expect(fundLockup(h.ctx, ADDRESS, 50_000)).resolves.toBe('ark-txid')
+
+    expect(h.sendCalls).toBe(1)
+    expect(h.selectedInputs).toBe(2)
   })
 
   it('reports a failed pre-submission READ the same way, carrying the cause', async () => {
