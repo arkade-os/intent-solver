@@ -148,8 +148,10 @@ let onchainStore: OnchainSendSwapStore
 let relay: FakeRelay
 let ingress: RelayIngress
 let service: SendSwapService
+let quoteTimings: { rfqRef?: string; quoteMs: number; publishMs: number; outcome: string }[]
 
 beforeEach(async () => {
+  quoteTimings = []
   clock = INVOICE_TIMESTAMP + 100
   store = await SwapStore.open(':memory:', () => clock)
   relay = new FakeRelay()
@@ -194,6 +196,7 @@ beforeEach(async () => {
     onchainStore,
     providerPubkey: PROVIDER,
     now: () => clock * 1000,
+    onQuoteTiming: (sample) => quoteTimings.push(sample),
   })
   await ingress.start()
 })
@@ -228,6 +231,14 @@ describe('RelayIngress', () => {
     // The swap is persisted exactly as the HTTP path persists it.
     expect((await store.findByPaymentHash(PAYMENT_HASH))!.state).toBe('quoted')
     expect((await store.findByPaymentHash(PAYMENT_HASH))!.rfqId).toBe(RFQ_ID)
+    expect(quoteTimings).toEqual([
+      expect.objectContaining({
+        rfqRef: RFQ_ID.slice(0, 12),
+        quoteMs: expect.any(Number),
+        publishMs: expect.any(Number),
+        outcome: 'quote',
+      }),
+    ])
   })
 
   it('publishes a refusal for an undecodable invoice with client-safe detail', async () => {
