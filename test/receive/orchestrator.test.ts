@@ -1056,6 +1056,9 @@ describe('ReceiveSwapService.tick — concurrent workers: no double-funding', ()
     await service.tick(outcome.swap.id)
     expect(arkade.state.fundCalls).toHaveLength(1)
 
+    now = outcome.swap.invoiceExpiresAt + 1
+    expect((await service.tick(outcome.swap.id)).state).toBe('armed')
+
     arkade.state.outputs = landed
     const row = await service.tick(outcome.swap.id)
     expect(row.state).toBe('funded')

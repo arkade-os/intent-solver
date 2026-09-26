@@ -869,6 +869,8 @@ export class ReceiveSwapService {
         arkade_lockup_value: alreadyFunded.value,
       })
     }
+    // A lost funding response cannot be turned into a clean refusal by invoice expiry.
+    if (row.fundStartedAt !== null) return false
 
     // Re-polled HERE, immediately before funding — not trusted from whenQuoted's
     // observation, which can be minutes stale. Only 'armed' status's E is
