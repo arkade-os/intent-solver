@@ -913,6 +913,7 @@ export const createServices = async (
         store: receiveStore,
         chainTip,
         ln: rail!.ln,
+        backendName: config.lnBackend ?? undefined,
         arkade: receiveOps,
         limits: policy.corridorLimits['lightning:BTC->arkade:BTC'],
         fee: policy.corridorFees['lightning:BTC->arkade:BTC'],

@@ -169,7 +169,17 @@ export interface ReceiveServiceDeps {
    */
   pricing?: PricingStrategy
   store: ReceiveSwapStore
-  ln: Pick<LightningBackend, 'createHoldInvoice' | 'getHoldState' | 'settleHold' | 'cancelHold' | 'onHoldAccepted'>
+  backendName?: string
+  ln: Pick<
+    LightningBackend,
+    | 'createHoldInvoice'
+    | 'getHoldState'
+    | 'settleHold'
+    | 'cancelHold'
+    | 'onHoldAccepted'
+    | 'walletFingerprint'
+    | 'getKnownInvoiceState'
+  >
   arkade: ReceiveArkadeOps
   /**
    * OPTIONAL. When set, the solver hands covclaimd the sealed packet so the
@@ -556,6 +566,8 @@ export class ReceiveSwapService {
       }
 
       const validUntil = now + DEFAULT_HOLD_INVOICE_WINDOW
+      const invoiceWalletFingerprint = ln.getKnownInvoiceState ? ((await ln.walletFingerprint?.()) ?? null) : null
+      const invoiceBackendName = ln.getKnownInvoiceState ? (this.deps.backendName ?? null) : null
       const held = await ln.createHoldInvoice({
         // The HTLC we HOLD is worth the give — on an exact-out request that is
         // the solved-up amount, not the payout they named. It is what `payoutSats`
@@ -585,6 +597,8 @@ export class ReceiveSwapService {
           // config has changed to since.
           payoutSats,
           invoice: held.invoice,
+          invoiceWalletFingerprint,
+          invoiceBackendName,
           invoiceExpiresAt: validUntil,
           payoutAddress: request.payoutAddress,
           payoutPkScript: hex.encode(payoutPkScript),

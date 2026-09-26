@@ -101,6 +101,8 @@ export interface ReceiveSwapRow {
   payoutSats: number
   /** The hold BOLT11 this provider minted on `H`. */
   invoice: string
+  invoiceWalletFingerprint: string | null
+  invoiceBackendName: string | null
   invoiceExpiresAt: number
   /** `E`: the deadline the held HTLC must be settled by. Null until `armed`. */
   htlcExpiresAt: number | null
@@ -215,7 +217,9 @@ const RECEIVE_SWAP_COLUMNS = `
   refund_ark_txid                TEXT,
   failure_reason                TEXT,
   rfq_id                        TEXT,
-  fund_started_at               INTEGER
+  fund_started_at               INTEGER,
+  invoice_wallet_fingerprint    TEXT,
+  invoice_backend_name          TEXT
 `
 
 const SCHEMA = `
@@ -253,6 +257,14 @@ const toRow = (raw: Raw): ReceiveSwapRow => ({
   payoutSats:
     raw.payout_sats === null || raw.payout_sats === undefined ? Number(raw.amount_sats) : Number(raw.payout_sats),
   invoice: String(raw.invoice),
+  invoiceWalletFingerprint:
+    raw.invoice_wallet_fingerprint === null || raw.invoice_wallet_fingerprint === undefined
+      ? null
+      : String(raw.invoice_wallet_fingerprint),
+  invoiceBackendName:
+    raw.invoice_backend_name === null || raw.invoice_backend_name === undefined
+      ? null
+      : String(raw.invoice_backend_name),
   invoiceExpiresAt: Number(raw.invoice_expires_at),
   htlcExpiresAt: raw.htlc_expires_at === null || raw.htlc_expires_at === undefined ? null : Number(raw.htlc_expires_at),
   payoutAddress: String(raw.payout_address),
@@ -304,6 +316,8 @@ export interface ReceiveQuoteRecord {
   /** See {@link ReceiveSwapRow.payoutSats} — required, never derived here. */
   payoutSats: number
   invoice: string
+  invoiceWalletFingerprint?: string | null
+  invoiceBackendName?: string | null
   invoiceExpiresAt: number
   payoutAddress: string
   payoutPkScript: string
@@ -407,6 +421,12 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
     if (!existing.has('fund_started_at')) {
       await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN fund_started_at INTEGER`)
     }
+    if (!existing.has('invoice_wallet_fingerprint')) {
+      await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN invoice_wallet_fingerprint TEXT`)
+    }
+    if (!existing.has('invoice_backend_name')) {
+      await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN invoice_backend_name TEXT`)
+    }
   }
 
   /** Twin of `OnchainReceiveSwapStore.claimFundLease` — see it for the argument, and
@@ -440,8 +460,8 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
         payout_address, payout_pk_script, payout_pubkey, claim_packet,
         refund_locktime, solver_pubkey, server_pubkey, claim_delay, refund_delay, refund_without_receiver_delay,
         emulator_pubkey, pk_script, lockup_address, solver_refund_pk_script,
-        non_interactive_parameters, rfq_id
-      ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        non_interactive_parameters, rfq_id, invoice_wallet_fingerprint, invoice_backend_name
+      ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         quote.id,
         at,
@@ -467,6 +487,8 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
         quote.solverRefundPkScript,
         quote.nonInteractiveParameters === undefined ? null : quote.nonInteractiveParameters ? '1' : null,
         quote.rfqId ?? null,
+        quote.invoiceWalletFingerprint ?? null,
+        quote.invoiceBackendName ?? null,
       ],
     )
     await this.recordEvent(quote.id, null, 'quoted', null)

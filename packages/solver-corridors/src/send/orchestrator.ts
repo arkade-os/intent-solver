@@ -86,7 +86,7 @@ const SEND_FEE_ESTIMATE_TIMEOUT_MS = 5_000
 export type CoupledReceiveRow = Pick<
   ReceiveSwapRow,
   'state' | 'invoice' | 'refundLocktime' | 'pkScript' | 'htlcExpiresAt' | 'fundStartedAt'
->
+> & { invoiceWalletFingerprint?: string | null; invoiceBackendName?: string | null }
 
 export interface SendServiceDeps {
   store: SwapStore
@@ -106,7 +106,7 @@ export interface SendServiceDeps {
     | 'getSendHtlcState'
     | 'walletFingerprint'
   > &
-    Pick<ReceiveBackend, 'getOwnInvoiceState'>
+    Pick<ReceiveBackend, 'getOwnInvoiceState' | 'getKnownInvoiceState'>
   arkade: ArkadeOps
   /**
    * Which backend implementation is wired in — `lnd`, for instance.
@@ -1088,11 +1088,32 @@ export class SendSwapService {
     if (failedReceive?.invoice.toLowerCase() === row.invoice.toLowerCase() && failedReceive.state === 'refused') {
       // A held funding lease may have submitted a payout that the indexer has not shown yet.
       if (failedReceive.fundStartedAt !== null || failedReceive.htlcExpiresAt !== null) return false
-      if (!this.deps.ln.getOwnInvoiceState) {
+      if (!this.deps.ln.getOwnInvoiceState && !this.deps.ln.getKnownInvoiceState) {
         this.onTickError?.(row.id, new Error('coupled refund blocked: Lightning backend cannot probe its own invoice'))
         return false
       }
-      const own = await this.deps.ln.getOwnInvoiceState(row.paymentHash)
+      let own: HoldState | null | undefined
+      if (this.deps.ln.getOwnInvoiceState) {
+        own = await this.deps.ln.getOwnInvoiceState(row.paymentHash)
+      } else {
+        const issuedBy = failedReceive.invoiceWalletFingerprint
+        const issuedThrough = failedReceive.invoiceBackendName
+        const currentWallet = await this.deps.ln.walletFingerprint?.()
+        if (
+          !issuedBy ||
+          !currentWallet ||
+          issuedBy !== currentWallet ||
+          !issuedThrough ||
+          issuedThrough !== this.backendName
+        ) {
+          this.onTickError?.(
+            row.id,
+            new Error('coupled refund blocked: invoice wallet or backend identity unavailable or changed'),
+          )
+          return false
+        }
+        own = await this.deps.ln.getKnownInvoiceState?.(row.paymentHash)
+      }
       if (own?.status !== 'pending' && own?.status !== 'cancelled') return false
       const won = await store.transition(row.id, 'funded', 'refused', {
         failure_reason: 'coupled receive refused before funding; client refund pending',
