@@ -82,12 +82,8 @@ export const usableSatsOf = (coin: Pick<FundingCandidate, 'value' | 'assets'>, d
  *
  * Running short of batch life is NOT a refusal. See {@link selectLockupFunding}.
  *
- * Deliberately only ONE reason: asset-bearing coins are no longer excluded from
- * funding (see the carrier note below), so a second reason naming that state could
- * never fire — and a refusal that cannot fire is worse than none, inviting a caller
- * to handle a case that will not happen and trust its absence as evidence.
  */
-export type LockupFundingRefusal = 'insufficient_unreserved_balance'
+export type LockupFundingRefusal = 'insufficient_unreserved_balance' | 'minimum_change_unavailable'
 
 export type LockupFundingSelection<T extends FundingCandidate = FundingCandidate> =
   | {
@@ -134,6 +130,8 @@ export interface LockupFundingRequest<T extends FundingCandidate = FundingCandid
    * would surface as a thrown send rather than a refusal we chose.
    */
   dustSats: number
+  /** Minimum positive change VTXO accepted by the operator. */
+  vtxoMinSats: number
 }
 
 /**
@@ -162,7 +160,7 @@ export interface LockupFundingRequest<T extends FundingCandidate = FundingCandid
 export const selectLockupFunding = <T extends FundingCandidate>(
   request: LockupFundingRequest<T>,
 ): LockupFundingSelection<T> => {
-  const { candidates, amountSats, horizonSeconds, nowSeconds, reserved, dustSats } = request
+  const { candidates, amountSats, horizonSeconds, nowSeconds, reserved, dustSats, vtxoMinSats } = request
   const deadlineMs = (nowSeconds + horizonSeconds) * 1000
 
   // AN ASSET-BEARING COIN CAN FUND A LOCKUP — it just cannot be drained to the
@@ -204,11 +202,18 @@ export const selectLockupFunding = <T extends FundingCandidate>(
 
   const take = (from: readonly T[]): readonly T[] | null => {
     const inputs: T[] = []
-    let total = 0
+    let usableTotal = 0
+    let rawTotal = 0
+    let hasAssets = false
     for (const coin of from) {
       inputs.push(coin)
-      total += usableSats(coin)
-      if (total >= amountSats) return inputs
+      usableTotal += usableSats(coin)
+      rawTotal += coin.value
+      hasAssets ||= !!coin.assets?.length
+      const change = rawTotal - amountSats
+      if (usableTotal >= amountSats && (change === 0 || change >= Math.max(vtxoMinSats, hasAssets ? dustSats : 0))) {
+        return inputs
+      }
     }
     return null
   }
@@ -219,5 +224,9 @@ export const selectLockupFunding = <T extends FundingCandidate>(
   const fallback = take(ordered)
   if (fallback) return { ok: true, inputs: fallback, clearedHorizon: false }
 
-  return { ok: false, reason: 'insufficient_unreserved_balance' }
+  if (ordered.reduce((total, coin) => total + usableSats(coin), 0) < amountSats) {
+    return { ok: false, reason: 'insufficient_unreserved_balance' }
+  }
+
+  return { ok: false, reason: 'minimum_change_unavailable' }
 }
