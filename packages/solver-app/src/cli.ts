@@ -293,6 +293,17 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
 
   const watcher = new LockupWatcher({
     contracts: contractEvents,
+    onEvent: (event, scripts) => {
+      if (process.env.SOLVER_LATENCY_DIAGNOSTICS !== '1') return
+      for (const script of scripts) {
+        const watched = swapByScript.get(script)
+        if (!watched) continue
+        log(
+          'lockup_stream_event_timing',
+          json({ swapId: watched.id, eventType: event.type, sdkToSolverMs: Math.max(0, Date.now() - event.timestamp) }),
+        )
+      }
+    },
     // An event is a nudge, never evidence: tick re-reads the lockup from the
     // indexer exactly as the sweep does, so a wrong or replayed script costs one
     // redundant tick and decides nothing.
@@ -300,11 +311,28 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
       for (const script of scripts) {
         const watched = swapByScript.get(script)
         if (!watched) continue
-        void watched.tick().catch((error) => {
-          // The sweep retries this row regardless; losing the fast path is not
-          // worth taking the watcher down.
-          log(`lockup-triggered tick ${watched.id} failed:`, error instanceof Error ? error.message : String(error))
-        })
+        const started = performance.now()
+        void watched
+          .tick()
+          .then(() => {
+            if (process.env.SOLVER_LATENCY_DIAGNOSTICS === '1') {
+              log(
+                'lockup_event_timing',
+                json({ swapId: watched.id, tickMs: Math.round(performance.now() - started), outcome: 'ok' }),
+              )
+            }
+          })
+          .catch((error) => {
+            if (process.env.SOLVER_LATENCY_DIAGNOSTICS === '1') {
+              log(
+                'lockup_event_timing',
+                json({ swapId: watched.id, tickMs: Math.round(performance.now() - started), outcome: 'failed' }),
+              )
+            }
+            // The sweep retries this row regardless; losing the fast path is not
+            // worth taking the watcher down.
+            log(`lockup-triggered tick ${watched.id} failed:`, error instanceof Error ? error.message : String(error))
+          })
       }
     },
     onError: (error) => log('lockup watcher:', error instanceof Error ? error.message : String(error)),
@@ -1065,6 +1093,10 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const latencyDiagnostics = process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
     if (latencyDiagnostics && services.receiveService) {
       services.receiveService.onQuoteTiming = (sample) => log('receive_quote_timing', json(sample))
+      services.receiveService.onStepTiming = (sample) => log('receive_step_timing', json(sample))
+    }
+    if (latencyDiagnostics && services.service) {
+      services.service.onFundingTiming = (sample) => log('send_funding_tick_timing', json(sample))
     }
 
     // The factory asserts the derived key IS the wallet identity — the pubkey

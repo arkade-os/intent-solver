@@ -44,6 +44,7 @@ export interface LockupWatcherDeps {
   contracts: ContractSource
   /** Called with the scripts an event named. Never awaited; may throw. */
   onScripts: (scripts: string[]) => void
+  onEvent?: (event: ContractEvent, scripts: string[]) => void
   onError?: (error: unknown) => void
 }
 
@@ -162,6 +163,11 @@ export class LockupWatcher {
           ? [event.contractScript]
           : []
     if (scripts.length === 0) return
+    try {
+      this.deps.onEvent?.(event, scripts)
+    } catch (error) {
+      this.deps.onError?.(error)
+    }
     this.nudge(scripts)
   }
 

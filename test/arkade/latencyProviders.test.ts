@@ -3,6 +3,7 @@ import { RestArkProvider, RestIndexerProvider } from '@arkade-os/sdk'
 import {
   TimedArkProvider,
   TimedIndexerProvider,
+  sendPhaseTimings,
   withProviderTimingScope,
 } from '@arkade-os/solver-arkade/arkade/latencyProviders.js'
 
@@ -20,7 +21,9 @@ describe('latency providers', () => {
 
     vi.stubEnv('SOLVER_LATENCY_DIAGNOSTICS', '1')
     await expect(
-      withProviderTimingScope('swap-ref', () => new TimedIndexerProvider('http://localhost').getVtxos(query)),
+      withProviderTimingScope({ fundRef: 'swap-ref' }, () =>
+        new TimedIndexerProvider('http://localhost').getVtxos(query),
+      ),
     ).resolves.toBe(response)
 
     expect(fetch).toHaveBeenCalledWith(query)
@@ -40,10 +43,36 @@ describe('latency providers', () => {
     const provider = new TimedArkProvider('http://localhost')
 
     vi.stubEnv('SOLVER_LATENCY_DIAGNOSTICS', '1')
-    await expect(withProviderTimingScope('swap-ref', () => provider.submitTx('signed-transaction', []))).rejects.toBe(
-      failure,
-    )
+    await expect(
+      withProviderTimingScope({ fundRef: 'swap-ref' }, () => provider.submitTx('signed-transaction', [])),
+    ).rejects.toBe(failure)
     expect(output.mock.calls[0]?.join(' ')).toContain('"outcome":"failed"')
     expect(output.mock.calls[0]?.join(' ')).toContain('"fundRef":"swap-ref"')
+  })
+
+  it('times finalization and preserves the funding correlation across both network calls', async () => {
+    vi.spyOn(RestArkProvider.prototype, 'submitTx').mockResolvedValue({
+      arkTxid: 'tx',
+      finalArkTx: 'signed',
+      signedCheckpointTxs: [],
+    })
+    vi.spyOn(RestArkProvider.prototype, 'finalizeTx').mockResolvedValue(undefined)
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const provider = new TimedArkProvider('http://localhost')
+    const scope = { fundRef: 'swap-ref' }
+    vi.stubEnv('SOLVER_LATENCY_DIAGNOSTICS', '1')
+
+    const started = performance.now()
+    await withProviderTimingScope(scope, async () => {
+      await provider.submitTx('signed-transaction', [])
+      await provider.finalizeTx('tx', [])
+    })
+    const phases = sendPhaseTimings(scope, started, performance.now())
+
+    expect(phases.submitMs).toBeGreaterThanOrEqual(0)
+    expect(phases.finalizeMs).toBeGreaterThanOrEqual(0)
+    expect(phases.afterFinalizeMs).toBeGreaterThanOrEqual(0)
+    expect(output.mock.calls.some((call) => call.join(' ').includes('ark_finalize_timing'))).toBe(true)
+    expect(output.mock.calls.at(-1)?.join(' ')).toContain('"fundRef":"swap-ref"')
   })
 })

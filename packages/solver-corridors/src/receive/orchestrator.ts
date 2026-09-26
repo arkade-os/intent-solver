@@ -317,6 +317,7 @@ export class ReceiveSwapService {
     holdMs: number
     persistMs: number
   }) => void
+  onStepTiming?: (sample: { swapId: string; rfqRef?: string; step: 'quoted' | 'armed'; ms: number }) => void
   private readonly now: () => number
   private readonly quoteLimiter: RateLimiter
   private readonly inFlight = new Set<string>()
@@ -690,7 +691,23 @@ export class ReceiveSwapService {
     try {
       let row = await store.get(id)
       const from = row.state
-      while (await this.step(row)) {
+      while (true) {
+        const step = row.state
+        const started = this.onStepTiming && (step === 'quoted' || step === 'armed') ? performance.now() : 0
+        const advanced = await this.step(row)
+        if (advanced && started && (step === 'quoted' || step === 'armed')) {
+          try {
+            this.onStepTiming?.({
+              swapId: row.id,
+              rfqRef: row.rfqId?.slice(0, 12),
+              step,
+              ms: Math.round(performance.now() - started),
+            })
+          } catch {
+            // Diagnostics cannot interrupt the receive tick.
+          }
+        }
+        if (!advanced) break
         // each successful step re-reads the row and tries the next
         row = await store.get(id)
       }
@@ -873,6 +890,7 @@ export class ReceiveSwapService {
 
   private async whenArmed(row: ReceiveSwapRow): Promise<boolean> {
     const { store, ln, arkade } = this.deps
+    const armedStarted = performance.now()
 
     // ADOPTION RUNS FIRST, BEFORE ANY GATE. A crashed attempt may already have
     // broadcast this payment (fund() succeeded, the transition never persisted), and
@@ -1011,6 +1029,7 @@ export class ReceiveSwapService {
     const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
     const stampMs = Math.round(performance.now() - stampStarted)
     const fundStarted = performance.now()
+    const preFundMs = Math.round(fundStarted - armedStarted)
     try {
       fundTxid = await arkade.fund(row.lockupAddress, row.payoutSats, stamp)
     } catch (error) {
@@ -1019,6 +1038,7 @@ export class ReceiveSwapService {
         json({
           swapId: row.id,
           rfqRef: row.rfqId?.slice(0, 12),
+          preFundMs,
           stampMs,
           fundMs: Math.round(performance.now() - fundStarted),
           outcome: 'failed',
@@ -1072,6 +1092,7 @@ export class ReceiveSwapService {
       json({
         swapId: row.id,
         rfqRef: row.rfqId?.slice(0, 12),
+        preFundMs,
         txRef: fundTxid.slice(0, 12),
         stampMs,
         fundMs,

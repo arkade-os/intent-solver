@@ -87,6 +87,19 @@ const build = (over: Partial<ConstructorParameters<typeof LockupWatcher>[0]> = {
 }
 
 describe('LockupWatcher — events into nudges', () => {
+  it('passes event timing to diagnostics without letting a diagnostics failure drop the nudge', () => {
+    const onEvent = vi.fn(() => {
+      throw new Error('diagnostics failed')
+    })
+    const { contracts, onScripts, onError, watcher } = build({ onEvent })
+    watcher.start()
+    watcher.sync(['aa'])
+    contracts.emit(received('aa'))
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ timestamp: 1 }), ['aa'])
+    expect(onError).toHaveBeenCalledWith(expect.any(Error))
+    expect(onScripts).toHaveBeenCalledWith(['aa'])
+  })
+
   it('nudges the swap whose script an arrival names', () => {
     const { contracts, onScripts, watcher } = build()
     watcher.start()
