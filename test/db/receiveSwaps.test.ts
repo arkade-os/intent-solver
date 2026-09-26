@@ -49,7 +49,19 @@ describe('ReceiveSwapStore', () => {
     expect(row.htlcExpiresAt).toBeNull()
     expect(row.preimage).toBeNull()
     expect(row.arkadeLockupTxid).toBeNull()
+    expect(row.invoiceWalletFingerprint).toBeNull()
+    expect(row.invoiceBackendName).toBeNull()
     expect(row.revealedAt).toBeNull()
+  })
+
+  it('persists the invoice wallet identity', async () => {
+    const row = await store.insertQuote({
+      ...baseQuote,
+      invoiceWalletFingerprint: 'probe-wallet',
+      invoiceBackendName: 'probe-backend',
+    })
+    expect(row.invoiceWalletFingerprint).toBe('probe-wallet')
+    expect(row.invoiceBackendName).toBe('probe-backend')
   })
 
   it('round-trips an ABSENT claim packet as null, never the string "null"', async () => {
@@ -385,6 +397,8 @@ describe('ReceiveSwapStore — migration', () => {
     expect(row.payoutSats).toBe(4_950)
     expect(row.htlcExpiresAt).toBe(2_000)
     expect(row.fundStartedAt).toBeNull()
+    expect(row.invoiceWalletFingerprint).toBeNull()
+    expect(row.invoiceBackendName).toBeNull()
 
     expect(await migrated.claimFundLease('in-flight-row', 'armed')).toBe(true)
     expect(await migrated.claimFundLease('in-flight-row', 'armed')).toBe(false)

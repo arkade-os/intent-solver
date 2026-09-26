@@ -17,6 +17,8 @@ const row: ReceiveSwapRow = {
   amountSats: 5_000,
   payoutSats: 5_000,
   invoice: 'lnbcrt50000n1...',
+  invoiceWalletFingerprint: null,
+  invoiceBackendName: null,
   invoiceExpiresAt: 1600,
   htlcExpiresAt: null,
   payoutAddress: 'tark1payoutexample',

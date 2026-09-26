@@ -580,6 +580,9 @@ export interface ReceiveBackend {
    */
   getOwnInvoiceState?(paymentHash: string): Promise<HoldState | null>
 
+  /** Live state for a DB-proven own invoice; negative answers must exhaust the backend's HTLC view. */
+  getKnownInvoiceState?(paymentHash: string): Promise<HoldState>
+
   /**
    * Retire an invoice that has NOT been paid, so nothing can pay it later.
    *

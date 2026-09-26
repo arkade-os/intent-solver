@@ -203,6 +203,7 @@ beforeEach(async () => {
     acceptUnilateralGap: false,
     store,
     ln,
+    backendName: 'probe-backend',
     arkade: arkade.ops,
     covclaimd: covclaimd.client,
     limits: LIMITS,
@@ -228,6 +229,45 @@ const quoteRequest = (over: Partial<Parameters<ReceiveSwapService['quote']>[0]> 
 })
 
 describe('ReceiveSwapService.quote', () => {
+  it('persists the wallet that minted the hold invoice', async () => {
+    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'probe-wallet' })
+    Object.defineProperty(ln, 'getKnownInvoiceState', { value: async () => ({ status: 'pending', expiresAt: null }) })
+
+    const outcome = await service.quote(quoteRequest())
+
+    if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+    expect(outcome.swap.invoiceWalletFingerprint).toBe('probe-wallet')
+    expect(outcome.swap.invoiceBackendName).toBe('probe-backend')
+  })
+
+  it('still mints a quote when the optional wallet identity lookup fails', async () => {
+    Object.defineProperty(ln, 'walletFingerprint', {
+      value: async () => {
+        throw new Error('wallet info unavailable')
+      },
+    })
+    Object.defineProperty(ln, 'getKnownInvoiceState', { value: async () => ({ status: 'pending', expiresAt: null }) })
+
+    const outcome = await service.quote(quoteRequest())
+
+    if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+    expect(outcome.swap.invoice).toBeTruthy()
+    expect(outcome.swap.invoiceWalletFingerprint).toBeNull()
+    expect(outcome.swap.invoiceBackendName).toBe('probe-backend')
+  })
+
+  it('does not query wallet identity for backends with their own invoice probe', async () => {
+    const fingerprint = vi.fn(async () => 'lnd-wallet')
+    Object.defineProperty(ln, 'walletFingerprint', { value: fingerprint })
+
+    const outcome = await service.quote(quoteRequest())
+
+    if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+    expect(fingerprint).not.toHaveBeenCalled()
+    expect(outcome.swap.invoiceWalletFingerprint).toBeNull()
+    expect(outcome.swap.invoiceBackendName).toBeNull()
+  })
+
   it('meters new requester quotes while preserving duplicate and other-client outcomes', async () => {
     const request = (n: number, requesterKey = 'client') =>
       quoteRequest({ paymentHash: n.toString(16).padStart(64, '0'), requesterKey })

@@ -2519,10 +2519,11 @@ describe('claiming a coupled self-payment', () => {
     }
   })
 
-  const coupledService = (): SendSwapService =>
+  const coupledService = (backendName?: string): SendSwapService =>
     new SendSwapService({
       store,
       ln,
+      backendName,
       arkade,
       limits: { minSats: 500, maxSats: 10_000 },
       invoicePrefix: 'bc',
@@ -2562,6 +2563,90 @@ describe('claiming a coupled self-payment', () => {
     expect(row.refundOutcome).toBe('pushed')
     expect(arkade.refundCalls).toHaveLength(1)
     expect(ln.payCalls).toHaveLength(0)
+  })
+
+  it('uses a DB-proven invoice probe when the backend cannot identify arbitrary own invoices', async () => {
+    const svc = coupledService('probe-backend')
+    const id = await fundedCoupledSwap(svc)
+    receiveRow = {
+      ...receiveRow,
+      state: 'refused',
+      invoiceWalletFingerprint: 'probe-wallet',
+      invoiceBackendName: 'probe-backend',
+    }
+    Object.defineProperty(ln, 'getOwnInvoiceState', { value: undefined })
+    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'probe-wallet' })
+    const probe = vi.fn(async () => ({ status: 'pending' as const, expiresAt: null }))
+    Object.defineProperty(ln, 'getKnownInvoiceState', { value: probe })
+
+    const row = await svc.tick(id)
+
+    expect(probe).toHaveBeenCalledWith(FORGED_HASH)
+    expect(row.state).toBe('refused')
+    expect(row.refundOutcome).toBe('pushed')
+  })
+
+  it('withholds the coupled refund when the DB-proven invoice probe sees a live HTLC', async () => {
+    const svc = coupledService('probe-backend')
+    const id = await fundedCoupledSwap(svc)
+    receiveRow = {
+      ...receiveRow,
+      state: 'refused',
+      invoiceWalletFingerprint: 'probe-wallet',
+      invoiceBackendName: 'probe-backend',
+    }
+    Object.defineProperty(ln, 'getOwnInvoiceState', { value: undefined })
+    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'probe-wallet' })
+    Object.defineProperty(ln, 'getKnownInvoiceState', {
+      value: async () => ({ status: 'armed', expiresAt: clock + 3600 }),
+    })
+
+    const row = await svc.tick(id)
+
+    expect(row.state).toBe('funded')
+    expect(arkade.refundCalls).toHaveLength(0)
+  })
+
+  it('withholds the known-invoice refund after the Lightning wallet changes', async () => {
+    const svc = coupledService('probe-backend')
+    const id = await fundedCoupledSwap(svc)
+    receiveRow = {
+      ...receiveRow,
+      state: 'refused',
+      invoiceWalletFingerprint: 'old-wallet',
+      invoiceBackendName: 'probe-backend',
+    }
+    Object.defineProperty(ln, 'getOwnInvoiceState', { value: undefined })
+    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'new-wallet' })
+    const probe = vi.fn()
+    Object.defineProperty(ln, 'getKnownInvoiceState', { value: probe })
+
+    const row = await svc.tick(id)
+
+    expect(row.state).toBe('funded')
+    expect(arkade.refundCalls).toHaveLength(0)
+    expect(probe).not.toHaveBeenCalled()
+  })
+
+  it('withholds the known-invoice refund after switching Lightning backends', async () => {
+    const svc = coupledService('probe-backend')
+    const id = await fundedCoupledSwap(svc)
+    receiveRow = {
+      ...receiveRow,
+      state: 'refused',
+      invoiceWalletFingerprint: 'probe-wallet',
+      invoiceBackendName: 'other-backend',
+    }
+    Object.defineProperty(ln, 'getOwnInvoiceState', { value: undefined })
+    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'probe-wallet' })
+    const probe = vi.fn()
+    Object.defineProperty(ln, 'getKnownInvoiceState', { value: probe })
+
+    const row = await svc.tick(id)
+
+    expect(row.state).toBe('funded')
+    expect(arkade.refundCalls).toHaveLength(0)
+    expect(probe).not.toHaveBeenCalled()
   })
 
   it('retries a coupled refund on the ordinary sweep when the first push fails', async () => {
