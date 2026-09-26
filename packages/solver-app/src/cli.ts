@@ -1062,6 +1062,10 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const services = await createServices(config)
     const { webSocketRelayConnection, isRelayFault } = await import('@arkade-os/solver-transport/relay/connection.js')
     const { RelayIngress, OpenRfqBidder } = await import('@arkade-os/solver-transport/ingress/relay.js')
+    const latencyDiagnostics = process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
+    if (latencyDiagnostics && services.receiveService) {
+      services.receiveService.onQuoteTiming = (sample) => log('receive_quote_timing', json(sample))
+    }
 
     // The factory asserts the derived key IS the wallet identity — the pubkey
     // on the registry card, the one makers address — and refuses to start on
@@ -1106,6 +1110,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       providerPubkey: services.providerPubkey,
       onError,
       onRefusal,
+      onQuoteTiming: latencyDiagnostics ? (sample) => log('rfq_relay_timing', json(sample)) : undefined,
     })
     await ingress.start()
     log(

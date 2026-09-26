@@ -148,8 +148,10 @@ let onchainStore: OnchainSendSwapStore
 let relay: FakeRelay
 let ingress: RelayIngress
 let service: SendSwapService
+let quoteTimings: { rfqRef?: string; quoteMs: number; publishMs: number; outcome: string }[]
 
 beforeEach(async () => {
+  quoteTimings = []
   clock = INVOICE_TIMESTAMP + 100
   store = await SwapStore.open(':memory:', () => clock)
   relay = new FakeRelay()
@@ -194,6 +196,7 @@ beforeEach(async () => {
     onchainStore,
     providerPubkey: PROVIDER,
     now: () => clock * 1000,
+    onQuoteTiming: (sample) => quoteTimings.push(sample),
   })
   await ingress.start()
 })
@@ -228,6 +231,14 @@ describe('RelayIngress', () => {
     // The swap is persisted exactly as the HTTP path persists it.
     expect((await store.findByPaymentHash(PAYMENT_HASH))!.state).toBe('quoted')
     expect((await store.findByPaymentHash(PAYMENT_HASH))!.rfqId).toBe(RFQ_ID)
+    expect(quoteTimings).toEqual([
+      expect.objectContaining({
+        rfqRef: RFQ_ID.slice(0, 12),
+        quoteMs: expect.any(Number),
+        publishMs: expect.any(Number),
+        outcome: 'quote',
+      }),
+    ])
   })
 
   it('publishes a refusal for an undecodable invoice with client-safe detail', async () => {
@@ -249,6 +260,7 @@ describe('RelayIngress', () => {
   })
 
   it('REFUSES rather than going silent when the backend throws mid-quote', async () => {
+    const failureTimings: { rfqRef?: string; quoteMs: number; publishMs: number; outcome: string }[] = []
     // Observed on mainnet: a Lightning-receive quote died inside
     // `createHoldInvoice` on a transport fault, `handle` logged it and
     // returned, and the client got nothing back — waiting out its own 30s
@@ -261,6 +273,7 @@ describe('RelayIngress', () => {
       onchainStore,
       providerPubkey: PROVIDER,
       now: () => clock * 1000,
+      onQuoteTiming: (sample) => failureTimings.push(sample),
       service: {
         quote: () => {
           throw new Error('service provider error: promise resolved to unexpected type')
@@ -277,6 +290,9 @@ describe('RelayIngress', () => {
       // A closed-set reason, not the exception text: the vocabulary is the
       // client's contract, and a backend message is neither stable nor theirs.
       expect(reply.reason).toBe('pricing_unavailable')
+      expect(failureTimings).toEqual([
+        expect.objectContaining({ rfqRef: RFQ_ID.slice(0, 12), outcome: 'pricing_unavailable' }),
+      ])
     } finally {
       await thrower.stop()
     }

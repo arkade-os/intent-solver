@@ -70,6 +70,7 @@ export interface RelayIngressDeps {
    * long before this is called.
    */
   onRefusal?: RfqRefusalObserver
+  onQuoteTiming?: (sample: { rfqRef?: string; quoteMs: number; publishMs: number; outcome: string }) => void
   now?: () => number
 }
 
@@ -230,6 +231,7 @@ export class RelayIngress implements SwapIngress {
       // idempotent re-emit and the closed refusal set; the reply goes back in
       // the family the request arrived in.
       if (type === 'rfq_request') {
+        const quoteStarted = performance.now()
         // A THROW here is still an answer owed. Observed on mainnet: a
         // Lightning-receive quote died inside `createHoldInvoice` on a
         // transport fault, this handler logged it and returned, and the client
@@ -252,12 +254,32 @@ export class RelayIngress implements SwapIngress {
         } catch (error) {
           this.deps.onError?.('relay quote', error)
           if (typeof rfqId === 'string') {
+            const quoteMs = Math.round(performance.now() - quoteStarted)
+            const publishStarted = performance.now()
             await this.reply(event.author, rfqRefusalPayload(rfqId, 'pricing_unavailable'))
+            try {
+              this.deps.onQuoteTiming?.({
+                rfqRef: rfqId.slice(0, 12),
+                quoteMs,
+                publishMs: Math.round(performance.now() - publishStarted),
+                outcome: 'pricing_unavailable',
+              })
+            } catch {}
           }
           return
         }
+        const quoteMs = Math.round(performance.now() - quoteStarted)
         reportRfqRefusal(this.deps.onRefusal, 'relay', 'rfq_request', outcome)
+        const publishStarted = performance.now()
         await this.reply(event.author, outcome.payload)
+        try {
+          this.deps.onQuoteTiming?.({
+            rfqRef: typeof rfqId === 'string' ? rfqId.slice(0, 12) : undefined,
+            quoteMs,
+            publishMs: Math.round(performance.now() - publishStarted),
+            outcome: outcome.kind,
+          })
+        } catch {}
         return
       }
       if (type === 'rfq_status_request') {

@@ -278,6 +278,8 @@ describe('ReceiveSwapService.quote', () => {
   })
 
   it('accepts a valid request, mints a hold invoice, and persists a quoted row', async () => {
+    const timings: unknown[] = []
+    service.onQuoteTiming = (sample) => timings.push(sample)
     const outcome = await service.quote(quoteRequest())
     expect(outcome.accepted).toBe(true)
     if (!outcome.accepted) throw new Error('expected acceptance')
@@ -286,6 +288,7 @@ describe('ReceiveSwapService.quote', () => {
     expect(outcome.swap.invoice).toMatch(/^lnbcrt/)
     // The hold invoice really exists against the fake backend under this hash.
     await expect(ln.getHoldState(paymentHash)).resolves.toMatchObject({ status: 'pending' })
+    expect(timings).toEqual([expect.objectContaining({ swapId: outcome.swap.id, holdMs: expect.any(Number) })])
   })
 
   it('stamps refund_locktime and valid_until from one clock read', async () => {

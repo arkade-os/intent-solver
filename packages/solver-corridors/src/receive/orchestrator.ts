@@ -310,6 +310,13 @@ export type QuoteOutcome =
   { accepted: true; swap: ReceiveSwapRow; validUntil: number } | { accepted: false; reason: QuoteRefusal }
 
 export class ReceiveSwapService {
+  onQuoteTiming?: (sample: {
+    rfqRef?: string
+    swapId: string
+    prepareMs: number
+    holdMs: number
+    persistMs: number
+  }) => void
   private readonly now: () => number
   private readonly quoteLimiter: RateLimiter
   private readonly inFlight = new Set<string>()
@@ -429,6 +436,7 @@ export class ReceiveSwapService {
    * doubles up on retry.
    */
   async quote(request: ReceiveQuoteRequest): Promise<QuoteOutcome> {
+    const quoteStarted = performance.now()
     const { store, arkade, limits, ln } = this.deps
 
     // exact-in: the client names what it GIVES. exact-out: it names what it
@@ -575,6 +583,7 @@ export class ReceiveSwapService {
         }
       }
       const invoiceBackendName = ln.getKnownInvoiceState ? (this.deps.backendName ?? null) : null
+      const holdStarted = performance.now()
       const held = await ln.createHoldInvoice({
         // The HTLC we HOLD is worth the give — on an exact-out request that is
         // the solved-up amount, not the payout they named. It is what `payoutSats`
@@ -584,8 +593,10 @@ export class ReceiveSwapService {
         expirySeconds: DEFAULT_HOLD_INVOICE_WINDOW,
         minFinalCltvBlocks,
       })
+      const holdMs = Math.round(performance.now() - holdStarted)
 
       try {
+        const persistStarted = performance.now()
         const swap = await store.insertQuote({
           id: randomUUID(),
           paymentHash: request.paymentHash,
@@ -624,6 +635,15 @@ export class ReceiveSwapService {
           nonInteractiveParameters: true,
           rfqId: request.rfqId,
         })
+        try {
+          this.onQuoteTiming?.({
+            rfqRef: request.rfqId?.slice(0, 12),
+            swapId: swap.id,
+            prepareMs: Math.round(holdStarted - quoteStarted),
+            holdMs,
+            persistMs: Math.round(performance.now() - persistStarted),
+          })
+        } catch {}
         this.tickOnHold(swap)
         return { accepted: true, swap, validUntil }
       } catch (error) {
