@@ -15,10 +15,12 @@
  * about to be spent so a renewal settle cannot take it first).
  */
 
+import { randomUUID } from 'node:crypto'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { ArkError } from '@arkade-os/sdk'
 import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { selectLockupFunding } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
+import { withProviderTimingScope } from '@arkade-os/solver-arkade/arkade/latencyProviders.js'
 import { CLAIM_PACKET_TYPE } from '@arkade-os/swap'
 import { MAX_REFUND_HORIZON } from '@arkade-os/solver-core/core/receive.js'
 import { json, log } from '@arkade-os/solver-core/util/poll.js'
@@ -53,13 +55,14 @@ export const fundLockup = async (
   stamp?: ClaimPacketStamp,
 ): Promise<string> => {
   const started = performance.now()
+  const fundRef = randomUUID()
   let inputs: Awaited<ReturnType<typeof ctx.wallet.getSpendableVtxos>>
   let readMs = 0
   let selectMs = 0
   let reserveMs = 0
   let release: () => void
   try {
-    const selection = await selectFundingInputs(ctx, amountSats)
+    const selection = await selectFundingInputs(ctx, amountSats, fundRef)
     inputs = selection.inputs
     readMs = selection.readMs
     selectMs = selection.selectMs
@@ -71,6 +74,7 @@ export const fundLockup = async (
       'receive_fund_timing',
       json({
         addressRef: address.slice(0, 16),
+        fundRef,
         stage: 'select',
         totalMs: Math.round(performance.now() - started),
         outcome: 'failed',
@@ -103,19 +107,21 @@ export const fundLockup = async (
     // a contract must be funded from coins outliving its timelock, which generic
     // selection does not know about" — so nothing about the expiry ordering or
     // the reservation is given up.
-    const txid = await ctx.wallet.send({
-      recipients: [
-        {
-          address,
-          amount: amountSats,
-          // Both or neither — @see ClaimPacketStamp.
-          ...(stamp
-            ? { extensions: [{ type: CLAIM_PACKET_TYPE, payload: stamp.packet }], tapTree: stamp.tapTree }
-            : {}),
-        },
-      ],
-      selectedVtxos: [...inputs],
-    })
+    const txid = await withProviderTimingScope(fundRef, () =>
+      ctx.wallet.send({
+        recipients: [
+          {
+            address,
+            amount: amountSats,
+            // Both or neither — @see ClaimPacketStamp.
+            ...(stamp
+              ? { extensions: [{ type: CLAIM_PACKET_TYPE, payload: stamp.packet }], tapTree: stamp.tapTree }
+              : {}),
+          },
+        ],
+        selectedVtxos: [...inputs],
+      }),
+    )
     outcome = 'submitted'
     return txid
   } catch (error) {
@@ -132,6 +138,7 @@ export const fundLockup = async (
       'receive_fund_timing',
       json({
         addressRef: address.slice(0, 16),
+        fundRef,
         readMs,
         selectMs,
         reserveMs,
@@ -145,13 +152,13 @@ export const fundLockup = async (
 }
 
 /** The read-select-refuse half, which runs entirely before any funding request exists. */
-const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number) => {
+const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number, scope: string) => {
   // GATED read, not `getVtxos`. The SDK's own note on `getVtxos` is that
   // feeding it to `sendBitcoin({ selectedVtxos })` bypasses the
   // generic-spending gate — which here would mean funding one lockup out of
   // another live one's escrow, since `vhtlc-v2` is exactly what the gate hides.
   const started = performance.now()
-  const spendable = await ctx.wallet.getSpendableVtxos()
+  const spendable = await withProviderTimingScope(scope, () => ctx.wallet.getSpendableVtxos())
   const readMs = Math.round(performance.now() - started)
   const selectStarted = performance.now()
   // Passed WHOLE, not mapped down. `selectLockupFunding` is generic and hands
