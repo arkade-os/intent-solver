@@ -57,11 +57,11 @@ describe('ReceiveSwapStore', () => {
   it('persists the invoice wallet identity', async () => {
     const row = await store.insertQuote({
       ...baseQuote,
-      invoiceWalletFingerprint: 'spark-wallet',
-      invoiceBackendName: 'spark-breez',
+      invoiceWalletFingerprint: 'probe-wallet',
+      invoiceBackendName: 'probe-backend',
     })
-    expect(row.invoiceWalletFingerprint).toBe('spark-wallet')
-    expect(row.invoiceBackendName).toBe('spark-breez')
+    expect(row.invoiceWalletFingerprint).toBe('probe-wallet')
+    expect(row.invoiceBackendName).toBe('probe-backend')
   })
 
   it('round-trips an ABSENT claim packet as null, never the string "null"', async () => {

@@ -2566,16 +2566,16 @@ describe('claiming a coupled self-payment', () => {
   })
 
   it('uses a DB-proven invoice probe when the backend cannot identify arbitrary own invoices', async () => {
-    const svc = coupledService('spark-breez')
+    const svc = coupledService('probe-backend')
     const id = await fundedCoupledSwap(svc)
     receiveRow = {
       ...receiveRow,
       state: 'refused',
-      invoiceWalletFingerprint: 'spark-wallet',
-      invoiceBackendName: 'spark-breez',
+      invoiceWalletFingerprint: 'probe-wallet',
+      invoiceBackendName: 'probe-backend',
     }
     Object.defineProperty(ln, 'getOwnInvoiceState', { value: undefined })
-    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'spark-wallet' })
+    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'probe-wallet' })
     const probe = vi.fn(async () => ({ status: 'pending' as const, expiresAt: null }))
     Object.defineProperty(ln, 'getKnownInvoiceState', { value: probe })
 
@@ -2587,16 +2587,16 @@ describe('claiming a coupled self-payment', () => {
   })
 
   it('withholds the coupled refund when the DB-proven invoice probe sees a live HTLC', async () => {
-    const svc = coupledService('spark-breez')
+    const svc = coupledService('probe-backend')
     const id = await fundedCoupledSwap(svc)
     receiveRow = {
       ...receiveRow,
       state: 'refused',
-      invoiceWalletFingerprint: 'spark-wallet',
-      invoiceBackendName: 'spark-breez',
+      invoiceWalletFingerprint: 'probe-wallet',
+      invoiceBackendName: 'probe-backend',
     }
     Object.defineProperty(ln, 'getOwnInvoiceState', { value: undefined })
-    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'spark-wallet' })
+    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'probe-wallet' })
     Object.defineProperty(ln, 'getKnownInvoiceState', {
       value: async () => ({ status: 'armed', expiresAt: clock + 3600 }),
     })
@@ -2608,13 +2608,13 @@ describe('claiming a coupled self-payment', () => {
   })
 
   it('withholds the known-invoice refund after the Lightning wallet changes', async () => {
-    const svc = coupledService('spark-breez')
+    const svc = coupledService('probe-backend')
     const id = await fundedCoupledSwap(svc)
     receiveRow = {
       ...receiveRow,
       state: 'refused',
       invoiceWalletFingerprint: 'old-wallet',
-      invoiceBackendName: 'spark-breez',
+      invoiceBackendName: 'probe-backend',
     }
     Object.defineProperty(ln, 'getOwnInvoiceState', { value: undefined })
     Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'new-wallet' })
@@ -2629,16 +2629,16 @@ describe('claiming a coupled self-payment', () => {
   })
 
   it('withholds the known-invoice refund after switching Lightning backends', async () => {
-    const svc = coupledService('spark-breez')
+    const svc = coupledService('probe-backend')
     const id = await fundedCoupledSwap(svc)
     receiveRow = {
       ...receiveRow,
       state: 'refused',
-      invoiceWalletFingerprint: 'spark-wallet',
-      invoiceBackendName: 'spark',
+      invoiceWalletFingerprint: 'probe-wallet',
+      invoiceBackendName: 'other-backend',
     }
     Object.defineProperty(ln, 'getOwnInvoiceState', { value: undefined })
-    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'spark-wallet' })
+    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'probe-wallet' })
     const probe = vi.fn()
     Object.defineProperty(ln, 'getKnownInvoiceState', { value: probe })
 
