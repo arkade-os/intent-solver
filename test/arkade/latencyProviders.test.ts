@@ -30,7 +30,7 @@ describe('latency providers', () => {
       expect.stringContaining('"scripts":1'),
     )
     expect(output.mock.calls[0]?.join(' ')).not.toContain('sensitive-script')
-    expect(output.mock.calls[0]?.join(' ')).toContain('"scope":"swap-ref"')
+    expect(output.mock.calls[0]?.join(' ')).toContain('"fundRef":"swap-ref"')
   })
 
   it('rethrows an ambiguous submit failure unchanged', async () => {
@@ -44,6 +44,6 @@ describe('latency providers', () => {
       failure,
     )
     expect(output.mock.calls[0]?.join(' ')).toContain('"outcome":"failed"')
-    expect(output.mock.calls[0]?.join(' ')).toContain('"scope":"swap-ref"')
+    expect(output.mock.calls[0]?.join(' ')).toContain('"fundRef":"swap-ref"')
   })
 })

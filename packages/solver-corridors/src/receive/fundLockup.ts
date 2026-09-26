@@ -15,6 +15,7 @@
  * about to be spent so a renewal settle cannot take it first).
  */
 
+import { randomUUID } from 'node:crypto'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { ArkError } from '@arkade-os/sdk'
 import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
@@ -54,13 +55,14 @@ export const fundLockup = async (
   stamp?: ClaimPacketStamp,
 ): Promise<string> => {
   const started = performance.now()
+  const fundRef = randomUUID()
   let inputs: Awaited<ReturnType<typeof ctx.wallet.getSpendableVtxos>>
   let readMs = 0
   let selectMs = 0
   let reserveMs = 0
   let release: () => void
   try {
-    const selection = await selectFundingInputs(ctx, amountSats, address.slice(0, 16))
+    const selection = await selectFundingInputs(ctx, amountSats, fundRef)
     inputs = selection.inputs
     readMs = selection.readMs
     selectMs = selection.selectMs
@@ -72,6 +74,7 @@ export const fundLockup = async (
       'receive_fund_timing',
       json({
         addressRef: address.slice(0, 16),
+        fundRef,
         stage: 'select',
         totalMs: Math.round(performance.now() - started),
         outcome: 'failed',
@@ -104,7 +107,7 @@ export const fundLockup = async (
     // a contract must be funded from coins outliving its timelock, which generic
     // selection does not know about" — so nothing about the expiry ordering or
     // the reservation is given up.
-    const txid = await withProviderTimingScope(address.slice(0, 16), () =>
+    const txid = await withProviderTimingScope(fundRef, () =>
       ctx.wallet.send({
         recipients: [
           {
@@ -135,6 +138,7 @@ export const fundLockup = async (
       'receive_fund_timing',
       json({
         addressRef: address.slice(0, 16),
+        fundRef,
         readMs,
         selectMs,
         reserveMs,

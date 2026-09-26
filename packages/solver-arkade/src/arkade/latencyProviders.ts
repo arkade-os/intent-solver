@@ -11,7 +11,7 @@ export class TimedIndexerProvider extends RestIndexerProvider {
   override async getVtxos(options?: Parameters<RestIndexerProvider['getVtxos']>[0]) {
     const started = performance.now()
     const request = {
-      scope: timingScope.getStore(),
+      fundRef: timingScope.getStore(),
       scripts: options?.scripts?.length ?? 0,
       outpoints: options?.outpoints?.length ?? 0,
       pageIndex: options?.pageIndex,
@@ -49,14 +49,14 @@ export class TimedArkProvider extends RestArkProvider {
       const result = await super.submitTx(...args)
       log(
         'ark_submit_timing',
-        json({ scope: timingScope.getStore(), ms: Math.round(performance.now() - started), outcome: 'ok' }),
+        json({ fundRef: timingScope.getStore(), ms: Math.round(performance.now() - started), outcome: 'ok' }),
       )
       return result
     } catch (error) {
       log(
         'ark_submit_timing',
         json({
-          scope: timingScope.getStore(),
+          fundRef: timingScope.getStore(),
           ms: Math.round(performance.now() - started),
           outcome: 'failed',
           errorName: error instanceof Error ? error.name : 'unknown',

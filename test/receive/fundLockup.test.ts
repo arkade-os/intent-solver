@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { fundLockup, FundNotSubmittedError } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import { ArkError } from '@arkade-os/sdk'
@@ -145,5 +145,22 @@ describe('fundLockup — what it proves about submission', () => {
 
     await expect(fundLockup(h.ctx, ADDRESS, 50_000)).resolves.toBe('ark-txid')
     expect(h.reservations.reserved().size).toBe(0)
+  })
+
+  it('gives separate funding attempts to the same address distinct timing references', async () => {
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await fundLockup(harness().ctx, ADDRESS, 50_000)
+      await fundLockup(harness().ctx, ADDRESS, 50_000)
+      const timings = output.mock.calls
+        .filter((call) => call[1] === 'receive_fund_timing')
+        .map((call) => JSON.parse(call[2] as string) as { addressRef: string; fundRef: string })
+
+      expect(timings.map((sample) => sample.addressRef)).toEqual([ADDRESS, ADDRESS])
+      expect(timings[0]?.fundRef).toBeDefined()
+      expect(timings[0]?.fundRef).not.toBe(timings[1]?.fundRef)
+    } finally {
+      output.mockRestore()
+    }
   })
 })
