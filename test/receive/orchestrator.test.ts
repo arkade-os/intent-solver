@@ -240,6 +240,22 @@ describe('ReceiveSwapService.quote', () => {
     expect(outcome.swap.invoiceBackendName).toBe('probe-backend')
   })
 
+  it('still mints a quote when the optional wallet identity lookup fails', async () => {
+    Object.defineProperty(ln, 'walletFingerprint', {
+      value: async () => {
+        throw new Error('wallet info unavailable')
+      },
+    })
+    Object.defineProperty(ln, 'getKnownInvoiceState', { value: async () => ({ status: 'pending', expiresAt: null }) })
+
+    const outcome = await service.quote(quoteRequest())
+
+    if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+    expect(outcome.swap.invoice).toBeTruthy()
+    expect(outcome.swap.invoiceWalletFingerprint).toBeNull()
+    expect(outcome.swap.invoiceBackendName).toBe('probe-backend')
+  })
+
   it('does not query wallet identity for backends with their own invoice probe', async () => {
     const fingerprint = vi.fn(async () => 'lnd-wallet')
     Object.defineProperty(ln, 'walletFingerprint', { value: fingerprint })

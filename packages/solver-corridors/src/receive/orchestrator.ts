@@ -566,7 +566,14 @@ export class ReceiveSwapService {
       }
 
       const validUntil = now + DEFAULT_HOLD_INVOICE_WINDOW
-      const invoiceWalletFingerprint = ln.getKnownInvoiceState ? ((await ln.walletFingerprint?.()) ?? null) : null
+      let invoiceWalletFingerprint: string | null = null
+      if (ln.getKnownInvoiceState && ln.walletFingerprint) {
+        try {
+          invoiceWalletFingerprint = await ln.walletFingerprint()
+        } catch {
+          // Still serve the quote; the missing identity blocks its later early refund.
+        }
+      }
       const invoiceBackendName = ln.getKnownInvoiceState ? (this.deps.backendName ?? null) : null
       const held = await ln.createHoldInvoice({
         // The HTLC we HOLD is worth the give — on an exact-out request that is
