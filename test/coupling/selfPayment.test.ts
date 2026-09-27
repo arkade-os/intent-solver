@@ -337,12 +337,18 @@ describe('self-payment refresh, both legs', () => {
 
   it('drives each leg on the transition the other waits for, with no sweep in between', async () => {
     const errors: unknown[] = []
+    const sendTiming = vi.fn()
+    const receiveTiming = vi.fn()
+    const handoffTiming = vi.fn()
+    sendService.onFundingTiming = sendTiming
+    receiveService.onStepTiming = receiveTiming
     driveCoupledPeers({
       send: sendService,
       receive: receiveService,
       sendStore,
       receiveStore,
       onError: (error) => errors.push(error),
+      onTiming: handoffTiming,
     })
     const receiveQuote = await receiveService.quote({
       paymentHash,
@@ -364,6 +370,21 @@ describe('self-payment refresh, both legs', () => {
     expect((await sendService.tick(sendRow.id)).state).toBe('funded')
     await vi.waitFor(async () => expect((await receiveStore.get(receiveRow.id)).state).toBe('funded'))
     expect(chain.fundCalls).toHaveLength(1)
+    expect(sendTiming).toHaveBeenCalledWith(
+      expect.objectContaining({ swapId: sendRow.id, quotedStepMs: expect.any(Number) }),
+    )
+    expect(receiveTiming).toHaveBeenCalledWith(expect.objectContaining({ swapId: receiveRow.id, step: 'quoted' }))
+    expect(receiveTiming).toHaveBeenCalledWith(expect.objectContaining({ swapId: receiveRow.id, step: 'armed' }))
+    await vi.waitFor(() =>
+      expect(handoffTiming).toHaveBeenCalledWith(
+        expect.objectContaining({
+          direction: 'send_to_receive',
+          sourceSwapId: sendRow.id,
+          peerSwapId: receiveRow.id,
+          outcome: 'ok',
+        }),
+      ),
+    )
 
     // Only the receive leg is ticked, as the claim's spend event would; the send leg collects unprompted.
     const payoutTxid = chain.outputs.get(receiveRow.pkScript)?.[0]?.txid

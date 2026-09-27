@@ -20,7 +20,11 @@ import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { ArkError } from '@arkade-os/sdk'
 import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { selectLockupFunding } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
-import { withProviderTimingScope } from '@arkade-os/solver-arkade/arkade/latencyProviders.js'
+import {
+  sendPhaseTimings,
+  withProviderTimingScope,
+  type ProviderTimingScope,
+} from '@arkade-os/solver-arkade/arkade/latencyProviders.js'
 import { CLAIM_PACKET_TYPE } from '@arkade-os/swap'
 import { MAX_REFUND_HORIZON } from '@arkade-os/solver-core/core/receive.js'
 import { json, log } from '@arkade-os/solver-core/util/poll.js'
@@ -85,6 +89,7 @@ export const fundLockup = async (
       : new FundNotSubmittedError(`failed to select coins to fund a lockup of ${amountSats} sats`, { cause: error })
   }
   const sendStarted = performance.now()
+  const sendScope: ProviderTimingScope = { fundRef }
   let outcome = 'failed'
   try {
     // `send`, not `sendBitcoin`, and that single swap is the whole fix.
@@ -107,7 +112,7 @@ export const fundLockup = async (
     // a contract must be funded from coins outliving its timelock, which generic
     // selection does not know about" — so nothing about the expiry ordering or
     // the reservation is given up.
-    const txid = await withProviderTimingScope(fundRef, () =>
+    const txid = await withProviderTimingScope(sendScope, () =>
       ctx.wallet.send({
         recipients: [
           {
@@ -130,10 +135,22 @@ export const fundLockup = async (
     }
     throw error
   } finally {
+    const sendFinished = performance.now()
     // Released whether the send landed or threw: a pin outliving its operation
     // shrinks the spendable float with nothing left to free it. If the send
     // DID land, the coins are spent and the next read will not offer them.
     release()
+    if (process.env.SOLVER_LATENCY_DIAGNOSTICS === '1') {
+      log(
+        'wallet_send_phase_timing',
+        json({
+          fundRef,
+          sendMs: Math.round(sendFinished - sendStarted),
+          ...sendPhaseTimings(sendScope, sendStarted, sendFinished),
+          outcome,
+        }),
+      )
+    }
     log(
       'receive_fund_timing',
       json({
@@ -158,7 +175,7 @@ const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number, scope
   // generic-spending gate — which here would mean funding one lockup out of
   // another live one's escrow, since `vhtlc-v2` is exactly what the gate hides.
   const started = performance.now()
-  const spendable = await withProviderTimingScope(scope, () => ctx.wallet.getSpendableVtxos())
+  const spendable = await withProviderTimingScope({ fundRef: scope }, () => ctx.wallet.getSpendableVtxos())
   const readMs = Math.round(performance.now() - started)
   const selectStarted = performance.now()
   // Passed WHOLE, not mapped down. `selectLockupFunding` is generic and hands

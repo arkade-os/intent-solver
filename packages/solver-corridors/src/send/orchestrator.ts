@@ -778,13 +778,35 @@ export class SendSwapService {
     if (this.inFlight.has(id)) return store.get(id)
     this.inFlight.add(id)
     try {
+      const tickStarted = this.onFundingTiming ? performance.now() : 0
+      let quotedStepMs = 0
+      let quotedAdvanced = false
       let row = await store.get(id)
       const from = row.state
-      while (await this.step(row)) {
+      while (true) {
+        const stepStarted = row.state === 'quoted' && this.onFundingTiming ? performance.now() : 0
+        const advanced = await this.step(row)
+        if (stepStarted) quotedStepMs = Math.round(performance.now() - stepStarted)
+        if (stepStarted && advanced) quotedAdvanced = true
+        if (!advanced) break
         // each successful step re-reads the row and tries the next
         row = await store.get(id)
       }
       row = await store.get(id)
+      if (from === 'quoted' && quotedAdvanced && this.onFundingTiming) {
+        const tickMs = Math.round(performance.now() - tickStarted)
+        try {
+          this.onFundingTiming({
+            swapId: row.id,
+            rfqRef: row.rfqId?.slice(0, 12),
+            quotedStepMs,
+            afterQuotedMs: tickMs - quotedStepMs,
+            tickMs,
+          })
+        } catch {
+          // Diagnostics cannot block the peer handoff.
+        }
+      }
       if (row.state !== from) this.onStateChange?.(row, from)
       return row
     } finally {
@@ -794,6 +816,14 @@ export class SendSwapService {
 
   /** Fired after a tick moved a row. @see driveCoupledPeers */
   onStateChange?: (row: SendSwapRow, from: SendSwapRow['state']) => void
+
+  onFundingTiming?: (sample: {
+    swapId: string
+    rfqRef?: string
+    quotedStepMs: number
+    afterQuotedMs: number
+    tickMs: number
+  }) => void
 
   /** Drive every non-terminal swap once. The recovery sweep and the interval loop. */
   async tickAll(): Promise<SendSwapRow[]> {

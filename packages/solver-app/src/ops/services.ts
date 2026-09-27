@@ -954,6 +954,10 @@ export const createServices = async (
       sendStore: store,
       receiveStore,
       onError: (error) => log('coupled peer tick failed:', error instanceof Error ? error.message : String(error)),
+      onTiming:
+        process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
+          ? (sample) => log('coupled_handoff_timing', json(sample))
+          : undefined,
     })
   }
 
