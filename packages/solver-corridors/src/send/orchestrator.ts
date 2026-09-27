@@ -780,18 +780,20 @@ export class SendSwapService {
     try {
       const tickStarted = this.onFundingTiming ? performance.now() : 0
       let quotedStepMs = 0
+      let quotedAdvanced = false
       let row = await store.get(id)
       const from = row.state
       while (true) {
         const stepStarted = row.state === 'quoted' && this.onFundingTiming ? performance.now() : 0
         const advanced = await this.step(row)
         if (stepStarted) quotedStepMs = Math.round(performance.now() - stepStarted)
+        if (stepStarted && advanced) quotedAdvanced = true
         if (!advanced) break
         // each successful step re-reads the row and tries the next
         row = await store.get(id)
       }
       row = await store.get(id)
-      if (from === 'quoted' && row.state === 'funded' && this.onFundingTiming) {
+      if (from === 'quoted' && quotedAdvanced && this.onFundingTiming) {
         const tickMs = Math.round(performance.now() - tickStarted)
         try {
           this.onFundingTiming({

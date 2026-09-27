@@ -718,11 +718,14 @@ describe('tick: the full drive', () => {
 
   it('drives a funded swap through payment to paid in one tick', async () => {
     const { swap } = await quoted()
+    const onFundingTiming = vi.fn()
+    service.onFundingTiming = onFundingTiming
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
     ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
 
     const row = await service.tick(swap.id)
     expect(row.state).toBe('paid')
+    expect(onFundingTiming).toHaveBeenCalledWith(expect.objectContaining({ swapId: swap.id }))
     expect(row.paymentId).toBe('pay-1')
     expect(ln.payCalls).toHaveLength(1)
     // The idempotency key is derived from the payment hash, so a retry from any

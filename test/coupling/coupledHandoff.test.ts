@@ -4,6 +4,37 @@ import type { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orc
 import { driveCoupledPeers } from '@arkade-os/solver-corridors/coupledHandoff.js'
 
 describe('driveCoupledPeers', () => {
+  it('includes synchronous peer lookup work in lookupMs', async () => {
+    let elapsed = 0
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => elapsed)
+    try {
+      const send = { onStateChange: undefined as SendSwapService['onStateChange'], tick: vi.fn(async () => ({})) }
+      const receive = { tick: vi.fn(async () => ({})) }
+      const onTiming = vi.fn()
+      const peers = {
+        findLiveByPaymentHash: () => {
+          elapsed += 17
+          return Promise.resolve({ id: 'peer' })
+        },
+      }
+      driveCoupledPeers({
+        send: send as unknown as SendSwapService,
+        receive: receive as unknown as ReceiveSwapService,
+        sendStore: peers,
+        receiveStore: peers,
+        onError: (error) => {
+          throw error
+        },
+        onTiming,
+      })
+
+      send.onStateChange?.({ id: 'send', state: 'funded', paymentHash: 'h' } as never, 'quoted')
+      await vi.waitFor(() => expect(onTiming).toHaveBeenCalledWith(expect.objectContaining({ lookupMs: 17 })))
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
   it('keeps a state-change handler installed before it, and still drives the peer', async () => {
     const priorSend = vi.fn()
     const priorReceive = vi.fn()
