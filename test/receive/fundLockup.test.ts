@@ -144,11 +144,17 @@ describe('fundLockup — what it proves about submission', () => {
     const h = harness()
 
     await expect(fundLockup(h.ctx, ADDRESS, 50_000)).resolves.toBe('ark-txid')
+    expect(h.reservations.reserved().size).toBe(0)
+  })
+
+  it('requests only generically spendable, nonrecoverable funding inputs', async () => {
+    const h = harness()
+
+    await fundLockup(h.ctx, ADDRESS, 50_000)
     expect(h.ctx.wallet.getSpendableVtxos).toHaveBeenCalledWith({
       withRecoverable: false,
       genericallySpendableOnly: true,
     })
-    expect(h.reservations.reserved().size).toBe(0)
   })
 
   it('gives separate funding attempts to the same address distinct timing references', async () => {
