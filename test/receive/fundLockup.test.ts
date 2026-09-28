@@ -34,10 +34,10 @@ const harness = (over: { spendable?: unknown; send?: () => Promise<string> } = {
           throw new Error('funding must not refetch server info: dust is read at boot')
         },
       },
-      getSpendableVtxos: async () => {
+      getSpendableVtxos: vi.fn(async () => {
         if (typeof over.spendable === 'function') return (over.spendable as () => unknown[])()
         return over.spendable ?? [coin(50_000)]
-      },
+      }),
       send: async (request: { selectedVtxos?: unknown[] }) => {
         state.sendCalls += 1
         state.selectedInputs = request.selectedVtxos?.length ?? 0
@@ -144,6 +144,10 @@ describe('fundLockup — what it proves about submission', () => {
     const h = harness()
 
     await expect(fundLockup(h.ctx, ADDRESS, 50_000)).resolves.toBe('ark-txid')
+    expect(h.ctx.wallet.getSpendableVtxos).toHaveBeenCalledWith({
+      withRecoverable: true,
+      genericallySpendableOnly: true,
+    })
     expect(h.reservations.reserved().size).toBe(0)
   })
 

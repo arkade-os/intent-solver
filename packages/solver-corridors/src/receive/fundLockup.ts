@@ -175,7 +175,8 @@ const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number, scope
   // generic-spending gate — which here would mean funding one lockup out of
   // another live one's escrow, since `vhtlc-v2` is exactly what the gate hides.
   const started = performance.now()
-  const spendable = await withProviderTimingScope({ fundRef: scope }, () => ctx.wallet.getSpendableVtxos())
+  const fundingFilter = { withRecoverable: true, genericallySpendableOnly: true }
+  const spendable = await withProviderTimingScope({ fundRef: scope }, () => ctx.wallet.getSpendableVtxos(fundingFilter))
   const readMs = Math.round(performance.now() - started)
   const selectStarted = performance.now()
   // Passed WHOLE, not mapped down. `selectLockupFunding` is generic and hands
