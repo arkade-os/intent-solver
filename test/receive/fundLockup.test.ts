@@ -145,7 +145,7 @@ describe('fundLockup — what it proves about submission', () => {
 
     await expect(fundLockup(h.ctx, ADDRESS, 50_000)).resolves.toBe('ark-txid')
     expect(h.ctx.wallet.getSpendableVtxos).toHaveBeenCalledWith({
-      withRecoverable: true,
+      withRecoverable: false,
       genericallySpendableOnly: true,
     })
     expect(h.reservations.reserved().size).toBe(0)
