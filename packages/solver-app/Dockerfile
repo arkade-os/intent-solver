@@ -60,6 +60,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # one workspace project among twelve, and there is deliberately no second copy
 # of it.
 COPY packages ./packages
+COPY vendor ./vendor
 RUN pnpm install --frozen-lockfile
 # The root tsconfig, which every package's `tsconfig.build.json` extends — not
 # an emit config in its own right. The root emits nothing at all now.
