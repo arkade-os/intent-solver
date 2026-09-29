@@ -33,6 +33,7 @@ import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import {
   buildOnchainRefundTx,
@@ -855,7 +856,8 @@ export class OnchainSendSwapService {
     } catch (error) {
       if (this.now() >= row.refundLocktime) {
         const detail = error instanceof Error ? error.message : String(error)
-        await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail}`)
+        const recourse = unilateralExitRecourse(covenantRowFor(row), { solverPubkey: arkade.providerPubkey })
+        await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail} — ${recourse}`)
         return false
       }
       throw error

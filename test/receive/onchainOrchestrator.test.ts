@@ -7,7 +7,7 @@ import { base64, hex } from '@scure/base'
 import { SigHash, Transaction } from '@scure/btc-signer'
 import { ArkAddress } from '@arkade-os/sdk'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
-import { EMPTY_LOCKUP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
+import { EMPTY_LOCKUP_GRACE, REFUND_CENSORSHIP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import {
   OnchainReceiveSwapStore,
   type OnchainReceiveSwapRow,
@@ -1016,6 +1016,26 @@ describe('OnchainReceiveSwapService', () => {
       const row = await service.tick(awaitingClaim.id)
       expect(row.state).toBe('stuck')
       expect(row.failureReason).toMatch(/no matching claim/)
+    })
+
+    it('names the server-independent recourse on a refund it parks after the censorship grace', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      now = awaitingClaim.refundLocktime + 1
+      deps.arkadeFake.arkade.refund = async () => {
+        throw new Error('server refused to co-sign')
+      }
+      await expect(service.tick(awaitingClaim.id)).rejects.toThrow('server refused to co-sign')
+      const entered = await store.get(awaitingClaim.id)
+      expect(entered.state).toBe('refunding_arkade')
+
+      now = entered.updatedAt + REFUND_CENSORSHIP_GRACE
+      const row = await service.tick(awaitingClaim.id)
+      expect(row.state).toBe('stuck')
+      expect(row.failureReason).toContain('server refused to co-sign')
+      // The solver funded this lockup, so its solo path is the refund leaf, never the client's claim.
+      expect(row.failureReason).toContain('unilateralRefundWithoutReceiver')
+      expect(row.failureReason).not.toContain('unilateralClaim')
+      expect(row.failureReason).toContain(String(entered.refundWithoutReceiverDelay))
     })
   })
 

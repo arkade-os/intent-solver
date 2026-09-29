@@ -1570,7 +1570,8 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    * WITHOUT the Arkade Service, by landing the VTXO on Bitcoin first.
    *
    * Reach for it when a row is parked with `claim failing past the refund
-   * deadline` or `refund failing past the refund deadline` — the failure detail
+   * deadline`, `refund failing past the refund deadline` or (onchain receive)
+   * `refund failing for …s` — the failure detail
    * on such a row already names which leaf this would spend. Both mean the
    * Service is censoring or gone, which is the only situation an exit is worth
    * its cost: it is slow (the leaf's CSV runs from when the lockup CONFIRMS

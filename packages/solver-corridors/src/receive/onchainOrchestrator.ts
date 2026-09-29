@@ -47,6 +47,7 @@ import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/co
 import { RFQ_PAIR_ONCHAIN_RECEIVE } from '../wire/onchainReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
@@ -1020,7 +1021,12 @@ export class OnchainReceiveSwapService {
       // to take the row.
       if (this.now() - row.updatedAt >= REFUND_CENSORSHIP_GRACE) {
         const detail = error instanceof Error ? error.message : String(error)
-        await store.fail(row.id, 'refunding_arkade', `refund failing for ${REFUND_CENSORSHIP_GRACE}s: ${detail}`)
+        const recourse = unilateralExitRecourse(receiveCovenantRowFor(row), { solverPubkey: arkade.providerPubkey })
+        await store.fail(
+          row.id,
+          'refunding_arkade',
+          `refund failing for ${REFUND_CENSORSHIP_GRACE}s: ${detail} — ${recourse}`,
+        )
         return false
       }
       throw error
