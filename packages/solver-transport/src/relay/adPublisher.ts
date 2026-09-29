@@ -11,6 +11,7 @@
 import { hex } from '@scure/base'
 import { cardDigest } from '@arkade-os/solver-core/core/registryCard.js'
 import type { SolverAd } from '@arkade-os/solver-core/core/solverAd.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 
 export type AdPublishMode = 'off' | 'manual' | 'auto'
 
@@ -27,8 +28,6 @@ export interface AdPublisherOptions {
   now: () => number
   heartbeatSeconds: number
 }
-
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 export class AdPublisher {
   private publishedDigest: string | null = null

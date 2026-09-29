@@ -99,6 +99,19 @@ export const fakeFeeSats = (amountSats: number, policy: FakeFeePolicy): number =
  */
 export const fakeFeeHandle = (paymentHash: string, feeSats: number): string => `fake-fee-${paymentHash}-${feeSats}`
 
+const readJson = <T>(path: string): Record<string, T> => {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as Record<string, T>
+  } catch {
+    return {}
+  }
+}
+
+const writeJson = (path: string, map: object): void => {
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, JSON.stringify(map, null, 2))
+}
+
 export class FakeLightningBackend implements LightningBackend {
   /**
    * The enforcing budget. The fake pays its own forged invoices over no network
@@ -130,35 +143,13 @@ export class FakeLightningBackend implements LightningBackend {
     private readonly feePolicy: FakeFeePolicy | null = DEFAULT_FAKE_FEE_POLICY,
   ) {}
 
-  private load(): Record<string, string> {
-    try {
-      return JSON.parse(readFileSync(this.statePath, 'utf8')) as Record<string, string>
-    } catch {
-      return {}
-    }
-  }
-
-  private save(map: Record<string, string>): void {
-    mkdirSync(dirname(this.statePath), { recursive: true })
-    writeFileSync(this.statePath, JSON.stringify(map, null, 2))
-  }
-
-  private get holdStatePath(): string {
-    return `${this.statePath}.holds.json`
-  }
-
-  private loadHolds(): Record<string, HoldRecord> {
-    try {
-      return JSON.parse(readFileSync(this.holdStatePath, 'utf8')) as Record<string, HoldRecord>
-    } catch {
-      return {}
-    }
-  }
-
-  private saveHolds(map: Record<string, HoldRecord>): void {
-    mkdirSync(dirname(this.holdStatePath), { recursive: true })
-    writeFileSync(this.holdStatePath, JSON.stringify(map, null, 2))
-  }
+  private load = (): Record<string, string> => readJson(this.statePath)
+  private save = (map: Record<string, string>): void => writeJson(this.statePath, map)
+  private loadHolds = (): Record<string, HoldRecord> => readJson(`${this.statePath}.holds.json`)
+  private saveHolds = (map: Record<string, HoldRecord>): void => writeJson(`${this.statePath}.holds.json`, map)
+  /** Stored, not derived: `getPayment` gets an id and no invoice, so it cannot recompute the fee. */
+  private loadFees = (): Record<string, number> => readJson(`${this.statePath}.fees.json`)
+  private saveFees = (map: Record<string, number>): void => writeJson(`${this.statePath}.fees.json`, map)
 
   /** Forge a payable invoice; the preimage is persisted, never returned here. */
   forgeInvoice(amountSats: number, expirySeconds = 7200): { invoice: string; paymentHash: string } {
@@ -192,15 +183,9 @@ export class FakeLightningBackend implements LightningBackend {
    * payment whose amount is not decided yet.
    */
   async estimateSendFee(params: EstimateSendFeeParams): Promise<SendFeeEstimate | null> {
-    if (this.feePolicy === null) return null
-    let amountSats: number
-    try {
-      amountSats = amountSatsOf(params.invoice)
-    } catch {
-      return null
-    }
-    const feeSats = fakeFeeSats(amountSats, this.feePolicy)
-    if (!this.feePolicy.handle) return { feeSats }
+    const feeSats = this.quotedFee(params.invoice)
+    if (feeSats === null) return null
+    if (!this.feePolicy?.handle) return { feeSats }
     return { feeSats, feeHandle: fakeFeeHandle(paymentHashOf(params.invoice), feeSats) }
   }
 
@@ -236,34 +221,6 @@ export class FakeLightningBackend implements LightningBackend {
       preimage,
       ...(feePaidSats === null ? {} : { feePaidSats }),
     }
-  }
-
-  private get feeStatePath(): string {
-    return `${this.statePath}.fees.json`
-  }
-
-  /**
-   * The realized routing fee, by payment hash.
-   *
-   * A sidecar, mirroring `.holds.json`, and the only part of this fake that has
-   * to be STORED rather than derived. `getPayment` is given an id and nothing
-   * else — no invoice, so no amount, so no way to recompute what
-   * {@link fakeFeeSats} would have charged. The alternative was reporting a fee
-   * from `payInvoice` and not from `getPayment`, which breaks the regression
-   * lock that the two answer identically, and rightly: a real backend reports
-   * the same settled payment whichever way you ask.
-   */
-  private loadFees(): Record<string, number> {
-    try {
-      return JSON.parse(readFileSync(this.feeStatePath, 'utf8')) as Record<string, number>
-    } catch {
-      return {}
-    }
-  }
-
-  private saveFees(map: Record<string, number>): void {
-    mkdirSync(dirname(this.feeStatePath), { recursive: true })
-    writeFileSync(this.feeStatePath, JSON.stringify(map, null, 2))
   }
 
   /** What this backend would have quoted for an invoice, if it quotes at all. */

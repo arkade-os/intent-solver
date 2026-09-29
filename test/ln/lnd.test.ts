@@ -34,7 +34,6 @@ const {
   heldTimeoutHeight,
   isInvoiceNotFound,
   isNoFeeEstimate,
-  isoToUnixSeconds,
   probeTimeoutMs,
   rejectionReason,
   toExpiresAt,
@@ -62,12 +61,6 @@ describe('rejectionReason', () => {
     expect(rejectionReason('plain string')).toBeUndefined()
     expect(rejectionReason(undefined)).toBeUndefined()
     expect(rejectionReason([])).toBeUndefined()
-  })
-})
-
-describe('isoToUnixSeconds', () => {
-  it('converts an LND ISO 8601 date to unix seconds', () => {
-    expect(isoToUnixSeconds('2026-08-06T00:00:00.000Z')).toBe(1785974400)
   })
 })
 

@@ -203,12 +203,6 @@ export interface WebSocketRelayOptions {
    * torn-down subscription is otherwise invisible.
    */
   onNotice?: (notice: RelayNotice) => void
-  /**
-   * How far back a reconnect may ask the relay to replay, ms. Defaults to
-   * {@link DEFAULT_MAX_REPLAY_MS}. A subscriber that legitimately wants more
-   * backfill raises it here rather than being silently truncated.
-   */
-  maxReplayMs?: number
   maxConcurrentHandlers?: number
   maxQueuedEvents?: number
   now?: () => number
@@ -229,9 +223,9 @@ export interface WebSocketRelayOptions {
  *
  * Two minutes is shorter than any quote's validity: a request older than that
  * has no live client behind it (the reference wallet stops waiting after
- * 30 s). A caller that wants more sets `maxReplayMs`.
+ * 30 s).
  */
-export const DEFAULT_MAX_REPLAY_MS = 120_000
+export const MAX_REPLAY_MS = 120_000
 
 /**
  * Fixed safety margin subtracted from the high-water mark when resuming.
@@ -265,8 +259,6 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
   const delays = options.reconnectDelaysMs ?? [1000, 2000, 4000, 8000, 16000]
   const now = options.now ?? (() => Date.now())
   const codec = options.codec ?? devCodec
-
-  const maxReplayMs = options.maxReplayMs ?? DEFAULT_MAX_REPLAY_MS
   const maxConcurrentHandlers = options.maxConcurrentHandlers ?? 8
   const maxQueuedEvents = options.maxQueuedEvents ?? 256
   if (!Number.isSafeInteger(maxConcurrentHandlers) || maxConcurrentHandlers < 1) {
@@ -352,7 +344,7 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
    * `since` it carries must move with time rather than staying frozen at the
    * moment subscribe() was called. Resume from the newest event we actually
    * saw (minus an overlap for wire-stamp truncation), never earlier than the
-   * caller's own floor, and never further back than `maxReplayMs`.
+   * caller's own floor, and never further back than {@link MAX_REPLAY_MS}.
    *
    * The armed filter is what the CODEC says it encoded, so the local match can
    * never be stricter than the subscription we sent.
@@ -360,7 +352,7 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
   const armFilter = (sub: Subscription): RelayFilter => {
     const wire = {
       ...sub.filter,
-      sinceMs: Math.max(sub.filter.sinceMs, sub.highWaterMs - RESUME_OVERLAP_MS, now() - maxReplayMs),
+      sinceMs: Math.max(sub.filter.sinceMs, sub.highWaterMs - RESUME_OVERLAP_MS, now() - MAX_REPLAY_MS),
     }
     sub.armed = codec.effectiveFilter?.(wire) ?? wire
     return wire
@@ -489,13 +481,9 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
   }
 }
 
-// Uniqueness within a process run comes from the sequence; across restarts from
-// the run tag. Payload length alone collided: two same-millisecond replies with
-// equal-length JSON (refusals are all the same shape) got identical ids, and a
-// relay that dedups by id — the field's documented purpose — dropped one.
+// Uniqueness within a process run comes from the sequence; across restarts from the run tag.
 let eventSequence = 0
 const runTag = Math.random().toString(36).slice(2, 8)
 
 /** Stamp a fresh, unique event id: author + time + run tag + sequence. */
-export const eventId = (author: string, _payload: unknown, nowMs: number): string =>
-  `${author}:${nowMs}:${runTag}:${(eventSequence += 1)}`
+export const eventId = (author: string, nowMs: number): string => `${author}:${nowMs}:${runTag}:${(eventSequence += 1)}`
