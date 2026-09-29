@@ -28,12 +28,14 @@
  */
 
 import { hex } from '@scure/base'
-import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import {
   liveLockupRows,
   recoverableVtxosFrom,
+  registeredLockupDeadlines,
   renewExpiringVtxos,
   runVtxoLifecycle,
+  LOCKUP_CONTRACT_TYPE,
   RENEWAL_THRESHOLD_MS,
   type LockupDeadline,
   type VtxoLifecycleReport,
@@ -46,13 +48,14 @@ import { planBoardingSettle } from '@arkade-os/solver-arkade/arkade/boardingSett
 import type { Services } from './services.js'
 
 /**
- * Every live lockup's refund deadline, for the recovery guard.
+ * Every registered lockup's refund deadline, for the recovery guard.
  *
- * Derived from `liveLockupRows` exactly as the daemon's contract registration
- * derives it, rather than being handed over as that registration's by-product.
- * Registration and this guard want the same rows for different reasons, and
- * coupling them would mean a manual recovery could only be as safe as whatever
- * the last registration pass happened to leave behind.
+ * TWO SOURCES. Live rows are derived from `liveLockupRows` exactly as the
+ * daemon's contract registration derives them, rather than being handed over as
+ * that registration's by-product: registration and this guard want the same rows
+ * for different reasons, and coupling them would mean a manual recovery could
+ * only be as safe as whatever the last registration pass happened to leave
+ * behind. They are not enough on their own — @see registeredLockupDeadlines
  *
  * The ROLE travels with the deadline, because the deadline alone answers the
  * wrong question on a send leg — see {@link LockupDeadline.refundable}. The
@@ -74,16 +77,24 @@ export const lockupDeadlinesOf = async (services: Services): Promise<readonly Lo
   // send leg — so case can only ever confirm the correct outcome, never
   // invert it.
   const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
-  return rows.map((row) => ({
-    script: row.pkScript,
-    refundLocktime: row.refundLocktime,
-    // NULL IS "NO OPINION", not "not ours". A row carrying no client refund
-    // key at all predates that leaf, and `covenantScriptFromRow` refuses to
-    // rebuild it — so it is never registered, never in the contract snapshot,
-    // and never in the sweep set to block anything. Answering `false` for it
-    // would be inventing a refusal about a lockup this guard cannot see.
-    refundable: row.clientRefundPubkey === null ? undefined : row.clientRefundPubkey === solverPubkey,
-  }))
+  const manager = await services.arkade.wallet.getContractManager()
+  // `getContracts`, never `getContractsWithVtxos`: that one re-syncs against
+  // the indexer (every call, with `vtxoSyncMaxAgeMs` unset) and rethrows a
+  // non-retryable answer. Only the stored params are read here, already local.
+  const registered = await manager.getContracts({ type: [LOCKUP_CONTRACT_TYPE] })
+  return [
+    ...rows.map((row) => ({
+      script: row.pkScript,
+      refundLocktime: row.refundLocktime,
+      // NULL IS "NO OPINION", not "not ours". A row carrying no client refund
+      // key at all predates that leaf, and `covenantScriptFromRow` refuses to
+      // rebuild it — so it is never registered, never in the contract snapshot,
+      // and never in the sweep set to block anything. Answering `false` for it
+      // would be inventing a refusal about a lockup this guard cannot see.
+      refundable: row.clientRefundPubkey === null ? undefined : row.clientRefundPubkey === solverPubkey,
+    })),
+    ...registeredLockupDeadlines(registered, solverPubkey, log),
+  ]
 }
 
 /**
@@ -140,7 +151,6 @@ const migrationDue = (failed: boolean): boolean => {
 export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> => {
   const wallet = services.arkade.wallet
   const vtxoManager = await wallet.getVtxoManager()
-  const deadlines = await lockupDeadlinesOf(services)
 
   // OURS BECAUSE IT IS NO LONGER THEIRS. The SDK ran this inside the boarding
   // poll that `settlementConfig: false` turns off, so it moves here rather than
@@ -239,7 +249,9 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
     resplitFloat: async () => (await resplitFloat(services))?.txid ?? null,
     recoverVtxos: () => vtxoManager.recoverVtxos(),
     recoverableVtxos: () => recoverableVtxosFrom(wallet),
-    lockupDeadlines: async () => deadlines,
+    // Lazy, so a throw from either source costs only recovery — which then
+    // fails closed — instead of migration, boarding and renewal before it.
+    lockupDeadlines: () => lockupDeadlinesOf(services),
     nowSeconds,
   })
 

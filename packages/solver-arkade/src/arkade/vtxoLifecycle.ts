@@ -116,6 +116,43 @@ export const lockupContractRegistration = (script: CovenantSwapScript, address: 
 }
 
 /**
+ * The lockups the SDK cannot get out of its own way for, read out of the
+ * REGISTERED contracts — the inverse of {@link lockupContractRegistration}.
+ * Live rows cannot name them: retirement needs `!live && !funded` and a swept
+ * output has no terminal spend, so a TERMINAL send leg stays registered.
+ *
+ * ONLY the not-ours ones, or this over-blocks: `recoverVtxos` drops an input
+ * its contract refuses and keeps the batch, and `assertVhtlcSpendableNow`
+ * refuses only a pre-CLTV lockup whose wallet is the `sender` — ours. The
+ * trader-sender leaf it never refuses is the one we can never sign.
+ *
+ * An unreadable row is skipped and said, not blocked: blocking would wedge
+ * recovery with no remedy.
+ */
+export const registeredLockupDeadlines = (
+  contracts: readonly { script: string; type?: string; params: Record<string, string> }[],
+  solverPubkey: string,
+  log: (line: string) => void = () => {},
+): LockupDeadline[] => {
+  const deadlines: LockupDeadline[] = []
+  for (const contract of contracts) {
+    if (contract.type !== LOCKUP_CONTRACT_TYPE) continue
+    try {
+      const params = VHTLCV2ContractHandler.deserializeParams(contract.params)
+      if (hex.encode(params.sender) === solverPubkey) continue
+      deadlines.push({
+        script: contract.script,
+        refundLocktime: Number(params.refundLocktime),
+        refundable: false,
+      })
+    } catch (error) {
+      log(`registered lockup ${contract.script} cannot be read, recovery is unguarded for it: ${messageOf(error)}`)
+    }
+  }
+  return deadlines
+}
+
+/**
  * Every live lockup across every REGISTERED corridor, as rows `covenantScriptFromRow` rebuilds.
  * Takes the READER set, never `Services.corridors`: a switched-off corridor keeps its store and
  * its in-flight lockups, which still need registering — an unregistered lockup is invisible to
@@ -175,6 +212,12 @@ export interface LifecycleVtxo {
   vout: number
   /** pkScript hex — what ties a coin back to the contract it belongs to. */
   script: string
+  /**
+   * `canRecoverOnchain` said yes, rather than the coin being in this set only
+   * as {@link recoverableVtxosFrom}'s height-expiry guess. `undefined` counts
+   * as confirmed: absent information must not switch a block off.
+   */
+  confirmedRecoverable?: boolean
 }
 
 /** A registered lockup and the deadline its recovery must wait for. */
@@ -483,11 +526,12 @@ export interface VtxoLifecycleDeps {
    * Re-shape the float after a renewal consolidated it. Resolves to a
    * settlement txid, or null when the float was already the right shape.
    *
-   * Renewal settles every selectable coin into ONE output. That is fine for
-   * sats, and fatal once the float holds an Arkade asset: settle carries assets
-   * onto the wallet's own output, so the whole float lands on one asset-bearing
-   * coin that may not fund a sats lockup. Splitting afterwards is what keeps the
-   * float spendable.
+   * A SAFETY NET, not the mechanism: {@link renewExpiringVtxos} settles straight
+   * into the pool's shape when a target is configured, and into ONE output only
+   * when none is. This covers what that cannot reach — too little to carve, or a
+   * float reshaped by something other than a renewal — and a consolidated float
+   * matters most once it holds an Arkade asset: settle carries assets onto the
+   * wallet's own output, so one asset-bearing coin may not fund a sats lockup.
    *
    * Optional so a deployment that has no pool — or a test that is not about
    * this — can leave it out and get the previous behaviour exactly.
@@ -664,20 +708,25 @@ export const runVtxoLifecycle = async (deps: VtxoLifecycleDeps): Promise<VtxoLif
     // the CLTV does not help, and once it matures the immature arm stops
     // holding the input back, which is precisely when the batch starts
     // failing. Checked first so its reason is the one reported.
-    const blocked = new Map<string, string>()
+    //
+    // CONFIRMED outputs only, unlike the immature arm: not being a clock
+    // question, a block on a height-guess the sweep would skip never lifts.
+    const notOurs = new Map<string, string>()
+    const immature = new Map<string, string>()
     for (const lockup of deadlines) {
       if (lockup.refundable === false) {
-        blocked.set(lockup.script, 'no refund key of ours: its annotation leaf needs the lockup’s sender')
+        notOurs.set(lockup.script, 'no refund key of ours: its annotation leaf needs the lockup’s sender')
       } else if (now < lockup.refundLocktime + LOCKUP_RECOVERY_MTP_MARGIN_SECONDS) {
-        blocked.set(lockup.script, `not yet safely past CLTV, refundLocktime ${lockup.refundLocktime}`)
+        immature.set(lockup.script, `not yet safely past CLTV, refundLocktime ${lockup.refundLocktime}`)
       }
     }
-    const blocking = recoverable.filter((vtxo) => blocked.has(vtxo.script))
+    const blocking = recoverable.flatMap((vtxo) => {
+      const reason =
+        (vtxo.confirmedRecoverable === false ? undefined : notOurs.get(vtxo.script)) ?? immature.get(vtxo.script)
+      return reason === undefined ? [] : [`${vtxo.txid}:${vtxo.vout} at ${vtxo.script} (${reason})`]
+    })
     if (blocking.length > 0) {
-      const detail = blocking
-        .map((vtxo) => `${vtxo.txid}:${vtxo.vout} at ${vtxo.script} (${blocked.get(vtxo.script)})`)
-        .join(', ')
-      recoverySkipped = `${blocking.length} recoverable lockup output(s) not safe to sweep at ${now}: ${detail}`
+      recoverySkipped = `${blocking.length} recoverable lockup output(s) not safe to sweep at ${now}: ${blocking.join(', ')}`
       return { boarded: null, renewed, resplit, recovered, recoverySkipped, migrated: 0, failures }
     }
 
@@ -718,5 +767,12 @@ export const recoverableVtxosFrom = async (wallet: {
   const now = { timestamp: new Date() }
   return vtxos
     .filter((vtxo) => canRecoverOnchain(vtxo, now) || vtxo.expiresAtHeight !== undefined)
-    .map((vtxo) => ({ txid: vtxo.txid, vout: vtxo.vout, script: vtxo.script }))
+    .map((vtxo) => ({
+      txid: vtxo.txid,
+      vout: vtxo.vout,
+      script: vtxo.script,
+      // Which arm admitted it. `isSwept` needs no height, so a swept coin still
+      // confirms whatever its expiry counts in.
+      confirmedRecoverable: canRecoverOnchain(vtxo, now),
+    }))
 }
