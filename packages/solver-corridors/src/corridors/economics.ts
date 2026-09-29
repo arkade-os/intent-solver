@@ -28,8 +28,8 @@ import type { OnchainReceiveSwapRow } from '../db/onchainReceiveSwaps.js'
 import type { AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 
 /**
- * The word every store in this package sends an EXPOSED failure to — each one's
- * `failStates.exposed`, and the asset store's `fail()` routing.
+ * The word every store in this package sends an EXPOSED failure to —
+ * `BaseSwapStore.fail()` and the asset store's `fail()` routing.
  *
  * A row here is one where the solver paid out and was not made whole, which is
  * the only state this layer is willing to call a LOSS. `refused` is not one:

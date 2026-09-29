@@ -36,7 +36,7 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
-import { addColumns, assertColumns, numberOrNull } from './baseSwapStore.js'
+import { BaseSwapStore, addColumns, numberOrNull, type RawRow, type StoreShape } from './baseSwapStore.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
@@ -262,11 +262,22 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
 const bigIntOrNull = (value: string | number | null | undefined): bigint | null =>
   value === null || value === undefined ? null : BigInt(String(value))
 
-export class AssetRfqSwapStore {
-  private constructor(
-    readonly driver: SqlDriver,
-    private readonly now: () => number,
-  ) {}
+const SHAPE: StoreShape<AssetRfqSwapRow, AssetRfqSwapState> = {
+  table: 'asset_rfq_swap',
+  eventTable: 'asset_rfq_swap_event',
+  noun: 'asset rfq swap',
+  lifecycleLabel: 'asset rfq lifecycle',
+  searchColumns: [],
+  legalEdges: LEGAL_EDGES,
+  transitionColumns: TRANSITION_COLUMNS,
+  patchColumns: new Set(),
+  live: NON_TERMINAL,
+  exposed: EXPOSED,
+  toRow: (raw: RawRow) => toRow(raw as Raw),
+}
+
+export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSwapState> {
+  protected readonly shape = SHAPE
 
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<AssetRfqSwapStore> {
     const store = new AssetRfqSwapStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
@@ -374,26 +385,16 @@ export class AssetRfqSwapStore {
     return row
   }
 
-  async close(): Promise<void> {
-    await this.driver.close()
-  }
-
   async findById(id: string): Promise<AssetRfqSwapRow | undefined> {
     const raw = await this.driver.get<Raw>(`SELECT * FROM asset_rfq_swap WHERE id = ?`, [id])
     return raw ? toRow(raw) : undefined
   }
 
   /** Throws on an unknown id, matching the shape `parkVia` and `detail` expect. */
-  async get(id: string): Promise<AssetRfqSwapRow> {
+  override async get(id: string): Promise<AssetRfqSwapRow> {
     const row = await this.findById(id)
     if (!row) throw new Error(`no asset rfq swap ${id}`)
     return row
-  }
-
-  /** The negotiation for an rfq id. UNIQUE, so there is at most one. */
-  async findByRfqId(rfqId: string): Promise<AssetRfqSwapRow | undefined> {
-    const raw = await this.driver.get<Raw>(`SELECT * FROM asset_rfq_swap WHERE rfq_id = ?`, [rfqId])
-    return raw ? toRow(raw) : undefined
   }
 
   /** The live negotiation watching an offer script, if this solver has one. */
@@ -406,12 +407,7 @@ export class AssetRfqSwapStore {
   }
 
   async listNonTerminal(): Promise<AssetRfqSwapRow[]> {
-    const placeholders = NON_TERMINAL.map(() => '?').join(', ')
-    const raws = await this.driver.all<Raw>(
-      `SELECT * FROM asset_rfq_swap WHERE state IN (${placeholders}) ORDER BY created_at ASC`,
-      [...NON_TERMINAL],
-    )
-    return raws.map(toRow)
+    return this.findRecoverable()
   }
 
   /**
@@ -427,7 +423,7 @@ export class AssetRfqSwapStore {
    * One table backs every market, so a corridor asks for its own `pair` and a
    * caller summing whole STORES omits it. Both callers exist.
    */
-  async committedSats(pair?: string): Promise<number> {
+  override async committedSats(pair?: string): Promise<number> {
     const raws = await this.driver.all<Raw>(
       `SELECT to_amount FROM asset_rfq_swap WHERE state = 'filling' AND to_asset_id IS NULL` +
         (pair === undefined ? '' : ' AND pair = ?'),
@@ -439,11 +435,6 @@ export class AssetRfqSwapStore {
   /**
    * Rows whose last movement falls in a window. @see BaseSwapStore.ledgerRows
    *
-   * Duplicated rather than inherited because this store is not a
-   * `BaseSwapStore` — its amounts are bigints in TEXT columns and its lifecycle
-   * is its own — and the shared base is the wrong place to grow a second
-   * hierarchy for one method.
-   *
    * `pair` NARROWS IN SQL, AND MUST. One table backs every asset market, so a
    * caller that took the whole window and filtered afterwards would be applying
    * `LIMIT` across every market and then discarding — a busy market's rows push
@@ -451,7 +442,10 @@ export class AssetRfqSwapStore {
    * profit for a window in which it settled fills. Silent, and the screen looks
    * healthy. The same reason `committedSats` above takes a pair.
    */
-  async ledgerRows(window: LedgerWindow, pair?: string): Promise<{ rows: AssetRfqSwapRow[]; truncated: boolean }> {
+  override async ledgerRows(
+    window: LedgerWindow,
+    pair?: string,
+  ): Promise<{ rows: AssetRfqSwapRow[]; truncated: boolean }> {
     const limit = clampLedgerLimit(window.limit)
     const raw = await this.driver.all<Raw>(
       `SELECT * FROM asset_rfq_swap WHERE updated_at >= ? AND updated_at < ?` +
@@ -462,77 +456,18 @@ export class AssetRfqSwapStore {
     return { rows: raw.slice(0, limit).map(toRow), truncated: raw.length > limit }
   }
 
-  async page(options: PageOptions = {}): Promise<{ rows: AssetRfqSwapRow[]; nextCursor: string | null }> {
+  // Not the base's, which would turn `searchTerm` into a search this store never ran.
+  override async page(options: PageOptions = {}): Promise<{ rows: AssetRfqSwapRow[]; nextCursor: string | null }> {
     const { sql, params, limit } = pageQuery('asset_rfq_swap', options)
     const raw = await this.driver.all<Raw & PageRawFields>(sql, params)
     const { page, nextCursor } = takePage(raw, limit)
     return { rows: page.map(toRow), nextCursor }
   }
 
-  async history(id: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]> {
-    const raws = await this.driver.all<Raw>(
-      `SELECT at, from_state, to_state, detail FROM asset_rfq_swap_event WHERE swap_id = ? ORDER BY id ASC`,
-      [id],
-    )
-    return raws.map((raw) => ({
-      at: Number(raw.at),
-      from: raw.from_state === null ? null : String(raw.from_state),
-      to: String(raw.to_state),
-      detail: raw.detail === null ? null : String(raw.detail),
-    }))
-  }
-
-  /**
-   * Compare-and-swap on `state`, so two ticks racing one row cannot both win.
-   * Returns whether this caller was the one that moved it.
-   */
-  async transition(
-    id: string,
-    from: AssetRfqSwapState,
-    to: AssetRfqSwapState,
-    fields: Partial<Record<string, unknown>> = {},
-  ): Promise<boolean> {
-    if (!LEGAL_EDGES[from].includes(to)) {
-      throw new Error(`illegal transition ${from} -> ${to}: not an edge of the asset rfq lifecycle`)
-    }
-    const columns = Object.keys(fields)
-    assertColumns(columns, TRANSITION_COLUMNS, 'transition()')
-    const assignments = ['state = ?', 'updated_at = ?', ...columns.map((c) => `${c} = ?`)].join(', ')
-    const result = await this.driver.run(`UPDATE asset_rfq_swap SET ${assignments} WHERE id = ? AND state = ?`, [
-      to,
-      this.now(),
-      ...columns.map((c) => fields[c]),
-      id,
-      from,
-    ])
-    if (result.changes === 1) await this.recordEvent(id, from, to, null)
-    return result.changes === 1
-  }
-
-  /**
-   * Terminal failure with a reason a human will read.
-   *
-   * Routed by EXPOSURE, which is the distinction an operator acts on: a row
-   * that never submitted anything is `refused` and needs nobody, while one
-   * that did is `stuck` and needs a human to find out what became of it.
-   */
-  async fail(id: string, from: AssetRfqSwapState, reason: string): Promise<void> {
+  override async fail(id: string, from: AssetRfqSwapState, reason: string): Promise<void> {
     if (!NON_TERMINAL.includes(from)) {
       throw new Error(`fail() cannot act on ${from}: it is terminal, so there is nothing left to fail`)
     }
-    const to: AssetRfqSwapState = EXPOSED.includes(from) ? 'stuck' : 'refused'
-    await this.transition(id, from, to, { failure_reason: reason })
-  }
-
-  private async recordEvent(
-    id: string,
-    from: AssetRfqSwapState | null,
-    to: AssetRfqSwapState,
-    detail: string | null,
-  ): Promise<void> {
-    await this.driver.run(
-      `INSERT INTO asset_rfq_swap_event (swap_id, at, from_state, to_state, detail) VALUES (?, ?, ?, ?, ?)`,
-      [id, this.now(), from, to, detail],
-    )
+    await super.fail(id, from, reason)
   }
 }

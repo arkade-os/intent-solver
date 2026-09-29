@@ -45,6 +45,7 @@ import type { OnchainSendSwapRow, OnchainSendSwapStore } from '../db/onchainSwap
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
@@ -432,48 +433,12 @@ export class OnchainSendSwapService {
     )
   }
 
-  async tick(id: string): Promise<OnchainSendSwapRow> {
-    const { store } = this.deps
-    if (this.inFlight.has(id)) return store.get(id)
-    this.inFlight.add(id)
-    try {
-      while (await this.step(await store.get(id))) {
-        // each successful step re-reads the row and tries the next
-      }
-      return await store.get(id)
-    } finally {
-      this.inFlight.delete(id)
-    }
+  tick(id: string): Promise<OnchainSendSwapRow> {
+    return guardedTick(id, this.inFlight, this.deps.store, (row) => this.step(row))
   }
 
   async tickAll(): Promise<OnchainSendSwapRow[]> {
-    const rows: OnchainSendSwapRow[] = []
-    for (const row of await this.deps.store.findRecoverable()) {
-      // Held off after repeated failures, or already being ticked elsewhere.
-      // Neither means the swap advanced, so the row comes back unchanged and
-      // `onTickSuccess` does not fire. Gated here rather than in `tick` so a
-      // direct caller — an operator's recheck, a one-shot CLI tick — is never
-      // throttled: only this timer is.
-      if (this.shouldSkipTick?.(row.id) || this.inFlight.has(row.id)) {
-        rows.push(row)
-        continue
-      }
-      try {
-        rows.push(await this.tick(row.id))
-        // Ran, and did not throw: the fault is over. The host clears the
-        // backoff on this rather than on membership of the returned array,
-        // which also holds skipped rows and rows that threw.
-        this.onTickSuccess?.(row.id)
-      } catch (error) {
-        this.onTickError?.(row.id, error)
-        try {
-          rows.push(await this.deps.store.get(row.id))
-        } catch {
-          // Store fault, not a swap fault — skip, the next sweep retries.
-        }
-      }
-    }
-    return rows
+    return sweep(await this.deps.store.findRecoverable(), this, this.deps.store, { inFlight: this.inFlight })
   }
 
   /**
@@ -493,7 +458,7 @@ export class OnchainSendSwapService {
     const { store, arkade } = this.deps
     const outputs = await arkade.findLockups(row.pkScript)
     if (outputs.length === 0) {
-      // The Lightning leg's `refundSweep` guards this identically, for the
+      // The Lightning leg's `pushRefund` guards this identically, for the
       // identical reason: `findLockups` is `spendableOnly`, so an empty answer
       // is not proof of a spend, and `findRefundable` (src/db/onchainSwaps.ts)
       // filters `refund_outcome IS NULL` — so recording one shuts the row for

@@ -45,6 +45,7 @@ import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 
 export interface EvmReceiveServiceDeps {
   store: EvmReceiveSwapStore
@@ -491,34 +492,15 @@ export class EvmReceiveSwapService {
     }
   }
 
-  async tick(id: string): Promise<EvmReceiveSwapRow> {
-    const { store } = this.deps
-    if (this.inFlight.has(id)) return store.get(id)
-    this.inFlight.add(id)
-    try {
-      while (await this.step(await store.get(id))) {
-        // each successful step re-reads and tries the next
-      }
-      return await store.get(id)
-    } finally {
-      this.inFlight.delete(id)
-    }
+  tick(id: string): Promise<EvmReceiveSwapRow> {
+    return guardedTick(id, this.inFlight, this.deps.store, (row) => this.step(row))
   }
 
   async tickAll(): Promise<EvmReceiveSwapRow[]> {
-    const rows: EvmReceiveSwapRow[] = []
-    for (const row of await this.deps.store.findLive()) {
-      try {
-        rows.push(await this.tick(row.id))
-      } catch (error) {
-        this.deps.onTickError?.(row.id, error)
-        try {
-          rows.push(await this.deps.store.get(row.id))
-        } catch {
-          // Store fault rather than a swap fault - the next sweep retries.
-        }
-      }
-    }
-    return rows
+    return sweep(
+      await this.deps.store.findLive(),
+      { tick: (id) => this.tick(id), onTickError: (id, error) => this.deps.onTickError?.(id, error) },
+      this.deps.store,
+    )
   }
 }

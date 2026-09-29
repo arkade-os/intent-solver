@@ -365,7 +365,6 @@ const SHAPE: StoreShape<OnchainSendSwapRow, OnchainSendSwapState> = {
   patchColumns: PATCH_COLUMNS,
   live: NON_TERMINAL,
   exposed: EXPOSED,
-  failStates: { exposed: 'stuck', clean: 'refused' },
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 
@@ -423,52 +422,12 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
     return Number(row?.total ?? 0)
   }
 
-  /**
-   * Claim the exclusive right to broadcast this swap's onchain HTLC funding.
-   *
-   * Returns true to exactly ONE caller — the mirror of the receive leg's lease,
-   * and the same defect. Two workers reaching `submitFunding` together
-   * would both broadcast an L1 payment to the client's HTLC address, from
-   * different UTXOs, because coin selection is per-process. The compare-and-swap
-   * on `state` afterwards gates RECORDING, not spending.
-   *
-   * `tick()`'s `inFlight` set hides this within one process, and is exactly what
-   * a second worker, a restart, or the Go rewrite removes.
-   *
-   * One-shot rather than timed. A lease that expires lets a second worker
-   * broadcast while the first may still be in flight, which reinstates the bug
-   * on a timer. A crash between winning the lease and broadcasting leaves the
-   * row stuck and visible, which is the honest outcome: this service cannot
-   * tell from its own state whether that transaction exists, and retrying is
-   * the double-spend the lease exists to prevent.
-   */
-  async claimFundLease(id: string, from: OnchainSendSwapState): Promise<boolean> {
-    const result = await this.driver.run(
-      `UPDATE send_onchain_swap SET fund_started_at = ?, updated_at = ?
-       WHERE id = ? AND state = ? AND fund_started_at IS NULL`,
-      [this.now(), this.now(), id, from],
-    )
-    return result.changes === 1
+  override async claimFundLease(id: string, from: OnchainSendSwapState): Promise<boolean> {
+    return super.claimFundLease(id, from)
   }
 
-  /**
-   * Give the lease back when the broadcast provably did not happen.
-   *
-   * Called only when `fund()` THREW. Without it the lease outlives a failure
-   * that moved no money and the row can never be funded by anyone — which an
-   * existing test catches directly: it strands a row by making `fund()` throw,
-   * then requires recovery to fund it afterwards.
-   *
-   * This is deliberately NOT "the lease expired". A throw is not proof that
-   * nothing was sent — a timeout can throw after the transaction is already
-   * out — so releasing here re-opens the same ambiguity the surrounding
-   * recovery already owns and already resolves by looking for an output at the
-   * address for exactly the right amount. What the lease adds is narrower and
-   * is the actual defect: two workers in the same window cannot both be inside
-   * `fund()` at once.
-   */
-  async releaseFundLease(id: string): Promise<void> {
-    await this.driver.run(`UPDATE send_onchain_swap SET fund_started_at = NULL WHERE id = ?`, [id])
+  override async releaseFundLease(id: string): Promise<void> {
+    await super.releaseFundLease(id)
   }
 
   async insertQuote(quote: OnchainQuoteRecord): Promise<OnchainSendSwapRow> {

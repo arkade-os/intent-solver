@@ -37,6 +37,7 @@ import { evmSendCovenantRowFor } from '../evm/covenantRow.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
 
@@ -227,8 +228,8 @@ export class EvmSendSwapService {
     if (row.state !== 'refunding_evm') return false
     const lock = this.deps.lockFor(row)
     try {
-      // FROM THE TIMELOCK: the contract reverts `SwapNotTimedOut` below it (@see
-      // refundSweep.ts), so no Refund precedes it in ANY chain - no margin, unlike
+      // FROM THE TIMELOCK: the contract reverts `SwapNotTimedOut` below it, so
+      // no Refund precedes it in ANY chain - no margin, unlike
       // below. `evm_timeout` also keys the lock and is write-once (not a
       // TRANSITION_COLUMN), so floor and lock identity cannot drift apart.
       return await this.deps.evm.findRefund(lock, lock.timelock)
@@ -624,18 +625,8 @@ export class EvmSendSwapService {
    * loop and an operator command can both reach this, and the store's
    * from-state guard would catch a double step only as a thrown error.
    */
-  async tick(id: string): Promise<EvmSendSwapRow> {
-    const { store } = this.deps
-    if (this.inFlight.has(id)) return store.get(id)
-    this.inFlight.add(id)
-    try {
-      while (await this.step(await store.get(id))) {
-        // each successful step re-reads and tries the next
-      }
-      return await store.get(id)
-    } finally {
-      this.inFlight.delete(id)
-    }
+  tick(id: string): Promise<EvmSendSwapRow> {
+    return guardedTick(id, this.inFlight, this.deps.store, (row) => this.step(row))
   }
 
   /**
@@ -653,19 +644,11 @@ export class EvmSendSwapService {
   }
 
   private async sweepRows(): Promise<EvmSendSwapRow[]> {
-    const rows: EvmSendSwapRow[] = []
-    for (const row of await this.deps.store.findLive()) {
-      try {
-        rows.push(await this.tick(row.id))
-      } catch (error) {
-        this.deps.onTickError?.(row.id, error)
-        try {
-          rows.push(await this.deps.store.get(row.id))
-        } catch {
-          // Store fault rather than a swap fault - the next sweep retries.
-        }
-      }
-    }
+    const rows = await sweep(
+      await this.deps.store.findLive(),
+      { tick: (id) => this.tick(id), onTickError: (id, error) => this.deps.onTickError?.(id, error) },
+      this.deps.store,
+    )
     await this.watchLateLocks()
     return rows
   }

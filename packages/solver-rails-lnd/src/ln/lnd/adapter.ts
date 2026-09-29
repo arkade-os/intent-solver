@@ -448,9 +448,6 @@ export class LndLightningBackendAdapter implements LightningBackend {
         // the timeout it was given, so a deadline at it would cut a live probe.
         probeMs + LND_READ_TIMEOUT_MS,
       )
-      // No `feeHandle`. LND reserves nothing: this probe and the later
-      // `payViaPaymentRequest` are unconnected calls, and minting a token would claim a
-      // link between them that does not exist.
       return { feeSats: feeSatsFromMtokens(estimate.fee_mtokens) }
     } catch (error) {
       if (isNoFeeEstimate(error)) return null

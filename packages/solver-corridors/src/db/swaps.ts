@@ -191,8 +191,6 @@ export interface SendSwapRow {
   paymentWallet: string | null
   /** Routing fee learned when this quote was priced; null on legacy or unestimated rows. */
   quotedRoutingFeeSats: number | null
-  /** Opaque backend token paired with the quote-time routing fee, when one was supplied. */
-  feeHandle: string | null
   lockupTxid: string | null
   lockupVout: number | null
   lockupValue: number | null
@@ -363,7 +361,6 @@ const toRow = (raw: Raw): SendSwapRow => ({
   paymentBackend: text(raw.payment_backend),
   paymentWallet: text(raw.payment_wallet),
   quotedRoutingFeeSats: numberOrNull(raw.quoted_routing_fee_sats),
-  feeHandle: text(raw.fee_handle),
   lockupTxid: raw.lockup_txid === null ? null : String(raw.lockup_txid),
   lockupVout: raw.lockup_vout === null ? null : Number(raw.lockup_vout),
   lockupValue: raw.lockup_value === null ? null : Number(raw.lockup_value),
@@ -407,7 +404,6 @@ export interface QuoteRecord {
    */
   nonInteractiveParameters: boolean
   quotedRoutingFeeSats?: number
-  feeHandle?: string
   rfqId?: string
 }
 
@@ -444,9 +440,6 @@ const SHAPE: StoreShape<SendSwapRow, SendSwapState> = {
   patchColumns: PATCH_COLUMNS,
   live: NON_TERMINAL,
   exposed: EXPOSED,
-  // `stuck` rather than a generic failure when money is already exposed: those
-  // need a human, and flattening them into "failed" hides that.
-  failStates: { exposed: 'stuck', clean: 'refused' },
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 
@@ -490,6 +483,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
       ['payment_failure_reason', 'TEXT'],
       ['non_interactive_parameters', 'TEXT'],
       ['quoted_routing_fee_sats', 'INTEGER'],
+      // Nothing reads or writes it; kept because dropping a column is a table rebuild.
       ['fee_handle', 'TEXT'],
       // INTEGER, matching the schema above rather than defaulting to TEXT: a
       // migrated database would otherwise give this column TEXT affinity and
@@ -597,8 +591,8 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
         quoted_refund_deadline, refund_locktime, sender_pubkey, receiver_pubkey, server_pubkey,
         claim_delay, refund_delay, refund_without_receiver_delay, pk_script, lockup_address,
         refund_pk_script, emulator_pubkey, client_refund_pubkey, receiver_pk_script,
-        non_interactive_parameters, quoted_routing_fee_sats, fee_handle, rfq_id
-      ) SELECT ?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        non_interactive_parameters, quoted_routing_fee_sats, rfq_id
+      ) SELECT ?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       WHERE NOT EXISTS (
         SELECT 1 FROM send_swap WHERE payment_hash = ?
         AND (state != 'refused' OR (COALESCE(lockup_value, 0) > 0 AND refund_outcome IS NULL))
@@ -632,7 +626,6 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
         // to carry. Only `true` changes what gets derived.
         quote.nonInteractiveParameters ? '1' : null,
         quote.quotedRoutingFeeSats ?? null,
-        quote.feeHandle ?? null,
         quote.rfqId ?? null,
         quote.paymentHash,
       ],

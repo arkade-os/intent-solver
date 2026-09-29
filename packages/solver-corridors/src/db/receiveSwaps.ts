@@ -363,9 +363,6 @@ const SHAPE: StoreShape<ReceiveSwapRow, ReceiveSwapState> = {
   patchColumns: PATCH_COLUMNS,
   live: NON_TERMINAL,
   exposed: EXPOSED,
-  // `stuck` rather than a generic failure when the provider's own money is
-  // already out — same "stuck-over-silence" rule every other leg applies.
-  failStates: { exposed: 'stuck', clean: 'refused' },
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 
@@ -401,20 +398,12 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
     ])
   }
 
-  /** Twin of `OnchainReceiveSwapStore.claimFundLease` — see it for the argument, and
-   *  for the two limits kept here: no TTL, and a crash mid-fund is left stuck. */
-  async claimFundLease(id: string, from: ReceiveSwapState): Promise<boolean> {
-    const result = await this.driver.run(
-      `UPDATE receive_swap SET fund_started_at = ?, updated_at = ?
-       WHERE id = ? AND state = ? AND fund_started_at IS NULL`,
-      [this.now(), this.now(), id, from],
-    )
-    return result.changes === 1
+  override async claimFundLease(id: string, from: ReceiveSwapState): Promise<boolean> {
+    return super.claimFundLease(id, from)
   }
 
-  /** Only for a `FundNotSubmittedError`. @see OnchainReceiveSwapStore.releaseFundLease */
-  async releaseFundLease(id: string): Promise<void> {
-    await this.driver.run(`UPDATE receive_swap SET fund_started_at = NULL WHERE id = ?`, [id])
+  override async releaseFundLease(id: string): Promise<void> {
+    await super.releaseFundLease(id)
   }
 
   /**

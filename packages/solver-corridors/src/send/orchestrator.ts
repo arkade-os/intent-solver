@@ -40,15 +40,9 @@ import {
 import { maxRoutingFeeSats, type Limits } from '@arkade-os/solver-core/core/limits.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { FREE, giveSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
-import {
-  absoluteLocktimeIn,
-  absoluteLocktimeReached,
-  absoluteLocktimeSeconds,
-  absoluteLocktimeUnit,
-  relativeDelayFrom,
-  type UnilateralDelays,
-} from '@arkade-os/solver-core/core/timelocks.js'
+import type { UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
 import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
+import { absoluteLocktimeFor, refundDeadlineReached, refundDeadlineSeconds } from '../chainClock.js'
 import {
   decodeCoupledInvoice,
   decodeInvoice,
@@ -63,6 +57,7 @@ import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
 import type { SendSwapRow, SendSwapState, SwapStore } from '../db/swaps.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
@@ -72,6 +67,8 @@ import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 export type { ArkadeOps }
 
 const SEND_FEE_ESTIMATE_TIMEOUT_MS = 5_000
+
+const DEADLINE_SECONDS_PURPOSE = 'size the remaining claim window'
 
 /**
  * What this corridor needs to read off a coupled RECEIVE row: whether it is
@@ -365,74 +362,6 @@ export class SendSwapService {
   }
 
   /**
-   * A unix-seconds deadline as the locktime this deployment writes.
-   *
-   * The unit is taken from the unilateral LADDER rather than from a setting of its own:
-   * the ladder was derived from the server's advertised delay, so its unit already IS
-   * this deployment's, and reading it here keeps the covenant's relative and absolute
-   * timelocks from ever disagreeing about which clock the swap runs on.
-   */
-  private async absoluteLocktimeFor(deadlineSeconds: number, ladderDelay: number): Promise<number> {
-    if (relativeDelayFrom(ladderDelay).unit === 'seconds') return deadlineSeconds
-    const chainTip = this.deps.chainTip
-    if (!chainTip) {
-      throw new Error(
-        'this deployment has block-typed timelocks, so a refund deadline must be written as a height — ' +
-          'but no chainTip provider is wired',
-      )
-    }
-    return absoluteLocktimeIn(deadlineSeconds, 'blocks', { now: this.now(), tipHeight: await chainTip.height() })
-  }
-
-  /**
-   * A stored refund locktime as a unix-seconds deadline.
-   *
-   * For DURATION questions only — "how much claim window is left", "does the HTLC fit
-   * inside it" — which the whole deadline model asks in seconds. A height is projected
-   * from the current tip at the nominal block interval, so the answer is an estimate
-   * that moves as blocks arrive.
-   *
-   * NEVER to ask whether the deadline has OPENED: that is
-   * {@link SendSwapService.refundDeadlineReached}, which compares in the locktime's own
-   * unit and cannot drift from what the chain will enforce.
-   */
-  private async refundDeadlineSeconds(refundLocktime: number): Promise<number> {
-    const now = this.now()
-    if (absoluteLocktimeUnit(refundLocktime) === 'seconds') return refundLocktime
-    const chainTip = this.deps.chainTip
-    if (!chainTip) {
-      throw new Error(
-        `refund locktime ${refundLocktime} is a block height, but no chainTip provider is wired — ` +
-          'a block-typed deployment needs one to size the remaining claim window',
-      )
-    }
-    return absoluteLocktimeSeconds(refundLocktime, { now, tipHeight: await chainTip.height() })
-  }
-
-  /**
-   * Has this swap's refund deadline opened?
-   *
-   * Asked in the locktime's OWN unit — a height against the chain tip, seconds against
-   * the clock. The tip is read only when there is a height to compare, so a
-   * seconds-typed deployment never issues the request and needs no `chainTip` at all.
-   */
-  private async refundDeadlineReached(refundLocktime: number): Promise<boolean> {
-    const now = this.now()
-    if (absoluteLocktimeUnit(refundLocktime) === 'seconds') return now >= refundLocktime
-    const chainTip = this.deps.chainTip
-    if (!chainTip) {
-      // A block-typed row with nowhere to read a height is a wiring error, and guessing
-      // either answer moves money the wrong way: "not reached" strands a refund forever,
-      // "reached" pushes one the chain will reject.
-      throw new Error(
-        `refund locktime ${refundLocktime} is a block height, but no chainTip provider is wired — ` +
-          'a block-typed deployment needs one to tell whether a deadline has opened',
-      )
-    }
-    return absoluteLocktimeReached(refundLocktime, { now, tipHeight: await chainTip.height() })
-  }
-
-  /**
    * Quote a send swap and persist it BEFORE returning the lockup address.
    *
    * The order matters: once the address leaves this process a client may fund
@@ -530,7 +459,12 @@ export class SendSwapService {
         ...acceptance,
         refundLocktime: Math.max(
           acceptance.refundLocktime,
-          (await this.refundDeadlineSeconds(coupledCandidate.refundLocktime)) + MIN_CLAIM_WINDOW,
+          (await refundDeadlineSeconds(
+            coupledCandidate.refundLocktime,
+            this.now,
+            this.deps.chainTip,
+            DEADLINE_SECONDS_PURPOSE,
+          )) + MIN_CLAIM_WINDOW,
         ),
       }
     }
@@ -563,7 +497,12 @@ export class SendSwapService {
       }
       const deadlines = evaluateCouplingDeadlines({
         sendRefundLocktime: acceptance.refundLocktime,
-        receiveRefundLocktime: await this.refundDeadlineSeconds(coupled.refundLocktime),
+        receiveRefundLocktime: await refundDeadlineSeconds(
+          coupled.refundLocktime,
+          this.now,
+          this.deps.chainTip,
+          DEADLINE_SECONDS_PURPOSE,
+        ),
       })
       // Refused with its OWN reason, not `duplicate_swap`: the request is
       // legitimate and the deadline is what cannot be served, which is the
@@ -650,11 +589,13 @@ export class SendSwapService {
       // exactly HERE, once, and the SAME value goes into both the covenant and the row —
       // they derive each other, so a second conversion anywhere would produce a script
       // the row cannot spend.
-      const refundLocktime = await this.absoluteLocktimeFor(
+      const refundLocktime = await absoluteLocktimeFor(
         acceptance.refundLocktime,
         // The ladder's rung, not the base: on a flipped quote the deadline is
         // written in seconds, on an unflipped one in the deployment's unit.
         ladder.unilateralClaimDelay,
+        this.now,
+        this.deps.chainTip,
       )
       const script = new CovenantSwapScript({
         receiver: hex.decode(arkade.providerPubkey),
@@ -706,7 +647,6 @@ export class SendSwapService {
           receiverPkScript: arkade.receiverPkScript,
           nonInteractiveParameters: true,
           quotedRoutingFeeSats: feeEstimate?.feeSats,
-          feeHandle: feeEstimate?.feeHandle,
           rfqId: options.rfqId,
         })
         return { accepted: true, swap, lockupDeadline: acceptance.lockupDeadline }
@@ -776,7 +716,6 @@ export class SendSwapService {
         if (stepStarted) quotedStepMs = Math.round(performance.now() - stepStarted)
         if (stepStarted && advanced) quotedAdvanced = true
         if (!advanced) break
-        // each successful step re-reads the row and tries the next
         row = await store.get(id)
       }
       row = await store.get(id)
@@ -832,57 +771,12 @@ export class SendSwapService {
   }
 
   /**
-   * Tick each row once, bounded-concurrently, isolating per-row failures.
-   *
    * Concurrency is safe by this class's own contract — `tick`'s in-flight guard
    * stops duplicate RPC work per swap and the store's compare-and-swap settles
    * any race — so the bound exists only to cap fan-out against the backends.
-   * Returned rows are in completion order, never creation order.
    */
-  private async driveRows(rows: readonly SendSwapRow[]): Promise<SendSwapRow[]> {
-    const driven: SendSwapRow[] = []
-    // One shared iterator: every worker pulls from it, so each row is claimed
-    // exactly once without any index bookkeeping to get wrong.
-    const cursor = rows[Symbol.iterator]()
-    const worker = async (): Promise<void> => {
-      for (const row of cursor) {
-        // Held off after repeated failures, or already being ticked by someone
-        // else. Both are reasons this SWEEP should not ask again, and neither
-        // is a reason the swap advanced — so the row comes back in its current
-        // state without `onTickSuccess` firing for it.
-        //
-        // Gated here rather than inside `tick` so a DIRECT caller is never
-        // throttled: the admin recheck action, the lockup-watcher callback and
-        // a one-shot CLI tick are a human or an event asking once, not a timer
-        // re-asking. Only the timer needs slowing down.
-        if (this.shouldSkipTick?.(row.id) || this.inFlight.has(row.id)) {
-          driven.push(row)
-          continue
-        }
-        try {
-          driven.push(await this.tick(row.id))
-          // Ticked without throwing AND without being held off — the only
-          // combination that means the fault is over. The host clears the
-          // backoff on this signal rather than on membership of `driven`,
-          // which also holds rows that were skipped and rows that threw.
-          this.onTickSuccess?.(row.id)
-        } catch (error) {
-          // One swap's network failure must not stop the sweep: the row keeps its
-          // state and the next sweep retries. Money-safety never depends on this
-          // loop completing — only on the per-row transitions.
-          this.onTickError?.(row.id, error)
-          try {
-            driven.push(await this.deps.store.get(row.id))
-          } catch {
-            // The tick failure was likely a store fault; re-reading here would
-            // rethrow and abort the whole sweep — the exact thing this catch
-            // exists to prevent. Skip the row; the next sweep retries it.
-          }
-        }
-      }
-    }
-    await Promise.all(Array.from({ length: Math.min(this.sweepConcurrency, rows.length) }, worker))
-    return driven
+  private driveRows(rows: readonly SendSwapRow[]): Promise<SendSwapRow[]> {
+    return sweep(rows, this, this.deps.store, { inFlight: this.inFlight, concurrency: this.sweepConcurrency })
   }
 
   /** Hook for the host (CLI, server) to log per-swap tick failures. */
@@ -941,44 +835,36 @@ export class SendSwapService {
    * timestamp, not wall clock) is simply retried on the next sweep.
    */
   async refundSweep(): Promise<string[]> {
-    const { store, arkade } = this.deps
     const pushed: string[] = []
-    for (const row of await store.findRefundable(this.now())) {
+    for (const row of await this.deps.store.findRefundable(this.now())) {
       if ((row.lockupValue ?? 0) <= 0) continue
       try {
-        const outputs = await arkade.findLockups(row.pkScript)
-        if (outputs.length === 0) {
-          // Nothing SPENDABLE at the script, which is two different facts: the
-          // client (or another watcher) already moved it, or the `spendableOnly`
-          // view this reads is a moment behind. Recording the first on the
-          // strength of one empty read is a ONE-WAY DOOR — `findRefundable`
-          // filters `refund_outcome IS NULL`, so the row is never selected
-          // again, and `rfqStateFromRow` then reports the swap `refunded` to a
-          // client whose every sat is still sitting at the covenant script.
-          // That status is exactly what would talk a client out of pushing the
-          // refund itself, which is the only recourse left once we stop.
-          //
-          // So require the spend ITSELF, not the absence of a spendable output.
-          // Without it the row is left exactly as it was and the next sweep
-          // looks again — costing only a delayed refund, against a permanent
-          // one. This is the same read lag the receive leg fixed, but not
-          // the same remedy: there a grace period worked because the row had
-          // just entered `refunding`, whereas a row here becomes refundable
-          // when its deadline matures, long after `updatedAt` last moved.
-          if (!(await arkade.lockupProvablySpent(row.pkScript))) continue
-          // The outcome discriminator records that somebody else moved it; the
-          // txid column only ever holds txids.
-          await store.patch(row.id, { refund_outcome: 'external' })
-          continue
-        }
-        const txid = await arkade.refund(row, outputs)
-        await store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
-        pushed.push(row.id)
+        if (await this.pushRefund(row)) pushed.push(row.id)
       } catch (error) {
         this.onTickError?.(row.id, error)
       }
     }
     return pushed
+  }
+
+  /**
+   * Push the covenant refund, or record that the lockup provably moved.
+   *
+   * An empty `spendableOnly` read is not a spend — the view may be behind. Recording it
+   * is a ONE-WAY DOOR (`findRefundable` filters `refund_outcome IS NULL`) that reports
+   * `refunded` to a client whose sats are still at the script, so without proof the row
+   * is left for the next sweep: a delayed refund rather than a lost one.
+   */
+  private async pushRefund(row: SendSwapRow): Promise<boolean> {
+    const { store, arkade } = this.deps
+    const outputs = await arkade.findLockups(row.pkScript)
+    if (outputs.length === 0) {
+      if (await arkade.lockupProvablySpent(row.pkScript)) await store.patch(row.id, { refund_outcome: 'external' })
+      return false
+    }
+    const txid = await arkade.refund(row, outputs)
+    await store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
+    return true
   }
 
   /** @returns true when the swap moved to a new state and the next step should run. */
@@ -1068,7 +954,12 @@ export class SendSwapService {
       await store.fail(row.id, 'funded', 'provider key rotated since quote; refusing to pay an unclaimable lockup')
       return false
     }
-    const refundDeadline = await this.refundDeadlineSeconds(row.refundLocktime)
+    const refundDeadline = await refundDeadlineSeconds(
+      row.refundLocktime,
+      this.now,
+      this.deps.chainTip,
+      DEADLINE_SECONDS_PURPOSE,
+    )
     if (
       !refundWithoutReceiverDelayCovers(
         row.refundWithoutReceiverDelay,
@@ -1304,8 +1195,8 @@ export class SendSwapService {
    * output and is skipped. Failing first would leave a `stuck` row that no
    * sweep ever revisits, since `findRefundable` selects only `refused`.
    *
-   * An empty read is NOT recorded as refunded, for the reason `refundSweep`
-   * spells out at length: `refund_outcome` is a one-way door, and writing it on
+   * An empty read is NOT recorded as refunded, for the reason {@link pushRefund}
+   * spells out: `refund_outcome` is a one-way door, and writing it on
    * the strength of one empty read would report `refunded` to a client whose
    * sats are still at the script.
    */
@@ -1413,7 +1304,12 @@ export class SendSwapService {
       await store.fail(row.id, row.state, 'paying state with no idempotency key')
       return false
     }
-    const refundDeadlineForCltv = await this.refundDeadlineSeconds(row.refundLocktime)
+    const refundDeadlineForCltv = await refundDeadlineSeconds(
+      row.refundLocktime,
+      this.now,
+      this.deps.chainTip,
+      DEADLINE_SECONDS_PURPOSE,
+    )
     if (
       !refundWithoutReceiverDelayCovers(
         row.refundWithoutReceiverDelay,
@@ -1453,7 +1349,6 @@ export class SendSwapService {
         maxFeeSats: row.quotedRoutingFeeSats ?? maxRoutingFeeSats(invoice.amountSats),
         idempotencyKey: row.idempotencyKey,
         maxCltvBlocks: payableCltvBlocks(cltv, refundDeadlineForCltv, this.now()),
-        ...(row.feeHandle !== null ? { feeHandle: row.feeHandle } : {}),
       })
     } catch (error) {
       if (!(error instanceof PaymentNotStarted) || !nothingCommitted) throw error
@@ -1545,7 +1440,7 @@ export class SendSwapService {
    *   rule stands on its own.
    */
   private async refundProvenSelfPayment(row: SendSwapRow, from: 'paying' | 'paid'): Promise<SelfPaymentVerdict> {
-    const { store, ln, arkade } = this.deps
+    const { store, ln } = this.deps
     let own: HoldState | null
     try {
       if (ln.getOwnInvoiceState === undefined) return 'unknown'
@@ -1585,20 +1480,7 @@ export class SendSwapService {
     // deadline matures, which needs no human and no new machinery.
     if (row.clientRefundPubkey === null) return 'resolved'
     try {
-      const outputs = await arkade.findLockups(row.pkScript)
-      if (outputs.length === 0) {
-        // Empty reads two ways, exactly as refundSweep documents: genuinely
-        // moved (our own earlier push, crashing before the patch landed — the
-        // only mover possible before the deadline, since the client alone
-        // cannot spend this leaf) or a `spendableOnly` view a moment behind.
-        // Only the first is recorded; the second leaves the sweep to retry.
-        if (await arkade.lockupProvablySpent(row.pkScript)) {
-          await store.patch(row.id, { refund_outcome: 'external' })
-        }
-        return 'resolved'
-      }
-      const txid = await arkade.refund(row, outputs)
-      await store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
+      await this.pushRefund(row)
     } catch (error) {
       // The row is already refused, so the deadline sweep owns the retry —
       // the client gets the same refund, only later. Log and resolve.
@@ -1762,7 +1644,7 @@ export class SendSwapService {
       // the preimage this row already holds. `unilateralExitRecourse` reads that
       // off the row's own roles rather than assuming the leg, and never throws,
       // so it cannot turn an escalation into an error about the escalation.
-      if (await this.refundDeadlineReached(row.refundLocktime)) {
+      if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
         const detail = error instanceof Error ? error.message : String(error)
         const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
         await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail} — ${recourse}`)

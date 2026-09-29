@@ -58,7 +58,6 @@ const SHAPE: StoreShape<ProbeRow, ProbeState> = {
   patchColumns: new Set(['note']),
   live: ['quoted', 'funded'],
   exposed: ['funded'],
-  failStates: { exposed: 'stuck', clean: 'refused' },
   toRow: (raw: RawRow): ProbeRow => ({
     id: String(raw.id),
     state: String(raw.state) as ProbeState,

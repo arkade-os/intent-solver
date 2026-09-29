@@ -209,7 +209,6 @@ describe('FakeLightningBackend — estimateSendFee', () => {
     const floored = new FakeLightningBackend(join(dir, 'floored.json'), 'bcrt', clock, {
       ppm: 1000,
       floorSats: 25,
-      handle: false,
     })
     const { invoice } = floored.forgeInvoice(1000)
     await expect(floored.estimateSendFee({ invoice, timeoutMs: 5_000 })).resolves.toEqual({ feeSats: 25 })
@@ -230,110 +229,5 @@ describe('FakeLightningBackend — estimateSendFee', () => {
     const { invoice } = backend.forgeInvoice(100_000)
     const amountless = bech32.encode('lnbcrt', bech32.decode(invoice, false).words, false)
     await expect(backend.estimateSendFee({ invoice: amountless, timeoutMs: 5_000 })).resolves.toBeNull()
-  })
-
-  it('mints no handle by default, matching the one real rail in this tree', async () => {
-    const { invoice } = backend.forgeInvoice(100_000)
-    await expect(backend.estimateSendFee({ invoice, timeoutMs: 5_000 })).resolves.not.toHaveProperty('feeHandle')
-  })
-})
-
-describe('FakeLightningBackend — the prepare-then-execute handle', () => {
-  let preparing: FakeLightningBackend
-
-  beforeEach(() => {
-    preparing = new FakeLightningBackend(join(dir, 'prepare.json'), 'bcrt', clock, {
-      ppm: 1000,
-      floorSats: 1,
-      handle: true,
-    })
-  })
-
-  it('mints a handle that names what it committed to, and pays against it', async () => {
-    const { invoice, paymentHash } = preparing.forgeInvoice(100_000)
-    const estimate = await preparing.estimateSendFee({ invoice, timeoutMs: 5_000 })
-    expect(estimate).toEqual({ feeSats: 100, feeHandle: `fake-fee-${paymentHash}-100` })
-    const paid = await preparing.payInvoice({
-      invoice,
-      maxFeeSats: 10_000,
-      idempotencyKey: 'k',
-      maxCltvBlocks: 450,
-      feeHandle: estimate!.feeHandle,
-    })
-    expect(paid.status).toBe('succeeded')
-  })
-
-  // Derived rather than stored, which is what lets the CLI's
-  // process-per-command model prepare in one process and execute in another.
-  it('honours a handle minted by a different process against the same state', async () => {
-    const { invoice } = preparing.forgeInvoice(100_000)
-    const estimate = await preparing.estimateSendFee({ invoice, timeoutMs: 5_000 })
-    const second = new FakeLightningBackend(join(dir, 'prepare.json'), 'bcrt', clock, {
-      ppm: 1000,
-      floorSats: 1,
-      handle: true,
-    })
-    const paid = await second.payInvoice({
-      invoice,
-      maxFeeSats: 10_000,
-      idempotencyKey: 'k',
-      maxCltvBlocks: 450,
-      feeHandle: estimate!.feeHandle,
-    })
-    expect(paid.status).toBe('succeeded')
-  })
-
-  // A caller that priced its quote off a token it cannot spend must not have
-  // that quietly become a payment at some other price.
-  it('refuses a handle it would not have minted rather than paying anyway', async () => {
-    const { invoice, paymentHash } = preparing.forgeInvoice(100_000)
-    await expect(
-      preparing.payInvoice({
-        invoice,
-        maxFeeSats: 10_000,
-        idempotencyKey: 'k',
-        maxCltvBlocks: 450,
-        feeHandle: `fake-fee-${paymentHash}-1`,
-      }),
-    ).rejects.toThrow(/not one this backend minted/)
-  })
-
-  it('refuses a handle minted against a different invoice', async () => {
-    const { invoice } = preparing.forgeInvoice(100_000)
-    const other = preparing.forgeInvoice(100_000)
-    const stolen = await preparing.estimateSendFee({ invoice: other.invoice, timeoutMs: 5_000 })
-    await expect(
-      preparing.payInvoice({
-        invoice,
-        maxFeeSats: 10_000,
-        idempotencyKey: 'k',
-        maxCltvBlocks: 450,
-        feeHandle: stolen!.feeHandle,
-      }),
-    ).rejects.toThrow(/not one this backend minted/)
-  })
-
-  // `backend` is the default one, which mints nothing, so every handle is one
-  // it would not have minted.
-  it('refuses any handle at all from a backend that mints none', async () => {
-    const { invoice, paymentHash } = backend.forgeInvoice(100_000)
-    await expect(
-      backend.payInvoice({
-        invoice,
-        maxFeeSats: 10_000,
-        idempotencyKey: 'k',
-        maxCltvBlocks: 450,
-        feeHandle: `fake-fee-${paymentHash}-100`,
-      }),
-    ).rejects.toThrow(/not one this backend minted/)
-  })
-
-  // Every existing caller passes no handle, and this is the assertion that says
-  // adding the field changed nothing for them — on a backend that DOES mint
-  // handles, so the check is being skipped rather than merely not reached.
-  it('pays exactly as before when no handle is offered', async () => {
-    const { invoice } = preparing.forgeInvoice(100_000)
-    const paid = await preparing.payInvoice({ invoice, maxFeeSats: 10_000, idempotencyKey: 'k', maxCltvBlocks: 450 })
-    expect(paid.status).toBe('succeeded')
   })
 })

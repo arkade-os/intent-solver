@@ -657,13 +657,6 @@ describe('LndLightningBackendAdapter.estimateSendFee', () => {
     getRoutingFeeEstimate.mockRejectedValue([503, 'UnexpectedGetRoutingFeeEstimateError', { err: { code: 14 } }])
     await expect(estimate()).rejects.toBeDefined()
   })
-
-  // LND reserves nothing: the probe and the later payment are unconnected calls,
-  // and a token would claim a link between them that does not exist.
-  it('mints no handle, because nothing here is prepared to be spent against', async () => {
-    getRoutingFeeEstimate.mockResolvedValue({ fee_mtokens: '10500', timeout: 144 })
-    await expect(estimate()).resolves.not.toHaveProperty('feeHandle')
-  })
 })
 
 describe('LndLightningBackendAdapter read deadlines', () => {

@@ -435,7 +435,6 @@ const SHAPE: StoreShape<OnchainReceiveSwapRow, OnchainReceiveSwapState> = {
   patchColumns: PATCH_COLUMNS,
   live: NON_TERMINAL,
   exposed: EXPOSED,
-  failStates: { exposed: 'stuck', clean: 'refused' },
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 
@@ -487,57 +486,12 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
     ])
   }
 
-  /**
-   * Claim the exclusive right to pay this swap's Arkade lockup.
-   *
-   * Returns true to exactly ONE caller. The compare-and-swap is on
-   * `fund_started_at IS NULL`, so a second worker reaching the same row loses
-   * here — before it spends, which is the only place losing is free.
-   *
-   * ## Why the chain read is not enough
-   *
-   * `whenFundingArkade` already asks `findLockups` whether this swap's script
-   * is funded, and adopts it if so. That closes the CRASH case: a restart sees
-   * what landed. It does not close the CONCURRENT case, and its comment saying
-   * a persisted flag is unnecessary is true only of the former. Two workers in
-   * the same window both read an empty script — the first one's payment has not
-   * landed yet, which is precisely why the second is still running — and both
-   * pay. Coin selection is per-process, so they select DIFFERENT vtxos and both
-   * succeed, leaving two lockup outputs where the swap needs one. The
-   * compare-and-swap on `state` that follows the payment gates RECORDING, not
-   * spending.
-   *
-   * ## What it does not close
-   *
-   * A crash between winning the lease and the payment landing. The row then
-   * holds a lease with no `arkade_fund_txid`, and this service cannot tell from
-   * its own state whether the transaction is in flight or was never sent. That
-   * is deliberately left STUCK and visible rather than retried: retrying is the
-   * double-fund this exists to prevent, and `findLockups` will adopt the lockup
-   * on the next tick if the payment did land. Closing it properly needs
-   * idempotency at the wallet, which `sendBitcoin` does not offer.
-   *
-   * No TTL, for the same reason. A lease that expires is a lease that lets a
-   * second worker pay while the first may still be in flight, which reinstates
-   * the bug on a timer.
-   */
-  async claimFundLease(id: string, from: OnchainReceiveSwapState): Promise<boolean> {
-    const result = await this.driver.run(
-      `UPDATE receive_onchain_swap SET fund_started_at = ?, updated_at = ?
-       WHERE id = ? AND state = ? AND fund_started_at IS NULL`,
-      [this.now(), this.now(), id, from],
-    )
-    return result.changes === 1
+  override async claimFundLease(id: string, from: OnchainReceiveSwapState): Promise<boolean> {
+    return super.claimFundLease(id, from)
   }
 
-  /**
-   * Give the lease back when the payment provably did not happen.
-   *
-   * Called only for a `FundNotSubmittedError`, never on a bare throw and never
-   * as an expiry: an ambiguous failure joins the crash case above and stays stuck.
-   */
-  async releaseFundLease(id: string): Promise<void> {
-    await this.driver.run(`UPDATE receive_onchain_swap SET fund_started_at = NULL WHERE id = ?`, [id])
+  override async releaseFundLease(id: string): Promise<void> {
+    await super.releaseFundLease(id)
   }
 
   /**

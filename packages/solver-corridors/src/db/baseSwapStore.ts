@@ -59,15 +59,6 @@ export interface StoreShape<Row, State extends string> {
   readonly live: readonly State[]
   /** States in which the solver may have paid out and not been made whole. */
   readonly exposed: readonly State[]
-  /**
-   * Where `fail()` sends a row.
-   *
-   * All four stores spell these `stuck` and `refused`, but the words are a
-   * corridor's own vocabulary rather than this file's, and a corridor that
-   * named them differently would otherwise get a silent illegal-edge throw at
-   * the worst possible moment — the moment something already went wrong.
-   */
-  readonly failStates: { readonly exposed: State; readonly clean: State }
   toRow(raw: RawRow): Row
 }
 
@@ -327,8 +318,26 @@ export abstract class BaseSwapStore<Row, State extends string> {
    * need a human, and flattening them into "failed" hides that.
    */
   async fail(id: string, from: State, reason: string): Promise<void> {
-    const to = this.shape.exposed.includes(from) ? this.shape.failStates.exposed : this.shape.failStates.clean
+    const to = (this.shape.exposed.includes(from) ? 'stuck' : 'refused') as State
     await this.transition(id, from, to, { failure_reason: reason })
+  }
+
+  /**
+   * Won by ONE caller before it spends; the `transition` CAS after gates only recording.
+   * No TTL: an expiry lets a second worker pay while the first is in flight. Protected
+   * because `send_swap` has no `fund_started_at`; stores with the column widen it.
+   */
+  protected async claimFundLease(id: string, from: State): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE ${this.shape.table} SET fund_started_at = ?, updated_at = ?
+       WHERE id = ? AND state = ? AND fund_started_at IS NULL`,
+      [this.now(), this.now(), id, from],
+    )
+    return result.changes === 1
+  }
+
+  protected async releaseFundLease(id: string): Promise<void> {
+    await this.driver.run(`UPDATE ${this.shape.table} SET fund_started_at = NULL WHERE id = ?`, [id])
   }
 
   protected async recordEvent(swapId: string, from: State | null, to: State, detail: string | null): Promise<void> {
