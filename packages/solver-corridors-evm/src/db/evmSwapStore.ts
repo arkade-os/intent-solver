@@ -89,7 +89,9 @@ export abstract class EvmSwapStore<Row, State extends string> {
     protected readonly driver: SqlDriver,
     protected readonly now: () => number,
     private readonly shape: EvmSwapShape<Row, State>,
-  ) {}
+  ) {
+    if (!/^[a-z_][a-z0-9_]*$/.test(shape.table)) throw new Error(`not a plain SQL identifier: ${shape.table}`)
+  }
 
   async close(): Promise<void> {
     await this.driver.close?.()
