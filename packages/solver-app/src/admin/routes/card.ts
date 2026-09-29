@@ -15,13 +15,12 @@ import {
   type SolverCard,
 } from '@arkade-os/solver-core/core/registryCard.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import type { SolverAd } from '@arkade-os/solver-core/core/solverAd.js'
 import type { Services } from '../../ops/services.js'
 import { publishStateOf } from '../publishState.js'
 import type { AdminDeps } from '../server.js'
 import { assetCardMarketsFromPolicy } from '../../ops/assetRfqMarkets.js'
-
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 /**
  * This deployment's signed registry card, built exactly as `cli card` builds it.

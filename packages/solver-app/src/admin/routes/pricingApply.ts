@@ -21,6 +21,7 @@ import {
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { savePassFor, type SaveField, type SavePass } from '@arkade-os/solver-core/core/saveOrder.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { carrierSatsFor } from '../../ops/assetRfqMarkets.js'
 import { applyOverrides, editableKnobValues, validateOverride, LIVE_KEYS } from '../settings.js'
 import { marketFrom, marketJson, type MarketBody } from './markets.js'
@@ -30,8 +31,6 @@ interface ApplyBody {
   markets?: unknown
   overrides?: unknown
 }
-
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 const asScalar = (value: unknown): bigint | number | boolean | null =>
   typeof value === 'bigint' || typeof value === 'number' || typeof value === 'boolean' ? value : null
@@ -48,13 +47,7 @@ export const fieldForOverride = (key: string): SaveField | null => {
   return null
 }
 
-/**
- * `null` is INHERIT, not absence, so it resolves rather than taking
- * `savePassFor`'s appearing/disappearing arms. Each side resolves against ITS
- * OWN `feeBps`, because this save may be moving `feeBps` too.
- */
-const effectiveBps = (own: number | undefined, feeBps: number): number => own ?? feeBps
-
+/** Unset is INHERIT, so each side resolves against ITS OWN `feeBps`: this save may be moving `feeBps` too. */
 const keptBps = (
   stored: number | undefined,
   target: number | undefined,
@@ -63,8 +56,8 @@ const keptBps = (
 ): number | undefined =>
   savePassFor({
     field: 'feeBps',
-    before: effectiveBps(stored, storedFee),
-    after: effectiveBps(target, targetFee),
+    before: stored ?? storedFee,
+    after: target ?? targetFee,
   }) === 'widening'
     ? stored
     : target

@@ -3,19 +3,7 @@
  *
  * A solver holds money in more than one place and always has: the Arkade float
  * every corridor pays out of, the BTC rail's channel and onchain balances, and —
- * once a chain is configured — token liquidity for the EVM corridors. Until this
- * existed, the console could only READ one of them and could move none, so
- * topping any of them up meant leaving for a node's own CLI, a faucet script or
- * a vendor dashboard.
- *
- * ## Why a seam rather than a Lightning-shaped pair of buttons
- *
- * The first cut of this was "fund the Lightning backend". That is one source of
- * four, and its shape is not the general shape: an Arkade wallet boards on L1 and
- * pays out in VTXOs (offchain, or off L1 by collaborative exit), an EVM rail's
- * deposit is a plain account address and its balance is a token, and each of them
- * splits its balance into a different set of numbers. Anything the console
- * hardcodes about one of them is a thing the next source has to be bent into.
+ * once a chain is configured — token liquidity for the EVM corridors, each shaped differently.
  *
  * So a source declares three things and nothing more: what it is, what it holds,
  * and which of the three operations it can perform.

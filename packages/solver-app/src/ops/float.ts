@@ -28,6 +28,7 @@
  */
 
 import { hex } from '@scure/base'
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import {
   liveLockupRows,
   recoverableVtxosFrom,
@@ -239,7 +240,7 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
     recoverVtxos: () => vtxoManager.recoverVtxos(),
     recoverableVtxos: () => recoverableVtxosFrom(wallet),
     lockupDeadlines: async () => deadlines,
-    nowSeconds: () => Math.floor(Date.now() / 1000),
+    nowSeconds,
   })
 
   // Folded in rather than returned separately: `failures` is already the one

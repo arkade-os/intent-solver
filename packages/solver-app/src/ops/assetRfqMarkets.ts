@@ -171,8 +171,10 @@ export const recoverReadableMarkets = (
 
 type Bounds = { min: bigint; max: bigint }
 
-const samePair = (market: AssetMarketPricingView, pair: AssetMarket): boolean =>
-  (market.base === pair.a && market.quote === pair.b) || (market.base === pair.b && market.quote === pair.a)
+export const samePair = (
+  market: { base: string | null; quote: string | null },
+  pair: { a: string | null; b: string | null },
+): boolean => (market.base === pair.a && market.quote === pair.b) || (market.base === pair.b && market.quote === pair.a)
 
 const unionBounds = (...bounds: Array<Bounds | null | undefined>): Bounds | undefined => {
   const present = bounds.filter((bound): bound is Bounds => bound !== null && bound !== undefined)

@@ -20,30 +20,21 @@ export interface RecordedOfferRefusal {
   detail: string
 }
 
-export interface OfferRefusalTail {
-  entries: RecordedOfferRefusal[]
-  /** Always true. Present so the UI can say so rather than implying an empty list is meaningful. */
-  ephemeral: true
-  /** How many refusals the buffer holds before the oldest is dropped. */
-  capacity: number
-}
-
 export const OFFER_REFUSAL_TAIL_CAPACITY = 200
 
-export interface OfferRefusalRecorder {
-  record(refusal: RecordedOfferRefusal): void
-  recent(): OfferRefusalTail
-}
-
-export const createOfferRefusalTail = (capacity = OFFER_REFUSAL_TAIL_CAPACITY): OfferRefusalRecorder => {
-  const entries: RecordedOfferRefusal[] = []
+/** Newest first and bounded; `recent()` hands back copies, so a caller cannot reshape the shared buffer. */
+export const createTail = <T extends object>(capacity: number) => {
+  const entries: T[] = []
   return {
-    record: (refusal) => {
-      // Newest first, so the drop is O(1) at the end rather than a shift at the head.
-      entries.unshift(refusal)
+    record: (entry: T): void => {
+      entries.unshift(entry)
       if (entries.length > capacity) entries.length = capacity
     },
-    // A copy: a caller that sorts the result must not reshape the shared buffer.
-    recent: () => ({ entries: [...entries], ephemeral: true, capacity }),
+    recent: () => ({ entries: entries.map((entry) => ({ ...entry })), ephemeral: true as const, capacity }),
   }
 }
+
+export const createOfferRefusalTail = (capacity = OFFER_REFUSAL_TAIL_CAPACITY) =>
+  createTail<RecordedOfferRefusal>(capacity)
+
+export type OfferRefusalRecorder = ReturnType<typeof createOfferRefusalTail>

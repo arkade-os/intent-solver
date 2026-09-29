@@ -34,6 +34,7 @@ import { registerEventRoutes } from './routes/events.js'
 import type { ChangeFeed } from './events.js'
 import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { readStaticFile } from './static.js'
 import { createFeedCache } from './feedCache.js'
 
@@ -79,7 +80,7 @@ export interface AdminDeps {
 
 export const buildAdminApp = (deps: AdminDeps): Hono => {
   const app = new Hono()
-  const now = deps.now ?? ((): number => Math.floor(Date.now() / 1000))
+  const now = deps.now ?? nowSeconds
 
   app.get('/api/healthz', (c) =>
     c.json({ ok: true, mode: deps.mode, uptimeSeconds: Math.max(0, now() - deps.startedAt) }),
