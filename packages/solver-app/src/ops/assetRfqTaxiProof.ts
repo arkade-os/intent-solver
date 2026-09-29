@@ -24,7 +24,12 @@ import type {
   ReceiveCarrierQuotes,
   ReceiveCarrierReconcileOutcome,
 } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import { decodeCarrierAttemptInputs, type CarrierOutpoint, type CarrierPinLedger } from './assetRfqTaxi.js'
+import {
+  canonicalDecimal,
+  decodeCarrierAttemptInputs,
+  type CarrierOutpoint,
+  type CarrierPinLedger,
+} from './assetRfqTaxi.js'
 
 /** The two spend facts a virtual output carries: `spentBy` is normally the
  * CHECKPOINT id and `arkTxId` the final transaction's. */
@@ -74,16 +79,13 @@ const outpointOf = (value: JsonValue | undefined, label: string): CarrierOutpoin
   return { txid: raw.txid, vout: raw.vout as number }
 }
 
-const stringField = (value: JsonValue | undefined, label: string): string => {
+export const stringField = (value: JsonValue | undefined, label: string): string => {
   if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} is not recorded`)
   return value
 }
 
-const satsField = (value: JsonValue | undefined, label: string): bigint => {
-  const raw = stringField(value, label)
-  if (!/^(0|[1-9][0-9]*)$/.test(raw)) throw new Error(`${label} is not a canonical decimal`)
-  return BigInt(raw)
-}
+const satsField = (value: JsonValue | undefined, label: string): bigint =>
+  canonicalDecimal(stringField(value, label), label)
 
 interface BoundGraph {
   arkTx: string
@@ -189,7 +191,7 @@ const reconstruct = (row: AssetRfqSwapRow, attempt: CarrierAttempt, label: strin
 }
 
 /** Null is "the chain has not shown me enough", never "it is not settled". */
-export const proveCarrierFill = async (
+const proveCarrierFill = async (
   row: AssetRfqSwapRow,
   attempt: CarrierAttempt,
   chain: CarrierChainReader,

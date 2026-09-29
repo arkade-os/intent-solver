@@ -14,6 +14,7 @@ import { taxiClientCache, type CarrierCoin, type CarrierOutpoint, type CarrierPi
 import {
   carrierFillSigner,
   createTaxiReceiveCarrierSettler,
+  messageOf,
   type CarrierAttemptStore,
   type CarrierFillSeams,
   type CarrierTaxi,
@@ -57,8 +58,6 @@ export class CarrierTaxiRefusedError extends Error {
     this.name = 'CarrierTaxiRefusedError'
   }
 }
-
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 /** Keyed on the row's MODE, never on URL equality: a named Taxi spelling `TAXI_URL` is still a payer's input (G3). */
 export const carrierTaxiFor = (

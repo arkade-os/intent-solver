@@ -19,7 +19,7 @@ import {
 import { outpointKey } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 import { attachEmulatorPackets, refundAssetPacket } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
-import type { CarrierAttempt, JsonObject, JsonValue } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
+import type { CarrierAttempt, JsonObject } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 import type { ReceiveCarrierReconcileOutcome } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
   carrierTaprootEvidence,
@@ -28,7 +28,7 @@ import {
   type CarrierOutpoint,
   type CarrierPinLedger,
 } from './assetRfqTaxi.js'
-import { carrierFillIds, type CarrierChainReader } from './assetRfqTaxiProof.js'
+import { carrierFillIds, stringField, type CarrierChainReader } from './assetRfqTaxiProof.js'
 
 export const CARRIER_CONFLICT_AFTER_SECONDS = 900
 
@@ -74,11 +74,6 @@ export class CarrierConflictRejectedError extends Error {
 
 const PENDING: ReceiveCarrierReconcileOutcome = { status: 'pending' }
 
-const stringOf = (value: JsonValue | undefined, label: string): string => {
-  if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} is not recorded`)
-  return value
-}
-
 const conflictDeadline = (snapshot: JsonObject, label: string): number => {
   const deadlines = [snapshot.valid_until, (snapshot.quote as JsonObject | undefined)?.expires_at]
   if (!deadlines.every((value) => Number.isSafeInteger(value))) {
@@ -106,8 +101,8 @@ const storedConflictOf = (
   if (raw === undefined || !Array.isArray(raw.checkpoints) || !Array.isArray(raw.checkpoint_txids)) {
     throw new Error(`${label} records no conflict spend`)
   }
-  const arkTxPsbt = stringOf(raw.ark_tx, `${label} conflict transaction`)
-  const checkpointPsbts = raw.checkpoints.map((entry, i) => stringOf(entry, `${label} conflict checkpoint ${i}`))
+  const arkTxPsbt = stringField(raw.ark_tx, `${label} conflict transaction`)
+  const checkpointPsbts = raw.checkpoints.map((entry, i) => stringField(entry, `${label} conflict checkpoint ${i}`))
   const arkTx = Transaction.fromPSBT(base64.decode(arkTxPsbt))
   const checkpoints = checkpointPsbts.map((psbt) => Transaction.fromPSBT(base64.decode(psbt)))
   if (arkTx.id !== raw.txid || checkpoints.map((tx) => tx.id).join() !== raw.checkpoint_txids.join()) {
@@ -128,7 +123,7 @@ const storedConflictOf = (
   if (links.join() !== checkpoints.map((tx) => outpointKey(tx.id, 0)).join()) {
     throw new Error(`${label} conflict does not spend exactly its own checkpoints`)
   }
-  const proceeds = stringOf(attempt.snapshot.proceeds_script, `${label} snapshot proceeds script`).toLowerCase()
+  const proceeds = stringField(attempt.snapshot.proceeds_script, `${label} snapshot proceeds script`).toLowerCase()
   const paid = arkTx.getOutput(0)?.script
   if (paid === undefined || hex.encode(paid) !== proceeds) throw new Error(`${label} conflict does not pay the solver`)
   const ids = new Set([arkTx.id, ...checkpoints.map((tx) => tx.id)])
@@ -181,7 +176,7 @@ const buildConflict = async (
     return { coin, leaf: coin.forfeitTapLeafScript, tapTree: evidence.tapTree }
   })
   const total = spent.reduce((sum, { coin }) => sum + BigInt(coin.value), 0n)
-  const proceeds = hex.decode(stringOf(attempt.snapshot.proceeds_script, `${label} snapshot proceeds script`))
+  const proceeds = hex.decode(stringField(attempt.snapshot.proceeds_script, `${label} snapshot proceeds script`))
   const { arkTx, checkpoints } = buildOffchainTx(
     spent.map(({ coin, leaf, tapTree }) => ({
       txid: coin.txid,

@@ -98,13 +98,18 @@ export const assetIdValue = (assetId: string): { txid: Uint8Array; groupIndex: n
   return { txid: Uint8Array.from(parsed.txid).reverse(), groupIndex: parsed.groupIndex }
 }
 
+export const canonicalDecimal = (value: string, label: string): bigint => {
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new Error(`${label} is not a canonical decimal`)
+  return BigInt(value)
+}
+
 const locktimeOf = (
   tagged: { kind: 'height' | 'time'; value: string },
   field: string,
-): { kind: 'height' | 'time'; value: bigint } => {
-  if (!/^(0|[1-9][0-9]*)$/.test(tagged.value)) throw new Error(`carrier quote ${field} is not a canonical decimal`)
-  return { kind: tagged.kind, value: BigInt(tagged.value) }
-}
+): { kind: 'height' | 'time'; value: bigint } => ({
+  kind: tagged.kind,
+  value: canonicalDecimal(tagged.value, `carrier quote ${field}`),
+})
 
 type ReceiveQuoteWire = Awaited<ReturnType<TaxiClient['getReceiveQuote']>>
 

@@ -23,7 +23,7 @@ import {
 import { buildOfferFillPlan, type JointGraph, type TaxiClient } from '@arkade-taxi/client'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierFillRebuildRequest } from './assetRfqTaxiSettle.js'
-import type { CarrierCoin } from './assetRfqTaxi.js'
+import { canonicalDecimal, type CarrierCoin } from './assetRfqTaxi.js'
 
 type SwapFillGraphWire = Parameters<TaxiClient['submitSwapFill']>[1]
 type SwapFillGraphInputWire = SwapFillGraphWire['inputs'][number]
@@ -75,12 +75,6 @@ export const recoverJointFunding = (wire: SwapFillGraphWire, label: string): rea
   return wire.inputs.map((claimed, i) => fundingFromCheckpoint(wire.checkpoints[i]!, claimed, `${label} input ${i}`))
 }
 
-/** Strict, matching the observer's decimal-only reader. */
-const wireSats = (value: string, label: string): bigint => {
-  if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new Error(`${label} is not a canonical decimal`)
-  return BigInt(value)
-}
-
 export const sponsorLegFrom = (
   wire: SwapFillGraphWire,
   funding: readonly CarrierJointFunding[],
@@ -98,7 +92,7 @@ export const sponsorLegFrom = (
   const script = change?.script ?? fare?.script
   const quoted =
     fund.reduce((total, coin) => total + BigInt(coin.value), 0n) -
-    (change === undefined ? 0n : wireSats(change.sats, `${label} sponsor change`))
+    (change === undefined ? 0n : canonicalDecimal(change.sats, `${label} sponsor change`))
   if (quoted <= 0n) throw new Error(`${label} quotes a sponsor contributing ${quoted} sats`)
   const changeScript = script === undefined ? fallbackChangeScript : hex.decode(script)
   // The AUTHORISED number is what gets built; the quote's own is only compared
@@ -178,7 +172,7 @@ const fareFrom = (
   if ((output.assets ?? []).length > 0) {
     throw new Error(`${label} quotes a fare carrying assets; only a sats fare was authorised`)
   }
-  const sats = wireSats(output.sats, `${label} fare`)
+  const sats = canonicalDecimal(output.sats, `${label} fare`)
   if (sats > maxFareSats) throw new Error(`${label} quotes a fare of ${sats} sats over the ${maxFareSats} authorised`)
   // Refused here rather than by the assembler's `min: 1`, so the vocabulary of
   // the refusal is this adapter's.
@@ -239,7 +233,7 @@ export const createCarrierFillRebuilder =
     assertQuotedOwnership(wire, request, label)
     const receiver = wire.outputs[0]
     if (receiver?.role !== 'receiver') throw new Error(`${label} was quoted no receiver output to pay the maker`)
-    if (wireSats(receiver.sats, `${label} carrier`) !== request.physicalSats) {
+    if (canonicalDecimal(receiver.sats, `${label} carrier`) !== request.physicalSats) {
       throw new Error(
         `${label} was quoted a ${receiver.sats} sat carrier, not the ${request.physicalSats} it authorised`,
       )

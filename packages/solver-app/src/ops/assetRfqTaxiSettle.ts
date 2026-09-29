@@ -45,7 +45,7 @@ type SwapFillGraphWire = Parameters<TaxiClient['submitSwapFill']>[1]
 
 /** Backoff before each re-POST on `not_ready`: the Taxi's runtime check takes seconds, and this settle holds the
  * orchestrator's fill queue while it waits. */
-export const CARRIER_NOT_READY_RETRY_MS: readonly number[] = [1_000, 2_000, 4_000]
+const CARRIER_NOT_READY_RETRY_MS: readonly number[] = [1_000, 2_000, 4_000]
 
 declare const carrierSnapshot: unique symbol
 
@@ -423,7 +423,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
   }
 }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+export const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 /** Runs past `submitting`, so no exit here releases. The Taxi already holds the signatures, and a named one is
  * untrusted: its `not_ready` is no proof it will never submit, so the SAME bytes are re-sent, never rebuilt. */
