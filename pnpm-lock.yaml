@@ -56,9 +56,6 @@ importers:
       '@scure/base':
         specifier: ^2.0.0
         version: 2.2.0
-      '@scure/bip32':
-        specifier: ^2.2.0
-        version: 2.2.0
       '@scure/bip39':
         specifier: ^2.2.0
         version: 2.2.0
@@ -80,9 +77,6 @@ importers:
       nostr-tools:
         specifier: ^2.24.1
         version: 2.24.1(typescript@5.9.3)
-      zod:
-        specifier: ^3.24.1
-        version: 3.25.76
     devDependencies:
       '@arkade-os/swap':
         specifier: 0.0.22
