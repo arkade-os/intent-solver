@@ -11,21 +11,11 @@
  * existing importers keep working; vendor packages import from here directly.
  */
 
-/** One chain call: a destination and calldata, plus optional native value. */
+/** One chain call: a destination and calldata. Every call is ERC-20, so none carries native value. */
 export interface EvmCall {
   /** The `ERC20Swap` deployment, 20 bytes. */
   to: Uint8Array
   data: Uint8Array
-  /**
-   * Native currency to attach, in wei. Absent means none.
-   *
-   * Only `lockPrepayMinerfee` uses it, and it is not decoration: that value IS
-   * the claimant's gas money, forwarded to them by the contract in the same
-   * transaction. Attaching zero would lock the tokens and fund nobody, leaving
-   * a client who holds no native asset unable to claim — the failure the
-   * function exists to prevent.
-   */
-  value?: bigint
 }
 
 /**
@@ -131,17 +121,9 @@ export interface EvmHtlcBackend {
    * What this contract may currently move of `token` on `owner`'s behalf.
    *
    * Read rather than assumed, because the safe approval sequence depends on it:
-   * see {@link EvmHtlcBackend.approveCall}.
+   * see {@link EvmHtlcBackend.lockCalls}.
    */
   allowance(token: Uint8Array, owner: Uint8Array): Promise<bigint>
-  /**
-   * Calldata to fund this lock — the allowance above must already stand.
-   *
-   * Prefer {@link EvmHtlcBackend.lockCalls}, which establishes it. Alone this
-   * reverts against a token the solver has not approved, and a revert is not
-   * distinguishable downstream from a lock that has not landed yet.
-   */
-  lockCall(lock: Erc20SwapLock): EvmCall
   /**
    * Every call the lock needs, in order — approval included. The LAST is always
    * the lock itself.
@@ -151,86 +133,15 @@ export interface EvmHtlcBackend {
    * transactions a lock costs in one readable place.
    */
   lockCalls(lock: Erc20SwapLock, currentAllowance: bigint): readonly EvmCall[]
-  /**
-   * The same lock, forwarding `prepayWei` of native currency to the claimant so
-   * a client holding no gas can still claim.
-   *
-   * The contract sets `refundAddress` to `msg.sender`, so `lock.refundAddress`
-   * MUST be the address that will sign this — otherwise the swap key the
-   * contract stores is not the one we derive, and we lose track of our own
-   * lock. Refused here rather than discovered on chain.
-   *
-   * ONLY VALID WHEN THE CLAIMANT IS THE SUBMITTER, and that is not checkable
-   * here. The contract forwards the value to `claimAddress`:
-   *
-   * ```solidity
-   * TransferHelper.transferEther(claimAddress, msg.value);
-   * ```
-   *
-   * That is right when `claimAddress` is the party who will send the claim
-   * transaction — a self-custody client claiming its own tokens. It is WRONG
-   * whenever the claimant and the submitter differ, and the clearest case is
-   * paying a third party: Arkade BTC to a merchant's USDC. There
-   * `claimAddress` is the merchant, who publishes an address and runs nothing,
-   * while the claim is submitted by the payer or by a daemon holding the
-   * preimage. The prepay then funds an address that will never spend it, and
-   * the party who actually needs gas still has none — a silent subsidy to the
-   * wrong account, with the swap failing for the original reason.
-   *
-   * Nothing at this layer knows who will submit, so the check belongs to
-   * whatever builds the lock. Use {@link claimForCall} for the third-party
-   * case, and fund that submitter separately.
-   *
-   * It also moves the tokens with `transferFrom` exactly as `lock` does, so
-   * whoever wires it needs the allowance too. There is no `lockPrepayCalls`
-   * sibling because there is no caller to shape one around — see
-   * {@link EvmHtlcBackend.lockCalls}.
-   */
-  lockPrepayCall(lock: Erc20SwapLock, prepayWei: bigint, senderAddress: Uint8Array): EvmCall
   /** Calldata to claim it with a revealed preimage. Caller must be `claimAddress`. */
   claimCall(preimage: Uint8Array, lock: Erc20SwapLock): EvmCall
   /** Calldata to refund it after the timelock. Caller must be `refundAddress`. */
   refundCall(lock: Erc20SwapLock): EvmCall
   /**
-   * The same claim, submittable BY ANYONE, with the tokens still going to
-   * `lock.claimAddress`.
-   *
-   * This is the non-interactive path — what covclaimd provides on Arkade. The
-   * contract's `claim` overload taking an explicit `claimAddress` is `public`
-   * and does not read `msg.sender`, so a preimage that is already public is
-   * enough for a third party to settle the swap. Use it when the party who
-   * SHOULD claim has not: offline, out of gas, or simply gone.
-   *
-   * The sender pays gas and receives nothing, so this is a deliberate act by
-   * someone with a reason — typically the solver, whose counter-leg is parked
-   * until the claim lands.
-   */
-  claimForCall(preimage: Uint8Array, lock: Erc20SwapLock): EvmCall
-  /**
    * The same refund, submittable by anyone once the timelock has matured, with
    * the tokens still returning to `lock.refundAddress`.
    */
   refundForCall(lock: Erc20SwapLock): EvmCall
-  /**
-   * How much the swap contract may currently move of `owner`'s tokens.
-   *
-   * Read against the TOKEN named by `lock.tokenAddress`, not the swap contract,
-   * and needed before approving rather than only as an optimisation — some
-   * tokens revert an approve that moves a non-zero allowance to another
-   * non-zero value. See {@link approvalStepFor}.
-   */
-  allowanceOf(lock: Erc20SwapLock, owner: Uint8Array): Promise<bigint>
-  /**
-   * Calldata to let the swap contract move `amount` of the caller's tokens.
-   *
-   * ADDRESSED TO THE TOKEN, not to `contractAddress` like every other call
-   * here — `lock.tokenAddress` is the `to`. Sending this to the swap
-   * contract would revert with nothing that names the cause.
-   *
-   * `lock` does `transferFrom`, so without this the first real lock fails on
-   * a step this port documented and never took.
-   */
-  approveCall(lock: Erc20SwapLock, amount: bigint): EvmCall
 }
 
 export interface EvmHtlcBackendDeps {

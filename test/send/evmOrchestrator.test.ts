@@ -75,11 +75,8 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
     transactionBlock: vi.fn().mockResolvedValue(LOCK_BLOCK),
     allowance: vi.fn().mockResolvedValue(0n),
     lockCalls: vi.fn().mockReturnValue([APPROVE_CALL, LOCK_CALL]),
-    approveCall: vi.fn(),
-    lockCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
     refundCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
     claimCall: vi.fn(),
-    lockPrepayCall: vi.fn(),
     ...(over.evm ?? {}),
   } as unknown as EvmSendServiceDeps['evm']
   const deps: EvmSendServiceDeps = {
@@ -491,10 +488,8 @@ describe('the preimage is persisted BEFORE the Arkade claim is attempted', () =>
 
         isLockedAt: vi.fn().mockResolvedValue(true),
         blockTimestampAt: vi.fn().mockResolvedValue(0),
-        lockCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
         refundCall: vi.fn(),
         claimCall: vi.fn(),
-        lockPrepayCall: vi.fn(),
       } as unknown as EvmSendServiceDeps['evm'],
       claimArkade: vi.fn().mockImplementation(async () => {
         preimageAtClaim = (await store.get('swap-1')).preimage

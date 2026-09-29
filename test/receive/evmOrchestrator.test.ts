@@ -58,9 +58,7 @@ const evmFake = () =>
     blockTimestampAt: vi.fn().mockResolvedValue(0),
     transactionOutcome: vi.fn().mockResolvedValue('pending'),
     claimCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
-    lockCall: vi.fn(),
     refundCall: vi.fn(),
-    lockPrepayCall: vi.fn(),
   }) as unknown as EvmReceiveServiceDeps['evm']
 
 const build = async (over: Partial<EvmReceiveServiceDeps> = {}) => {

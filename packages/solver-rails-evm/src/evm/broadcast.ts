@@ -77,7 +77,7 @@ export const createEvmBroadcaster = (deps: EvmBroadcastDeps) => {
         maxFeePerGas: priced.maxFeePerGas,
         gas: deps.gasLimit,
         to: call.to,
-        value: call.value ?? 0n,
+        value: 0n,
         data: call.data,
       }
       raw = '0x' + bytesToHex(signTransaction(tx, deps.privateKey).raw)

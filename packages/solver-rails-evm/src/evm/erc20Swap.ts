@@ -1,6 +1,6 @@
 /**
  * Talking to Boltz's `ERC20Swap` — the swap-key derivation, the calldata for
- * its three money functions, and reading the preimage back off a claim.
+ * its three money functions, and the topics of the events they emit.
  *
  * WHY WE HAND-ROLL THE ABI. `lock`, `claim` and `refund` take only static
  * types — `bytes32`, `uint256`, `address` — so every argument is exactly one
@@ -19,15 +19,7 @@
  */
 
 import { keccak_256 } from '@noble/hashes/sha3.js'
-// SHA-256 IS NOT A CHOICE HERE, so it is not a parameter. The contract applies
-// `sha256(abi.encodePacked(preimage))` and Lightning hashes payment preimages
-// the same way; any other digest rejects every honest preimage and the
-// cross-leg signal is simply never seen. It used to be injected "for
-// testability", but every caller in src/ and test/ passed this exact function —
-// so the seam bought nothing and offered one way to be silently wrong.
-import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes } from '@noble/hashes/utils.js'
-import { equalBytes } from '@noble/curves/utils.js'
 // The lock identity moved to the core port vocabulary with the vendor split.
 // Re-exported so existing importers keep resolving; vendor packages read core.
 export type { Erc20SwapLock } from '@arkade-os/solver-core/ports/evm.js'
@@ -149,38 +141,10 @@ export const encodeClaim = (preimage: Uint8Array, lock: Erc20SwapLock): Uint8Arr
   )
 
 /**
- * `claim(bytes32,uint256,address,address,address,uint256)` — the NON-INTERACTIVE
- * claim, and the EVM answer to what covclaimd does on Arkade.
+ * `refund(bytes32,uint256,address,address,address,uint256)` — the NON-INTERACTIVE
+ * refund.
  *
- * The contract declares this overload `public` and takes `claimAddress` as a
- * parameter rather than reading `msg.sender`, so ANYONE may submit it and the
- * tokens still land on `claimAddress`. That is the whole point: a client who is
- * offline, or who never acquires gas despite {@link encodeLockPrepayMinerfee},
- * no longer has to be the one to act. Without it a swap whose preimage is
- * already public resolves by timeout — the tokens sit until the refund opens
- * even though everything needed to settle them is known.
- *
- * The words are `lockWords` with the preimage in place of its hash, because the
- * overload's parameter list IS the lock's, in order. Reusing it rather than
- * re-listing five fields is the same defence the header describes: a caller
- * cannot assemble a second, subtly different argument set.
- *
- * Submitting it is not free — the sender pays gas and receives nothing — so who
- * runs it is a deployment question, not a protocol one. The solver already has
- * a reason to: on a receive corridor it is holding the counter-leg, and a claim
- * that never lands is capital parked until timeout.
- */
-export const CLAIM_FOR_SIGNATURE = 'claim(bytes32,uint256,address,address,address,uint256)'
-const CLAIM_FOR_SELECTOR = selectorFor(CLAIM_FOR_SIGNATURE)
-
-export const encodeClaimFor = (preimage: Uint8Array, lock: Erc20SwapLock): Uint8Array =>
-  concatBytes(CLAIM_FOR_SELECTOR, bytes32Word(preimage, 'preimage'), ...lockWords(lock).slice(1))
-
-/**
- * `refund(bytes32,uint256,address,address,address,uint256)` — the same thing for
- * the refund leg.
- *
- * Also `public` with an explicit `refundAddress`, so a third party can push a
+ * `public` with an explicit `refundAddress`, so a third party can push a
  * matured refund and the tokens still return to whoever funded the lock. The
  * argument list is exactly the lock's, so this is `lockWords` unchanged.
  */
@@ -201,48 +165,6 @@ const REFUND_SELECTOR = selectorFor(REFUND_SIGNATURE)
 export const encodeRefund = (lock: Erc20SwapLock): Uint8Array =>
   concatBytes(
     REFUND_SELECTOR,
-    bytes32Word(lock.preimageHash, 'preimageHash'),
-    uintWord(lock.amount, 'amount'),
-    addressWord(lock.tokenAddress, 'tokenAddress'),
-    addressWord(lock.claimAddress, 'claimAddress'),
-    uintWord(lock.timelock, 'timelock'),
-  )
-
-/**
- * `lockPrepayMinerfee(bytes32,uint256,address,address,uint256)`.
- *
- * The same lock, plus native currency forwarded to the claimant in the very
- * same transaction:
- *
- * ```solidity
- * function lockPrepayMinerfee(..., address payable claimAddress, uint256 timelock)
- *     external payable {
- *   lock(preimageHash, amount, tokenAddress, claimAddress, msg.sender, timelock);
- *   TransferHelper.transferEther(claimAddress, msg.value);
- * }
- * ```
- *
- * WHY THIS FUNCTION EXISTS FOR US. A client receiving tokens usually holds none
- * of the chain's native asset, so it cannot pay for the claim and the swap
- * resolves by timeout — for exactly the users most likely to want the corridor.
- * This funds them for gas at the moment the tokens are locked, atomically, with
- * no extra round trip and nothing to trust. It is the contract-level answer
- * that decided the contract choice, so the binding would be incomplete without
- * it.
- *
- * NOTE THE PARAMETER LIST. `refundAddress` is NOT passed — the locker is
- * `msg.sender` and the contract fills it in. Passing the full lock and dropping
- * the field here keeps a caller from assembling a second, subtly different
- * argument set, exactly as `encodeClaim` and `encodeRefund` do. The lock's
- * `refundAddress` must therefore BE the sender, or the swap key the contract
- * stores will not be the one {@link swapKey} derives.
- */
-export const LOCK_PREPAY_SIGNATURE = 'lockPrepayMinerfee(bytes32,uint256,address,address,uint256)'
-const LOCK_PREPAY_SELECTOR = selectorFor(LOCK_PREPAY_SIGNATURE)
-
-export const encodeLockPrepayMinerfee = (lock: Erc20SwapLock): Uint8Array =>
-  concatBytes(
-    LOCK_PREPAY_SELECTOR,
     bytes32Word(lock.preimageHash, 'preimageHash'),
     uintWord(lock.amount, 'amount'),
     addressWord(lock.tokenAddress, 'tokenAddress'),
@@ -291,42 +213,3 @@ const REFUND_EVENT_TOPIC = keccak_256(new TextEncoder().encode(REFUND_EVENT_SIGN
 
 /** A COPY, for the reason {@link claimEventTopic} returns one. */
 export const refundEventTopic = (): Uint8Array => Uint8Array.from(REFUND_EVENT_TOPIC)
-
-/**
- * The preimage carried by a `Claim` log, checked against the hash we expect.
- *
- * `preimageHash` is indexed and so rides in `topics[1]`; `preimage` is not
- * indexed and is the whole of `data`. That layout is the contract's
- * declaration, quoted verbatim:
- *
- * ```solidity
- * event Claim(bytes32 indexed preimageHash, bytes32 preimage);
- * ```
- *
- * The topic this derives from that signature was confirmed present in the
- * deployed bytecode (see the tests). The layout itself is NOT confirmed against
- * a live log — the Arbitrum deployment has emitted nothing in 2M blocks, and
- * every public RPC reachable from here gates the historical `eth_getLogs` range
- * needed to find one elsewhere. Source plus bytecode is the strongest evidence
- * available without a funded testnet claim.
- *
- * The verification is the point. A log is untrusted input — anyone may emit an
- * event shaped like this from another contract, and a node may hand us the
- * wrong one — so a preimage that does not hash to what we locked against must
- * never reach the code that would spend on it. The caller supplies the hash it
- * expects rather than trusting `topics[1]`, because the topic is attacker-chosen
- * in exactly the case that matters.
- */
-export const preimageFromClaimLog = (
-  log: { topics: readonly Uint8Array[]; data: Uint8Array },
-  expectedPreimageHash: Uint8Array,
-): Uint8Array => {
-  const topic = log.topics[0]
-  if (!topic || !equalBytes(topic, CLAIM_EVENT_TOPIC)) throw new Error('not a Claim log')
-  if (log.data.length !== WORD) throw new Error(`Claim data must be ${WORD} bytes, got ${log.data.length}`)
-  const preimage = Uint8Array.from(log.data)
-  if (!equalBytes(sha256(preimage), expectedPreimageHash)) {
-    throw new Error('Claim log preimage does not hash to the expected payment hash')
-  }
-  return preimage
-}

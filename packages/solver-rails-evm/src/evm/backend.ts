@@ -29,10 +29,8 @@ import { equalBytes } from '@noble/curves/utils.js'
 import {
   claimEventTopic,
   encodeClaim,
-  encodeClaimFor,
   decodeUint256,
   encodeLock,
-  encodeLockPrepayMinerfee,
   encodeRefund,
   encodeRefundFor,
   refundEventTopic,
@@ -239,8 +237,6 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
       return decodeUint256(word, 'allowance()')
     },
 
-    lockCall: (lock) => call(encodeLock(lock)),
-
     lockCalls(lock, currentAllowance) {
       // ONE place decides the sequence. `approvalStepFor` owns the
       // non-zero-to-non-zero rule (see erc20Token.ts); re-deriving it here would
@@ -254,51 +250,8 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
       return calls
     },
 
-    lockPrepayCall: (lock, prepayWei, senderAddress) => {
-      if (prepayWei <= 0n) {
-        // Zero would lock the tokens and fund nobody — the exact failure this
-        // function exists to prevent, and silent on chain. Use `lockCall` when
-        // no prepay is wanted.
-        throw new Error(`prepayWei must be positive, got ${prepayWei}; use lockCall for no prepay`)
-      }
-      // Length first, so a wrong-shaped input says so. Without this a 32-byte
-      // hash passed by mistake fails `equalBytes` on LENGTH and reports "must
-      // be the sending address", sending a caller to look at the wrong thing.
-      if (senderAddress.length !== 20) {
-        throw new Error(`senderAddress must be 20 bytes, got ${senderAddress.length}`)
-      }
-      if (!equalBytes(lock.refundAddress, senderAddress)) {
-        // The contract writes msg.sender into the key as refundAddress. A
-        // mismatch means the lock we fund is keyed differently from the one we
-        // can address, so we could neither find nor refund it.
-        throw new Error('lockPrepayCall: lock.refundAddress must be the sending address')
-      }
-      return { ...call(encodeLockPrepayMinerfee(lock)), value: prepayWei }
-    },
     claimCall: (preimage, lock) => call(encodeClaim(preimage, lock)),
-    claimForCall: (preimage, lock) => call(encodeClaimFor(preimage, lock)),
     refundCall: (lock) => call(encodeRefund(lock)),
     refundForCall: (lock) => call(encodeRefundFor(lock)),
-
-    async allowanceOf(lock, owner) {
-      if (owner.length !== 20) throw new Error(`owner must be 20 bytes, got ${owner.length}`)
-      const result = await rpc('eth_call', [
-        { to: hexOf(lock.tokenAddress), data: hexOf(encodeAllowance(owner, contractAddress)) },
-        'latest',
-      ])
-      const word = bytesOfHex(result, 'eth_call allowance()')
-      if (word.length !== 32) throw new Error(`eth_call allowance(): expected one word, got ${word.length} bytes`)
-      // A uint256 word, big-endian. Read as a whole rather than assuming it fits
-      // a Number: an unlimited approval is 2**256-1 and would silently lose
-      // precision, reporting a smaller allowance than exists.
-      return word.reduce((acc, byte) => (acc << 8n) | BigInt(byte), 0n)
-    },
-
-    approveCall: (lock, amount) => ({
-      // The TOKEN, not contractAddress — the one call here that is not addressed
-      // to the swap deployment.
-      to: Uint8Array.from(lock.tokenAddress),
-      data: encodeApprove(contractAddress, amount),
-    }),
   }
 }

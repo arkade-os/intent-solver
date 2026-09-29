@@ -63,7 +63,6 @@ import {
   evmRpc,
   broadcastWithNonce,
   fundWithWeth,
-  setEth,
   waitForReceipt,
   installContracts,
   sendFrom,
@@ -151,81 +150,6 @@ describe('EVM ERC20Swap — against the deployed contract`s own bytecode', () =>
 
       // The flag is deleted on claim, so the same lock reads unfunded.
       expect(await backend.isLocked(lock)).toBe(false)
-    },
-    180_000,
-  )
-
-  itOnChain(
-    'lockPrepayMinerfee funds the claimant with native currency, in the same transaction',
-    async () => {
-      // THE MECHANISM THE CONTRACT CHOICE RESTS ON, and until now the only
-      // function in the binding never actually executed. A client receiving
-      // tokens usually holds no native asset, so without this it cannot pay for
-      // its own claim and every such swap resolves by timeout.
-      const preimage = hex.decode('66'.repeat(32))
-      const tip = BigInt((await rpc('eth_blockNumber', [])) as string)
-      const lock = lockFor(preimage, tip + 5_000n)
-      const PREPAY = 5_000_000_000_000_000n // 0.005 ETH — comfortably covers one claim
-
-      await fundWithWeth(rpc, SOLVER_KEY, AMOUNT)
-      await sendFrom(rpc, SOLVER_KEY, WETH, abiCall('095ea7b3', SWAP_ADDRESS, word(AMOUNT)))
-
-      // Drain the claimant so the prepay is the ONLY thing that could fund it.
-      await setEth(rpc, client, 0n)
-      try {
-        expect(BigInt((await rpc('eth_getBalance', [`0x${hex.encode(client)}`, 'latest'])) as string)).toBe(0n)
-
-        const call = backend.lockPrepayCall(lock, PREPAY, solver)
-        expect(call.value).toBe(PREPAY)
-        const locked = await sendFrom(rpc, SOLVER_KEY, call.to, call.data, call.value)
-        expect(locked.status).toBe('0x1')
-
-        // The tokens are locked AND the claimant now holds gas money — both from
-        // the one transaction.
-        expect(await backend.isLocked(lock)).toBe(true)
-        const claimantEth = BigInt((await rpc('eth_getBalance', [`0x${hex.encode(client)}`, 'latest'])) as string)
-        expect(claimantEth).toBe(PREPAY)
-
-        // And it is enough to actually claim with, which is the whole point.
-        const claimed = await sendFrom(rpc, CLIENT_KEY, SWAP_ADDRESS, encodeClaim(preimage, lock))
-        expect(claimed.status).toBe('0x1')
-        expect(await backend.isLocked(lock)).toBe(false)
-      } finally {
-        // `finally`, not a trailing line. Anvil state is shared across every
-        // test in this file, so a failure ANYWHERE above would leave the
-        // claimant broke and every later test that sends from it would fail out
-        // of gas — burying the one real failure under a cascade of unrelated
-        // ones. This leaked once already when the restore was the last
-        // statement of the body; a second failure point brought it back.
-        await setEth(rpc, client, 10n ** 18n)
-      }
-    },
-    180_000,
-  )
-
-  itOnChain(
-    'the contract really does key the lock by msg.sender, which lockPrepayCall guards',
-    async () => {
-      // `lockPrepayMinerfee` passes five parameters — refundAddress is NOT one
-      // of them; the contract fills it from msg.sender. `lockPrepayCall`
-      // refuses a sender that is not `lock.refundAddress` on that basis. This
-      // confirms the basis rather than trusting the source: locking from the
-      // solver must produce a lock our key finds with refundAddress = solver.
-      const preimage = hex.decode('77'.repeat(32))
-      const tip = BigInt((await rpc('eth_blockNumber', [])) as string)
-      const lock = lockFor(preimage, tip + 5_000n)
-
-      await fundWithWeth(rpc, SOLVER_KEY, AMOUNT)
-      await sendFrom(rpc, SOLVER_KEY, WETH, abiCall('095ea7b3', SWAP_ADDRESS, word(AMOUNT)))
-      const call = backend.lockPrepayCall(lock, 1_000_000_000_000n, solver)
-      expect((await sendFrom(rpc, SOLVER_KEY, call.to, call.data, call.value)).status).toBe('0x1')
-
-      // Found under refundAddress = solver — so msg.sender is what the contract
-      // stored, and the guard protects a real invariant.
-      expect(await backend.isLocked(lock)).toBe(true)
-      // The same lock with any other refundAddress is a DIFFERENT key, and
-      // unfunded. This is the failure the guard exists to prevent.
-      expect(await backend.isLocked({ ...lock, refundAddress: client })).toBe(false)
     },
     180_000,
   )
@@ -464,7 +388,7 @@ describe('EVM ERC20Swap — against the deployed contract`s own bytecode', () =>
 
       let last = ''
       for (const call of calls) {
-        const receipt = await sendFrom(rpc, SOLVER_KEY, call.to, call.data, call.value)
+        const receipt = await sendFrom(rpc, SOLVER_KEY, call.to, call.data)
         expect(receipt.status, `call to ${hex.encode(call.to)} reverted`).toBe('0x1')
         last = receipt.hash
       }
@@ -504,7 +428,7 @@ describe('EVM ERC20Swap — against the deployed contract`s own bytecode', () =>
       // Three: zero the stale one, approve the real amount, lock.
       expect(calls).toHaveLength(3)
       for (const call of calls) {
-        expect((await sendFrom(rpc, SOLVER_KEY, call.to, call.data, call.value)).status).toBe('0x1')
+        expect((await sendFrom(rpc, SOLVER_KEY, call.to, call.data)).status).toBe('0x1')
       }
       expect(await backend.isLocked(lock)).toBe(true)
       expect(await backend.allowance(WETH, solver)).toBe(0n)
