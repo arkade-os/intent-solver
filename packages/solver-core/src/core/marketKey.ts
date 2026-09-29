@@ -12,7 +12,7 @@ const CORRIDORS = new Set(['arkade', 'lightning', 'onchain', 'ethereum'])
 
 /**
  * An Arkade asset id on the wire: `txid` (32 bytes) then `gidx` (u16), hex —
- * the `serializeAssetId` form. 68 characters.
+ * the SDK's `AssetId.toString()` form. 68 characters.
  *
  * LOWERCASE ONLY, § 2's identity rule verbatim (`^(btc|[0-9a-f]{68})$`). Hex is
  * case-insensitive, so normalising here is tempting — and wrong, because

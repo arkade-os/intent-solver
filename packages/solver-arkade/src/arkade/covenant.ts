@@ -85,7 +85,6 @@
  */
 
 import { arkade, VHTLC, type TapLeafScript } from '@arkade-os/sdk'
-import { hex } from '@scure/base'
 import {
   absoluteLocktimeUnit,
   assertAbsoluteLocktime,
@@ -127,66 +126,6 @@ const enforcePayToAsm = (refundKey: AsmToken): AsmToken[] => [
   'GREATERTHANOREQUAL',
 ]
 
-/**
- * The same covenant for a lockup carrying an Arkade ASSET: "this input's output
- * pays the given P2TR key, carries at least the input's amount of ONE named
- * asset, and value >= input".
- *
- * The sat clause is NOT dropped — it is {@link enforcePayToAsm} verbatim, as
- * the tail. An asset-carrying VTXO carries sats too (the SDK's `Recipient` has
- * both `amount` and `assets`), so a covenant that constrained only the asset
- * would let the sats be stripped, exactly as the sat-only covenant would let
- * the ASSET be stripped. Sharing the tail rather than restating it is what
- * makes "BTC is unaffected" structural: the BTC path is this function's tail
- * with no prefix, so the two cannot drift.
- *
- * Two details of the opcodes decide whether this is safe, and both are easy to
- * get wrong (see `arkade-os/emulator`'s "Supported Opcodes" table, which is
- * what actually executes this):
- *
- *  - **A canonical Asset ID is TWO stack items**, `asset_txid` then
- *    `asset_gidx` (the issuance group index) — not one 32-byte push. Encoding
- *    it as a single blob compiles cleanly and fails only at spend time.
- *  - **`INSPECTOUTASSETLOOKUP` pushes `amount 1`, or `0 0` when the asset is
- *    absent.** The `VERIFY` after each lookup pops that success flag, and it is
- *    load-bearing rather than defensive: without it an output carrying NONE of
- *    the asset reports `amount = 0`, and `0 >= 0` passes — so the
- *    asset-stripping spend this covenant exists to stop would still succeed.
- *
- * `INSPECTOUTASSETCOUNT ... EQUALVERIFY 1` bounds the output to exactly the one
- * asset. Without it a spend may satisfy the amount check and still inject
- * further assets alongside. Deliberately strict: a covenant that is too
- * permissive cannot be tightened once funds are locked to it, while a strict
- * one can be relaxed in a later script version.
- *
- * Shape follows the SDK's own `banco-btc-to-asset` program
- * (`packages/swap/src/swap-want-asset.program.json`), which uses the identical
- * `INSPECTOUTASSETLOOKUP VERIFY ... GREATERTHANOREQUAL VERIFY` sequence.
- */
-const enforcePayToAssetAsm = (refundKey: AsmToken, assetTxid: AsmToken, assetGroupIndex: AsmToken): AsmToken[] => [
-  // The output must carry at least as much of the asset as the input did.
-  // Output index is the input's, the self-send convention the tail also uses.
-  'PUSHCURRENTINPUTINDEX',
-  assetTxid,
-  assetGroupIndex,
-  'INSPECTOUTASSETLOOKUP',
-  'VERIFY', // the asset is PRESENT on the output, not merely "zero of it"
-  'PUSHCURRENTINPUTINDEX',
-  assetTxid,
-  assetGroupIndex,
-  'INSPECTINASSETLOOKUP',
-  'VERIFY', // ...and was present on the input, so the comparison is meaningful
-  'GREATERTHANOREQUAL',
-  'VERIFY',
-  // Exactly one asset out: no injection alongside the one we bound.
-  'PUSHCURRENTINPUTINDEX',
-  'INSPECTOUTASSETCOUNT',
-  1,
-  'EQUALVERIFY',
-  // ...and then the destination and sat covenant, unchanged.
-  ...enforcePayToAsm(refundKey),
-]
-
 const assertEncodableDelay = (name: string, value: number): void => {
   if (!isEncodableDelay(value)) {
     throw new Error(
@@ -223,9 +162,7 @@ export const enforcePayTo = (destinationPkScript: Uint8Array): Uint8Array => {
  *
  * Two fields rather than one string because that is the opcode's own shape —
  * `INSPECTOUTASSETLOOKUP` consumes `asset_txid` and `asset_gidx` as separate
- * stack items. Keeping the split here means no call site has to know how to
- * take a serialized id apart, and none can push it as a single blob by
- * mistake.
+ * stack items.
  */
 export interface ArkadeAssetId {
   /**
@@ -237,117 +174,6 @@ export interface ArkadeAssetId {
   txid: Uint8Array
   /** The issuance group index within that transaction. */
   groupIndex: number
-}
-
-/**
- * {@link enforcePayTo} for a lockup denominated in an Arkade asset: "pays this
- * P2TR script, carries at least the input's amount of exactly this one asset,
- * and value >= input".
- *
- * Encodes {@link enforcePayToAssetAsm}. The BTC covenant is this one's tail, so
- * an asset lockup enforces everything a BTC lockup does and more — never less.
- *
- * NOT yet wired into any corridor: no swap is quoted or funded in an asset
- * today. This is the script half, landed on its own so it can be reviewed
- * without a state machine attached.
- */
-export const enforcePayToAsset = (destinationPkScript: Uint8Array, asset: ArkadeAssetId): Uint8Array => {
-  assertP2trPkScript(destinationPkScript)
-  assertAssetId(asset)
-  // REVERSED here, once, so no caller has to know. `asset.txid` is the id in
-  // canonical order — what `parseAssetId` returns and what the registry
-  // publishes — but `INSPECTOUTASSETLOOKUP` matches the reversed 32 bytes.
-  // Push canonical and the lookup reports the asset absent (`0 0`), which
-  // fails the covenant with nothing in the error naming the cause: the
-  // emulator says only `OP_VERIFY failed`. Established on regtest against a
-  // real minted asset, by elimination against a passing BTC-only control.
-  //
-  // A copy rather than an in-place `reverse()`, because the caller's id is
-  // theirs and a covenant builder must not mutate it.
-  //
-  // Corroborated by the reference implementation: `@arkade-os/swap`'s
-  // `offer.ts` builds the `banco-btc-to-asset` program with
-  // `wantAssetTxid: offer.wantAsset.txid.slice().reverse()` — same flip, and
-  // the same copy-then-reverse for the same reason.
-  const inspectionTxid = Uint8Array.from(asset.txid).reverse()
-  return encodeAsm(enforcePayToAssetAsm(destinationPkScript.subarray(2), inspectionTxid, asset.groupIndex))
-}
-
-/**
- * The wire form of an Asset ID: 34 bytes, `txid || gidx`, as 68 lowercase hex
- * characters.
- *
- * This is the identity `docs/rfq-protocol.md` § 2 carries ("the serialized
- * Arkade AssetId in lowercase hex (68 chars, network-scoped)") and the one the
- * solver-registry card validates as `^(btc|[0-9a-f]{68})$`. 32 + 2 = 34 bytes
- * is exactly those 68 characters.
- */
-const ASSET_ID_HEX_LENGTH = 68
-
-/**
- * Parse the 68-hex wire Asset ID into the pair the introspection opcodes take.
- *
- * The format is normative in the Arkade Assets spec:
- *
- * ```
- * AssetId := { txid: bytes32, gidx: u16 LE }   # genesis tx id + group index
- * ```
- *
- * **`gidx` is LITTLE-endian** — the spec is explicit that all multi-byte
- * integer fields are, "consistent with Bitcoin's serialization convention",
- * and names `gidx` first among them. Reading it big-endian is the mistake this
- * function exists to make impossible: it does not fail, it silently names a
- * different asset (group 1 becomes group 256), and the covenant then binds a
- * lockup to an asset nobody meant.
- *
- * `txid` is a byte string rather than an integer, so the endianness rule above
- * (which covers the integer fields) does not apply to it. It is returned here
- * exactly as it appears in the id — CANONICAL order, per {@link ArkadeAssetId}.
- *
- * BUT a script that INSPECTS the asset must push those 32 bytes REVERSED.
- * `OP_INSPECTOUTASSETLOOKUP` matches the reversed form; pushing them as they
- * appear makes it report the asset absent (`0 0`), and the covenant then fails
- * with nothing in the error naming the cause — the emulator says only
- * `OP_VERIFY failed`. Confirmed on regtest against a real minted asset.
- *
- * So: reverse when building a covenant, do not reverse when comparing ids on
- * the wire. {@link enforcePayToAsset} takes the id in canonical order and is
- * responsible for that flip, so callers pass what they read.
- */
-export const parseAssetId = (hexId: string): ArkadeAssetId => {
-  if (hexId.length !== ASSET_ID_HEX_LENGTH || !/^[0-9a-f]+$/.test(hexId)) {
-    throw new Error(`asset id must be ${ASSET_ID_HEX_LENGTH} lowercase hex characters, got ${JSON.stringify(hexId)}`)
-  }
-  const bytes = hex.decode(hexId)
-  return {
-    txid: bytes.subarray(0, 32),
-    groupIndex: bytes[32]! | (bytes[33]! << 8),
-  }
-}
-
-/** The inverse of {@link parseAssetId}, so a round trip is testable in both directions. */
-export const serializeAssetId = (asset: ArkadeAssetId): string => {
-  assertAssetId(asset)
-  return hex.encode(Uint8Array.from([...asset.txid, asset.groupIndex & 0xff, (asset.groupIndex >> 8) & 0xff]))
-}
-
-/** An asset id must be a 32-byte issuance txid and a non-negative group index. */
-const assertAssetId = (asset: ArkadeAssetId): void => {
-  if (asset.txid.length !== 32) {
-    throw new Error(`asset txid must be 32 bytes, got ${asset.txid.length}`)
-  }
-  // A negative index cannot name a group, and a non-integer would encode as
-  // something the opcode never accepts — both are caller bugs worth naming here
-  // rather than at spend time, when the lockup is already funded.
-  // Upper bound as well as lower, and it belongs HERE rather than only in
-  // `serializeAssetId`: this is what `enforcePayToAsset` calls before building
-  // a pkScript. A group index past u16 clears a lower-bound-only check, gets
-  // encoded into the script push, and yields a covenant the emulator rejects
-  // at SPEND time — with `OP_VERIFY failed vin=0` and nothing naming the
-  // cause, on a lockup that is already funded.
-  if (!Number.isInteger(asset.groupIndex) || asset.groupIndex < 0 || asset.groupIndex > 0xffff) {
-    throw new Error(`asset group index must be an integer in [0, 65535], got ${asset.groupIndex}`)
-  }
 }
 
 /**

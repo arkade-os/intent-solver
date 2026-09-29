@@ -32,7 +32,6 @@ import { RfqOpen, rfqBidPayload, rfqRefusalPayload } from '@arkade-os/solver-cor
 import { respondToRfqRequest, respondToRfqStatus } from './rfq.js'
 import { reportRfqRefusal, type RfqRefusalObserver } from './refusals.js'
 import type { CorridorReaderSet, CorridorSet } from '@arkade-os/solver-core/core/corridor.js'
-import type { SwapIngress } from './port.js'
 
 /** Publish a payload addressed to one recipient — the reply shape both
  * ingress classes share. */
@@ -186,7 +185,7 @@ export class OpenRfqBidder {
   }
 }
 
-export class RelayIngress implements SwapIngress {
+export class RelayIngress {
   private readonly now: () => number
   private subscription?: RelaySubscription
 

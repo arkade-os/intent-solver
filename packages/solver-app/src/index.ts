@@ -99,7 +99,6 @@ export {
   type RfqOutcome,
   type RfqStatusOutcome,
 } from '@arkade-os/solver-transport/ingress/rfq.js'
-export type { SwapIngress } from '@arkade-os/solver-transport/ingress/port.js'
 export { RelayIngress, type RelayIngressDeps } from '@arkade-os/solver-transport/ingress/relay.js'
 export {
   webSocketRelayConnection,
