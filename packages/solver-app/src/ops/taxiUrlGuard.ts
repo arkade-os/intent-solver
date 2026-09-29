@@ -1,6 +1,6 @@
 /**
  * Ruling 3's SSRF hygiene for a request-named Taxi URL — stricter than the
- * operator `TAXI_URL` gate at `config.ts` (~:1108-1125), which allows
+ * operator `TAXI_URL` gate (`operatorUrlFromEnv` in `config.ts`), which allows
  * loopback and plaintext for a value the operator typed rather than a payer.
  */
 
