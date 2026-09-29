@@ -84,13 +84,18 @@ export interface EvmSwapShape<Row, State extends string> {
   transitionColumns: ReadonlySet<string>
 }
 
+const SQL_IDENTIFIER = /^[a-z_][a-z0-9_]*$/
+const assertIdentifier = (name: string): void => {
+  if (!SQL_IDENTIFIER.test(name)) throw new Error(`not a plain SQL identifier: ${name}`)
+}
+
 export abstract class EvmSwapStore<Row, State extends string> {
   protected constructor(
     protected readonly driver: SqlDriver,
     protected readonly now: () => number,
     private readonly shape: EvmSwapShape<Row, State>,
   ) {
-    if (!/^[a-z_][a-z0-9_]*$/.test(shape.table)) throw new Error(`not a plain SQL identifier: ${shape.table}`)
+    assertIdentifier(shape.table)
   }
 
   async close(): Promise<void> {
@@ -131,6 +136,7 @@ export abstract class EvmSwapStore<Row, State extends string> {
       ...extra,
     }
     const columns = Object.keys(values)
+    Object.keys(extra).forEach(assertIdentifier)
     const at = this.now()
     await this.driver.run(
       `INSERT INTO ${table} (id, state, created_at, updated_at, ${columns.join(', ')})

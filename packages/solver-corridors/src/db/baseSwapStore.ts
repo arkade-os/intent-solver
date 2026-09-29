@@ -31,6 +31,11 @@ import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/anal
 export type RawRow = Record<string, unknown>
 
 /** Everything the shared methods need that genuinely differs per store. */
+/** `fail()` routes to `stuck` / `refused`, so a store whose states lack either must not compile. */
+type FailStatesIn<State extends string> = 'stuck' | 'refused' extends State
+  ? unknown
+  : { 'State must include stuck and refused': never }
+
 export interface StoreShape<Row, State extends string> {
   readonly table: string
   readonly eventTable: string
@@ -76,6 +81,7 @@ export const numberOrNull = (value: unknown): number | null =>
 
 /** Additive migration: `CREATE TABLE IF NOT EXISTS` never alters an existing table. */
 const SQL_IDENTIFIER = /^[a-z_][a-z0-9_]*$/
+const SQL_COLUMN_TYPE = /^(TEXT|INTEGER|REAL|BLOB)( NOT NULL)?( DEFAULT (-?\d+|'[^']*'))?$/
 
 export const addColumns = async (
   driver: SqlDriver,
@@ -84,6 +90,9 @@ export const addColumns = async (
 ): Promise<void> => {
   for (const name of [table, ...columns.map(([column]) => column)]) {
     if (!SQL_IDENTIFIER.test(name)) throw new Error(`addColumns: not a plain SQL identifier: ${name}`)
+  }
+  for (const [, type] of columns) {
+    if (!SQL_COLUMN_TYPE.test(type)) throw new Error(`addColumns: not a plain column type: ${type}`)
   }
   const existing = new Set((await driver.all<{ name: string }>(`PRAGMA table_info(${table})`)).map((c) => c.name))
   for (const [column, type] of columns) {
@@ -108,7 +117,7 @@ export abstract class BaseSwapStore<Row, State extends string> {
    * base-constructor logic that reached for it would silently see `undefined`.
    * If this constructor ever needs the shape, take it as a parameter instead.
    */
-  protected abstract readonly shape: StoreShape<Row, State>
+  protected abstract readonly shape: StoreShape<Row, State> & FailStatesIn<State>
 
   async close(): Promise<void> {
     await this.driver.close()

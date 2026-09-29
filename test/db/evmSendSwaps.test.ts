@@ -199,4 +199,22 @@ describe('EvmSwapStore', () => {
     }
     expect(() => new Bad()).toThrow(/not a plain SQL identifier/)
   })
+
+  it('refuses an insert column that is not a plain SQL identifier', async () => {
+    class Probe extends EvmSwapStore<never, never> {
+      constructor() {
+        super({} as never, () => 0, {
+          table: 'send_evm_swap',
+          noun: 'send',
+          toRow: () => undefined as never,
+          nonTerminal: [],
+          transitionColumns: new Set(),
+        })
+      }
+      insertWith(extra: Record<string, string>) {
+        return this.insert({} as never, extra)
+      }
+    }
+    await expect(new Probe().insertWith({ 'x) VALUES (1); --': 'y' })).rejects.toThrow(/not a plain SQL identifier/)
+  })
 })

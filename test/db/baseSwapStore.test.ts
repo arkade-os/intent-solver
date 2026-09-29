@@ -229,5 +229,19 @@ describe('addColumns', () => {
     const driver = {} as SqlDriver
     await expect(addColumns(driver, 'swap; DROP TABLE swap', [])).rejects.toThrow(/not a plain SQL identifier/)
     await expect(addColumns(driver, 'swap', [['a b', 'TEXT']])).rejects.toThrow(/not a plain SQL identifier/)
+    await expect(addColumns(driver, 'swap', [['note', 'TEXT; DROP TABLE swap']])).rejects.toThrow(
+      /not a plain column type/,
+    )
+  })
+
+  it('does not compile a store whose states cannot take a fail()', () => {
+    class NoStuck extends BaseSwapStore<ProbeRow, 'quoted' | 'refused'> {
+      // @ts-expect-error `fail()` routes exposed rows to `stuck`, which this store lacks.
+      protected readonly shape = { ...SHAPE, live: ['quoted'], exposed: [] } as StoreShape<
+        ProbeRow,
+        'quoted' | 'refused'
+      >
+    }
+    expect(NoStuck).toBeTypeOf('function')
   })
 })
