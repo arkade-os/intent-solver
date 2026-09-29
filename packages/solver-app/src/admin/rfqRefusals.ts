@@ -12,7 +12,6 @@ export interface RecordedRfqRefusal extends RfqRefusalMetadata {
 }
 
 export const createRfqRefusalTail = (capacity = 200) => {
-  if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Error('refusal capacity must be positive')
   const tail = createTail<RecordedRfqRefusal>(capacity)
   return {
     record: (refusal: RecordedRfqRefusal): void =>

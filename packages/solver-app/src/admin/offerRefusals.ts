@@ -24,6 +24,7 @@ export const OFFER_REFUSAL_TAIL_CAPACITY = 200
 
 /** Newest first and bounded; `recent()` hands back copies, so a caller cannot reshape the shared buffer. */
 export const createTail = <T extends object>(capacity: number) => {
+  if (!Number.isSafeInteger(capacity) || capacity < 1) throw new Error('refusal capacity must be positive')
   const entries: T[] = []
   return {
     record: (entry: T): void => {

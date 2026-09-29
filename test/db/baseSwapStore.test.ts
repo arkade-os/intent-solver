@@ -11,7 +11,12 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest'
 import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
-import { BaseSwapStore, type RawRow, type StoreShape } from '@arkade-os/solver-corridors/db/baseSwapStore.js'
+import {
+  addColumns,
+  BaseSwapStore,
+  type RawRow,
+  type StoreShape,
+} from '@arkade-os/solver-corridors/db/baseSwapStore.js'
 
 type ProbeState = 'quoted' | 'funded' | 'settled' | 'stuck' | 'refused'
 interface ProbeRow {
@@ -216,5 +221,13 @@ describe('BaseSwapStore reads', () => {
 
   it('answers null for an rfq id it has never seen', async () => {
     expect(await store.findByRfqId('absent')).toBeNull()
+  })
+})
+
+describe('addColumns', () => {
+  it('refuses a table or column that is not a plain identifier, before touching the database', async () => {
+    const driver = {} as SqlDriver
+    await expect(addColumns(driver, 'swap; DROP TABLE swap', [])).rejects.toThrow(/not a plain SQL identifier/)
+    await expect(addColumns(driver, 'swap', [['a b', 'TEXT']])).rejects.toThrow(/not a plain SQL identifier/)
   })
 })

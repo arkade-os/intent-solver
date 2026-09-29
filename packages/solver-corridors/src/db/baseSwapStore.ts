@@ -75,11 +75,16 @@ export const numberOrNull = (value: unknown): number | null =>
   value === null || value === undefined ? null : Number(value)
 
 /** Additive migration: `CREATE TABLE IF NOT EXISTS` never alters an existing table. */
+const SQL_IDENTIFIER = /^[a-z_][a-z0-9_]*$/
+
 export const addColumns = async (
   driver: SqlDriver,
   table: string,
   columns: readonly (readonly [column: string, type: string])[],
 ): Promise<void> => {
+  for (const name of [table, ...columns.map(([column]) => column)]) {
+    if (!SQL_IDENTIFIER.test(name)) throw new Error(`addColumns: not a plain SQL identifier: ${name}`)
+  }
   const existing = new Set((await driver.all<{ name: string }>(`PRAGMA table_info(${table})`)).map((c) => c.name))
   for (const [column, type] of columns) {
     if (!existing.has(column)) await driver.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`)
