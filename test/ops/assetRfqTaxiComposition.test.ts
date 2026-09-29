@@ -31,8 +31,8 @@ import {
 } from '@arkade-os/solver-app/ops/assetRfqTaxiAdapter.js'
 import type { TaxiUrlPolicy } from '@arkade-os/solver-app/ops/taxiUrlGuard.js'
 import { createServicesBody } from '../support/createServicesBody.js'
+import { ASSET, RECYCLE } from '../support/carrierFixtures.js'
 
-const ASSET = `${'aa'.repeat(31)}bb0100`
 /** A real Arkade address, because the fill half decodes it to a pkScript. */
 const PROCEEDS_ADDRESS = new ArkAddress(
   Uint8Array.from({ length: 32 }, () => 1),
@@ -73,17 +73,6 @@ const COIN: CarrierCoin = {
   tapTree: SOLVER_SCRIPT.encode(),
   forfeitTapLeafScript: SOLVER_SCRIPT.forfeit(),
   script: hex.encode(SOLVER_SCRIPT.pkScript),
-}
-
-const RECYCLE: AssetRfqCarrierTerms = {
-  mode: 'recycle',
-  quoteId: 'q-1',
-  physicalSats: 330n,
-  loanSats: 329n,
-  receiptSats: 1n,
-  serviceFareSats: 4n,
-  pricedSats: 5n,
-  expiresAt: 9_000,
 }
 
 const RECEIVER_PAID: AssetRfqCarrierTerms = {

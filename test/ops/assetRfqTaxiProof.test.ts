@@ -9,13 +9,10 @@
 
 import { describe, it, expect } from 'vitest'
 import { base64, hex } from '@scure/base'
-import { schnorr } from '@noble/curves/secp256k1.js'
 import {
   ArkAddress,
   buildOffchainTx,
   createAssetPacket,
-  CSVMultisigTapscript,
-  DefaultVtxo,
   Extension,
   getArkPsbtFields,
   setArkPsbtField,
@@ -37,48 +34,27 @@ import {
   type CarrierChainReader,
   type TaxiCarrierProofDeps,
 } from '@arkade-os/solver-app/ops/assetRfqTaxiProof.js'
+import {
+  ASSET,
+  ASSET_EXT,
+  COIN_A,
+  coinInput,
+  DEPOSIT,
+  DEPOSIT_TXID,
+  MAKER,
+  PROCEEDS,
+  RECYCLE,
+  SERVER,
+  SERVER_UNROLL,
+  SOLVER,
+  SPONSOR_SCRIPT,
+  SPONSOR_TXID,
+  vtxoScript,
+  xonly,
+} from '../support/carrierFixtures.js'
 
-const ASSET = `${'aa'.repeat(31)}bb0100`
-const DEPOSIT_TXID = '1'.repeat(64)
-const COIN_A = '2'.repeat(64)
-const SPONSOR_TXID = '3'.repeat(64)
 const SOLVER_KEY = 'd'.repeat(64)
-
-const xonly = (seed: number): string => hex.encode(schnorr.getPublicKey(new Uint8Array(32).fill(seed)))
-const SERVER = xonly(9)
-
-const vtxoScript = (seed: number) =>
-  new DefaultVtxo.Script({
-    pubKey: hex.decode(xonly(seed)),
-    serverPubKey: hex.decode(SERVER),
-    csvTimelock: { type: 'blocks', value: 144n },
-  })
-
-const SERVER_UNROLL = CSVMultisigTapscript.encode({
-  timelock: { type: 'blocks', value: 144n },
-  pubkeys: [hex.decode(SERVER)],
-})
-
-const MAKER = vtxoScript(4).pkScript
-const PROCEEDS = vtxoScript(6).pkScript
-
-const coinInput = (seed: number, txid: string, vout: number, value: number) => {
-  const s = vtxoScript(seed)
-  return { txid, vout, value, tapLeafScript: s.forfeit(), tapTree: s.encode() }
-}
-
-const SPONSOR_SCRIPT = vtxoScript(5).pkScript
-
-const DEPOSIT = coinInput(1, DEPOSIT_TXID, 1, 1_000)
-const SOLVER = coinInput(2, COIN_A, 0, 2_000)
 const SPONSOR = coinInput(3, SPONSOR_TXID, 7, 500)
-
-/** Input 1 (the solver coin) carries the asset; output 0 pays it to the maker. */
-const ASSET_EXT = Extension.create([
-  createAssetPacket(new Map([[1, [{ assetId: ASSET, amount: 10n }]]]), [
-    { address: '', assets: [{ assetId: ASSET, amount: 10n }] },
-  ]),
-]).txOut()
 
 /** `solverNet = 1000 + 329 - 330 - 4` = 995 = payout 2995 less the 2000 solver
  * input, so the default fixture sits EXACTLY on the floor: one sat moved away
@@ -142,17 +118,6 @@ const snapshotJson = () => ({
   max_fare_sats: AUTHORISED.maxFare.toString(),
   valid_until: 9_000,
 })
-
-const RECYCLE: AssetRfqCarrierTerms = {
-  mode: 'recycle',
-  quoteId: 'q-1',
-  physicalSats: 330n,
-  loanSats: 329n,
-  receiptSats: 1n,
-  serviceFareSats: 4n,
-  pricedSats: 5n,
-  expiresAt: 9_000,
-}
 
 const openStore = async (carrierTerms: AssetRfqCarrierTerms = RECYCLE) => {
   const store = await AssetRfqSwapStore.open(':memory:', () => 1_000)

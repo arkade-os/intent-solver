@@ -41,8 +41,8 @@ import {
 } from '@arkade-os/solver-app/ops/assetRfqTaxiSettle.js'
 import { carrierTaxiFor, CarrierTaxiRefusedError } from '@arkade-os/solver-app/ops/assetRfqTaxiAdapter.js'
 import type { TaxiUrlPolicy } from '@arkade-os/solver-app/ops/taxiUrlGuard.js'
+import { ASSET, COIN_A, DEPOSIT_TXID, RECYCLE } from '../support/carrierFixtures.js'
 
-const ASSET = `${'aa'.repeat(31)}bb0100`
 const MAKER_PK_SCRIPT = `5120${'c'.repeat(64)}`
 const MAKER_KEY = 'b'.repeat(64)
 const PROCEEDS = `5120${'e'.repeat(64)}`
@@ -51,8 +51,6 @@ const PROCEEDS = `5120${'e'.repeat(64)}`
 const SOLVER_KEY = hex.encode(await SingleKey.fromHex('21'.repeat(32)).xOnlyPublicKey())
 const SERVER_KEY = hex.encode(await SingleKey.fromHex('22'.repeat(32)).xOnlyPublicKey())
 const OTHER_KEY = hex.encode(await SingleKey.fromHex('23'.repeat(32)).xOnlyPublicKey())
-const DEPOSIT_TXID = '1'.repeat(64)
-const COIN_A = '2'.repeat(64)
 const COIN_B = '3'.repeat(64)
 /** Sorts before `COIN_A`, unlike `COIN_B` — so a filter that let an ineligible
  * coin through would pick it FIRST, rather than passing either way. */
@@ -170,17 +168,6 @@ const statusBody = (over: Record<string, unknown> = {}): Record<string, unknown>
   expiresAt: 8_000,
   ...over,
 })
-
-const RECYCLE: AssetRfqCarrierTerms = {
-  mode: 'recycle',
-  quoteId: 'q-1',
-  physicalSats: 330n,
-  loanSats: 329n,
-  receiptSats: 1n,
-  serviceFareSats: 4n,
-  pricedSats: 5n,
-  expiresAt: 9_000,
-}
 
 /** Spelled un-normalised on purpose: the attempt must record the guard's form. */
 const RECEIVER_PAID: AssetRfqCarrierTerms = {

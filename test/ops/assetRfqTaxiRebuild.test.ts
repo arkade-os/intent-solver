@@ -9,15 +9,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { base64, hex } from '@scure/base'
-import { schnorr } from '@noble/curves/secp256k1.js'
-import {
-  buildOffchainTx,
-  createAssetPacket,
-  CSVMultisigTapscript,
-  DefaultVtxo,
-  Extension,
-  Transaction,
-} from '@arkade-os/sdk'
+import { buildOffchainTx, createAssetPacket, Extension, Transaction } from '@arkade-os/sdk'
 import { digestJointGraph, OFFER_FILL_TEMPLATE, verifyOfferFillPlan } from '@arkade-taxi/client'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierCoin } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
@@ -27,46 +19,22 @@ import {
   recoverJointFunding,
   sponsorLegFrom,
 } from '@arkade-os/solver-app/ops/assetRfqTaxiRebuild.js'
+import {
+  ASSET,
+  ASSET_EXT,
+  COIN_A,
+  coinInput,
+  DEPOSIT,
+  DEPOSIT_TXID,
+  MAKER,
+  PROCEEDS,
+  SERVER_UNROLL,
+  SOLVER,
+  SPONSOR_SCRIPT,
+  SPONSOR_TXID,
+} from '../support/carrierFixtures.js'
 
-const ASSET = `${'aa'.repeat(31)}bb0100`
-const DEPOSIT_TXID = '1'.repeat(64)
-const COIN_A = '2'.repeat(64)
-const SPONSOR_TXID = '3'.repeat(64)
-
-const xonly = (seed: number): string => hex.encode(schnorr.getPublicKey(new Uint8Array(32).fill(seed)))
-const SERVER = xonly(9)
-
-const vtxoScript = (seed: number) =>
-  new DefaultVtxo.Script({
-    pubKey: hex.decode(xonly(seed)),
-    serverPubKey: hex.decode(SERVER),
-    csvTimelock: { type: 'blocks', value: 144n },
-  })
-
-const SERVER_UNROLL = CSVMultisigTapscript.encode({
-  timelock: { type: 'blocks', value: 144n },
-  pubkeys: [hex.decode(SERVER)],
-})
-
-const MAKER = vtxoScript(4).pkScript
-const SPONSOR_SCRIPT = vtxoScript(5).pkScript
-const PROCEEDS = vtxoScript(6).pkScript
-
-const input = (seed: number, txid: string, vout: number, value: number) => {
-  const s = vtxoScript(seed)
-  return { txid, vout, value, tapLeafScript: s.forfeit(), tapTree: s.encode() }
-}
-
-const DEPOSIT = input(1, DEPOSIT_TXID, 1, 1_000)
-const SOLVER = input(2, COIN_A, 0, 2_000)
-const SPONSOR = input(3, SPONSOR_TXID, 7, 5_000)
-
-/** Input 1 carries the asset; output 0 pays the maker its 10. */
-const ASSET_EXT = Extension.create([
-  createAssetPacket(new Map([[1, [{ assetId: ASSET, amount: 10n }]]]), [
-    { address: '', assets: [{ assetId: ASSET, amount: 10n }] },
-  ]),
-]).txOut()
+const SPONSOR = coinInput(3, SPONSOR_TXID, 7, 5_000)
 
 /** `[receiver 330, sponsor-change 1500, solver 6170]` over the three inputs. */
 const built = buildOffchainTx(
@@ -533,7 +501,7 @@ describe('the folded shape, which is the only one a receive quote produces', () 
   const live = { contributionSats: LIVE.contribution, maxFareSats: LIVE.fare }
 
   const liveWire = (over: { change?: string } = {}) => {
-    const sponsorCoin = input(3, SPONSOR_TXID, 7, LIVE.inputs)
+    const sponsorCoin = coinInput(3, SPONSOR_TXID, 7, LIVE.inputs)
     const graph = buildOffchainTx(
       [DEPOSIT, SOLVER, sponsorCoin],
       [

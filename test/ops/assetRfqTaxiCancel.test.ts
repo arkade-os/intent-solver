@@ -5,23 +5,9 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { base64, hex } from '@scure/base'
-import { schnorr } from '@noble/curves/secp256k1.js'
-import {
-  buildOffchainTx,
-  createAssetPacket,
-  CSVMultisigTapscript,
-  DefaultVtxo,
-  Extension,
-  SingleKey,
-  Transaction,
-  type ArkProvider,
-} from '@arkade-os/sdk'
+import { buildOffchainTx, Extension, SingleKey, Transaction, type ArkProvider } from '@arkade-os/sdk'
 import { digestJointGraph, OFFER_FILL_TEMPLATE } from '@arkade-taxi/client'
-import {
-  AssetRfqSwapStore,
-  type AssetRfqCarrierTerms,
-  type AssetRfqSwapRow,
-} from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import { AssetRfqSwapStore, type AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierAttempt } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import {
@@ -40,56 +26,42 @@ import {
   createCarrierConflictCanceller,
   type CarrierConflictDeps,
 } from '@arkade-os/solver-app/ops/assetRfqTaxiCancel.js'
+import {
+  ASSET,
+  ASSET_EXT,
+  COIN_A,
+  coinInput,
+  DEPOSIT,
+  DEPOSIT_TXID,
+  MAKER,
+  PROCEEDS,
+  RECYCLE,
+  SERVER,
+  SERVER_UNROLL,
+  SOLVER,
+  SPONSOR_SCRIPT,
+  SPONSOR_TXID,
+  vtxoScript,
+  xonly,
+} from '../support/carrierFixtures.js'
 
-const ASSET = `${'aa'.repeat(31)}bb0100`
-const DEPOSIT_TXID = '1'.repeat(64)
-const COIN_A = '2'.repeat(64)
 const COIN_B = '4'.repeat(64)
-const SPONSOR_TXID = '3'.repeat(64)
 const THIRD = 'ff'.repeat(32)
 type PendingTx = Awaited<ReturnType<ArkProvider['getPendingTxs']>>[number]
 
-const secret = (seed: number) => new Uint8Array(32).fill(seed)
-const xonly = (seed: number): string => hex.encode(schnorr.getPublicKey(secret(seed)))
-const SERVER = xonly(9)
 const SOLVER_KEY = xonly(2)
-const SIGNER = SingleKey.fromPrivateKey(secret(2))
-
-const vtxoScript = (seed: number) =>
-  new DefaultVtxo.Script({
-    pubKey: hex.decode(xonly(seed)),
-    serverPubKey: hex.decode(SERVER),
-    csvTimelock: { type: 'blocks', value: 144n },
-  })
-const SERVER_UNROLL = CSVMultisigTapscript.encode({
-  timelock: { type: 'blocks', value: 144n },
-  pubkeys: [hex.decode(SERVER)],
-})
-
-const MAKER = vtxoScript(4).pkScript
-const PROCEEDS = vtxoScript(6).pkScript
-const SPONSOR_SCRIPT = vtxoScript(5).pkScript
-
-const coinInput = (seed: number, txid: string, vout: number, value: number) => {
-  const s = vtxoScript(seed)
-  return { txid, vout, value, tapLeafScript: s.forfeit(), tapTree: s.encode() }
-}
+const SIGNER = SingleKey.fromPrivateKey(new Uint8Array(32).fill(2))
 
 /** The fill the Taxi holds: deposit, the solver's COIN_A, a sponsor — as the observer's own fixture. */
 const fillGraph = () => {
-  const assetExt = Extension.create([
-    createAssetPacket(new Map([[1, [{ assetId: ASSET, amount: 10n }]]]), [
-      { address: '', assets: [{ assetId: ASSET, amount: 10n }] },
-    ]),
-  ]).txOut()
   const built = buildOffchainTx(
-    [coinInput(1, DEPOSIT_TXID, 1, 1_000), coinInput(2, COIN_A, 0, 2_000), coinInput(3, SPONSOR_TXID, 7, 500)],
+    [DEPOSIT, SOLVER, coinInput(3, SPONSOR_TXID, 7, 500)],
     [
       { script: MAKER, amount: 330n },
       { script: SPONSOR_SCRIPT, amount: 4n },
       { script: SPONSOR_SCRIPT, amount: 171n },
       { script: PROCEEDS, amount: 2_995n },
-      assetExt,
+      ASSET_EXT,
     ],
     SERVER_UNROLL,
   )
@@ -109,17 +81,6 @@ const FILL = fillGraph()
 
 const VALID_UNTIL = 9_000
 const DUE = VALID_UNTIL + CARRIER_CONFLICT_AFTER_SECONDS
-
-const RECYCLE: AssetRfqCarrierTerms = {
-  mode: 'recycle',
-  quoteId: 'q-1',
-  physicalSats: 330n,
-  loanSats: 329n,
-  receiptSats: 1n,
-  serviceFareSats: 4n,
-  pricedSats: 5n,
-  expiresAt: VALID_UNTIL,
-}
 
 const PIN_A: CarrierOutpoint = { txid: COIN_A, vout: 0 }
 const PIN_B: CarrierOutpoint = { txid: COIN_B, vout: 3 }
