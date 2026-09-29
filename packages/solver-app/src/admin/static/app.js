@@ -2100,7 +2100,7 @@ const discoveryView = () => {
         publish.mode === 'off'
           ? h('span.muted', ' NOSTR_AD_PUBLISH is off')
           : !publish.publisher
-            ? h('span.muted', ' nothing is wired to publish yet')
+            ? h('span.muted', ' only the relay command publishes')
             : null,
       ),
     ),

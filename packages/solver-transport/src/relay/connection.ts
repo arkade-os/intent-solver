@@ -28,6 +28,12 @@ export interface RelayEvent {
    * docs/rfq-protocol.md § 4.6). Undefined for directed traffic.
    */
   topic?: string
+  /**
+   * A stored, replaceable document (Nostr's addressable range, keyed by author,
+   * kind and `d` tag) — the kind-38859 solver ad. Ignored when `recipient` is
+   * set: a sealed event must never be downgraded to a public one.
+   */
+  replaceable?: { kind: number; d: string }
   /** Unix milliseconds the sender stamped. Used only for `since` filtering. */
   createdAtMs: number
   payload: unknown
@@ -419,7 +425,18 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
       // events that were published while no socket was open.
       for (const [id, sub] of subscriptions) send(codec.encodeSub(id, armFilter(sub)))
       while (pending.length > 0 && socket === ws && ws.readyState === ws.OPEN) {
-        send(codec.encodeEvent(pending.shift()!))
+        const event = pending.shift()!
+        try {
+          send(codec.encodeEvent(event))
+        } catch (error) {
+          // Dropped, per event: thrown out of this listener, one unencodable
+          // event would strand every queued reply behind it.
+          options.onNotice?.({
+            kind: 'rejected',
+            ref: event.id,
+            message: `dropped from the reconnect queue, cannot encode: ${error instanceof Error ? error.message : String(error)}`,
+          })
+        }
       }
     })
     ws.addEventListener('message', (ev: MessageEvent) => {

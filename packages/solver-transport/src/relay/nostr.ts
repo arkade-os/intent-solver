@@ -195,10 +195,17 @@ export const nostrCodec = (identity: NostrIdentity): WireCodec => {
           tags: [['t', event.topic]],
           content: payloadJson,
         }
+      } else if (event.replaceable !== undefined) {
+        const { kind, d } = event.replaceable
+        // Outside 30000–39999 a relay keeps every copy instead of the newest.
+        if (!Number.isInteger(kind) || kind < 30_000 || kind >= 40_000) {
+          throw new Error(`kind ${kind} is not in the NIP-01 addressable range`)
+        }
+        template = { kind, created_at: createdAt, tags: [['d', d]], content: payloadJson }
       } else {
-        // Nothing in the protocol publishes an event that is neither addressed
-        // nor topiced; reaching this is a bug upstream, not a wire case.
-        throw new Error('nostr event needs a recipient or a topic')
+        // Nothing in the protocol publishes an event that is neither addressed,
+        // topiced nor replaceable; reaching this is a bug upstream, not a wire case.
+        throw new Error('nostr event needs a recipient, a topic or a replaceable key')
       }
       return JSON.stringify(['EVENT', finalizeEvent(template, identity.secretKey)])
     },

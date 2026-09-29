@@ -23,6 +23,8 @@ import {
   defaultBidding,
   tokenBucket,
   type BiddingStrategy,
+  type OpenRfq,
+  type OpenRfqBidDecision,
   type TokenBucket,
 } from '@arkade-os/solver-core/core/openRfq.js'
 import { marketKeyForPair } from '@arkade-os/solver-core/core/marketKey.js'
@@ -101,6 +103,8 @@ export interface OpenRfqBidderDeps {
   bidding?: BiddingStrategy
   /** MUST be positive — whether to bid at all is the composer's decision. */
   maxBidsPerMinute: number
+  /** Each bid, once its publish has resolved. */
+  onBid?: (open: OpenRfq, bid: Extract<OpenRfqBidDecision, { kind: 'bid' }>) => void
   onError?: (context: string, error: unknown) => void
   now?: () => number
 }
@@ -179,6 +183,7 @@ export class OpenRfqBidder {
         rfqBidPayload(parsed.data.open_id, this.deps.pair, decision),
         this.now(),
       )
+      this.deps.onBid?.(parsed.data, decision)
     } catch (error) {
       this.deps.onError?.('open-rfq handle', error)
     }

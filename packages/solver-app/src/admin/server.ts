@@ -57,10 +57,9 @@ export interface AdminDeps {
   /** Recent open-RFQ bids. Absent when bidding is off (`OPEN_RFQ_MAX_BIDS_PER_MIN=0`). */
   bids?: BidRecorder
   /**
-   * The kind-38859 ad publisher. Absent in a mode with no relay connection —
-   * exactly the treatment {@link AdminDeps.relay} and {@link AdminDeps.bids}
-   * get, and for the same reason: reporting a publisher as `off` where none
-   * could exist reads as a policy an operator chose rather than an absence.
+   * The kind-38859 ad publisher. Present only in `relay` mode with
+   * `NOSTR_AD_PUBLISH` manual or auto — the treatment {@link AdminDeps.relay}
+   * and {@link AdminDeps.bids} get.
    *
    * Absent means `POST /api/actions/post-ad` answers 409 rather than 500.
    */

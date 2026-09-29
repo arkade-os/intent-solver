@@ -80,6 +80,8 @@ import { AdminStore } from './admin/db.js'
 import { applyOverrides } from './admin/settings.js'
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import { recordRfqRefusals } from './admin/rfqRefusals.js'
+import { createBidTail, recordBidsIn, type BidRecorder } from './admin/bids.js'
+import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import type { Services } from './ops/services.js'
 import { refundNow, onchainRefundNow, reclaimL1Htlc } from './ops/refunds.js'
 import { planExitForSwap } from './ops/unilateralExit.js'
@@ -722,7 +724,7 @@ const startAdminServer = async (
    * which is the one thing a port-less solver cannot otherwise be asked — see
    * `RelayConnection.isConnected`'s own docstring.
    */
-  extras?: { relay?: { url: string; isConnected(): boolean } },
+  extras?: { relay?: { url: string; isConnected(): boolean }; bids?: BidRecorder; adPublisher?: AdPublisher },
 ): Promise<{ close(): void } | null> => {
   if (config.adminPort === null) return null
   const { buildAdminApp } = await import('./admin/server.js')
@@ -734,7 +736,15 @@ const startAdminServer = async (
     onError: (error) => log('admin change feed:', error instanceof Error ? error.message : String(error)),
   })
   changes.start()
-  const app = buildAdminApp({ services, startedAt: nowSeconds(), mode, relay: extras?.relay, changes })
+  const app = buildAdminApp({
+    services,
+    startedAt: nowSeconds(),
+    mode,
+    relay: extras?.relay,
+    bids: extras?.bids,
+    adPublisher: extras?.adPublisher,
+    changes,
+  })
   const server = serve({ fetch: app.fetch, port: config.adminPort, hostname: config.adminHost, ...HONO_SERVE_OPTIONS })
   log(`admin console on ${config.adminHost}:${config.adminPort}`)
   return {
@@ -1148,7 +1158,9 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     // corridor — the bidder only ever bids on that one pair, and a bid on a
     // corridor that then refuses the directed RFQ is worse than no bid.
     let bidder
+    let bids: BidRecorder | undefined
     if (config.openRfqMaxBidsPerMinute > 0 && services.service) {
+      bids = createBidTail()
       bidder = new OpenRfqBidder({
         connection,
         providerPubkey: services.providerPubkey,
@@ -1159,11 +1171,24 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         limits: services.policy.corridorLimits['arkade:BTC->lightning:BTC'],
         fee: services.policy.corridorFees['arkade:BTC->lightning:BTC'],
         maxBidsPerMinute: config.openRfqMaxBidsPerMinute,
+        onBid: recordBidsIn(bids),
         onError,
       })
       await bidder.start()
       log('open-RFQ bidding on, capped at', config.openRfqMaxBidsPerMinute, 'bids/min')
     }
+
+    // Undefined under `off`: nothing is constructed, so nothing can publish.
+    const { startAdPublishing } = await import('@arkade-os/solver-transport/relay/adPublisher.js')
+    const { deploymentAd } = await import('./admin/routes/card.js')
+    const ads = startAdPublishing({
+      mode: config.nostrAdPublish,
+      connection,
+      author: services.providerPubkey,
+      buildAd: () => deploymentAd(services),
+      onError: (error) => onError('solver ad publish', error),
+    })
+    if (ads) log('solver ad publishing', config.nostrAdPublish)
 
     // Liveness for a container with no port to probe: the file's mtime, touched
     // only while the relay socket is up, so a solver that is running but
@@ -1219,12 +1244,15 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     // and this is the only surface that can say otherwise.
     const admin = await startAdminServer(services, config, 'relay', {
       relay: { url: config.relayUrl, isConnected: () => connection.isConnected() },
+      bids,
+      adPublisher: ads?.publisher,
     })
 
     try {
       await watchUntilStopped(services)
     } finally {
       clearInterval(heartbeat)
+      ads?.stop()
       try {
         await bidder?.stop()
       } catch (error) {
@@ -1850,12 +1878,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const name = nameArg ?? process.env.SOLVER_NAME
     if (!name) throw new GiveUp('usage: card <name>   (or set SOLVER_NAME; becomes solvers/<network>/<name>.json)')
     const config = loadConfig()
-    // Extra relays beyond RELAY_URL, for a deployment listening on several.
-    const extra = (process.env.SOLVER_CARD_RELAYS ?? '')
-      .split(',')
-      .map((r) => r.trim())
-      .filter(Boolean)
-    const relays = [...(config.relayUrl ? [config.relayUrl] : []), ...extra]
+    const relays = (await import('./admin/routes/card.js')).advertisedRelays(config.relayUrl)
     // This command does not build the service stack, but the card it writes
     // must state the terms the stack would actually enforce — so it resolves
     // the same effective policy `createServices` does, from the same store.
