@@ -54,10 +54,9 @@ import { RFQ_PAIR_RECEIVE } from '../wire/lightningReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
-import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
-import { appendArkadeScript, claimPacketShape } from '@arkade-os/swap'
+import { claimPacketStamp } from './claimPacket.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
 import { FundNotSubmittedError } from './fundLockup.js'
 import type { CovclaimdClient } from './covclaimd.js'
@@ -1026,7 +1025,7 @@ export class ReceiveSwapService {
     // returns is what the confirmation below keys off.
     let fundTxid: string
     const stampStarted = performance.now()
-    const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
+    const stamp = claimPacketStamp(row.claimPacket, covenantScriptFromRow(receiveCovenantRowFor(row)))
     const stampMs = Math.round(performance.now() - stampStarted)
     const fundStarted = performance.now()
     const preFundMs = Math.round(fundStarted - armedStarted)
@@ -1168,25 +1167,6 @@ export class ReceiveSwapService {
       return store.transition(row.id, 'funded', 'refunding', {})
     }
     return false
-  }
-
-  /** Derived rather than stored: `claim_packet` never changes. `script` is passed
-   *  in so the reveal path, which needs it either way, decodes it once. */
-  private claimPacketStamp(
-    row: ReceiveSwapRow,
-    script: ReturnType<typeof covenantScriptFromRow>,
-  ): ClaimPacketStamp | undefined {
-    if (row.claimPacket === null) return undefined
-    const shape = claimPacketShape(row.claimPacket)
-    if (shape.kind !== 'packet') return undefined
-    // Without `0x03` no covclaimd's filter selects the tx, so stamping would
-    // strand it AND turn off the reveal that could still have settled it.
-    if (!shape.covclaimdPubkey) return undefined
-    const arkadeScript = script.nonInteractiveClaimArkadeScript
-    if (!shape.needsArkadeScript) return { packet: shape.body, tapTree: script.encode() }
-    // No leaf to derive from: fall back to the reveal, whose guard reports it.
-    if (!arkadeScript) return undefined
-    return { packet: appendArkadeScript(shape.body, arkadeScript), tapTree: script.encode() }
   }
 
   /** Hand the sealed claim packet to covclaimd. Only called when both a covclaimd and a packet exist. Idempotent to retry — see this file's own top comment. */

@@ -71,9 +71,27 @@ export interface StoreShape<Row, State extends string> {
   toRow(raw: RawRow): Row
 }
 
-const assertColumns = (columns: string[], allowed: ReadonlySet<string>, method: string): void => {
+export const assertColumns = (columns: string[], allowed: ReadonlySet<string>, method: string): void => {
   for (const column of columns) {
     if (!allowed.has(column)) throw new Error(`${method} may not set column '${column}'`)
+  }
+}
+
+/** A nullable column; `undefined` (a column this database predates) reads as null too. */
+export const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value))
+
+export const numberOrNull = (value: unknown): number | null =>
+  value === null || value === undefined ? null : Number(value)
+
+/** Additive migration: `CREATE TABLE IF NOT EXISTS` never alters an existing table. */
+export const addColumns = async (
+  driver: SqlDriver,
+  table: string,
+  columns: readonly (readonly [column: string, type: string])[],
+): Promise<void> => {
+  const existing = new Set((await driver.all<{ name: string }>(`PRAGMA table_info(${table})`)).map((c) => c.name))
+  for (const [column, type] of columns) {
+    if (!existing.has(column)) await driver.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`)
   }
 }
 
@@ -119,6 +137,24 @@ export abstract class BaseSwapStore<Row, State extends string> {
     const raw = await this.driver.get<RawRow>(
       `SELECT * FROM ${this.shape.table} WHERE rfq_id = ? ORDER BY created_at DESC LIMIT 1`,
       [rfqId],
+    )
+    return raw ? this.shape.toRow(raw) : null
+  }
+
+  /** Most recent swap for a hash, any state — the status lookup's view. */
+  async findByPaymentHash(paymentHash: string): Promise<Row | null> {
+    const raw = await this.driver.get<RawRow>(
+      `SELECT * FROM ${this.shape.table} WHERE payment_hash = ? ORDER BY created_at DESC LIMIT 1`,
+      [paymentHash],
+    )
+    return raw ? this.shape.toRow(raw) : null
+  }
+
+  /** The swap that BLOCKS a new quote for this hash, if any — mirrors the partial unique index. */
+  async findLiveByPaymentHash(paymentHash: string): Promise<Row | null> {
+    const raw = await this.driver.get<RawRow>(
+      `SELECT * FROM ${this.shape.table} WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
+      [paymentHash],
     )
     return raw ? this.shape.toRow(raw) : null
   }

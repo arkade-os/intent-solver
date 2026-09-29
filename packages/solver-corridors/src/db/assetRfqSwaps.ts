@@ -36,6 +36,7 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
+import { addColumns, assertColumns, numberOrNull } from './baseSwapStore.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
@@ -80,12 +81,6 @@ const LEGAL_EDGES: Record<AssetRfqSwapState, readonly AssetRfqSwapState[]> = {
  * funded — and `offer_pk_script` is what a deposit is recognised by.
  */
 const TRANSITION_COLUMNS = new Set(['deposit_txid', 'deposit_vout', 'fill_txid', 'failure_reason'])
-
-const assertColumns = (columns: string[], allowed: Set<string>, method: string): void => {
-  for (const column of columns) {
-    if (!allowed.has(column)) throw new Error(`${method} may not set column '${column}'`)
-  }
-}
 
 export interface AssetRfqSwapRow {
   id: string
@@ -267,9 +262,6 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
 const bigIntOrNull = (value: string | number | null | undefined): bigint | null =>
   value === null || value === undefined ? null : BigInt(String(value))
 
-const numberOrNull = (value: string | number | null | undefined): number | null =>
-  value === null || value === undefined ? null : Number(value)
-
 export class AssetRfqSwapStore {
   private constructor(
     readonly driver: SqlDriver,
@@ -303,17 +295,13 @@ export class AssetRfqSwapStore {
    * operator told it was a duplicate-id problem.
    */
   private async migrate(): Promise<void> {
-    const columns = await this.driver.all<{ name: string }>(`PRAGMA table_info(asset_rfq_swap)`)
-    const existing = new Set(columns.map((c) => c.name))
-    for (const [column, type] of [
+    await addColumns(this.driver, 'asset_rfq_swap', [
       ['quote_implied_mantissa', 'TEXT'],
       ['quote_implied_scale', 'INTEGER'],
       ['quote_gives_base', 'INTEGER'],
       ['fill_price_mantissa', 'TEXT'],
       ['fill_price_scale', 'INTEGER'],
-    ] as const) {
-      if (!existing.has(column)) await this.driver.exec(`ALTER TABLE asset_rfq_swap ADD COLUMN ${column} ${type}`)
-    }
+    ])
   }
 
   /**
@@ -424,17 +412,6 @@ export class AssetRfqSwapStore {
       [...NON_TERMINAL],
     )
     return raws.map(toRow)
-  }
-
-  /**
-   * Rows the sweep should drive, with the script worth watching.
-   *
-   * The offer script rather than a lockup of ours, because on this corridor the
-   * funded contract is the CLIENT's deposit — that is the script whose activity
-   * means anything has happened.
-   */
-  async findRecoverable(): Promise<AssetRfqSwapRow[]> {
-    return this.listNonTerminal()
   }
 
   /**

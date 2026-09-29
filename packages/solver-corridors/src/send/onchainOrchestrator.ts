@@ -17,7 +17,6 @@
 import { hex } from '@scure/base'
 import type { AdmissionStrategy, FloatRequirement } from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { RFQ_PAIR_ONCHAIN_SEND } from '../wire/onchainPayloads.js'
-import { sha256 } from '@noble/hashes/sha2.js'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
   ARKADE_CLAIM_WINDOW_SECONDS,
@@ -32,7 +31,7 @@ import {
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
-import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
+import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import {
@@ -47,7 +46,6 @@ import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
-import { MINUTE } from '@arkade-os/solver-core/core/timelocks.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 export type { ArkadeOps as OnchainArkadeOps } from './orchestrator.js'
@@ -137,9 +135,6 @@ export interface OnchainQuoteRequest {
   clientRefundPubkey: string
   rfqId?: string
 }
-
-/** `sha256(P)`, hex — the same wire-form comparison `row.paymentHash` already uses. */
-const paymentHashOf = (preimage: Uint8Array): string => hex.encode(sha256(preimage))
 
 /** Extract the preimage from a claim witness: `[signature, preimage, claimScript, controlBlock]`. */
 const preimageFromClaimWitness = (witness: Uint8Array[]): Uint8Array | null => witness[1] ?? null
@@ -612,7 +607,7 @@ export class OnchainSendSwapService {
       outputScript: hex.decode(row.onchainPkScript),
     })
     const preimage = witness ? preimageFromClaimWitness(witness) : null
-    if (preimage && paymentHashOf(preimage) === row.paymentHash) {
+    if (preimage && paymentHashFromPreimage(preimage) === row.paymentHash) {
       throw new Error(
         `swap ${id}'s onchain HTLC was already claimed by the client, preimage ${hex.encode(preimage)} — ` +
           'a refund of it can never confirm; claim the Arkade lockup with that preimage instead',
@@ -842,7 +837,7 @@ export class OnchainSendSwapService {
     }
 
     const preimage = preimageFromClaimWitness(witness)
-    if (!preimage || paymentHashOf(preimage) !== row.paymentHash) {
+    if (!preimage || paymentHashFromPreimage(preimage) !== row.paymentHash) {
       // A spend exists but does not look like our claim leaf (or reveals a
       // preimage that does not fit) — most likely the SOLVER'S OWN refund
       // spend after a timeout, not the client's claim. Routed to a human:
@@ -942,7 +937,7 @@ export class OnchainSendSwapService {
     })
     if (claimWitness) {
       const preimage = preimageFromClaimWitness(claimWitness)
-      if (preimage && paymentHashOf(preimage) === row.paymentHash) {
+      if (preimage && paymentHashFromPreimage(preimage) === row.paymentHash) {
         return store.transition(row.id, 'refunding_onchain', 'claiming', { preimage: hex.encode(preimage) })
       }
       // Neither a matching claim nor the refund above: genuinely unrecognisable.

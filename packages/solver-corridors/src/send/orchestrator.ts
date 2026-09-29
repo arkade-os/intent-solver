@@ -23,7 +23,6 @@ import { randomUUID } from 'node:crypto'
 import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { RFQ_PAIR_SEND } from '../wire/payloads.js'
 import { ArkAddress } from '@arkade-os/sdk'
-import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import {
   DEFAULT_LOCKUP_TIMEOUT,
@@ -56,7 +55,7 @@ import {
   paymentHashOf,
   type DroppedHint,
 } from '@arkade-os/solver-core/invoice/decode.js'
-import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
+import { preimageMatchesHash, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import type { HoldState, ReceiveBackend, SendBackend, SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
@@ -272,15 +271,6 @@ const HOT_STATES: readonly SendSwapState[] = ['paying', 'paid']
  */
 export const ORPHANED_REGISTRATION_SECONDS = 3600
 
-/** A BOLT11 payment hash is sha256(P); the backend hands us P and we must check it fits. */
-const preimageMatchesHash = (preimageHex: string, paymentHashHex: string): boolean => {
-  try {
-    return hex.encode(sha256(hex.decode(preimageHex))) === paymentHashHex
-  } catch {
-    return false
-  }
-}
-
 /** The pure acceptance gate's refusals, plus the ones only the orchestrator can decide. */
 export type QuoteRefusal =
   | SendAcceptanceRefusal
@@ -345,9 +335,6 @@ export class SendSwapService {
   private readonly quoteLimiter: RateLimiter
   /** Swaps a tick is currently driving, so overlapping loops skip rather than race. */
   private readonly inFlight = new Set<string>()
-  private get backendName(): string | undefined {
-    return this.deps.backendName
-  }
 
   private readonly sweepConcurrency: number
 
@@ -715,12 +702,12 @@ export class SendSwapService {
           lockupAddress: script.address(arkade.hrp, serverKey).encode(),
           refundPkScript: hex.encode(refundPkScript),
           emulatorPubkey: arkade.emulatorPubkey,
-          clientRefundPubkey: options?.clientRefundPubkey,
-          receiverPkScript: options?.clientRefundPubkey !== undefined ? arkade.receiverPkScript : undefined,
+          clientRefundPubkey: options.clientRefundPubkey,
+          receiverPkScript: arkade.receiverPkScript,
           nonInteractiveParameters: true,
           quotedRoutingFeeSats: feeEstimate?.feeSats,
           feeHandle: feeEstimate?.feeHandle,
-          rfqId: options?.rfqId,
+          rfqId: options.rfqId,
         })
         return { accepted: true, swap, lockupDeadline: acceptance.lockupDeadline }
       } catch (error) {
@@ -1004,7 +991,7 @@ export class SendSwapService {
       case 'paying':
         return this.whenPaying(row)
       case 'paid':
-        return this.whenPaid(row)
+        return this.settleFromBackend(row, 'paid')
       case 'claiming':
         return this.whenClaiming(row)
       default:
@@ -1134,7 +1121,7 @@ export class SendSwapService {
           !currentWallet ||
           issuedBy !== currentWallet ||
           !issuedThrough ||
-          issuedThrough !== this.backendName
+          issuedThrough !== this.deps.backendName
         ) {
           this.onTickError?.(
             row.id,
@@ -1343,17 +1330,9 @@ export class SendSwapService {
       }
       txid = await arkade.refund(row, outputs)
     } catch (error) {
-      // The gap this closes: a THROW here was swallowed to a log and the row
-      // continued to `stuck` with `refund_outcome` null — indistinguishable
-      // from a refund never attempted. `stuck` is excluded from
-      // `findRefundable` deliberately (a false "failed" verdict plus an
-      // automatic refund is a double payout), so nothing retries it and the
-      // operator is the retry. They cannot be, if the row does not say what
-      // happened.
-      //
-      // Observed in production: a 50,151-sat row parked for four days with a
-      // funded lockup, `refund_outcome` null, and the only evidence in a log
-      // line that had long since scrolled away.
+      // Recorded on the row: `stuck` is excluded from `findRefundable`, so the
+      // operator is the retry, and a bare `refund_outcome` null would read as
+      // a refund never attempted.
       const reason = error instanceof Error ? error.message : String(error)
       await store.patch(row.id, { refund_attempt: `failed: ${reason}`.slice(0, 500) }).catch(() => undefined) // recording is best-effort too; never mask the original
       this.onTickError?.(row.id, error)
@@ -1456,42 +1435,11 @@ export class SendSwapService {
       routeCltvBudgetBlocks: ln.routeCltvBudgetBlocks,
       enforcesRouteCltv: ln.enforcesRouteCltv,
     }
-    // The rail-change gate's second door, and the one `evaluateSendPayment`
-    // cannot cover. `whenFunded` asks before transitioning; `whenPaying`
-    // reaches here WITHOUT re-asking any pay-time gate, because a row that
-    // committed intent and then died before `payInvoice` is re-submitted on
-    // whatever backend is running now. That is the same capped -> uncapped
-    // rail change, arriving one state later — and a crash is precisely when a
-    // deployment gets restarted under new configuration.
-    //
-    // Only the uncapped case, deliberately. Everything else `evaluateSendPayment`
-    // checks is a reason not to START a payment; this one is the invariant that
-    // the ceiling below cannot carry on a rail that drops it, so re-submitting
-    // is what would breach it.
-    //
-    // Reachable ONLY from that recovery path in practice: `whenFunded` runs
-    // `evaluateSendPayment` against this same live `ln` immediately before
-    // transitioning, so a row that would trip this never reaches `paying` by
-    // the ordinary route. It still supplies its own proof below rather than
-    // leaning on that, because "unreachable" here is a property of two gates
-    // agreeing — not something this branch should assume about its callers.
-    //
-    // Refunds or parks on `nothingCommitted`, which is the CALLER's fact rather
-    // than one readable from the row: only the caller knows how this row
-    // reached here. `whenFunded` has just won the transition and not yet called
-    // `payInvoice`; `whenPaying` has just had `getSendHtlcState` answer
-    // "nothing committed" for this hash. Either way nothing was paid out, the
-    // row was never really exposed, and `store.fail`'s state-based rule — which
-    // sees only `paying` — parks it for an operator who has nothing to decide.
-    //
-    // `stuck` remains right for the case that fact does NOT cover: a backend
-    // with no probe has contradicted nothing, its silence is not "holds
-    // nothing", and auto-refunding there would be the empty read recorded as a
-    // refund that the refund sweep documents at length. Same distinction
-    // `whenPaying` already draws for `PaymentHashRegistered`.
-    // Resolved to seconds for the same reason `whenFunded` resolves it: both readings
-    // below order this deadline against a CLTV budget, which is Lightning's and is
-    // wall-clock whatever unit our covenant counts.
+    // The rail-change gate's second door: `whenPaying` re-submits a row that died
+    // before `payInvoice` on whatever backend runs NOW, without re-asking pay-time
+    // gates. Refuse only on `nothingCommitted` (the caller's proof nothing was paid);
+    // a backend with no probe has proved nothing, so that row still parks `stuck`.
+    // Seconds, as in `whenFunded`: the CLTV budget is Lightning's wall clock.
     if (!ln.enforcesRouteCltv && !deadlineContainsHtlc(cltv, refundDeadlineForCltv, this.now())) {
       const reason = 'refused to pay: uncapped_route_deadline_too_short'
       if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
@@ -1519,7 +1467,7 @@ export class SendSwapService {
     const wallet = await ln.walletFingerprint?.().catch(() => undefined)
     await store.patch(row.id, {
       payment_id: result.id,
-      ...(this.backendName ? { payment_backend: this.backendName } : {}),
+      ...(this.deps.backendName ? { payment_backend: this.deps.backendName } : {}),
       ...(wallet ? { payment_wallet: wallet } : {}),
       // The fee, captured HERE and not only on the poll. A payment that settles
       // inside `payInvoice` is claimed straight from the preimage it returned
@@ -1545,16 +1493,10 @@ export class SendSwapService {
       // is needed) or vetoes the refund below.
       const verdict = await this.refundProvenSelfPayment(row, 'paying')
       if (verdict === 'resolved') return false
-      // Every other terminal failure: give the client their money back NOW
-      // rather than leaving them to wait out `refundLocktime` for a swap we
-      // already know is dead. Before this the lockup simply sat there, and the
-      // client learned nothing until their own deadline matured — days, for a
-      // failure that took a second.
-      //
-      // Unless the probe vetoed it. `failed` proves the sats did not leave by
-      // the route we tried; it says nothing about an htlc our own node is
-      // holding against this same invoice, and refunding into that would pay
-      // the client twice.
+      // Every other terminal failure: refund NOW rather than wait out
+      // `refundLocktime` — unless the probe vetoed it: `failed` says nothing about
+      // an htlc our own node holds against this invoice, and refunding into that
+      // would pay the client twice.
       const refunded = verdict !== 'withhold' && (await this.refundAfterTerminalFailure(row))
       await this.settleTerminalFailure(row, 'paying', refunded, verdict)
       return false
@@ -1563,7 +1505,7 @@ export class SendSwapService {
     // `payInvoice` frequently resolves `P` itself, and the backend already told
     // us so in this very response. Spending it here saves a whole `getPayment`
     // round trip on the one path where latency is the provider's own exposure
-    // window; when it is absent, `whenPaid` polls exactly as it always did.
+    // window; when it is absent, `settleFromBackend` polls exactly as it always did.
     if (result.preimage) await this.claimWithPreimage(row.id, row.paymentHash, result.preimage)
     return true
   }
@@ -1707,10 +1649,6 @@ export class SendSwapService {
     // The preimage hits disk in the same transition that changes state: from
     // `claiming` onward the claim needs nothing external any more.
     return store.transition(id, from, 'claiming', { preimage })
-  }
-
-  private async whenPaid(row: SendSwapRow): Promise<boolean> {
-    return this.settleFromBackend(row, 'paid')
   }
 
   /** Poll the backend once for the payment's outcome and advance accordingly. */

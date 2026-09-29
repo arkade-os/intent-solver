@@ -21,13 +21,9 @@
  * no operator-forced refund at all.
  */
 import {
-  createCorridorReaderSet,
-  createCorridorSet,
   parkVia,
   type Corridor,
   type CorridorReader,
-  type CorridorReaderSet,
-  type CorridorSet,
   type CorridorSwapView,
 } from '@arkade-os/solver-core/core/corridor.js'
 import { NON_TERMINAL as LN_SEND_LIVE } from '../db/swaps.js'

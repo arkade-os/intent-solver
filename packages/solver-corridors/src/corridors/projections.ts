@@ -10,6 +10,7 @@
  * corridor-specific is here.
  */
 import { diagnose, phaseOfStates, type AdminSwap } from '@arkade-os/solver-core/core/swapView.js'
+import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 import { LN_SEND, LN_RECEIVE, ONCHAIN_SEND, ONCHAIN_RECEIVE } from './index.js'
 import type { SendSwapRow } from '../db/swaps.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
@@ -34,65 +35,35 @@ import type { OnchainReceiveSwapRow } from '../db/onchainReceiveSwaps.js'
 export const presentedState = (state: string, refundOutcome: 'pushed' | 'external' | null): string =>
   state === 'refused' && refundOutcome !== null ? 'refunded' : state
 
-export const projectSend = (row: SendSwapRow): AdminSwap => {
-  const state = presentedState(row.state, row.refundOutcome)
-  return {
-    ...diagnose(state, row.failureReason),
-    id: row.id,
-    corridor: LN_SEND.pair,
-    state,
-    phase: phaseOfStates(LN_SEND.states, state),
-    amountSats: row.amountSats,
-    // This corridor quotes the invoice amount directly and has no payout column.
-    payoutSats: null,
-    paymentHash: row.paymentHash,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-    failureReason: row.failureReason,
-  }
-}
+type ProjectedRow = Pick<SendSwapRow, 'id' | 'amountSats' | 'paymentHash' | 'createdAt' | 'updatedAt' | 'failureReason'>
 
-export const projectReceive = (row: ReceiveSwapRow): AdminSwap => ({
-  ...diagnose(row.state, row.failureReason),
+const project = (
+  descriptor: CorridorDescriptor,
+  row: ProjectedRow,
+  state: string,
+  payoutSats: number | null,
+): AdminSwap => ({
+  ...diagnose(state, row.failureReason),
   id: row.id,
-  corridor: LN_RECEIVE.pair,
-  state: row.state,
-  phase: phaseOfStates(LN_RECEIVE.states, row.state),
+  corridor: descriptor.pair,
+  state,
+  phase: phaseOfStates(descriptor.states, state),
   amountSats: row.amountSats,
-  payoutSats: row.payoutSats,
+  payoutSats,
   paymentHash: row.paymentHash,
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
   failureReason: row.failureReason,
 })
 
-export const projectOnchainSend = (row: OnchainSendSwapRow): AdminSwap => {
-  const state = presentedState(row.state, row.refundOutcome)
-  return {
-    ...diagnose(state, row.failureReason),
-    id: row.id,
-    corridor: ONCHAIN_SEND.pair,
-    state,
-    phase: phaseOfStates(ONCHAIN_SEND.states, state),
-    amountSats: row.amountSats,
-    payoutSats: row.payoutSats,
-    paymentHash: row.paymentHash,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-    failureReason: row.failureReason,
-  }
-}
+// This corridor quotes the invoice amount directly and has no payout column.
+export const projectSend = (row: SendSwapRow): AdminSwap =>
+  project(LN_SEND, row, presentedState(row.state, row.refundOutcome), null)
 
-export const projectOnchainReceive = (row: OnchainReceiveSwapRow): AdminSwap => ({
-  ...diagnose(row.state, row.failureReason),
-  id: row.id,
-  corridor: ONCHAIN_RECEIVE.pair,
-  state: row.state,
-  phase: phaseOfStates(ONCHAIN_RECEIVE.states, row.state),
-  amountSats: row.amountSats,
-  payoutSats: row.payoutSats,
-  paymentHash: row.paymentHash,
-  createdAt: row.createdAt,
-  updatedAt: row.updatedAt,
-  failureReason: row.failureReason,
-})
+export const projectReceive = (row: ReceiveSwapRow): AdminSwap => project(LN_RECEIVE, row, row.state, row.payoutSats)
+
+export const projectOnchainSend = (row: OnchainSendSwapRow): AdminSwap =>
+  project(ONCHAIN_SEND, row, presentedState(row.state, row.refundOutcome), row.payoutSats)
+
+export const projectOnchainReceive = (row: OnchainReceiveSwapRow): AdminSwap =>
+  project(ONCHAIN_RECEIVE, row, row.state, row.payoutSats)

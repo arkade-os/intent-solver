@@ -28,10 +28,8 @@
  */
 
 import { hex, base64 } from '@scure/base'
-import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
-import { appendArkadeScript, claimPacketShape } from '@arkade-os/swap'
+import { claimPacketStamp } from './claimPacket.js'
 import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
-import { sha256 } from '@noble/hashes/sha2.js'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
   DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT,
@@ -172,9 +170,6 @@ export interface OnchainReceiveQuoteRequest {
   minFromSats?: number
   maxFromSats?: number
 }
-
-/** `sha256(P)`, hex — same wire-form comparison `row.paymentHash` already uses. */
-const paymentHashOf = (preimage: Uint8Array): string => hex.encode(sha256(preimage))
 
 /**
  * Maps the receive row's fields onto the shape `covenantScriptFromRow` needs.
@@ -511,20 +506,6 @@ export class OnchainReceiveSwapService {
     return rows
   }
 
-  /** Derived rather than stored: `claim_packet` never changes. @see receive/orchestrator.ts */
-  private claimPacketStamp(
-    row: OnchainReceiveSwapRow,
-    script: ReturnType<typeof covenantScriptFromRow>,
-  ): ClaimPacketStamp | undefined {
-    if (row.claimPacket === null) return undefined
-    const shape = claimPacketShape(row.claimPacket)
-    if (shape.kind !== 'packet' || !shape.covclaimdPubkey) return undefined
-    const arkadeScript = script.nonInteractiveClaimArkadeScript
-    if (!shape.needsArkadeScript) return { packet: shape.body, tapTree: script.encode() }
-    if (!arkadeScript) return undefined
-    return { packet: appendArkadeScript(shape.body, arkadeScript), tapTree: script.encode() }
-  }
-
   private async step(row: OnchainReceiveSwapRow): Promise<boolean> {
     switch (row.state) {
       case 'quoted':
@@ -722,7 +703,7 @@ export class OnchainReceiveSwapService {
     if (!(await store.claimFundLease(row.id, 'funding_arkade'))) return false
 
     let txid: string
-    const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
+    const stamp = claimPacketStamp(row.claimPacket, covenantScriptFromRow(receiveCovenantRowFor(row)))
     try {
       txid = await arkade.fund({ address: row.lockupAddress, amountSats: arkadePayoutSats, stamp })
     } catch (error) {

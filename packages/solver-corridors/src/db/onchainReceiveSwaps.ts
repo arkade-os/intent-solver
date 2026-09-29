@@ -32,7 +32,7 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
-import { BaseSwapStore, type RawRow, type StoreShape } from './baseSwapStore.js'
+import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
 export type OnchainReceiveSwapState =
@@ -316,8 +316,7 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   amountSats: Number(raw.amount_sats),
   // Rows quoted before fees existed have no payout_sats; they charged nothing,
   // so the payout WAS the amount. The fallback is that fact, not a default.
-  payoutSats:
-    raw.payout_sats === null || raw.payout_sats === undefined ? Number(raw.amount_sats) : Number(raw.payout_sats),
+  payoutSats: numberOrNull(raw.payout_sats) ?? Number(raw.amount_sats),
   htlcLocktime: Number(raw.htlc_locktime),
   refundLocktime: Number(raw.refund_locktime),
   minConfirmations: Number(raw.min_confirmations),
@@ -341,12 +340,9 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   onchainAddress: String(raw.onchain_address),
   onchainPkScript: String(raw.onchain_pk_script),
   // '' is the stored form of absence — see `receiveSwaps.ts`'s `toRow` for why.
-  claimPacket:
-    raw.claim_packet === null || raw.claim_packet === undefined || raw.claim_packet === ''
-      ? null
-      : String(raw.claim_packet),
+  claimPacket: raw.claim_packet === '' ? null : text(raw.claim_packet),
   fundingTxid: raw.funding_txid === null ? null : String(raw.funding_txid),
-  fundingVout: raw.funding_vout === null || raw.funding_vout === undefined ? null : Number(raw.funding_vout),
+  fundingVout: numberOrNull(raw.funding_vout),
   arkadeFundTxid: raw.arkade_fund_txid === null ? null : String(raw.arkade_fund_txid),
   preimage: raw.preimage === null ? null : String(raw.preimage),
   arkadeClaimTxid: raw.arkade_claim_txid === null ? null : String(raw.arkade_claim_txid),
@@ -354,16 +350,14 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   arkadeRefundTxid: raw.arkade_refund_txid === null ? null : String(raw.arkade_refund_txid),
   refundOutcome: raw.refund_outcome === null ? null : (String(raw.refund_outcome) as 'pushed' | 'external'),
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
-  rfqId: raw.rfq_id === null || raw.rfq_id === undefined ? null : String(raw.rfq_id),
-  fundStartedAt: raw.fund_started_at === null || raw.fund_started_at === undefined ? null : Number(raw.fund_started_at),
-  stampedAt: raw.stamped_at === null || raw.stamped_at === undefined ? null : Number(raw.stamped_at),
+  rfqId: text(raw.rfq_id),
+  fundStartedAt: numberOrNull(raw.fund_started_at),
+  stampedAt: numberOrNull(raw.stamped_at),
   // Unlike `payout_sats`, missing here means "never amended".
-  fundedValueSats:
-    raw.funded_value_sats === null || raw.funded_value_sats === undefined ? null : Number(raw.funded_value_sats),
-  fundedPayoutSats:
-    raw.funded_payout_sats === null || raw.funded_payout_sats === undefined ? null : Number(raw.funded_payout_sats),
-  minFromSats: raw.min_from_sats === null || raw.min_from_sats === undefined ? null : Number(raw.min_from_sats),
-  maxFromSats: raw.max_from_sats === null || raw.max_from_sats === undefined ? null : Number(raw.max_from_sats),
+  fundedValueSats: numberOrNull(raw.funded_value_sats),
+  fundedPayoutSats: numberOrNull(raw.funded_payout_sats),
+  minFromSats: numberOrNull(raw.min_from_sats),
+  maxFromSats: numberOrNull(raw.max_from_sats),
 })
 
 export interface OnchainReceiveQuoteRecord {
@@ -481,32 +475,16 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
    * `toRow`, not fabricated here.
    */
   private async migrate(): Promise<void> {
-    const columns = await this.driver.all<{ name: string }>(`PRAGMA table_info(receive_onchain_swap)`)
-    const existing = new Set(columns.map((c) => c.name))
-    if (!existing.has('payout_sats')) {
-      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN payout_sats INTEGER`)
-    }
-    if (!existing.has('stamped_at')) {
-      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN stamped_at INTEGER`)
-    }
-    if (!existing.has('fund_started_at')) {
-      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN fund_started_at INTEGER`)
-    }
-    if (!existing.has('non_interactive_parameters')) {
-      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN non_interactive_parameters TEXT`)
-    }
-    if (!existing.has('funded_value_sats')) {
-      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN funded_value_sats INTEGER`)
-    }
-    if (!existing.has('funded_payout_sats')) {
-      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN funded_payout_sats INTEGER`)
-    }
-    if (!existing.has('min_from_sats')) {
-      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN min_from_sats INTEGER`)
-    }
-    if (!existing.has('max_from_sats')) {
-      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN max_from_sats INTEGER`)
-    }
+    await addColumns(this.driver, 'receive_onchain_swap', [
+      ['payout_sats', 'INTEGER'],
+      ['stamped_at', 'INTEGER'],
+      ['fund_started_at', 'INTEGER'],
+      ['non_interactive_parameters', 'TEXT'],
+      ['funded_value_sats', 'INTEGER'],
+      ['funded_payout_sats', 'INTEGER'],
+      ['min_from_sats', 'INTEGER'],
+      ['max_from_sats', 'INTEGER'],
+    ])
   }
 
   /**
@@ -601,7 +579,7 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
         quote.lockupAddress,
         quote.refundPkScript,
         quote.clientPayoutPkScript,
-        quote.nonInteractiveParameters === undefined ? null : quote.nonInteractiveParameters ? '1' : null,
+        quote.nonInteractiveParameters ? '1' : null,
         quote.htlcPubkey,
         quote.clientOnchainRefundPubkey,
         quote.onchainAddress,
@@ -614,13 +592,5 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
     )
     await this.recordEvent(quote.id, null, 'quoted', null)
     return this.get(quote.id)
-  }
-
-  async findLiveByPaymentHash(paymentHash: string): Promise<OnchainReceiveSwapRow | null> {
-    const raw = await this.driver.get<Raw>(
-      `SELECT * FROM receive_onchain_swap WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
-      [paymentHash],
-    )
-    return raw ? toRow(raw) : null
   }
 }

@@ -28,7 +28,7 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
-import { BaseSwapStore, type RawRow, type StoreShape } from './baseSwapStore.js'
+import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
 export type ReceiveSwapState =
@@ -254,19 +254,12 @@ const toRow = (raw: Raw): ReceiveSwapRow => ({
   amountSats: Number(raw.amount_sats),
   // Rows quoted before fees existed have no payout_sats; they charged nothing,
   // so the payout WAS the amount. The fallback is that fact, not a default.
-  payoutSats:
-    raw.payout_sats === null || raw.payout_sats === undefined ? Number(raw.amount_sats) : Number(raw.payout_sats),
+  payoutSats: numberOrNull(raw.payout_sats) ?? Number(raw.amount_sats),
   invoice: String(raw.invoice),
-  invoiceWalletFingerprint:
-    raw.invoice_wallet_fingerprint === null || raw.invoice_wallet_fingerprint === undefined
-      ? null
-      : String(raw.invoice_wallet_fingerprint),
-  invoiceBackendName:
-    raw.invoice_backend_name === null || raw.invoice_backend_name === undefined
-      ? null
-      : String(raw.invoice_backend_name),
+  invoiceWalletFingerprint: text(raw.invoice_wallet_fingerprint),
+  invoiceBackendName: text(raw.invoice_backend_name),
   invoiceExpiresAt: Number(raw.invoice_expires_at),
-  htlcExpiresAt: raw.htlc_expires_at === null || raw.htlc_expires_at === undefined ? null : Number(raw.htlc_expires_at),
+  htlcExpiresAt: numberOrNull(raw.htlc_expires_at),
   payoutAddress: String(raw.payout_address),
   payoutPkScript: String(raw.payout_pk_script),
   payoutPubkey: String(raw.payout_pubkey),
@@ -274,10 +267,7 @@ const toRow = (raw: Raw): ReceiveSwapRow => ({
   // deployed database, and SQLite cannot relax that without rebuilding a table
   // of funded swaps. '' is unambiguous because the wire schema refuses an empty
   // claim_packet. NULL reads as absent too, in case a column never was NOT NULL.
-  claimPacket:
-    raw.claim_packet === null || raw.claim_packet === undefined || raw.claim_packet === ''
-      ? null
-      : String(raw.claim_packet),
+  claimPacket: raw.claim_packet === '' ? null : text(raw.claim_packet),
   refundLocktime: Number(raw.refund_locktime),
   solverPubkey: String(raw.solver_pubkey),
   serverPubkey: String(raw.server_pubkey),
@@ -292,21 +282,17 @@ const toRow = (raw: Raw): ReceiveSwapRow => ({
     raw.non_interactive_parameters === null || raw.non_interactive_parameters === undefined
       ? null
       : raw.non_interactive_parameters === '1',
-  fundStartedAt: raw.fund_started_at === null || raw.fund_started_at === undefined ? null : Number(raw.fund_started_at),
-  arkadeLockupTxid:
-    raw.arkade_lockup_txid === null || raw.arkade_lockup_txid === undefined ? null : String(raw.arkade_lockup_txid),
-  arkadeLockupVout:
-    raw.arkade_lockup_vout === null || raw.arkade_lockup_vout === undefined ? null : Number(raw.arkade_lockup_vout),
-  arkadeLockupValue:
-    raw.arkade_lockup_value === null || raw.arkade_lockup_value === undefined ? null : Number(raw.arkade_lockup_value),
-  revealedAt: raw.revealed_at === null || raw.revealed_at === undefined ? null : Number(raw.revealed_at),
-  stampedAt: raw.stamped_at === null || raw.stamped_at === undefined ? null : Number(raw.stamped_at),
-  settleAttemptedAt:
-    raw.settle_attempted_at === null || raw.settle_attempted_at === undefined ? null : Number(raw.settle_attempted_at),
-  preimage: raw.preimage === null || raw.preimage === undefined ? null : String(raw.preimage),
-  refundArkTxid: raw.refund_ark_txid === null || raw.refund_ark_txid === undefined ? null : String(raw.refund_ark_txid),
-  failureReason: raw.failure_reason === null || raw.failure_reason === undefined ? null : String(raw.failure_reason),
-  rfqId: raw.rfq_id === null || raw.rfq_id === undefined ? null : String(raw.rfq_id),
+  fundStartedAt: numberOrNull(raw.fund_started_at),
+  arkadeLockupTxid: text(raw.arkade_lockup_txid),
+  arkadeLockupVout: numberOrNull(raw.arkade_lockup_vout),
+  arkadeLockupValue: numberOrNull(raw.arkade_lockup_value),
+  revealedAt: numberOrNull(raw.revealed_at),
+  stampedAt: numberOrNull(raw.stamped_at),
+  settleAttemptedAt: numberOrNull(raw.settle_attempted_at),
+  preimage: text(raw.preimage),
+  refundArkTxid: text(raw.refund_ark_txid),
+  failureReason: text(raw.failure_reason),
+  rfqId: text(raw.rfq_id),
 })
 
 export interface ReceiveQuoteRecord {
@@ -404,29 +390,15 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
    * `toRow`, not fabricated here.
    */
   private async migrate(): Promise<void> {
-    const columns = await this.driver.all<{ name: string }>(`PRAGMA table_info(receive_swap)`)
-    const existing = new Set(columns.map((c) => c.name))
-    if (!existing.has('payout_sats')) {
-      await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN payout_sats INTEGER`)
-    }
-    if (!existing.has('stamped_at')) {
-      await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN stamped_at INTEGER`)
-    }
-    if (!existing.has('settle_attempted_at')) {
-      await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN settle_attempted_at INTEGER`)
-    }
-    if (!existing.has('non_interactive_parameters')) {
-      await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN non_interactive_parameters TEXT`)
-    }
-    if (!existing.has('fund_started_at')) {
-      await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN fund_started_at INTEGER`)
-    }
-    if (!existing.has('invoice_wallet_fingerprint')) {
-      await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN invoice_wallet_fingerprint TEXT`)
-    }
-    if (!existing.has('invoice_backend_name')) {
-      await this.driver.exec(`ALTER TABLE receive_swap ADD COLUMN invoice_backend_name TEXT`)
-    }
+    await addColumns(this.driver, 'receive_swap', [
+      ['payout_sats', 'INTEGER'],
+      ['stamped_at', 'INTEGER'],
+      ['settle_attempted_at', 'INTEGER'],
+      ['non_interactive_parameters', 'TEXT'],
+      ['fund_started_at', 'INTEGER'],
+      ['invoice_wallet_fingerprint', 'TEXT'],
+      ['invoice_backend_name', 'TEXT'],
+    ])
   }
 
   /** Twin of `OnchainReceiveSwapStore.claimFundLease` — see it for the argument, and
@@ -485,7 +457,7 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
         quote.pkScript,
         quote.lockupAddress,
         quote.solverRefundPkScript,
-        quote.nonInteractiveParameters === undefined ? null : quote.nonInteractiveParameters ? '1' : null,
+        quote.nonInteractiveParameters ? '1' : null,
         quote.rfqId ?? null,
         quote.invoiceWalletFingerprint ?? null,
         quote.invoiceBackendName ?? null,
@@ -493,23 +465,6 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
     )
     await this.recordEvent(quote.id, null, 'quoted', null)
     return this.get(quote.id)
-  }
-
-  async findByPaymentHash(paymentHash: string): Promise<ReceiveSwapRow | null> {
-    const raw = await this.driver.get<Raw>(
-      'SELECT * FROM receive_swap WHERE payment_hash = ? ORDER BY created_at DESC LIMIT 1',
-      [paymentHash],
-    )
-    return raw ? toRow(raw) : null
-  }
-
-  /** The swap that BLOCKS a new quote for this hash, if any — mirrors the partial unique index. */
-  async findLiveByPaymentHash(paymentHash: string): Promise<ReceiveSwapRow | null> {
-    const raw = await this.driver.get<Raw>(
-      `SELECT * FROM receive_swap WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
-      [paymentHash],
-    )
-    return raw ? toRow(raw) : null
   }
 
   /** #161's measurement, as a NOTE (`from === to`): nothing moved. Two integers, no secrets. */

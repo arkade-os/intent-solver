@@ -22,7 +22,7 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
-import { BaseSwapStore, type RawRow, type StoreShape } from './baseSwapStore.js'
+import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
 export type OnchainSendSwapState =
@@ -248,8 +248,7 @@ const toRow = (raw: Raw): OnchainSendSwapRow => ({
   amountSats: Number(raw.amount_sats),
   // Rows quoted before fees existed have no payout_sats; they charged nothing,
   // so the payout WAS the amount. The fallback is that fact, not a default.
-  payoutSats:
-    raw.payout_sats === null || raw.payout_sats === undefined ? Number(raw.amount_sats) : Number(raw.payout_sats),
+  payoutSats: numberOrNull(raw.payout_sats) ?? Number(raw.amount_sats),
   refundLocktime: Number(raw.refund_locktime),
   providerPubkey: String(raw.provider_pubkey),
   serverPubkey: String(raw.server_pubkey),
@@ -276,15 +275,15 @@ const toRow = (raw: Raw): OnchainSendSwapRow => ({
   onchainLockupVout: raw.onchain_lockup_vout === null ? null : Number(raw.onchain_lockup_vout),
   onchainLockupValue: raw.onchain_lockup_value === null ? null : Number(raw.onchain_lockup_value),
   fundingTxid: raw.funding_txid === null ? null : String(raw.funding_txid),
-  fundingVout: raw.funding_vout === null || raw.funding_vout === undefined ? null : Number(raw.funding_vout),
+  fundingVout: numberOrNull(raw.funding_vout),
   preimage: raw.preimage === null ? null : String(raw.preimage),
   claimArkTxid: raw.claim_ark_txid === null ? null : String(raw.claim_ark_txid),
   onchainRefundTxid: raw.onchain_refund_txid === null ? null : String(raw.onchain_refund_txid),
   refundArkTxid: raw.refund_ark_txid === null ? null : String(raw.refund_ark_txid),
   refundOutcome: raw.refund_outcome === null ? null : (String(raw.refund_outcome) as 'pushed' | 'external'),
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
-  rfqId: raw.rfq_id === null || raw.rfq_id === undefined ? null : String(raw.rfq_id),
-  fundStartedAt: raw.fund_started_at === null || raw.fund_started_at === undefined ? null : Number(raw.fund_started_at),
+  rfqId: text(raw.rfq_id),
+  fundStartedAt: numberOrNull(raw.fund_started_at),
 })
 
 export interface OnchainQuoteRecord {
@@ -399,23 +398,15 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
    * this migration could have reached a state where real capital moved.
    */
   private async migrate(): Promise<void> {
-    const columns = await this.driver.all<{ name: string }>(`PRAGMA table_info(send_onchain_swap)`)
-    const existing = new Set(columns.map((c) => c.name))
-    for (const column of [
-      'funding_vout',
-      'onchain_refund_txid',
-      'client_refund_pubkey',
-      'receiver_pk_script',
-      'payout_sats',
-      'fund_started_at',
-      'non_interactive_parameters',
-    ]) {
-      if (!existing.has(column)) {
-        const type =
-          column === 'funding_vout' || column === 'payout_sats' || column === 'fund_started_at' ? 'INTEGER' : 'TEXT'
-        await this.driver.exec(`ALTER TABLE send_onchain_swap ADD COLUMN ${column} ${type}`)
-      }
-    }
+    await addColumns(this.driver, 'send_onchain_swap', [
+      ['funding_vout', 'INTEGER'],
+      ['onchain_refund_txid', 'TEXT'],
+      ['client_refund_pubkey', 'TEXT'],
+      ['receiver_pk_script', 'TEXT'],
+      ['payout_sats', 'INTEGER'],
+      ['fund_started_at', 'INTEGER'],
+      ['non_interactive_parameters', 'TEXT'],
+    ])
   }
 
   /**
@@ -510,7 +501,7 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
         quote.emulatorPubkey,
         quote.clientRefundPubkey,
         quote.receiverPkScript,
-        quote.nonInteractiveParameters === undefined ? null : quote.nonInteractiveParameters ? '1' : null,
+        quote.nonInteractiveParameters ? '1' : null,
         quote.payoutPubkey,
         quote.htlcPubkey,
         quote.htlcLocktime,
@@ -522,14 +513,6 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
     )
     await this.recordEvent(quote.id, null, 'quoted', null)
     return this.get(quote.id)
-  }
-
-  async findLiveByPaymentHash(paymentHash: string): Promise<OnchainSendSwapRow | null> {
-    const raw = await this.driver.get<Raw>(
-      `SELECT * FROM send_onchain_swap WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
-      [paymentHash],
-    )
-    return raw ? toRow(raw) : null
   }
 
   async findRefundable(now: number): Promise<OnchainSendSwapRow[]> {
