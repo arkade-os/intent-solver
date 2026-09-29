@@ -23,7 +23,6 @@
     "@arkade-os/solver-core": "workspace:*",
     "@arkade-os/solver-corridors": "workspace:*",
     "@arkade-os/solver-corridors-evm": "workspace:*",
-    "@arkade-os/solver-db": "workspace:*",
     "@arkade-os/solver-rails": "workspace:*",
     "@arkade-os/solver-rails-esplora": "workspace:*",
     "@arkade-os/solver-rails-evm": "workspace:*",

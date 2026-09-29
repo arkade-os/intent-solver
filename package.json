@@ -48,7 +48,6 @@
     "light-bolt11-decoder": "^3.2.0",
     "lightning": "^12.2.3",
     "nostr-tools": "^2.24.1",
-    "pino": "^9.6.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
