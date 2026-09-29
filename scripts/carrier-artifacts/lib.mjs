@@ -65,7 +65,7 @@ export const CANDIDATE_SDK_SYMBOL = 'SendDeadlineExceededError'
 
 // One member out of a gzipped tar without a tar dependency: decode the POSIX
 // ustar fields this needs, skip everything else by size.
-export function readTarMember(archivePath, member) {
+function readTarMember(archivePath, member) {
   const buffer = gunzipSync(readFileSync(archivePath))
   let offset = 0
   while (offset + 512 <= buffer.length) {
