@@ -126,8 +126,9 @@ export const lockupContractRegistration = (script: CovenantSwapScript, address: 
  * refuses only a pre-CLTV lockup whose wallet is the `sender` — ours. The
  * trader-sender leaf it never refuses is the one we can never sign.
  *
- * An unreadable row is skipped and said, not blocked: blocking would wedge
- * recovery with no remedy.
+ * Every entry is `refundable: false`, so its `refundLocktime` is never
+ * compared — only the immature arm reads the clock. An unreadable row is
+ * skipped and said, not blocked: blocking would wedge recovery with no remedy.
  */
 export const registeredLockupDeadlines = (
   contracts: readonly { script: string; type?: string; params: Record<string, string> }[],
@@ -712,8 +713,11 @@ export const runVtxoLifecycle = async (deps: VtxoLifecycleDeps): Promise<VtxoLif
     // holding the input back, which is precisely when the batch starts
     // failing. Checked first so its reason is the one reported.
     //
-    // CONFIRMED outputs only, unlike the immature arm: not being a clock
-    // question, a block on a height-guess the sweep would skip never lifts.
+    // CONFIRMED outputs only, unlike the immature arm. An unswept height-expiry
+    // is a guess here (no chain tip): blocking on it wedges a block-typed stack
+    // for good. The cost is a window once that height passes but before arkd
+    // sweeps — the SDK, which has the height, includes it and the batch fails —
+    // closing when the sweep confirms it and this arm starts blocking.
     const notOurs = new Map<string, string>()
     const immature = new Map<string, string>()
     for (const lockup of deadlines) {

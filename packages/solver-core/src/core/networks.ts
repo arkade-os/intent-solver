@@ -22,6 +22,8 @@ const BITCOIN_LIMITS: Limits = { minSats: 500, maxSats: 50_000 }
 export interface NetworkProfile {
   /** Amount range this network permits. */
   limits: Limits
+  /** This network in the uppercase spelling a backend SDK asks for. No caller here; a downstream fork that vendors this repo reads it. */
+  backendNetwork: 'MAINNET' | 'SIGNET' | 'REGTEST'
   /** bech32 prefix a BOLT11 carries here. */
   invoicePrefix: string
   /** bech32 prefix for Arkade addresses here. */
@@ -72,6 +74,7 @@ export const NETWORKS = {
     invoicePrefix: 'bc',
     arkadeHrp: 'ark',
     arkdNetwork: 'bitcoin',
+    backendNetwork: 'MAINNET',
     isMainnet: true,
     minCheckpointExitDelaySeconds: undefined,
     explorers: { arkade: 'https://arkade.space', onchain: 'https://mempool.arkade.sh' },
@@ -83,6 +86,7 @@ export const NETWORKS = {
     invoicePrefix: 'tbs',
     arkadeHrp: 'tark',
     arkdNetwork: 'mutinynet',
+    backendNetwork: 'SIGNET',
     isMainnet: false,
     // The hosted Service advertises 4096s, and the SDK cannot tell mutinynet from
     // signet — both are byte-identical `Network` structs — so it applies the 86400s
@@ -103,6 +107,7 @@ export const NETWORKS = {
     invoicePrefix: 'tbs',
     arkadeHrp: 'tark',
     arkdNetwork: 'signet',
+    backendNetwork: 'SIGNET',
     isMainnet: false,
     minCheckpointExitDelaySeconds: undefined,
     explorers: { arkade: 'https://explorer.signet.arkade.sh', onchain: 'https://mempool.signet.arkade.sh' },
@@ -112,6 +117,7 @@ export const NETWORKS = {
     invoicePrefix: 'bcrt',
     arkadeHrp: 'tark',
     arkdNetwork: 'regtest',
+    backendNetwork: 'REGTEST',
     isMainnet: false,
     // The SDK's regtest floor is already 1200, and the stack's own
     // ARKD_CHECKPOINT_EXIT_DELAY=1536 clears it. Nothing to relax.
