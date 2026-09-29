@@ -985,12 +985,14 @@ export class AssetRfqSwapService {
       }
       try {
         const outcome: unknown = await adapter.reconcile(row)
-        if (typeof outcome === 'object' && outcome !== null && (outcome as { status?: unknown }).status === 'pending') {
-          return
+        const { status, reason, txid } = (typeof outcome === 'object' && outcome !== null ? outcome : {}) as {
+          status?: unknown
+          reason?: unknown
+          txid?: unknown
         }
-        if (typeof outcome === 'object' && outcome !== null && (outcome as { status?: unknown }).status === 'stuck') {
+        if (status === 'pending') return
+        if (status === 'stuck') {
           // `fail` from `filling` is `stuck`: unobservable is not never-sent.
-          const reason = (outcome as { reason?: unknown }).reason
           await this.deps.store.fail(
             row.id,
             'filling',
@@ -998,15 +1000,10 @@ export class AssetRfqSwapService {
           )
           return
         }
-        if (
-          typeof outcome !== 'object' ||
-          outcome === null ||
-          (outcome as { status?: unknown }).status !== 'settled' ||
-          !isCanonicalTxid((outcome as { txid?: unknown }).txid)
-        ) {
+        if (status !== 'settled' || !isCanonicalTxid(txid)) {
           throw new Error('receive-carrier reconciliation returned a malformed outcome')
         }
-        await this.completeReceiveCarrierFill(row, (outcome as { txid: string }).txid)
+        await this.completeReceiveCarrierFill(row, txid)
       } catch (error) {
         this.deps.onError?.(row.id, error)
       }
