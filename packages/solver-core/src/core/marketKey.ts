@@ -20,8 +20,11 @@ const CORRIDORS = new Set(['arkade', 'lightning', 'onchain', 'ethereum'])
  * pair would then derive the RIGHT market key, arrive at our subscription, and be
  * skipped as "unserved pair": a silent miss whose stated reason is a lie.
  */
-const ASSET_ID_HEX = /^[0-9a-f]{68}$/
+export const ASSET_ID_HEX = /^[0-9a-f]{68}$/
 export const ASSET_ID_HEX_LENGTH = 68
+
+/** The env-stem symbol rule shared by EVM tokens and asset markets: 1-12 uppercase alphanumerics, letter first. */
+export const STEM_SYMBOL = /^[A-Z][A-Z0-9]{0,11}$/
 
 /**
  * The longest pair string the wire can be asked to carry, derived rather than

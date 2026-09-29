@@ -321,18 +321,9 @@ const costed = (record: SwapEconomics): boolean => priced(record) && record.real
 /**
  * The sats size of a trade — THE DENOMINATOR every margin is a margin of.
  *
- * Takes whichever leg is actually sats, not the inbound one. Reading the
- * inbound leg alone was a unit error with a visible consequence: on the ERC20
- * RECEIVE direction the intake is a token and the payout is sats, so its spread
- * entered the numerator while its notional contributed nothing to the
- * denominator. One 500-sat spread on a 50,000-sat trade then moved a blended
- * `marginBps` by fifty basis points while adding no volume at all — and the
- * mirror direction, whose intake IS sats, behaved correctly, so the error was
- * asymmetric and looked like a real difference between the two legs.
- *
- * Intake and payout differ by exactly the spread, which is immaterial as a
- * denominator and is why either leg will do as "the size of the trade".
- * Zero only when NEITHER leg is sats — a genuine asset-to-asset fill, which has
+ * Whichever leg is sats, NOT the inbound one: on an ERC20 receive the intake is a
+ * token, and counting it would add spread without volume. The two legs differ only
+ * by the spread, so either will do. Zero only for an asset-to-asset fill, which has
  * no `grossSats` either and so never reaches a total.
  */
 const notionalSats = (record: SwapEconomics): number => {

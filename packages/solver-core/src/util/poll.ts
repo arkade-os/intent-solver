@@ -5,6 +5,8 @@ export const nowSeconds = (): number => Math.floor(Date.now() / 1000)
 
 export const log = (...parts: unknown[]): void => console.log(`[${new Date().toISOString()}]`, ...parts)
 
+export const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
 export const json = (value: unknown): string =>
   JSON.stringify(value, (_key, v) => (typeof v === 'bigint' ? v.toString() : v))
 

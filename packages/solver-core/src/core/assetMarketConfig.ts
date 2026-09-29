@@ -28,8 +28,8 @@
  */
 
 import { BPS_DENOMINATOR } from './assetOfferPrice.js'
-import { ASSET_ID_HEX_LENGTH, marketKeyForPair } from './marketKey.js'
-import { defaultPricePath, validatePricePath } from './priceFeed.js'
+import { ASSET_ID_HEX, ASSET_ID_HEX_LENGTH, marketKeyForPair, STEM_SYMBOL } from './marketKey.js'
+import { defaultPricePath, MAX_DECIMALS, validatePricePath } from './priceFeed.js'
 
 /**
  * A payout bound for one direction, in the WANT leg's atomic units.
@@ -114,16 +114,6 @@ export const DEFAULT_SERVING = {
 >
 
 /**
- * The widest precision a leg may declare — the same bound `convertAmount`
- * enforces, for the reason `evmCorridorConfig.ts` states: a value past it would
- * be refused there instead, mid-decision, after the market had been accepted.
- */
-const MAX_DECIMALS = 36
-
-/** § 2's identity rule for an Arkade asset id, verbatim. Lowercase only; hex is case-insensitive and this is not. */
-const ASSET_ID = new RegExp(`^[0-9a-f]{${ASSET_ID_HEX_LENGTH}}$`)
-
-/**
  * The § 2 pair string for a market's two legs, arbitrarily oriented.
  *
  * `BTC` rather than an id for the sats leg, because that is the ticker
@@ -159,7 +149,7 @@ const legName = (leg: string | null): string => leg ?? 'BTC'
 
 const checkLeg = (label: string, leg: string | null): void => {
   if (leg === null) return
-  if (!ASSET_ID.test(leg)) {
+  if (!ASSET_ID_HEX.test(leg)) {
     throw new Error(
       `${label} must be null for the BTC leg or a lowercase ${ASSET_ID_HEX_LENGTH}-character Arkade asset id, ` +
         `got ${JSON.stringify(leg)}`,
@@ -214,16 +204,13 @@ const checkFlatFee = (label: string, value: bigint): void => {
   if (value < 0n) throw new Error(`${label} must be a non-negative integer of atomic units, got ${value}`)
 }
 
-/** § 2's stem rule, the same one `ops/assetRfqMarkets.ts` applied to `ASSET_MARKETS`. */
-const SYMBOL = /^[A-Z][A-Z0-9]{0,11}$/
-
 // 12-char stem: issuance prefix plus gidx. First-11-hex alone collides two
 // assets from the same tx with different group indexes.
 export const rfqSymbolFor = (assetId: string): string =>
   `A${assetId.slice(0, 7).toUpperCase()}${assetId.slice(64).toUpperCase()}`
 
 const checkServing = (market: AssetMarketConfig): void => {
-  if (market.symbol !== null && !SYMBOL.test(market.symbol)) {
+  if (market.symbol !== null && !STEM_SYMBOL.test(market.symbol)) {
     throw new Error(
       `symbol must be 1-12 uppercase alphanumerics starting with a letter, got ${JSON.stringify(market.symbol)}`,
     )

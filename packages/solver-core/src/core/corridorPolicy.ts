@@ -52,13 +52,6 @@ export type AnyCorridor = Corridor | EvmCorridor
 /** `0x` then 40 lowercase hex — the canonical spelling of an ERC20 address. */
 const EVM_TOKEN = /^0x[0-9a-f]{40}$/
 
-export const isEvmCorridor = (value: string): value is EvmCorridor => {
-  const send = /^arkade:BTC->ethereum:(0x[0-9a-f]{40})$/.exec(value)
-  if (send) return true
-  const receive = /^ethereum:(0x[0-9a-f]{40})->arkade:BTC$/.exec(value)
-  return receive !== null
-}
-
 /** The corridor a token is served on, in the given direction. */
 export const evmCorridorFor = (token: string, direction: 'send' | 'receive'): EvmCorridor => {
   if (!EVM_TOKEN.test(token)) {
@@ -67,30 +60,13 @@ export const evmCorridorFor = (token: string, direction: 'send' | 'receive'): Ev
   return direction === 'send' ? `arkade:BTC->ethereum:${token}` : `ethereum:${token}->arkade:BTC`
 }
 
-/** The ERC20 a corridor serves, or null when it is not an EVM corridor. A plain string for the same
- * reason {@link evmDirectionOf} takes one: deciding whether the pair IS an EVM corridor is the job. */
+/** The ERC20 a corridor serves, or null when it is not an EVM corridor. A plain string, not an
+ * `AnyCorridor`: this is what the wire hands over, and deciding whether it IS a corridor is the job. */
 export const evmTokenOf = (corridor: string): string | null => {
   const send = /^arkade:BTC->ethereum:(0x[0-9a-f]{40})$/.exec(corridor)
   if (send) return send[1] ?? null
   const receive = /^ethereum:(0x[0-9a-f]{40})->arkade:BTC$/.exec(corridor)
   return receive ? (receive[1] ?? null) : null
-}
-/**
- * Which EVM direction a pair string names, or null when it names neither.
- *
- * Exists because the RFQ ingress dispatches on pair CONSTANTS for the four BTC
- * corridors, and an EVM pair cannot be a constant - it carries the token
- * address. Without this, `arkade:BTC->ethereum:0x...` reaches the ingress's
- * fall-through case, which is the Lightning send handler, and the client gets a
- * refusal about an invoice it never mentioned.
- *
- * Takes a plain string rather than an `AnyCorridor`: this is what the wire hands
- * over, and deciding whether it IS a corridor is the job.
- */
-export const evmDirectionOf = (pair: string): 'send' | 'receive' | null => {
-  if (/^arkade:BTC->ethereum:0x[0-9a-f]{40}$/.test(pair)) return 'send'
-  if (/^ethereum:0x[0-9a-f]{40}->arkade:BTC$/.test(pair)) return 'receive'
-  return null
 }
 
 /**
