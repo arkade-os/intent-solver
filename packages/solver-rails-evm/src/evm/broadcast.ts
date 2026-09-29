@@ -15,6 +15,7 @@
  * sent yet, and a failed SEND deliberately keeps the nonce burnt.
  */
 
+import { bytesToHex } from '@noble/hashes/utils.js'
 import { createNonceSource, type NonceReader, type NonceSource } from './nonce.js'
 import { priceTransaction, blocksBefore } from './fees.js'
 import { addressFromPrivateKey, signTransaction, type Eip1559Fields } from './transaction.js'
@@ -79,7 +80,7 @@ export const createEvmBroadcaster = (deps: EvmBroadcastDeps) => {
         value: call.value ?? 0n,
         data: call.data,
       }
-      raw = '0x' + Buffer.from(signTransaction(tx, deps.privateKey).raw).toString('hex')
+      raw = '0x' + bytesToHex(signTransaction(tx, deps.privateKey).raw)
     } catch (error) {
       // Nothing left this process, so the nonce is safe to give back. Past this
       // point it is not: a released nonce after a send makes the next
@@ -98,9 +99,7 @@ export const createEvmBroadcaster = (deps: EvmBroadcastDeps) => {
 
 /** A nonce source bound to one JSON-RPC endpoint, shared per solver key. */
 export const nonceSourceFor = (rpc: (method: string, params: readonly unknown[]) => Promise<unknown>): NonceSource => {
-  const read: NonceReader = async (address, block) => {
-    const hex = Array.from(address, (b) => b.toString(16).padStart(2, '0')).join('')
-    return quantity(await rpc('eth_getTransactionCount', ['0x' + hex, block]), 'eth_getTransactionCount')
-  }
+  const read: NonceReader = async (address, block) =>
+    quantity(await rpc('eth_getTransactionCount', ['0x' + bytesToHex(address), block]), 'eth_getTransactionCount')
   return createNonceSource(read)
 }

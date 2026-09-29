@@ -13,6 +13,7 @@
  */
 
 import { keccak_256 } from '@noble/hashes/sha3.js'
+import { bytesToHex } from '@noble/hashes/utils.js'
 
 const selectorFor = (signature: string): Uint8Array => keccak_256(new TextEncoder().encode(signature)).subarray(0, 4)
 
@@ -36,7 +37,7 @@ export const encodeBalanceOf = (owner: Uint8Array): Uint8Array => {
   return out
 }
 
-const hexOf = (bytes: Uint8Array): string => '0x' + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+const hexOf = (bytes: Uint8Array): string => '0x' + bytesToHex(bytes)
 
 /**
  * The owner's balance of one token, in the token's own base units.

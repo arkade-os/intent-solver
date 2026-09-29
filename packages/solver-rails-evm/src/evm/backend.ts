@@ -24,6 +24,8 @@
 
 import { keccak_256 } from '@noble/hashes/sha3.js'
 import { sha256 } from '@noble/hashes/sha2.js'
+import { bytesToHex, concatBytes, hexToBytes } from '@noble/hashes/utils.js'
+import { equalBytes } from '@noble/curves/utils.js'
 import {
   claimEventTopic,
   encodeClaim,
@@ -33,7 +35,6 @@ import {
   encodeLockPrepayMinerfee,
   encodeRefund,
   encodeRefundFor,
-  equalBytes,
   refundEventTopic,
   swapKey,
   type Erc20SwapLock,
@@ -51,19 +52,15 @@ export type {
 } from '@arkade-os/solver-core/ports/evm.js'
 import type { EvmCall, EvmHtlcBackend, EvmHtlcBackendDeps, JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
 
-/** A call for someone else to sign and broadcast: where it goes, the calldata, and any value. */
 /** `swaps(bytes32)` — the public mapping getter, cross-checked in tests. */
 const SWAPS_SELECTOR_SIGNATURE = 'swaps(bytes32)'
 
-const hexOf = (bytes: Uint8Array): string => `0x${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`
+const hexOf = (bytes: Uint8Array): string => '0x' + bytesToHex(bytes)
 
 /** Decodes, or null when the string is not whole-byte hex. */
 const tryBytesOfHex = (value: unknown): Uint8Array | null => {
   if (typeof value !== 'string' || !/^0x([0-9a-fA-F]{2})*$/.test(value)) return null
-  const body = value.slice(2)
-  const out = new Uint8Array(body.length / 2)
-  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(body.slice(i * 2, i * 2 + 2), 16)
-  return out
+  return hexToBytes(value.slice(2))
 }
 
 const bytesOfHex = (value: unknown, label: string): Uint8Array => {
@@ -109,6 +106,15 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
     data: encodeApprove(contractAddress, amount),
   })
 
+  const readSwaps = async (lock: Erc20SwapLock, tag: string, hexLabel: string, wordLabel: string) => {
+    const data = hexOf(concatBytes(swapsSelector, swapKey(lock)))
+    const word = bytesOfHex(await rpc('eth_call', [{ to, data }, tag]), hexLabel)
+    if (word.length !== 32) throw new Error(`${wordLabel}: expected one word, got ${word.length} bytes`)
+    // A bool is a full word, zero or one. Testing every byte rather than the
+    // last one costs nothing and does not assume the node normalises.
+    return word.some((byte) => byte !== 0)
+  }
+
   /**
    * Every log this swap matches in `[fromBlock, tip]`, a page at a time. ONLY
    * THE TIP ENDS THE LOOP, never an empty page: an unread stretch drops a Claim
@@ -147,35 +153,16 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
       return quantityOf(await rpc('eth_blockNumber', []), 'eth_blockNumber')
     },
 
-    async isLocked(lock) {
-      const data = new Uint8Array(4 + 32)
-      data.set(swapsSelector, 0)
-      data.set(swapKey(lock), 4)
-      // 'latest' rather than a pinned height: this answers "is it funded NOW",
-      // and a caller that needs finality applies its own confirmation policy.
-      const result = await rpc('eth_call', [{ to, data: hexOf(data) }, 'latest'])
-      const word = bytesOfHex(result, 'eth_call swaps()')
-      if (word.length !== 32) throw new Error(`eth_call swaps(): expected one word, got ${word.length} bytes`)
-      // A bool is a full word, zero or one. Testing every byte rather than the
-      // last one costs nothing and does not assume the node normalises.
-      return word.some((byte) => byte !== 0)
-    },
+    // 'latest' rather than a pinned height: this answers "is it funded NOW",
+    // and a caller that needs finality applies its own confirmation policy.
+    isLocked: (lock) => readSwaps(lock, 'latest', 'eth_call swaps()', 'eth_call swaps()'),
 
     async findClaimPreimage(lock, fromBlock) {
       return scanLogs(claimEventTopic(), lock, fromBlock, async (entry) => {
         const log = entry as { data?: unknown }
-        // NO CHECK ON `topics` HERE, and that is not an oversight. An earlier
-        // cut confirmed `topics` was an array and then never read it, which
-        // reads as a security guard while filtering nothing. The topic is the
-        // node's own matching criterion echoed back — untrusted, and in the
-        // case that counts, attacker-chosen. The sha256 check below is the
-        // whole filter, so a log with no usable topics at all is decided
-        // correctly by it.
-        // SKIPPED, not thrown. An earlier cut called `bytesOfHex` here, which
-        // throws on a `data` that is a string but not whole-byte hex — so a
-        // single malformed entry aborted the entire scan, including the later
-        // log actually carrying the preimage. One bad record from a node must
-        // not be able to hide a real claim.
+        // No `topics` check: they are attacker-chosen, so the sha256 check below
+        // is the whole filter. A malformed entry is SKIPPED, not thrown, so one
+        // bad record cannot abort the scan and hide a later real claim.
         const preimage = tryBytesOfHex(log.data)
         if (!preimage || preimage.length !== 32) return null
         // THE CHECK THAT MATTERS. A node's filter is a convenience, not a
@@ -216,17 +203,8 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
       return found === true
     },
 
-    async isLockedAt(lock, block) {
-      const data = new Uint8Array(4 + 32)
-      data.set(swapsSelector, 0)
-      data.set(swapKey(lock), 4)
-      const tag = `0x${block.toString(16)}`
-      const result = await rpc('eth_call', [{ to, data: hexOf(data) }, tag])
-      const word = bytesOfHex(result, 'eth_call swaps() at height')
-      if (word.length !== 32)
-        throw new Error(`eth_call swaps() at ${block}: expected one word, got ${word.length} bytes`)
-      return word.some((byte) => byte !== 0)
-    },
+    isLockedAt: (lock, block) =>
+      readSwaps(lock, `0x${block.toString(16)}`, 'eth_call swaps() at height', `eth_call swaps() at ${block}`),
 
     async blockTimestampAt(block) {
       const header = await rpc('eth_getBlockByNumber', [`0x${block.toString(16)}`, false])

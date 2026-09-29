@@ -12,7 +12,9 @@
  * for an outage. Only a stated RANGE rejection is a fact no retry changes.
  */
 
+import { bytesToHex } from '@noble/hashes/utils.js'
 import type { JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 
 /**
  * Provider phrasings meaning the BLOCK RANGE was too large, and nothing else.
@@ -51,12 +53,10 @@ export interface LogScanProbeDeps {
   logScanRange: number
 }
 
-const hexOf = (bytes: Uint8Array): string => `0x${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`
+const hexOf = (bytes: Uint8Array): string => '0x' + bytesToHex(bytes)
 
 /** No event carries this: `topics[0]` is a keccak of a signature, never the zero word. */
 const MATCHES_NOTHING = `0x${'00'.repeat(32)}`
-
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 /**
  * Ask the endpoint to serve one `logScanRange`-wide `eth_getLogs`.

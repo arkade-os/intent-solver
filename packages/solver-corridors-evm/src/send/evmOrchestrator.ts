@@ -36,6 +36,7 @@ import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { evmSendCovenantRowFor } from '../evm/covenantRow.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
 
@@ -177,8 +178,6 @@ export type EvmSendQuoteRefusal =
 export type EvmSendQuoteOutcome =
   { accepted: true; swap: EvmSendSwapRow } | { accepted: false; reason: EvmSendQuoteRefusal }
 
-const nowSeconds = (): number => Math.floor(Date.now() / 1000)
-
 export class EvmSendSwapService {
   private readonly inFlight = new Set<string>()
   private readonly lateLockReported = new Set<string>()
@@ -290,19 +289,10 @@ export class EvmSendSwapService {
       this.refundOutcome(row),
       this.refundLanded(row),
     ])
-    // Scanned once WE HAVE LOCKED, not while the lock is still present.
-    //
-    // `present` is `isLocked`, and the contract DELETES its flag on claim — so
-    // `present` goes false at exactly the moment a Claim event starts existing.
-    // Gating the scan on it made the preimage impossible to find: the client
-    // took the tokens, the solver never learned the secret, and the Arkade
-    // lockup sat until the client's own refund opened. The client ends up with
-    // both sides. The lock's ABSENCE is the signal here, not a reason to stop
-    // looking.
-    //
-    // The ROW HAVING ENTERED `locking_evm` is the honest guard: its CAS
-    // precedes the broadcast. Gating on `evmLockTxid` read one write too late —
-    // that patch lands AFTER it, so a crash between blinded the scan.
+    // Scanned once WE HAVE LOCKED, never gated on `present`: the contract
+    // deletes its flag on claim, so absence is exactly when a Claim exists.
+    // Keyed on the state (its CAS precedes the broadcast), not `evmLockTxid`,
+    // which is patched after it and so is null across a crash.
     let preimage = row.preimage
     if (preimage === null && (EVM_SEND_EXPOSED as readonly string[]).includes(row.state)) {
       // Reported and survived, as `provenDepth` treats its failed reads.
@@ -332,17 +322,8 @@ export class EvmSendSwapService {
       evmLockReverted: lockReverted,
       evmRefundOutcome: refundOutcome,
       evmRefundLanded: refundLanded,
-      // MEASURED, not assumed. Feeding the row's own thresholds back here made
-      // the planner's `>= minConfirmations` check true the instant any block
-      // carried the lock, whatever depth the operator configured — the policy
-      // still read as enforced while enforcing nothing.
-      //
-      // `isLocked` cannot supply this: it asks the contract at `latest`, so it
-      // answers whether the lock EXISTS and never how buried it is. Depth needs
-      // the block the lock was mined in, which is what `minedAt` reads.
-      //
-      // Zero for a lock that is not mined yet, and the planner requires both
-      // depth and age, so an absent or pending lock cannot advance.
+      // MEASURED by `provenDepth`, never the row's own thresholds fed back:
+      // zero for an absent or unproven lock, so it cannot advance.
       evmLockConfirmations: depth.confirmations,
       evmLockAgeSeconds: depth.ageSeconds,
       preimage,
@@ -432,14 +413,6 @@ export class EvmSendSwapService {
   }
 
   /**
-   * Drive one swap as far as it will go.
-   *
-   * Guarded against re-entry: the watch loop and an operator command can both
-   * reach this, and two ticks stepping one row would each read a state the other
-   * is about to change. The store's from-state guard catches it, but as a thrown
-   * error rather than as nothing happening.
-   */
-  /**
    * Admit a swap, or refuse it by name.
    *
    * Mirrors `OnchainSendSwapService.quote` in shape, and differs in the two
@@ -485,15 +458,9 @@ export class EvmSendSwapService {
     })
     if (!acceptance.accept) return { accepted: false, reason: acceptance.reason }
 
-    // The acceptance gate ran in SECONDS; the contract reads a block HEIGHT.
-    // Convert once, here, floored on the SLOWEST cadence — the "setting our own
-    // timelock" direction per blockTime.ts, so the solver's refund opens no
-    // later than the seconds deadline sized it. The row stores the HEIGHT: it
-    // is the only domain `lockFor` can rebuild the lock from, the quote
-    // exposes it to the client as the on-chain deadline, and the contract keys
-    // the lock by exactly this timelock. Storing seconds here put a ~1.75e9
-    // "height" into the contract — centuries at any real cadence — and the
-    // refund branch could never be reached.
+    // Seconds -> HEIGHT, floored on the SLOWEST cadence ("setting our own
+    // timelock", blockTime.ts) so the refund opens no later than sized. The row
+    // stores the height: the contract keys the lock by exactly this timelock.
     const evmTimeoutHeight =
       (await this.deps.blockHeight()) + Number(blocksForDuration(acceptance.evmTimeout - nowSeconds, chain.cadence))
     // The quote binds for the configured window, NOT until the refund locktime:
@@ -652,6 +619,11 @@ export class EvmSendSwapService {
     }
   }
 
+  /**
+   * Drive one swap as far as it will go. Guarded against re-entry: the watch
+   * loop and an operator command can both reach this, and the store's
+   * from-state guard would catch a double step only as a thrown error.
+   */
   async tick(id: string): Promise<EvmSendSwapRow> {
     const { store } = this.deps
     if (this.inFlight.has(id)) return store.get(id)

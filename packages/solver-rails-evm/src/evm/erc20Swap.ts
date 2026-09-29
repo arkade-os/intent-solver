@@ -27,6 +27,7 @@ import { keccak_256 } from '@noble/hashes/sha3.js'
 // so the seam bought nothing and offered one way to be silently wrong.
 import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes } from '@noble/hashes/utils.js'
+import { equalBytes } from '@noble/curves/utils.js'
 // The lock identity moved to the core port vocabulary with the vendor split.
 // Re-exported so existing importers keep resolving; vendor packages read core.
 export type { Erc20SwapLock } from '@arkade-os/solver-core/ports/evm.js'
@@ -67,7 +68,7 @@ export const addressWord = (address: Uint8Array, label: string): Uint8Array => {
  * A `bytes32` as itself — already one word, so only its length is in question.
  *
  * Returns the caller's array rather than a copy. Every result here goes
- * straight into {@link concat}, which copies into a fresh buffer, so a
+ * straight into `concatBytes`, which copies into a fresh buffer, so a
  * defensive copy would protect nothing and allocate a word per parameter. If
  * this ever gains a call site that does NOT concat, it needs the copy back.
  */
@@ -75,20 +76,6 @@ const bytes32Word = (value: Uint8Array, label: string): Uint8Array => {
   assertLength(label, value, WORD)
   return value
 }
-
-export const concat = (parts: readonly Uint8Array[]): Uint8Array => concatBytes(...parts)
-
-/**
- * Byte equality, shared with `backend.ts` rather than copied into it.
- *
- * Not from `@noble/hashes/utils` — v2 exports `concatBytes` but no
- * `equalBytes`, so there is nothing to import. Everything compared here is
- * public (a hash of a revealed preimage against a published payment hash), so
- * constant time buys nothing; the reason this is one function is that two
- * copies in two files drift invisibly.
- */
-export const equalBytes = (a: Uint8Array, b: Uint8Array): boolean =>
-  a.length === b.length && a.every((byte, i) => byte === b[i])
 
 /** The 4-byte selector for a canonical signature. */
 export const selectorFor = (signature: string): Uint8Array =>
@@ -128,13 +115,13 @@ const lockWords = (lock: Erc20SwapLock): readonly Uint8Array[] => [
  * `encodePacked`, which would pack them to 20 and yield a plausible-looking
  * hash matching nothing on chain.
  */
-export const swapKey = (lock: Erc20SwapLock): Uint8Array => keccak_256(concat(lockWords(lock)))
+export const swapKey = (lock: Erc20SwapLock): Uint8Array => keccak_256(concatBytes(...lockWords(lock)))
 
 /** `lock(bytes32,uint256,address,address,address,uint256)`. */
 export const LOCK_SIGNATURE = 'lock(bytes32,uint256,address,address,address,uint256)'
 const LOCK_SELECTOR = selectorFor(LOCK_SIGNATURE)
 
-export const encodeLock = (lock: Erc20SwapLock): Uint8Array => concat([LOCK_SELECTOR, ...lockWords(lock)])
+export const encodeLock = (lock: Erc20SwapLock): Uint8Array => concatBytes(LOCK_SELECTOR, ...lockWords(lock))
 
 /**
  * `claim(bytes32,uint256,address,address,uint256)`.
@@ -152,14 +139,14 @@ export const CLAIM_SIGNATURE = 'claim(bytes32,uint256,address,address,uint256)'
 const CLAIM_SELECTOR = selectorFor(CLAIM_SIGNATURE)
 
 export const encodeClaim = (preimage: Uint8Array, lock: Erc20SwapLock): Uint8Array =>
-  concat([
+  concatBytes(
     CLAIM_SELECTOR,
     bytes32Word(preimage, 'preimage'),
     uintWord(lock.amount, 'amount'),
     addressWord(lock.tokenAddress, 'tokenAddress'),
     addressWord(lock.refundAddress, 'refundAddress'),
     uintWord(lock.timelock, 'timelock'),
-  ])
+  )
 
 /**
  * `claim(bytes32,uint256,address,address,address,uint256)` — the NON-INTERACTIVE
@@ -187,7 +174,7 @@ export const CLAIM_FOR_SIGNATURE = 'claim(bytes32,uint256,address,address,addres
 const CLAIM_FOR_SELECTOR = selectorFor(CLAIM_FOR_SIGNATURE)
 
 export const encodeClaimFor = (preimage: Uint8Array, lock: Erc20SwapLock): Uint8Array =>
-  concat([CLAIM_FOR_SELECTOR, bytes32Word(preimage, 'preimage'), ...lockWords(lock).slice(1)])
+  concatBytes(CLAIM_FOR_SELECTOR, bytes32Word(preimage, 'preimage'), ...lockWords(lock).slice(1))
 
 /**
  * `refund(bytes32,uint256,address,address,address,uint256)` — the same thing for
@@ -200,7 +187,7 @@ export const encodeClaimFor = (preimage: Uint8Array, lock: Erc20SwapLock): Uint8
 export const REFUND_FOR_SIGNATURE = 'refund(bytes32,uint256,address,address,address,uint256)'
 const REFUND_FOR_SELECTOR = selectorFor(REFUND_FOR_SIGNATURE)
 
-export const encodeRefundFor = (lock: Erc20SwapLock): Uint8Array => concat([REFUND_FOR_SELECTOR, ...lockWords(lock)])
+export const encodeRefundFor = (lock: Erc20SwapLock): Uint8Array => concatBytes(REFUND_FOR_SELECTOR, ...lockWords(lock))
 
 /**
  * `refund(bytes32,uint256,address,address,uint256)`.
@@ -212,14 +199,14 @@ export const REFUND_SIGNATURE = 'refund(bytes32,uint256,address,address,uint256)
 const REFUND_SELECTOR = selectorFor(REFUND_SIGNATURE)
 
 export const encodeRefund = (lock: Erc20SwapLock): Uint8Array =>
-  concat([
+  concatBytes(
     REFUND_SELECTOR,
     bytes32Word(lock.preimageHash, 'preimageHash'),
     uintWord(lock.amount, 'amount'),
     addressWord(lock.tokenAddress, 'tokenAddress'),
     addressWord(lock.claimAddress, 'claimAddress'),
     uintWord(lock.timelock, 'timelock'),
-  ])
+  )
 
 /**
  * `lockPrepayMinerfee(bytes32,uint256,address,address,uint256)`.
@@ -254,47 +241,14 @@ export const LOCK_PREPAY_SIGNATURE = 'lockPrepayMinerfee(bytes32,uint256,address
 const LOCK_PREPAY_SELECTOR = selectorFor(LOCK_PREPAY_SIGNATURE)
 
 export const encodeLockPrepayMinerfee = (lock: Erc20SwapLock): Uint8Array =>
-  concat([
+  concatBytes(
     LOCK_PREPAY_SELECTOR,
     bytes32Word(lock.preimageHash, 'preimageHash'),
     uintWord(lock.amount, 'amount'),
     addressWord(lock.tokenAddress, 'tokenAddress'),
     addressWord(lock.claimAddress, 'claimAddress'),
     uintWord(lock.timelock, 'timelock'),
-  ])
-
-/**
- * THE TOKEN'S OWN ABI, not `ERC20Swap`'s.
- *
- * `lock` moves the tokens with `transferFrom`, so it can only succeed against a
- * standing allowance. These two calls are addressed to the TOKEN contract while
- * everything above is addressed to the swap contract — a distinction that is
- * invisible in the calldata and fatal in the `to` field, which is why they are
- * named for it rather than folded in with the rest.
- *
- * Both are static-typed, so the same hand-rolled encoding argument in the module
- * header applies unchanged.
- */
-const APPROVE_SIGNATURE = 'approve(address,uint256)'
-const APPROVE_SELECTOR = selectorFor(APPROVE_SIGNATURE)
-const ALLOWANCE_SIGNATURE = 'allowance(address,address)'
-const ALLOWANCE_SELECTOR = selectorFor(ALLOWANCE_SIGNATURE)
-
-/** `approve(spender, amount)` on the token. */
-export const encodeApprove = (spender: Uint8Array, amount: bigint): Uint8Array =>
-  concat([APPROVE_SELECTOR, addressWord(spender, 'spender'), uintWord(amount, 'amount')])
-
-/**
- * `allowance(owner, spender)` on the token.
- *
- * ARGUMENT ORDER IS LOAD-BEARING and the two are the same type, so swapping
- * them does not fail — it reads what the OWNER may spend of the spender's
- * balance, which for our pair is reliably zero. That reads as "no allowance",
- * and the recovery it triggers (approve again) succeeds, so the mistake would
- * survive every happy path and only cost an extra transaction per lock.
- */
-export const encodeAllowance = (owner: Uint8Array, spender: Uint8Array): Uint8Array =>
-  concat([ALLOWANCE_SELECTOR, addressWord(owner, 'owner'), addressWord(spender, 'spender')])
+  )
 
 /** One returned `uint256` word, big-endian. */
 export const decodeUint256 = (word: Uint8Array, label: string): bigint => {

@@ -33,7 +33,8 @@ import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-db/driver.
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { EVM_RECEIVE_NON_TERMINAL, type EvmReceiveSwapState } from '@arkade-os/solver-core/core/evmSwapState.js'
-import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
+import type { LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
+import { assertColumns, findByStates, history, ledgerRows, text, type Raw } from './evmStoreReads.js'
 
 export interface EvmReceiveSwapRow {
   id: string
@@ -161,11 +162,6 @@ CREATE TABLE IF NOT EXISTS receive_evm_swap_event (
 CREATE INDEX IF NOT EXISTS idx_receive_evm_swap_event_swap ON receive_evm_swap_event(swap_id);
 `
 
-type Raw = Record<string, string | number | null>
-
-const text = (value: string | number | null | undefined): string | null =>
-  value === null || value === undefined ? null : String(value)
-
 const toRow = (raw: Raw): EvmReceiveSwapRow => ({
   id: String(raw.id),
   state: String(raw.state) as EvmReceiveSwapState,
@@ -245,12 +241,6 @@ const TRANSITION_COLUMNS: ReadonlySet<string> = new Set([
   'refund_ark_txid',
   'failure_reason',
 ])
-
-const assertColumns = (columns: readonly string[], allowed: ReadonlySet<string>, where: string): void => {
-  for (const column of columns) {
-    if (!allowed.has(column)) throw new Error(where + ': unknown column ' + column)
-  }
-}
 
 export class EvmReceiveSwapStore {
   private constructor(
@@ -368,13 +358,7 @@ export class EvmReceiveSwapStore {
   }
 
   async findByStates(states: readonly EvmReceiveSwapState[]): Promise<EvmReceiveSwapRow[]> {
-    if (states.length === 0) return []
-    const placeholders = states.map(() => '?').join(', ')
-    const rows = (await this.driver.all(
-      'SELECT * FROM receive_evm_swap WHERE state IN (' + placeholders + ') ORDER BY created_at ASC',
-      [...states],
-    )) as Raw[]
-    return rows.map(toRow)
+    return findByStates(this.driver, 'receive_evm_swap', states, toRow)
   }
 
   async findLive(): Promise<EvmReceiveSwapRow[]> {
@@ -382,33 +366,15 @@ export class EvmReceiveSwapStore {
   }
 
   async history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]> {
-    const rows = (await this.driver.all(
-      'SELECT at, from_state, to_state, detail FROM receive_evm_swap_event WHERE swap_id = ? ORDER BY id ASC',
-      [swapId],
-    )) as Raw[]
-    return rows.map((raw) => ({
-      at: Number(raw.at),
-      from: text(raw.from_state),
-      to: String(raw.to_state),
-      detail: text(raw.detail),
-    }))
+    return history(this.driver, 'receive_evm_swap_event', swapId)
   }
 
-  /** Rows whose last movement falls in a window. @see EvmSendSwapStore.ledgerRows for why the token narrows in SQL. */
+  /** @see ledgerRows in ./evmStoreReads.ts — `tokenAddress` narrows in SQL. */
   async ledgerRows(
     window: LedgerWindow,
     tokenAddress?: string,
   ): Promise<{ rows: EvmReceiveSwapRow[]; truncated: boolean }> {
-    const limit = clampLedgerLimit(window.limit)
-    const raw = await this.driver.all<Raw>(
-      `SELECT * FROM receive_evm_swap WHERE updated_at >= ? AND updated_at < ?` +
-        (tokenAddress === undefined ? '' : ' AND token_address = ?') +
-        ` ORDER BY updated_at DESC LIMIT ?`,
-      tokenAddress === undefined
-        ? [window.since, window.until, limit + 1]
-        : [window.since, window.until, tokenAddress, limit + 1],
-    )
-    return { rows: raw.slice(0, limit).map(toRow), truncated: raw.length > limit }
+    return ledgerRows(this.driver, 'receive_evm_swap', toRow, window, tokenAddress)
   }
 
   async page(options: PageOptions = {}): Promise<{ rows: EvmReceiveSwapRow[]; nextCursor: string | null }> {

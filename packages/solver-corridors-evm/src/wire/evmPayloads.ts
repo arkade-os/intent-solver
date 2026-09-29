@@ -3,8 +3,8 @@
  *
  * Unlike every sibling module here, these carry NO pair constant. An EVM pair
  * names its token — `arkade:BTC->ethereum:0x…` — so the constant that the four
- * BTC corridors dispatch on cannot exist. The ingress matches the pair with
- * `evmDirectionOf` and the schemas below validate only its shape, exactly as
+ * BTC corridors dispatch on cannot exist. The ingress looks the pair up in the
+ * corridor registry and the schemas below validate only its shape, exactly as
  * they do for every other corridor: whether the pair is SERVED is the
  * orchestrator's answer (`unsupported_token`), not the schema's.
  *
@@ -22,48 +22,24 @@
  */
 
 import { z } from 'zod'
-import { MAX_PAIR_LENGTH } from '@arkade-os/solver-core/core/marketKey.js'
 import type { EvmSendSwapRow } from '../db/evmSendSwaps.js'
 import type { EvmReceiveSwapRow } from '../db/evmReceiveSwaps.js'
-import { rfqRefusalPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
+import { RFQ_ID, RFQ_PAIR } from '@arkade-os/solver-core/core/rfqProtocol.js'
 
-const RFQ_ID = z
-  .string()
-  .length(64)
-  .regex(/^[0-9a-f]{64}$/)
-const HEX32 = z
-  .string()
-  .length(64)
-  .regex(/^[0-9a-f]{64}$/)
-const XONLY_HEX = z
-  .string()
-  .length(64)
-  .regex(/^[0-9a-f]{64}$/)
+/** 32 bytes as lowercase hex — the same shape as an rfq id. */
+const HEX64 = RFQ_ID
 
 /** `0x` then 40 hex. Case-insensitive on the wire — EIP-55 checksums are mixed case. */
 const EVM_ADDRESS = z.string().regex(/^0x[0-9a-fA-F]{40}$/)
 
 /**
- * An EVM address as {@link EVM_ADDRESS} spells it, from a stored value that may
- * not be prefixed.
- *
- * The two EVM addresses on a send row reach it by different routes and do not
- * agree on this: `evmClaimAddress` is echoed from a request that already
- * matched `EVM_ADDRESS`, while `evmRefundAddress` is written as
- * `hex.encode(solverEvmAddress)` and carries no prefix. Nothing internal
- * noticed, because `lockFromRow`'s `bytesFromHex` strips an optional `0x` — the
- * wire is the first reader that cares, and it is anchored.
- *
- * Idempotent rather than prefix-always, so it is correct whichever route the
- * value took and stays correct if the write side is ever normalised.
+ * An EVM address as {@link EVM_ADDRESS} spells it. `evmRefundAddress` is stored
+ * as bare `hex.encode(solverEvmAddress)` while `evmClaimAddress` arrives
+ * prefixed, so this is idempotent rather than prefix-always.
  */
 const prefixed = (address: string): string => {
-  // Named rather than left to `undefined.startsWith`. A row that reached the
-  // quote without the solver's address is a broken invariant, and the two ways
-  // of being quiet about it are both worse than throwing: emitting the value
-  // raw would put `"0xundefined"` on the wire, and omitting the field would
-  // ship exactly the quote this field was added to prevent — one that parses,
-  // funds, and cannot be claimed.
+  // Thrown, not emitted: `"0xundefined"` or an omitted field ships a quote that
+  // parses, funds, and cannot be claimed.
   if (typeof address !== 'string' || address.length === 0) {
     throw new Error(`evm refund address missing from the row; a client cannot address the lock without it`)
   }
@@ -93,17 +69,17 @@ export const EvmSendRfqRequest = z
     v: z.literal(1),
     type: z.literal('rfq_request'),
     rfq_id: RFQ_ID,
-    pair: z.string().min(1).max(MAX_PAIR_LENGTH),
+    pair: RFQ_PAIR,
     amount_side: z.literal('from'),
     amount: z.number().int().positive(),
     profile: z
       .object({
-        payment_hash: HEX32,
+        payment_hash: HEX64,
         /** Where the CLIENT claims the tokens. */
         evm_claim_address: EVM_ADDRESS,
         /** The client's Arkade refund destination. */
         refund_address: z.string().min(1).max(200),
-        client_refund_pubkey: XONLY_HEX,
+        client_refund_pubkey: HEX64,
       })
       .strict(),
   })
@@ -126,11 +102,11 @@ export const EvmReceiveRfqRequest = z
     v: z.literal(1),
     type: z.literal('rfq_request'),
     rfq_id: RFQ_ID,
-    pair: z.string().min(1).max(MAX_PAIR_LENGTH),
+    pair: RFQ_PAIR,
     amount_side: z.literal('from'),
     profile: z
       .object({
-        payment_hash: HEX32,
+        payment_hash: HEX64,
         /** Atomic units of the token the client locks. */
         evm_amount: TOKEN_AMOUNT,
         /**
@@ -143,7 +119,7 @@ export const EvmReceiveRfqRequest = z
         /** Where the client's own EVM refund goes. */
         evm_refund_address: EVM_ADDRESS,
         payout_address: z.string().min(1).max(200),
-        payout_pubkey: XONLY_HEX,
+        payout_pubkey: HEX64,
       })
       .strict(),
   })
@@ -193,34 +169,9 @@ export const evmSendRfqQuotePayload = (
      */
     evm_timeout_block: row.evmTimeout,
     /**
-     * The SOLVER's EVM address, and the client cannot settle this corridor
-     * without it.
-     *
-     * `evm_refund_address` names whoever the CONTRACT refunds, which on this
-     * leg is the solver — it locks, so it holds the refund role. That is the
-     * mirror of the receive leg, where the client locks and sends its own
-     * `evm_refund_address` in the REQUEST. The asymmetry is why this field was
-     * missing: the name reads as "the client's" on both legs until you notice
-     * it tracks the role rather than the party.
-     *
-     * TWO distinct uses, and neither is optional:
-     *
-     * 1. It is the sixth field of `hashValues`, which is the contract's whole
-     *    key for the lock. With five of six the client cannot compute the key,
-     *    so it cannot check `swaps(key)` and cannot prove the solver ever
-     *    locked before it parts with the preimage.
-     * 2. `claim(bytes32,uint256,address,address,uint256)` takes it as an
-     *    EXPLICIT argument — the caller is the claimer, so the contract reads
-     *    `claimAddress` from `msg.sender` and must be told the other side.
-     *    Without it the client cannot construct the claim call at all.
-     *
-     * Normalised to `0x` here rather than passed through. The row's own two
-     * addresses do not agree: `evmClaimAddress` arrives from the wire already
-     * prefixed, while this one is written as `hex.encode(solverEvmAddress)`,
-     * which emits bare hex. Nothing internal noticed, because `bytesFromHex`
-     * accepts either — but the wire's `EVM_ADDRESS` is anchored on `0x`, so
-     * passing the row value straight out would emit a value this schema's own
-     * clients must reject.
+     * The SOLVER's address: it names the refund ROLE, not the party. The client
+     * needs it as the sixth `hashValues` field (to check `swaps(key)` before
+     * revealing) and as an explicit argument of the 5-arg `claim`.
      */
     evm_refund_address: prefixed(row.evmRefundAddress),
     evm_contract_address: row.evmContractAddress,
@@ -265,5 +216,3 @@ export const evmReceiveRfqQuotePayload = (
     min_age_seconds: row.minAgeSeconds,
   },
 })
-
-export { rfqRefusalPayload }
