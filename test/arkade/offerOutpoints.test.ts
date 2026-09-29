@@ -8,11 +8,11 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import {
-  heldOnOutpoint,
   largestOfferOutpoint,
   liveOfferOutpoints,
   type OfferOutpoint,
 } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
+import { heldOf } from '@arkade-os/solver-arkade/arkade/offerFill.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const SCRIPT = '5120' + 'ab'.repeat(32)
@@ -132,9 +132,9 @@ describe('largestOfferOutpoint', () => {
   })
 })
 
-describe('heldOnOutpoint', () => {
+describe('heldOf', () => {
   it('reads sats for the BTC leg', () => {
-    expect(heldOnOutpoint(outpoint({ sats: 7n }), null)).toBe(7n)
+    expect(heldOf(outpoint({ sats: 7n }), null)).toBe(7n)
   })
 
   it('sums an asset across entries rather than taking the first', () => {
@@ -145,10 +145,10 @@ describe('heldOnOutpoint', () => {
         { assetId: USD, amount: 6n },
       ],
     }
-    expect(heldOnOutpoint(held, USD)).toBe(10n)
+    expect(heldOf(held, USD)).toBe(10n)
   })
 
   it('reads zero for an asset the outpoint does not carry', () => {
-    expect(heldOnOutpoint(outpoint(), USD)).toBe(0n)
+    expect(heldOf(outpoint(), USD)).toBe(0n)
   })
 })

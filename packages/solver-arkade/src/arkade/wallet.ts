@@ -428,35 +428,10 @@ const candidateWitnessItems = (tx: InstanceType<typeof Transaction>, inputIndex:
 }
 
 /**
- * Read the preimage back out of whichever transaction claimed one of `outpoints`,
- * once covclaimd's autonomous non-interactive claim has landed.
- *
- * The Arkade-side counterpart to `src/onchain/port.ts`'s `findSpendWitness` +
- * `src/send/onchainOrchestrator.ts`'s `preimageFromClaimWitness`: the send leg
- * only ever reads a preimage from Lightning's `getPayment` or an ONCHAIN claim
- * witness; this is the first time this repo reads one back out of an ARKADE
- * spend. "Ask the indexer, don't trust local state" — same posture as
- * {@link findLockups}: every outpoint is checked (a lockup can be more than one
- * output), and every candidate this finds is verified against `paymentHashHex`
- * before being trusted — a matching witness SHAPE is not proof, only a matching
- * HASH is, exactly the discipline `send/orchestrator.ts`'s `preimageMatchesHash`
- * and `send/onchainOrchestrator.ts`'s `paymentHashOf(...) === row.paymentHash`
- * already apply to every other preimage this codebase consumes.
- *
- * Returns null when nothing is spent yet, when the indexer cannot produce the
- * spending transaction, or when nothing found hashes to `paymentHashHex` — all
- * three are "nothing provable yet", never distinguished, because a caller's
- * only correct response to any of them is the same: wait, or (past the refund
- * deadline) escalate to a human rather than guess.
- *
- * Worth knowing about the transaction this ends up reading: the indexer's
- * `spentBy` names the CHECKPOINT transaction, not the higher-level Ark
- * transaction id (`arkTxId`) — every offchain spend builds one checkpoint per
- * input (`buildOffchainTx`/`buildCheckpointTx`), and the checkpoint's own
- * input is the one carrying the swap-script `tapLeafScript`, so that is where
- * the claim leaf's witness actually lands. Matching that input back to the
- * outpoints asked for works either way, which is why this needs no special
- * case for it.
+ * The preimage from whichever transaction claimed one of `outpoints` (covclaimd's claim),
+ * verified against `paymentHashHex` — a matching witness SHAPE is not proof. Null means
+ * nothing provable yet. `spentBy` names the CHECKPOINT tx, whose input carries the claim
+ * leaf's witness, so matching its inputs to `outpoints` needs no special case.
  */
 export const findClaimPreimage = async (
   ctx: ArkadeContext,
@@ -466,16 +441,8 @@ export const findClaimPreimage = async (
   if (outpoints.length === 0) return null
   const { vtxos } = await ctx.wallet.indexerProvider.getVtxos({ outpoints: [...outpoints] })
 
-  // Both spend facts, not just `spentBy`. The SDK's own `hasTerminalSpend`
-  // spells out why: "The wire contract permits `isSpent: true` with an empty
-  // `spentBy` (settlement inputs needing no forfeit are written that way)", so
-  // a `spentBy`-only read can look straight past a real spend and report
-  // nothing provable — which on this path means never learning `P` for a claim
-  // that did land. Either field naming a transaction is worth reading.
-  //
-  // Truthiness, never presence: both are documented as "" rather than absent
-  // for an output they do not apply to (the same rule `convertVtxo`'s own
-  // mapping applies).
+  // Both spend facts, not just `spentBy` — see lockupSpendEvidence. Truthiness, never
+  // presence: both are "" rather than absent for an output they do not apply to.
   const spendingTxids = [...new Set(vtxos.flatMap((v) => [v.spentBy, v.settledBy]).filter((id): id is string => !!id))]
   if (spendingTxids.length === 0) return null
 
@@ -503,35 +470,10 @@ export const totalValue = (outputs: readonly FundedOutput[]): number =>
   outputs.reduce((sum, output) => sum + output.value, 0)
 
 /**
- * Every outpoint this script has ever held — SPENT ONES INCLUDED, which is the
- * whole reason it exists separately from {@link findLockups}.
- *
- * `findLockups` answers "what can still be spent here" and so goes empty the
- * moment a claim lands, which is exactly when {@link findClaimPreimage} needs
- * the outpoint to look up what did the claiming. Reading the unfiltered set
- * recovers it from the indexer rather than making every caller persist the
- * outpoint at funding time.
- *
- * Passing NO filter is what makes that work, and is deliberate: every one of
- * `getVtxos`'s state filters is opt-in narrowing — `spendableOnly`,
- * `spentOnly`, `recoverableOnly`, `pendingOnly`, `renewableOnly`, each
- * documented as "Only return ..." — so an absent filter restricts nothing and
- * spent outputs are included. Adding one here would reintroduce exactly the
- * blindness this exists to avoid.
- *
- * `value` and `spent` come back alongside the outpoint because the Lightning
- * receive leg funds its OWN lockup and has to tell "this script was already
- * funded (and maybe already claimed)" apart from "somebody dusted a public
- * address": the outpoint alone cannot answer that, and the exact-value
- * comparison is what keeps a 1-sat payment from being adopted as the
- * provider's funding — or from blocking one. `spent` is `hasTerminalSpend`
- * rather than a hand-rolled `spentBy` test for the reason
- * {@link lockupProvablySpent} spells out: the wire contract permits
- * `isSpent: true` with an empty `spentBy`, and only the SDK's own predicate
- * cannot read a spent output back as unspent.
- *
- * Paged the same way {@link findLockups} is, and for the same reason now that
- * values are compared here: a truncated first page would undercount the lockup.
+ * Every outpoint this script has ever held — SPENT ONES INCLUDED, unlike {@link findLockups},
+ * so {@link findClaimPreimage} can still find the claimed outpoint. `value` lets the receive
+ * leg tell its own funding from a dust payment to a public address. Paged like findLockups;
+ * unfiltered and `hasTerminalSpend` for the reasons at {@link lockupSpendEvidence}.
  */
 export const findLockupOutpoints = async (
   ctx: Pick<ArkadeContext, 'wallet'>,
@@ -547,31 +489,9 @@ export const findLockupOutpoints = async (
 }
 
 /**
- * Whether this script's money is provably GONE — it held at least one output,
- * and every one of them is spent.
- *
- * The positive counterpart to {@link findLockups}, and the reason the refund
- * sweeps no longer read an empty spendable answer as proof that somebody else
- * refunded. `findLockups` is `spendableOnly`, so it answers "what can still be
- * spent here" and goes empty for two unrelated reasons: the outputs really
- * were spent, or that view has not caught up. Absence of a spendable output is
- * not evidence of a spend, so this asks for the spend itself.
- *
- * Unfiltered for the same reason {@link findLockupOutpoints} is: every one of
- * `getVtxos`'s state filters is opt-in narrowing, so passing none is what
- * keeps spent outputs in the answer.
- *
- * `hasTerminalSpend` rather than a hand-rolled `spentBy` test, because the
- * wire contract permits `isSpent: true` with an empty `spentBy` — the SDK's
- * own predicate unions all three spend facts, and is the only one that cannot
- * read a spent output back as unspent. A SWEPT output is deliberately NOT a
- * terminal spend (the SDK keeps that fact separate), so a batch the server
- * swept answers false here and leaves the row actionable, rather than being
- * reported to a client as a refund it never received.
- *
- * An empty answer is FALSE, never true: a script the indexer knows nothing
- * about is lag, not proof, and callers only reach this for a row that already
- * recorded a funded lockup.
+ * Whether this script's money is provably GONE: it held at least one output and every one
+ * is spent. `findLockups` is `spendableOnly`, so its empty answer cannot tell a spend from
+ * a view that has not caught up — this asks for the spend itself. @see lockupSpendEvidence
  */
 export const lockupProvablySpent = async (ctx: Pick<ArkadeContext, 'wallet'>, pkScriptHex: string): Promise<boolean> =>
   (await lockupSpendEvidence(ctx, pkScriptHex)) === 'spent'
@@ -579,6 +499,12 @@ export const lockupProvablySpent = async (ctx: Pick<ArkadeContext, 'wallet'>, pk
 /** The same read {@link lockupProvablySpent} makes, keeping the answer its boolean folds away: `unknown` — no output at all — is permanent, where `unspent` is a view that may still catch up. */
 export type LockupSpendEvidence = 'unknown' | 'unspent' | 'spent'
 
+/**
+ * Unfiltered on purpose — every `getVtxos` state filter is opt-in narrowing, so none keeps
+ * spent outputs. `hasTerminalSpend`, not a `spentBy` test: the wire contract permits
+ * `isSpent: true` with an empty `spentBy`. A SWEPT output is not a terminal spend, so a
+ * swept batch stays actionable; no output at all is `unknown` (lag), never proof.
+ */
 export const lockupSpendEvidence = async (
   ctx: Pick<ArkadeContext, 'wallet'>,
   pkScriptHex: string,

@@ -1,11 +1,6 @@
 /**
- * Turning a decoded Arkade offer into the decision `core/assetOffer.ts` takes.
- *
- * THE ADAPTER LAYER THAT MODULE NAMED. `evaluateOfferFill` deliberately does not
- * import `@arkade-os/swap`'s `Offer` — "the decision is pure data in and a
- * verdict out, and the package that decodes the offer packet belongs to the
- * adapter layer that will call this". This is that layer, and until now it did
- * not exist: the decision had no caller anywhere in `src/`.
+ * Turning a decoded Arkade offer into the decision `core/assetOffer.ts` takes —
+ * the adapter layer that keeps `@arkade-os/swap`'s `Offer` out of that pure decision.
  *
  * WHAT THE PACKET DOES NOT CARRY, and it is the whole reason this file has two
  * arguments rather than one. `Offer` has `wantAmount` — what the maker asks for
@@ -61,24 +56,15 @@ export interface OfferDeposit {
  * some BTC id — and `evaluateOfferFill` keys its markets and inventory the same
  * way.
  *
- * TYPED STRUCTURALLY, not as the SDK's `asset.AssetId`, and that is not
- * fastidiousness: the only thing this function depends on is the serialization
- * `toString()` produces, never the class. Naming exactly that keeps the adapter
- * honest about its dependency — a serialization, nothing more.
- *
- * It also survives a version split, which is worth knowing but is NOT the
- * reason. When this repo pinned `@arkade-os/sdk@0.4.62` while
- * `@arkade-os/swap@0.0.7` required `0.4.64`, pnpm installed both and the two
- * `AssetId` classes were nominally distinct — identical shape, incompatible
- * types. It recurred on the 0.0.10 bump, which needs `0.4.67`, and surfaced as
- * `Argument of type 'Wallet' is not assignable to parameter of type 'IWallet'`.
- * The fix both times was to pin the SAME sdk the swap package asks for, so keep
- * them in step rather than relying on this being structural.
+ * Typed structurally, not as the SDK's `asset.AssetId`: the only dependency is
+ * the serialization `toString()` produces, never the class. Keep `@arkade-os/sdk`
+ * pinned to the version `@arkade-os/swap` asks for — two copies make nominally
+ * distinct `AssetId`/`IWallet` types.
  */
 const idOf = (id: { toString(): string } | undefined): string | null => (id === undefined ? null : id.toString())
 
 /** How much of `assetId` the deposit holds — or its sats, when the leg is BTC. */
-const heldOf = (deposit: OfferDeposit, assetId: string | null): bigint => {
+export const heldOf = (deposit: OfferDeposit, assetId: string | null): bigint => {
   if (assetId === null) return deposit.sats
   // Summed rather than found: nothing says one output holds the whole balance,
   // and an offer funded by two payments is still an offer.
