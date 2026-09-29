@@ -5,6 +5,7 @@ import {
   decodeCoupledInvoice,
   decodeInvoice,
   expiresAtOf,
+  finalCltvBlocksOf,
   paymentHashOf,
   InvalidInvoice,
   MAX_CLIENT_CLTV_BLOCKS,
@@ -345,6 +346,19 @@ describe('paymentHashOf / amountSatsOf — the already-accepted readers', () => 
 })
 
 /**
+ * `finalCltvBlocksOf` — the reader for invoices THIS SOLVER minted.
+ *
+ * The ceilings in `decodeInvoice` are send-leg protections: they bound what a
+ * CLIENT's invoice may demand of us, because a delta outliving our refund
+ * deadline is the double-collect window. On the receive leg the invoice is
+ * ours, we are the payee, and a longer delta only pushes `E` later — which
+ * every gate in `core/receive.ts` wants rather than fears.
+ *
+ * The mainnet privacy wrapper mints 420 blocks against a 288 ceiling, so
+ * running those defences over our own invoice threw `cltv_too_large` on every
+ * receive quote. These pin that this reader does not.
+ */
+/**
  * The reader for invoices this solver MINTS, whose defining property is that
  * they carry no amount — so the one thing that matters is that it answers where
  * {@link decodeInvoice} refuses.
@@ -390,6 +404,54 @@ describe('expiresAtOf', () => {
     // is the exact failure this whole path was written to prevent.
     expect(() => expiresAtOf('not-an-invoice')).toThrow(InvalidInvoice)
     expect(() => expiresAtOf('x'.repeat(MAX_INVOICE_LENGTH + 1))).toThrow(/too_long/)
+  })
+})
+
+describe('finalCltvBlocksOf', () => {
+  const withCltv = (blocks: number): string =>
+    forgeInvoice({
+      network: 'bcrt',
+      amountSats: 50_000,
+      paymentHash: new Uint8Array(32).fill(7),
+      timestamp: 1_734_606_755,
+      expirySeconds: 1800,
+      minFinalCltvBlocks: blocks,
+    })
+
+  it('reads a delta the send-leg ceiling would refuse', () => {
+    // 420 is what the live mainnet wrapper actually mints, and 288 is the
+    // ceiling that rejected it. This is the regression, at its real value.
+    const invoice = withCltv(420)
+    expect(finalCltvBlocksOf(invoice)).toBe(420)
+    expect(() => decodeInvoice(invoice)).toThrow(/cltv_too_large/)
+  })
+
+  it('agrees with decodeInvoice wherever decodeInvoice will answer', () => {
+    // Not a different parser — the same value, minus the refusals. If these ever
+    // disagree, one of them is reading the wrong tag.
+    for (const blocks of [18, 40, 60, 144, 288]) {
+      const invoice = withCltv(blocks)
+      expect(finalCltvBlocksOf(invoice)).toBe(decodeInvoice(invoice).minFinalCltvBlocks)
+    }
+  })
+
+  it('returns BOLT11’s default when the invoice carries no c tag', () => {
+    // An absent tag is a real 18, not "unknown" — and 18 is below everything
+    // this corridor needs, so reading it as absent would silently pass a check
+    // that should refuse.
+    const noTag = forgeInvoice({
+      network: 'bcrt',
+      amountSats: 50_000,
+      paymentHash: new Uint8Array(32).fill(7),
+      timestamp: 1_734_606_755,
+      expirySeconds: 1800,
+    })
+    expect(finalCltvBlocksOf(noTag)).toBe(18)
+  })
+
+  it('still refuses input it cannot parse, rather than inventing a number', () => {
+    expect(() => finalCltvBlocksOf('not-an-invoice')).toThrow(/malformed/)
+    expect(() => finalCltvBlocksOf('x'.repeat(MAX_INVOICE_LENGTH + 1))).toThrow(/too_long/)
   })
 })
 

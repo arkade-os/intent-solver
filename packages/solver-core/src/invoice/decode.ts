@@ -44,6 +44,15 @@ const sectionReader = (raw: string): ((name: string) => unknown) => {
 }
 
 /**
+ * The `c` tag alone, BOLT11's 18 when absent — read through the section reader, not `decodeInvoice`,
+ * so an invoice this repo would refuse still yields its delta. No caller here; a downstream fork imports it.
+ */
+export const finalCltvBlocksOf = (raw: string): number => {
+  const value = sectionReader(raw)('min_final_cltv_expiry')
+  return typeof value === 'number' ? value : DEFAULT_MIN_FINAL_CLTV
+}
+
+/**
  * When an invoice THIS SOLVER MINTED stops being payable, unix seconds.
  *
  * ## Why this exists rather than `decodeInvoice(raw).expiresAt`
