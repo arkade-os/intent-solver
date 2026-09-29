@@ -224,7 +224,10 @@ export interface LifecycleVtxo {
 export interface LockupDeadline {
   /** pkScript hex. */
   script: string
-  /** Absolute refund deadline: unix seconds, or a HEIGHT on a block-typed arkd (see the guard's SECONDS ONLY note). */
+  /**
+   * Absolute refund deadline: unix seconds, or a HEIGHT on a block-typed arkd. Only the
+   * `immature` arm of `runVtxoLifecycle` compares it, as seconds — see SECONDS ONLY there.
+   */
   refundLocktime: number
   /**
    * Whether this wallet holds the lockup's `sender` key. `vhtlc-v2` stamps the

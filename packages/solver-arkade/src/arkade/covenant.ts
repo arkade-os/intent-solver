@@ -225,7 +225,12 @@ export interface CovenantSwapParams {
   refundLocktime: number
   /** CSV delay for the provider's server-independent claim, seconds. */
   claimDelay: number
-  /** Denominating asset, if any. ONLY THE ONE NAMED IS PROTECTED: extras on a funded VTXO are the spender's. */
+  /**
+   * Denominating asset, if any. ONLY THE ONE NAMED IS PROTECTED: extras on a funded VTXO are the spender's.
+   * Its covenant is the SDK's; if it is ever built here again, keep the two opcode traps: a `VERIFY` after
+   * each `INSPECTOUTASSETLOOKUP` (an absent asset reads `amount 0`, and `0 >= 0` passes), and
+   * `INSPECTOUTASSETCOUNT ... EQUALVERIFY 1` (else extra assets ride along).
+   */
   asset?: ArkadeAssetId
   /** The client's own refund key — the covenant's `sender`. */
   client: XOnlyKey
