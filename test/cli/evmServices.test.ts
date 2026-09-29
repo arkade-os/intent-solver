@@ -14,8 +14,6 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { corridorSetFromDeps, readerSetFromDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 import { respondToRfqRequest } from '@arkade-os/solver-transport/ingress/rfq.js'
 import { endpointHost } from '@arkade-os/solver-app/ops/services.js'

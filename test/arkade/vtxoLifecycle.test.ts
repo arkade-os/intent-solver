@@ -53,23 +53,6 @@ const extendedScript = (refundLocktime = REFUND_LOCKTIME): CovenantSwapScript =>
     },
   })
 
-const baseScript = (): CovenantSwapScript =>
-  new CovenantSwapScript({
-    receiver: RECEIVER,
-    server: SERVER,
-    preimageHash: new Uint8Array(20).fill(7),
-    refundLocktime: REFUND_LOCKTIME,
-    claimDelay: 512,
-    client: CLIENT,
-    clientRefundDelay: 1024,
-    refundWithoutServerDelay: 2048,
-    nonInteractiveParameters: {
-      emulatorPubkey: EMULATOR,
-      receiverPkScript: P2TR(9),
-      senderPkScript: P2TR(8),
-    },
-  })
-
 interface Calls {
   renew: number
   recover: number
