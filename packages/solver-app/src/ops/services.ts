@@ -487,6 +487,12 @@ export const createServices = async (
    * not hammered, and the corridors share their backends.
    */
   const tickErrors = new TickErrorTracker()
+  const tickErrorLogger =
+    (label: string) =>
+    (id: string, error: unknown): void => {
+      const { line } = tickErrors.record(id, error)
+      if (line) log(`${label} ${id} failed:`, line)
+    }
   const wireTickErrors = (
     service: {
       onTickError?: (id: string, error: unknown) => void
@@ -495,10 +501,7 @@ export const createServices = async (
     },
     label: string,
   ): void => {
-    service.onTickError = (id, error) => {
-      const { line } = tickErrors.record(id, error)
-      if (line) log(`${label} ${id} failed:`, line)
-    }
+    service.onTickError = tickErrorLogger(label)
     service.onTickSuccess = (id) => tickErrors.clear(id)
     service.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
   }
@@ -1117,10 +1120,7 @@ export const createServices = async (
       },
       peerStores: [store, onchainStore, receiveStore, onchainReceiveStore],
       // The late-lock watch reports here too; a bare log line gave it no dedup and no `failing` panel.
-      onTickError: (id, error) => {
-        const { line } = tickErrors.record(id, error)
-        if (line) log(`evm send tick ${id} failed:`, line)
-      },
+      onTickError: tickErrorLogger('evm send tick'),
     })
     evmReceiveService = new EvmReceiveSwapService({
       quoteLimiter,
@@ -1150,8 +1150,7 @@ export const createServices = async (
       // bound this corridor alone, which is not what the cap means.
       admission,
       peerStores: [store, onchainStore, receiveStore, onchainReceiveStore],
-      onTickError: (id, error) =>
-        log(`evm receive tick ${id} failed:`, error instanceof Error ? error.message : String(error)),
+      onTickError: tickErrorLogger('evm receive tick'),
     })
   }
 

@@ -116,7 +116,16 @@ describe('the EVM send leg`s tick failures', () => {
   it('go through the tracker the four BTC corridors share, not straight to the log', () => {
     const body = createServices()
     const send = body.slice(body.indexOf('new EvmSendSwapService('), body.indexOf('new EvmReceiveSwapService('))
-    expect(send).toContain('tickErrors.record(id, error)')
+    expect(send).toContain("onTickError: tickErrorLogger('evm send tick')")
+    expect(body).toMatch(/const tickErrorLogger =[\s\S]{0,120}tickErrors\.record\(id, error\)/)
+  })
+})
+
+describe('the EVM receive leg`s tick failures', () => {
+  it('go through that same tracker, so the one leg holding client tokens is not the one with no dedup', () => {
+    const body = createServices()
+    const receive = body.slice(body.indexOf('new EvmReceiveSwapService('), body.indexOf('recoverReadableMarkets('))
+    expect(receive).toContain("onTickError: tickErrorLogger('evm receive tick')")
   })
 })
 
