@@ -21,16 +21,17 @@ import { consoleBalance, type AssetDetailSource } from '../assets.js'
 import { marketServingDivergence } from '../../ops/marketDivergence.js'
 import { poolPlan } from '../../ops/pool.js'
 import { requireLn, requireOnchain } from '../../ops/rails.js'
+import { attempt } from '../../ops/attempt.js'
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import type { AdminSwap } from '@arkade-os/solver-core/core/swapView.js'
 import {
   projectSend,
   projectReceive,
   projectOnchainSend,
   projectOnchainReceive,
-  type AdminSwap,
-} from '../projection.js'
+} from '@arkade-os/solver-corridors/corridors/projections.js'
+import { liveSwaps } from '../projection.js'
 import type { AdminDeps } from '../server.js'
-
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 /**
  * The wallet's asset-metadata reader, when there is one.
@@ -42,23 +43,6 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 const assetSource = (wallet: unknown): AssetDetailSource | undefined => {
   const manager = (wallet as { assetManager?: Partial<AssetDetailSource> } | null)?.assetManager
   return typeof manager?.getAssetDetails === 'function' ? (manager as AssetDetailSource) : undefined
-}
-
-/**
- * Read a value that depends on a backend, or report why it could not be read.
- *
- * Same discipline as `probes.ts`: an unreachable Lightning node must not take
- * the wallet page down, it must show as unreadable beside the parts that DID
- * answer.
- */
-const attempt = async <T>(
-  read: () => Promise<T>,
-): Promise<{ value: T; error: null } | { value: null; error: string }> => {
-  try {
-    return { value: await read(), error: null }
-  } catch (error) {
-    return { value: null, error: messageOf(error) }
-  }
 }
 
 /**
@@ -137,30 +121,13 @@ const stuckSwaps = async (deps: AdminDeps): Promise<{ rows: AdminSwap[]; total: 
   }
 }
 
-/** Every non-terminal swap, projected — the live set across all four corridors. */
-const liveSwaps = async (deps: AdminDeps): Promise<AdminSwap[]> => {
-  const { services } = deps
-  const [send, receive, onchainSend, onchainReceive] = await Promise.all([
-    services.store.findRecoverable(),
-    services.receiveStore.findRecoverable(),
-    services.onchainStore.findRecoverable(),
-    services.onchainReceiveStore.findRecoverable(),
-  ])
-  return [
-    ...send.map(projectSend),
-    ...receive.map(projectReceive),
-    ...onchainSend.map(projectOnchainSend),
-    ...onchainReceive.map(projectOnchainReceive),
-  ]
-}
-
 export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/overview', async (c) => {
     const { services } = deps
     const overrides = await services.adminStore.getOverrides()
     const effective = applyOverrides(services.config, overrides)
     const storedMarkets = await services.adminStore.listMarkets()
-    const live = await liveSwaps(deps)
+    const live = await liveSwaps(deps.services)
     const stuck = await stuckSwaps(deps)
 
     const committed = await Promise.all([
@@ -185,7 +152,7 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       // of per-network facts, and a second copy in untyped browser code is a
       // copy that will eventually point a mainnet swap at a signet explorer.
       explorers: NETWORKS[services.config.network].explorers,
-      uptimeSeconds: Math.max(0, (deps.now?.() ?? Math.floor(Date.now() / 1000)) - deps.startedAt),
+      uptimeSeconds: Math.max(0, (deps.now?.() ?? nowSeconds()) - deps.startedAt),
       /** What `routes/settings.ts`'s `pendingKeys` derives, independently — and for the reasons stated there. */
       pendingRestart: settingsDrift(
         services.bootPolicy,
@@ -301,7 +268,7 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/quotes', async (c) => {
     // A quote IS a swap in `quoted` state — insertQuote writes the row — so
     // this is a projection of the same tables rather than a separate store.
-    const quoted = (await liveSwaps(deps)).filter((swap) => swap.state === 'quoted')
+    const quoted = (await liveSwaps(deps.services)).filter((swap) => swap.state === 'quoted')
     return c.json({ quoted, bids: deps.bids?.recent() ?? { entries: [], ephemeral: true, capacity: 0 } })
   })
 }

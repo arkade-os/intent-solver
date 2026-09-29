@@ -3,7 +3,6 @@ import {
   EVM_MIN_CLAIM_WINDOW_SECONDS,
   EVM_ORDER_MARGIN_SECONDS,
   evaluateEvmSendLock,
-  evmTimeoutFor,
   type EvmSendLockParams,
 } from '@arkade-os/solver-core/core/evmSend.js'
 
@@ -91,30 +90,5 @@ describe('evaluateEvmSendLock', () => {
       ok: false,
       reason: 'recourse_after_refund_deadline',
     })
-  })
-})
-
-describe('evmTimeoutFor', () => {
-  it('proposes the latest safe value, giving the client every second it can', () => {
-    // Deliberately not the earliest: claim time matters on a corridor where
-    // the client may have to obtain gas first, and the margin already covers
-    // our own recourse.
-    expect(evmTimeoutFor(params())).toBe(NOW + 24 * HOUR - EVM_ORDER_MARGIN_SECONDS)
-  })
-
-  it('proposes something its own gate accepts', () => {
-    const proposed = evmTimeoutFor(params())
-    expect(proposed).not.toBeNull()
-    expect(evaluateEvmSendLock(params({ evmTimeout: proposed! }))).toEqual({ ok: true })
-  })
-
-  it('returns null rather than an unsafe proposal when no value works', () => {
-    // A caller must not be able to lift a deadline out of a quote that cannot
-    // be served — that is how an unsafe lock gets funded from a refused quote.
-    expect(evmTimeoutFor(params({ refundLocktime: NOW + 60 }))).toBeNull()
-  })
-
-  it('honours an overridden margin', () => {
-    expect(evmTimeoutFor(params({ orderMarginSeconds: HOUR }))).toBe(NOW + 23 * HOUR)
   })
 })

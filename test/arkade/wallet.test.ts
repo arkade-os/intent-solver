@@ -14,7 +14,7 @@ import {
   Extension,
   PrevArkTxField,
 } from '@arkade-os/sdk'
-import { CovenantSwapScript, parseAssetId } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import type { ArkadeContext, FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 interface AssetGroupView {
@@ -379,7 +379,7 @@ describe('refunding an asset-carrying lockup', () => {
         receiverPkScript: RECEIVER_PAYOUT,
         senderPkScript: DEST,
       },
-      asset: parseAssetId(ASSET_A),
+      asset: asset.AssetId.fromString(ASSET_A),
     })
 
   const arkSubmitTx = vi.fn(async (arkTxB64: string, checkpointsB64: string[]) => ({

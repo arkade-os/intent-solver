@@ -28,10 +28,8 @@
  */
 
 import { hex, base64 } from '@scure/base'
-import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
-import { appendArkadeScript, claimPacketShape } from '@arkade-os/swap'
+import { claimPacketStamp } from './claimPacket.js'
 import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
-import { sha256 } from '@noble/hashes/sha2.js'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
   DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT,
@@ -49,6 +47,7 @@ import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/co
 import { RFQ_PAIR_ONCHAIN_RECEIVE } from '../wire/onchainReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
@@ -64,6 +63,7 @@ import type { OnchainReceiveSwapRow, OnchainReceiveSwapStore } from '../db/oncha
 import type { CovclaimdClient } from './covclaimd.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
@@ -172,9 +172,6 @@ export interface OnchainReceiveQuoteRequest {
   minFromSats?: number
   maxFromSats?: number
 }
-
-/** `sha256(P)`, hex — same wire-form comparison `row.paymentHash` already uses. */
-const paymentHashOf = (preimage: Uint8Array): string => hex.encode(sha256(preimage))
 
 /**
  * Maps the receive row's fields onto the shape `covenantScriptFromRow` needs.
@@ -462,67 +459,17 @@ export class OnchainReceiveSwapService {
     }
   }
 
-  async tick(id: string): Promise<OnchainReceiveSwapRow> {
-    const { store } = this.deps
-    if (this.inFlight.has(id)) return store.get(id)
-    this.inFlight.add(id)
-    try {
-      while (await this.step(await store.get(id))) {
-        // each successful step re-reads the row and tries the next
-      }
-      return await store.get(id)
-    } finally {
-      this.inFlight.delete(id)
-    }
+  tick(id: string): Promise<OnchainReceiveSwapRow> {
+    return guardedTick(id, this.inFlight, this.deps.store, (row) => this.step(row))
   }
 
   async tickAll(): Promise<OnchainReceiveSwapRow[]> {
-    const rows: OnchainReceiveSwapRow[] = []
     const page = await this.deps.store.pageRecoverable({
       cursor: this.recoverySweepCursor,
       limit: this.recoverySweepRowBudget,
     })
     this.recoverySweepCursor = page.nextCursor
-    for (const row of page.rows) {
-      // Held off after repeated failures, or already being ticked elsewhere.
-      // Neither means the swap advanced, so the row comes back unchanged and
-      // `onTickSuccess` does not fire. Gated here rather than in `tick` so a
-      // direct caller — an operator's recheck, a one-shot CLI tick — is never
-      // throttled: only this timer is.
-      if (this.shouldSkipTick?.(row.id) || this.inFlight.has(row.id)) {
-        rows.push(row)
-        continue
-      }
-      try {
-        rows.push(await this.tick(row.id))
-        // Ran, and did not throw: the fault is over. The host clears the
-        // backoff on this rather than on membership of the returned array,
-        // which also holds skipped rows and rows that threw.
-        this.onTickSuccess?.(row.id)
-      } catch (error) {
-        this.onTickError?.(row.id, error)
-        try {
-          rows.push(await this.deps.store.get(row.id))
-        } catch {
-          // Store fault, not a swap fault — skip, the next sweep retries.
-        }
-      }
-    }
-    return rows
-  }
-
-  /** Derived rather than stored: `claim_packet` never changes. @see receive/orchestrator.ts */
-  private claimPacketStamp(
-    row: OnchainReceiveSwapRow,
-    script: ReturnType<typeof covenantScriptFromRow>,
-  ): ClaimPacketStamp | undefined {
-    if (row.claimPacket === null) return undefined
-    const shape = claimPacketShape(row.claimPacket)
-    if (shape.kind !== 'packet' || !shape.covclaimdPubkey) return undefined
-    const arkadeScript = script.nonInteractiveClaimArkadeScript
-    if (!shape.needsArkadeScript) return { packet: shape.body, tapTree: script.encode() }
-    if (!arkadeScript) return undefined
-    return { packet: appendArkadeScript(shape.body, arkadeScript), tapTree: script.encode() }
+    return sweep(page.rows, this, this.deps.store, { inFlight: this.inFlight })
   }
 
   private async step(row: OnchainReceiveSwapRow): Promise<boolean> {
@@ -722,7 +669,7 @@ export class OnchainReceiveSwapService {
     if (!(await store.claimFundLease(row.id, 'funding_arkade'))) return false
 
     let txid: string
-    const stamp = this.claimPacketStamp(row, covenantScriptFromRow(receiveCovenantRowFor(row)))
+    const stamp = claimPacketStamp(row.claimPacket, covenantScriptFromRow(receiveCovenantRowFor(row)))
     try {
       txid = await arkade.fund({ address: row.lockupAddress, amountSats: arkadePayoutSats, stamp })
     } catch (error) {
@@ -1074,7 +1021,12 @@ export class OnchainReceiveSwapService {
       // to take the row.
       if (this.now() - row.updatedAt >= REFUND_CENSORSHIP_GRACE) {
         const detail = error instanceof Error ? error.message : String(error)
-        await store.fail(row.id, 'refunding_arkade', `refund failing for ${REFUND_CENSORSHIP_GRACE}s: ${detail}`)
+        const recourse = unilateralExitRecourse(receiveCovenantRowFor(row), { solverPubkey: arkade.providerPubkey })
+        await store.fail(
+          row.id,
+          'refunding_arkade',
+          `refund failing for ${REFUND_CENSORSHIP_GRACE}s: ${detail} — ${recourse}`,
+        )
         return false
       }
       throw error

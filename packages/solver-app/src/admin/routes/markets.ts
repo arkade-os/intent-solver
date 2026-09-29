@@ -42,12 +42,11 @@ import {
   type CarrierMode,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetMarketRow } from '../db.js'
 import { marketCapability } from '../marketCapability.js'
 import type { AdminDeps } from '../server.js'
 import type { FeedCache } from '../feedCache.js'
-
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 /**
  * Why a stored market is not yet in force. One string, so the UI renders the

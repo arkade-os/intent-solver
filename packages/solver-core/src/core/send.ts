@@ -95,38 +95,11 @@ export const evaluateCouplingDeadlines = (input: CouplingDeadlineInput): Couplin
 export const DEFAULT_LOCKUP_TIMEOUT = 15 * MINUTE
 
 /**
- * When a quote stops being fundable: the funding window, fitted to the invoice.
- *
- * THE single definition, and it has consumers that must never disagree —
- * `evaluateSendAcceptance` quotes it to the client, the send orchestrator times
- * the quote out against it, and the RFQ re-quote path replays it for a swap
- * already on disk. A client told one deadline and timed out against another is
- * refused for funding exactly when it was invited to.
- *
- * The invariant: a client funding inside the window it was quoted must never
- * then be refused for expiry. `evaluateSendPayment` insists on
- * `MIN_INVOICE_WINDOW` at the moment it pays, so the window may not outlast
- * `invoiceExpiresAt - MIN_INVOICE_WINDOW`, and simply ENDS there when the
- * invoice is too short to hold a whole `lockupTimeout`.
- *
- * Fitting the window to the invoice, rather than demanding an invoice that fits
- * a fixed window, is what lets a short invoice be quoted at all. This used to
- * run the other way — refuse anything under `lockupTimeout +
- * MIN_INVOICE_WINDOW` (17 min at the default), and before that
- * `MIN_INVOICE_WINDOW + MIN_CLAIM_WINDOW` (92 min). Nothing needed either
- * floor. The invoice clock bounds one thing only: whether the PAYEE will still
- * accept the payment. What guards the money is the payee's CLTV delta held
- * against `refundLocktime` (`refundLocktimeFor`, and `worstCaseHtlcBlocks`
- * under it) — and no term of that reads the invoice's expiry, because once the
- * payment is out the invoice has no further say in when the HTLC resolves.
- *
- * The floors' cost was real and ordinary: 15 min is BTCPay Server's default
- * invoice expiry, and 92 min sat above BOLT11's own 3600s default (the decoder's
- * `DEFAULT_EXPIRY_SECONDS`, `src/invoice/decode.ts`), so an invoice minted
- * without an `x` tag was refused outright.
- *
- * Only a quote-time pre-check either way. The gates that guard the money are
- * re-evaluated immediately before the payment in `evaluateSendPayment`.
+ * When a quote stops being fundable. THE single definition: quoting, the orchestrator's
+ * timeout and the RFQ re-quote must agree. Ends at `invoiceExpiresAt - MIN_INVOICE_WINDOW`
+ * because `evaluateSendPayment` insists on that margin at pay time. Fitted to the invoice
+ * rather than refusing short ones: the invoice clock only bounds whether the payee still
+ * accepts; the money is guarded by the CLTV delta against `refundLocktime`.
  */
 export const lockupDeadlineFor = (
   quotedAt: number,
@@ -312,26 +285,10 @@ export const deadlineContainsHtlc = (cltv: HtlcCltv, refundLocktime: number, now
 /**
  * Longest funding window an operator may configure (`LOCKUP_TIMEOUT_SECONDS`).
  *
- * DERIVED: the window is the gap between quoting — when `refundLocktime` is
- * fixed, absolutely — and paying, and `payableCltvBlocks` spends every second of
- * it out of `REFUND_SAFETY_MARGIN`. A window longer than that margin can only
- * produce quotes which, if funded near their deadline, refuse themselves with
- * `cltv_budget_too_short`. Refusing the configuration once at boot says that
- * plainly instead of once per swap.
- *
- * Defence in depth rather than the guard itself: `payableCltvBlocks` enforces
- * the real invariant at payment time whatever this is set to. It is written down
- * because the bound that USED to sit on this knob (3480s) was justified by an
- * invoice-expiry constraint that no longer exists, and while removing it for
- * that reason was right, 3480 had also been holding the window under this margin
- * by accident — an invariant nothing named and nothing tested.
- *
- * Note the equality is now a coincidence worth keeping rather than a derivation.
- * Neither rail spends the margin on funding: the enforcing one absorbs the delay
- * into its CEILING, which `payableCltvBlocks` shortens second for second, and the
- * other has the window reserved in its deadline up front (`refundLocktimeFor`).
- * What this bound still buys is that the second of those reservations stays
- * small — a client is quoted the window as extra refund clock.
+ * Defence in depth: `payableCltvBlocks` enforces the real invariant at pay time, but a
+ * window past `REFUND_SAFETY_MARGIN` only produces quotes that, funded late, refuse
+ * themselves with `cltv_budget_too_short` — so it is refused once at boot instead. It
+ * also keeps small the window a non-capping rail reserves in `refundLocktimeFor`.
  */
 export const MAX_LOCKUP_TIMEOUT = REFUND_SAFETY_MARGIN
 
@@ -659,22 +616,10 @@ export interface SendPaymentInput {
   /**
    * Whether this backend caps the route — `SendBackend.enforcesRouteCltv`.
    *
-   * Read LIVE, from the rail in use right now, while `refundLocktime` was fixed
-   * on the row at quote time. Nothing on the row records which rail quoted it
-   * (`payment_backend` is written alongside a payment id, so it exists only
-   * AFTER a payment), and a `funded` row has no staleness bound, so a deployment
-   * that swaps one Lightning rail for another pays out rows quoted under the old
-   * one. Same shape `routeCltvBudgetBlocks` has had all along.
-   *
-   * The asymmetry is deliberate and it fails closed — but via
-   * `deadlineContainsHtlc`, NOT via the budget check, which is where this
-   * comment used to point and was wrong. Re-selecting the worst hint and
-   * clamping the ceiling refuses only when the payee's own floor already
-   * exceeds the remaining deadline; on mainnet, where the unilateral bound sets
-   * that deadline, an ordinary invoice sails through it and the uncapped route
-   * on top is never asked about. The deadline-containment gate is what asks.
-   *
-   * The reverse switch only tightens a ceiling already inside a longer deadline.
+   * Read LIVE while `refundLocktime` was fixed at quote time, and nothing on the row
+   * records which rail quoted it, so a rail swap pays out rows quoted under the old one.
+   * That fails closed via `deadlineContainsHtlc`, NOT the budget check; the reverse
+   * switch only tightens a ceiling already inside a longer deadline.
    */
   enforcesRouteCltv: boolean
   now: number

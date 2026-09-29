@@ -90,7 +90,7 @@ describe('the phase vocabulary this relies on', () => {
     // deliver. If it ever moved into `done`, the gate above would start hiding
     // the actions on rows that may still need them, so pin the classification
     // the gate reads rather than trusting it stays put.
-    const { phaseOf } = await import('@arkade-os/solver-app/admin/projection.js')
+    const { phaseOf } = await import('../support/phaseOf.js')
     expect(phaseOf('arkade:BTC->lightning:BTC', 'claimed')).toBe('done')
     expect(phaseOf('arkade:BTC->onchain:BTC', 'claimed')).toBe('done')
     expect(phaseOf('arkade:BTC->lightning:BTC', 'refused')).toBe('failed')

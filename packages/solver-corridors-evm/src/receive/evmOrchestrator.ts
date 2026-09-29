@@ -21,7 +21,8 @@ import {
   type EvmReceiveObservation,
 } from '@arkade-os/solver-core/core/evmReceivePlan.js'
 import type { EvmReceiveSwapRow, EvmReceiveSwapStore } from '../db/evmReceiveSwaps.js'
-import type { EvmCall, EvmHtlcBackend, EvmTransactionOutcome } from '@arkade-os/solver-core/ports/evm.js'
+import type { EvmBroadcaster } from '../send/evmOrchestrator.js'
+import type { EvmHtlcBackend, EvmTransactionOutcome } from '@arkade-os/solver-core/ports/evm.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
@@ -43,8 +44,8 @@ import { deadlineSecondsForBlock, type EvmBlockCadence } from '@arkade-os/solver
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
-
-export type EvmBroadcaster = (call: EvmCall) => Promise<string>
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 
 export interface EvmReceiveServiceDeps {
   store: EvmReceiveSwapStore
@@ -157,8 +158,6 @@ export type EvmReceiveQuoteRefusal =
 export type EvmReceiveQuoteOutcome =
   { accepted: true; swap: EvmReceiveSwapRow } | { accepted: false; reason: EvmReceiveQuoteRefusal }
 
-const nowSeconds = (): number => Math.floor(Date.now() / 1000)
-
 export class EvmReceiveSwapService {
   private readonly inFlight = new Set<string>()
   private readonly admission: AdmissionControl
@@ -219,13 +218,8 @@ export class EvmReceiveSwapService {
     )
     return {
       evmLockPresent: present,
-      // MEASURED, and it matters more on this leg than on the send one. Here
-      // the depth check is the only thing standing between a client's lock and
-      // the solver's own sats: feeding the thresholds back made it pass at
-      // depth one, so the solver funded the Arkade lockup against a lock that
-      // could still reorg away — after which the client claims the sats and the
-      // solver's token claim finds nothing. `isLocked` reads `latest` and so
-      // reports existence, never depth; `minedAt` reads the block it landed in.
+      // MEASURED by `provenDepth`: on this leg it is all that stops the solver
+      // funding sats against a client lock that can still reorg away.
       evmLockConfirmations: depth.confirmations,
       evmLockAgeSeconds: depth.ageSeconds,
       arkadeLockupFunded: funded,
@@ -498,34 +492,15 @@ export class EvmReceiveSwapService {
     }
   }
 
-  async tick(id: string): Promise<EvmReceiveSwapRow> {
-    const { store } = this.deps
-    if (this.inFlight.has(id)) return store.get(id)
-    this.inFlight.add(id)
-    try {
-      while (await this.step(await store.get(id))) {
-        // each successful step re-reads and tries the next
-      }
-      return await store.get(id)
-    } finally {
-      this.inFlight.delete(id)
-    }
+  tick(id: string): Promise<EvmReceiveSwapRow> {
+    return guardedTick(id, this.inFlight, this.deps.store, (row) => this.step(row))
   }
 
   async tickAll(): Promise<EvmReceiveSwapRow[]> {
-    const rows: EvmReceiveSwapRow[] = []
-    for (const row of await this.deps.store.findLive()) {
-      try {
-        rows.push(await this.tick(row.id))
-      } catch (error) {
-        this.deps.onTickError?.(row.id, error)
-        try {
-          rows.push(await this.deps.store.get(row.id))
-        } catch {
-          // Store fault rather than a swap fault - the next sweep retries.
-        }
-      }
-    }
-    return rows
+    return sweep(
+      await this.deps.store.findLive(),
+      { tick: (id) => this.tick(id), onTickError: (id, error) => this.deps.onTickError?.(id, error) },
+      this.deps.store,
+    )
   }
 }

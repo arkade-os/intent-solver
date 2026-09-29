@@ -34,6 +34,7 @@ import { registerEventRoutes } from './routes/events.js'
 import type { ChangeFeed } from './events.js'
 import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { readStaticFile } from './static.js'
 import { createFeedCache } from './feedCache.js'
 
@@ -56,10 +57,9 @@ export interface AdminDeps {
   /** Recent open-RFQ bids. Absent when bidding is off (`OPEN_RFQ_MAX_BIDS_PER_MIN=0`). */
   bids?: BidRecorder
   /**
-   * The kind-38859 ad publisher. Absent in a mode with no relay connection —
-   * exactly the treatment {@link AdminDeps.relay} and {@link AdminDeps.bids}
-   * get, and for the same reason: reporting a publisher as `off` where none
-   * could exist reads as a policy an operator chose rather than an absence.
+   * The kind-38859 ad publisher. Present only in `relay` mode with
+   * `NOSTR_AD_PUBLISH` manual or auto — the treatment {@link AdminDeps.relay}
+   * and {@link AdminDeps.bids} get.
    *
    * Absent means `POST /api/actions/post-ad` answers 409 rather than 500.
    */
@@ -79,7 +79,7 @@ export interface AdminDeps {
 
 export const buildAdminApp = (deps: AdminDeps): Hono => {
   const app = new Hono()
-  const now = deps.now ?? ((): number => Math.floor(Date.now() / 1000))
+  const now = deps.now ?? nowSeconds
 
   app.get('/api/healthz', (c) =>
     c.json({ ok: true, mode: deps.mode, uptimeSeconds: Math.max(0, now() - deps.startedAt) }),

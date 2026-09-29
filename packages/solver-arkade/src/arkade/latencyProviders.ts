@@ -15,26 +15,44 @@ const timingScope = new AsyncLocalStorage<ProviderTimingScope>()
 export const withProviderTimingScope = <T>(scope: ProviderTimingScope, operation: () => Promise<T>): Promise<T> =>
   process.env.SOLVER_LATENCY_DIAGNOSTICS === '1' ? timingScope.run(scope, operation) : operation()
 
+const span = (from: number | undefined, to: number | undefined): number | undefined =>
+  from === undefined || to === undefined ? undefined : Math.round(to - from)
+
 export const sendPhaseTimings = (scope: ProviderTimingScope, started: number, finished: number) => ({
-  beforeSubmitMs: scope.submitStarted === undefined ? undefined : Math.round(scope.submitStarted - started),
-  submitMs:
-    scope.submitStarted === undefined || scope.submitFinished === undefined
-      ? undefined
-      : Math.round(scope.submitFinished - scope.submitStarted),
-  checkpointMs:
-    scope.submitFinished === undefined || scope.finalizeStarted === undefined
-      ? undefined
-      : Math.round(scope.finalizeStarted - scope.submitFinished),
-  finalizeMs:
-    scope.finalizeStarted === undefined || scope.finalizeFinished === undefined
-      ? undefined
-      : Math.round(scope.finalizeFinished - scope.finalizeStarted),
-  afterFinalizeMs: scope.finalizeFinished === undefined ? undefined : Math.round(finished - scope.finalizeFinished),
+  beforeSubmitMs: span(started, scope.submitStarted),
+  submitMs: span(scope.submitStarted, scope.submitFinished),
+  checkpointMs: span(scope.submitFinished, scope.finalizeStarted),
+  finalizeMs: span(scope.finalizeStarted, scope.finalizeFinished),
+  afterFinalizeMs: span(scope.finalizeFinished, finished),
 })
+
+const timed = async <T>(
+  event: string,
+  fields: Record<string, unknown>,
+  run: () => Promise<T>,
+  okFields: (result: T) => Record<string, unknown> = () => ({}),
+): Promise<T> => {
+  const started = performance.now()
+  try {
+    const result = await run()
+    log(event, json({ ...fields, ...okFields(result), ms: Math.round(performance.now() - started), outcome: 'ok' }))
+    return result
+  } catch (error) {
+    log(
+      event,
+      json({
+        ...fields,
+        ms: Math.round(performance.now() - started),
+        outcome: 'failed',
+        errorName: error instanceof Error ? error.name : 'unknown',
+      }),
+    )
+    throw error
+  }
+}
 
 export class TimedIndexerProvider extends RestIndexerProvider {
   override async getVtxos(options?: Parameters<RestIndexerProvider['getVtxos']>[0]) {
-    const started = performance.now()
     const request = {
       fundRef: timingScope.getStore()?.fundRef,
       scripts: options?.scripts?.length ?? 0,
@@ -45,78 +63,31 @@ export class TimedIndexerProvider extends RestIndexerProvider {
       before: options?.before,
       pendingOnly: options?.pendingOnly ?? false,
     }
-    try {
-      const result = await super.getVtxos(options)
-      log(
-        'indexer_vtxos_timing',
-        json({ ...request, rows: result.vtxos.length, ms: Math.round(performance.now() - started), outcome: 'ok' }),
-      )
-      return result
-    } catch (error) {
-      log(
-        'indexer_vtxos_timing',
-        json({
-          ...request,
-          ms: Math.round(performance.now() - started),
-          outcome: 'failed',
-          errorName: error instanceof Error ? error.name : 'unknown',
-        }),
-      )
-      throw error
-    }
+    return timed(
+      'indexer_vtxos_timing',
+      request,
+      () => super.getVtxos(options),
+      (result) => ({ rows: result.vtxos.length }),
+    )
   }
 }
 
 export class TimedArkProvider extends RestArkProvider {
   override async submitTx(...args: Parameters<RestArkProvider['submitTx']>) {
-    const started = performance.now()
     const scope = timingScope.getStore()
-    if (scope) scope.submitStarted = started
+    if (scope) scope.submitStarted = performance.now()
     try {
-      const result = await super.submitTx(...args)
-      log(
-        'ark_submit_timing',
-        json({ fundRef: scope?.fundRef, ms: Math.round(performance.now() - started), outcome: 'ok' }),
-      )
-      return result
-    } catch (error) {
-      log(
-        'ark_submit_timing',
-        json({
-          fundRef: scope?.fundRef,
-          ms: Math.round(performance.now() - started),
-          outcome: 'failed',
-          errorName: error instanceof Error ? error.name : 'unknown',
-        }),
-      )
-      throw error
+      return await timed('ark_submit_timing', { fundRef: scope?.fundRef }, () => super.submitTx(...args))
     } finally {
       if (scope) scope.submitFinished = performance.now()
     }
   }
 
   override async finalizeTx(...args: Parameters<RestArkProvider['finalizeTx']>) {
-    const started = performance.now()
     const scope = timingScope.getStore()
-    if (scope) scope.finalizeStarted = started
+    if (scope) scope.finalizeStarted = performance.now()
     try {
-      const result = await super.finalizeTx(...args)
-      log(
-        'ark_finalize_timing',
-        json({ fundRef: scope?.fundRef, ms: Math.round(performance.now() - started), outcome: 'ok' }),
-      )
-      return result
-    } catch (error) {
-      log(
-        'ark_finalize_timing',
-        json({
-          fundRef: scope?.fundRef,
-          ms: Math.round(performance.now() - started),
-          outcome: 'failed',
-          errorName: error instanceof Error ? error.name : 'unknown',
-        }),
-      )
-      throw error
+      return await timed('ark_finalize_timing', { fundRef: scope?.fundRef }, () => super.finalizeTx(...args))
     } finally {
       if (scope) scope.finalizeFinished = performance.now()
     }

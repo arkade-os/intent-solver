@@ -175,9 +175,6 @@ export const planEvmReceive = (row: EvmReceivePlanRow, seen: EvmReceiveObservati
       // lockup HERE is that unspent covenant.
       return seen.arkadeLockupFunded ? { do: 'refund_arkade' } : { do: 'wait' }
 
-    case 'claiming':
-      return { do: 'wait' }
-
     default:
       return { do: 'wait' }
   }

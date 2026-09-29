@@ -4,8 +4,8 @@
  * The ordering runs the OPPOSITE way from the other corridors, and that is what
  * this file mostly pins. On the Lightning leg the payee's CLTV fixes the
  * outbound deadline and the Arkade refund is sized to outlast it; on the onchain
- * leg `htlcLocktimeFor` picks the HTLC's CLTV first. Here `evmTimeoutFor`
- * DERIVES the EVM deadline from the Arkade one, so the Arkade side has to be
+ * leg `htlcLocktimeFor` picks the HTLC's CLTV first. Here the gate DERIVES
+ * the EVM deadline from the Arkade one, so the Arkade side has to be
  * chosen first or the definition is circular — and the anchor is the solver's
  * own recourse delay.
  */

@@ -195,7 +195,7 @@ describe('the broadcaster against a real node', () => {
   itOnChain(
     'drives the backend calldata the orchestrator hands it, not a hand-built one',
     async () => {
-      // `lockCall` is what the orchestrator passes the broadcaster. Pinning the
+      // `lockCalls` is what the orchestrator passes the broadcaster. Pinning the
       // two together here catches a change to either side on chain, rather than
       // at the first live swap.
       const preimage = hex.decode('33'.repeat(32))
@@ -207,7 +207,7 @@ describe('the broadcaster against a real node', () => {
       const approved = await broadcast({ to: WETH, data: abiCall('095ea7b3', SWAP_ADDRESS, word(AMOUNT)) })
       expect((await waitForReceipt(evmRpc(), approved)).status).toBe('0x1')
 
-      const locked = await broadcast(backend.lockCall(lock))
+      const locked = await broadcast(backend.lockCalls(lock, AMOUNT).at(-1)!)
       expect((await waitForReceipt(evmRpc(), locked)).status).toBe('0x1')
       expect(await backend.isLocked(lock)).toBe(true)
     },

@@ -31,6 +31,11 @@ import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/anal
 export type RawRow = Record<string, unknown>
 
 /** Everything the shared methods need that genuinely differs per store. */
+/** `fail()` routes to `stuck` / `refused`, so a store whose states lack either must not compile. */
+type FailStatesIn<State extends string> = 'stuck' | 'refused' extends State
+  ? unknown
+  : { 'State must include stuck and refused': never }
+
 export interface StoreShape<Row, State extends string> {
   readonly table: string
   readonly eventTable: string
@@ -59,21 +64,39 @@ export interface StoreShape<Row, State extends string> {
   readonly live: readonly State[]
   /** States in which the solver may have paid out and not been made whole. */
   readonly exposed: readonly State[]
-  /**
-   * Where `fail()` sends a row.
-   *
-   * All four stores spell these `stuck` and `refused`, but the words are a
-   * corridor's own vocabulary rather than this file's, and a corridor that
-   * named them differently would otherwise get a silent illegal-edge throw at
-   * the worst possible moment — the moment something already went wrong.
-   */
-  readonly failStates: { readonly exposed: State; readonly clean: State }
   toRow(raw: RawRow): Row
 }
 
-const assertColumns = (columns: string[], allowed: ReadonlySet<string>, method: string): void => {
+export const assertColumns = (columns: string[], allowed: ReadonlySet<string>, method: string): void => {
   for (const column of columns) {
     if (!allowed.has(column)) throw new Error(`${method} may not set column '${column}'`)
+  }
+}
+
+/** A nullable column; `undefined` (a column this database predates) reads as null too. */
+export const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value))
+
+export const numberOrNull = (value: unknown): number | null =>
+  value === null || value === undefined ? null : Number(value)
+
+/** Additive migration: `CREATE TABLE IF NOT EXISTS` never alters an existing table. */
+const SQL_IDENTIFIER = /^[a-z_][a-z0-9_]*$/
+const SQL_COLUMN_TYPE = /^(TEXT|INTEGER|REAL|BLOB)( NOT NULL)?( DEFAULT (-?\d+|'[^']*'))?$/
+
+export const addColumns = async (
+  driver: SqlDriver,
+  table: string,
+  columns: readonly (readonly [column: string, type: string])[],
+): Promise<void> => {
+  for (const name of [table, ...columns.map(([column]) => column)]) {
+    if (!SQL_IDENTIFIER.test(name)) throw new Error(`addColumns: not a plain SQL identifier: ${name}`)
+  }
+  for (const [, type] of columns) {
+    if (!SQL_COLUMN_TYPE.test(type)) throw new Error(`addColumns: not a plain column type: ${type}`)
+  }
+  const existing = new Set((await driver.all<{ name: string }>(`PRAGMA table_info(${table})`)).map((c) => c.name))
+  for (const [column, type] of columns) {
+    if (!existing.has(column)) await driver.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`)
   }
 }
 
@@ -94,7 +117,7 @@ export abstract class BaseSwapStore<Row, State extends string> {
    * base-constructor logic that reached for it would silently see `undefined`.
    * If this constructor ever needs the shape, take it as a parameter instead.
    */
-  protected abstract readonly shape: StoreShape<Row, State>
+  protected abstract readonly shape: StoreShape<Row, State> & FailStatesIn<State>
 
   async close(): Promise<void> {
     await this.driver.close()
@@ -119,6 +142,24 @@ export abstract class BaseSwapStore<Row, State extends string> {
     const raw = await this.driver.get<RawRow>(
       `SELECT * FROM ${this.shape.table} WHERE rfq_id = ? ORDER BY created_at DESC LIMIT 1`,
       [rfqId],
+    )
+    return raw ? this.shape.toRow(raw) : null
+  }
+
+  /** Most recent swap for a hash, any state — the status lookup's view. */
+  async findByPaymentHash(paymentHash: string): Promise<Row | null> {
+    const raw = await this.driver.get<RawRow>(
+      `SELECT * FROM ${this.shape.table} WHERE payment_hash = ? ORDER BY created_at DESC LIMIT 1`,
+      [paymentHash],
+    )
+    return raw ? this.shape.toRow(raw) : null
+  }
+
+  /** The swap that BLOCKS a new quote for this hash, if any — mirrors the partial unique index. */
+  async findLiveByPaymentHash(paymentHash: string): Promise<Row | null> {
+    const raw = await this.driver.get<RawRow>(
+      `SELECT * FROM ${this.shape.table} WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
+      [paymentHash],
     )
     return raw ? this.shape.toRow(raw) : null
   }
@@ -291,8 +332,26 @@ export abstract class BaseSwapStore<Row, State extends string> {
    * need a human, and flattening them into "failed" hides that.
    */
   async fail(id: string, from: State, reason: string): Promise<void> {
-    const to = this.shape.exposed.includes(from) ? this.shape.failStates.exposed : this.shape.failStates.clean
+    const to = (this.shape.exposed.includes(from) ? 'stuck' : 'refused') as State
     await this.transition(id, from, to, { failure_reason: reason })
+  }
+
+  /**
+   * Won by ONE caller before it spends; the `transition` CAS after gates only recording.
+   * No TTL: an expiry lets a second worker pay while the first is in flight. Protected
+   * because `send_swap` has no `fund_started_at`; stores with the column widen it.
+   */
+  protected async claimFundLease(id: string, from: State): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE ${this.shape.table} SET fund_started_at = ?, updated_at = ?
+       WHERE id = ? AND state = ? AND fund_started_at IS NULL`,
+      [this.now(), this.now(), id, from],
+    )
+    return result.changes === 1
+  }
+
+  protected async releaseFundLease(id: string): Promise<void> {
+    await this.driver.run(`UPDATE ${this.shape.table} SET fund_started_at = NULL WHERE id = ?`, [id])
   }
 
   protected async recordEvent(swapId: string, from: State | null, to: State, detail: string | null): Promise<void> {

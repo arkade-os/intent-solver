@@ -8,15 +8,13 @@
  */
 import { assetRfqEnvStem } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetMarketRow, ServingSeed } from '../admin/db.js'
+import { samePair } from './assetRfqMarkets.js'
 
 const label = (row: AssetMarketRow): string => row.symbol ?? row.marketKey
 
 export const marketServingDivergence = (rows: readonly AssetMarketRow[], env: ServingSeed): readonly string[] => {
   const lines: string[] = []
-  const declaredForOffers = (row: AssetMarketRow): boolean =>
-    env.offerMarkets.some(
-      (pair) => (pair.a === row.base && pair.b === row.quote) || (pair.a === row.quote && pair.b === row.base),
-    )
+  const declaredForOffers = (row: AssetMarketRow): boolean => env.offerMarkets.some((pair) => samePair(row, pair))
   const byAsset = new Map(env.tokens.map((token) => [token.assetId, token]))
 
   for (const row of rows) {

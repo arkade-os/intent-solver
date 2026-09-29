@@ -33,6 +33,7 @@ import { randomUUID } from 'node:crypto'
 import { Address } from '@scure/btc-signer'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { requireLn, requireOnchain } from './rails.js'
+import { attempt } from './attempt.js'
 import type { Services } from './services.js'
 import {
   parseWholeSats,
@@ -45,27 +46,6 @@ import {
 
 export const RAIL_FUND_SOURCE_ID = 'rail'
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
-
-/**
- * Read one side, or report why it could not be read.
- *
- * Per SIDE rather than one try around the pair, because the two are separate
- * connections and the answer an operator needs is usually about the one that DID
- * respond: "L1 holds 500k, the node is unreachable" is a decision, whereas a
- * single error for the whole read is only a shrug. Same discipline as the
- * console's overview, which must render with a backend down.
- */
-const attempt = async <T>(
-  read: () => Promise<T>,
-): Promise<{ value: T; error: null } | { value: null; error: string }> => {
-  try {
-    return { value: await read(), error: null }
-  } catch (error) {
-    return { value: null, error: messageOf(error) }
-  }
-}
-
 /** A figure that failed to read carries the reason INSTEAD of a number, never a zero beside it. */
 const figure = (label: string, amount: number | null | undefined, error: string | null) =>
   error !== null
@@ -75,6 +55,7 @@ const figure = (label: string, amount: number | null | undefined, error: string 
 const railBalance = async (services: Services): Promise<FundBalance> => {
   const ln = requireLn(services.ln)
   const onchain = requireOnchain(services.onchain)
+  // Per SIDE, not one try around the pair: "L1 holds 500k, the node is unreachable" is a decision.
   const [lightning, chain, feeRate] = await Promise.all([
     attempt(() => ln.getBalance()),
     attempt(() => onchain.getBalance()),

@@ -20,7 +20,7 @@ import {
 import { BPS_DENOMINATOR, offerWithinTolerance } from '@arkade-os/solver-core/core/assetOfferPrice.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
 
-/** 68 hex characters — `serializeAssetId` is a 32-byte txid plus a u16 index. */
+/** 68 hex characters — an asset id is a 32-byte txid plus a u16 index. */
 const USDT = 'aa'.repeat(34)
 const OTHER = 'bb'.repeat(34)
 const USDA = 'cc'.repeat(34)

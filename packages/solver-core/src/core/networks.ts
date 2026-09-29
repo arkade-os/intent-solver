@@ -22,17 +22,6 @@ const BITCOIN_LIMITS: Limits = { minSats: 500, maxSats: 50_000 }
 export interface NetworkProfile {
   /** Amount range this network permits. */
   limits: Limits
-  /**
-   * This network's name in the uppercase spelling a backend SDK may ask for.
-   *
-   * The same network as the key it sits under, respelled: read only where a
-   * backend is constructed, never by the swap logic above the port, since which
-   * casing a vendor wants is an adapter's business. Present on every network
-   * rather than nullable, so a backend reading it never has to handle a hole;
-   * whether a given backend can actually serve a network is the backend's own
-   * question, answered where it is constructed rather than by a null here.
-   */
-  backendNetwork: 'MAINNET' | 'SIGNET' | 'REGTEST'
   /** bech32 prefix a BOLT11 carries here. */
   invoicePrefix: string
   /** bech32 prefix for Arkade addresses here. */
@@ -69,7 +58,7 @@ export interface NetworkProfile {
    * other's data. Pointing an L1 txid at the Arkade explorer produces a "not found"
    * that reads exactly like lost funds.
    *
-   * No trailing slash: the builders in `./explorers.ts` join a path onto these.
+   * No trailing slash: the console (`admin/static/app.js`) joins a path onto these.
    */
   explorers: {
     arkade: string
@@ -80,7 +69,6 @@ export interface NetworkProfile {
 export const NETWORKS = {
   bitcoin: {
     limits: BITCOIN_LIMITS,
-    backendNetwork: 'MAINNET',
     invoicePrefix: 'bc',
     arkadeHrp: 'ark',
     arkdNetwork: 'bitcoin',
@@ -92,7 +80,6 @@ export const NETWORKS = {
   // share an invoice prefix.
   mutinynet: {
     limits: TESTNET_LIMITS,
-    backendNetwork: 'SIGNET',
     invoicePrefix: 'tbs',
     arkadeHrp: 'tark',
     arkdNetwork: 'mutinynet',
@@ -113,7 +100,6 @@ export const NETWORKS = {
   },
   signet: {
     limits: TESTNET_LIMITS,
-    backendNetwork: 'SIGNET',
     invoicePrefix: 'tbs',
     arkadeHrp: 'tark',
     arkdNetwork: 'signet',
@@ -123,7 +109,6 @@ export const NETWORKS = {
   },
   regtest: {
     limits: TESTNET_LIMITS,
-    backendNetwork: 'REGTEST',
     invoicePrefix: 'bcrt',
     arkadeHrp: 'tark',
     arkdNetwork: 'regtest',

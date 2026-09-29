@@ -19,7 +19,6 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import { Transaction } from '@scure/btc-signer'
-import { GiveUp, poll } from '@arkade-os/solver-core/util/poll.js'
 import type { FundedOnchainOutput, OnchainTxOutcome } from '@arkade-os/solver-core/ports/onchain.js'
 
 export interface EsploraTx {
@@ -273,19 +272,3 @@ export const witnessFromRawTx = (txHex: string, inputIndex: number): Uint8Array[
   if (!input.finalScriptWitness) throw new Error(`input ${inputIndex} of ${tx.id} has no witness`)
   return [...input.finalScriptWitness]
 }
-
-/** Poll Esplora's address history for `txid`'s output paying `address`, and return its vout. */
-export const pollForVout = async (esplora: EsploraClient, txid: string, address: string): Promise<number> =>
-  poll(
-    async () => {
-      const txs = await esplora.getAddressTxs(address)
-      const tx = txs.find((t) => t.txid === txid)
-      if (!tx) return null
-      const vout = tx.vout.findIndex((o) => o.scriptpubkey_address === address)
-      // Present but not paying the address is a fact, not a slow indexer:
-      // retrying it fifteen times would only delay the same answer.
-      if (vout === -1) throw new GiveUp(`funding tx ${txid} does not pay ${address} — cannot locate its vout`)
-      return vout
-    },
-    { attempts: 15, intervalMs: 2_000, whenExhausted: `funding tx ${txid} did not appear in ${address}'s history` },
-  )

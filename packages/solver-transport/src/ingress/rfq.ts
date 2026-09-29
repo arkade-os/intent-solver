@@ -24,27 +24,9 @@ import {
 } from '@arkade-os/solver-core/core/rfqProtocol.js'
 
 /**
- * Why a request was turned away, for the LOG only — never for the wire.
- *
- * The closed RFQ vocabulary is deliberately coarse: six distinct faults on the
- * Lightning send leg alone all reach the client as `unsupported_payload`,
- * because a client can do nothing useful with a finer answer and a solver that
- * narrated its internals would be describing its own validation to anyone who
- * asked. That is the right contract and it is not what changes here.
- *
- * What it cost is diagnosis. A refusal is not an exception, so nothing reached
- * `onError` and the service logged NOTHING at all for a rejected request —
- * leaving an operator to guess which of six checks fired, with the only other
- * copy of the answer inside someone else's wallet. That happened on mainnet on
- * 2026-08-21.
- *
- * So the reason travels beside the payload rather than inside it. Populated at
- * every non-quote exit, logged by the transports, and impossible to serialise
- * onto the wire by accident because no payload builder reads it.
- *
- * Values are FIELD NAMES and check names, never field values: an invoice, a
- * refund address and a pubkey are all either money-linkable or the client's to
- * keep, and a log line outlives the incident that justified it.
+ * `detail` says why a request was turned away, for the LOG only: the closed refusal vocabulary is deliberately
+ * coarse, and no payload builder reads `detail`, so it cannot reach the wire by accident. Values are FIELD and
+ * check NAMES, never field values — invoices, addresses and pubkeys are money-linkable or the client's to keep.
  */
 export type RfqOutcome =
   /**
@@ -61,11 +43,6 @@ export type RfqOutcome =
   /** The request itself is unserviceable — HTTP 400. */
   | { kind: 'invalid'; payload: Record<string, unknown>; detail?: string }
 
-/**
- * Best-effort correlation id off an unparseable payload, so even an
- * `unsupported_payload` refusal tells the sender WHICH negotiation it killed.
- * Bounded: an attacker-sized string must not be echoed back onto the wire.
- */
 const extractPair = (payload: unknown): string | undefined => {
   const pair = (payload as { pair?: unknown } | null)?.pair
   return typeof pair === 'string' ? pair : undefined
@@ -99,19 +76,8 @@ const enforceWireContract = (pair: string, rfqId: string | undefined, outcome: C
   }
   let payload = outcome.payload
   const reason = (payload as { reason?: unknown }).reason
-  // ABSENCE IS REJECTED AS FIRMLY AS A NON-MEMBER. The earlier check only fired
-  // when a reason was PRESENT, so a corridor returning
-  // `{ kind: 'refused', payload: { v: 1, type: 'rfq_refusal' } }` — no `reason`
-  // field at all — passed enforcement and put a reasonless refusal on the wire.
-  //
-  // That is the one thing this gate exists to stop for third-party corridor
-  // code. A client receiving a refusal with no reason cannot tell "we do not
-  // serve this pair" from "try again in a minute", which is the whole point of
-  // the closed set. Both refusing kinds build their payload through
-  // `rfqRefusalPayload`, which always names one, so an absent reason means the
-  // corridor bypassed it.
-  //
-  // A `quote` carries no reason and is not asked for one.
+  // ABSENCE is rejected as firmly as a non-member: `rfqRefusalPayload` always names a reason, so a reasonless
+  // refusal means the corridor bypassed it. A `quote` carries no reason and is not asked for one.
   if ((outcome.kind === 'refused' || outcome.kind === 'invalid') && reason === undefined) {
     return reject(`a ${outcome.kind} outcome must name a refusal reason`)
   }
@@ -169,21 +135,8 @@ export const respondToRfqRequest = async (
     }
   }
 
-  // A NAMED pair this solver does not serve is a corridor fact, and it has to
-  // say so whatever else is configured. Before this check the lightning-send
-  // handler was a catch-all, so an unknown pair reached a schema built for a
-  // BOLT11 profile, failed it, and came back `unsupported_payload` — telling a
-  // client its message was malformed when the message was fine and the corridor
-  // was the problem. Worse, the answer depended on unrelated configuration: a
-  // deployment WITHOUT a send service answered `unsupported_pair` correctly,
-  // and every normal one answered wrongly.
-  //
-  // Refusing by NAME also beats falling through to another handler and being
-  // refused as unsupported by accident (or, worse, throwing a TypeError into
-  // the transport): "this solver does not serve that corridor" is a different
-  // fact to a client than "that pair does not exist", and since an operator can
-  // switch a corridor off (`<CORRIDOR>_ENABLED=false`) the first is a routine
-  // answer rather than a sign of a misconfigured deployment.
+  // A NAMED pair this solver does not serve is `unsupported_pair`, never another corridor's schema failure
+  // (`unsupported_payload`): an operator can switch a corridor off, so this is a routine answer, not bad input.
   const target = corridors.get(pair)
   if (!target) {
     return {
@@ -202,41 +155,10 @@ export type RfqStatusOutcome =
   | { kind: 'invalid'; payload: Record<string, unknown>; detail?: string }
 
 /**
- * `RfqStores` used to sit here: four named stores this fell through by hand.
- *
- * It is gone because `CorridorReaderSet` does the same job for any corridor,
- * including one this build has never compiled against. The properties it
- * carried are preserved rather than dropped — see `respondToRfqStatus`.
- */
-
-/**
- * Handle one `rfq_status_request`. Carries no `pair`, so every registered
- * corridor is asked in turn until one claims the `rfq_id`. Registration order
- * is the fall-through order — the two send legs first (the busier profiles, and
- * the order this had before the receive legs existed), then Lightning-receive,
- * then onchain-receive. `rfq_id` identifies at most one negotiation, so the
- * chain is pure fall-through and the order is a latency choice, not a
- * correctness one.
- *
- * READERS, NOT THE QUOTING REGISTRY, and the distinction is the whole reason
- * `CorridorReader` exists as a separate interface.
- *
- * A corridor is quotable iff its SERVICE exists, and `createServices` builds a
- * service only for an ENABLED corridor while opening every store regardless.
- * Status must therefore reach WIDER than quoting: it answers for swaps a
- * corridor quoted before it was switched off. Handing this a `CorridorSet`
- * would silently narrow that — a disabled corridor's in-flight swaps would
- * start reporting "no negotiation with this rfq_id", a lie an operator would
- * act on. A `CorridorReaderSet` is built from the STORES, so a disabled
- * corridor still answers.
- *
- * This previously fell through four hardcoded stores, with a comment saying
- * unifying it "needs a corridor that can be registered read-only, which is a
- * design this plan does not have". That design landed in this same change and
- * the comment went stale: raised in review of that change, where the consequence was
- * that a corridor registered through `CorridorSet` could be QUOTED but its
- * in-flight swaps could never be retrieved — `rfq_status_request` would answer
- * "no negotiation with this rfq_id" for a swap that plainly exists.
+ * Handle one `rfq_status_request`. It carries no `pair`, so corridors are asked in registration order until one
+ * claims the `rfq_id` (the order is latency, not correctness). READERS, not the quoting registry: readers are built
+ * from the STORES, so a corridor switched off still answers for swaps it quoted, where a `CorridorSet` would report
+ * "no negotiation" for a live swap.
  */
 export const respondToRfqStatus = async (readers: CorridorReaderSet, payload: unknown): Promise<RfqStatusOutcome> => {
   const parsed = RfqStatusRequest.safeParse(payload)
