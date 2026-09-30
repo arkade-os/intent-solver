@@ -29,6 +29,17 @@ const lock: Erc20SwapLock = {
   timelock: 200n,
 }
 const policy = { minConfirmations: 3, minAgeSeconds: 100, nowSeconds: 1_000 }
+const claimForInput = asHex(
+  concatBytes(
+    selectorFor(CLAIM_FOR_SIGNATURE),
+    preimage,
+    uintWord(lock.amount, 'amount'),
+    addressWord(lock.tokenAddress, 'token'),
+    addressWord(lock.claimAddress, 'claim'),
+    addressWord(lock.refundAddress, 'refund'),
+    uintWord(lock.timelock, 'timelock'),
+  ),
+)
 const fixture = () => {
   const log = {
     address: asHex(contract),
@@ -70,6 +81,32 @@ const fixture = () => {
   }
   return { log, receipt, transaction, block, answers, rpc }
 }
+const nestedFixture = () => {
+  const f = fixture()
+  const wallet = address('7')
+  const router = address('8')
+  const rootInput = '0xabcdef01'
+  f.transaction.to = router
+  f.transaction.from = wallet
+  f.transaction.input = rootInput
+  f.receipt.to = router
+  f.receipt.from = wallet
+  const frame = {
+    type: 'CALL',
+    from: wallet,
+    to: asHex(contract),
+    input: claimForInput,
+    logs: [{ address: asHex(contract), topics: f.log.topics, data: f.log.data }],
+  }
+  f.answers.debug_traceTransaction = {
+    type: 'CALL',
+    from: wallet,
+    to: router,
+    input: rootInput,
+    calls: [frame],
+  }
+  return { ...f, frame, wallet, router }
+}
 
 describe('successful canonical exact HTLC claim evidence', () => {
   it('returns a preimage only after its exact receipt and configured depth/age are established', async () => {
@@ -100,6 +137,135 @@ describe('successful canonical exact HTLC claim evidence', () => {
     f.receipt.from = address('7')
     await expect(verifyEvmClaimEvidence(f.rpc, contract, lock, f.log, policy)).resolves.toEqual(preimage)
   })
+
+  it('accepts logs where the RPC omits removed', async () => {
+    const f = fixture()
+    delete (f.log as unknown as Record<string, unknown>).removed
+    delete (f.receipt.logs[0] as Record<string, unknown>).removed
+    await expect(verifyEvmClaimEvidence(f.rpc, contract, lock, f.log, policy)).resolves.toEqual(preimage)
+  })
+
+  it.each([true, 'false', null, 0])('rejects malformed removed=%s', async (removed) => {
+    const f = fixture()
+    ;(f.log as unknown as Record<string, unknown>).removed = removed
+    await expect(verifyEvmClaimEvidence(f.rpc, contract, lock, f.log, policy)).resolves.toBeNull()
+  })
+
+  it('attributes a nested claim event to its exact successful CALL frame', async () => {
+    const f = nestedFixture()
+    const rpc: JsonRpc = async (method, params) => {
+      if (method === 'debug_traceTransaction') {
+        expect(params).toEqual([hash('5'), { tracer: 'callTracer', tracerConfig: { withLog: true } }])
+      }
+      return f.rpc(method, params)
+    }
+    await expect(verifyEvmClaimEvidence(rpc, contract, lock, f.log, policy)).resolves.toEqual(preimage)
+  })
+
+  it('accepts a claim beside an unrelated reverted sibling frame', async () => {
+    const f = nestedFixture()
+    ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [
+      { type: 'CALL', error: 'execution reverted' },
+      f.frame,
+    ]
+    await expect(verifyEvmClaimEvidence(f.rpc, contract, lock, f.log, policy)).resolves.toEqual(preimage)
+  })
+
+  it.each([
+    [
+      'root transaction mismatch',
+      (f: ReturnType<typeof nestedFixture>) => {
+        ;(f.answers.debug_traceTransaction as Record<string, unknown>).input = '0xdeadbeef'
+      },
+    ],
+    [
+      'delegatecall frame',
+      (f: ReturnType<typeof nestedFixture>) => {
+        f.frame.type = 'DELEGATECALL'
+      },
+    ],
+    [
+      'reverted claim frame',
+      (f: ReturnType<typeof nestedFixture>) => {
+        ;(f.frame as Record<string, unknown>).error = 'execution reverted'
+      },
+    ],
+    [
+      'claim event outside the matching frame',
+      (f: ReturnType<typeof nestedFixture>) => {
+        f.frame.logs = []
+        ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [
+          { type: 'CALL', from: f.wallet, to: asHex(contract), input: claimForInput, logs: f.frame.logs },
+          {
+            type: 'CALL',
+            from: f.wallet,
+            to: address('9'),
+            input: '0xdeadbeef',
+            logs: [{ address: asHex(contract), topics: f.log.topics, data: f.log.data }],
+          },
+        ]
+      },
+    ],
+    [
+      'failed ancestor frame',
+      (f: ReturnType<typeof nestedFixture>) => {
+        ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [
+          { type: 'CALL', error: 'execution reverted', calls: [f.frame] },
+        ]
+      },
+    ],
+    [
+      'ambiguous matching claim frames',
+      (f: ReturnType<typeof nestedFixture>) => {
+        ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [f.frame, { ...f.frame }]
+      },
+    ],
+    [
+      'trace beyond the node limit',
+      (f: ReturnType<typeof nestedFixture>) => {
+        ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [
+          ...Array.from({ length: 256 }, () => ({ type: 'CALL', from: f.wallet, to: address('9'), input: '0x' })),
+          f.frame,
+        ]
+      },
+    ],
+    [
+      'different claim amount',
+      (f: ReturnType<typeof nestedFixture>) => {
+        f.frame.input = asHex(
+          concatBytes(
+            selectorFor(CLAIM_FOR_SIGNATURE),
+            preimage,
+            uintWord(lock.amount + 1n, 'amount'),
+            addressWord(lock.tokenAddress, 'token'),
+            addressWord(lock.claimAddress, 'claim'),
+            addressWord(lock.refundAddress, 'refund'),
+            uintWord(lock.timelock, 'timelock'),
+          ),
+        )
+      },
+    ],
+    [
+      'self claim from the wrong caller',
+      (f: ReturnType<typeof nestedFixture>) => {
+        f.frame.input = asHex(encodeClaim(preimage, lock))
+        f.frame.from = address('9')
+      },
+    ],
+    [
+      'unavailable trace',
+      (f: ReturnType<typeof nestedFixture>) => {
+        f.answers.debug_traceTransaction = null
+      },
+    ],
+  ] satisfies [string, (sample: ReturnType<typeof nestedFixture>) => void][])(
+    'rejects nested evidence with %s',
+    async (_name, mutate) => {
+      const f = nestedFixture()
+      mutate(f)
+      await expect(verifyEvmClaimEvidence(f.rpc, contract, lock, f.log, policy)).resolves.toBeNull()
+    },
+  )
 
   it.each([
     [

@@ -229,6 +229,7 @@ beforeAll(async () => {
       cadence: { fastestSecondsPerBlock: 1, slowestSecondsPerBlock: 1 },
       quoteValiditySeconds: 60,
     },
+    onTickError: (id, error) => console.error(`EVM receiver funding ${id} failed:`, error),
   })
   available = true
 }, 240_000)
