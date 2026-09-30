@@ -113,6 +113,8 @@ export interface EvmSendServiceDeps {
    * "mine" during a sweep.
    */
   markets: ReadonlyMap<string, EvmSendMarket>
+  /** Prove the selected token's canonical event traces before admitting a new quote. */
+  assertClaimTraceSupport(tokenAddress: Uint8Array): Promise<void>
   fetchPrice: FetchPrice
   /** Chain facts the row snapshots so settlement never re-reads config. */
   chain: {
@@ -566,6 +568,13 @@ export class EvmSendSwapService {
       if (await peer.findLiveByPaymentHash(request.paymentHash)) {
         return { accepted: false, reason: 'duplicate_swap' }
       }
+    }
+
+    try {
+      await this.deps.assertClaimTraceSupport(hex.decode(token.address.slice(2)))
+    } catch (error) {
+      this.deps.onTickError?.(request.paymentHash, error)
+      return { accepted: false, reason: 'execution_unavailable' }
     }
 
     // PRICED AT QUOTE TIME, and the figure is persisted rather than recomputed:

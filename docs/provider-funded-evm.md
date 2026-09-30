@@ -11,6 +11,32 @@ The built-in rails keep their existing funding path. Registering an adapter does
 not deploy a public-chain receiver or enable a provider route by itself; the
 consumer supplies its durable inventory, operator policy, and credentials.
 
+Every fresh `arkade:BTC -> ethereum:<token>` quote also probes the configured
+token's recent canonical event logs and confirms the settlement RPC can
+trace those transactions with `callTracer` and logs. This admission check covers
+the native EVM send route as well as provider-funded quotes, since either route
+must later recover the customer's claim preimage. It runs after cheap request
+and duplicate checks but before pricing, funding preparation, exposure
+reservation, or quote insertion. If the RPC cannot prove support, that quote is
+refused as `execution_unavailable` and the failure is reported to the operator;
+the service still starts, and settlement/recovery of existing rows continue.
+The probe bounds its search to 128 recent blocks, at most three candidate
+transactions and bounded trace frames. Operators should use an endpoint that
+retains recent receipts and supports `debug_traceTransaction` with
+`callTracer`'s `withLog` option; no token event in the sample or an unsupported
+trace method fails closed for new quotes.
+
+Existing native EVM send rows are not made safe by this upgrade: before
+upgrading, operators with live rows must verify the settlement RPC supports the
+trace method, because an existing indirect smart-wallet claim may need tracing
+before it can be settled. Keep the recovery loop running if quote admission
+fails.
+
+Programmatic `EvmSendSwapService` construction now requires an
+`assertClaimTraceSupport` dependency. Custom hosts must provide a real
+provider-backed probe or equivalent evidence; a no-op only belongs in a test
+that deliberately excludes EVM behavior.
+
 ## Ownership and settlement
 
 The customer generates the outer secret. The solver never needs it to deploy,

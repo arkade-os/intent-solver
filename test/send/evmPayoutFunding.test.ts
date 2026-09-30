@@ -84,6 +84,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
     maxExposedSats: 1_000_000,
     totalCommitted: vi.fn().mockResolvedValue(0),
     markets: new Map(),
+    assertClaimTraceSupport: vi.fn().mockResolvedValue(undefined),
     fetchPrice: vi.fn(),
     chain: {
       contractAddress: '0x' + '22'.repeat(20),
