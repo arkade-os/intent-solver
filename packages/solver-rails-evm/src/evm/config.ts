@@ -12,6 +12,7 @@
  * that costs money. An operator enabling a new chain must state what it does.
  */
 
+import { hexToBytes } from '@noble/hashes/utils.js'
 import { assertCadence, type EvmBlockCadence } from './blockTime.js'
 import { EVM_ORDER_MARGIN_SECONDS } from '@arkade-os/solver-core/core/evmSend.js'
 
@@ -116,26 +117,27 @@ const required = (env: NodeJS.ProcessEnv, name: string): string => {
  * `intFromEnv`: `Number('')` is 0, so a set-but-empty variable would otherwise
  * become zero while the logs claim otherwise.
  *
- * Allows non-integers, because a sub-second block cadence is a real value on
- * chains this must support.
+ * `numberFrom` allows non-integers, because a sub-second block cadence is a real
+ * value on chains this must support.
  */
-const numberFrom = (env: NodeJS.ProcessEnv, name: string, min: number): number => {
+const boundedFrom = (
+  env: NodeJS.ProcessEnv,
+  name: string,
+  min: number,
+  valid: (value: number) => boolean,
+  kind: string,
+): number => {
   const raw = required(env, name)
   const value = Number(raw)
-  if (!Number.isFinite(value) || value < min) {
-    throw new Error(`${name} must be a finite number >= ${min}, got ${JSON.stringify(raw)}`)
-  }
+  if (!valid(value) || value < min) throw new Error(`${name} must be ${kind} >= ${min}, got ${JSON.stringify(raw)}`)
   return value
 }
 
-const intFrom = (env: NodeJS.ProcessEnv, name: string, min: number): number => {
-  const raw = required(env, name)
-  const value = Number(raw)
-  if (!Number.isInteger(value) || value < min) {
-    throw new Error(`${name} must be an integer >= ${min}, got ${JSON.stringify(raw)}`)
-  }
-  return value
-}
+const numberFrom = (env: NodeJS.ProcessEnv, name: string, min: number): number =>
+  boundedFrom(env, name, min, Number.isFinite, 'a finite number')
+
+const intFrom = (env: NodeJS.ProcessEnv, name: string, min: number): number =>
+  boundedFrom(env, name, min, Number.isInteger, 'an integer')
 
 /**
  * An integer knob WITH a default, and a ceiling as well as a floor. Set-but-empty
@@ -156,19 +158,9 @@ const intFromOptional = (env: NodeJS.ProcessEnv, name: string, def: number, min:
 /** `0x`-prefixed 20-byte address to bytes. Case-insensitive; checksum is not verified. */
 export const addressFromHex = (value: string, name: string): Uint8Array => {
   if (!HEX_ADDRESS.test(value)) throw new Error(`${name} must be a 0x-prefixed 20-byte address, got ${value}`)
-  const body = value.slice(2)
-  const out = new Uint8Array(20)
-  for (let i = 0; i < 20; i++) out[i] = Number.parseInt(body.slice(i * 2, i * 2 + 2), 16)
-  return out
+  return hexToBytes(value.slice(2))
 }
 
-/**
- * Read one chain's configuration, or null when the corridor is not enabled.
- *
- * Absent `EVM_RPC_URL` means "not serving this corridor" and is not an error.
- * Anything else missing IS an error: a half-configured chain must not start,
- * because the missing half is always a safety knob.
- */
 /**
  * A 32-byte signing key from hex.
  *
@@ -177,14 +169,12 @@ export const addressFromHex = (value: string, name: string): Uint8Array => {
  * it would look like a chain problem rather than a missing setting.
  */
 const privateKeyFrom = (env: NodeJS.ProcessEnv, name: string): Uint8Array => {
-  const raw = required(env, name).trim()
+  const raw = required(env, name)
   const body = raw.startsWith('0x') ? raw.slice(2) : raw
   if (body.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(body)) {
     throw new Error(name + ' must be 32 bytes of hex')
   }
-  const out = new Uint8Array(32)
-  for (let i = 0; i < 32; i++) out[i] = Number.parseInt(body.slice(i * 2, i * 2 + 2), 16)
-  return out
+  return hexToBytes(body)
 }
 
 /**
@@ -198,13 +188,20 @@ const privateKeyFrom = (env: NodeJS.ProcessEnv, name: string): Uint8Array => {
  * every price.
  */
 const bigintFrom = (env: NodeJS.ProcessEnv, name: string): bigint => {
-  const raw = required(env, name).trim()
+  const raw = required(env, name)
   if (!/^[0-9]+$/.test(raw)) throw new Error(name + ' must be a decimal integer, got ' + raw)
   const value = BigInt(raw)
   if (value <= 0n) throw new Error(name + ' must be positive, got ' + raw)
   return value
 }
 
+/**
+ * Read one chain's configuration, or null when the corridor is not enabled.
+ *
+ * Absent `EVM_RPC_URL` means "not serving this corridor" and is not an error.
+ * Anything else missing IS an error: a half-configured chain must not start,
+ * because the missing half is always a safety knob.
+ */
 export const loadEvmChainConfig = (env: NodeJS.ProcessEnv = process.env): EvmChainConfig | null => {
   if (!env.EVM_RPC_URL?.trim()) return null
 

@@ -5,8 +5,8 @@
  * The engine deliberately knows nothing about swaps. A corridor contributes a
  * {@link CorridorSource}; this decides what to register, disable and delete.
  * That split is what keeps a fifth corridor from arriving with a fifth
- * lifecycle — the failure mode `liveLockupRows` already had once, when
- * `registerLiveLockups` read only the two SEND stores and silently skipped both
+ * lifecycle — the failure mode `liveLockupRows` already had once, when the
+ * registration pass read only the two SEND stores and silently skipped both
  * RECEIVE legs.
  *
  * RETIREMENT IS TWO-STAGE, and the stages answer different questions. Disabling
@@ -177,10 +177,9 @@ export const planContractLifecycle = (
 /**
  * The four BTC corridors as one source.
  *
- * The row's own script stays the authority, exactly as `registerLiveLockups`
- * had it: rebuilding something that derives a different pkScript would register
- * a contract against a script nothing is funded at, leaving the real lockup
- * unwatched while reporting success.
+ * The row's own script stays the authority: rebuilding something that derives a
+ * different pkScript would register a contract against a script nothing is
+ * funded at, leaving the real lockup unwatched while reporting success.
  *
  * PER-ROW ISOLATION IS LOAD-BEARING HERE, not tidiness. `covenantScriptFromRow`
  * THROWS for a row predating the client-unilateral refund leaf, and

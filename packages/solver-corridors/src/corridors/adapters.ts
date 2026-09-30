@@ -21,13 +21,9 @@
  * no operator-forced refund at all.
  */
 import {
-  createCorridorReaderSet,
-  createCorridorSet,
   parkVia,
   type Corridor,
   type CorridorReader,
-  type CorridorReaderSet,
-  type CorridorSet,
   type CorridorSwapView,
 } from '@arkade-os/solver-core/core/corridor.js'
 import { NON_TERMINAL as LN_SEND_LIVE } from '../db/swaps.js'
@@ -170,10 +166,8 @@ export const onchainReceiveReader = (store: OnchainReceiveSwapStore): CorridorRe
 /**
  * Where a parked row lands, for all four BTC corridors.
  *
- * One constant because all four stores declare the same
- * `failStates: { exposed: 'stuck', clean: 'refused' }` — see each store's shape.
- * A corridor that renamed either word would need its own list, which is exactly
- * why `parkVia` takes it rather than assuming these two.
+ * The two words `BaseSwapStore.fail()` routes to. A corridor that renamed
+ * either would need its own list, which is why `parkVia` takes it.
  */
 const BTC_PARKED = ['stuck', 'refused'] as const
 

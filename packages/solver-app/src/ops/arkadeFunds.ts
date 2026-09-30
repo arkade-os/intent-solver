@@ -129,34 +129,8 @@ const arkadeDeposit = async (services: Services): Promise<FundDeposit> => {
 /**
  * The Arkade address: a VTXO sent here IS float on arrival.
  *
- * The other half of the answer, and usually the one an operator wants. Boarding
- * takes L1 sats and needs a settlement before they are spendable; this takes a
- * VTXO from anyone already on Arkade and needs nothing afterwards. Offering only
- * the first — which this source did — quietly told an operator already holding
- * VTXOs to go out to L1 and wait.
- *
- * PREFIX-CHECKED, exactly like the boarding address below.
- *
- * An earlier version of this skipped the check, on the reasoning that an Arkade
- * address is derived from the server this wallet is connected to and so has no
- * wrong-chain form. That reasoning is wrong, and the SDK's own network table is
- * the proof: `hrp` is `ark` on bitcoin and `tark` on every test network, so a
- * wallet pointed at a mainnet server on a regtest-configured deployment hands
- * back a perfectly well-formed `ark1…` while this file labels it
- * `arkade regtest`. That is the identical hazard the boarding guard exists for
- * — an irreversible send to a wallet this solver is not running, against an
- * address the operator never typed and has no reason to doubt.
- *
- * The HRP comes from the SDK's `networks` rather than a table written here, for
- * the same reason the boarding check reads `ONCHAIN_NETWORKS`: a mapping
- * maintained beside the thing it describes cannot drift from it.
- *
- * In practice the misconfiguration that produces a wrong `ark1…` also produces a
- * wrong boarding address, which `arkadeDeposit` already refuses — and since
- * `depositOptions` awaits both, either refusal takes the whole answer down and
- * the operator is shown nothing rather than one good option beside one bad one.
- * This guard is therefore belt-and-braces, which is the correct posture for the
- * one mistake nobody downstream can catch.
+ * PREFIX-CHECKED like boarding: the SDK's `networks` gives `ark` on bitcoin and `tark` elsewhere, so a
+ * wallet on the wrong Arkade server is refused rather than handed out under this network's label.
  */
 const arkadeOffchainDeposit = async (services: Services): Promise<FundDeposit> => {
   const network = services.config.network

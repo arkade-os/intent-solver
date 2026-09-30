@@ -6,21 +6,16 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { keccak_256 } from '@noble/hashes/sha3.js'
 import {
   CLAIM_EVENT_SIGNATURE,
-  CLAIM_FOR_SIGNATURE,
   CLAIM_SIGNATURE,
-  LOCK_PREPAY_SIGNATURE,
   LOCK_SIGNATURE,
   REFUND_EVENT_SIGNATURE,
   REFUND_FOR_SIGNATURE,
   REFUND_SIGNATURE,
   claimEventTopic,
   encodeClaim,
-  encodeClaimFor,
   encodeLock,
-  encodeLockPrepayMinerfee,
   encodeRefund,
   encodeRefundFor,
-  preimageFromClaimLog,
   refundEventTopic,
   swapKey,
   type Erc20SwapLock,
@@ -53,11 +48,9 @@ describe('selectors — pinned against the public 4byte registry', () => {
     [CLAIM_SIGNATURE, 'cd413efa'],
     [LOCK_SIGNATURE, 'e64fafcc'],
     [REFUND_SIGNATURE, '36504721'],
-    [LOCK_PREPAY_SIGNATURE, 'b8080ab8'],
-    // The third-party overloads: same names, one more address, different
-    // selectors. Getting these wrong is not a compile error anywhere — it is a
+    // The third-party overload: same name, one more address, different
+    // selector. Getting it wrong is not a compile error anywhere — it is a
     // transaction that reverts on chain.
-    [CLAIM_FOR_SIGNATURE, 'bc586b28'],
     [REFUND_FOR_SIGNATURE, '0e5bbd59'],
   ])('%s -> %s', (signature, expected) => {
     expect(hex.encode(keccak_256(new TextEncoder().encode(signature)).subarray(0, 4))).toBe(expected)
@@ -205,20 +198,6 @@ describe('calldata layout', () => {
     expect(wordAt(data, 0)).toBe(hex.encode(invalidUtf8))
   })
 
-  it('lockPrepayMinerfee omits refundAddress, which the contract fills from msg.sender', () => {
-    // Five parameters, not six. The locker IS the refunder here, so passing it
-    // would be a different function; getting this wrong builds calldata that
-    // reverts, or worse, locks under a key we cannot derive.
-    const data = encodeLockPrepayMinerfee(lock())
-    expect(data).toHaveLength(4 + 5 * 32)
-    expect(hex.encode(data.subarray(0, 4))).toBe('b8080ab8')
-    expect(wordAt(data, 0)).toBe(hex.encode(sha256(PREIMAGE)))
-    expect(wordAt(data, 2)).toBe(`${'00'.repeat(12)}${hex.encode(TOKEN)}`)
-    expect(wordAt(data, 3)).toBe(`${'00'.repeat(12)}${hex.encode(CLAIMER)}`)
-    // The refunder is nowhere in the calldata.
-    expect(hex.encode(data)).not.toContain(hex.encode(REFUNDER))
-  })
-
   it('refuses inputs it cannot encode', () => {
     expect(() => encodeClaim(new Uint8Array(31), lock())).toThrow(/preimage must be 32 bytes/)
     expect(() => encodeLock(lock({ tokenAddress: new Uint8Array(19) }))).toThrow(/tokenAddress must be 20 bytes/)
@@ -227,34 +206,7 @@ describe('calldata layout', () => {
   })
 })
 
-describe('preimageFromClaimLog', () => {
-  const topic = claimEventTopic()
-
-  it('returns the preimage when it hashes to what we locked against', () => {
-    const log = { topics: [topic, sha256(PREIMAGE)], data: PREIMAGE }
-    expect(hex.encode(preimageFromClaimLog(log, sha256(PREIMAGE)))).toBe(hex.encode(PREIMAGE))
-  })
-
-  it('refuses a preimage that does not hash to the expected value', () => {
-    // THE security property. A log is untrusted: anyone can emit this shape
-    // from another contract. Accepting an unverified preimage would let a
-    // forged log drive the solver to spend its own side for nothing.
-    const forged = hex.decode('c'.repeat(64))
-    const log = { topics: [topic, sha256(PREIMAGE)], data: forged }
-    expect(() => preimageFromClaimLog(log, sha256(PREIMAGE))).toThrow(/does not hash to the expected/)
-  })
-
-  it('refuses a log that is not a Claim', () => {
-    const other = keccak_256(new TextEncoder().encode('Refund(bytes32)'))
-    expect(() => preimageFromClaimLog({ topics: [other], data: PREIMAGE }, sha256(PREIMAGE))).toThrow(/not a Claim log/)
-    expect(() => preimageFromClaimLog({ topics: [], data: PREIMAGE }, sha256(PREIMAGE))).toThrow(/not a Claim log/)
-  })
-
-  it('refuses data that is not one word', () => {
-    const log = { topics: [topic], data: new Uint8Array(31) }
-    expect(() => preimageFromClaimLog(log, sha256(PREIMAGE))).toThrow(/must be 32 bytes/)
-  })
-
+describe('claimEventTopic', () => {
   it('derives the topic from the signature rather than hardcoding it', () => {
     expect(CLAIM_EVENT_SIGNATURE).toBe('Claim(bytes32,bytes32)')
     expect(hex.encode(claimEventTopic())).toBe(
@@ -263,78 +215,29 @@ describe('preimageFromClaimLog', () => {
   })
 })
 
-/**
- * The NON-INTERACTIVE paths — the EVM equivalent of what covclaimd does on
- * Arkade, and the reason these overloads are bound at all.
- *
- * The contract declares both `public` with the address as a PARAMETER rather
- * than reading `msg.sender`, so anyone may submit them and the funds still
- * reach the intended party. That is the whole property, and it lives entirely
- * in the calldata layout: a wrong word order sends someone else's tokens
- * somewhere else, and nothing local would catch it.
- */
-describe('third-party claim and refund', () => {
+/** `public` with refundAddress as a PARAMETER, so anyone may submit it: the property lives
+ * entirely in the calldata layout, where a wrong word order pays someone else. */
+describe('third-party refund', () => {
   it('addresses the SAME lock as encodeLock, so it cannot settle a different swap', () => {
-    // Words 1-5 of both overloads are the lock's own words. If these ever drift
-    // from `encodeLock`, the call would reference a swap key the contract does
-    // not have and revert — or, worse, one it does.
+    // Words 1-5 are the lock's own words. If these ever drift from
+    // `encodeLock`, the call would reference a swap key the contract does not
+    // have and revert — or, worse, one it does.
     const l = lock()
     const locked = encodeLock(l)
-    const claimed = encodeClaimFor(PREIMAGE, l)
     const refunded = encodeRefundFor(l)
     for (const index of [1, 2, 3, 4, 5]) {
-      expect(wordAt(claimed, index)).toBe(wordAt(locked, index))
       expect(wordAt(refunded, index)).toBe(wordAt(locked, index))
     }
   })
 
-  it('carries the PREIMAGE in word 0 for claim, and its HASH for refund', () => {
+  it('carries the preimage HASH in word 0', () => {
     const l = lock()
-    expect(wordAt(encodeClaimFor(PREIMAGE, l), 0)).toBe(hex.encode(PREIMAGE))
     expect(wordAt(encodeRefundFor(l), 0)).toBe(hex.encode(l.preimageHash))
-    // The interactive claim omits claimAddress entirely, so the two layouts
-    // differ by exactly one word — the property that makes them separate calls.
-    expect(encodeClaimFor(PREIMAGE, l).length).toBe(encodeClaim(PREIMAGE, l).length + 32)
-  })
-
-  it('names claimAddress explicitly, which is what lets a third party submit it', () => {
-    const claimAddress = new Uint8Array(20).fill(0x7c)
-    const encoded = encodeClaimFor(PREIMAGE, lock({ claimAddress }))
-    // Left-padded to a word, and it must be the CLAIM address — sending it the
-    // refund address would pay the wrong party from a call anyone can make.
-    expect(wordAt(encoded, 3)).toBe('00'.repeat(12) + '7c'.repeat(20))
   })
 
   it('names refundAddress explicitly on the refund side', () => {
     const refundAddress = new Uint8Array(20).fill(0x3f)
     expect(wordAt(encodeRefundFor(lock({ refundAddress })), 4)).toBe('00'.repeat(12) + '3f'.repeat(20))
-  })
-})
-
-/**
- * Who the prepay actually pays, pinned because the answer decides whether a
- * whole class of swap works.
- *
- * The contract forwards the attached value to `claimAddress`:
- * `TransferHelper.transferEther(claimAddress, msg.value)`. That is correct
- * when the claimant submits its own claim, and wrong the moment claimant and
- * submitter differ — paying a merchant, where `claimAddress` publishes an
- * address and runs nothing while a payer or daemon sends the transaction.
- *
- * Nothing here can tell those cases apart, so this pins the FACT instead: the
- * beneficiary is word 3, and word 3 is the claim address. A change that moved
- * the prepay to some other party would land here rather than in a swap that
- * quietly funds the wrong account.
- */
-describe(`prepay beneficiary`, () => {
-  it(`names claimAddress, which is who the contract forwards the value to`, () => {
-    const claimAddress = new Uint8Array(20).fill(0x5a)
-    const refundAddress = new Uint8Array(20).fill(0x6b)
-    const encoded = encodeLockPrepayMinerfee(lock({ claimAddress, refundAddress }))
-    expect(wordAt(encoded, 3)).toBe('00'.repeat(12) + '5a'.repeat(20))
-    // And the refunder is NOT in the calldata at all — the contract takes
-    // msg.sender for that, which is why lockPrepayCall insists the two agree.
-    expect(hex.encode(encoded)).not.toContain('6b'.repeat(20))
   })
 })
 

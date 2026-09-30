@@ -9,6 +9,8 @@ import {
   LOCKUP_CONTRACT_TYPE,
   LOCKUP_RECOVERY_MTP_MARGIN_SECONDS,
   lockupContractRegistration,
+  recoverableVtxosFrom,
+  registeredLockupDeadlines,
   renewExpiringVtxos,
   renewalThresholdMs,
   isRenewalDue,
@@ -42,23 +44,6 @@ const extendedScript = (refundLocktime = REFUND_LOCKTIME): CovenantSwapScript =>
     server: SERVER,
     preimageHash: new Uint8Array(20).fill(7),
     refundLocktime,
-    claimDelay: 512,
-    client: CLIENT,
-    clientRefundDelay: 1024,
-    refundWithoutServerDelay: 2048,
-    nonInteractiveParameters: {
-      emulatorPubkey: EMULATOR,
-      receiverPkScript: P2TR(9),
-      senderPkScript: P2TR(8),
-    },
-  })
-
-const baseScript = (): CovenantSwapScript =>
-  new CovenantSwapScript({
-    receiver: RECEIVER,
-    server: SERVER,
-    preimageHash: new Uint8Array(20).fill(7),
-    refundLocktime: REFUND_LOCKTIME,
     claimDelay: 512,
     client: CLIENT,
     clientRefundDelay: 1024,
@@ -122,6 +107,58 @@ describe('lockupContractRegistration', () => {
     const registration = lockupContractRegistration(script, 'ark1address')
     const rebuilt = VHTLCV2ContractHandler.createScript(registration!.params)
     expect(hex.encode(rebuilt.pkScript)).toBe(hex.encode(script.pkScript))
+  })
+})
+
+describe('recoverableVtxosFrom', () => {
+  const wallet = (vtxos: Record<string, unknown>[]) => ({ getVtxos: async () => vtxos }) as never
+
+  it('marks a swept output confirmed, whichever clock its expiry is denominated in', async () => {
+    const [entry] = await recoverableVtxosFrom(
+      wallet([{ txid: 'a'.repeat(64), vout: 0, script: 'aa', isSwept: true, expiresAtHeight: 900_000 }]),
+    )
+    expect(entry).toMatchObject({ script: 'aa', confirmedRecoverable: true })
+  })
+
+  /** In the set only so the guard's view can never be narrower than the sweep's. */
+  it('marks an unswept height-expiry output as a guess, not a confirmation', async () => {
+    const [entry] = await recoverableVtxosFrom(
+      wallet([{ txid: 'a'.repeat(64), vout: 0, script: 'aa', expiresAtHeight: 900_000 }]),
+    )
+    expect(entry).toMatchObject({ script: 'aa', confirmedRecoverable: false })
+  })
+})
+
+describe('registeredLockupDeadlines', () => {
+  it('reads the deadline and the role back out of the stored params', () => {
+    const script = extendedScript()
+    const registration = lockupContractRegistration(script, 'ark1address')
+    expect(registeredLockupDeadlines([registration!], 'not-the-solver')).toEqual([
+      { script: hex.encode(script.pkScript), refundLocktime: REFUND_LOCKTIME, refundable: false },
+    ])
+  })
+
+  it('contributes nothing for a lockup whose sender is us — the SDK drops that input alone', () => {
+    const script = extendedScript()
+    const registration = lockupContractRegistration(script, 'ark1address')
+    expect(registeredLockupDeadlines([registration!], hex.encode(script.vhtlcOptions.sender))).toEqual([])
+  })
+
+  it('ignores a row of another contract type', () => {
+    expect(registeredLockupDeadlines([{ script: 'aa', type: 'default', params: {} }], 'ours')).toEqual([])
+  })
+
+  // Skipping leaves that row's output in the batch unguarded, so it must be said.
+  it('reports a lockup row the handler cannot read rather than dropping it silently', () => {
+    const said: string[] = []
+    const deadlines = registeredLockupDeadlines(
+      [{ script: 'aa', type: LOCKUP_CONTRACT_TYPE, params: {} }],
+      'ours',
+      (line) => said.push(line),
+    )
+    expect(deadlines).toEqual([])
+    expect(said).toHaveLength(1)
+    expect(said[0]).toMatch(/registered lockup aa cannot be read/)
   })
 })
 
@@ -454,6 +491,35 @@ describe('runVtxoLifecycle', () => {
     const report = await runVtxoLifecycle(d)
     expect(calls.recover).toBe(1)
     expect(report.recoverySkipped).toBeNull()
+  })
+
+  // Blocking a height-guess refuses a recovery the SDK would have run, and the
+  // not-ours arm is not a clock question, so it would never stop refusing.
+  it('does not block on a lockup that is in the sweep set only as a height-expiry guess', async () => {
+    const scriptHex = hex.encode(extendedScript().pkScript)
+    const { deps: d, calls } = deps({
+      recoverableVtxos: async () => [{ ...vtxo(scriptHex), confirmedRecoverable: false }],
+      lockupDeadlines: async (): Promise<LockupDeadline[]> => [
+        { script: scriptHex, refundLocktime: REFUND_LOCKTIME, refundable: false },
+      ],
+      nowSeconds: () => REFUND_LOCKTIME + LOCKUP_RECOVERY_MTP_MARGIN_SECONDS,
+    })
+    const report = await runVtxoLifecycle(d)
+    expect(calls.recover).toBe(1)
+    expect(report.recoverySkipped).toBeNull()
+  })
+
+  // The CLTV arm keeps its full width: too wide there only defers a round.
+  it('still blocks a pre-CLTV lockup that is only a height-expiry guess', async () => {
+    const scriptHex = hex.encode(extendedScript().pkScript)
+    const { deps: d, calls } = deps({
+      recoverableVtxos: async () => [{ ...vtxo(scriptHex), confirmedRecoverable: false }],
+      lockupDeadlines: async (): Promise<LockupDeadline[]> => [{ script: scriptHex, refundLocktime: REFUND_LOCKTIME }],
+      nowSeconds: () => REFUND_LOCKTIME - 1,
+    })
+    const report = await runVtxoLifecycle(d)
+    expect(calls.recover).toBe(0)
+    expect(report.recoverySkipped).toContain('not yet safely past CLTV')
   })
 
   /**

@@ -38,7 +38,7 @@ export interface EvmSendLockParams {
   /**
    * When the solver's EVM refund opens, unix seconds. Direction depends on the
    * leg: on receive this is converted FROM the client's height; on send it is
-   * derived by {@link evmTimeoutFor} and converted TO the height the row
+   * derived by {@link evaluateEvmSendAcceptance} and converted TO the height the row
    * stores. Either way this gate sees seconds only — the height conversion
    * happens at the orchestrator, never here.
    */
@@ -92,19 +92,6 @@ export const evaluateEvmSendLock = (params: EvmSendLockParams): EvmSendLockDecis
 }
 
 /**
- * The `evmTimeout` to ask for, given a committed `refundLocktime`.
- *
- * The LATEST safe value: every second belongs to the client's claim window, and the
- * margin already covers our recourse. Null rather than an unsafe proposal when nothing
- * works.
- */
-export const evmTimeoutFor = (params: Omit<EvmSendLockParams, 'evmTimeout'>): number | null => {
-  const latestSafe = params.refundLocktime - (params.orderMarginSeconds ?? EVM_ORDER_MARGIN_SECONDS)
-  const decision = evaluateEvmSendLock({ ...params, evmTimeout: latestSafe })
-  return decision.ok ? latestSafe : null
-}
-
-/**
  * Why a quote was refused before any deadline was even proposed.
  *
  * Separate from {@link EvmSendLockRefusal}: that one answers "are these two
@@ -140,9 +127,9 @@ export type EvmSendAcceptance =
  * Lightning leg the payee's CLTV fixes the outbound deadline and the Arkade
  * refund is sized to outlast it; on the onchain leg `htlcLocktimeFor` picks the
  * HTLC's CLTV first and `onchainRefundLocktimeFor` follows. Here neither is
- * possible: {@link evmTimeoutFor} DERIVES the EVM deadline from the Arkade one
- * by subtracting the margin, so the Arkade side has to be chosen first or the
- * definition is circular.
+ * possible: the EVM deadline is DERIVED from the Arkade one by subtracting the
+ * margin, so the Arkade side has to be chosen first or the definition is
+ * circular.
  *
  * So the anchor is the solver's own recourse. `refundLocktime` is
  * `now + unilateralClaimDelay + margin`, the same server-independent bound
@@ -172,38 +159,17 @@ export const evaluateEvmSendAcceptance = (params: EvmSendAcceptanceParams): EvmS
   }
   const orderMargin = params.orderMarginSeconds ?? EVM_ORDER_MARGIN_SECONDS
   const minClaimWindow = params.minClaimWindowSeconds ?? EVM_MIN_CLAIM_WINDOW_SECONDS
-  // TWO INDEPENDENT CONSTRAINTS, and the anchor has to clear both.
-  //
-  // The solver's recourse wants `unilateralClaimDelay` before its own refund
-  // opens. The CLIENT separately needs `minClaimWindow` to claim at all - and
-  // since `evmTimeout` is one margin earlier than this, anchoring on the exit
-  // delay alone hands the client a window as short as that delay.
-  //
-  // On any network whose exit delay exceeds the claim window the two never
-  // conflict, which is why a unit test with a production-shaped 24h delay
-  // cannot see this. On the regtest stack, where the delay is under thirty
-  // minutes, it made `evaluateEvmSendLock` refuse EVERY quote with
-  // `deadlines_cannot_be_ordered` - found by running the corridor against a
-  // live operator rather than by reading it.
+  // `evmTimeout` sits one margin earlier, so anchoring on a short exit delay alone
+  // (regtest) would hand the client less than `minClaimWindow` to claim.
   const refundLocktime = nowSeconds + Math.max(unilateralClaimDelay, minClaimWindow) + orderMargin
-  const evmTimeout = evmTimeoutFor({
+  // The LATEST safe value: every second belongs to the client's claim window.
+  const evmTimeout = refundLocktime - orderMargin
+  const decision = evaluateEvmSendLock({
+    evmTimeout,
     refundLocktime,
     nowSeconds,
     orderMarginSeconds: orderMargin,
-    ...(params.minClaimWindowSeconds !== undefined ? { minClaimWindowSeconds: params.minClaimWindowSeconds } : {}),
+    minClaimWindowSeconds: minClaimWindow,
   })
-  if (evmTimeout === null) {
-    // `evmTimeoutFor` answers null exactly when no safe value exists. Re-run the
-    // evaluation to recover WHICH rule bit, so the refusal names it instead of
-    // collapsing every cause into one opaque reason.
-    const decision = evaluateEvmSendLock({
-      evmTimeout: refundLocktime - orderMargin,
-      refundLocktime,
-      nowSeconds,
-      orderMarginSeconds: orderMargin,
-      ...(params.minClaimWindowSeconds !== undefined ? { minClaimWindowSeconds: params.minClaimWindowSeconds } : {}),
-    })
-    return { accept: false, reason: decision.ok ? 'deadlines_cannot_be_ordered' : decision.reason }
-  }
-  return { accept: true, refundLocktime, evmTimeout }
+  return decision.ok ? { accept: true, refundLocktime, evmTimeout } : { accept: false, reason: decision.reason }
 }

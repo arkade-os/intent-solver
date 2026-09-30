@@ -18,7 +18,7 @@
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
-import { ASSET_ID_HEX_LENGTH, ASSETS } from './marketKey.js'
+import { ASSET_ID_HEX, ASSET_ID_HEX_LENGTH, ASSETS } from './marketKey.js'
 import { isSwapNetwork } from './networks.js'
 import { defaultPricePath } from './priceFeed.js'
 import type { AssetMarketPricingView } from './assetMarketConfig.js'
@@ -31,8 +31,6 @@ const NAME = /^[a-z0-9-]+$/
 /** Mirrors the registry schemas' relay item rule and bound. */
 const RELAY = /^wss:\/\/[^\s]+$/
 const MAX_RELAYS = 8
-/** § 2's identity rule for a configured asset leg — the INPUT, not the emitted id. */
-const ASSET_ID = new RegExp(`^[0-9a-f]{${ASSET_ID_HEX_LENGTH}}$`)
 /** The registry's ceiling on an asset's `decimals` AND on `price_decimals`. */
 const MAX_DECIMALS = 18
 /** Label width. The schema demands a ticker the config has none of, and the
@@ -172,7 +170,7 @@ const cardAsset = (leg: string | null, decimals: number, network: SwapNetwork): 
     }
     return btcAsset(ARKADE, network)
   }
-  if (!ASSET_ID.test(leg)) {
+  if (!ASSET_ID_HEX.test(leg)) {
     throw new Error(
       `an asset leg must be null for BTC or a lowercase ${ASSET_ID_HEX_LENGTH}-character asset id, ` +
         `got ${JSON.stringify(leg)}`,

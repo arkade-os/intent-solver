@@ -26,7 +26,7 @@ export const RFQ_ID = z
 export const RFQ_PAIR = z.string().min(1).max(MAX_PAIR_LENGTH)
 export const AMOUNT_SIDE = z.enum(['from', 'to'])
 // § 2.1: a canonical decimal string of atomic units, with a JSON number
-// accepted only where it is provably lossless. @see ./amount.ts
+// accepted only where it is provably lossless. @see ./wireAmount.ts
 export const RFQ_AMOUNT = WIRE_AMOUNT
 
 /**
@@ -100,25 +100,10 @@ export const rfqBidPayload = (
   valid_until: bid.valid_until,
 })
 
-/** The closed RFQ refusal set. Anything a client does not recognise is a generic decline. */
-export type RfqRefusalReason =
-  | 'unsupported_pair'
-  | 'unsupported_payload'
-  | 'amount_out_of_range'
-  | 'exposure_cap'
-  | 'invoice_expired'
-  | 'quote_conflict'
-  | 'pricing_unavailable'
-  | 'rate_limited'
-
 /**
- * The same members as a value, so a runtime check can be made against the set.
- *
- * Needed because a CORRIDOR now builds its own refusal payload, and a corridor
- * is third-party code from the host's point of view — the host has to verify on
- * the way out what it used to guarantee by construction. The exhaustiveness
- * check below fails to COMPILE if a member is added to the union and not here,
- * so the guard cannot silently narrow as the vocabulary grows.
+ * The closed RFQ refusal set, as a value so a runtime check can be made against
+ * it: a CORRIDOR builds its own refusal payload, so the host has to verify on the
+ * way out. Anything a client does not recognise is a generic decline.
  */
 export const RFQ_REFUSAL_REASON_VALUES = [
   'unsupported_pair',
@@ -129,18 +114,9 @@ export const RFQ_REFUSAL_REASON_VALUES = [
   'quote_conflict',
   'pricing_unavailable',
   'rate_limited',
-] as const satisfies readonly RfqRefusalReason[]
+] as const
 
-const _EVERY_REASON_LISTED: Record<RfqRefusalReason, true> = {
-  unsupported_pair: true,
-  unsupported_payload: true,
-  amount_out_of_range: true,
-  exposure_cap: true,
-  invoice_expired: true,
-  quote_conflict: true,
-  pricing_unavailable: true,
-  rate_limited: true,
-}
+export type RfqRefusalReason = (typeof RFQ_REFUSAL_REASON_VALUES)[number]
 
 export const isRfqRefusalReason = (value: string): value is RfqRefusalReason =>
   (RFQ_REFUSAL_REASON_VALUES as readonly string[]).includes(value)

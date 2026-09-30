@@ -8,7 +8,7 @@
  * sats carrier but the wrong asset amount reads as funded, and the swap
  * proceeds for a figure nobody quoted.
  *
- * The covenant does not catch that and should not try: `enforcePayToAsset`
+ * The covenant does not catch that and should not try: its asset clause
  * relates the refund OUTPUT to the INPUT (`out >= in`), which is the only
  * correct rule for a refund — binding it to the quote would refund an
  * underfunding client MORE than they locked, out of the solver's own pocket.

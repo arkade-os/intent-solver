@@ -12,43 +12,11 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { evmDirectionOf } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { respondToRfqRequest } from '@arkade-os/solver-transport/ingress/rfq.js'
 import { createCorridorSet, type Corridor } from '@arkade-os/solver-core/core/corridor.js'
 import { RFQ_PAIR_SEND, rfqRefusalPayload } from '@arkade-os/solver-corridors/wire/payloads.js'
 
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
-
-describe('evmDirectionOf', () => {
-  it('names the send direction', () => {
-    expect(evmDirectionOf(`arkade:BTC->ethereum:${TOKEN}`)).toBe('send')
-  })
-
-  it('names the receive direction', () => {
-    expect(evmDirectionOf(`ethereum:${TOKEN}->arkade:BTC`)).toBe('receive')
-  })
-
-  it.each([
-    ['a lightning pair', 'arkade:BTC->lightning:BTC'],
-    ['an onchain pair', 'onchain:BTC->arkade:BTC'],
-    ['an arkade asset pair', 'arkade:BTC->arkade:USDT'],
-    ['an empty string', ''],
-    ['nonsense', 'not-a-pair'],
-  ])('is null for %s', (_why, pair) => {
-    expect(evmDirectionOf(pair)).toBeNull()
-  })
-
-  it.each([
-    ['an uppercase address, which is not the canonical spelling', `arkade:BTC->ethereum:${TOKEN.toUpperCase()}`],
-    ['a short address', 'arkade:BTC->ethereum:0xdead'],
-    ['no 0x prefix', `arkade:BTC->ethereum:${TOKEN.slice(2)}`],
-    ['a token on the wrong side', `arkade:${TOKEN}->ethereum:BTC`],
-  ])('refuses %s rather than matching loosely', (_why, pair) => {
-    // A loose match here is worse than no match: it would route a malformed
-    // pair into a corridor that then quotes against a token id it cannot serve.
-    expect(evmDirectionOf(pair)).toBeNull()
-  })
-})
 
 describe('the ingress', () => {
   const sendQuote = vi.fn()

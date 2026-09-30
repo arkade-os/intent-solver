@@ -630,16 +630,7 @@ const onchainReceiveMaxBandSatsFromEnv = (onchainReceiveLimits: Limits): number 
  */
 const corridorFeesFromEnv = (): Record<Corridor, Fee> => {
   const entries = ALL_DESCRIPTORS.map(({ pair, envStem: stem }) => {
-    const component = (suffix: string, max: number): number => {
-      const name = `${stem}_${suffix}`
-      const raw = process.env[name]?.trim()
-      if (!raw) return 0
-      const value = Number(raw)
-      if (!Number.isInteger(value) || value < 0 || value > max) {
-        throw new Error(`${name} must be an integer between 0 and ${max}, got ${process.env[name]}`)
-      }
-      return value
-    }
+    const component = (suffix: string, max: number): number => intFromEnv(`${stem}_${suffix}`, 0, 0, max)
     // bps is capped at 10_000 (100%) because a spread at or above it leaves the
     // taker nothing; the flat cap is a sanity bound, not a policy — a flat fee
     // in the millions is a typo, and one that would quietly refuse every swap
@@ -684,21 +675,10 @@ const NETWORK_FEE_CAPABLE: readonly Corridor[] = ['arkade:BTC->onchain:BTC', 'on
  */
 const corridorNetworkFeesFromEnv = (): Record<Corridor, NetworkFeeBounds | null> => {
   const entries = ALL_DESCRIPTORS.map(({ pair, envStem: stem }) => {
-    // Same shape as `corridorLimitsFromEnv`'s `bound`, not `corridorFeesFromEnv`'s
-    // `component`: absence has to survive as `undefined` here rather than
-    // collapsing to 0, because absence is what keeps the old pricing.
+    // Unset stays `undefined`, not 0: absence is what keeps the old pricing.
     const sats = (suffix: string, min: number): number | undefined => {
       const name = `${stem}_${suffix}`
-      const raw = process.env[name]?.trim()
-      if (!raw) return undefined
-      const value = Number(raw)
-      // Same 1_000_000 sanity bound `<STEM>_FEE_FLAT_SATS` carries, and for the
-      // same reason: an execution charge in the millions is a typo, and one
-      // that would refuse every swap as unquotable rather than fail here.
-      if (!Number.isInteger(value) || value < min || value > 1_000_000) {
-        throw new Error(`${name} must be an integer between ${min} and 1000000, got ${process.env[name]}`)
-      }
-      return value
+      return process.env[name]?.trim() ? intFromEnv(name, 0, min, 1_000_000) : undefined
     }
     // A cap of 0 would mean "charge nothing for execution, ever", which is
     // `<STEM>_FEE_FLAT_SATS=0` written so that it looks like it does something.
@@ -1025,15 +1005,8 @@ export const loadConfig = (): Config => {
     contractRetentionMs: contractRetentionDays * 86_400_000,
     sweepConcurrency,
     chainTipEsploraUrl: process.env.CHAIN_TIP_ESPLORA_URL?.trim() || process.env.LND_ESPLORA_URL?.trim(),
-    // Ceiling is `MAX_LOCKUP_TIMEOUT` (= REFUND_SAFETY_MARGIN), DERIVED there and
-    // imported rather than written as a number here, so it cannot drift from the
-    // margin it is the same quantity as. This is NOT the 3480 that used to sit
-    // here: that one was justified by an invoice-expiry floor which no longer
-    // exists, and removing it for that reason was right — but it had also been
-    // holding this window under the safety margin by accident, which is the bound
-    // that actually matters. `payableCltvBlocks` enforces the invariant properly,
-    // at payment time; this refuses at boot a window that could only ever produce
-    // swaps refusing themselves. The 60s floor still rules out one nobody can fund.
+    // Ceiling imported (= REFUND_SAFETY_MARGIN) so it cannot drift: a longer window only yields swaps that
+    // refuse themselves at payment time. The 60s floor rules out one nobody can fund.
     lockupTimeoutSeconds: intFromEnv('LOCKUP_TIMEOUT_SECONDS', DEFAULT_LOCKUP_TIMEOUT, 60, MAX_LOCKUP_TIMEOUT),
     sendHintScidDenylist: sendHintScidDenylistFromEnv(),
     lnBackend,

@@ -19,7 +19,7 @@ import { z } from 'zod'
 import { WIRE_AMOUNT } from '@arkade-os/solver-core/core/wireAmount.js'
 import { MAX_PAIR_LENGTH } from '@arkade-os/solver-core/core/marketKey.js'
 import type { OnchainSendSwapRow } from '../db/onchainSwaps.js'
-import { type RfqState, rfqRefusalPayload } from './payloads.js'
+import type { RfqState } from './payloads.js'
 
 export const RFQ_PAIR_ONCHAIN_SEND = 'arkade:BTC->onchain:BTC'
 
@@ -143,5 +143,3 @@ export const onchainRfqStatusPayload = (row: OnchainSendSwapRow, rfqId: string):
     },
   }
 }
-
-export { rfqRefusalPayload }

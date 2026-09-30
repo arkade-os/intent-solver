@@ -17,7 +17,6 @@
 import { hex } from '@scure/base'
 import type { AdmissionStrategy, FloatRequirement } from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { RFQ_PAIR_ONCHAIN_SEND } from '../wire/onchainPayloads.js'
-import { sha256 } from '@noble/hashes/sha2.js'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
   ARKADE_CLAIM_WINDOW_SECONDS,
@@ -32,8 +31,9 @@ import {
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
-import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
+import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import {
   buildOnchainRefundTx,
@@ -46,8 +46,8 @@ import type { OnchainSendSwapRow, OnchainSendSwapStore } from '../db/onchainSwap
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
-import { MINUTE } from '@arkade-os/solver-core/core/timelocks.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 export type { ArkadeOps as OnchainArkadeOps } from './orchestrator.js'
@@ -137,9 +137,6 @@ export interface OnchainQuoteRequest {
   clientRefundPubkey: string
   rfqId?: string
 }
-
-/** `sha256(P)`, hex — the same wire-form comparison `row.paymentHash` already uses. */
-const paymentHashOf = (preimage: Uint8Array): string => hex.encode(sha256(preimage))
 
 /** Extract the preimage from a claim witness: `[signature, preimage, claimScript, controlBlock]`. */
 const preimageFromClaimWitness = (witness: Uint8Array[]): Uint8Array | null => witness[1] ?? null
@@ -437,48 +434,12 @@ export class OnchainSendSwapService {
     )
   }
 
-  async tick(id: string): Promise<OnchainSendSwapRow> {
-    const { store } = this.deps
-    if (this.inFlight.has(id)) return store.get(id)
-    this.inFlight.add(id)
-    try {
-      while (await this.step(await store.get(id))) {
-        // each successful step re-reads the row and tries the next
-      }
-      return await store.get(id)
-    } finally {
-      this.inFlight.delete(id)
-    }
+  tick(id: string): Promise<OnchainSendSwapRow> {
+    return guardedTick(id, this.inFlight, this.deps.store, (row) => this.step(row))
   }
 
   async tickAll(): Promise<OnchainSendSwapRow[]> {
-    const rows: OnchainSendSwapRow[] = []
-    for (const row of await this.deps.store.findRecoverable()) {
-      // Held off after repeated failures, or already being ticked elsewhere.
-      // Neither means the swap advanced, so the row comes back unchanged and
-      // `onTickSuccess` does not fire. Gated here rather than in `tick` so a
-      // direct caller — an operator's recheck, a one-shot CLI tick — is never
-      // throttled: only this timer is.
-      if (this.shouldSkipTick?.(row.id) || this.inFlight.has(row.id)) {
-        rows.push(row)
-        continue
-      }
-      try {
-        rows.push(await this.tick(row.id))
-        // Ran, and did not throw: the fault is over. The host clears the
-        // backoff on this rather than on membership of the returned array,
-        // which also holds skipped rows and rows that threw.
-        this.onTickSuccess?.(row.id)
-      } catch (error) {
-        this.onTickError?.(row.id, error)
-        try {
-          rows.push(await this.deps.store.get(row.id))
-        } catch {
-          // Store fault, not a swap fault — skip, the next sweep retries.
-        }
-      }
-    }
-    return rows
+    return sweep(await this.deps.store.findRecoverable(), this, this.deps.store, { inFlight: this.inFlight })
   }
 
   /**
@@ -498,7 +459,7 @@ export class OnchainSendSwapService {
     const { store, arkade } = this.deps
     const outputs = await arkade.findLockups(row.pkScript)
     if (outputs.length === 0) {
-      // The Lightning leg's `refundSweep` guards this identically, for the
+      // The Lightning leg's `pushRefund` guards this identically, for the
       // identical reason: `findLockups` is `spendableOnly`, so an empty answer
       // is not proof of a spend, and `findRefundable` (src/db/onchainSwaps.ts)
       // filters `refund_outcome IS NULL` — so recording one shuts the row for
@@ -612,7 +573,7 @@ export class OnchainSendSwapService {
       outputScript: hex.decode(row.onchainPkScript),
     })
     const preimage = witness ? preimageFromClaimWitness(witness) : null
-    if (preimage && paymentHashOf(preimage) === row.paymentHash) {
+    if (preimage && paymentHashFromPreimage(preimage) === row.paymentHash) {
       throw new Error(
         `swap ${id}'s onchain HTLC was already claimed by the client, preimage ${hex.encode(preimage)} — ` +
           'a refund of it can never confirm; claim the Arkade lockup with that preimage instead',
@@ -842,7 +803,7 @@ export class OnchainSendSwapService {
     }
 
     const preimage = preimageFromClaimWitness(witness)
-    if (!preimage || paymentHashOf(preimage) !== row.paymentHash) {
+    if (!preimage || paymentHashFromPreimage(preimage) !== row.paymentHash) {
       // A spend exists but does not look like our claim leaf (or reveals a
       // preimage that does not fit) — most likely the SOLVER'S OWN refund
       // spend after a timeout, not the client's claim. Routed to a human:
@@ -895,7 +856,8 @@ export class OnchainSendSwapService {
     } catch (error) {
       if (this.now() >= row.refundLocktime) {
         const detail = error instanceof Error ? error.message : String(error)
-        await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail}`)
+        const recourse = unilateralExitRecourse(covenantRowFor(row), { solverPubkey: arkade.providerPubkey })
+        await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail} — ${recourse}`)
         return false
       }
       throw error
@@ -942,7 +904,7 @@ export class OnchainSendSwapService {
     })
     if (claimWitness) {
       const preimage = preimageFromClaimWitness(claimWitness)
-      if (preimage && paymentHashOf(preimage) === row.paymentHash) {
+      if (preimage && paymentHashFromPreimage(preimage) === row.paymentHash) {
         return store.transition(row.id, 'refunding_onchain', 'claiming', { preimage: hex.encode(preimage) })
       }
       // Neither a matching claim nor the refund above: genuinely unrecognisable.

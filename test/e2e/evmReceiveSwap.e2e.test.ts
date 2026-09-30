@@ -234,7 +234,7 @@ describe('e2e ethereum:<token>->arkade:BTC (receive) — both stacks', () => {
       const lock = evmReceiveArkadeDeps(await receiveArkadeOpsFromContext(arkade.ctx, arkade.emulator)).lockFor(row)
       const backend = createEvmHtlcBackend({ contractAddress: SWAP_ADDRESS, rpc })
       for (const call of backend.lockCalls(lock, await backend.allowance(WETH, addressFromPrivateKey(CLIENT_KEY)))) {
-        expect((await sendFrom(rpc, CLIENT_KEY, call.to, call.data, call.value)).status).toBe('0x1')
+        expect((await sendFrom(rpc, CLIENT_KEY, call.to, call.data)).status).toBe('0x1')
       }
       expect(await backend.isLocked(lock), 'the client’s lock is not on chain').toBe(true)
 

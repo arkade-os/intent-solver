@@ -67,7 +67,6 @@ type Offer = import('@arkade-os/swap').Offer
 const SERVER_KEY = hex.decode('4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa')
 const MAKER_KEY = '71102fc86b5c576c72f411e083cc03eb83d1b55065406ba2a483208dbb5074ab'
 const EMULATOR_KEY = '466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27'
-const TAKER_PAYOUT = hex.decode('512035f737927627c4af1e9a39ae02b086c6b31426d0d64f01e5ce3ee8a445bbd667')
 const ASSET_A = `${'aa'.repeat(32)}0000`
 const ASSET_B = `${'bb'.repeat(32)}0000`
 

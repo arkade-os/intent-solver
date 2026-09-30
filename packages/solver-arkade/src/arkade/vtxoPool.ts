@@ -67,14 +67,8 @@ export const poolTarget = (maxSats: number, maxExposedSats: number): PoolRung[] 
 }
 
 /** Which rung a coin counts toward: the largest rung it can fully serve. */
-const rungOf = (value: number, target: readonly PoolRung[]): number => {
-  let index = -1
-  for (let i = 0; i < target.length; i++) {
-    const rung = target[i]
-    if (rung !== undefined && value >= rung.size) index = i
-  }
-  return index
-}
+const rungOf = (value: number, target: readonly PoolRung[]): number =>
+  target.findLastIndex((rung) => value >= rung.size)
 
 /**
  * What to mint so the float matches {@link poolTarget}.
@@ -111,10 +105,7 @@ export const planPool = (args: {
   const have = target.map(() => 0)
   for (const value of spendable) {
     const rung = rungOf(value, target)
-    if (rung >= 0) {
-      const count = have[rung]
-      if (count !== undefined) have[rung] = count + 1
-    }
+    if (rung >= 0) have[rung]!++
   }
 
   const smallest = target[0]

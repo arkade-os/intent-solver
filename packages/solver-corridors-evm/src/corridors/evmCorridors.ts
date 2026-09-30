@@ -55,6 +55,21 @@ import type { EvmSendSwapService } from '../send/evmOrchestrator.js'
 import type { EvmReceiveSwapService } from '../receive/evmOrchestrator.js'
 import { respondToEvmReceiveRfqRequest, respondToEvmSendRfqRequest } from './evmRfq.js'
 
+const EVM_SEND_STATES: CorridorDescriptor<EvmSendSwapState>['states'] = {
+  live: EVM_SEND_NON_TERMINAL,
+  exposed: EVM_SEND_EXPOSED,
+  // `claimed` and no other terminal: `refunded` is the send leg's safe END,
+  // not a delivery — phaseOfStates files it under `failed` beside `refused`,
+  // which is the swapView.ts convention for "no harm, no delivery".
+  delivered: ['claimed'],
+}
+
+const EVM_RECEIVE_STATES: CorridorDescriptor<EvmReceiveSwapState>['states'] = {
+  live: EVM_RECEIVE_NON_TERMINAL,
+  exposed: EVM_RECEIVE_EXPOSED,
+  delivered: ['claimed'],
+}
+
 export const evmSendDescriptor = (token: EvmToken): CorridorDescriptor<EvmSendSwapState> => ({
   pair: evmCorridorFor(token.address, 'send'),
   envStem: evmEnvStem(token, 'send'),
@@ -62,14 +77,7 @@ export const evmSendDescriptor = (token: EvmToken): CorridorDescriptor<EvmSendSw
   // it today, so the console reads UNKNOWN for this corridor's payout balance —
   // the honest answer, per rail.ts's contract, not zero.
   payoutRail: `ethereum:${token.symbol.toLowerCase()}`,
-  states: {
-    live: EVM_SEND_NON_TERMINAL,
-    exposed: EVM_SEND_EXPOSED,
-    // `claimed` and no other terminal: `refunded` is the send leg's safe END,
-    // not a delivery — phaseOfStates files it under `failed` beside `refused`,
-    // which is the swapView.ts convention for "no harm, no delivery".
-    delivered: ['claimed'],
-  },
+  states: EVM_SEND_STATES,
 })
 
 export const evmReceiveDescriptor = (token: EvmToken): CorridorDescriptor<EvmReceiveSwapState> => ({
@@ -77,11 +85,7 @@ export const evmReceiveDescriptor = (token: EvmToken): CorridorDescriptor<EvmRec
   envStem: evmEnvStem(token, 'receive'),
   // The client is paid in SATS out of the Arkade float on this leg.
   payoutRail: 'arkade',
-  states: {
-    live: EVM_RECEIVE_NON_TERMINAL,
-    exposed: EVM_RECEIVE_EXPOSED,
-    delivered: ['claimed'],
-  },
+  states: EVM_RECEIVE_STATES,
 })
 
 // The same exception the two send corridors carry: a pushed refund lives as a
@@ -98,7 +102,7 @@ export const projectEvmSend = (row: EvmSendSwapRow): AdminSwap => {
     id: row.id,
     corridor: evmCorridorFor(row.tokenAddress, 'send'),
     state,
-    phase: phaseOfStates(evmSendDescriptorForStatesOnly.states, state),
+    phase: phaseOfStates(EVM_SEND_STATES, state),
     amountSats: row.amountSats,
     payoutSats: row.payoutSats,
     paymentHash: row.paymentHash,
@@ -113,7 +117,7 @@ export const projectEvmReceive = (row: EvmReceiveSwapRow): AdminSwap => ({
   id: row.id,
   corridor: evmCorridorFor(row.tokenAddress, 'receive'),
   state: row.state,
-  phase: phaseOfStates(evmReceiveDescriptorForStatesOnly.states, row.state),
+  phase: phaseOfStates(EVM_RECEIVE_STATES, row.state),
   amountSats: row.amountSats,
   payoutSats: row.payoutSats,
   paymentHash: row.paymentHash,
@@ -121,16 +125,6 @@ export const projectEvmReceive = (row: EvmReceiveSwapRow): AdminSwap => ({
   updatedAt: row.updatedAt,
   failureReason: row.failureReason,
 })
-
-// phaseOfStates needs the three state lists, which are direction-constant —
-// the token's address in a descriptor is irrelevant to bucketing, so the
-// projectors share one standing instance rather than minting one per call.
-const evmSendDescriptorForStatesOnly = {
-  states: { live: EVM_SEND_NON_TERMINAL, exposed: EVM_SEND_EXPOSED, delivered: ['claimed' as const] },
-}
-const evmReceiveDescriptorForStatesOnly = {
-  states: { live: EVM_RECEIVE_NON_TERMINAL, exposed: EVM_RECEIVE_EXPOSED, delivered: ['claimed' as const] },
-}
 
 /** What both EVM stores share: every live row, one page at a time. */
 interface EvmReadableStore<Row extends { id: string; pkScript: string }> {

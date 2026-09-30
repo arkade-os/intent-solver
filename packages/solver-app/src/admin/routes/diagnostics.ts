@@ -22,62 +22,25 @@
  *     only when something is already going wrong.
  */
 import type { Hono } from 'hono'
-import { CORRIDORS, type Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { balanceOfRail, readRails } from '@arkade-os/solver-core/core/rail.js'
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { applyOverrides } from '../settings.js'
 import { probeBackends } from '../probes.js'
+import { attempt } from '../../ops/attempt.js'
 import { requireLn, requireOnchain } from '../../ops/rails.js'
 import { publishStateOf } from '../publishState.js'
 import type { AdminDeps } from '../server.js'
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
-
 /**
- * Read a value, or report why it could not be read.
- *
- * Same discipline — and deliberately the same shape — as the `attempt` helper
- * in `routes/status.ts` and the `probe` wrapper in `probes.ts`: this is the
- * route an operator opens BECAUSE something is broken, so a single dead
- * backend has to degrade to one reported row rather than a 500.
- *
- * Kept local rather than imported from `status.ts`, which does not export it;
- * a route importing from a sibling route to borrow six lines is a worse
- * coupling than the duplication, and `messageOf` is already duplicated across
- * `probes.ts` and `status.ts` for the same reason.
- */
-const attempt = async <T>(
-  read: () => Promise<T>,
-): Promise<{ value: T; error: null } | { value: null; error: string }> => {
-  try {
-    return { value: await read(), error: null }
-  } catch (error) {
-    return { value: null, error: messageOf(error) }
-  }
-}
-
-/**
- * Which rail the solver PAYS OUT on for each corridor — the destination leg —
- * is read off the corridor's own descriptor, and the balance off the rail
- * snapshot taken below.
- *
- * This was an explicit `Record<Corridor, PayoutRail>` here, and the reason it
- * was explicit still governs: exhaustiveness meant adding a fifth corridor
- * failed to COMPILE until someone stated which balance funds it, where a
- * `split('->')` would yield a rail string that silently matches nothing and
- * quietly answer the funding question wrong. `payoutRail` is a REQUIRED field
- * on `CorridorDescriptor` for exactly that reason — the question still cannot
- * go unanswered, it is now answered by the corridor rather than by this file.
- *
- * The rail id is now OPEN, so the remaining risk moved rather than vanished: a
- * corridor can name a rail this build has no probe for. That resolves to
- * UNKNOWN (`balanceOfRail`), never to zero — a solver that cannot read a
- * balance must not be reported as broke.
+ * `payoutRail` is REQUIRED on the descriptor, never a `split('->')` that could silently match nothing. An
+ * unprobed rail resolves to UNKNOWN (`balanceOfRail`), never zero: a solver must not be reported as broke.
  */
 export const registerDiagnosticsRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/diagnostics', async (c) => {
     const { services } = deps
-    const now = deps.now ?? ((): number => Math.floor(Date.now() / 1000))
+    const now = deps.now ?? nowSeconds
     const backends = await probeBackends(services, deps.relay)
 
     // One read per RAIL, not per corridor: two corridors pay out on Arkade, and

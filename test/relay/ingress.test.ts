@@ -531,12 +531,8 @@ describe('relay frame codec', () => {
     expect(matchesFilter({ ...e, topic: undefined }, { topic: 'arkade:btc/lightning:btc' })).toBe(false)
   })
 
-  it('mints unique ids for same-ms, same-shape payloads (a relay dedups by id)', () => {
-    // Two refusals in the same millisecond serialise to equal length; length
-    // alone collided, so a deduping relay dropped one client's reply.
-    const a = eventId(PROVIDER, { v: 1, type: 'rfq_refusal', reason: 'quote_conflict' }, 1000)
-    const b = eventId(PROVIDER, { v: 1, type: 'rfq_refusal', reason: 'quote_conflict' }, 1000)
-    expect(a).not.toBe(b)
+  it('mints unique ids for same-author, same-ms events (a relay dedups by id)', () => {
+    expect(eventId(PROVIDER, 1000)).not.toBe(eventId(PROVIDER, 1000))
   })
 })
 

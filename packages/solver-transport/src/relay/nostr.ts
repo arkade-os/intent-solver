@@ -20,34 +20,10 @@ import { z } from 'zod'
 import type { RelayEvent, RelayFilter, RelayNotice, WireCodec } from './connection.js'
 
 /**
- * Provisional kind numbers (docs/rfq-protocol.md § 3.1, § 12).
- *
- * Both sit in NIP-01's EPHEMERAL range (20000 ≤ n < 30000), and that range is
- * the whole point rather than an arbitrary pick. RFQ traffic is a negotiation:
- * a request nobody answered inside the client's 30-second patience, or a quote
- * past its `valid_until`, is worthless to everyone. In the regular range these
- * kinds started in (4859/4860) a relay stores them and serves them to any
- * subscriber who asks, forever — which cost two distinct things:
- *
- *  - PRIVACY. `rfq_open` is plaintext by design (§ 4.6), so a permanent public
- *    archive of every broadcast is a permanent public record of trade intent,
- *    pair and size. Directed traffic is NIP-44 sealed so its content is safe,
- *    but who negotiated with whom, when and how often is metadata no amount of
- *    client-side care removes once a relay has written it down.
- *  - CORRECTNESS. A stored backlog is a backlog to replay, so every reconnect
- *    re-delivered stale opens. `sinceMs` on both subscriptions
- *    (`src/ingress/relay.ts`) still bounds that — it is also a freshness
- *    policy, not only a workaround — but with nothing to replay the whole
- *    class stops depending on the client getting it right.
- *
- * The cost, stated honestly: ephemeral means no store-and-forward, so a
- * request sent while this solver is disconnected is dropped rather than
- * queued. The reference client's 30-second timeout and retry already covers
- * that, and a swap quoted from a request the solver never saw would have been
- * refused as stale anyway.
- *
- * docs/relay-transport.md § 4(b) has the measurements behind this, including
- * the live retention check on the relay this deployment actually uses.
+ * Provisional kind numbers (docs/rfq-protocol.md § 3.1, § 12), in NIP-01's EPHEMERAL range so relays do not store
+ * them: an archive of plaintext `rfq_open`s is a public record of trade intent, and a stored backlog is replayed on
+ * every reconnect. The cost: a request sent while this solver is disconnected is dropped, which the client's 30 s
+ * retry covers. Measurements: docs/relay-transport.md § 4(b).
  */
 export const NOSTR_KIND_DIRECTED = 24859
 export const NOSTR_KIND_BROADCAST = 24860
@@ -219,10 +195,17 @@ export const nostrCodec = (identity: NostrIdentity): WireCodec => {
           tags: [['t', event.topic]],
           content: payloadJson,
         }
+      } else if (event.replaceable !== undefined) {
+        const { kind, d } = event.replaceable
+        // Outside 30000–39999 a relay keeps every copy instead of the newest.
+        if (!Number.isInteger(kind) || kind < 30_000 || kind >= 40_000) {
+          throw new Error(`kind ${kind} is not in the NIP-01 addressable range`)
+        }
+        template = { kind, created_at: createdAt, tags: [['d', d]], content: payloadJson }
       } else {
-        // Nothing in the protocol publishes an event that is neither addressed
-        // nor topiced; reaching this is a bug upstream, not a wire case.
-        throw new Error('nostr event needs a recipient or a topic')
+        // Nothing in the protocol publishes an event that is neither addressed,
+        // topiced nor replaceable; reaching this is a bug upstream, not a wire case.
+        throw new Error('nostr event needs a recipient, a topic or a replaceable key')
       }
       return JSON.stringify(['EVENT', finalizeEvent(template, identity.secretKey)])
     },

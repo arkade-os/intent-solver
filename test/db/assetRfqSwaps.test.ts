@@ -269,7 +269,7 @@ describe('reads the sweep and the console depend on', () => {
     const store = await open()
     await store.insertQuote(quote())
     expect((await store.findByRfqId('a'.repeat(64)))?.id).toBe('swap-1')
-    expect(await store.findByRfqId('0'.repeat(64))).toBeUndefined()
+    expect(await store.findByRfqId('0'.repeat(64))).toBeNull()
     await store.close()
   })
 

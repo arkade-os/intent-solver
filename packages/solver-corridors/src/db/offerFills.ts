@@ -34,6 +34,7 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
+import { assertColumns } from './baseSwapStore.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
@@ -43,19 +44,6 @@ export const OFFER_FILL_STATES = ['fillable', 'filling', 'filled', 'lost', 'refu
 export type OfferFillState = (typeof OFFER_FILL_STATES)[number]
 
 export const NON_TERMINAL: readonly OfferFillState[] = ['fillable', 'filling']
-
-/**
- * There is no EXPOSED set, and its absence is the point.
- *
- * Its siblings use one to find rows where this service's own capital is
- * committed and not yet recovered, so the operator can be told and a sweep can
- * act. Here that set is empty in every state by construction: `fulfill` pays
- * the client and takes the deposit atomically, so a row is either before that
- * transaction or after it, never inside it.
- *
- * Stated rather than omitted, because "this store has no EXPOSED" reads like an
- * oversight next to four stores that do.
- */
 
 const LEGAL_EDGES: Record<OfferFillState, readonly OfferFillState[]> = {
   // `lost` from `fillable` too: an offer can be filled by another solver or
@@ -75,12 +63,6 @@ const LEGAL_EDGES: Record<OfferFillState, readonly OfferFillState[]> = {
  * describe a contract that was never funded.
  */
 const TRANSITION_COLUMNS = new Set(['fill_txid', 'failure_reason'])
-
-const assertColumns = (columns: string[], allowed: Set<string>, method: string): void => {
-  for (const column of columns) {
-    if (!allowed.has(column)) throw new Error(`${method} may not set column '${column}'`)
-  }
-}
 
 export interface OfferFillRow {
   id: string

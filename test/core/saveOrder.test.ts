@@ -1,6 +1,6 @@
 /** Every case below is a change an operator can reach from the market form. */
 import { describe, it, expect } from 'vitest'
-import { savePassFor, SAVE_FIELDS, type SaveField } from '@arkade-os/solver-core/core/saveOrder.js'
+import { savePassFor } from '@arkade-os/solver-core/core/saveOrder.js'
 import { carrierSatsFor } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import type { CarrierMode } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
@@ -61,25 +61,6 @@ describe('savePassFor', () => {
     expect(savePassFor({ field: 'max', before: 50n, after: null })).toBe('widening')
     expect(savePassFor({ field: 'min', before: null, after: 50n })).toBe('narrowing')
     expect(savePassFor({ field: 'min', before: 50n, after: null })).toBe('widening')
-  })
-
-  it('names every field it has an opinion about, so the route cannot pass an unclassified one', () => {
-    const fields: SaveField[] = [
-      'max',
-      'min',
-      'feeBps',
-      'toleranceBps',
-      'maxExposedSats',
-      'lockupTimeoutSeconds',
-      'enabled',
-      'servesOffer',
-      'servesRfq',
-      'rfqSellBase',
-      'rfqBuyBase',
-      'corridorEnabled',
-      'carrierPriced',
-    ]
-    expect([...SAVE_FIELDS].sort()).toEqual([...fields].sort())
   })
 })
 

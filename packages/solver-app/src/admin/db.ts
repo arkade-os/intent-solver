@@ -15,6 +15,7 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import { addColumns } from '@arkade-os/solver-corridors/db/baseSwapStore.js'
 import {
   assetMarketKey,
   rfqSymbolFor,
@@ -22,7 +23,7 @@ import {
   type CarrierMode,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
-import type { AssetRfqToken } from '../ops/assetRfqMarkets.js'
+import { samePair, type AssetRfqToken } from '../ops/assetRfqMarkets.js'
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS admin_override (
@@ -270,10 +271,7 @@ export class AdminStore {
     if (done) return
     const rows = await this.listMarkets()
     const byAsset = new Map(seed.tokens.map((token) => [token.assetId, token]))
-    const declaredForOffers = (row: AssetMarketRow): boolean =>
-      seed.offerMarkets.some(
-        (pair) => (pair.a === row.base && pair.b === row.quote) || (pair.a === row.quote && pair.b === row.base),
-      )
+    const declaredForOffers = (row: AssetMarketRow): boolean => seed.offerMarkets.some((pair) => samePair(row, pair))
     const taken = new Set<string>()
     await this.driver.transaction(async () => {
       for (const row of rows) {
@@ -305,16 +303,7 @@ export class AdminStore {
   }
 
   private async migrate(): Promise<void> {
-    for (const [table, columns] of MIGRATIONS) {
-      const present = new Set(
-        (await this.driver.all<{ name: string }>(`PRAGMA table_info(${table})`)).map((c) => c.name),
-      )
-      for (const [column, type] of columns) {
-        if (!present.has(column)) {
-          await this.driver.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`)
-        }
-      }
-    }
+    for (const [table, columns] of MIGRATIONS) await addColumns(this.driver, table, columns)
   }
 
   /**

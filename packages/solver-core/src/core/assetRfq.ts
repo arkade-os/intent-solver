@@ -30,6 +30,7 @@
  */
 import type { Price } from './priceFeed.js'
 import { assetExactInPayout, assetExactOutInput } from './assetExactInPrice.js'
+import { ASSET_ID_HEX } from './marketKey.js'
 
 /**
  * One leg's asset: the canonical 68-hex Arkade asset id, or `null` for BTC.
@@ -48,8 +49,6 @@ export interface AssetPair {
   to: AssetLeg
 }
 
-/** § 2's identity rule: lowercase only, 32-byte txid then a u16 group index. */
-const ASSET_ID = /^[0-9a-f]{68}$/
 const ARKADE_PAIR = /^arkade:([A-Za-z0-9]+)->arkade:([A-Za-z0-9]+)$/
 
 const legOf = (ticker: string): AssetLeg | undefined => {
@@ -58,7 +57,7 @@ const legOf = (ticker: string): AssetLeg | undefined => {
   // with the reason: a pair is compared byte for byte elsewhere, so a spelling
   // accepted here and rejected there derives the right market key and is then
   // refused as unserved, with a stated reason that is a lie.
-  return ASSET_ID.test(ticker) ? ticker : undefined
+  return ASSET_ID_HEX.test(ticker) ? ticker : undefined
 }
 
 /**

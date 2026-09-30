@@ -9,7 +9,7 @@ deployment shapes, one hybrid.
 | Piece                   | What it does                                         | Where it can run                                                           |
 | ----------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------- |
 | API (`buildApp`)        | quotes + status, bus-shaped payloads                 | Node (`serve`) or Cloudflare Workers (`fetch`)                             |
-| Ingress (`SwapIngress`) | how swap requests REACH the provider                 | HTTP (`serve`, inbound) or relay (`relay`, outbound-only)                  |
+| Ingress                 | how swap requests REACH the provider                 | HTTP (`serve`, inbound) or relay (`relay`, outbound-only)                  |
 | Money-mover             | drives swaps: fund-watch → pay → claim; refund sweep | Node (`watch`/`serve`/`relay`) or Workers `scheduled`+`queue` (see caveat) |
 | Store                   | durable swap state, compare-and-swap transitions     | better-sqlite3 file (Node) or D1 (Workers)                                 |
 | CLI                     | every operation by hand; the reproducibility surface | Node                                                                       |

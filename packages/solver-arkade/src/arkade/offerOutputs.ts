@@ -51,13 +51,7 @@ export const offerOutputsAt = async (
       outputs.push({
         script: vtxo.script,
         value: Number(vtxo.value),
-        // `isVtxoSpent` rather than `vtxo.isSpent`, for the reason
-        // `lockupProvablySpent` gives: the wire contract permits `isSpent: true`
-        // with an empty `spentBy`, and the SDK's own predicate is the only one
-        // that unions all three spend facts. `offerDepositFrom` filters on this
-        // single flag, so a spend reported only as `spentBy` would otherwise
-        // resurrect a deposit that is gone and let the offer be filled against
-        // nothing.
+        // `isVtxoSpent`, not `vtxo.isSpent` — see `lockupSpendEvidence` (wallet.ts).
         isSpent: isVtxoSpent(vtxo),
         // Kept SEPARATE from the spend, exactly as the SDK keeps it: a swept
         // output is not a terminal spend, and folding the two would lose the

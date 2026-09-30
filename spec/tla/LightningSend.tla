@@ -366,7 +366,7 @@ ClientRefundLockup(s) ==
 
 \* claimNow (ops/claims.ts).  THE PREIMAGE IS THE GUARD: possessing P for
 \* this invoice proves the payee revealed it, and only a settled payment
-\* reveals — the check is preimageOpens, in the same file — so the operator
+\* reveals — the check is preimageMatchesHash (solver-core core/preimage.ts) — so the operator
 \* can hold one exactly when the payment succeeded.
 \*
 \* `~Spent(s)` is the model's own restriction, not the code's: claimNow does

@@ -4,6 +4,10 @@ import { fileURLToPath } from 'node:url'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
+import { deploymentAd } from '@arkade-os/solver-app/admin/routes/card.js'
+import { DEFAULT_ONCHAIN_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/onchainSend.js'
+import { DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/onchainReceive.js'
+import { DEFAULT_HOLD_INVOICE_WINDOW } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { verifyCardSig, type SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { AdPublisher, type AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 // `AdPublishMode` is imported for the double's `nostrAdPublish`, which is now
@@ -108,6 +112,7 @@ const makeDeps = (
     services: {
       config: {
         relayUrl: over.relayUrl === undefined ? 'wss://relay.example' : over.relayUrl,
+        lockupTimeoutSeconds: 600,
         limits: { minSats: 1_000, maxSats: 50_000 },
         network: 'mutinynet',
         // What the OPERATOR configured, which is the only source for the
@@ -359,6 +364,12 @@ describe('GET /api/card', () => {
     ])
   })
 
+  it('strips credentials from a relay URL before advertising it', async () => {
+    process.env.SOLVER_CARD_RELAYS = 'wss://user:pw@second.example/nostr?token=secret'
+    const { body } = await getCard(makeDeps())
+    expect(body.card?.transports.nostr.relays).toEqual(['wss://relay.example', 'wss://second.example/nostr'])
+  })
+
   /**
    * AN UNBUILDABLE CARD MUST NOT BLANK THE PAGE.
    *
@@ -554,6 +565,12 @@ describe('POST /api/actions/post-ad', () => {
     const { status, body } = await postAd(makeDeps({ nostrAdPublish: 'auto' }))
     expect(status).toBe(409)
     expect(body['error']).toBe('no_publisher')
+    expect(body['detail']).toBe('no ad publisher is wired')
+  })
+
+  it('blames the missing relay connection only in a mode that has none', async () => {
+    const serve = { ...(makeDeps({ nostrAdPublish: 'auto' }) as object), mode: 'serve' } as never
+    expect((await postAd(serve)).body['detail']).toBe('serve mode has no relay connection to publish on')
   })
 
   /** A relay outage is reported, never fatal — advertising is not on the money path. */
@@ -659,5 +676,50 @@ describe('the discovery screen', () => {
     expect(panel).toContain('d.cardOmitted')
     // Outside the cardError ternary: true whether or not this card built.
     expect(panel.indexOf('d.cardOmitted')).toBeLessThan(panel.indexOf('d.cardError'))
+  })
+})
+
+describe('deploymentAd', () => {
+  const adOf = (deps: ReturnType<typeof makeDeps>) =>
+    deploymentAd((deps as unknown as { services: Parameters<typeof deploymentAd>[0] }).services)
+
+  it('advertises each enabled corridor on its own terms and quote window, over the card relays', () => {
+    process.env.SOLVER_CARD_RELAYS = 'wss://b.example, wss://c.example'
+    const ad = adOf(makeDeps({ lnSendFlatSats: 50 }))
+    expect(ad.relays).toEqual(['wss://relay.example', 'wss://b.example', 'wss://c.example'])
+    const bounds = { min: '1000', max: '50000' }
+    expect(ad.pairs).toEqual([
+      {
+        pair: 'arkade:BTC->lightning:BTC',
+        ...bounds,
+        fee_bps_indicative: 30,
+        fee_flat_indicative: '50',
+        quote_validity_s_typical: 600,
+      },
+      {
+        pair: 'lightning:BTC->arkade:BTC',
+        ...bounds,
+        fee_bps_indicative: 10,
+        quote_validity_s_typical: DEFAULT_HOLD_INVOICE_WINDOW,
+      },
+      {
+        pair: 'arkade:BTC->onchain:BTC',
+        ...bounds,
+        fee_bps_indicative: 0,
+        quote_validity_s_typical: DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
+      },
+      {
+        pair: 'onchain:BTC->arkade:BTC',
+        ...bounds,
+        fee_bps_indicative: 0,
+        quote_validity_s_typical: DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT,
+      },
+    ])
+  })
+
+  it('leaves out a disabled corridor', () => {
+    const pairs = adOf(makeDeps({ lnSendEnabled: false })).pairs.map((p) => p['pair'])
+    expect(pairs).not.toContain('arkade:BTC->lightning:BTC')
+    expect(pairs).toHaveLength(3)
   })
 })

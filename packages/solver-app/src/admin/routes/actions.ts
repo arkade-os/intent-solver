@@ -40,6 +40,7 @@ import { requestRestart } from '../../ops/restart.js'
 import type { Services } from '../../ops/services.js'
 import type { AdminDeps } from '../server.js'
 import { clampLimit } from '@arkade-os/solver-core/core/page.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { CORRIDORS, isCorridor, type Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 
 export type ActionTier = 'safe' | 'armed'
@@ -137,8 +138,7 @@ const requireReason = (body: ActionBody): string => {
   return body.reason
 }
 
-const idConfirm = (body: ActionBody): string | null => (typeof body.id === 'string' ? body.id : null)
-const idTarget = (body: ActionBody): string | null => (typeof body.id === 'string' ? body.id : null)
+const bodyId = (body: ActionBody): string | null => (typeof body.id === 'string' ? body.id : null)
 
 /**
  * Where a withdrawal is going. Trimmed, because a trailing space pasted out of a
@@ -264,7 +264,7 @@ export const ACTIONS: Record<string, ActionDefinition> = {
    */
   tick: {
     tier: 'safe',
-    target: idTarget,
+    target: bodyId,
     run: async (services, body) => {
       const id = requireId(body)
       const corridor = requireCorridorName(body)
@@ -293,7 +293,7 @@ export const ACTIONS: Record<string, ActionDefinition> = {
    */
   'read-payment': {
     tier: 'safe',
-    target: idTarget,
+    target: bodyId,
     run: async (services, body) => {
       const id = requireId(body)
       const corridor = requireCorridor(body)
@@ -434,8 +434,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'refund-now': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       'Pushes the covenant refund for this swap immediately, bypassing the deadline gate that deliberately ' +
       'excludes swaps which were ever exposed. Only do this after looking at the row and deciding a refund is warranted.',
@@ -455,8 +455,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'claim-now': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       'For this swap the solver ALREADY PAID. Records the preimage and returns the row to claiming so the sweep ' +
       'pushes the claim. Run read-payment first: if it says paid-do-not-refund then refunding this row instead ' +
@@ -480,8 +480,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'park-swap': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       'STOPS this swap being driven. The sweep will not touch it again and it cannot resolve itself afterwards; an ' +
       'exposed row lands in `stuck` for a human, an unexposed one in `refused`. Use it when a swap is failing in a ' +
@@ -526,7 +526,7 @@ export const ACTIONS: Record<string, ActionDefinition> = {
    */
   'unilateral-exit-plan': {
     tier: 'safe',
-    target: idTarget,
+    target: bodyId,
     run: async (services, body) => {
       const id = requireId(body)
       const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
@@ -548,8 +548,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'onchain-refund-now': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       'REFUNDS THE CLIENT THEIR ARKADE LOCKUP. For a `stuck` row this is correct in some cases and A DOUBLE-PAYOUT ' +
       'in others — the solver may already have paid out on the onchain leg. Read the row and the onchain HTLC first. ' +
@@ -570,8 +570,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'receive-refund-now': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       "RECOVERS THE SOLVER'S OWN Arkade lockup on the lightning:BTC->arkade:BTC leg — this money is ours, not the " +
       'client’s. The risk here is different from the send legs: if the client can still claim, this spends the ' +
@@ -583,8 +583,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'onchain-receive-refund-now': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       "RECOVERS THE SOLVER'S OWN Arkade lockup on the onchain:BTC->arkade:BTC leg. Same direction and same caveat " +
       'as receive-refund-now: our money, but refunding under a client who can still claim kills a live swap.',
@@ -601,8 +601,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'onchain-receive-claim-now': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       "Retries the solver's own claim of the CLIENT's L1 HTLC at today's fee rate, for a row that parked in " +
       '`stuck` because the fee once left less than dust. Safe to repeat — every attempt spends the same output, ' +
@@ -614,8 +614,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'reclaim-l1-htlc': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       "Re-broadcasts the solver's own Bitcoin L1 HTLC refund, to the solver. Safe to repeat — both legs spend the " +
       'same output, so a redundant refund is a double-spend the network rejects rather than a second payout.',
@@ -845,8 +845,6 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     },
   },
 }
-
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 export const registerActionRoutes = (app: Hono, deps: AdminDeps): void => {
   /** So the UI can render buttons, tiers and warnings without hardcoding them. */

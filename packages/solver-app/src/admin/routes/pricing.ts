@@ -32,6 +32,7 @@ import type { AssetMarketRow } from '../db.js'
 import type { FeedCache } from '../feedCache.js'
 import { resolveDraftPolicy, type DraftRefusal } from '../draftPolicy.js'
 import { marketFrom, type MarketBody } from './markets.js'
+import { samePair } from '../../ops/assetRfqMarkets.js'
 
 const MAX_SAMPLES = 6
 
@@ -288,11 +289,7 @@ const offerCeilingFor = (
   deposit: bigint | null,
 ): { deposit: string; wantAmount: string } | null => {
   if (deposit === null) return null
-  const serves = deps.services.policy.offerMarkets.some(
-    (served) =>
-      (served.a === market.base && served.b === market.quote) ||
-      (served.a === market.quote && served.b === market.base),
-  )
+  const serves = deps.services.policy.offerMarkets.some((served) => samePair(market, served))
   if (!serves) return null
   // The offer path's carrier flag is separate from the RFQ one, and applies to the delivered leg only.
   const carrier = deps.services.policy.offerChargesDeliveredCarrier ? deps.services.arkade.dustSats : 0n

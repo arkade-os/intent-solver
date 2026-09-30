@@ -7,8 +7,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { hex } from '@scure/base'
-import { ArkAddress } from '@arkade-os/sdk'
-import { CovenantSwapScript, parseAssetId } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { ArkAddress, asset } from '@arkade-os/sdk'
+import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { findLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { poll } from '@arkade-os/solver-core/util/poll.js'
 import {
@@ -67,7 +67,7 @@ describe('e2e asset lockup — a ScriptV2 covenant leaf spent against the emulat
           receiverPkScript: ourPkScript,
           senderPkScript: ourPkScript,
         },
-        asset: parseAssetId(held.assetId),
+        asset: asset.AssetId.fromString(held.assetId),
       })
 
       const address = script.address(ctx.hrp, ctx.wallet.arkServerPublicKey).encode()

@@ -1,26 +1,9 @@
 /**
- * The wire encoding for an amount.
- *
- * `docs/rfq-protocol.md` § 2.1: every amount is atomic units of one named
- * asset, encoded as a canonical decimal STRING. JSON numbers are IEEE-754
- * doubles in every mainstream parser, so they are exact only to 2^53 - 1 - and
- * for an 18-decimal asset that ceiling is 0.009 tokens. A quote for one whole
- * USDT would be rounded inside `JSON.parse`, before any validator here could
- * see it.
- *
- * WHAT THIS MODULE LANDS, AND WHAT IT DOES NOT. It lands the ENCODING: a
- * conforming client may now send the string form, and a value this process
- * cannot represent exactly is REFUSED rather than silently rounded. It does not
- * yet land the RANGE. Every amount downstream of here - `Limits`, the fee
- * arithmetic in `core/corridorPolicy.ts`, `amount_sats` in four tables - is a
- * `number`, so an amount above `Number.MAX_SAFE_INTEGER` still cannot be
- * carried and is refused by name. Widening those to bigint is a separate
- * change; this one is what lets clients migrate their encoding first, and turns
- * the silent failure into a loud one in the meantime.
- *
- * The refusal is the point. Today a client sending 1e18 gets a rounded amount
- * that quotes, settles, and moves the wrong money. After this it gets
- * `unsupported_payload`.
+ * The wire encoding for an amount (`docs/rfq-protocol.md` § 2.1): atomic units as a
+ * canonical decimal STRING, because a JSON number is exact only to 2^53 - 1 and is
+ * rounded inside `JSON.parse`. The sats form stops at `Number.MAX_SAFE_INTEGER`:
+ * everything downstream (`Limits`, the fee arithmetic, `amount_sats` columns) is a
+ * `number`, so a larger amount is refused by name rather than silently rounded.
  */
 
 import { z } from 'zod'

@@ -29,7 +29,6 @@
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
-    "@scure/bip32": "^2.2.0",
     "@scure/bip39": "^2.2.0",
     "@scure/btc-signer": "^2.0.1",
     "@arkade-os/solver-arkade": "workspace:*",
@@ -47,9 +46,7 @@
     "hono": "^4.13.0",
     "light-bolt11-decoder": "^3.2.0",
     "lightning": "^12.2.3",
-    "nostr-tools": "^2.24.1",
-    "pino": "^9.6.0",
-    "zod": "^3.24.1"
+    "nostr-tools": "^2.24.1"
   },
   "devDependencies": {
     "@arkade-os/swap": "0.0.22",
