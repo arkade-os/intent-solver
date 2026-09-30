@@ -40,6 +40,12 @@ import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
+import {
+  checkedActivationTxid,
+  payoutFundingBinding,
+  type EvmPayoutFundingAdapter,
+  type EvmPayoutFundingMode,
+} from './evmPayoutFunding.js'
 
 /** Signs and broadcasts one call, resolving to its transaction hash. */
 export type EvmBroadcaster = (call: EvmCall) => Promise<string>
@@ -48,6 +54,10 @@ export interface EvmSendServiceDeps {
   store: EvmSendSwapStore
   evm: EvmHtlcBackend
   broadcast: EvmBroadcaster
+  /** Optional external funding of the SAME quoted HTLC; never provider-status settlement. */
+  payoutFunding?: EvmPayoutFundingAdapter
+  /** Pause new intake while tick/recovery continue serving existing obligations. */
+  acceptingQuotes?: () => boolean
   /** Is the client's Arkade lockup funded for the quoted amount? */
   arkadeLockupFunded(row: EvmSendSwapRow): Promise<boolean>
   /** Claim the Arkade lockup with the revealed preimage; resolves to the ark txid. */
@@ -333,9 +343,40 @@ export class EvmSendSwapService {
     }
   }
 
+  private async ensurePayoutFunding(row: EvmSendSwapRow, mode: EvmPayoutFundingMode): Promise<void> {
+    const adapter = this.deps.payoutFunding
+    if (adapter === undefined) return
+    const binding = payoutFundingBinding(adapter.identity, row, this.deps.lockFor(row))
+    const result = await adapter.ensure(
+      { binding, nowSeconds: this.now(), blockHeight: await this.deps.blockHeight() },
+      mode,
+    )
+    const txid = checkedActivationTxid(result)
+    if (txid !== undefined) {
+      const current = await this.deps.store.get(row.id)
+      if (current.evmLockTxid !== null && current.evmLockTxid.toLowerCase() !== txid) {
+        throw new Error(`payout funding changed activation transaction for ${row.id}`)
+      }
+      if (current.evmLockTxid === null) await this.deps.store.patch(row.id, { evm_lock_txid: txid })
+    }
+  }
+
   /** One step. Returns true when the row moved, so the caller can try again. */
   private async step(row: EvmSendSwapRow): Promise<boolean> {
-    const action: EvmSendAction = planEvmSend(row, await this.observe(row))
+    let seen = await this.observe(row)
+    let action: EvmSendAction = planEvmSend(row, seen)
+    // Provider downtime must not withhold a chain-proven payout or revealed preimage.
+    if (this.deps.payoutFunding !== undefined && row.state === 'locking_evm' && action.do === 'wait') {
+      await this.ensurePayoutFunding(row, 'reconcile')
+      row = await this.deps.store.get(row.id)
+      seen = await this.observe(row)
+      action = planEvmSend(row, seen)
+    }
+    // A provider/receiver recovery is not an HTLC refund against a nonexistent lock.
+    if (this.deps.payoutFunding !== undefined && action.do === 'refund_evm' && !seen.evmLockPresent) {
+      await this.ensurePayoutFunding(row, 'recover')
+      return false
+    }
     const { store } = this.deps
 
     switch (action.do) {
@@ -355,8 +396,15 @@ export class EvmSendSwapService {
         const locking = this.lockSequence.then(async () => {
           const current = await store.get(row.id)
           if (planEvmSend(current, await this.observe(current)).do !== 'lock_evm') return true
+          if (this.deps.payoutFunding !== undefined) {
+            payoutFundingBinding(this.deps.payoutFunding.identity, current, this.deps.lockFor(current))
+          }
           // Exposure precedes even the approval, preserving recovery after a crash.
           await store.transition(current.id, current.state, 'locking_evm')
+          if (this.deps.payoutFunding !== undefined) {
+            await this.ensurePayoutFunding(await store.get(current.id), 'start')
+            return true
+          }
           const lock = this.deps.lockFor(current)
           const allowance = await this.deps.evm.allowance(lock.tokenAddress, this.deps.solverEvmAddress)
           const calls = this.deps.evm.lockCalls(lock, allowance)
@@ -428,6 +476,7 @@ export class EvmSendSwapService {
    */
   async quote(request: EvmSendQuoteRequest): Promise<EvmSendQuoteOutcome> {
     const { store, arkade, chain } = this.deps
+    if (this.deps.acceptingQuotes?.() === false) return { accepted: false, reason: 'provider_at_capacity' }
     if (request.requesterKey !== undefined) {
       if (await store.findLiveByPaymentHash(request.paymentHash)) return { accepted: false, reason: 'duplicate_swap' }
       if (!this.quoteLimiter.take(request.requesterKey)) return { accepted: false, reason: 'rate_limited' }
@@ -649,8 +698,17 @@ export class EvmSendSwapService {
       { tick: (id) => this.tick(id), onTickError: (id, error) => this.deps.onTickError?.(id, error) },
       this.deps.store,
     )
+    await this.payoutFundingRecoverySweep()
     await this.watchLateLocks()
     return rows
+  }
+
+  async payoutFundingRecoverySweep(): Promise<void> {
+    try {
+      await this.deps.payoutFunding?.sweepRecovery()
+    } catch (error) {
+      this.deps.onTickError?.('payout-funding-recovery', error)
+    }
   }
 
   /**
