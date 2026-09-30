@@ -79,8 +79,12 @@ describe('normalizeTaxiUrl', () => {
     expect(() => normalizeTaxiUrl('https://taxi.localhost', main)).toThrow(/private/)
   })
 
-  it('still accepts a dotted public name that merely contains "localhost"', () => {
+  it('still accepts public names, reachable protocol exceptions and adjacent IPv4 ranges', () => {
     expect(normalizeTaxiUrl('https://localhost.example', main)).toBe('https://localhost.example')
+    for (const host of ['192.0.0.9', '192.0.0.10', '192.0.1.1', '198.17.255.254', '198.20.0.1', '223.255.255.254']) {
+      const url = `https://${host}`
+      expect(normalizeTaxiUrl(url, { isMainnet: false, allowPrivate: false })).toBe(url)
+    }
   })
 
   it.each([
@@ -111,6 +115,14 @@ describe('normalizeTaxiUrl', () => {
     ['169.254/16', 'http://169.254.1.1'],
     ['172.16/12', 'http://172.20.5.5'],
     ['192.168/16', 'http://192.168.1.1'],
+    ['192.0.0/24 protocol assignments', 'http://192.0.0.1'],
+    ['198.18/15 benchmarking', 'http://198.18.0.1'],
+    ['198.18/15 upper boundary', 'http://198.19.255.255'],
+    ['224/4 multicast', 'http://224.0.0.1'],
+    ['240/4 reserved', 'http://240.0.0.1'],
+    ['limited broadcast', 'http://255.255.255.255'],
+    ['mapped benchmarking address', 'http://[::ffff:c612:1]'],
+    ['NAT64 benchmarking address', 'http://[64:ff9b::c612:1]'],
   ])('refuses IPv4 %s unless allowed (rule 5 extension)', (_range, url) => {
     expect(() => normalizeTaxiUrl(url, { isMainnet: false, allowPrivate: false })).toThrow(/private/)
     expect(normalizeTaxiUrl(url, { isMainnet: false, allowPrivate: true })).toBe(url)

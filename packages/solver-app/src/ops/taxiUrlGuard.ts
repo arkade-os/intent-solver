@@ -32,16 +32,18 @@ const ipv4Octets = (host: string): [number, number, number, number] | null => {
   return parts.length === 4 ? (parts as [number, number, number, number]) : null
 }
 
-// "no private destination", not just the literal spellings rule 5 names:
-// 0/8, 10/8, 100.64/10 (CGN), 127/8, 169.254/16, 172.16/12, 192.168/16.
-const isPrivateIPv4 = ([a, b]: [number, number, number, number]): boolean =>
+// Non-public IPv4; 192.0.0.9 and .10 are globally reachable protocol exceptions.
+const isPrivateIPv4 = ([a, b, c, d]: [number, number, number, number]): boolean =>
   a === 0 ||
   a === 10 ||
   (a === 100 && b >= 64 && b <= 127) ||
   a === 127 ||
   (a === 169 && b === 254) ||
   (a === 172 && b >= 16 && b <= 31) ||
-  (a === 192 && b === 168)
+  (a === 192 && b === 168) ||
+  (a === 192 && b === 0 && c === 0 && d !== 9 && d !== 10) ||
+  (a === 198 && (b === 18 || b === 19)) ||
+  a >= 224
 
 // Both embed a full IPv4 in the trailing two hextets; other transition layouts
 // are rejected wholesale below.
