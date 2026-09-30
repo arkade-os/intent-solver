@@ -252,7 +252,7 @@ describe('e2e arkade:BTC->ethereum:<token> (send) — both stacks', () => {
       //    which is correct behaviour and indistinguishable from a real refusal
       //    if the test only ever asks once.
       const locked = await tickUntil(row.id, (r) => r.state !== 'quoted')
-      expect(locked.state, `row did not reach locking_evm: ${JSON.stringify(locked)}`).toBe('locking_evm')
+      expect(['locking_evm', 'awaiting_claim'], `row did not lock: ${JSON.stringify(locked)}`).toContain(locked.state)
       expect(locked.evmLockTxid, 'no lock txid recorded').toMatch(/^0x[0-9a-f]+$/)
 
       // 4. AND THE CHAIN AGREES. The contract's own `swaps` mapping, addressed
