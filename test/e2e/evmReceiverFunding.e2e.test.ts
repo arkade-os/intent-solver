@@ -70,6 +70,7 @@ let sql: SqlDriver | undefined
 let store: EvmSendSwapStore
 let service: EvmSendSwapService
 let receivers: ReturnType<typeof createReceiverBackend>
+let activationSubmissions = 0
 
 type PreparedReceiver = {
   binding: string
@@ -208,6 +209,7 @@ beforeAll(async () => {
       if (!prepared || prepared.binding !== JSON.stringify(binding)) throw new Error('Missing immutable receiver quote')
       expect(mode).not.toBe('recover')
       expect((await store.get(binding.intentId)).state).toBe('locking_evm')
+      if (prepared.activation_txid) return { activationTxid: prepared.activation_txid }
       const immutable = receiverBinding(binding)
       const receiver = bytes(prepared.address)
       let fundingTxid = prepared.funding_txid
@@ -261,6 +263,7 @@ beforeAll(async () => {
       // timestamp is ahead of wall time. Keep the row live and retry next tick.
       if (observation.tokenBalance < immutable.lock.amount) return {}
       const activation = await receivers.activate(`activate:${binding.intentId}`, receiver, immutable)
+      activationSubmissions++
       await sql!.run('UPDATE receiver_funding_e2e SET activation_txid=? WHERE intent_id=?', [
         activation.hash,
         binding.intentId,
@@ -370,6 +373,7 @@ describe('e2e provider-funded receiver across real Arkade and EVM chains', () =>
     const prepared = (await sql!.get<PreparedReceiver>('SELECT * FROM receiver_funding_e2e WHERE intent_id=?', [
       quoted.id,
     ]))!
+    expect(activationSubmissions).toBe(1)
     const immutable = receiverBinding(JSON.parse(prepared.binding) as EvmPayoutFundingBinding)
     const proof = await receivers.inspect(bytes(prepared.address), immutable)
     expect(proof.htlcPresent).toBe(true)
