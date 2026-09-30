@@ -423,7 +423,7 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
         payload: { type: 'rfq_refusal', rfq_id: rfqId, reason: 'pricing_unavailable' },
         detail: 'price_unavailable: the receive-carrier quote could not be read',
       })
-      expect(await store.findByRfqId(rfqId)).toBeUndefined()
+      expect(await store.findByRfqId(rfqId)).toBeNull()
 
       expect(errors).toEqual([{ id: 'carrier', error: expect.objectContaining({ code: 'NETWORK_ERROR' }) }])
       expect((errors[0]!.error as Error).message).toMatch(
