@@ -120,7 +120,7 @@ export const planEvmReceiverFunding = (input: EvmReceiverFundingInput): EvmRecei
     if (input.nowSeconds >= input.quoteValidUntil) {
       return { do: 'quarantine', reason: 'quote expired before provider dispatch' }
     }
-    if (input.nowSeconds >= input.dispatchCutoffSeconds) {
+    if (input.nowSeconds >= input.dispatchCutoffSeconds || input.nowSeconds >= input.activationCutoffSeconds) {
       return { do: 'quarantine', reason: 'provider dispatch cutoff passed' }
     }
     if (input.receiverDeployment.currentBlock >= binding.activationCutoff) {
@@ -189,6 +189,9 @@ export const planEvmReceiverFunding = (input: EvmReceiverFundingInput): EvmRecei
   ) {
     if (input.nowSeconds >= input.quoteValidUntil || input.nowSeconds >= input.dispatchCutoffSeconds) {
       return { do: 'quarantine', reason: 'provider dispatch cutoff passed' }
+    }
+    if (input.nowSeconds >= input.activationCutoffSeconds) {
+      return { do: 'wait', reason: 'activation safety cutoff passed; wait for on-chain recovery window' }
     }
     if (observation.currentBlock >= binding.activationCutoff) {
       return { do: 'quarantine', reason: 'receiver activation block cutoff passed' }

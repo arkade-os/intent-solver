@@ -30,6 +30,12 @@ type Receipt = {
   transactionHash: string
 }
 export class ReceiverFinalityPendingError extends Error {}
+export class ReceiverInvariantError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ReceiverInvariantError'
+  }
+}
 export interface ReceiverFinalityPolicy {
   confirmations: number
   minAgeSeconds: number
@@ -206,10 +212,10 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
     )
     const activated = bool(await read(receiverAddress, 'activated()', [], tag))
     const htlcPresent = bool(await read(binding.swapContract, 'swaps(bytes32)', [swapKey(binding.lock)], tag))
-    if (htlcPresent && (!activated || swapTokenBalance < binding.lock.amount))
-      throw new Error('exact lock lacks receiver activation or token backing')
+    const invalidExactLock = htlcPresent && (!activated || swapTokenBalance < binding.lock.amount)
     await stable(observed)
     await stable(current)
+    if (invalidExactLock) throw new ReceiverInvariantError('exact lock lacks receiver activation or token backing')
     return {
       receiverAddress: Uint8Array.from(receiverAddress),
       runtimeHash,
@@ -245,7 +251,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
     async deploymentAttempt(id: string, binding: IntentReceiverBinding) {
       const attempt = await deps.transactions.getPrepared(id, { to: null, data: receiverCreation(binding) })
       if (!attempt) return null
-      if (!attempt.createdAddress) throw new Error('deployment journal has no derived address')
+      if (attempt.createdAddress?.length !== 20) throw new Error('deployment journal has no derived address')
       return {
         address: attempt.createdAddress,
         transactionHash: attempt.hash,
@@ -267,9 +273,11 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
       await allowed(binding.swapContract, deps.allowedSwapCodeHashes, current.number)
       await allowed(binding.lock.tokenAddress, deps.allowedTokenCodeHashes, current.number)
       const request = { to: null, data: receiverCreation(binding) }
-      const attempt = await deps.transactions.prepare(id, request)
-      if (!attempt.createdAddress) throw new Error('receiver deployment missing derived address')
-      await deps.transactions.submit(id, request)
+      const prepared = await deps.transactions.prepare(id, request)
+      if (prepared.createdAddress?.length !== 20) throw new Error('receiver deployment missing derived address')
+      const attempt = await deps.transactions.submit(id, request)
+      if (attempt.createdAddress?.length !== 20 || hx(attempt.createdAddress) !== hx(prepared.createdAddress))
+        throw new Error('receiver deployment address changed between attempts')
       let observationView: Awaited<ReturnType<typeof view>>
       try {
         observationView = await view()

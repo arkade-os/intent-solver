@@ -21,6 +21,7 @@ import {
   encodeReceiverConstructor,
   encodeReceiverDeployment,
   encodeReceiverRecover,
+  receiverCreation,
   receiverRuntimeHash,
   verifyReceiverBinding,
   type IntentReceiverBinding,
@@ -29,7 +30,7 @@ import {
 import { concatBytes } from '@noble/hashes/utils.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { createDurableEvmSender } from '@arkade-os/solver-rails-evm/evm/durableSender.js'
-import { createReceiverBackend } from '@arkade-os/solver-rails-evm/evm/receiverBackend.js'
+import { createReceiverBackend, ReceiverInvariantError } from '@arkade-os/solver-rails-evm/evm/receiverBackend.js'
 import { receiverArtifact } from '@arkade-os/solver-rails-evm/evm/receiverArtifact.js'
 import type { SqlDriver } from '@arkade-os/solver-core/core/driver.js'
 
@@ -219,8 +220,13 @@ beforeAll(async () => {
   const port = address.port
   await new Promise<void>((resolve, reject) => listener.close((e) => (e ? reject(e) : resolve())))
   rpcUrl = `http://127.0.0.1:${port}`
+  const anvilRequire = createRequire(createRequire(import.meta.url).resolve('@foundry-rs/anvil/package.json'))
+  const architecture = process.arch === 'x64' ? 'amd64' : process.arch
+  const anvilPath = anvilRequire.resolve(
+    `@foundry-rs/anvil-${process.platform}-${architecture}/bin/anvil${process.platform === 'win32' ? '.exe' : ''}`,
+  )
   anvil = spawn(
-    new URL('../../node_modules/.bin/anvil', import.meta.url).pathname,
+    anvilPath,
     ['--host', '127.0.0.1', '--port', String(port), '--chain-id', '31337', '--hardfork', 'cancun', '--silent'],
     { stdio: ['ignore', 'ignore', 'pipe'] },
   )
@@ -329,8 +335,20 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
         '0x' + '00'.repeat(32),
         'gap-activation',
       ])
+      expect((await transactions.pending())[0]!.hash).toBe(abandoned.hash)
+      const storedAttempt = await driver.get<{ hash: string }>(
+        'SELECT hash FROM evm_transaction_attempts WHERE id = ? AND sequence = 0',
+        ['gap-activation'],
+      )
+      await driver.run('UPDATE evm_transaction_attempts SET hash = ? WHERE id = ? AND sequence = 0', [
+        '0x' + '00'.repeat(32),
+        'gap-activation',
+      ])
       await expect(backend.broadcastRawTransaction(unknown!.raw)).rejects.toThrow('no matching durable authorization')
-      await driver.run('UPDATE evm_transaction_journal SET hash = ? WHERE id = ?', [abandoned.hash, 'gap-activation'])
+      await driver.run('UPDATE evm_transaction_attempts SET hash = ? WHERE id = ? AND sequence = 0', [
+        storedAttempt!.hash,
+        'gap-activation',
+      ])
       const pending = await transactions.pending()
       expect(pending).toHaveLength(1)
       expect(pending[0]!.rawTransaction).toBe(abandoned.rawTransaction)
@@ -372,6 +390,36 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
       await expect(
         backend.deploy('short-window', { ...terms, lock: { ...terms.lock, timelock: terms.activationCutoff + 1n } }),
       ).rejects.toThrow('claim window is too short')
+    } finally {
+      await driver.close()
+    }
+  })
+
+  chainTest('proves deployment with the hash returned by reconciliation during submit', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend, transactions } = await testBackend(driver)
+      const terms = await binding()
+      const id = 'winning-deploy'
+      const request = { to: null, data: receiverCreation(terms) }
+      const winner = await transactions.submit(id, request)
+      expect((await receiptFor(winner.hash)).status).toBe('0x1')
+      const prepared = { ...winner, hash: `0x${'11'.repeat(32)}`, state: 'prepared' }
+      const originalPrepare = transactions.prepare
+      const originalSubmit = transactions.submit
+      transactions.prepare = async () => prepared
+      transactions.submit = async () => winner
+      try {
+        const deployed = await backend.deploy(id, terms)
+        expect(deployed.verified).toBe(true)
+        expect(deployed.address).toEqual(winner.createdAddress)
+        expect(deployed.transactionHash).toBe(winner.hash)
+        transactions.submit = async () => ({ ...winner, createdAddress: new Uint8Array(20) })
+        await expect(backend.deploy(id, terms)).rejects.toThrow('address changed between attempts')
+      } finally {
+        transactions.prepare = originalPrepare
+        transactions.submit = originalSubmit
+      }
     } finally {
       await driver.close()
     }
@@ -503,7 +551,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
         }
         const first = await createDurableEvmSender(deps)
         const request = { to: accounts[3]!, data: new Uint8Array() }
-        await expect(first.submit('durable-send', request)).rejects.toThrow('network stopped')
+        expect((await first.submit('durable-send', request)).state).toBe('unknown')
         const saved = await driver.get<{ raw: string; state: string }>(
           'SELECT raw,state FROM evm_transaction_journal WHERE id = ?',
           ['durable-send'],
@@ -520,11 +568,45 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
           'changed request',
         )
         expect(rawTransactions).toHaveLength(2)
+
+        const minedOriginal = await restarted.replace(
+          'durable-send',
+          request,
+          { maxFeePerGas: 6_000_000_000n, maxPriorityFeePerGas: 1_200_000_000n },
+          8_000_000_000n,
+        )
+        expect(minedOriginal.hash).toBe(replayed.hash)
+        expect(minedOriginal.state).toBe('success')
+        expect(rawTransactions).toHaveLength(2)
+
+        await rpc('anvil_setAutomine', [false])
+        let replacement: Awaited<ReturnType<typeof restarted.replace>>
+        try {
+          await restarted.submit('durable-replacement', request)
+          replacement = await restarted.replace(
+            'durable-replacement',
+            request,
+            { maxFeePerGas: 6_000_000_000n, maxPriorityFeePerGas: 1_200_000_000n },
+            8_000_000_000n,
+          )
+          expect(replacement.state).toBe('submitted')
+          const pending = await restarted.pending()
+          expect(pending.map((item) => item.hash)).toEqual([replacement.hash])
+          await rpc('evm_mine', [])
+          expect(await restarted.getPrepared('durable-replacement', request)).toMatchObject({
+            hash: replacement.hash,
+            state: 'success',
+          })
+          expect(await restarted.pending()).toEqual([])
+        } finally {
+          await rpc('anvil_setAutomine', [true])
+        }
+
         const next = await restarted.prepare('next-send', request)
-        expect(next.nonce).toBe(replayed.nonce + 1n)
+        expect(next.nonce).toBe(replacement!.nonce + 1n)
         await driver.run("UPDATE evm_transaction_journal SET nonce = '000000000000ffff' WHERE id = ?", ['durable-send'])
         await expect(restarted.submit('durable-send', request)).rejects.toThrow('does not authorize')
-        expect(rawTransactions).toHaveLength(2)
+        expect(rawTransactions).toHaveLength(4)
       } finally {
         await driver.close()
       }
@@ -665,6 +747,30 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     expect(await tokenBalance(WETH, receiver)).toBe(AMOUNT)
     expect(await call(receiver, 'activated()')).toBe(0n)
     expect(await locked(terms)).toBe(1n)
+  })
+
+  chainTest('classifies a stable exact lock without receiver activation as an invariant failure', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend } = await testBackend(driver)
+      const terms = await binding()
+      const deployed = await verifiedDeploy(backend, 'invariant-deploy', terms)
+      expect((await send(accounts[0]!, WETH, selectorFor('deposit()'), AMOUNT)).status).toBe('0x1')
+      expect(
+        (
+          await send(
+            accounts[0]!,
+            WETH,
+            concatBytes(selectorFor('approve(address,uint256)'), addressWord(SWAP, 'swap'), uintWord(AMOUNT, 'amount')),
+          )
+        ).status,
+      ).toBe('0x1')
+      expect((await send(accounts[0]!, SWAP, encodeLock(terms.lock))).status).toBe('0x1')
+
+      await expect(backend.inspect(deployed.address, terms)).rejects.toBeInstanceOf(ReceiverInvariantError)
+    } finally {
+      await driver.close()
+    }
   })
 
   chainTest('atomically rolls back approval failure and permits retry after token recovery', async () => {

@@ -119,11 +119,27 @@ or replace an independent contract review. The receiver artifact is recompiled
 and compared during the mandatory unit suite. The separate EVM E2E group also
 executes the linked exchange against the real Arkade and EVM stacks.
 
-Current claim proof accepts direct calls to the swap contract. Routes using this
-proof must restrict customer claim addresses to EOAs; smart-wallet or router
-claims require an independently verified execution proof before admission. Use
-a dedicated execution EOA and one durable SQL journal for every signed call.
-Keep signer policy and journal backups available for replay after restart.
+Claim proof accepts direct calls and verifies smart-wallet/router claims against
+successful `CALL` frames with the exact calldata, claimant and emitted event.
+Indirect claims require `debug_traceTransaction` with `callTracer` and
+`tracerConfig.withLog`; admission must prove this capability with
+`assertEvmClaimTraceSupport` against a canonical recent token transaction.
+Failure to obtain a proof leaves the claim unresolved. Use a dedicated execution
+EOA and one durable SQL journal for every signed call.
+
+The sender retains the original gas policy across restarts. An operator can
+authorize `replace(id, request, fees, maxFeeCeiling)` to increase both fees by at
+least 10% while keeping the same nonce, destination, calldata, value and gas
+limit. Every signed attempt remains in the journal, and reconciliation checks
+which hash actually mined, including reverted transactions. Monitor pending
+attempts and reserve the authorized replacement gas before raising a ceiling.
+Keep journal backups; completed rows currently remain in the database, so
+`pending()` work grows with its history. Archive only after confirming every
+attempt consumed its nonce and retaining the recovery record.
+
+Independent contract review and artifact verification are mandatory before any
+mainnet receiver deployment, including a smoke test. Merging this opt-in code
+does not satisfy that gate.
 
 Before registering a route:
 

@@ -75,7 +75,7 @@ const input = (over: Partial<EvmReceiverFundingInput> = {}): EvmReceiverFundingI
 })
 
 describe('provider dispatch is single-attempt and cutoff bound', () => {
-  it('dispatches only after Arkade funding and before both quote and dispatch expiry', () => {
+  it('dispatches only after Arkade funding and before every dispatch cutoff', () => {
     expect(planEvmReceiverFunding(input())).toEqual({ do: 'dispatch_provider' })
     // A durable prepared row is still pre-submit; callers change it to
     // `submitting` immediately before making the non-idempotent provider call.
@@ -83,6 +83,15 @@ describe('provider dispatch is single-attempt and cutoff bound', () => {
     expect(planEvmReceiverFunding(input({ arkadeLockupFunded: false }))).toMatchObject({ do: 'wait' })
     expect(planEvmReceiverFunding(input({ nowSeconds: 1_800_000_100 }))).toMatchObject({ do: 'quarantine' })
     expect(planEvmReceiverFunding(input({ nowSeconds: 1_800_000_090 }))).toMatchObject({ do: 'quarantine' })
+    expect(
+      planEvmReceiverFunding(
+        input({
+          nowSeconds: 1_800_000_200,
+          quoteValidUntil: 1_800_000_290,
+          dispatchCutoffSeconds: 1_800_000_300,
+        }),
+      ),
+    ).toMatchObject({ do: 'quarantine' })
   })
 
   it('requires exact receiver code and immutable binding verification before dispatch', () => {
@@ -141,6 +150,20 @@ describe('provider dispatch is single-attempt and cutoff bound', () => {
         }),
       ),
     ).toEqual({ do: 'dispatch_provider' })
+  })
+
+  it('does not redispatch a partial balance after the activation timestamp cutoff', () => {
+    expect(
+      planEvmReceiverFunding(
+        input({
+          attemptState: 'prepared',
+          nowSeconds: 1_800_000_200,
+          quoteValidUntil: 1_800_000_290,
+          dispatchCutoffSeconds: 1_800_000_300,
+          observation: observation({ tokenBalance: binding().lock.amount - 1n }),
+        }),
+      ),
+    ).toEqual({ do: 'wait', reason: 'activation safety cutoff passed; wait for on-chain recovery window' })
   })
 })
 

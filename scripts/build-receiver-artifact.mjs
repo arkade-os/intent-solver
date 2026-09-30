@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { format, resolveConfig } from 'prettier'
 
 const compiler = createRequire(import.meta.url)('solc')
@@ -8,7 +9,7 @@ if (!compiler.version().startsWith('0.8.30+commit.73712a01')) throw new Error('r
 const source = readFileSync(
   new URL('../packages/solver-rails-evm/contracts/IntentReceiver.sol', import.meta.url),
   'utf8',
-)
+).replace(/\r\n/g, '\n')
 const settings = {
   optimizer: { enabled: true, runs: 200 },
   evmVersion: 'shanghai',
@@ -46,10 +47,10 @@ const artifact = {
 }
 const destination = new URL('../packages/solver-rails-evm/src/evm/receiverArtifact.ts', import.meta.url)
 const content = await format(`export const receiverArtifact = ${JSON.stringify(artifact, null, 2)} as const\n`, {
-  ...(await resolveConfig(destination.pathname)),
+  ...(await resolveConfig(fileURLToPath(destination))),
   parser: 'typescript',
 })
 if (process.argv.includes('--check')) {
-  if (readFileSync(destination, 'utf8') !== content)
+  if (readFileSync(destination, 'utf8').replace(/\r\n/g, '\n') !== content)
     throw new Error('receiver artifact does not match pinned source/compiler')
 } else writeFileSync(destination, content)

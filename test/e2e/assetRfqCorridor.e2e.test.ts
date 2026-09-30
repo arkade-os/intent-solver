@@ -294,7 +294,11 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
       expect(filled.fillTxid).not.toBe(fundingTxid)
 
-      expect(await depositAt(filled.offerPkScript)).toBeNull()
+      await poll(async () => ((await depositAt(filled.offerPkScript)) === null ? true : null), {
+        attempts: 30,
+        intervalMs: 2000,
+        whenExhausted: 'asset deposit remained spendable after the fill',
+      })
 
       // The asset rides the emulator packet, so an output can only show the
       // maker's script and the carrier the covenant obliges; the emulator

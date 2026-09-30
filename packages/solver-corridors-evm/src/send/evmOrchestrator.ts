@@ -385,13 +385,27 @@ export class EvmSendSwapService {
       seen = await this.observe(row)
       action = planEvmSend(row, seen)
     }
+    const { store } = this.deps
     // A provider/receiver recovery is not an HTLC refund against a nonexistent lock.
     if (this.deps.payoutFunding !== undefined && action.do === 'refund_evm' && !seen.evmLockPresent) {
-      await this.ensurePayoutFunding(row, 'recover')
+      let recoveryError: unknown
+      try {
+        await this.ensurePayoutFunding(row, 'recover')
+      } catch (error) {
+        recoveryError = error
+        this.deps.onTickError?.(row.id, error)
+      }
+      const current = await store.get(row.id)
+      // Stuck frees quote capacity while keeping the late-lock watch and avoiding refused-row refunds.
+      await store.fail(
+        current.id,
+        current.state,
+        recoveryError === undefined
+          ? 'no EVM lock is proven; provider recovery remains in its independent ledger'
+          : 'provider recovery failed without a proven EVM lock; independent ledger retained',
+      )
       return false
     }
-    const { store } = this.deps
-
     switch (action.do) {
       case 'wait':
         return false
@@ -754,7 +768,6 @@ export class EvmSendSwapService {
       { tick: (id) => this.tick(id), onTickError: (id, error) => this.deps.onTickError?.(id, error) },
       this.deps.store,
     )
-    await this.payoutFundingRecoverySweep()
     await this.watchLateLocks()
     return rows
   }
