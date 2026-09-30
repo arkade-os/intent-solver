@@ -20,7 +20,12 @@ import { planEvmSend, type EvmSendAction, type EvmSendObservation } from '@arkad
 import { blocksForDuration, type EvmBlockCadence } from '@arkade-os/solver-rails-evm/evm/blockTime.js'
 import type { EvmSendQuoteRecord, EvmSendSwapRow, EvmSendSwapStore } from '../db/evmSendSwaps.js'
 import { sendLockFromRow } from '../evm/lockFromRow.js'
-import type { EvmCall, EvmHtlcBackend, EvmTransactionOutcome } from '@arkade-os/solver-core/ports/evm.js'
+import {
+  EvmClaimVerificationError,
+  type EvmCall,
+  type EvmHtlcBackend,
+  type EvmTransactionOutcome,
+} from '@arkade-os/solver-core/ports/evm.js'
 import { EVM_SEND_EXPOSED } from '@arkade-os/solver-core/core/evmSwapState.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
@@ -324,6 +329,7 @@ export class EvmSendSwapService {
         })
         preimage = found === null ? null : Buffer.from(found).toString('hex')
       } catch (error) {
+        if (error instanceof EvmClaimVerificationError) throw error
         this.deps.onTickError?.(row.id, error)
       }
     }

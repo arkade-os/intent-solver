@@ -11,6 +11,7 @@ import { EvmSendSwapService, type EvmSendServiceDeps } from '@arkade-os/solver-c
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { EvmSendSwapStore, type EvmSendQuoteRecord } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import { EvmClaimVerificationError } from '@arkade-os/solver-core/ports/evm.js'
 
 const NOW = 1_800_000_000
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
@@ -340,6 +341,44 @@ describe('a preimage scan the node refuses must not strand the solver’s tokens
     // Silent degradation would make a provider misconfiguration look like a slow
     // swap; a stall needs a cause an operator can read.
     expect(errors, 'the scan failure never reached the operator log').toHaveLength(1)
+  })
+
+  it('keeps a timed-out live lock open when claim verification is bounded, then claims after proof recovers', async () => {
+    const proofError = new EvmClaimVerificationError('claim trace exceeded its verification bound')
+    const preimage = new Uint8Array(32).fill(0x7b)
+    const findClaimPreimage = vi.fn().mockRejectedValueOnce(proofError).mockResolvedValueOnce(preimage)
+    const broadcast = vi.fn().mockResolvedValue('0xrefund')
+    const ensure = vi.fn().mockResolvedValue({})
+    const onTickError = vi.fn()
+    const { store, service, deps } = await build({
+      evm: { isLocked: vi.fn().mockResolvedValue(true), findClaimPreimage } as never,
+      blockHeight: vi.fn().mockResolvedValue(21_000_000),
+      broadcast,
+      payoutFunding: { identity: 'test-provider', ensure } as never,
+      onTickError,
+    })
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+    await store.transition('swap-1', 'locking_evm', 'awaiting_claim')
+
+    await service.tickAll()
+
+    let row = await store.get('swap-1')
+    expect(row.state).toBe('awaiting_claim')
+    expect(row.preimage).toBeNull()
+    expect(broadcast).not.toHaveBeenCalled()
+    expect(deps.claimArkade).not.toHaveBeenCalled()
+    expect(ensure).not.toHaveBeenCalled()
+    expect(onTickError).toHaveBeenCalledTimes(1)
+    expect(onTickError).toHaveBeenCalledWith('swap-1', proofError)
+
+    await service.tickAll()
+
+    row = await store.get('swap-1')
+    expect(deps.claimArkade).toHaveBeenCalledWith(expect.anything(), '7b'.repeat(32))
+    expect(row.state).toBe('claimed')
+    expect(broadcast).not.toHaveBeenCalled()
+    await store.close()
   })
 })
 
@@ -1315,6 +1354,21 @@ describe('a lock that lands after the books closed', () => {
 
     expect(onTickError).toHaveBeenCalledTimes(1)
     expect(onTickError.mock.calls[0]?.[1].message).toContain('the ERC20 lock is funded on a closed row')
+    await store.close()
+  })
+
+  it('alerts but never invents a preimage when late-lock proof hits a verification bound', async () => {
+    const { store, service, evm, onTickError } = await closedOverLock()
+    const proofError = new EvmClaimVerificationError('ambiguous claim trace')
+    evm.findClaimPreimage.mockRejectedValue(proofError)
+    onTickError.mockClear()
+
+    await service.tickAll()
+
+    const row = await store.get('swap-1')
+    expect(row.state).toBe('stuck')
+    expect(row.preimage).toBeNull()
+    expect(onTickError).toHaveBeenCalledWith('swap-1', proofError)
     await store.close()
   })
 

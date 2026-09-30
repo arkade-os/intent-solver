@@ -62,6 +62,13 @@ export interface EvmClaimFinalityPolicy {
   nowSeconds: number
 }
 
+export class EvmClaimVerificationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'EvmClaimVerificationError'
+  }
+}
+
 /**
  * What an EVM swap corridor needs from a chain: reads about locks, and the
  * calldata for every money move — the SIGNING stays with whoever holds the
