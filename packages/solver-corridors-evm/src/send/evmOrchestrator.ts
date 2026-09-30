@@ -46,6 +46,7 @@ import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { evmSendCovenantRowFor } from '../evm/covenantRow.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { EvmPayoutFundingQuarantinedError } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { hex } from '@scure/base'
@@ -760,7 +761,18 @@ export class EvmSendSwapService {
    * from-state guard would catch a double step only as a thrown error.
    */
   tick(id: string): Promise<EvmSendSwapRow> {
-    return guardedTick(id, this.inFlight, this.deps.store, (row) => this.step(row))
+    return guardedTick(id, this.inFlight, this.deps.store, async (row) => {
+      try {
+        return await this.step(row)
+      } catch (error) {
+        if (!(error instanceof EvmPayoutFundingQuarantinedError)) throw error
+        const current = await this.deps.store.get(row.id)
+        if (current.state !== 'locking_evm') throw error
+        this.deps.onTickError?.(current.id, error)
+        await this.deps.store.fail(current.id, current.state, error.message)
+        return false
+      }
+    })
   }
 
   /**
