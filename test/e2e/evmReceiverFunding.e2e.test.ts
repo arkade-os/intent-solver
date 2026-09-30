@@ -135,8 +135,25 @@ beforeAll(async () => {
     identity: 'plain-token-provider-e2e',
     async prepareQuote({ binding }) {
       const immutable = receiverBinding(binding)
-      const deployed = await receivers.deploy(`deploy:${binding.intentId}`, immutable)
-      await rpc('anvil_mine', ['0x1', '0x0'])
+      const deploymentId = `deploy:${binding.intentId}`
+      let deployed = await receivers.deploy(deploymentId, immutable)
+      if (!deployed.verified) await rpc('anvil_mine', ['0x1', '0x0'])
+      const verifyUntil = Math.min(Date.now() + 20_000, binding.quoteValidUntil * 1_000)
+      while (!deployed.verified && Date.now() < verifyUntil) {
+        await new Promise((resolve) => setTimeout(resolve, 250))
+        deployed = await receivers.deploy(deploymentId, immutable)
+      }
+      if (!deployed.verified) {
+        const head = (await rpc('eth_getBlockByNumber', ['latest', false])) as {
+          number?: unknown
+          timestamp?: unknown
+          hash?: unknown
+        } | null
+        throw new Error(
+          `receiver deployment ${deployed.transactionHash} did not reach its canonical verified view; ` +
+            `latest=${JSON.stringify(head)}`,
+        )
+      }
       const observation = await receivers.inspect(deployed.address, immutable)
       expect(observation.runtimeHash).toEqual(expectedReceiverRuntimeHash(immutable))
       expect(observation.htlcPresent).toBe(false)

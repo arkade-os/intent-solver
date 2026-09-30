@@ -1,6 +1,6 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, concatBytes, hexToBytes } from '@noble/hashes/utils.js'
-import type { Erc20SwapLock, JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
+import { EvmClaimVerificationError, type Erc20SwapLock, type JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
 import { CLAIM_FOR_SIGNATURE, addressWord, claimEventTopic, encodeClaim, selectorFor, uintWord } from './erc20Swap.js'
 
 export interface EvmClaimFinalityPolicy {
@@ -37,6 +37,17 @@ const eventPreimage = (value: unknown, contract: string, lock: Erc20SwapLock): s
   return log && (log.removed === undefined || log.removed === false) ? claimPreimage(log, contract, lock) : null
 }
 
+const MAX_TRACE_NODES = 256
+const MAX_TRACE_DEPTH = 32
+const TRACE_FRAME_TYPES = new Set([
+  'CALL',
+  'CALLCODE',
+  'DELEGATECALL',
+  'STATICCALL',
+  'CREATE',
+  'CREATE2',
+  'SELFDESTRUCT',
+])
 const failed = (frame: Record<string, unknown>): boolean =>
   frame.error !== undefined && frame.error !== null && frame.error !== ''
 
@@ -170,10 +181,19 @@ const nestedClaimExecuted = async (
   preimage: string,
   receiptLogs: unknown[],
 ): Promise<boolean> => {
-  if (transactionTo === contract || input === null) return false
-  const trace = object(
-    await rpc('debug_traceTransaction', [txHash, { tracer: 'callTracer', tracerConfig: { withLog: true } }]),
-  )
+  if (input === null) throw new EvmClaimVerificationError('claim transaction has no usable root calldata')
+  if (transactionTo === contract) return false
+  let traceValue: unknown
+  try {
+    traceValue = await rpc('debug_traceTransaction', [
+      txHash,
+      { tracer: 'callTracer', tracerConfig: { withLog: true } },
+    ])
+  } catch (error) {
+    const reason = (error instanceof Error ? error.message : String(error)).slice(0, 256)
+    throw new EvmClaimVerificationError(`claim transaction trace ${txHash} is unavailable: ${reason}`)
+  }
+  const trace = object(traceValue)
   if (
     !trace ||
     failed(trace) ||
@@ -181,20 +201,36 @@ const nestedClaimExecuted = async (
     fixedHex(trace.from, 20) !== sender ||
     fixedHex(trace.to, 20) !== transactionTo ||
     typeof trace.input !== 'string' ||
+    !/^0x(?:[0-9a-f]{2})*$/i.test(trace.input) ||
     trace.input.toLowerCase() !== input
   )
-    return false
+    throw new EvmClaimVerificationError('claim transaction trace does not match the canonical transaction')
   const matchingReceiptEvents = receiptLogs.filter((entry) => claimPreimage(entry, contract, lock) === preimage)
-  if (matchingReceiptEvents.length !== 1) return false
+  if (matchingReceiptEvents.length === 0) return false
   // ponytail: cap untrusted traces at 256 nodes and 32 levels; raise for larger wallet batches.
   let nodes = 0
   let matches = 0
-  let attributed = 0
-  const visit = (frameValue: unknown, depth: number): boolean => {
-    if (++nodes > 256 || depth > 32) return false
+  const visit = (frameValue: unknown, depth: number): void => {
+    if (++nodes > MAX_TRACE_NODES)
+      throw new EvmClaimVerificationError(`claim transaction trace exceeds the ${MAX_TRACE_NODES}-frame limit`)
+    if (depth > MAX_TRACE_DEPTH)
+      throw new EvmClaimVerificationError(`claim transaction trace exceeds the ${MAX_TRACE_DEPTH}-level depth limit`)
     const frame = object(frameValue)
-    if (!frame || (frame.calls !== undefined && !Array.isArray(frame.calls))) return false
-    if (failed(frame)) return true
+    if (!frame || (frame.calls !== undefined && !Array.isArray(frame.calls)))
+      throw new EvmClaimVerificationError('claim transaction trace is malformed')
+    if (frame.error !== undefined && frame.error !== null && frame.error !== '' && typeof frame.error !== 'string')
+      throw new EvmClaimVerificationError('claim transaction trace has a malformed error field')
+    if (failed(frame)) return
+    if (
+      typeof frame.type !== 'string' ||
+      !TRACE_FRAME_TYPES.has(frame.type) ||
+      fixedHex(frame.from, 20) === null ||
+      fixedHex(frame.to, 20) === null ||
+      typeof frame.input !== 'string' ||
+      !/^0x(?:[0-9a-f]{2})*$/i.test(frame.input) ||
+      (frame.logs !== undefined && !Array.isArray(frame.logs))
+    )
+      throw new EvmClaimVerificationError('claim transaction trace is malformed')
     if (
       frame.type === 'CALL' &&
       fixedHex(frame.to, 20) === contract &&
@@ -204,14 +240,13 @@ const nestedClaimExecuted = async (
     ) {
       matches++
       if (!Array.isArray(frame.logs) || !frame.logs.some((entry) => claimPreimage(entry, contract, lock) === preimage))
-        return false
-      attributed++
+        throw new EvmClaimVerificationError('claim trace cannot attribute the receipt event to its exact call')
     }
     for (const child of (frame.calls as unknown[] | undefined) ?? []) {
-      if (!visit(child, depth + 1)) return false
+      visit(child, depth + 1)
     }
-    return true
   }
-  if (!visit(trace, 0)) return false
-  return matches === 1 && attributed === 1
+  visit(trace, 0)
+  if (matches > 1) throw new EvmClaimVerificationError('claim trace has multiple exact successful claim calls')
+  return matches === 1
 }

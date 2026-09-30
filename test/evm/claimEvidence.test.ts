@@ -12,7 +12,7 @@ import {
   type Erc20SwapLock,
 } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import { verifyEvmClaimEvidence } from '@arkade-os/solver-rails-evm/evm/claimEvidence.js'
-import type { JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
+import { EvmClaimVerificationError, type JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
 
 const address = (value: string) => `0x${value.repeat(40)}`
 const hash = (value: string) => `0x${value.repeat(64)}`
@@ -162,60 +162,33 @@ describe('successful canonical exact HTLC claim evidence', () => {
     await expect(verifyEvmClaimEvidence(rpc, contract, lock, f.log, policy)).resolves.toEqual(preimage)
   })
 
-  it('accepts a claim beside an unrelated reverted sibling frame', async () => {
+  it('accepts an exact claim beside a same-preimage event from a different lock', async () => {
     const f = nestedFixture()
+    const otherLock = { ...lock, amount: lock.amount + 1n }
+    const otherInput = asHex(
+      concatBytes(
+        selectorFor(CLAIM_FOR_SIGNATURE),
+        preimage,
+        uintWord(otherLock.amount, 'amount'),
+        addressWord(otherLock.tokenAddress, 'token'),
+        addressWord(otherLock.claimAddress, 'claim'),
+        addressWord(otherLock.refundAddress, 'refund'),
+        uintWord(otherLock.timelock, 'timelock'),
+      ),
+    )
+    const otherLog = { ...f.log, logIndex: '0x2' }
+    f.receipt.logs.push(otherLog)
     ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [
-      { type: 'CALL', error: 'execution reverted' },
       f.frame,
+      { type: 'CALL', from: f.wallet, to: asHex(contract), input: otherInput, logs: [otherLog] },
     ]
+
     await expect(verifyEvmClaimEvidence(f.rpc, contract, lock, f.log, policy)).resolves.toEqual(preimage)
   })
 
   it.each([
     [
-      'root transaction mismatch',
-      (f: ReturnType<typeof nestedFixture>) => {
-        ;(f.answers.debug_traceTransaction as Record<string, unknown>).input = '0xdeadbeef'
-      },
-    ],
-    [
-      'delegatecall frame',
-      (f: ReturnType<typeof nestedFixture>) => {
-        f.frame.type = 'DELEGATECALL'
-      },
-    ],
-    [
-      'reverted claim frame',
-      (f: ReturnType<typeof nestedFixture>) => {
-        ;(f.frame as Record<string, unknown>).error = 'execution reverted'
-      },
-    ],
-    [
-      'claim event outside the matching frame',
-      (f: ReturnType<typeof nestedFixture>) => {
-        f.frame.logs = []
-        ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [
-          { type: 'CALL', from: f.wallet, to: asHex(contract), input: claimForInput, logs: f.frame.logs },
-          {
-            type: 'CALL',
-            from: f.wallet,
-            to: address('9'),
-            input: '0xdeadbeef',
-            logs: [{ address: asHex(contract), topics: f.log.topics, data: f.log.data }],
-          },
-        ]
-      },
-    ],
-    [
-      'failed ancestor frame',
-      (f: ReturnType<typeof nestedFixture>) => {
-        ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [
-          { type: 'CALL', error: 'execution reverted', calls: [f.frame] },
-        ]
-      },
-    ],
-    [
-      'ambiguous matching claim frames',
+      'multiple exact calls',
       (f: ReturnType<typeof nestedFixture>) => {
         ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [f.frame, { ...f.frame }]
       },
@@ -230,7 +203,127 @@ describe('successful canonical exact HTLC claim evidence', () => {
       },
     ],
     [
-      'different claim amount',
+      'trace beyond the depth limit',
+      (f: ReturnType<typeof nestedFixture>) => {
+        let nested: Record<string, unknown> = f.frame
+        for (let depth = 0; depth < 33; depth++)
+          nested = { type: 'CALL', from: f.wallet, to: address('9'), input: '0x', calls: [nested] }
+        ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [nested]
+      },
+    ],
+    [
+      'unavailable trace',
+      (f: ReturnType<typeof nestedFixture>) => {
+        f.answers.debug_traceTransaction = null
+      },
+    ],
+    [
+      'root transaction mismatch',
+      (f: ReturnType<typeof nestedFixture>) => {
+        ;(f.answers.debug_traceTransaction as Record<string, unknown>).input = '0xdeadbeef'
+      },
+    ],
+    [
+      'malformed trace tree',
+      (f: ReturnType<typeof nestedFixture>) => {
+        ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = {}
+      },
+    ],
+    [
+      'claim event only outside the exact frame',
+      (f: ReturnType<typeof nestedFixture>) => {
+        f.frame.logs = []
+        ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [
+          f.frame,
+          {
+            type: 'CALL',
+            from: f.wallet,
+            to: address('9'),
+            input: '0xdeadbeef',
+            logs: [{ address: asHex(contract), topics: f.log.topics, data: f.log.data }],
+          },
+        ]
+      },
+    ],
+    [
+      'missing exact-frame logs',
+      (f: ReturnType<typeof nestedFixture>) => {
+        f.frame.logs = []
+      },
+    ],
+  ] satisfies [string, (sample: ReturnType<typeof nestedFixture>) => void][])(
+    'requires operator review for %s',
+    async (_name, mutate) => {
+      const f = nestedFixture()
+      mutate(f)
+      await expect(verifyEvmClaimEvidence(f.rpc, contract, lock, f.log, policy)).rejects.toBeInstanceOf(
+        EvmClaimVerificationError,
+      )
+    },
+  )
+
+  it('preserves transaction identity and the RPC reason when tracing is unavailable', async () => {
+    const f = nestedFixture()
+    const rpc: JsonRpc = async (method, params) => {
+      if (method === 'debug_traceTransaction') throw new Error('missing trie node')
+      return f.rpc(method, params)
+    }
+
+    await expect(verifyEvmClaimEvidence(rpc, contract, lock, f.log, policy)).rejects.toMatchObject({
+      name: 'EvmClaimVerificationError',
+      message: `claim transaction trace ${hash('5')} is unavailable: missing trie node`,
+    })
+  })
+
+  it('accepts a claim beside an unrelated reverted sibling frame', async () => {
+    const f = nestedFixture()
+    ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [
+      { type: 'CALL', from: f.wallet, to: address('9'), input: '0x', error: 'execution reverted' },
+      f.frame,
+    ]
+    await expect(verifyEvmClaimEvidence(f.rpc, contract, lock, f.log, policy)).resolves.toEqual(preimage)
+  })
+
+  it('accepts a claim beside a failed CREATE frame without a to address', async () => {
+    const f = nestedFixture()
+    ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [
+      { type: 'CREATE', from: f.wallet, error: 'execution reverted' },
+      f.frame,
+    ]
+
+    await expect(verifyEvmClaimEvidence(f.rpc, contract, lock, f.log, policy)).resolves.toEqual(preimage)
+  })
+
+  it.each([
+    [
+      'delegatecall frame',
+      (f: ReturnType<typeof nestedFixture>) => {
+        f.frame.type = 'DELEGATECALL'
+      },
+    ],
+    [
+      'reverted claim frame',
+      (f: ReturnType<typeof nestedFixture>) => {
+        ;(f.frame as Record<string, unknown>).error = 'execution reverted'
+      },
+    ],
+    [
+      'failed ancestor frame',
+      (f: ReturnType<typeof nestedFixture>) => {
+        ;(f.answers.debug_traceTransaction as Record<string, unknown>).calls = [
+          {
+            type: 'CALL',
+            from: f.wallet,
+            to: address('9'),
+            input: '0x',
+            error: 'execution reverted',
+            calls: [f.frame],
+          },
+        ]
+      },
+    ],
+    [
+      'wrong-lock-only successful call',
       (f: ReturnType<typeof nestedFixture>) => {
         f.frame.input = asHex(
           concatBytes(
@@ -250,12 +343,6 @@ describe('successful canonical exact HTLC claim evidence', () => {
       (f: ReturnType<typeof nestedFixture>) => {
         f.frame.input = asHex(encodeClaim(preimage, lock))
         f.frame.from = address('9')
-      },
-    ],
-    [
-      'unavailable trace',
-      (f: ReturnType<typeof nestedFixture>) => {
-        f.answers.debug_traceTransaction = null
       },
     ],
   ] satisfies [string, (sample: ReturnType<typeof nestedFixture>) => void][])(
