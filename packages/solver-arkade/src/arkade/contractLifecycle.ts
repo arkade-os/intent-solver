@@ -74,8 +74,8 @@ export interface KnownContract {
 /**
  * The spend facts of a VTXO as the funded gate needs them, typed structurally
  * rather than as the SDK's `VirtualCoin` so the interface names exactly what
- * it reads. Mirrors `isVtxoSpent` (`isSpent || spentBy || settledBy`,
- * checked against SDK 0.4.66): the wire contract permits `isSpent: true` with
+ * it reads. Mirrors the SDK's `isVtxoSpent` (`isSpent || spentBy || settledBy`,
+ * checked against SDK 0.4.77): the wire contract permits `isSpent: true` with
  * an empty `spentBy`, so all three facts are consulted — and a SWEPT output
  * is deliberately absent, so a batch-swept lockup still reads as funded and
  * stays protected until recovery drains it. Duplicated rather than imported
@@ -88,8 +88,8 @@ export interface LifecycleVtxo {
   settledBy?: string
 }
 
-/** `isVtxoSpent`, over the structural slice this module defines. */
-const isVtxoSpent = (vtxo: LifecycleVtxo): boolean => Boolean(vtxo.isSpent || vtxo.spentBy || vtxo.settledBy)
+/** The SDK's `isVtxoSpent`, over the structural slice this module defines. */
+const hasSpendFact = (vtxo: LifecycleVtxo): boolean => Boolean(vtxo.isSpent || vtxo.spentBy || vtxo.settledBy)
 
 /**
  * A repository row, as the ownership predicate sees it. Both fields are
@@ -321,7 +321,7 @@ export const runContractLifecycle = async (deps: LifecycleDeps): Promise<LockupD
     // UNSPENT only: the repository keeps spent rows forever, so counting them
     // would leave every settled lockup — the precise set retirement exists
     // for — permanently funded, and neither stage would ever fire.
-    funded: row.vtxos.some((vtxo) => !isVtxoSpent(vtxo)),
+    funded: row.vtxos.some((vtxo) => !hasSpendFact(vtxo)),
   }))
 
   const now = deps.now()
