@@ -68,7 +68,7 @@
       "protobufjs"
     ],
     "overrides": {
-      "@arkade-os/sdk": "file:./vendor/arkade-os-sdk-pr991-fed105ce.tgz"
+      "@arkade-os/sdk": "file:./vendor/arkade-os-sdk-pr991-9c3445b3.tgz"
     }
   }
 }

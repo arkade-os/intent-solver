@@ -1,8 +1,8 @@
 # Vendored SDK for PR #219
 
-`arkade-os-sdk-pr991-fed105ce.tgz` is a packed build of `@arkade-os/sdk` from
-`arkade-os/ts-sdk` PR #991 at commit `fed105ced11012c7e2a68725da0eef97f0876ee6`.
-SHA-256: `fc7eca505b8077ccc9db128641151633412569e9cb2843fadfc3d28cdd567598`.
+`arkade-os-sdk-pr991-9c3445b3.tgz` is a packed build of `@arkade-os/sdk` from
+`arkade-os/ts-sdk` PR #991 at commit `9c3445b30a4a2f784cae8f499bbd4b34d1b3ae6b`.
+SHA-256: `7534640b65bc97cc391eab24c8673a7ac2f5340ee4448f1eec01fe908895b0ea`.
 
 The root pnpm override makes the solver and its transitive dependencies use one
 SDK copy. The Docker build copies this directory before its frozen install.

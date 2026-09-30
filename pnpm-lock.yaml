@@ -5,15 +5,15 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@arkade-os/sdk': file:./vendor/arkade-os-sdk-pr991-fed105ce.tgz
+  '@arkade-os/sdk': file:./vendor/arkade-os-sdk-pr991-9c3445b3.tgz
 
 importers:
 
   .:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:vendor/arkade-os-sdk-pr991-fed105ce.tgz
-        version: file:vendor/arkade-os-sdk-pr991-fed105ce.tgz
+        specifier: file:vendor/arkade-os-sdk-pr991-9c3445b3.tgz
+        version: file:vendor/arkade-os-sdk-pr991-9c3445b3.tgz
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:packages/solver-arkade
@@ -118,8 +118,8 @@ importers:
   packages/solver-app:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:../../vendor/arkade-os-sdk-pr991-fed105ce.tgz
-        version: file:vendor/arkade-os-sdk-pr991-fed105ce.tgz
+        specifier: file:../../vendor/arkade-os-sdk-pr991-9c3445b3.tgz
+        version: file:vendor/arkade-os-sdk-pr991-9c3445b3.tgz
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -182,8 +182,8 @@ importers:
   packages/solver-arkade:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:../../vendor/arkade-os-sdk-pr991-fed105ce.tgz
-        version: file:vendor/arkade-os-sdk-pr991-fed105ce.tgz
+        specifier: file:../../vendor/arkade-os-sdk-pr991-9c3445b3.tgz
+        version: file:vendor/arkade-os-sdk-pr991-9c3445b3.tgz
       '@arkade-os/solver-core':
         specifier: workspace:*
         version: link:../solver-core
@@ -225,8 +225,8 @@ importers:
   packages/solver-corridors:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:../../vendor/arkade-os-sdk-pr991-fed105ce.tgz
-        version: file:vendor/arkade-os-sdk-pr991-fed105ce.tgz
+        specifier: file:../../vendor/arkade-os-sdk-pr991-9c3445b3.tgz
+        version: file:vendor/arkade-os-sdk-pr991-9c3445b3.tgz
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -255,8 +255,8 @@ importers:
   packages/solver-corridors-evm:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:../../vendor/arkade-os-sdk-pr991-fed105ce.tgz
-        version: file:vendor/arkade-os-sdk-pr991-fed105ce.tgz
+        specifier: file:../../vendor/arkade-os-sdk-pr991-9c3445b3.tgz
+        version: file:vendor/arkade-os-sdk-pr991-9c3445b3.tgz
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -409,8 +409,8 @@ packages:
     resolution: {integrity: sha512-+90ob+ruUhb5RfdZhfryIb0H+G3BDtQ+IiQvNJwpwN/gMRcMm9jwJpUBAf5yqhPCWY8KsPNcKFzt5IzCmtqzxQ==}
     engines: {node: '>=20'}
 
-  '@arkade-os/sdk@file:vendor/arkade-os-sdk-pr991-fed105ce.tgz':
-    resolution: {integrity: sha512-jD6lSmiyQr4X0Sh+cNeLXLYma/I91hQEa46Q73YIYB51sRd3Rd2eaKoQ9VGMWJQpiEDC0nXbBN47LV5dfsQy2A==, tarball: file:vendor/arkade-os-sdk-pr991-fed105ce.tgz}
+  '@arkade-os/sdk@file:vendor/arkade-os-sdk-pr991-9c3445b3.tgz':
+    resolution: {integrity: sha512-ypVHfceYykWFKEdD4FAI0ztHrs6ZvapyA2njAi0gU/876nIU9Kyu71qAd22+HvkurFc2ThDLqQg7YbgbRPvtCg==, tarball: file:vendor/arkade-os-sdk-pr991-9c3445b3.tgz}
     version: 0.4.76
     engines: {node: '>=22.12.0 <27'}
     peerDependencies:
@@ -1646,7 +1646,7 @@ snapshots:
 
   '@alexbosworth/blockchain@3.2.0': {}
 
-  '@arkade-os/sdk@file:vendor/arkade-os-sdk-pr991-fed105ce.tgz':
+  '@arkade-os/sdk@file:vendor/arkade-os-sdk-pr991-9c3445b3.tgz':
     dependencies:
       '@bitcoinerlab/descriptors-scure': 3.1.7
       '@marcbachmann/cel-js': 8.0.0
@@ -1669,7 +1669,7 @@ snapshots:
 
   '@arkade-os/swap@0.0.22(nostr-tools@2.24.1(typescript@5.9.3))':
     dependencies:
-      '@arkade-os/sdk': file:vendor/arkade-os-sdk-pr991-fed105ce.tgz
+      '@arkade-os/sdk': file:vendor/arkade-os-sdk-pr991-9c3445b3.tgz
       '@arkade-os/solver-discovery': 0.2.7
       '@noble/ciphers': 2.1.1
       '@noble/curves': 2.0.1
