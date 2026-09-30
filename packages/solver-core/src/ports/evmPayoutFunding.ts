@@ -23,6 +23,12 @@ export interface EvmPayoutFundingContext {
   readonly blockHeight: number
 }
 
+export interface EvmPayoutFundingQuoteContext extends EvmPayoutFundingContext {
+  readonly tokenDecimals: number
+  readonly orderMarginSeconds: number
+  readonly quoteValiditySeconds: number
+}
+
 export type EvmPayoutFundingMode = 'start' | 'reconcile' | 'recover'
 
 export interface EvmPayoutFundingResult {
@@ -32,6 +38,8 @@ export interface EvmPayoutFundingResult {
 
 export interface EvmPayoutFundingAdapter {
   readonly identity: string
+  prepareQuote?(context: EvmPayoutFundingQuoteContext): Promise<{ validUntil: number } | void>
+  abandonQuote?(binding: EvmPayoutFundingBinding): Promise<void>
   /**
    * Persist binding, receiver, cutoff, reservations and attempt before dispatch;
    * use a durable cross-process CAS. Reconcile must quarantine unknown sends,

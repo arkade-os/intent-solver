@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { hex } from '@scure/base'
@@ -26,6 +27,11 @@ import {
   type ReceiverImmutableReferences,
 } from '@arkade-os/solver-rails-evm/evm/receiver.js'
 import { concatBytes } from '@noble/hashes/utils.js'
+import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
+import { createDurableEvmSender } from '@arkade-os/solver-rails-evm/evm/durableSender.js'
+import { createReceiverBackend } from '@arkade-os/solver-rails-evm/evm/receiverBackend.js'
+import { receiverArtifact } from '@arkade-os/solver-rails-evm/evm/receiverArtifact.js'
+import type { SqlDriver } from '@arkade-os/solver-core/core/driver.js'
 
 type Artifact = {
   evm: {
@@ -72,6 +78,17 @@ const call = async (address: Uint8Array, signature: string, ...words: Uint8Array
     ])) as string,
   )
 const block = async (): Promise<bigint> => BigInt((await rpc('eth_blockNumber', [])) as string)
+const receiptFor = async (hash: unknown) => {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    const receipt = (await rpc('eth_getTransactionReceipt', [hash])) as {
+      status: string
+      contractAddress: string | null
+    } | null
+    if (receipt) return receipt
+    await new Promise((r) => setTimeout(r, 20))
+  }
+  throw new Error('local transaction receipt missing')
+}
 const send = async (from: Uint8Array, to: Uint8Array | null, data: Uint8Array, value = 0n) => {
   const hash = await rpc('eth_sendTransaction', [
     {
@@ -82,15 +99,7 @@ const send = async (from: Uint8Array, to: Uint8Array | null, data: Uint8Array, v
       value: `0x${value.toString(16)}`,
     },
   ])
-  for (let attempt = 0; attempt < 100; attempt++) {
-    const receipt = (await rpc('eth_getTransactionReceipt', [hash])) as {
-      status: string
-      contractAddress: string | null
-    } | null
-    if (receipt) return receipt
-    await new Promise((r) => setTimeout(r, 20))
-  }
-  throw new Error('local transaction receipt missing')
+  return receiptFor(hash)
 }
 const deployArtifact = async (file: string, name: string): Promise<Uint8Array> => {
   const receipt = await send(accounts[0]!, null, hex.decode(artifacts[file]![name]!.evm.bytecode.object))
@@ -103,6 +112,8 @@ const binding = async (token = WETH): Promise<IntentReceiverBinding> => {
     chainId: 31337n,
     swapContract: SWAP,
     activationCutoff: tip + 50n,
+    activationCutoffTimestamp:
+      BigInt(((await rpc('eth_getBlockByNumber', ['latest', false])) as { timestamp: string }).timestamp) + 3600n,
     lock: {
       amount: AMOUNT,
       preimageHash: sha256(PREIMAGE),
@@ -145,7 +156,8 @@ const transfer = async (receiver: Uint8Array, amount: bigint) => {
 const activate = (receiver: Uint8Array) => send(accounts[2]!, receiver, encodeReceiverActivate())
 const recover = (receiver: Uint8Array, token = WETH) => send(accounts[2]!, receiver, encodeReceiverRecover(token))
 const mineTo = async (target: bigint) => {
-  while ((await block()) < target) await rpc('evm_mine', [])
+  const count = target - (await block())
+  if (count > 0n) await rpc('anvil_mine', [`0x${count.toString(16)}`, '0x0'])
 }
 const locked = (terms: IntentReceiverBinding) => call(SWAP, 'swaps(bytes32)', swapKey(terms.lock))
 const allowance = (token: Uint8Array, receiver: Uint8Array) =>
@@ -158,6 +170,46 @@ const mint = (token: Uint8Array, receiver: Uint8Array, amount = AMOUNT) =>
   )
 const mode = (token: Uint8Array, value: bigint) =>
   send(accounts[0]!, token, concatBytes(selectorFor('setMode(uint256)'), uintWord(value, 'mode')))
+
+const testBackend = async (driver: SqlDriver, confirmations = 1) => {
+  const transactions = await createDurableEvmSender({
+    driver,
+    rpc,
+    chainId: 31337n,
+    privateKey: hex.decode('59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d'),
+    gasLimit: 6_000_000n,
+    maxFeePerGas: 5_000_000_000n,
+    maxPriorityFeePerGas: 1_000_000_000n,
+  })
+  const backend = createReceiverBackend({
+    rpc,
+    chainId: 31337n,
+    transactions,
+    minClaimWindowBlocks: 5n,
+    finality: {
+      confirmations,
+      minAgeSeconds: 0,
+      requireFinalizedTag: false,
+      nowSeconds: () => Math.floor(Date.now() / 1000),
+      maxClockSkewSeconds: 60,
+    },
+    allowedSwapCodeHashes: [keccak_256(bytes((await rpc('eth_getCode', [hx(SWAP), 'latest'])) as string))],
+    allowedTokenCodeHashes: [keccak_256(bytes((await rpc('eth_getCode', [hx(WETH), 'latest'])) as string))],
+  })
+  return { backend, transactions }
+}
+const verifiedDeploy = async (
+  backend: ReturnType<typeof createReceiverBackend>,
+  id: string,
+  terms: IntentReceiverBinding,
+) => {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const deployed = await backend.deploy(id, terms)
+    if (deployed.verified) return deployed
+    await new Promise((r) => setTimeout(r, 20))
+  }
+  throw new Error('test receiver deployment never became verified')
+}
 
 beforeAll(async () => {
   const listener = createServer()
@@ -172,6 +224,7 @@ beforeAll(async () => {
     ['--host', '127.0.0.1', '--port', String(port), '--chain-id', '31337', '--hardfork', 'cancun', '--silent'],
     { stdio: ['ignore', 'ignore', 'pipe'] },
   )
+
   let startupError = ''
   anvil.stderr?.on('data', (chunk: Buffer) => {
     startupError += chunk.toString()
@@ -257,30 +310,252 @@ afterAll(async () => {
   }
 })
 
+const chainTest = (name: string, body: () => Promise<void> | void) => it(name, body, 60_000)
+
 describe('experimental provider-funded receiver against real ERC20Swap runtime', () => {
-  it('holds partial funding, permits topups, activates exactly once, and pays the immutable claimant', async () => {
-    const terms = await binding()
-    const receiver = await deployReceiver(terms)
-    await transfer(receiver, AMOUNT - 1n)
-    expect((await activate(receiver)).status).toBe('0x0')
-    expect((await recover(receiver)).status).toBe('0x0')
-    expect(await locked(terms)).toBe(0n)
-    await transfer(receiver, 1n)
-    expect((await activate(receiver)).status).toBe('0x1')
-    expect(await locked(terms)).toBe(1n)
-    expect(await allowance(WETH, receiver)).toBe(0n)
-    expect((await activate(receiver)).status).toBe('0x0')
-    expect((await send(accounts[2]!, SWAP, encodeClaim(PREIMAGE, terms.lock))).status).toBe('0x0')
-    expect((await send(accounts[1]!, SWAP, encodeClaim(hex.decode('22'.repeat(32)), terms.lock))).status).toBe('0x0')
-    expect((await send(accounts[0]!, SWAP, encodeRefund(terms.lock))).status).toBe('0x0')
-    expect((await activate(receiver)).status).toBe('0x0')
-    expect((await send(accounts[1]!, SWAP, encodeClaim(PREIMAGE, terms.lock))).status).toBe('0x1')
-    expect(await tokenBalance(WETH, accounts[1]!)).toBe(AMOUNT)
-    expect(await locked(terms)).toBe(0n)
-    expect((await send(accounts[0]!, SWAP, encodeRefund(terms.lock))).status).toBe('0x0')
+  chainTest('consumes an abandoned expired activation nonce before the next recovery can mine', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend, transactions } = await testBackend(driver)
+      const terms = await binding()
+      const deployed = await verifiedDeploy(backend, 'gap-deploy', terms)
+      expect(deployed.verified).toBe(true)
+      await transfer(deployed.address, AMOUNT)
+      const abandoned = await backend.prepareActivation('gap-activation', deployed.address, terms)
+      const unknown = await driver.get<{ raw: string }>('SELECT raw FROM evm_transaction_journal WHERE id = ?', [
+        'gap-activation',
+      ])
+      await driver.run('UPDATE evm_transaction_journal SET hash = ? WHERE id = ?', [
+        '0x' + '00'.repeat(32),
+        'gap-activation',
+      ])
+      await expect(backend.broadcastRawTransaction(unknown!.raw)).rejects.toThrow('no matching durable authorization')
+      await driver.run('UPDATE evm_transaction_journal SET hash = ? WHERE id = ?', [abandoned.hash, 'gap-activation'])
+      const pending = await transactions.pending()
+      expect(pending).toHaveLength(1)
+      expect(pending[0]!.rawTransaction).toBe(abandoned.rawTransaction)
+      expect(pending[0]!.request.to).toEqual(deployed.address)
+      await expect(backend.resolveExpiredActivation('gap-activation', deployed.address, terms)).rejects.toThrow(
+        'guaranteed expired',
+      )
+      await expect(backend.recover('gap-recovery', deployed.address, terms)).rejects.toThrow('unresolved earlier nonce')
+      await mineTo(terms.activationCutoff)
+      expect(await backend.resolveExpiredActivation('never-prepared', deployed.address, terms)).toBeNull()
+      const resolved = await backend.resolveExpiredActivation('gap-activation', deployed.address, terms)
+      const receipt = await receiptFor(resolved!.hash)
+      expect(receipt.status).toBe('0x0')
+      expect(resolved!.rawTransaction).toBe(abandoned.rawTransaction)
+      const recovered = await backend.recover('gap-recovery', deployed.address, terms)
+      expect(recovered.nonce).toBe(abandoned.nonce + 1n)
+      expect((await receiptFor(recovered.hash)).status).toBe('0x1')
+      expect(await tokenBalance(WETH, accounts[0]!)).toBe(AMOUNT)
+      expect(await tokenBalance(WETH, accounts[1]!)).toBe(0n)
+      expect(await locked(terms)).toBe(0n)
+    } finally {
+      await driver.close()
+    }
   })
 
-  it('protects the required amount and sends excess/duplicates to the fixed refund address', async () => {
+  chainTest('waits for deployment finality before returning a quotable recipient', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend } = await testBackend(driver, 2)
+      const terms = await binding()
+      const pending = await backend.deploy('finalized-deploy', terms)
+      expect(pending.verified).toBe(false)
+      await receiptFor(pending.transactionHash)
+      await rpc('evm_mine', [])
+      const ready = await backend.deploy('finalized-deploy', terms)
+      expect(ready.verified).toBe(true)
+      expect(ready.address).toEqual(pending.address)
+      expect(ready.transactionHash).toBe(pending.transactionHash)
+      await expect(
+        backend.deploy('short-window', { ...terms, lock: { ...terms.lock, timelock: terms.activationCutoff + 1n } }),
+      ).rejects.toThrow('claim window is too short')
+    } finally {
+      await driver.close()
+    }
+  })
+
+  chainTest('permits a dedicated gas signer to execute refundFor to the fixed primary solver address', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend } = await testBackend(driver)
+      const initial = await binding()
+      const terms = { ...initial, lock: { ...initial.lock, claimAddress: accounts[2]! } }
+      const deployed = await verifiedDeploy(backend, 'refund-deploy', terms)
+      await transfer(deployed.address, AMOUNT)
+      await receiptFor((await backend.activate('refund-activation', deployed.address, terms)).hash)
+      await expect(backend.refund('refund-destination', terms)).rejects.toThrow('not mature')
+      await mineTo(terms.lock.timelock)
+      const refunded = await backend.refund('refund-destination', terms)
+      expect((await receiptFor(refunded.hash)).status).toBe('0x1')
+      expect(await backend.refundEvidence(terms, 0n)).toBe(true)
+      expect(await tokenBalance(WETH, accounts[0]!)).toBe(AMOUNT)
+      expect(await tokenBalance(WETH, accounts[1]!)).toBe(0n)
+    } finally {
+      await driver.close()
+    }
+  })
+  chainTest('pins reproducible compiled deployment and runtime artifacts', () => {
+    execFileSync(
+      process.execPath,
+      [fileURLToPath(new URL('../../scripts/build-receiver-artifact.mjs', import.meta.url)), '--check'],
+      { cwd: fileURLToPath(new URL('../../', import.meta.url)), timeout: 30_000, stdio: 'pipe' },
+    )
+    expect(receiverArtifact.creationBytecode).toBe(
+      artifacts['IntentReceiver.sol']!['IntentReceiver']!.evm.bytecode.object,
+    )
+    expect(receiverArtifact.runtimeTemplate).toBe(
+      artifacts['IntentReceiver.sol']!['IntentReceiver']!.evm.deployedBytecode.object,
+    )
+    expect(receiverArtifact.immutableReferences).toEqual(immutableReferences)
+  })
+
+  chainTest('closes permissionless activation by timestamp even while block cutoff is distant', async () => {
+    const terms = await binding()
+    const receiver = await deployReceiver(terms)
+    await transfer(receiver, AMOUNT)
+    await rpc('evm_setNextBlockTimestamp', [Number(terms.activationCutoffTimestamp)])
+    expect((await activate(receiver)).status).toBe('0x0')
+    expect(await block()).toBeLessThan(terms.activationCutoff)
+    expect((await recover(receiver)).status).toBe('0x1')
+    expect(await tokenBalance(WETH, accounts[0]!)).toBe(AMOUNT)
+    expect(await locked(terms)).toBe(0n)
+  })
+
+  chainTest(
+    'deploys before publishing, observes finalized exact funding, activates, and binds canonical claims',
+    async () => {
+      const driver = betterSqliteDriver(':memory:')
+      try {
+        const transactions = await createDurableEvmSender({
+          driver,
+          rpc,
+          chainId: 31337n,
+          privateKey: hex.decode('ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'),
+          gasLimit: 6_000_000n,
+          maxFeePerGas: 5_000_000_000n,
+          maxPriorityFeePerGas: 1_000_000_000n,
+        })
+        const backend = createReceiverBackend({
+          rpc,
+          chainId: 31337n,
+          transactions,
+          minClaimWindowBlocks: 5n,
+          finality: {
+            confirmations: 1,
+            minAgeSeconds: 0,
+            requireFinalizedTag: false,
+            nowSeconds: () => Math.floor(Date.now() / 1000),
+            maxClockSkewSeconds: 60,
+          },
+          allowedSwapCodeHashes: [keccak_256(bytes((await rpc('eth_getCode', [hx(SWAP), 'latest'])) as string))],
+          allowedTokenCodeHashes: [keccak_256(bytes((await rpc('eth_getCode', [hx(WETH), 'latest'])) as string))],
+        })
+        const terms = await binding()
+        const deployed = await verifiedDeploy(backend, 'deploy-intent', terms)
+        expect(deployed.verified).toBe(true)
+        const before = await backend.inspect(deployed.address, terms)
+        expect(before.htlcPresent).toBe(false)
+        expect(before.tokenBalance).toBe(0n)
+        await transfer(deployed.address, AMOUNT)
+        expect((await backend.inspect(deployed.address, terms)).tokenBalance).toBe(AMOUNT)
+        const activated = await backend.activate('activate-intent', deployed.address, terms)
+        await receiptFor(activated.hash)
+        expect(activated.state).toBe('submitted')
+        const after = await backend.inspect(deployed.address, terms)
+        expect(after.activated).toBe(true)
+        expect(after.htlcPresent).toBe(true)
+        expect(after.tokenBalance).toBe(0n)
+        expect(await backend.claimEvidence(terms, before.observedBlock)).toBeNull()
+        expect((await send(accounts[1]!, SWAP, encodeClaim(PREIMAGE, terms.lock))).status).toBe('0x1')
+        expect(await backend.claimEvidence(terms, before.observedBlock)).toEqual(PREIMAGE)
+        expect(await backend.refundEvidence(terms, before.observedBlock)).toBe(false)
+      } finally {
+        await driver.close()
+      }
+    },
+  )
+
+  chainTest(
+    'persists signed dispatch before network, replays identical bytes after restart, and rejects request mutation',
+    async () => {
+      const driver = betterSqliteDriver(':memory:')
+      try {
+        const rawTransactions: string[] = []
+        let fail = true
+        const journalRpc = async (method: string, params: readonly unknown[]) => {
+          if (method === 'eth_sendRawTransaction') {
+            rawTransactions.push(params[0] as string)
+            if (fail) throw new Error('network stopped')
+          }
+          return rpc(method, params)
+        }
+        const deps = {
+          driver,
+          rpc: journalRpc,
+          chainId: 31337n,
+          privateKey: hex.decode('ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'),
+          gasLimit: 6_000_000n,
+          maxFeePerGas: 5_000_000_000n,
+          maxPriorityFeePerGas: 1_000_000_000n,
+        }
+        const first = await createDurableEvmSender(deps)
+        const request = { to: accounts[3]!, data: new Uint8Array() }
+        await expect(first.submit('durable-send', request)).rejects.toThrow('network stopped')
+        const saved = await driver.get<{ raw: string; state: string }>(
+          'SELECT raw,state FROM evm_transaction_journal WHERE id = ?',
+          ['durable-send'],
+        )
+        expect(saved!.raw).toBe(rawTransactions[0])
+        expect(saved!.state).toBe('unknown')
+        fail = false
+        const restarted = await createDurableEvmSender(deps)
+        const replayed = await restarted.submit('durable-send', request)
+        expect(replayed.state).toBe('submitted')
+        await receiptFor(replayed.hash)
+        expect(rawTransactions[1]).toBe(rawTransactions[0])
+        await expect(restarted.submit('durable-send', { to: accounts[4]!, data: new Uint8Array() })).rejects.toThrow(
+          'changed request',
+        )
+        expect(rawTransactions).toHaveLength(2)
+        const next = await restarted.prepare('next-send', request)
+        expect(next.nonce).toBe(replayed.nonce + 1n)
+        await driver.run("UPDATE evm_transaction_journal SET nonce = '000000000000ffff' WHERE id = ?", ['durable-send'])
+        await expect(restarted.submit('durable-send', request)).rejects.toThrow('does not authorize')
+        expect(rawTransactions).toHaveLength(2)
+      } finally {
+        await driver.close()
+      }
+    },
+  )
+  chainTest(
+    'holds partial funding, permits topups, activates exactly once, and pays the immutable claimant',
+    async () => {
+      const terms = await binding()
+      const receiver = await deployReceiver(terms)
+      await transfer(receiver, AMOUNT - 1n)
+      expect((await activate(receiver)).status).toBe('0x0')
+      expect((await recover(receiver)).status).toBe('0x0')
+      expect(await locked(terms)).toBe(0n)
+      await transfer(receiver, 1n)
+      expect((await activate(receiver)).status).toBe('0x1')
+      expect(await locked(terms)).toBe(1n)
+      expect(await allowance(WETH, receiver)).toBe(0n)
+      expect((await activate(receiver)).status).toBe('0x0')
+      expect((await send(accounts[2]!, SWAP, encodeClaim(PREIMAGE, terms.lock))).status).toBe('0x0')
+      expect((await send(accounts[1]!, SWAP, encodeClaim(hex.decode('22'.repeat(32)), terms.lock))).status).toBe('0x0')
+      expect((await send(accounts[0]!, SWAP, encodeRefund(terms.lock))).status).toBe('0x0')
+      expect((await activate(receiver)).status).toBe('0x0')
+      expect((await send(accounts[1]!, SWAP, encodeClaim(PREIMAGE, terms.lock))).status).toBe('0x1')
+      expect(await tokenBalance(WETH, accounts[1]!)).toBe(AMOUNT)
+      expect(await locked(terms)).toBe(0n)
+      expect((await send(accounts[0]!, SWAP, encodeRefund(terms.lock))).status).toBe('0x0')
+    },
+  )
+
+  chainTest('protects the required amount and sends excess/duplicates to the fixed refund address', async () => {
     const terms = await binding()
     const receiver = await deployReceiver(terms)
     await transfer(receiver, AMOUNT + 20n)
@@ -296,7 +571,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     expect((await activate(receiver)).status).toBe('0x0')
   })
 
-  it('rejects activation at the exact cutoff and recovers late funds without creating a lock', async () => {
+  chainTest('rejects activation at the exact cutoff and recovers late funds without creating a lock', async () => {
     const terms = await binding()
     const receiver = await deployReceiver(terms)
     await transfer(receiver, AMOUNT)
@@ -311,7 +586,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     expect(await tokenBalance(WETH, accounts[0]!)).toBe(AMOUNT * 2n)
   })
 
-  it('refunds a matured destination lock to solver and cannot claim after refund', async () => {
+  chainTest('refunds a matured destination lock to solver and cannot claim after refund', async () => {
     const terms = await binding()
     const receiver = await deployReceiver(terms)
     await transfer(receiver, AMOUNT)
@@ -322,7 +597,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     expect((await send(accounts[1]!, SWAP, encodeClaim(PREIMAGE, terms.lock))).status).toBe('0x0')
   })
 
-  it('shows the actual destination claim branch remains valid after timelock until refund wins', async () => {
+  chainTest('shows the actual destination claim branch remains valid after timelock until refund wins', async () => {
     const terms = await binding()
     const receiver = await deployReceiver(terms)
     await transfer(receiver, AMOUNT)
@@ -332,7 +607,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     expect((await send(accounts[0]!, SWAP, encodeRefund(terms.lock))).status).toBe('0x0')
   })
 
-  it('rejects wrong asset funding while allowing its recovery', async () => {
+  chainTest('rejects wrong asset funding while allowing its recovery', async () => {
     const wrong = await deployArtifact('ReceiverTokens.sol', 'ReceiverProbeToken')
     const terms = await binding()
     const receiver = await deployReceiver(terms)
@@ -343,7 +618,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     expect(await locked(terms)).toBe(0n)
   })
 
-  it('recovers a short unactivated deposit after cutoff', async () => {
+  chainTest('recovers a short unactivated deposit after cutoff', async () => {
     const terms = await binding()
     const receiver = await deployReceiver(terms)
     await transfer(receiver, AMOUNT - 1n)
@@ -355,7 +630,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     expect(await locked(terms)).toBe(0n)
   })
 
-  it('does not report recovery when transfer fails or falsely returns success', async () => {
+  chainTest('does not report recovery when transfer fails or falsely returns success', async () => {
     const token = await deployArtifact('ReceiverTokens.sol', 'ReceiverProbeToken')
     const terms = await binding(token)
     const receiver = await deployReceiver(terms)
@@ -371,7 +646,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     expect(await tokenBalance(token, receiver)).toBe(AMOUNT)
   })
 
-  it('refuses to overwrite an already funded destination lock', async () => {
+  chainTest('refuses to overwrite an already funded destination lock', async () => {
     const terms = await binding()
     const receiver = await deployReceiver(terms)
     expect((await send(accounts[0]!, WETH, selectorFor('deposit()'), AMOUNT)).status).toBe('0x1')
@@ -392,7 +667,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     expect(await locked(terms)).toBe(1n)
   })
 
-  it('atomically rolls back approval failure and permits retry after token recovery', async () => {
+  chainTest('atomically rolls back approval failure and permits retry after token recovery', async () => {
     const token = await deployArtifact('ReceiverTokens.sol', 'ReceiverProbeToken')
     const terms = await binding(token)
     const receiver = await deployReceiver(terms)
@@ -407,7 +682,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     expect(await allowance(token, receiver)).toBe(0n)
   })
 
-  it('blocks token callback recovery during activation', async () => {
+  chainTest('blocks token callback recovery during activation', async () => {
     const token = await deployArtifact('ReceiverTokens.sol', 'ReceiverProbeToken')
     const terms = await binding(token)
     const receiver = await deployReceiver(terms)
@@ -420,7 +695,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     expect(await tokenBalance(token, accounts[0]!)).toBe(0n)
   })
 
-  it('rejects fee-on-transfer tokens and rolls back the swap flag and allowance', async () => {
+  chainTest('rejects fee-on-transfer tokens and rolls back the swap flag and allowance', async () => {
     const token = await deployArtifact('ReceiverTokens.sol', 'ReceiverProbeToken')
     const terms = await binding(token)
     const receiver = await deployReceiver(terms)
@@ -434,7 +709,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     expect(await allowance(token, receiver)).toBe(0n)
   })
 
-  it('supports tokens returning no approval/transfer result against the real swap', async () => {
+  chainTest('supports tokens returning no approval/transfer result against the real swap', async () => {
     const token = await deployArtifact('ReceiverTokens.sol', 'ReceiverNoReturnToken')
     const terms = await binding(token)
     const receiver = await deployReceiver(terms)
@@ -445,7 +720,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     expect(await tokenBalance(token, accounts[0]!)).toBe(1n)
   })
 
-  it('checks chain, exact runtime, immutable binding, state, and activation window', async () => {
+  chainTest('checks chain, exact runtime, immutable binding, state, and activation window', async () => {
     const terms = await binding()
     const receiver = await deployReceiver(terms)
     const codeHash = receiverRuntimeHash(
@@ -467,7 +742,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     await expect(verifyReceiverBinding(rpc, receiver, terms, codeHash)).rejects.toThrow('already activated')
   })
 
-  it('fails verification for an expired receiver and malformed trusted build metadata', async () => {
+  chainTest('fails verification for an expired receiver and malformed trusted build metadata', async () => {
     const terms = await binding()
     const receiver = await deployReceiver(terms)
     const template = hex.decode(artifacts['IntentReceiver.sol']!['IntentReceiver']!.evm.deployedBytecode.object)
@@ -486,7 +761,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     await expect(verifyReceiverBinding(rpc, receiver, terms, codeHash)).rejects.toThrow('activation closed')
   })
 
-  it('enforces constructor chain and nonempty deployed swap/token code', async () => {
+  chainTest('enforces constructor chain and nonempty deployed swap/token code', async () => {
     const terms = await binding()
     const creation = hex.decode(artifacts['IntentReceiver.sol']!['IntentReceiver']!.evm.bytecode.object)
     expect((await send(accounts[0]!, null, encodeReceiverDeployment(creation, { ...terms, chainId: 1n }))).status).toBe(
@@ -507,9 +782,9 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     ).toBe('0x0')
   })
 
-  it('rejects malformed and overflowing constructor terms before encoding', async () => {
+  chainTest('rejects malformed and overflowing constructor terms before encoding', async () => {
     const terms = await binding()
-    expect(encodeReceiverConstructor(terms)).toHaveLength(9 * 32)
+    expect(encodeReceiverConstructor(terms)).toHaveLength(10 * 32)
     expect(() => encodeReceiverConstructor({ ...terms, activationCutoff: terms.lock.timelock })).toThrow('precede')
     expect(() => encodeReceiverConstructor({ ...terms, lock: { ...terms.lock, amount: 2n ** 256n } })).toThrow(
       'uint256',

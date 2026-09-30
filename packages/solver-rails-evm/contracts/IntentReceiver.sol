@@ -33,6 +33,7 @@ contract IntentReceiver {
     address public immutable claimAddress;
     address public immutable refundAddress;
     uint256 public immutable activationCutoff;
+    uint256 public immutable activationCutoffTimestamp;
     uint256 public immutable timelock;
     bytes32 public immutable swapKey;
     bool public activated;
@@ -50,7 +51,8 @@ contract IntentReceiver {
         address claimant,
         address solverRefund,
         uint256 cutoffBlock,
-        uint256 refundBlock
+        uint256 refundBlock,
+        uint256 cutoffTimestamp
     ) {
         if (block.chainid != expectedChainId) revert WrongChain();
         if (
@@ -58,7 +60,7 @@ contract IntentReceiver {
             requiredAmount == 0 || hash == bytes32(0) || claimant == address(0) ||
             solverRefund == address(0) || claimant == solverRefund ||
             claimant == address(this) || solverRefund == address(this) ||
-            cutoffBlock <= block.number || refundBlock <= cutoffBlock
+            cutoffBlock <= block.number || refundBlock <= cutoffBlock || cutoffTimestamp <= block.timestamp
         ) revert InvalidBinding();
         chainId = expectedChainId;
         swapContract = destinationSwap;
@@ -68,6 +70,7 @@ contract IntentReceiver {
         claimAddress = claimant;
         refundAddress = solverRefund;
         activationCutoff = cutoffBlock;
+        activationCutoffTimestamp = cutoffTimestamp;
         timelock = refundBlock;
         swapKey = keccak256(abi.encode(hash, requiredAmount, destinationToken, claimant, solverRefund, refundBlock));
     }
@@ -82,7 +85,7 @@ contract IntentReceiver {
 
     function activate() external guarded {
         if (activated) revert AlreadyActivated();
-        if (block.number >= activationCutoff) revert ActivationClosed();
+        if (block.number >= activationCutoff || block.timestamp >= activationCutoffTimestamp) revert ActivationClosed();
         IERC20ReceiverToken asset = IERC20ReceiverToken(token);
         uint256 beforeBalance = asset.balanceOf(address(this));
         if (beforeBalance < amount) revert InsufficientFunding();
@@ -107,7 +110,7 @@ contract IntentReceiver {
         IERC20ReceiverToken asset = IERC20ReceiverToken(recoveredToken);
         uint256 beforeBalance = asset.balanceOf(address(this));
         uint256 recoverable = beforeBalance;
-        if (recoveredToken == token && !activated && block.number < activationCutoff) {
+        if (recoveredToken == token && !activated && block.number < activationCutoff && block.timestamp < activationCutoffTimestamp) {
             if (recoverable <= amount) revert NothingRecoverable();
             recoverable -= amount;
         }
