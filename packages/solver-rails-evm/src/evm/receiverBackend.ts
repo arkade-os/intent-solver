@@ -1,6 +1,7 @@
 import { bytesToHex, hexToBytes, concatBytes } from '@noble/hashes/utils.js'
 import { keccak_256 } from '@noble/hashes/sha3.js'
 import type { JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
+import { EvmPayoutFundingQuarantinedError } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
 import {
   addressWord,
   selectorFor,
@@ -30,7 +31,7 @@ type Receipt = {
   transactionHash: string
 }
 export class ReceiverFinalityPendingError extends Error {}
-export class ReceiverInvariantError extends Error {
+export class ReceiverInvariantError extends EvmPayoutFundingQuarantinedError {
   constructor(message: string) {
     super(message)
     this.name = 'ReceiverInvariantError'

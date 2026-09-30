@@ -36,6 +36,7 @@ import {
   installContracts,
   sendFrom,
   setEth,
+  waitForReceipt,
   word,
   type EvmRpc,
 } from './support/evmChain.js'
@@ -48,6 +49,19 @@ const REFUND_KEY = new Uint8Array(32).fill(5)
 const MIN_CONFIRMATIONS = 2
 const hx = (bytes: Uint8Array): string => `0x${hex.encode(bytes)}`
 const bytes = (value: string): Uint8Array => hex.decode(value.replace(/^0x/, ''))
+const minedConfirmation = async (label: string, receiptBlock: bigint): Promise<void> => {
+  await rpc('anvil_mine', ['0x1', '0x0'])
+  const postMineHead = BigInt((await rpc('eth_blockNumber', [])) as string)
+  const confirmations = postMineHead - receiptBlock + 1n
+  console.info(
+    `${label} confirmation mine receiptBlock=${receiptBlock} postMineHead=${postMineHead} confirmations=${confirmations}`,
+  )
+  if (confirmations < BigInt(MIN_CONFIRMATIONS))
+    throw new Error(
+      `${label} confirmation mine did not reach depth ${MIN_CONFIRMATIONS}: ` +
+        `receiptBlock=${receiptBlock}, postMineHead=${postMineHead}, confirmations=${confirmations}`,
+    )
+}
 
 let available = false
 let arkade: E2eArkade | undefined
@@ -139,21 +153,41 @@ beforeAll(async () => {
       const immutable = receiverBinding(binding)
       const deploymentId = `deploy:${binding.intentId}`
       let deployed = await receivers.deploy(deploymentId, immutable)
-      if (!deployed.verified) await rpc('anvil_mine', ['0x1', '0x0'])
+      if (!deployed.verified) {
+        const receipt = await waitForReceipt(rpc, deployed.transactionHash)
+        expect(receipt.status, `receiver deployment reverted: ${deployed.transactionHash}`).toBe('0x1')
+        await minedConfirmation('receiver deployment', BigInt(receipt.blockNumber))
+      }
       const verifyUntil = Math.min(Date.now() + 20_000, binding.quoteValidUntil * 1_000)
       while (!deployed.verified && Date.now() < verifyUntil) {
         await new Promise((resolve) => setTimeout(resolve, 250))
         deployed = await receivers.deploy(deploymentId, immutable)
       }
       if (!deployed.verified) {
-        const head = (await rpc('eth_getBlockByNumber', ['latest', false])) as {
-          number?: unknown
-          timestamp?: unknown
-          hash?: unknown
-        } | null
+        const [head, receipt, attempt] = (await Promise.all([
+          rpc('eth_getBlockByNumber', ['latest', false]),
+          rpc('eth_getTransactionReceipt', [deployed.transactionHash]),
+          receivers.deploymentAttempt(deploymentId, immutable),
+        ])) as [
+          { number?: unknown; timestamp?: unknown; hash?: unknown } | null,
+          { transactionHash?: unknown; status?: unknown; blockNumber?: unknown; blockHash?: unknown } | null,
+          { transactionHash: string; state: string } | null,
+        ]
+        const attemptSummary = attempt && { transactionHash: attempt.transactionHash, state: attempt.state }
+        const receiptSummary = receipt && {
+          transactionHash: receipt.transactionHash,
+          status: receipt.status,
+          blockNumber: receipt.blockNumber,
+          blockHash: receipt.blockHash,
+        }
+        const headSummary = head && {
+          number: head.number,
+          timestamp: head.timestamp,
+          hash: head.hash,
+        }
         throw new Error(
           `receiver deployment ${deployed.transactionHash} did not reach its canonical verified view; ` +
-            `latest=${String(head?.number)}/${String(head?.timestamp)}/${String(head?.hash)}`,
+            `state=${JSON.stringify({ latest: headSummary, receipt: receiptSummary, attempt: attemptSummary })}`,
         )
       }
       const observation = await receivers.inspect(deployed.address, immutable)
@@ -177,18 +211,23 @@ beforeAll(async () => {
       const immutable = receiverBinding(binding)
       const receiver = bytes(prepared.address)
       let fundingTxid = prepared.funding_txid
+      let fundingWasSubmitted = false
       if (!prepared.funding_txid) {
         const transfer = await providerSender.submit(`provider-fund:${binding.intentId}`, {
           to: WETH,
           data: abiCall('a9059cbb', receiver, word(immutable.lock.amount)),
         })
         fundingTxid = transfer.hash
+        fundingWasSubmitted = true
         await sql!.run('UPDATE receiver_funding_e2e SET funding_txid=? WHERE intent_id=?', [
           fundingTxid,
           binding.intentId,
         ])
-        await rpc('anvil_mine', ['0x1', '0x0'])
       }
+      if (!fundingTxid) throw new Error('Provider funding transaction was not recorded')
+      const minedFunding = await waitForReceipt(rpc, fundingTxid)
+      expect(minedFunding.status, `provider funding reverted: ${fundingTxid}`).toBe('0x1')
+      if (fundingWasSubmitted) await minedConfirmation('provider funding', BigInt(minedFunding.blockNumber))
       const fundingReceipt = (await rpc('eth_getTransactionReceipt', [fundingTxid ?? ''])) as {
         transactionHash?: unknown
         blockHash?: unknown
@@ -226,6 +265,8 @@ beforeAll(async () => {
         activation.hash,
         binding.intentId,
       ])
+      const activationReceipt = await waitForReceipt(rpc, activation.hash)
+      expect(activationReceipt.status, `receiver activation reverted: ${activation.hash}`).toBe('0x1')
       return { activationTxid: activation.hash }
     },
     async sweepRecovery() {},

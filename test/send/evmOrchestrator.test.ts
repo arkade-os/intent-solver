@@ -12,6 +12,7 @@ import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { EvmSendSwapStore, type EvmSendQuoteRecord } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { EvmClaimVerificationError } from '@arkade-os/solver-core/ports/evm.js'
+import { EvmPayoutFundingQuarantinedError } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
 
 const NOW = 1_800_000_000
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
@@ -60,6 +61,17 @@ const LOCK_CALL = { to: new Uint8Array(20), data: Uint8Array.of(0xcd, 0x41, 0x30
 
 const LOCK_BLOCK = 19_000_000n
 const TIMELOCK = 21_000_000n
+const payoutLockForQuote = () => {
+  const saved = quote()
+  return {
+    preimageHash: Uint8Array.from(Buffer.from(saved.paymentHash, 'hex')),
+    amount: BigInt(saved.evmAmount),
+    tokenAddress: Uint8Array.from(Buffer.from(saved.tokenAddress.slice(2), 'hex')),
+    claimAddress: Uint8Array.from(Buffer.from(saved.evmClaimAddress.slice(2), 'hex')),
+    refundAddress: Uint8Array.from(Buffer.from(saved.evmRefundAddress.slice(2), 'hex')),
+    timelock: BigInt(saved.evmTimeout),
+  }
+}
 
 const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
   const store = await EvmSendSwapStore.open(betterSqliteDriver(':memory:'), () => NOW)
@@ -397,6 +409,80 @@ describe('a preimage scan the node refuses must not strand the solver’s tokens
       await store.close()
     },
   )
+})
+
+describe('a quarantined receiver invariant closes only the public live row', () => {
+  it.each(['start', 'reconcile'] as const)(
+    'alerts once, releases live capacity, and preserves late-lock monitoring from %s',
+    async (mode) => {
+      const invariant = new EvmPayoutFundingQuarantinedError('receiver invariant was quarantined')
+      const ensure = vi.fn().mockRejectedValue(invariant)
+      const onTickError = vi.fn()
+      const { store, service } = await build({
+        evm: {
+          isLocked: vi.fn().mockResolvedValue(false),
+          isLockedAt: vi.fn().mockResolvedValue(false),
+          transactionOutcome: vi.fn().mockResolvedValue('pending'),
+          findClaimPreimage: vi.fn().mockResolvedValue(null),
+        } as never,
+        blockHeight: vi.fn().mockResolvedValue(20_000_000),
+        lockFor: vi.fn().mockReturnValue(payoutLockForQuote()) as never,
+        payoutFunding: { identity: 'test-provider', ensure } as never,
+        onTickError,
+      })
+      if (mode === 'start') {
+        await store.transition('swap-1', 'quoted', 'funded')
+      } else {
+        await store.transition('swap-1', 'quoted', 'funded')
+        await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+      }
+      const lateLockQuery = vi.spyOn(store, 'findClosedOverLock')
+
+      await service.tickAll()
+
+      const row = await store.get('swap-1')
+      expect(ensure).toHaveBeenCalledWith(expect.anything(), mode)
+      expect(onTickError).toHaveBeenCalledTimes(1)
+      expect(onTickError).toHaveBeenCalledWith('swap-1', invariant)
+      expect(row.state).toBe('stuck')
+      expect(row.preimage).toBeNull()
+      expect(await store.findLive()).toEqual([])
+      expect(await store.findClosedOverLock(NOW)).toEqual([row])
+      expect(lateLockQuery).toHaveBeenCalled()
+      await store.close()
+    },
+  )
+
+  it('keeps retrying generic reconciliation failures without closing the live row', async () => {
+    const failure = new Error('receiver RPC unavailable')
+    const ensure = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue({})
+    const onTickError = vi.fn()
+    const { store, service } = await build({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(false),
+        isLockedAt: vi.fn().mockResolvedValue(false),
+        transactionOutcome: vi.fn().mockResolvedValue('pending'),
+      } as never,
+      blockHeight: vi.fn().mockResolvedValue(20_000_000),
+      lockFor: vi.fn().mockReturnValue(payoutLockForQuote()) as never,
+      payoutFunding: { identity: 'test-provider', ensure } as never,
+      onTickError,
+    })
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+
+    await service.tickAll()
+    expect((await store.get('swap-1')).state).toBe('locking_evm')
+    expect(await store.findLive()).toHaveLength(1)
+    expect(onTickError).toHaveBeenCalledOnce()
+
+    await service.tickAll()
+    expect(ensure).toHaveBeenCalledTimes(2)
+    expect((await store.get('swap-1')).state).toBe('locking_evm')
+    expect(await store.findLive()).toHaveLength(1)
+    expect(onTickError).toHaveBeenCalledOnce()
+    await store.close()
+  })
 })
 
 /**
