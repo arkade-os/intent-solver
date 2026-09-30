@@ -1,4 +1,4 @@
-# Provider-funded EVM payout prototype
+# Provider-funded EVM payout
 
 An external execution provider can send an ordinary ERC-20 transfer to an
 immutable per-intent receiver. The receiver then approves and calls the existing
@@ -6,8 +6,10 @@ Boltz `ERC20Swap.lock` operation. The customer claims that final-asset HTLC with
 their own secret; the existing EVM send corridor observes the claim and uses the
 secret to collect the Arkade input.
 
-This prototype is opt-in through dependency injection. It is not registered by
-the CLI, advertised through discovery, or deployed to a public chain.
+This path is opt-in through a registered rail’s `createEvmPayoutFunding` factory.
+The built-in rails keep their existing funding path. Registering an adapter does
+not deploy a public-chain receiver or enable a provider route by itself; the
+consumer supplies its durable inventory, operator policy, and credentials.
 
 ## Ownership and settlement
 
@@ -18,7 +20,9 @@ and destination payment details.
 
 The receiver pins the chain ID, swap contract, token, exact payout amount,
 customer claim address, solver refund address, payment hash, activation cutoff
-block and HTLC refund block. The activation cutoff precedes the refund block.
+block, activation cutoff timestamp and HTLC refund block. Both cutoffs precede
+the input-side refund with the configured safety margin; the block cutoff also
+leaves a configured minimum destination claim window.
 A third party can activate or recover tokens, but cannot redirect either payout.
 
 ```mermaid
@@ -49,7 +53,10 @@ and age still apply.
 | ------------------------------------------------------------ | --------------------------------------------------------------------------------- |
 | `packages/solver-rails-evm/contracts/IntentReceiver.sol`     | Immutable receiver, one activation, bounded allowance, fixed recovery destination |
 | `packages/solver-rails-evm/src/evm/receiver.ts`              | Constructor/deployment encoding and independent runtime/immutable verification    |
-| `packages/solver-core/src/core/evmReceiverFunding.ts`        | Experimental policy gate over independently verified observations                 |
+| `packages/solver-rails-evm/src/evm/receiverBackend.ts`       | Canonical finalized receiver snapshots, activation and recovery                   |
+| `packages/solver-rails-evm/src/evm/durableSender.ts`         | Signed transaction journal, nonce reservation and exact replay                    |
+| `packages/solver-rails-evm/src/evm/claimEvidence.ts`         | Successful canonical claim receipt, exact lock and preimage verification          |
+| `packages/solver-core/src/core/evmReceiverFunding.ts`        | Policy gate over independently verified observations                              |
 | `packages/solver-core/src/ports/evmPayoutFunding.ts`         | Provider-independent funding adapter contract                                     |
 | `packages/solver-corridors-evm/src/send/evmPayoutFunding.ts` | Persisted-row binding and activation correlation                                  |
 | `packages/solver-corridors-evm/src/send/evmOrchestrator.ts`  | Existing corridor, with alternate funding and independent recovery sweep          |
@@ -59,6 +66,12 @@ cutoffs, source reservations and authorized attempt before sending funds. An
 adapter resumed in reconciliation mode must not create a missing execution or
 repeat an uncertain funding transfer. Its recovery sweep must retain provider
 and receiver obligations after the customer row becomes terminal.
+
+Quote authoring runs before the customer quote row is inserted. A failed insert
+calls `abandonQuote`; successful unused quotes still require adapter expiry
+maintenance. If deployment delays preparation, an adapter may return a fresh
+expiry bounded by the configured validity interval. A persisted global deployment
+budget must bound gas before any quote-triggered transaction is signed.
 
 Changing or removing the adapter while its obligations exist is not a safe
 rollback. Use the same adapter identity and durable database for settlement and
@@ -102,7 +115,15 @@ copied from the receiver being verified.
 EVM against the committed real `ERC20Swap` and WETH runtime fixtures. Core and
 corridor tests cover funding/finality gates and preservation of the original
 settlement ordering. These tests do not establish live provider interoperability
-or replace an independent contract review.
+or replace an independent contract review. The receiver artifact is recompiled
+and compared during the mandatory unit suite. The separate EVM E2E group also
+executes the linked exchange against the real Arkade and EVM stacks.
+
+Current claim proof accepts direct calls to the swap contract. Routes using this
+proof must restrict customer claim addresses to EOAs; smart-wallet or router
+claims require an independently verified execution proof before admission. Use
+a dedicated execution EOA and one durable SQL journal for every signed call.
+Keep signer policy and journal backups available for replay after restart.
 
 Before registering a route:
 

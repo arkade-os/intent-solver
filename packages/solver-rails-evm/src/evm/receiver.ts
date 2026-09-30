@@ -1,11 +1,13 @@
 import { concatBytes } from '@noble/hashes/utils.js'
 import { keccak_256 } from '@noble/hashes/sha3.js'
 import { addressWord, selectorFor, swapKey, uintWord, type Erc20SwapLock } from './erc20Swap.js'
+import { receiverArtifact } from './receiverArtifact.js'
 
 export type IntentReceiverBinding = {
   chainId: bigint
   swapContract: Uint8Array
   activationCutoff: bigint
+  activationCutoffTimestamp: bigint
   lock: Erc20SwapLock
 }
 
@@ -21,6 +23,7 @@ export const encodeReceiverConstructor = (binding: IntentReceiverBinding): Uint8
   if (lock.amount <= 0n) throw new Error('amount must be positive')
   if (binding.activationCutoff <= 0n || binding.activationCutoff >= lock.timelock)
     throw new Error('activationCutoff must be positive and precede timelock')
+  if (binding.activationCutoffTimestamp <= 0n) throw new Error('activationCutoffTimestamp must be positive')
   if (lock.preimageHash.length !== 32 || lock.preimageHash.every((byte) => byte === 0))
     throw new Error('preimageHash must be a nonzero bytes32')
   if (
@@ -38,6 +41,7 @@ export const encodeReceiverConstructor = (binding: IntentReceiverBinding): Uint8
     nonzeroAddress(lock.refundAddress, 'refundAddress'),
     uintWord(binding.activationCutoff, 'activationCutoff'),
     uintWord(lock.timelock, 'timelock'),
+    uintWord(binding.activationCutoffTimestamp, 'activationCutoffTimestamp'),
   )
 }
 
@@ -45,6 +49,15 @@ export const encodeReceiverDeployment = (creationBytecode: Uint8Array, binding: 
   if (creationBytecode.length === 0) throw new Error('creationBytecode must not be empty')
   return concatBytes(creationBytecode, encodeReceiverConstructor(binding))
 }
+
+export const receiverCreation = (binding: IntentReceiverBinding): Uint8Array =>
+  encodeReceiverDeployment(Uint8Array.from(Buffer.from(receiverArtifact.creationBytecode, 'hex')), binding)
+export const expectedReceiverRuntimeHash = (binding: IntentReceiverBinding): Uint8Array =>
+  receiverRuntimeHash(
+    Uint8Array.from(Buffer.from(receiverArtifact.runtimeTemplate, 'hex')),
+    receiverArtifact.immutableReferences,
+    binding,
+  )
 
 export const encodeReceiverActivate = (): Uint8Array => selectorFor('activate()')
 export const encodeReceiverRecover = (tokenAddress: Uint8Array): Uint8Array =>
@@ -59,6 +72,7 @@ export type ReceiverImmutableName =
   | 'claimAddress'
   | 'refundAddress'
   | 'activationCutoff'
+  | 'activationCutoffTimestamp'
   | 'timelock'
   | 'swapKey'
 export type ReceiverImmutableReferences = Record<ReceiverImmutableName, readonly { start: number; length: number }[]>
@@ -79,6 +93,7 @@ export const receiverRuntimeHash = (
     'refundAddress',
     'activationCutoff',
     'timelock',
+    'activationCutoffTimestamp',
   ]
   const values = Object.fromEntries(names.map((name, i) => [name, words.subarray(i * 32, (i + 1) * 32)])) as Record<
     ReceiverImmutableName,
@@ -117,13 +132,18 @@ export const verifyReceiverBinding = async (
   receiverAddress: Uint8Array,
   binding: IntentReceiverBinding,
   expectedRuntimeHash: Uint8Array,
+  options: {
+    blockTag?: string | { blockHash: string; requireCanonical: boolean }
+    allowActivated?: boolean
+    allowClosed?: boolean
+  } = {},
 ): Promise<void> => {
   nonzeroAddress(receiverAddress, 'receiverAddress')
   if (expectedRuntimeHash.length !== 32) throw new Error('expectedRuntimeHash must be bytes32')
   const expected = encodeReceiverConstructor(binding)
   const chainId = BigInt((await rpc('eth_chainId', [])) as string)
   if (chainId !== binding.chainId) throw new Error('receiver chain mismatch')
-  const blockTag = (await rpc('eth_blockNumber', [])) as string
+  const blockTag = options.blockTag ?? ((await rpc('eth_blockNumber', [])) as string)
   const code = fromHex(await rpc('eth_getCode', [asHex(receiverAddress), blockTag]))
   if (code.length === 0 || !equal(keccak_256(code), expectedRuntimeHash)) throw new Error('receiver runtime mismatch')
   const getters = [
@@ -136,6 +156,7 @@ export const verifyReceiverBinding = async (
     'refundAddress()',
     'activationCutoff()',
     'timelock()',
+    'activationCutoffTimestamp()',
   ]
   for (let i = 0; i < getters.length; i++) {
     const value = fromHex(
@@ -147,6 +168,14 @@ export const verifyReceiverBinding = async (
   const active = fromHex(
     await rpc('eth_call', [{ to: asHex(receiverAddress), data: asHex(selectorFor('activated()')) }, blockTag]),
   )
-  if (active.length !== 32 || active.some((b) => b !== 0)) throw new Error('receiver already activated')
-  if (BigInt(blockTag) >= binding.activationCutoff) throw new Error('receiver activation closed')
+  if (active.length !== 32 || active.subarray(0, 31).some((b) => b !== 0) || active[31]! > 1)
+    throw new Error('invalid receiver activated state')
+  if (!options.allowActivated && active[31] === 1) throw new Error('receiver already activated')
+  if (!options.allowClosed) {
+    if (typeof blockTag !== 'string') throw new Error('open-window check requires numeric block tag')
+    if (BigInt(blockTag) >= binding.activationCutoff) throw new Error('receiver activation closed')
+    const header = (await rpc('eth_getBlockByNumber', [blockTag, false])) as { timestamp: string } | null
+    if (!header || BigInt(header.timestamp) >= binding.activationCutoffTimestamp)
+      throw new Error('receiver timestamp activation closed')
+  }
 }

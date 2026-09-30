@@ -1,0 +1,129 @@
+import { sha256 } from '@noble/hashes/sha2.js'
+import { bytesToHex, concatBytes, hexToBytes } from '@noble/hashes/utils.js'
+import type { Erc20SwapLock, JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
+import { CLAIM_FOR_SIGNATURE, addressWord, claimEventTopic, encodeClaim, selectorFor, uintWord } from './erc20Swap.js'
+
+export interface EvmClaimFinalityPolicy {
+  minConfirmations: number
+  minAgeSeconds: number
+  nowSeconds: number
+}
+
+const object = (value: unknown): Record<string, unknown> | null =>
+  value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+const quantity = (value: unknown): bigint | null =>
+  typeof value === 'string' && /^0x[0-9a-f]+$/i.test(value) ? BigInt(value) : null
+const fixedHex = (value: unknown, length: number): string | null =>
+  typeof value === 'string' && new RegExp(`^0x[0-9a-f]{${length * 2}}$`, 'i').test(value) ? value.toLowerCase() : null
+const hex = (value: Uint8Array): string => `0x${bytesToHex(value)}`
+
+const eventPreimage = (value: unknown, contract: string, lock: Erc20SwapLock): string | null => {
+  const log = object(value)
+  if (!log || log.removed !== false || fixedHex(log.address, 20) !== contract) return null
+  if (
+    !Array.isArray(log.topics) ||
+    log.topics.length !== 2 ||
+    fixedHex(log.topics[0], 32) !== hex(claimEventTopic()) ||
+    fixedHex(log.topics[1], 32) !== hex(lock.preimageHash)
+  )
+    return null
+  const preimage = fixedHex(log.data, 32)
+  if (preimage === null || hex(sha256(hexToBytes(preimage.slice(2)))) !== hex(lock.preimageHash)) return null
+  return preimage
+}
+
+export const verifyEvmClaimEvidence = async (
+  rpc: JsonRpc,
+  contractAddress: Uint8Array,
+  lock: Erc20SwapLock,
+  candidate: unknown,
+  policy: EvmClaimFinalityPolicy,
+): Promise<Uint8Array | null> => {
+  if (contractAddress.length !== 20) throw new Error('Claim contract must be a 20-byte address')
+  if (
+    !Number.isSafeInteger(policy.minConfirmations) ||
+    policy.minConfirmations < 0 ||
+    !Number.isSafeInteger(policy.minAgeSeconds) ||
+    policy.minAgeSeconds < 0 ||
+    !Number.isSafeInteger(policy.nowSeconds) ||
+    policy.nowSeconds < 0
+  )
+    throw new Error('Invalid claim finality policy')
+  const contract = hex(contractAddress)
+  const log = object(candidate)
+  const preimageHex = eventPreimage(log, contract, lock)
+  if (!log || preimageHex === null) return null
+  const txHash = fixedHex(log.transactionHash, 32)
+  const blockHash = fixedHex(log.blockHash, 32)
+  const blockNumber = quantity(log.blockNumber)
+  const logIndex = quantity(log.logIndex)
+  if (!txHash || !blockHash || blockNumber === null || logIndex === null) return null
+  const receipt = object(await rpc('eth_getTransactionReceipt', [txHash]))
+  if (
+    !receipt ||
+    quantity(receipt.status) !== 1n ||
+    fixedHex(receipt.transactionHash, 32) !== txHash ||
+    fixedHex(receipt.blockHash, 32) !== blockHash ||
+    quantity(receipt.blockNumber) !== blockNumber ||
+    fixedHex(receipt.to, 20) !== contract ||
+    !Array.isArray(receipt.logs)
+  )
+    return null
+  const included = receipt.logs.some((value) => {
+    const entry = object(value)
+    return (
+      entry !== null &&
+      eventPreimage(entry, contract, lock) === preimageHex &&
+      fixedHex(entry.transactionHash, 32) === txHash &&
+      fixedHex(entry.blockHash, 32) === blockHash &&
+      quantity(entry.blockNumber) === blockNumber &&
+      quantity(entry.logIndex) === logIndex
+    )
+  })
+  if (!included) return null
+  const transaction = object(await rpc('eth_getTransactionByHash', [txHash]))
+  if (
+    !transaction ||
+    fixedHex(transaction.hash, 32) !== txHash ||
+    fixedHex(transaction.to, 20) !== contract ||
+    fixedHex(transaction.blockHash, 32) !== blockHash ||
+    quantity(transaction.blockNumber) !== blockNumber
+  )
+    return null
+  const sender = fixedHex(transaction.from, 20)
+  if (sender === null || fixedHex(receipt.from, 20) !== sender) return null
+  const preimage = hexToBytes(preimageHex.slice(2))
+  const claimSelf = hex(encodeClaim(preimage, lock))
+  const claimFor = hex(
+    concatBytes(
+      selectorFor(CLAIM_FOR_SIGNATURE),
+      preimage,
+      uintWord(lock.amount, 'amount'),
+      addressWord(lock.tokenAddress, 'tokenAddress'),
+      addressWord(lock.claimAddress, 'claimAddress'),
+      addressWord(lock.refundAddress, 'refundAddress'),
+      uintWord(lock.timelock, 'timelock'),
+    ),
+  )
+  const input = typeof transaction.input === 'string' ? transaction.input.toLowerCase() : null
+  if (input !== claimFor && !(input === claimSelf && sender === hex(lock.claimAddress))) return null
+  const tag = `0x${blockNumber.toString(16)}`
+  const header = object(await rpc('eth_getBlockByNumber', [tag, false]))
+  const timestamp = quantity(header?.timestamp)
+  if (
+    !header ||
+    fixedHex(header.hash, 32) !== blockHash ||
+    quantity(header.number) !== blockNumber ||
+    timestamp === null ||
+    timestamp > BigInt(Number.MAX_SAFE_INTEGER) ||
+    policy.nowSeconds - Number(timestamp) < policy.minAgeSeconds
+  )
+    return null
+  const tip = quantity(await rpc('eth_blockNumber', []))
+  if (tip === null || tip < blockNumber || tip - blockNumber + 1n < BigInt(Math.max(1, policy.minConfirmations)))
+    return null
+  // Re-read after the receipt/transaction checks so a replacement canonical block invalidates the evidence.
+  const current = object(await rpc('eth_getBlockByNumber', [tag, false]))
+  if (!current || fixedHex(current.hash, 32) !== blockHash || quantity(current.number) !== blockNumber) return null
+  return preimage
+}
