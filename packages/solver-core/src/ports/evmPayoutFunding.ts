@@ -31,6 +31,14 @@ export interface EvmPayoutFundingQuoteContext extends EvmPayoutFundingContext {
 
 export type EvmPayoutFundingMode = 'start' | 'reconcile' | 'recover'
 
+/** A durable receiver invariant failure that requires operator intervention. */
+export class EvmPayoutFundingQuarantinedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'EvmPayoutFundingQuarantinedError'
+  }
+}
+
 export interface EvmPayoutFundingResult {
   /** Evidence to correlate a transaction, never proof that the HTLC exists. */
   activationTxid?: string
