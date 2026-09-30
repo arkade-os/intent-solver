@@ -39,6 +39,7 @@ import { loadEvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
 import { createJsonRpc } from '@arkade-os/solver-rails-evm/evm/rpc.js'
 import { createEvmHtlcBackend } from '@arkade-os/solver-rails-evm/evm/backend.js'
 import { probeLogScanRange } from '@arkade-os/solver-rails-evm/evm/logScanProbe.js'
+import { assertEvmClaimTraceSupport } from '@arkade-os/solver-rails-evm/evm/claimTraceProbe.js'
 import { createEvmBroadcaster, nonceSourceFor } from '@arkade-os/solver-rails-evm/evm/broadcast.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { addressFromPrivateKey } from '@arkade-os/solver-rails-evm/evm/transaction.js'
@@ -1131,6 +1132,7 @@ export const createServices = async (
       broadcast,
       payoutFunding: payoutFundingRegistration?.adapter,
       acceptingQuotes: payoutFundingRegistration?.acceptingQuotes,
+      assertClaimTraceSupport: (tokenAddress) => assertEvmClaimTraceSupport(rpc, tokenAddress),
       blockHeight,
       ...evmSendArkadeDeps(arkadeOps),
       arkade: arkadeOps,

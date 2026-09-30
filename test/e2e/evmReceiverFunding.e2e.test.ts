@@ -20,6 +20,7 @@ import { createNonceSource } from '@arkade-os/solver-rails-evm/evm/nonce.js'
 import { encodeClaim } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import { createDurableEvmSender } from '@arkade-os/solver-rails-evm/evm/durableSender.js'
 import { createReceiverBackend } from '@arkade-os/solver-rails-evm/evm/receiverBackend.js'
+import { assertEvmClaimTraceSupport } from '@arkade-os/solver-rails-evm/evm/claimTraceProbe.js'
 import { expectedReceiverRuntimeHash, type IntentReceiverBinding } from '@arkade-os/solver-rails-evm/evm/receiver.js'
 import { addressFromPrivateKey } from '@arkade-os/solver-rails-evm/evm/transaction.js'
 import { openArkade, type E2eArkade } from './support/stack.js'
@@ -91,6 +92,7 @@ beforeAll(async () => {
   rpc = evmRpc()
   // Earlier refund cases advance Anvil time; this file needs honest wall-clock cutoff checks.
   await rpc('anvil_reset', [])
+  await rpc('anvil_setAutomine', [true])
   const fixture = (name: string) =>
     readFileSync(fileURLToPath(new URL(`fixtures/${name}.runtime.hex`, import.meta.url)), 'utf8')
   await installContracts(rpc, fixture('erc20swap'), fixture('weth9'))
@@ -151,7 +153,7 @@ beforeAll(async () => {
         } | null
         throw new Error(
           `receiver deployment ${deployed.transactionHash} did not reach its canonical verified view; ` +
-            `latest=${JSON.stringify(head)}`,
+            `latest=${String(head?.number)}/${String(head?.timestamp)}/${String(head?.hash)}`,
         )
       }
       const observation = await receivers.inspect(deployed.address, immutable)
@@ -253,6 +255,7 @@ beforeAll(async () => {
     maxExposedSats: 1_000_000_000,
     admission: new AdmissionControl(),
     totalCommitted: async () => 0,
+    assertClaimTraceSupport: (tokenAddress) => assertEvmClaimTraceSupport(rpc, tokenAddress),
     markets: new Map([
       [
         hx(WETH),

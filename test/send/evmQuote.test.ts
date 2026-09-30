@@ -68,6 +68,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
     admission: new AdmissionControl(),
     totalCommitted: vi.fn().mockResolvedValue(0),
     markets: new Map([[TOKEN, market()]]),
+    assertClaimTraceSupport: vi.fn().mockResolvedValue(undefined),
     // 50,000 quote-units per whole BTC — a round number so the arithmetic below
     // is checkable by eye.
     fetchPrice: vi.fn().mockResolvedValue({ mantissa: 50_000n, scale: 0 }),
@@ -172,6 +173,33 @@ describe('the happy path', () => {
       expect(outcome.swap.evmTimeout).toBeGreaterThan(20_000_000)
       expect(outcome.swap.refundLocktime).toBe(NOW + DELAY + 7_500)
     }
+  })
+})
+
+describe('claim trace admission', () => {
+  it('refuses before pricing, payout preparation, or row insertion when traces are unsupported', async () => {
+    const unsupported = new Error('canonical token call trace unavailable')
+    const assertClaimTraceSupport = vi.fn().mockRejectedValue(unsupported)
+    const prepareQuote = vi.fn()
+    const abandonQuote = vi.fn()
+    const onTickError = vi.fn()
+    const { store, deps, service } = await build({
+      assertClaimTraceSupport,
+      payoutFunding: { identity: 'test', prepareQuote, abandonQuote } as never,
+      onTickError,
+    })
+
+    const outcome = await service.quote(request())
+
+    expect(outcome).toEqual({ accepted: false, reason: 'execution_unavailable' })
+    expect(assertClaimTraceSupport).toHaveBeenCalledOnce()
+    expect(assertClaimTraceSupport).toHaveBeenCalledWith(hex.decode(TOKEN.slice(2)))
+    expect(onTickError).toHaveBeenCalledWith('aa'.repeat(32), unsupported)
+    expect(deps.fetchPrice).not.toHaveBeenCalled()
+    expect(deps.totalCommitted).not.toHaveBeenCalled()
+    expect(prepareQuote).not.toHaveBeenCalled()
+    expect(abandonQuote).not.toHaveBeenCalled()
+    expect(await store.findLive()).toEqual([])
   })
 })
 
