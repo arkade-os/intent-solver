@@ -364,7 +364,11 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
     })
     await service.tick('swap-1')
     expect(transactionBlock).toHaveBeenCalledWith('0xlock')
-    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), LOCK_BLOCK - BigInt(quote().minConfirmations))
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), LOCK_BLOCK - BigInt(quote().minConfirmations), {
+      minConfirmations: 1,
+      minAgeSeconds: 0,
+      nowSeconds: NOW,
+    })
   })
 
   it('does not move the floor when the chain advances', async () => {
@@ -406,7 +410,11 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
     await store.transition('swap-1', 'quoted', 'funded')
     await store.transition('swap-1', 'funded', 'locking_evm')
     await service.tick('swap-1')
-    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 20_000_000n - BigInt(quote().minConfirmations))
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 20_000_000n - BigInt(quote().minConfirmations), {
+      minConfirmations: 1,
+      minAgeSeconds: 0,
+      nowSeconds: NOW,
+    })
   })
 
   it('falls back to the row`s own creation height when the lock txid resolves to no receipt', async () => {
@@ -419,7 +427,11 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
       } as never,
     })
     await service.tick('swap-1')
-    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 20_000_000n - BigInt(quote().minConfirmations))
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 20_000_000n - BigInt(quote().minConfirmations), {
+      minConfirmations: 1,
+      minAgeSeconds: 0,
+      nowSeconds: NOW,
+    })
   })
 
   it('still finds a Claim mined in the row`s own creation block', async () => {
@@ -458,7 +470,11 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
       now: () => NOW - 600,
     })
     await service.tick('swap-1')
-    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n)
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n, {
+      minConfirmations: 1,
+      minAgeSeconds: 0,
+      nowSeconds: NOW - 600,
+    })
   })
 
   it('clamps at genesis on a chain shallower than the margin', async () => {
@@ -471,7 +487,11 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
       } as never,
     })
     await service.tick('swap-1')
-    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n)
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n, {
+      minConfirmations: 1,
+      minAgeSeconds: 0,
+      nowSeconds: NOW,
+    })
   })
 })
 
@@ -1291,7 +1311,11 @@ describe('a lock that lands after the books closed', () => {
 
     await service.tickAll()
 
-    expect(evm.findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 20_999_999n)
+    expect(evm.findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 20_999_999n, {
+      minConfirmations: 1,
+      minAgeSeconds: 0,
+      nowSeconds: NOW,
+    })
     await store.close()
   })
 

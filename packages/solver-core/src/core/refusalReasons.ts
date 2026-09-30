@@ -51,11 +51,16 @@ type OrchestratorRefusal =
   | 'fee_consumes_swap'
   | 'payout_below_dust'
   | 'amount_out_of_range'
+  | 'execution_unavailable'
 
 export type RefusalReason =
   SendAcceptanceRefusal | SendPaymentRefusal | ReceiveFundingRefusal | OrchestratorRefusal | InvoiceRejection
 
 export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
+  execution_unavailable: {
+    meaning: 'The payout execution could not be prepared at the requested terms.',
+    whatToDo: 'Check the execution adapter and its capacity before accepting new quotes.',
+  },
   // --- the invoice itself, before any swap exists ---
   too_long: {
     meaning: 'The BOLT11 string was longer than we will parse at all (2048 chars), so it was rejected unread.',

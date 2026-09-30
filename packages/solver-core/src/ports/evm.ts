@@ -56,6 +56,12 @@ export interface Erc20SwapLock {
   timelock: bigint
 }
 
+export interface EvmClaimFinalityPolicy {
+  minConfirmations: number
+  minAgeSeconds: number
+  nowSeconds: number
+}
+
 /**
  * What an EVM swap corridor needs from a chain: reads about locks, and the
  * calldata for every money move — the SIGNING stays with whoever holds the
@@ -79,7 +85,7 @@ export interface EvmHtlcBackend {
    *
    * `fromBlock` MUST NOT be later than the lock's own block.
    */
-  findClaimPreimage(lock: Erc20SwapLock, fromBlock: bigint): Promise<Uint8Array | null>
+  findClaimPreimage(lock: Erc20SwapLock, fromBlock: bigint, policy?: EvmClaimFinalityPolicy): Promise<Uint8Array | null>
   /** A refund of THIS lock proven mined since `fromBlock`, whoever sent it -
    * the row's txid need not be the winner. False is "not proven", not "no". */
   findRefund(lock: Erc20SwapLock, fromBlock: bigint): Promise<boolean>

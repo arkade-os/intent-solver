@@ -18,7 +18,8 @@
 
 import { planEvmSend, type EvmSendAction, type EvmSendObservation } from '@arkade-os/solver-core/core/evmSendPlan.js'
 import { blocksForDuration, type EvmBlockCadence } from '@arkade-os/solver-rails-evm/evm/blockTime.js'
-import type { EvmSendSwapRow, EvmSendSwapStore } from '../db/evmSendSwaps.js'
+import type { EvmSendQuoteRecord, EvmSendSwapRow, EvmSendSwapStore } from '../db/evmSendSwaps.js'
+import { sendLockFromRow } from '../evm/lockFromRow.js'
 import type { EvmCall, EvmHtlcBackend, EvmTransactionOutcome } from '@arkade-os/solver-core/ports/evm.js'
 import { EVM_SEND_EXPOSED } from '@arkade-os/solver-core/core/evmSwapState.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
@@ -31,7 +32,11 @@ import { payoutSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPol
 import type { EvmMarket, EvmToken } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
 import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import { convertAmount } from '@arkade-os/solver-core/core/priceFeed.js'
-import { evaluateEvmSendAcceptance, type EvmSendAcceptanceRefusal } from '@arkade-os/solver-core/core/evmSend.js'
+import {
+  EVM_ORDER_MARGIN_SECONDS,
+  evaluateEvmSendAcceptance,
+  type EvmSendAcceptanceRefusal,
+} from '@arkade-os/solver-core/core/evmSend.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { evmSendCovenantRowFor } from '../evm/covenantRow.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
@@ -185,6 +190,7 @@ export type EvmSendQuoteRefusal =
   | 'price_unavailable'
   | 'rate_limited'
   | 'unsupported_token'
+  | 'execution_unavailable'
 
 export type EvmSendQuoteOutcome =
   { accepted: true; swap: EvmSendSwapRow } | { accepted: false; reason: EvmSendQuoteRefusal }
@@ -198,6 +204,9 @@ export class EvmSendSwapService {
   private readonly quoteLimiter: RateLimiter
 
   constructor(private readonly deps: EvmSendServiceDeps) {
+    if (Boolean(deps.payoutFunding?.prepareQuote) !== Boolean(deps.payoutFunding?.abandonQuote)) {
+      throw new Error('quote preparation and abandonment must be configured together')
+    }
     this.admission = deps.admission
     this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
   }
@@ -308,7 +317,11 @@ export class EvmSendSwapService {
     if (preimage === null && (EVM_SEND_EXPOSED as readonly string[]).includes(row.state)) {
       // Reported and survived, as `provenDepth` treats its failed reads.
       try {
-        const found = await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height))
+        const found = await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height), {
+          minConfirmations: row.minConfirmations,
+          minAgeSeconds: row.minAgeSeconds,
+          nowSeconds: this.now(),
+        })
         preimage = found === null ? null : Buffer.from(found).toString('hex')
       } catch (error) {
         this.deps.onTickError?.(row.id, error)
@@ -560,60 +573,60 @@ export class EvmSendSwapService {
     if (reservation === null) return { accepted: false, reason: 'provider_at_capacity' }
 
     try {
-      const price = await this.deps.fetchPrice(market.priceFeed, market.pricePath)
-      // ROUNDED DOWN: the solver is paying this out, so a sub-unit remainder
-      // stays with the solver rather than being given away on every swap.
-      evmAmount = convertAmount({
-        baseAmount: BigInt(payoutSats),
-        price,
-        baseDecimals: 8,
-        quoteDecimals: token.decimals,
-        rounding: 'down',
+      try {
+        const price = await this.deps.fetchPrice(market.priceFeed, market.pricePath)
+        // ROUNDED DOWN: the solver is paying this out, so a sub-unit remainder
+        // stays with the solver rather than being given away on every swap.
+        evmAmount = convertAmount({
+          baseAmount: BigInt(payoutSats),
+          price,
+          baseDecimals: 8,
+          quoteDecimals: token.decimals,
+          rounding: 'down',
+        })
+      } catch {
+        return { accepted: false, reason: 'price_unavailable' }
+      }
+      if (evmAmount <= 0n) return { accepted: false, reason: 'payout_below_dust' }
+      // The inventory bound, in the token's own units, enforced at QUOTE time —
+      // the sats bound above is width-limited and reads generous precisely when
+      // the price has run away; this is the knob that still refuses then.
+      if (
+        served.tokenLimits !== undefined &&
+        (evmAmount < served.tokenLimits.minUnits || evmAmount > served.tokenLimits.maxUnits)
+      ) {
+        return { accepted: false, reason: 'amount_out_of_range' }
+      }
+
+      const serverKey = hex.decode(arkade.serverPubkey)
+      const id = crypto.randomUUID()
+      // Constructed from parts rather than through `covenantScriptFromRow`: that
+      // helper rebuilds a script from a row that already carries its `pkScript`,
+      // and here the pkScript is what we are deriving. The field mapping is the
+      // one `evmSendCovenantRowFor` uses in the other direction — the SOLVER is
+      // the receiver on this leg, because the solver claims the client's sats.
+      const arkadeScript = new CovenantSwapScript({
+        receiver: hex.decode(arkade.providerPubkey),
+        server: serverKey,
+        // The 20-byte ripemd160(sha256(P)) the script wants, never a raw decode of
+        // the wire's sha256 form.
+        preimageHash: scriptHashFromPaymentHash(request.paymentHash),
+        refundLocktime: acceptance.refundLocktime,
+        claimDelay: arkade.delays.unilateralClaimDelay,
+        client: hex.decode(request.clientRefundPubkey),
+        clientRefundDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
+        refundWithoutServerDelay: arkade.delays.unilateralRefundDelay,
+        // Every quote from here on carries the current, full covenant suite —
+        // no legacy selector. See `NonInteractiveParameters.legacy`'s own doc comment
+        // for why that is not simply always omitted.
+        nonInteractiveParameters: {
+          emulatorPubkey: hex.decode(arkade.emulatorPubkey),
+          receiverPkScript: hex.decode(arkade.receiverPkScript),
+          senderPkScript: refundPkScript,
+        },
       })
-    } catch {
-      return { accepted: false, reason: 'price_unavailable' }
-    }
-    if (evmAmount <= 0n) return { accepted: false, reason: 'payout_below_dust' }
-    // The inventory bound, in the token's own units, enforced at QUOTE time —
-    // the sats bound above is width-limited and reads generous precisely when
-    // the price has run away; this is the knob that still refuses then.
-    if (
-      served.tokenLimits !== undefined &&
-      (evmAmount < served.tokenLimits.minUnits || evmAmount > served.tokenLimits.maxUnits)
-    ) {
-      return { accepted: false, reason: 'amount_out_of_range' }
-    }
 
-    const serverKey = hex.decode(arkade.serverPubkey)
-    const id = crypto.randomUUID()
-    // Constructed from parts rather than through `covenantScriptFromRow`: that
-    // helper rebuilds a script from a row that already carries its `pkScript`,
-    // and here the pkScript is what we are deriving. The field mapping is the
-    // one `evmSendCovenantRowFor` uses in the other direction — the SOLVER is
-    // the receiver on this leg, because the solver claims the client's sats.
-    const arkadeScript = new CovenantSwapScript({
-      receiver: hex.decode(arkade.providerPubkey),
-      server: serverKey,
-      // The 20-byte ripemd160(sha256(P)) the script wants, never a raw decode of
-      // the wire's sha256 form.
-      preimageHash: scriptHashFromPaymentHash(request.paymentHash),
-      refundLocktime: acceptance.refundLocktime,
-      claimDelay: arkade.delays.unilateralClaimDelay,
-      client: hex.decode(request.clientRefundPubkey),
-      clientRefundDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
-      refundWithoutServerDelay: arkade.delays.unilateralRefundDelay,
-      // Every quote from here on carries the current, full covenant suite —
-      // no legacy selector. See `NonInteractiveParameters.legacy`'s own doc comment
-      // for why that is not simply always omitted.
-      nonInteractiveParameters: {
-        emulatorPubkey: hex.decode(arkade.emulatorPubkey),
-        receiverPkScript: hex.decode(arkade.receiverPkScript),
-        senderPkScript: refundPkScript,
-      },
-    })
-
-    try {
-      const swap = await store.insertQuote({
+      const candidate: EvmSendQuoteRecord = {
         id,
         paymentHash: request.paymentHash,
         amountSats: request.amountSats,
@@ -655,16 +668,59 @@ export class EvmSendSwapService {
         receiverPkScript: arkade.receiverPkScript,
         nonInteractiveParameters: true,
         rfqId: request.rfqId ?? null,
-      })
-      return { accepted: true, swap }
-    } catch (error) {
-      if (error instanceof UniqueConstraintError) {
-        return { accepted: false, reason: 'duplicate_swap' }
       }
-      throw error
+      const funding = this.deps.payoutFunding
+      let preparedBinding: ReturnType<typeof payoutFundingBinding> | undefined
+      try {
+        if (funding?.prepareQuote) {
+          preparedBinding = payoutFundingBinding(funding.identity, candidate, sendLockFromRow(candidate))
+          try {
+            const prepared = await funding.prepareQuote({
+              binding: preparedBinding,
+              nowSeconds: this.now(),
+              blockHeight: await this.deps.blockHeight(),
+              tokenDecimals: token.decimals,
+              orderMarginSeconds: chain.orderMarginSeconds ?? EVM_ORDER_MARGIN_SECONDS,
+              quoteValiditySeconds: chain.quoteValiditySeconds,
+            })
+            if (prepared) {
+              const end = this.now()
+              if (
+                !Number.isSafeInteger(prepared.validUntil) ||
+                prepared.validUntil <= end ||
+                prepared.validUntil > end + chain.quoteValiditySeconds ||
+                prepared.validUntil >= candidate.refundLocktime
+              ) {
+                throw new Error('invalid prepared quote expiry')
+              }
+              candidate.validUntil = prepared.validUntil
+              preparedBinding = payoutFundingBinding(funding.identity, candidate, sendLockFromRow(candidate))
+            } else if (candidate.validUntil <= this.now()) {
+              throw new Error('prepared quote expired')
+            }
+          } catch (error) {
+            this.deps.onTickError?.(candidate.id, error)
+            return { accepted: false, reason: 'execution_unavailable' }
+          }
+        }
+        const swap = await store.insertQuote(candidate)
+        preparedBinding = undefined
+        return { accepted: true, swap }
+      } catch (error) {
+        if (error instanceof UniqueConstraintError) {
+          return { accepted: false, reason: 'duplicate_swap' }
+        }
+        throw error
+      } finally {
+        if (preparedBinding && funding?.abandonQuote) {
+          try {
+            await funding.abandonQuote(preparedBinding)
+          } catch (error) {
+            this.deps.onTickError?.(candidate.id, error)
+          }
+        }
+      }
     } finally {
-      // On every path. The inserted row is what `totalCommitted()` counts from
-      // here on, so holding the claim past this point would double-count it.
       reservation.release()
     }
   }
@@ -728,7 +784,11 @@ export class EvmSendSwapService {
         const present = await this.deps.evm.isLocked(lock)
         const claimed =
           row.preimage === null
-            ? await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height))
+            ? await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height), {
+                minConfirmations: row.minConfirmations,
+                minAgeSeconds: row.minAgeSeconds,
+                nowSeconds: this.now(),
+              })
             : null
         if (claimed !== null) {
           await store.patch(row.id, { preimage: Buffer.from(claimed).toString('hex') })

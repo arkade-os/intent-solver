@@ -1,5 +1,5 @@
 import type { Erc20SwapLock } from '@arkade-os/solver-core/ports/evm.js'
-import type { EvmSendSwapRow } from '../db/evmSendSwaps.js'
+import type { EvmSendSwapRow, EvmSendQuoteRecord } from '../db/evmSendSwaps.js'
 
 import type { EvmPayoutFundingBinding, EvmPayoutFundingResult } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
 export type {
@@ -7,6 +7,7 @@ export type {
   EvmPayoutFundingBinding,
   EvmPayoutFundingContext,
   EvmPayoutFundingMode,
+  EvmPayoutFundingQuoteContext,
   EvmPayoutFundingResult,
 } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
 
@@ -26,7 +27,7 @@ const validInteger = (value: number, positive = false): boolean =>
 
 export const payoutFundingBinding = (
   adapterId: string,
-  row: EvmSendSwapRow,
+  row: EvmSendSwapRow | EvmSendQuoteRecord,
   lock: Erc20SwapLock,
 ): EvmPayoutFundingBinding => {
   if (!adapterId.trim() || !row.id || !/^[1-9][0-9]*$/.test(row.evmAmount)) {
