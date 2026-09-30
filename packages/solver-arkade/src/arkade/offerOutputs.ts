@@ -25,7 +25,7 @@
  * and if offers ever become something the wallet tracks for its own sake, this
  * is the module that should move.
  */
-import { hasTerminalSpend } from '@arkade-os/sdk'
+import { isVtxoSpent } from '@arkade-os/sdk'
 import type { ArkadeContext } from './wallet.js'
 import { vtxoPages } from './indexerPaging.js'
 import type { OfferOutputView } from './offerDeposit.js'
@@ -51,8 +51,8 @@ export const offerOutputsAt = async (
       outputs.push({
         script: vtxo.script,
         value: Number(vtxo.value),
-        // `hasTerminalSpend`, not `vtxo.isSpent` — see `lockupSpendEvidence` (wallet.ts).
-        isSpent: hasTerminalSpend(vtxo),
+        // `isVtxoSpent`, not `vtxo.isSpent` — see `lockupSpendEvidence` (wallet.ts).
+        isSpent: isVtxoSpent(vtxo),
         // Kept SEPARATE from the spend, exactly as the SDK keeps it: a swept
         // output is not a terminal spend, and folding the two would lose the
         // distinction the deposit summing already makes.

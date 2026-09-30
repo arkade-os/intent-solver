@@ -19,7 +19,7 @@ import {
   EsploraProvider,
   Extension,
   getArkPsbtFields,
-  hasTerminalSpend,
+  isVtxoSpent,
   matchServerCheckpoints,
   MnemonicIdentity,
   PrevArkTxField,
@@ -473,7 +473,7 @@ export const totalValue = (outputs: readonly FundedOutput[]): number =>
  * Every outpoint this script has ever held — SPENT ONES INCLUDED, unlike {@link findLockups},
  * so {@link findClaimPreimage} can still find the claimed outpoint. `value` lets the receive
  * leg tell its own funding from a dust payment to a public address. Paged like findLockups;
- * unfiltered and `hasTerminalSpend` for the reasons at {@link lockupSpendEvidence}.
+ * unfiltered and `isVtxoSpent` for the reasons at {@link lockupSpendEvidence}.
  */
 export const findLockupOutpoints = async (
   ctx: Pick<ArkadeContext, 'wallet'>,
@@ -482,7 +482,7 @@ export const findLockupOutpoints = async (
   const outpoints: { txid: string; vout: number; value: number; spent: boolean }[] = []
   for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
     for (const vtxo of batch) {
-      outpoints.push({ txid: vtxo.txid, vout: vtxo.vout, value: Number(vtxo.value), spent: hasTerminalSpend(vtxo) })
+      outpoints.push({ txid: vtxo.txid, vout: vtxo.vout, value: Number(vtxo.value), spent: isVtxoSpent(vtxo) })
     }
   }
   return outpoints
@@ -501,7 +501,7 @@ export type LockupSpendEvidence = 'unknown' | 'unspent' | 'spent'
 
 /**
  * Unfiltered on purpose — every `getVtxos` state filter is opt-in narrowing, so none keeps
- * spent outputs. `hasTerminalSpend`, not a `spentBy` test: the wire contract permits
+ * spent outputs. `isVtxoSpent`, not a `spentBy` test: the wire contract permits
  * `isSpent: true` with an empty `spentBy`. A SWEPT output is not a terminal spend, so a
  * swept batch stays actionable; no output at all is `unknown` (lag), never proof.
  */
@@ -512,7 +512,7 @@ export const lockupSpendEvidence = async (
   const { vtxos } = await ctx.wallet.indexerProvider.getVtxos({ scripts: [pkScriptHex] })
   const all = vtxos ?? []
   if (all.length === 0) return 'unknown'
-  return all.every((vtxo) => hasTerminalSpend(vtxo)) ? 'spent' : 'unspent'
+  return all.every((vtxo) => isVtxoSpent(vtxo)) ? 'spent' : 'unspent'
 }
 
 /**

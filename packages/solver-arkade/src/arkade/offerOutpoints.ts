@@ -15,7 +15,7 @@
  * output a fill would spend, which reads as "the client never funded it" rather
  * than as an error.
  */
-import { hasTerminalSpend } from '@arkade-os/sdk'
+import { isVtxoSpent } from '@arkade-os/sdk'
 import type { ArkadeContext } from './wallet.js'
 import { vtxoPages } from './indexerPaging.js'
 import { heldOf } from './offerFill.js'
@@ -43,7 +43,7 @@ export const liveOfferOutpoints = async (
   const outpoints: OfferOutpoint[] = []
   for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
     for (const vtxo of batch) {
-      if (hasTerminalSpend(vtxo) || vtxo.isSwept === true) continue
+      if (isVtxoSpent(vtxo) || vtxo.isSwept === true) continue
       const carried = (vtxo as { assets?: { assetId: string; amount: bigint | string }[] }).assets ?? []
       outpoints.push({
         txid: vtxo.txid,

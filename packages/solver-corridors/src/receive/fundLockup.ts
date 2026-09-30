@@ -22,6 +22,8 @@ import { CLAIM_PACKET_TYPE } from '@arkade-os/swap'
 import { MAX_REFUND_HORIZON } from '@arkade-os/solver-core/core/receive.js'
 import { json, log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
+export const LOCKUP_FUNDING_FILTER = { withRecoverable: false, genericallySpendableOnly: true } as const
+
 /**
  * A funding failure that provably submitted nothing. The boundary is
  * `ctx.wallet.send()`, whose ambiguous errors stay unwrapped because a lost response cannot be
@@ -153,7 +155,9 @@ const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number, scope
   // generic-spending gate — which here would mean funding one lockup out of
   // another live one's escrow, since `vhtlc-v2` is exactly what the gate hides.
   const started = performance.now()
-  const spendable = await withProviderTimingScope({ fundRef: scope }, () => ctx.wallet.getSpendableVtxos())
+  const spendable = await withProviderTimingScope({ fundRef: scope }, () =>
+    ctx.wallet.getSpendableVtxos(LOCKUP_FUNDING_FILTER),
+  )
   const readMs = Math.round(performance.now() - started)
   const selectStarted = performance.now()
   // Passed WHOLE, not mapped down: `selectedVtxos` needs the entire VTXO (script,

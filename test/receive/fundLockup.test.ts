@@ -34,10 +34,10 @@ const harness = (over: { spendable?: unknown; send?: () => Promise<string> } = {
           throw new Error('funding must not refetch server info: dust is read at boot')
         },
       },
-      getSpendableVtxos: async () => {
+      getSpendableVtxos: vi.fn(async () => {
         if (typeof over.spendable === 'function') return (over.spendable as () => unknown[])()
         return over.spendable ?? [coin(50_000)]
-      },
+      }),
       send: async (request: { selectedVtxos?: unknown[] }) => {
         state.sendCalls += 1
         state.selectedInputs = request.selectedVtxos?.length ?? 0
@@ -145,6 +145,16 @@ describe('fundLockup — what it proves about submission', () => {
 
     await expect(fundLockup(h.ctx, ADDRESS, 50_000)).resolves.toBe('ark-txid')
     expect(h.reservations.reserved().size).toBe(0)
+  })
+
+  it('requests only generically spendable, nonrecoverable funding inputs', async () => {
+    const h = harness()
+
+    await fundLockup(h.ctx, ADDRESS, 50_000)
+    expect(h.ctx.wallet.getSpendableVtxos).toHaveBeenCalledWith({
+      withRecoverable: false,
+      genericallySpendableOnly: true,
+    })
   })
 
   it('gives separate funding attempts to the same address distinct timing references', async () => {

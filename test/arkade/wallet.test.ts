@@ -610,7 +610,7 @@ describe('findClaimPreimage', () => {
   })
 
   it('reads a spend named only by settledBy, which spentBy alone would miss', async () => {
-    // The SDK's own `hasTerminalSpend` documents that the wire contract permits
+    // The SDK's own `isVtxoSpent` documents that the wire contract permits
     // `isSpent: true` with an EMPTY `spentBy` — so a reader that consults only
     // that field can look straight past a claim that really landed, and never
     // learn `P` for it. Union both, and this resolves.
@@ -720,7 +720,7 @@ describe('findLockupOutpoints', () => {
     // The Lightning receive leg funds its own lockup and decides whether to
     // fund by comparing this value against the row's payout — an outpoint
     // alone cannot tell its own funding from a stray dust payment to a public
-    // address. `spent` is `hasTerminalSpend`, so `isSpent: true` with an empty
+    // address. `spent` is `isVtxoSpent`, so `isSpent: true` with an empty
     // `spentBy` (which the wire contract permits) still reads as spent.
     const ctx = ctxReturning([
       { txid: SPENT.txid, vout: 0, value: 4_900, isSpent: true, spentBy: '', settledBy: '' },
@@ -771,7 +771,7 @@ describe('findLockupOutpoints', () => {
 
 describe('lockupProvablySpent', () => {
   // The module mock at the top of this file spreads `...actual`, so the
-  // `hasTerminalSpend` these exercise is the REAL SDK predicate, not a stub.
+  // `isVtxoSpent` these exercise is the REAL SDK predicate, not a stub.
   // That is the point: this is the SDK boundary, and the whole safety argument
   // for writing a permanent `refund_outcome: 'external'` rests on what that
   // predicate does with the fixtures below.
@@ -800,7 +800,7 @@ describe('lockupProvablySpent', () => {
     // refund the client never received, permanently, via a `refund_outcome`
     // write that `findRefundable` then filters out forever.
     //
-    // Holds because the SDK keeps the two facts separate: `hasTerminalSpend` is
+    // Holds because the SDK keeps the two facts separate: `isVtxoSpent` is
     // `isSpent || spentBy || settledBy` and never consults `isSwept`, which is
     // ORed in explicitly (and only) by `canSpendOffchain`/`canRecoverOnchain`.
     const ctx = ctxReturning([vtxo({ isSwept: true, isSpent: false, spentBy: '', settledBy: '' })])
