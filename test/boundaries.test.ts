@@ -360,6 +360,9 @@ describe('layer boundaries', () => {
  */
 const CORRIDOR_RECORD_CENSUS: Readonly<Record<string, number>> = {
   'packages/solver-app/src/config.ts': 12,
+  // DEBT: the ad's per-corridor quote window. Uncast, so it does force an answer;
+  // it belongs on the descriptor once the send window stops being config-driven.
+  'packages/solver-app/src/admin/routes/card.ts': 1,
 }
 
 describe('the corridor record census', () => {

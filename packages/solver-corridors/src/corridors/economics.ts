@@ -28,8 +28,8 @@ import type { OnchainReceiveSwapRow } from '../db/onchainReceiveSwaps.js'
 import type { AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 
 /**
- * The word every store in this package sends an EXPOSED failure to — each one's
- * `failStates.exposed`, and the asset store's `fail()` routing.
+ * The word every store in this package sends an EXPOSED failure to —
+ * `BaseSwapStore.fail()` and the asset store's `fail()` routing.
  *
  * A row here is one where the solver paid out and was not made whole, which is
  * the only state this layer is willing to call a LOSS. `refused` is not one:
@@ -37,6 +37,20 @@ import type { AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
  * claim.
  */
 const LOST = 'stuck'
+
+const common = (
+  descriptor: CorridorDescriptor,
+  row: { id: string; state: string; createdAt: number; updatedAt: number },
+  state: string = row.state,
+) => ({
+  id: row.id,
+  corridor: descriptor.pair,
+  state,
+  phase: phaseOfStates(descriptor.states, state),
+  quotedAt: row.createdAt,
+  settledAt: row.updatedAt,
+  lost: row.state === LOST,
+})
 
 const sats = (amount: number | null): { assetId: null; amount: string | null; decimals: number } => ({
   assetId: null,
@@ -105,15 +119,9 @@ const invoiceSats = (invoice: string): number | null => {
  * the same way. The invoice amount is the only record of what this solver paid,
  * because nothing else on the row holds it.
  */
-export const sendEconomics = (row: SendSwapRow): SwapEconomics => {
-  const state = presentedState(row.state, row.refundOutcome)
-  return economicsOf({
-    id: row.id,
-    corridor: LN_SEND.pair,
-    state,
-    phase: phaseOfStates(LN_SEND.states, state),
-    quotedAt: row.createdAt,
-    settledAt: row.updatedAt,
+export const sendEconomics = (row: SendSwapRow): SwapEconomics =>
+  economicsOf({
+    ...common(LN_SEND, row, presentedState(row.state, row.refundOutcome)),
     // Null until the lockup is seen. Substituting the quoted figure would book
     // a spread on a swap nobody has funded and may never fund.
     inbound: sats(row.lockupValue),
@@ -128,9 +136,7 @@ export const sendEconomics = (row: SendSwapRow): SwapEconomics => {
     // all. Null on rows predating the column and on any backend that does not
     // report a fee — unmeasured, never free. @see SwapEconomics.realizedCostSats
     realizedCostSats: row.routingFeePaidSats,
-    lost: row.state === LOST,
   })
-}
 
 /**
  * Lightning receive. The intake is the client's held HTLC, and the evidence is
@@ -149,33 +155,19 @@ export const sendEconomics = (row: SendSwapRow): SwapEconomics => {
  */
 export const receiveEconomics = (row: ReceiveSwapRow): SwapEconomics =>
   economicsOf({
-    id: row.id,
-    corridor: LN_RECEIVE.pair,
-    state: row.state,
-    phase: phaseOfStates(LN_RECEIVE.states, row.state),
-    quotedAt: row.createdAt,
-    settledAt: row.updatedAt,
+    ...common(LN_RECEIVE, row),
     inbound: sats(fundedByLifecycle(row.state, null) ? row.amountSats : null),
     outbound: sats(row.payoutSats),
-    lost: row.state === LOST,
   })
 
-export const onchainSendEconomics = (row: OnchainSendSwapRow): SwapEconomics => {
-  const state = presentedState(row.state, row.refundOutcome)
-  return economicsOf({
-    id: row.id,
-    corridor: ONCHAIN_SEND.pair,
-    state,
-    phase: phaseOfStates(ONCHAIN_SEND.states, state),
-    quotedAt: row.createdAt,
-    settledAt: row.updatedAt,
+export const onchainSendEconomics = (row: OnchainSendSwapRow): SwapEconomics =>
+  economicsOf({
+    ...common(ONCHAIN_SEND, row, presentedState(row.state, row.refundOutcome)),
     // No column records the client's Arkade lockup on this leg, so the
     // lifecycle is the evidence. @see fundedByLifecycle
     inbound: sats(fundedByLifecycle(row.state, row.refundOutcome) ? row.amountSats : null),
     outbound: sats(row.payoutSats),
-    lost: row.state === LOST,
   })
-}
 
 /**
  * Onchain receive, read from the AMENDED pair when there is one.
@@ -188,17 +180,11 @@ export const onchainSendEconomics = (row: OnchainSendSwapRow): SwapEconomics => 
  */
 export const onchainReceiveEconomics = (row: OnchainReceiveSwapRow): SwapEconomics =>
   economicsOf({
-    id: row.id,
-    corridor: ONCHAIN_RECEIVE.pair,
-    state: row.state,
-    phase: phaseOfStates(ONCHAIN_RECEIVE.states, row.state),
-    quotedAt: row.createdAt,
-    settledAt: row.updatedAt,
+    ...common(ONCHAIN_RECEIVE, row),
     // `fundingTxid` is the CLIENT's HTLC — the solver's own broadcast is
     // `arkadeFundTxid` — so it is exact evidence that the intake arrived.
     inbound: sats(row.fundingTxid === null ? null : (row.fundedValueSats ?? row.amountSats)),
     outbound: sats(row.fundedPayoutSats ?? row.payoutSats),
-    lost: row.state === LOST,
   })
 
 /**
@@ -220,12 +206,7 @@ export const onchainReceiveEconomics = (row: OnchainReceiveSwapRow): SwapEconomi
  */
 export const assetRfqEconomics = (row: AssetRfqSwapRow, descriptor: CorridorDescriptor): SwapEconomics =>
   economicsOf({
-    id: row.id,
-    corridor: descriptor.pair,
-    state: row.state,
-    phase: phaseOfStates(descriptor.states, row.state),
-    quotedAt: row.createdAt,
-    settledAt: row.updatedAt,
+    ...common(descriptor, row),
     // The deposit outpoint is exact evidence: until one is observed at the
     // offer script, the quoted `fromAmount` is terms and not an intake.
     inbound: {
@@ -249,5 +230,4 @@ export const assetRfqEconomics = (row: AssetRfqSwapRow, descriptor: CorridorDesc
       row.fillPriceMantissa === null || row.fillPriceScale === null
         ? null
         : { mantissa: row.fillPriceMantissa.toString(), scale: row.fillPriceScale },
-    lost: row.state === LOST,
   })

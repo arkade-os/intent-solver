@@ -21,7 +21,8 @@ import { corridorEnabledFrom } from './corridorEnabled.js'
 import { evmCorridorFor, type EvmCorridor } from './corridorPolicy.js'
 import type { Fee } from './corridorPolicy.js'
 import type { Limits } from './limits.js'
-import { defaultPricePath, validatePricePath } from './priceFeed.js'
+import { STEM_SYMBOL } from './marketKey.js'
+import { defaultPricePath, MAX_DECIMALS, validatePricePath } from './priceFeed.js'
 
 export interface EvmToken {
   /** Uppercase label, and the env stem fragment. */
@@ -73,17 +74,6 @@ export interface EvmCorridorPolicy {
 }
 
 /** `SYMBOL:0xaddress:decimals`, comma separated. Empty or unset means no EVM corridors. */
-const SYMBOL = /^[A-Z][A-Z0-9]{0,11}$/
-
-/**
- * The widest precision a token may declare.
- *
- * The same bound `convertAmount` enforces, and it must stay the same: a token
- * past it would be refused there instead, mid-quote, after the corridor had
- * already advertised the pair.
- */
-const MAX_DECIMALS = 36
-
 export const parseEvmTokens = (raw: string | undefined): readonly EvmToken[] => {
   const trimmed = raw?.trim()
   if (!trimmed) return []
@@ -100,7 +90,7 @@ export const parseEvmTokens = (raw: string | undefined): readonly EvmToken[] => 
         `EVM_TOKENS decimals must be an integer in 0..${MAX_DECIMALS}, got ${JSON.stringify(decimalsRaw)}`,
       )
     }
-    if (!SYMBOL.test(symbol)) {
+    if (!STEM_SYMBOL.test(symbol)) {
       throw new Error(`EVM_TOKENS symbol must be 1-12 uppercase alphanumerics starting with a letter, got ${symbol}`)
     }
     // Built through `evmCorridorFor` so the address rule lives in ONE place —

@@ -18,12 +18,11 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.4.76",
+    "@arkade-os/sdk": "0.4.77",
     "@arkade-os/solver-arkade": "workspace:*",
     "@arkade-os/solver-core": "workspace:*",
     "@arkade-os/solver-corridors": "workspace:*",
     "@arkade-os/solver-corridors-evm": "workspace:*",
-    "@arkade-os/solver-db": "workspace:*",
     "@arkade-os/solver-rails": "workspace:*",
     "@arkade-os/solver-rails-esplora": "workspace:*",
     "@arkade-os/solver-rails-evm": "workspace:*",
@@ -41,6 +40,6 @@
     "undici": "7.29.1"
   },
   "devDependencies": {
-    "@arkade-os/swap": "0.0.22"
+    "@arkade-os/swap": "0.0.23"
   }
 }

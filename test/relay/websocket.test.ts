@@ -280,6 +280,43 @@ describe('webSocketRelayConnection', () => {
 
     await until(() => seen.some((e) => e.id === 'queued'), 5000)
   })
+
+  it('flushes the rest of the queue past an event the codec cannot encode', async () => {
+    const probe = startBroker(0)
+    const port = (probe.address() as { port: number }).port
+    await stopServer(probe)
+    const codec: WireCodec = {
+      ...devCodec,
+      encodeEvent: (event) => {
+        if (event.id === 'bad') throw new Error('unencodable')
+        return devCodec.encodeEvent(event)
+      },
+    }
+    const notices: RelayNotice[] = []
+    const connection = track(
+      webSocketRelayConnection(`ws://127.0.0.1:${port}`, {
+        reconnectDelaysMs: [40],
+        codec,
+        onNotice: (n) => notices.push(n),
+      }),
+    )
+    for (const id of ['bad', 'good']) {
+      await connection.publish({ id, author: 'provider', recipient: 'client', createdAtMs: 3, payload: {} })
+    }
+
+    const server = startBroker(port)
+    closed.push(async () => stopServer(server))
+    const seen: string[] = []
+    server.on('connection', (socket) => {
+      socket.on('message', (raw) => {
+        const frame = JSON.parse(String(raw)) as { op: string; event?: RelayEvent }
+        if (frame.op === 'event' && frame.event) seen.push(frame.event.id)
+      })
+    })
+    await until(() => seen.length > 0, 5000)
+    expect(seen).toEqual(['good'])
+    expect(notices).toEqual([expect.objectContaining({ kind: 'rejected', ref: 'bad' })])
+  })
 })
 
 /** Records every `sub` filter the broker is sent, across reconnects. */

@@ -28,7 +28,7 @@ import {
   tempStoreDir,
   type E2eArkade,
 } from './support/stack.js'
-import { streamOfferTxs, OFFER_PACKET_FILTER } from '@arkade-os/solver-arkade/arkade/offerStream.js'
+import { streamOfferTxs } from '@arkade-os/solver-arkade/arkade/offerStream.js'
 import { offerIsConsistent } from '@arkade-os/solver-arkade/arkade/offerConsistency.js'
 import { offerDepositFrom } from '@arkade-os/solver-arkade/arkade/offerDeposit.js'
 import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
@@ -82,7 +82,6 @@ describe('e2e arkade offers — publish, discover, settle', () => {
       const watching = (async () => {
         for await (const event of streamOfferTxs({
           arkdUrl: ARKD_URL,
-          expressions: [OFFER_PACKET_FILTER],
           signal: controller.signal,
         })) {
           seen.push(event)

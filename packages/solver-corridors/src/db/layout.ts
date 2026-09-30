@@ -3,25 +3,10 @@ import { existsSync } from 'node:fs'
 /**
  * Where each corridor's tables live.
  *
- * Historically every store opened its own SQLite file, derived from
- * `SWAP_DB_PATH` by suffix — `-onchain`, `-receive`, `-onchain-receive`,
- * `-admin`. Nothing forced that: each store's `open()` already takes a driver
- * rather than a path, and no two stores name the same table or index. It was
- * just what the call site did, and it cost operators real money — the runbook
- * and the compose file's litestream sidecar both named one file, so a backup
- * taken by the book covered one corridor of four.
- *
- * A FRESH deployment now puts every table in the single `SWAP_DB_PATH` file:
- * one file to back up, one connection, and — the reason this matters beyond
- * tidiness — one transaction that could span every corridor's table, which is
- * what a durable cross-corridor exposure reserve would need (today's reserve fixes the
- * in-process half; the multi-process half needs this).
- *
- * An EXISTING deployment keeps the files it already has. Nothing copies rows
- * between databases, so upgrading cannot strand, duplicate or half-move a
- * funded swap — the failure mode that makes automatic data migration a poor
- * trade on a money path. Those deployments keep today's behaviour exactly,
- * including that multi-process gap.
+ * A FRESH deployment puts every table in the single `SWAP_DB_PATH` file: one file
+ * to back up, and one transaction that could span every corridor's table. An
+ * EXISTING split deployment keeps its suffixed files: nothing copies rows between
+ * databases, so upgrading cannot strand, duplicate or half-move a funded swap.
  */
 export interface DbLayout {
   /** True when every table shares `swapDbPath`. */

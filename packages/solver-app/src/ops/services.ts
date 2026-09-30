@@ -19,11 +19,11 @@ import type { Corridor as CorridorPlugin } from '@arkade-os/solver-core/core/cor
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { resolveDbLayout } from '@arkade-os/solver-corridors/db/layout.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
-import { ArkAddress, RestEmulatorProvider } from '@arkade-os/sdk'
+import { RestEmulatorProvider } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
-import { Transaction, SigHash, p2tr, Address, OutScript } from '@scure/btc-signer'
+import { Address, OutScript } from '@scure/btc-signer'
 import { corridorSetFromDeps, readerSetFromDeps } from './corridorSet.js'
-import { loadConfig, swapDbPath, type Config } from '../config.js'
+import type { Config } from '../config.js'
 import type { PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { onchainCorridorPricing, onchainFeeRateSampler } from './onchainPricing.js'
 import { onchainFloatSampler, type FloatSampler } from './floatSampler.js'
@@ -31,8 +31,8 @@ import { claimSpendVsize, fundingTxVsize } from '@arkade-os/solver-rails/onchain
 import { esploraChainTip } from '@arkade-os/solver-rails/onchain/chainTip.js'
 import { createEsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
 import type { Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
-import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
-import { OnchainSendSwapStore, type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
+import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
 import { EvmSendSwapStore } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import { EvmReceiveSwapStore } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
 import { loadEvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
@@ -50,28 +50,22 @@ import {
   createArkadeContext,
   findClaimPreimage,
   findLockupOutpoints,
-  findLockups,
-  refundSwapScript,
   type ArkadeContext,
 } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import type { LightningBackend, SendBackend } from '@arkade-os/solver-core/ports/lightning.js'
+import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import { FakeLightningBackend } from '@arkade-os/solver-rails-fake/ln/fake/backend.js'
 import { LndLightningBackendAdapter } from '@arkade-os/solver-rails-lnd/ln/lnd/adapter.js'
 import { FakeOnchainBackend } from '@arkade-os/solver-rails-fake/onchain/fake/backend.js'
 import { LndOnchainAdapter } from '@arkade-os/solver-rails-lnd/onchain/lnd/adapter.js'
 import { lightningRailFor, type LightningRail } from './rails.js'
-import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
+import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { arkadeOpsFromContext } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { OnchainReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 import { AdminStore } from '../admin/db.js'
-import {
-  assetMarketPolicy,
-  type AssetMarketPair,
-  type AssetMarketPricingView,
-} from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { assetMarketPolicy, type AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { applyOverrides } from '../admin/settings.js'
 import { createOfferRefusalTail, type OfferRefusalRecorder } from '../admin/offerRefusals.js'
 import { createRfqRefusalTail, type RfqRefusalRecorder } from '../admin/rfqRefusals.js'
@@ -81,10 +75,10 @@ import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/o
 import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
 import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
-import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
+import { json, log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { createSerialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
-import { poolPlan, mintPool, committedAcrossCorridors } from './pool.js'
+import { committedAcrossCorridors } from './pool.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { AssetOfferService, type AssetMarket } from './assetOffers.js'
 import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
@@ -146,17 +140,9 @@ export interface Services {
   bootOverrides: Record<string, string>
   /**
    * The Arkade asset markets this process trades, from the console's stored rows.
-   * {@link Services.replaceMarkets} refreshes both lists without a restart.
-   *
-   * Both halves together, and never one without the other — @see
-   * `core/assetMarketConfig.ts`'s `assetMarketPolicy`, which derives them from
-   * one filter so the serve list and its economics cannot drift apart.
-   *
-   * EMPTY on a deployment that has configured none: no market rows means both
-   * lists are empty and the offer path serves no pair.
+   * {@link Services.replaceMarkets} refreshes it without a restart; EMPTY when none are configured.
    */
   assetMarkets: readonly AssetMarketPricingView[]
-  assetMarketPairs: readonly AssetMarketPair[]
   store: SwapStore
   onchainStore: OnchainSendSwapStore
   receiveStore: ReceiveSwapStore
@@ -319,19 +305,7 @@ export const endpointHost = (raw: string): string => {
 /**
  * Open the BTC rail `config.lnBackend` names — BOTH legs, from one place.
  *
- * ONE switch, where there used to be two mirrored ones: a Lightning selector
- * and an onchain selector over the same knob, with the same cases, which had to
- * agree case for case and had no way to enforce that they did. A rail is a
- * wallet, and a wallet answers both ports.
- *
- * The built-ins are answered here rather than through the registry so a
- * consumer's rail can never shadow them; `registerLightningRail` refuses those
- * two names as well, and the pair of guards is cheap.
- *
- * An unregistered name reaching here means `loadConfig` accepted a rail that has
- * since gone missing — registration happens at import time and validation reads
- * the registry, so the only way to get here is a consumer registering AFTER the
- * config was loaded. Named as that, rather than as an unknown backend.
+ * Built-ins are answered here, not through the registry, so a consumer's rail can never shadow them.
  */
 const createRail = async (config: Config): Promise<LightningRail> => {
   if (config.lnBackend === 'fake') {
@@ -527,6 +501,24 @@ export const createServices = async (
    * not hammered, and the corridors share their backends.
    */
   const tickErrors = new TickErrorTracker()
+  const tickErrorLogger =
+    (label: string) =>
+    (id: string, error: unknown): void => {
+      const { line } = tickErrors.record(id, error)
+      if (line) log(`${label} ${id} failed:`, line)
+    }
+  const wireTickErrors = (
+    service: {
+      onTickError?: (id: string, error: unknown) => void
+      onTickSuccess?: (id: string) => void
+      shouldSkipTick?: (id: string) => boolean
+    },
+    label: string,
+  ): void => {
+    service.onTickError = tickErrorLogger(label)
+    service.onTickSuccess = (id) => tickErrors.clear(id)
+    service.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
+  }
   /**
    * What this process will ACTUALLY quote: the environment, narrowed by any
    * overrides the console has stored.
@@ -900,11 +892,7 @@ export const createServices = async (
       })
     : undefined
   if (service) {
-    service.onTickError = (id, error) => {
-      const { line } = tickErrors.record(id, error)
-      if (line) log(`tick ${id} failed:`, line)
-    }
-    service.onTickSuccess = (id) => tickErrors.clear(id)
+    wireTickErrors(service, 'tick')
     // The denylist's only trace outside a config file. Logged at quote time,
     // where the number it changes (the refund deadline) is being decided.
     service.onDroppedRouteHints = ({ paymentHash, dropped, worstRouteHintCltvBlocks }) => {
@@ -914,7 +902,6 @@ export const createServices = async (
           ` pricing the worst surviving hint at ${worstRouteHintCltvBlocks} blocks`,
       )
     }
-    service.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
   }
 
   // The solver's own destination for reclaimed onchain HTLC funds — an address
@@ -977,14 +964,7 @@ export const createServices = async (
         },
       })
     : undefined
-  if (onchainService) {
-    onchainService.onTickError = (id, error) => {
-      const { line } = tickErrors.record(id, error)
-      if (line) log(`onchain tick ${id} failed:`, line)
-    }
-    onchainService.onTickSuccess = (id) => tickErrors.clear(id)
-    onchainService.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
-  }
+  if (onchainService) wireTickErrors(onchainService, 'onchain tick')
 
   // The receive legs. Their Arkade ops are built from the SAME context and
   // emulator info as the send legs' — the difference between the two is which
@@ -1014,6 +994,7 @@ export const createServices = async (
         store: receiveStore,
         chainTip,
         ln: rail!.ln,
+        backendName: config.lnBackend ?? undefined,
         arkade: receiveOps,
         limits: policy.corridorLimits['lightning:BTC->arkade:BTC'],
         fee: policy.corridorFees['lightning:BTC->arkade:BTC'],
@@ -1039,14 +1020,7 @@ export const createServices = async (
         coupledSendStore: selfPaymentCoupling ? store : undefined,
       })
     : undefined
-  if (receiveService) {
-    receiveService.onTickError = (id, error) => {
-      const { line } = tickErrors.record(id, error)
-      if (line) log(`receive tick ${id} failed:`, line)
-    }
-    receiveService.onTickSuccess = (id) => tickErrors.clear(id)
-    receiveService.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
-  }
+  if (receiveService) wireTickErrors(receiveService, 'receive tick')
   if (service && receiveService && selfPaymentCoupling) {
     driveCoupledPeers({
       send: service,
@@ -1054,6 +1028,10 @@ export const createServices = async (
       sendStore: store,
       receiveStore,
       onError: (error) => log('coupled peer tick failed:', error instanceof Error ? error.message : String(error)),
+      onTiming:
+        process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
+          ? (sample) => log('coupled_handoff_timing', json(sample))
+          : undefined,
     })
   }
 
@@ -1102,14 +1080,7 @@ export const createServices = async (
         covclaimd,
       })
     : undefined
-  if (onchainReceiveService) {
-    onchainReceiveService.onTickError = (id, error) => {
-      const { line } = tickErrors.record(id, error)
-      if (line) log(`onchain receive tick ${id} failed:`, line)
-    }
-    onchainReceiveService.onTickSuccess = (id) => tickErrors.clear(id)
-    onchainReceiveService.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
-  }
+  if (onchainReceiveService) wireTickErrors(onchainReceiveService, 'onchain receive tick')
 
   // The EVM corridors. BOTH LEGS OR NEITHER, unlike the four above: each of
   // those is switched off independently by `corridorEnabled`, whereas these two
@@ -1204,24 +1175,23 @@ export const createServices = async (
     }
     // Keyed by token address: one store per DIRECTION serves every token, so one
     // service does too. @see EvmSendServiceDeps.markets
-    const sendMarkets = new Map(
-      policy.evmCorridors
-        .filter((c) => c.direction === 'send' && c.enabled)
-        .flatMap((c) => {
-          const market = config.evmMarkets.find((m) => m.token.address === c.token.address)
-          // A served corridor with no market cannot be priced. `loadConfig`
-          // refuses that at startup, so reaching here means the two lists
-          // disagree — skip rather than quote against a guess.
-          return market
-            ? [
-                [
-                  c.token.address,
-                  { token: c.token, market, limits: c.limits, tokenLimits: c.tokenLimits, fee: c.fee },
-                ] as const,
-              ]
-            : []
-        }),
-    )
+    const marketsFor = (direction: 'send' | 'receive') =>
+      new Map(
+        policy.evmCorridors
+          .filter((c) => c.direction === direction && c.enabled)
+          .flatMap((c) => {
+            const market = config.evmMarkets.find((m) => m.token.address === c.token.address)
+            // No market means the two lists disagree (`loadConfig` refuses that at boot): skip, never guess.
+            return market
+              ? [
+                  [
+                    c.token.address,
+                    { token: c.token, market, limits: c.limits, tokenLimits: c.tokenLimits, fee: c.fee },
+                  ] as const,
+                ]
+              : []
+          }),
+      )
     evmSendService = new EvmSendSwapService({
       quoteLimiter,
       store: evmSendStore,
@@ -1238,7 +1208,7 @@ export const createServices = async (
       // The SAME control the other four corridors hold. A private one would
       // bound this corridor alone, which is not what the cap means.
       admission,
-      markets: sendMarkets,
+      markets: marketsFor('send'),
       fetchPrice: createPriceFeed(),
       chain: {
         contractAddress: hex.encode(evmChain.contractAddress),
@@ -1251,26 +1221,8 @@ export const createServices = async (
       },
       peerStores: [store, onchainStore, receiveStore, onchainReceiveStore],
       // The late-lock watch reports here too; a bare log line gave it no dedup and no `failing` panel.
-      onTickError: (id, error) => {
-        const { line } = tickErrors.record(id, error)
-        if (line) log(`evm send tick ${id} failed:`, line)
-      },
+      onTickError: tickErrorLogger('evm send tick'),
     })
-    const receiveMarkets = new Map(
-      policy.evmCorridors
-        .filter((c) => c.direction === 'receive' && c.enabled)
-        .flatMap((c) => {
-          const m = config.evmMarkets.find((x) => x.token.address === c.token.address)
-          return m
-            ? [
-                [
-                  c.token.address,
-                  { token: c.token, market: m, limits: c.limits, tokenLimits: c.tokenLimits, fee: c.fee },
-                ] as const,
-              ]
-            : []
-        }),
-    )
     evmReceiveService = new EvmReceiveSwapService({
       quoteLimiter,
       store: evmReceiveStore,
@@ -1279,7 +1231,7 @@ export const createServices = async (
       blockHeight,
       ...evmReceiveArkadeDeps(receiveOps),
       arkade: receiveOps,
-      markets: receiveMarkets,
+      markets: marketsFor('receive'),
       fetchPrice: createPriceFeed(),
       // Where the SOLVER claims the client's tokens to. Derived from the same
       // key that signs the claim, so the contract pays the account that asked.
@@ -1299,8 +1251,7 @@ export const createServices = async (
       // bound this corridor alone, which is not what the cap means.
       admission,
       peerStores: [store, onchainStore, receiveStore, onchainReceiveStore],
-      onTickError: (id, error) =>
-        log(`evm receive tick ${id} failed:`, error instanceof Error ? error.message : String(error)),
+      onTickError: tickErrorLogger('evm receive tick'),
     })
   }
 
@@ -1357,7 +1308,6 @@ export const createServices = async (
     services.corridors.replace([...nextSets.corridors])
     services.readers.replace([...nextSets.readers])
     services.assetMarkets = next.pricing
-    services.assetMarketPairs = next.pairs
     services.assetRfqMarkets = rfq
     services.liveOfferMarkets = offers
     readableMarkets = readable
@@ -1369,7 +1319,6 @@ export const createServices = async (
     bootPolicy: policy,
     bootOverrides,
     assetMarkets: assetMarkets.pricing,
-    assetMarketPairs: assetMarkets.pairs,
     store,
     onchainStore,
     receiveStore,

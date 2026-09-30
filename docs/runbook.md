@@ -9,7 +9,7 @@ deployment shapes, one hybrid.
 | Piece                   | What it does                                         | Where it can run                                                           |
 | ----------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------- |
 | API (`buildApp`)        | quotes + status, bus-shaped payloads                 | Node (`serve`) or Cloudflare Workers (`fetch`)                             |
-| Ingress (`SwapIngress`) | how swap requests REACH the provider                 | HTTP (`serve`, inbound) or relay (`relay`, outbound-only)                  |
+| Ingress                 | how swap requests REACH the provider                 | HTTP (`serve`, inbound) or relay (`relay`, outbound-only)                  |
 | Money-mover             | drives swaps: fund-watch → pay → claim; refund sweep | Node (`watch`/`serve`/`relay`) or Workers `scheduled`+`queue` (see caveat) |
 | Store                   | durable swap state, compare-and-swap transitions     | better-sqlite3 file (Node) or D1 (Workers)                                 |
 | CLI                     | every operation by hand; the reproducibility surface | Node                                                                       |
@@ -160,6 +160,14 @@ same corridor services, and publishes the quote back to the relay. Everything
 the container does — quote ingestion, LN payment, claim, refund, fund-watch
 polling — is now an outbound connection. **Zero listening ports.** Proven end to
 end on regtest with a distinct client wallet: `scripts/e2e-relay.sh`.
+
+Set `SOLVER_LATENCY_DIAGNOSTICS=1` on the `relay` process to log
+`rfq_relay_timing` for each answered RFQ and `receive_quote_timing` for each
+successful Lightning receive quote. Both include an RFQ ID prefix for
+correlation. The receive record splits preparation, hold-invoice creation,
+and persistence; the relay record splits quote handling and reply publish.
+Neither record includes invoices, payment hashes, preimages, or wallet keys.
+Funding already logs `receive_fund_call_timing` and `receive_fund_timing`.
 
 That script defaults to `scripts/mock-relay.mjs`, which needs no relay running
 but speaks a broker framing (`{op:'sub'}`) that only it understands. To prove

@@ -232,29 +232,6 @@ export interface PayInvoiceParams {
    * compile. Backends that cannot express a ceiling ignore it.
    */
   maxCltvBlocks: number
-  /**
-   * The token off a {@link SendFeeEstimate}, where the backend minted one and the
-   * caller is spending against it.
-   *
-   * The EXECUTE half of prepare-then-execute. Without a field here the shape is not
-   * expressible at all — an adapter whose prepare call reserves a price would have to
-   * key that reservation on state only it can see, and hope the payment leaves the same
-   * process. This send leg makes no such promise: it is crash-driven, re-reads the row,
-   * and may pay from a process that never ran the prepare. That is also why the token is
-   * a STRING rather than an object or a closure: what cannot be written to a row cannot
-   * be re-driven, and a handle that quietly works until the first restart is worse than
-   * one that was never offered.
-   *
-   * Optional on both sides. Absent means what it has always meant — pay at whatever the
-   * backend charges now, bounded by {@link maxFeeSats} — so a backend that mints no
-   * token never sees one and a caller that keeps none never sends one.
-   *
-   * A backend handed a token it cannot honour (expired, unknown, minted against a
-   * different invoice) MUST fail rather than fall back to paying at the current price.
-   * The caller passed it because the quote was priced off it, so a silent fallback pays
-   * a number nobody quoted, on a swap whose spread was computed against a different one.
-   */
-  feeHandle?: string
 }
 
 /** What {@link SendBackend.estimateSendFee} is asked about. */
@@ -319,21 +296,6 @@ export interface SendFeeEstimate {
    * calculate the lockup amount.
    */
   billableFeeSats?: number
-  /**
-   * An opaque token the backend will honour if it is handed back to
-   * {@link SendBackend.payInvoice} as {@link PayInvoiceParams.feeHandle}.
-   *
-   * Optional, and most backends mint nothing: an estimate is usually just a reading. It
-   * exists so the prepare-then-execute backends are expressible — the ones where the
-   * first call returns the fee for THIS payment and the second spends against it — since
-   * without it their exact figure would have to be re-derived by a second estimate that
-   * may answer differently.
-   *
-   * Opaque to everything above the adapter, and persistable by construction. See
-   * {@link PayInvoiceParams.feeHandle} for what a backend must do with one it cannot
-   * honour.
-   */
-  feeHandle?: string
 }
 
 export interface Balance {
@@ -455,7 +417,7 @@ export interface SendBackend {
    * swap, or refuse to quote one, because this answered null. It prices; it does not
    * admit.
    *
-   * NOT A PROMISE either, with or without a {@link SendFeeEstimate.feeHandle}. A quote is
+   * NOT A PROMISE either. A quote is
    * followed by the client funding a lockup, which takes as long as it takes, and the fee
    * can move in between. `maxFeeSats` is what guards payment time; this only makes the
    * quote honest.
@@ -579,6 +541,9 @@ export interface ReceiveBackend {
    * the conservative outcome.
    */
   getOwnInvoiceState?(paymentHash: string): Promise<HoldState | null>
+
+  /** Live state for a DB-proven own invoice; negative answers must exhaust the backend's HTLC view. */
+  getKnownInvoiceState?(paymentHash: string): Promise<HoldState>
 
   /**
    * Retire an invoice that has NOT been paid, so nothing can pay it later.

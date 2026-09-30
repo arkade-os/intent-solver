@@ -27,23 +27,6 @@ export type SaveField =
   | 'corridorEnabled'
   | 'carrierPriced'
 
-/** Anything absent is ordering-neutral and rides the narrowing pass. */
-export const SAVE_FIELDS: ReadonlySet<SaveField> = new Set<SaveField>([
-  'max',
-  'min',
-  'feeBps',
-  'toleranceBps',
-  'maxExposedSats',
-  'lockupTimeoutSeconds',
-  'enabled',
-  'servesOffer',
-  'servesRfq',
-  'rfqSellBase',
-  'rfqBuyBase',
-  'corridorEnabled',
-  'carrierPriced',
-])
-
 /** Fields a RISE relaxes. `lockupTimeoutSeconds` too: a longer funding window is longer exposure. */
 const RAISING_WIDENS: ReadonlySet<SaveField> = new Set<SaveField>([
   'max',

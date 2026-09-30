@@ -34,6 +34,7 @@
 
 import type { Hono } from 'hono'
 import type { AdminDeps } from '../server.js'
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import {
   DEFAULT_LEDGER_LIMIT,
   MAX_LEDGER_LIMIT,
@@ -212,7 +213,7 @@ const scan = async (deps: AdminDeps, window: LedgerWindow, corridor?: string): P
 }
 
 export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
-  const now = deps.now ?? ((): number => Math.floor(Date.now() / 1000))
+  const now = deps.now ?? nowSeconds
 
   app.get('/api/pnl', async (c) => {
     let window: LedgerWindow & { label: string }

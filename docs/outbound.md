@@ -15,7 +15,7 @@ bottom).
 A solver that is only reachable by URL can never sit behind NAT, and the design
 intent (`docs/architecture.md`) is a fleet of solvers that each subscribe
 outward. HTTP was always the scaffold; the relay is the destination. The seam
-that makes the swap is `SwapIngress` — the money path (`SendSwapService`) only
+that makes the swap is the ingress layer (`RelayIngress`) — the money path (`SendSwapService`) only
 ever sees `quote(invoice, refundAddress)`, so swapping the inbound HTTP host for
 an outbound relay connection changes the transport and nothing downstream.
 

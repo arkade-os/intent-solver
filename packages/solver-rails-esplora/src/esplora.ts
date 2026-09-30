@@ -274,7 +274,7 @@ export const witnessFromRawTx = (txHex: string, inputIndex: number): Uint8Array[
   return [...input.finalScriptWitness]
 }
 
-/** Poll Esplora's address history for `txid`'s output paying `address`, and return its vout. */
+/** Poll Esplora's address history for `txid`'s output paying `address`. No caller here; a downstream fork imports it. */
 export const pollForVout = async (esplora: EsploraClient, txid: string, address: string): Promise<number> =>
   poll(
     async () => {
@@ -282,8 +282,7 @@ export const pollForVout = async (esplora: EsploraClient, txid: string, address:
       const tx = txs.find((t) => t.txid === txid)
       if (!tx) return null
       const vout = tx.vout.findIndex((o) => o.scriptpubkey_address === address)
-      // Present but not paying the address is a fact, not a slow indexer:
-      // retrying it fifteen times would only delay the same answer.
+      // Present but not paying the address is a fact, not a slow indexer: retrying cannot change it.
       if (vout === -1) throw new GiveUp(`funding tx ${txid} does not pay ${address} — cannot locate its vout`)
       return vout
     },

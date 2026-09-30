@@ -14,6 +14,7 @@
 
 import type { Services } from '../ops/services.js'
 import { requireLn, requireOnchain } from '../ops/rails.js'
+import { messageOf, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
 export interface BackendStatus {
   name: 'lightning' | 'arkade' | 'emulator' | 'onchain' | 'relay'
@@ -39,8 +40,6 @@ export interface RelayProbeTarget {
   isConnected(): boolean
 }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
-
 /**
  * Run one probe, converting any rejection into a reported failure.
  *
@@ -58,7 +57,7 @@ const probe = async (
     // Stamped after the read resolves, not before it: the question the stamp
     // answers is "when did this backend last actually speak", and a stamp taken
     // on entry would date a hung probe to the moment it was dispatched.
-    return { name, ok: true, detail, error: null, target, lastCheckedAt: Math.floor(Date.now() / 1000) }
+    return { name, ok: true, detail, error: null, target, lastCheckedAt: nowSeconds() }
   } catch (error) {
     // A failed probe is stamped too. An operator needs to tell "this has been
     // down since 09:00" from "this just went down", and an unstamped failure
@@ -69,7 +68,7 @@ const probe = async (
       detail: 'unreachable',
       error: messageOf(error),
       target,
-      lastCheckedAt: Math.floor(Date.now() / 1000),
+      lastCheckedAt: nowSeconds(),
     }
   }
 }

@@ -22,16 +22,7 @@ const BITCOIN_LIMITS: Limits = { minSats: 500, maxSats: 50_000 }
 export interface NetworkProfile {
   /** Amount range this network permits. */
   limits: Limits
-  /**
-   * This network's name in the uppercase spelling a backend SDK may ask for.
-   *
-   * The same network as the key it sits under, respelled: read only where a
-   * backend is constructed, never by the swap logic above the port, since which
-   * casing a vendor wants is an adapter's business. Present on every network
-   * rather than nullable, so a backend reading it never has to handle a hole;
-   * whether a given backend can actually serve a network is the backend's own
-   * question, answered where it is constructed rather than by a null here.
-   */
+  /** This network in the uppercase spelling a backend SDK asks for. No caller here; a downstream fork that vendors this repo reads it. */
   backendNetwork: 'MAINNET' | 'SIGNET' | 'REGTEST'
   /** bech32 prefix a BOLT11 carries here. */
   invoicePrefix: string
@@ -69,7 +60,7 @@ export interface NetworkProfile {
    * other's data. Pointing an L1 txid at the Arkade explorer produces a "not found"
    * that reads exactly like lost funds.
    *
-   * No trailing slash: the builders in `./explorers.ts` join a path onto these.
+   * No trailing slash: the console (`admin/static/app.js`) joins a path onto these.
    */
   explorers: {
     arkade: string
@@ -80,10 +71,10 @@ export interface NetworkProfile {
 export const NETWORKS = {
   bitcoin: {
     limits: BITCOIN_LIMITS,
-    backendNetwork: 'MAINNET',
     invoicePrefix: 'bc',
     arkadeHrp: 'ark',
     arkdNetwork: 'bitcoin',
+    backendNetwork: 'MAINNET',
     isMainnet: true,
     minCheckpointExitDelaySeconds: undefined,
     explorers: { arkade: 'https://arkade.space', onchain: 'https://mempool.arkade.sh' },
@@ -92,10 +83,10 @@ export const NETWORKS = {
   // share an invoice prefix.
   mutinynet: {
     limits: TESTNET_LIMITS,
-    backendNetwork: 'SIGNET',
     invoicePrefix: 'tbs',
     arkadeHrp: 'tark',
     arkdNetwork: 'mutinynet',
+    backendNetwork: 'SIGNET',
     isMainnet: false,
     // The hosted Service advertises 4096s, and the SDK cannot tell mutinynet from
     // signet — both are byte-identical `Network` structs — so it applies the 86400s
@@ -113,20 +104,20 @@ export const NETWORKS = {
   },
   signet: {
     limits: TESTNET_LIMITS,
-    backendNetwork: 'SIGNET',
     invoicePrefix: 'tbs',
     arkadeHrp: 'tark',
     arkdNetwork: 'signet',
+    backendNetwork: 'SIGNET',
     isMainnet: false,
     minCheckpointExitDelaySeconds: undefined,
     explorers: { arkade: 'https://explorer.signet.arkade.sh', onchain: 'https://mempool.signet.arkade.sh' },
   },
   regtest: {
     limits: TESTNET_LIMITS,
-    backendNetwork: 'REGTEST',
     invoicePrefix: 'bcrt',
     arkadeHrp: 'tark',
     arkdNetwork: 'regtest',
+    backendNetwork: 'REGTEST',
     isMainnet: false,
     // The SDK's regtest floor is already 1200, and the stack's own
     // ARKD_CHECKPOINT_EXIT_DELAY=1536 clears it. Nothing to relax.

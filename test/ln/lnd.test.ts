@@ -34,7 +34,6 @@ const {
   heldTimeoutHeight,
   isInvoiceNotFound,
   isNoFeeEstimate,
-  isoToUnixSeconds,
   probeTimeoutMs,
   rejectionReason,
   toExpiresAt,
@@ -62,12 +61,6 @@ describe('rejectionReason', () => {
     expect(rejectionReason('plain string')).toBeUndefined()
     expect(rejectionReason(undefined)).toBeUndefined()
     expect(rejectionReason([])).toBeUndefined()
-  })
-})
-
-describe('isoToUnixSeconds', () => {
-  it('converts an LND ISO 8601 date to unix seconds', () => {
-    expect(isoToUnixSeconds('2026-08-06T00:00:00.000Z')).toBe(1785974400)
   })
 })
 
@@ -663,13 +656,6 @@ describe('LndLightningBackendAdapter.estimateSendFee', () => {
   it('re-throws a fault it does not recognise rather than quoting around it', async () => {
     getRoutingFeeEstimate.mockRejectedValue([503, 'UnexpectedGetRoutingFeeEstimateError', { err: { code: 14 } }])
     await expect(estimate()).rejects.toBeDefined()
-  })
-
-  // LND reserves nothing: the probe and the later payment are unconnected calls,
-  // and a token would claim a link between them that does not exist.
-  it('mints no handle, because nothing here is prepared to be spent against', async () => {
-    getRoutingFeeEstimate.mockResolvedValue({ fee_mtokens: '10500', timeout: 144 })
-    await expect(estimate()).resolves.not.toHaveProperty('feeHandle')
   })
 })
 

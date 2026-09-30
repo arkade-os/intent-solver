@@ -12,9 +12,18 @@
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { hex } from '@scure/base'
+import { schnorr } from '@noble/curves/secp256k1.js'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { ripemd160 } from '@noble/hashes/legacy.js'
 import { ArkAddress } from '@arkade-os/sdk'
 import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
 import * as floatOps from '@arkade-os/solver-app/ops/float.js'
+import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import {
+  lockupContractRegistration,
+  runVtxoLifecycle,
+  LOCKUP_CONTRACT_TYPE,
+} from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
 import type { LockupDeadline, VtxoLifecycleReport } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
 import {
   lockupDeadlinesOf,
@@ -179,6 +188,45 @@ const floatServices = (
 
 const NO_DEPRECATED = { rotated: false, expired: [], signers: [], skipped: 'no-deprecated-vtxos' }
 
+// Something to renew AND to sweep, so the contract read is reached. Honours the
+// filter: the migration's own default/delegate read must survive a failing
+// lockup read, or the test cannot tell the two apart.
+const servicesWithLockupRead = (lockupRead: () => Promise<unknown[]>, seen: unknown[] = []): Services => {
+  const due = {
+    value: 500_000,
+    createdAt: new Date(Date.now() - 9 * 60 * 60 * 1000),
+    expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+  }
+  const services = floatServices(async () => NO_DEPRECATED, [], [due])
+  const wallet = services.arkade.wallet as unknown as Record<string, unknown>
+  wallet.getVtxos = async () => [{ txid: 'a'.repeat(64), vout: 0, script: 'aa', isSwept: true }]
+  const forFilter = async (filter?: { type?: string[] }): Promise<unknown[]> => {
+    seen.push(filter)
+    return filter?.type?.includes(LOCKUP_CONTRACT_TYPE) ? lockupRead() : []
+  }
+  wallet.getContractManager = async () => ({ getContracts: forFilter, getContractsWithVtxos: forFilter })
+  return services
+}
+
+describe('a failing contract read costs recovery only', () => {
+  it('does not throw out of the pass, and leaves renewal done', async () => {
+    const report = await runFloatLifecycle(
+      servicesWithLockupRead(async () => {
+        throw new Error('indexer 503')
+      }),
+    )
+    expect(report.renewed).toBe('settle-txid')
+    expect(report.failures.filter((f) => f.includes('indexer 503'))).toEqual(['recover: indexer 503'])
+    expect(report.recovered).toBeNull()
+  })
+
+  it('asks the repository only for lockup rows', async () => {
+    const seen: unknown[] = []
+    await runFloatLifecycle(servicesWithLockupRead(async () => [], seen))
+    expect(seen).toContainEqual({ type: [LOCKUP_CONTRACT_TYPE] })
+  })
+})
+
 /**
  * The role half of the recovery guard, derived where the deadlines are.
  *
@@ -189,11 +237,23 @@ const NO_DEPRECATED = { rotated: false, expired: [], signers: [], skipped: 'no-d
  * reading, not merely before the CLTV.
  */
 describe('lockupDeadlinesOf', () => {
-  const SOLVER = hex.encode(new Uint8Array(32).fill(4))
+  const SOLVER_KEY = schnorr.getPublicKey(new Uint8Array(32).fill(4))
+  const SOLVER = hex.encode(SOLVER_KEY)
 
-  const deadlinesFor = (rows: Record<string, unknown>[]): Promise<readonly LockupDeadline[]> =>
+  const deadlinesFor = (
+    rows: Record<string, unknown>[],
+    contracts: Record<string, unknown>[] = [],
+  ): Promise<readonly LockupDeadline[]> =>
     lockupDeadlinesOf({
-      arkade: { identity: { xOnlyPublicKey: async () => new Uint8Array(32).fill(4) } },
+      arkade: {
+        identity: { xOnlyPublicKey: async () => SOLVER_KEY },
+        wallet: {
+          getContractManager: async () => ({
+            getContracts: async (filter?: { type?: string[] }) =>
+              contracts.filter((c) => filter?.type === undefined || filter.type.includes(c.type as string)),
+          }),
+        },
+      },
       readers: readerSetFromDeps({
         store: { findRecoverable: async () => rows },
         onchainStore: { findRecoverable: async () => [] },
@@ -238,6 +298,98 @@ describe('lockupDeadlinesOf', () => {
   it('has no opinion on a row carrying no client refund key', async () => {
     const [deadline] = await deadlinesFor([sendRow(null)])
     expect(deadline?.refundable).toBeUndefined()
+  })
+
+  /** THE WEDGE: no live row, so no deadline, so a doomed batch every pass. */
+  describe('a terminal row whose lockup contract is still registered', () => {
+    const trader = schnorr.getPublicKey(new Uint8Array(32).fill(11))
+
+    const lockup = (client: Uint8Array): CovenantSwapScript =>
+      new CovenantSwapScript({
+        receiver: schnorr.getPublicKey(new Uint8Array(32).fill(1)),
+        server: schnorr.getPublicKey(new Uint8Array(32).fill(3)),
+        preimageHash: ripemd160(sha256(new Uint8Array(32).fill(7))),
+        refundLocktime: 1_800_000_000,
+        claimDelay: 4096,
+        client,
+        clientRefundDelay: 6144,
+        refundWithoutServerDelay: 5120,
+        nonInteractiveParameters: {
+          emulatorPubkey: schnorr.getPublicKey(new Uint8Array(32).fill(9)),
+          receiverPkScript: Uint8Array.from([0x51, 0x20, ...schnorr.getPublicKey(new Uint8Array(32).fill(13))]),
+          senderPkScript: Uint8Array.from([0x51, 0x20, ...schnorr.getPublicKey(new Uint8Array(32).fill(5))]),
+        },
+      })
+
+    // Built by the call that writes it, so the params are the stored ones.
+    const registered = (script: CovenantSwapScript) => ({
+      ...lockupContractRegistration(script, 'ark1test'),
+      state: 'active',
+      createdAt: 0,
+    })
+
+    it('names the send leg unrefundable with no live row to derive it from', async () => {
+      const script = lockup(trader)
+      const deadlines = await deadlinesFor([], [registered(script)])
+      expect(deadlines).toEqual([
+        { script: hex.encode(script.pkScript), refundLocktime: 1_800_000_000, refundable: false },
+      ])
+    })
+
+    it('holds recovery back instead of attempting the doomed settlement', async () => {
+      const script = lockup(trader)
+      const recoverVtxos = vi.fn(async () => 'txid')
+      const report = await runVtxoLifecycle({
+        renewVtxos: async () => {
+          throw new Error('No VTXOs available to renew')
+        },
+        recoverVtxos,
+        recoverableVtxos: async () => [{ txid: 'a'.repeat(64), vout: 0, script: hex.encode(script.pkScript) }],
+        lockupDeadlines: () => deadlinesFor([], [registered(script)]),
+        nowSeconds: () => 1_900_000_000,
+      })
+      expect(recoverVtxos).not.toHaveBeenCalled()
+      expect(report.recoverySkipped).toMatch(/no refund key of ours/)
+    })
+
+    // The SDK drops this one input itself; blocking would cost the whole batch.
+    it('contributes nothing for a receive-leg lockup, even before its CLTV', async () => {
+      const script = lockup(SOLVER_KEY)
+      expect(await deadlinesFor([], [registered(script)])).toEqual([])
+    })
+
+    it('does not hold recovery back for a terminal receive-leg lockup pre-CLTV', async () => {
+      const script = lockup(SOLVER_KEY)
+      const recoverVtxos = vi.fn(async () => 'txid')
+      const report = await runVtxoLifecycle({
+        renewVtxos: async () => {
+          throw new Error('No VTXOs available to renew')
+        },
+        recoverVtxos,
+        recoverableVtxos: async () => [{ txid: 'a'.repeat(64), vout: 0, script: hex.encode(script.pkScript) }],
+        lockupDeadlines: () => deadlinesFor([], [registered(script)]),
+        nowSeconds: () => 1_700_000_000,
+      })
+      expect(report.recoverySkipped).toBeNull()
+      expect(recoverVtxos).toHaveBeenCalledOnce()
+    })
+
+    // The over-blocking direction: this one IS ours to refund.
+    it('lets a matured receive-leg lockup through', async () => {
+      const script = lockup(SOLVER_KEY)
+      const recoverVtxos = vi.fn(async () => 'txid')
+      const report = await runVtxoLifecycle({
+        renewVtxos: async () => {
+          throw new Error('No VTXOs available to renew')
+        },
+        recoverVtxos,
+        recoverableVtxos: async () => [{ txid: 'a'.repeat(64), vout: 0, script: hex.encode(script.pkScript) }],
+        lockupDeadlines: () => deadlinesFor([], [registered(script)]),
+        nowSeconds: () => 1_900_000_000,
+      })
+      expect(report.recoverySkipped).toBeNull()
+      expect(recoverVtxos).toHaveBeenCalledOnce()
+    })
   })
 })
 

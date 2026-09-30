@@ -23,6 +23,8 @@ import {
   defaultBidding,
   tokenBucket,
   type BiddingStrategy,
+  type OpenRfq,
+  type OpenRfqBidDecision,
   type TokenBucket,
 } from '@arkade-os/solver-core/core/openRfq.js'
 import { marketKeyForPair } from '@arkade-os/solver-core/core/marketKey.js'
@@ -32,7 +34,6 @@ import { RfqOpen, rfqBidPayload, rfqRefusalPayload } from '@arkade-os/solver-cor
 import { respondToRfqRequest, respondToRfqStatus } from './rfq.js'
 import { reportRfqRefusal, type RfqRefusalObserver } from './refusals.js'
 import type { CorridorReaderSet, CorridorSet } from '@arkade-os/solver-core/core/corridor.js'
-import type { SwapIngress } from './port.js'
 
 /** Publish a payload addressed to one recipient — the reply shape both
  * ingress classes share. */
@@ -42,8 +43,7 @@ const publishTo = async (
   recipient: string,
   payload: Record<string, unknown>,
   nowMs: number,
-): Promise<void> =>
-  connection.publish({ id: eventId(author, payload, nowMs), author, recipient, createdAtMs: nowMs, payload })
+): Promise<void> => connection.publish({ id: eventId(author, nowMs), author, recipient, createdAtMs: nowMs, payload })
 
 export interface RelayIngressDeps {
   /**
@@ -70,6 +70,7 @@ export interface RelayIngressDeps {
    * long before this is called.
    */
   onRefusal?: RfqRefusalObserver
+  onQuoteTiming?: (sample: { rfqRef?: string; quoteMs: number; publishMs: number; outcome: string }) => void
   now?: () => number
 }
 
@@ -102,6 +103,8 @@ export interface OpenRfqBidderDeps {
   bidding?: BiddingStrategy
   /** MUST be positive — whether to bid at all is the composer's decision. */
   maxBidsPerMinute: number
+  /** Each bid, once its publish has resolved. */
+  onBid?: (open: OpenRfq, bid: Extract<OpenRfqBidDecision, { kind: 'bid' }>) => void
   onError?: (context: string, error: unknown) => void
   now?: () => number
 }
@@ -180,28 +183,19 @@ export class OpenRfqBidder {
         rfqBidPayload(parsed.data.open_id, this.deps.pair, decision),
         this.now(),
       )
+      this.deps.onBid?.(parsed.data, decision)
     } catch (error) {
       this.deps.onError?.('open-rfq handle', error)
     }
   }
 }
 
-export class RelayIngress implements SwapIngress {
+export class RelayIngress {
   private readonly now: () => number
   private subscription?: RelaySubscription
-  /**
-   * Held once at construction rather than looked up per event. Assembly — and
-   * with it the pair/stem collision check, a composition-time fault rather than
-   * one to rediscover per quote — happens in `packages/solver-app/src/ops/corridorSet.ts`, before
-   * this is ever constructed.
-   */
-  private readonly corridors: CorridorSet
-  private readonly readers: CorridorReaderSet
 
   constructor(private readonly deps: RelayIngressDeps) {
     this.now = deps.now ?? (() => Date.now())
-    this.corridors = deps.corridors
-    this.readers = deps.readers
   }
 
   async start(): Promise<void> {
@@ -230,38 +224,30 @@ export class RelayIngress implements SwapIngress {
       // idempotent re-emit and the closed refusal set; the reply goes back in
       // the family the request arrived in.
       if (type === 'rfq_request') {
-        // A THROW here is still an answer owed. Observed on mainnet: a
-        // Lightning-receive quote died inside `createHoldInvoice` on a
-        // transport fault, this handler logged it and returned, and the client
-        // waited out its own 30s timeout for a reply that was never coming.
-        //
-        // The closed set already has the word for it. `pricing_unavailable` is
-        // what the corridor says when it cannot serve a request right now, and
-        // that is exactly true of a backend that would not answer — an
-        // immediate honest decline costs the client nothing and lets them
-        // retry or go elsewhere.
-        //
-        // Deliberately narrow: only this branch, and only after the request
-        // parsed as an `rfq_request` carrying an id to answer. A stray event
-        // is still ignored in silence, because scolding every event on a shared
-        // relay is the noise this handler already declines to make.
+        const quoteStarted = performance.now()
+        // A THROW is still an answer owed: an immediate `pricing_unavailable` beats a client waiting out its 30 s
+        // timeout. Only for a parsed `rfq_request` with an id; stray events stay silent on a shared relay.
         const rfqId = (event.payload as { rfq_id?: unknown } | null)?.rfq_id
         let outcome
         try {
-          outcome = await respondToRfqRequest(this.corridors, event.payload, { requesterKey: event.author })
+          outcome = await respondToRfqRequest(this.deps.corridors, event.payload, { requesterKey: event.author })
         } catch (error) {
           this.deps.onError?.('relay quote', error)
           if (typeof rfqId === 'string') {
-            await this.reply(event.author, rfqRefusalPayload(rfqId, 'pricing_unavailable'))
+            const quoteMs = Math.round(performance.now() - quoteStarted)
+            const payload = rfqRefusalPayload(rfqId, 'pricing_unavailable')
+            await this.publishTimed(event.author, payload, 'pricing_unavailable', quoteMs, rfqId.slice(0, 12))
           }
           return
         }
+        const quoteMs = Math.round(performance.now() - quoteStarted)
         reportRfqRefusal(this.deps.onRefusal, 'relay', 'rfq_request', outcome)
-        await this.reply(event.author, outcome.payload)
+        const rfqRef = typeof rfqId === 'string' ? rfqId.slice(0, 12) : undefined
+        await this.publishTimed(event.author, outcome.payload, outcome.kind, quoteMs, rfqRef)
         return
       }
       if (type === 'rfq_status_request') {
-        const outcome = await respondToRfqStatus(this.readers, event.payload)
+        const outcome = await respondToRfqStatus(this.deps.readers, event.payload)
         reportRfqRefusal(this.deps.onRefusal, 'relay', 'rfq_status_request', outcome)
         await this.reply(event.author, outcome.payload)
         return
@@ -276,5 +262,19 @@ export class RelayIngress implements SwapIngress {
 
   private async reply(recipient: string, payload: Record<string, unknown>): Promise<void> {
     await publishTo(this.deps.connection, this.deps.providerPubkey, recipient, payload, this.now())
+  }
+
+  private async publishTimed(
+    recipient: string,
+    payload: Record<string, unknown>,
+    outcome: string,
+    quoteMs: number,
+    rfqRef: string | undefined,
+  ): Promise<void> {
+    const publishStarted = performance.now()
+    await this.reply(recipient, payload)
+    try {
+      this.deps.onQuoteTiming?.({ rfqRef, quoteMs, publishMs: Math.round(performance.now() - publishStarted), outcome })
+    } catch {}
   }
 }

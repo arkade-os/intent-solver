@@ -5,8 +5,8 @@
  * The engine deliberately knows nothing about swaps. A corridor contributes a
  * {@link CorridorSource}; this decides what to register, disable and delete.
  * That split is what keeps a fifth corridor from arriving with a fifth
- * lifecycle — the failure mode `liveLockupRows` already had once, when
- * `registerLiveLockups` read only the two SEND stores and silently skipped both
+ * lifecycle — the failure mode `liveLockupRows` already had once, when the
+ * registration pass read only the two SEND stores and silently skipped both
  * RECEIVE legs.
  *
  * RETIREMENT IS TWO-STAGE, and the stages answer different questions. Disabling
@@ -74,8 +74,8 @@ export interface KnownContract {
 /**
  * The spend facts of a VTXO as the funded gate needs them, typed structurally
  * rather than as the SDK's `VirtualCoin` so the interface names exactly what
- * it reads. Mirrors `hasTerminalSpend` (`isSpent || spentBy || settledBy`,
- * checked against SDK 0.4.66): the wire contract permits `isSpent: true` with
+ * it reads. Mirrors the SDK's `isVtxoSpent` (`isSpent || spentBy || settledBy`,
+ * checked against SDK 0.4.77): the wire contract permits `isSpent: true` with
  * an empty `spentBy`, so all three facts are consulted — and a SWEPT output
  * is deliberately absent, so a batch-swept lockup still reads as funded and
  * stays protected until recovery drains it. Duplicated rather than imported
@@ -88,8 +88,8 @@ export interface LifecycleVtxo {
   settledBy?: string
 }
 
-/** `hasTerminalSpend`, over the structural slice this module defines. */
-const hasTerminalSpend = (vtxo: LifecycleVtxo): boolean => Boolean(vtxo.isSpent || vtxo.spentBy || vtxo.settledBy)
+/** The SDK's `isVtxoSpent`, over the structural slice this module defines. */
+const hasSpendFact = (vtxo: LifecycleVtxo): boolean => Boolean(vtxo.isSpent || vtxo.spentBy || vtxo.settledBy)
 
 /**
  * A repository row, as the ownership predicate sees it. Both fields are
@@ -177,10 +177,9 @@ export const planContractLifecycle = (
 /**
  * The four BTC corridors as one source.
  *
- * The row's own script stays the authority, exactly as `registerLiveLockups`
- * had it: rebuilding something that derives a different pkScript would register
- * a contract against a script nothing is funded at, leaving the real lockup
- * unwatched while reporting success.
+ * The row's own script stays the authority: rebuilding something that derives a
+ * different pkScript would register a contract against a script nothing is
+ * funded at, leaving the real lockup unwatched while reporting success.
  *
  * PER-ROW ISOLATION IS LOAD-BEARING HERE, not tidiness. `covenantScriptFromRow`
  * THROWS for a row predating the client-unilateral refund leaf, and
@@ -322,7 +321,7 @@ export const runContractLifecycle = async (deps: LifecycleDeps): Promise<LockupD
     // UNSPENT only: the repository keeps spent rows forever, so counting them
     // would leave every settled lockup — the precise set retirement exists
     // for — permanently funded, and neither stage would ever fire.
-    funded: row.vtxos.some((vtxo) => !hasTerminalSpend(vtxo)),
+    funded: row.vtxos.some((vtxo) => !hasSpendFact(vtxo)),
   }))
 
   const now = deps.now()

@@ -15,7 +15,8 @@
 import { hex } from '@scure/base'
 import type { ArkadeContext } from './wallet.js'
 import { fulfillOffer } from './offerFulfill.js'
-import { heldOnOutpoint, liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
+import { heldOf } from './offerFill.js'
+import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
 import {
   offerFromTerms,
   offerScriptFrom,
@@ -94,7 +95,7 @@ export const quotedOfferSettleFor = (deps: QuotedOfferSettleDeps): ((intent: Quo
     // terms compile to one address, so a second deposit can land beside this
     // one — spending it against a decision made about the other is the trade
     // this refuses.
-    const held = heldOnOutpoint(deposit, intent.fromAssetId)
+    const held = heldOf(deposit, intent.fromAssetId)
     if (held < intent.fromAmount) {
       throw new Error(
         `${intent.depositTxid}:${intent.depositVout} holds ${held} of the deposit leg, ` +

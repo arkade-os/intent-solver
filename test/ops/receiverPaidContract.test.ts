@@ -583,7 +583,7 @@ describe('the receiver-paid carrier against a stub Taxi on the real wire', () =>
     const plain = hex.encode(ArkAddress.decode(PAYOUT_ADDRESS).pkScript)
     const outcome = await s.corridor.quote(rfq(taxi, OPERATOR, plain))
     expect(outcome).toMatchObject({ kind: 'refused', payload: { reason: 'pricing_unavailable' } })
-    expect(await s.store.findByRfqId('c'.repeat(64))).toBeUndefined()
+    expect(await s.store.findByRfqId('c'.repeat(64))).toBeNull()
     expect(s.errors).toEqual([
       expect.objectContaining({ message: expect.stringMatching(/not the verified quote's receive covenant/) }),
     ])
@@ -595,7 +595,7 @@ describe('the receiver-paid carrier against a stub Taxi on the real wire', () =>
 
     const outcome = await s.corridor.quote(rfq(taxi, OPERATOR))
     expect(outcome).toMatchObject({ kind: 'refused', payload: { reason: 'pricing_unavailable' } })
-    expect(await s.store.findByRfqId('c'.repeat(64))).toBeUndefined()
+    expect(await s.store.findByRfqId('c'.repeat(64))).toBeNull()
     expect(taxi.requests).toContain('GET /v1/info')
     expect(taxi.swapFills).toEqual([])
     expect(s.errors).toEqual([expect.objectContaining({ message: expect.stringMatching(/operator key differs/) })])
@@ -607,7 +607,7 @@ describe('the receiver-paid carrier against a stub Taxi on the real wire', () =>
 
     const outcome = await s.corridor.quote(rfq(taxi, OPERATOR))
     expect(outcome).toMatchObject({ kind: 'refused', payload: { reason: 'pricing_unavailable' } })
-    expect(await s.store.findByRfqId('c'.repeat(64))).toBeUndefined()
+    expect(await s.store.findByRfqId('c'.repeat(64))).toBeNull()
     expect(taxi.swapFills).toEqual([])
     expect(s.errors).toEqual([expect.objectContaining({ message: expect.stringMatching(/untrusted server/) })])
   })

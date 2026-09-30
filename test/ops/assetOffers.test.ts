@@ -15,7 +15,7 @@ import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
 import { encodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap'
 import { Extension, UnknownPacket, asset } from '@arkade-os/sdk'
 import { Transaction } from '@scure/btc-signer'
-import { base64, hex } from '@scure/base'
+import { base64 } from '@scure/base'
 
 const USDT = '11'.repeat(34)
 const SCRIPT = new Uint8Array(34).fill(0xab)

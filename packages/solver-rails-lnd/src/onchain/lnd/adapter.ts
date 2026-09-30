@@ -26,12 +26,14 @@ import {
 import { hex } from '@scure/base'
 import { Transaction } from '@scure/btc-signer'
 import { deadlined } from '../../deadline.js'
-import { toFundedOutputs, txOutcomeVia, witnessFromRawTx } from '@arkade-os/solver-rails-esplora/esplora.js'
 import {
   createEsploraClient,
   type EsploraAuth,
   type EsploraClient,
   spenderOf,
+  toFundedOutputs,
+  txOutcomeVia,
+  witnessFromRawTx,
 } from '@arkade-os/solver-rails-esplora/esplora.js'
 import type {
   FundedOnchainOutput,
@@ -137,102 +139,39 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
     return { txid: result.id, vout }
   }
 
+  private esploraFor(why: string): EsploraClient {
+    if (!this.esplora) throw new Error(`${why} (set lnd.esploraUrl)`)
+    return this.esplora
+  }
+
   /**
-   * Esplora-backed, NOT `getChainTransactions`. Two defects made the LND chain
-   * view unusable here, both surfaced by the receive corridor's first real run
-   * against a live regtest stack (2026-08-07) and both harmless on the SEND
-   * corridor, which is why they survived: there `fund()` locates its vout by
-   * ADDRESS and never reads `valueSats`, and the funding transaction is always
-   * the solver's own.
-   *
-   *  1. `getChainTransactions` reports a per-TRANSACTION `tokens` total and no
-   *     per-output values at all. Confirmed against boltz-lnd: a 50 000-sat
-   *     payment to an HTLC address reports `tokens: 50156` — amount plus its
-   *     156-sat fee. `receive/onchainOrchestrator.ts`'s `whenQuoted` matches
-   *     `valueSats === row.amountSats` exactly (deliberately, so a partial or
-   *     dust payment is never adopted as funding), so it could never match and
-   *     the swap sat in `quoted` until it timed out. This was not fixable in
-   *     place: the value simply is not in that response.
-   *  2. It returns only the LND WALLET's own transactions. On this corridor the
-   *     CLIENT funds the HTLC, so in production that is a third party's
-   *     transaction and was invisible entirely — fixing (1) alone would not
-   *     have made the corridor work.
-   *
-   * Esplora answers both: address history is not wallet-scoped, and it carries
-   * real per-output values. `toFundedOutputs` is reused verbatim from the
-   * shared Esplora helpers rather than reimplemented — same mapping, already
-   * proven on another backend. The tip height comes from LND itself, so this adds no
-   * second source of truth for the chain tip.
+   * Esplora-backed, NOT `getChainTransactions`: that reports a per-TRANSACTION `tokens` total (amount plus fee),
+   * never the per-output value `whenQuoted` matches exactly, and lists only the LND wallet's own transactions,
+   * while here the CLIENT funds the HTLC. The tip height still comes from LND, so there is one chain-tip source.
    */
   async findOutputs(params: { address: string }): Promise<FundedOnchainOutput[]> {
-    if (!this.esplora) {
-      throw new Error(
-        'onchain receive needs an Esplora URL: LND alone cannot see third-party funding or per-output values (set lnd.esploraUrl)',
-      )
-    }
-    const [txs, info] = await Promise.all([
-      this.esplora.getAddressTxs(params.address),
-      getWalletInfo({ lnd: this.lnd }),
-    ])
+    const esplora = this.esploraFor(
+      'onchain receive needs an Esplora URL: LND alone cannot see third-party funding or per-output values',
+    )
+    const [txs, info] = await Promise.all([esplora.getAddressTxs(params.address), getWalletInfo({ lnd: this.lnd })])
     return toFundedOutputs(txs, params.address, info.current_block_height)
   }
 
   /**
-   * `registerSpendNtfn` (wrapped as `subscribeToChainSpend`) is LND's only way
-   * to watch an arbitrary, non-wallet-owned outpoint — the HTLC output is
-   * exactly that, from the moment `fund()` pays it out. It's a push
-   * subscription, not a one-shot query, so this adapts it to the port's poll
-   * shape: subscribe, wait briefly for a `'confirmation'` (which the notifier
-   * replays from `min_height` if the spend already happened, not just future
-   * ones), then tear down either way — the orchestrator's own tick loop
-   * (`whenAwaitingClaim`) is the real poll; this call only answers "as of
-   * right now". The rescan starts at the funding block, or at the LND tip
-   * sampled before an unconfirmed funding status. It is never 0: the
-   * underlying call falsy-checks `min_height` and throws.
-   */
-  /**
-   * Read through ESPLORA, not through lnd.
-   *
-   * The first version subscribed with `subscribeToChainSpend` and treated a
-   * five-second silence as "unspent". Both halves of that are wrong, and an
-   * e2e against a regtest node is what showed it:
-   *
-   *   spend sitting in the mempool, watched 60s -> NO EVENT AT ALL
-   *   the same outpoint, after one block         -> event in 32ms
-   *
-   * So lnd is confirmation-only for spends — not slow, it never dispatches a
-   * mempool spend. That made the old `resolve(null)` a lie in the one direction
-   * that costs money: `whenRefundingOnchain` reads null as UNSPENT and
-   * broadcasts the solver's refund against an HTLC the client has already
-   * claimed and whose preimage is already public.
-   *
-   * And a subscription cannot answer the ordinary question either. Nothing
-   * fires for an output that is simply unspent, so "no event" is the normal
-   * case as well as the failure case — a timeout can only ever guess between
-   * them. Rejecting instead of guessing broke the polling path, which is how
-   * this got caught.
-   *
-   * Esplora answers both definitively, in one request, including mempool
-   * spends — `outspend.spent` is true for an unconfirmed spend, which is how
-   * the preimage reaches us the moment the client broadcasts rather than a
-   * block later. Same call every Esplora-backed adapter makes, so the backends
-   * all satisfy the port's contract identically.
-   *
-   * Requiring Esplora here is not a new dependency: `findOutputs` already
-   * refuses without it, for the same underlying reason — an HTLC is a
-   * THIRD-PARTY output, and lnd cannot see those on its own.
+   * Read through ESPLORA, not lnd's spend subscription: lnd never dispatches a MEMPOOL spend (measured on regtest),
+   * and fires nothing for an unspent output, so "no event" cannot tell unspent from not-yet-seen — and null here
+   * makes `whenRefundingOnchain` refund an HTLC whose preimage may already be public. Esplora answers both in one
+   * request, including an unconfirmed spend, so the preimage arrives when the client broadcasts.
    */
   async findSpendWitness(params: {
     txid: string
     vout: number
     outputScript: Uint8Array
   }): Promise<Uint8Array[] | null> {
-    if (!this.esplora) {
-      throw new Error(
-        'onchain spend lookup needs an Esplora URL: lnd dispatches spends only on confirmation, and never for ' +
-          'a third-party output it does not own (set lnd.esploraUrl)',
-      )
-    }
+    const esplora = this.esploraFor(
+      'onchain spend lookup needs an Esplora URL: lnd dispatches spends only on confirmation, and never for ' +
+        'a third-party output it does not own',
+    )
     // Two shapes in the wild, and this has to work against both.
     //
     // A real Esplora serves `/tx/:txid/outspend/:vout` and names the spender
@@ -240,7 +179,7 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
     // mempool.space deployments this runs against 404 that path with HTML, and
     // their plural `/tx/:txid/outspends` answers `{"spent": true}` and nothing
     // more. Both measured on the regtest stack.
-    const spender = await spenderOf(this.esplora, params.txid, params.vout, params.outputScript)
+    const spender = await spenderOf(esplora, params.txid, params.vout, params.outputScript)
     if (spender === 'unspent') return null
     if (spender === 'spent-by-unknown') {
       // Esplora knows it is spent but will not name the spender. lnd WILL — it
@@ -249,8 +188,9 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
       // briefly: a confirmed spend answers in milliseconds (measured: 32ms),
       // and a mempool-only one answers never, which is the case below.
       const { current_block_height } = await getWalletInfo({ lnd: this.lnd })
-      const fundingStatus = (await this.esplora.getJson(`/tx/${params.txid}/status`)) as
+      const fundingStatus = (await esplora.getJson(`/tx/${params.txid}/status`)) as
         { confirmed: false } | { confirmed: true; block_height: number }
+      // Never 0: the vendor falsy-checks `min_height` and throws.
       const minHeight = fundingStatus.confirmed ? fundingStatus.block_height : current_block_height
       const viaLnd = await this.witnessFromLndSpend(params, minHeight)
       if (viaLnd) return viaLnd
@@ -265,7 +205,7 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
           'transaction, so its witness (and any preimage in it) cannot be read',
       )
     }
-    const rawTx = (await this.esplora.getText(`/tx/${spender.txid}/hex`)).trim()
+    const rawTx = (await esplora.getText(`/tx/${spender.txid}/hex`)).trim()
     return witnessFromRawTx(rawTx, spender.vin)
   }
 
@@ -322,13 +262,11 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
 
   /** NOT `getChainTransactions`: an HTLC spend is not lnd's own, so it lists none of them. */
   async transactionOutcome(txid: string): Promise<OnchainTxOutcome> {
-    if (!this.esplora) {
-      throw new Error(
-        'onchain transaction lookup needs an Esplora URL: lnd lists only its own wallet transactions, so it cannot ' +
-          'say whether a spend of a third-party output landed (set lnd.esploraUrl)',
-      )
-    }
-    return txOutcomeVia(this.esplora, txid)
+    const esplora = this.esploraFor(
+      'onchain transaction lookup needs an Esplora URL: lnd lists only its own wallet transactions, so it cannot ' +
+        'say whether a spend of a third-party output landed',
+    )
+    return txOutcomeVia(esplora, txid)
   }
 
   async estimateFeeRate(): Promise<number> {

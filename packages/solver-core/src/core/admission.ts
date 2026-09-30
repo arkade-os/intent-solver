@@ -15,9 +15,10 @@
  * describe quotes in flight, and a process that dies has none.
  */
 
-/** A claim on headroom, held until the row that supersedes it is durable. */
 import type { AdmissionRequest, AdmissionStrategy } from './admissionStrategy.js'
+import { createSerialiser } from '../util/serialise.js'
 
+/** A claim on headroom, held until the row that supersedes it is durable. */
 export interface Reservation {
   /**
    * Give the headroom back. Idempotent, because the two callers overlap: a `finally`
@@ -45,27 +46,10 @@ export class AdmissionControl implements AdmissionStrategy {
   private reservedFloat = 0
 
   /**
-   * The same claim, per non-sats cap dimension. Apart from `reserved` rather than
-   * summed into it: different units against a different ceiling, so one shared
-   * total would let a token claim consume the sats cap.
-   */
-  private reservedUnits = new Map<string, bigint>()
-
-  /**
    * Serialises read-modify-write on both counters. A promise chain rather than a lock
    * library: the critical section is one `await` on SQLite.
    */
-  private tail: Promise<unknown> = Promise.resolve()
-
-  private serialise<T>(job: () => Promise<T>): Promise<T> {
-    // `then(job, job)` so one caller's rejection never wedges the queue for the next.
-    const result = this.tail.then(job, job)
-    this.tail = result.then(
-      () => undefined,
-      () => undefined,
-    )
-    return result
-  }
+  private readonly serialise = createSerialiser()
 
   /**
    * Claim `sats` if the cap allows, counting both what is durable and what other
@@ -103,40 +87,6 @@ export class AdmissionControl implements AdmissionStrategy {
   }
 
   /**
-   * {@link reserve} for a quantity no `number` holds exactly: one whole ERC-20 token
-   * is 10^18 atomic units, ~111x `Number.MAX_SAFE_INTEGER`, and rounding an exposure
-   * cap admits past what the operator set. `dimension` names the ceiling claimed
-   * against — one asset, one market — so a claim in one never bounds another.
-   */
-  async reserveUnits(
-    dimension: string,
-    units: bigint,
-    committedUnits: () => Promise<bigint>,
-    capUnits: bigint,
-  ): Promise<Reservation | null> {
-    return this.serialise(async (): Promise<Reservation | null> => {
-      if (!(units > 0n)) throw new RangeError(`reserveUnits() needs a positive size, got ${units}`)
-      const committed = await committedUnits()
-      const held = this.reservedUnits.get(dimension) ?? 0n
-      if (committed + held + units > capUnits) return null
-      this.reservedUnits.set(dimension, held + units)
-      let released = false
-      return {
-        release: () => {
-          if (released) return
-          released = true
-          const next = (this.reservedUnits.get(dimension) ?? 0n) - units
-          // Dropped at zero, not left at 0n: dimensions are caller-supplied, and a
-          // map that only ever grows is a leak keyed by whatever it was handed.
-          if (next === 0n) this.reservedUnits.delete(dimension)
-          else this.reservedUnits.set(dimension, next)
-        },
-      }
-    })
-  }
-
-  /** In-flight sats. For assertions and diagnostics; not part of admission. */
-  /**
    * {@link AdmissionStrategy}'s shape over {@link reserve}.
    *
    * Present so the exposure cap IS a strategy rather than needing a wrapper: a
@@ -171,16 +121,12 @@ export class AdmissionControl implements AdmissionStrategy {
     })
   }
 
+  /** In-flight sats. For assertions and diagnostics; not part of admission. */
   get outstandingSats(): number {
     return this.reserved
   }
 
   get outstandingFloatSats(): number {
     return this.reservedFloat
-  }
-
-  /** In-flight units in `dimension`. For assertions and diagnostics; not part of admission. */
-  outstandingUnits(dimension: string): bigint {
-    return this.reservedUnits.get(dimension) ?? 0n
   }
 }

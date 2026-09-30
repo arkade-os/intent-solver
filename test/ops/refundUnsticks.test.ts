@@ -27,7 +27,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { LEGAL_EDGES_FOR_TEST } from '@arkade-os/solver-corridors/db/swaps.js'
-import { phaseOf } from '@arkade-os/solver-app/admin/projection.js'
+import { phaseOf } from '../support/phaseOf.js'
 
 const source = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
 

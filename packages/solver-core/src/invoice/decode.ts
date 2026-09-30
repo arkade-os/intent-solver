@@ -25,10 +25,9 @@ const DEFAULT_MIN_FINAL_CLTV = 18
  * PARSING — a length bound and decodability — and none of the send leg's
  * ceilings.
  *
- * Every reader built on it exists for the reason {@link finalCltvBlocksOf}
- * gives at length: {@link decodeInvoice} bundles parsing with the send leg's
- * CLTV defences, and a caller that wants one scalar off a string it already
- * holds is not asking for those defences to run again.
+ * {@link decodeInvoice} bundles parsing with the send leg's CLTV defences, and a
+ * caller that wants one scalar off a string it already holds is not asking for
+ * those defences to run again.
  */
 const parseBolt11 = (raw: string): ReturnType<typeof bolt11.decode> => {
   if (raw.length > MAX_INVOICE_LENGTH) throw new InvalidInvoice('too_long')
@@ -45,39 +44,8 @@ const sectionReader = (raw: string): ((name: string) => unknown) => {
 }
 
 /**
- * The final CLTV delta on an invoice THIS SOLVER MINTED, read without the
- * client-invoice defences {@link decodeInvoice} applies.
- *
- * ## Why this exists rather than a call to `decodeInvoice`
- *
- * Every CLTV ceiling in this file is a SEND-leg protection, and their own
- * comments say so: a large delta "lets the payee hold our outbound HTLC well
- * past any refund deadline we would quote", and the combined bound guards the
- * double-collect window — a client whose invoice outlives their own Arkade
- * refund, so they take the lockup back AND settle the payment.
- *
- * On the RECEIVE leg every term of that inverts. We are the payee, the HTLC is
- * inbound, and a larger delta pushes `E` LATER — which every gate in
- * `core/receive.ts` wants rather than fears. There is no hostile invoice here,
- * because the invoice is ours.
- *
- * Applying those ceilings to our own invoice was not merely pointless, it was
- * fatal: the mainnet privacy wrapper mints 420 blocks against a
- * `MAX_CLIENT_CLTV_BLOCKS` of 288, so the receive corridor threw
- * `cltv_too_large` on every quote it ever made.
- *
- * ## Why not just raise the bound
- *
- * Because 288 is load-bearing where it stands. It caps what a CLIENT's invoice
- * may demand of us, and the comment below is explicit that the combined check —
- * not the `c`-only one — is the one that matters. Raising it to admit our own
- * 420 would widen the double-collect window on every client invoice, to fix a
- * leg the bound was never written about.
- *
- * So the bound stays, and stops being applied where its threat cannot arise.
- *
- * Returns BOLT11's default of 18 when there is no `c` tag, exactly as
- * {@link decodeInvoice} does: an absent tag is a real 18, not "unknown".
+ * The `c` tag alone, BOLT11's 18 when absent — read through the section reader, not `decodeInvoice`,
+ * so an invoice this repo would refuse still yields its delta. No caller here; a downstream fork imports it.
  */
 export const finalCltvBlocksOf = (raw: string): number => {
   const value = sectionReader(raw)('min_final_cltv_expiry')
@@ -104,8 +72,7 @@ export const finalCltvBlocksOf = (raw: string): number => {
  * That requirement is correct where it lives. `decodeInvoice` reads CLIENT
  * invoices for the send leg, where an amount is what is being quoted and priced
  * and an absent one is a malformed request. It is simply not a general-purpose
- * BOLT11 reader, which is the same lesson {@link finalCltvBlocksOf} above
- * records for the CLTV ceilings.
+ * BOLT11 reader.
  *
  * Returns BOLT11's default of 3600 seconds when there is no `x` tag, exactly as
  * {@link decodeInvoice} does: an absent tag is a real hour, not "unknown".

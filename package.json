@@ -25,12 +25,11 @@
     "verify:artifacts": "node scripts/carrier-artifacts/verify.mjs"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.4.76",
+    "@arkade-os/sdk": "0.4.77",
     "@hono/node-server": "^2.1.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
-    "@scure/bip32": "^2.2.0",
     "@scure/bip39": "^2.2.0",
     "@scure/btc-signer": "^2.0.1",
     "@arkade-os/solver-arkade": "workspace:*",
@@ -50,12 +49,10 @@
     "light-bolt11-decoder": "^3.2.0",
     "lightning": "^12.2.3",
     "nostr-tools": "^2.24.1",
-    "pino": "^9.6.0",
-    "undici": "7.29.1",
-    "zod": "^3.24.1"
+    "undici": "7.29.1"
   },
   "devDependencies": {
-    "@arkade-os/swap": "0.0.22",
+    "@arkade-os/swap": "0.0.23",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^24.13.3",
     "@types/ws": "^8.18.1",
@@ -71,8 +68,8 @@
       "protobufjs"
     ],
     "overrides": {
-      "@arkade-os/sdk": "file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz",
-      "@arkade-os/swap": "file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz",
+      "@arkade-os/sdk": "file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz",
+      "@arkade-os/swap": "file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz",
       "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.0.0-dd8b03a1.tgz",
       "@arkade-taxi/covenant": "file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-0.0.0-dd8b03a1.tgz",
       "@arkade-taxi/protocol": "file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-0.0.0-dd8b03a1.tgz"

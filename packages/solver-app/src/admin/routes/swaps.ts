@@ -3,7 +3,7 @@
  *
  * Merging four stores into one stream is the whole difficulty. Each has its
  * own row shape and its own state vocabulary, so everything client-facing goes
- * through `projection.ts` — which carries each corridor's real `state` word
+ * through `corridors/projections.ts` — which carries each corridor's real `state` word
  * through verbatim and adds the `phase` that is safe to compare across them.
  *
  * Read-only. Nothing here can change a swap.
@@ -11,7 +11,7 @@
 
 import type { Hono } from 'hono'
 
-import { type AdminPhase } from '../projection.js'
+import type { AdminPhase } from '@arkade-os/solver-core/core/swapView.js'
 import type { CorridorSwapView } from '@arkade-os/solver-core/core/corridor.js'
 import type { AdminDeps } from '../server.js'
 import { PageRequestError, type PageOptions } from '@arkade-os/solver-core/core/page.js'
@@ -29,17 +29,7 @@ const pageOf = async (
   corridor: string,
   options: PageOptions,
 ): Promise<{ swaps: CorridorSwapView[]; nextCursor: string | null }> =>
-  (await readers(deps).get(corridor)?.page(options)) ?? { swaps: [], nextCursor: null }
-
-/**
- * The reader set for this request.
- *
- * Rebuilt per call rather than cached on `deps`: the readers are stateless
- * wrappers over stores the services already hold, and `AdminDeps` is shaped by
- * the console's own composition — threading a set through it would change every
- * caller for no behavioural gain.
- */
-const readers = (deps: AdminDeps) => deps.services.readers
+  (await deps.services.readers.get(corridor)?.page(options)) ?? { swaps: [], nextCursor: null }
 
 /**
  * Full row plus timeline for one swap, or null when that corridor has no such id.
@@ -61,7 +51,7 @@ const detailOf = async (
   raw: unknown
   swap: CorridorSwapView
   history: { at: number; from: string | null; to: string; detail: string | null }[]
-} | null> => (await readers(deps).get(corridor)?.detail(id)) ?? null
+} | null> => (await deps.services.readers.get(corridor)?.detail(id)) ?? null
 
 export const registerSwapRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/swaps', async (c) => {
@@ -72,7 +62,7 @@ export const registerSwapRoutes = (app: Hono, deps: AdminDeps): void => {
     // answering 400 for one would hide its swaps from the only screen that
     // lists them. Operator ACTIONS stay closed — see `actions.ts`, which
     // reaches per-corridor orchestrator methods a registry cannot generalise.
-    if (corridorParam !== undefined && !readers(deps).get(corridorParam)) {
+    if (corridorParam !== undefined && !deps.services.readers.get(corridorParam)) {
       return c.json({ error: 'unknown_corridor', corridor: corridorParam }, 400)
     }
     const phase = query.phase
@@ -100,7 +90,7 @@ export const registerSwapRoutes = (app: Hono, deps: AdminDeps): void => {
     // compiled with. Listing `CORRIDORS` here would have made a plugged-in
     // corridor's swaps visible only to someone who already knew to ask for it
     // by name — readable in principle and invisible in practice.
-    const wanted = corridorParam ? [corridorParam] : [...readers(deps)].map((r) => r.descriptor.pair)
+    const wanted = corridorParam ? [corridorParam] : [...deps.services.readers].map((r) => r.descriptor.pair)
     let pages
     try {
       pages = await Promise.all(
@@ -128,7 +118,7 @@ export const registerSwapRoutes = (app: Hono, deps: AdminDeps): void => {
 
   app.get('/api/swaps/:corridor/:id', async (c) => {
     const corridor = decodeURIComponent(c.req.param('corridor'))
-    if (!readers(deps).get(corridor)) return c.json({ error: 'unknown_corridor', corridor }, 400)
+    if (!deps.services.readers.get(corridor)) return c.json({ error: 'unknown_corridor', corridor }, 400)
     const detail = await detailOf(deps, corridor, c.req.param('id'))
     if (!detail) return c.json({ error: 'not_found' }, 404)
     return c.json(detail)

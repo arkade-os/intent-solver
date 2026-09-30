@@ -811,6 +811,39 @@ describe('OnchainSendSwapService', () => {
     expect(row.claimArkTxid).toBe('claim-ark-txid')
   })
 
+  it('names the server-independent recourse on a claim it parks past the refund deadline', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    const funded = await service.tick(outcome.swap.id)
+    deps.arkade.claim = async () => {
+      throw new Error('arkade server censoring the claim')
+    }
+    deps.onchain.spendClaim(funded.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      P,
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+    await expect(service.tick(funded.id)).rejects.toThrow('censoring')
+    expect((await deps.store.get(funded.id)).state).toBe('claiming')
+
+    now = funded.refundLocktime
+    const row = await service.tick(funded.id)
+    expect(row.state).toBe('stuck')
+    expect(row.failureReason).toContain('arkade server censoring the claim')
+    // The solver is the covenant receiver here, so its solo path is the claim leaf.
+    expect(row.failureReason).toContain('unilateralClaim')
+    expect(row.failureReason).not.toContain('unilateralRefundWithoutReceiver')
+    expect(row.failureReason).toContain(String(row.claimDelay))
+  })
+
   /**
    * TLA+ finding F7, the half a locktime cannot fix.
    *

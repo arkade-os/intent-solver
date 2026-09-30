@@ -30,10 +30,9 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-db/driver.js'
-import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { EVM_RECEIVE_NON_TERMINAL, type EvmReceiveSwapState } from '@arkade-os/solver-core/core/evmSwapState.js'
-import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
+import { EvmSwapStore, commonFields, text, type Raw } from './evmSwapStore.js'
 
 export interface EvmReceiveSwapRow {
   id: string
@@ -161,53 +160,11 @@ CREATE TABLE IF NOT EXISTS receive_evm_swap_event (
 CREATE INDEX IF NOT EXISTS idx_receive_evm_swap_event_swap ON receive_evm_swap_event(swap_id);
 `
 
-type Raw = Record<string, string | number | null>
-
-const text = (value: string | number | null | undefined): string | null =>
-  value === null || value === undefined ? null : String(value)
-
 const toRow = (raw: Raw): EvmReceiveSwapRow => ({
-  id: String(raw.id),
+  ...commonFields(raw),
   state: String(raw.state) as EvmReceiveSwapState,
-  createdAt: Number(raw.created_at),
-  updatedAt: Number(raw.updated_at),
-  paymentHash: String(raw.payment_hash),
-  amountSats: Number(raw.amount_sats),
-  payoutSats: raw.payout_sats === null ? Number(raw.amount_sats) : Number(raw.payout_sats),
-  evmAmount: String(raw.evm_amount),
-  tokenAddress: String(raw.token_address),
-  evmContractAddress: String(raw.evm_contract_address),
-  evmChainId: Number(raw.evm_chain_id),
-  evmTimeout: Number(raw.evm_timeout),
-  validUntil: Number(raw.valid_until),
-  minConfirmations: Number(raw.min_confirmations),
-  minAgeSeconds: Number(raw.min_age_seconds),
-  evmLockTxid: text(raw.evm_lock_txid),
-  evmClaimTxid: text(raw.evm_claim_txid),
-  evmClaimAddress: String(raw.evm_claim_address),
-  evmRefundAddress: String(raw.evm_refund_address),
-  refundLocktime: Number(raw.refund_locktime),
-  providerPubkey: String(raw.provider_pubkey),
-  serverPubkey: String(raw.server_pubkey),
-  claimDelay: Number(raw.claim_delay),
-  refundDelay: Number(raw.refund_delay),
-  refundWithoutReceiverDelay: Number(raw.refund_without_receiver_delay),
-  pkScript: String(raw.pk_script),
-  lockupAddress: String(raw.lockup_address),
-  refundPkScript: String(raw.refund_pk_script),
-  emulatorPubkey: String(raw.emulator_pubkey),
-  clientRefundPubkey: String(raw.client_refund_pubkey),
-  receiverPkScript: String(raw.receiver_pk_script),
-  nonInteractiveParameters:
-    raw.non_interactive_parameters === null || raw.non_interactive_parameters === undefined
-      ? null
-      : raw.non_interactive_parameters === '1',
   payoutPubkey: String(raw.payout_pubkey),
-  preimage: text(raw.preimage),
   fundArkTxid: text(raw.fund_ark_txid),
-  refundArkTxid: text(raw.refund_ark_txid),
-  rfqId: text(raw.rfq_id),
-  failureReason: text(raw.failure_reason),
 })
 
 export type EvmReceiveQuoteRecord = Omit<
@@ -237,26 +194,23 @@ export type EvmReceiveQuoteRecord = Omit<
   nonInteractiveParameters: boolean
 }
 
-const TRANSITION_COLUMNS: ReadonlySet<string> = new Set([
-  'evm_lock_txid',
-  'evm_claim_txid',
-  'preimage',
-  'fund_ark_txid',
-  'refund_ark_txid',
-  'failure_reason',
-])
-
-const assertColumns = (columns: readonly string[], allowed: ReadonlySet<string>, where: string): void => {
-  for (const column of columns) {
-    if (!allowed.has(column)) throw new Error(where + ': unknown column ' + column)
+export class EvmReceiveSwapStore extends EvmSwapStore<EvmReceiveSwapRow, EvmReceiveSwapState> {
+  private constructor(driver: SqlDriver, now: () => number) {
+    super(driver, now, {
+      table: 'receive_evm_swap',
+      noun: 'receive',
+      toRow,
+      nonTerminal: EVM_RECEIVE_NON_TERMINAL,
+      transitionColumns: new Set([
+        'evm_lock_txid',
+        'evm_claim_txid',
+        'preimage',
+        'fund_ark_txid',
+        'refund_ark_txid',
+        'failure_reason',
+      ]),
+    })
   }
-}
-
-export class EvmReceiveSwapStore {
-  private constructor(
-    private readonly driver: SqlDriver,
-    private readonly now: () => number,
-  ) {}
 
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<EvmReceiveSwapStore> {
     const store = new EvmReceiveSwapStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
@@ -264,199 +218,7 @@ export class EvmReceiveSwapStore {
     return store
   }
 
-  async close(): Promise<void> {
-    await this.driver.close?.()
-  }
-
   async insertQuote(quote: EvmReceiveQuoteRecord): Promise<EvmReceiveSwapRow> {
-    const at = this.now()
-    await this.driver.run(
-      `INSERT INTO receive_evm_swap (
-         id, state, created_at, updated_at, payment_hash, amount_sats, payout_sats, evm_amount,
-         token_address, evm_contract_address, evm_chain_id, evm_timeout, valid_until, min_confirmations,
-         min_age_seconds, evm_claim_address, evm_refund_address, refund_locktime, provider_pubkey,
-         server_pubkey, claim_delay, refund_delay, refund_without_receiver_delay, pk_script,
-         lockup_address, refund_pk_script, emulator_pubkey, client_refund_pubkey, receiver_pk_script,
-         non_interactive_parameters, payout_pubkey, rfq_id
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        quote.id,
-        at,
-        at,
-        quote.paymentHash,
-        quote.amountSats,
-        quote.payoutSats,
-        quote.evmAmount,
-        quote.tokenAddress,
-        quote.evmContractAddress,
-        quote.evmChainId,
-        quote.evmTimeout,
-        quote.validUntil,
-        quote.minConfirmations,
-        quote.minAgeSeconds,
-        quote.evmClaimAddress,
-        quote.evmRefundAddress,
-        quote.refundLocktime,
-        quote.providerPubkey,
-        quote.serverPubkey,
-        quote.claimDelay,
-        quote.refundDelay,
-        quote.refundWithoutReceiverDelay,
-        quote.pkScript,
-        quote.lockupAddress,
-        quote.refundPkScript,
-        quote.emulatorPubkey,
-        quote.clientRefundPubkey,
-        quote.receiverPkScript,
-        quote.nonInteractiveParameters === undefined ? null : quote.nonInteractiveParameters ? '1' : null,
-        quote.payoutPubkey,
-        quote.rfqId,
-      ],
-    )
-    await this.driver.run(
-      `INSERT INTO receive_evm_swap_event (swap_id, at, from_state, to_state) VALUES (?, ?, NULL, 'quoted')`,
-      [quote.id, at],
-    )
-    return this.get(quote.id)
-  }
-
-  async get(id: string): Promise<EvmReceiveSwapRow> {
-    const rows = (await this.driver.all('SELECT * FROM receive_evm_swap WHERE id = ?', [id])) as Raw[]
-    const raw = rows[0]
-    if (!raw) throw new Error('no evm receive swap ' + id)
-    return toRow(raw)
-  }
-
-  async findByRfqId(rfqId: string): Promise<EvmReceiveSwapRow | null> {
-    const rows = (await this.driver.all('SELECT * FROM receive_evm_swap WHERE rfq_id = ?', [rfqId])) as Raw[]
-    return rows[0] ? toRow(rows[0]) : null
-  }
-
-  async findLiveByPaymentHash(paymentHash: string): Promise<EvmReceiveSwapRow | null> {
-    const rows = (await this.driver.all(
-      "SELECT * FROM receive_evm_swap WHERE payment_hash = ? AND state != 'refused'",
-      [paymentHash],
-    )) as Raw[]
-    return rows[0] ? toRow(rows[0]) : null
-  }
-
-  /**
-   * Sats committed across every non-terminal swap — this corridor's
-   * contribution to the house cap.
-   *
-   * NON_TERMINAL, not money-committed-only. On this side that widens the count
-   * beyond where the solver's sats are literally at risk, and deliberately: the
-   * quote is binding until `valid_until`, and a client whose ERC20 lock is
-   * inside that window is owed a funded lockup — so a live `quoted` or
-   * `awaiting_lock` or `locked` row is capacity the solver may have to honour
-   * at the quoted rate. Reserving only the exposed states would let unlimited
-   * concurrent quotes slip past the cap and all expect funding at once. Once
-   * the row is terminal the claim is gone either way.
-   * One table backs every token, so a corridor asks for its own `token_address` and a
-   * caller summing whole STORES omits it. Both callers exist.
-   */
-  async committedSats(tokenAddress?: string): Promise<number> {
-    const placeholders = EVM_RECEIVE_NON_TERMINAL.map(() => '?').join(', ')
-    const rows = (await this.driver.all(
-      'SELECT COALESCE(SUM(amount_sats), 0) AS total FROM receive_evm_swap WHERE state IN (' +
-        placeholders +
-        ')' +
-        (tokenAddress === undefined ? '' : ' AND token_address = ?'),
-      tokenAddress === undefined ? [...EVM_RECEIVE_NON_TERMINAL] : [...EVM_RECEIVE_NON_TERMINAL, tokenAddress],
-    )) as Raw[]
-    return Number(rows[0]?.total ?? 0)
-  }
-
-  async findByStates(states: readonly EvmReceiveSwapState[]): Promise<EvmReceiveSwapRow[]> {
-    if (states.length === 0) return []
-    const placeholders = states.map(() => '?').join(', ')
-    const rows = (await this.driver.all(
-      'SELECT * FROM receive_evm_swap WHERE state IN (' + placeholders + ') ORDER BY created_at ASC',
-      [...states],
-    )) as Raw[]
-    return rows.map(toRow)
-  }
-
-  async findLive(): Promise<EvmReceiveSwapRow[]> {
-    return this.findByStates(EVM_RECEIVE_NON_TERMINAL)
-  }
-
-  async history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]> {
-    const rows = (await this.driver.all(
-      'SELECT at, from_state, to_state, detail FROM receive_evm_swap_event WHERE swap_id = ? ORDER BY id ASC',
-      [swapId],
-    )) as Raw[]
-    return rows.map((raw) => ({
-      at: Number(raw.at),
-      from: text(raw.from_state),
-      to: String(raw.to_state),
-      detail: text(raw.detail),
-    }))
-  }
-
-  /** Rows whose last movement falls in a window. @see EvmSendSwapStore.ledgerRows for why the token narrows in SQL. */
-  async ledgerRows(
-    window: LedgerWindow,
-    tokenAddress?: string,
-  ): Promise<{ rows: EvmReceiveSwapRow[]; truncated: boolean }> {
-    const limit = clampLedgerLimit(window.limit)
-    const raw = await this.driver.all<Raw>(
-      `SELECT * FROM receive_evm_swap WHERE updated_at >= ? AND updated_at < ?` +
-        (tokenAddress === undefined ? '' : ' AND token_address = ?') +
-        ` ORDER BY updated_at DESC LIMIT ?`,
-      tokenAddress === undefined
-        ? [window.since, window.until, limit + 1]
-        : [window.since, window.until, tokenAddress, limit + 1],
-    )
-    return { rows: raw.slice(0, limit).map(toRow), truncated: raw.length > limit }
-  }
-
-  async page(options: PageOptions = {}): Promise<{ rows: EvmReceiveSwapRow[]; nextCursor: string | null }> {
-    const { sql, params, limit } = pageQuery('receive_evm_swap', options)
-    const raw = await this.driver.all<Raw & PageRawFields>(sql, params)
-    const { page, nextCursor } = takePage(raw, limit)
-    return { rows: page.map(toRow), nextCursor }
-  }
-
-  async transition(
-    id: string,
-    from: EvmReceiveSwapState,
-    to: EvmReceiveSwapState,
-    fields: Record<string, unknown> = {},
-  ): Promise<void> {
-    const columns = Object.keys(fields)
-    assertColumns(columns, TRANSITION_COLUMNS, 'transition()')
-    const at = this.now()
-    const assignments = columns.map((column) => column + ' = ?').join(', ')
-    const result = await this.driver.run(
-      'UPDATE receive_evm_swap SET state = ?, updated_at = ?' +
-        (assignments ? ', ' + assignments : '') +
-        ' WHERE id = ? AND state = ?',
-      [to, at, ...columns.map((column) => fields[column] as string | number | null), id, from],
-    )
-    if ((result?.changes ?? 0) === 0) {
-      throw new Error('evm receive swap ' + id + ' is not in state ' + from)
-    }
-    await this.driver.run(
-      'INSERT INTO receive_evm_swap_event (swap_id, at, from_state, to_state) VALUES (?, ?, ?, ?)',
-      [id, at, from, to],
-    )
-  }
-
-  /** Set fields without moving the row - see the send store on why this is separate. */
-  async patch(id: string, fields: Record<string, unknown>): Promise<void> {
-    const columns = Object.keys(fields)
-    if (columns.length === 0) return
-    assertColumns(columns, TRANSITION_COLUMNS, 'patch()')
-    const assignments = columns.map((column) => column + ' = ?').join(', ')
-    await this.driver.run('UPDATE receive_evm_swap SET updated_at = ?, ' + assignments + ' WHERE id = ?', [
-      this.now(),
-      ...columns.map((column) => fields[column] as string | number | null),
-      id,
-    ])
-  }
-
-  async fail(id: string, from: EvmReceiveSwapState, reason: string): Promise<void> {
-    await this.transition(id, from, 'stuck', { failure_reason: reason })
+    return this.insert(quote, { payout_pubkey: quote.payoutPubkey })
   }
 }

@@ -17,7 +17,17 @@ const select = (
   amountSats = 1000,
   reserved = new Set<string>(),
   dustSats = DUST,
-) => selectLockupFunding({ candidates, amountSats, horizonSeconds: 2 * HOUR, nowSeconds: NOW, reserved, dustSats })
+  vtxoMinSats = DUST,
+) =>
+  selectLockupFunding({
+    candidates,
+    amountSats,
+    horizonSeconds: 2 * HOUR,
+    nowSeconds: NOW,
+    reserved,
+    dustSats,
+    vtxoMinSats,
+  })
 
 describe('selectLockupFunding', () => {
   it('funds from a coin whose batch outlives the swap horizon', () => {
@@ -68,8 +78,8 @@ describe('selectLockupFunding', () => {
   it('supplements insufficient preferred coins, and flags the mix', () => {
     const result = select(
       [
-        coin({ txid: 'safe', value: 400, expiresAt: new Date((NOW + 72 * HOUR) * 1000) }),
-        coin({ txid: 'lapsing', value: 700, expiresAt: new Date((NOW + HOUR) * 1000) }),
+        coin({ txid: 'safe', value: 500, expiresAt: new Date((NOW + 72 * HOUR) * 1000) }),
+        coin({ txid: 'lapsing', value: 900, expiresAt: new Date((NOW + HOUR) * 1000) }),
       ],
       1000,
     )
@@ -103,9 +113,54 @@ describe('selectLockupFunding', () => {
   })
 
   it('accumulates several coins when no single one covers the amount', () => {
-    const result = select([coin({ txid: 'a', value: 600 }), coin({ txid: 'b', value: 600 })], 1000)
+    const result = select([coin({ txid: 'a', value: 700 }), coin({ txid: 'b', value: 700 })], 1000)
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.inputs).toHaveLength(2)
+  })
+
+  it('adds an input when the first selection would leave sub-minimum change', () => {
+    const result = select([coin({ txid: 'first', value: 2111 }), coin({ txid: 'extra', value: 500 })], 2000)
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.inputs.map((input) => input.txid)).toEqual(['first', 'extra'])
+  })
+
+  it('refuses a selected set that can only produce sub-minimum change', () => {
+    const result = select([coin({ txid: 'only', value: 2111 })], 2000)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toBe('minimum_change_unavailable')
+  })
+
+  it('keeps an exact payment valid without change', () => {
+    const result = select([coin({ txid: 'exact', value: 2000 })], 2000)
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.inputs.map((input) => input.txid)).toEqual(['exact'])
+  })
+
+  it('can use a shorter-lived coin to clear the change minimum', () => {
+    const result = select(
+      [
+        coin({ txid: 'safe', value: 2111 }),
+        coin({ txid: 'soon', value: 500, expiresAt: new Date((NOW + HOUR) * 1000) }),
+      ],
+      2000,
+    )
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.inputs.map((input) => input.txid)).toEqual(['safe', 'soon'])
+      expect(result.clearedHorizon).toBe(false)
+    }
+  })
+
+  it('uses the operator VTXO minimum, not just dust', () => {
+    const result = select(
+      [coin({ txid: 'first', value: 2330 }), coin({ txid: 'extra', value: 500 })],
+      2000,
+      new Set(),
+      DUST,
+      600,
+    )
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.inputs.map((input) => input.txid)).toEqual(['first', 'extra'])
   })
 
   it('refuses rather than underfunding when the unreserved set is too small', () => {
@@ -179,6 +234,18 @@ describe('selectLockupFunding — asset-bearing coins', () => {
     const result = select([coin({ txid: 'asset-bearing', value: 5000, assets: asset })])
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.inputs.map((i) => i.txid)).toEqual(['asset-bearing'])
+  })
+
+  it('adds BTC when asset change clears dust but not the operator minimum', () => {
+    const result = select(
+      [coin({ txid: 'asset', value: 2330, assets: asset }), coin({ txid: 'extra', value: 500 })],
+      2000,
+      new Set(),
+      DUST,
+      600,
+    )
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.inputs.map((input) => input.txid)).toEqual(['asset', 'extra'])
   })
 
   it('discounts it by exactly one dust carrier, not by nothing and not by more', () => {

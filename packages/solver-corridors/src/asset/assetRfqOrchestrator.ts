@@ -50,7 +50,7 @@ import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/s
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
-import { AssetRfqSwapStore, type AssetRfqSwapRow, type AssetRfqSwapState } from '../db/assetRfqSwaps.js'
+import { AssetRfqSwapStore, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 import type { AssetRfqCarrierTerms } from '../db/assetRfqSwaps.js'
 import type { AssetRfqCarrierChoice } from '../wire/assetRfqPayloads.js'
 
@@ -1012,6 +1012,3 @@ export class AssetRfqSwapService {
     await this.deps.store.fail(row.id, 'filling', 'fill outcome unknown after restart; check the offer address')
   }
 }
-
-/** The states a park may leave a row in — `parkVia`'s `parked` list. */
-export const ASSET_RFQ_PARKED: readonly AssetRfqSwapState[] = ['stuck', 'refused']

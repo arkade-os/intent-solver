@@ -28,9 +28,8 @@ export interface SqlDriver {
   /**
    * Run `fn` inside a transaction where the runtime supports one, rolling back
    * if it throws. better-sqlite3 gives real atomicity; D1 has no interactive
-   * transaction over discrete calls, so it runs `fn` as-is (best effort). Used
-   * only by the one-time legacy table rebuild, so the D1 best-effort path is
-   * acceptable — a fresh D1 database never carries the constraint being rebuilt.
+   * transaction over discrete calls, so it runs `fn` as-is (best effort) — a
+   * caller needing atomicity on D1 cannot rely on this.
    */
   transaction<T>(fn: () => Promise<T>): Promise<T>
   close(): Promise<void>

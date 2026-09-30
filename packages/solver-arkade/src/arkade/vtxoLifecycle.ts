@@ -75,6 +75,7 @@ import { hex } from '@scure/base'
 import type { CovenantSwapScript } from './covenant.js'
 import { assertCovenantScriptRow, type CovenantScriptRow } from './covenantRow.js'
 import type { CorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 
 /**
  * The contract type a swap lockup registers as.
@@ -95,17 +96,9 @@ export const LOCKUP_CONTRACT_LABEL = 'Lightning swap lockup'
 export const LOCKUP_CONTRACT_KIND = 'lnswap-lockup'
 
 /**
- * The registration for a lockup.
- *
- * It used to return null for the base three-leaf program — a compiled
- * `ArkadeProgramScript` no handler could re-derive, so there was no type to
- * register it as truthfully, and such a lockup stayed invisible to the wallet's
- * own reads and to the contract stream. That shape is gone: every script this
- * service builds is a `VHTLC.ScriptV2`, so every lockup registers.
- *
- * The params come from the script's own `vhtlcOptions` rather than being
- * rebuilt from the row, so the row this was derived from and the contract that
- * gets stored cannot disagree.
+ * The registration for a lockup. The params come from the script's own
+ * `vhtlcOptions` rather than being rebuilt from the row, so the row this was
+ * derived from and the contract that gets stored cannot disagree.
  */
 export const lockupContractRegistration = (script: CovenantSwapScript, address: string): CreateContractParams => {
   return {
@@ -123,34 +116,48 @@ export const lockupContractRegistration = (script: CovenantSwapScript, address: 
 }
 
 /**
- * Every live lockup across every REGISTERED corridor, mapped onto the shape
- * {@link lockupContractRegistration} needs (by way of `covenantScriptFromRow`)
- * to register each one as a contract.
+ * The lockups the SDK cannot get out of its own way for, read out of the
+ * REGISTERED contracts — the inverse of {@link lockupContractRegistration}.
+ * Live rows cannot name them: retirement needs `!live && !funded` and a swept
+ * output has no terminal spend, so a TERMINAL send leg stays registered.
  *
- * TAKES THE READER SET, NEVER `Services.corridors`. The reader set holds every
- * corridor with a STORE; the serving set holds only corridors with a SERVICE,
- * and `createServices` gates the service on `corridorEnabled` while opening
- * every store regardless. An operator switching a corridor off does not un-fund
- * its in-flight lockups, and those are exactly the ones that still need
- * registering. Sourcing this from the serving set would drop them silently.
+ * ONLY the not-ours ones, or this over-blocks: `recoverVtxos` drops an input
+ * its contract refuses and keeps the batch, and `assertVhtlcSpendableNow`
+ * refuses only a pre-CLTV lockup whose wallet is the `sender` — ours. The
+ * trader-sender leaf it never refuses is the one we can never sign.
  *
- * This used to take four NAMED stores, which made completeness a COMPILE-TIME
- * fact — and that was the entire point rather than an incidental style choice,
- * because the bug it guards against already happened: `cli.ts`'s
- * `registerLiveLockups` once built its row set from only `store` and
- * `onchainStore`, the two SEND corridors, and never read the receive legs at
- * all. A set cannot give that guarantee, so it moved to
- * `test/arkade/liveLockups.test.ts` plus the emptiness check in the body.
- *
- * The gap this closes was not cosmetic. Per this module's header, a lockup is
- * invisible to `getVtxos`/`getSpendableVtxos` until it is registered, so an
- * unregistered receive-leg lockup got none of the `isGenericallySpendable:
- * false` gate protecting it from renewal, and no recovery path if swept.
- * Registering it also means its deadline now flows into
- * {@link runVtxoLifecycle}'s CLTV guard — intended, not a side effect to
- * suppress: the guard's job is holding recovery back from any registered
- * lockup that is not yet safe to sweep, and the solver's own receive-leg
- * escrow is exactly such a lockup.
+ * Every entry is `refundable: false`, so its `refundLocktime` is never
+ * compared — only the immature arm reads the clock. An unreadable row is
+ * skipped and said, not blocked: blocking would wedge recovery with no remedy.
+ */
+export const registeredLockupDeadlines = (
+  contracts: readonly { script: string; type?: string; params: Record<string, string> }[],
+  solverPubkey: string,
+  log: (line: string) => void = () => {},
+): LockupDeadline[] => {
+  const deadlines: LockupDeadline[] = []
+  for (const contract of contracts) {
+    if (contract.type !== LOCKUP_CONTRACT_TYPE) continue
+    try {
+      const params = VHTLCV2ContractHandler.deserializeParams(contract.params)
+      if (hex.encode(params.sender) === solverPubkey) continue
+      deadlines.push({
+        script: contract.script,
+        refundLocktime: Number(params.refundLocktime),
+        refundable: false,
+      })
+    } catch (error) {
+      log(`registered lockup ${contract.script} cannot be read, recovery is unguarded for it: ${messageOf(error)}`)
+    }
+  }
+  return deadlines
+}
+
+/**
+ * Every live lockup across every REGISTERED corridor, as rows `covenantScriptFromRow` rebuilds.
+ * Takes the READER set, never `Services.corridors`: a switched-off corridor keeps its store and
+ * its in-flight lockups, which still need registering — an unregistered lockup is invisible to
+ * `getVtxos`, so it loses the renewal gate and the recovery path.
  */
 export const liveLockupRows = async (
   corridors: CorridorReaderSet,
@@ -206,6 +213,12 @@ export interface LifecycleVtxo {
   vout: number
   /** pkScript hex — what ties a coin back to the contract it belongs to. */
   script: string
+  /**
+   * `canRecoverOnchain` said yes, rather than the coin being in this set only
+   * as {@link recoverableVtxosFrom}'s height-expiry guess. `undefined` counts
+   * as confirmed: absent information must not switch a block off.
+   */
+  confirmedRecoverable?: boolean
 }
 
 /** A registered lockup and the deadline its recovery must wait for. */
@@ -213,64 +226,15 @@ export interface LockupDeadline {
   /** pkScript hex. */
   script: string
   /**
-   * Absolute refund deadline, unix SECONDS. Always seconds here, never a
-   * block height: `assertAbsoluteLocktime` (core/timelocks.ts) rejects
-   * anything below `LOCKTIME_THRESHOLD`, and `CovenantSwapScript`'s
-   * constructor calls it, so a height-denominated lockup cannot exist in this
-   * service. That is what lets the guard compare numbers directly instead of
-   * dispatching on BIP65 form the way a general-purpose client must.
+   * Absolute refund deadline: unix seconds, or a HEIGHT on a block-typed arkd. Only the
+   * `immature` arm of `runVtxoLifecycle` compares it, as seconds — see SECONDS ONLY there.
    */
   refundLocktime: number
   /**
-   * Whether THIS wallet could satisfy the leaf a recovery would spend this
-   * lockup through — i.e. whether it holds the lockup's `sender` key.
-   *
-   * The CLTV alone is the wrong question, and on a SEND leg it opens at
-   * exactly the wrong moment. `VHTLCV2ContractHandler.deriveTapscripts`
-   * stamps ONE leaf onto every VTXO of a `vhtlc-v2` contract —
-   * `refundWithoutReceiver`, as both `forfeitTapLeafScript` and
-   * `intentTapLeafScript` — and it does so ROLE-BLIND, for the receiver's row
-   * as much as the sender's. That leaf is `client + server`, so the SDK's own
-   * note on it is that it "fails at intent registration" for any wallet
-   * without the `sender` key.
-   *
-   * This service holds `receiver` on send legs and `sender` on receive legs
-   * (`covenant.ts`, and `sender: params.client` there). So on a SEND leg the
-   * solver can NEVER settle its own registered lockup: the leaf names the
-   * trader. `assertVhtlcSpendableNow` does not catch it either — it refuses
-   * only when the wallet resolves to `sender`, and returns "no opinion" for a
-   * receiver — so the input stays in `recoverVtxos`' all-or-nothing batch and
-   * fails the whole settlement, every pass, for as long as the lockup exists.
-   * The CLTV guard below cannot see this: maturity is monotonic, so it opens
-   * and never closes again.
-   *
-   * OPTIONAL, and `undefined` means NO OPINION — the guard then asks the CLTV
-   * question alone, which is exactly what it did before this field existed.
-   * A caller that cannot resolve the role must not have its lockups blocked
-   * forever by omission; the one production caller (`lockupDeadlinesOf`)
-   * answers it explicitly.
-   *
-   * KNOWN GAP, and it is narrower than this field looks. The deadlines come
-   * from each corridor's `liveLockups`, which is `findRecoverable()`, which is
-   * `findByStates(shape.live)` — LIVE ROWS ONLY. So this protects the window
-   * where the swap is still live, and stops protecting the moment the row goes
-   * TERMINAL: the deadline disappears, this guard has nothing to match on, and
-   * an unsignable output still sitting in the wallet's recoverable set goes
-   * straight back into the all-or-nothing batch. The block clearing is what
-   * re-opens the failure, not what resolves it.
-   *
-   * The honest fix is not here. A send-leg lockup's money is the TRADER's —
-   * the leaf names them — so it should never have been a candidate for a sweep
-   * that pays the solver's own address. Excluding one input is what
-   * `recoverVtxos` cannot express, and this module deliberately does not
-   * reimplement that sweep (see the head comment). Closing it properly means
-   * either settling explicit inputs instead, or not registering a lockup this
-   * wallet can never spend.
-   *
-   * Note also that the guard is an EARLY RETURN: one blocked lockup skips the
-   * whole recovery pass. That predates this field — the immature arm did the
-   * same — but it means the float stays unrecovered either way. What this buys
-   * is an accurate reason in the log instead of an opaque batch failure.
+   * Whether this wallet holds the lockup's `sender` key. `vhtlc-v2` stamps the
+   * `refundWithoutReceiver` leaf (client + server) on every VTXO role-blind, so a
+   * send-leg lockup can never be recovered by us and would fail `recoverVtxos`'
+   * all-or-nothing batch on every pass. `undefined` means no opinion: CLTV only.
    */
   refundable?: boolean
 }
@@ -321,14 +285,7 @@ export interface RenewVtxoDeps<V extends RenewableVtxo> {
   expiringVtxos(): Promise<readonly V[]>
   /** Where the renewed output lands — the solver's own address. */
   destination(): Promise<string>
-  /** `IWallet.settle`, narrowed to the single-output shape a renewal builds. */
-  /**
-   * Settle `inputs` into `outputs`.
-   *
-   * An ARRAY, because a renewal that hands the float back as one coin is what
-   * makes it unable to fund more than one swap at a time. `settle` has always
-   * taken a list; this service was passing a list of one. @see splitRenewalOutputs
-   */
+  /** `IWallet.settle`: several outputs, so a renewal hands the float back already split. @see splitRenewalOutputs */
   settle(inputs: readonly V[], outputs: readonly { address: string; amount: bigint }[]): Promise<string>
   /**
    * The pool shape a renewal should carve its proceeds into.
@@ -380,22 +337,11 @@ const batchExpiryMs = (vtxo: RenewableVtxo): number | undefined => {
 }
 
 /**
- * Batch expiry as a WALL-CLOCK instant, for scheduling — `undefined` whenever
- * the coin does not carry one.
- *
- * A height is not a time, and no arithmetic here can turn it into one: the
- * conversion needs a chain tip, which is a fact about the world rather than
- * about the coin. So a height-denominated coin answers `undefined` — the same
- * answer the SDK's own predicates give, since `isPastExpiry` evaluates the
- * height arm only when a caller supplies `now.height`, and `isVtxoExpiringSoon`
- * reads `normalizeVtxo(vtxo).expiresAt` and returns false without one.
- *
- * Feeding `expiresAtHeight * 1000` to a clock comparison instead is what used
- * to happen, and it was never a near-miss: at any real height that product
- * lands in January 1970, so the coin read as expired by decades. It made
- * {@link renewalThresholdMs} collapse to 0 and {@link isRenewalDue}
- * unconditionally true, which is to say it disabled the treadmill cap outright
- * for those coins.
+ * Batch expiry as a WALL-CLOCK instant, for scheduling — `undefined` for a
+ * height-denominated coin: a height is not a time without a chain tip, and the
+ * SDK's own `isVtxoExpiringSoon` answers the same. Never `expiresAtHeight * 1000`
+ * here: that lands in 1970, reads every such coin as expired by decades, and
+ * disables the treadmill cap in {@link renewalThresholdMs}.
  */
 const scheduleExpiryMs = (vtxo: RenewableVtxo): number | undefined => vtxo.expiresAt?.getTime()
 
@@ -456,7 +402,7 @@ export const isRenewalDue = (vtxo: RenewableVtxo, nowMs: number): boolean => {
   return expiry - nowMs <= renewalThresholdMs(vtxo)
 }
 
-/** The fee-program inputs a coin contributes, mirroring the SDK's `toOffchainInputFeeParams`. Exported so a withdrawal's exit (`ops/arkadeFunds.ts`) prices inputs through the same mapping. */
+/** The fee-program inputs a coin contributes, mirroring the SDK's `toOffchainInputFeeParams`. */
 export const offchainInputFeeParams = (vtxo: RenewableVtxo): OffchainInput => {
   const expiry = batchExpiryMs(vtxo)
   return {
@@ -581,28 +527,25 @@ export interface VtxoLifecycleDeps {
   /** Renews the expiring float. Resolves to a settlement txid. */
   renewVtxos(): Promise<string>
   /**
-   * `IVtxoManager.recoverVtxos`, narrowed. Resolves to a settlement txid.
-   *
-   * Left calling the SDK, and now correctly so: it prices its own intent fee
-   * from `@arkade-os/sdk@0.4.70`, and its subdust-sensitive input selection
-   * cannot be reproduced from the public surface. It feeds the all-or-nothing
-   * sweep the guard below holds back, where app code no test has exercised would
-   * trade a loud, contained failure for a silent, dangerous one.
-   */
-  /**
    * Re-shape the float after a renewal consolidated it. Resolves to a
    * settlement txid, or null when the float was already the right shape.
    *
-   * Renewal settles every selectable coin into ONE output. That is fine for
-   * sats, and fatal once the float holds an Arkade asset: settle carries assets
-   * onto the wallet's own output, so the whole float lands on one asset-bearing
-   * coin that may not fund a sats lockup. Splitting afterwards is what keeps the
-   * float spendable.
+   * A SAFETY NET, not the mechanism: {@link renewExpiringVtxos} settles straight
+   * into the pool's shape when a target is configured, and into ONE output only
+   * when none is. This covers what that cannot reach — too little to carve, or a
+   * float reshaped by something other than a renewal — and a consolidated float
+   * matters most once it holds an Arkade asset: settle carries assets onto the
+   * wallet's own output, so one asset-bearing coin may not fund a sats lockup.
    *
    * Optional so a deployment that has no pool — or a test that is not about
    * this — can leave it out and get the previous behaviour exactly.
    */
   resplitFloat?(): Promise<string | null>
+  /**
+   * `IVtxoManager.recoverVtxos`, narrowed; resolves to a settlement txid. Left on
+   * the SDK: its subdust-sensitive input selection cannot be reproduced from the
+   * public surface.
+   */
   recoverVtxos(): Promise<string>
   /**
    * Exactly what `recoverVtxos` would sweep: the UNGATED read, already
@@ -679,8 +622,6 @@ const BENIGN_RENEWAL = [
  * the pass simply runs again.
  */
 export const LOCKUP_RECOVERY_MTP_MARGIN_SECONDS = 90 * 60
-
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 const isBenignRenewal = (error: unknown): boolean => {
   const message = messageOf(error)
@@ -771,20 +712,28 @@ export const runVtxoLifecycle = async (deps: VtxoLifecycleDeps): Promise<VtxoLif
     // the CLTV does not help, and once it matures the immature arm stops
     // holding the input back, which is precisely when the batch starts
     // failing. Checked first so its reason is the one reported.
-    const blocked = new Map<string, string>()
+    //
+    // CONFIRMED outputs only, unlike the immature arm. An unswept height-expiry
+    // is a guess here (no chain tip): blocking on it wedges a block-typed stack
+    // for good. The cost is a window once that height passes but before arkd
+    // sweeps — the SDK, which has the height, includes it and the batch fails —
+    // closing when the sweep confirms it and this arm starts blocking.
+    const notOurs = new Map<string, string>()
+    const immature = new Map<string, string>()
     for (const lockup of deadlines) {
       if (lockup.refundable === false) {
-        blocked.set(lockup.script, 'no refund key of ours: its annotation leaf needs the lockup’s sender')
+        notOurs.set(lockup.script, 'no refund key of ours: its annotation leaf needs the lockup’s sender')
       } else if (now < lockup.refundLocktime + LOCKUP_RECOVERY_MTP_MARGIN_SECONDS) {
-        blocked.set(lockup.script, `not yet safely past CLTV, refundLocktime ${lockup.refundLocktime}`)
+        immature.set(lockup.script, `not yet safely past CLTV, refundLocktime ${lockup.refundLocktime}`)
       }
     }
-    const blocking = recoverable.filter((vtxo) => blocked.has(vtxo.script))
+    const blocking = recoverable.flatMap((vtxo) => {
+      const reason =
+        (vtxo.confirmedRecoverable === false ? undefined : notOurs.get(vtxo.script)) ?? immature.get(vtxo.script)
+      return reason === undefined ? [] : [`${vtxo.txid}:${vtxo.vout} at ${vtxo.script} (${reason})`]
+    })
     if (blocking.length > 0) {
-      const detail = blocking
-        .map((vtxo) => `${vtxo.txid}:${vtxo.vout} at ${vtxo.script} (${blocked.get(vtxo.script)})`)
-        .join(', ')
-      recoverySkipped = `${blocking.length} recoverable lockup output(s) not safe to sweep at ${now}: ${detail}`
+      recoverySkipped = `${blocking.length} recoverable lockup output(s) not safe to sweep at ${now}: ${blocking.join(', ')}`
       return { boarded: null, renewed, resplit, recovered, recoverySkipped, migrated: 0, failures }
     }
 
@@ -825,5 +774,12 @@ export const recoverableVtxosFrom = async (wallet: {
   const now = { timestamp: new Date() }
   return vtxos
     .filter((vtxo) => canRecoverOnchain(vtxo, now) || vtxo.expiresAtHeight !== undefined)
-    .map((vtxo) => ({ txid: vtxo.txid, vout: vtxo.vout, script: vtxo.script }))
+    .map((vtxo) => ({
+      txid: vtxo.txid,
+      vout: vtxo.vout,
+      script: vtxo.script,
+      // Which arm admitted it. `isSwept` needs no height, so a swept coin still
+      // confirms whatever its expiry counts in.
+      confirmedRecoverable: canRecoverOnchain(vtxo, now),
+    }))
 }

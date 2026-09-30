@@ -45,14 +45,9 @@ describe('createServices — asset markets', () => {
     expect(body).toContain('const marketRows = await adminStore.listMarkets()')
   })
 
-  it('hands BOTH derived lists to Services, from the one call', () => {
-    // Never assembled separately at this call site. `assetMarketPolicy` derives
-    // the pair list and the pricing list from one filter precisely so that a
-    // market cannot leave one without the other — reconstructing either here
-    // would put that back.
+  it('hands the derived pricing list to Services, from the one call', () => {
     const body = createServicesBody()
     expect(body).toContain('assetMarkets: assetMarkets.pricing')
-    expect(body).toContain('assetMarketPairs: assetMarkets.pairs')
     expect(body).not.toMatch(/assetMarkets:.*\.filter\(/)
   })
 

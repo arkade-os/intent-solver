@@ -1,6 +1,7 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { fundLockup, FundNotSubmittedError } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
+import { ArkError } from '@arkade-os/sdk'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const ADDRESS = 'tark1lockup'
@@ -16,27 +17,30 @@ const coin = (value: number) => ({
 interface Harness {
   ctx: ArkadeContext
   sendCalls: number
+  selectedInputs: number
   reservations: ReturnType<typeof createReservationLedger>
 }
 
 const harness = (over: { spendable?: unknown; send?: () => Promise<string> } = {}): Harness => {
   const reservations = createReservationLedger()
-  const state = { sendCalls: 0 }
+  const state = { sendCalls: 0, selectedInputs: 0 }
   const ctx = {
     reservations,
     dustSats: 330n,
+    vtxoMinSats: 330n,
     wallet: {
       arkProvider: {
         getInfo: async () => {
           throw new Error('funding must not refetch server info: dust is read at boot')
         },
       },
-      getSpendableVtxos: async () => {
+      getSpendableVtxos: vi.fn(async () => {
         if (typeof over.spendable === 'function') return (over.spendable as () => unknown[])()
         return over.spendable ?? [coin(50_000)]
-      },
-      send: async () => {
+      }),
+      send: async (request: { selectedVtxos?: unknown[] }) => {
         state.sendCalls += 1
+        state.selectedInputs = request.selectedVtxos?.length ?? 0
         return over.send ? over.send() : 'ark-txid'
       },
     },
@@ -46,6 +50,9 @@ const harness = (over: { spendable?: unknown; send?: () => Promise<string> } = {
     reservations,
     get sendCalls() {
       return state.sendCalls
+    },
+    get selectedInputs() {
+      return state.selectedInputs
     },
   } as Harness
 }
@@ -64,6 +71,25 @@ describe('fundLockup — what it proves about submission', () => {
     expect(error).toBeInstanceOf(FundNotSubmittedError)
     expect((error as Error).message).toMatch(/refusing to fund lockup of 50000 sats/)
     expect(h.sendCalls).toBe(0)
+  })
+
+  it('refuses sub-minimum change before submission', async () => {
+    const h = harness({ spendable: [coin(50_111)] })
+
+    const error = await fundLockup(h.ctx, ADDRESS, 50_000).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(FundNotSubmittedError)
+    expect((error as Error).message).toContain('minimum_change_unavailable')
+    expect(h.sendCalls).toBe(0)
+  })
+
+  it('submits an additional input when change needs topping up', async () => {
+    const h = harness({ spendable: [coin(50_111), { ...coin(500), vout: 1 }] })
+
+    await expect(fundLockup(h.ctx, ADDRESS, 50_000)).resolves.toBe('ark-txid')
+
+    expect(h.sendCalls).toBe(1)
+    expect(h.selectedInputs).toBe(2)
   })
 
   it('reports a failed pre-submission READ the same way, carrying the cause', async () => {
@@ -98,10 +124,53 @@ describe('fundLockup — what it proves about submission', () => {
     expect(h.reservations.reserved().size).toBe(0)
   })
 
+  it('treats arkd AMOUNT_TOO_LOW as a rejected transaction', async () => {
+    const rejected = new ArkError(15, 'output #1 amount is lower than min vtxo amount: 330', 'AMOUNT_TOO_LOW')
+    const h = harness({
+      send: async () => {
+        throw rejected
+      },
+    })
+
+    const error = await fundLockup(h.ctx, ADDRESS, 50_000).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(FundNotSubmittedError)
+    expect((error as Error).cause).toBe(rejected)
+    expect(h.sendCalls).toBe(1)
+    expect(h.reservations.reserved().size).toBe(0)
+  })
+
   it('releases the pin on the happy path too', async () => {
     const h = harness()
 
     await expect(fundLockup(h.ctx, ADDRESS, 50_000)).resolves.toBe('ark-txid')
     expect(h.reservations.reserved().size).toBe(0)
+  })
+
+  it('requests only generically spendable, nonrecoverable funding inputs', async () => {
+    const h = harness()
+
+    await fundLockup(h.ctx, ADDRESS, 50_000)
+    expect(h.ctx.wallet.getSpendableVtxos).toHaveBeenCalledWith({
+      withRecoverable: false,
+      genericallySpendableOnly: true,
+    })
+  })
+
+  it('gives separate funding attempts to the same address distinct timing references', async () => {
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await fundLockup(harness().ctx, ADDRESS, 50_000)
+      await fundLockup(harness().ctx, ADDRESS, 50_000)
+      const timings = output.mock.calls
+        .filter((call) => call[1] === 'receive_fund_timing')
+        .map((call) => JSON.parse(call[2] as string) as { addressRef: string; fundRef: string })
+
+      expect(timings.map((sample) => sample.addressRef)).toEqual([ADDRESS, ADDRESS])
+      expect(timings[0]?.fundRef).toBeDefined()
+      expect(timings[0]?.fundRef).not.toBe(timings[1]?.fundRef)
+    } finally {
+      output.mockRestore()
+    }
   })
 })

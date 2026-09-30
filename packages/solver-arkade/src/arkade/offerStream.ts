@@ -8,7 +8,7 @@
  * this speaks gRPC directly. @see grpcWire.ts
  *
  * Reconnects, because the alternative is a solver that goes quietly deaf. arkd
- * heartbeats the stream, so silence past `staleMs` means a half-open
+ * heartbeats the stream, so silence past `STALE_MS` means a half-open
  * connection rather than an idle market.
  */
 import http2 from 'node:http2'
@@ -16,6 +16,9 @@ import { encodeSubscriptionRequest, grpcFrame, readFrames, decodeSubscriptionRes
 
 /** Matches any transaction carrying an offer packet. Evaluated by arkd. */
 export const OFFER_PACKET_FILTER = 'has(tx.extension) && hasPacket(tx.extension, 3)'
+
+/** Silence longer than this means half-open, not idle: arkd beats every 60s. */
+const STALE_MS = 180_000
 
 /** One request's response chunks. Injectable so tests need no arkd. */
 export type GrpcTransport = (url: string, body: Uint8Array, signal: AbortSignal) => AsyncIterable<Uint8Array>
@@ -60,10 +63,6 @@ export const http2Transport: GrpcTransport = async function* (url, body, signal)
 export interface OfferStreamDeps {
   /** arkd's base URL — the same host the REST indexer is on. */
   arkdUrl: string
-  /** Defaults to offers only. */
-  expressions?: readonly string[]
-  /** Silence longer than this means half-open, not idle. arkd beats every 60s. */
-  staleMs?: number
   /** Bounds how long the stream stays down once arkd is reachable again. */
   reconnectMinMs?: number
   reconnectMaxMs?: number
@@ -100,8 +99,6 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
  */
 export async function* streamOfferTxs(deps: OfferStreamDeps): AsyncGenerator<OfferTx> {
   const transport = deps.transport ?? http2Transport
-  const expressions = deps.expressions ?? [OFFER_PACKET_FILTER]
-  const staleMs = deps.staleMs ?? 180_000
   const minMs = deps.reconnectMinMs ?? 1_000
   const maxMs = deps.reconnectMaxMs ?? 10_000
   const url = `${deps.arkdUrl.replace(/\/+$/, '')}/ark.v1.IndexerService/GetSubscription`
@@ -112,10 +109,10 @@ export async function* streamOfferTxs(deps: OfferStreamDeps): AsyncGenerator<Off
     const attempt = new AbortController()
     const onAbort = (): void => attempt.abort()
     deps.signal?.addEventListener('abort', onAbort)
-    let watchdog = setTimeout(() => attempt.abort(), staleMs)
+    let watchdog = setTimeout(() => attempt.abort(), STALE_MS)
 
     try {
-      const chunks = transport(url, grpcFrame(encodeSubscriptionRequest(expressions)), attempt.signal)
+      const chunks = transport(url, grpcFrame(encodeSubscriptionRequest([OFFER_PACKET_FILTER])), attempt.signal)
 
       // `ArrayBufferLike`, because `readFrames` hands back a subarray view and
       // a narrower annotation rejects it.
@@ -125,7 +122,7 @@ export async function* streamOfferTxs(deps: OfferStreamDeps): AsyncGenerator<Off
         // generator, so invoking it has connected to nothing yet.
         backoff = minMs
         clearTimeout(watchdog)
-        watchdog = setTimeout(() => attempt.abort(), staleMs)
+        watchdog = setTimeout(() => attempt.abort(), STALE_MS)
 
         const merged = new Uint8Array(buffer.length + chunk.length)
         merged.set(buffer)

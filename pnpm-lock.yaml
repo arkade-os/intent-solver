@@ -5,8 +5,8 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@arkade-os/sdk': file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
-  '@arkade-os/swap': file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz
+  '@arkade-os/sdk': file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
+  '@arkade-os/swap': file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz
   '@arkade-taxi/client': file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.0.0-dd8b03a1.tgz
   '@arkade-taxi/covenant': file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-0.0.0-dd8b03a1.tgz
   '@arkade-taxi/protocol': file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-0.0.0-dd8b03a1.tgz
@@ -16,8 +16,8 @@ importers:
   .:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
-        version: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
+        specifier: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
+        version: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:packages/solver-arkade
@@ -66,9 +66,6 @@ importers:
       '@scure/base':
         specifier: ^2.0.0
         version: 2.2.0
-      '@scure/bip32':
-        specifier: ^2.2.0
-        version: 2.2.0
       '@scure/bip39':
         specifier: ^2.2.0
         version: 2.2.0
@@ -90,19 +87,13 @@ importers:
       nostr-tools:
         specifier: ^2.24.1
         version: 2.24.1(typescript@5.9.3)
-      pino:
-        specifier: ^9.6.0
-        version: 9.14.0
       undici:
         specifier: 7.29.1
         version: 7.29.1
-      zod:
-        specifier: ^3.24.1
-        version: 3.25.76
     devDependencies:
       '@arkade-os/swap':
-        specifier: file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz
-        version: file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz
+        version: file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz(nostr-tools@2.24.1(typescript@5.9.3))
       '@types/better-sqlite3':
         specifier: ^7.6.12
         version: 7.6.13
@@ -128,8 +119,8 @@ importers:
   packages/solver-app:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
-        version: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
+        specifier: file:vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
+        version: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -142,9 +133,6 @@ importers:
       '@arkade-os/solver-corridors-evm':
         specifier: workspace:*
         version: link:../solver-corridors-evm
-      '@arkade-os/solver-db':
-        specifier: workspace:*
-        version: link:../solver-db
       '@arkade-os/solver-rails':
         specifier: workspace:*
         version: link:../solver-rails
@@ -192,20 +180,20 @@ importers:
         version: 7.29.1
     devDependencies:
       '@arkade-os/swap':
-        specifier: file:vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz
-        version: file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: file:vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz
+        version: file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz(nostr-tools@2.24.1(typescript@5.9.3))
 
   packages/solver-arkade:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:../solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
-        version: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
+        specifier: file:../solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
+        version: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
       '@arkade-os/solver-core':
         specifier: workspace:*
         version: link:../solver-core
       '@arkade-os/swap':
-        specifier: file:../solver-app/vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz
-        version: file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: file:../solver-app/vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz
+        version: file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz(nostr-tools@2.24.1(typescript@5.9.3))
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.2.0
@@ -241,8 +229,8 @@ importers:
   packages/solver-corridors:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:../solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
-        version: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
+        specifier: file:../solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
+        version: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -256,8 +244,8 @@ importers:
         specifier: workspace:*
         version: link:../solver-rails
       '@arkade-os/swap':
-        specifier: file:../solver-app/vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz
-        version: file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: file:../solver-app/vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz
+        version: file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz(nostr-tools@2.24.1(typescript@5.9.3))
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.2.0
@@ -271,8 +259,8 @@ importers:
   packages/solver-corridors-evm:
     dependencies:
       '@arkade-os/sdk':
-        specifier: file:../solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
-        version: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
+        specifier: file:../solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
+        version: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -425,9 +413,9 @@ packages:
     resolution: {integrity: sha512-+90ob+ruUhb5RfdZhfryIb0H+G3BDtQ+IiQvNJwpwN/gMRcMm9jwJpUBAf5yqhPCWY8KsPNcKFzt5IzCmtqzxQ==}
     engines: {node: '>=20'}
 
-  '@arkade-os/sdk@file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz':
-    resolution: {integrity: sha512-ZeRZ+kxiRKhdNFGIf9Kfk73N+SUgJjdjEsm0p6ry4RlnMAudQkOpaO+JEAsbvVirKistLMGE5kfdAZI0LGuuqw==, tarball: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz}
-    version: 0.4.74
+  '@arkade-os/sdk@file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz':
+    resolution: {integrity: sha512-hUJOaicKdMnMdNerT9vxKTCFQ4rUMxr7Ay5gUIrwv5oRHYBcX61uVDv2QURK1d2+eraLACEfKc+Zwvs8ZS4clA==, tarball: file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz}
+    version: 0.4.77
     engines: {node: '>=22.12.0 <27'}
     peerDependencies:
       '@react-native-async-storage/async-storage': '>=1.0.0'
@@ -451,9 +439,9 @@ packages:
     resolution: {integrity: sha512-T5dfiezUG5YKtzOmX1Z2E0LePF3bx6unsqq7UPgha0Zp9PQFcodYMYl6T1i0AbruaGup5XWq8Die5wusiA5qUA==}
     engines: {node: '>=18'}
 
-  '@arkade-os/swap@file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz':
-    resolution: {integrity: sha512-0GdJhDq0i1A6W2iOzs+U3JuHIRulLI962oy/UlKByHIt3ETQYki9ARixLcvwSkqOi/NonBw15wAiGQ31T3gBdA==, tarball: file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz}
-    version: 0.0.20
+  '@arkade-os/swap@file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz':
+    resolution: {integrity: sha512-5cIipxKeqLe5yHv0+k0ZGyud6T8G9YaGXy0r6wPPXlpMK5DaWlTxir+MleiRz10keVJOEc1LkEGuftz75EZNkQ==, tarball: file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz}
+    version: 0.0.23
     peerDependencies:
       nostr-tools: ^2.12.0
     peerDependenciesMeta:
@@ -732,9 +720,6 @@ packages:
   '@noble/secp256k1@3.0.0':
     resolution: {integrity: sha512-NJBaR352KyIvj3t6sgT/+7xrNyF9Xk9QlLSIqUGVUYlsnDTAUqY8LOmwpcgEx4AMJXRITQ5XEVHD+mMaPfr3mg==}
 
-  '@pinojs/redact@0.4.0':
-    resolution: {integrity: sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg==}
-
   '@protobufjs/aspromise@1.1.2':
     resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
 
@@ -993,10 +978,6 @@ packages:
 
   asynckit@0.4.0:
     resolution: {integrity: sha512-Oei9OH4tRh0YqU3GxhX79dM/mwVgvbZJaSNaRk+bshkj0S5cfHcgYakreBjrHwatXKbz+IoIdYLxrKim2MjW0Q==}
-
-  atomic-sleep@1.0.0:
-    resolution: {integrity: sha512-kNOjDqAh7px0XWNI+4QbzoiR/nTkHAWNud2uvnJquD1/x5a7EQZMJT0AczqK0Qn67oY/TTQ1LbUKajZpp3I9tQ==}
-    engines: {node: '>=8.0.0'}
 
   base-x@4.0.1:
     resolution: {integrity: sha512-uAZ8x6r6S3aUM9rbHGVOIsR15U/ZSc82b3ymnCPsT45Gk1DDvhDPdIgB5MrhirZWt+5K0EEPQH985kNqZgNPFw==}
@@ -1330,10 +1311,6 @@ packages:
   nostr-wasm@0.1.0:
     resolution: {integrity: sha512-78BTryCLcLYv96ONU8Ws3Q1JzjlAt+43pWQhIl86xZmWeegYCNLPml7yQ+gG3vR6V5h4XGj+TxO+SS5dsThQIA==}
 
-  on-exit-leak-free@2.1.2:
-    resolution: {integrity: sha512-0eJJY6hXLGf1udHwfNftBqH+g73EU4B504nZeKpz1sYRKafAghwxEJunB2O7rDZkL4PGfsMVnTXZ2EjibbqcsA==}
-    engines: {node: '>=14.0.0'}
-
   once@1.4.0:
     resolution: {integrity: sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==}
 
@@ -1351,16 +1328,6 @@ packages:
     resolution: {integrity: sha512-RvwwcruNjI1ncT5xRakeyS9Lf8lcItv34KD+aif+VH9kduAyfYBipGh12274xtenIPZ119/R9BdTBa8gAwSh0A==}
     engines: {node: '>=12'}
 
-  pino-abstract-transport@2.0.0:
-    resolution: {integrity: sha512-F63x5tizV6WCh4R6RHyi2Ml+M70DNRXt/+HANowMflpgGFMAym/VKm6G7ZOQRjqN7XbGxK1Lg9t6ZrtzOaivMw==}
-
-  pino-std-serializers@7.1.0:
-    resolution: {integrity: sha512-BndPH67/JxGExRgiX1dX0w1FvZck5Wa4aal9198SrRhZjH3GxKQUKIBnYJTdj2HDN3UQAS06HlfcSbQj2OHmaw==}
-
-  pino@9.14.0:
-    resolution: {integrity: sha512-8OEwKp5juEvb/MjpIc4hjqfgCNysrS94RIOMXYvpYCdm/jglrKEiAYmiumbmGhCvs+IcInsphYDFwqrjr7398w==}
-    hasBin: true
-
   postcss@8.5.25:
     resolution: {integrity: sha512-DTPx3RWSSnWyzLxQnlH0rJP+EW5ekl16ZU4/psbIhA0e53kJfdgaN5vKM+xP7yJtXVu+nfdVFmlgFDEKAe4Pyw==}
     engines: {node: ^10 || ^12 || >=14}
@@ -1376,9 +1343,6 @@ packages:
     engines: {node: '>=14'}
     hasBin: true
 
-  process-warning@5.1.0:
-    resolution: {integrity: sha512-jQSaVHsPgtyw60e1rQ/A+/ArPEj/S8pS/vFnyGa/gYFXrKk/6RuDkoqVDQ5NI5MmS01698ltlAk0NoDBNLujRw==}
-
   protobufjs@7.6.5:
     resolution: {integrity: sha512-/FPD0nUc9jH6rfFjji9IBqOz4pcSE3CsT1m7Ep6Mdb0LxSUMj8hgl6GomOvZzpNpAqqGaXA0P3VSrZLFzIhQrw==}
     engines: {node: '>=12.0.0'}
@@ -1393,9 +1357,6 @@ packages:
   pushdata-bitcoin@1.0.1:
     resolution: {integrity: sha512-hw7rcYTJRAl4olM8Owe8x0fBuJJ+WGbMhQuLWOXEMN3PxPCKQHRkhfL+XG0+iXUmSHjkMmb3Ba55Mt21cZc9kQ==}
 
-  quick-format-unescaped@4.0.4:
-    resolution: {integrity: sha512-tYC1Q1hgyRuHgloV/YXs2w15unPVh8qfu/qCTfhTYamaw7fyhumKa2yGpdSo87vY32rIclj+4fWYQXUMs9EHvg==}
-
   rc@1.2.8:
     resolution: {integrity: sha512-y3bGgqKj3QBdxLbLkomlohkvsA8gdAiUQlSBJnBhfn+BPxg4bc62d8TcBW15wavDfgexCgccckhcZvywyQYPOw==}
     hasBin: true
@@ -1403,10 +1364,6 @@ packages:
   readable-stream@3.6.2:
     resolution: {integrity: sha512-9u/sniCrY3D5WdsERHzHE4G2YCXqoG5FTHUiCC4SIbr6XcLZBY05ya9EKjYek9O5xOAwjGq+1JdGBAS7Q9ScoA==}
     engines: {node: '>= 6'}
-
-  real-require@0.2.0:
-    resolution: {integrity: sha512-57frrGM/OCTLqLOAh0mhVA9VBMHd+9U7Zb2THMGdBUoZVOtGbJzjxsYGDJ3A9AYYCP4hn6y1TVbaOfzWtm5GFg==}
-    engines: {node: '>= 12.13.0'}
 
   require-directory@2.1.1:
     resolution: {integrity: sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q==}
@@ -1419,10 +1376,6 @@ packages:
 
   safe-buffer@5.2.1:
     resolution: {integrity: sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ==}
-
-  safe-stable-stringify@2.5.0:
-    resolution: {integrity: sha512-b3rppTKm9T+PsVCBEOUR46GWI7fdOs00VKZ1+9c1EWDaDMvjQc6tUwuFyIprgGgTcWoVHSKrU8H31ZHA2e0RHA==}
-    engines: {node: '>=10'}
 
   semver@7.8.5:
     resolution: {integrity: sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==}
@@ -1438,16 +1391,9 @@ packages:
   simple-get@4.0.1:
     resolution: {integrity: sha512-brv7p5WgH0jmQJr1ZDDfKDOSeWWg+OVypG99A/5vYGPqJ6pxiaHLy8nxtFjBA7oMa01ebA9gfh1uMCFqOuXxvA==}
 
-  sonic-boom@4.2.1:
-    resolution: {integrity: sha512-w6AxtubXa2wTXAUsZMMWERrsIRAdrK0Sc+FUytWvYAhBJLyuI4llrMIC1DtlNSdI99EI86KZum2MMq3EAZlF9Q==}
-
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
     engines: {node: '>=0.10.0'}
-
-  split2@4.2.0:
-    resolution: {integrity: sha512-UcjcJOWknrNkF6PLX83qcHM6KHgVKNkV62Y8a5uYDVv9ydGQVwAHMKqHdJje1VTWpljG0WYpCDhrCdAOYH4TWg==}
-    engines: {node: '>= 10.x'}
 
   stackback@0.0.2:
     resolution: {integrity: sha512-1XMJE5fQo1jGH6Y/7ebnwPOBEkIEnT4QF32d5R1+VXdXveM0IBMJt8zfaxX1P3QhVwrYe+576+jkANtSS2mBbw==}
@@ -1483,9 +1429,6 @@ packages:
   tar-stream@2.2.0:
     resolution: {integrity: sha512-ujeqbceABgwMZxEJnk2HDY2DlnUZ+9oEcb1KzTVfYHio0UE6dG71n60d8D2I4qNvleWrrXpmjpt7vZeF1LnMZQ==}
     engines: {node: '>=6'}
-
-  thread-stream@3.2.0:
-    resolution: {integrity: sha512-zLBvqpwr4Esa0kRjcrzGU6zL25lePWaCLMx0RQFrmteozIfeNdaMLpG5U7PeHzvlFkAWaRKA9/KVW4F60iB+qw==}
 
   tiny-secp256k1@2.2.4:
     resolution: {integrity: sha512-FoDTcToPqZE454Q04hH9o2EhxWsm7pOSpicyHkgTwKhdKWdsTUuqfP5MLq3g+VjAtl2vSx6JpXGdwA2qpYkI0Q==}
@@ -1679,7 +1622,7 @@ snapshots:
 
   '@alexbosworth/blockchain@3.2.0': {}
 
-  '@arkade-os/sdk@file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz':
+  '@arkade-os/sdk@file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz':
     dependencies:
       '@bitcoinerlab/descriptors-scure': 3.1.7
       '@marcbachmann/cel-js': 8.0.0
@@ -1700,9 +1643,9 @@ snapshots:
 
   '@arkade-os/solver-discovery@0.2.7': {}
 
-  '@arkade-os/swap@file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz(nostr-tools@2.24.1(typescript@5.9.3))':
+  '@arkade-os/swap@file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz(nostr-tools@2.24.1(typescript@5.9.3))':
     dependencies:
-      '@arkade-os/sdk': file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
+      '@arkade-os/sdk': file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
       '@arkade-os/solver-discovery': 0.2.7
       '@noble/ciphers': 2.1.1
       '@noble/curves': 2.0.1
@@ -1726,8 +1669,8 @@ snapshots:
 
   '@arkade-taxi/client@file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.0.0-dd8b03a1.tgz(nostr-tools@2.24.1(typescript@5.9.3))':
     dependencies:
-      '@arkade-os/sdk': file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
-      '@arkade-os/swap': file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.20-c4ff451f.tgz(nostr-tools@2.24.1(typescript@5.9.3))
+      '@arkade-os/sdk': file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
+      '@arkade-os/swap': file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.23-23c6d353.tgz(nostr-tools@2.24.1(typescript@5.9.3))
       '@arkade-taxi/covenant': file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-0.0.0-dd8b03a1.tgz
       '@arkade-taxi/protocol': file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-0.0.0-dd8b03a1.tgz
       '@noble/hashes': 2.2.0
@@ -1749,7 +1692,7 @@ snapshots:
 
   '@arkade-taxi/covenant@file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-0.0.0-dd8b03a1.tgz':
     dependencies:
-      '@arkade-os/sdk': file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.74-c4ff451f.tgz
+      '@arkade-os/sdk': file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-23c6d353.tgz
       '@noble/hashes': 2.2.0
       '@scure/btc-signer': 2.0.1
     transitivePeerDependencies:
@@ -1917,8 +1860,6 @@ snapshots:
   '@noble/hashes@2.2.0': {}
 
   '@noble/secp256k1@3.0.0': {}
-
-  '@pinojs/redact@0.4.0': {}
 
   '@protobufjs/aspromise@1.1.2': {}
 
@@ -2145,8 +2086,6 @@ snapshots:
       async: 3.2.4
 
   asynckit@0.4.0: {}
-
-  atomic-sleep@1.0.0: {}
 
   base-x@4.0.1: {}
 
@@ -2485,8 +2424,6 @@ snapshots:
 
   nostr-wasm@0.1.0: {}
 
-  on-exit-leak-free@2.1.2: {}
-
   once@1.4.0:
     dependencies:
       wrappy: 1.0.2
@@ -2498,26 +2435,6 @@ snapshots:
   picocolors@1.1.1: {}
 
   picomatch@4.0.5: {}
-
-  pino-abstract-transport@2.0.0:
-    dependencies:
-      split2: 4.2.0
-
-  pino-std-serializers@7.1.0: {}
-
-  pino@9.14.0:
-    dependencies:
-      '@pinojs/redact': 0.4.0
-      atomic-sleep: 1.0.0
-      on-exit-leak-free: 2.1.2
-      pino-abstract-transport: 2.0.0
-      pino-std-serializers: 7.1.0
-      process-warning: 5.1.0
-      quick-format-unescaped: 4.0.4
-      real-require: 0.2.0
-      safe-stable-stringify: 2.5.0
-      sonic-boom: 4.2.1
-      thread-stream: 3.2.0
 
   postcss@8.5.25:
     dependencies:
@@ -2541,8 +2458,6 @@ snapshots:
       tunnel-agent: 0.6.0
 
   prettier@3.9.6: {}
-
-  process-warning@5.1.0: {}
 
   protobufjs@7.6.5:
     dependencies:
@@ -2576,8 +2491,6 @@ snapshots:
     dependencies:
       bitcoin-ops: 1.4.1
 
-  quick-format-unescaped@4.0.4: {}
-
   rc@1.2.8:
     dependencies:
       deep-extend: 0.6.0
@@ -2590,8 +2503,6 @@ snapshots:
       inherits: 2.0.4
       string_decoder: 1.3.0
       util-deprecate: 1.0.2
-
-  real-require@0.2.0: {}
 
   require-directory@2.1.1: {}
 
@@ -2629,8 +2540,6 @@ snapshots:
 
   safe-buffer@5.2.1: {}
 
-  safe-stable-stringify@2.5.0: {}
-
   semver@7.8.5: {}
 
   siginfo@2.0.0: {}
@@ -2643,13 +2552,7 @@ snapshots:
       once: 1.4.0
       simple-concat: 1.0.1
 
-  sonic-boom@4.2.1:
-    dependencies:
-      atomic-sleep: 1.0.0
-
   source-map-js@1.2.1: {}
-
-  split2@4.2.0: {}
 
   stackback@0.0.2: {}
 
@@ -2691,10 +2594,6 @@ snapshots:
       fs-constants: 1.0.0
       inherits: 2.0.4
       readable-stream: 3.6.2
-
-  thread-stream@3.2.0:
-    dependencies:
-      real-require: 0.2.0
 
   tiny-secp256k1@2.2.4:
     dependencies:

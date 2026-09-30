@@ -203,6 +203,7 @@ beforeEach(async () => {
     acceptUnilateralGap: false,
     store,
     ln,
+    backendName: 'probe-backend',
     arkade: arkade.ops,
     covclaimd: covclaimd.client,
     limits: LIMITS,
@@ -228,6 +229,45 @@ const quoteRequest = (over: Partial<Parameters<ReceiveSwapService['quote']>[0]> 
 })
 
 describe('ReceiveSwapService.quote', () => {
+  it('persists the wallet that minted the hold invoice', async () => {
+    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'probe-wallet' })
+    Object.defineProperty(ln, 'getKnownInvoiceState', { value: async () => ({ status: 'pending', expiresAt: null }) })
+
+    const outcome = await service.quote(quoteRequest())
+
+    if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+    expect(outcome.swap.invoiceWalletFingerprint).toBe('probe-wallet')
+    expect(outcome.swap.invoiceBackendName).toBe('probe-backend')
+  })
+
+  it('still mints a quote when the optional wallet identity lookup fails', async () => {
+    Object.defineProperty(ln, 'walletFingerprint', {
+      value: async () => {
+        throw new Error('wallet info unavailable')
+      },
+    })
+    Object.defineProperty(ln, 'getKnownInvoiceState', { value: async () => ({ status: 'pending', expiresAt: null }) })
+
+    const outcome = await service.quote(quoteRequest())
+
+    if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+    expect(outcome.swap.invoice).toBeTruthy()
+    expect(outcome.swap.invoiceWalletFingerprint).toBeNull()
+    expect(outcome.swap.invoiceBackendName).toBe('probe-backend')
+  })
+
+  it('does not query wallet identity for backends with their own invoice probe', async () => {
+    const fingerprint = vi.fn(async () => 'lnd-wallet')
+    Object.defineProperty(ln, 'walletFingerprint', { value: fingerprint })
+
+    const outcome = await service.quote(quoteRequest())
+
+    if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+    expect(fingerprint).not.toHaveBeenCalled()
+    expect(outcome.swap.invoiceWalletFingerprint).toBeNull()
+    expect(outcome.swap.invoiceBackendName).toBeNull()
+  })
+
   it('meters new requester quotes while preserving duplicate and other-client outcomes', async () => {
     const request = (n: number, requesterKey = 'client') =>
       quoteRequest({ paymentHash: n.toString(16).padStart(64, '0'), requesterKey })
@@ -238,6 +278,8 @@ describe('ReceiveSwapService.quote', () => {
   })
 
   it('accepts a valid request, mints a hold invoice, and persists a quoted row', async () => {
+    const timings: unknown[] = []
+    service.onQuoteTiming = (sample) => timings.push(sample)
     const outcome = await service.quote(quoteRequest())
     expect(outcome.accepted).toBe(true)
     if (!outcome.accepted) throw new Error('expected acceptance')
@@ -246,6 +288,7 @@ describe('ReceiveSwapService.quote', () => {
     expect(outcome.swap.invoice).toMatch(/^lnbcrt/)
     // The hold invoice really exists against the fake backend under this hash.
     await expect(ln.getHoldState(paymentHash)).resolves.toMatchObject({ status: 'pending' })
+    expect(timings).toEqual([expect.objectContaining({ swapId: outcome.swap.id, holdMs: expect.any(Number) })])
   })
 
   it('stamps refund_locktime and valid_until from one clock read', async () => {
@@ -1056,6 +1099,9 @@ describe('ReceiveSwapService.tick — concurrent workers: no double-funding', ()
     await service.tick(outcome.swap.id)
     expect(arkade.state.fundCalls).toHaveLength(1)
 
+    now = outcome.swap.invoiceExpiresAt + 1
+    expect((await service.tick(outcome.swap.id)).state).toBe('armed')
+
     arkade.state.outputs = landed
     const row = await service.tick(outcome.swap.id)
     expect(row.state).toBe('funded')
@@ -1820,9 +1866,10 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     sendLockups = []
   })
 
-  const coupledService = (): ReceiveSwapService => {
+  const coupledService = (fund: ReceiveArkadeOps['fund'] = arkade.ops.fund): ReceiveSwapService => {
     const ops: ReceiveArkadeOps = {
       ...arkade.ops,
+      fund,
       // Script-aware: this path reads the OTHER leg's lockup, so the fake has
       // to tell the two scripts apart rather than answering the same list.
       findLockups: async (pkScriptHex) => (pkScriptHex === SEND_PKSCRIPT ? sendLockups : arkade.state.outputs),
@@ -1862,6 +1909,45 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
 
     expect(row.state).toBe('quoted')
     expect(arkade.state.fundCalls).toHaveLength(0)
+  })
+
+  it('refuses a coupled payout when funding was provably never submitted', async () => {
+    let fundFailed = false
+    const svc = coupledService(async () => {
+      fundFailed = true
+      throw new FundNotSubmittedError('no valid funding inputs')
+    })
+    const swap = await quotedCoupled(svc)
+    sendRow = coupledSendRow('funded')
+    sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
+    const cancelHold = ln.cancelHold.bind(ln)
+    let competingClaim: boolean | undefined
+    ln.cancelHold = async (hash) => {
+      if (fundFailed) competingClaim = await store.claimFundLease(swap.id, 'armed')
+      await cancelHold(hash)
+    }
+
+    const row = await svc.tick(swap.id)
+
+    expect(competingClaim).toBe(false)
+    expect(row.state).toBe('refused')
+    expect(row.fundStartedAt).toBeNull()
+    expect(row.arkadeLockupTxid).toBeNull()
+    expect(row.failureReason).toContain('no valid funding inputs')
+  })
+
+  it('keeps a coupled payout armed when funding submission is ambiguous', async () => {
+    const svc = coupledService(async () => {
+      throw new Error('funding response lost')
+    })
+    const swap = await quotedCoupled(svc)
+    sendRow = coupledSendRow('funded')
+    sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
+
+    await expect(svc.tick(swap.id)).rejects.toThrow('funding response lost')
+    const row = await store.get(swap.id)
+    expect(row.state).toBe('armed')
+    expect(row.fundStartedAt).not.toBeNull()
   })
 
   it('refuses to fund when the coupled send lockup cannot cover the payout', async () => {

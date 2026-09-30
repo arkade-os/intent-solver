@@ -44,6 +44,7 @@ export interface LockupWatcherDeps {
   contracts: ContractSource
   /** Called with the scripts an event named. Never awaited; may throw. */
   onScripts: (scripts: string[]) => void
+  onEvent?: (event: ContractEvent, scripts: string[]) => void
   onError?: (error: unknown) => void
 }
 
@@ -55,18 +56,6 @@ export class LockupWatcher {
   private reconciling?: Promise<void>
 
   constructor(private readonly deps: LockupWatcherDeps) {}
-
-  /**
-   * True between {@link start} and {@link stop}. Diagnostics only.
-   *
-   * Says nothing about whether the source behind it has actually attached: with
-   * a lazy source (`arkade/lazyContractSource.ts`) that resolves the manager on
-   * first use, this is true from the moment `start()` returns while the attach
-   * is still in flight, or retrying.
-   */
-  isSubscribed(): boolean {
-    return this.unsubscribe !== undefined
-  }
 
   /**
    * Record which scripts a swap is waiting on, and put them on the stream.
@@ -162,6 +151,11 @@ export class LockupWatcher {
           ? [event.contractScript]
           : []
     if (scripts.length === 0) return
+    try {
+      this.deps.onEvent?.(event, scripts)
+    } catch (error) {
+      this.deps.onError?.(error)
+    }
     this.nudge(scripts)
   }
 

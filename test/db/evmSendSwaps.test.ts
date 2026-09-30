@@ -7,6 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { EvmSendSwapStore, type EvmSendQuoteRecord } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
+import { EvmSwapStore } from '@arkade-os/solver-corridors-evm/db/evmSwapStore.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
@@ -180,5 +181,40 @@ describe('EvmSendSwapStore', () => {
     expect(await store.claimRefundTxid('swap-1', 'first')).toBe(true)
     expect(await store.claimRefundTxid('swap-1', 'second')).toBe(false)
     expect((await store.get('swap-1')).evmRefundTxid, 'the second writer overwrote the first').toBe('first')
+  })
+})
+
+describe('EvmSwapStore', () => {
+  it('refuses a table name that is not a plain SQL identifier', () => {
+    class Bad extends EvmSwapStore<never, never> {
+      constructor() {
+        super({} as never, () => 0, {
+          table: 'send_evm_swap; DROP TABLE x',
+          noun: 'send',
+          toRow: () => undefined as never,
+          nonTerminal: [],
+          transitionColumns: new Set(),
+        })
+      }
+    }
+    expect(() => new Bad()).toThrow(/not a plain SQL identifier/)
+  })
+
+  it('refuses an insert column that is not a plain SQL identifier', async () => {
+    class Probe extends EvmSwapStore<never, never> {
+      constructor() {
+        super({} as never, () => 0, {
+          table: 'send_evm_swap',
+          noun: 'send',
+          toRow: () => undefined as never,
+          nonTerminal: [],
+          transitionColumns: new Set(),
+        })
+      }
+      insertWith(extra: Record<string, string>) {
+        return this.insert({} as never, extra)
+      }
+    }
+    await expect(new Probe().insertWith({ 'x) VALUES (1); --': 'y' })).rejects.toThrow(/not a plain SQL identifier/)
   })
 })
