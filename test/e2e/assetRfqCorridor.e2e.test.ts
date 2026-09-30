@@ -21,7 +21,7 @@ import { createServer, type Server } from 'node:http'
 import { randomBytes, randomInt } from 'node:crypto'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { ArkAddress, hasTerminalSpend, asset, Transaction } from '@arkade-os/sdk'
+import { ArkAddress, isVtxoSpent, asset, Transaction } from '@arkade-os/sdk'
 import { createOffer, cancelOffer, InMemoryAssetSwapRepository, type Offer } from '@arkade-os/swap'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
@@ -160,7 +160,7 @@ const termsOf = (row: AssetRfqSwapRow): OfferTerms => ({
 /** ONE outpoint, never a sum across the script: `fulfill` spends one input. */
 const depositAt = async (offerPkScript: string): Promise<ObservedDeposit | null> => {
   const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ scripts: [offerPkScript] })
-  const live = (vtxos ?? []).filter((vtxo) => !hasTerminalSpend(vtxo) && vtxo.isSwept !== true)
+  const live = (vtxos ?? []).filter((vtxo) => !isVtxoSpent(vtxo) && vtxo.isSwept !== true)
   const biggest = live.sort((a, b) => Number(b.value) - Number(a.value))[0]
   if (!biggest) return null
   const assets = ((biggest as { assets?: { assetId: string; amount: bigint }[] }).assets ?? []).map((entry) => ({

@@ -20,7 +20,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { WebSocketServer } from 'ws'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { ArkAddress, asset, hasTerminalSpend, Transaction } from '@arkade-os/sdk'
+import { ArkAddress, asset, isVtxoSpent, Transaction } from '@arkade-os/sdk'
 import { relayTransport, requestArkadeSwap, type Offer } from '@arkade-os/swap'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
@@ -221,7 +221,7 @@ const termsOf = (row: AssetRfqSwapRow): OfferTerms => ({
 
 const depositAt = async (offerPkScript: string): Promise<ObservedDeposit | null> => {
   const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ scripts: [offerPkScript] })
-  const live = (vtxos ?? []).filter((vtxo) => !hasTerminalSpend(vtxo) && vtxo.isSwept !== true)
+  const live = (vtxos ?? []).filter((vtxo) => !isVtxoSpent(vtxo) && vtxo.isSwept !== true)
   const biggest = live.sort((a, b) => Number(b.value) - Number(a.value))[0]
   if (!biggest) return null
   const assets = ((biggest as { assets?: { assetId: string; amount: bigint }[] }).assets ?? []).map((entry) => ({
@@ -246,7 +246,7 @@ const depositSpent = async (offerPkScript: string): Promise<'spent'> =>
     async () => {
       const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ scripts: [offerPkScript] })
       if (!vtxos?.length) return null
-      return vtxos.every((vtxo) => hasTerminalSpend(vtxo) || vtxo.isSwept === true) ? 'spent' : null
+      return vtxos.every((vtxo) => isVtxoSpent(vtxo) || vtxo.isSwept === true) ? 'spent' : null
     },
     {
       attempts: 15,

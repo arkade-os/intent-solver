@@ -25,7 +25,7 @@
  * and if offers ever become something the wallet tracks for its own sake, this
  * is the module that should move.
  */
-import { hasTerminalSpend } from '@arkade-os/sdk'
+import { isVtxoSpent } from '@arkade-os/sdk'
 import type { ArkadeContext } from './wallet.js'
 import { vtxoPages } from './indexerPaging.js'
 import type { OfferOutputView } from './offerDeposit.js'
@@ -51,14 +51,14 @@ export const offerOutputsAt = async (
       outputs.push({
         script: vtxo.script,
         value: Number(vtxo.value),
-        // `hasTerminalSpend` rather than `vtxo.isSpent`, for the reason
+        // `isVtxoSpent` rather than `vtxo.isSpent`, for the reason
         // `lockupProvablySpent` gives: the wire contract permits `isSpent: true`
         // with an empty `spentBy`, and the SDK's own predicate is the only one
         // that unions all three spend facts. `offerDepositFrom` filters on this
         // single flag, so a spend reported only as `spentBy` would otherwise
         // resurrect a deposit that is gone and let the offer be filled against
         // nothing.
-        isSpent: hasTerminalSpend(vtxo),
+        isSpent: isVtxoSpent(vtxo),
         // Kept SEPARATE from the spend, exactly as the SDK keeps it: a swept
         // output is not a terminal spend, and folding the two would lose the
         // distinction the deposit summing already makes.

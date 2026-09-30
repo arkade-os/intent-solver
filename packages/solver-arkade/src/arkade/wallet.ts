@@ -19,7 +19,7 @@ import {
   EsploraProvider,
   Extension,
   getArkPsbtFields,
-  hasTerminalSpend,
+  isVtxoSpent,
   matchServerCheckpoints,
   MnemonicIdentity,
   PrevArkTxField,
@@ -466,7 +466,7 @@ export const findClaimPreimage = async (
   if (outpoints.length === 0) return null
   const { vtxos } = await ctx.wallet.indexerProvider.getVtxos({ outpoints: [...outpoints] })
 
-  // Both spend facts, not just `spentBy`. The SDK's own `hasTerminalSpend`
+  // Both spend facts, not just `spentBy`. The SDK's own `isVtxoSpent`
   // spells out why: "The wire contract permits `isSpent: true` with an empty
   // `spentBy` (settlement inputs needing no forfeit are written that way)", so
   // a `spentBy`-only read can look straight past a real spend and report
@@ -524,7 +524,7 @@ export const totalValue = (outputs: readonly FundedOutput[]): number =>
  * funded (and maybe already claimed)" apart from "somebody dusted a public
  * address": the outpoint alone cannot answer that, and the exact-value
  * comparison is what keeps a 1-sat payment from being adopted as the
- * provider's funding — or from blocking one. `spent` is `hasTerminalSpend`
+ * provider's funding — or from blocking one. `spent` is `isVtxoSpent`
  * rather than a hand-rolled `spentBy` test for the reason
  * {@link lockupProvablySpent} spells out: the wire contract permits
  * `isSpent: true` with an empty `spentBy`, and only the SDK's own predicate
@@ -540,7 +540,7 @@ export const findLockupOutpoints = async (
   const outpoints: { txid: string; vout: number; value: number; spent: boolean }[] = []
   for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
     for (const vtxo of batch) {
-      outpoints.push({ txid: vtxo.txid, vout: vtxo.vout, value: Number(vtxo.value), spent: hasTerminalSpend(vtxo) })
+      outpoints.push({ txid: vtxo.txid, vout: vtxo.vout, value: Number(vtxo.value), spent: isVtxoSpent(vtxo) })
     }
   }
   return outpoints
@@ -561,7 +561,7 @@ export const findLockupOutpoints = async (
  * `getVtxos`'s state filters is opt-in narrowing, so passing none is what
  * keeps spent outputs in the answer.
  *
- * `hasTerminalSpend` rather than a hand-rolled `spentBy` test, because the
+ * `isVtxoSpent` rather than a hand-rolled `spentBy` test, because the
  * wire contract permits `isSpent: true` with an empty `spentBy` — the SDK's
  * own predicate unions all three spend facts, and is the only one that cannot
  * read a spent output back as unspent. A SWEPT output is deliberately NOT a
@@ -586,7 +586,7 @@ export const lockupSpendEvidence = async (
   const { vtxos } = await ctx.wallet.indexerProvider.getVtxos({ scripts: [pkScriptHex] })
   const all = vtxos ?? []
   if (all.length === 0) return 'unknown'
-  return all.every((vtxo) => hasTerminalSpend(vtxo)) ? 'spent' : 'unspent'
+  return all.every((vtxo) => isVtxoSpent(vtxo)) ? 'spent' : 'unspent'
 }
 
 /**
