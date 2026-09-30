@@ -157,20 +157,51 @@ beforeAll(async () => {
       expect((await store.get(binding.intentId)).state).toBe('locking_evm')
       const immutable = receiverBinding(binding)
       const receiver = bytes(prepared.address)
+      let fundingTxid = prepared.funding_txid
       if (!prepared.funding_txid) {
         const transfer = await providerSender.submit(`provider-fund:${binding.intentId}`, {
           to: WETH,
           data: abiCall('a9059cbb', receiver, word(immutable.lock.amount)),
         })
+        fundingTxid = transfer.hash
         await sql!.run('UPDATE receiver_funding_e2e SET funding_txid=? WHERE intent_id=?', [
-          transfer.hash,
+          fundingTxid,
           binding.intentId,
         ])
         await rpc('anvil_mine', ['0x1', '0x0'])
       }
+      const fundingReceipt = (await rpc('eth_getTransactionReceipt', [fundingTxid ?? ''])) as {
+        transactionHash?: unknown
+        blockHash?: unknown
+        blockNumber?: unknown
+        status?: unknown
+      } | null
+      if (
+        !fundingReceipt ||
+        fundingReceipt.transactionHash !== fundingTxid ||
+        typeof fundingReceipt.blockNumber !== 'string' ||
+        typeof fundingReceipt.blockHash !== 'string' ||
+        fundingReceipt.status !== '0x1'
+      )
+        throw new Error(`provider funding transaction is missing or reverted: ${fundingTxid}`)
+      const fundingBlock = (await rpc('eth_getBlockByNumber', [fundingReceipt.blockNumber, false])) as {
+        hash?: unknown
+      } | null
+      if (fundingBlock?.hash !== fundingReceipt.blockHash)
+        throw new Error(`provider funding transaction is not canonical: ${fundingTxid}`)
       const observation = await receivers.inspect(receiver, immutable)
       if (observation.htlcPresent) return { activationTxid: prepared.activation_txid ?? undefined }
-      expect(observation.tokenBalance).toBe(immutable.lock.amount)
+      const latestBalance = await balanceOf(rpc, WETH, receiver)
+      if (latestBalance !== immutable.lock.amount)
+        throw new Error(
+          `provider funding did not credit exact amount: latest=${latestBalance}, observed=${observation.tokenBalance}, ` +
+            `observedBlock=${observation.observedBlock}, observedTimestamp=${observation.observedTimestamp}`,
+        )
+      if (observation.tokenBalance > immutable.lock.amount)
+        throw new Error(`finalized receiver balance exceeds the exact quote: ${observation.tokenBalance}`)
+      // The canonical, two-confirmation view may lag a fresh Anvil block whose
+      // timestamp is ahead of wall time. Keep the row live and retry next tick.
+      if (observation.tokenBalance < immutable.lock.amount) return {}
       const activation = await receivers.activate(`activate:${binding.intentId}`, receiver, immutable)
       await sql!.run('UPDATE receiver_funding_e2e SET activation_txid=? WHERE intent_id=?', [
         activation.hash,
