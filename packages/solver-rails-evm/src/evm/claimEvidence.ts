@@ -17,9 +17,9 @@ const fixedHex = (value: unknown, length: number): string | null =>
   typeof value === 'string' && new RegExp(`^0x[0-9a-f]{${length * 2}}$`, 'i').test(value) ? value.toLowerCase() : null
 const hex = (value: Uint8Array): string => `0x${bytesToHex(value)}`
 
-const eventPreimage = (value: unknown, contract: string, lock: Erc20SwapLock): string | null => {
+const claimPreimage = (value: unknown, contract: string, lock: Erc20SwapLock): string | null => {
   const log = object(value)
-  if (!log || log.removed !== false || fixedHex(log.address, 20) !== contract) return null
+  if (!log || fixedHex(log.address, 20) !== contract) return null
   if (
     !Array.isArray(log.topics) ||
     log.topics.length !== 2 ||
@@ -31,6 +31,14 @@ const eventPreimage = (value: unknown, contract: string, lock: Erc20SwapLock): s
   if (preimage === null || hex(sha256(hexToBytes(preimage.slice(2)))) !== hex(lock.preimageHash)) return null
   return preimage
 }
+
+const eventPreimage = (value: unknown, contract: string, lock: Erc20SwapLock): string | null => {
+  const log = object(value)
+  return log && (log.removed === undefined || log.removed === false) ? claimPreimage(log, contract, lock) : null
+}
+
+const failed = (frame: Record<string, unknown>): boolean =>
+  frame.error !== undefined && frame.error !== null && frame.error !== ''
 
 export const verifyEvmClaimEvidence = async (
   rpc: JsonRpc,
@@ -65,7 +73,6 @@ export const verifyEvmClaimEvidence = async (
     fixedHex(receipt.transactionHash, 32) !== txHash ||
     fixedHex(receipt.blockHash, 32) !== blockHash ||
     quantity(receipt.blockNumber) !== blockNumber ||
-    fixedHex(receipt.to, 20) !== contract ||
     !Array.isArray(receipt.logs)
   )
     return null
@@ -82,10 +89,12 @@ export const verifyEvmClaimEvidence = async (
   })
   if (!included) return null
   const transaction = object(await rpc('eth_getTransactionByHash', [txHash]))
+  const transactionTo = fixedHex(transaction?.to, 20)
   if (
     !transaction ||
     fixedHex(transaction.hash, 32) !== txHash ||
-    fixedHex(transaction.to, 20) !== contract ||
+    transactionTo === null ||
+    fixedHex(receipt.to, 20) !== transactionTo ||
     fixedHex(transaction.blockHash, 32) !== blockHash ||
     quantity(transaction.blockNumber) !== blockNumber
   )
@@ -106,7 +115,26 @@ export const verifyEvmClaimEvidence = async (
     ),
   )
   const input = typeof transaction.input === 'string' ? transaction.input.toLowerCase() : null
-  if (input !== claimFor && !(input === claimSelf && sender === hex(lock.claimAddress))) return null
+  const directClaim =
+    transactionTo === contract && (input === claimFor || (input === claimSelf && sender === hex(lock.claimAddress)))
+  if (
+    !directClaim &&
+    !(await nestedClaimExecuted(
+      rpc,
+      txHash,
+      transaction,
+      sender,
+      transactionTo,
+      input,
+      contract,
+      lock,
+      claimFor,
+      claimSelf,
+      preimageHex,
+      receipt.logs,
+    ))
+  )
+    return null
   const tag = `0x${blockNumber.toString(16)}`
   const header = object(await rpc('eth_getBlockByNumber', [tag, false]))
   const timestamp = quantity(header?.timestamp)
@@ -126,4 +154,64 @@ export const verifyEvmClaimEvidence = async (
   const current = object(await rpc('eth_getBlockByNumber', [tag, false]))
   if (!current || fixedHex(current.hash, 32) !== blockHash || quantity(current.number) !== blockNumber) return null
   return preimage
+}
+
+const nestedClaimExecuted = async (
+  rpc: JsonRpc,
+  txHash: string,
+  transaction: Record<string, unknown>,
+  sender: string,
+  transactionTo: string,
+  input: string | null,
+  contract: string,
+  lock: Erc20SwapLock,
+  claimFor: string,
+  claimSelf: string,
+  preimage: string,
+  receiptLogs: unknown[],
+): Promise<boolean> => {
+  if (transactionTo === contract || input === null) return false
+  const trace = object(
+    await rpc('debug_traceTransaction', [txHash, { tracer: 'callTracer', tracerConfig: { withLog: true } }]),
+  )
+  if (
+    !trace ||
+    failed(trace) ||
+    trace.type !== 'CALL' ||
+    fixedHex(trace.from, 20) !== sender ||
+    fixedHex(trace.to, 20) !== transactionTo ||
+    typeof trace.input !== 'string' ||
+    trace.input.toLowerCase() !== input
+  )
+    return false
+  const matchingReceiptEvents = receiptLogs.filter((entry) => claimPreimage(entry, contract, lock) === preimage)
+  if (matchingReceiptEvents.length !== 1) return false
+  // ponytail: cap untrusted traces at 256 nodes and 32 levels; raise for larger wallet batches.
+  let nodes = 0
+  let matches = 0
+  let attributed = 0
+  const visit = (frameValue: unknown, depth: number): boolean => {
+    if (++nodes > 256 || depth > 32) return false
+    const frame = object(frameValue)
+    if (!frame || (frame.calls !== undefined && !Array.isArray(frame.calls))) return false
+    if (failed(frame)) return true
+    if (
+      frame.type === 'CALL' &&
+      fixedHex(frame.to, 20) === contract &&
+      typeof frame.input === 'string' &&
+      (frame.input.toLowerCase() === claimFor ||
+        (frame.input.toLowerCase() === claimSelf && fixedHex(frame.from, 20) === hex(lock.claimAddress)))
+    ) {
+      matches++
+      if (!Array.isArray(frame.logs) || !frame.logs.some((entry) => claimPreimage(entry, contract, lock) === preimage))
+        return false
+      attributed++
+    }
+    for (const child of (frame.calls as unknown[] | undefined) ?? []) {
+      if (!visit(child, depth + 1)) return false
+    }
+    return true
+  }
+  if (!visit(trace, 0)) return false
+  return matches === 1 && attributed === 1
 }

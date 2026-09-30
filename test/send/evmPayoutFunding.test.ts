@@ -157,20 +157,44 @@ describe('alternate EVM payout funding', () => {
     expect((await service.tick('swap-1')).state).toBe('awaiting_claim')
   })
 
-  it('recovers an absent payout after timeout without refunding a nonexistent HTLC', async () => {
+  it('quarantines an absent payout after timeout without refunding or hiding a late lock', async () => {
     const { store, deps, adapter, service } = await build()
     await service.tick('swap-1')
     vi.mocked(deps.blockHeight).mockResolvedValue(quote().evmTimeout)
-    expect((await service.tick('swap-1')).state).toBe('locking_evm')
+    expect((await service.tick('swap-1')).state).toBe('stuck')
     expect(vi.mocked(adapter.ensure).mock.calls.at(-1)?.[1]).toBe('recover')
     expect(deps.evm.refundCall).not.toHaveBeenCalled()
     expect((await store.get('swap-1')).evmRefundTxid).toBeNull()
+    expect(await store.committedSats()).toBe(0)
+    expect(await store.findRefundable()).toEqual([])
+    expect((await store.findClosedOverLock(NOW)).map((row) => row.id)).toEqual(['swap-1'])
   })
 
-  it('sweeps provider recovery after the customer row becomes terminal', async () => {
+  it('quarantines a failed no-lock recovery while retaining independent provider-ledger recovery', async () => {
+    const onTickError = vi.fn()
+    const { store, deps, adapter, service } = await build({ onTickError })
+    await service.tick('swap-1')
+    vi.mocked(deps.blockHeight).mockResolvedValue(quote().evmTimeout)
+    const error = new Error('receiver recovery RPC unavailable')
+    vi.mocked(adapter.ensure).mockRejectedValueOnce(error)
+
+    expect((await service.tick('swap-1')).state).toBe('stuck')
+    expect(onTickError).toHaveBeenCalledWith('swap-1', error)
+    expect(await store.committedSats()).toBe(0)
+    expect(await store.findRefundable()).toEqual([])
+    expect((await store.findClosedOverLock(NOW)).map((row) => row.id)).toEqual(['swap-1'])
+    expect(deps.evm.refundCall).not.toHaveBeenCalled()
+
+    await service.payoutFundingRecoverySweep()
+    expect(adapter.sweepRecovery).toHaveBeenCalledOnce()
+  })
+
+  it('runs provider-ledger recovery separately after the customer row becomes terminal', async () => {
     const { store, adapter, service } = await build()
     await store.transition('swap-1', 'quoted', 'refused')
     await service.tickAll()
+    expect(adapter.sweepRecovery).not.toHaveBeenCalled()
+    await service.payoutFundingRecoverySweep()
     expect(adapter.sweepRecovery).toHaveBeenCalledTimes(1)
     expect(adapter.ensure).not.toHaveBeenCalled()
   })

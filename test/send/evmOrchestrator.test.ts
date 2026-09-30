@@ -863,6 +863,35 @@ describe('a lock transaction that reverted is not a lock that has not landed', (
   })
 })
 
+describe('provider recovery without an EVM lock', () => {
+  it('hands recovery to the adapter, then quarantines without triggering a client refund', async () => {
+    const q = quote()
+    const ensure = vi.fn().mockResolvedValue({})
+    const { store, service } = await build({
+      payoutFunding: { identity: 'test-provider', ensure } as never,
+      lockFor: vi.fn().mockReturnValue({
+        amount: BigInt(q.evmAmount),
+        tokenAddress: Uint8Array.from(Buffer.from(q.tokenAddress.slice(2), 'hex')),
+        preimageHash: Uint8Array.from(Buffer.from(q.paymentHash, 'hex')),
+        claimAddress: Uint8Array.from(Buffer.from(q.evmClaimAddress.slice(2), 'hex')),
+        refundAddress: Uint8Array.from(Buffer.from(q.evmRefundAddress.slice(2), 'hex')),
+        timelock: BigInt(q.evmTimeout),
+      }),
+      blockHeight: vi.fn().mockResolvedValue(q.evmTimeout),
+    })
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'locking_evm')
+
+    await service.tick('swap-1')
+
+    expect(ensure).toHaveBeenCalledWith(expect.anything(), 'recover')
+    expect((await store.get('swap-1')).state).toBe('stuck')
+    expect(await store.committedSats()).toBe(0)
+    expect(await store.findRefundable()).toEqual([])
+    expect((await store.findClosedOverLock(1_800_000_000)).map((row) => row.id)).toEqual(['swap-1'])
+  })
+})
+
 /** `refunded` is the word over the money; only a mined refund earns it. */
 describe('a refund that was broadcast is not a refund that landed', () => {
   const REFUND_TXID = '0xrefund'

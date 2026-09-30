@@ -192,6 +192,7 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
   try {
     await withEvmSendSweep({
       service: services.evmSendService,
+      recoverySweep: services.evmSendService ? () => services.evmSendService!.payoutFundingRecoverySweep() : undefined,
       intervalMs: FULL_SWEEP_MS,
       signal: controller.signal,
       run: (startSweep) => watchSwaps(services, startSweep, controller.signal),
