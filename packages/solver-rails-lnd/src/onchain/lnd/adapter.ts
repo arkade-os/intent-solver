@@ -26,6 +26,7 @@ import {
 import { hex } from '@scure/base'
 import { Transaction } from '@scure/btc-signer'
 import { deadlined } from '../../deadline.js'
+import { probeLnd } from '../../ln/lnd/adapter.js'
 import {
   createEsploraClient,
   type EsploraAuth,
@@ -103,13 +104,17 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
     private readonly esplora: EsploraClient | undefined,
   ) {}
 
-  static async create(config: AdapterConfig): Promise<LndOnchainAdapter> {
+  /** No round-trip, like the Lightning adapter's `open`. */
+  static open(config: AdapterConfig): LndOnchainAdapter {
     const { lnd } = authenticatedLndGrpc(config)
-    // Round-trip once so a bad cert/macaroon/socket fails here, at boot,
-    // same rule as the Lightning LND adapter.
-    await getWalletInfo({ lnd })
     const esplora = config.esploraUrl ? createEsploraClient(config.esploraUrl, config.esploraAuth) : undefined
     return new LndOnchainAdapter(lnd, esplora)
+  }
+
+  static async create(config: AdapterConfig): Promise<LndOnchainAdapter> {
+    const adapter = LndOnchainAdapter.open(config)
+    await probeLnd(adapter.lnd, config.socket)
+    return adapter
   }
 
   /**

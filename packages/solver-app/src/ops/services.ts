@@ -75,7 +75,8 @@ import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/o
 import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
 import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
-import { json, log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { json, log, messageOf, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { watchRail, type RailWatch } from './railWatch.js'
 import { createSerialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { committedAcrossCorridors } from './pool.js'
@@ -307,7 +308,10 @@ export const endpointHost = (raw: string): string => {
  *
  * Built-ins are answered here, not through the registry, so a consumer's rail can never shadow them.
  */
-const createRail = async (config: Config): Promise<LightningRail> => {
+/** A refusing LND closes the rail gate within one interval; a stalled probe within three (`watchRail`). */
+const RAIL_PROBE_MS = 5_000
+
+const createRail = async (config: Config): Promise<LightningRail & { probe?: () => Promise<void> }> => {
   if (config.lnBackend === 'fake') {
     return {
       ln: new FakeLightningBackend(config.fakeLnStatePath, config.profile.invoicePrefix),
@@ -315,11 +319,10 @@ const createRail = async (config: Config): Promise<LightningRail> => {
     }
   }
   if (config.lnBackend === 'lnd') {
-    // loadConfig() only produces lnBackend: 'lnd' together with a populated lnd config.
-    return {
-      ln: await LndLightningBackendAdapter.create(config.lnd!),
-      onchain: await LndOnchainAdapter.create(config.lnd!),
-    }
+    // loadConfig() only produces lnBackend: 'lnd' together with a populated lnd config. Opened, not probed: a
+    // node that is down leaves its corridors refusing (`watchRail`) instead of the whole solver crash-looping.
+    const ln = LndLightningBackendAdapter.open(config.lnd!)
+    return { ln, onchain: LndOnchainAdapter.open(config.lnd!), probe: () => ln.probe() }
   }
   // Non-null: the caller only reaches this for a configured rail.
   const rail = lightningRailFor(config.lnBackend!)
@@ -567,6 +570,12 @@ export const createServices = async (
   // asset flow alone, which has no use for a Lightning node and is not made to
   // stand one up. Nothing below constructs a BTC corridor without it.
   const rail = config.lnBackend === null ? null : await createRail(config)
+  const railUpAtBoot = rail?.probe
+    ? await rail.probe().then(
+        () => true,
+        () => false,
+      )
+    : true
   const arkade = await createArkadeContext(config.arkade)
   // The emulator key is read at startup and snapshotted per swap; a rotation
   // only affects new quotes, never the reconstruction of funded scripts.
@@ -916,55 +925,60 @@ export const createServices = async (
   // evidence available of what its wallet's change output will look like.
   // Still resolved only when the corridor is on — a disabled corridor must not
   // put an address request to a backend nothing is going to use.
-  const onchainRefundDestinationScript = enabled('arkade:BTC->onchain:BTC')
-    ? OutScript.encode(Address(ONCHAIN_NETWORKS[config.network]).decode(await rail!.onchain.newReceiveAddress()))
-    : null
-
-  const onchainService = enabled('arkade:BTC->onchain:BTC')
-    ? new OnchainSendSwapService({
-        quoteLimiter,
-        store: onchainStore,
-        onchain: rail!.onchain,
-        arkade: arkadeOps,
-        limits: policy.corridorLimits['arkade:BTC->onchain:BTC'],
-        fee: policy.corridorFees['arkade:BTC->onchain:BTC'],
-        // The transaction this corridor's solver broadcasts is the FUNDING of
-        // the client's HTLC. The client pays for its own claim, so pricing this
-        // side off a claim's vbytes would bill for a spend the solver never
-        // makes.
-        pricing: onchainPricingFor(
-          'arkade:BTC->onchain:BTC',
-          fundingTxVsize({
-            network: ONCHAIN_NETWORKS[config.network],
-            changeScript: onchainRefundDestinationScript!,
-          }),
-        ),
-        network: config.network,
-        maxExposedSats: policy.maxExposedSats,
-        totalCommitted,
-        admission,
-        signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
-        refundDestinationScript: onchainRefundDestinationScript!,
-        peerStores: [store, receiveStore, onchainReceiveStore],
-        float: onchainFloat && {
-          read: () => onchainFloat.read(),
-          // Unreadable rate falls back to the same flat `networkFeePricing` bills,
-          // so the gate requires exactly what the quote charged.
-          fundingFeeSats: () => {
-            const rate = onchainFeeRate?.()
-            return rate === null || rate === undefined
-              ? policy.corridorFees['arkade:BTC->onchain:BTC'].flatSats
-              : Math.ceil(
-                  fundingTxVsize({
-                    network: ONCHAIN_NETWORKS[config.network],
-                    changeScript: onchainRefundDestinationScript!,
-                  }) * rate,
-                )
-          },
+  let onchainService: OnchainSendSwapService | undefined
+  // Kept across retries: each `newReceiveAddress` advances LND's address index, and a fault after it would
+  // otherwise mint a fresh one on every probe.
+  let onchainRefundAddress: string | undefined
+  const buildOnchainSend = async (): Promise<void> => {
+    if (!enabled('arkade:BTC->onchain:BTC') || onchainService) return
+    onchainRefundAddress ??= await rail!.onchain.newReceiveAddress()
+    const onchainRefundDestinationScript = OutScript.encode(
+      Address(ONCHAIN_NETWORKS[config.network]).decode(onchainRefundAddress),
+    )
+    onchainService = new OnchainSendSwapService({
+      quoteLimiter,
+      store: onchainStore,
+      onchain: rail!.onchain,
+      arkade: arkadeOps,
+      limits: policy.corridorLimits['arkade:BTC->onchain:BTC'],
+      fee: policy.corridorFees['arkade:BTC->onchain:BTC'],
+      // The transaction this corridor's solver broadcasts is the FUNDING of
+      // the client's HTLC. The client pays for its own claim, so pricing this
+      // side off a claim's vbytes would bill for a spend the solver never
+      // makes.
+      pricing: onchainPricingFor(
+        'arkade:BTC->onchain:BTC',
+        fundingTxVsize({
+          network: ONCHAIN_NETWORKS[config.network],
+          changeScript: onchainRefundDestinationScript,
+        }),
+      ),
+      network: config.network,
+      maxExposedSats: policy.maxExposedSats,
+      totalCommitted,
+      admission,
+      signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
+      refundDestinationScript: onchainRefundDestinationScript,
+      peerStores: [store, receiveStore, onchainReceiveStore],
+      float: onchainFloat && {
+        read: () => onchainFloat.read(),
+        // Unreadable rate falls back to the same flat `networkFeePricing` bills,
+        // so the gate requires exactly what the quote charged.
+        fundingFeeSats: () => {
+          const rate = onchainFeeRate?.()
+          return rate === null || rate === undefined
+            ? policy.corridorFees['arkade:BTC->onchain:BTC'].flatSats
+            : Math.ceil(
+                fundingTxVsize({
+                  network: ONCHAIN_NETWORKS[config.network],
+                  changeScript: onchainRefundDestinationScript,
+                }) * rate,
+              )
         },
-      })
-    : undefined
-  if (onchainService) wireTickErrors(onchainService, 'onchain tick')
+      },
+    })
+    wireTickErrors(onchainService, 'onchain tick')
+  }
 
   // The receive legs. Their Arkade ops are built from the SAME context and
   // emulator info as the send legs' — the difference between the two is which
@@ -1042,45 +1056,68 @@ export const createServices = async (
   // history when reconciling. Resolved once at startup, like the refund
   // destination above, and hoisted for the same reason: it is the claim
   // spend's only variable-size field, so this corridor's cost depends on it.
-  const onchainClaimDestinationScript = enabled('onchain:BTC->arkade:BTC')
-    ? OutScript.encode(Address(ONCHAIN_NETWORKS[config.network]).decode(await rail!.onchain.newReceiveAddress()))
-    : null
-
-  const onchainReceiveService = enabled('onchain:BTC->arkade:BTC')
-    ? new OnchainReceiveSwapService({
-        quoteLimiter,
-        store: onchainReceiveStore,
-        onchain: rail!.onchain,
-        arkade: await onchainReceiveArkadeOpsFromContext(arkade, {
-          url: config.emulatorUrl,
-          pubkey: emulatorInfo.signerPubkey,
-        }),
-        limits: policy.corridorLimits['onchain:BTC->arkade:BTC'],
-        maxBandWidthSats: policy.onchainReceiveMaxBandSats,
-        bandBelowShare: policy.onchainReceiveBandBelowShare,
-        fee: policy.corridorFees['onchain:BTC->arkade:BTC'],
-        // Here the CLIENT funds the HTLC and the solver claims it, so the
-        // transaction this corridor pays for is that claim — which
-        // `solver-rails` sizes exactly, down to this deployment's own
-        // destination script.
-        pricing: onchainPricingFor(
-          'onchain:BTC->arkade:BTC',
-          claimSpendVsize({
-            network: ONCHAIN_NETWORKS[config.network],
-            destinationScript: onchainClaimDestinationScript!,
-          }),
-        ),
-        network: config.network,
-        maxExposedSats: policy.maxExposedSats,
-        totalCommitted,
-        admission,
-        signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
-        claimDestinationScript: onchainClaimDestinationScript!,
-        peerStores: [store, onchainStore, receiveStore],
-        covclaimd,
-      })
+  let onchainReceiveService: OnchainReceiveSwapService | undefined
+  // Read at boot like every other Arkade call: only the LND half below may wait for the node.
+  const onchainReceiveOps = enabled('onchain:BTC->arkade:BTC')
+    ? await onchainReceiveArkadeOpsFromContext(arkade, { url: config.emulatorUrl, pubkey: emulatorInfo.signerPubkey })
     : undefined
-  if (onchainReceiveService) wireTickErrors(onchainReceiveService, 'onchain receive tick')
+  let onchainClaimAddress: string | undefined
+  const buildOnchainReceive = async (): Promise<void> => {
+    if (!enabled('onchain:BTC->arkade:BTC') || !onchainReceiveOps || onchainReceiveService) return
+    onchainClaimAddress ??= await rail!.onchain.newReceiveAddress()
+    const onchainClaimDestinationScript = OutScript.encode(
+      Address(ONCHAIN_NETWORKS[config.network]).decode(onchainClaimAddress),
+    )
+    onchainReceiveService = new OnchainReceiveSwapService({
+      quoteLimiter,
+      store: onchainReceiveStore,
+      onchain: rail!.onchain,
+      arkade: onchainReceiveOps,
+      limits: policy.corridorLimits['onchain:BTC->arkade:BTC'],
+      maxBandWidthSats: policy.onchainReceiveMaxBandSats,
+      bandBelowShare: policy.onchainReceiveBandBelowShare,
+      fee: policy.corridorFees['onchain:BTC->arkade:BTC'],
+      // Here the CLIENT funds the HTLC and the solver claims it, so the
+      // transaction this corridor pays for is that claim — which
+      // `solver-rails` sizes exactly, down to this deployment's own
+      // destination script.
+      pricing: onchainPricingFor(
+        'onchain:BTC->arkade:BTC',
+        claimSpendVsize({
+          network: ONCHAIN_NETWORKS[config.network],
+          destinationScript: onchainClaimDestinationScript,
+        }),
+      ),
+      network: config.network,
+      maxExposedSats: policy.maxExposedSats,
+      totalCommitted,
+      admission,
+      signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
+      claimDestinationScript: onchainClaimDestinationScript,
+      peerStores: [store, onchainStore, receiveStore],
+      covclaimd,
+    })
+    wireTickErrors(onchainReceiveService, 'onchain receive tick')
+  }
+
+  // Both onchain legs need an LND address, and `createChainAddress` is a write with no deadline: asked only of a
+  // node that just answered, else a half-open one would hang boot. Missing legs are built when it next answers.
+  const onchainLegsMissing = (): boolean =>
+    (enabled('arkade:BTC->onchain:BTC') && !onchainService) ||
+    (enabled('onchain:BTC->arkade:BTC') && !onchainReceiveService)
+  let onchainLegsError: string | undefined
+  const buildOnchainLegs = async (): Promise<void> => {
+    try {
+      await buildOnchainSend()
+      await buildOnchainReceive()
+    } catch (error) {
+      const message = messageOf(error)
+      if (message !== onchainLegsError) log(`onchain corridors wait for LND: ${message}`)
+      onchainLegsError = message
+    }
+  }
+  if (railUpAtBoot) await buildOnchainLegs()
+  else if (onchainLegsMissing()) log('onchain corridors wait for LND: it did not answer at boot')
 
   // The EVM corridors. BOTH LEGS OR NEITHER, unlike the four above: each of
   // those is switched off independently by `corridorEnabled`, whereas these two
@@ -1263,6 +1300,7 @@ export const createServices = async (
   )
   const replaceQueue = createSerialiser()
   const extraCorridors = opts?.corridors ?? []
+  let railWatch: RailWatch | undefined
   const setsFrom = (
     livePolicy: Config,
     serving: readonly AssetRfqMarket[],
@@ -1285,6 +1323,7 @@ export const createServices = async (
       evmCorridors: livePolicy.evmCorridors,
       assetRfqService,
       assetRfqStore,
+      railUp: rail?.probe ? () => railWatch?.up() ?? false : undefined,
     }
     return {
       corridors: corridorSetFromDeps({ ...shared, assetRfqMarkets: serving }, extraCorridors),
@@ -1311,6 +1350,31 @@ export const createServices = async (
     services.assetRfqMarkets = rfq
     services.liveOfferMarkets = offers
     readableMarkets = readable
+  }
+
+  // Built OUTSIDE `replaceQueue`: the address write has no deadline, and a hang inside the queue would also hang
+  // every market save behind it. Only the registration, which makes no call, is queued.
+  let onchainLegsBuilding = false
+  const completeOnchainLegs = (): void => {
+    if (onchainLegsBuilding || !onchainLegsMissing()) return
+    onchainLegsBuilding = true
+    const had = { send: onchainService, receive: onchainReceiveService }
+    buildOnchainLegs()
+      .then(() => {
+        if (onchainService === had.send && onchainReceiveService === had.receive) return
+        return replaceQueue(async () => {
+          services.onchainService = onchainService
+          services.onchainReceiveService = onchainReceiveService
+          services.corridors.replace([
+            ...setsFrom(services.policy, services.assetRfqMarkets, readableMarkets).corridors,
+          ])
+          log('onchain corridors built: LND answers')
+        })
+      })
+      .catch((error: unknown) => log('onchain corridor registration failed:', messageOf(error)))
+      .finally(() => {
+        onchainLegsBuilding = false
+      })
   }
 
   const services: Services = {
@@ -1364,6 +1428,7 @@ export const createServices = async (
       // sequential await chain with no isolation would skip both if
       // store.close() (first, and least likely to matter) threw first.
       const steps: Array<[string, () => Promise<void> | void]> = [
+        ['railWatch', () => railWatch?.stop()],
         ['store', () => store.close()],
         ['onchainStore', () => onchainStore.close()],
         ['receiveStore', () => receiveStore.close()],
@@ -1383,6 +1448,9 @@ export const createServices = async (
         }
       }
     },
+  }
+  if (rail?.probe) {
+    railWatch = watchRail({ probe: rail.probe, intervalMs: RAIL_PROBE_MS, log, onReachable: completeOnchainLegs })
   }
   return services
 }

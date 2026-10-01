@@ -25,7 +25,7 @@ import { deadlined, LND_READ_TIMEOUT_MS } from '../../deadline.js'
 import { htlcDeadlineFromHeight } from '@arkade-os/solver-core/core/receive.js'
 import { ROUTE_CLTV_BUDGET_BLOCKS } from '@arkade-os/solver-core/core/send.js'
 import { expiresAtOf, paymentHashOf } from '@arkade-os/solver-core/invoice/decode.js'
-import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { messageOf, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import type {
   PaymentEvidence,
   PaymentFailureReason,
@@ -74,6 +74,21 @@ export const FAILED_PAYMENT_REASONS: Set<string> = new Set(Object.keys(REJECTION
  */
 export const rejectionReason = (error: unknown): string | undefined =>
   Array.isArray(error) && typeof error[1] === 'string' ? error[1] : undefined
+
+/**
+ * The boot round-trip, so a bad cert/macaroon/socket fails at startup. Rethrown as an `Error`: the vendor's
+ * tuple prints as `503,GetWalletInfoErr,[object Object]`, hiding the gRPC status that names the cause.
+ */
+export const probeLnd = async (lnd: AuthenticatedLnd, socket: string): Promise<void> => {
+  try {
+    await getWalletInfo({ lnd })
+  } catch (error) {
+    const inner = Array.isArray(error) ? (error[2] as { err?: unknown } | undefined)?.err : undefined
+    const reason = rejectionReason(error) ?? messageOf(error)
+    const detail = inner instanceof Error ? `${reason}: ${inner.message}` : reason
+    throw new Error(`LND at ${socket} did not answer getWalletInfo: ${detail}`, { cause: error })
+  }
+}
 
 export const toExpiresAt = (fromSeconds: number, expirySeconds: number): string =>
   new Date((fromSeconds + expirySeconds) * 1000).toISOString()
@@ -353,18 +368,29 @@ export class LndLightningBackendAdapter implements LightningBackend {
     return true
   }
 
-  private constructor(private readonly lnd: AuthenticatedLnd) {}
+  private constructor(
+    private readonly lnd: AuthenticatedLnd,
+    private readonly socket: string,
+  ) {}
 
-  static async create(config: AdapterConfig): Promise<LndLightningBackendAdapter> {
+  /** No round-trip: the gRPC channel connects on its first call, so this succeeds with the node down. */
+  static open(config: AdapterConfig): LndLightningBackendAdapter {
     const { lnd } = authenticatedLndGrpc({
       socket: config.socket,
       cert: config.cert,
       macaroon: config.macaroon,
     })
-    // Round-trip once so a bad cert/macaroon/socket fails here, at boot,
-    // rather than on the first swap.
-    await getWalletInfo({ lnd })
-    return new LndLightningBackendAdapter(lnd)
+    return new LndLightningBackendAdapter(lnd, config.socket)
+  }
+
+  static async create(config: AdapterConfig): Promise<LndLightningBackendAdapter> {
+    const adapter = LndLightningBackendAdapter.open(config)
+    await adapter.probe()
+    return adapter
+  }
+
+  probe(): Promise<void> {
+    return probeLnd(this.lnd, this.socket)
   }
 
   async getBalance(): Promise<Balance> {

@@ -44,6 +44,16 @@ const { LndOnchainAdapter } = await import('@arkade-os/solver-rails-lnd/onchain/
 const { LND_READ_TIMEOUT_MS, LndReadTimeoutError } = await import('@arkade-os/solver-rails-lnd/deadline.js')
 const { onchainFeeRateSampler } = await import('@arkade-os/solver-app/ops/onchainPricing.js')
 
+describe('LndOnchainAdapter.create', () => {
+  it('names the gRPC status a failed boot probe carries, not `[object Object]`', async () => {
+    const err = new Error('2 UNKNOWN: wallet locked, unlock it to enable full RPC access')
+    getWalletInfo.mockRejectedValueOnce([503, 'GetWalletInfoErr', { err }])
+    await expect(LndOnchainAdapter.create({ socket: 'lnd:10009', cert: 'c', macaroon: 'm' })).rejects.toThrow(
+      `LND at lnd:10009 did not answer getWalletInfo: GetWalletInfoErr: ${err.message}`,
+    )
+  })
+})
+
 describe('LndOnchainAdapter.findOutputs', () => {
   const address = 'bcrt1pexample'
   const config = { socket: 's', cert: 'c', macaroon: 'm', esploraUrl: 'http://esplora.test' }

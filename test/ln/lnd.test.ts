@@ -244,6 +244,31 @@ describe('isInvoiceNotFound', () => {
   })
 })
 
+describe('LndLightningBackendAdapter.create', () => {
+  const create = () => LndLightningBackendAdapter.create({ socket: 'lnd:10009', cert: 'c', macaroon: 'm' })
+
+  it('names the gRPC status a failed boot probe carries, not `[object Object]`', async () => {
+    const err = new Error('14 UNAVAILABLE: No connection established. Last error: Error: connect ECONNREFUSED')
+    getWalletInfo.mockRejectedValueOnce([503, 'GetWalletInfoErr', { err }])
+    await expect(create()).rejects.toThrow(
+      `LND at lnd:10009 did not answer getWalletInfo: GetWalletInfoErr: ${err.message}`,
+    )
+  })
+
+  it('keeps the bare reason when the vendor attaches no gRPC error', async () => {
+    getWalletInfo.mockRejectedValueOnce([503, 'LndLocked'])
+    await expect(create()).rejects.toThrow('LND at lnd:10009 did not answer getWalletInfo: LndLocked')
+  })
+
+  it('opens without asking the node, and probes it on demand', async () => {
+    getWalletInfo.mockClear()
+    const adapter = LndLightningBackendAdapter.open({ socket: 'lnd:10009', cert: 'c', macaroon: 'm' })
+    expect(getWalletInfo).not.toHaveBeenCalled()
+    getWalletInfo.mockRejectedValueOnce([503, 'LndLocked'])
+    await expect(adapter.probe()).rejects.toThrow('LND at lnd:10009 did not answer getWalletInfo: LndLocked')
+  })
+})
+
 describe('LndLightningBackendAdapter.getOwnInvoiceState', () => {
   beforeEach(() => {
     vi.clearAllMocks()
