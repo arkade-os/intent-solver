@@ -1981,8 +1981,8 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
   },
 
   /**
-   * Split the float into the shape {@link poolTarget} asks for. Dry unless
-   * `--mint`, because this is the one read-only-adjacent command that spends.
+   * Reshape the float toward {@link poolTarget}: split below the coin ceiling, merge at
+   * it. Dry unless `--mint`, because this is the one read-only-adjacent command that spends.
    *
    * The mechanism is one Arkade transaction paying the solver's own address
    * several times over: `send` takes a list of recipients, so N pieces cost one
@@ -2013,7 +2013,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       if (plan.outputs.length === 0) return
 
       if (!args.includes('--mint')) {
-        log('dry run:', json(plan.outputs), 'would be minted. Pass --mint to execute')
+        log('dry run: would spend', plan.inputs.length, 'coin(s) into', json(plan.outputs), '— pass --mint to execute')
         return
       }
 
@@ -2023,9 +2023,13 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         process.exitCode = 1
         return
       }
-      if ('skipped' in result) return
+      if ('skipped' in result) {
+        log('skipped:', result.skipped)
+        return
+      }
       if (result.committedSats > 0) log(`--force: minting with ${result.committedSats} sat committed`)
-      log('minted', result.minted.length, 'piece(s):', json(result.minted), 'arkTxid', result.txid)
+      log('minted', result.minted.length, 'output(s) from', result.spent.length, 'coin(s):', json(result.minted))
+      log('arkTxid', result.txid)
     })
   },
 }

@@ -32,9 +32,23 @@ export interface PoolRung {
   want: number
 }
 
-/** What the pool is short of, and why it is not being fixed when it is not. */
+/** One coin, as the planner sees it. */
+export interface PoolCoin {
+  /** `txid:vout`. */
+  key: string
+  value: number
+  /** `usableSatsOf`: zero for a coin that is all asset dust. */
+  usable: number
+  expiresAtMs?: number
+  hasAssets: boolean
+  /** Renewal takes it this pass, so it is never a reshape input. */
+  renewalDue: boolean
+}
+
+/** What to spend and pay back to the solver: rung pieces first, then the remainder. */
 export interface PoolPlan {
-  /** Piece sizes to mint, in the order they should be created. Empty when nothing is needed. */
+  /** Empty exactly when `outputs` is. */
+  inputs: readonly string[]
   outputs: readonly number[]
   /** Always populated, including when `outputs` is empty — see below. */
   reason: string
@@ -49,7 +63,7 @@ export interface PoolPlan {
  * from it, and adds no knob an operator has to keep in step.
  *
  * Two rungs, not three: this service's swap range is far narrower than a
- * casino's bet range (500..1000 sats on bitcoin), so a third rung would be
+ * casino's bet range (500..50,000 sats on bitcoin by default), so a third rung would be
  * three names for the same size. `maxSats` pieces fund any swap alone;
  * quarter-size pieces let small swaps lock little and compose for large ones.
  *
@@ -70,8 +84,28 @@ export const poolTarget = (maxSats: number, maxExposedSats: number): PoolRung[] 
 const rungOf = (value: number, target: readonly PoolRung[]): number =>
   target.findLastIndex((rung) => value >= rung.size)
 
+const none = (reason: string): PoolPlan => ({ inputs: [], outputs: [], reason })
+
+const byExpiry =
+  (latestFirst: boolean) =>
+  (a: PoolCoin, b: PoolCoin): number => {
+    if (a.expiresAtMs === b.expiresAtMs) return 0
+    if (a.expiresAtMs === undefined) return 1
+    if (b.expiresAtMs === undefined) return -1
+    return latestFirst ? b.expiresAtMs - a.expiresAtMs : a.expiresAtMs - b.expiresAtMs
+  }
+
+const evenly = (sum: number, parts: number): number[] =>
+  Array.from({ length: parts }, (_, i) => Math.floor(sum / parts) + (i < sum % parts ? 1 : 0))
+
 /**
- * What to mint so the float matches {@link poolTarget}.
+ * What to spend so the float matches {@link poolTarget}, in either direction.
+ *
+ * Below the coin ceiling it splits loose coins into the pieces the target is short
+ * of; at the ceiling it merges loose coins into those pieces plus one remainder,
+ * kept whole because cutting it would refill the count the merge just drained.
+ * Keepers — the latest-expiring coins worth about one piece — are what funding
+ * picks first, so a reshape never pins them.
  *
  * `reason` is populated even when `outputs` is empty, because "already
  * matches", "nothing spendable", and "float too small for even one piece" are
@@ -79,75 +113,149 @@ const rungOf = (value: number, target: readonly PoolRung[]): number =>
  * an empty plan with no explanation reads as healthy in all three.
  */
 export const planPool = (args: {
-  /**
-   * Values of the coins available to split — already filtered of reserved.
-   * Near-expiry coins are deliberately IN; {@link poolPlan} says why.
-   */
-  spendable: readonly number[]
+  /** Already filtered of reserved coins. */
+  coins: readonly PoolCoin[]
   target: readonly PoolRung[]
-  /** Ceiling on total pieces, so a large float is not shredded without bound. */
+  /** Coin count at which the pool stops splitting and starts merging. */
   maxCount: number
-  /** Outputs one split transaction may create. */
+  maxInputs: number
+  /** Outputs one transaction may create, an asset carrier included. */
   maxOutputs: number
-  dust: number
+  /** The larger of dust and the operator's `vtxoMinAmount`. */
+  minOutput: number
+  /** Per-output ceiling; negative means none. */
+  maxAmount: number
 }): PoolPlan => {
-  const { spendable, target, maxCount, maxOutputs, dust } = args
-  if (target.length === 0) return { outputs: [], reason: 'no pool target configured' }
-
-  const headroom = maxCount - spendable.length
-  if (headroom < 1) {
-    return { outputs: [], reason: `pool at its ceiling — ${spendable.length}/${maxCount} pieces` }
+  const { coins, target, maxCount, maxInputs, maxOutputs, minOutput, maxAmount } = args
+  if (target.length === 0) return none('no pool target configured')
+  if (maxAmount >= 0 && maxAmount < minOutput) {
+    return none(`the operator's ${maxAmount} sat per-output ceiling is below its ${minOutput} sat floor`)
   }
+  const total = coins.reduce((sum, coin) => sum + coin.value, 0)
+  if (total <= 0) return none(`nothing spendable — ${total} sat`)
 
-  const bankroll = spendable.reduce((sum, value) => sum + value, 0)
-  if (bankroll <= dust) return { outputs: [], reason: `nothing spendable to split — ${bankroll} sat` }
+  const ceiling = Math.max(
+    maxCount,
+    target.reduce((sum, rung) => sum + rung.want, 0),
+  )
+  const largest = Math.max(...target.map((rung) => rung.size))
+  const smallest = Math.min(...target.map((rung) => rung.size))
 
+  const kept = new Set<PoolCoin>()
   const have = target.map(() => 0)
-  for (const value of spendable) {
-    const rung = rungOf(value, target)
-    if (rung >= 0) have[rung]!++
+  for (const coin of [...coins].sort(byExpiry(true))) {
+    const rung = rungOf(coin.usable, target)
+    if (rung < 0 || coin.usable >= 2 * largest || have[rung]! >= target[rung]!.want) continue
+    have[rung]!++
+    kept.add(coin)
   }
+  const shape = target.map((rung, i) => `${have[i]}/${rung.want}x${rung.size}`).join(' ')
+  const eligible = coins.filter((coin) => !kept.has(coin) && !coin.renewalDue)
 
-  const smallest = target[0]
-  if (smallest !== undefined && bankroll < smallest.size + dust) {
-    return {
-      outputs: [],
-      reason: `float ${bankroll} sat is below one ${smallest.size} sat piece plus dust — fund the solver`,
+  const consolidating = coins.length >= ceiling
+  const inputs: PoolCoin[] = []
+  let gross = 0
+  if (consolidating) {
+    // Soonest expiry first: a merged coin inherits the earliest of its inputs'.
+    const capacity = maxAmount >= 0 ? (maxOutputs - 1) * maxAmount : Infinity
+    for (const coin of [...eligible].sort((a, b) => byExpiry(false)(a, b) || a.value - b.value)) {
+      if (inputs.length >= maxInputs) break
+      if (gross + coin.value > capacity) continue
+      inputs.push(coin)
+      gross += coin.value
     }
+    if (inputs.length < 2) {
+      const due = coins.filter((coin) => !kept.has(coin) && coin.renewalDue).length
+      return none(
+        `pool at its ceiling — ${coins.length}/${ceiling} coins, ${eligible.length} loose, ${due} due for renewal`,
+      )
+    }
+  } else if (have.some((count, i) => count < target[i]!.want)) {
+    const need = target.reduce((sum, rung, i) => sum + (rung.want - have[i]!) * rung.size, minOutput)
+    for (const coin of [...eligible].sort((a, b) => b.value - a.value)) {
+      if (inputs.length >= maxInputs || gross >= need) break
+      inputs.push(coin)
+      gross += coin.value
+    }
+    if (inputs.length === 0) {
+      const due = coins.filter((coin) => !kept.has(coin) && coin.renewalDue).length
+      return none(
+        due > 0
+          ? `pool short toward ${shape}; its ${due} loose coin(s) are due for renewal, which reshapes them`
+          : `pool short toward ${shape} with nothing loose to cut — fund the solver`,
+      )
+    }
+  } else {
+    return none(`pool already matches its target — ${shape}`)
   }
 
-  const short = target
-    .map((rung, i) => ({ size: rung.size, missing: rung.want - (have[i] ?? 0) }))
-    .filter((rung) => rung.missing > 0)
-
-  if (short.length === 0) {
-    const shape = target.map((rung, i) => `${have[i] ?? 0}x${rung.size}`).join(' ')
-    return { outputs: [], reason: `pool already matches its target — ${shape}` }
-  }
+  const carrier = inputs.some((coin) => coin.hasAssets) ? minOutput : 0
+  const extra = carrier > 0 ? 1 : 0
+  const slots = consolidating
+    ? maxOutputs - extra
+    : Math.min(maxOutputs - extra, ceiling - (coins.length - inputs.length) - extra)
+  if (slots < 2) return none(`pool at its ceiling — ${coins.length}/${ceiling} coins`)
 
   // Round-robin from the smallest rung, so one expensive rung cannot consume a
   // whole transaction's output budget and starve the others.
-  const outputs: number[] = []
-  const remaining = short.map((rung) => ({ ...rung }))
-  let budget = bankroll - dust
+  const short = target
+    .map((rung, i) => ({ size: rung.size, missing: rung.want - have[i]! }))
+    .filter((rung) => rung.missing > 0 && rung.size >= minOutput && (maxAmount < 0 || rung.size <= maxAmount))
+  const pieces: number[] = []
+  let left = gross - carrier
   let progress = true
-  while (progress && outputs.length < Math.min(headroom, maxOutputs)) {
+  while (progress && pieces.length < slots - 1) {
     progress = false
-    for (const rung of remaining) {
-      if (outputs.length >= Math.min(headroom, maxOutputs)) break
-      if (rung.missing <= 0 || budget < rung.size) continue
-      outputs.push(rung.size)
-      budget -= rung.size
+    for (const rung of short) {
+      if (pieces.length >= slots - 1) break
+      if (rung.missing <= 0 || left < rung.size) continue
+      pieces.push(rung.size)
+      left -= rung.size
       rung.missing--
       progress = true
     }
   }
-
-  if (outputs.length === 0) {
-    return { outputs: [], reason: `float ${bankroll} sat cannot afford any missing piece` }
+  while (left > 0 && left < minOutput && pieces.length > 0) left += pieces.pop()!
+  let chunks = left > 0 ? 1 : 0
+  if (maxAmount >= 0 && left > maxAmount) {
+    while (pieces.length > 0 && pieces.length + Math.ceil(left / maxAmount) > slots) left += pieces.pop()!
+    chunks = Math.ceil(left / maxAmount)
   }
-  const shape = target.map((rung, i) => `${have[i] ?? 0}/${rung.want}x${rung.size}`).join(' ')
-  return { outputs, reason: `minting ${outputs.length} piece(s) toward ${shape}` }
+
+  const outputs = [...pieces, ...evenly(left, chunks)]
+  const keys = inputs.map((coin) => coin.key)
+  const assets = carrier > 0 ? `; assets ride a ${carrier} sat change` : ''
+  const bounded = outputs.every((amount) => amount >= minOutput && (maxAmount < 0 || amount <= maxAmount))
+  if (consolidating) {
+    const remain = coins.length - inputs.length + outputs.length + extra
+    const fits = left >= 0 && bounded && outputs.length <= slots
+    if (!fits || remain >= coins.length) {
+      const why = fits ? 'would not shrink it' : "would leave an output outside the operator's bounds"
+      return none(`pool at its ceiling — ${coins.length}/${ceiling} coins, and merging ${inputs.length} ${why}`)
+    }
+    return {
+      inputs: keys,
+      outputs,
+      reason: `consolidating ${inputs.length} of ${coins.length} coins into ${outputs.length} output(s), ceiling ${ceiling}; ${remain} remain${assets}`,
+    }
+  }
+  if (outputs.length > slots || (pieces.length > 0 && !bounded)) {
+    return none(
+      `${gross} sat cannot be cut into ${slots} outputs under the operator's ${maxAmount} sat per-output ceiling`,
+    )
+  }
+  if (pieces.length === 0) {
+    return none(
+      total < smallest + minOutput
+        ? `float ${total} sat is below one ${smallest} sat piece plus ${minOutput} — fund the solver`
+        : `float ${total} sat cannot afford any piece toward ${shape}`,
+    )
+  }
+  return {
+    inputs: keys,
+    outputs,
+    reason: `minting ${pieces.length} piece(s) from ${inputs.length} coin(s) toward ${shape}${assets}`,
+  }
 }
 
 /**
