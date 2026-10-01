@@ -342,7 +342,7 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
         })
         expect(fundingTxid).toMatch(/^[0-9a-f]{64}$/)
 
-        const id = (await store.listNonTerminal())[0]!.id
+        const id = (await store.findByRfqId(rfqId))!.id
         const funded = await driveTo(tickAll, store, id, 'funded')
         expect(funded.depositTxid).toBe(fundingTxid)
 
@@ -412,7 +412,7 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
         })
         expect(fundingTxid).toMatch(/^[0-9a-f]{64}$/)
 
-        const id = (await store.listNonTerminal())[0]!.id
+        const id = (await store.findByRfqId(rfqId))!.id
         const funded = await driveTo(tickAll, store, id, 'funded')
         expect(funded.depositTxid).toBe(fundingTxid)
 
