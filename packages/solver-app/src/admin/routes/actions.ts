@@ -672,7 +672,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     confirmKind: 'literal:MINT',
     expectedConfirm: () => 'MINT',
     warning:
-      'Spends: splits the float into smaller pieces in one Arkade transaction. Refused while any corridor has a ' +
+      'Spends: reshapes the float in one Arkade transaction to the solver’s own address — splitting it into pool ' +
+      'pieces, or merging small coins into them once it holds too many. Refused while any corridor has a ' +
       'non-terminal swap, because coin reservations are process-local and a concurrent provider could be holding them.',
     run: (services, body) => mintPool(services, { force: body.force === true }),
   },
