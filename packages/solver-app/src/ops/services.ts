@@ -825,10 +825,14 @@ export const createServices = async (
   // Still resolved only when the corridor is on — a disabled corridor must not
   // put an address request to a backend nothing is going to use.
   let onchainService: OnchainSendSwapService | undefined
+  // Kept across retries: each `newReceiveAddress` advances LND's address index, and a fault after it would
+  // otherwise mint a fresh one on every probe.
+  let onchainRefundAddress: string | undefined
   const buildOnchainSend = async (): Promise<void> => {
     if (!enabled('arkade:BTC->onchain:BTC') || onchainService) return
+    onchainRefundAddress ??= await rail!.onchain.newReceiveAddress()
     const onchainRefundDestinationScript = OutScript.encode(
-      Address(ONCHAIN_NETWORKS[config.network]).decode(await rail!.onchain.newReceiveAddress()),
+      Address(ONCHAIN_NETWORKS[config.network]).decode(onchainRefundAddress),
     )
     onchainService = new OnchainSendSwapService({
       quoteLimiter,
@@ -956,10 +960,12 @@ export const createServices = async (
   const onchainReceiveOps = enabled('onchain:BTC->arkade:BTC')
     ? await onchainReceiveArkadeOpsFromContext(arkade, { url: config.emulatorUrl, pubkey: emulatorInfo.signerPubkey })
     : undefined
+  let onchainClaimAddress: string | undefined
   const buildOnchainReceive = async (): Promise<void> => {
     if (!enabled('onchain:BTC->arkade:BTC') || !onchainReceiveOps || onchainReceiveService) return
+    onchainClaimAddress ??= await rail!.onchain.newReceiveAddress()
     const onchainClaimDestinationScript = OutScript.encode(
-      Address(ONCHAIN_NETWORKS[config.network]).decode(await rail!.onchain.newReceiveAddress()),
+      Address(ONCHAIN_NETWORKS[config.network]).decode(onchainClaimAddress),
     )
     onchainReceiveService = new OnchainReceiveSwapService({
       quoteLimiter,
@@ -1245,17 +1251,29 @@ export const createServices = async (
     readableMarkets = readable
   }
 
+  // Built OUTSIDE `replaceQueue`: the address write has no deadline, and a hang inside the queue would also hang
+  // every market save behind it. Only the registration, which makes no call, is queued.
+  let onchainLegsBuilding = false
   const completeOnchainLegs = (): void => {
-    if (!onchainLegsMissing()) return
-    replaceQueue(async () => {
-      const had = { send: onchainService, receive: onchainReceiveService }
-      await buildOnchainLegs()
-      if (onchainService === had.send && onchainReceiveService === had.receive) return
-      services.onchainService = onchainService
-      services.onchainReceiveService = onchainReceiveService
-      services.corridors.replace([...setsFrom(services.policy, services.assetRfqMarkets, readableMarkets).corridors])
-      log('onchain corridors built: LND answers')
-    }).catch((error: unknown) => log('onchain corridor registration failed:', messageOf(error)))
+    if (onchainLegsBuilding || !onchainLegsMissing()) return
+    onchainLegsBuilding = true
+    const had = { send: onchainService, receive: onchainReceiveService }
+    buildOnchainLegs()
+      .then(() => {
+        if (onchainService === had.send && onchainReceiveService === had.receive) return
+        return replaceQueue(async () => {
+          services.onchainService = onchainService
+          services.onchainReceiveService = onchainReceiveService
+          services.corridors.replace([
+            ...setsFrom(services.policy, services.assetRfqMarkets, readableMarkets).corridors,
+          ])
+          log('onchain corridors built: LND answers')
+        })
+      })
+      .catch((error: unknown) => log('onchain corridor registration failed:', messageOf(error)))
+      .finally(() => {
+        onchainLegsBuilding = false
+      })
   }
 
   const services: Services = {

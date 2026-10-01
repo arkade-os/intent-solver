@@ -41,6 +41,27 @@ describe('watchRail', () => {
     watch.stop()
   })
 
+  it('fails closed when a probe stalls, before its own deadline would say so', async () => {
+    let answer: () => Promise<void> = async () => {}
+    const { watch } = start(() => answer())
+    await vi.advanceTimersByTimeAsync(0)
+    answer = () => new Promise<void>(() => {})
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(watch.up()).toBe(true)
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(watch.up()).toBe(false)
+    watch.stop()
+  })
+
+  it('does not act on a probe that answers after it was stopped', async () => {
+    let resolve: () => void = () => {}
+    const { watch, onReachable } = start(() => new Promise<void>((r) => (resolve = r)))
+    watch.stop()
+    resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onReachable).not.toHaveBeenCalled()
+  })
+
   it('never stacks probes behind one that hangs', async () => {
     const probe = vi.fn(() => new Promise<void>(() => {}))
     const { watch } = start(probe)

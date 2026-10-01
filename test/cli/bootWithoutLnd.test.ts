@@ -13,4 +13,13 @@ describe('createServices boots with LND unreachable', () => {
     expect(body).toMatch(/railUp: rail\?\.probe \?/)
     expect(body).toMatch(/railWatch = watchRail\(/)
   })
+
+  it('builds the onchain legs at boot when LND answers, and on its next answer when not', () => {
+    const body = createServicesBody()
+    // One-shot commands read `services.onchainService` before any probe could have answered.
+    expect(body).toMatch(/if \(railUpAtBoot\) await buildOnchainLegs\(\)/)
+    expect(body).toMatch(/onReachable: completeOnchainLegs/)
+    const complete = body.slice(body.indexOf('const completeOnchainLegs'))
+    expect(complete.indexOf('buildOnchainLegs()')).toBeLessThan(complete.indexOf('replaceQueue('))
+  })
 })

@@ -1368,7 +1368,9 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     if (!Number.isInteger(amountSats) || amountSats <= 0) throw new GiveUp('usage: send-onchain <sats>')
     await withServices({}, async (services, config) => {
       if (!services.onchainService) {
-        throw new GiveUp('the arkade:BTC->onchain:BTC corridor is disabled (ONCHAIN_SEND_ENABLED=false)')
+        throw new GiveUp(
+          'the arkade:BTC->onchain:BTC corridor is unavailable: disabled (ONCHAIN_SEND_ENABLED=false), or LND did not answer at boot',
+        )
       }
       const onchainService = services.onchainService
       // The "client" role needs its own onchain keypair to claim with — a real
@@ -1514,7 +1516,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       // hand is asking for every eligible refund, and the onchain corridor has
       // its own store and its own sweep.
       const pushed = await services.service!.refundSweep()
-      const onchainPushed = await services.onchainService!.refundSweep()
+      const onchainPushed = (await services.onchainService?.refundSweep()) ?? []
       const evmPushed = (await services.evmSendService?.refundSweep()) ?? []
       if (pushed.length === 0 && onchainPushed.length === 0 && evmPushed.length === 0) {
         log('nothing eligible: refunds need a failed swap past its deadline with funds at the script')
