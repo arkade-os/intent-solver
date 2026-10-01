@@ -26,6 +26,7 @@ import {
 import { hex } from '@scure/base'
 import { Transaction } from '@scure/btc-signer'
 import { deadlined } from '../../deadline.js'
+import { probeLnd } from '../../ln/lnd/adapter.js'
 import {
   createEsploraClient,
   type EsploraAuth,
@@ -105,9 +106,7 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
 
   static async create(config: AdapterConfig): Promise<LndOnchainAdapter> {
     const { lnd } = authenticatedLndGrpc(config)
-    // Round-trip once so a bad cert/macaroon/socket fails here, at boot,
-    // same rule as the Lightning LND adapter.
-    await getWalletInfo({ lnd })
+    await probeLnd(lnd, config.socket)
     const esplora = config.esploraUrl ? createEsploraClient(config.esploraUrl, config.esploraAuth) : undefined
     return new LndOnchainAdapter(lnd, esplora)
   }
