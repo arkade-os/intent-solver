@@ -593,9 +593,12 @@ describe('a receiver-paid quote is checked against the fare it was priced at', (
     { id: 'share', currency: 'sats', pricing: { kind: 'proportional', bps: 100, minUnits: '1', maxUnits: null } },
     { id: 'in-kind', currency: 'sameAsset', pricing: { kind: 'flat', units: '50' } },
   ]
-  const resolveAt = (receiverFare: { currency: 'sats' | 'asset'; units: bigint }) => {
+  const resolveAt = (
+    receiverFare: { currency: 'sats' | 'asset'; units: bigint },
+    info: Record<string, unknown> = infoFixture({ fares: FARES }),
+  ) => {
     const quote = quoteFixture({ topup: DUST, fareUnits: '0', payer: 'receiver', receiverFare })
-    const { read } = reader({ quote, info: infoFixture({ fares: FARES }) })
+    const { read } = reader({ quote, info })
     return read.resolve(request({ makerPkScript: covenantScriptOf(quote), receiverPaid: true }))
   }
 
@@ -612,6 +615,26 @@ describe('a receiver-paid quote is checked against the fare it was priced at', (
     ['asset units only a sats fare prices', { currency: 'asset', units: 7n }],
   ] as const)('refuses a quote at %s', async (_why, receiverFare) => {
     await expect(resolveAt(receiverFare)).rejects.toThrow(/q-1 is priced at no fare the Taxi advertises/)
+  })
+
+  const fast = { currency: 'sats', units: 9n } as const
+  const [ownRule] = infoFixture({ fares: FARES }).assetRules as [Record<string, unknown>]
+  const withRules = (...assetRules: Record<string, unknown>[]) => ({ ...infoFixture(), assetRules })
+
+  it('verifies a quote priced at a fare of the "*" rule, for an asset with no rule of its own', async () => {
+    await expect(resolveAt(fast, withRules({ ...ownRule, assetId: '*' }))).resolves.toMatchObject({
+      receiverFare: fast,
+    })
+  })
+
+  it('takes the fare from the asset\'s own rule over "*", wherever each sits', async () => {
+    const star = {
+      ...ownRule,
+      assetId: '*',
+      fares: [{ id: 'star', currency: 'sats', pricing: { kind: 'flat', units: '9' } }],
+    }
+    for (const info of [withRules(star, ownRule), withRules(ownRule, star)])
+      await expect(resolveAt(fast, info)).resolves.toMatchObject({ receiverFare: fast })
   })
 })
 

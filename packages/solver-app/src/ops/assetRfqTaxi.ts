@@ -155,12 +155,14 @@ const receiverFareId = (
 ): string => {
   const fare = quote.receiverFare
   const units = decimal(fare?.units)
-  const rule = info.assetRules.find(
-    (candidate) =>
-      typeof candidate.assetId === 'object' &&
-      candidate.assetId?.txid.toLowerCase() === hex.encode(assetId.txid) &&
-      candidate.assetId.groupIndex === assetId.groupIndex,
-  )
+  // The rule the client's verifyPolicy resolves, or the id names a fare it never looks in: exact first, then "*".
+  const rule =
+    info.assetRules.find(
+      (candidate) =>
+        typeof candidate.assetId === 'object' &&
+        candidate.assetId?.txid.toLowerCase() === hex.encode(assetId.txid) &&
+        candidate.assetId.groupIndex === assetId.groupIndex,
+    ) ?? info.assetRules.find((candidate) => candidate.assetId === '*')
   const option = rule?.fares.find(
     (offered) =>
       RECEIVER_FARE_CURRENCY[offered.currency] === fare?.currency &&
