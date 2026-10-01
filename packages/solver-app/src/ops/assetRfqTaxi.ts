@@ -157,6 +157,7 @@ const receiverFareId = (
   const units = decimal(fare?.units)
   const rule = info.assetRules.find(
     (candidate) =>
+      typeof candidate.assetId === 'object' &&
       candidate.assetId?.txid.toLowerCase() === hex.encode(assetId.txid) &&
       candidate.assetId.groupIndex === assetId.groupIndex,
   )
