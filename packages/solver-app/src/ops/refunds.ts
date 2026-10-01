@@ -87,7 +87,9 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
  */
 export const onchainRefundNow = async (services: Services, id: string): Promise<RefundOutcome> => {
   if (!services.onchainService) {
-    throw new Error('the arkade:BTC->onchain:BTC service is not available; build Services with allCorridors')
+    throw new Error(
+      'the arkade:BTC->onchain:BTC service is not available; build Services with allCorridors, or wait for LND to answer',
+    )
   }
   // Read first so the caller can report what it acted on.
   await services.onchainStore.get(id)
@@ -110,7 +112,9 @@ export const onchainRefundNow = async (services: Services, id: string): Promise<
  */
 export const reclaimL1Htlc = async (services: Services, id: string): Promise<{ txid: string }> => {
   if (!services.onchainService) {
-    throw new Error('the arkade:BTC->onchain:BTC service is not available; build Services with allCorridors')
+    throw new Error(
+      'the arkade:BTC->onchain:BTC service is not available; build Services with allCorridors, or wait for LND to answer',
+    )
   }
   await services.onchainStore.get(id)
   const txid = await services.onchainService.reclaimOnchainHtlc(id)
@@ -143,7 +147,9 @@ export const receiveRefundNow = async (services: Services, id: string): Promise<
 /** {@link receiveRefundNow} for the onchain receive leg. Same money, same direction. */
 export const onchainReceiveRefundNow = async (services: Services, id: string): Promise<RefundOutcome> => {
   if (!services.onchainReceiveService) {
-    throw new Error('the onchain:BTC->arkade:BTC service is not available; build Services with allCorridors')
+    throw new Error(
+      'the onchain:BTC->arkade:BTC service is not available; build Services with allCorridors, or wait for LND to answer',
+    )
   }
   await services.onchainReceiveStore.get(id)
   const txid = await services.onchainReceiveService.refundNow(id)
@@ -168,7 +174,9 @@ export const onchainReceiveClaimNow = async (
   id: string,
 ): Promise<{ txid: string } | { refused: string }> => {
   if (!services.onchainReceiveService) {
-    throw new Error('the onchain:BTC->arkade:BTC service is not available; build Services with allCorridors')
+    throw new Error(
+      'the onchain:BTC->arkade:BTC service is not available; build Services with allCorridors, or wait for LND to answer',
+    )
   }
   await services.onchainReceiveStore.get(id)
   return services.onchainReceiveService.claimNow(id)

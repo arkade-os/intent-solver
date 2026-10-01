@@ -16,6 +16,7 @@ import {
   type CorridorSet,
 } from '@arkade-os/solver-core/core/corridor.js'
 import type { EvmCorridorPolicy } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
+import { extractRfqId, rfqRefusalPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import {
   lightningSendCorridor,
   lightningReceiveCorridor,
@@ -97,7 +98,28 @@ export interface FlatCorridorDeps {
   assetRfqService?: AssetRfqSwapService | null
   assetRfqStore?: AssetRfqSwapStore | null
   assetRfqMarkets?: readonly AssetRfqMarket[]
+  /** Whether the four BTC corridors' LND answers. Unset means always. */
+  railUp?: () => boolean
 }
+
+/**
+ * One gate rather than each quote's own LND read: the onchain legs make none before the client has funded, so
+ * they would quote a swap the solver cannot complete.
+ */
+const whileRailUp = (corridor: Corridor, railUp: (() => boolean) | undefined): Corridor =>
+  railUp === undefined
+    ? corridor
+    : {
+        ...corridor,
+        quote: async (payload, options) =>
+          railUp()
+            ? corridor.quote(payload, options)
+            : {
+                kind: 'refused',
+                payload: rfqRefusalPayload(extractRfqId(payload), 'pricing_unavailable'),
+                detail: 'LND unreachable',
+              },
+      }
 
 /** The same deps, narrowed to what a READER uses. Its extra entries come from
  * swap rows, which know a pair and no pricing: `AssetRfqMarket` here would make
@@ -122,13 +144,16 @@ export interface FlatReaderDeps extends Omit<FlatCorridorDeps, 'assetRfqMarkets'
  */
 export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corridor[] = []): CorridorSet => {
   const corridors: Corridor[] = []
-  if (deps.service) corridors.push(lightningSendCorridor(deps.service, deps.store))
-  if (deps.onchainService) corridors.push(onchainSendCorridor(deps.onchainService, deps.onchainStore))
+  const { railUp } = deps
+  if (deps.service) corridors.push(whileRailUp(lightningSendCorridor(deps.service, deps.store), railUp))
+  if (deps.onchainService) {
+    corridors.push(whileRailUp(onchainSendCorridor(deps.onchainService, deps.onchainStore), railUp))
+  }
   if (deps.receiveService && deps.receiveStore) {
-    corridors.push(lightningReceiveCorridor(deps.receiveService, deps.receiveStore))
+    corridors.push(whileRailUp(lightningReceiveCorridor(deps.receiveService, deps.receiveStore), railUp))
   }
   if (deps.onchainReceiveService && deps.onchainReceiveStore) {
-    corridors.push(onchainReceiveCorridor(deps.onchainReceiveService, deps.onchainReceiveStore))
+    corridors.push(whileRailUp(onchainReceiveCorridor(deps.onchainReceiveService, deps.onchainReceiveStore), railUp))
   }
   // EVM last, after the four built-ins: one corridor per ENABLED policy, and a
   // corridor registers only when its leg's service exists — absent means the
