@@ -128,6 +128,9 @@ export const planPool = (args: {
 }): PoolPlan => {
   const { coins, target, maxCount, maxInputs, maxOutputs, minOutput, maxAmount } = args
   if (target.length === 0) return none('no pool target configured')
+  if (maxAmount >= 0 && maxAmount < minOutput) {
+    return none(`the operator's ${maxAmount} sat per-output ceiling is below its ${minOutput} sat floor`)
+  }
   const total = coins.reduce((sum, coin) => sum + coin.value, 0)
   if (total <= 0) return none(`nothing spendable — ${total} sat`)
 
@@ -174,7 +177,14 @@ export const planPool = (args: {
       inputs.push(coin)
       gross += coin.value
     }
-    if (inputs.length === 0) return none(`pool short toward ${shape} with nothing loose to cut — fund the solver`)
+    if (inputs.length === 0) {
+      const due = coins.filter((coin) => !kept.has(coin) && coin.renewalDue).length
+      return none(
+        due > 0
+          ? `pool short toward ${shape}; its ${due} loose coin(s) are due for renewal, which reshapes them`
+          : `pool short toward ${shape} with nothing loose to cut — fund the solver`,
+      )
+    }
   } else {
     return none(`pool already matches its target — ${shape}`)
   }
@@ -190,7 +200,7 @@ export const planPool = (args: {
   // whole transaction's output budget and starve the others.
   const short = target
     .map((rung, i) => ({ size: rung.size, missing: rung.want - have[i]! }))
-    .filter((rung) => rung.missing > 0 && rung.size >= minOutput)
+    .filter((rung) => rung.missing > 0 && rung.size >= minOutput && (maxAmount < 0 || rung.size <= maxAmount))
   const pieces: number[] = []
   let left = gross - carrier
   let progress = true
@@ -215,9 +225,10 @@ export const planPool = (args: {
   const outputs = [...pieces, ...evenly(left, chunks)]
   const keys = inputs.map((coin) => coin.key)
   const assets = carrier > 0 ? `; assets ride a ${carrier} sat change` : ''
+  const bounded = outputs.every((amount) => amount >= minOutput && (maxAmount < 0 || amount <= maxAmount))
   if (consolidating) {
     const remain = coins.length - inputs.length + outputs.length + extra
-    const fits = left >= 0 && (left === 0 || left >= minOutput) && outputs.length <= slots
+    const fits = left >= 0 && bounded && outputs.length <= slots
     if (!fits || remain >= coins.length) {
       return none(
         `pool at its ceiling — ${coins.length}/${ceiling} coins, and merging ${inputs.length} would not shrink it`,
@@ -229,7 +240,7 @@ export const planPool = (args: {
       reason: `consolidating ${inputs.length} of ${coins.length} coins into ${outputs.length} output(s), ceiling ${ceiling}; ${remain} remain${assets}`,
     }
   }
-  if (outputs.length > slots) {
+  if (outputs.length > slots || (pieces.length > 0 && !bounded)) {
     return none(
       `${gross} sat cannot be cut into ${slots} outputs under the operator's ${maxAmount} sat per-output ceiling`,
     )

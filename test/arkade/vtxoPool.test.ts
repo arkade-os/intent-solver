@@ -96,6 +96,23 @@ describe('planPool — splitting', () => {
     expect(plan([coin(1_000_000, { renewalDue: true })]).outputs).toEqual([])
   })
 
+  it('names renewal, not funding, when every loose coin is due', () => {
+    const result = plan([coin(1_000_000, { renewalDue: true })])
+    expect(result.reason).toMatch(/due for renewal/)
+    expect(result.reason).not.toMatch(/fund the solver/)
+  })
+
+  it('never mints a piece above the per-output ceiling', () => {
+    const result = plan([coin(300_000)], { maxAmount: 50_000 })
+    expect(result.outputs.length).toBeGreaterThan(0)
+    expect(result.outputs.every((amount) => amount <= 50_000)).toBe(true)
+  })
+
+  it('plans nothing under a ceiling below the smallest output arkd accepts', () => {
+    expect(plan([coin(300_000)], { maxAmount: 0 }).outputs).toEqual([])
+    expect(plan(coins(64, 4_000), { maxAmount: FLOOR - 1 }).outputs).toEqual([])
+  })
+
   it('cuts a coin above the per-output ceiling into chunks under it', () => {
     const result = plan([coin(1_200_000)], { maxAmount: 500_000 })
     expect(result.outputs.every((amount) => amount <= 500_000)).toBe(true)
@@ -169,6 +186,11 @@ describe('planPool — consolidating', () => {
     expect(result.reason).toMatch(/assets ride a 330 sat change/)
   })
 
+  it('refuses a merge whose chunks would fall under the floor', () => {
+    const result = plan([...coins(61, 2_000, { renewalDue: true }), ...coins(3, 200)], { maxAmount: 500 })
+    expect(result.outputs).toEqual([])
+  })
+
   it('cuts the remainder under the per-output ceiling', () => {
     const result = plan([...keepers(), ...coins(60, 40_000)], { maxAmount: 500_000 })
     expect(result.inputs).toHaveLength(50)
@@ -191,6 +213,9 @@ describe('every plan conserves its sats and respects its bounds', () => {
     ['ceiling-bound chunks', [...keepers(), ...coins(60, 40_000)], 500_000],
     ['big coins under a ceiling', coins(64, 100_000), 500_000],
     ['a coin over the ceiling', [coin(1_200_000)], 500_000],
+    ['a ceiling below every piece', coins(64, 4_000), 20_000],
+    ['a ceiling below the large piece', [coin(300_000)], 50_000],
+    ['a ceiling under twice the floor', coins(64, 400), 500],
   ] as const)('%s', (_name, float, maxAmount) => {
     const result = plan(float, { maxAmount })
     const spent = float.filter((c) => result.inputs.includes(c.key))
