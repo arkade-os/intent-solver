@@ -34,6 +34,31 @@
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import type { OnchainSendBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import type { Config } from '../config.js'
+import type { EvmPayoutFundingAdapter } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
+import type { EvmHtlcBackend, JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
+import type { EvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
+import type { EvmSendSwapStore } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
+import type { SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
+
+export interface LightningRailHost {
+  sql: SqlDriver
+  assertNoPendingOutgoing(): Promise<void>
+}
+
+export interface EvmPayoutFundingHost {
+  sql: SqlDriver
+  config: Config
+  chain: EvmChainConfig
+  rpc: JsonRpc
+  backend: EvmHtlcBackend
+  sendStore: EvmSendSwapStore
+}
+
+export interface EvmPayoutFundingRegistration {
+  adapter: EvmPayoutFundingAdapter
+  acceptingQuotes?: () => boolean
+  close?(): Promise<void>
+}
 
 export interface LightningRail {
   /**
@@ -48,6 +73,7 @@ export interface LightningRail {
    * those two corridors cannot be served at all.
    */
   onchain: OnchainSendBackend
+  createEvmPayoutFunding?(host: EvmPayoutFundingHost): Promise<EvmPayoutFundingRegistration | null>
 }
 
 export interface LightningRailModule {
@@ -63,7 +89,7 @@ export interface LightningRailModule {
    * initialises every wallet sequentially — a `create` that opens more than one
    * should do the same.
    */
-  create(config: Config): Promise<LightningRail>
+  create(config: Config, host?: LightningRailHost): Promise<LightningRail>
   /**
    * Optional: mint an invoice from a SEPARATE payee wallet, for the `invoice`
    * command's self-test.

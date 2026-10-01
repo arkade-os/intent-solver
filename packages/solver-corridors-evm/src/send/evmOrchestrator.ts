@@ -18,8 +18,14 @@
 
 import { planEvmSend, type EvmSendAction, type EvmSendObservation } from '@arkade-os/solver-core/core/evmSendPlan.js'
 import { blocksForDuration, type EvmBlockCadence } from '@arkade-os/solver-rails-evm/evm/blockTime.js'
-import type { EvmSendSwapRow, EvmSendSwapStore } from '../db/evmSendSwaps.js'
-import type { EvmCall, EvmHtlcBackend, EvmTransactionOutcome } from '@arkade-os/solver-core/ports/evm.js'
+import type { EvmSendQuoteRecord, EvmSendSwapRow, EvmSendSwapStore } from '../db/evmSendSwaps.js'
+import { sendLockFromRow } from '../evm/lockFromRow.js'
+import {
+  EvmClaimVerificationError,
+  type EvmCall,
+  type EvmHtlcBackend,
+  type EvmTransactionOutcome,
+} from '@arkade-os/solver-core/ports/evm.js'
 import { EVM_SEND_EXPOSED } from '@arkade-os/solver-core/core/evmSwapState.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
@@ -31,15 +37,26 @@ import { payoutSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPol
 import type { EvmMarket, EvmToken } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
 import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import { convertAmount } from '@arkade-os/solver-core/core/priceFeed.js'
-import { evaluateEvmSendAcceptance, type EvmSendAcceptanceRefusal } from '@arkade-os/solver-core/core/evmSend.js'
+import {
+  EVM_ORDER_MARGIN_SECONDS,
+  evaluateEvmSendAcceptance,
+  type EvmSendAcceptanceRefusal,
+} from '@arkade-os/solver-core/core/evmSend.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { evmSendCovenantRowFor } from '../evm/covenantRow.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { EvmPayoutFundingQuarantinedError } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
+import {
+  checkedActivationTxid,
+  payoutFundingBinding,
+  type EvmPayoutFundingAdapter,
+  type EvmPayoutFundingMode,
+} from './evmPayoutFunding.js'
 
 /** Signs and broadcasts one call, resolving to its transaction hash. */
 export type EvmBroadcaster = (call: EvmCall) => Promise<string>
@@ -48,6 +65,10 @@ export interface EvmSendServiceDeps {
   store: EvmSendSwapStore
   evm: EvmHtlcBackend
   broadcast: EvmBroadcaster
+  /** Optional external funding of the SAME quoted HTLC; never provider-status settlement. */
+  payoutFunding?: EvmPayoutFundingAdapter
+  /** Pause new intake while tick/recovery continue serving existing obligations. */
+  acceptingQuotes?: () => boolean
   /** Is the client's Arkade lockup funded for the quoted amount? */
   arkadeLockupFunded(row: EvmSendSwapRow): Promise<boolean>
   /** Claim the Arkade lockup with the revealed preimage; resolves to the ark txid. */
@@ -93,6 +114,8 @@ export interface EvmSendServiceDeps {
    * "mine" during a sweep.
    */
   markets: ReadonlyMap<string, EvmSendMarket>
+  /** Prove the selected token's canonical event traces before admitting a new quote. */
+  assertClaimTraceSupport(tokenAddress: Uint8Array): Promise<void>
   fetchPrice: FetchPrice
   /** Chain facts the row snapshots so settlement never re-reads config. */
   chain: {
@@ -175,6 +198,7 @@ export type EvmSendQuoteRefusal =
   | 'price_unavailable'
   | 'rate_limited'
   | 'unsupported_token'
+  | 'execution_unavailable'
 
 export type EvmSendQuoteOutcome =
   { accepted: true; swap: EvmSendSwapRow } | { accepted: false; reason: EvmSendQuoteRefusal }
@@ -188,6 +212,9 @@ export class EvmSendSwapService {
   private readonly quoteLimiter: RateLimiter
 
   constructor(private readonly deps: EvmSendServiceDeps) {
+    if (Boolean(deps.payoutFunding?.prepareQuote) !== Boolean(deps.payoutFunding?.abandonQuote)) {
+      throw new Error('quote preparation and abandonment must be configured together')
+    }
     this.admission = deps.admission
     this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
   }
@@ -298,9 +325,14 @@ export class EvmSendSwapService {
     if (preimage === null && (EVM_SEND_EXPOSED as readonly string[]).includes(row.state)) {
       // Reported and survived, as `provenDepth` treats its failed reads.
       try {
-        const found = await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height))
+        const found = await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height), {
+          minConfirmations: row.minConfirmations,
+          minAgeSeconds: row.minAgeSeconds,
+          nowSeconds: this.now(),
+        })
         preimage = found === null ? null : Buffer.from(found).toString('hex')
       } catch (error) {
+        if (error instanceof EvmClaimVerificationError) throw error
         this.deps.onTickError?.(row.id, error)
       }
     }
@@ -333,11 +365,56 @@ export class EvmSendSwapService {
     }
   }
 
+  private async ensurePayoutFunding(row: EvmSendSwapRow, mode: EvmPayoutFundingMode): Promise<void> {
+    const adapter = this.deps.payoutFunding
+    if (adapter === undefined) return
+    const binding = payoutFundingBinding(adapter.identity, row, this.deps.lockFor(row))
+    const result = await adapter.ensure(
+      { binding, nowSeconds: this.now(), blockHeight: await this.deps.blockHeight() },
+      mode,
+    )
+    const txid = checkedActivationTxid(result)
+    if (txid !== undefined) {
+      const current = await this.deps.store.get(row.id)
+      if (current.evmLockTxid !== null && current.evmLockTxid.toLowerCase() !== txid) {
+        throw new Error(`payout funding changed activation transaction for ${row.id}`)
+      }
+      if (current.evmLockTxid === null) await this.deps.store.patch(row.id, { evm_lock_txid: txid })
+    }
+  }
+
   /** One step. Returns true when the row moved, so the caller can try again. */
   private async step(row: EvmSendSwapRow): Promise<boolean> {
-    const action: EvmSendAction = planEvmSend(row, await this.observe(row))
+    let seen = await this.observe(row)
+    let action: EvmSendAction = planEvmSend(row, seen)
+    // Provider downtime must not withhold a chain-proven payout or revealed preimage.
+    if (this.deps.payoutFunding !== undefined && row.state === 'locking_evm' && action.do === 'wait') {
+      await this.ensurePayoutFunding(row, 'reconcile')
+      row = await this.deps.store.get(row.id)
+      seen = await this.observe(row)
+      action = planEvmSend(row, seen)
+    }
     const { store } = this.deps
-
+    // A provider/receiver recovery is not an HTLC refund against a nonexistent lock.
+    if (this.deps.payoutFunding !== undefined && action.do === 'refund_evm' && !seen.evmLockPresent) {
+      let recoveryError: unknown
+      try {
+        await this.ensurePayoutFunding(row, 'recover')
+      } catch (error) {
+        recoveryError = error
+        this.deps.onTickError?.(row.id, error)
+      }
+      const current = await store.get(row.id)
+      // Stuck frees quote capacity while keeping the late-lock watch and avoiding refused-row refunds.
+      await store.fail(
+        current.id,
+        current.state,
+        recoveryError === undefined
+          ? 'no EVM lock is proven; provider recovery remains in its independent ledger'
+          : 'provider recovery failed without a proven EVM lock; independent ledger retained',
+      )
+      return false
+    }
     switch (action.do) {
       case 'wait':
         return false
@@ -355,8 +432,15 @@ export class EvmSendSwapService {
         const locking = this.lockSequence.then(async () => {
           const current = await store.get(row.id)
           if (planEvmSend(current, await this.observe(current)).do !== 'lock_evm') return true
+          if (this.deps.payoutFunding !== undefined) {
+            payoutFundingBinding(this.deps.payoutFunding.identity, current, this.deps.lockFor(current))
+          }
           // Exposure precedes even the approval, preserving recovery after a crash.
           await store.transition(current.id, current.state, 'locking_evm')
+          if (this.deps.payoutFunding !== undefined) {
+            await this.ensurePayoutFunding(await store.get(current.id), 'start')
+            return true
+          }
           const lock = this.deps.lockFor(current)
           const allowance = await this.deps.evm.allowance(lock.tokenAddress, this.deps.solverEvmAddress)
           const calls = this.deps.evm.lockCalls(lock, allowance)
@@ -428,6 +512,7 @@ export class EvmSendSwapService {
    */
   async quote(request: EvmSendQuoteRequest): Promise<EvmSendQuoteOutcome> {
     const { store, arkade, chain } = this.deps
+    if (this.deps.acceptingQuotes?.() === false) return { accepted: false, reason: 'provider_at_capacity' }
     if (request.requesterKey !== undefined) {
       if (await store.findLiveByPaymentHash(request.paymentHash)) return { accepted: false, reason: 'duplicate_swap' }
       if (!this.quoteLimiter.take(request.requesterKey)) return { accepted: false, reason: 'rate_limited' }
@@ -486,6 +571,13 @@ export class EvmSendSwapService {
       }
     }
 
+    try {
+      await this.deps.assertClaimTraceSupport(hex.decode(token.address.slice(2)))
+    } catch (error) {
+      this.deps.onTickError?.(request.paymentHash, error)
+      return { accepted: false, reason: 'execution_unavailable' }
+    }
+
     // PRICED AT QUOTE TIME, and the figure is persisted rather than recomputed:
     // once the client has locked, the rate that priced their payout is a fact
     // whatever the feed says later. A feed that is down refuses the quote rather
@@ -511,60 +603,60 @@ export class EvmSendSwapService {
     if (reservation === null) return { accepted: false, reason: 'provider_at_capacity' }
 
     try {
-      const price = await this.deps.fetchPrice(market.priceFeed, market.pricePath)
-      // ROUNDED DOWN: the solver is paying this out, so a sub-unit remainder
-      // stays with the solver rather than being given away on every swap.
-      evmAmount = convertAmount({
-        baseAmount: BigInt(payoutSats),
-        price,
-        baseDecimals: 8,
-        quoteDecimals: token.decimals,
-        rounding: 'down',
+      try {
+        const price = await this.deps.fetchPrice(market.priceFeed, market.pricePath)
+        // ROUNDED DOWN: the solver is paying this out, so a sub-unit remainder
+        // stays with the solver rather than being given away on every swap.
+        evmAmount = convertAmount({
+          baseAmount: BigInt(payoutSats),
+          price,
+          baseDecimals: 8,
+          quoteDecimals: token.decimals,
+          rounding: 'down',
+        })
+      } catch {
+        return { accepted: false, reason: 'price_unavailable' }
+      }
+      if (evmAmount <= 0n) return { accepted: false, reason: 'payout_below_dust' }
+      // The inventory bound, in the token's own units, enforced at QUOTE time —
+      // the sats bound above is width-limited and reads generous precisely when
+      // the price has run away; this is the knob that still refuses then.
+      if (
+        served.tokenLimits !== undefined &&
+        (evmAmount < served.tokenLimits.minUnits || evmAmount > served.tokenLimits.maxUnits)
+      ) {
+        return { accepted: false, reason: 'amount_out_of_range' }
+      }
+
+      const serverKey = hex.decode(arkade.serverPubkey)
+      const id = crypto.randomUUID()
+      // Constructed from parts rather than through `covenantScriptFromRow`: that
+      // helper rebuilds a script from a row that already carries its `pkScript`,
+      // and here the pkScript is what we are deriving. The field mapping is the
+      // one `evmSendCovenantRowFor` uses in the other direction — the SOLVER is
+      // the receiver on this leg, because the solver claims the client's sats.
+      const arkadeScript = new CovenantSwapScript({
+        receiver: hex.decode(arkade.providerPubkey),
+        server: serverKey,
+        // The 20-byte ripemd160(sha256(P)) the script wants, never a raw decode of
+        // the wire's sha256 form.
+        preimageHash: scriptHashFromPaymentHash(request.paymentHash),
+        refundLocktime: acceptance.refundLocktime,
+        claimDelay: arkade.delays.unilateralClaimDelay,
+        client: hex.decode(request.clientRefundPubkey),
+        clientRefundDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
+        refundWithoutServerDelay: arkade.delays.unilateralRefundDelay,
+        // Every quote from here on carries the current, full covenant suite —
+        // no legacy selector. See `NonInteractiveParameters.legacy`'s own doc comment
+        // for why that is not simply always omitted.
+        nonInteractiveParameters: {
+          emulatorPubkey: hex.decode(arkade.emulatorPubkey),
+          receiverPkScript: hex.decode(arkade.receiverPkScript),
+          senderPkScript: refundPkScript,
+        },
       })
-    } catch {
-      return { accepted: false, reason: 'price_unavailable' }
-    }
-    if (evmAmount <= 0n) return { accepted: false, reason: 'payout_below_dust' }
-    // The inventory bound, in the token's own units, enforced at QUOTE time —
-    // the sats bound above is width-limited and reads generous precisely when
-    // the price has run away; this is the knob that still refuses then.
-    if (
-      served.tokenLimits !== undefined &&
-      (evmAmount < served.tokenLimits.minUnits || evmAmount > served.tokenLimits.maxUnits)
-    ) {
-      return { accepted: false, reason: 'amount_out_of_range' }
-    }
 
-    const serverKey = hex.decode(arkade.serverPubkey)
-    const id = crypto.randomUUID()
-    // Constructed from parts rather than through `covenantScriptFromRow`: that
-    // helper rebuilds a script from a row that already carries its `pkScript`,
-    // and here the pkScript is what we are deriving. The field mapping is the
-    // one `evmSendCovenantRowFor` uses in the other direction — the SOLVER is
-    // the receiver on this leg, because the solver claims the client's sats.
-    const arkadeScript = new CovenantSwapScript({
-      receiver: hex.decode(arkade.providerPubkey),
-      server: serverKey,
-      // The 20-byte ripemd160(sha256(P)) the script wants, never a raw decode of
-      // the wire's sha256 form.
-      preimageHash: scriptHashFromPaymentHash(request.paymentHash),
-      refundLocktime: acceptance.refundLocktime,
-      claimDelay: arkade.delays.unilateralClaimDelay,
-      client: hex.decode(request.clientRefundPubkey),
-      clientRefundDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
-      refundWithoutServerDelay: arkade.delays.unilateralRefundDelay,
-      // Every quote from here on carries the current, full covenant suite —
-      // no legacy selector. See `NonInteractiveParameters.legacy`'s own doc comment
-      // for why that is not simply always omitted.
-      nonInteractiveParameters: {
-        emulatorPubkey: hex.decode(arkade.emulatorPubkey),
-        receiverPkScript: hex.decode(arkade.receiverPkScript),
-        senderPkScript: refundPkScript,
-      },
-    })
-
-    try {
-      const swap = await store.insertQuote({
+      const candidate: EvmSendQuoteRecord = {
         id,
         paymentHash: request.paymentHash,
         amountSats: request.amountSats,
@@ -606,16 +698,59 @@ export class EvmSendSwapService {
         receiverPkScript: arkade.receiverPkScript,
         nonInteractiveParameters: true,
         rfqId: request.rfqId ?? null,
-      })
-      return { accepted: true, swap }
-    } catch (error) {
-      if (error instanceof UniqueConstraintError) {
-        return { accepted: false, reason: 'duplicate_swap' }
       }
-      throw error
+      const funding = this.deps.payoutFunding
+      let preparedBinding: ReturnType<typeof payoutFundingBinding> | undefined
+      try {
+        if (funding?.prepareQuote) {
+          preparedBinding = payoutFundingBinding(funding.identity, candidate, sendLockFromRow(candidate))
+          try {
+            const prepared = await funding.prepareQuote({
+              binding: preparedBinding,
+              nowSeconds: this.now(),
+              blockHeight: await this.deps.blockHeight(),
+              tokenDecimals: token.decimals,
+              orderMarginSeconds: chain.orderMarginSeconds ?? EVM_ORDER_MARGIN_SECONDS,
+              quoteValiditySeconds: chain.quoteValiditySeconds,
+            })
+            if (prepared) {
+              const end = this.now()
+              if (
+                !Number.isSafeInteger(prepared.validUntil) ||
+                prepared.validUntil <= end ||
+                prepared.validUntil > end + chain.quoteValiditySeconds ||
+                prepared.validUntil >= candidate.refundLocktime
+              ) {
+                throw new Error('invalid prepared quote expiry')
+              }
+              candidate.validUntil = prepared.validUntil
+              preparedBinding = payoutFundingBinding(funding.identity, candidate, sendLockFromRow(candidate))
+            } else if (candidate.validUntil <= this.now()) {
+              throw new Error('prepared quote expired')
+            }
+          } catch (error) {
+            this.deps.onTickError?.(candidate.id, error)
+            return { accepted: false, reason: 'execution_unavailable' }
+          }
+        }
+        const swap = await store.insertQuote(candidate)
+        preparedBinding = undefined
+        return { accepted: true, swap }
+      } catch (error) {
+        if (error instanceof UniqueConstraintError) {
+          return { accepted: false, reason: 'duplicate_swap' }
+        }
+        throw error
+      } finally {
+        if (preparedBinding && funding?.abandonQuote) {
+          try {
+            await funding.abandonQuote(preparedBinding)
+          } catch (error) {
+            this.deps.onTickError?.(candidate.id, error)
+          }
+        }
+      }
     } finally {
-      // On every path. The inserted row is what `totalCommitted()` counts from
-      // here on, so holding the claim past this point would double-count it.
       reservation.release()
     }
   }
@@ -626,7 +761,18 @@ export class EvmSendSwapService {
    * from-state guard would catch a double step only as a thrown error.
    */
   tick(id: string): Promise<EvmSendSwapRow> {
-    return guardedTick(id, this.inFlight, this.deps.store, (row) => this.step(row))
+    return guardedTick(id, this.inFlight, this.deps.store, async (row) => {
+      try {
+        return await this.step(row)
+      } catch (error) {
+        if (!(error instanceof EvmPayoutFundingQuarantinedError)) throw error
+        const current = await this.deps.store.get(row.id)
+        if (current.state !== 'locking_evm') throw error
+        this.deps.onTickError?.(current.id, error)
+        await this.deps.store.fail(current.id, current.state, error.message)
+        return false
+      }
+    })
   }
 
   /**
@@ -653,6 +799,14 @@ export class EvmSendSwapService {
     return rows
   }
 
+  async payoutFundingRecoverySweep(): Promise<void> {
+    try {
+      await this.deps.payoutFunding?.sweepRecovery()
+    } catch (error) {
+      this.deps.onTickError?.('payout-funding-recovery', error)
+    }
+  }
+
   /**
    * Keep reading the contract for a closed row whose ERC20 may still be out: a
    * lock still pending at the timeout refund can mine at ANY later height, by
@@ -670,7 +824,11 @@ export class EvmSendSwapService {
         const present = await this.deps.evm.isLocked(lock)
         const claimed =
           row.preimage === null
-            ? await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height))
+            ? await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height), {
+                minConfirmations: row.minConfirmations,
+                minAgeSeconds: row.minAgeSeconds,
+                nowSeconds: this.now(),
+              })
             : null
         if (claimed !== null) {
           await store.patch(row.id, { preimage: Buffer.from(claimed).toString('hex') })

@@ -273,6 +273,9 @@ export {
   lightningRailFor,
   type LightningRail,
   type LightningRailModule,
+  type LightningRailHost,
+  type EvmPayoutFundingHost,
+  type EvmPayoutFundingRegistration,
 } from './ops/rails.js'
 /**
  * Arkade asset-swap offers — asset↔BTC and asset↔asset. Not a corridor: both

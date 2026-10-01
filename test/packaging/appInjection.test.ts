@@ -171,7 +171,7 @@ describe('a deployment described in code rather than in the environment', () => 
     // The branch that makes `lnBackend: null` a supported deployment rather than
     // a crash. Without it the registry would be mandatory for everyone, and with
     // it a consumer serving their own corridors never mutates module state.
-    expect(servicesSource).toContain('config.lnBackend === null ? null : await createRail(config)')
+    expect(servicesSource).toMatch(/config\.lnBackend === null\s*\? null\s*:\s*await createRail\(config,\s*\{/)
   })
 
   it('takes corridors as a PARAMETER, with no global to mutate first', () => {
