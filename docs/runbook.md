@@ -628,15 +628,24 @@ the reasons to take one.
   regtest: nine coins (eight of them plain sats) became one 8,550,951-sat
   asset-bearing coin after a single settle, with no swap traffic at all.
 
-  `cli pool --mint` works because the split isolates the asset: it lands on
-  exactly one piece and the rest come out clean. It is a recovery, not a fix —
-  nothing re-splits automatically after a renewal consolidates. Tracked in
-  the solver's own tracker.
+  `cli pool --mint` works because the reshape isolates the asset: every asset
+  its inputs carry lands on one small change output, and the pieces come out
+  clean. Renewal settles into the pool's shape and re-plans after itself, so
+  this is a recovery for whatever reaches the float between renewals.
 
   The refusal reason is true (there really are no spendable sats) but names the
   wrong cause, which is why this is worth recognising by its signature: a large
   `total` beside a dead corridor. `cli balances` prints `assets` separately, so
   an asset in the float is visible there.
+
+- **Hundreds of coins in the float.** Swap proceeds and refunds land as
+  separate coins, so a busy solver fragments between renewals. `cli balances`
+  and the console's pool line then read `consolidating M of N coins…`. Each
+  `cli pool --mint` (or console `pool-mint`) merges up to 50 of them into the
+  pool's pieces plus one remainder, in one Arkade transaction and at no intent
+  fee; repeat until the reason stops saying `consolidating`. With
+  `POOL_AUTO_MINT=true` the watch loop does one pass per lifecycle cadence
+  while no swap is in flight.
 
 - **Exposure**: `cli balances` shows current exposed sats vs the cap. The cap
   counts every non-terminal swap including bare quotes, and quote creation is

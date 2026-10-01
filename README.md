@@ -871,13 +871,17 @@ leg applied these rules, and regtest cannot tell the two apart — where no coin
 clears the horizon, the wrong selection returns the same coin as the right one.
 Only mainnet would have.
 
-`planPool` is **never acted on automatically**. `balances` prints the current
-shape and what it is short of; `pool` prints the same and, with `--mint`,
-executes it — one Arkade transaction paying the solver's own address the
-planned pieces, so N pieces cost one transaction and no intent fee (settling
-would charge per input to reshape a float that is already spendable).
+`planPool` reshapes in both directions. Below the coin ceiling (64, or the
+target's own size if larger) it cuts loose coins into the pieces the target is
+short of; at the ceiling it merges up to 50 loose coins — soonest batch expiry
+first, never the keepers funding picks first, never a coin renewal is about to
+take — into those pieces plus one remainder. `balances` prints the plan; `pool`
+prints the same and, with `--mint`, executes it — one Arkade transaction paying
+the solver's own address, naming and pinning its inputs, so it costs no intent
+fee (settling would charge per input to reshape a float that is already
+spendable) and neither a funding nor a renewal can spend a coin under it.
 
-Minting is a command rather than a watch-loop job because the hazard is a
+The spend is gated because the hazard is a
 _concurrent provider_: funding pins its inputs in a process-local ledger, so a
 mint run from a second process cannot see what a running provider reserved and
 can spend a coin out from under an in-flight funding. Non-terminal rows are the
@@ -1023,7 +1027,8 @@ Two more, current as of the receive corridors going live:
   keeps this unwired is therefore the wiring work itself, no longer doubt about
   the daemon. See `docs/runbook.md` § covclaimd.
 
-- **Nothing shapes the float automatically.** `planPool` reports what the pool is
-  short of; minting the pieces is still manual. Since funding pins the coins it
-  spends, a float of one coin serves one swap at a time however many sats it
-  holds.
+- **Reshaping between renewals is opt-in.** Renewal settles into the pool's
+  shape and re-plans after itself, but a float that fragments or consolidates in
+  between is reshaped only by `pool --mint`, or by the watch loop with
+  `POOL_AUTO_MINT=true` — and then only while no swap is in flight, since the
+  second-process gate still applies.
