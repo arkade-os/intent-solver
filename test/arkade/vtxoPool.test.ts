@@ -134,6 +134,14 @@ describe('planPool — splitting', () => {
     expect(result.outputs.length).toBeGreaterThan(0)
     expect(result.outputs.every((amount) => amount >= FLOOR)).toBe(true)
   })
+
+  it('refuses a split whose chunks would fall under the floor', () => {
+    const target = [
+      { size: 400, want: 6 },
+      { size: 1_000, want: 4 },
+    ]
+    expect(plan([coin(2_120)], { target, maxAmount: 500 }).outputs).toEqual([])
+  })
 })
 
 describe('planPool — consolidating', () => {
@@ -189,6 +197,7 @@ describe('planPool — consolidating', () => {
   it('refuses a merge whose chunks would fall under the floor', () => {
     const result = plan([...coins(61, 2_000, { renewalDue: true }), ...coins(3, 200)], { maxAmount: 500 })
     expect(result.outputs).toEqual([])
+    expect(result.reason).toMatch(/outside the operator's bounds/)
   })
 
   it('cuts the remainder under the per-output ceiling', () => {

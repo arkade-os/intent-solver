@@ -246,7 +246,11 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
     // pool's shape above, so the float does not come back as one coin. This covers what
     // that cannot reach — too little to carve, or a float reshaped by something other
     // than a renewal.
-    resplitFloat: async () => (await resplitFloat(services))?.txid ?? null,
+    resplitFloat: async () => {
+      const result = await resplitFloat(services)
+      if (result !== null && 'skipped' in result) log('float re-split after renewal skipped:', result.skipped)
+      return result !== null && 'txid' in result ? result.txid : null
+    },
     recoverVtxos: () => vtxoManager.recoverVtxos(),
     recoverableVtxos: () => recoverableVtxosFrom(wallet),
     // Lazy, so a throw from either source costs only recovery — which then

@@ -14,7 +14,7 @@
 
 import { createCorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
 import { describe, it, expect, vi } from 'vitest'
-import { mintPool, poolPlan, committedAcrossCorridors } from '@arkade-os/solver-app/ops/pool.js'
+import { mintPool, poolPlan, committedAcrossCorridors, resplitFloat } from '@arkade-os/solver-app/ops/pool.js'
 import { usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 import { createReservationLedger, type ReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { Services } from '@arkade-os/solver-app/ops/services.js'
@@ -450,6 +450,18 @@ describe('mintPool — named, pinned inputs', () => {
       return 0
     }
     expect(await mintPool(servicesWith({ ledger, send, committed }))).toEqual({ skipped: 'inputs-pinned' })
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('has resplitFloat report a pin collision rather than read as nothing to do', async () => {
+    const ledger = createReservationLedger()
+    const send = vi.fn()
+    const services = servicesWith({ ledger, send })
+    vi.mocked(services.arkade.wallet.getAddress).mockImplementationOnce(async () => {
+      ledger.reserve([{ txid: 'coin0', vout: 0 }])
+      return 'tark1solver'
+    })
+    expect(await resplitFloat(services)).toEqual({ skipped: 'inputs-pinned' })
     expect(send).not.toHaveBeenCalled()
   })
 })

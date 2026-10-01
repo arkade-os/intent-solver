@@ -208,14 +208,16 @@ export const mintPool = async (services: Services, opts: { force?: boolean } = {
  * ledger when the split is planned and the inputs are pinned for the spend, so the
  * safety comes from re-reading rather than exclusivity.
  */
-export const resplitFloat = async (services: Services): Promise<{ minted: readonly number[]; txid: string } | null> => {
+export const resplitFloat = async (
+  services: Services,
+): Promise<{ minted: readonly number[]; txid: string } | { skipped: 'inputs-pinned' } | null> => {
   const { plan, inputCoins } = await poolPlan(services)
   if (plan.outputs.length === 0) return null
   const address = await services.arkade.wallet.getAddress()
   const [first, ...rest] = plan.outputs.map((amount) => ({ address, amount }))
   if (!first) return null
   const release = pinInputs(services, inputCoins)
-  if (release === null) return null
+  if (release === null) return { skipped: 'inputs-pinned' }
   try {
     const txid = await services.arkade.wallet.send({ recipients: [first, ...rest], selectedVtxos: inputCoins })
     return { minted: plan.outputs, txid }

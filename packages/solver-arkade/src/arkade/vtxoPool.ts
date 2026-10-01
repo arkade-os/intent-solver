@@ -230,9 +230,8 @@ export const planPool = (args: {
     const remain = coins.length - inputs.length + outputs.length + extra
     const fits = left >= 0 && bounded && outputs.length <= slots
     if (!fits || remain >= coins.length) {
-      return none(
-        `pool at its ceiling — ${coins.length}/${ceiling} coins, and merging ${inputs.length} would not shrink it`,
-      )
+      const why = fits ? 'would not shrink it' : "would leave an output outside the operator's bounds"
+      return none(`pool at its ceiling — ${coins.length}/${ceiling} coins, and merging ${inputs.length} ${why}`)
     }
     return {
       inputs: keys,
