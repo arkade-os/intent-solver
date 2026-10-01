@@ -104,11 +104,17 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
     private readonly esplora: EsploraClient | undefined,
   ) {}
 
-  static async create(config: AdapterConfig): Promise<LndOnchainAdapter> {
+  /** No round-trip, like the Lightning adapter's `open`. */
+  static open(config: AdapterConfig): LndOnchainAdapter {
     const { lnd } = authenticatedLndGrpc(config)
-    await probeLnd(lnd, config.socket)
     const esplora = config.esploraUrl ? createEsploraClient(config.esploraUrl, config.esploraAuth) : undefined
     return new LndOnchainAdapter(lnd, esplora)
+  }
+
+  static async create(config: AdapterConfig): Promise<LndOnchainAdapter> {
+    const adapter = LndOnchainAdapter.open(config)
+    await probeLnd(adapter.lnd, config.socket)
+    return adapter
   }
 
   /**

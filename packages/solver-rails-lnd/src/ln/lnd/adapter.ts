@@ -368,16 +368,29 @@ export class LndLightningBackendAdapter implements LightningBackend {
     return true
   }
 
-  private constructor(private readonly lnd: AuthenticatedLnd) {}
+  private constructor(
+    private readonly lnd: AuthenticatedLnd,
+    private readonly socket: string,
+  ) {}
 
-  static async create(config: AdapterConfig): Promise<LndLightningBackendAdapter> {
+  /** No round-trip: the gRPC channel connects on its first call, so this succeeds with the node down. */
+  static open(config: AdapterConfig): LndLightningBackendAdapter {
     const { lnd } = authenticatedLndGrpc({
       socket: config.socket,
       cert: config.cert,
       macaroon: config.macaroon,
     })
-    await probeLnd(lnd, config.socket)
-    return new LndLightningBackendAdapter(lnd)
+    return new LndLightningBackendAdapter(lnd, config.socket)
+  }
+
+  static async create(config: AdapterConfig): Promise<LndLightningBackendAdapter> {
+    const adapter = LndLightningBackendAdapter.open(config)
+    await adapter.probe()
+    return adapter
+  }
+
+  probe(): Promise<void> {
+    return probeLnd(this.lnd, this.socket)
   }
 
   async getBalance(): Promise<Balance> {

@@ -259,6 +259,14 @@ describe('LndLightningBackendAdapter.create', () => {
     getWalletInfo.mockRejectedValueOnce([503, 'LndLocked'])
     await expect(create()).rejects.toThrow('LND at lnd:10009 did not answer getWalletInfo: LndLocked')
   })
+
+  it('opens without asking the node, and probes it on demand', async () => {
+    getWalletInfo.mockClear()
+    const adapter = LndLightningBackendAdapter.open({ socket: 'lnd:10009', cert: 'c', macaroon: 'm' })
+    expect(getWalletInfo).not.toHaveBeenCalled()
+    getWalletInfo.mockRejectedValueOnce([503, 'LndLocked'])
+    await expect(adapter.probe()).rejects.toThrow('LND at lnd:10009 did not answer getWalletInfo: LndLocked')
+  })
 })
 
 describe('LndLightningBackendAdapter.getOwnInvoiceState', () => {
