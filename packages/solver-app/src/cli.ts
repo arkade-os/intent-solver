@@ -1517,6 +1517,9 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       // its own store and its own sweep.
       const pushed = await services.service!.refundSweep()
       const onchainPushed = (await services.onchainService?.refundSweep()) ?? []
+      // `allCorridors` builds it whenever there is a rail, so its absence here means LND did not answer at boot.
+      if (!services.onchainService)
+        log('onchain refunds NOT checked: LND did not answer at boot; run this again once it does')
       const evmPushed = (await services.evmSendService?.refundSweep()) ?? []
       if (pushed.length === 0 && onchainPushed.length === 0 && evmPushed.length === 0) {
         log('nothing eligible: refunds need a failed swap past its deadline with funds at the script')
