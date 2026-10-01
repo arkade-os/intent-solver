@@ -294,7 +294,7 @@ export const endpointHost = (raw: string): string => {
  *
  * Built-ins are answered here, not through the registry, so a consumer's rail can never shadow them.
  */
-/** Bounds how long the rail gate admits quotes after LND dies, plus one probe's own deadline. */
+/** A refusing LND closes the rail gate within one interval; a stalled probe within three (`watchRail`). */
 const RAIL_PROBE_MS = 5_000
 
 const createRail = async (config: Config): Promise<LightningRail & { probe?: () => Promise<void> }> => {
