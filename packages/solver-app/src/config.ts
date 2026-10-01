@@ -178,7 +178,8 @@ export interface Config {
    */
   corridorEnabled: Record<Corridor, boolean>
   /**
-   * Whether the daemon may SPLIT the float on its own, without an operator.
+   * Whether the daemon may RESHAPE the float on its own — split it, or merge small
+   * coins at the coin ceiling — without an operator.
    *
    * Off by default, and not for symmetry with renewal. Renewal preserves what
    * the solver already has; a mint SPENDS, on a timer, with nobody watching —

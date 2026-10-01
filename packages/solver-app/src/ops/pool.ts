@@ -64,8 +64,8 @@ export const poolPlan = async (services: Services): Promise<PoolPlan> => {
   // dust of the coin is committed before the pool gets a say — the same rule the
   // funding path already applies, shared from it rather than restated here so the two
   // cannot answer "what can this coin fund" differently. A coin worth no more than
-  // dust drops out entirely: it can pay for its own asset change and nothing else, and
-  // left in it would count as a whole piece against `maxCount` while funding nothing.
+  // dust funds nothing, so it is never a piece; it still counts toward the coin
+  // ceiling, and a merge may take it, its asset riding the merge's change.
   const info = await services.arkade.wallet.arkProvider.getInfo()
   const dustSats = Number(info.dust)
   const maxAmount = Number(info.vtxoMaxAmount ?? -1)
@@ -190,7 +190,7 @@ export const mintPool = async (services: Services, opts: { force?: boolean } = {
 }
 
 /**
- * Re-split the float from INSIDE the provider process, after a renewal consolidated it.
+ * Reshape the float from INSIDE the provider process, after a renewal consolidated it.
  *
  * A no-argument `settle()` sweeps every selectable coin into ONE output and carries
  * Arkade assets onto the output matching the wallet's own script. So one asset anywhere
