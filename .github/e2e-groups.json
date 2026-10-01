@@ -22,6 +22,17 @@
     "arkdTimelocks": "blocks"
   },
   {
+    "name": "pool",
+    "why": "Reshapes the solver's own float: it mints seventy coins and merges fifty, which would change what every corridor file's coin selection sees. Seconds-typed because the planner judges renewal by wall-clock expiry, and on a block-typed arkd every expiry is a height.",
+    "profiles": "emulator",
+    "files": ["poolConsolidation.e2e.test.ts"],
+    "mintAsset": false,
+    "lnd": false,
+    "covclaimdImage": "",
+    "evmChain": false,
+    "arkdTimelocks": "seconds"
+  },
+  {
     "name": "send-lightning",
     "why": "Needs the boltz profile: the counterparty is the base `lnd`, the solver's own node is `boltz-lnd`, and setupBoltz() is the only thing that funds that node and opens the channel between them. Seconds-typed, like every corridor group: the receive orchestrator refuses to write a block-height refund deadline without a chainTip provider, and these tests wire none.",
     "profiles": "emulator,boltz",
