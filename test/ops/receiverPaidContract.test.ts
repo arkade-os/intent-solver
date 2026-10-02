@@ -60,6 +60,7 @@ const OPERATOR = key(3)
 const PAYOUT = key(4)
 const MAKER = key(5)
 const SOLVER = key(6)
+const OPERATOR_SIGNER = key(7)
 const HRP = 'tark'
 const DUST = 330n
 const FLAT_FARE = '25'
@@ -166,10 +167,12 @@ const receiveQuoteWire = (id: TaxiIdentity, payer: Payer = 'receiver', floor = 1
       receiverKey: PAYOUT,
       senderKey: MAKER,
       operatorKey: id.operator,
+      operatorSignerKey: OPERATOR_SIGNER,
       dust: DUST,
       topup,
       assetId: assetValue(),
       locktime: 1_000_000n,
+      exitDelay: { type: 'blocks', value: 5n },
       recoveryRecipient: 'receiver',
       claimMode: 'recycle',
       ...(receiverPaid ? { receiverFare: { currency: 'sats', units: BigInt(FLAT_FARE) } } : {}),
@@ -185,10 +188,12 @@ const receiveQuoteWire = (id: TaxiIdentity, payer: Payer = 'receiver', floor = 1
       receiverKey: hex.encode(PAYOUT),
       senderKey: hex.encode(MAKER),
       operatorKey: hex.encode(id.operator),
+      operatorSignerKey: hex.encode(OPERATOR_SIGNER),
       dust: String(DUST),
       topup: String(topup),
       assetId: assetWire(),
       locktime: '1000000',
+      exitDelay: { value: '5', type: 'blocks' },
       recoveryRecipient: 'receiver',
       claimMode: 'recycle',
       ...(receiverPaid ? { receiverFare: { currency: 'sats', units: FLAT_FARE } } : {}),

@@ -71,6 +71,7 @@ const EMULATOR_KEY = key(2)
 const OPERATOR_KEY = key(3)
 const MAKER_KEY = key(4)
 const PAYOUT_KEY = key(5)
+const OPERATOR_SIGNER_KEY = key(6)
 const HRP = 'tark'
 const DUST = 330n
 const VTXO_MIN = 1n
@@ -145,10 +146,12 @@ const quoteFixture = (
       receiverKey,
       senderKey: MAKER_KEY,
       operatorKey: OPERATOR_KEY,
+      operatorSignerKey: OPERATOR_SIGNER_KEY,
       dust: DUST,
       topup,
       assetId: { txid: Uint8Array.from(parsed.txid).reverse(), groupIndex: parsed.groupIndex },
       locktime: recovery,
+      exitDelay: { type: 'blocks', value: EXIT_DELAY },
       recoveryRecipient: 'receiver',
       claimMode: 'recycle',
       ...(receiverFare ? { receiverFare } : {}),
@@ -163,10 +166,12 @@ const quoteFixture = (
       receiverKey: hex.encode(receiverKey),
       senderKey: hex.encode(MAKER_KEY),
       operatorKey: hex.encode(OPERATOR_KEY),
+      operatorSignerKey: hex.encode(OPERATOR_SIGNER_KEY),
       dust: String(DUST),
       topup: String(topup),
       assetId: wire,
       locktime: String(recovery),
+      exitDelay: { value: String(EXIT_DELAY), type: 'blocks' },
       recoveryRecipient: 'receiver',
       claimMode: 'recycle',
       ...(fareWire ? { receiverFare: fareWire } : {}),
