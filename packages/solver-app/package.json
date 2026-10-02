@@ -29,7 +29,7 @@
     "@arkade-os/solver-rails-fake": "workspace:*",
     "@arkade-os/solver-rails-lnd": "workspace:*",
     "@arkade-os/solver-transport": "workspace:*",
-    "@arkade-taxi/client": "file:./vendor/carrier/arkade-taxi-client-0.0.0-179fc31b.tgz",
+    "@arkade-taxi/client": "file:./vendor/carrier/arkade-taxi-client-0.0.0-d5a13017.tgz",
     "@hono/node-server": "^2.1.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.0.0",
