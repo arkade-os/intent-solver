@@ -52,6 +52,23 @@ export const encodeReceiverDeployment = (creationBytecode: Uint8Array, binding: 
 
 export const receiverCreation = (binding: IntentReceiverBinding): Uint8Array =>
   encodeReceiverDeployment(Uint8Array.from(Buffer.from(receiverArtifact.creationBytecode, 'hex')), binding)
+
+// The keyless deterministic deployment proxy, at one address on every chain that has it.
+export const RECEIVER_DEPLOYER = Uint8Array.from(Buffer.from('4e59b44847b379578588920ca78fbf26c0b4956c', 'hex'))
+export const RECEIVER_DEPLOYER_RUNTIME = Uint8Array.from(
+  Buffer.from(
+    '7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3',
+    'hex',
+  ),
+)
+const RECEIVER_SALT = new Uint8Array(32)
+
+export const receiverDeploymentCall = (binding: IntentReceiverBinding): Uint8Array =>
+  concatBytes(RECEIVER_SALT, receiverCreation(binding))
+export const receiverAddress = (binding: IntentReceiverBinding): Uint8Array =>
+  keccak_256(
+    concatBytes(Uint8Array.of(0xff), RECEIVER_DEPLOYER, RECEIVER_SALT, keccak_256(receiverCreation(binding))),
+  ).subarray(12)
 export const expectedReceiverRuntimeHash = (binding: IntentReceiverBinding): Uint8Array =>
   receiverRuntimeHash(
     Uint8Array.from(Buffer.from(receiverArtifact.runtimeTemplate, 'hex')),

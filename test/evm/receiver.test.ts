@@ -21,8 +21,11 @@ import {
   encodeReceiverConstructor,
   encodeReceiverDeployment,
   encodeReceiverRecover,
+  receiverAddress,
   receiverCreation,
+  receiverDeploymentCall,
   receiverRuntimeHash,
+  RECEIVER_DEPLOYER,
   verifyReceiverBinding,
   type IntentReceiverBinding,
   type ReceiverImmutableReferences,
@@ -374,13 +377,14 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     }
   })
 
-  chainTest('waits for deployment finality before returning a quotable recipient', async () => {
+  chainTest('deploys at the precomputed address and waits for its finality before verifying', async () => {
     const driver = betterSqliteDriver(':memory:')
     try {
       const { backend } = await testBackend(driver, 2)
       const terms = await binding()
       const pending = await backend.deploy('finalized-deploy', terms)
       expect(pending.verified).toBe(false)
+      expect(pending.address).toEqual(receiverAddress(terms))
       await receiptFor(pending.transactionHash)
       await rpc('evm_mine', [])
       const ready = await backend.deploy('finalized-deploy', terms)
@@ -395,31 +399,25 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     }
   })
 
-  chainTest('proves deployment with the hash returned by reconciliation during submit', async () => {
+  chainTest('verifies a receiver another account deployed without sending its own', async () => {
     const driver = betterSqliteDriver(':memory:')
     try {
-      const { backend, transactions } = await testBackend(driver)
+      const { backend } = await testBackend(driver)
       const terms = await binding()
-      const id = 'winning-deploy'
-      const request = { to: null, data: receiverCreation(terms) }
-      const winner = await transactions.submit(id, request)
-      expect((await receiptFor(winner.hash)).status).toBe('0x1')
-      const prepared = { ...winner, hash: `0x${'11'.repeat(32)}`, state: 'prepared' }
-      const originalPrepare = transactions.prepare
-      const originalSubmit = transactions.submit
-      transactions.prepare = async () => prepared
-      transactions.submit = async () => winner
-      try {
-        const deployed = await backend.deploy(id, terms)
-        expect(deployed.verified).toBe(true)
-        expect(deployed.address).toEqual(winner.createdAddress)
-        expect(deployed.transactionHash).toBe(winner.hash)
-        transactions.submit = async () => ({ ...winner, createdAddress: new Uint8Array(20) })
-        await expect(backend.deploy(id, terms)).rejects.toThrow('address changed between attempts')
-      } finally {
-        transactions.prepare = originalPrepare
-        transactions.submit = originalSubmit
-      }
+      expect((await send(accounts[3]!, RECEIVER_DEPLOYER, receiverDeploymentCall(terms))).status).toBe('0x1')
+      const deployed = await backend.deploy('foreign-deploy', terms)
+      expect(deployed).toEqual({ address: receiverAddress(terms), transactionHash: null, verified: true })
+    } finally {
+      await driver.close()
+    }
+  })
+
+  chainTest('refuses to deploy on a chain without the deterministic deployer', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend } = await testBackend(driver)
+      await rpc('anvil_setCode', [hx(RECEIVER_DEPLOYER), '0x'])
+      await expect(backend.deploy('no-deployer', await binding())).rejects.toThrow('not allowlisted')
     } finally {
       await driver.close()
     }
