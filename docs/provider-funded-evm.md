@@ -137,10 +137,9 @@ copied from the receiver being verified.
 
 ## Verification and rollout
 
-**Unmet pre-merge gate:** keep public PR #223 and its dependent private PR open
-until the public PR links an independent reviewer/auditor's scope acceptance
-and review of `IntentReceiver.sol` plus the exact artifact and compiler inputs,
-and the required real EVM E2E run is green. These are merge gates; they do not
+**Unmet pre-merge gate:** keep PR #223 open until it links an independent
+reviewer/auditor's scope acceptance and review of `IntentReceiver.sol` plus the
+exact artifact and compiler inputs, and the required real EVM E2E run is green. These are merge gates; they do not
 replace the later operator and mainnet gates below.
 
 `test/evm/receiver.test.ts` compiles the receiver and runs transactions on a local
