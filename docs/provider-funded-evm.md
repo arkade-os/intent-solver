@@ -82,7 +82,6 @@ and age still apply.
 | `packages/solver-rails-evm/src/evm/receiverBackend.ts`       | Canonical finalized receiver snapshots, activation and recovery                   |
 | `packages/solver-rails-evm/src/evm/durableSender.ts`         | Signed transaction journal, nonce reservation and exact replay                    |
 | `packages/solver-rails-evm/src/evm/claimEvidence.ts`         | Successful canonical claim receipt, exact lock and preimage verification          |
-| `packages/solver-core/src/core/evmReceiverFunding.ts`        | Policy gate over independently verified observations                              |
 | `packages/solver-core/src/ports/evmPayoutFunding.ts`         | Provider-independent funding adapter contract                                     |
 | `packages/solver-corridors-evm/src/send/evmPayoutFunding.ts` | Persisted-row binding and activation correlation                                  |
 | `packages/solver-corridors-evm/src/send/evmOrchestrator.ts`  | Existing corridor, with alternate funding and independent recovery sweep          |
