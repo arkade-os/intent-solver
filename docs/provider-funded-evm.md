@@ -94,9 +94,10 @@ and receiver obligations after the customer row becomes terminal.
 
 Quote authoring runs before the customer quote row is inserted. A failed insert
 calls `abandonQuote`; successful unused quotes still require adapter expiry
-maintenance. If deployment delays preparation, an adapter may return a fresh
-expiry bounded by the configured validity interval. A persisted global deployment
-budget must bound gas before any quote-triggered transaction is signed.
+maintenance. The receiver address derives from the binding, so it is known before
+deployment; deploy and verify the receiver before the provider is paid. If that
+happens during quote authoring, return a fresh expiry bounded by the configured
+validity interval and bound quote-triggered gas with a persisted budget.
 
 Changing or removing the adapter while its obligations exist is not a safe
 rollback. Use the same adapter identity and durable database for settlement and

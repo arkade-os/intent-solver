@@ -37,10 +37,11 @@ an explicit compatibility registry or draining those operations first.
 
 ## Deployment and observation
 
-`createReceiverBackend` deploys through `createDurableEvmSender`; the deployment
-address follows the persisted signer and nonce. A recipient is quotable only
-when `deploy(...).verified` is true. The adapter checks the successful canonical
-deployment receipt, trusted receiver runtime and every immutable getter, and
+`receiverAddress(binding)` derives the recipient through the keyless CREATE2
+deployment proxy, so it is known before deployment. `createReceiverBackend` deploys there
+through `createDurableEvmSender`, accepting a receiver anyone deployed first; fund
+a recipient only once `deploy(...).verified` is true. The adapter checks the
+trusted receiver runtime and every immutable getter at a finalized view, and
 configured swap/token code hashes. Funding observations pin all reads to one
 canonical block hash, then verify that header remains canonical. Confirmations,
 age, and optionally the chain's finalized tag bound the chosen observation.
