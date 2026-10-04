@@ -1,9 +1,15 @@
 [
   {
     "name": "asset",
-    "why": "The only group that mints an asset. An asset coin in the shared float changes what every later sats-only spend can select, so nothing that measures the sats float runs beside it.",
-    "profiles": "emulator",
-    "files": ["assetRfqCorridor.e2e.test.ts", "assetOffer.e2e.test.ts", "assetLockup.e2e.test.ts", "assetRfqRelay.e2e.test.ts"],
+    "why": "Mints an asset and runs the real Nostr relay for Alice's RFQ. An asset coin in the shared float changes what later sats-only spends can select.",
+    "profiles": "emulator,nostr",
+    "files": [
+      "assetRfqCorridor.e2e.test.ts",
+      "assetOffer.e2e.test.ts",
+      "assetLockup.e2e.test.ts",
+      "assetRfqRelay.e2e.test.ts",
+      "assetRfqCarrierConflict.e2e.test.ts"
+    ],
     "mintAsset": true,
     "lnd": false,
     "covclaimdImage": "",

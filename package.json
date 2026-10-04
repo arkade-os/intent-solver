@@ -21,7 +21,8 @@
     "test:watch": "vitest",
     "format": "prettier --write test packages",
     "format:check": "prettier --check test packages",
-    "test:perf": "vitest run --config vitest.perf.config.ts"
+    "test:perf": "vitest run --config vitest.perf.config.ts",
+    "verify:artifacts": "node scripts/carrier-artifacts/verify.mjs"
   },
   "dependencies": {
     "@arkade-os/sdk": "0.4.77",
@@ -42,11 +43,13 @@
     "@arkade-os/solver-rails-fake": "workspace:*",
     "@arkade-os/solver-rails-lnd": "workspace:*",
     "@arkade-os/solver-transport": "workspace:*",
+    "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.0.0-d5a13017.tgz",
     "better-sqlite3": "^12.11.1",
     "hono": "^4.13.0",
     "light-bolt11-decoder": "^3.2.0",
     "lightning": "^12.2.3",
-    "nostr-tools": "^2.24.1"
+    "nostr-tools": "^2.24.1",
+    "undici": "7.29.1"
   },
   "devDependencies": {
     "@arkade-os/swap": "0.0.23",
@@ -63,6 +66,13 @@
       "better-sqlite3",
       "esbuild",
       "protobufjs"
-    ]
+    ],
+    "overrides": {
+      "@arkade-os/sdk": "file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-f0dfc648.tgz",
+      "@arkade-os/swap": "file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.23-f0dfc648.tgz",
+      "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.0.0-d5a13017.tgz",
+      "@arkade-taxi/covenant": "file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-0.0.0-d5a13017.tgz",
+      "@arkade-taxi/protocol": "file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-0.0.0-d5a13017.tgz"
+    }
   }
 }

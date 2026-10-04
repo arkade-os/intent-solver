@@ -49,7 +49,8 @@ export const esploraChainTip = (
 
   return {
     async height(): Promise<number> {
-      if (cached && now() - cached.readAt < cacheMs) return cached.height
+      // `cacheMs > 0` FIRST: a backwards clock step makes the difference negative.
+      if (cacheMs > 0 && cached && now() - cached.readAt < cacheMs) return cached.height
       inFlight ??= (async () => {
         try {
           const raw = (await client.getText('/blocks/tip/height')).trim()

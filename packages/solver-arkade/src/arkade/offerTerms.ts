@@ -12,7 +12,7 @@
  */
 import { asset, type RelativeTimelock } from '@arkade-os/sdk'
 import { isEncodableRelativeDelay, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
-import { offerVtxoScript, type Offer } from '@arkade-os/swap'
+import { encodeOffer, offerVtxoScript, type Offer } from '@arkade-os/swap'
 import { hex } from '@scure/base'
 
 /**
@@ -113,5 +113,30 @@ export const offerScriptFrom = (
     // told and the pkScript is what the deposit is recognised by, so two
     // compilations could disagree about one covenant.
     return { pkScript: hex.encode(script.pkScript), address: script.address(deps.hrp, deps.serverPubkey).encode() }
+  }
+}
+
+/**
+ * The same covenant, encoded — what a fill builder takes instead of a script.
+ *
+ * Compiled from the terms rather than read off the row, and refusing when the
+ * result does not derive the script the client was actually told to fund: an
+ * offer that encodes one covenant while the deposit sits at another describes a
+ * spend of something else.
+ */
+export const offerHexFrom = (deps: OfferDerivation): ((terms: QuotedOfferTerms, offerPkScript: string) => string) => {
+  const emulatorPubkey = xOnlyPubkey(deps.emulatorPubkey)
+  const derive = offerScriptFrom(deps)
+  return (terms, offerPkScript) => {
+    const derived = derive(terms)
+    if (derived.pkScript.toLowerCase() !== offerPkScript.toLowerCase()) {
+      throw new Error(`the recorded terms derive ${derived.pkScript}, not the offer script ${offerPkScript}`)
+    }
+    return hex.encode(
+      encodeOffer({
+        ...offerFromTerms(terms, emulatorPubkey, deps.exitDelay),
+        swapPkScript: hex.decode(derived.pkScript),
+      }),
+    )
   }
 }
