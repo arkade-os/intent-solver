@@ -1227,7 +1227,7 @@ const walletView = () => {
               actButton(
                 'button.act.armed',
                 { 'data-action': 'pool-mint', onclick: () => armDialog('pool-mint', {}) },
-                'mint pieces…',
+                'reshape pool…',
               ),
             ),
           )

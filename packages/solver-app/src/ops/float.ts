@@ -9,9 +9,9 @@
  * and can fund nothing. Every corridor then refuses for a reason that names the
  * corridor rather than the float.
  *
- * **Shape** — split one fat coin into several. Funding PINS the coins it spends,
- * so a float of one coin funds one swap and refuses the next however large it
- * is. `poolPlan` answers "how many swaps can this fund at once", which is not
+ * **Shape** — split one fat coin into several, or merge a cluttered float into
+ * pieces. Funding PINS the coins it spends, so a float of one coin funds one swap
+ * and refuses the next however large it is. `poolPlan` answers "how many swaps can this fund at once", which is not
  * the same question as how many sats it holds.
  *
  * Here rather than inline in the watch loop so the console and the CLI drive the SAME
@@ -246,7 +246,11 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
     // pool's shape above, so the float does not come back as one coin. This covers what
     // that cannot reach — too little to carve, or a float reshaped by something other
     // than a renewal.
-    resplitFloat: async () => (await resplitFloat(services))?.txid ?? null,
+    resplitFloat: async () => {
+      const result = await resplitFloat(services)
+      if (result !== null && 'skipped' in result) log('float re-split after renewal skipped:', result.skipped)
+      return result !== null && 'txid' in result ? result.txid : null
+    },
     recoverVtxos: () => vtxoManager.recoverVtxos(),
     recoverableVtxos: () => recoverableVtxosFrom(wallet),
     // Lazy, so a throw from either source costs only recovery — which then
@@ -308,7 +312,7 @@ export type AutoMintSkip = 'disabled' | 'shape_is_fine'
 export type AutoMintOutcome = { minted: false; skipped: AutoMintSkip } | { minted: true; result: unknown }
 
 /**
- * Split the float only when its SHAPE needs it — the automatic half of minting.
+ * Reshape the float only when its SHAPE needs it — the automatic half of minting.
  *
  * **Opt-in, off by default.** Renewal preserves what the solver already has; this
  * SPENDS on a timer with no human present, which is not a decision to make silently.

@@ -13,9 +13,11 @@
  */
 
 import { createCorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
+import { canRecoverOnchain, canSpendOffchain, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { describe, it, expect, vi } from 'vitest'
-import { mintPool, poolPlan, committedAcrossCorridors } from '@arkade-os/solver-app/ops/pool.js'
+import { mintPool, poolPlan, committedAcrossCorridors, resplitFloat } from '@arkade-os/solver-app/ops/pool.js'
 import { usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
+import { createReservationLedger, type ReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { Services } from '@arkade-os/solver-app/ops/services.js'
 import { readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
@@ -77,24 +79,41 @@ const evmReceiveQuote = (over: Partial<EvmReceiveQuoteRecord> = {}): EvmReceiveQ
 const zero = () => ({ committedSats: vi.fn().mockResolvedValue(0) })
 
 const servicesWith = (over: {
-  committed?: number
+  committed?: number | (() => Promise<number>)
   spendable?: number[]
   send?: ReturnType<typeof vi.fn>
   /** Outpoint keys the ledger is holding, as `txid:vout`. */
   reserved?: string[]
+  ledger?: ReservationLedger
+  info?: Record<string, unknown>
   /**
    * Whole coins, when a case needs a field beyond `value` — an asset, above all.
    * `spendable` stays the shorthand for the sats-only cases that are most of them.
    */
-  coins?: { txid: string; vout: number; value: number; assets?: { assetId: string; amount: bigint }[] }[]
+  coins?: {
+    txid: string
+    vout: number
+    value: number
+    assets?: { assetId: string; amount: bigint }[]
+    createdAt?: Date
+    expiresAt?: Date
+    expiresAtHeight?: number
+  }[]
 }) => {
   const committed = over.committed ?? 0
   const send = over.send ?? vi.fn().mockResolvedValue('ark-txid')
   // Real outpoints, not just values: the reserved filter keys on them, and a
   // fixture without them cannot tell a filtered coin from an unfiltered one.
   const coins = over.coins ?? (over.spendable ?? [300_000]).map((value, i) => ({ txid: `coin${i}`, vout: 0, value }))
+  const ledger = over.ledger ?? createReservationLedger()
+  for (const key of over.reserved ?? []) {
+    const [txid, vout] = key.split(':')
+    ledger.reserve([{ txid: txid!, vout: Number(vout) }])
+  }
   const stores = {
-    store: { committedSats: vi.fn().mockResolvedValue(committed) },
+    store: {
+      committedSats: typeof committed === 'function' ? vi.fn(committed) : vi.fn().mockResolvedValue(committed),
+    },
     onchainStore: zero(),
     receiveStore: zero(),
     onchainReceiveStore: zero(),
@@ -102,10 +121,10 @@ const servicesWith = (over: {
   return {
     config: { limits: { minSats: 1_000, maxSats: 100_000 }, maxExposedSats: 300_000 },
     arkade: {
-      reservations: { reserved: () => new Set(over.reserved ?? []) },
+      reservations: ledger,
       wallet: {
         getSpendableVtxos: vi.fn().mockResolvedValue(coins),
-        arkProvider: { getInfo: vi.fn().mockResolvedValue({ dust: 330 }) },
+        arkProvider: { getInfo: vi.fn().mockResolvedValue(over.info ?? { dust: 330 }) },
         getAddress: vi.fn().mockResolvedValue('tark1solver'),
         send,
       },
@@ -384,17 +403,151 @@ describe('mintPool — the spend gate', () => {
     const send = vi.fn().mockResolvedValue('ark-txid')
     const result = await mintPool(servicesWith({ send }))
     expect(send).toHaveBeenCalledTimes(1)
-    // Every piece rides on that single call, as trailing recipients.
-    expect(send.mock.calls[0]!.length).toBeGreaterThan(1)
+    expect(send.mock.calls[0]![0].recipients.length).toBeGreaterThan(1)
     expect(result).toMatchObject({ txid: 'ark-txid' })
   })
 
-  it('does not spend when the float is already the right shape', async () => {
+  it('consolidates a float at its ceiling instead of calling it the right shape', async () => {
+    const send = vi.fn().mockResolvedValue('ark-txid')
+    const result = await mintPool(servicesWith({ spendable: Array.from({ length: 64 }, () => 4_000), send }))
+    const { recipients, selectedVtxos } = send.mock.calls[0]![0]
+    expect(selectedVtxos).toHaveLength(50)
+    expect(result).toMatchObject({ minted: recipients.map((r: { amount: number }) => r.amount) })
+    expect(recipients.every((r: { address: string }) => r.address === 'tark1solver')).toBe(true)
+  })
+})
+
+describe('mintPool — named, pinned inputs', () => {
+  it.each([
+    ['mint', mintPool],
+    ['resplit', resplitFloat],
+  ] as const)('%s leaves swept height-denominated inventory to recovery', async (_name, reshape) => {
+    const now = { timestamp: new Date(), height: 1 }
+    const live = {
+      ...({
+        txid: '11'.repeat(32),
+        vout: 0,
+        value: 300_000,
+        createdAt: now.timestamp,
+        expiresAtHeight: 100,
+      } as ExtendedVirtualCoin),
+      isSwept: false,
+      isPreconfirmed: false,
+      isSpent: false,
+      spentBy: '',
+      commitmentTxIds: [],
+    }
+    const swept = { ...live, txid: '22'.repeat(32), value: 1_000_000, isSwept: true }
+    const coins = [swept, live]
+    const ledger = createReservationLedger()
+    const seen: string[][] = []
+    const send = vi.fn(async (_params: { selectedVtxos: readonly ExtendedVirtualCoin[] }) => {
+      seen.push([...ledger.reserved()])
+      return 'ark-txid'
+    })
+    const services = servicesWith({ coins, ledger, send })
+    const read = vi.mocked(services.arkade.wallet.getSpendableVtxos)
+    read.mockImplementation(async (filter) =>
+      coins.filter((coin) => filter?.withRecoverable !== false || !canRecoverOnchain(coin, now)),
+    )
+    expect(canSpendOffchain(swept, now)).toBe(false)
+    expect(canSpendOffchain(live, now)).toBe(true)
+    expect(await reshape(services)).toMatchObject({ txid: 'ark-txid' })
+    expect([...ledger.reserved()]).toEqual([])
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0]![0].selectedVtxos).toEqual([live])
+    expect(seen).toEqual([[`${live.txid}:0`]])
+    expect(read).toHaveBeenCalledWith({ withRecoverable: false, genericallySpendableOnly: true })
+  })
+
+  it('spends exactly the planned coins, never a reserved one', async () => {
+    const send = vi.fn().mockResolvedValue('ark-txid')
+    await mintPool(servicesWith({ spendable: [300_000, 250_000], reserved: ['coin0:0'], send }))
+    expect(send.mock.calls[0]![0].selectedVtxos.map((v: { txid: string }) => v.txid)).toEqual(['coin1'])
+  })
+
+  it('pins its inputs for the send and releases them after', async () => {
+    const ledger = createReservationLedger()
+    const seen: string[][] = []
+    const send = vi.fn(async () => {
+      seen.push([...ledger.reserved()])
+      return 'ark-txid'
+    })
+    await mintPool(servicesWith({ ledger, send }))
+    expect(seen).toEqual([['coin0:0']])
+    expect([...ledger.reserved()]).toEqual([])
+  })
+
+  it('releases its pins when the send throws', async () => {
+    const ledger = createReservationLedger()
+    const send = vi.fn().mockRejectedValue(new Error('arkd said no'))
+    await expect(mintPool(servicesWith({ ledger, send }))).rejects.toThrow(/arkd said no/)
+    expect([...ledger.reserved()]).toEqual([])
+  })
+
+  it('skips the pass when a funding pins a planned coin before the spend', async () => {
+    const ledger = createReservationLedger()
     const send = vi.fn()
-    // A pool already split into many small pieces has nothing to plan.
-    const spendable = Array.from({ length: 64 }, () => 4_000)
-    const result = await mintPool(servicesWith({ spendable, send }))
+    const committed = async () => {
+      ledger.reserve([{ txid: 'coin0', vout: 0 }])
+      return 0
+    }
+    expect(await mintPool(servicesWith({ ledger, send, committed }))).toEqual({ skipped: 'inputs-pinned' })
     expect(send).not.toHaveBeenCalled()
-    expect(result).toEqual({ skipped: 'nothing-to-do' })
+  })
+
+  it('has resplitFloat report a pin collision rather than read as nothing to do', async () => {
+    const ledger = createReservationLedger()
+    const send = vi.fn()
+    const services = servicesWith({ ledger, send })
+    vi.mocked(services.arkade.wallet.getAddress).mockImplementationOnce(async () => {
+      ledger.reserve([{ txid: 'coin0', vout: 0 }])
+      return 'tark1solver'
+    })
+    expect(await resplitFloat(services)).toEqual({ skipped: 'inputs-pinned' })
+    expect(send).not.toHaveBeenCalled()
+  })
+})
+
+describe('poolPlan — what the planner is told', () => {
+  const HOUR = 3_600_000
+  const dueSoon = (value: number) => ({
+    txid: 'coin0',
+    vout: 0,
+    value,
+    createdAt: new Date(Date.now() - 240 * HOUR),
+    expiresAt: new Date(Date.now() + HOUR),
+  })
+
+  it('reads the ledger after the wallet, so a pin taken during the read still counts', async () => {
+    const ledger = createReservationLedger()
+    const services = servicesWith({ ledger, spendable: [300_000, 250_000] })
+    const read = vi.mocked(services.arkade.wallet.getSpendableVtxos)
+    const coins = await read()
+    read.mockImplementationOnce(async () => {
+      ledger.reserve([{ txid: 'coin0', vout: 0 }])
+      return coins
+    })
+    expect((await poolPlan(services)).spendable).toEqual([250_000])
+  })
+
+  it('leaves a coin renewal is about to take to renewal', async () => {
+    expect((await poolPlan(servicesWith({ coins: [dueSoon(300_000)] }))).plan.inputs).toEqual([])
+  })
+
+  it('still cuts a due coin renewal can never take whole', async () => {
+    const info = { dust: 330n, vtxoMaxAmount: 500_000n }
+    const result = await poolPlan(servicesWith({ coins: [dueSoon(1_200_000)], info }))
+    expect(result.plan.inputs).toEqual(['coin0:0'])
+  })
+
+  it('reads a vtxoMaxAmount of -1 as no ceiling', async () => {
+    const result = await poolPlan(servicesWith({ spendable: [1_200_000], info: { dust: 330n, vtxoMaxAmount: -1n } }))
+    expect(Math.max(...result.plan.outputs)).toBeGreaterThan(500_000)
+  })
+
+  it('never treats a height-denominated coin as due', async () => {
+    const coins = [{ txid: 'coin0', vout: 0, value: 300_000, createdAt: new Date(), expiresAtHeight: 100 }]
+    expect((await poolPlan(servicesWith({ coins }))).plan.inputs).toEqual(['coin0:0'])
   })
 })
