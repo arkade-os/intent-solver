@@ -10,6 +10,7 @@ import { offerVtxoScript, type Offer } from '@arkade-os/swap'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { asset } from '@arkade-os/sdk'
 import { fulfillOffer, ASSET_CARRIER_SATS, makerScriptHex } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
@@ -31,6 +32,8 @@ const honest = offerVtxoScript(offerWith({ swapPkScript: new Uint8Array(34) }), 
 /** Only what the guards reach before any network call. */
 const ctx = (over: Record<string, unknown> = {}): ArkadeContext =>
   ({
+    dustSats: 330n,
+    reservations: createReservationLedger(),
     wallet: {
       arkServerPublicKey: SERVER,
       getVtxos: async () => [],

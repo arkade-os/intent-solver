@@ -318,15 +318,19 @@ export const createTaxiReceiveCarrierReader = (
   deps: TaxiReceiveCarrierDeps,
 ): Pick<ReceiveCarrierQuotes, 'resolve' | 'available'> => {
   const tip = deps.trust.locktimeDomain === 'height' ? deps.tipHeight : undefined
-  if (deps.trust.locktimeDomain === 'height' && tip === undefined) {
-    throw new Error('a height-typed deployment needs a chain tip to anchor the carrier input expiry floor on')
-  }
   const slack = carrierAdmissionSlack(deps.trust.locktimeDomain, deps.quoteValiditySeconds)
-  const anchoredFloor = async (now: number, admission: boolean) => ({
-    kind: deps.trust.locktimeDomain,
-    value:
-      (tip === undefined ? BigInt(now) : BigInt(await tip())) + deps.trust.inputExpiryMargin + (admission ? slack : 0n),
-  })
+  const anchoredFloor = async (now: number, admission: boolean) => {
+    if (deps.trust.locktimeDomain === 'height' && tip === undefined) {
+      throw new Error('a height-typed deployment needs a chain tip to anchor the carrier input expiry floor on')
+    }
+    return {
+      kind: deps.trust.locktimeDomain,
+      value:
+        (tip === undefined ? BigInt(now) : BigInt(await tip())) +
+        deps.trust.inputExpiryMargin +
+        (admission ? slack : 0n),
+    }
+  }
   const quoteFor = async (request: ReceiveCarrierQuoteRequest): Promise<ReceiveCarrierQuote> =>
     carrierQuoteFrom(await verifiedQuoteFor(deps, request, await anchoredFloor(request.now, request.admission)))
 

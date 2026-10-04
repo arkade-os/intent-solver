@@ -246,10 +246,26 @@ describe('a configured solver is pointable by that URL alone', () => {
     expect(touched).toEqual(['trust'])
   })
 
-  it('refuses to compose a height-typed deployment with no chain tip wired', async () => {
-    const { deps } = watched({ taxiUrl: 'http://taxi.example:7080', tipHeight: undefined })
-    await expect(taxiReceiveCarrier(deps)).rejects.toThrow(/chain tip/)
-  })
+  it.each([undefined, CONFIGURED])(
+    'composes without a height tip and refuses carrier reads before touching providers (TAXI_URL=%s)',
+    async (taxiUrl) => {
+      const { deps, touched, urls } = watched({ taxiUrl, tipHeight: undefined })
+      const carrier = await taxiReceiveCarrier(deps)
+      const request = {
+        quoteId: 'q-1',
+        makerPkScript: MAKER_PK_SCRIPT,
+        makerPublicKey: MAKER_KEY,
+        assetId: ASSET,
+        now: 2_000,
+        admission: false,
+        taxi: { url: NAMED, operatorKey: TAXI_KEY },
+      }
+      await expect(carrier.resolve(request)).rejects.toThrow(/chain tip/)
+      await expect(carrier.available(request)).rejects.toThrow(/chain tip/)
+      expect(touched).toEqual(['trust'])
+      expect(urls).toEqual([])
+    },
+  )
 })
 
 describe('the composed adapter is refused, never degraded', () => {

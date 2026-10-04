@@ -324,6 +324,10 @@ export class AssetRfqSwapService {
   private readonly serialiseQuotes: Serialiser = createSerialiser()
   private readonly serialiseTrustedReads: Serialiser = createSerialiser()
   private readonly serialiseFills: Serialiser = createSerialiser()
+  private readonly activeTicks = new Map<string, { work: Promise<void>; driven: boolean }>()
+  private readonly activeSweeps = new Set<Promise<string[]>>()
+  private namedTick: Promise<void> | undefined
+  private stopped = false
 
   constructor(private readonly deps: AssetRfqDeps) {
     this.now = deps.now ?? nowSeconds
@@ -767,7 +771,44 @@ export class AssetRfqSwapService {
    * both act.
    */
   tick(id: string): Promise<void> {
-    return this.serialiseFills(() => this.drive(id))
+    return this.startTick(id).work
+  }
+
+  private startTick(id: string): { work: Promise<void>; driven: boolean } {
+    if (this.stopped) return { work: Promise.resolve(), driven: false }
+    const active = this.activeTicks.get(id)
+    if (active) return active
+    const activeTick = { work: Promise.resolve(), driven: false }
+    activeTick.work = this.schedule(id)
+      .then((driven) => {
+        activeTick.driven = driven
+      })
+      .finally(() => {
+        this.activeTicks.delete(id)
+      })
+    this.activeTicks.set(id, activeTick)
+    return activeTick
+  }
+
+  private async schedule(id: string): Promise<boolean> {
+    const row = await this.deps.store.findById(id)
+    if (!row) return true
+    if (row.carrierTerms?.mode === 'recycle_receiver' && (row.state === 'funded' || row.state === 'filling')) {
+      if (this.namedTick) return false
+      const work = this.drive(id).finally(() => {
+        this.namedTick = undefined
+      })
+      this.namedTick = work
+      await work
+      return true
+    }
+    await this.serialiseFills(() => this.drive(id))
+    return true
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true
+    await Promise.allSettled([...this.activeSweeps, ...Array.from(this.activeTicks.values(), ({ work }) => work)])
   }
 
   private async drive(id: string): Promise<void> {
@@ -796,19 +837,43 @@ export class AssetRfqSwapService {
    * One row's failure is isolated from the rest: an indexer blip on the first
    * negotiation must not stop the second from being driven.
    */
-  tickAll(): Promise<string[]> {
-    return this.serialiseFills(async () => {
-      const driven: string[] = []
-      for (const row of await this.deps.store.listNonTerminal()) {
-        try {
-          await this.drive(row.id)
-          driven.push(row.id)
-        } catch (error) {
-          this.deps.onError?.(row.id, error)
-        }
-      }
-      return driven
+  tickAll(options: { backgroundNamed?: boolean } = {}): Promise<string[]> {
+    if (this.stopped) return Promise.resolve([])
+    const work = this.driveAll(options).finally(() => {
+      this.activeSweeps.delete(work)
     })
+    this.activeSweeps.add(work)
+    return work
+  }
+
+  private async driveAll(options: { backgroundNamed?: boolean }): Promise<string[]> {
+    const driven: string[] = []
+    const named: string[] = []
+    const drive = async (id: string, wait: boolean): Promise<void> => {
+      try {
+        while (!this.stopped) {
+          const tick = this.startTick(id)
+          await tick.work
+          if (tick.driven) {
+            driven.push(id)
+            return
+          }
+          if (!wait) return
+          await this.namedTick?.catch(() => {})
+        }
+      } catch (error) {
+        this.deps.onError?.(id, error)
+      }
+    }
+    for (const row of await this.deps.store.listNonTerminal()) {
+      if (row.carrierTerms?.mode === 'recycle_receiver') named.push(row.id)
+      else await drive(row.id, false)
+    }
+    for (const id of named) {
+      const work = drive(id, !options.backgroundNamed)
+      if (!options.backgroundNamed) await work
+    }
+    return [...driven]
   }
 
   /** Awaiting the client's deposit, until `valid_until`. */
@@ -846,6 +911,19 @@ export class AssetRfqSwapService {
       ? completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes)
       : null
     const deposit = await this.deps.depositAt(row.offerPkScript, row.fromAssetId)
+    const local = evaluateAssetFill({
+      toAmount: row.toAmount,
+      toAssetId: row.toAssetId,
+      fromAmount: row.fromAmount,
+      depositedAmount: deposit ? heldOf(deposit, row.fromAssetId) : 0n,
+      available: new Map(),
+      now: this.now(),
+      validUntil: row.validUntil,
+    })
+    if (!local.fill && local.reason !== 'insufficient_inventory') {
+      await this.deps.store.fail(row.id, 'funded', `not filled: ${local.reason}`)
+      return
+    }
     let available: ReadonlyMap<AssetLeg, bigint>
     if (carrierSettled(carrierTerms)) {
       if (receiveCarrier === null) {

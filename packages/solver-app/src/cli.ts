@@ -198,6 +198,7 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       onError: (error) => log('EVM send sweep failed:', error instanceof Error ? error.message : String(error)),
     })
   } finally {
+    await services.assetRfqService.stop()
     process.removeListener('SIGINT', stop)
     process.removeListener('SIGTERM', stop)
   }
@@ -226,7 +227,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
       ticked += await corridor.tickAll()
     }
     try {
-      ticked += (await services.assetRfqService.tickAll()).length
+      ticked += (await services.assetRfqService.tickAll({ backgroundNamed: true })).length
     } catch (error) {
       log(`asset rfq ${phase} failed:`, error instanceof Error ? error.message : String(error))
     }
@@ -486,138 +487,142 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   let lastRefundSweep = 0
   let lastVtxoLifecycle = 0
   let lastWatchSync = 0
-  while (!signal.aborted) {
-    await sleep(HOT_TICK_MS)
-    // Money already in flight, checked on its own cadence: waiting for the full
-    // sweep here rounds a sub-second Lightning payment up to that sweep's
-    // interval, inside the window where the provider is exposed.
-    await services.service?.tickHot()
-    if (Date.now() - lastFullSweep >= FULL_SWEEP_MS) {
-      lastFullSweep = Date.now()
-      // Every registered corridor on one cadence. The onchain and receive legs
-      // never had a hot-tick path of their own — HTLC confirmations are minutes
-      // wide — so riding the full sweep costs nothing and needs no cadence of
-      // its own, which is what the four hardcoded calls here already did.
-      //
-      // SEQUENTIAL is load-bearing, not incidental: the receive legs are the
-      // funding side of the float that `runVtxoLifecycle` below renews, and
-      // awaiting each in turn is what keeps the reservation ledger's job small.
-      // @see arkade/reservations.ts — do not turn this into a Promise.all.
-      //
-      // The EVM legs ride this same loop: no hot tick (an EVM confirmation
-      // depth is minutes wide, so a sub-second cadence would buy nothing but
-      // RPC calls), and their rows are driven by the sweep alone.
-      await tickEveryCorridor('sweep')
-      // The offer path rides the same cadence and needs no other: a fill is one
-      // Arkade transaction with no confirmation to wait on, so there is nothing
-      // a faster loop could observe.
-      //
-      // WRAPPED, unlike the corridors above. This path is new and optional, and
-      // an offer store that throws must not be able to end a watch loop those
-      // four corridors were already depending on. Per-fill failures are already
-      // recorded on their own rows by `tickAll`; this catches only what is left.
-      try {
-        const filled = (await services.assetOffers?.tickAll()) ?? 0
-        if (filled > 0) log(`filled ${filled} offer(s)`)
-      } catch (error) {
-        log('offer fill sweep failed:', error instanceof Error ? error.message : String(error))
-      }
-    }
-    // After the sweep, so a swap it just retired is dropped before this reads.
-    // Cheap enough to run often: local reads, and `watchScript` is asked once.
-    //
-    // Caught, unlike the corridor sweep above: the watcher is best-effort by
-    // contract, so a store that throws here must degrade to the sweep rather
-    // than end the loop every corridor depends on.
-    if (Date.now() - lastWatchSync >= WATCH_SYNC_MS) {
-      lastWatchSync = Date.now()
-      try {
-        await resyncWatchedScripts()
-      } catch (error) {
-        log('watched-script sync failed:', error instanceof Error ? error.message : String(error))
-      }
-    }
-    if (Date.now() - lastRefundSweep > REFUND_SWEEP_MS) {
-      lastRefundSweep = Date.now()
-      // Every corridor that HAS an unattended refund sweep, not the two that
-      // happened to be named here. `refundSweep` is optional on `Corridor` —
-      // absent means the corridor has no refund it can push on its own, which
-      // is true of both receive legs — so this reproduces exactly what the two
-      // hardcoded calls did, and additionally sweeps a corridor this build was
-      // never compiled against. The EVM send corridor has one: a refused row's
-      // lockup is returned via the non-interactive covenant refund.
-      for (const corridor of services.corridors) {
-        if (!corridor.refundSweep) continue
-        for (const id of await corridor.refundSweep()) log('refunded', corridor.descriptor.pair, id)
-      }
-      // Settling a reclaimed deposit is recovery of money already safely back
-      // in our own hands, so it must never cost a tick of the money path:
-      // caught here, unlike the sweeps above, because this one adds a network
-      // call whose failure would otherwise end the watch loop entirely. The
-      // next sweep re-lists whatever this pass missed.
-      try {
-        for (const settlement of (await services.onchainService?.settleRefundDeposits()) ?? []) {
-          const deposit = `${settlement.txid}:${settlement.vout}`
-          if (settlement.settled) log('onchain refund deposit settled', deposit, settlement.reference)
-          else log('onchain refund deposit still unsettled', deposit, settlement.reason)
-        }
-      } catch (error) {
-        log('onchain refund deposit sweep failed:', error instanceof Error ? error.message : String(error))
-      }
-    }
-    if (Date.now() - lastVtxoLifecycle > VTXO_LIFECYCLE_MS) {
-      lastVtxoLifecycle = Date.now()
-      // Wrapped for the same reason as the deposit sweep above, and more so:
-      // this is the only entry in the loop that is not about a specific swap,
-      // so nothing downstream isolates its failures the way `onTickError`
-      // isolates a tick's. A wallet-level settlement failing must not end the
-      // watch loop and take every swap down with it.
-      try {
-        // The SAME pass the `float-lifecycle` admin action runs. @see ops/float.ts
+  try {
+    while (!signal.aborted) {
+      await sleep(HOT_TICK_MS)
+      // Money already in flight, checked on its own cadence: waiting for the full
+      // sweep here rounds a sub-second Lightning payment up to that sweep's
+      // interval, inside the window where the provider is exposed.
+      await services.service?.tickHot()
+      if (Date.now() - lastFullSweep >= FULL_SWEEP_MS) {
+        lastFullSweep = Date.now()
+        // Every registered corridor on one cadence. The onchain and receive legs
+        // never had a hot-tick path of their own — HTLC confirmations are minutes
+        // wide — so riding the full sweep costs nothing and needs no cadence of
+        // its own, which is what the four hardcoded calls here already did.
         //
-        // Registration stays here and stays first: it is what makes a lockup's
-        // vtxos visible to the contract snapshot at all, and it is the daemon's
-        // job rather than an operator-triggerable one. Retirement is the half
-        // that only exists here.
-        await runLifecyclePass()
-        const report = await runFloatLifecycle(services)
-        // Shape, after lifecycle and only ever after it: minting spends the
-        // float, and spending coins that were about to expire — or are sitting
-        // in `recoverable` and cannot be spent at all — is the wrong order. A
-        // pass that recovered first has something to split.
+        // SEQUENTIAL is load-bearing, not incidental: the receive legs are the
+        // funding side of the float that `runVtxoLifecycle` below renews, and
+        // awaiting each in turn is what keeps the reservation ledger's job small.
+        // @see arkade/reservations.ts — do not turn this into a Promise.all.
         //
-        // Opt-in. @see Config.poolAutoMint
+        // The EVM legs ride this same loop: no hot tick (an EVM confirmation
+        // depth is minutes wide, so a sub-second cadence would buy nothing but
+        // RPC calls), and their rows are driven by the sweep alone.
+        await tickEveryCorridor('sweep')
+        // The offer path rides the same cadence and needs no other: a fill is one
+        // Arkade transaction with no confirmation to wait on, so there is nothing
+        // a faster loop could observe.
+        //
+        // WRAPPED, unlike the corridors above. This path is new and optional, and
+        // an offer store that throws must not be able to end a watch loop those
+        // four corridors were already depending on. Per-fill failures are already
+        // recorded on their own rows by `tickAll`; this catches only what is left.
         try {
-          const mint = await maybeMintPool(services, {
-            enabled: services.config.poolAutoMint,
-            // No `force`: the concurrent-provider guard exists for exactly the
-            // caller that has no human to weigh it.
-            mint: (s) => mintPool(s),
-          })
-          if (mint.minted) log('pool auto-minted', JSON.stringify(mint.result))
-          else if (mint.skipped !== 'disabled') log('pool auto-mint skipped:', mint.skipped)
+          const filled = (await services.assetOffers?.tickAll()) ?? 0
+          if (filled > 0) log(`filled ${filled} offer(s)`)
         } catch (error) {
-          // Same isolation as the pass above: a failed split must not end the
-          // watch loop. The next cadence sees the same float.
-          log('pool auto-mint failed:', error instanceof Error ? error.message : String(error))
+          log('offer fill sweep failed:', error instanceof Error ? error.message : String(error))
         }
-        if (report.migrated) log('vtxos migrated off deprecated signers', report.migrated)
-        if (report.boarded) log('boarded sats settled into float', report.boarded)
-        if (report.renewed) log('vtxos renewed', report.renewed)
-        if (report.resplit) log('float re-split after renewal', report.resplit)
-        if (report.recovered) log('vtxos recovered', report.recovered)
-        if (report.recoverySkipped) log('vtxo recovery skipped:', report.recoverySkipped)
-        for (const failure of report.failures) log('vtxo lifecycle:', failure)
-      } catch (error) {
-        log('vtxo lifecycle failed:', error instanceof Error ? error.message : String(error))
+      }
+      // After the sweep, so a swap it just retired is dropped before this reads.
+      // Cheap enough to run often: local reads, and `watchScript` is asked once.
+      //
+      // Caught, unlike the corridor sweep above: the watcher is best-effort by
+      // contract, so a store that throws here must degrade to the sweep rather
+      // than end the loop every corridor depends on.
+      if (Date.now() - lastWatchSync >= WATCH_SYNC_MS) {
+        lastWatchSync = Date.now()
+        try {
+          await resyncWatchedScripts()
+        } catch (error) {
+          log('watched-script sync failed:', error instanceof Error ? error.message : String(error))
+        }
+      }
+      if (Date.now() - lastRefundSweep > REFUND_SWEEP_MS) {
+        lastRefundSweep = Date.now()
+        // Every corridor that HAS an unattended refund sweep, not the two that
+        // happened to be named here. `refundSweep` is optional on `Corridor` —
+        // absent means the corridor has no refund it can push on its own, which
+        // is true of both receive legs — so this reproduces exactly what the two
+        // hardcoded calls did, and additionally sweeps a corridor this build was
+        // never compiled against. The EVM send corridor has one: a refused row's
+        // lockup is returned via the non-interactive covenant refund.
+        for (const corridor of services.corridors) {
+          if (!corridor.refundSweep) continue
+          for (const id of await corridor.refundSweep()) log('refunded', corridor.descriptor.pair, id)
+        }
+        // Settling a reclaimed deposit is recovery of money already safely back
+        // in our own hands, so it must never cost a tick of the money path:
+        // caught here, unlike the sweeps above, because this one adds a network
+        // call whose failure would otherwise end the watch loop entirely. The
+        // next sweep re-lists whatever this pass missed.
+        try {
+          for (const settlement of (await services.onchainService?.settleRefundDeposits()) ?? []) {
+            const deposit = `${settlement.txid}:${settlement.vout}`
+            if (settlement.settled) log('onchain refund deposit settled', deposit, settlement.reference)
+            else log('onchain refund deposit still unsettled', deposit, settlement.reason)
+          }
+        } catch (error) {
+          log('onchain refund deposit sweep failed:', error instanceof Error ? error.message : String(error))
+        }
+      }
+      if (Date.now() - lastVtxoLifecycle > VTXO_LIFECYCLE_MS) {
+        lastVtxoLifecycle = Date.now()
+        // Wrapped for the same reason as the deposit sweep above, and more so:
+        // this is the only entry in the loop that is not about a specific swap,
+        // so nothing downstream isolates its failures the way `onTickError`
+        // isolates a tick's. A wallet-level settlement failing must not end the
+        // watch loop and take every swap down with it.
+        try {
+          // The SAME pass the `float-lifecycle` admin action runs. @see ops/float.ts
+          //
+          // Registration stays here and stays first: it is what makes a lockup's
+          // vtxos visible to the contract snapshot at all, and it is the daemon's
+          // job rather than an operator-triggerable one. Retirement is the half
+          // that only exists here.
+          await runLifecyclePass()
+          const report = await runFloatLifecycle(services)
+          // Shape, after lifecycle and only ever after it: minting spends the
+          // float, and spending coins that were about to expire — or are sitting
+          // in `recoverable` and cannot be spent at all — is the wrong order. A
+          // pass that recovered first has something to split.
+          //
+          // Opt-in. @see Config.poolAutoMint
+          try {
+            const mint = await maybeMintPool(services, {
+              enabled: services.config.poolAutoMint,
+              // No `force`: the concurrent-provider guard exists for exactly the
+              // caller that has no human to weigh it.
+              mint: (s) => mintPool(s),
+            })
+            if (mint.minted) log('pool auto-minted', JSON.stringify(mint.result))
+            else if (mint.skipped !== 'disabled') log('pool auto-mint skipped:', mint.skipped)
+          } catch (error) {
+            // Same isolation as the pass above: a failed split must not end the
+            // watch loop. The next cadence sees the same float.
+            log('pool auto-mint failed:', error instanceof Error ? error.message : String(error))
+          }
+          if (report.migrated) log('vtxos migrated off deprecated signers', report.migrated)
+          if (report.boarded) log('boarded sats settled into float', report.boarded)
+          if (report.renewed) log('vtxos renewed', report.renewed)
+          if (report.resplit) log('float re-split after renewal', report.resplit)
+          if (report.recovered) log('vtxos recovered', report.recovered)
+          if (report.recoverySkipped) log('vtxo recovery skipped:', report.recoverySkipped)
+          for (const failure of report.failures) log('vtxo lifecycle:', failure)
+        } catch (error) {
+          log('vtxo lifecycle failed:', error instanceof Error ? error.message : String(error))
+        }
       }
     }
+  } finally {
+    // Aborted after the loop rather than inside `stop`: the stream is a consumer
+    // of arkd, not of the loop, and tearing it down while a fill sweep is still
+    // running would cut discovery off mid-decision for no gain.
+    await services.assetRfqService.stop()
+    offers.abort()
+    await watcher.stop()
   }
-  // Aborted after the loop rather than inside `stop`: the stream is a consumer
-  // of arkd, not of the loop, and tearing it down while a fill sweep is still
-  // running would cut discovery off mid-decision for no gain.
-  offers.abort()
-  await watcher.stop()
 }
 
 /** Tick one swap until it lands in a terminal state. */

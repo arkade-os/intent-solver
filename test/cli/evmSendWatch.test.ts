@@ -92,7 +92,7 @@ describe('the watch loop during slow wallet maintenance', () => {
           findRecoverable: async () => [],
         },
       ],
-      assetRfqService: { tickAll: async () => [] },
+      assetRfqService: { tickAll: async () => [], stop: async () => {} },
       assetRfqMarkets: [],
     }
     const watch = watchLoopIn(signals, {
@@ -131,7 +131,7 @@ describe('disabling the EVM send corridor', () => {
       readers: [],
       evmSendService: { tickAll },
       corridors: [],
-      assetRfqService: { tickAll: async () => [] },
+      assetRfqService: { tickAll: async () => [], stop: async () => {} },
       assetRfqMarkets: [],
     }
     const watching = watchLoopIn(signals)(services)
@@ -264,5 +264,81 @@ describe('the independent EVM send sweep', () => {
     sweep.resolve()
     expect(await watching).toBe(error)
     expect(closed).toBe(true)
+  })
+})
+
+describe('named carrier work in the CLI watch loop', () => {
+  it.each(['stop', 'loop failure', 'recovery failure'] as const)('drains before closing after %s', async (exit) => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_800_000_000_000)
+    const signals = new EventEmitter()
+    const held = deferred()
+    const stop = vi.fn(() => held.promise)
+    const watcherStop = vi.fn(async () => {})
+    const tickAll = vi.fn(async () => [])
+    const fault = new Error(exit)
+    let failLoop = false
+    const services = {
+      config: { corridorEnabled: {}, contractRetentionMs: 0, poolAutoMint: false },
+      policy: { evmCorridors: [] },
+      arkade: { wallet: { getContractManager: async () => ({}) } },
+      readers: [],
+      corridors:
+        exit === 'recovery failure'
+          ? [
+              {
+                descriptor: { pair: 'custom' },
+                tickAll: async () => {
+                  throw fault
+                },
+              },
+            ]
+          : [],
+      service: {
+        tickHot: async () => {
+          if (failLoop) throw fault
+        },
+      },
+      assetRfqService: { tickAll, stop },
+      assetRfqMarkets: [],
+    }
+    let completed = false
+    const watching = watchLoopIn(signals, {
+      LockupWatcher: class {
+        start() {}
+        sync() {}
+        stop = watcherStop
+      },
+    })(services).then(
+      () => {
+        completed = true
+        return undefined
+      },
+      (error: unknown) => {
+        completed = true
+        return error
+      },
+    )
+    try {
+      await vi.advanceTimersByTimeAsync(3250)
+      if (exit !== 'recovery failure') {
+        expect(tickAll.mock.calls.length).toBeGreaterThan(1)
+        expect(tickAll).toHaveBeenCalledWith({ backgroundNamed: true })
+        failLoop = exit === 'loop failure'
+        if (exit === 'stop') signals.emit('SIGTERM')
+        await vi.advanceTimersByTimeAsync(250)
+      }
+      expect(stop).toHaveBeenCalled()
+      expect(completed).toBe(false)
+      expect(watcherStop).not.toHaveBeenCalled()
+      held.resolve()
+      expect(await watching).toBe(exit === 'stop' ? undefined : fault)
+      expect(watcherStop).toHaveBeenCalledTimes(exit === 'recovery failure' ? 0 : 1)
+    } finally {
+      signals.emit('SIGTERM')
+      held.resolve()
+      await vi.advanceTimersByTimeAsync(250)
+      await watching
+    }
   })
 })

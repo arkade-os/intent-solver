@@ -21,7 +21,7 @@
 import { createServer, type Server } from 'node:http'
 import { randomBytes, randomInt } from 'node:crypto'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ArkAddress, hasTerminalSpend, asset } from '@arkade-os/sdk'
 import { createOffer, cancelOffer, InMemoryAssetSwapRepository, type Offer } from '@arkade-os/swap'
 import { hex } from '@scure/base'
@@ -214,7 +214,7 @@ const shippedCarrier = async (
       serverKey: wallet.arkServerPublicKey,
       emulatorKey: emulatorXOnly(),
       dustSats: arkade.ctx.dustSats,
-      vtxoMinAmount: BigInt((await wallet.arkProvider.getInfo()).vtxoMinAmount),
+      vtxoMinAmount: arkade.ctx.vtxoMinSats,
       hrp: arkade.ctx.hrp,
       locktimeDomain: arkade.ctx.timelockUnit === 'blocks' ? 'height' : 'time',
       inputExpiryMargin: BigInt(arkade.ctx.advertisedExitDelay),
@@ -340,6 +340,21 @@ const causeChain = (error: unknown): string => {
 }
 
 describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
+  it('composes the receive carrier without another Arkade info read after the context is initialized', async () => {
+    const store = await AssetRfqSwapStore.open(':memory:')
+    const getInfo = vi
+      .spyOn(arkade.ctx.wallet.arkProvider, 'getInfo')
+      .mockRejectedValue(new Error('unexpected post-initialization Arkade info read'))
+    try {
+      const carrier = await shippedCarrier(store, { isMainnet: false, allowPrivate: true }, 600)
+      expect(Object.keys(carrier).sort()).toEqual(['available', 'reconcile', 'resolve', 'settle'])
+      expect(getInfo).not.toHaveBeenCalled()
+    } finally {
+      getInfo.mockRestore()
+      await store.close()
+    }
+  })
+
   it(
     'refuses what it cannot quote, in the closed RFQ vocabulary',
     async () => {

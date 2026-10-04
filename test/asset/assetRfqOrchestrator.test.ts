@@ -13,7 +13,7 @@
  * silently retries.
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, onTestFinished } from 'vitest'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
@@ -2098,5 +2098,278 @@ describe('profile.carrier — no per-market bleed', () => {
     // different priced terms, neither bleeding into the other.
     expect((purchased as { swap: { toAmount: bigint } }).swap.toAmount).toBe(99_499_671_650n)
     expect((recycled as { swap: { toAmount: bigint } }).swap.toAmount).toBe(99_499_999_005n)
+  })
+})
+
+describe('named carrier fill isolation', () => {
+  const latch = () => {
+    let resolve!: () => void
+    const promise = new Promise<void>((done) => {
+      resolve = done
+    })
+    return { promise, resolve }
+  }
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve))
+  const setup = async (stage: 'available' | 'settle' | 'reconcile') => {
+    const entered = latch()
+    const release = latch()
+    let holding = false
+    const held = async () => {
+      if (!holding) return
+      entered.resolve()
+      await release.promise
+    }
+    const available = vi.fn<ReceiveCarrierQuotes['available']>(async (ask) => {
+      if (!ask.admission && stage === 'available') await held()
+      return new Map([[ASSET_A, 10n ** 18n]])
+    })
+    const settle = vi.fn<ReceiveCarrierQuotes['settle']>(async () => {
+      if (stage === 'settle') await held()
+      return { status: 'submitted' }
+    })
+    const reconcile = vi.fn<ReceiveCarrierQuotes['reconcile']>(async () => {
+      if (stage === 'reconcile') await held()
+      return { status: 'pending' }
+    })
+    const h = await harness({
+      depositAt: async () => deposit(),
+      receiveCarrierQuotes: adapter({ loanSats: 330n, receiptSats: 0n, taxiKey: TAXI_KEY }, undefined, {
+        available,
+        settle,
+        reconcile,
+      }),
+    })
+    const outcome = await h.service.quote(
+      request({
+        carrier: {
+          mode: 'recycle_receiver',
+          quoteId: 'q-1',
+          taxiUrl: 'https://taxi.example',
+          taxiKey: TAXI_KEY,
+        },
+      }),
+    )
+    if (!outcome.accepted) throw new Error('expected named quote')
+    const tracked: Promise<unknown>[] = []
+    onTestFinished(async () => {
+      release.resolve()
+      await Promise.allSettled(tracked)
+      await h.store.close()
+    })
+    await h.service.tick('swap-1')
+    if (stage === 'reconcile') await h.store.transition('swap-1', 'funded', 'filling')
+    const add = async (id: string, expired = false, named = false) => {
+      await h.store.insertQuote({
+        ...outcome.swap,
+        id,
+        rfqId: id,
+        offerPkScript: id,
+        offerAddress: id,
+        validUntil: expired ? 999 : outcome.swap.validUntil,
+        carrierTerms: named ? outcome.swap.carrierTerms! : undefined,
+      })
+      if (!expired) await h.store.transition(id, 'quoted', 'funded')
+    }
+    await add('trusted')
+    await add('expired', true)
+    holding = true
+    const running = h.service.tick('swap-1')
+    tracked.push(running)
+    await entered.promise
+    return { ...h, quoted: outcome.swap, add, entered, release, running, tracked, available, settle, reconcile }
+  }
+
+  it.each(['available', 'settle', 'reconcile'] as const)(
+    'keeps trusted fills and expiry moving while named %s is held',
+    async (stage) => {
+      const h = await setup(stage)
+      let trustedDone = false
+      let expiredDone = false
+      h.tracked.push(
+        h.service.tick('trusted').then(() => {
+          trustedDone = true
+        }),
+      )
+      h.tracked.push(
+        h.service.tick('expired').then(() => {
+          expiredDone = true
+        }),
+      )
+      await flush()
+      expect(trustedDone).toBe(true)
+      expect(expiredDone).toBe(true)
+      expect((await h.store.get('trusted')).state).toBe('filled')
+      expect((await h.store.get('expired')).state).toBe('refused')
+      expect(h.service.tick('swap-1')).toBe(h.running)
+      if (stage !== 'reconcile') expect(h.reconcile).not.toHaveBeenCalled()
+    },
+  )
+
+  it('bounds named work and allows repeated background sweeps', async () => {
+    const h = await setup('settle')
+    await h.add('second-named', false, true)
+    for (let pass = 0; pass < 3; pass++) {
+      let done = false
+      h.tracked.push(
+        h.service.tickAll({ backgroundNamed: true }).then(() => {
+          done = true
+        }),
+      )
+      await flush()
+      expect(done).toBe(true)
+    }
+    expect(h.settle).toHaveBeenCalledOnce()
+    expect(h.reconcile).not.toHaveBeenCalled()
+    expect((await h.store.get('second-named')).state).toBe('funded')
+  })
+
+  it('does not await an active named fill when the sweep snapshot still says quoted', async () => {
+    const h = await setup('settle')
+    const rows = (await h.store.listNonTerminal()).map((row) => (row.id === 'swap-1' ? h.quoted : row))
+    vi.spyOn(h.store, 'listNonTerminal').mockResolvedValueOnce(rows)
+    let done = false
+    h.tracked.push(
+      h.service.tickAll({ backgroundNamed: true }).then(() => {
+        done = true
+      }),
+    )
+    await flush()
+    expect(done).toBe(true)
+    expect(h.settle).toHaveBeenCalledOnce()
+    expect(h.reconcile).not.toHaveBeenCalled()
+  })
+
+  it('keeps default sweeps awaiting completion and stop drains the active call', async () => {
+    const h = await setup('settle')
+    await h.add('second-named', false, true)
+    let swept = false
+    let stopped = false
+    const sweep = h.service.tickAll().then(() => {
+      swept = true
+    })
+    h.tracked.push(sweep)
+    await flush()
+    expect(swept).toBe(false)
+    const stop = h.service.stop().then(() => {
+      stopped = true
+    })
+    h.tracked.push(stop)
+    await flush()
+    expect(stopped).toBe(false)
+    h.release.resolve()
+    await sweep
+    await stop
+    expect(stopped).toBe(true)
+    await h.service.tick('swap-1')
+    expect(h.reconcile).not.toHaveBeenCalled()
+  })
+
+  it('drives every named row in a default sweep and reports only completed rows', async () => {
+    const h = await setup('settle')
+    await h.add('second-named', false, true)
+    let done = false
+    const sweep = h.service.tickAll().then((driven) => {
+      done = true
+      return driven
+    })
+    h.tracked.push(sweep)
+    await flush()
+    expect(done).toBe(false)
+    expect((await h.store.get('trusted')).state).toBe('filled')
+    h.release.resolve()
+    expect(await sweep).toEqual(expect.arrayContaining(['swap-1', 'second-named', 'trusted', 'expired']))
+    expect(h.settle).toHaveBeenCalledTimes(2)
+    expect((await h.store.get('second-named')).state).toBe('filling')
+  })
+
+  it('drains an unresolved row listing and schedules no new work after stop', async () => {
+    const h = await harness()
+    const entered = latch()
+    const release = latch()
+    const list = h.store.listNonTerminal.bind(h.store)
+    vi.spyOn(h.store, 'listNonTerminal').mockImplementation(async () => {
+      entered.resolve()
+      await release.promise
+      return list()
+    })
+    const sweep = h.service.tickAll({ backgroundNamed: true })
+    await entered.promise
+    let done = false
+    let stop = Promise.resolve()
+    onTestFinished(async () => {
+      release.resolve()
+      await sweep
+      await stop
+      await h.store.close()
+    })
+    stop = h.service.stop().then(() => {
+      done = true
+    })
+    await flush()
+    expect(done).toBe(false)
+    release.resolve()
+    await stop
+    expect(await sweep).toEqual([])
+  })
+
+  it('keeps ordinary financial fills serial', async () => {
+    const entered = latch()
+    const release = latch()
+    const settle = vi.fn(async () => {
+      entered.resolve()
+      await release.promise
+      return 'fa'.repeat(32)
+    })
+    const h = await harness({ depositAt: async () => deposit(), settle })
+    const outcome = await h.service.quote(request())
+    if (!outcome.accepted) throw new Error('expected quote')
+    await h.store.insertQuote({
+      ...outcome.swap,
+      id: 'second',
+      rfqId: 'second',
+      offerPkScript: 'second',
+      offerAddress: 'second',
+      carrierTerms: undefined,
+    })
+    await h.service.tickAll()
+    const first = h.service.tick('swap-1')
+    const second = h.service.tick('second')
+    onTestFinished(async () => {
+      release.resolve()
+      await Promise.allSettled([first, second])
+      await h.store.close()
+    })
+    await entered.promise
+    await flush()
+    expect(settle).toHaveBeenCalledOnce()
+    release.resolve()
+    await first
+    await second
+    expect(settle).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['short', 'expired'] as const)('refuses %s funding before named availability', async (kind) => {
+    const available = vi.fn(async () => new Map([[ASSET_A, 10n ** 18n]]))
+    const h = await harness({
+      depositAt: async () => deposit({ sats: kind === 'short' ? 1n : 100_000_000n }),
+      receiveCarrierQuotes: adapter({ loanSats: 330n, receiptSats: 0n, taxiKey: TAXI_KEY }, undefined, { available }),
+    })
+    onTestFinished(() => h.store.close())
+    await h.service.quote(
+      request({
+        carrier: {
+          mode: 'recycle_receiver',
+          quoteId: 'q-1',
+          taxiUrl: 'https://taxi.example',
+          taxiKey: TAXI_KEY,
+        },
+      }),
+    )
+    await h.service.tick('swap-1')
+    available.mockClear()
+    if (kind === 'expired') h.tick(2000)
+    await h.service.tick('swap-1')
+    expect(available).not.toHaveBeenCalled()
+    expect((await h.store.get('swap-1')).state).toBe('refused')
   })
 })

@@ -237,6 +237,6 @@ describe('the sweep a consumer has to write themselves', () => {
     expect(cliSource).toContain('for (const corridor of services.corridors)')
     expect(cliSource).toContain('if (assetRfqPairs.has(corridor.descriptor.pair)) continue')
     expect(cliSource).toContain('ticked += await corridor.tickAll()')
-    expect(cliSource).toContain('ticked += (await services.assetRfqService.tickAll()).length')
+    expect(cliSource).toContain('ticked += (await services.assetRfqService.tickAll({ backgroundNamed: true })).length')
   })
 })

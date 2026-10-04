@@ -882,17 +882,23 @@ describe('the input expiry floor is anchored, not merely ordered', () => {
     await expect(read.resolve(request())).rejects.toThrow(/below the caller minimum/)
   })
 
-  it('refuses to build a height-typed reader with no tip to anchor on', () => {
-    expect(() =>
-      createTaxiReceiveCarrierReader({
-        clientFor: () => taxiClient(),
-        trust: TRUST,
-        maxServiceFareSats: 10n,
-        coins: async () => [],
-        reserved: () => new Set<string>(),
-        quoteValiditySeconds: VALIDITY_SECONDS,
-      }),
-    ).toThrow(/chain tip/)
+  it('composes without a height tip and refuses both reads before touching Taxi or inventory', async () => {
+    const clientFor = vi.fn(() => taxiClient())
+    const coins = vi.fn(async () => [])
+    const reserved = vi.fn(() => new Set<string>())
+    const read = createTaxiReceiveCarrierReader({
+      clientFor,
+      trust: TRUST,
+      maxServiceFareSats: 10n,
+      coins,
+      reserved,
+      quoteValiditySeconds: VALIDITY_SECONDS,
+    })
+    await expect(read.resolve(request())).rejects.toThrow(/chain tip/)
+    await expect(read.available(request())).rejects.toThrow(/chain tip/)
+    expect(clientFor).not.toHaveBeenCalled()
+    expect(coins).not.toHaveBeenCalled()
+    expect(reserved).not.toHaveBeenCalled()
   })
 })
 

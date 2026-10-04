@@ -94,7 +94,7 @@ import {
   retainReadableMarkets,
 } from './assetRfqMarkets.js'
 import { marketServingDivergence } from './marketDivergence.js'
-import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
+import { offerInventoryFor } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import {
   offerExitDelay,
   offerHexFrom,
@@ -680,7 +680,7 @@ export const createServices = async (
       serverKey: arkade.wallet.arkServerPublicKey,
       emulatorKey: assetRfqDerivation.emulatorPubkey,
       dustSats: arkade.dustSats,
-      vtxoMinAmount: BigInt((await arkade.wallet.arkProvider.getInfo()).vtxoMinAmount),
+      vtxoMinAmount: arkade.vtxoMinSats,
       hrp: arkade.hrp,
       locktimeDomain: arkade.timelockUnit === 'blocks' ? 'height' : 'time',
       inputExpiryMargin: BigInt(arkade.advertisedExitDelay),
@@ -758,7 +758,7 @@ export const createServices = async (
     depositAt: async (offerPkScript, depositLeg) =>
       largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),
     // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
-    balance: async () => offerInventoryFrom(await arkade.wallet.getBalance()),
+    balance: () => offerInventoryFor(arkade),
     fetchPrice: createPriceFeed(),
     settle: quotedOfferSettleFor({
       ctx: arkade,
