@@ -20,7 +20,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { generateMnemonic } from '@scure/bip39'
 import { wordlist } from '@scure/bip39/wordlists/english.js'
 import { ArkAddress, asset, hasTerminalSpend, Transaction } from '@arkade-os/sdk'
-import { requestArkadeSwap, type Offer } from '@arkade-os/swap'
+import { cancelOffer, InMemoryAssetSwapRepository, requestArkadeSwap, type Offer } from '@arkade-os/swap'
 import { nostrRfqTransport } from '@arkade-os/swap/nostr'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
@@ -375,6 +375,258 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
         await store.close()
         await ingress.stop()
       }
+    },
+    SWAP_TIMEOUT_MS,
+  )
+
+  it(
+    'refuses a funded quote after its real asset inventory is drained, leaving the deposit cancellable',
+    async () => {
+      const inventoryBefore = await assetUnits(arkade.ctx.wallet)
+      const solverSatsBefore = (
+        await arkade.ctx.wallet.getSpendableVtxos({ withRecoverable: false, genericallySpendableOnly: true })
+      ).reduce((total, coin) => total + coin.value, 0)
+      const solverAddress = await arkade.ctx.wallet.getAddress()
+      const { ingress, store, tickAll } = await harness()
+      let alice: ArkadeContext | undefined
+      let sink: ArkadeContext | undefined
+      let swap: Awaited<ReturnType<typeof requestArkadeSwap>> | undefined
+      let aliceFundingTxid: string | undefined
+      let drainTxid: string | undefined
+      let fundingTxid: string | undefined
+      let depositOutpoint: { txid: string; vout: number } | undefined
+      let cancelTxid: string | undefined
+      const failures: unknown[] = []
+
+      const cancelDeposit = async () => {
+        if (!alice || !swap || !fundingTxid) return
+        const client = alice.wallet
+        const offer = swap
+        const originalTxid = fundingTxid
+        const deposited = await poll(
+          async () =>
+            (await client.indexerProvider.getVtxos({ scripts: [hex.encode(offer.swapPkScript)] })).vtxos.find(
+              (coin) => coin.txid === originalTxid,
+            ) ?? null,
+          { attempts: 30, intervalMs: 1_000, whenExhausted: 'the original offer deposit was never indexed' },
+        )
+        depositOutpoint ??= { txid: deposited.txid, vout: deposited.vout }
+        if (!cancelTxid) {
+          if (hasTerminalSpend(deposited)) return
+          cancelTxid = await cancelOffer(client, ARKD_URL, offer.offerHex, {
+            repository: new InMemoryAssetSwapRepository(),
+            fundingTxid: originalTxid,
+            fundingOutpoint: depositOutpoint,
+            swapAddress: offer.address,
+          })
+        }
+        const refundTxid = cancelTxid
+        const refund = await poll(
+          async () => {
+            const { vtxos } = await client.indexerProvider.getVtxos({ outpoints: [depositOutpoint!] })
+            const spent = vtxos.find((coin) => coin.txid === originalTxid && coin.vout === depositOutpoint!.vout)
+            if (!spent || !hasTerminalSpend(spent) || spent.arkTxId !== refundTxid) return null
+            return (
+              (await client.getSpendableVtxos({ withRecoverable: false, genericallySpendableOnly: true })).find(
+                (coin) => coin.txid === refundTxid && coin.vout === 0,
+              ) ?? null
+            )
+          },
+          { attempts: 30, intervalMs: 1_000, whenExhausted: 'the original deposit was never refunded to Alice' },
+        )
+        expect(refund.value).toBe(Number(offer.fundAmount))
+        expect(refund.script).toBe(hex.encode(ArkAddress.decode(await client.getAddress()).pkScript))
+        return refundTxid
+      }
+
+      const returnFloat = async (actor: ArkadeContext | undefined, incomingTxid: string | undefined) => {
+        if (!actor) return
+        const actorScript = hex.encode(ArkAddress.decode(await actor.wallet.getAddress()).pkScript)
+        const coins = await poll(
+          async () => {
+            const spendable = await actor.wallet.getSpendableVtxos({
+              withRecoverable: false,
+              genericallySpendableOnly: true,
+            })
+            if (!incomingTxid) return spendable
+            const { vtxos } = await actor.wallet.indexerProvider.getVtxos({
+              outpoints: [{ txid: incomingTxid, vout: 0 }],
+            })
+            const incoming = vtxos.find(
+              (coin) => coin.txid === incomingTxid && coin.vout === 0 && coin.script === actorScript,
+            )
+            if (!incoming) return null
+            return hasTerminalSpend(incoming) || spendable.some((coin) => coin.txid === incomingTxid && coin.vout === 0)
+              ? spendable
+              : null
+          },
+          { attempts: 30, intervalMs: 1_000, whenExhausted: 'an owned wallet never observed its incoming float' },
+        )
+        const sats = coins.reduce((total, coin) => total + coin.value, 0)
+        const assets = new Map<string, bigint>()
+        for (const coin of coins) {
+          for (const entry of coin.assets ?? []) {
+            assets.set(entry.assetId, (assets.get(entry.assetId) ?? 0n) + entry.amount)
+          }
+        }
+        if (sats > 0) {
+          await actor.wallet.send({
+            address: solverAddress,
+            amount: sats,
+            assets: [...assets].map(([assetId, amount]) => ({ assetId, amount })),
+          })
+        }
+        await poll(
+          async () => {
+            const remaining = await actor.wallet.getBalance()
+            return remaining.total === 0 && remaining.assets.every((entry) => entry.amount === 0n) ? true : null
+          },
+          { attempts: 30, intervalMs: 1_000, whenExhausted: 'an owned wallet still holds drained float' },
+        )
+      }
+
+      try {
+        alice = await party()
+        sink = await party()
+        const aliceAddress = await alice.wallet.getAddress()
+        const sinkAddress = await sink.wallet.getAddress()
+        const sinkScript = hex.encode(ArkAddress.decode(sinkAddress).pkScript)
+        expect(new Set([aliceAddress, sinkAddress, solverAddress]).size).toBe(3)
+        aliceFundingTxid = await arkade.ctx.wallet.send({ address: aliceAddress, amount: 40_000 })
+        await poll(
+          async () =>
+            (await alice!.wallet.getSpendableVtxos({ withRecoverable: false })).some(
+              (coin) => coin.txid === aliceFundingTxid,
+            )
+              ? true
+              : null,
+          { attempts: 30, intervalMs: 1_000, whenExhausted: 'Alice never received her BTC float' },
+        )
+        const rfqId = randomBytes(32).toString('hex')
+        const transport = openTransport()
+        try {
+          swap = await requestArkadeSwap(alice.wallet, ARKD_URL, transport, {
+            amount: depositSats(6_000),
+            rfqId,
+            wantAsset: asset.AssetId.fromString(assetId),
+          })
+        } finally {
+          await transport.close()
+        }
+        fundingTxid = await alice.wallet.send({
+          address: swap.address,
+          amount: Number(swap.fundAmount),
+          extensions: [swap.extension],
+        })
+        const id = (await store.findByRfqId(rfqId))!.id
+        const funded = await driveTo(tickAll, store, id, 'funded')
+        expect(funded.depositTxid).toBe(fundingTxid)
+        expect(funded.fromAmount).toBe(swap.fundAmount)
+        expect(funded.depositVout).not.toBeNull()
+        depositOutpoint = { txid: fundingTxid, vout: funded.depositVout! }
+        expect(funded.toAmount).toBe(BigInt(swap.quote.to_amount))
+        const held = await assetUnits(arkade.ctx.wallet)
+        expect(held).toBe(inventoryBefore)
+        expect(held).toBeGreaterThanOrEqual(funded.toAmount)
+        const remaining = funded.toAmount - 1n
+        const drained = held - remaining
+        const originalInputs = (
+          await arkade.ctx.wallet.getSpendableVtxos({
+            withRecoverable: false,
+            genericallySpendableOnly: true,
+          })
+        )
+          .filter((coin) => coin.assets?.some((entry) => entry.assetId === assetId && entry.amount > 0n))
+          .map(({ txid, vout }) => ({ txid, vout }))
+        expect(originalInputs.length).toBeGreaterThan(0)
+        drainTxid = await arkade.ctx.wallet.send({
+          address: sinkAddress,
+          amount: 2_000,
+          assets: [{ assetId, amount: drained }],
+        })
+        await poll(
+          async () => {
+            const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ outpoints: originalInputs })
+            const spent = vtxos.some((coin) => hasTerminalSpend(coin) && coin.arkTxId === drainTxid)
+            const received = (await sink!.wallet.getSpendableVtxos({ withRecoverable: false })).some(
+              (coin) =>
+                coin.txid === drainTxid &&
+                coin.script === sinkScript &&
+                coin.value === 2_000 &&
+                coin.assets?.some((entry) => entry.assetId === assetId && entry.amount === drained),
+            )
+            return spent &&
+              received &&
+              (await assetUnits(arkade.ctx.wallet)) === remaining &&
+              (await assetUnits(sink!.wallet)) === drained
+              ? true
+              : null
+          },
+          { attempts: 30, intervalMs: 1_000, whenExhausted: 'the real inventory drain never reached both wallets' },
+        )
+        expect(Math.floor(Date.now() / 1_000)).toBeLessThan(funded.validUntil)
+        await tickAll()
+        const refused = await store.get(id)
+        expect(refused.state).toBe('refused')
+        expect(refused.failureReason).toBe('not filled: insufficient_inventory')
+        expect(refused.fillTxid).toBeNull()
+        const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ outpoints: [depositOutpoint] })
+        const live = vtxos.find((coin) => coin.txid === fundingTxid && coin.vout === depositOutpoint!.vout)
+        expect(live).toBeDefined()
+        expect(hasTerminalSpend(live!)).toBe(false)
+        expect(live!.isSwept).toBe(false)
+        expect(BigInt(live!.value)).toBe(funded.fromAmount)
+        const statusTransport = openTransport()
+        try {
+          const status = await statusTransport.status(rfqId)
+          expect(status).toMatchObject({
+            type: 'rfq_status',
+            state: 'refused',
+            profile: { failure_reason: 'not filled: insufficient_inventory' },
+          })
+          expect(status?.profile['fill_txid']).toBeUndefined()
+        } finally {
+          await statusTransport.close()
+        }
+        expect(await cancelDeposit()).toMatch(/^[0-9a-f]{64}$/)
+      } catch (error) {
+        failures.push(error)
+      } finally {
+        for (const cleanup of [
+          cancelDeposit,
+          () => returnFloat(sink, drainTxid),
+          () => returnFloat(alice, aliceFundingTxid),
+          () =>
+            poll(
+              async () => {
+                const coins = await arkade.ctx.wallet.getSpendableVtxos({
+                  withRecoverable: false,
+                  genericallySpendableOnly: true,
+                })
+                return coins.reduce((total, coin) => total + coin.value, 0) === solverSatsBefore &&
+                  (await assetUnits(arkade.ctx.wallet)) === inventoryBefore
+                  ? true
+                  : null
+              },
+              {
+                attempts: 30,
+                intervalMs: 1_000,
+                whenExhausted: 'the solver asset and BTC float was not restored after the drain',
+              },
+            ),
+          () => ingress.stop(),
+          () => store.close(),
+          async () => alice?.close(),
+          async () => sink?.close(),
+        ]) {
+          try {
+            await cleanup()
+          } catch (error) {
+            failures.push(error)
+          }
+        }
+      }
+      if (failures.length) throw new AggregateError(failures, 'funded inventory refusal or float cleanup failed')
     },
     SWAP_TIMEOUT_MS,
   )
