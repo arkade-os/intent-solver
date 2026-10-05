@@ -167,8 +167,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ArkLabsHQ/arkade-regtest
-          ref: ${{ env.REGTEST_REF }}
+          ref: ${{ matrix.regtestRef || env.REGTEST_REF }}
           path: arkade-regtest
+
+      - name: Checkout Taxi regtest image source
+        if: matrix.name == 'taxi'
+        uses: actions/checkout@v4
+        with:
+          repository: ArkLabsHQ/arkade-taxi
+          ref: ffdeff7c1b171e660e1c119cd6994c440a456338
+          path: arkade-taxi
+
+      - name: Build Taxi regtest image
+        if: matrix.name == 'taxi'
+        working-directory: arkade-taxi
+        run: docker build --build-arg OCI_REVISION=ffdeff7c1b171e660e1c119cd6994c440a456338 -t arkade-taxi:regtest .
 
       - uses: actions/setup-node@v4
         with:
@@ -221,9 +234,10 @@ jobs:
         env:
           COVCLAIMD_IMAGE: ${{ matrix.covclaimdImage }}
           SECONDS_TYPED: ${{ matrix.arkdTimelocks == 'seconds' }}
+          GROUP_NAME: ${{ matrix.name }}
         run: |
           set -eu
-          if [ "$SECONDS_TYPED" = "true" ]; then
+          if [ "$SECONDS_TYPED" = "true" ] && [ "$GROUP_NAME" != "taxi" ]; then
             export ARKD_VTXO_TREE_EXPIRY=6144 ARKD_UNILATERAL_EXIT_DELAY=512 \
                    ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 ARKD_BOARDING_EXIT_DELAY=2048 \
                    ARKD_CHECKPOINT_EXIT_DELAY=1536
@@ -298,6 +312,7 @@ jobs:
               "ARK_SERVER_URL=http://localhost:7070",
               "EMULATOR_URL=http://localhost:7073",
               "ESPLORA_URL=http://localhost:3000/api",
+              "ARK_ESPLORA_URL=http://localhost:3000/api",
               ...lnd,
               "ARK_DB_PATH=.data/ark-ci.sqlite",
               "SWAP_DB_PATH=.data/swaps-ci.sqlite",
@@ -352,6 +367,9 @@ jobs:
       - name: E2E suite
         id: suite
         timeout-minutes: 60
+        env:
+          TAXI_URL: ${{ matrix.name == 'taxi' && 'http://localhost:8080' || '' }}
+          TAXI_ADMIN_URL: ${{ matrix.name == 'taxi' && 'http://localhost:8081' || '' }}
         run: |
           set -eu
           read -ra e2e_files <<< "$E2E_FILES"

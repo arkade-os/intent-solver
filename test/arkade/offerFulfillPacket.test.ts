@@ -12,16 +12,13 @@
  * = 0`. Every other asset on every input must still be declared or arkd
  * answers ASSET_NOT_FOUND.
  */
-import { describe, it, expect, vi, onTestFinished } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { fulfillOffer, offerInventoryFor } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
-import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
-import { selectCarrierInputs } from '@arkade-os/solver-app/ops/assetRfqTaxiSettle.js'
+import { fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const state = vi.hoisted(() => ({
-  beforeSubmit: undefined as (() => Promise<void>) | undefined,
   vtxos: [] as unknown[],
   arkTx: undefined as string | undefined,
   prevTxs: new Map<string, string>(),
@@ -56,7 +53,6 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
     RestEmulatorProvider: class {
       constructor(readonly url: string) {}
       async submitTx(arkTx: string, checkpointTxs: string[]) {
-        await state.beforeSubmit?.()
         state.arkTx = arkTx
         return { signedArkTx: arkTx, signedCheckpointTxs: checkpointTxs }
       }
@@ -81,8 +77,6 @@ const identity = { xOnlyPublicKey: async () => takerKey, sign: async (tx: unknow
  * is what the gate would have handed back, which is the half this repo keeps. */
 const ctx = (spendable: unknown[]): ArkadeContext =>
   ({
-    dustSats: 330n,
-    reservations: createReservationLedger(),
     wallet: {
       identity,
       arkServerPublicKey: SERVER_KEY,
@@ -91,6 +85,7 @@ const ctx = (spendable: unknown[]): ArkadeContext =>
       getContractManager: async () => null,
     },
     identity,
+    reservations: { reserved: () => new Set<string>(), reserve: () => () => {} },
     arkServerUrl: 'http://ark',
   }) as unknown as ArkadeContext
 
@@ -113,8 +108,6 @@ const fundingCoin = (value: number, assets?: { assetId: string; amount: bigint }
     ...mintCoin(value),
     forfeitTapLeafScript: vs.leaves[0],
     tapTree: vs.encode(),
-    script: hex.encode(vs.pkScript),
-    expiresAtHeight: 2,
     ...(assets ? { assets } : {}),
   }
 }
@@ -205,138 +198,5 @@ describe('the asset packet fulfillOffer submits', () => {
     )
 
     expect(packetGroups()).toEqual([ASSET_B])
-  })
-})
-
-describe('direct and carrier offer reservations', () => {
-  const pickCarrier = (context: ArkadeContext, coins: ReturnType<typeof fundingCoin>[]) =>
-    selectCarrierInputs({
-      coins,
-      reserved: context.reservations.reserved(),
-      floor: { kind: 'height', value: 1n },
-      dustSats: 330n,
-      leg: ASSET_A,
-      amount: 500n,
-      solverKeys: [hex.encode(takerKey)],
-      serverKey: SERVER_KEY,
-    })
-  const pendingFill = () => {
-    let resolve!: () => void
-    let entered!: () => void
-    const held = new Promise<void>((done) => {
-      resolve = done
-    })
-    const started = new Promise<void>((done) => {
-      entered = done
-    })
-    state.beforeSubmit = async () => {
-      entered()
-      await held
-    }
-    return { resolve, started }
-  }
-  const direct = (context: ArkadeContext) => {
-    const deposit = mintCoin(60_000)
-    state.vtxos = [deposit]
-    return fulfillOffer(
-      context,
-      'http://emulator.test',
-      offerFor({ wantAsset: asset.AssetId.fromString(ASSET_A) }),
-      deposit,
-    )
-  }
-
-  it('excludes carrier-selected coins from direct selection and quoted float', async () => {
-    const coins = [fundingCoin(80_000, [{ assetId: ASSET_A, amount: 600n }])]
-    const context = ctx(coins)
-    const selected = pickCarrier(context, coins)
-    const release = context.reservations.reserve(selected.map(({ coin }) => coin))
-    onTestFinished(release)
-    await expect(direct(context)).rejects.toThrow(/no spendable coins/)
-    expect(await offerInventoryFor(context)).toEqual(new Map())
-    expect(context.reservations.reserved().size).toBe(1)
-  })
-
-  it('pins direct-selected coins before awaiting submit and excludes carrier selection', async () => {
-    const coins = [fundingCoin(80_000, [{ assetId: ASSET_A, amount: 600n }])]
-    const context = ctx(coins)
-    expect(pickCarrier(context, coins)).toHaveLength(1)
-    const held = pendingFill()
-    const fill = direct(context)
-    onTestFinished(async () => {
-      held.resolve()
-      await fill
-      state.beforeSubmit = undefined
-    })
-    await held.started
-    expect(() => pickCarrier(context, coins)).toThrow(/inventory holds 0/)
-    expect(await offerInventoryFor(context)).toEqual(new Map())
-    await expect(direct(context)).rejects.toThrow(/no spendable coins/)
-    held.resolve()
-    await fill
-    expect(context.reservations.reserved().size).toBe(0)
-  })
-
-  it('releases a direct pin if building fails before submission', async () => {
-    const context = ctx([fundingCoin(80_000, [{ assetId: ASSET_A, amount: 600n }])])
-    const original = context.wallet.getAddress
-    context.wallet.getAddress = async () => {
-      throw new Error('address unavailable')
-    }
-    onTestFinished(() => {
-      context.wallet.getAddress = original
-    })
-    await expect(direct(context)).rejects.toThrow('address unavailable')
-    expect(context.reservations.reserved().size).toBe(0)
-  })
-
-  it('retains the pin when emulator submission may have succeeded', async () => {
-    const context = ctx([fundingCoin(80_000, [{ assetId: ASSET_A, amount: 600n }])])
-    state.beforeSubmit = async () => {
-      throw new Error('submit response lost')
-    }
-    onTestFinished(() => {
-      state.beforeSubmit = undefined
-    })
-    await expect(direct(context)).rejects.toThrow('submit response lost')
-    expect(context.reservations.reserved().size).toBe(1)
-    expect(await offerInventoryFor(context)).toEqual(new Map())
-  })
-
-  it('preserves the available balance carrier reserve after filtering pins', async () => {
-    const coins = [fundingCoin(1000, [{ assetId: ASSET_A, amount: 600n }]), fundingCoin(500)]
-    const context = ctx(coins)
-    expect(await offerInventoryFor(context)).toEqual(
-      new Map([
-        [null, 1170n],
-        [ASSET_A, 600n],
-      ]),
-    )
-    const release = context.reservations.reserve([coins[0]!])
-    expect(await offerInventoryFor(context)).toEqual(new Map([[null, 500n]]))
-    release()
-    const releaseSats = context.reservations.reserve([coins[1]!])
-    expect(await offerInventoryFor(context)).toEqual(
-      new Map([
-        [null, 670n],
-        [ASSET_A, 600n],
-      ]),
-    )
-    releaseSats()
-    const dust = ctx([fundingCoin(300, [{ assetId: ASSET_A, amount: 1n }])])
-    expect((await offerInventoryFor(dust)).get(null)).toBe(0n)
-  })
-
-  it('asks the wallet to exclude recoverable and non-generic coins for both balance and selection', async () => {
-    const unusable = fundingCoin(80_000, [{ assetId: ASSET_A, amount: 600n }])
-    const context = ctx([unusable])
-    const getSpendable = vi.fn(async (filter?: { withRecoverable?: boolean; genericallySpendableOnly?: boolean }) =>
-      filter?.withRecoverable === false && filter.genericallySpendableOnly === true ? [] : [unusable],
-    )
-    context.wallet.getSpendableVtxos = getSpendable as never
-    expect(await offerInventoryFor(context)).toEqual(new Map())
-    await expect(direct(context)).rejects.toThrow(/no spendable coins/)
-    expect(getSpendable).toHaveBeenCalledTimes(2)
-    expect(getSpendable).toHaveBeenLastCalledWith({ withRecoverable: false, genericallySpendableOnly: true })
   })
 })

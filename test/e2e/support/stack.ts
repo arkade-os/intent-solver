@@ -116,6 +116,7 @@ export const openArkade = async (): Promise<E2eArkade> => {
   const ctx = await createArkadeContext({
     mnemonic: required('ARK_MNEMONIC'),
     arkServerUrl: required('ARK_SERVER_URL'),
+    esploraUrl: process.env.ARK_ESPLORA_URL ?? esploraUrl(),
     // The service's own resolution, not a copy of it: this suite is only
     // meaningful against the same wallet database the service opens.
     databasePath: arkDbPath(),

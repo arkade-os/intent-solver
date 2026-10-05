@@ -17,6 +17,18 @@
     "arkdTimelocks": "seconds"
   },
   {
+    "name": "taxi",
+    "why": "Proves the running relay solver submits a receiver-paid asset fill to a real Taxi and its receiver recycles the claim; uses the Taxi-only arkade-regtest profile pin.",
+    "profiles": "emulator,nostr,taxi",
+    "files": ["assetRfqTaxi.e2e.test.ts"],
+    "regtestRef": "c364ea8af124ca5f75d62d6cabf6436481e10dcc",
+    "mintAsset": true,
+    "lnd": false,
+    "covclaimdImage": "",
+    "evmChain": false,
+    "arkdTimelocks": "seconds"
+  },
+  {
     "name": "lifecycle",
     "why": "The only group on a BLOCK-typed arkd, which is what blockTimelocks exists to cover and what the compose defaults happen to give. vtxoLifecycle rides along: it reads the wallet's own float, so it wants one with no minted asset in it and a server still charging its intent fees, since its headline assertion is the ABSENCE of INTENT_INSUFFICIENT_FEE.",
     "profiles": "emulator",
