@@ -242,11 +242,15 @@ jobs:
                    ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 ARKD_BOARDING_EXIT_DELAY=2048 \
                    ARKD_CHECKPOINT_EXIT_DELAY=1536
           fi
-          node regtest.mjs start --profile "$E2E_PROFILES"
+          if [ "$GROUP_NAME" = "taxi" ]; then
+            node regtest.mjs start --env .env.taxi --profile "$E2E_PROFILES"
+          else
+            node regtest.mjs start --profile "$E2E_PROFILES"
+          fi
 
-      # Nothing here zeroes arkd's intent fees, and nothing may: what
-      # `vtxoLifecycle` asserts is the ABSENCE of INTENT_INSUFFICIENT_FEE from a
-      # renewal pass, which is a claim about a server that charges one.
+      # The Taxi lane alone uses the documented zero-fee .env.taxi fixture.
+      # Other lanes keep arkd's intent fees: `vtxoLifecycle` asserts the
+      # ABSENCE of INTENT_INSUFFICIENT_FEE on a server that charges one.
       - name: What this arkd advertises
         run: curl -sf http://localhost:7070/v1/info | jq '{unilateralExitDelay, vtxoTreeExpiry, boardingExitDelay}'
 
@@ -389,14 +393,22 @@ jobs:
 
       - name: Dump diagnostics on failure
         if: failure()
+        env:
+          GROUP_NAME: ${{ matrix.name }}
         run: |
           docker ps -a --format 'table {{.Names}}\t{{.Status}}' || true
-          for c in bitcoin bitcoin-miner fulcrum mempool_api mempool_web nbxplorer \
+          for c in bitcoin bitcoin-miner fulcrum mempool_api mempool_web nbxplorer taxi \
                    arkd-wallet arkd emulator covclaimd boltz boltz-lnd boltz-fulmine \
                    lnd pricefeed lsw-anvil; do
             echo "===== logs: $c ====="
             docker logs --tail 80 "$c" 2>&1 || true
           done
+          if [ "${GROUP_NAME:-}" = "taxi" ]; then
+            echo "===== Taxi health ====="
+            curl -fsS --max-time 3 http://localhost:8080/health || true
+            echo "===== Taxi funding ====="
+            curl -fsS --max-time 3 http://localhost:8081/admin/api/funding || true
+          fi
           echo "===== anvil + feed ====="
           cat "$RUNNER_TEMP/e2e-stack.log" 2>/dev/null || true
 
