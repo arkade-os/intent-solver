@@ -521,7 +521,13 @@ describe('running solver to Taxi on regtest', () => {
       })
       const statusTransport = nostrRfqTransport({ relays: [relayUrl], solverPubkey: solverPublicKey })
       try {
-        const status = await statusTransport.status(rfqId)
+        const status = await poll(
+          async () => {
+            const latest = await statusTransport.status(rfqId)
+            return latest?.state === 'settled' ? latest : null
+          },
+          { attempts: 30, intervalMs: 1_000, whenExhausted: 'solver did not publish the settled RFQ status' },
+        )
         expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
         expect(status?.profile['fill_txid']).toMatch(/^[0-9a-f]{64}$/)
       } finally {
