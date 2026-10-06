@@ -1172,7 +1172,9 @@ export const createServices = async (
       broadcast,
       payoutFunding: payoutFundingRegistration?.adapter,
       acceptingQuotes: payoutFundingRegistration?.acceptingQuotes,
-      assertClaimTraceSupport: (tokenAddress) => assertEvmClaimTraceSupport(rpc, tokenAddress),
+      assertClaimTraceSupport: evmChain.directClaimsOnly
+        ? async () => {}
+        : (tokenAddress) => assertEvmClaimTraceSupport(rpc, tokenAddress),
       blockHeight,
       ...evmSendArkadeDeps(arkadeOps),
       arkade: arkadeOps,

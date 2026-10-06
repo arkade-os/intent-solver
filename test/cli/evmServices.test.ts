@@ -93,6 +93,14 @@ describe('a half-configured EVM chain is refused, not degraded', () => {
   })
 })
 
+describe('claim-trace admission on the send leg', () => {
+  it('probes the RPC unless the chain is configured for direct claims only', () => {
+    expect(createServices()).toMatch(
+      /assertClaimTraceSupport: evmChain\.directClaimsOnly\s*\?\s*async \(\) => \{\}\s*:\s*\(tokenAddress\) => assertEvmClaimTraceSupport\(rpc, tokenAddress\)/,
+    )
+  })
+})
+
 describe('one broadcaster across both legs', () => {
   it('constructs exactly one, because the nonce source is per ACCOUNT', () => {
     // Two broadcasters means two nonce sources over one key, which hands out the
