@@ -25,7 +25,7 @@
     "verify:artifacts": "node scripts/carrier-artifacts/verify.mjs"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.4.77",
+    "@arkade-os/sdk": "0.4.78",
     "@hono/node-server": "^2.1.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.0.0",
@@ -52,7 +52,7 @@
     "undici": "7.29.1"
   },
   "devDependencies": {
-    "@arkade-os/swap": "0.0.23",
+    "@arkade-os/swap": "0.0.24",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^24.13.3",
     "@types/ws": "^8.18.1",
@@ -68,8 +68,8 @@
       "protobufjs"
     ],
     "overrides": {
-      "@arkade-os/sdk": "file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.77-f0dfc648.tgz",
-      "@arkade-os/swap": "file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.23-f0dfc648.tgz",
+      "@arkade-os/sdk": "file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.4.78-14a43077.tgz",
+      "@arkade-os/swap": "file:packages/solver-app/vendor/carrier/arkade-os-swap-0.0.24-14a43077.tgz",
       "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.0.0-d5a13017.tgz",
       "@arkade-taxi/covenant": "file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-0.0.0-d5a13017.tgz",
       "@arkade-taxi/protocol": "file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-0.0.0-d5a13017.tgz"

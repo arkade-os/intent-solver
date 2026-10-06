@@ -28,6 +28,8 @@
  */
 
 import { hex } from '@scure/base'
+import type { SettleParams } from '@arkade-os/sdk'
+import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import {
   liveLockupRows,
@@ -46,6 +48,21 @@ import { poolPlan, resplitFloat } from './pool.js'
 import { summariseSignerMigration } from '@arkade-os/solver-arkade/arkade/signerMigration.js'
 import { planBoardingSettle } from '@arkade-os/solver-arkade/arkade/boardingSettle.js'
 import type { Services } from './services.js'
+
+export const settleReservedRenewal = async (arkade: ArkadeContext, params: SettleParams): Promise<string> => {
+  const reserved = arkade.reservations.reserved()
+  if (params.inputs.some((coin) => reserved.has(`${coin.txid}:${coin.vout}`))) {
+    throw new Error('renewal input is reserved by another operation')
+  }
+  const release = arkade.reservations.reserve(params.inputs)
+  const outcome = await arkade.wallet.settleWithOutcome(params)
+  if (!outcome.ok) {
+    if (!outcome.intentRegistrationAttempted) release()
+    throw outcome.error
+  }
+  release()
+  return outcome.txid
+}
 
 /**
  * Every registered lockup's refund deadline, for the recovery guard.
@@ -243,17 +260,8 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
           return expiring.filter((vtxo) => !reserved.has(`${vtxo.txid}:${vtxo.vout}`))
         },
         destination: () => wallet.getAddress(),
-        settle: async (inputs, outputs) => {
-          const reserved = services.arkade.reservations.reserved()
-          if (inputs.some((coin) => reserved.has(`${coin.txid}:${coin.vout}`))) {
-            throw new Error('renewal input is reserved by another operation')
-          }
-          const release = services.arkade.reservations.reserve(inputs)
-          // Settlement rejection does not prove that these inputs were never spent.
-          const txid = await wallet.settle({ inputs: [...inputs], outputs: [...outputs] })
-          release()
-          return txid
-        },
+        settle: (inputs, outputs) =>
+          settleReservedRenewal(services.arkade, { inputs: [...inputs], outputs: [...outputs] }),
         // The shape a renewal should carve its proceeds into, so the float
         // comes back able to fund several swaps at once rather than one.
         // Same target `pool`/`mintPool` work from, so the two cannot drift.

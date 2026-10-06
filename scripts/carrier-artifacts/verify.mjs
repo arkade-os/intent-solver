@@ -133,15 +133,16 @@ for (const entry of readdirSync(at('packages'), { withFileTypes: true })) {
 // Where a registry build of the same version would reappear: every resolution
 // must name a frozen archive, and the integrity pnpm recorded must be the
 // sha512 of the archive that is committed.
-const lock = readFileSync(at('pnpm-lock.yaml'), 'utf8')
+const lock = readFileSync(at('pnpm-lock.yaml'), 'utf8').replaceAll('\r\n', '\n')
 const escape = (value) => value.replaceAll(/[.*+?^${}()|[\]\\/]/g, '\\$&')
 for (const name of PINNED_PACKAGES) {
   const artifact = byPackage.get(name)
+  const expected = artifact ? `file:${VENDOR_DIR}/${artifact.file}` : undefined
   const keys = [...lock.matchAll(new RegExp(`^ {2}'${escape(name)}@([^']+)':(?: \\{\\})?$`, 'gm'))]
   if (!check(keys.length > 0, `pnpm-lock.yaml resolves nothing for ${name}`)) continue
   for (const [, spec] of keys)
     check(
-      spec.startsWith(`file:${VENDOR_DIR}/${artifact?.file}`),
+      spec === expected || spec.startsWith(`${expected}(`),
       `pnpm-lock.yaml resolves ${name}@${spec}, which is not the frozen archive`,
     )
   check(
@@ -149,8 +150,14 @@ for (const name of PINNED_PACKAGES) {
     `pnpm-lock.yaml does not record the root override of ${name}`,
   )
   if (!artifact || !existsSync(at(VENDOR_DIR, artifact.file))) continue
-  const integrity = `sha512-${createHash('sha512').update(readFileSync(at(VENDOR_DIR, artifact.file))).digest('base64')}`
-  check(lock.includes(integrity), `pnpm-lock.yaml does not pin the bytes of ${artifact.file}`)
+  const integrity = `sha512-${createHash('sha512')
+    .update(readFileSync(at(VENDOR_DIR, artifact.file)))
+    .digest('base64')}`
+  const resolution = new RegExp(
+    `^ {2}'${escape(name)}@${escape(expected)}':\\n {4}resolution: \\{integrity: ${escape(integrity)}, tarball: ${escape(expected)}\\}$`,
+    'm',
+  )
+  check(resolution.test(lock), `pnpm-lock.yaml does not bind ${name} to its archive bytes`)
 }
 
 // What actually resolved, when there is an install to ask. The unit suite
