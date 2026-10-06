@@ -82,6 +82,7 @@ const party = async (): Promise<ArkadeContext> =>
   createArkadeContext({
     mnemonic: generateMnemonic(wordlist, 128),
     arkServerUrl: ARKD_URL,
+    esploraUrl: process.env.ARK_ESPLORA_URL?.trim() || process.env.ESPLORA_URL,
     databasePath: join(tempStoreDir(), 'wallet.sqlite'),
     isMainnet: arkade.profile.isMainnet,
     arkadeHrp: arkade.profile.arkadeHrp,
@@ -319,7 +320,9 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
           async () =>
             (await alice.wallet.getSpendableVtxos({ withRecoverable: false })).some(
               (coin) => coin.txid === aliceFundingTxid,
-            ),
+            )
+              ? true
+              : null,
           { attempts: 30, intervalMs: 1_000, whenExhausted: 'Alice never received her BTC float' },
         )
         const aliceBefore = (await alice.wallet.getBalance()).available
@@ -354,7 +357,7 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
         const fill = Transaction.fromPSBT(base64.decode(txs[0]!))
         expect(hex.encode(fill.getOutput(0)!.script!)).toBe(hex.encode(ArkAddress.decode(bobAddress).pkScript))
         expect(fill.getOutput(0)!.amount).toBe(ASSET_CARRIER_SATS)
-        await poll(async () => (await assetUnits(bob.wallet)) === filled.toAmount, {
+        await poll(async () => ((await assetUnits(bob.wallet)) === filled.toAmount ? true : null), {
           attempts: 30,
           intervalMs: 1_000,
           whenExhausted: 'Bob never received the swapped asset',

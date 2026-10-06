@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { ArkAddress, buildOffchainTx, DefaultVtxo } from '@arkade-os/sdk'
+import { ArkAddress, buildOffchainTx, DefaultVtxo, matchServerCheckpoints } from '@arkade-os/sdk'
 import { digestJointGraph, OFFER_FILL_TEMPLATE } from '@arkade-taxi/client'
 import { nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
@@ -268,6 +268,106 @@ const cancelByConflict = async (coin: CarrierCoin) => {
 }
 
 describe('e2e cancel-by-conflict against a real arkd', () => {
+  it(
+    'keeps both phases and their pins when an accepted output is not yet indexed',
+    async () => {
+      const coin = await freshCoin()
+      expect(coin.script).toBe(proceedsScript)
+      const build = (input: CarrierCoin) =>
+        buildOffchainTx(
+          [
+            {
+              txid: input.txid,
+              vout: input.vout,
+              value: input.value,
+              tapLeafScript: input.forfeitTapLeafScript!,
+              tapTree: spendable(input)!.tapTree,
+            },
+          ],
+          [{ script: hex.decode(proceedsScript), amount: BigInt(input.value) }],
+          arkade.ctx.wallet.serverUnrollScript,
+        )
+      const provider = arkade.ctx.wallet.arkProvider
+      const indexer = arkade.ctx.wallet.indexerProvider
+      const original = build(coin)
+      const signed = await arkade.ctx.identity.sign(original.arkTx, [0])
+      const submitted = await provider.submitTx(
+        base64.encode(signed.toPSBT()),
+        original.checkpoints.map((tx) => base64.encode(tx.toPSBT())),
+      )
+      let failed = false
+      try {
+        const pendingCoin = { ...coin, txid: submitted.arkTxid, vout: 0 }
+        expect((await indexer.getVtxos({ outpoints: [pendingCoin] })).vtxos).toEqual([])
+        const { store, id, pins, due } = await seed(pendingCoin)
+        try {
+          const pass = async () =>
+            createCarrierConflictCanceller({
+              store,
+              chain: indexer,
+              pins,
+              ark: () => provider,
+              serverUnrollScript: () => arkade.ctx.wallet.serverUnrollScript,
+              signer: arkade.ctx.identity,
+              coins,
+              solverKeys: [solverKey],
+              serverKey: () => arkade.ctx.wallet.arkServerPublicKey,
+              now: () => due + 1,
+            })(await store.get(id), (await store.readCarrierAttempt(id))!)
+          const submitting = (await store.readCarrierAttempt(id))!
+          expect(await pass()).toEqual({ status: 'pending' })
+          expect(await store.readCarrierAttempt(id)).toEqual(submitting)
+          expect((await store.get(id)).state).toBe('filling')
+          expect(pins.heldFor(id)).toHaveLength(1)
+
+          const conflict = build(pendingCoin)
+          const conflictSigned = await arkade.ctx.identity.sign(conflict.arkTx, [0])
+          const cancelling = {
+            ...submitting,
+            phase: 'cancelling' as const,
+            binding: {
+              ...submitting.binding,
+              conflict: {
+                txid: conflictSigned.id,
+                ark_tx: base64.encode(conflictSigned.toPSBT()),
+                checkpoints: conflict.checkpoints.map((tx) => base64.encode(tx.toPSBT())),
+                checkpoint_txids: conflict.checkpoints.map((tx) => tx.id),
+              },
+            },
+          }
+          expect(await store.cancelCarrierAttempt(id, submitting, cancelling)).toBe(true)
+          const stored = await store.readCarrierAttempt(id)
+          expect(await pass()).toEqual({ status: 'pending' })
+          expect(await store.readCarrierAttempt(id)).toEqual(stored)
+          expect((await store.get(id)).state).toBe('filling')
+          expect(pins.heldFor(id)).toHaveLength(1)
+        } finally {
+          for (const pin of pins.heldFor(id)) pin.release()
+          await store.close()
+        }
+      } catch (error) {
+        failed = true
+        throw error
+      } finally {
+        try {
+          const matched = matchServerCheckpoints(
+            submitted.signedCheckpointTxs,
+            original.checkpoints,
+            'pending output cleanup',
+          )
+          const final = await Promise.all(
+            matched.map(async ({ server }) => base64.encode((await arkade.ctx.identity.sign(server, [0])).toPSBT())),
+          )
+          await provider.finalizeTx(submitted.arkTxid, final)
+        } catch (error) {
+          if (!failed) throw error
+          console.error('failed to finalize the pending output during cleanup', error)
+        }
+      }
+    },
+    SWAP_TIMEOUT_MS,
+  )
+
   it(
     'spends a pinned sats coin back to the solver, and frees the pin on the pass after txid:0 is indexed',
     async () => {

@@ -130,7 +130,7 @@ const storedConflictOf = (
   return { txid: arkTx.id, arkTx, arkTxPsbt, checkpoints, checkpointPsbts, ids }
 }
 
-type Evidence = { kind: 'unspent' | 'fill' | 'conflict' } | { kind: 'stuck'; reason: string }
+type Evidence = { kind: 'unknown' | 'unspent' | 'fill' | 'conflict' } | { kind: 'stuck'; reason: string }
 
 /** An id counts only if one side alone produces it. The conflict's checkpoint over a pinned
  * coin IS the fill's (same coin, leaf, unroll script), so in practice only its ark txid reads
@@ -145,6 +145,7 @@ const evidenceOf = async (
   const ids = new Set<string>()
   for (const coin of pinned) {
     const seen = vtxos.find((vtxo) => vtxo.txid === coin.txid && vtxo.vout === coin.vout)
+    if (seen === undefined) return { kind: 'unknown' }
     for (const id of [seen?.spentBy, seen?.arkTxId, seen?.settledBy]) if (id) ids.add(id)
   }
   const spenders = [...ids]
@@ -305,6 +306,6 @@ export const createCarrierConflictCanceller =
     const seen = await evidenceOf(deps.chain, pinned, conflict.ids, fillIds)
     if (seen.kind === 'stuck') return { status: 'stuck', reason: seen.reason }
     if (seen.kind === 'unspent') return submitStored(deps, conflict, label)
-    if (seen.kind === 'fill') return PENDING
+    if (seen.kind === 'fill' || seen.kind === 'unknown') return PENDING
     return finalizePending(deps, conflict, label)
   }

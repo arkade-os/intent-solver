@@ -188,7 +188,12 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
         vtxos.filter((vtxo) => !vtxo.isSwept && !(vtxo.isSpent || vtxo.spentBy || vtxo.settledBy)),
       )
       const reserved = services.arkade.reservations.reserved()
-      if (!candidates.some((coin) => reserved.has(`${coin.txid}:${coin.vout}`))) {
+      const held = candidates.filter((coin) => reserved.has(`${coin.txid}:${coin.vout}`))
+      if (held.length > 0) {
+        migration.failures.push(
+          `deprecated-signer migration deferred: ${held.length} candidate coin(s) reserved by another operation`,
+        )
+      } else {
         release = services.arkade.reservations.reserve(candidates)
         const outcome = summariseSignerMigration(await vtxoManager.migrateDeprecatedSignerVtxos())
         migration.migrated = outcome.migrated

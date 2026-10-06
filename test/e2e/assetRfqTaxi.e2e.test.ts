@@ -14,6 +14,9 @@ import { nostrRfqTransport } from '@arkade-os/swap/nostr'
 import { hex } from '@scure/base'
 import { createArkadeContext, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
+import { runFloatLifecycle } from '@arkade-os/solver-app/ops/float.js'
+import type { Services } from '@arkade-os/solver-app/ops/services.js'
+import { createCorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
 import { DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
@@ -251,6 +254,26 @@ beforeAll(async () => {
   buyerBefore = { sats: (await buyer.wallet.getBalance()).available, assets: await assetUnits(buyer.wallet) }
   solverBefore = { sats: (await solver.wallet.getBalance()).available, assets: await assetUnits(solver.wallet) }
   taxiBefore = await taxiInventory()
+  const coins = await solver.wallet.getSpendableVtxos({ withRecoverable: false, genericallySpendableOnly: true })
+  expect(coins.length).toBeGreaterThan(0)
+  const release = solver.reservations.reserve(coins)
+  try {
+    const report = await runFloatLifecycle({
+      arkade: solver,
+      config: { limits: arkade.limits, maxExposedSats: arkade.limits.maxSats * 3 },
+      readers: createCorridorReaderSet([]),
+    } as unknown as Services)
+    expect(report.migrated).toBe(0)
+    expect(report.failures).toContain(
+      `deprecated-signer migration deferred: ${coins.length} candidate coin(s) reserved by another operation`,
+    )
+    expect(solver.reservations.reserved()).toEqual(new Set(coins.map(({ txid, vout }) => `${txid}:${vout}`)))
+    expect((await solver.wallet.getBalance()).available).toBe(solverBefore.sats)
+    expect(await assetUnits(solver.wallet)).toBe(solverBefore.assets)
+  } finally {
+    release()
+  }
+  expect(solver.reservations.reserved().size).toBe(0)
   expect(taxiBefore.sats).toBeGreaterThan(0n)
   const relayCheck = await fetch(relayUrl.replace(/^ws/, 'http'), {
     headers: { accept: 'application/nostr+json' },
@@ -309,10 +332,11 @@ afterAll(async () => {
     if (feed) await new Promise<void>((resolve) => feed.close(() => resolve()))
     if (workdir) {
       const target = resolve(workdir)
-      if (dirname(target) !== resolve(tmpdir()) || !basename(target).startsWith('solver-taxi-rfq-')) {
-        throw new Error(`refusing to remove unexpected E2E temp path: ${target}`)
+      if (dirname(target) === resolve(tmpdir()) && basename(target).startsWith('solver-taxi-rfq-')) {
+        rmSync(target, { recursive: true, force: true })
+      } else {
+        console.error(`refusing to remove unexpected E2E temp path: ${target}`)
       }
-      rmSync(target, { recursive: true, force: true })
     }
   }
 })
