@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 import {
   CANDIDATE_SDK_SYMBOL,
   CANDIDATE_SWAP_SYMBOL,
+  CANDIDATE_TAXI_RFQ_SYMBOL,
   MANIFEST_PATH,
   PINNED_PACKAGES,
   TAXI_CONSUMER,
@@ -178,6 +179,16 @@ if (entry) {
     } catch (error) {
       failures.push(error.message)
     }
+  }
+  try {
+    await assertCandidateExport(
+      packageRootFrom(entry, '@arkade-taxi/client'),
+      '@arkade-taxi/client',
+      CANDIDATE_TAXI_RFQ_SYMBOL,
+      './wallet',
+    )
+  } catch (error) {
+    failures.push(error.message)
   }
 } else if (INSTALLED) {
   failures.push(

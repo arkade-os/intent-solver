@@ -18,6 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   CANDIDATE_SDK_SYMBOL,
   CANDIDATE_SWAP_SYMBOL,
+  CANDIDATE_TAXI_RFQ_SYMBOL,
   PINNED_PACKAGES,
   PINNED_SOURCES,
   VENDOR_DIR,
@@ -80,7 +81,6 @@ const runPnpm = (cwd, argv, npmUserConfig) => {
 
 const spec = (from, path) => `file:${relative(from, path).replaceAll('\\', '/')}`
 
-
 const scratch = mkdtempSync(join(tmpdir(), 'carrier-pack-'))
 const shortCommit = (commit) => commit.slice(0, 8)
 const archiveName = (name, version, commit) =>
@@ -119,9 +119,7 @@ try {
       { name, packDir },
     ),
   )
-  const beforeInstall = Object.fromEntries(
-    taxiTarballs.map((path) => [path, sha256(readFileSync(path))]),
-  )
+  const beforeInstall = Object.fromEntries(taxiTarballs.map((path) => [path, sha256(readFileSync(path))]))
 
   const consumerManifest = harness.buildConsumerManifest(taxiTarballs, consumer)
   consumerManifest.pnpm.overrides['@arkade-os/sdk'] = spec(consumer, candidate['@arkade-os/sdk'])
@@ -148,6 +146,12 @@ try {
     ['@arkade-os/swap', CANDIDATE_SWAP_SYMBOL],
   ])
     await assertCandidateExport(packageRootFrom(entry, name), name, symbol)
+  await assertCandidateExport(
+    packageRootFrom(entry, '@arkade-taxi/client'),
+    '@arkade-taxi/client',
+    CANDIDATE_TAXI_RFQ_SYMBOL,
+    './wallet',
+  )
   await import(pathToFileURL(entry).href)
 
   for (const path of taxiTarballs) {
