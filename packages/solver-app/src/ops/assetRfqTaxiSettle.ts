@@ -2,6 +2,7 @@
 
 import { hex } from '@scure/base'
 import {
+  requestQuoteWhenReady,
   signJointGraphForOwner,
   TaxiError,
   verifyOfferFillPlan,
@@ -278,7 +279,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         pin.release()
         throw new Error(`carrier fill ${row.id} could not prepare its attempt; the operator was asked nothing`)
       }
-      const { verified } = await taxi.swapFills.requestVerifiedSwapFillQuote({
+      const quoteRequest: Omit<Parameters<TaxiClient['requestVerifiedSwapFillQuote']>[0], 'now'> = {
         operationId: row.id,
         receiveQuoteId: terms.quoteId,
         offerHex,
@@ -302,8 +303,10 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         fundingVout: deposit.vout,
         // Persist this value because it participates in request identity.
         validUntil,
-        now: deps.now(),
-      })
+      }
+      const { verified } = await requestQuoteWhenReady(() =>
+        taxi.swapFills.requestVerifiedSwapFillQuote({ ...quoteRequest, now: deps.now() }),
+      )
 
       const quoted = verified.quote.graph
       const expected = await deps.fill.rebuild({

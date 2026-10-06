@@ -41,6 +41,9 @@ let buyerBefore: { sats: number; assets: bigint }
 let solverBefore: { sats: number; assets: bigint }
 let taxiBefore: { sats: bigint; assets: string[] }
 let originalTaxiRules: Record<string, unknown>[] | undefined
+let forwardedTaxiUrl = ''
+const fillQuoteBodies: string[] = []
+let acceptedFillQuotes = 0
 
 type TaxiFareWire = {
   id: string
@@ -114,14 +117,45 @@ const assetWire = (id: string) => {
 }
 
 const feedServer = async (): Promise<string> => {
-  feed = createServer((_request, response) => {
-    response.writeHead(200, { 'content-type': 'application/json' })
-    response.end(JSON.stringify({ price: '100000000' }))
+  feed = createServer(async (request, response) => {
+    if (!request.url?.startsWith('/v1/')) {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ price: '100000000' }))
+      return
+    }
+    try {
+      const chunks: Buffer[] = []
+      for await (const chunk of request) chunks.push(Buffer.from(chunk))
+      const body = Buffer.concat(chunks).toString()
+      const fillQuote = request.method === 'POST' && request.url === '/v1/swap-fills'
+      if (fillQuote) {
+        fillQuoteBodies.push(body)
+        if (fillQuoteBodies.length <= 2) {
+          response.writeHead(503, { 'content-type': 'application/json' })
+          response.end(JSON.stringify({ code: 'not_ready', error: 'proceeds_reservation_changed' }))
+          return
+        }
+      }
+      const upstream = await fetch(`${taxiUrl}${request.url}`, {
+        method: request.method,
+        headers: { 'content-type': 'application/json' },
+        ...(body ? { body } : {}),
+      })
+      if (fillQuote && upstream.ok) acceptedFillQuotes++
+      response.writeHead(upstream.status, {
+        'content-type': upstream.headers.get('content-type') ?? 'application/json',
+      })
+      response.end(await upstream.text())
+    } catch {
+      response.writeHead(502)
+      response.end('Taxi forwarding failed')
+    }
   })
   await new Promise<void>((resolve) => feed.listen(0, '127.0.0.1', resolve))
   const address = feed.address()
   if (!address || typeof address === 'string') throw new Error('price feed did not start')
-  return `http://127.0.0.1:${address.port}/price`
+  forwardedTaxiUrl = `http://127.0.0.1:${address.port}`
+  return `${forwardedTaxiUrl}/price`
 }
 
 const assetUnits = async (wallet: ArkadeContext['wallet']): Promise<bigint> => {
@@ -370,7 +404,7 @@ describe('running solver to Taxi on regtest', () => {
       const choice = {
         mode: 'recycleReceiver' as const,
         quote: verified.descriptor,
-        taxi: { url: taxiUrl, operatorKey: info.operatorKey },
+        taxi: { url: forwardedTaxiUrl, operatorKey: info.operatorKey },
       }
       const transport = nostrRfqTransport({ relays: [relayUrl], solverPubkey: solverPublicKey })
       const rfqId = randomBytes(32).toString('hex')
@@ -416,10 +450,13 @@ describe('running solver to Taxi on regtest', () => {
           }
         }
         throw new Error(
-          `${error instanceof Error ? error.message : String(error)}; rfq: ${JSON.stringify({ rfqId, fundingTxid, state: rfqState ?? null })}; solver: ${daemonLog}`,
+          `${error instanceof Error ? error.message : String(error)}; rfq: ${JSON.stringify({ rfqId, fundingTxid, state: rfqState ?? null, fillQuoteAttempts: fillQuoteBodies.length, acceptedFillQuotes })}; solver: ${daemonLog}`,
           { cause: error },
         )
       })
+      expect(fillQuoteBodies.length).toBeGreaterThanOrEqual(3)
+      expect(new Set(fillQuoteBodies).size).toBe(1)
+      expect(acceptedFillQuotes).toBe(1)
       const status = await taxi.status(claim.transferId)
       const transfer = await taxi.verifyIncomingClaim(
         claim,
