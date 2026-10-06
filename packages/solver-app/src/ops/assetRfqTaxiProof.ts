@@ -292,7 +292,8 @@ const observeWith =
       throw error
     }
     if (proof === null) return deps.cancel(row, attempt)
+    if (!(await deps.store.settleCarrierAttempt(row.id, attempt, proof.txid))) return { status: 'pending' }
     // Release only after proving the spend of these reserved coins.
-    if (await deps.store.settleCarrierAttempt(row.id, attempt, proof.txid)) releaseEveryPin(deps.pins, row.id)
+    releaseEveryPin(deps.pins, row.id)
     return { status: 'settled', txid: proof.txid }
   }
