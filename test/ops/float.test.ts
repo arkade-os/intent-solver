@@ -155,13 +155,14 @@ const floatServices = (
   ({
     arkade: {
       wallet: {
-        settle: boarding.settle ?? (async () => 'settle-txid'),
-        settleWithOutcome: async (params: SettleParams) => {
-          try {
-            return { ok: true, txid: await (boarding.settle ?? (async () => 'settle-txid'))(params) }
-          } catch (error) {
-            return { ok: false, error, intentRegistrationAttempted: true }
-          }
+        settle: async (
+          params: SettleParams,
+          _eventCallback: unknown,
+          hooks?: { onPhase?: (phase: 'preparing' | 'registration_attempt') => void },
+        ) => {
+          hooks?.onPhase?.('preparing')
+          hooks?.onPhase?.('registration_attempt')
+          return (boarding.settle ?? (async () => 'settle-txid'))(params)
         },
         getBoardingUtxos: async () => boarding.boarded ?? [],
         // Read by resplitFloat after a renewal; empty means the float needs no reshaping.

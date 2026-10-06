@@ -1,9 +1,4 @@
-/**
- * Cancel-by-conflict (Ruling 5): past both deadlines the solver spends every
- * pinned input to itself, so a fill it signed can never land. The exact bytes
- * are durable before they are sent, a restart only ever re-sends those bytes,
- * and a pin is released on chain evidence alone — never on a submit's answer.
- */
+/** After both deadlines, persist and resend a conflict spend; release pins only on chain proof. */
 
 import { base64, hex } from '@scure/base'
 import {
@@ -44,7 +39,6 @@ export interface CarrierConflictDeps {
   store: CarrierConflictStore
   chain: CarrierChainReader
   pins: CarrierPinLedger
-  /** Getters, so nothing is resolved before an attempt is actually due. */
   ark: () => CarrierConflictArk
   serverUnrollScript: () => CSVMultisigTapscript.Type
   signer: Pick<Identity, 'sign'>
@@ -54,7 +48,7 @@ export interface CarrierConflictDeps {
   now: () => number
 }
 
-/** Pins held, attempt still `cancelling` or `submitting`: a human or a later pass must move it. */
+/** Retain pins in cancelling or submitting until evidence allows progress. */
 export class CarrierConflictStalledError extends Error {
   constructor(message: string) {
     super(message)
@@ -62,7 +56,7 @@ export class CarrierConflictStalledError extends Error {
   }
 }
 
-/** Not confirmed accepted: refused, or lost after arkd may have taken it. Pins held; the next pass re-sends it. */
+/** A refused or lost submission may still be accepted; retain pins and resend the same bytes. */
 export class CarrierConflictRejectedError extends Error {
   readonly txid: string
   constructor(label: string, txid: string, cause: unknown) {
@@ -91,7 +85,7 @@ interface StoredConflict {
   ids: ReadonlySet<string>
 }
 
-/** Re-hashed on every read: a release is keyed on ids from these bytes, not the strings beside them. */
+/** Rehash bytes before deriving ids used to release pins. */
 const storedConflictOf = (
   attempt: CarrierAttempt,
   pinned: readonly CarrierOutpoint[],
@@ -115,7 +109,7 @@ const storedConflictOf = (
   if (spends.join() !== pinned.map((coin) => outpointKey(coin.txid, coin.vout)).join()) {
     throw new Error(`${label} conflict spends ${spends.join()}, not the inputs it pinned`)
   }
-  // Release reads only this transaction's txid:0, so it must be what spends every checkpoint above.
+  // Conflict txid:0 must spend every stored checkpoint before it can prove release.
   const links = Array.from({ length: arkTx.inputsLength }, (_, i) => {
     const input = arkTx.getInput(i)
     return outpointKey(input.txid === undefined ? '' : hex.encode(input.txid), input.index ?? -1)
@@ -132,9 +126,7 @@ const storedConflictOf = (
 
 type Evidence = { kind: 'unknown' | 'unspent' | 'fill' | 'conflict' } | { kind: 'stuck'; reason: string }
 
-/** An id counts only if one side alone produces it. The conflict's checkpoint over a pinned
- * coin IS the fill's (same coin, leaf, unroll script), so in practice only its ark txid reads
- * `conflict`; nothing here releases. Truthiness: the wire spells unspent as "". */
+/** Shared checkpoint ids prove neither fill nor conflict; empty spend ids mean unspent. */
 const evidenceOf = async (
   chain: CarrierChainReader,
   pinned: readonly CarrierOutpoint[],
@@ -159,7 +151,7 @@ const evidenceOf = async (
   return { kind: byConflict ? 'conflict' : byFill ? 'fill' : 'unspent' }
 }
 
-/** Every pinned coin via its collaborative leaf, all value to the proceeds script. */
+/** Spend every pinned coin via its collaborative leaf back to the proceeds script. */
 const buildConflict = async (
   deps: CarrierConflictDeps,
   attempt: CarrierAttempt,
@@ -213,7 +205,6 @@ const buildConflict = async (
   return { ...attempt, phase: 'cancelling', binding: { ...attempt.binding, conflict } }
 }
 
-/** Signs only checkpoints proven to be the stored ones, exactly as `claimSwapScript` does. */
 const finalizeWith = async (
   deps: CarrierConflictDeps,
   conflict: StoredConflict,
@@ -227,8 +218,7 @@ const finalizeWith = async (
   await deps.ark().finalizeTx(conflict.txid, final)
 }
 
-/** arkd marks the inputs spent at ACCEPT and keeps the server-signed checkpoints for
- * `getPendingTxs`; that is the only way back to a finalize a restart interrupted. */
+/** Accepted inputs are spent; recover server-signed checkpoints via getPendingTxs to resume finalize. */
 const finalizePending = async (deps: CarrierConflictDeps, conflict: StoredConflict, label: string) => {
   const message: Intent.GetPendingTxMessage = { type: 'get-pending-tx', expire_at: 0 }
   const proof = await deps.signer.sign(
@@ -253,7 +243,7 @@ const submitStored = async (deps: CarrierConflictDeps, conflict: StoredConflict,
   try {
     submitted = await deps.ark().submitTx(conflict.arkTxPsbt, [...conflict.checkpointPsbts])
   } catch (error) {
-    // An identical resubmit of an accepted tx is refused by id, never re-accepted.
+    // Identical accepted submissions are rejected by id.
     const text = error instanceof Error ? error.message : String(error)
     if (!text.includes(`duplicated offchain tx ${conflict.txid}`)) {
       throw new CarrierConflictRejectedError(label, conflict.txid, error)
@@ -265,14 +255,12 @@ const submitStored = async (deps: CarrierConflictDeps, conflict: StoredConflict,
   return PENDING
 }
 
-/** arkd indexes an offchain output only on finalize, and the outpoint lookup reads that store
- * alone: any vtxo at txid:0 is the landed conflict (`isPreconfirmed` on it is normal). */
+/** An indexed conflict output proves finalize; isPreconfirmed is normal. */
 const finalizedOnChain = async (chain: CarrierChainReader, conflict: StoredConflict): Promise<boolean> => {
   const { vtxos } = await chain.getVtxos({ outpoints: [{ txid: conflict.txid, vout: 0 }] })
   return vtxos.some((vtxo) => vtxo.txid === conflict.txid && vtxo.vout === 0)
 }
 
-/** Reached only when `proveCarrierFill` returned null on this same pass. */
 export const createCarrierConflictCanceller =
   (deps: CarrierConflictDeps) =>
   async (row: AssetRfqSwapRow, attempt: CarrierAttempt): Promise<ReceiveCarrierReconcileOutcome> => {
@@ -284,7 +272,7 @@ export const createCarrierConflictCanceller =
       if (deps.now() <= conflictDeadline(attempt.snapshot, label)) return PENDING
       const seen = await evidenceOf(deps.chain, pinned, new Set(), fillIds)
       if (seen.kind === 'stuck') {
-        // A sibling that won the cancelling CAS reads as foreign from this stale envelope.
+        // A sibling may have won the cancelling CAS after this envelope was read.
         const now = await deps.store.readCarrierAttempt(row.id)
         return now?.phase === 'submitting' ? { status: 'stuck', reason: seen.reason } : PENDING
       }

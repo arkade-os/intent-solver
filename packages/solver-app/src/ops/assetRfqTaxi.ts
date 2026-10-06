@@ -1,9 +1,3 @@
-/**
- * The receive-carrier adapter's READ half. DELIBERATELY NOT a complete
- * {@link ReceiveCarrierQuotes}: `settle` and `reconcile` are a later slice, and
- * the orchestrator's completeness gate refuses a recycle rather than degrading.
- */
-
 import {
   asset,
   MultisigTapscript,
@@ -31,18 +25,15 @@ import type {
   ReceiveCarrierQuotes,
 } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 
-/** The running Arkade context's, so an operator URL substitutes none of it. */
+/** Trust comes from the running wallet, never the request-named operator. */
 export interface TaxiCarrierTrust {
   serverKey: Uint8Array
   emulatorKey: Uint8Array
   dustSats: bigint
   vtxoMinAmount: bigint
   hrp: string
-  /** @see resolveTimelockUnit */
   locktimeDomain: 'height' | 'time'
-  /** How far past the anchor the operator's input expiry floor must sit, in this
-   * domain's units — arkd's advertised exit delay. Verification only ORDERS the
-   * quote's deadlines, which `recovery=1 / floor=2` satisfies. */
+  /** Minimum input-expiry headroom, in the deployment's locktime units. */
   inputExpiryMargin: bigint
 }
 
@@ -53,15 +44,12 @@ export interface CarrierCoin {
   expiresAt?: Date
   expiresAtHeight?: number
   assets?: readonly { assetId: string; amount: bigint | string }[]
-  /** Carried by every real ContractManager coin; the rebuild refuses without
-   * them rather than spending a coin it cannot prove a path into. */
+  /** Required to prove and spend the selected coin's taproot path. */
   tapTree?: Uint8Array
   forfeitTapLeafScript?: TapLeafScript
-  /** The indexer's scriptPubKey — what `tapTree` must actually rebuild. */
   script?: string
 }
 
-/** T21 routes settle/reconcile through this same client, so it is typed for that now, not narrowed to today's two reads. */
 export type TaxiCarrierClient = Pick<
   TaxiClient,
   'info' | 'getReceiveQuote' | 'requestVerifiedSwapFillQuote' | 'submitSwapFill'
@@ -74,7 +62,6 @@ export interface TaxiReceiveCarrierDeps {
   maxServiceFareSats: bigint
   coins: () => Promise<readonly CarrierCoin[]>
   reserved: () => ReadonlySet<string>
-  /** How long a quote binds — the window an admission read must also clear. */
   quoteValiditySeconds: number
   /** Required on a height-typed deployment: the clock cannot anchor a height. */
   tipHeight?: () => Promise<number>
@@ -83,8 +70,6 @@ export interface TaxiReceiveCarrierDeps {
 const TAPROOT_PK_SCRIPT = /^5120([0-9a-f]{64})$/
 const XONLY_HEX = /^[0-9a-f]{64}$/
 
-/** NOT `ContractManagerLike`: that slice is the lockup watcher's and narrows the
- * manager to its event and watch trio, which carries no coins. */
 export const spendableCarrierCoins = async (
   manager: Pick<IContractManager, 'getContractsWithVtxos'>,
 ): Promise<readonly CarrierCoin[]> =>
@@ -113,8 +98,7 @@ const locktimeOf = (
 
 type ReceiveQuoteWire = Awaited<ReturnType<TaxiClient['getReceiveQuote']>>
 
-/** The Taxi's bind moves only `state` and `boundFillId`, so a quote bound to THIS fill re-verifies as the quoted one
- * it was. Bound to another fill, or not bound at all, is refused. */
+/** Reverify a bound quote only when boundFillId names this fill. */
 const boundTo = (quote: ReceiveQuoteWire, fillId: string): ReceiveQuoteWire => {
   if (quote.state !== 'bound' || quote.boundFillId !== fillId) {
     const to = quote.boundFillId === undefined ? '' : ` to ${quote.boundFillId}`
@@ -131,7 +115,6 @@ type FarePricing = InfoWire['assetRules'][number]['fares'][number]['pricing']
 const decimal = (value: unknown): bigint | undefined =>
   typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value) ? BigInt(value) : undefined
 
-/** The client's own `verifyPolicy` arithmetic, used only to pick an id: the client re-verifies against it. */
 const pricedAt = (pricing: FarePricing, loan: bigint): bigint | undefined => {
   if (pricing.kind === 'flat') return decimal(pricing.units)
   const min = decimal(pricing.minUnits)
@@ -145,8 +128,7 @@ const pricedAt = (pricing: FarePricing, loan: bigint): bigint | undefined => {
 /** A token fare is never a receiver's to pay, so it names no currency here. */
 const RECEIVER_FARE_CURRENCY: Readonly<Record<string, 'sats' | 'asset'>> = { sats: 'sats', sameAsset: 'asset' }
 
-/** The advertised fare a receiver-paid quote was priced at. The RFQ names none, and without one the client checks the
- * first listed, refusing every payee who picked another. */
+/** Recover the advertised receiver fare so verification does not default to the first fare. */
 const receiverFareId = (
   info: InfoWire,
   quote: ReceiveQuoteWire,
@@ -187,14 +169,12 @@ const verifiedQuoteFor = async (
   const assetId = assetIdValue(request.assetId)
   const client = deps.clientFor(request.taxi?.url, request.admission ? 'quote' : 'fill')
   const [info, served] = await Promise.all([client.info(), client.getReceiveQuote(request.quoteId)])
-  // Verification binds every other field but not the id, and `available` reads
-  // this quote's floor without the orchestrator's own id check beside it.
+  // Verification does not bind the quote id; availability must check it separately.
   if (served.quoteId !== request.quoteId)
     throw new Error(`carrier quote ${request.quoteId} answered as ${served.quoteId}`)
   const quote = request.boundFillId === undefined ? served : boundTo(served, request.boundFillId)
   const operatorKey = info.operatorKey.toLowerCase()
-  // The ONLY identity read off a request-named Taxi. `deps.trust` below is
-  // shared and singular regardless — see the module comment on `TaxiCarrierTrust`.
+  // Request-named Taxi identity is separate from the wallet trust anchors.
   if (request.taxi && operatorKey !== request.taxi.operatorKey.toLowerCase()) {
     throw new Error('carrier quote operator key differs from the one the request named')
   }
@@ -213,9 +193,7 @@ const verifiedQuoteFor = async (
       receiverAddress: quote.receiverAddress,
       makerPublicKey: hex.decode(request.makerPublicKey),
       assetId,
-      // ECHOED, so this sub-check collapses: the CLIENT made the quote.
       fundingExpiry: floor,
-      // Keyed on `receiverPaid`, NOT `taxi`: WHICH Taxi vs who pays it.
       ...(request.receiverPaid
         ? { payer: 'receiver' as const, fareId: receiverFareId(info, quote, assetId, deps.trust.dustSats) }
         : {}),
@@ -224,15 +202,13 @@ const verifiedQuoteFor = async (
       minInputExpiryFloor,
     },
   })
-  // The covenant REBUILT from params: receiver, maker and operator keys, asset, split and, receiver-paid, the fare.
   if (hex.encode(verified.script.pkScript) !== request.makerPkScript) {
     throw new Error(`carrier payout script ${request.makerPkScript} is not the verified quote's receive covenant`)
   }
   return { verified, operatorKey }
 }
 
-/** `taxiKey` is the SAME `info` already fetched above, never copied off the
- * request — set on every resolve, since `recycle` never reads it anyway. */
+/** Refresh operator identity from verified info, never request data. */
 const carrierQuoteFrom = (from: { verified: VerifiedReceiveQuote; operatorKey: string }): ReceiveCarrierQuote => {
   const { verified, operatorKey } = from
   return {
@@ -254,9 +230,7 @@ const carrierQuoteFrom = (from: { verified: VerifiedReceiveQuote; operatorKey: s
   }
 }
 
-/** KNOWN same-domain expiry only — the other unit, neither, and both are all
- * excluded: an unknown expiry is not a distant one, and comparing a height to a
- * clock needs a chain tip this layer does not take. */
+/** Require a known expiry in exactly the deployment's locktime domain. */
 export const clearsFloor = (coin: CarrierCoin, floor: { kind: 'height' | 'time'; value: bigint }): boolean => {
   const height = coin.expiresAtHeight
   const time = coin.expiresAt
@@ -270,10 +244,7 @@ export interface CarrierTaprootEvidence {
   spendLeaf: Uint8Array
 }
 
-/** The coin's own tree and forfeit leaf, wire-shaped — but only when the tree
- * rebuilds the coin's own script and the leaf is a collaborative multisig of
- * one of `solverKeys` and `serverKey`. `undefined` for anything else, so
- * callers exclude the coin at selection rather than pin it toward a refusal. */
+/** Require a matching taproot script and a collaborative leaf for the solver and server. */
 export const carrierTaprootEvidence = (
   coin: CarrierCoin,
   solverKeys: readonly string[],
@@ -300,14 +271,12 @@ export const carrierTaprootEvidence = (
   }
 }
 
-/** Mutinynet's rate, and a DIVISOR: assuming blocks are fast over-states the
- * slack, which is the safe side and the opposite of `HTLC_SECONDS_PER_BLOCK`. */
+/** A conservative seconds-per-block divisor overstates the required expiry slack. */
 const CARRIER_FAST_BLOCK_SECONDS = 30
 
 /** Headroom over an expected count that is only a mean — arrivals are Poisson. */
 const CARRIER_SLACK_FLOOR_BLOCKS = 6
 
-/** How far the anchor may move between admitting a quote and filling it. */
 export const carrierAdmissionSlack = (domain: 'height' | 'time', quoteValiditySeconds: number): bigint => {
   const window = Math.max(0, Math.ceil(quoteValiditySeconds))
   if (domain === 'time') return BigInt(window + CARRIER_FILL_MARGIN_SECONDS)
@@ -359,8 +328,6 @@ export const createTaxiReceiveCarrierReader = (
   }
 }
 
-/** G4: runs regardless of `taxiUrl` — only the fallback for a request naming
- * none still needs it, so `trust`/the tip are now always paid for. */
 export interface TaxiCarrierComposition {
   taxiUrl?: string
   trust: () => Promise<TaxiCarrierTrust>
@@ -370,32 +337,27 @@ export interface TaxiCarrierComposition {
   quoteValiditySeconds: number
   tipHeight?: () => Promise<number>
   fetch?: typeof fetch
-  /** Ruling 3's SSRF gate for a request-named URL; `taxiUrl` above never routes through it. */
+  /** SSRF policy for request-named URLs; configured URLs are trusted separately. */
   policy: TaxiUrlPolicy
 }
 
-/** UNCACHED, unlike the shared reader: one block mined inside its 15s window
- * puts the floor behind the chain, admitting an already-expired coin. */
+/** Do not cache the chain tip: a newly mined block can invalidate the expiry floor. */
 export const carrierChainTip = (client: EsploraClient): ChainTipProvider => esploraChainTip(client, { cacheMs: 0 })
 
-/** Which per-host budget a named-Taxi request spends. Quote traffic costs nothing to generate, so it has its own. */
+/** Separate cheap quote traffic from funded-fill traffic. */
 export type TaxiBudget = 'quote' | 'fill'
 
-/** A named Taxi's quote budget: generous for real traffic, tight enough to cap a hostile URL's round-trip storm. */
 export const TAXI_QUOTE_RATE_LIMIT = 20
-/** Spent only behind a funded deposit, at most 6 requests a fill per host, so ten concurrent fills a minute. */
+/** Funded fills use at most six requests per host. */
 export const TAXI_FILL_RATE_LIMIT = 60
 /** Shared by every named host, so fresh subdomains cannot multiply it: ten receiver-paid quotes a minute, 4 reads each. */
 export const TAXI_QUOTE_GLOBAL_RATE_LIMIT = 40
-/** One small GET: an honest Taxi answers well inside it, and a tarpit holds a quote at most two parallel rounds. */
+/** Bound how long an untrusted quote endpoint can hold the queue. */
 export const TAXI_QUOTE_TIMEOUT_MS = 2_000
 const TAXI_CLIENT_RATE_WINDOW_SECONDS = 60
-/** Ruling 3's cap on the client cache below. */
 const TAXI_CLIENT_CACHE_SIZE = 32
 
-/** One client per budget and normalized URL, built lazily in a FIFO cache — evicted oldest-INSERTED first, a hit
- * refreshes nothing — so distinct attacker URLs cannot grow it unbounded. The configured URL
- * skips untrusted URL normalization, but its responses still need bounded reads. */
+/** Bounded FIFO cache per URL and budget; configured URLs still use bounded reads. */
 export const taxiClientCache = (deps: {
   configuredUrl?: string
   policy: TaxiUrlPolicy
@@ -463,19 +425,16 @@ export const taxiReceiveCarrier = async (
     tipHeight: deps.tipHeight,
   })
 
-/** ONE caller's reservation on one row. Scoped rather than row-keyed: a settle
- * that lost a CAS must not free the coins of the one that won it. */
+/** Caller-scoped ownership prevents a losing CAS from releasing the winner's coins. */
 export interface CarrierPin {
   readonly id: string
   /** Frees this reservation and no other. Idempotent. */
   release(): void
 }
 
-/** A pin is only given up against durable proof that nothing was submitted, so
- * its release has to outlive the call that took it. */
+/** Pins survive the settle call until durable evidence permits release. */
 export interface CarrierPinLedger {
   adopt(id: string, release: ReleaseReservation): CarrierPin
-  /** Every pin a row still owes — the seam reconciliation resolves through. */
   heldFor(id: string): readonly CarrierPin[]
   held(): readonly string[]
 }
@@ -509,9 +468,7 @@ export interface CarrierOutpoint {
   vout: number
 }
 
-/** THE shape of `snapshot.inputs`, in one place: the settle slice writes through
- * this, {@link decodeCarrierAttemptInputs} is the only reader, and a key chosen
- * independently at either end silently un-pins a coin a fill may have spent. */
+/** Shared snapshot codec: writer and reader must agree on reserved outpoints. */
 export const encodeCarrierAttemptInputs = (outpoints: readonly CarrierOutpoint[]): JsonObject => ({
   inputs: checkedOutpoints(outpoints, 'carrier attempt inputs').map(({ txid, vout }) => ({ txid, vout })),
 })
@@ -533,12 +490,7 @@ const checkedOutpoints = (value: unknown, label: string): CarrierOutpoint[] => {
   })
 }
 
-/**
- * Re-pin what an unresolved attempt still owns, before anything can tick: a
- * reservation is process-local, so a restart drops it while the liability
- * survives. REFUSES rather than skips, and the releases go into the ledger
- * rather than back to the caller, so there is no way to drop one.
- */
+/** Restore unresolved pins before any tick; liability survives process-local reservations. */
 export const restoreCarrierAttemptPins = async (deps: {
   attempts: () => Promise<readonly CarrierAttemptRecord[]>
   reserve: (outpoints: readonly CarrierOutpoint[]) => ReleaseReservation

@@ -1,14 +1,4 @@
-/**
- * Rebuilding the quoted fill graph from the solver's own inputs.
- *
- * The sponsor's coins are the operator's to pick and the structured wire names
- * only their outpoints — but every quoted CHECKPOINT PSBT carries the whole
- * `ArkTxInput` its input was built from, tap tree and leaf included, because
- * that is what `buildCheckpointTx` writes. So the sponsor leg is read back out
- * of the quote's own bytes while the solver leg stays the solver's, and the
- * `graphId` the caller then compares is what proves the assembly over both is
- * the canonical one rather than the operator's word for it.
- */
+/** Rebuild solver inputs locally, recover sponsor inputs from checkpoint PSBTs, and compare graphId. */
 
 import { base64, hex } from '@scure/base'
 import {
@@ -28,7 +18,6 @@ import { canonicalDecimal, type CarrierCoin } from './assetRfqTaxi.js'
 type SwapFillGraphWire = Parameters<TaxiClient['submitSwapFill']>[1]
 type SwapFillGraphInputWire = SwapFillGraphWire['inputs'][number]
 
-/** Exactly `ArkTxInput`: what the SDK needs to spend a coin it does not hold. */
 export interface CarrierJointFunding {
   txid: string
   vout: number
@@ -41,7 +30,7 @@ export interface CarrierSponsorLeg {
   fund: CarrierJointFunding[]
   netContributionSats: bigint
   changeScript: Uint8Array
-  /** Sats only: the type is the guard against a fare in the offered asset. */
+  /** Asset fares are not authorised. */
   fare?: { script: Uint8Array; sats: bigint }
   combineSatsFareWithChange?: boolean
 }
@@ -80,23 +69,20 @@ export const sponsorLegFrom = (
   funding: readonly CarrierJointFunding[],
   label: string,
   authorised: Pick<CarrierAuthorisedSats, 'contributionSats' | 'maxFareSats'>,
-  /** The SOLVER's own script: `solverSatsFlow` sums BY SCRIPT, so this is free. */
   fallbackChangeScript: Uint8Array,
 ): CarrierSponsorLeg | undefined => {
   const fund = wire.inputs.flatMap((input, i) => (input.owner === 'sponsor' ? [funding[i]!] : []))
   if (fund.length === 0) return undefined
   const change = wire.outputs.find((output) => output.role === 'sponsor-change')
   const fare = wire.outputs.find((output) => output.role === 'sponsor-fare')
-  // The sponsor pays its fare and its change to one script, which is what lets
-  // the quote label two outputs that are otherwise identical.
+  // Fare and sponsor change can share a script; verify their roles explicitly.
   const script = change?.script ?? fare?.script
   const quoted =
     fund.reduce((total, coin) => total + BigInt(coin.value), 0n) -
     (change === undefined ? 0n : canonicalDecimal(change.sats, `${label} sponsor change`))
   if (quoted <= 0n) throw new Error(`${label} quotes a sponsor contributing ${quoted} sats`)
   const changeScript = script === undefined ? fallbackChangeScript : hex.decode(script)
-  // The AUTHORISED number is what gets built; the quote's own is only compared
-  // to it, so a leg priced differently refuses legibly rather than as a digest.
+  // Build authorised economics, then compare the quote.
   if (fare !== undefined) {
     if (quoted !== authorised.contributionSats) throw shortContribution(quoted, authorised, label)
     return {
@@ -106,9 +92,7 @@ export const sponsorLegFrom = (
       fare: fareFrom(fare, label, authorised.maxFareSats),
     }
   }
-  // FOLDED: the fare is inside the change, so this is
-  // `fare + (authorised - Taxi's contribution)`, NOT the fare alone. Bounded
-  // anyway (`net - floor == maxFareSats - folded`); only TAXI zeroes the rest.
+  // A folded fare includes change; bound the combined net against authorised terms.
   const folded = authorised.contributionSats - quoted
   if (folded < 0n) throw shortContribution(quoted, authorised, label)
   if (folded === 0n) return { fund, netContributionSats: authorised.contributionSats, changeScript }
@@ -137,13 +121,7 @@ export interface CarrierAuthorisedSats {
   maxFareSats: bigint
 }
 
-/**
- * `assembleOfferFill` pays the solver `inputs - maker - fare - sponsorChange`
- * over `sponsorChange = sponsorInputs - netContribution`, so its net is exactly
- * `deposit + netContribution - maker - fare`. Measuring that net rather than
- * reading a role label means an inflated carrier, a short contribution and a
- * fare hidden in change all move ONE number.
- */
+/** Measure net solver sats, including folded fares, rather than trusting output role labels. */
 export const assertSolverSatsFloor = (
   flow: { depositValue: bigint; solverInputsSum: bigint; solverPayout: bigint },
   authorised: CarrierAuthorisedSats,
@@ -160,10 +138,7 @@ export const assertSolverSatsFloor = (
   }
 }
 
-/** The one quantity the operator legitimately picks, so it is read from the
- * quote and bounded here before it is built with. An ASSET fare is refused
- * outright: `assembleOfferFill` pays one out of the INPUTS' own holdings, so an
- * unbounded one takes the whole offered leg while moving no sats. */
+/** Bound the operator-selected sats fare; an asset fare could drain holdings without moving sats. */
 const fareFrom = (
   output: SwapFillGraphWire['outputs'][number],
   label: string,
@@ -174,8 +149,6 @@ const fareFrom = (
   }
   const sats = canonicalDecimal(output.sats, `${label} fare`)
   if (sats > maxFareSats) throw new Error(`${label} quotes a fare of ${sats} sats over the ${maxFareSats} authorised`)
-  // Refused here rather than by the assembler's `min: 1`, so the vocabulary of
-  // the refusal is this adapter's.
   if (sats === 0n) throw new Error(`${label} quotes a fare output of no sats at all`)
   return { script: hex.decode(output.script), sats }
 }
@@ -183,7 +156,6 @@ const fareFrom = (
 export interface CarrierFillRebuildDeps {
   wallet: IWallet
   arkServerUrl: string
-  /** Seam for the tests that cannot reach an Arkade server. */
   build?: typeof buildOfferFillPlan
 }
 
@@ -197,19 +169,12 @@ const solverFunding = (coin: CarrierCoin, label: string) => {
     value: coin.value,
     tapTree: coin.tapTree,
     tapLeafScript: coin.forfeitTapLeafScript,
-    // EVERY asset, not just the recycled one: arkd refuses a spend whose packet
-    // omits an asset one of its inputs owns.
+    // Preserve all input assets, not just the recycled asset.
     assets: (coin.assets ?? []).map((held) => ({ assetId: held.assetId, amount: BigInt(held.amount) })),
   }
 }
 
-/**
- * What the quote is allowed to decide, checked before any of it is believed:
- * the covenant input must be the deposit THIS row recorded, and the inputs the
- * quote calls the solver's must be exactly the ones this call selected. Without
- * that, an operator could relabel a solver coin as its own and the rebuild
- * would faithfully reproduce a graph over money it never meant to lend.
- */
+/** Bind the recorded deposit and selected solver inputs so the operator cannot relabel coin ownership. */
 const assertQuotedOwnership = (wire: SwapFillGraphWire, request: CarrierFillRebuildRequest, label: string): void => {
   const covenant = wire.inputs[0]
   if (covenant?.owner !== 'offer-covenant') throw new Error(`${label} was quoted no offer deposit to spend`)
@@ -243,27 +208,22 @@ export const createCarrierFillRebuilder =
       fund: request.inputs.map((coin) => solverFunding(coin, label)),
       payoutScript: request.proceedsScript,
       fundingOutpoint: { txid: request.row.depositTxid!, vout: request.row.depositVout! },
-      // The solver's own number sizes the carrier the maker is paid on.
       assetCarrierSats: request.physicalSats,
       ...(sponsor === undefined ? {} : { sponsor }),
     })
-    // Measured on what was BUILT: `outputs[].sats` is in no digest and checked
-    // against no bytes, so a floor over it is an inequality over the operator's
-    // own term, which proves nothing.
+    // Enforce the floor on built bytes; quoted output amounts are not in the digest.
     assertBuiltGraph(built, request, label)
     return built
   }
 
-/** An asset paid to a third script moves no sats, so no floor can see it: every
- * unit must land on the maker's output — exactly what the row sold and nothing
- * else — or come back to the solver's own proceeds. */
+/** Conserve assets to the maker or solver: the sats floor cannot detect diverted units. */
 export const assertAssetPayouts = (
   finalTx: Transaction,
   proceeds: string,
   row: Pick<AssetRfqSwapRow, 'toAssetId' | 'toAmount'>,
   label: string,
 ): void => {
-  // Without this, `paid === 0n === toAmount` makes everything below unfalsifiable.
+  // Require a positive asset amount or paid === toAmount === 0 would pass.
   if (row.toAmount <= 0n) throw new Error(`${label} sells ${row.toAmount} of ${row.toAssetId}, which is nothing to pay`)
   const outputs = Array.from({ length: finalTx.outputsLength }, (_, i) => finalTx.getOutput(i))
   const groups = assetGroupsOf(finalTx, label)
@@ -292,7 +252,6 @@ const assetGroupsOf = (tx: Transaction, label: string) => {
   try {
     return Extension.fromTx(tx).getAssetPacket()?.groups ?? []
   } catch (error) {
-    // No extension output at all moves no asset; a malformed one says nothing.
     if (error instanceof ExtensionNotFoundError) return []
     const message = error instanceof Error ? error.message : String(error)
     throw new Error(`${label} could not decode its asset packet: ${message}`, { cause: error })
@@ -305,8 +264,7 @@ const valueSpentBy = (checkpoint: Transaction, label: string): bigint => {
   return amount
 }
 
-/** Shared with the observer, so the two ends cannot measure a fill differently.
- * The deposit index is the CALLER's: a second derivation here could disagree. */
+/** Share the flow calculation and caller-selected deposit index with reconciliation. */
 export const solverSatsFlow = (
   finalTx: Transaction,
   checkpoints: readonly Transaction[],
@@ -332,8 +290,7 @@ export const solverSatsFlow = (
   }
 }
 
-/** The assembler lays the deposit at input 0 with the only null owner, so a
- * graph shaped otherwise is not one this builder produced. */
+/** The canonical assembler puts the deposit at input 0 as the only null owner. */
 const assertBuiltGraph = (graph: JointGraph, request: CarrierFillRebuildRequest, label: string): void => {
   const finalTx = Transaction.fromPSBT(base64.decode(graph.arkTx))
   const checkpoints = graph.checkpoints.map((psbt) => Transaction.fromPSBT(base64.decode(psbt)))
@@ -342,7 +299,5 @@ const assertBuiltGraph = (graph: JointGraph, request: CarrierFillRebuildRequest,
     request,
     label,
   )
-  // The asset counterpart of the floor, on the same bytes before the same
-  // signature: a diverted unit moves no sats for the floor to see.
   assertAssetPayouts(finalTx, hex.encode(request.proceedsScript).toLowerCase(), request.row, label)
 }

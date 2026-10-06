@@ -1,13 +1,4 @@
-/**
- * Reconciling one submitted fill: exact evidence, or it stays pending.
- *
- * Every id compared here is derived from PSBT bytes the solver built itself and
- * committed at checkpoint 2 — never from a Taxi label, a `state`, or a graph
- * digest taken on trust. The indexer is asked only to serve transactions back,
- * and what it serves has to be those same bytes. Missing or contradictory
- * evidence keeps the attempt liable and its coins pinned: an ambiguous fill is
- * never released, by this or anything else.
- */
+/** Require locally committed transaction bytes; ambiguous evidence retains liability and pins. */
 
 import { base64, hex } from '@scure/base'
 import { Extension, getArkPsbtFields, Transaction, VtxoTaprootTree } from '@arkade-os/sdk'
@@ -31,8 +22,7 @@ import {
   type CarrierPinLedger,
 } from './assetRfqTaxi.js'
 
-/** The two spend facts a virtual output carries: `spentBy` is normally the
- * CHECKPOINT id and `arkTxId` the final transaction's. */
+/** spentBy usually names a checkpoint; arkTxId names the final transaction. */
 export interface CarrierSpentVtxo {
   txid: string
   vout: number
@@ -46,8 +36,7 @@ export interface CarrierChainReader {
   getVirtualTxs(txids: string[]): Promise<{ txs: readonly string[] }>
 }
 
-/** Deliberately without `prepareCarrierAttempt` or `markCarrierAttemptSubmitting`:
- * reconciliation cannot start an attempt or advance one towards a submit. */
+/** Reconciliation cannot prepare or submit new attempts. */
 export interface CarrierProofStore {
   readCarrierAttempt(id: string): Promise<CarrierAttempt | null>
   settleCarrierAttempt(id: string, expected: CarrierAttempt, fillTxid: string): Promise<boolean>
@@ -59,14 +48,12 @@ export interface TaxiCarrierProofDeps {
   store: CarrierProofStore
   chain: CarrierChainReader
   pins: CarrierPinLedger
-  /** Ruling 5's canceller, reached only on a pass that proved nothing. Absent, an unproven fill pends forever. */
+  /** Without a canceller, an unproven fill remains pending. */
   cancel?: (row: AssetRfqSwapRow, attempt: CarrierAttempt) => Promise<ReceiveCarrierReconcileOutcome>
 }
 
 export interface CarrierFillProof {
-  /** The FINAL transaction's own id, derived from its bytes. */
   txid: string
-  /** The checkpoint that spends the deposit — what `spentBy` normally names. */
   depositCheckpointTxid: string
 }
 
@@ -106,25 +93,18 @@ const boundGraphOf = (attempt: CarrierAttempt, label: string): BoundGraph => {
     graphId: stringField(raw.id, `${label} bound graph id`),
     inputOwners: owners.map((owner) => (owner === null ? null : stringField(owner, `${label} bound graph owner`))),
   }
-  // The stored blob proves nothing by being stored: re-hash it, so a rolled
-  // back or edited row cannot hand this observer a graph it never built.
+  // Rehash stored bytes; persistence alone does not prove their integrity.
   if (!verifyOfferFillPlan(graph)) throw new Error(`${label} bound graph does not hash to the id beside it`)
   return graph
 }
 
-/** Every id the bound fill produces, from re-hashed bytes: a pinned coin spent by
- * one of these is the fill landing, never a third party. */
+/** Derive fill ids from verified bytes before classifying pinned input spends. */
 export const carrierFillIds = (attempt: CarrierAttempt, label: string): ReadonlySet<string> => {
   const graph = boundGraphOf(attempt, label)
   return new Set([graph.arkTx, ...graph.checkpoints].map((psbt) => Transaction.fromPSBT(base64.decode(psbt)).id))
 }
 
-/**
- * The whole of what the solver built, re-derived from its own committed bytes.
- * Every failure in here is a contradiction between two things the SOLVER owns —
- * the row and the checkpoint — so each one throws rather than reading as an
- * absent answer from the chain.
- */
+/** A contradiction between the stored row and checkpoint is an error, not missing chain evidence. */
 const reconstruct = (row: AssetRfqSwapRow, attempt: CarrierAttempt, label: string) => {
   const graph = boundGraphOf(attempt, label)
   const finalTx = Transaction.fromPSBT(base64.decode(graph.arkTx))
@@ -182,15 +162,14 @@ const reconstruct = (row: AssetRfqSwapRow, attempt: CarrierAttempt, label: strin
     authorised,
     `${label} bound graph`,
   )
-  // A recycle with no asset leg cannot exist — `settle` refuses one before any
-  // attempt is written — so this is a contradiction, never a case to skip.
+  // Missing the required asset leg contradicts a prepared recycle attempt.
   if (row.toAssetId === null) throw new Error(`${label} reconciles a recycle row that names no asset leg`)
   assertAssetPayouts(finalTx, proceeds, row, `${label} bound graph`)
 
   return { finalTx, txid: finalTx.id, checkpoints, checkpointTxids, depositIndex, deposit }
 }
 
-/** Null is "the chain has not shown me enough", never "it is not settled". */
+/** Null means insufficient evidence, not a proof of non-settlement. */
 const proveCarrierFill = async (
   row: AssetRfqSwapRow,
   attempt: CarrierAttempt,
@@ -205,8 +184,7 @@ const proveCarrierFill = async (
   // Truthiness, never presence: the wire spells "unspent" as an empty string.
   const spends = [funded?.spentBy, funded?.arkTxId, funded?.settledBy].filter((id): id is string => !!id)
   if (spends.length === 0) return null
-  // The deposit's spender is one of the two ids THIS graph produces, or it is
-  // somebody else's transaction and nothing here is proven.
+  // The deposit spender must be an id derived from this graph.
   if (!spends.some((id) => id === depositCheckpointTxid || id === built.txid)) return null
 
   const wanted = [depositCheckpointTxid, built.txid]
@@ -226,9 +204,7 @@ const proveCarrierFill = async (
   ])
   for (const id of wanted) {
     const onChain = served.get(id)
-    // Not served yet is ordinary. Served under this id while committing to
-    // something else is not, and must not read as "not confirmed yet": an
-    // attempt that pends forever holds its coins forever.
+    // Missing transactions are ordinary; mismatched bytes under a served id are a contradiction.
     if (onChain === undefined) return null
     assertSameSpendCommitment(onChain, expected.get(id)!, `${label} transaction ${id}`)
   }
@@ -246,24 +222,20 @@ const tapLeavesOf = (tx: Transaction, at: number): readonly string[] =>
     )
     .sort()
 
-/** TAP METADATA ONLY, and only while these bytes are EVIDENCE: nothing spends
- * them, so a missing leaf is a thinner answer. Never widen to `witnessUtxo`. */
+/** Evidence may omit tap metadata, never witnessUtxo. */
 const sameOrAbsent = (got: readonly string[], want: readonly string[]): boolean =>
   got.length === 0 || got.join(',') === want.join(',')
 
-/** Only what the txid leaves out — both sides are keyed on an id recomputed from
- * their own bytes. `witnessUtxo.script` is the live one: the taproot output key. */
+/** Compare fields absent from txid, including the live witnessUtxo script. */
 const assertSameSpendCommitment = (candidate: Transaction, trusted: Transaction, label: string): void => {
   const differs = (what: string): never => {
     throw new Error(`${label} is served with a different ${what} than the one this solver signed`)
   }
-  // Asserted, not assumed: a caller keying by label would unmake the rest.
   if (candidate.id !== trusted.id) differs('transaction')
   for (let i = 0; i < trusted.inputsLength; i += 1) {
     const got = candidate.getInput(i)
     const want = trusted.getInput(i)
-    // Strict where finalization KEEPS a field (`PSBTInputFinalKeys`), tolerant
-    // below where it drops one: missing this wedges, missing a taptree settles.
+    // Require fields retained by finalization; tolerate only those it removes.
     if (!sameBytes(got.witnessUtxo?.script, want.witnessUtxo?.script)) differs(`input ${i} prevout script`)
     if (got.witnessUtxo?.amount !== want.witnessUtxo?.amount) differs(`input ${i} prevout value`)
     if (!sameOrAbsent(tapLeavesOf(candidate, i), tapLeavesOf(trusted, i))) differs(`input ${i} tap leaves`)
@@ -281,15 +253,12 @@ export const createTaxiReceiveCarrierObserver = (
   deps: TaxiCarrierProofDeps,
 ): Pick<ReceiveCarrierQuotes, 'reconcile'> => ({ reconcile: observeWith(deps, new Set<string>()) })
 
-/** The hold is the invariant; the silence is not. `raised` is PER ADAPTER. */
+/** Raise contradictions once per adapter while retaining the pins. */
 const observeWith =
   (deps: TaxiCarrierProofDeps, raised: Set<string>) =>
   async (row: AssetRfqSwapRow): Promise<ReceiveCarrierReconcileOutcome> => {
     const attempt = await deps.store.readCarrierAttempt(row.id)
-    // The write that precedes the first POST never landed, so nothing was sent
-    // and nothing ever will be. Refused but NOT released: a null attempt also
-    // spells a settle short of its first checkpoint, whose pin its own lost
-    // prepare frees — every attempt write CASes on `filling`.
+    // No attempt means no POST; a racing prepare owns and releases its own pin.
     if (attempt === null) {
       const reason = 'not filled: receive-carrier settlement stopped before preparing an attempt'
       await deps.store.refuseUnattemptedCarrierFill(row.id, reason)
@@ -301,16 +270,13 @@ const observeWith =
       releaseEveryPin(deps.pins, row.id)
       return { status: 'settled', txid }
     }
-    // Durable proof nothing can land: the refusal CAS writes `not_submitted` only
-    // over `prepared`/`quoted`, and `cancelled` only once the chain showed the
-    // conflict spend. Any other holder's pin is `settle`'s leak.
+    // not_submitted proves no submission; cancelled proves the conflict landed.
     if (attempt.phase === 'not_submitted' || attempt.phase === 'cancelled') {
       releaseEveryPin(deps.pins, row.id)
       return { status: 'pending' }
     }
     if (attempt.phase !== 'submitting' && attempt.phase !== 'cancelling') {
-      // The submitting marker is committed BEFORE the submit POST, so a durable
-      // phase short of it is proof nothing was ever sent.
+      // The durable submitting marker precedes the POST.
       const reason = `not filled: reconciliation found the attempt still '${attempt.phase}', so it never submitted`
       if (await deps.store.refuseNeverSubmittedCarrierAttempt(row.id, attempt, reason)) {
         releaseEveryPin(deps.pins, row.id)
@@ -327,8 +293,7 @@ const observeWith =
       throw error
     }
     if (proof === null) return deps.cancel === undefined ? { status: 'pending' } : deps.cancel(row, attempt)
-    // The coins are spent by a transaction this call just proved, so the
-    // reservation over them is the one thing that is now certainly stale.
+    // Release only after proving the spend of these reserved coins.
     if (await deps.store.settleCarrierAttempt(row.id, attempt, proof.txid)) releaseEveryPin(deps.pins, row.id)
     return { status: 'settled', txid: proof.txid }
   }

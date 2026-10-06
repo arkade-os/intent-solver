@@ -1,12 +1,4 @@
-/**
- * Settling one recycle fill: durable intent before every external effect.
- *
- * Three checkpoints, each committed before the boundary it guards. A reply
- * lost after one is recoverable; a reply lost before one cannot have moved
- * money. Each CAS is given the envelope THIS call knows it wrote, never a
- * re-read, which would let a racing worker's checkpoint base this one's.
- * Nothing returns a txid: only chain evidence resolves a submitted fill.
- */
+/** Persist before external effects; CAS against this caller's envelope and settle only on chain evidence. */
 
 import { hex } from '@scure/base'
 import {
@@ -43,18 +35,14 @@ type Locktime = Readonly<{ kind: 'height' | 'time'; value: bigint }>
 type VerifiedSwapFill = Parameters<TaxiClient['submitSwapFill']>[0]
 type SwapFillGraphWire = Parameters<TaxiClient['submitSwapFill']>[1]
 
-/** Backoff before each re-POST on `not_ready`: the Taxi's runtime check takes seconds, and this settle holds the
- * orchestrator's fill queue while it waits. */
+/** Back off not_ready replies while holding the fill queue. */
 const CARRIER_NOT_READY_RETRY_MS: readonly number[] = [1_000, 2_000, 4_000]
 
 declare const carrierSnapshot: unique symbol
 
-/** REQUIRED, not optional: the compiler refuses a snapshot that skipped the
- * shared input codec. The symbol has no runtime existence to serialize. */
+/** Brand snapshots only through the shared input codec. */
 export type CarrierAttemptSnapshot = JsonObject & { readonly [carrierSnapshot]: true }
 
-/** Methods, not arrow properties: bivariance lets the real store's
- * `snapshot: unknown` satisfy the narrowed parameter above. */
 export interface CarrierAttemptStore {
   readCarrierAttempt(id: string): Promise<CarrierAttempt | null>
   prepareCarrierAttempt(id: string, snapshot: CarrierAttemptSnapshot): Promise<boolean>
@@ -69,22 +57,19 @@ export interface CarrierFillRebuildRequest {
   offerHex: string
   inputs: readonly CarrierCoin[]
   proceedsScript: Uint8Array
-  /** The three sats the solver AUTHORISED. The rebuild builds with these rather
-   * than the quote's, and refuses a quote that priced itself differently. */
+  /** Rebuild from authorised economics and reject differently priced quotes. */
   physicalSats: bigint
   contributionSats: bigint
   maxFareSats: bigint
   quotedGraph: SwapFillGraphWire
 }
 
-/** `rebuild` must derive the graph from the solver's own inputs and the offer,
- * never from the operator's bytes; `sign` touches only solver-owned inputs. */
+/** Derive the graph locally and sign only solver-owned inputs. */
 export interface CarrierFillSeams {
   rebuild: (request: CarrierFillRebuildRequest) => Promise<JointGraph>
   sign: (expected: JointGraph) => Promise<JointGraph>
 }
 
-/** The Taxi one row's fill goes to, and what its attempt records about it. */
 export interface CarrierTaxi {
   /** The guard's normalised form for a Taxi the row named; `TAXI_URL` verbatim otherwise. */
   provider: string
@@ -95,7 +80,6 @@ export interface CarrierTaxi {
 
 export interface TaxiCarrierSettleDeps {
   store: CarrierAttemptStore
-  /** Throws, before anything is pinned, for a Taxi this solver cannot or may not reach. */
   taxiFor: (row: AssetRfqSwapRow) => CarrierTaxi
   resolve: ReceiveCarrierQuotes['resolve']
   coins: () => Promise<readonly CarrierCoin[]>
@@ -106,8 +90,7 @@ export interface TaxiCarrierSettleDeps {
   offerHex: (row: AssetRfqSwapRow) => string
   proceedsScript: Uint8Array
   solverKeys: readonly string[]
-  /** What a solver input's forfeit leaf must be collaborative with — a getter
-   * so a signer rotation is live without a restart. */
+  /** Resolve collaborative signer keys on demand so rotations take effect. */
   serverKey: () => Uint8Array
   fill: CarrierFillSeams
   now: () => number
@@ -121,16 +104,12 @@ const contributionOf = (coin: CarrierCoin, leg: AssetLeg, dustSats: bigint): big
     .reduce((total, held) => total + BigInt(held.amount), 0n)
 }
 
-/** A selected coin paired with the evidence that qualified it, so the request
- * builder uses selection's own answer rather than deriving a second one. */
 export interface CarrierSelectedInput {
   coin: CarrierCoin
   evidence: CarrierTaprootEvidence
 }
 
-/** Ordered by outpoint rather than by value or expiry: the set has to be a
- * function of the inventory alone, so a reconciler re-deriving it after a
- * restart gets the same answer this call got. */
+/** Sort by outpoint so reconciliation reproduces selection after a restart. */
 export const selectCarrierInputs = (args: {
   coins: readonly CarrierCoin[]
   reserved: ReadonlySet<string>
@@ -177,11 +156,9 @@ const carrierAttemptSnapshotFor = (parts: {
   maxFareSats: bigint
   validUntil: number
 }): CarrierAttemptSnapshot =>
-  // The ONE mint of the brand, reachable only through the codec below.
   mintSnapshot({
     ...encodeCarrierAttemptInputs(parts.inputs),
     operation: parts.row.id,
-    // A record of which Taxi holds this graph; nothing reads it back yet, and a reader must use it, not config.
     provider: parts.taxi.provider,
     ...(parts.taxi.providerKey === undefined ? {} : { provider_key: parts.taxi.providerKey }),
     offer: parts.offerHex,
@@ -197,8 +174,7 @@ const carrierAttemptSnapshotFor = (parts: {
 
 const mintSnapshot = (fields: JsonObject): CarrierAttemptSnapshot => fields as unknown as CarrierAttemptSnapshot
 
-/** `offer-covenant` is the provider-signed deposit, which the fill template
- * spells as a null owner. */
+/** The provider-signed offer covenant has a null owner in the fill template. */
 const quotedInputOwners = (wire: SwapFillGraphWire): readonly (string | null)[] =>
   wire.inputs.map((input) => (input.owner === 'offer-covenant' ? null : input.owner))
 
@@ -209,16 +185,14 @@ export const sameInputOwners = (a: readonly (string | null)[], b: readonly (stri
   return true
 }
 
-/** Only the signed transactions are replaced: every economic field the submit
- * pre-flight compares stays the operator's own bytes. */
+/** Replace signed bytes without changing economics checked by submit preflight. */
 const solverGraphWire = (quoted: SwapFillGraphWire, signed: JointGraph): SwapFillGraphWire => ({
   ...quoted,
   arkTx: signed.arkTx,
   checkpoints: [...signed.checkpoints],
 })
 
-/** Owner-restricted by construction: the bindings come from the graph the
- * solver built itself, so a relabelled owner cannot steer what gets signed. */
+/** Signer bindings come from the locally built graph, preventing owner relabelling. */
 export const carrierFillSigner =
   (identity: Identity) =>
   async (expected: JointGraph): Promise<JointGraph> => {
@@ -290,9 +264,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       validUntil,
     })
 
-    // Still before the write that names them, and after the last refusal that
-    // would leave no attempt for reconciliation to release this pin from.
-    // Everything between is synchronous, so nothing can interleave here.
+    // Pin after synchronous refusals but before the durable input write.
     const pin = deps.pins.adopt(row.id, deps.reserve(outpoints))
 
     const prepared: CarrierAttempt = { phase: 'prepared', snapshot }
@@ -301,8 +273,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
     try {
       wrote = true
       if (!(await deps.store.prepareCarrierAttempt(row.id, snapshot))) {
-        // The CAS LOST: the attempt is not this caller's to end, and only
-        // the pin above is its to free.
+        // Losing the prepare CAS releases only this caller's pin.
         wrote = false
         pin.release()
         throw new Error(`carrier fill ${row.id} could not prepare its attempt; the operator was asked nothing`)
@@ -317,8 +288,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
           value: BigInt(coin.value),
           tapTree: evidence.tapTree,
           spendLeaf: evidence.spendLeaf,
-          // EVERY asset the coin owns: arkd refuses a spend whose packet omits
-          // one an input carries.
+          // Preserve every input asset or arkd rejects the spend.
           assets: (coin.assets ?? []).map((held) => ({
             assetId: assetIdValue(held.assetId),
             amount: BigInt(held.amount),
@@ -330,8 +300,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         maxFare: { currency: 'sats', units: terms.serviceFareSats },
         fundingTxid: deposit.txid,
         fundingVout: deposit.vout,
-        // PINNED: it participates in request identity, so a recomputed value
-        // is a conflict rather than the same request.
+        // Persist this value because it participates in request identity.
         validUntil,
         now: deps.now(),
       })
@@ -351,8 +320,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       if (!sameInputOwners(expected.inputOwners, quotedInputOwners(quoted))) {
         throw new Error(`carrier fill ${row.id} was quoted input owners it did not build`)
       }
-      // The digest binds bytes, owners and template together: an equal one is
-      // the whole graph re-derived, not a field-by-field echo.
+      // The digest binds locally rebuilt bytes, owners and template.
       if (expected.graphId !== quoted.graphId) {
         throw new Error(`carrier fill ${row.id} rebuilt ${expected.graphId}, not the quoted ${quoted.graphId}`)
       }
@@ -364,8 +332,6 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
           id: expected.graphId,
           ark_tx: expected.arkTx,
           checkpoints: [...expected.checkpoints],
-          // Carried because the digest commits to them: without the owners
-          // reconciliation cannot re-hash the bytes it is handed.
           input_owners: [...expected.inputOwners],
         },
       }
@@ -375,16 +341,14 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
 
       const signed = await deps.fill.sign(expected)
 
-      // The last gate: the authority this attempt was admitted under must
-      // still be the one the operator serves, now bound to this fill.
+      // Recheck the admitted operator authority, now bound to this fill.
       const current = await deps.resolve({ ...request, now: deps.now(), boundFillId: verified.fillId })
       if (!sameLocktime(current.inputExpiryFloor, floor)) {
         throw new Error(
           `carrier fill ${row.id} pinned an input expiry floor of ${floor.value} and the operator now serves ${current.inputExpiryFloor.value}`,
         )
       }
-      // The coin AS IT IS NOW: re-testing the object selected before the
-      // boundary could not fail, whatever had changed.
+      // Recheck current coin state, not the pre-boundary selection.
       const live = new Map((await deps.coins()).map((coin) => [outpointKey(coin.txid, coin.vout), coin]))
       for (const { coin } of inputs) {
         const fresh = live.get(outpointKey(coin.txid, coin.vout))
@@ -415,7 +379,6 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       try {
         return await settleOnce(row)
       } catch (error) {
-        // Refuses only a row still holding no attempt; one this cannot write is left to reconciliation's own.
         await deps.store.refuseUnattemptedCarrierFill(row.id, `not filled: ${messageOf(error)}`).catch(() => false)
         throw error
       }
@@ -425,8 +388,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
 
 export const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
-/** Runs past `submitting`, so no exit here releases. The Taxi already holds the signatures, and a named one is
- * untrusted: its `not_ready` is no proof it will never submit, so the SAME bytes are re-sent, never rebuilt. */
+/** After submitting, retain pins and resend the same bytes even on an untrusted not_ready reply. */
 const submitWhileNotReady = async (
   deps: Pick<TaxiCarrierSettleDeps, 'now' | 'sleep'>,
   taxi: CarrierTaxi,
@@ -446,9 +408,7 @@ const submitWhileNotReady = async (
   }
 }
 
-/** Routed on the DURABLE phase, never on what this call believes it did: a
- * checkpoint write that threw may still have landed, and the row is the only
- * thing that knows. */
+/** Read durable phase: a failed checkpoint write may still have landed. */
 const releaseIfProvenNeverSubmitted = async (
   deps: TaxiCarrierSettleDeps,
   pin: CarrierPin,
@@ -457,11 +417,7 @@ const releaseIfProvenNeverSubmitted = async (
   const current = await deps.store.readCarrierAttempt(pin.id)
   // No attempt means the write that precedes the first POST never landed.
   if (current === null) return pin.release()
-  // `not_submitted` is somebody's WON terminal CAS, and that CAS refuses any
-  // prior phase but `prepared`/`quoted` — so it is durable proof this row never
-  // submitted. The winner freed its own pin; this one is the loser's, over
-  // coins nothing spent, and no later caller can ever reach it: the row is
-  // `refused`, which reconciliation never visits.
+  // not_submitted is durable proof of a terminal CAS from prepared or quoted.
   if (current.phase === 'not_submitted') return pin.release()
   // Anything past `quoted` may have been submitted, and keeps its pin for good.
   if (current.phase !== 'prepared' && current.phase !== 'quoted') return

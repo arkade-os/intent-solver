@@ -55,13 +55,21 @@ export const settleReservedRenewal = async (arkade: ArkadeContext, params: Settl
     throw new Error('renewal input is reserved by another operation')
   }
   const release = arkade.reservations.reserve(params.inputs)
-  const outcome = await arkade.wallet.settleWithOutcome(params)
-  if (!outcome.ok) {
-    if (!outcome.intentRegistrationAttempted) release()
-    throw outcome.error
+  let preparing = false
+  let registrationAttempted = false
+  try {
+    const txid = await arkade.wallet.settle(params, undefined, {
+      onPhase: (phase) => {
+        if (phase === 'preparing') preparing = true
+        if (phase === 'registration_attempt') registrationAttempted = true
+      },
+    })
+    release()
+    return txid
+  } catch (error) {
+    if (preparing && !registrationAttempted) release()
+    throw error
   }
-  release()
-  return outcome.txid
 }
 
 /**
