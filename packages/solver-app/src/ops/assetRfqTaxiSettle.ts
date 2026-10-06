@@ -37,7 +37,7 @@ type Locktime = Readonly<{ kind: 'height' | 'time'; value: bigint }>
 type VerifiedSwapFill = Parameters<TaxiClient['submitSwapFill']>[0]
 type SwapFillGraphWire = Parameters<TaxiClient['submitSwapFill']>[1]
 
-/** Back off not_ready replies while holding the fill queue. */
+/** Back off post-sign not_ready submits while holding the fill queue; quote retries use the client's schedule. */
 const CARRIER_NOT_READY_RETRY_MS: readonly number[] = [1_000, 2_000, 4_000]
 
 export interface CarrierAttemptStore {
