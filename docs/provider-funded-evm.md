@@ -24,7 +24,9 @@ The probe bounds its search to 128 recent blocks, at most three candidate
 transactions and bounded trace frames. Operators should use an endpoint that
 retains recent receipts and supports `debug_traceTransaction` with
 `callTracer`'s `withLog` option; no token event in the sample or an unsupported
-trace method fails closed for new quotes.
+trace method fails closed for new quotes. A chain whose claims are direct HTLC
+calls may set `EVM_DIRECT_CLAIMS_ONLY=true` to skip the probe; direct claims are
+verified without a trace, and an indirect one holds its row for the operator.
 
 Existing native EVM send rows are not made safe by this upgrade: before
 upgrading, operators with live rows must verify the settlement RPC supports the
@@ -34,8 +36,8 @@ fails.
 
 Programmatic `EvmSendSwapService` construction now requires an
 `assertClaimTraceSupport` dependency. Custom hosts must provide a real
-provider-backed probe or equivalent evidence; a no-op only belongs in a test
-that deliberately excludes EVM behavior.
+provider-backed probe or equivalent evidence; a no-op belongs only in a test
+that deliberately excludes EVM behavior, or behind `EVM_DIRECT_CLAIMS_ONLY`.
 
 ## Ownership and settlement
 
