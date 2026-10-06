@@ -395,8 +395,31 @@ describe('running solver to Taxi on regtest', () => {
           const snapshot = await taxi.listClaims({ receiverAddresses: [buyerAddress] })
           return snapshot.claims.find((entry) => entry.claimable && entry.claim) ?? null
         },
-        { attempts: 120, intervalMs: 1_000, whenExhausted: `no real Taxi claim appeared; solver: ${daemonLog}` },
-      )
+        { attempts: 120, intervalMs: 1_000, whenExhausted: 'no real Taxi claim appeared' },
+      ).catch(async (error: unknown) => {
+        let rfqState: unknown
+        try {
+          const db = betterSqliteDriver(join(workdir, 'solver-swaps.sqlite'))
+          try {
+            rfqState = await db.get(
+              `SELECT id, state, failure_reason, valid_until, deposit_txid, deposit_vout, fill_txid,
+                      json_extract(carrier_attempt, '$.phase') AS carrier_attempt_phase
+                 FROM asset_rfq_swap WHERE rfq_id = ?`,
+              [rfqId],
+            )
+          } finally {
+            await db.close()
+          }
+        } catch (diagnosticError) {
+          rfqState = {
+            diagnosticError: diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError),
+          }
+        }
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}; rfq: ${JSON.stringify({ rfqId, fundingTxid, state: rfqState ?? null })}; solver: ${daemonLog}`,
+          { cause: error },
+        )
+      })
       const status = await taxi.status(claim.transferId)
       const transfer = await taxi.verifyIncomingClaim(
         claim,
