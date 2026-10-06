@@ -1,22 +1,13 @@
-/**
- * The four-method adapter, assembled where the read half already is.
- *
- * The declared return type is the whole {@link ReceiveCarrierQuotes}, so the
- * compiler — not the orchestrator's runtime gate — is what proves this one is
- * complete. The gate still stands behind it for anything else handed in.
- */
-
 import { ArkAddress, type Identity, type IndexerProvider, type IWallet, type Wallet } from '@arkade-os/sdk'
 import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { ReceiveCarrierQuotes } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import { taxiClientCache, type CarrierCoin, type CarrierOutpoint, type CarrierPinLedger } from './assetRfqTaxi.js'
 import {
   carrierFillSigner,
   createTaxiReceiveCarrierSettler,
-  messageOf,
   type CarrierAttemptStore,
-  type CarrierFillSeams,
   type CarrierTaxi,
 } from './assetRfqTaxiSettle.js'
 import { createTaxiReceiveCarrierObserver, type CarrierProofStore } from './assetRfqTaxiProof.js'
@@ -25,17 +16,16 @@ import { createCarrierFillRebuilder } from './assetRfqTaxiRebuild.js'
 import { normalizeTaxiUrl, type TaxiUrlPolicy } from './taxiUrlGuard.js'
 
 export interface TaxiCarrierFillComposition {
-  /** Only a row naming no Taxi of its own needs it (G4). */
+  /** Only a row naming no Taxi of its own needs it. */
   taxiUrl?: string
   policy: TaxiUrlPolicy
-  fetch?: typeof fetch
   store: CarrierAttemptStore & CarrierProofStore & CarrierConflictStore
   chain: Pick<IndexerProvider, 'getVtxos' | 'getVirtualTxs'>
   pins: CarrierPinLedger
   coins: () => Promise<readonly CarrierCoin[]>
   reserved: () => ReadonlySet<string>
   reserve: (outpoints: readonly CarrierOutpoint[]) => ReleaseReservation
-  /** The two `Wallet` members are the conflict spend's (Ruling 5), read only once one is due. */
+  /** The two `Wallet` members are the conflict spend's, read only once one is due. */
   wallet: IWallet & Pick<Wallet, 'arkProvider' | 'serverUnrollScript'>
   identity: Identity
   arkServerUrl: string
@@ -46,25 +36,14 @@ export interface TaxiCarrierFillComposition {
   solverKeys: readonly string[]
   serverKey: () => Uint8Array
   now: () => number
-  /** Tests only: a stub Taxi's graph is nothing a real arkd could rebuild or sign. */
-  fill?: CarrierFillSeams
 }
 
-export class CarrierTaxiRefusedError extends Error {
-  constructor(rowId: string, url: string, cause: unknown) {
-    super(`carrier fill ${rowId} names Taxi ${url}, which this solver's URL policy refuses: ${messageOf(cause)}`, {
-      cause,
-    })
-    this.name = 'CarrierTaxiRefusedError'
-  }
-}
-
-/** Keyed on the row's MODE, never on URL equality: a named Taxi spelling `TAXI_URL` is still a payer's input (G3). */
+/** Keyed on the row's MODE, never on URL equality: a named Taxi spelling `TAXI_URL` is still a payer's input. */
 export const carrierTaxiFor = (
-  deps: Pick<TaxiCarrierFillComposition, 'taxiUrl' | 'policy' | 'fetch'>,
+  deps: Pick<TaxiCarrierFillComposition, 'taxiUrl' | 'policy'>,
 ): ((row: AssetRfqSwapRow) => CarrierTaxi) => {
   const configured = deps.taxiUrl?.trim() || undefined
-  const clientFor = taxiClientCache({ configuredUrl: configured, policy: deps.policy, fetch: deps.fetch })
+  const clientFor = taxiClientCache({ configuredUrl: configured, policy: deps.policy })
   return (row) => {
     const terms = row.carrierTerms
     if (terms?.mode === 'recycle_receiver') {
@@ -72,7 +51,10 @@ export const carrierTaxiFor = (
       try {
         provider = normalizeTaxiUrl(terms.taxiUrl ?? '', deps.policy)
       } catch (cause) {
-        throw new CarrierTaxiRefusedError(row.id, String(terms.taxiUrl), cause)
+        throw new Error(
+          `carrier fill ${row.id} names Taxi ${String(terms.taxiUrl)}, which this solver's URL policy refuses: ${messageOf(cause)}`,
+          { cause },
+        )
       }
       return { provider, providerKey: terms.taxiKey, swapFills: clientFor(provider, 'fill') }
     }
@@ -102,7 +84,7 @@ export const completeTaxiReceiveCarrier = (
       proceedsScript,
       solverKeys: deps.solverKeys,
       serverKey: deps.serverKey,
-      fill: deps.fill ?? {
+      fill: {
         rebuild: createCarrierFillRebuilder({ wallet: deps.wallet, arkServerUrl: deps.arkServerUrl }),
         sign: carrierFillSigner(deps.identity),
       },

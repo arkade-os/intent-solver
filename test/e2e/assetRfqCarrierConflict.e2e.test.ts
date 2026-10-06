@@ -1,5 +1,5 @@
 /**
- * E2E — cancel-by-conflict (Ruling 5) against a real arkd: a `submitting` attempt past both deadlines
+ * E2E — cancel-by-conflict against a real arkd: a `submitting` attempt past both deadlines
  * spends its pinned coins back to the solver, and its pin is freed only once the conflict's `txid:0` is
  * indexed. No Taxi runs here, so the attempt is seeded from real wallet coins; the clock is injected.
  * Needs arkd, the emulator, spendable sats and a minted asset. Run: `pnpm test:e2e`.

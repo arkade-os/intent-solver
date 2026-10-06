@@ -336,7 +336,6 @@ export interface TaxiCarrierComposition {
   reserved: () => ReadonlySet<string>
   quoteValiditySeconds: number
   tipHeight?: () => Promise<number>
-  fetch?: typeof fetch
   /** SSRF policy for request-named URLs; configured URLs are trusted separately. */
   policy: TaxiUrlPolicy
 }
@@ -361,19 +360,17 @@ const TAXI_CLIENT_CACHE_SIZE = 32
 export const taxiClientCache = (deps: {
   configuredUrl?: string
   policy: TaxiUrlPolicy
-  fetch?: typeof fetch
 }): ((url?: string, budget?: TaxiBudget) => TaxiCarrierClient) => {
-  const baseFetch = deps.fetch ?? fetch
   const configured = deps.configuredUrl
     ? new TaxiClient({
         baseUrl: deps.configuredUrl,
         fetch: guardedTaxiFetch(
-          baseFetch,
+          fetch,
           new RateLimiter(Number.MAX_SAFE_INTEGER, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
         ),
       })
     : undefined
-  const requestFetch = deps.fetch ?? (deps.policy.allowPrivate ? fetch : createPinnedTaxiFetch())
+  const requestFetch = deps.policy.allowPrivate ? fetch : createPinnedTaxiFetch()
   const limiters: Record<TaxiBudget, RateLimiter> = {
     quote: new RateLimiter(TAXI_QUOTE_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
     fill: new RateLimiter(TAXI_FILL_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
@@ -415,7 +412,6 @@ export const taxiReceiveCarrier = async (
     clientFor: taxiClientCache({
       configuredUrl: deps.taxiUrl?.trim() || undefined,
       policy: deps.policy,
-      fetch: deps.fetch,
     }),
     trust: await deps.trust(),
     maxServiceFareSats: deps.maxServiceFareSats,
@@ -436,7 +432,6 @@ export interface CarrierPin {
 export interface CarrierPinLedger {
   adopt(id: string, release: ReleaseReservation): CarrierPin
   heldFor(id: string): readonly CarrierPin[]
-  held(): readonly string[]
 }
 
 export const createCarrierPinLedger = (): CarrierPinLedger => {
@@ -457,7 +452,6 @@ export const createCarrierPinLedger = (): CarrierPinLedger => {
       return pin
     },
     heldFor: (id) => [...(held.get(id) ?? [])],
-    held: () => [...held.keys()],
   }
 }
 

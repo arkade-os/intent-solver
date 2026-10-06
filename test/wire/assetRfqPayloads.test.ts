@@ -111,7 +111,7 @@ describe('AssetRfqRequest', () => {
     expect(parsed.success && parsed.data.profile.carrier).toEqual({ mode: 'recycle', quote_id: 'q-1' })
   })
 
-  /** Ruling 4: the payee's own Taxi, named on the wire rather than configured. */
+  /** The payee's own Taxi, named on the wire rather than configured. */
   it('accepts a recycle_receiver mode carrying a quote id, a taxi url and its key', () => {
     const carrier = { mode: 'recycle_receiver', quote_id: 'q-1', taxi_url: 'https://taxi.example', taxi_key: XONLY }
     const parsed = AssetRfqRequest.safeParse(request({}, { carrier }))

@@ -47,6 +47,7 @@ import { poolTarget } from '@arkade-os/solver-arkade/arkade/vtxoPool.js'
 import { poolPlan, resplitFloat } from './pool.js'
 import { summariseSignerMigration } from '@arkade-os/solver-arkade/arkade/signerMigration.js'
 import { planBoardingSettle } from '@arkade-os/solver-arkade/arkade/boardingSettle.js'
+import { spendableCarrierCoins } from './assetRfqTaxi.js'
 import type { Services } from './services.js'
 
 export const settleReservedRenewal = async (arkade: ArkadeContext, params: SettleParams): Promise<string> => {
@@ -204,14 +205,7 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
     // direction, since a failed funding is a dead swap.
     let release: ReleaseReservation = () => {}
     try {
-      const contracts = await (
-        await wallet.getContractManager()
-      ).getContractsWithVtxos({
-        type: ['default', 'delegate'],
-      })
-      const candidates = contracts.flatMap(({ vtxos }) =>
-        vtxos.filter((vtxo) => !vtxo.isSwept && !(vtxo.isSpent || vtxo.spentBy || vtxo.settledBy)),
-      )
+      const candidates = await spendableCarrierCoins(await wallet.getContractManager())
       const reserved = services.arkade.reservations.reserved()
       const held = candidates.filter((coin) => reserved.has(`${coin.txid}:${coin.vout}`))
       if (held.length > 0) {

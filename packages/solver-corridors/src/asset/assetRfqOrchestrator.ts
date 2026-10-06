@@ -138,9 +138,9 @@ export interface ReceiveCarrierQuoteRequest {
    * or tip, so a floor admitted with no room to spare refuses the client that
    * funded it. Required: it also picks which Taxi budget the read spends. */
   admission: boolean
-  /** Absent resolves against the configured Taxi, as today (Ruling 3). */
+  /** Absent resolves against the configured Taxi, as today. */
   taxi?: { url: string; operatorKey: string }
-  /** Ruling 4, decoupled from `taxi`: opts the adapter into the SDK's own `payer: 'receiver'` check. */
+  /** Decoupled from `taxi`: opts the adapter into the SDK's own `payer: 'receiver'` check. */
   receiverPaid?: boolean
   /** Settle's post-sign re-read only: requesting the swap fill BOUND the quote, so it must be bound to this fill. */
   boundFillId?: string
@@ -187,30 +187,6 @@ export const receiveCarrierTaxiOf = (
   return { taxi: { url: terms.taxiUrl, operatorKey: terms.taxiKey }, receiverPaid: true }
 }
 
-const completeReceiveCarrierQuotes = (value: unknown): ReceiveCarrierQuotes | null => {
-  if (typeof value !== 'object' || value === null) return null
-  const candidate = value as Record<string, unknown>
-  return typeof candidate.resolve === 'function' &&
-    typeof candidate.available === 'function' &&
-    typeof candidate.settle === 'function' &&
-    typeof candidate.reconcile === 'function'
-    ? (value as ReceiveCarrierQuotes)
-    : null
-}
-
-const snapshotInputExpiryFloor = (value: unknown): Readonly<{ kind: 'height' | 'time'; value: bigint }> | null => {
-  if (typeof value !== 'object' || value === null) return null
-  const candidate = value as { kind?: unknown; value?: unknown }
-  const kind = candidate.kind
-  const floor = candidate.value
-  if ((kind !== 'height' && kind !== 'time') || typeof floor !== 'bigint' || floor <= 0n) return null
-  if (kind === 'height' && floor >= 500_000_000n) return null
-  if (kind === 'time' && (floor < 500_000_000n || floor > 4_294_967_295n)) return null
-  return { kind, value: floor }
-}
-
-const isCanonicalTxid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
-
 export interface AssetRfqDeps {
   quoteLimiter?: RateLimiter
   store: AssetRfqSwapStore
@@ -241,9 +217,8 @@ export interface AssetRfqDeps {
   /** Spend the deposit through `fulfill`, paying the client. Returns the txid. */
   settle: (row: AssetRfqSwapRow) => Promise<string>
   /** The internal Taxi adapter, reached only for an explicit `recycle`.
-   * OPTIONAL, and its absence is a REFUSAL rather than a default. `Partial`
-   * because the gate below refuses a half-built one on its own. */
-  receiveCarrierQuotes?: Partial<ReceiveCarrierQuotes>
+   * OPTIONAL, and its absence is a REFUSAL rather than a default. */
+  receiveCarrierQuotes?: ReceiveCarrierQuotes
   onError?: (id: string, error: unknown) => void
   now?: () => number
   newId?: () => string
@@ -383,19 +358,9 @@ export class AssetRfqSwapService {
         publishedSats: physical,
       }
     }
-    // Reachable only past a caller that bypassed the wire schema — named here
-    // rather than falling through to the recycle path below.
-    if (carrier.mode !== 'recycle' && carrier.mode !== 'recycle_receiver') {
-      return {
-        ok: false,
-        reason: 'unsupported_payload',
-        detail: `profile.carrier names an unsupported mode '${String((carrier as { mode: unknown }).mode)}'`,
-      }
-    }
-
     // Refused BEFORE anything is priced, so an unconfigured deployment cannot
     // quote the market's free carrier.
-    const adapter = completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes)
+    const adapter = this.deps.receiveCarrierQuotes
     if (!adapter) {
       return {
         ok: false,
@@ -423,18 +388,10 @@ export class AssetRfqSwapService {
       return { ok: false, reason: 'price_unavailable', detail: 'the receive-carrier quote could not be read' }
     }
 
-    const inputExpiryFloor = snapshotInputExpiryFloor(
-      (quote as ReceiveCarrierQuote & { inputExpiryFloor?: unknown }).inputExpiryFloor,
-    )
-    if (inputExpiryFloor === null) {
-      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote input expiry floor is invalid' }
-    }
-    quote = { ...quote, inputExpiryFloor }
-
     const rejected = this.validateCarrierQuote({ quote, request, assetId, now })
     if (rejected) return rejected
 
-    // Ruling 4: nothing is netted here; `physicalSats`/`loanSats` are THIS
+    // Nothing is netted here; `physicalSats`/`loanSats` are THIS
     // solver's own dust, never a Taxi-supplied figure.
     if (carrier.mode === 'recycle_receiver') {
       const dust = this.deps.dustSats
@@ -505,7 +462,7 @@ export class AssetRfqSwapService {
     if (quote.physicalSats !== this.deps.dustSats) {
       return { ok: false, reason: 'price_unavailable', detail: 'carrier quote physical sats are not this dust floor' }
     }
-    // Ruling 4: the payee's Taxi fronted the whole dust, so the ordinary
+    // The payee's Taxi fronted the whole dust, so the ordinary
     // `receiptSats <= 0n` refusal below is exactly what this mode must fail.
     if (request.carrier?.mode === 'recycle_receiver') {
       if (quote.receiptSats !== 0n) {
@@ -661,14 +618,8 @@ export class AssetRfqSwapService {
     // ONE clock for the admission read and the window it admits.
     const admittedAt = this.now()
     if (carrierSettled(terms)) {
-      const adapter = completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes)
-      if (adapter === null) {
-        return {
-          accepted: false,
-          reason: 'price_unavailable',
-          detail: 'recycle requested but the receive-carrier adapter became unavailable',
-        }
-      }
+      // Carrier terms exist only past resolveCarrier's refusal of an absent adapter.
+      const adapter = this.deps.receiveCarrierQuotes!
       try {
         const read = () =>
           adapter.available({
@@ -907,9 +858,7 @@ export class AssetRfqSwapService {
    */
   private async whenFunded(row: AssetRfqSwapRow): Promise<void> {
     const carrierTerms = row.carrierTerms
-    const receiveCarrier = carrierSettled(carrierTerms)
-      ? completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes)
-      : null
+    const receiveCarrier = carrierSettled(carrierTerms) ? (this.deps.receiveCarrierQuotes ?? null) : null
     const deposit = await this.deps.depositAt(row.offerPkScript, row.fromAssetId)
     const local = evaluateAssetFill({
       toAmount: row.toAmount,
@@ -974,17 +923,9 @@ export class AssetRfqSwapService {
     if (receiveCarrier !== null) {
       try {
         const filling = await this.deps.store.get(row.id)
-        const outcome: unknown = await receiveCarrier.settle(filling)
-        const { status, txid } = (typeof outcome === 'object' && outcome !== null ? outcome : {}) as {
-          status?: unknown
-          txid?: unknown
-        }
-        if (status === 'submitted') return
-        if (status !== 'settled') throw new Error('receive-carrier settlement returned a malformed outcome')
-        if (!isCanonicalTxid(txid)) {
-          throw new Error(`receive-carrier settlement returned invalid txid '${String(txid)}'`)
-        }
-        await this.completeReceiveCarrierFill(filling, txid)
+        const outcome = await receiveCarrier.settle(filling)
+        if (outcome.status === 'submitted') return
+        await this.completeReceiveCarrierFill(filling, outcome.txid)
       } catch (error) {
         this.deps.onError?.(row.id, error)
       }
@@ -1056,32 +997,20 @@ export class AssetRfqSwapService {
    * observer; legacy rows retain the existing stuck-over-silence policy. */
   private async whenFilling(row: AssetRfqSwapRow): Promise<void> {
     if (carrierSettled(row.carrierTerms)) {
-      const adapter = completeReceiveCarrierQuotes(this.deps.receiveCarrierQuotes)
-      if (adapter === null) {
+      const adapter = this.deps.receiveCarrierQuotes
+      if (adapter === undefined) {
         this.deps.onError?.(row.id, new Error('receive-carrier adapter unavailable while fill outcome is unknown'))
         return
       }
       try {
-        const outcome: unknown = await adapter.reconcile(row)
-        const { status, reason, txid } = (typeof outcome === 'object' && outcome !== null ? outcome : {}) as {
-          status?: unknown
-          reason?: unknown
-          txid?: unknown
-        }
-        if (status === 'pending') return
-        if (status === 'stuck') {
+        const outcome = await adapter.reconcile(row)
+        if (outcome.status === 'pending') return
+        if (outcome.status === 'stuck') {
           // `fail` from `filling` is `stuck`: unobservable is not never-sent.
-          await this.deps.store.fail(
-            row.id,
-            'filling',
-            typeof reason === 'string' && reason.length > 0 ? reason : 'receive-carrier fill outcome is unobservable',
-          )
+          await this.deps.store.fail(row.id, 'filling', outcome.reason)
           return
         }
-        if (status !== 'settled' || !isCanonicalTxid(txid)) {
-          throw new Error('receive-carrier reconciliation returned a malformed outcome')
-        }
-        await this.completeReceiveCarrierFill(row, txid)
+        await this.completeReceiveCarrierFill(row, outcome.txid)
       } catch (error) {
         this.deps.onError?.(row.id, error)
       }

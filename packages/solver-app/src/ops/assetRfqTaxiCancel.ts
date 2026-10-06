@@ -13,6 +13,7 @@ import {
 } from '@arkade-os/sdk'
 import { outpointKey } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 import { attachEmulatorPackets, refundAssetPacket } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierAttempt, JsonObject } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 import type { ReceiveCarrierReconcileOutcome } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
@@ -46,24 +47,6 @@ export interface CarrierConflictDeps {
   solverKeys: readonly string[]
   serverKey: () => Uint8Array
   now: () => number
-}
-
-/** Retain pins in cancelling or submitting until evidence allows progress. */
-export class CarrierConflictStalledError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'CarrierConflictStalledError'
-  }
-}
-
-/** A refused or lost submission may still be accepted; retain pins and resend the same bytes. */
-export class CarrierConflictRejectedError extends Error {
-  readonly txid: string
-  constructor(label: string, txid: string, cause: unknown) {
-    super(`${label}: conflict ${txid}: ${cause instanceof Error ? cause.message : String(cause)}`, { cause })
-    this.name = 'CarrierConflictRejectedError'
-    this.txid = txid
-  }
 }
 
 const PENDING: ReceiveCarrierReconcileOutcome = { status: 'pending' }
@@ -164,7 +147,7 @@ const buildConflict = async (
     const coin = live.get(outpointKey(txid, vout))
     const evidence = coin && carrierTaprootEvidence(coin, deps.solverKeys, serverKey)
     if (coin?.forfeitTapLeafScript === undefined || evidence === undefined) {
-      throw new CarrierConflictStalledError(`${label}: pinned ${txid}:${vout} is unspent but not spendable from here`)
+      throw new Error(`${label}: pinned ${txid}:${vout} is unspent but not spendable from here`)
     }
     return { coin, leaf: coin.forfeitTapLeafScript, tapTree: evidence.tapTree }
   })
@@ -231,7 +214,7 @@ const finalizePending = async (deps: CarrierConflictDeps, conflict: StoredConfli
   const held = await deps.ark().getPendingTxs({ proof: base64.encode(proof.toPSBT()), message })
   const pending = held.find((tx) => tx.arkTxid === conflict.txid)
   if (pending === undefined) {
-    throw new CarrierConflictStalledError(`${label}: arkd accepted ${conflict.txid} but holds no pending copy of it`)
+    throw new Error(`${label}: arkd accepted ${conflict.txid} but holds no pending copy of it`)
   }
   assertSubmittedArkTxid(pending, conflict.arkTx, label)
   await finalizeWith(deps, conflict, pending.signedCheckpointTxs, label)
@@ -244,9 +227,10 @@ const submitStored = async (deps: CarrierConflictDeps, conflict: StoredConflict,
     submitted = await deps.ark().submitTx(conflict.arkTxPsbt, [...conflict.checkpointPsbts])
   } catch (error) {
     // Identical accepted submissions are rejected by id.
-    const text = error instanceof Error ? error.message : String(error)
+    const text = messageOf(error)
     if (!text.includes(`duplicated offchain tx ${conflict.txid}`)) {
-      throw new CarrierConflictRejectedError(label, conflict.txid, error)
+      // A refused or lost submission may still be accepted: keep the pins and resend the same bytes.
+      throw new Error(`${label}: conflict ${conflict.txid}: ${text}`, { cause: error })
     }
     return finalizePending(deps, conflict, label)
   }

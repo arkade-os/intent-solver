@@ -12,6 +12,7 @@ import {
 import type { Identity } from '@arkade-os/sdk'
 import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierAttempt, JsonObject } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 import {
@@ -39,14 +40,9 @@ type SwapFillGraphWire = Parameters<TaxiClient['submitSwapFill']>[1]
 /** Back off not_ready replies while holding the fill queue. */
 const CARRIER_NOT_READY_RETRY_MS: readonly number[] = [1_000, 2_000, 4_000]
 
-declare const carrierSnapshot: unique symbol
-
-/** Brand snapshots only through the shared input codec. */
-export type CarrierAttemptSnapshot = JsonObject & { readonly [carrierSnapshot]: true }
-
 export interface CarrierAttemptStore {
   readCarrierAttempt(id: string): Promise<CarrierAttempt | null>
-  prepareCarrierAttempt(id: string, snapshot: CarrierAttemptSnapshot): Promise<boolean>
+  prepareCarrierAttempt(id: string, snapshot: JsonObject): Promise<boolean>
   bindCarrierAttempt(id: string, expected: CarrierAttempt, binding: JsonObject): Promise<boolean>
   markCarrierAttemptSubmitting(id: string, expected: CarrierAttempt): Promise<boolean>
   refuseNeverSubmittedCarrierAttempt(id: string, expected: CarrierAttempt, reason: string): Promise<boolean>
@@ -156,24 +152,21 @@ const carrierAttemptSnapshotFor = (parts: {
   contributionSats: bigint
   maxFareSats: bigint
   validUntil: number
-}): CarrierAttemptSnapshot =>
-  mintSnapshot({
-    ...encodeCarrierAttemptInputs(parts.inputs),
-    operation: parts.row.id,
-    provider: parts.taxi.provider,
-    ...(parts.taxi.providerKey === undefined ? {} : { provider_key: parts.taxi.providerKey }),
-    offer: parts.offerHex,
-    deposit: { txid: parts.deposit.txid, vout: parts.deposit.vout },
-    quote: { id: parts.quoteId, expires_at: parts.quoteExpiresAt },
-    input_expiry_floor: locktimeJson(parts.floor),
-    proceeds_script: hex.encode(parts.proceedsScript),
-    physical_sats: parts.physicalSats.toString(),
-    contribution_sats: parts.contributionSats.toString(),
-    max_fare_sats: parts.maxFareSats.toString(),
-    valid_until: parts.validUntil,
-  })
-
-const mintSnapshot = (fields: JsonObject): CarrierAttemptSnapshot => fields as unknown as CarrierAttemptSnapshot
+}): JsonObject => ({
+  ...encodeCarrierAttemptInputs(parts.inputs),
+  operation: parts.row.id,
+  provider: parts.taxi.provider,
+  ...(parts.taxi.providerKey === undefined ? {} : { provider_key: parts.taxi.providerKey }),
+  offer: parts.offerHex,
+  deposit: { txid: parts.deposit.txid, vout: parts.deposit.vout },
+  quote: { id: parts.quoteId, expires_at: parts.quoteExpiresAt },
+  input_expiry_floor: locktimeJson(parts.floor),
+  proceeds_script: hex.encode(parts.proceedsScript),
+  physical_sats: parts.physicalSats.toString(),
+  contribution_sats: parts.contributionSats.toString(),
+  max_fare_sats: parts.maxFareSats.toString(),
+  valid_until: parts.validUntil,
+})
 
 /** The provider-signed offer covenant has a null owner in the fill template. */
 const quotedInputOwners = (wire: SwapFillGraphWire): readonly (string | null)[] =>
@@ -388,8 +381,6 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
     },
   }
 }
-
-export const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 /** After submitting, retain pins and resend the same bytes even on an untrusted not_ready reply. */
 const submitWhileNotReady = async (

@@ -11,6 +11,7 @@ import {
   type TapLeafScript,
 } from '@arkade-os/sdk'
 import { buildOfferFillPlan, type JointGraph, type TaxiClient } from '@arkade-taxi/client'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierFillRebuildRequest } from './assetRfqTaxiSettle.js'
 import { canonicalDecimal, type CarrierCoin } from './assetRfqTaxi.js'
@@ -156,7 +157,6 @@ const fareFrom = (
 export interface CarrierFillRebuildDeps {
   wallet: IWallet
   arkServerUrl: string
-  build?: typeof buildOfferFillPlan
 }
 
 const solverFunding = (coin: CarrierCoin, label: string) => {
@@ -204,7 +204,7 @@ export const createCarrierFillRebuilder =
       )
     }
     const sponsor = sponsorLegFrom(wire, recoverJointFunding(wire, label), label, request, request.proceedsScript)
-    const built = await (deps.build ?? buildOfferFillPlan)(deps.wallet, deps.arkServerUrl, request.offerHex, {
+    const built = await buildOfferFillPlan(deps.wallet, deps.arkServerUrl, request.offerHex, {
       fund: request.inputs.map((coin) => solverFunding(coin, label)),
       payoutScript: request.proceedsScript,
       fundingOutpoint: { txid: request.row.depositTxid!, vout: request.row.depositVout! },
@@ -253,7 +253,7 @@ const assetGroupsOf = (tx: Transaction, label: string) => {
     return Extension.fromTx(tx).getAssetPacket()?.groups ?? []
   } catch (error) {
     if (error instanceof ExtensionNotFoundError) return []
-    const message = error instanceof Error ? error.message : String(error)
+    const message = messageOf(error)
     throw new Error(`${label} could not decode its asset packet: ${message}`, { cause: error })
   }
 }

@@ -6,9 +6,7 @@
  *
  * The store owns the phase and the byte-stable identity; the app adapter owns
  * what a snapshot and a binding MEAN. So both payloads are opaque here beyond
- * being JSON — validated, key-sorted and deep-copied, so the same content
- * always serializes to the same TEXT and a single-statement compare-and-set can
- * match the exact previous checkpoint.
+ * being JSON.
  */
 
 export type CarrierAttemptPhase =

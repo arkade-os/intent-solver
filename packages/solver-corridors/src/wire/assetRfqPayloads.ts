@@ -33,10 +33,8 @@ import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import { carrierTermsToJson, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 import { type RfqState } from './payloads.js'
 
-export type AssetRfqCarrierMode = 'purchase' | 'recycle' | 'recycle_receiver'
-
 /** The client's carrier choice, as parsed off the wire. Absent means legacy.
- * `recycle_receiver` (Ruling 4) names the payee's own Taxi, priced at zero below. */
+ * `recycle_receiver` names the payee's own Taxi, priced at zero below. */
 export type AssetRfqCarrierChoice =
   | { mode: 'purchase' }
   | { mode: 'recycle'; quoteId: string }
@@ -124,7 +122,7 @@ export const AssetRfqRequest = z
         maker_public_key: XONLY_HEX,
         /** OPTIONAL; absent stays byte-identical. `recycle` names a quote whose
          * returnable loan is delivered at claim and priced nowhere here.
-         * `recycle_receiver` prices at zero instead (Ruling 4). */
+         * `recycle_receiver` prices at zero instead. */
         carrier: AssetRfqCarrierField.optional(),
       })
       .strict(),

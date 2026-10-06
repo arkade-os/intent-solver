@@ -1,5 +1,5 @@
 /**
- * Ruling 3's SSRF hygiene for a request-named Taxi URL — stricter than the
+ * SSRF hygiene for a request-named Taxi URL — stricter than the
  * operator `TAXI_URL` gate (`operatorUrlFromEnv` in `config.ts`), which allows
  * loopback and plaintext for a value the operator typed rather than a payer.
  */
@@ -110,7 +110,7 @@ export const createPinnedTaxiFetch = (resolve: typeof lookup = lookup): typeof f
     }) as unknown as Promise<Response>
 }
 
-/** Ruling 3, rules 1-5. Throws on any violation; never used for `config.ts`'s TAXI_URL. */
+/** Throws on any violation; never used for `config.ts`'s TAXI_URL. */
 export const normalizeTaxiUrl = (raw: string, policy: TaxiUrlPolicy): string => {
   let url: URL
   try {
@@ -175,7 +175,7 @@ const readCapped = async (body: ReadableStream<Uint8Array> | null): Promise<Uint
 }
 
 /**
- * Ruling 3, rules 6-7. `redirect: 'error'` is set AND the response is
+ * `redirect: 'error'` is set AND the response is
  * inspected — a stub, or a fetch implementation that ignores the option,
  * still hands back a 3xx. The limiter is consulted before `base` runs at all,
  * keyed per host, so an exhausted host never reaches the network.

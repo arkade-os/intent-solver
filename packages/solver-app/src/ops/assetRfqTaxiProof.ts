@@ -48,8 +48,7 @@ export interface TaxiCarrierProofDeps {
   store: CarrierProofStore
   chain: CarrierChainReader
   pins: CarrierPinLedger
-  /** Without a canceller, an unproven fill remains pending. */
-  cancel?: (row: AssetRfqSwapRow, attempt: CarrierAttempt) => Promise<ReceiveCarrierReconcileOutcome>
+  cancel: (row: AssetRfqSwapRow, attempt: CarrierAttempt) => Promise<ReceiveCarrierReconcileOutcome>
 }
 
 export interface CarrierFillProof {
@@ -292,7 +291,7 @@ const observeWith =
       raised.add(row.id)
       throw error
     }
-    if (proof === null) return deps.cancel === undefined ? { status: 'pending' } : deps.cancel(row, attempt)
+    if (proof === null) return deps.cancel(row, attempt)
     // Release only after proving the spend of these reserved coins.
     if (await deps.store.settleCarrierAttempt(row.id, attempt, proof.txid)) releaseEveryPin(deps.pins, row.id)
     return { status: 'settled', txid: proof.txid }

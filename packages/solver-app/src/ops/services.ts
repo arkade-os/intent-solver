@@ -662,12 +662,10 @@ export const createServices = async (
     exitDelay: offerExitDelay(arkade.advertisedExitDelay),
   }
   /**
-   * The receive-carrier READ half (Ruling 3/G4): exists regardless of
+   * The receive-carrier READ half: exists regardless of
    * `TAXI_URL`, since a request naming its own Taxi resolves against that one
    * either way — and so does the fill half below. Every identity a quote is
    * verified against comes from the context above, never from a URL.
-   * TAXI_RECEIVER_ALLOW_PRIVATE is read here, at the composition root, never
-   * inside the guard module.
    */
   const taxiUrlPolicy: TaxiUrlPolicy = {
     isMainnet: config.arkade.isMainnet,
@@ -712,9 +710,7 @@ export const createServices = async (
     log(`receive carrier: re-pinned the inputs of ${restoredPins.length} unresolved attempt(s)`)
   }
   /**
-   * The fill half. Its declared type is the complete port, so a method left out
-   * is a compile error here rather than a `price_unavailable` a live taker
-   * discovers. With no `TAXI_URL` a sender-paid recycle is still refused, by
+   * The fill half. With no `TAXI_URL` a sender-paid recycle is still refused, by
    * the resolve and the settle that find no configured Taxi.
    */
   const carrierOfferHex = offerHexFrom(assetRfqDerivation)
