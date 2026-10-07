@@ -175,13 +175,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ArkLabsHQ/arkade-taxi
-          ref: 182c18f0189a3594f62874f88c752ae24fab2f25
+          ref: 11f954914573dec8aa34a60182f4648aee4d448b
           path: arkade-taxi
 
       - name: Build Taxi regtest image
         if: matrix.name == 'taxi'
         working-directory: arkade-taxi
-        run: docker build --build-arg OCI_REVISION=182c18f0189a3594f62874f88c752ae24fab2f25 -t arkade-taxi:regtest .
+        run: docker build --build-arg OCI_REVISION=11f954914573dec8aa34a60182f4648aee4d448b -t arkade-taxi:regtest .
 
       - uses: actions/setup-node@v4
         with:
