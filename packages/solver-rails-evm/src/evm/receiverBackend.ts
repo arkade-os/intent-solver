@@ -12,13 +12,17 @@ import {
   claimEventTopic,
 } from './erc20Swap.js'
 import {
+  expectedImplementationRuntimeHash,
   expectedReceiverRuntimeHash,
-  receiverAddress,
-  receiverDeploymentCall,
+  receiverAddress as receiverAddressOf,
+  receiverFactoryDeploymentCall,
   RECEIVER_DEPLOYER,
   RECEIVER_DEPLOYER_RUNTIME,
-  encodeReceiverActivate,
-  encodeReceiverRecover,
+  RECEIVER_FACTORY,
+  RECEIVER_IMPLEMENTATION,
+  encodeFactoryDeploy,
+  encodeFactoryDeployAndActivate,
+  encodeFactoryDeployAndRecover,
   verifyReceiverBinding,
   type IntentReceiverBinding,
 } from './receiver.js'
@@ -65,6 +69,8 @@ export interface ReceiverInspection {
   confirmations: number
   ageSeconds: number
   finalized: boolean
+  /** False until a clone exists; the address alone already commits to the binding. */
+  deployed: boolean
   activated: boolean
   tokenBalance: bigint
   swapTokenBalance: bigint
@@ -193,13 +199,17 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
     if (binding.chainId !== deps.chainId) throw new Error('receiver binding chain mismatch')
     if (binding.lock.timelock - binding.activationCutoff < deps.minClaimWindowBlocks)
       throw new Error('receiver destination claim window is too short')
+    if (hx(receiverAddress) !== hx(receiverAddressOf(binding)))
+      throw new Error('receiver address does not derive from its binding')
     const { current, observed, tip, target, tag, ageSeconds } = await view(policy)
     const runtimeHash = expectedReceiverRuntimeHash(binding)
-    await verifyReceiverBinding(rpc, receiverAddress, binding, runtimeHash, {
-      blockTag: tag,
-      allowActivated: true,
-      allowClosed: true,
-    })
+    const deployed = bytes(await rpc('eth_getCode', [hx(receiverAddress), tag])).length > 0
+    if (deployed)
+      await verifyReceiverBinding(rpc, receiverAddress, binding, runtimeHash, {
+        blockTag: tag,
+        allowActivated: true,
+        allowClosed: true,
+      })
     await allowed(binding.swapContract, deps.allowedSwapCodeHashes, tag)
     await allowed(binding.lock.tokenAddress, deps.allowedTokenCodeHashes, tag)
     const tokenBalance = await read(
@@ -214,7 +224,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
       [addressWord(binding.swapContract, 'swap')],
       tag,
     )
-    const activated = bool(await read(receiverAddress, 'activated()', [], tag))
+    const activated = deployed && bool(await read(receiverAddress, 'activated()', [], tag))
     const htlcPresent = bool(await read(binding.swapContract, 'swaps(bytes32)', [swapKey(binding.lock)], tag))
     const invalidExactLock = htlcPresent && (!activated || swapTokenBalance < binding.lock.amount)
     await stable(observed)
@@ -233,6 +243,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
       confirmations: Number(tip - target + 1n),
       ageSeconds,
       finalized: true,
+      deployed,
       activated,
       tokenBalance,
       swapTokenBalance,
@@ -250,32 +261,50 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
     if (quantity(receipt.status) !== 1n) throw new Error('receiver transaction reverted')
     return receipt
   }
+  const factoryRequest = { to: RECEIVER_DEPLOYER, data: receiverFactoryDeploymentCall() }
+  const factoryReady = async (tag: unknown): Promise<boolean> => {
+    if (bytes(await rpc('eth_getCode', [hx(RECEIVER_FACTORY), tag])).length === 0) return false
+    const implementation = bytes(await rpc('eth_getCode', [hx(RECEIVER_IMPLEMENTATION), tag]))
+    if (hx(keccak_256(implementation)) !== hx(expectedImplementationRuntimeHash()))
+      throw new Error('receiver implementation mismatch')
+    return true
+  }
+  const requireFactory = async (): Promise<void> => {
+    if (!(await factoryReady('latest'))) throw new Error('receiver factory is not deployed')
+  }
+  // Anyone may deploy the factory or a receiver first; a nonce we already reserved must still be spent.
+  const ensureFactory = async (tag: unknown): Promise<void> => {
+    if (
+      (await deps.transactions.getPrepared('intent-receiver-factory', factoryRequest)) ||
+      !(await factoryReady(tag))
+    ) {
+      await allowed(RECEIVER_DEPLOYER, [keccak_256(RECEIVER_DEPLOYER_RUNTIME)], tag)
+      await deps.transactions.submit('intent-receiver-factory', factoryRequest)
+    }
+  }
+  const activationRequest = (binding: IntentReceiverBinding) => ({
+    to: RECEIVER_FACTORY,
+    data: encodeFactoryDeployAndActivate(binding),
+  })
   return {
     inspect,
+    ensureFactory: () => ensureFactory('latest'),
     async deploy(id: string, binding: IntentReceiverBinding) {
       if (binding.chainId !== deps.chainId) throw new Error('receiver deployment chain mismatch')
       if (binding.lock.timelock - binding.activationCutoff < deps.minClaimWindowBlocks)
         throw new Error('receiver destination claim window is too short')
       const current = await header('latest')
-      if (
-        binding.activationCutoff <= quantity(current.number) ||
-        binding.activationCutoffTimestamp <= quantity(current.timestamp) ||
-        binding.activationCutoffTimestamp <= BigInt(finality.nowSeconds())
-      )
-        throw new Error('receiver deployment activation window closed')
       await allowed(binding.swapContract, deps.allowedSwapCodeHashes, current.number)
       await allowed(binding.lock.tokenAddress, deps.allowedTokenCodeHashes, current.number)
-      const address = receiverAddress(binding)
-      const request = { to: RECEIVER_DEPLOYER, data: receiverDeploymentCall(binding) }
+      await ensureFactory(current.number)
+      const address = receiverAddressOf(binding)
+      const request = { to: RECEIVER_FACTORY, data: encodeFactoryDeploy(binding) }
       let transactionHash: string | null = null
-      // Anyone may deploy the same receiver first; a nonce we already reserved must still be spent.
       if (
         (await deps.transactions.getPrepared(id, request)) ||
         bytes(await rpc('eth_getCode', [hx(address), current.number])).length === 0
-      ) {
-        await allowed(RECEIVER_DEPLOYER, [keccak_256(RECEIVER_DEPLOYER_RUNTIME)], current.number)
+      )
         transactionHash = (await deps.transactions.submit(id, request)).hash
-      }
       let observationView: Awaited<ReturnType<typeof view>>
       try {
         observationView = await view()
@@ -301,7 +330,8 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
           observation.tokenBalance < binding.lock.amount)
       )
         throw new Error('receiver is not safely activatable')
-      return deps.transactions.submit(id, { to: address, data: encodeReceiverActivate() })
+      await requireFactory()
+      return deps.transactions.submit(id, activationRequest(binding))
     },
     async prepareActivation(
       id: string,
@@ -318,7 +348,8 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
         observation.tokenBalance < binding.lock.amount
       )
         throw new Error('receiver is not safely activatable')
-      return deps.transactions.prepare(id, { to: address, data: encodeReceiverActivate() })
+      await requireFactory()
+      return deps.transactions.prepare(id, activationRequest(binding))
     },
     broadcastRawTransaction: (raw: string) => deps.transactions.broadcastRawTransaction(raw),
     pendingTransactions: () => deps.transactions.pending(),
@@ -334,13 +365,14 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
         observation.currentTimestamp < binding.activationCutoffTimestamp
       )
         throw new Error('original activation is not guaranteed expired on chain')
-      const request = { to: address, data: encodeReceiverActivate() }
+      const request = activationRequest(binding)
       if (!(await deps.transactions.getPrepared(id, request))) return null
       return deps.transactions.replay(id, request)
     },
     async recover(id: string, address: Uint8Array, binding: IntentReceiverBinding, token = binding.lock.tokenAddress) {
       await inspect(address, binding)
-      return deps.transactions.submit(id, { to: address, data: encodeReceiverRecover(token) })
+      await requireFactory()
+      return deps.transactions.submit(id, { to: RECEIVER_FACTORY, data: encodeFactoryDeployAndRecover(binding, token) })
     },
     async refund(id: string, binding: IntentReceiverBinding) {
       if (binding.chainId !== deps.chainId) throw new Error('receiver binding chain mismatch')
