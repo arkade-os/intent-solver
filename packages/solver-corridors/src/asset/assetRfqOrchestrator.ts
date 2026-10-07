@@ -172,6 +172,9 @@ export interface ReceiveCarrierQuotes {
  * read, the submit) and 10s for clock skew against the Taxi. */
 export const CARRIER_FILL_MARGIN_SECONDS = 30
 
+/** The ceiling on `quoteValiditySeconds`, and so the longest a carrier quote may bind this solver's fill inputs. */
+export const MAX_ASSET_QUOTE_VALIDITY_SECONDS = 900
+
 /** Settled through the carrier adapter rather than the generic spend. */
 const carrierSettled = (terms: AssetRfqCarrierTerms | null | undefined): terms is AssetRfqCarrierTerms =>
   terms?.mode === 'recycle' || terms?.mode === 'recycle_receiver'
@@ -509,6 +512,9 @@ export class AssetRfqSwapService {
     }
     if (!Number.isSafeInteger(quote.expiresAt) || quote.expiresAt <= now) {
       return { ok: false, reason: 'price_unavailable', detail: 'carrier quote is already expired' }
+    }
+    if (quote.expiresAt - now > MAX_ASSET_QUOTE_VALIDITY_SECONDS) {
+      return { ok: false, reason: 'price_unavailable', detail: 'carrier quote binds for longer than this solver will' }
     }
     return undefined
   }

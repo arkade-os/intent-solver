@@ -12,7 +12,10 @@
 import { describe, it, expect } from 'vitest'
 import { createCorridorSet } from '@arkade-os/solver-core/core/corridor.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
-import { AssetRfqSwapService } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import {
+  AssetRfqSwapService,
+  MAX_ASSET_QUOTE_VALIDITY_SECONDS,
+} from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
   assetRfqCorridor,
   assetRfqDescriptor,
@@ -42,7 +45,10 @@ const MARKET = {
 const BUY = assetRfqDescriptor(MARKET, 'sell_base')
 const SELL = assetRfqDescriptor(MARKET, 'buy_base')
 
-const harness = async (markets: (typeof MARKET)[] = [MARKET], options: { carrier?: boolean } = {}) => {
+const harness = async (
+  markets: (typeof MARKET)[] = [MARKET],
+  options: { carrier?: boolean; carrierExpiresAt?: number } = {},
+) => {
   let clock = 1_000
   let sequence = 0
   const store = await AssetRfqSwapStore.open(':memory:', () => clock)
@@ -81,7 +87,7 @@ const harness = async (markets: (typeof MARKET)[] = [MARKET], options: { carrier
               receiptSats: 1n,
               serviceFareSats: 0n,
               inputExpiryFloor: { kind: 'height' as const, value: 1_000_000n },
-              expiresAt: 5_000,
+              expiresAt: options.carrierExpiresAt ?? 1_600,
             }),
             available: async () => new Map([[ASSET_A, 10n ** 18n]]),
             settle: async () => ({ status: 'settled' as const, txid: 'fb'.repeat(32) }),
@@ -425,8 +431,25 @@ describe('profile.carrier through the corridor', () => {
       receipt_sats: '1',
       service_fare_sats: '0',
       priced_sats: '1',
-      expires_at: 5_000,
+      expires_at: 1_600,
     })
+  })
+
+  it('refuses a recycle whose quote outlives the longest window this solver prices', async () => {
+    const { corridor } = await harness(undefined, {
+      carrier: true,
+      carrierExpiresAt: 1_000 + MAX_ASSET_QUOTE_VALIDITY_SECONDS + 1,
+    })
+    const outcome = await corridor.quote(carrierRequest({ mode: 'recycle', quote_id: 'q-1' }))
+    expect(outcome).toMatchObject({ kind: 'refused', payload: { reason: 'pricing_unavailable' } })
+  })
+
+  it('admits a recycle whose quote lasts exactly that long', async () => {
+    const { corridor } = await harness(undefined, {
+      carrier: true,
+      carrierExpiresAt: 1_000 + MAX_ASSET_QUOTE_VALIDITY_SECONDS,
+    })
+    expect((await corridor.quote(carrierRequest({ mode: 'recycle', quote_id: 'q-1' }))).kind).toBe('quote')
   })
 
   it('answers an unknown mode with unsupported_payload', async () => {

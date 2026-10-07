@@ -16,7 +16,10 @@ import { attachEmulatorPackets, refundAssetPacket } from '@arkade-os/solver-arka
 import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierAttempt, JsonObject } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
-import type { ReceiveCarrierReconcileOutcome } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import {
+  CARRIER_FILL_MARGIN_SECONDS,
+  type ReceiveCarrierReconcileOutcome,
+} from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
   carrierTaprootEvidence,
   decodeCarrierAttemptInputs,
@@ -56,7 +59,10 @@ const conflictDeadline = (snapshot: JsonObject, label: string): number => {
   if (!deadlines.every((value) => Number.isSafeInteger(value))) {
     throw new Error(`${label} snapshot records no deadline to wait out`)
   }
-  return Math.max(...(deadlines as number[])) + CARRIER_CONFLICT_AFTER_SECONDS
+  const [validUntil, quoteExpiry] = deadlines as number[]
+  // A Taxi names its own expiry, so it only extends the wait as far as the ceiling the fill authorised.
+  const bounded = Math.min(quoteExpiry!, validUntil! + CARRIER_FILL_MARGIN_SECONDS)
+  return Math.max(validUntil!, bounded) + CARRIER_CONFLICT_AFTER_SECONDS
 }
 
 interface StoredConflict {

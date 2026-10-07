@@ -16,6 +16,7 @@ import { MAX_BIP68_BLOCKS, MAX_BIP68_SECONDS, relativeDelayFrom } from '@arkade-
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
 import { FREE, type Corridor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { ALL_DESCRIPTORS } from '@arkade-os/solver-corridors/corridors/index.js'
+import { MAX_ASSET_QUOTE_VALIDITY_SECONDS } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
   evmCorridorPolicies,
   evmMarkets,
@@ -1019,7 +1020,7 @@ export const loadConfig = (): Config => {
     // What each named asset is WORTH still comes from the console's market rows,
     // which `createServices` joins to these.
     assetRfqTokens: parseAssetRfqTokens(process.env.ASSET_MARKETS, (name) => process.env[name]),
-    assetQuoteValiditySeconds: intFromEnv('ASSET_QUOTE_VALIDITY_SECONDS', 30, 5, 900),
+    assetQuoteValiditySeconds: intFromEnv('ASSET_QUOTE_VALIDITY_SECONDS', 30, 5, MAX_ASSET_QUOTE_VALIDITY_SECONDS),
     swapDbPath: swapDbPath(),
     poolAutoMint: poolAutoMintFromEnv(),
     lnReceiveAcceptUnilateralGap: lnReceiveAcceptUnilateralGapFromEnv(raw),

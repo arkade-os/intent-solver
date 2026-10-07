@@ -16,6 +16,7 @@ import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierAttempt, JsonObject } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 import {
+  CARRIER_FILL_MARGIN_SECONDS,
   receiveCarrierTaxiOf,
   type ReceiveCarrierQuotes,
   type ReceiveCarrierSettleOutcome,
@@ -239,8 +240,9 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
 
     const outpoints = inputs.map(({ coin }) => ({ txid: coin.txid, vout: coin.vout }))
     const deposit = { txid: row.depositTxid, vout: row.depositVout }
-    // Not `row.validUntil`: that bounds the decision to fill, and the quote stopped short of this to leave time to act.
-    const validUntil = terms.expiresAt
+    // Not `row.validUntil`: that bounds the decision to fill, and the quote stopped short of this to leave time to
+    // act. Adding that margin back bounds a Taxi whose own expiry runs past the window this row was quoted for.
+    const validUntil = Math.min(terms.expiresAt, row.validUntil + CARRIER_FILL_MARGIN_SECONDS)
     const offerHex = deps.offerHex(row)
     const snapshot = carrierAttemptSnapshotFor({
       row,
