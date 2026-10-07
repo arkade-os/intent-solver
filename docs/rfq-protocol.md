@@ -1515,10 +1515,8 @@ both a want asset and an offer asset, or neither, so an `arkade:<A>->arkade:<B>`
 offer is not expressible at all. A solver MUST refuse such a pair with
 `unsupported_pair` at quote time rather than discovering it at fill time.
 
-**Exact-in only.** `amount_side` MUST be `"from"`; `"to"` is refused with
-`unsupported_payload`. Every pair here is cross-asset by construction, and
-§ 7.1.5 already gives the reason for the EVM legs: exact-out "would mean
-inverting a fetched, rounded, directional rate".
+**Both amount sides.** `amount_side` is `"from"` or `"to"`. § 4.2 gives how
+exact-out resolves `from_amount`.
 
 **Amounts are the § 2.1 string form and nothing else.** A JSON number is refused
 rather than accepted under the `v: 1` carve-out, because that carve-out is
@@ -1890,8 +1888,6 @@ have a tested reference in this repo.
   both-legs-arkade reads as spot and therefore as packet-only, and no field means
   "also negotiable over RFQ" (§ 7.2.1). Until one exists, a taker must already
   know the solver's pubkey, a relay, and the exact pair string.
-- **Atomic-class fill format.** The exact partially-signed Arkade transaction
-  encoding for `rfq_fill` (and who broadcasts) is unspecified.
 - **Canonical Ethereum HTLC contract — RESOLVED for 7.1.5**: Boltz
   `ERC20Swap`, addressed by configuration so any EVM chain can serve it. Still
   open: whether a published third-party audit is required before mainnet.
@@ -1906,8 +1902,6 @@ have a tested reference in this repo.
   the decision this entry gates, and answering the audit question is what closes
   it. Also open: per-chain `min_confirmations` / `min_age_seconds` norms, which
   cannot be a single figure across chains.
-  funds". Also open: per-chain `min_confirmations` / `min_age_seconds` norms,
-  which cannot be a single figure across chains.
 - **Multi-solver fan-out** is resolved by the open-RFQ flow (§ 4.6):
   broadcast, sealed bids, directed close; losing bids expire with no
   notification. Still open from that design: whether a shared bus may
