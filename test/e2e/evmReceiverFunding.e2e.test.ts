@@ -154,6 +154,7 @@ beforeAll(async () => {
     allowedSwapCodeHashes: [keccak_256(bytes((await rpc('eth_getCode', [hx(SWAP_ADDRESS), 'latest'])) as string))],
     allowedTokenCodeHashes: [keccak_256(bytes((await rpc('eth_getCode', [hx(WETH), 'latest'])) as string))],
   })
+  await receivers.ensureFactory()
   const funding: EvmPayoutFundingAdapter = {
     identity: 'plain-token-provider-e2e',
     async prepareQuote({ binding }) {
@@ -178,16 +179,6 @@ beforeAll(async () => {
       let fundingTxid = prepared.funding_txid
       let fundingWasSubmitted = false
       if (!prepared.funding_txid) {
-        const deployed = await receivers.deploy(`deploy:${binding.intentId}`, immutable)
-        if (!deployed.verified) {
-          if (deployed.transactionHash === null) await rpc('anvil_mine', ['0x1', '0x0'])
-          else {
-            const receipt = await waitForReceipt(rpc, deployed.transactionHash)
-            await minedConfirmation('receiver deployment', BigInt(receipt.blockNumber))
-          }
-          return {}
-        }
-        expect(deployed.address).toEqual(receiver)
         const transfer = await providerSender.submit(`provider-fund:${binding.intentId}`, {
           to: WETH,
           data: abiCall('a9059cbb', receiver, word(immutable.lock.amount)),

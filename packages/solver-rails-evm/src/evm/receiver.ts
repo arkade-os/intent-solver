@@ -1,6 +1,6 @@
 import { concatBytes } from '@noble/hashes/utils.js'
 import { keccak_256 } from '@noble/hashes/sha3.js'
-import { addressWord, selectorFor, swapKey, uintWord, type Erc20SwapLock } from './erc20Swap.js'
+import { addressWord, selectorFor, uintWord, type Erc20SwapLock } from './erc20Swap.js'
 import { receiverArtifact } from './receiverArtifact.js'
 
 export type IntentReceiverBinding = {
@@ -16,8 +16,12 @@ const nonzeroAddress = (address: Uint8Array, label: string): Uint8Array => {
   if (address.every((byte) => byte === 0)) throw new Error(`${label} must not be zero`)
   return word
 }
+const fromArtifact = (value: string): Uint8Array => Uint8Array.from(Buffer.from(value, 'hex'))
+const create2Address = (deployer: Uint8Array, initcode: Uint8Array): Uint8Array =>
+  keccak_256(concatBytes(Uint8Array.of(0xff), deployer, new Uint8Array(32), keccak_256(initcode))).subarray(12)
 
-export const encodeReceiverConstructor = (binding: IntentReceiverBinding): Uint8Array => {
+/** The clone's immutable args: the ten binding words, in the order `IntentReceiver.Binding` declares them. */
+export const encodeReceiverArgs = (binding: IntentReceiverBinding): Uint8Array => {
   const { lock } = binding
   if (binding.chainId <= 0n) throw new Error('chainId must be positive')
   if (lock.amount <= 0n) throw new Error('amount must be positive')
@@ -45,95 +49,80 @@ export const encodeReceiverConstructor = (binding: IntentReceiverBinding): Uint8
   )
 }
 
-export const encodeReceiverDeployment = (creationBytecode: Uint8Array, binding: IntentReceiverBinding): Uint8Array => {
-  if (creationBytecode.length === 0) throw new Error('creationBytecode must not be empty')
-  return concatBytes(creationBytecode, encodeReceiverConstructor(binding))
-}
-
-export const receiverCreation = (binding: IntentReceiverBinding): Uint8Array =>
-  encodeReceiverDeployment(Uint8Array.from(Buffer.from(receiverArtifact.creationBytecode, 'hex')), binding)
-
 // Arachnid's keyless deterministic-deployment-proxy (not EIP-2470). This runtime, keccak256
 // 0x2fa86add…7e4989, matches eth_getCode at that address on Ethereum, Arbitrum and Base.
-export const RECEIVER_DEPLOYER = Uint8Array.from(Buffer.from('4e59b44847b379578588920ca78fbf26c0b4956c', 'hex'))
-export const RECEIVER_DEPLOYER_RUNTIME = Uint8Array.from(
-  Buffer.from(
-    '7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3',
-    'hex',
-  ),
+export const RECEIVER_DEPLOYER = fromArtifact('4e59b44847b379578588920ca78fbf26c0b4956c')
+export const RECEIVER_DEPLOYER_RUNTIME = fromArtifact(
+  '7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3',
 )
-const RECEIVER_SALT = new Uint8Array(32)
+const FACTORY_CREATION = fromArtifact(receiverArtifact.factoryCreationBytecode)
+export const receiverFactoryDeploymentCall = (): Uint8Array => concatBytes(new Uint8Array(32), FACTORY_CREATION)
+export const RECEIVER_FACTORY = create2Address(RECEIVER_DEPLOYER, FACTORY_CREATION)
+// The factory's constructor is its first CREATE, so the implementation sits at nonce 1.
+export const RECEIVER_IMPLEMENTATION = keccak_256(
+  concatBytes(Uint8Array.of(0xd6, 0x94), RECEIVER_FACTORY, Uint8Array.of(0x01)),
+).subarray(12)
 
-export const receiverDeploymentCall = (binding: IntentReceiverBinding): Uint8Array =>
-  concatBytes(RECEIVER_SALT, receiverCreation(binding))
-export const receiverAddress = (binding: IntentReceiverBinding): Uint8Array =>
-  keccak_256(
-    concatBytes(Uint8Array.of(0xff), RECEIVER_DEPLOYER, RECEIVER_SALT, keccak_256(receiverCreation(binding))),
-  ).subarray(12)
-export const expectedReceiverRuntimeHash = (binding: IntentReceiverBinding): Uint8Array =>
-  receiverRuntimeHash(
-    Uint8Array.from(Buffer.from(receiverArtifact.runtimeTemplate, 'hex')),
-    receiverArtifact.immutableReferences,
-    binding,
+const cloneRuntime = (args: Uint8Array): Uint8Array =>
+  concatBytes(
+    fromArtifact('363d3d373d3d3d363d73'),
+    RECEIVER_IMPLEMENTATION,
+    fromArtifact('5af43d82803e903d91602b57fd5bf3'),
+    args,
   )
+const cloneInitcode = (args: Uint8Array): Uint8Array => {
+  const length = args.length + 0x2d
+  return concatBytes(
+    Uint8Array.of(0x61, length >> 8, length & 0xff),
+    fromArtifact('3d81600a3d39f3'),
+    cloneRuntime(args),
+  )
+}
+
+export const receiverAddress = (binding: IntentReceiverBinding): Uint8Array =>
+  create2Address(RECEIVER_FACTORY, cloneInitcode(encodeReceiverArgs(binding)))
+export const expectedReceiverRuntimeHash = (binding: IntentReceiverBinding): Uint8Array =>
+  keccak_256(cloneRuntime(encodeReceiverArgs(binding)))
+
+export type ImplementationImmutableReferences = Record<'self', readonly { start: number; length: number }[]>
+
+export const implementationRuntimeHash = (
+  runtimeTemplate: Uint8Array,
+  references: ImplementationImmutableReferences,
+  implementation: Uint8Array,
+): Uint8Array => {
+  if (!references.self?.length) throw new Error('missing immutable references: self')
+  const runtime = Uint8Array.from(runtimeTemplate)
+  for (const { start, length } of references.self) {
+    if (!Number.isSafeInteger(start) || length !== 32 || start < 0 || start + length > runtime.length)
+      throw new Error('invalid immutable reference: self')
+    if (runtimeTemplate.subarray(start, start + length).some((byte) => byte !== 0))
+      throw new Error('invalid immutable template: self')
+    runtime.set(addressWord(implementation, 'implementation'), start)
+  }
+  return keccak_256(runtime)
+}
+export const expectedImplementationRuntimeHash = (): Uint8Array =>
+  implementationRuntimeHash(
+    fromArtifact(receiverArtifact.implementationRuntimeTemplate),
+    receiverArtifact.implementationImmutableReferences,
+    RECEIVER_IMPLEMENTATION,
+  )
+
+const factoryCall = (signature: string, binding: IntentReceiverBinding, ...tail: Uint8Array[]): Uint8Array => {
+  const args = encodeReceiverArgs(binding)
+  const head = uintWord(BigInt(32 * (1 + tail.length)), 'args offset')
+  return concatBytes(selectorFor(signature), head, ...tail, uintWord(BigInt(args.length), 'args length'), args)
+}
+export const encodeFactoryDeploy = (binding: IntentReceiverBinding): Uint8Array => factoryCall('deploy(bytes)', binding)
+export const encodeFactoryDeployAndActivate = (binding: IntentReceiverBinding): Uint8Array =>
+  factoryCall('deployAndActivate(bytes)', binding)
+export const encodeFactoryDeployAndRecover = (binding: IntentReceiverBinding, tokenAddress: Uint8Array): Uint8Array =>
+  factoryCall('deployAndRecover(bytes,address)', binding, nonzeroAddress(tokenAddress, 'tokenAddress'))
 
 export const encodeReceiverActivate = (): Uint8Array => selectorFor('activate()')
 export const encodeReceiverRecover = (tokenAddress: Uint8Array): Uint8Array =>
   concatBytes(selectorFor('recover(address)'), nonzeroAddress(tokenAddress, 'tokenAddress'))
-
-export type ReceiverImmutableName =
-  | 'chainId'
-  | 'swapContract'
-  | 'token'
-  | 'amount'
-  | 'preimageHash'
-  | 'claimAddress'
-  | 'refundAddress'
-  | 'activationCutoff'
-  | 'activationCutoffTimestamp'
-  | 'timelock'
-  | 'swapKey'
-export type ReceiverImmutableReferences = Record<ReceiverImmutableName, readonly { start: number; length: number }[]>
-
-export const receiverRuntimeHash = (
-  runtimeTemplate: Uint8Array,
-  references: ReceiverImmutableReferences,
-  binding: IntentReceiverBinding,
-): Uint8Array => {
-  const words = encodeReceiverConstructor(binding)
-  const names: ReceiverImmutableName[] = [
-    'chainId',
-    'swapContract',
-    'token',
-    'amount',
-    'preimageHash',
-    'claimAddress',
-    'refundAddress',
-    'activationCutoff',
-    'timelock',
-    'activationCutoffTimestamp',
-  ]
-  const values = Object.fromEntries(names.map((name, i) => [name, words.subarray(i * 32, (i + 1) * 32)])) as Record<
-    ReceiverImmutableName,
-    Uint8Array
-  >
-  values.swapKey = swapKey(binding.lock)
-  const runtime = Uint8Array.from(runtimeTemplate)
-  const occupied = new Set<number>()
-  for (const name of [...names, 'swapKey'] as ReceiverImmutableName[]) {
-    if (!references[name]?.length) throw new Error(`missing immutable references: ${name}`)
-    for (const { start, length } of references[name]) {
-      if (!Number.isSafeInteger(start) || length !== 32 || start < 0 || start + length > runtime.length)
-        throw new Error(`invalid immutable reference: ${name}`)
-      for (let i = start; i < start + length; i++) {
-        if (occupied.has(i) || runtimeTemplate[i] !== 0) throw new Error(`invalid immutable template: ${name}`)
-        occupied.add(i)
-      }
-      runtime.set(values[name], start)
-    }
-  }
-  return keccak_256(runtime)
-}
 
 type ReceiverRpc = (method: string, params: readonly unknown[]) => Promise<unknown>
 const asHex = (bytes: Uint8Array): string => `0x${Buffer.from(bytes).toString('hex')}`
@@ -158,12 +147,15 @@ export const verifyReceiverBinding = async (
 ): Promise<void> => {
   nonzeroAddress(receiverAddress, 'receiverAddress')
   if (expectedRuntimeHash.length !== 32) throw new Error('expectedRuntimeHash must be bytes32')
-  const expected = encodeReceiverConstructor(binding)
+  const expected = encodeReceiverArgs(binding)
   const chainId = BigInt((await rpc('eth_chainId', [])) as string)
   if (chainId !== binding.chainId) throw new Error('receiver chain mismatch')
   const blockTag = options.blockTag ?? ((await rpc('eth_blockNumber', [])) as string)
   const code = fromHex(await rpc('eth_getCode', [asHex(receiverAddress), blockTag]))
   if (code.length === 0 || !equal(keccak_256(code), expectedRuntimeHash)) throw new Error('receiver runtime mismatch')
+  const implementation = fromHex(await rpc('eth_getCode', [asHex(RECEIVER_IMPLEMENTATION), blockTag]))
+  if (!equal(keccak_256(implementation), expectedImplementationRuntimeHash()))
+    throw new Error('receiver implementation mismatch')
   const getters = [
     'chainId()',
     'swapContract()',
