@@ -947,8 +947,10 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
       { ...terms, swapContract: accounts[3]! },
       { ...terms, lock: { ...terms.lock, tokenAddress: accounts[3]! } },
       { ...terms, lock: { ...terms.lock, claimAddress: SWAP } },
+      { ...terms, lock: { ...terms.lock, refundAddress: terms.lock.tokenAddress } },
     ]) {
       const receiver = await deployReceiver(bad)
+      await transfer(receiver, AMOUNT)
       expect((await activate(receiver)).status).toBe('0x0')
     }
   })

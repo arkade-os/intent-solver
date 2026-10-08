@@ -89,6 +89,8 @@ contract IntentReceiver {
             b.refundAddress == address(0) || b.claimAddress == b.refundAddress ||
             b.claimAddress == address(this) || b.refundAddress == address(this) ||
             b.swapContract == b.token || b.claimAddress == b.swapContract || b.refundAddress == b.swapContract ||
+            b.claimAddress == b.token || b.refundAddress == b.token ||
+            b.token == address(this) || b.swapContract == address(this) ||
             b.timelock <= b.activationCutoff
         ) revert InvalidBinding();
         if (activated) revert AlreadyActivated();
