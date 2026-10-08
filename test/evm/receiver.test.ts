@@ -412,6 +412,24 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     }
   })
 
+  chainTest('spends a reserved deploy nonce after another account deployed first, and still verifies', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend, transactions } = await testBackend(driver)
+      const terms = await binding()
+      const prepared = await transactions.prepare('raced-deploy', {
+        to: RECEIVER_DEPLOYER,
+        data: receiverDeploymentCall(terms),
+      })
+      expect((await send(accounts[3]!, RECEIVER_DEPLOYER, receiverDeploymentCall(terms))).status).toBe('0x1')
+      const deployed = await backend.deploy('raced-deploy', terms)
+      expect(deployed).toEqual({ address: receiverAddress(terms), transactionHash: prepared.hash, verified: true })
+      expect((await receiptFor(prepared.hash)).status).toBe('0x0')
+    } finally {
+      await driver.close()
+    }
+  })
+
   chainTest('refuses to deploy on a chain without the deterministic deployer', async () => {
     const driver = betterSqliteDriver(':memory:')
     try {
