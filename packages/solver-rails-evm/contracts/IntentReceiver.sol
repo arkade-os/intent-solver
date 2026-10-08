@@ -88,6 +88,7 @@ contract IntentReceiver {
             b.amount == 0 || b.preimageHash == bytes32(0) || b.claimAddress == address(0) ||
             b.refundAddress == address(0) || b.claimAddress == b.refundAddress ||
             b.claimAddress == address(this) || b.refundAddress == address(this) ||
+            b.swapContract == b.token || b.claimAddress == b.swapContract || b.refundAddress == b.swapContract ||
             b.timelock <= b.activationCutoff
         ) revert InvalidBinding();
         if (activated) revert AlreadyActivated();
@@ -104,6 +105,7 @@ contract IntentReceiver {
         _tokenCall(b.token, abi.encodeCall(asset.approve, (b.swapContract, b.amount)));
         destination.lock(b.preimageHash, b.amount, b.token, b.claimAddress, b.refundAddress, b.timelock);
         _tokenCall(b.token, abi.encodeCall(asset.approve, (b.swapContract, 0)));
+        // Exact deltas are deliberate: fee-on-transfer and rebasing tokens are unsupported, not to be tolerated.
         if (
             !destination.swaps(key) || asset.allowance(address(this), b.swapContract) != 0 ||
             asset.balanceOf(address(this)) != beforeBalance - b.amount ||
@@ -114,7 +116,17 @@ contract IntentReceiver {
 
     function recover(address recoveredToken) external guarded {
         Binding memory b = _binding();
-        if (recoveredToken.code.length == 0 || b.refundAddress == address(0)) revert InvalidBinding();
+        if (b.refundAddress == address(0)) revert InvalidBinding();
+        // ETH can still be forced in (selfdestruct, block rewards); address(0) sweeps it.
+        if (recoveredToken == address(0)) {
+            uint256 balance = address(this).balance;
+            if (balance == 0) revert NothingRecoverable();
+            (bool sent,) = b.refundAddress.call{value: balance}("");
+            if (!sent) revert TokenCallFailed();
+            emit Recovered(address(0), balance);
+            return;
+        }
+        if (recoveredToken.code.length == 0) revert InvalidBinding();
         IERC20ReceiverToken asset = IERC20ReceiverToken(recoveredToken);
         uint256 beforeBalance = asset.balanceOf(address(this));
         uint256 recoverable = beforeBalance;

@@ -118,11 +118,11 @@ export const encodeFactoryDeploy = (binding: IntentReceiverBinding): Uint8Array 
 export const encodeFactoryDeployAndActivate = (binding: IntentReceiverBinding): Uint8Array =>
   factoryCall('deployAndActivate(bytes)', binding)
 export const encodeFactoryDeployAndRecover = (binding: IntentReceiverBinding, tokenAddress: Uint8Array): Uint8Array =>
-  factoryCall('deployAndRecover(bytes,address)', binding, nonzeroAddress(tokenAddress, 'tokenAddress'))
+  factoryCall('deployAndRecover(bytes,address)', binding, addressWord(tokenAddress, 'tokenAddress'))
 
 export const encodeReceiverActivate = (): Uint8Array => selectorFor('activate()')
 export const encodeReceiverRecover = (tokenAddress: Uint8Array): Uint8Array =>
-  concatBytes(selectorFor('recover(address)'), nonzeroAddress(tokenAddress, 'tokenAddress'))
+  concatBytes(selectorFor('recover(address)'), addressWord(tokenAddress, 'tokenAddress'))
 
 type ReceiverRpc = (method: string, params: readonly unknown[]) => Promise<unknown>
 const asHex = (bytes: Uint8Array): string => `0x${Buffer.from(bytes).toString('hex')}`
