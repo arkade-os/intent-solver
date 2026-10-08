@@ -8,7 +8,8 @@ The settlement signal is the exact finalized HTLC claim and its valid preimage.
 
 The fixed solver refund address receives excess, wrong-token, duplicate, and
 expired unactivated funds, and `recover(address(0))` sweeps ETH forced in by
-`selfdestruct` or a block reward. Before either cutoff closes, recovery preserves the
+`selfdestruct` or a block reward; a refund contract that rejects ETH leaves it
+stranded. Before either cutoff closes, recovery preserves the
 entire required token amount. Activation and recovery check actual token balance
 changes and support tokens returning no boolean; fee-taking or dishonest tokens
 are rejected. Operators must explicitly allowlist token and swap code. Tokens
