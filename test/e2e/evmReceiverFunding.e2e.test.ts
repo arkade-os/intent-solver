@@ -180,8 +180,11 @@ beforeAll(async () => {
       if (!prepared.funding_txid) {
         const deployed = await receivers.deploy(`deploy:${binding.intentId}`, immutable)
         if (!deployed.verified) {
-          const receipt = await waitForReceipt(rpc, deployed.transactionHash!)
-          await minedConfirmation('receiver deployment', BigInt(receipt.blockNumber))
+          if (deployed.transactionHash === null) await rpc('anvil_mine', ['0x1', '0x0'])
+          else {
+            const receipt = await waitForReceipt(rpc, deployed.transactionHash)
+            await minedConfirmation('receiver deployment', BigInt(receipt.blockNumber))
+          }
           return {}
         }
         expect(deployed.address).toEqual(receiver)

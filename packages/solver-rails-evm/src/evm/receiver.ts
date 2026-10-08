@@ -53,7 +53,8 @@ export const encodeReceiverDeployment = (creationBytecode: Uint8Array, binding: 
 export const receiverCreation = (binding: IntentReceiverBinding): Uint8Array =>
   encodeReceiverDeployment(Uint8Array.from(Buffer.from(receiverArtifact.creationBytecode, 'hex')), binding)
 
-// The keyless deterministic deployment proxy, at one address on every chain that has it.
+// Arachnid's keyless deterministic-deployment-proxy (not EIP-2470). This runtime, keccak256
+// 0x2fa86add…7e4989, matches eth_getCode at that address on Ethereum, Arbitrum and Base.
 export const RECEIVER_DEPLOYER = Uint8Array.from(Buffer.from('4e59b44847b379578588920ca78fbf26c0b4956c', 'hex'))
 export const RECEIVER_DEPLOYER_RUNTIME = Uint8Array.from(
   Buffer.from(
