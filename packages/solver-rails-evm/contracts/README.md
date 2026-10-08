@@ -7,12 +7,18 @@ an external execution status is authority to collect the input-side payment.
 The settlement signal is the exact finalized HTLC claim and its valid preimage.
 
 The fixed solver refund address receives excess, wrong-token, duplicate, and
-expired unactivated funds. Before either cutoff closes, recovery preserves the
+expired unactivated funds, and `recover(address(0))` sweeps ETH forced in by
+`selfdestruct` or a block reward. Before either cutoff closes, recovery preserves the
 entire required token amount. Activation and recovery check actual token balance
 changes and support tokens returning no boolean; fee-taking or dishonest tokens
 are rejected. Operators must explicitly allowlist token and swap code. Tokens
 with upgradeable implementations additionally retain their administrator's trust
 and freeze risks; a proxy runtime hash alone does not remove those assumptions.
+
+Anyone may open the byte-identical lock in the swap contract first, since its
+key omits the funder. Activation then reverts with `ExistingLock`; nothing is
+lost, as that lock pays the same claimant and refunds to the solver, but the
+receiver's funds stay idle until the cutoff lets `recover` release them.
 
 The timestamp cutoff uses the destination chain's consensus clock. Quote
 authoring must bind it earlier than the input-side refund, with the configured

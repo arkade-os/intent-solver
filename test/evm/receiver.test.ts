@@ -946,6 +946,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
       { ...terms, chainId: 1n },
       { ...terms, swapContract: accounts[3]! },
       { ...terms, lock: { ...terms.lock, tokenAddress: accounts[3]! } },
+      { ...terms, lock: { ...terms.lock, claimAddress: SWAP } },
     ]) {
       const receiver = await deployReceiver(bad)
       expect((await activate(receiver)).status).toBe('0x0')
@@ -959,6 +960,17 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     await deployReceiver(terms)
     expect((await recover(receiver)).status).toBe('0x1')
     expect(await tokenBalance(WETH, accounts[0]!)).toBe(AMOUNT)
+  })
+
+  chainTest('sweeps force-fed ETH to the refund address', async () => {
+    const receiver = await deployReceiver(await binding())
+    const NO_TOKEN = new Uint8Array(20)
+    expect((await recover(receiver, NO_TOKEN)).status).toBe('0x0')
+    await rpc('anvil_setBalance', [hx(receiver), '0xde0b6b3a7640000'])
+    const before = BigInt((await rpc('eth_getBalance', [hx(accounts[0]!), 'latest'])) as string)
+    expect((await recover(receiver, NO_TOKEN)).status).toBe('0x1')
+    expect(BigInt((await rpc('eth_getBalance', [hx(receiver), 'latest'])) as string)).toBe(0n)
+    expect(BigInt((await rpc('eth_getBalance', [hx(accounts[0]!), 'latest'])) as string) - before).toBe(10n ** 18n)
   })
 
   chainTest('refuses calls made to the implementation rather than a clone', async () => {
