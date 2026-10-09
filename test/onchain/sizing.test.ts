@@ -91,11 +91,6 @@ describe('refundSpendVsize', () => {
   })
 
   it('is the size a script-path refund actually occupies', () => {
-    // 138 vbytes: one taproot script-path input carrying a 64-byte signature,
-    // the 41-byte refund leaf and a 65-byte control block, plus one P2TR
-    // output. Written down so a change in any of those is a deliberate edit
-    // here rather than a silent move in the smallest payout this corridor
-    // will quote.
     expect(refundSpendVsize({ network, destinationScript: p2trScript })).toBe(138)
   })
 })

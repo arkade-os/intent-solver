@@ -51,12 +51,7 @@ export const claimSpendVsize = (params: { network: OnchainNetworkProfile; destin
   })
 }
 
-/**
- * The SEND corridor's unhappy path: the solver's own refund of an HTLC the client never claimed. Not what a
- * quote is PRICED off ({@link fundingTxVsize}) — what its payout FLOOR is sized against. The refund leaf is
- * revealed in this witness, so unlike a claim spend the locktime's CScriptNum width reaches the size: a
- * locktime past 2038 measures one byte wider than the placeholder's.
- */
+// The refund of an HTLC nobody claimed — not what a quote is PRICED off, what its payout FLOOR is sized against.
 export const refundSpendVsize = (params: { network: OnchainNetworkProfile; destinationScript: Uint8Array }): number => {
   const htlc = placeholderHtlc(params.network)
   return estimateRefundTxVsize({

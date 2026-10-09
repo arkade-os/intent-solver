@@ -59,7 +59,6 @@ const signer: OnchainSigner = {
 }
 /** Any valid 34-byte P2TR script — the fake backend doesn't care where refunds go. */
 const refundDestinationScript = Uint8Array.from([0x51, 0x20, ...keyBytes(8)])
-/** What reclaiming an unclaimed HTLC costs in vbytes, the figure the payout floor is built from. */
 const REFUND_VSIZE = refundSpendVsize({ network: ONCHAIN_NETWORKS.regtest, destinationScript: refundDestinationScript })
 
 // A real, decodable Arkade address for the client's refund destination —
@@ -332,8 +331,6 @@ describe('OnchainSendSwapService', () => {
     })
 
     it('refuses a payout that clears dust but could not pay for its own refund', async () => {
-      // That refund spends the payout and nothing else, so under dust PLUS its
-      // fee the solver funds an HTLC it cannot take back.
       const svc = withFee({
         limits: { minSats: 100, maxSats: 1_000_000 },
         fee: { bps: 0, flatSats: 0 },
@@ -348,9 +345,6 @@ describe('OnchainSendSwapService', () => {
     })
 
     it('reserves the relay minimum when no rate has been sampled', async () => {
-      // Null is a reading too old to quote off and absent is a deployment that
-      // never asked for live pricing; neither licenses a payout unrefundable at
-      // the lowest rate that would relay at all.
       const floor = ONCHAIN_DUST_SATS + REFUND_VSIZE
       for (const feeRate of [undefined, () => null]) {
         const svc = withFee({ limits: { minSats: 100, maxSats: 1_000_000 }, fee: { bps: 0, flatSats: 0 }, feeRate })
@@ -1105,17 +1099,11 @@ describe('OnchainSendSwapService', () => {
     const funded = await driveToUnrefundableHtlc()
 
     now = funded.htlcLocktime + HTLC_REFUND_MTP_MARGIN + 1
-    // Parking here is what hands the client both legs: an operator refunding
-    // the Arkade lockup off a `stuck` row returns it while the HTLC's claim
-    // leaf — which carries no locktime — is still spendable with the preimage
-    // they held back. A throw keeps the row recoverable instead.
     await expect(service.tick(funded.id)).rejects.toThrow(/below the 330 sat dust limit/)
     let row = await deps.store.get(funded.id)
     expect(row.state).toBe('refunding_onchain')
     expect(row.onchainRefundTxid).toBeNull() // never broadcast
 
-    // The fee rate is re-read every attempt, so the refusal is a verdict about
-    // one moment's mempool and the retry is the whole remedy.
     deps.onchain.estimateFeeRate = async () => 1
     row = await service.tick(funded.id)
     expect(row.onchainRefundTxid).toBeTruthy()
@@ -1123,16 +1111,7 @@ describe('OnchainSendSwapService', () => {
     expect((await service.tick(funded.id)).state).toBe('refunded')
   })
 
-  /**
-   * Drive a swap to `stuck` through the orchestrator's OWN logic — a sub-dust
-   * refund past the refund deadline — rather than hand-setting the state. A
-   * hand-set row would prove nothing about whether production can reach the
-   * case under test, and would miss the funding txid/vout a real one carries.
-   *
-   * Past `refundLocktime` is the only clock at which that path parks: before
-   * it the refusal is retried (the test directly above), because the client
-   * cannot pull their lockup back yet.
-   */
+  /** `stuck` through the orchestrator's own logic: a sub-dust refund past `refundLocktime`, the only clock that parks it. */
   const driveToStuck = async (): Promise<OnchainSendSwapRow> => {
     const funded = await driveToUnrefundableHtlc()
     now = funded.refundLocktime + 1
@@ -1144,8 +1123,6 @@ describe('OnchainSendSwapService', () => {
   }
 
   it('parks a sub-dust refund once the client could pull their lockup back, where a human weighs both legs', async () => {
-    // The rate is in the reason, so "fees spiked" stays separable from "too
-    // small at any rate".
     expect((await driveToStuck()).failureReason).toMatch(/at 5 sat\/vB/)
   })
 
@@ -1169,8 +1146,6 @@ describe('OnchainSendSwapService', () => {
   })
 
   it('refundNow() pushes the covenant refund for a stuck swap — the operator override the sweep leaves to a human', async () => {
-    // The unreadable-spend route: the sub-dust one parks only past
-    // `refundLocktime`, and what this pins is the override working before it.
     const row = await driveToStuckOnUnreadableSpend()
     // No clock move: the leaf this spends (nonInteractiveRefund — server +
     // receiver + emulator) carries no timelock, so the override works BEFORE
@@ -1824,7 +1799,6 @@ describe('OnchainSendSwapService', () => {
     it('never reports a floor below the dust a payout must clear, plus its own refund', () => {
       const tiny = { bps: 0, flatSats: 900 }
       expect(serviceCharging(tiny, 1_000).minimumPayoutSats()).toBe(ONCHAIN_DUST_SATS + REFUND_VSIZE)
-      // Moves with the sampled rate, so an operator reads what quoting applies.
       expect(serviceCharging(tiny, 1_000, () => 5).minimumPayoutSats()).toBe(ONCHAIN_DUST_SATS + REFUND_VSIZE * 5)
     })
   })
