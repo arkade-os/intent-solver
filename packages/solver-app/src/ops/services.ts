@@ -473,10 +473,6 @@ export const createServices = async (
     tokens: config.assetRfqTokens,
   })
   for (const line of adminStore.repairedServing) log(`market serving repaired — ${line}`)
-  // The READER set: a corridor an operator switched off still has in-flight
-  // swaps, and those are still exposure the cap must count.
-  const totalCommitted = () =>
-    committedAcrossCorridors(readerSetFromDeps({ store, onchainStore, receiveStore, onchainReceiveStore }))
   /**
    * ONE control for every corridor, deliberately. Each service would happily
    * make its own, and that still bounds a corridor against itself — but the
@@ -667,6 +663,18 @@ export const createServices = async (
     }),
     onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
   })
+
+  // ONE reading, whole house: a narrower one lends out headroom another corridor
+  // holds. EVM and asset read direct — their readers narrow per token and pair.
+  const totalCommitted = async (): Promise<number> => {
+    const totals = await Promise.all([
+      committedAcrossCorridors(readerSetFromDeps({ store, onchainStore, receiveStore, onchainReceiveStore })),
+      evmSendStore?.committedSats() ?? 0,
+      evmReceiveStore?.committedSats() ?? 0,
+      assetRfqStore.committedSats(),
+    ])
+    return totals.reduce((sum, value) => sum + value, 0)
+  }
 
   /**
    * Whether to build a BTC corridor's service — its own switch, and a rail to
@@ -1093,22 +1101,6 @@ export const createServices = async (
       onCappedByPolicy: (call) =>
         log(`evm fee capped by policy on a call to ${call.to} — raise EVM_MAX_FEE_PER_GAS_CEILING or wait`),
     })
-    // EVERY corridor's exposure, the EVM pair included. The cap bounds the
-    // HOUSE, so a reading that left out two corridors would let them spend it
-    // again — the same hole `committedAcrossCorridors` closed for the other
-    // four. Built here rather than reused from `ops/pool.ts` because that helper
-    // takes the assembled `Services`, which does not exist yet at construction.
-    const totalCommitted = async (): Promise<number> => {
-      const totals = await Promise.all([
-        store.committedSats(),
-        onchainStore.committedSats(),
-        receiveStore.committedSats(),
-        onchainReceiveStore.committedSats(),
-        evmSendStore.committedSats(),
-        evmReceiveStore.committedSats(),
-      ])
-      return totals.reduce((sum, value) => sum + value, 0)
-    }
     // Keyed by token address: one store per DIRECTION serves every token, so one
     // service does too. @see EvmSendServiceDeps.markets
     const marketsFor = (direction: 'send' | 'receive') =>

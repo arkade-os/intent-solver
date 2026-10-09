@@ -54,6 +54,15 @@ describe('createServices — one admission control for every corridor', () => {
     expect(body.match(/^\s*admission,$/gm) ?? []).toHaveLength(6)
     expect(body.match(/^\s*totalCommitted,$/gm) ?? []).toHaveLength(6)
   })
+
+  it('reads one house-wide committed total, every exposure-bearing store in it', () => {
+    const body = createServicesBody()
+    expect(body.match(/const totalCommitted/g) ?? []).toHaveLength(1)
+    for (const read of ['evmSendStore?.committedSats()', 'evmReceiveStore?.committedSats()']) {
+      expect(body, `${read} is missing from the house-wide total`).toContain(read)
+    }
+    expect(body).toContain('assetRfqStore.committedSats()')
+  })
 })
 
 describe('createServices — stores follow the resolved layout', () => {
