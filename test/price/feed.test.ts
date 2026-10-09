@@ -13,13 +13,38 @@ import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 /** What the arkade regtest stack serves at `http://pricefeed/btc-asset`. */
 const REGTEST_BODY = '{"btc":{"asset":100000000}}'
 
-const respond = (text: string, init: { status?: number; statusText?: string } = {}) =>
+/** A body the reader has to pull, like a real one. No `text()`: the feed is read as bytes. */
+const responded = (body: ReadableStream<Uint8Array>, init: { status?: number; statusText?: string } = {}) =>
   vi.fn().mockResolvedValue({
     ok: (init.status ?? 200) >= 200 && (init.status ?? 200) < 300,
     status: init.status ?? 200,
     statusText: init.statusText ?? 'OK',
-    text: async () => text,
+    body,
   } as unknown as Response)
+
+const respond = (text: string, init: { status?: number; statusText?: string } = {}) =>
+  responded(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(text))
+        controller.close()
+      },
+    }),
+    init,
+  )
+
+const endless = (chunkBytes: number) => {
+  let pulled = 0
+  return {
+    pulled: () => pulled,
+    stream: new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1
+        controller.enqueue(new Uint8Array(chunkBytes))
+      },
+    }),
+  }
+}
 
 describe('reading a price off a feed', () => {
   it('resolves the pointer the regtest stack actually needs', async () => {
@@ -87,6 +112,31 @@ describe('refusals', () => {
   it('refuses a zero price, which would make every swap free one way', async () => {
     const fetch = respond('{"btc":{"asset":0}}')
     await expect(createPriceFeed({ fetch })('http://feed', '/btc/asset')).rejects.toThrow(/positive/)
+  })
+
+  it('refuses an oversized body instead of buffering it', async () => {
+    const feed = endless(256 * 1024)
+    const fetch = responded(feed.stream)
+
+    await expect(createPriceFeed({ fetch })('http://feed', '/btc/asset')).rejects.toThrow(/exceeded/)
+    expect(feed.pulled()).toBeLessThan(16)
+  })
+
+  it('refuses an oversized body even when cancelling its stream never settles', async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      pull: (controller) => controller.enqueue(new Uint8Array(256 * 1024)),
+      cancel: () => new Promise<void>(() => {}),
+    })
+
+    await expect(createPriceFeed({ fetch: responded(stream) })('http://feed', '/btc/asset')).rejects.toThrow(/exceeded/)
+  })
+
+  it('caps an error body too, which no status code bounds either', async () => {
+    const feed = endless(256 * 1024)
+    const fetch = responded(feed.stream, { status: 429, statusText: 'Too Many Requests' })
+
+    await expect(createPriceFeed({ fetch })('http://feed', '/btc/asset')).rejects.toThrow(/exceeded/)
+    expect(feed.pulled()).toBeLessThan(16)
   })
 
   it('abandons a feed that accepts the connection and never answers', async () => {

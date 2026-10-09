@@ -37,6 +37,39 @@ export interface PriceFeedDeps {
 
 const DEFAULT_TIMEOUT_MS = 10_000
 
+/** A price is a few hundred bytes; the largest feed response seen is kilobytes. */
+const MAX_BODY_BYTES = 1_048_576
+
+/**
+ * The body, to a cap, then the connection dropped. `response.text()` buffers
+ * whatever the feed chose to send, and the timeout bounds how LONG a response
+ * takes rather than how big it is - on the quote path, before a synchronous parse.
+ */
+const cappedText = async (response: Response, feedUrl: string): Promise<string> => {
+  const tooLarge = () => new Error(`price feed ${feedUrl}: response exceeded ${MAX_BODY_BYTES} bytes`)
+  // No stream: a null-body status, or an injected fetch that answers with `text()` only.
+  if (!response.body) {
+    const text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) throw tooLarge()
+    return text
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let text = ''
+  let bytes = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    bytes += value.byteLength
+    if (bytes > MAX_BODY_BYTES) {
+      void reader.cancel().catch(() => {})
+      throw tooLarge()
+    }
+    text += decoder.decode(value, { stream: true })
+  }
+  return text + decoder.decode()
+}
+
 /** Reads the price at `pricePath` in the response from `feedUrl`. */
 export type FetchPrice = (feedUrl: string, pricePath: string) => Promise<Price>
 
@@ -66,7 +99,7 @@ export const createPriceFeed = (deps: PriceFeedDeps = {}): FetchPrice => {
     // Body first, then status - the same order `evm/rpc.ts` reads them, because
     // a rate-limited or unauthorised feed puts the actionable part in the body
     // and "429" alone turns a one-line fix into an investigation.
-    const text = await response.text()
+    const text = await cappedText(response, feedUrl)
     if (!response.ok) {
       throw new Error(`price feed ${feedUrl}: HTTP ${response.status} ${response.statusText} - ${text.slice(0, 200)}`)
     }

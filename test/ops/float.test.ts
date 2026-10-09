@@ -618,6 +618,18 @@ describe('runFloatLifecycle boards confirmed sats', () => {
     expect(second).toEqual(['expiring'])
   })
 
+  it('refuses a deposit the per-output ceiling cannot carry whole', async () => {
+    const settle = vi.fn(async (_params: SettleParams) => 'boarding-txid')
+    const services = floatServices(async () => NO_DEPRECATED, [], [], { boarded: [boarded(2_000_000)], settle })
+    const wallet = services.arkade.wallet as unknown as Record<string, unknown>
+    wallet.arkProvider = { getInfo: async () => ({ fees: { intentFee: {} }, vtxoMaxAmount: 150_000n, dust: 330n }) }
+    const report = await runFloatLifecycle(services)
+
+    expect(settle).not.toHaveBeenCalled()
+    expect(report.boarded).toBeNull()
+    expect(report.failures.join(' ')).toContain('150000')
+  })
+
   it('reports nothing and settles nothing when nothing is boarded', async () => {
     const { report, settle } = await passWith({})
 

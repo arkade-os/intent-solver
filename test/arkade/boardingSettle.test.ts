@@ -104,6 +104,21 @@ describe('planBoardingSettle', () => {
     expect(result.outputs.every((amount) => amount <= 150_000n)).toBe(true)
   })
 
+  it('refuses a deposit the eight-output capacity cannot carry', () => {
+    const result = plan([utxo(2_000_000)], { vtxoMaxAmount: 150_000n })
+
+    expect(result).toEqual({ settle: false, reason: 'over-capacity' })
+  })
+
+  it('leaves an input that would overflow the capacity to a later pass, whole', () => {
+    const result = plan([utxo(1_000_000, 'first'), utxo(1_000_000, 'second')], { vtxoMaxAmount: 150_000n })
+
+    expect(result.settle).toBe(true)
+    if (!result.settle) return
+    expect(result.inputs.map((i) => i.txid)).toEqual(['first'])
+    expect(total(result.outputs)).toBe(1_000_000n)
+  })
+
   it('refuses an input the sweep owns, however much it is worth', () => {
     const gone = utxo(500_000, 'gone')
     const result = plan([gone], { expired: new Set(['gone:0']) })
