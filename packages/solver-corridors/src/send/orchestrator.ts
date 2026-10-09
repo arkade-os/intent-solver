@@ -1304,6 +1304,14 @@ export class SendSwapService {
       await store.fail(row.id, row.state, 'paying state with no idempotency key')
       return false
     }
+    // A row recovered in `paying` re-submits on whatever key is configured now, and
+    // `ArkadeOps.claim` throws on a mismatch rather than reaching for a retained key.
+    if (row.receiverPubkey !== this.deps.arkade.providerPubkey) {
+      const reason = 'refused to pay: provider key rotated since quote'
+      if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
+      else await store.fail(row.id, row.state, reason)
+      return false
+    }
     const refundDeadlineForCltv = await refundDeadlineSeconds(
       row.refundLocktime,
       this.now,

@@ -1161,6 +1161,23 @@ describe('tick: refusals before money moves', () => {
     expect(row.failureReason).toContain('provider key rotated')
     expect(ln.payCalls).toHaveLength(0)
   })
+
+  it('refuses a rotated row recovered in `paying` rather than re-submitting it', async () => {
+    const { swap } = await quoted()
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: swap.amountSats })
+    await store.transition(swap.id, 'funded', 'paying', {
+      idempotency_key: `swap-${swap.paymentHash}`,
+      pay_attempted_at: clock,
+    })
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: swap.amountSats }]
+    arkade.providerPubkey = key(7)
+
+    const row = await service.tick(swap.id)
+
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toContain('provider key rotated')
+    expect(ln.payCalls).toHaveLength(0)
+  })
 })
 
 describe('tick: failure and recovery', () => {
