@@ -859,6 +859,8 @@ export const createServices = async (
       signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
       refundDestinationScript: onchainRefundDestinationScript,
       peerStores: [store, receiveStore, onchainReceiveStore],
+      // Not for pricing: for reserving the refund of what a quote funds.
+      feeRate: onchainFeeRate ?? undefined,
       float: onchainFloat && {
         read: () => onchainFloat.read(),
         // Unreadable rate falls back to the same flat `networkFeePricing` bills,
