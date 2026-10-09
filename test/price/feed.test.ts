@@ -122,6 +122,15 @@ describe('refusals', () => {
     expect(feed.pulled()).toBeLessThan(16)
   })
 
+  it('refuses an oversized body even when cancelling its stream never settles', async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      pull: (controller) => controller.enqueue(new Uint8Array(256 * 1024)),
+      cancel: () => new Promise<void>(() => {}),
+    })
+
+    await expect(createPriceFeed({ fetch: responded(stream) })('http://feed', '/btc/asset')).rejects.toThrow(/exceeded/)
+  })
+
   it('caps an error body too, which no status code bounds either', async () => {
     const feed = endless(256 * 1024)
     const fetch = responded(feed.stream, { status: 429, statusText: 'Too Many Requests' })

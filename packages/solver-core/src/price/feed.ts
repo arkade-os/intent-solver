@@ -62,7 +62,7 @@ const cappedText = async (response: Response, feedUrl: string): Promise<string> 
     if (done) break
     bytes += value.byteLength
     if (bytes > MAX_BODY_BYTES) {
-      await reader.cancel()
+      void reader.cancel().catch(() => {})
       throw tooLarge()
     }
     text += decoder.decode(value, { stream: true })
