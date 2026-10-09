@@ -1691,7 +1691,26 @@ describe('ReceiveSwapService.tick — refund path', () => {
     expect((await store.history(funded.id)).map((e) => e.to)).not.toContain('stuck')
   })
 
-  it('escalates to stuck if the lockup is gone and no claim can be found once past the refund deadline', async () => {
+  it('keeps looking for the claim while the held payment can still be settled', async () => {
+    // Escalating discards the recheck above, the only thing that still recovers it.
+    const funded = await armAndFund()
+    const row0 = await store.get(funded.id)
+    expect(row0.htlcExpiresAt!).toBeGreaterThan(row0.refundLocktime + EMPTY_LOCKUP_GRACE)
+    now = row0.refundLocktime
+    arkade.state.outputs = []
+    arkade.state.claimPreimage = null
+
+    expect((await service.tick(funded.id)).state).toBe('refunding')
+    now = row0.htlcExpiresAt! - 1
+    expect((await service.tick(funded.id)).state).toBe('refunding')
+
+    arkade.state.claimPreimage = P
+    const row = await service.tick(funded.id)
+    expect(row.state).toBe('settled')
+    expect(row.preimage).toBe(hex.encode(P))
+  })
+
+  it('escalates to stuck if the lockup is gone and no claim can be found by the time the payment expires', async () => {
     const funded = await armAndFund()
     const row0 = await store.get(funded.id)
     now = row0.refundLocktime
@@ -1704,7 +1723,9 @@ describe('ReceiveSwapService.tick — refund path', () => {
     // to PERSIST to be judged inexplicable rather than merely early.
     expect((await service.tick(funded.id)).state).toBe('refunding')
     now += EMPTY_LOCKUP_GRACE
+    expect((await service.tick(funded.id)).state).toBe('refunding')
 
+    now = row0.htlcExpiresAt!
     const row = await service.tick(funded.id)
     expect(row.state).toBe('stuck')
     expect(row.failureReason).toMatch(/no matching claim found/)
@@ -1718,14 +1739,12 @@ describe('ReceiveSwapService.tick — refund path', () => {
     arkade.state.outputs = []
     arkade.state.claimPreimage = null
 
-    // Ticking inside the grace must not be able to postpone the escalation
-    // indefinitely: the clock runs from the row's own entry into `refunding`,
-    // not from the last attempt, so polling it cannot starve the human.
-    for (let elapsed = 0; elapsed < EMPTY_LOCKUP_GRACE; elapsed += 10) {
-      now = row0.refundLocktime + elapsed
+    // Neither clock runs from the last attempt, so polling cannot starve the human.
+    for (let at = row0.refundLocktime; at < row0.htlcExpiresAt!; at += 600) {
+      now = at
       expect((await service.tick(funded.id)).state).toBe('refunding')
     }
-    now = row0.refundLocktime + EMPTY_LOCKUP_GRACE
+    now = row0.htlcExpiresAt!
     expect((await service.tick(funded.id)).state).toBe('stuck')
   })
 

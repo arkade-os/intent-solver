@@ -846,6 +846,13 @@ export class OnchainSendSwapService {
     }
     const outputs = await arkade.findLockups(row.pkScript)
     if (outputs.length === 0) {
+      // Proof of neither our claim nor the lockup's spend: `findLockups` is
+      // spendableOnly. {@link pushRefund}'s refusal applies here too, and harder —
+      // `stuck` has no `step` case, so parking ends collection after we paid out.
+      const evidence = await arkade.lockupSpendEvidence(row.pkScript)
+      if (evidence !== 'spent' && this.now() < row.refundLocktime) {
+        throw new Error(`swap ${row.id}: lockup reads empty while claiming but no spend is provable (${evidence})`)
+      }
       await store.fail(row.id, 'claiming', 'lockup empty while claiming with no claim txid recorded; needs review')
       return false
     }

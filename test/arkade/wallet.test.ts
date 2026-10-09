@@ -692,7 +692,81 @@ describe('findClaimPreimage', () => {
     const ctx = indexerCtx({ getVtxos, virtualTxs: { [SPEND_TXID]: spendTxForOther } })
     const found = await findClaimPreimage(ctx, [OUTPOINT, other], PAYMENT_HASH)
     expect(found).toEqual(PREIMAGE)
-    expect(getVtxos).toHaveBeenCalledWith({ outpoints: [OUTPOINT, other] })
+    expect(getVtxos).toHaveBeenCalledWith({ outpoints: [OUTPOINT, other], pageIndex: 0, pageSize: 500 })
+  })
+
+  it('finds a claim the indexer did not fit on its first page', async () => {
+    // Padding a script past `arkd`'s 100-row page ceiling pushes the claimed
+    // outpoint onto a later page, leaving `P` unlearnable for a claim that landed.
+    const padding = Array.from({ length: 249 }, (_, vout) => ({ txid: 'e'.repeat(64), vout }))
+    const claimed = { txid: 'd'.repeat(64), vout: 9 }
+    const rows = [...padding, claimed].map((o) => ({
+      txid: o.txid,
+      vout: o.vout,
+      value: 330,
+      status: {},
+      spentBy: o.txid === claimed.txid ? SPEND_TXID : '',
+    }))
+    const getVtxos = vi.fn(async ({ pageIndex }: { pageIndex: number }) => {
+      const num = Math.max(pageIndex, 1)
+      const total = Math.ceil(rows.length / 100)
+      return {
+        vtxos: rows.slice((num - 1) * 100, num * 100),
+        page: { current: num, next: num < total ? num + 1 : total, total },
+      }
+    })
+    const ctx = indexerCtx({
+      getVtxos,
+      virtualTxs: { [SPEND_TXID]: buildSpendTxB64({ spends: claimed, conditionWitness: [PREIMAGE] }) },
+    })
+    await expect(findClaimPreimage(ctx, [...padding, claimed], PAYMENT_HASH)).resolves.toEqual(PREIMAGE)
+    expect(getVtxos).toHaveBeenCalledTimes(3)
+  })
+
+  it('reads every chunk of spending transactions, not just the first', async () => {
+    // A padded script puts one claim among many spends, and here it is a late one.
+    const CLAIMED = 140
+    const spent = Array.from({ length: 150 }, (_, vout) => ({ txid: 'a'.repeat(64), vout }))
+    const spentBy = Array.from({ length: 150 }, (_, i) => i.toString(16).padStart(64, '0'))
+    const spendTx = buildSpendTxB64({ spends: spent[CLAIMED], conditionWitness: [PREIMAGE] })
+    const getVtxos = vi.fn(async () => ({
+      vtxos: spent.map((o, i) => ({ txid: o.txid, vout: o.vout, value: 330, status: {}, spentBy: spentBy[i] })),
+    }))
+    // Answers at most 100 and says nothing about the rest — losing a claim silently.
+    const getVirtualTxs = vi.fn(async (txids: string[]) => ({
+      txs: txids
+        .slice(0, 100)
+        .filter((id) => id === spentBy[CLAIMED])
+        .map(() => spendTx),
+    }))
+    const ctx = {
+      wallet: { indexerProvider: { getVtxos, getVirtualTxs } } as unknown as ArkadeContext['wallet'],
+    } as ArkadeContext
+
+    await expect(findClaimPreimage(ctx, spent, PAYMENT_HASH)).resolves.toEqual(PREIMAGE)
+    expect(getVirtualTxs.mock.calls.length).toBeGreaterThan(1)
+    expect(Math.max(...getVirtualTxs.mock.calls.map(([txids]) => txids.length))).toBeLessThanOrEqual(100)
+  })
+
+  it('follows the page metadata when a spending-transaction read is itself paged', async () => {
+    const spendTx = buildSpendTxB64({ conditionWitness: [PREIMAGE] })
+    const decoy = buildSpendTxB64({ spends: { txid: 'c'.repeat(64), vout: 7 }, conditionWitness: [WRONG_PREIMAGE] })
+    const getVtxos = vi.fn(async () => ({
+      vtxos: [
+        { txid: OUTPOINT.txid, vout: OUTPOINT.vout, value: 50_000, status: {}, spentBy: SPEND_TXID, settledBy: '' },
+      ],
+    }))
+    const getVirtualTxs = vi.fn(async (_txids: string[], opts?: { pageIndex?: number }) =>
+      (opts?.pageIndex ?? 0) === 0
+        ? { txs: [decoy], page: { current: 1, next: 2, total: 2 } }
+        : { txs: [spendTx], page: { current: 2, next: 2, total: 2 } },
+    )
+    const ctx = {
+      wallet: { indexerProvider: { getVtxos, getVirtualTxs } } as unknown as ArkadeContext['wallet'],
+    } as ArkadeContext
+
+    await expect(findClaimPreimage(ctx, [OUTPOINT], PAYMENT_HASH)).resolves.toEqual(PREIMAGE)
+    expect(getVirtualTxs).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -843,7 +917,7 @@ describe('lockupProvablySpent', () => {
     const getVtxos = vi.fn(async () => ({ vtxos: [] }))
     const ctx = { wallet: { indexerProvider: { getVtxos } } as unknown as ArkadeContext['wallet'] } as ArkadeContext
     await lockupProvablySpent(ctx, SCRIPT)
-    expect(getVtxos).toHaveBeenCalledWith({ scripts: [SCRIPT] })
+    expect(getVtxos).toHaveBeenCalledWith({ scripts: [SCRIPT], pageIndex: 0, pageSize: 500 })
   })
 
   // The two answers the boolean folds into `false`; only one is worth waiting on.

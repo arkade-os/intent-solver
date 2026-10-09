@@ -3,7 +3,12 @@ import { describe, it, expect, vi } from 'vitest'
 import { IndexerPagingError } from '@arkade-os/solver-arkade/arkade/indexerPaging.js'
 import { liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
-import { findLockupOutpoints, findLockups, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import {
+  findLockupOutpoints,
+  findLockups,
+  lockupSpendEvidence,
+  type ArkadeContext,
+} from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const SCRIPT = '5120' + 'ab'.repeat(32)
 
@@ -69,6 +74,21 @@ describe.each(READS)('$name', ({ read }) => {
     )
     await expect(read(ctxWith(getVtxos))).resolves.toHaveLength(5)
     expect(getVtxos).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe('lockupSpendEvidence', () => {
+  it('reads every page before calling a lockup spent', async () => {
+    // `arkd` clamps a page to 100 rows, and `spent` is the answer that stops collection.
+    const rows = Array.from({ length: 250 }, (_, vout) => vtxo({ vout, isSpent: vout < 249 }))
+    const getVtxos = arkdPaging(rows, 100)
+    await expect(lockupSpendEvidence(ctxWith(getVtxos), SCRIPT)).resolves.toBe('unspent')
+    expect(getVtxos).toHaveBeenCalledTimes(3)
+  })
+
+  it('still reports spent when every page agrees', async () => {
+    const rows = Array.from({ length: 250 }, (_, vout) => vtxo({ vout, isSpent: true }))
+    await expect(lockupSpendEvidence(ctxWith(arkdPaging(rows, 100)), SCRIPT)).resolves.toBe('spent')
   })
 })
 

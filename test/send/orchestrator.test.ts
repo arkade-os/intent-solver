@@ -1853,9 +1853,9 @@ describe('tick: failure and recovery', () => {
     // The loss the review found: findLockups returns [] for a swept, renewed or
     // lagging vtxo just as it does after our own spend, so "empty" is not proof
     // our claim landed. Booking it `claimed` (no txid) buries a full-amount loss.
-    // Empty-while-claiming always routes to `stuck` for a human, at any clock.
     const row = await claiming()
     arkade.lockups = []
+    arkade.lockupsSpent = true
     expect(clock).toBeLessThan(row.refundLocktime) // even BEFORE the deadline
 
     const done = await service.tick(row.id)
@@ -1863,6 +1863,36 @@ describe('tick: failure and recovery', () => {
     expect(done.claimArkTxid).toBeNull()
     expect(done.failureReason).toContain('no claim txid')
     expect(arkade.claimCalls).toHaveLength(0)
+  })
+
+  it('keeps an UNPROVEN empty script in claiming, and claims it when the lockup reappears', async () => {
+    // The lagging view `pushRefund` already refuses to act on; `stuck` is terminal.
+    const row = await claiming()
+    arkade.lockups = []
+    arkade.lockupsSpent = false
+    const errors: string[] = []
+    service.onTickError = (id) => errors.push(id)
+
+    await service.tickAll()
+    expect((await store.get(row.id)).state).toBe('claiming')
+    expect(errors).toEqual([row.id])
+    expect(arkade.claimCalls).toHaveLength(0)
+
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    const done = await service.tick(row.id)
+    expect(done.state).toBe('claimed')
+    expect(done.claimArkTxid).toBe('claim-txid')
+  })
+
+  it('escalates an unproven empty script once the refund deadline has passed', async () => {
+    const row = await claiming()
+    arkade.lockups = []
+    arkade.lockupsSpent = false
+    clock = row.refundLocktime + 1
+
+    const done = await service.tick(row.id)
+    expect(done.state).toBe('stuck')
+    expect(done.claimArkTxid).toBeNull()
   })
 
   it('records claimed only with our own claim txid in hand', async () => {
