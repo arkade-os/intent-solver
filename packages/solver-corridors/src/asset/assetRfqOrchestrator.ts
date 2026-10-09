@@ -141,7 +141,6 @@ export interface AssetRfqDeps {
 export type AssetRfqQuoteRefusal =
   | 'rate_limited'
   | 'unsupported_pair'
-  | 'exact_out_unsupported'
   | 'price_unavailable'
   | 'fee_consumes_swap'
   | 'amount_out_of_range'
