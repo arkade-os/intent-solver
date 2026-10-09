@@ -1161,7 +1161,9 @@ export class SendSwapService {
         await store.fail(row.id, 'paying', 'backend settled the payment but reported no preimage')
         return false
       }
-      if (!(await store.transition(row.id, 'paying', 'paid'))) return false
+      // P rides the SAME write: this row's id was never learned, so a crash between a
+      // bare `paid` and the claim would leave nothing on disk to collect on.
+      if (!(await store.transition(row.id, 'paying', 'paid', { preimage: htlc.preimage }))) return false
       return this.claimWithPreimage(row.id, row.paymentHash, htlc.preimage)
     }
 
@@ -1544,7 +1546,9 @@ export class SendSwapService {
   /** Poll the backend once for the payment's outcome and advance accordingly. */
   private async settleFromBackend(row: SendSwapRow, from: 'paying' | 'paid'): Promise<boolean> {
     const { store, ln } = this.deps
-    if (!row.paymentId) return false
+    if (!row.paymentId) {
+      return row.preimage ? this.claimWithPreimage(row.id, row.paymentHash, row.preimage) : false
+    }
     const polled = await ln.getPayment(row.paymentId)
     // Record what the backend knew before acting on it, so a fill that has
     // stalled is legible to an operator and to the client instead of reading

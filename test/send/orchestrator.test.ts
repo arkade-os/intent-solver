@@ -2886,6 +2886,33 @@ describe('a payment whose commitment outlived its id', () => {
     expect(row.state).toBe('paid')
     expect(row.paymentId).toBe('pay-2')
   })
+
+  it('claims a recovered preimage on a later tick when the claim write died first', async () => {
+    const wedged = await wedgedInPaying()
+    ln.sendHtlc = { status: 'settled', preimage: FORGED_PREIMAGE }
+    const write = store.transition.bind(store)
+    let failed = false
+    const spy = vi.spyOn(store, 'transition').mockImplementation(async (id, from, to, fields) => {
+      if (to === 'claiming' && !failed) {
+        failed = true
+        throw new Error('store write failed')
+      }
+      return write(id, from, to, fields)
+    })
+
+    await expect(service.tick(wedged.id)).rejects.toThrow('store write failed')
+    const stranded = await store.get(wedged.id)
+    expect(stranded.state).toBe('paid')
+    expect(stranded.paymentId).toBeNull()
+    expect(stranded.preimage).toBe(FORGED_PREIMAGE)
+
+    spy.mockRestore()
+    const row = await service.tick(wedged.id)
+
+    expect(row.state).toBe('claimed')
+    expect(arkade.claimCalls).toHaveLength(1)
+    expect(arkade.refundCalls).toHaveLength(0)
+  })
 })
 
 describe('a payment refused before submission', () => {
