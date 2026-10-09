@@ -46,7 +46,13 @@ const MAX_BODY_BYTES = 1_048_576
  * takes rather than how big it is - on the quote path, before a synchronous parse.
  */
 const cappedText = async (response: Response, feedUrl: string): Promise<string> => {
-  if (!response.body) return ''
+  const tooLarge = () => new Error(`price feed ${feedUrl}: response exceeded ${MAX_BODY_BYTES} bytes`)
+  // No stream: a null-body status, or an injected fetch that answers with `text()` only.
+  if (!response.body) {
+    const text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) throw tooLarge()
+    return text
+  }
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let text = ''
@@ -57,7 +63,7 @@ const cappedText = async (response: Response, feedUrl: string): Promise<string> 
     bytes += value.byteLength
     if (bytes > MAX_BODY_BYTES) {
       await reader.cancel()
-      throw new Error(`price feed ${feedUrl}: response exceeded ${MAX_BODY_BYTES} bytes`)
+      throw tooLarge()
     }
     text += decoder.decode(value, { stream: true })
   }
