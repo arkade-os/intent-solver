@@ -1220,7 +1220,10 @@ export class ReceiveSwapService {
       // this method runs again on every tick, which is what actually recovers
       // the swap once the spending transaction becomes readable.
       if (this.now() - row.updatedAt < EMPTY_LOCKUP_GRACE) return false
-      // Still nothing, long past any read lag. A human needs to look, same
+      // `stuck` is swept by nothing, so escalating also stops the recheck above —
+      // the only thing that still recovers this swap. `E` is the real deadline.
+      if (row.htlcExpiresAt !== null && this.now() < row.htlcExpiresAt) return false
+      // Still nothing, and nothing left to collect. A human needs to look, same
       // posture the onchain leg takes for its own ambiguous-witness case.
       await store.fail(row.id, 'refunding', 'lockup empty during refunding with no matching claim found; needs review')
       return false
