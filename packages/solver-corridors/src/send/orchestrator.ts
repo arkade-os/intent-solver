@@ -268,6 +268,13 @@ const HOT_STATES: readonly SendSwapState[] = ['paying', 'paid']
  */
 export const ORPHANED_REGISTRATION_SECONDS = 3600
 
+/**
+ * `payInvoice` answers `pending` for an unrecognised error because the request may
+ * still be executing, and a lookup inside that window reports "never heard of this
+ * hash" either way — acting on it refunds a client whose payment then settles.
+ */
+export const NO_RECORD_GRACE_SECONDS = 60
+
 /** The pure acceptance gate's refusals, plus the ones only the orchestrator can decide. */
 export type QuoteRefusal =
   | SendAcceptanceRefusal
@@ -1095,6 +1102,16 @@ export class SendSwapService {
     const { ln } = this.deps
     const committed = await ln.getSendHtlcState?.(row.paymentHash)
     if (committed) return this.recoverCommitted(row, committed)
+    // A probe that reaches the backend before the submission it follows is
+    // recorded answers null either way, so inside the grace it is not yet the
+    // proof the gates in `submitPayment` treat it as.
+    if (
+      ln.getSendHtlcState !== undefined &&
+      row.payAttemptedAt !== null &&
+      this.now() - row.payAttemptedAt < NO_RECORD_GRACE_SECONDS
+    ) {
+      return false
+    }
 
     try {
       // The probe above answering falsy is only PROOF on a backend that has a
@@ -1161,7 +1178,9 @@ export class SendSwapService {
         await store.fail(row.id, 'paying', 'backend settled the payment but reported no preimage')
         return false
       }
-      if (!(await store.transition(row.id, 'paying', 'paid'))) return false
+      // P rides the SAME write: this row's id was never learned, so a crash between a
+      // bare `paid` and the claim would leave nothing on disk to collect on.
+      if (!(await store.transition(row.id, 'paying', 'paid', { preimage: htlc.preimage }))) return false
       return this.claimWithPreimage(row.id, row.paymentHash, htlc.preimage)
     }
 
@@ -1304,6 +1323,14 @@ export class SendSwapService {
       await store.fail(row.id, row.state, 'paying state with no idempotency key')
       return false
     }
+    // A row recovered in `paying` re-submits on whatever key is configured now, and
+    // `ArkadeOps.claim` throws on a mismatch rather than reaching for a retained key.
+    if (row.receiverPubkey !== this.deps.arkade.providerPubkey) {
+      const reason = 'refused to pay: provider key rotated since quote'
+      if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
+      else await store.fail(row.id, row.state, reason)
+      return false
+    }
     const refundDeadlineForCltv = await refundDeadlineSeconds(
       row.refundLocktime,
       this.now,
@@ -1362,6 +1389,9 @@ export class SendSwapService {
     const wallet = await ln.walletFingerprint?.().catch(() => undefined)
     await store.patch(row.id, {
       payment_id: result.id,
+      // Per submission, not per transition. AFTER `payInvoice` on purpose: a call that
+      // threw is `whenHashBlocked`'s to measure, and resetting its clock never parks.
+      pay_attempted_at: this.now(),
       ...(this.deps.backendName ? { payment_backend: this.deps.backendName } : {}),
       ...(wallet ? { payment_wallet: wallet } : {}),
       // The fee, captured HERE and not only on the poll. A payment that settles
@@ -1536,7 +1566,9 @@ export class SendSwapService {
   /** Poll the backend once for the payment's outcome and advance accordingly. */
   private async settleFromBackend(row: SendSwapRow, from: 'paying' | 'paid'): Promise<boolean> {
     const { store, ln } = this.deps
-    if (!row.paymentId) return false
+    if (!row.paymentId) {
+      return row.preimage ? this.claimWithPreimage(row.id, row.paymentHash, row.preimage) : false
+    }
     const polled = await ln.getPayment(row.paymentId)
     // Record what the backend knew before acting on it, so a fill that has
     // stalled is legible to an operator and to the client instead of reading
@@ -1569,6 +1601,13 @@ export class SendSwapService {
       await store.patch(row.id, { routing_fee_paid_sats: polled.feePaidSats })
     }
     if (polled.status === 'failed') {
+      if (
+        polled.evidence === 'no_record' &&
+        row.payAttemptedAt !== null &&
+        this.now() - row.payAttemptedAt < NO_RECORD_GRACE_SECONDS
+      ) {
+        return false
+      }
       // The self-payment exception applies to the polled failure exactly as to
       // the immediate one: from either non-terminal payment state, "failed"
       // plus our own node saying it was never paid is the same provable fact.

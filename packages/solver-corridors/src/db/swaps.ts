@@ -90,6 +90,7 @@ const TRANSITION_COLUMNS = new Set([
 const PATCH_COLUMNS = new Set([
   'lockup_value',
   'payment_id',
+  'pay_attempted_at',
   'refund_ark_txid',
   'refund_outcome',
   'payment_evidence',
