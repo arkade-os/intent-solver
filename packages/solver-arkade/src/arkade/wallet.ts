@@ -44,7 +44,7 @@ import { log } from '@arkade-os/solver-core/util/poll.js'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import { claimIdentity } from './claimIdentity.js'
 import type { CovenantSwapScript } from './covenant.js'
-import { vtxoPages } from './indexerPaging.js'
+import { virtualTxPages, vtxoPages } from './indexerPaging.js'
 import { TimedArkProvider, TimedIndexerProvider } from './latencyProviders.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
 
@@ -452,20 +452,21 @@ export const findClaimPreimage = async (
   const spendingTxids = [...new Set(vtxos.flatMap((v) => [v.spentBy, v.settledBy]).filter((id): id is string => !!id))]
   if (spendingTxids.length === 0) return null
 
-  const { txs } = await ctx.wallet.indexerProvider.getVirtualTxs(spendingTxids)
-  for (const raw of txs) {
-    // No options object, matching every other Transaction.fromPSBT call in
-    // this file (claimSwapScript, refundSwapScript) — confirmed against the
-    // pinned SDK build that the default already preserves Ark's proprietary
-    // PSBT fields (ConditionWitness among them) through this exact round trip.
-    const tx = Transaction.fromPSBT(base64.decode(raw))
-    for (let i = 0; i < tx.inputsLength; i++) {
-      const input = tx.getInput(i)
-      if (!input.txid) continue
-      const matchesOurOutpoint = outpoints.some((o) => hex.encode(input.txid!) === o.txid && input.index === o.vout)
-      if (!matchesOurOutpoint) continue
-      for (const candidate of candidateWitnessItems(tx, i)) {
-        if (hashMatches(candidate, paymentHashHex)) return candidate
+  // Same reason the vtxo read above is paged: a padded script names more spending
+  // transactions than one request carries back. A match stops the later chunks too.
+  for await (const batch of virtualTxPages(ctx.wallet.indexerProvider, spendingTxids)) {
+    for (const raw of batch) {
+      // No options object, as everywhere else in this file: confirmed against the
+      // pinned SDK that the default preserves ConditionWitness through this trip.
+      const tx = Transaction.fromPSBT(base64.decode(raw))
+      for (let i = 0; i < tx.inputsLength; i++) {
+        const input = tx.getInput(i)
+        if (!input.txid) continue
+        const matchesOurOutpoint = outpoints.some((o) => hex.encode(input.txid!) === o.txid && input.index === o.vout)
+        if (!matchesOurOutpoint) continue
+        for (const candidate of candidateWitnessItems(tx, i)) {
+          if (hashMatches(candidate, paymentHashHex)) return candidate
+        }
       }
     }
   }
