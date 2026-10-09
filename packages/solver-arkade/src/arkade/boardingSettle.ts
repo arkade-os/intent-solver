@@ -23,8 +23,9 @@ export interface BoardingUtxo {
   status: { confirmed: boolean }
 }
 
-/** Why a pass settled nothing. Each is ordinary, none a failure. */
-export type BoardingSettleSkip = 'nothing-boarded' | 'nothing-settleable' | 'below-its-own-fee' | 'below-dust'
+/** Why a pass settled nothing. Ordinary but for `over-capacity`, which no later pass clears. */
+export type BoardingSettleSkip =
+  'nothing-boarded' | 'nothing-settleable' | 'below-its-own-fee' | 'below-dust' | 'over-capacity'
 
 export type BoardingSettlePlan<U> =
   { settle: false; reason: BoardingSettleSkip } | { settle: true; inputs: U[]; outputs: bigint[] }
@@ -60,18 +61,34 @@ export const planBoardingSettle = <U extends BoardingUtxo>(args: BoardingSettleA
   const script = hex.encode(ArkAddress.decode(address).pkScript)
   const outputFeeOn = (amount: bigint): bigint => BigInt(estimator.evalOffchainOutput({ amount, script }).satoshis)
 
+  // WHAT ONE SETTLEMENT MAY CARRY, the bound a renewal already applies: the
+  // ceiling bounds each OUTPUT, the split emits at most `MAX_SPLIT_OUTPUTS` of
+  // them, and `settle` pays the operator everything selected past the product.
+  const capacity = vtxoMaxAmount < 0n ? -1n : BigInt(MAX_SPLIT_OUTPUTS) * (vtxoMaxAmount + outputFeeOn(vtxoMaxAmount))
+
   const inputs: U[] = []
   let gross = 0n
+  let overCapacity = 0
   for (const utxo of settleable) {
     const fee = estimator.evalOnchainInput({ amount: BigInt(utxo.value) })
     // Judged on the CEILED figure, which is what the deduction below spends:
     // `value` is a raw float, so guarding on it admits a coin whose fee rounds
     // up to its whole worth and which therefore contributes nothing.
     if (BigInt(fee.satoshis) >= BigInt(utxo.value)) continue
+    const net = BigInt(utxo.value) - BigInt(fee.satoshis)
+    // An L1 output this cannot divide, so ALONE is final; the deferral below is not.
+    if (capacity >= 0n && net > capacity) {
+      overCapacity += 1
+      continue
+    }
+    if (capacity >= 0n && gross + net > capacity) continue
     inputs.push(utxo)
-    gross += BigInt(utxo.value) - BigInt(fee.satoshis)
+    gross += net
   }
-  if (inputs.length === 0) return { settle: false, reason: 'below-its-own-fee' }
+  // `gross` never left zero, so every refusal was an input judged alone.
+  if (inputs.length === 0) {
+    return { settle: false, reason: overCapacity > 0 ? 'over-capacity' : 'below-its-own-fee' }
+  }
 
   // The carve a renewal makes, for its reason: one output funds one swap at a
   // time, and is refused outright once it lands over the operator's ceiling.

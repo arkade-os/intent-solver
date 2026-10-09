@@ -211,7 +211,7 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
   // is float by the end of the same pass. @see arkade/boardingSettle.ts
   const boarding = { txid: null as string | null, failures: [] as string[] }
   try {
-    boarding.txid = await settleBoardedSats(services)
+    boarding.txid = await settleBoardedSats(services, (message) => boarding.failures.push(`boarding: ${message}`))
   } catch (error) {
     boarding.failures.push(`boarding settle failed: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -279,7 +279,7 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
  * comes from the SDK rather than being re-derived: that judgement needs the exit
  * timelock and, in block mode, a chain tip.
  */
-const settleBoardedSats = async (services: Services): Promise<string | null> => {
+const settleBoardedSats = async (services: Services, warn: (message: string) => void): Promise<string | null> => {
   const wallet = services.arkade.wallet
   const utxos = await wallet.getBoardingUtxos()
   if (utxos.length === 0) return null
@@ -298,7 +298,16 @@ const settleBoardedSats = async (services: Services): Promise<string | null> => 
     address,
     target: poolTarget(services.config.limits.maxSats, services.config.maxExposedSats),
   })
-  if (!plan.settle) return null
+  if (!plan.settle) {
+    // Said not thrown, like a renewal's: every other reason clears itself later.
+    if (plan.reason === 'over-capacity') {
+      warn(
+        `a deposit exceeds what one settlement can carry at the operator's ${info.vtxoMaxAmount} sat per-output ` +
+          'ceiling and was left at the boarding address; split it on L1 and board the pieces',
+      )
+    }
+    return null
+  }
 
   return wallet.settle({
     inputs: plan.inputs,
