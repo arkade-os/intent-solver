@@ -439,7 +439,12 @@ export const findClaimPreimage = async (
   paymentHashHex: string,
 ): Promise<Uint8Array | null> => {
   if (outpoints.length === 0) return null
-  const { vtxos } = await ctx.wallet.indexerProvider.getVtxos({ outpoints: [...outpoints] })
+  // Paged: `arkd` clamps a page below the size the SDK asks for, so one read of a
+  // long outpoint list stops short and a claim past the ceiling never reveals `P`.
+  const vtxos = []
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { outpoints: [...outpoints] })) {
+    vtxos.push(...batch)
+  }
 
   // Both spend facts, not just `spentBy` — see lockupSpendEvidence. Truthiness, never
   // presence: both are "" rather than absent for an output they do not apply to.
@@ -504,15 +509,20 @@ export type LockupSpendEvidence = 'unknown' | 'unspent' | 'spent'
  * spent outputs. `isVtxoSpent`, not a `spentBy` test: the wire contract permits
  * `isSpent: true` with an empty `spentBy`. A SWEPT output is not a terminal spend, so a
  * swept batch stays actionable; no output at all is `unknown` (lag), never proof.
+ * `spent` needs every page, being the one answer that lets a caller stop collecting.
  */
 export const lockupSpendEvidence = async (
   ctx: Pick<ArkadeContext, 'wallet'>,
   pkScriptHex: string,
 ): Promise<LockupSpendEvidence> => {
-  const { vtxos } = await ctx.wallet.indexerProvider.getVtxos({ scripts: [pkScriptHex] })
-  const all = vtxos ?? []
-  if (all.length === 0) return 'unknown'
-  return all.every((vtxo) => isVtxoSpent(vtxo)) ? 'spent' : 'unspent'
+  let seen = false
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
+    for (const vtxo of batch) {
+      seen = true
+      if (!isVtxoSpent(vtxo)) return 'unspent'
+    }
+  }
+  return seen ? 'spent' : 'unknown'
 }
 
 /**
