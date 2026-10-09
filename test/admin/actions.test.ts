@@ -107,7 +107,12 @@ describe('the confirmation gate', () => {
   })
 
   it('refuses an armed action with no body whatsoever', async () => {
-    const response = await app().fetch(new Request('http://admin/api/actions/refund-now', { method: 'POST' }))
+    const response = await app().fetch(
+      new Request('http://admin/api/actions/refund-now', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
     expect(response.status).toBe(400)
   })
 

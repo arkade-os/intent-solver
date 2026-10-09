@@ -77,9 +77,33 @@ export interface AdminDeps {
   fetchPrice?: FetchPrice
 }
 
+const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
 export const buildAdminApp = (deps: AdminDeps): Hono => {
   const app = new Hono()
   const now = deps.now ?? nowSeconds
+
+  /**
+   * Same-site JSON only, ahead of every route: Hono runs handlers in
+   * registration order, so a guard added later runs later. Host rather than
+   * whole origin — a proxy terminating TLS changes the scheme, not the host.
+   */
+  app.use('/api/*', async (c, next) => {
+    if (!MUTATING.has(c.req.method)) return next()
+    const origin = c.req.header('origin')
+    if (
+      c.req.header('sec-fetch-site') === 'cross-site' ||
+      (origin !== undefined && URL.parse(origin)?.host !== new URL(c.req.url).host)
+    ) {
+      return c.json({ error: 'cross_origin', message: 'a cross-origin request cannot change this solver' }, 403)
+    }
+    // A form post cannot set this header; `DELETE` is the one the console sends bodiless.
+    const mediaType = (c.req.header('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
+    if (c.req.method !== 'DELETE' && mediaType !== 'application/json') {
+      return c.json({ error: 'unsupported_media_type', message: 'content-type must be application/json' }, 415)
+    }
+    return next()
+  })
 
   app.get('/api/healthz', (c) =>
     c.json({ ok: true, mode: deps.mode, uptimeSeconds: Math.max(0, now() - deps.startedAt) }),
