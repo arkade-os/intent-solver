@@ -1102,6 +1102,16 @@ export class SendSwapService {
     const { ln } = this.deps
     const committed = await ln.getSendHtlcState?.(row.paymentHash)
     if (committed) return this.recoverCommitted(row, committed)
+    // A probe that reaches the backend before the submission it follows is
+    // recorded answers null either way, so inside the grace it is not yet the
+    // proof the gates in `submitPayment` treat it as.
+    if (
+      ln.getSendHtlcState !== undefined &&
+      row.payAttemptedAt !== null &&
+      this.now() - row.payAttemptedAt < NO_RECORD_GRACE_SECONDS
+    ) {
+      return false
+    }
 
     try {
       // The probe above answering falsy is only PROOF on a backend that has a

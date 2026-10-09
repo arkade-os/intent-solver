@@ -1170,10 +1170,38 @@ describe('tick: refusals before money moves', () => {
     await store.transition(swap.id, 'quoted', 'funded', { lockup_value: swap.amountSats })
     await store.transition(swap.id, 'funded', 'paying', {
       idempotency_key: `swap-${swap.paymentHash}`,
+      pay_attempted_at: clock - NO_RECORD_GRACE_SECONDS,
+    })
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: swap.amountSats }]
+    arkade.providerPubkey = key(7)
+
+    const row = await service.tick(swap.id)
+
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toContain('provider key rotated')
+    expect(ln.payCalls).toHaveLength(0)
+  })
+
+  it('withholds a rotated row’s refusal while its own submission could still be executing', async () => {
+    const { swap } = await quoted()
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: swap.amountSats })
+    await store.transition(swap.id, 'funded', 'paying', {
+      idempotency_key: `swap-${swap.paymentHash}`,
       pay_attempted_at: clock,
     })
     arkade.lockups = [{ txid: 'f1', vout: 0, value: swap.amountSats }]
     arkade.providerPubkey = key(7)
+
+    const held = await service.tick(swap.id)
+
+    // `refused` here is what the sweep refunds, so a probe that merely raced the
+    // submission would give the lockup back under a payment that then settles.
+    expect(held.state).toBe('paying')
+    expect(held.failureReason).toBeNull()
+    expect(ln.payCalls).toHaveLength(0)
+    expect(await service.refundSweep()).toEqual([])
+
+    clock += NO_RECORD_GRACE_SECONDS
 
     const row = await service.tick(swap.id)
 
@@ -1649,7 +1677,7 @@ describe('tick: failure and recovery', () => {
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
     await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
     await store.transition(swap.id, 'funded', 'paying', {
-      pay_attempted_at: clock,
+      pay_attempted_at: clock - NO_RECORD_GRACE_SECONDS,
       idempotency_key: `swap-${PAYMENT_HASH}`,
     })
     ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
@@ -1660,12 +1688,31 @@ describe('tick: failure and recovery', () => {
     expect(ln.payCalls[0]?.idempotencyKey).toBe(`swap-${PAYMENT_HASH}`)
   })
 
-  it('refuses to submit an unsafe pre-upgrade row already persisted as paying', async () => {
+  it('does not re-submit a recovered row until its last submission is old enough to be absent', async () => {
     const { swap } = await quoted()
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
     await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
     await store.transition(swap.id, 'funded', 'paying', {
       pay_attempted_at: clock,
+      idempotency_key: `swap-${PAYMENT_HASH}`,
+    })
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+
+    expect((await service.tick(swap.id)).state).toBe('paying')
+    expect(ln.payCalls).toHaveLength(0)
+
+    clock += NO_RECORD_GRACE_SECONDS
+
+    expect((await service.tick(swap.id)).state).toBe('paid')
+    expect(ln.payCalls).toHaveLength(1)
+  })
+
+  it('refuses to submit an unsafe pre-upgrade row already persisted as paying', async () => {
+    const { swap } = await quoted()
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+    await store.transition(swap.id, 'funded', 'paying', {
+      pay_attempted_at: clock - NO_RECORD_GRACE_SECONDS,
       idempotency_key: `swap-${PAYMENT_HASH}`,
     })
     await (store as unknown as { driver: { run: (sql: string, params: unknown[]) => Promise<unknown> } }).driver.run(
@@ -2877,6 +2924,7 @@ describe('a payment whose commitment outlived its id', () => {
 
   it('still re-submits when the backend never heard of the hash', async () => {
     const wedged = await wedgedInPaying()
+    clock += NO_RECORD_GRACE_SECONDS
     // Null is "nothing was committed" â€” the crash-before-the-call case, where
     // re-submitting is exactly right and is the only way to learn the id.
     ln.sendHtlc = null
