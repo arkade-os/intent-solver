@@ -844,6 +844,70 @@ describe('OnchainSendSwapService', () => {
     expect(row.failureReason).toContain(String(row.claimDelay))
   })
 
+  /** A row parked in `claiming`: the client revealed `P` onchain and the arkade claim then threw. */
+  const claiming = async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    const funded = await service.tick(outcome.swap.id)
+    deps.onchain.spendClaim(funded.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      P,
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+    deps.arkade.claim = async () => {
+      throw new Error('arkade server briefly unreachable')
+    }
+    await expect(service.tick(funded.id)).rejects.toThrow('briefly unreachable')
+    deps.arkade.claim = async () => 'claim-ark-txid'
+    return deps.store.get(funded.id)
+  }
+
+  it('keeps an UNPROVEN empty lockup in claiming, and claims it when the view catches up', async () => {
+    // Same refusal `pushRefund` above makes; parking ends collection after payout.
+    const row = await claiming()
+    deps.outputs.delete(row.pkScript)
+    deps.known.set(row.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    const errors: string[] = []
+    service.onTickError = (id) => errors.push(id)
+
+    await service.tickAll()
+    expect((await deps.store.get(row.id)).state).toBe('claiming')
+    expect(errors).toEqual([row.id])
+
+    deps.outputs.set(row.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    const done = await service.tick(row.id)
+    expect(done.state).toBe('claimed')
+    expect(done.claimArkTxid).toBe('claim-ark-txid')
+  })
+
+  it('parks an empty lockup whose spend IS provable', async () => {
+    const row = await claiming()
+    deps.outputs.delete(row.pkScript)
+    deps.spent.add(row.pkScript)
+
+    const done = await service.tick(row.id)
+    expect(done.state).toBe('stuck')
+    expect(done.claimArkTxid).toBeNull()
+    expect(done.failureReason).toContain('no claim txid')
+  })
+
+  it('parks an unproven empty lockup once the refund deadline has passed', async () => {
+    const row = await claiming()
+    deps.outputs.delete(row.pkScript)
+    deps.known.set(row.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    now = row.refundLocktime
+
+    expect((await service.tick(row.id)).state).toBe('stuck')
+  })
+
   /**
    * TLA+ finding F7, the half a locktime cannot fix.
    *
