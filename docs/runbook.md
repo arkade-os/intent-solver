@@ -1577,8 +1577,9 @@ covers separately — see "covclaimd" below.
   `test/e2e/support/preflight.ts` so `pnpm test:e2e` stays one command.
   Anything already exported wins, so a one-off override still works.
   `COVCLAIMD_URL` (default `http://localhost:7271`) and `ESPLORA_URL` (default
-  `http://localhost:3000/api`) are e2e-only knobs — no `packages/solver-app/src/config.ts` setting
-  exists for covclaimd yet, because the receive legs are not wired into the CLI.
+  `http://localhost:3000/api`) carry e2e defaults here; `COVCLAIMD_URL` is also
+  a real `packages/solver-app/src/config.ts` setting, so an exported one wires
+  the deployed receive legs to it too — see § covclaimd before you do.
 - **A missing dependency FAILS, it never skips.** A suite that runs this rarely
   and skips quietly is a suite that rots into one that cannot pass at all. The
   preflight probes every dependency and prints the whole stack as a table,
@@ -1612,8 +1613,8 @@ covers separately — see "covclaimd" below.
 
 ### covclaimd
 
-Optional, and still unwired here — but the reason has an expiry date on it now,
-so read the version before repeating the old conclusion.
+Optional, and unwired unless `COVCLAIMD_URL` names one — but the reason has an
+expiry date on it now, so read the version before repeating the old conclusion.
 
 **What was observed (regtest, 2026-08-07).** Against a live
 `ghcr.io/arkade-os/covclaimd:v0.0.1-rc.1`, `POST /v1/reveal` returned **200**
@@ -1648,8 +1649,10 @@ the timelocked non-interactive refund leaf is on unverified ground until this
 note says otherwise.
 
 **Required operator action: leave covclaimd unwired.** There is no safe middle
-setting to pick here. `createServices` leaves `covclaimd` unset on purpose
-(`packages/solver-app/src/cli.ts:444`), and every quote path now writes
+setting to pick here, and nothing in the code enforces it: `createServices`
+wires covclaimd whenever `COVCLAIMD_URL` is set
+(`packages/solver-app/src/ops/services.ts`), so leaving it unwired means
+leaving that variable unset. Every quote path now writes
 `nonInteractiveParameters: true` unconditionally — all six `insertQuote` call
 sites, with no config gate and no per-swap opt-out — so wiring covclaimd would
 put it against a nine-leaf tree on EVERY newly funded lockup, not on some

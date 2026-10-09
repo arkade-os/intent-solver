@@ -722,6 +722,26 @@ export class OnchainReceiveSwapService {
     // failing fast here would turn a claim observed a moment late into a
     // stuck swap.
 
+    // Deadline backstop: reuses the SAME headroom check that gates funding
+    // the Arkade lockup in the first place — "is there still enough time
+    // before our own refund path" is exactly the question here too, just
+    // asked AFTER funding instead of before it.
+    //
+    // BEFORE the reveal, as the Lightning leg's `whenFunded` does: `reveal()`
+    // throws while covclaimd is down, so asked second this never runs through
+    // an outage — and the client can then refund their HTLC and still claim.
+    const decision = evaluateOnchainReceiveFunding({
+      arkadeRefundLocktime: row.refundLocktime,
+      htlcLocktime: row.htlcLocktime,
+      // From the ROW: the covenant was built from this snapshot, so a rotated
+      // operator delay must not change what the gate reasons about.
+      unilateralRefundWithoutReceiverDelay: row.refundWithoutReceiverDelay,
+      now: this.now(),
+    })
+    if (!decision.fund) {
+      return store.transition(row.id, 'awaiting_claim', 'refunding_arkade', {})
+    }
+
     // `stampedAt`, NOT the packet shape: an adopted output carries nothing the
     // shape promises, and skipping the reveal on it strands the swap. No packet
     // is the same case as no covclaimd: the client claims it itself.
@@ -741,22 +761,6 @@ export class OnchainReceiveSwapService {
         arkadeScript: base64.encode(script.nonInteractiveClaimArkadeScript),
         taptree: hex.encode(script.encode()),
       })
-    }
-
-    // Deadline backstop: reuses the SAME headroom check that gates funding
-    // the Arkade lockup in the first place — "is there still enough time
-    // before our own refund path" is exactly the question here too, just
-    // asked AFTER funding instead of before it.
-    const decision = evaluateOnchainReceiveFunding({
-      arkadeRefundLocktime: row.refundLocktime,
-      htlcLocktime: row.htlcLocktime,
-      // From the ROW: the covenant was built from this snapshot, so a rotated
-      // operator delay must not change what the gate reasons about.
-      unilateralRefundWithoutReceiverDelay: row.refundWithoutReceiverDelay,
-      now: this.now(),
-    })
-    if (!decision.fund) {
-      return store.transition(row.id, 'awaiting_claim', 'refunding_arkade', {})
     }
     return false
   }
