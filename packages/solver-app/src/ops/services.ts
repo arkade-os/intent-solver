@@ -884,19 +884,15 @@ export const createServices = async (
   // covenant role the solver plays (funder here, receiver there), which the
   // ops factories encode, not a second wallet.
   //
-  // `covclaimd` is left unset on purpose. It is optional by design, and
-  // `covclaimd:v0.0.1-rc.1` accepts a reveal with HTTP 200 and then silently
-  // never claims (observed on regtest 2026-08-07). Absent, the client claims
-  // its own lockup holding the covenant's receiver key, which costs only the
-  // client being online — so wiring a component that fails silently would be
-  // strictly worse than not wiring it. See both orchestrators' `covclaimd` docs.
+  // Wired when the deployment names a covclaimd (COVCLAIMD_URL). The receive legs
+  // reveal each funded lockup's sealed claim packet to it so offline clients get
+  // claimed; unset keeps the client-claims-its-own-lockup default, which costs
+  // only the client being online. See both orchestrators' `covclaimd` docs, and
+  // `docs/runbook.md` § covclaimd for which release is safe to point this at.
+  const covclaimd = config.covclaimdUrl ? createCovclaimdClient(config.covclaimdUrl) : undefined
   // Hoisted rather than built inline, because the EVM receive leg below needs
   // the SAME ops. Two calls would derive two identical objects from the same
   // context, which works and gives the corridors two places to drift apart.
-  // Wired when the deployment names a covclaimd (COVCLAIMD_URL). The receive legs
-  // reveal each funded lockup's sealed claim packet to it so offline clients get
-  // claimed; unset keeps the client-claims-its-own-lockup default.
-  const covclaimd = config.covclaimdUrl ? createCovclaimdClient(config.covclaimdUrl) : undefined
   const receiveOps = await receiveArkadeOpsFromContext(arkade, {
     url: config.emulatorUrl,
     pubkey: emulatorInfo.signerPubkey,
