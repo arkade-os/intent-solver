@@ -29,6 +29,7 @@ import {
   Wallet,
   type Recipient,
   type TapLeafScript,
+  type VirtualCoin,
 } from '@arkade-os/sdk'
 import { SQLiteContractRepository, SQLiteWalletRepository, type SQLExecutor } from '@arkade-os/sdk/repositories/sqlite'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -441,7 +442,7 @@ export const findClaimPreimage = async (
   if (outpoints.length === 0) return null
   // Paged: `arkd` clamps a page below the size the SDK asks for, so one read of a
   // long outpoint list stops short and a claim past the ceiling never reveals `P`.
-  const vtxos = []
+  const vtxos: VirtualCoin[] = []
   for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { outpoints: [...outpoints] })) {
     vtxos.push(...batch)
   }
