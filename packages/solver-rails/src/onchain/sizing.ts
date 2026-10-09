@@ -8,6 +8,7 @@
 import { Transaction } from '@scure/btc-signer'
 import { buildOnchainHtlc, type OnchainNetworkProfile } from './htlc.js'
 import { estimateClaimTxVsize } from './claim.js'
+import { estimateRefundTxVsize } from './refund.js'
 
 /**
  * Placeholders, never signed or broadcast: only their LENGTHS matter, and each is fixed-width in the claim
@@ -44,6 +45,19 @@ export const claimSpendVsize = (params: { network: OnchainNetworkProfile; destin
     // Any value: an amount's size on the wire is a fixed 8 bytes, and no input
     // selection happens here — this transaction has exactly one input by
     // construction.
+    fundingValueSats: 100_000,
+    destinationScript: params.destinationScript,
+    payoutAmountSats: 100_000n,
+  })
+}
+
+// The refund of an HTLC nobody claimed — not what a quote is PRICED off, what its payout FLOOR is sized against.
+export const refundSpendVsize = (params: { network: OnchainNetworkProfile; destinationScript: Uint8Array }): number => {
+  const htlc = placeholderHtlc(params.network)
+  return estimateRefundTxVsize({
+    htlc,
+    fundingTxid: PLACEHOLDER_TXID,
+    fundingVout: 0,
     fundingValueSats: 100_000,
     destinationScript: params.destinationScript,
     payoutAmountSats: 100_000n,
