@@ -41,7 +41,10 @@ import type {
   SendFeeEstimate,
   SendHtlcState,
 } from '@arkade-os/solver-core/ports/lightning.js'
-import { ORPHANED_REGISTRATION_SECONDS } from '@arkade-os/solver-corridors/send/orchestrator.js'
+import {
+  NO_RECORD_GRACE_SECONDS,
+  ORPHANED_REGISTRATION_SECONDS,
+} from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { rfqStateFromRow, rfqStatusPayload } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import { rawDelaySeconds, relativeDelayFrom, secondsForBlockRung } from '@arkade-os/solver-core/core/timelocks.js'
@@ -2912,6 +2915,64 @@ describe('a payment whose commitment outlived its id', () => {
     expect(row.state).toBe('claimed')
     expect(arkade.claimCalls).toHaveLength(1)
     expect(arkade.refundCalls).toHaveLength(0)
+  })
+})
+
+describe('a no_record lookup after an ambiguous submission', () => {
+  const ambiguouslySubmitted = async () => {
+    const { swap } = await quoted()
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: swap.amountSats }]
+    ln.payResult = { id: 'pay-1', status: 'pending' }
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'failed', evidence: 'no_record' })
+    return swap
+  }
+
+  it('withholds the refund inside the grace, and pushes it once the grace has passed', async () => {
+    const swap = await ambiguouslySubmitted()
+
+    const held = await service.tick(swap.id)
+
+    expect(held.state).toBe('paid')
+    expect(held.paymentEvidence).toBe('no_record')
+    expect(arkade.refundCalls).toHaveLength(0)
+
+    clock += NO_RECORD_GRACE_SECONDS
+
+    const row = await service.tick(swap.id)
+
+    expect(row.state).toBe('refused')
+    expect(row.refundOutcome).toBe('pushed')
+    expect(arkade.refundCalls).toHaveLength(1)
+  })
+
+  it('measures the grace from the LAST submission, not the first', async () => {
+    const { swap } = await quoted()
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: swap.amountSats })
+    await store.transition(swap.id, 'funded', 'paying', {
+      idempotency_key: `swap-${swap.paymentHash}`,
+      pay_attempted_at: clock - 10 * NO_RECORD_GRACE_SECONDS,
+    })
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: swap.amountSats }]
+    ln.payResult = { id: 'pay-1', status: 'pending' }
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'failed', evidence: 'no_record' })
+
+    const row = await service.tick(swap.id)
+
+    expect(ln.payCalls).toHaveLength(1)
+    expect(row.state).toBe('paid')
+    expect(arkade.refundCalls).toHaveLength(0)
+  })
+
+  it('still refunds a terminal failure at once', async () => {
+    const { swap } = await quoted()
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: swap.amountSats }]
+    ln.payResult = { id: 'pay-1', status: 'pending' }
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'failed', evidence: 'terminal' })
+
+    const row = await service.tick(swap.id)
+
+    expect(row.state).toBe('refused')
+    expect(arkade.refundCalls).toHaveLength(1)
   })
 })
 

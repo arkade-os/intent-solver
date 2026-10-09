@@ -268,6 +268,13 @@ const HOT_STATES: readonly SendSwapState[] = ['paying', 'paid']
  */
 export const ORPHANED_REGISTRATION_SECONDS = 3600
 
+/**
+ * `payInvoice` answers `pending` for an unrecognised error because the request may
+ * still be executing, and a lookup inside that window reports "never heard of this
+ * hash" either way — acting on it refunds a client whose payment then settles.
+ */
+export const NO_RECORD_GRACE_SECONDS = 60
+
 /** The pure acceptance gate's refusals, plus the ones only the orchestrator can decide. */
 export type QuoteRefusal =
   | SendAcceptanceRefusal
@@ -1372,6 +1379,9 @@ export class SendSwapService {
     const wallet = await ln.walletFingerprint?.().catch(() => undefined)
     await store.patch(row.id, {
       payment_id: result.id,
+      // Per submission, not per transition. AFTER `payInvoice` on purpose: a call that
+      // threw is `whenHashBlocked`'s to measure, and resetting its clock never parks.
+      pay_attempted_at: this.now(),
       ...(this.deps.backendName ? { payment_backend: this.deps.backendName } : {}),
       ...(wallet ? { payment_wallet: wallet } : {}),
       // The fee, captured HERE and not only on the poll. A payment that settles
@@ -1581,6 +1591,13 @@ export class SendSwapService {
       await store.patch(row.id, { routing_fee_paid_sats: polled.feePaidSats })
     }
     if (polled.status === 'failed') {
+      if (
+        polled.evidence === 'no_record' &&
+        row.payAttemptedAt !== null &&
+        this.now() - row.payAttemptedAt < NO_RECORD_GRACE_SECONDS
+      ) {
+        return false
+      }
       // The self-payment exception applies to the polled failure exactly as to
       // the immediate one: from either non-terminal payment state, "failed"
       // plus our own node saying it was never paid is the same provable fact.
