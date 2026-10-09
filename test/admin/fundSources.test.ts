@@ -1096,6 +1096,63 @@ describe('the withdrawal confirmation', () => {
   })
 })
 
+/** The confirmation proves the operator meant this destination, never that they sent the request. */
+describe('a mutating request from another origin', () => {
+  const WITHDRAWAL = JSON.stringify({
+    source: 'rail',
+    address: REGTEST_ADDRESS,
+    amount: '1000',
+    confirm: REGTEST_ADDRESS,
+  })
+
+  const send = (headers: Record<string, string>, services: Fake) =>
+    buildAdminApp({ services: services as never, startedAt: 1_000_000, mode: 'relay' }).fetch(
+      new Request('http://admin/api/actions/fund-withdraw', { method: 'POST', headers, body: WITHDRAWAL }),
+    )
+
+  it('refuses a body that is not declared JSON, without paying', async () => {
+    // What a form post sends, on a browser volunteering neither header below.
+    const onchain = onchainBackend()
+    const response = await send({ 'content-type': 'text/plain' }, fakeServices({ onchain }))
+
+    expect(response.status).toBe(415)
+    expect(onchain.fund).not.toHaveBeenCalled()
+  })
+
+  it('refuses a cross-site request that does declare JSON, without paying', async () => {
+    const onchain = onchainBackend()
+    const response = await send(
+      { 'content-type': 'application/json', 'sec-fetch-site': 'cross-site' },
+      fakeServices({ onchain }),
+    )
+
+    expect(response.status).toBe(403)
+    expect(onchain.fund).not.toHaveBeenCalled()
+  })
+
+  it('refuses a foreign Origin, which is all an older browser sends', async () => {
+    const onchain = onchainBackend()
+    const response = await send(
+      { 'content-type': 'application/json', origin: 'https://another.example' },
+      fakeServices({ onchain }),
+    )
+
+    expect(response.status).toBe(403)
+    expect(onchain.fund).not.toHaveBeenCalled()
+  })
+
+  it('still pays for the console’s own request', async () => {
+    const onchain = onchainBackend()
+    const response = await send(
+      { 'content-type': 'application/json', origin: 'http://admin', 'sec-fetch-site': 'same-origin' },
+      fakeServices({ onchain }),
+    )
+
+    expect(response.status).toBe(200)
+    expect(onchain.fund).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('the read-only fund actions stay unarmed', () => {
   // So an operator is not trained to click through warnings on the reads and
   // then does the same on the one that empties a wallet.

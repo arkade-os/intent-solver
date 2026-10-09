@@ -383,6 +383,20 @@ describe('DELETE /api/markets/:key', () => {
     expect((await adminStore.listActions())[0]).toMatchObject({ action: 'market-delete', target: KEY })
     await adminStore.close()
   })
+
+  it('refuses a cross-site delete, which carries no body for a content check to reach', async () => {
+    const { app, adminStore } = await build()
+    await put(app, body())
+    const response = await app.fetch(
+      new Request(`http://admin/api/markets/${encodeURIComponent(KEY)}`, {
+        method: 'DELETE',
+        headers: { 'sec-fetch-site': 'cross-site' },
+      }),
+    )
+    expect(response.status).toBe(403)
+    expect(await adminStore.listMarkets()).toHaveLength(1)
+    await adminStore.close()
+  })
 })
 
 describe('the serving fields an operator can only set from here', () => {
