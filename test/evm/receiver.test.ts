@@ -430,6 +430,29 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     }
   })
 
+  chainTest('re-signs a signed activation over a rising base fee, within the ceiling', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend } = await testBackend(driver)
+      const terms = await binding()
+      const address = receiverAddress(terms)
+      await transfer(address, AMOUNT)
+      const prepared = await backend.prepareActivation('bump', address, terms)
+      expect(await backend.bumpActivation('bump', terms, 50_000_000_000n)).toBeNull()
+      await rpc('anvil_setNextBlockBaseFeePerGas', ['0xee6b2800'])
+      await rpc('evm_mine', [])
+      expect(await backend.bumpActivation('bump', terms, 9_000_000_000n)).toBeNull()
+      const bumped = await backend.bumpActivation('bump', terms, 10_000_000_000n)
+      expect(bumped?.nonce).toBe(prepared.nonce)
+      expect(bumped?.hash).not.toBe(prepared.hash)
+      expect((await receiptFor(bumped!.hash)).status).toBe('0x1')
+      expect(await locked(terms)).toBe(1n)
+      expect(await backend.bumpActivation('bump', terms, 10_000_000_000n)).toBeNull()
+    } finally {
+      await driver.close()
+    }
+  })
+
   chainTest('deploys and recovers a late delivery to an address that never had code', async () => {
     const driver = betterSqliteDriver(':memory:')
     try {
