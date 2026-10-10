@@ -13,7 +13,10 @@ import {
 } from './erc20Swap.js'
 import {
   expectedReceiverRuntimeHash,
-  receiverCreation,
+  receiverAddress,
+  receiverDeploymentCall,
+  RECEIVER_DEPLOYER,
+  RECEIVER_DEPLOYER_RUNTIME,
   encodeReceiverActivate,
   encodeReceiverRecover,
   verifyReceiverBinding,
@@ -249,17 +252,6 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
   }
   return {
     inspect,
-    async deploymentAttempt(id: string, binding: IntentReceiverBinding) {
-      const attempt = await deps.transactions.getPrepared(id, { to: null, data: receiverCreation(binding) })
-      if (!attempt) return null
-      if (attempt.createdAddress?.length !== 20) throw new Error('deployment journal has no derived address')
-      return {
-        address: attempt.createdAddress,
-        transactionHash: attempt.hash,
-        rawTransaction: attempt.rawTransaction,
-        state: attempt.state,
-      }
-    },
     async deploy(id: string, binding: IntentReceiverBinding) {
       if (binding.chainId !== deps.chainId) throw new Error('receiver deployment chain mismatch')
       if (binding.lock.timelock - binding.activationCutoff < deps.minClaimWindowBlocks)
@@ -273,27 +265,31 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
         throw new Error('receiver deployment activation window closed')
       await allowed(binding.swapContract, deps.allowedSwapCodeHashes, current.number)
       await allowed(binding.lock.tokenAddress, deps.allowedTokenCodeHashes, current.number)
-      const request = { to: null, data: receiverCreation(binding) }
-      const prepared = await deps.transactions.prepare(id, request)
-      if (prepared.createdAddress?.length !== 20) throw new Error('receiver deployment missing derived address')
-      const attempt = await deps.transactions.submit(id, request)
-      if (attempt.createdAddress?.length !== 20 || hx(attempt.createdAddress) !== hx(prepared.createdAddress))
-        throw new Error('receiver deployment address changed between attempts')
+      const address = receiverAddress(binding)
+      const request = { to: RECEIVER_DEPLOYER, data: receiverDeploymentCall(binding) }
+      let transactionHash: string | null = null
+      // Anyone may deploy the same receiver first; a nonce we already reserved must still be spent.
+      if (
+        (await deps.transactions.getPrepared(id, request)) ||
+        bytes(await rpc('eth_getCode', [hx(address), current.number])).length === 0
+      ) {
+        await allowed(RECEIVER_DEPLOYER, [keccak_256(RECEIVER_DEPLOYER_RUNTIME)], current.number)
+        transactionHash = (await deps.transactions.submit(id, request)).hash
+      }
       let observationView: Awaited<ReturnType<typeof view>>
       try {
         observationView = await view()
       } catch (error) {
-        if (error instanceof ReceiverFinalityPendingError)
-          return { address: attempt.createdAddress, transactionHash: attempt.hash, verified: false }
+        if (error instanceof ReceiverFinalityPendingError) return { address, transactionHash, verified: false }
         throw error
       }
-      const receipt = await canonicalReceipt(attempt.hash, observationView.target)
-      if (!receipt) return { address: attempt.createdAddress, transactionHash: attempt.hash, verified: false }
-      if (receipt.contractAddress?.toLowerCase() !== hx(attempt.createdAddress))
-        throw new Error('deployment receipt address mismatch')
-      const observation = await inspect(attempt.createdAddress, binding)
-      if (observation.activated) throw new Error('receiver already activated before quote publication')
-      return { address: attempt.createdAddress, transactionHash: attempt.hash, verified: true }
+      if (bytes(await rpc('eth_getCode', [hx(address), observationView.tag])).length === 0) {
+        if (transactionHash) await canonicalReceipt(transactionHash, observationView.target)
+        return { address, transactionHash, verified: false }
+      }
+      const observation = await inspect(address, binding)
+      if (observation.activated) throw new Error('receiver already activated before provider dispatch')
+      return { address, transactionHash, verified: true }
     },
     async activate(id: string, address: Uint8Array, binding: IntentReceiverBinding, policy: ReceiverReadPolicy = {}) {
       const observation = await inspect(address, binding, policy)

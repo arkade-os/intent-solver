@@ -102,6 +102,11 @@ export interface EvmChainConfig {
    * whatever you set. Below only costs round trips.
    */
   logScanRange: number
+  /**
+   * Skip the claim-trace probe at quote time. Direct `claim` calls are still
+   * verified without a trace; an indirect claim holds its row for the operator.
+   */
+  directClaimsOnly: boolean
 }
 
 const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/
@@ -153,6 +158,13 @@ const intFromOptional = (env: NodeJS.ProcessEnv, name: string, def: number, min:
     throw new Error(`${name} must be an integer in [${min}, ${max}], got ${JSON.stringify(raw)}`)
   }
   return value
+}
+
+const booleanFromOptional = (env: NodeJS.ProcessEnv, name: string): boolean => {
+  const raw = env[name]?.trim()
+  if (raw === undefined || raw === '' || raw === 'false') return false
+  if (raw === 'true') return true
+  throw new Error(`${name} must be true or false, got ${JSON.stringify(raw)}`)
 }
 
 /** `0x`-prefixed 20-byte address to bytes. Case-insensitive; checksum is not verified. */
@@ -243,5 +255,6 @@ export const loadEvmChainConfig = (env: NodeJS.ProcessEnv = process.env): EvmCha
       Number.MAX_SAFE_INTEGER,
     ),
     logScanRange: intFromOptional(env, 'EVM_LOG_SCAN_RANGE', 10_000, 1, 10_000_000),
+    directClaimsOnly: booleanFromOptional(env, 'EVM_DIRECT_CLAIMS_ONLY'),
   }
 }

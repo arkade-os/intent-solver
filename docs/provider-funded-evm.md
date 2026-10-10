@@ -24,7 +24,10 @@ The probe bounds its search to 128 recent blocks, at most three candidate
 transactions and bounded trace frames. Operators should use an endpoint that
 retains recent receipts and supports `debug_traceTransaction` with
 `callTracer`'s `withLog` option; no token event in the sample or an unsupported
-trace method fails closed for new quotes.
+trace method fails closed for new quotes. A chain whose claims are direct HTLC
+calls may set `EVM_DIRECT_CLAIMS_ONLY=true` to skip the probe; direct claims are
+verified without a trace, and an indirect one holds its row until the operator
+settles it by hand, so monitor for held rows.
 
 Existing native EVM send rows are not made safe by this upgrade: before
 upgrading, operators with live rows must verify the settlement RPC supports the
@@ -34,8 +37,8 @@ fails.
 
 Programmatic `EvmSendSwapService` construction now requires an
 `assertClaimTraceSupport` dependency. Custom hosts must provide a real
-provider-backed probe or equivalent evidence; a no-op only belongs in a test
-that deliberately excludes EVM behavior.
+provider-backed probe or equivalent evidence; a no-op belongs only in a test
+that deliberately excludes EVM behavior, or behind `EVM_DIRECT_CLAIMS_ONLY`.
 
 ## Ownership and settlement
 
@@ -82,7 +85,6 @@ and age still apply.
 | `packages/solver-rails-evm/src/evm/receiverBackend.ts`       | Canonical finalized receiver snapshots, activation and recovery                   |
 | `packages/solver-rails-evm/src/evm/durableSender.ts`         | Signed transaction journal, nonce reservation and exact replay                    |
 | `packages/solver-rails-evm/src/evm/claimEvidence.ts`         | Successful canonical claim receipt, exact lock and preimage verification          |
-| `packages/solver-core/src/core/evmReceiverFunding.ts`        | Policy gate over independently verified observations                              |
 | `packages/solver-core/src/ports/evmPayoutFunding.ts`         | Provider-independent funding adapter contract                                     |
 | `packages/solver-corridors-evm/src/send/evmPayoutFunding.ts` | Persisted-row binding and activation correlation                                  |
 | `packages/solver-corridors-evm/src/send/evmOrchestrator.ts`  | Existing corridor, with alternate funding and independent recovery sweep          |
@@ -95,9 +97,10 @@ and receiver obligations after the customer row becomes terminal.
 
 Quote authoring runs before the customer quote row is inserted. A failed insert
 calls `abandonQuote`; successful unused quotes still require adapter expiry
-maintenance. If deployment delays preparation, an adapter may return a fresh
-expiry bounded by the configured validity interval. A persisted global deployment
-budget must bound gas before any quote-triggered transaction is signed.
+maintenance. The receiver address derives from the binding, so it is known before
+deployment; deploy and verify the receiver before the provider is paid. If that
+happens during quote authoring, return a fresh expiry bounded by the configured
+validity interval and bound quote-triggered gas with a persisted budget.
 
 Changing or removing the adapter while its obligations exist is not a safe
 rollback. Use the same adapter identity and durable database for settlement and
@@ -137,10 +140,9 @@ copied from the receiver being verified.
 
 ## Verification and rollout
 
-**Unmet pre-merge gate:** keep public PR #223 and its dependent private PR open
-until the public PR links an independent reviewer/auditor's scope acceptance
-and review of `IntentReceiver.sol` plus the exact artifact and compiler inputs,
-and the required real EVM E2E run is green. These are merge gates; they do not
+**Unmet pre-merge gate:** keep PR #223 open until it links an independent
+reviewer/auditor's scope acceptance and review of `IntentReceiver.sol` plus the
+exact artifact and compiler inputs, and the required real EVM E2E run is green. These are merge gates; they do not
 replace the later operator and mainnet gates below.
 
 `test/evm/receiver.test.ts` compiles the receiver and runs transactions on a local
