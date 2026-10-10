@@ -78,16 +78,16 @@ and age still apply.
 
 ## Components
 
-| Path                                                         | Responsibility                                                                    |
-| ------------------------------------------------------------ | --------------------------------------------------------------------------------- |
-| `packages/solver-rails-evm/contracts/IntentReceiver.sol`     | Immutable receiver, one activation, bounded allowance, fixed recovery destination |
-| `packages/solver-rails-evm/src/evm/receiver.ts`              | Constructor/deployment encoding and independent runtime/immutable verification    |
-| `packages/solver-rails-evm/src/evm/receiverBackend.ts`       | Canonical finalized receiver snapshots, activation and recovery                   |
-| `packages/solver-rails-evm/src/evm/durableSender.ts`         | Signed transaction journal, nonce reservation and exact replay                    |
-| `packages/solver-rails-evm/src/evm/claimEvidence.ts`         | Successful canonical claim receipt, exact lock and preimage verification          |
-| `packages/solver-core/src/ports/evmPayoutFunding.ts`         | Provider-independent funding adapter contract                                     |
-| `packages/solver-corridors-evm/src/send/evmPayoutFunding.ts` | Persisted-row binding and activation correlation                                  |
-| `packages/solver-corridors-evm/src/send/evmOrchestrator.ts`  | Existing corridor, with alternate funding and independent recovery sweep          |
+| Path                                                         | Responsibility                                                                   |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| `packages/solver-rails-evm/contracts/IntentReceiver.sol`     | Receiver implementation and its clone factory; one activation, fixed recovery    |
+| `packages/solver-rails-evm/src/evm/receiver.ts`              | Clone addresses, factory calls and independent clone/implementation verification |
+| `packages/solver-rails-evm/src/evm/receiverBackend.ts`       | Canonical finalized receiver snapshots, activation and recovery                  |
+| `packages/solver-rails-evm/src/evm/durableSender.ts`         | Signed transaction journal, nonce reservation and exact replay                   |
+| `packages/solver-rails-evm/src/evm/claimEvidence.ts`         | Successful canonical claim receipt, exact lock and preimage verification         |
+| `packages/solver-core/src/ports/evmPayoutFunding.ts`         | Provider-independent funding adapter contract                                    |
+| `packages/solver-corridors-evm/src/send/evmPayoutFunding.ts` | Persisted-row binding and activation correlation                                 |
+| `packages/solver-corridors-evm/src/send/evmOrchestrator.ts`  | Existing corridor, with alternate funding and independent recovery sweep         |
 
 Adapters must persist the complete binding, provider quote, receiver identity,
 cutoffs, source reservations and authorized attempt before sending funds. An
@@ -97,10 +97,10 @@ and receiver obligations after the customer row becomes terminal.
 
 Quote authoring runs before the customer quote row is inserted. A failed insert
 calls `abandonQuote`; successful unused quotes still require adapter expiry
-maintenance. The receiver address derives from the binding, so it is known before
-deployment; deploy and verify the receiver before the provider is paid. If that
-happens during quote authoring, return a fresh expiry bounded by the configured
-validity interval and bound quote-triggered gas with a persisted budget.
+maintenance. The receiver address derives from the binding, so quote authoring
+needs no transaction: the provider pays an address that has no code yet, and
+activation deploys the clone and registers the HTLC in one transaction. The
+receiver factory must exist on the chain before activation or recovery.
 
 Changing or removing the adapter while its obligations exist is not a safe
 rollback. Use the same adapter identity and durable database for settlement and

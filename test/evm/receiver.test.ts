@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join, relative } from 'node:path'
 import { createRequire } from 'node:module'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -17,18 +18,20 @@ import {
   uintWord,
 } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import {
+  encodeFactoryDeploy,
   encodeReceiverActivate,
-  encodeReceiverConstructor,
-  encodeReceiverDeployment,
+  encodeReceiverArgs,
   encodeReceiverRecover,
+  expectedReceiverRuntimeHash,
+  implementationRuntimeHash,
   receiverAddress,
-  receiverCreation,
-  receiverDeploymentCall,
-  receiverRuntimeHash,
+  receiverFactoryDeploymentCall,
   RECEIVER_DEPLOYER,
+  RECEIVER_FACTORY,
+  RECEIVER_IMPLEMENTATION,
   verifyReceiverBinding,
   type IntentReceiverBinding,
-  type ReceiverImmutableReferences,
+  type ImplementationImmutableReferences,
 } from '@arkade-os/solver-rails-evm/evm/receiver.js'
 import { concatBytes } from '@noble/hashes/utils.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
@@ -43,6 +46,22 @@ type Artifact = {
     deployedBytecode: { object: string; immutableReferences: Record<string, { start: number; length: number }[]> }
   }
 }
+const CONTRACTS = fileURLToPath(new URL('../../packages/solver-rails-evm/contracts/', import.meta.url))
+const solidityFiles = (dir: string): string[] =>
+  readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+    entry.isDirectory()
+      ? solidityFiles(join(dir, entry.name))
+      : entry.name.endsWith('.sol')
+        ? [join(dir, entry.name)]
+        : [],
+  )
+const receiverSources = (): Record<string, { content: string }> =>
+  Object.fromEntries(
+    solidityFiles(CONTRACTS).map((path) => [
+      relative(CONTRACTS, path).split('\\').join('/'),
+      { content: readFileSync(path, 'utf8') },
+    ]),
+  )
 type AstNode = { id: number; name?: string; mutability?: string; nodes?: AstNode[] }
 type CompileResult = {
   contracts: Record<string, Record<string, Artifact>>
@@ -71,7 +90,7 @@ const AMOUNT = 1_000n
 const PREIMAGE = hex.decode('11'.repeat(32))
 let accounts: Uint8Array[]
 let artifacts: CompileResult['contracts']
-let immutableReferences: ReceiverImmutableReferences
+let immutableReferences: ImplementationImmutableReferences
 let snapshot: string
 
 const call = async (address: Uint8Array, signature: string, ...words: Uint8Array[]): Promise<bigint> =>
@@ -129,16 +148,8 @@ const binding = async (token = WETH): Promise<IntentReceiverBinding> => {
   }
 }
 const deployReceiver = async (terms: IntentReceiverBinding): Promise<Uint8Array> => {
-  const receipt = await send(
-    accounts[0]!,
-    null,
-    encodeReceiverDeployment(
-      hex.decode(artifacts['IntentReceiver.sol']!['IntentReceiver']!.evm.bytecode.object),
-      terms,
-    ),
-  )
-  expect(receipt.status).toBe('0x1')
-  return bytes(receipt.contractAddress!)
+  expect((await send(accounts[0]!, RECEIVER_FACTORY, encodeFactoryDeploy(terms))).status).toBe('0x1')
+  return receiverAddress(terms)
 }
 const tokenBalance = (token: Uint8Array, who: Uint8Array) => call(token, 'balanceOf(address)', addressWord(who, 'who'))
 const transfer = async (receiver: Uint8Array, amount: bigint) => {
@@ -257,12 +268,7 @@ beforeAll(async () => {
       JSON.stringify({
         language: 'Solidity',
         sources: {
-          'IntentReceiver.sol': {
-            content: readFileSync(
-              new URL('../../packages/solver-rails-evm/contracts/IntentReceiver.sol', import.meta.url),
-              'utf8',
-            ),
-          },
+          ...receiverSources(),
           'ReceiverTokens.sol': {
             content: readFileSync(new URL('fixtures/ReceiverTokens.sol', import.meta.url), 'utf8'),
           },
@@ -292,7 +298,7 @@ beforeAll(async () => {
     Object.entries(artifacts['IntentReceiver.sol']!['IntentReceiver']!.evm.deployedBytecode.immutableReferences).map(
       ([id, refs]) => [immutableIds[id], refs],
     ),
-  ) as ReceiverImmutableReferences
+  ) as ImplementationImmutableReferences
   accounts = ((await rpc('eth_accounts', [])) as string[]).map(bytes)
   for (const [address, fixture] of [
     [SWAP, 'erc20swap.runtime.hex'],
@@ -303,6 +309,7 @@ beforeAll(async () => {
       readFileSync(new URL(`../e2e/fixtures/${fixture}`, import.meta.url), 'utf8').trim(),
     ])
   }
+  expect((await send(accounts[0]!, RECEIVER_DEPLOYER, receiverFactoryDeploymentCall())).status).toBe('0x1')
   snapshot = (await rpc('evm_snapshot', [])) as string
 }, 60_000)
 
@@ -355,7 +362,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
       const pending = await transactions.pending()
       expect(pending).toHaveLength(1)
       expect(pending[0]!.rawTransaction).toBe(abandoned.rawTransaction)
-      expect(pending[0]!.request.to).toEqual(deployed.address)
+      expect(pending[0]!.request.to).toEqual(RECEIVER_FACTORY)
       await expect(backend.resolveExpiredActivation('gap-activation', deployed.address, terms)).rejects.toThrow(
         'guaranteed expired',
       )
@@ -399,12 +406,66 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     }
   })
 
+  chainTest('takes funding before deployment, then deploys and activates in one transaction', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend } = await testBackend(driver)
+      const terms = await binding()
+      const address = receiverAddress(terms)
+      await transfer(address, AMOUNT)
+      const before = await backend.inspect(address, terms)
+      expect(before).toMatchObject({ deployed: false, activated: false, tokenBalance: AMOUNT, htlcPresent: false })
+      const activation = await backend.activate('lazy-activation', address, terms)
+      const receipt = (await receiptFor(activation.hash)) as { status: string; gasUsed?: string }
+      expect(receipt.status).toBe('0x1')
+      expect(Number(receipt.gasUsed)).toBeLessThan(400_000)
+      expect(await backend.inspect(address, terms)).toMatchObject({
+        deployed: true,
+        activated: true,
+        htlcPresent: true,
+      })
+      expect(await locked(terms)).toBe(1n)
+    } finally {
+      await driver.close()
+    }
+  })
+
+  chainTest('deploys and recovers a late delivery to an address that never had code', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend } = await testBackend(driver)
+      const terms = await binding()
+      const address = receiverAddress(terms)
+      await mineTo(terms.activationCutoff)
+      await transfer(address, AMOUNT)
+      expect((await receiptFor((await backend.recover('late-recovery', address, terms)).hash)).status).toBe('0x1')
+      expect(await tokenBalance(WETH, accounts[0]!)).toBe(AMOUNT)
+      expect(await tokenBalance(WETH, address)).toBe(0n)
+    } finally {
+      await driver.close()
+    }
+  })
+
+  chainTest('refuses to activate or recover through a factory that is not deployed', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend } = await testBackend(driver)
+      const terms = await binding()
+      await transfer(receiverAddress(terms), AMOUNT)
+      await rpc('anvil_setCode', [hx(RECEIVER_FACTORY), '0x'])
+      await expect(backend.activate('no-factory', receiverAddress(terms), terms)).rejects.toThrow('factory')
+      await expect(backend.recover('no-factory-recovery', receiverAddress(terms), terms)).rejects.toThrow('factory')
+    } finally {
+      await driver.close()
+    }
+  })
+
   chainTest('verifies a receiver another account deployed without sending its own', async () => {
     const driver = betterSqliteDriver(':memory:')
     try {
       const { backend } = await testBackend(driver)
       const terms = await binding()
-      expect((await send(accounts[3]!, RECEIVER_DEPLOYER, receiverDeploymentCall(terms))).status).toBe('0x1')
+      expect((await send(accounts[3]!, RECEIVER_FACTORY, encodeFactoryDeploy(terms))).status).toBe('0x1')
       const deployed = await backend.deploy('foreign-deploy', terms)
       expect(deployed).toEqual({ address: receiverAddress(terms), transactionHash: null, verified: true })
     } finally {
@@ -418,13 +479,13 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
       const { backend, transactions } = await testBackend(driver)
       const terms = await binding()
       const prepared = await transactions.prepare('raced-deploy', {
-        to: RECEIVER_DEPLOYER,
-        data: receiverDeploymentCall(terms),
+        to: RECEIVER_FACTORY,
+        data: encodeFactoryDeploy(terms),
       })
-      expect((await send(accounts[3]!, RECEIVER_DEPLOYER, receiverDeploymentCall(terms))).status).toBe('0x1')
+      expect((await send(accounts[3]!, RECEIVER_FACTORY, encodeFactoryDeploy(terms))).status).toBe('0x1')
       const deployed = await backend.deploy('raced-deploy', terms)
       expect(deployed).toEqual({ address: receiverAddress(terms), transactionHash: prepared.hash, verified: true })
-      expect((await receiptFor(prepared.hash)).status).toBe('0x0')
+      expect((await receiptFor(prepared.hash)).status).toBe('0x1')
     } finally {
       await driver.close()
     }
@@ -434,6 +495,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     const driver = betterSqliteDriver(':memory:')
     try {
       const { backend } = await testBackend(driver)
+      await rpc('anvil_setCode', [hx(RECEIVER_FACTORY), '0x'])
       await rpc('anvil_setCode', [hx(RECEIVER_DEPLOYER), '0x'])
       await expect(backend.deploy('no-deployer', await binding())).rejects.toThrow('not allowlisted')
     } finally {
@@ -467,13 +529,13 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
       [fileURLToPath(new URL('../../scripts/build-receiver-artifact.mjs', import.meta.url)), '--check'],
       { cwd: fileURLToPath(new URL('../../', import.meta.url)), timeout: 30_000, stdio: 'pipe' },
     )
-    expect(receiverArtifact.creationBytecode).toBe(
-      artifacts['IntentReceiver.sol']!['IntentReceiver']!.evm.bytecode.object,
+    expect(receiverArtifact.factoryCreationBytecode).toBe(
+      artifacts['IntentReceiver.sol']!['IntentReceiverFactory']!.evm.bytecode.object,
     )
-    expect(receiverArtifact.runtimeTemplate).toBe(
+    expect(receiverArtifact.implementationRuntimeTemplate).toBe(
       artifacts['IntentReceiver.sol']!['IntentReceiver']!.evm.deployedBytecode.object,
     )
-    expect(receiverArtifact.immutableReferences).toEqual(immutableReferences)
+    expect(receiverArtifact.implementationImmutableReferences).toEqual(immutableReferences)
   })
 
   chainTest('closes permissionless activation by timestamp even while block cutoff is distant', async () => {
@@ -845,11 +907,7 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
   chainTest('checks chain, exact runtime, immutable binding, state, and activation window', async () => {
     const terms = await binding()
     const receiver = await deployReceiver(terms)
-    const codeHash = receiverRuntimeHash(
-      hex.decode(artifacts['IntentReceiver.sol']!['IntentReceiver']!.evm.deployedBytecode.object),
-      immutableReferences,
-      terms,
-    )
+    const codeHash = expectedReceiverRuntimeHash(terms)
     expect(codeHash).toEqual(keccak_256(bytes((await rpc('eth_getCode', [hx(receiver), 'latest'])) as string)))
     await expect(verifyReceiverBinding(rpc, receiver, terms, codeHash)).resolves.toBeUndefined()
     await expect(verifyReceiverBinding(rpc, receiver, { ...terms, chainId: 1n }, codeHash)).rejects.toThrow(
@@ -867,55 +925,74 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
   chainTest('fails verification for an expired receiver and malformed trusted build metadata', async () => {
     const terms = await binding()
     const receiver = await deployReceiver(terms)
+    const codeHash = expectedReceiverRuntimeHash(terms)
     const template = hex.decode(artifacts['IntentReceiver.sol']!['IntentReceiver']!.evm.deployedBytecode.object)
-    const codeHash = receiverRuntimeHash(template, immutableReferences, terms)
-    expect(() => receiverRuntimeHash(template, { ...immutableReferences, amount: [] }, terms)).toThrow(
+    expect(implementationRuntimeHash(template, immutableReferences, RECEIVER_IMPLEMENTATION)).toEqual(
+      keccak_256(bytes((await rpc('eth_getCode', [hx(RECEIVER_IMPLEMENTATION), 'latest'])) as string)),
+    )
+    expect(() => implementationRuntimeHash(template, { self: [] }, RECEIVER_IMPLEMENTATION)).toThrow(
       'missing immutable',
     )
     expect(() =>
-      receiverRuntimeHash(
-        template,
-        { ...immutableReferences, amount: [{ start: template.length, length: 32 }] },
-        terms,
-      ),
+      implementationRuntimeHash(template, { self: [{ start: template.length, length: 32 }] }, RECEIVER_IMPLEMENTATION),
     ).toThrow('invalid immutable')
     await mineTo(terms.activationCutoff)
     await expect(verifyReceiverBinding(rpc, receiver, terms, codeHash)).rejects.toThrow('activation closed')
   })
 
-  chainTest('enforces constructor chain and nonempty deployed swap/token code', async () => {
+  chainTest('deploys any binding but activates only on its chain with deployed swap and token code', async () => {
     const terms = await binding()
-    const creation = hex.decode(artifacts['IntentReceiver.sol']!['IntentReceiver']!.evm.bytecode.object)
-    expect((await send(accounts[0]!, null, encodeReceiverDeployment(creation, { ...terms, chainId: 1n }))).status).toBe(
-      '0x0',
-    )
-    expect(
-      (await send(accounts[0]!, null, encodeReceiverDeployment(creation, { ...terms, swapContract: accounts[3]! })))
-        .status,
-    ).toBe('0x0')
-    expect(
-      (
-        await send(
-          accounts[0]!,
-          null,
-          encodeReceiverDeployment(creation, { ...terms, lock: { ...terms.lock, tokenAddress: accounts[3]! } }),
-        )
-      ).status,
-    ).toBe('0x0')
+    for (const bad of [
+      { ...terms, chainId: 1n },
+      { ...terms, swapContract: accounts[3]! },
+      { ...terms, lock: { ...terms.lock, tokenAddress: accounts[3]! } },
+      { ...terms, lock: { ...terms.lock, claimAddress: SWAP } },
+      { ...terms, lock: { ...terms.lock, refundAddress: terms.lock.tokenAddress } },
+      { ...terms, swapContract: terms.lock.tokenAddress },
+      { ...terms, lock: { ...terms.lock, refundAddress: SWAP } },
+      { ...terms, lock: { ...terms.lock, claimAddress: terms.lock.tokenAddress } },
+    ]) {
+      const receiver = await deployReceiver(bad)
+      await transfer(receiver, AMOUNT)
+      expect((await activate(receiver)).status).toBe('0x0')
+    }
   })
 
-  chainTest('rejects malformed and overflowing constructor terms before encoding', async () => {
+  chainTest('recovers everything on a chain the binding does not name', async () => {
+    const terms = { ...(await binding()), chainId: 1n }
+    const receiver = receiverAddress(terms)
+    await transfer(receiver, AMOUNT)
+    await deployReceiver(terms)
+    expect((await recover(receiver)).status).toBe('0x1')
+    expect(await tokenBalance(WETH, accounts[0]!)).toBe(AMOUNT)
+  })
+
+  chainTest('sweeps force-fed ETH to the refund address', async () => {
+    const receiver = await deployReceiver(await binding())
+    const NO_TOKEN = new Uint8Array(20)
+    expect((await recover(receiver, NO_TOKEN)).status).toBe('0x0')
+    await rpc('anvil_setBalance', [hx(receiver), '0xde0b6b3a7640000'])
+    const before = BigInt((await rpc('eth_getBalance', [hx(accounts[0]!), 'latest'])) as string)
+    expect((await recover(receiver, NO_TOKEN)).status).toBe('0x1')
+    expect(BigInt((await rpc('eth_getBalance', [hx(receiver), 'latest'])) as string)).toBe(0n)
+    expect(BigInt((await rpc('eth_getBalance', [hx(accounts[0]!), 'latest'])) as string) - before).toBe(10n ** 18n)
+  })
+
+  chainTest('refuses calls made to the implementation rather than a clone', async () => {
+    expect((await activate(RECEIVER_IMPLEMENTATION)).status).toBe('0x0')
+    expect((await recover(RECEIVER_IMPLEMENTATION)).status).toBe('0x0')
+  })
+
+  chainTest('rejects malformed and overflowing binding terms before encoding', async () => {
     const terms = await binding()
-    expect(encodeReceiverConstructor(terms)).toHaveLength(10 * 32)
-    expect(() => encodeReceiverConstructor({ ...terms, activationCutoff: terms.lock.timelock })).toThrow('precede')
-    expect(() => encodeReceiverConstructor({ ...terms, lock: { ...terms.lock, amount: 2n ** 256n } })).toThrow(
-      'uint256',
+    expect(encodeReceiverArgs(terms)).toHaveLength(10 * 32)
+    expect(() => encodeReceiverArgs({ ...terms, activationCutoff: terms.lock.timelock })).toThrow('precede')
+    expect(() => encodeReceiverArgs({ ...terms, lock: { ...terms.lock, amount: 2n ** 256n } })).toThrow('uint256')
+    expect(() => encodeReceiverArgs({ ...terms, lock: { ...terms.lock, preimageHash: new Uint8Array(31) } })).toThrow(
+      'bytes32',
     )
     expect(() =>
-      encodeReceiverConstructor({ ...terms, lock: { ...terms.lock, preimageHash: new Uint8Array(31) } }),
-    ).toThrow('bytes32')
-    expect(() =>
-      encodeReceiverConstructor({ ...terms, lock: { ...terms.lock, claimAddress: terms.lock.refundAddress } }),
+      encodeReceiverArgs({ ...terms, lock: { ...terms.lock, claimAddress: terms.lock.refundAddress } }),
     ).toThrow('differ')
   })
 })
