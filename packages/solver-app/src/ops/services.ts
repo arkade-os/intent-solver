@@ -39,6 +39,7 @@ import { loadEvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
 import { createJsonRpc } from '@arkade-os/solver-rails-evm/evm/rpc.js'
 import { createEvmHtlcBackend } from '@arkade-os/solver-rails-evm/evm/backend.js'
 import { probeLogScanRange } from '@arkade-os/solver-rails-evm/evm/logScanProbe.js'
+import { assertEvmClaimTraceSupport } from '@arkade-os/solver-rails-evm/evm/claimTraceProbe.js'
 import { createEvmBroadcaster, nonceSourceFor } from '@arkade-os/solver-rails-evm/evm/broadcast.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { addressFromPrivateKey } from '@arkade-os/solver-rails-evm/evm/transaction.js'
@@ -57,7 +58,12 @@ import { FakeLightningBackend } from '@arkade-os/solver-rails-fake/ln/fake/backe
 import { LndLightningBackendAdapter } from '@arkade-os/solver-rails-lnd/ln/lnd/adapter.js'
 import { FakeOnchainBackend } from '@arkade-os/solver-rails-fake/onchain/fake/backend.js'
 import { LndOnchainAdapter } from '@arkade-os/solver-rails-lnd/onchain/lnd/adapter.js'
-import { lightningRailFor, type LightningRail } from './rails.js'
+import {
+  lightningRailFor,
+  type LightningRail,
+  type LightningRailHost,
+  type EvmPayoutFundingRegistration,
+} from './rails.js'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { arkadeOpsFromContext } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
@@ -297,7 +303,10 @@ export const endpointHost = (raw: string): string => {
 /** A refusing LND closes the rail gate within one interval; a stalled probe within three (`watchRail`). */
 const RAIL_PROBE_MS = 5_000
 
-const createRail = async (config: Config): Promise<LightningRail & { probe?: () => Promise<void> }> => {
+const createRail = async (
+  config: Config,
+  host: LightningRailHost,
+): Promise<LightningRail & { probe?: () => Promise<void> }> => {
   if (config.lnBackend === 'fake') {
     return {
       ln: new FakeLightningBackend(config.fakeLnStatePath, config.profile.invoicePrefix),
@@ -317,7 +326,7 @@ const createRail = async (config: Config): Promise<LightningRail & { probe?: () 
       `no lightning rail is registered as '${config.lnBackend}' — registerLightningRail must run before loadConfig`,
     )
   }
-  return rail.create(config)
+  return rail.create(config, host)
 }
 
 /**
@@ -555,7 +564,25 @@ export const createServices = async (
   // while all four BTC corridors are disabled — a deployment serving EVM or
   // asset flow alone, which has no use for a Lightning node and is not made to
   // stand one up. Nothing below constructs a BTC corridor without it.
-  const rail = config.lnBackend === null ? null : await createRail(config)
+  const rail =
+    config.lnBackend === null
+      ? null
+      : await createRail(config, {
+          sql: swapFile,
+          assertNoPendingOutgoing: async () => {
+            const pending =
+              (await store.countByStates(['funded', 'paying', 'paid', 'claiming', 'stuck'])) +
+              (await onchainStore.countByStates([
+                'funded',
+                'funding_onchain',
+                'awaiting_claim',
+                'claiming',
+                'refunding_onchain',
+                'stuck',
+              ]))
+            if (pending > 0) throw new Error('cannot initialize wallet budget with pending outgoing swaps')
+          },
+        })
   const railUpAtBoot = rail?.probe
     ? await rail.probe().then(
         () => true,
@@ -1039,6 +1066,7 @@ export const createServices = async (
   }
   let evmSendService: EvmSendSwapService | null = null
   let evmReceiveService: EvmReceiveSwapService | null = null
+  let payoutFundingRegistration: EvmPayoutFundingRegistration | null = null
   if (evmChain !== null && evmSendStore !== null && evmReceiveStore !== null) {
     const rpc = createJsonRpc({ url: evmChain.rpcUrl })
     const evm = createEvmHtlcBackend({
@@ -1128,11 +1156,23 @@ export const createServices = async (
               : []
           }),
       )
+    payoutFundingRegistration =
+      (await rail?.createEvmPayoutFunding?.({
+        sql: swapFile,
+        config,
+        chain: evmChain,
+        rpc,
+        backend: evm,
+        sendStore: evmSendStore,
+      })) ?? null
     evmSendService = new EvmSendSwapService({
       quoteLimiter,
       store: evmSendStore,
       evm,
       broadcast,
+      payoutFunding: payoutFundingRegistration?.adapter,
+      acceptingQuotes: payoutFundingRegistration?.acceptingQuotes,
+      assertClaimTraceSupport: (tokenAddress) => assertEvmClaimTraceSupport(rpc, tokenAddress),
       blockHeight,
       ...evmSendArkadeDeps(arkadeOps),
       arkade: arkadeOps,
@@ -1328,6 +1368,7 @@ export const createServices = async (
       // store.close() (first, and least likely to matter) threw first.
       const steps: Array<[string, () => Promise<void> | void]> = [
         ['railWatch', () => railWatch?.stop()],
+        ['payoutFunding', () => payoutFundingRegistration?.close?.()],
         ['store', () => store.close()],
         ['onchainStore', () => onchainStore.close()],
         ['receiveStore', () => receiveStore.close()],

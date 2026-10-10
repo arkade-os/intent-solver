@@ -23,9 +23,8 @@
  */
 
 import { keccak_256 } from '@noble/hashes/sha3.js'
-import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, concatBytes, hexToBytes } from '@noble/hashes/utils.js'
-import { equalBytes } from '@noble/curves/utils.js'
+import { verifyEvmClaimEvidence, type EvmClaimFinalityPolicy } from './claimEvidence.js'
 import {
   claimEventTopic,
   encodeClaim,
@@ -155,20 +154,18 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
     // and a caller that needs finality applies its own confirmation policy.
     isLocked: (lock) => readSwaps(lock, 'latest', 'eth_call swaps()', 'eth_call swaps()'),
 
-    async findClaimPreimage(lock, fromBlock) {
-      return scanLogs(claimEventTopic(), lock, fromBlock, async (entry) => {
-        const log = entry as { data?: unknown }
-        // No `topics` check: they are attacker-chosen, so the sha256 check below
-        // is the whole filter. A malformed entry is SKIPPED, not thrown, so one
-        // bad record cannot abort the scan and hide a later real claim.
-        const preimage = tryBytesOfHex(log.data)
-        if (!preimage || preimage.length !== 32) return null
-        // THE CHECK THAT MATTERS. A node's filter is a convenience, not a
-        // guarantee: the log is untrusted input and the topic it was matched
-        // on is attacker-chosen in the case that counts. Only a preimage that
-        // hashes to the one WE locked against may leave this function.
-        return equalBytes(sha256(preimage), lock.preimageHash) ? preimage : null
-      })
+    async findClaimPreimage(
+      lock,
+      fromBlock,
+      policy: EvmClaimFinalityPolicy = {
+        minConfirmations: 1,
+        minAgeSeconds: 0,
+        nowSeconds: Math.floor(Date.now() / 1000),
+      },
+    ) {
+      return scanLogs(claimEventTopic(), lock, fromBlock, (entry) =>
+        verifyEvmClaimEvidence(rpc, contractAddress, lock, entry, policy),
+      )
     },
 
     async findRefund(lock, fromBlock) {
