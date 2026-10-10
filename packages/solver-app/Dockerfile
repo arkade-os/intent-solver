@@ -88,6 +88,7 @@ RUN pnpm build
 # A local `docker build` can hide this by reusing a cached layer from before
 # the workspace existed, so it first appeared on the CI run.
 RUN CI=true pnpm prune --prod
+RUN node scripts/carrier-artifacts/verify.mjs --installed
 
 FROM node:${NODE_VERSION}-slim
 ENV NODE_ENV=production

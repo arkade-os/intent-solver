@@ -9,7 +9,8 @@ import { generateMnemonic } from '@scure/bip39'
 import { wordlist } from '@scure/bip39/wordlists/english.js'
 import { ArkAddress, asset, RestIndexerProvider } from '@arkade-os/sdk'
 import { TaxiClient } from '@arkade-taxi/client'
-import { requestTaxiArkadeSwap } from '@arkade-taxi/client/wallet'
+import { requestArkadeSwap } from '@arkade-os/swap'
+import { receiverPaidTransport } from './support/receiverPaidTransport.js'
 import { nostrRfqTransport } from '@arkade-os/swap/nostr'
 import { hex } from '@scure/base'
 import { createArkadeContext, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -42,8 +43,9 @@ let solverBefore: { sats: number; assets: bigint }
 let taxiBefore: { sats: bigint; assets: string[] }
 let originalTaxiRules: Record<string, unknown>[] | undefined
 let forwardedTaxiUrl = ''
-const fillQuoteBodies: string[] = []
-let acceptedFillQuotes = 0
+const fillBodies: string[] = []
+let acceptedFills = 0
+let droppedFillReplies = 0
 
 type TaxiFareWire = {
   id: string
@@ -127,25 +129,24 @@ const feedServer = async (): Promise<string> => {
       const chunks: Buffer[] = []
       for await (const chunk of request) chunks.push(Buffer.from(chunk))
       const body = Buffer.concat(chunks).toString()
-      const fillQuote = request.method === 'POST' && request.url === '/v1/swap-fills'
-      if (fillQuote) {
-        fillQuoteBodies.push(body)
-        if (fillQuoteBodies.length <= 2) {
-          response.writeHead(503, { 'content-type': 'application/json' })
-          response.end(JSON.stringify({ code: 'not_ready', error: 'proceeds_reservation_changed' }))
-          return
-        }
-      }
+      const fill = request.method === 'POST' && request.url === '/v1/fills'
+      if (fill) fillBodies.push(body)
       const upstream = await fetch(`${taxiUrl}${request.url}`, {
         method: request.method,
         headers: { 'content-type': 'application/json' },
         ...(body ? { body } : {}),
       })
-      if (fillQuote && upstream.ok) acceptedFillQuotes++
+      const upstreamBody = await upstream.text()
+      if (fill && upstream.ok) {
+        acceptedFills++
+        droppedFillReplies++
+        response.destroy()
+        return
+      }
       response.writeHead(upstream.status, {
         'content-type': upstream.headers.get('content-type') ?? 'application/json',
       })
-      response.end(await upstream.text())
+      response.end(upstreamBody)
     } catch {
       response.writeHead(502)
       response.end('Taxi forwarding failed')
@@ -377,7 +378,7 @@ afterAll(async () => {
 
 describe('running solver to Taxi on regtest', () => {
   it(
-    'answers a wallet RFQ, submits one real Taxi fill, and the receiver recycles the asset claim',
+    'answers a wallet RFQ, reconciles a Taxi fill after its reply is lost, and the receiver recycles the asset claim',
     async () => {
       const info = await taxi.info()
       const buyerAddress = await buyer.wallet.getAddress()
@@ -385,7 +386,7 @@ describe('running solver to Taxi on regtest', () => {
       const now = Math.floor(Date.now() / 1000)
       const { verified } = await taxi.requestVerifiedReceiveQuote({
         receiverAddress: buyerAddress,
-        makerPublicKey,
+        senderKey: makerPublicKey,
         assetId: assetWire(assetId),
         payer: 'receiver',
         trustedServerKey: arkade.ctx.wallet.arkServerPublicKey,
@@ -401,22 +402,23 @@ describe('running solver to Taxi on regtest', () => {
       })
       expect(verified.descriptor.loanSats).toBe(arkade.ctx.dustSats)
       expect(verified.descriptor.serviceFareSats).toBe(0n)
-      const choice = {
-        mode: 'recycleReceiver' as const,
-        quote: verified.descriptor,
-        taxi: { url: forwardedTaxiUrl, operatorKey: info.operatorKey },
-      }
       const transport = nostrRfqTransport({ relays: [relayUrl], solverPubkey: solverPublicKey })
+      const carrier = receiverPaidTransport(
+        transport,
+        verified.descriptor,
+        { url: forwardedTaxiUrl, operatorKey: info.operatorKey },
+        asset.AssetId.fromString(assetId),
+        process.env.ARK_SERVER_URL!,
+      )
       const rfqId = randomBytes(32).toString('hex')
-      const swap = await requestTaxiArkadeSwap(buyer.wallet, process.env.ARK_SERVER_URL!, transport, {
+      const swap = await requestArkadeSwap(buyer.wallet, process.env.ARK_SERVER_URL!, carrier.transport, {
         rfqId,
         amount: 10_000,
         wantAsset: asset.AssetId.fromString(assetId),
         receiveAddress: verified.descriptor.receiveAddress,
-        carrier: choice,
       })
       await transport.close()
-      expect(swap.carrier?.mode).toBe('recycle_receiver')
+      expect(carrier.assertQuote(swap.quote).mode).toBe('recycle_receiver')
       const fundingTxid = await buyer.wallet.send({
         address: swap.address,
         amount: Number(swap.fundAmount),
@@ -450,13 +452,13 @@ describe('running solver to Taxi on regtest', () => {
           }
         }
         throw new Error(
-          `${error instanceof Error ? error.message : String(error)}; rfq: ${JSON.stringify({ rfqId, fundingTxid, state: rfqState ?? null, fillQuoteAttempts: fillQuoteBodies.length, acceptedFillQuotes })}; solver: ${daemonLog}`,
+          `${error instanceof Error ? error.message : String(error)}; rfq: ${JSON.stringify({ rfqId, fundingTxid, state: rfqState ?? null, fillAttempts: fillBodies.length, acceptedFills, droppedFillReplies })}; solver: ${daemonLog}`,
           { cause: error },
         )
       })
-      expect(fillQuoteBodies.length).toBeGreaterThanOrEqual(3)
-      expect(new Set(fillQuoteBodies).size).toBe(1)
-      expect(acceptedFillQuotes).toBe(1)
+      expect(fillBodies).toHaveLength(1)
+      expect(acceptedFills).toBe(1)
+      expect(droppedFillReplies).toBe(1)
       const status = await taxi.status(claim.transferId)
       const transfer = await taxi.verifyIncomingClaim(
         claim,

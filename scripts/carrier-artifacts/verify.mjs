@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
 import {
   CANDIDATE_SDK_SYMBOL,
   CANDIDATE_SWAP_SYMBOL,
-  CANDIDATE_TAXI_RFQ_SYMBOL,
+  CANDIDATE_TAXI_FILL_SYMBOL,
   MANIFEST_PATH,
   PINNED_PACKAGES,
   TAXI_CONSUMER,
@@ -93,6 +93,8 @@ for (const [name, spec] of Object.entries(overrides)) {
 const clientArchive = byPackage.get('@arkade-taxi/client')?.file
 const consumer = readJson(at(TAXI_CONSUMER, 'package.json'))
 const clientSpec = consumer.dependencies?.['@arkade-taxi/client']
+check(Boolean(consumer.dependencies?.['@arkade-os/swap']), `${TAXI_CONSUMER} has no production swap dependency`)
+check(Boolean(root.dependencies?.['@arkade-os/swap']), 'the workspace root has no production swap dependency')
 check(
   clientSpec === fileSpec('./vendor/carrier', clientArchive),
   `${TAXI_CONSUMER} declares @arkade-taxi/client as ${clientSpec}, which is not the frozen archive`,
@@ -170,12 +172,12 @@ try {
   entry = undefined
 }
 if (entry) {
-  for (const [name, symbol] of [
-    ['@arkade-os/sdk', CANDIDATE_SDK_SYMBOL],
-    ['@arkade-os/swap', CANDIDATE_SWAP_SYMBOL],
+  for (const [from, name, symbol] of [
+    [entry, '@arkade-os/sdk', CANDIDATE_SDK_SYMBOL],
+    [at(TAXI_CONSUMER, 'package.json'), '@arkade-os/swap', CANDIDATE_SWAP_SYMBOL],
   ]) {
     try {
-      await assertCandidateExport(packageRootFrom(entry, name), name, symbol)
+      await assertCandidateExport(packageRootFrom(from, name), name, symbol)
     } catch (error) {
       failures.push(error.message)
     }
@@ -184,8 +186,9 @@ if (entry) {
     await assertCandidateExport(
       packageRootFrom(entry, '@arkade-taxi/client'),
       '@arkade-taxi/client',
-      CANDIDATE_TAXI_RFQ_SYMBOL,
-      './wallet',
+      CANDIDATE_TAXI_FILL_SYMBOL,
+      '.',
+      'submitFill',
     )
   } catch (error) {
     failures.push(error.message)

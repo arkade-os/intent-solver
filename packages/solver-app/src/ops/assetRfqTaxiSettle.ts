@@ -1,15 +1,9 @@
 /** Persist before external effects; CAS against this caller's envelope and settle only on chain evidence. */
 
 import { hex } from '@scure/base'
-import {
-  requestQuoteWhenReady,
-  signJointGraphForOwner,
-  TaxiError,
-  verifyOfferFillPlan,
-  type JointGraph,
-  type TaxiClient,
-} from '@arkade-taxi/client'
+import { signJointGraphForOwner, type TaxiClient, type VerifiedReceiveQuote } from '@arkade-taxi/client'
 import type { Identity } from '@arkade-os/sdk'
+import { OFFER_FILL_TEMPLATE, verifyOfferFillPlan, type JointGraph } from '@arkade-os/swap'
 import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import { messageOf } from '@arkade-os/solver-core/util/poll.js'
@@ -22,7 +16,6 @@ import {
   type ReceiveCarrierSettleOutcome,
 } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
-  assetIdValue,
   carrierTaprootEvidence,
   clearsFloor,
   encodeCarrierAttemptInputs,
@@ -35,11 +28,7 @@ import {
 import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 
 type Locktime = Readonly<{ kind: 'height' | 'time'; value: bigint }>
-type VerifiedSwapFill = Parameters<TaxiClient['submitSwapFill']>[0]
-type SwapFillGraphWire = Parameters<TaxiClient['submitSwapFill']>[1]
-
-/** Back off post-sign not_ready submits while holding the fill queue; quote retries use the client's schedule. */
-const CARRIER_NOT_READY_RETRY_MS: readonly number[] = [1_000, 2_000, 4_000]
+type FillRequest = Parameters<TaxiClient['submitFill']>[0]
 
 export interface CarrierAttemptStore {
   readCarrierAttempt(id: string): Promise<CarrierAttempt | null>
@@ -59,7 +48,7 @@ export interface CarrierFillRebuildRequest {
   physicalSats: bigint
   contributionSats: bigint
   maxFareSats: bigint
-  quotedGraph: SwapFillGraphWire
+  quote: VerifiedReceiveQuote
 }
 
 /** Derive the graph locally and sign only solver-owned inputs. */
@@ -73,13 +62,14 @@ export interface CarrierTaxi {
   provider: string
   /** Only a Taxi the row named carries one: the key its quote was verified against. */
   providerKey?: string
-  swapFills: Pick<TaxiClient, 'requestVerifiedSwapFillQuote' | 'submitSwapFill'>
+  fills: Pick<TaxiClient, 'submitFill'>
 }
 
 export interface TaxiCarrierSettleDeps {
   store: CarrierAttemptStore
   taxiFor: (row: AssetRfqSwapRow) => CarrierTaxi
   resolve: ReceiveCarrierQuotes['resolve']
+  receiveQuote: (request: Parameters<ReceiveCarrierQuotes['resolve']>[0]) => Promise<VerifiedReceiveQuote>
   coins: () => Promise<readonly CarrierCoin[]>
   reserved: () => ReadonlySet<string>
   reserve: (outpoints: readonly CarrierOutpoint[]) => ReleaseReservation
@@ -92,7 +82,6 @@ export interface TaxiCarrierSettleDeps {
   serverKey: () => Uint8Array
   fill: CarrierFillSeams
   now: () => number
-  sleep: (ms: number) => Promise<void>
 }
 
 const contributionOf = (coin: CarrierCoin, leg: AssetLeg, dustSats: bigint): bigint => {
@@ -169,24 +158,6 @@ const carrierAttemptSnapshotFor = (parts: {
   valid_until: parts.validUntil,
 })
 
-/** The provider-signed offer covenant has a null owner in the fill template. */
-const quotedInputOwners = (wire: SwapFillGraphWire): readonly (string | null)[] =>
-  wire.inputs.map((input) => (input.owner === 'offer-covenant' ? null : input.owner))
-
-/** An index loop: JSON reads a hole or `undefined` as the covenant's `null`, and `every` skips holes. */
-export const sameInputOwners = (a: readonly (string | null)[], b: readonly (string | null)[]): boolean => {
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
-  return true
-}
-
-/** Replace signed bytes without changing economics checked by submit preflight. */
-const solverGraphWire = (quoted: SwapFillGraphWire, signed: JointGraph): SwapFillGraphWire => ({
-  ...quoted,
-  arkTx: signed.arkTx,
-  checkpoints: [...signed.checkpoints],
-})
-
 /** Signer bindings come from the locally built graph, preventing owner relabelling. */
 export const carrierFillSigner =
   (identity: Identity) =>
@@ -196,6 +167,7 @@ export const carrierFillSigner =
     return signJointGraphForOwner({
       expected,
       owner: 'solver',
+      template: OFFER_FILL_TEMPLATE,
       bindings: owned.map((inputIndex) => ({ inputIndex, identity })),
     })
   }
@@ -224,7 +196,8 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       admission: false,
       ...receiveCarrierTaxiOf(terms),
     }
-    const floor = (await deps.resolve(request)).inputExpiryFloor
+    const quote = await deps.receiveQuote(request)
+    const floor = { kind: quote.quote.inputExpiryFloor.kind, value: BigInt(quote.quote.inputExpiryFloor.value) }
     const coins = await deps.coins()
     const serverKey = deps.serverKey()
     const inputs = selectCarrierInputs({
@@ -242,7 +215,11 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
     const deposit = { txid: row.depositTxid, vout: row.depositVout }
     // Not `row.validUntil`: that bounds the decision to fill, and the quote stopped short of this to leave time to
     // act. Adding that margin back bounds a Taxi whose own expiry runs past the window this row was quoted for.
-    const validUntil = Math.min(terms.expiresAt, row.validUntil + CARRIER_FILL_MARGIN_SECONDS)
+    const validUntil = Math.min(
+      terms.expiresAt,
+      quote.descriptor.expiresAt,
+      row.validUntil + CARRIER_FILL_MARGIN_SECONDS,
+    )
     const offerHex = deps.offerHex(row)
     const snapshot = carrierAttemptSnapshotFor({
       row,
@@ -274,36 +251,6 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         pin.release()
         throw new Error(`carrier fill ${row.id} could not prepare its attempt; the operator was asked nothing`)
       }
-      const quoteRequest: Omit<Parameters<TaxiClient['requestVerifiedSwapFillQuote']>[0], 'now'> = {
-        operationId: row.id,
-        receiveQuoteId: terms.quoteId,
-        offerHex,
-        solverInputs: inputs.map(({ coin, evidence }) => ({
-          txid: coin.txid,
-          vout: coin.vout,
-          value: BigInt(coin.value),
-          tapTree: evidence.tapTree,
-          spendLeaf: evidence.spendLeaf,
-          // Preserve every input asset or arkd rejects the spend.
-          assets: (coin.assets ?? []).map((held) => ({
-            assetId: assetIdValue(held.assetId),
-            amount: BigInt(held.amount),
-          })),
-        })),
-        solverProceedsScript: deps.proceedsScript,
-        solverKeys: [...deps.solverKeys],
-        contributionSats: terms.loanSats,
-        maxFare: { currency: 'sats', units: terms.serviceFareSats },
-        fundingTxid: deposit.txid,
-        fundingVout: deposit.vout,
-        // Persist this value because it participates in request identity.
-        validUntil,
-      }
-      const { verified } = await requestQuoteWhenReady(() =>
-        taxi.swapFills.requestVerifiedSwapFillQuote({ ...quoteRequest, now: deps.now() }),
-      )
-
-      const quoted = verified.quote.graph
       const expected = await deps.fill.rebuild({
         row,
         offerHex,
@@ -312,20 +259,14 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         physicalSats: terms.physicalSats,
         contributionSats: terms.loanSats,
         maxFareSats: terms.serviceFareSats,
-        quotedGraph: quoted,
+        quote,
       })
       if (!verifyOfferFillPlan(expected)) throw new Error(`carrier fill ${row.id} rebuilt a graph off its own template`)
-      if (!sameInputOwners(expected.inputOwners, quotedInputOwners(quoted))) {
-        throw new Error(`carrier fill ${row.id} was quoted input owners it did not build`)
-      }
-      // The digest binds locally rebuilt bytes, owners and template.
-      if (expected.graphId !== quoted.graphId) {
-        throw new Error(`carrier fill ${row.id} rebuilt ${expected.graphId}, not the quoted ${quoted.graphId}`)
-      }
 
       const binding: JsonObject = {
-        fill_id: verified.fillId,
-        expires_at: verified.expiresAt,
+        operation_id: row.id,
+        quote_id: terms.quoteId,
+        expires_at: validUntil,
         graph: {
           id: expected.graphId,
           ark_tx: expected.arkTx,
@@ -339,8 +280,8 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
 
       const signed = await deps.fill.sign(expected)
 
-      // Recheck the admitted operator authority, now bound to this fill.
-      const current = await deps.resolve({ ...request, now: deps.now(), boundFillId: verified.fillId })
+      // Recheck the admitted operator authority after signing.
+      const current = await deps.resolve({ ...request, now: deps.now() })
       if (!sameLocktime(current.inputExpiryFloor, floor)) {
         throw new Error(
           `carrier fill ${row.id} pinned an input expiry floor of ${floor.value} and the operator now serves ${current.inputExpiryFloor.value}`,
@@ -357,15 +298,25 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       }
 
       // The Taxi refuses an expired fill at submit, and by then this attempt would be liable.
-      if (deps.now() >= verified.expiresAt) {
-        throw new Error(`carrier fill ${row.id} expired before it was sent, at ${verified.expiresAt}`)
+      if (deps.now() >= validUntil) {
+        throw new Error(`carrier fill ${row.id} expired before it was sent, at ${validUntil}`)
       }
       const bound: CarrierAttempt = { phase: 'quoted', snapshot, binding }
       if (!(await deps.store.markCarrierAttemptSubmitting(row.id, bound))) {
         throw new Error(`carrier fill ${row.id} could not mark itself submitting; nothing has been sent`)
       }
+      const submission: FillRequest = {
+        operationId: row.id,
+        quoteId: terms.quoteId,
+        arkTx: signed.arkTx,
+        checkpoints: [...signed.checkpoints],
+        taxiInputIndexes: expected.inputOwners.flatMap((owner, index) => (owner === 'sponsor' ? [index] : [])),
+        covenantOutputIndex: 0,
+        assetUnits: row.toAmount,
+        validUntil,
+      }
       liable = true
-      await submitWhileNotReady(deps, taxi, verified, solverGraphWire(quoted, signed))
+      await taxi.fills.submitFill(submission)
     } catch (error) {
       if (wrote && !liable) await releaseIfProvenNeverSubmitted(deps, pin, messageOf(error))
       throw error
@@ -381,26 +332,6 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
         throw error
       }
     },
-  }
-}
-
-/** After submitting, retain pins and resend the same bytes even on an untrusted not_ready reply. */
-const submitWhileNotReady = async (
-  deps: Pick<TaxiCarrierSettleDeps, 'now' | 'sleep'>,
-  taxi: CarrierTaxi,
-  verified: VerifiedSwapFill,
-  graph: SwapFillGraphWire,
-): Promise<void> => {
-  for (const delay of [...CARRIER_NOT_READY_RETRY_MS, undefined]) {
-    try {
-      await taxi.swapFills.submitSwapFill(verified, graph)
-      return
-    } catch (error) {
-      if (!(error instanceof TaxiError && error.code === 'not_ready') || delay === undefined) throw error
-      if (deps.now() + Math.ceil(delay / 1000) >= verified.expiresAt) throw error
-      await deps.sleep(delay)
-      if (deps.now() >= verified.expiresAt) throw error
-    }
   }
 }
 

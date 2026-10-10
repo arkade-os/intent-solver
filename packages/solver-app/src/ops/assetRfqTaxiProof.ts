@@ -2,7 +2,7 @@
 
 import { base64, hex } from '@scure/base'
 import { Extension, getArkPsbtFields, Transaction, VtxoTaprootTree } from '@arkade-os/sdk'
-import { verifyOfferFillPlan } from '@arkade-taxi/client'
+import { verifyOfferFillPlan } from '@arkade-os/swap'
 import {
   assertAssetPayouts,
   assertSolverSatsFloor,

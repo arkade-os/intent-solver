@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { ArkAddress, buildOffchainTx, DefaultVtxo, matchServerCheckpoints } from '@arkade-os/sdk'
-import { digestJointGraph, OFFER_FILL_TEMPLATE } from '@arkade-taxi/client'
+import { digestJointGraph, OFFER_FILL_TEMPLATE } from '@arkade-os/swap'
 import { nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import {

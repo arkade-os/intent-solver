@@ -1,120 +1,12 @@
-/** Rebuild solver inputs locally, recover sponsor inputs from checkpoint PSBTs, and compare graphId. */
+/** Build from verified receive-quote funding and enforce the solver's own economics. */
 
 import { base64, hex } from '@scure/base'
-import {
-  Extension,
-  ExtensionNotFoundError,
-  getArkPsbtFields,
-  Transaction,
-  VtxoTaprootTree,
-  type IWallet,
-  type TapLeafScript,
-} from '@arkade-os/sdk'
-import { buildOfferFillPlan, type JointGraph, type TaxiClient } from '@arkade-taxi/client'
+import { Extension, ExtensionNotFoundError, Transaction, VtxoScript, type IWallet } from '@arkade-os/sdk'
+import { buildOfferFillPlan, type JointGraph } from '@arkade-os/swap'
 import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { CarrierFillRebuildRequest } from './assetRfqTaxiSettle.js'
 import { canonicalDecimal, type CarrierCoin } from './assetRfqTaxi.js'
-
-type SwapFillGraphWire = Parameters<TaxiClient['submitSwapFill']>[1]
-type SwapFillGraphInputWire = SwapFillGraphWire['inputs'][number]
-
-export interface CarrierJointFunding {
-  txid: string
-  vout: number
-  value: number
-  tapLeafScript: TapLeafScript
-  tapTree: Uint8Array
-}
-
-export interface CarrierSponsorLeg {
-  fund: CarrierJointFunding[]
-  netContributionSats: bigint
-  changeScript: Uint8Array
-  /** Asset fares are not authorised. */
-  fare?: { script: Uint8Array; sats: bigint }
-  combineSatsFareWithChange?: boolean
-}
-
-const MAX_SATS = BigInt(Number.MAX_SAFE_INTEGER)
-
-const fundingFromCheckpoint = (psbt: string, claimed: SwapFillGraphInputWire, label: string): CarrierJointFunding => {
-  const checkpoint = Transaction.fromPSBT(base64.decode(psbt))
-  if (checkpoint.inputsLength !== 1) {
-    throw new Error(`${label} checkpoint spends ${checkpoint.inputsLength} inputs, not the one it is for`)
-  }
-  const input = checkpoint.getInput(0)
-  const txid = input.txid === undefined ? '' : hex.encode(input.txid)
-  if (txid !== claimed.txid.toLowerCase() || input.index !== claimed.vout) {
-    throw new Error(`${label} checkpoint spends ${txid}:${String(input.index)}, not ${claimed.txid}:${claimed.vout}`)
-  }
-  const leaves = input.tapLeafScript ?? []
-  if (leaves.length !== 1) throw new Error(`${label} checkpoint carries ${leaves.length} tap leaves, not one`)
-  const trees = getArkPsbtFields(checkpoint, 0, VtxoTaprootTree)
-  if (trees.length !== 1) throw new Error(`${label} checkpoint carries ${trees.length} taptrees, not one`)
-  const amount = input.witnessUtxo?.amount
-  if (amount === undefined) throw new Error(`${label} checkpoint declares no witness utxo to value its input`)
-  if (amount < 0n || amount > MAX_SATS) throw new Error(`${label} checkpoint values its input at ${amount} sats`)
-  return { txid, vout: input.index!, value: Number(amount), tapLeafScript: leaves[0]!, tapTree: trees[0]! }
-}
-
-export const recoverJointFunding = (wire: SwapFillGraphWire, label: string): readonly CarrierJointFunding[] => {
-  if (wire.checkpoints.length !== wire.inputs.length) {
-    throw new Error(`${label} quotes ${wire.inputs.length} inputs against ${wire.checkpoints.length} checkpoints`)
-  }
-  return wire.inputs.map((claimed, i) => fundingFromCheckpoint(wire.checkpoints[i]!, claimed, `${label} input ${i}`))
-}
-
-export const sponsorLegFrom = (
-  wire: SwapFillGraphWire,
-  funding: readonly CarrierJointFunding[],
-  label: string,
-  authorised: Pick<CarrierAuthorisedSats, 'contributionSats' | 'maxFareSats'>,
-  fallbackChangeScript: Uint8Array,
-): CarrierSponsorLeg | undefined => {
-  const fund = wire.inputs.flatMap((input, i) => (input.owner === 'sponsor' ? [funding[i]!] : []))
-  if (fund.length === 0) return undefined
-  const change = wire.outputs.find((output) => output.role === 'sponsor-change')
-  const fare = wire.outputs.find((output) => output.role === 'sponsor-fare')
-  // Fare and sponsor change can share a script; verify their roles explicitly.
-  const script = change?.script ?? fare?.script
-  const quoted =
-    fund.reduce((total, coin) => total + BigInt(coin.value), 0n) -
-    (change === undefined ? 0n : canonicalDecimal(change.sats, `${label} sponsor change`))
-  if (quoted <= 0n) throw new Error(`${label} quotes a sponsor contributing ${quoted} sats`)
-  const changeScript = script === undefined ? fallbackChangeScript : hex.decode(script)
-  // Build authorised economics, then compare the quote.
-  if (fare !== undefined) {
-    if (quoted !== authorised.contributionSats) throw shortContribution(quoted, authorised, label)
-    return {
-      fund,
-      netContributionSats: authorised.contributionSats,
-      changeScript,
-      fare: fareFrom(fare, label, authorised.maxFareSats),
-    }
-  }
-  // A folded fare includes change; bound the combined net against authorised terms.
-  const folded = authorised.contributionSats - quoted
-  if (folded < 0n) throw shortContribution(quoted, authorised, label)
-  if (folded === 0n) return { fund, netContributionSats: authorised.contributionSats, changeScript }
-  if (folded > authorised.maxFareSats) {
-    throw new Error(
-      `${label} folds a fare of ${folded} sats into change, over the ${authorised.maxFareSats} authorised`,
-    )
-  }
-  return {
-    fund,
-    netContributionSats: authorised.contributionSats,
-    changeScript,
-    fare: { script: changeScript, sats: folded },
-    combineSatsFareWithChange: true,
-  }
-}
-
-const shortContribution = (quoted: bigint, authorised: { contributionSats: bigint }, label: string): Error =>
-  new Error(
-    `${label} quotes a sponsor contributing ${quoted} sats, not the ${authorised.contributionSats} it authorised`,
-  )
 
 export interface CarrierAuthorisedSats {
   physicalSats: bigint
@@ -139,21 +31,6 @@ export const assertSolverSatsFloor = (
   }
 }
 
-/** Bound the operator-selected sats fare; an asset fare could drain holdings without moving sats. */
-const fareFrom = (
-  output: SwapFillGraphWire['outputs'][number],
-  label: string,
-  maxFareSats: bigint,
-): NonNullable<CarrierSponsorLeg['fare']> => {
-  if ((output.assets ?? []).length > 0) {
-    throw new Error(`${label} quotes a fare carrying assets; only a sats fare was authorised`)
-  }
-  const sats = canonicalDecimal(output.sats, `${label} fare`)
-  if (sats > maxFareSats) throw new Error(`${label} quotes a fare of ${sats} sats over the ${maxFareSats} authorised`)
-  if (sats === 0n) throw new Error(`${label} quotes a fare output of no sats at all`)
-  return { script: hex.decode(output.script), sats }
-}
-
 export interface CarrierFillRebuildDeps {
   wallet: IWallet
   arkServerUrl: string
@@ -174,44 +51,44 @@ const solverFunding = (coin: CarrierCoin, label: string) => {
   }
 }
 
-/** Bind the recorded deposit and selected solver inputs so the operator cannot relabel coin ownership. */
-const assertQuotedOwnership = (wire: SwapFillGraphWire, request: CarrierFillRebuildRequest, label: string): void => {
-  const covenant = wire.inputs[0]
-  if (covenant?.owner !== 'offer-covenant') throw new Error(`${label} was quoted no offer deposit to spend`)
-  if (covenant.txid.toLowerCase() !== request.row.depositTxid || covenant.vout !== request.row.depositVout) {
-    throw new Error(`${label} was quoted the deposit ${covenant.txid}:${covenant.vout}, not the one the row recorded`)
-  }
-  const quoted = wire.inputs.flatMap((input) =>
-    input.owner === 'solver' ? [`${input.txid.toLowerCase()}:${input.vout}`] : [],
-  )
-  const selected = request.inputs.map((coin) => `${coin.txid.toLowerCase()}:${coin.vout}`)
-  if (quoted.join(',') !== selected.join(',')) {
-    throw new Error(`${label} was quoted solver inputs ${quoted.join(',')}, not the ${selected.join(',')} it selected`)
-  }
-}
-
 export const createCarrierFillRebuilder =
   (deps: CarrierFillRebuildDeps) =>
   async (request: CarrierFillRebuildRequest): Promise<JointGraph> => {
     const label = `carrier fill ${request.row.id}`
-    const wire = request.quotedGraph
-    assertQuotedOwnership(wire, request, label)
-    const receiver = wire.outputs[0]
-    if (receiver?.role !== 'receiver') throw new Error(`${label} was quoted no receiver output to pay the maker`)
-    if (canonicalDecimal(receiver.sats, `${label} carrier`) !== request.physicalSats) {
-      throw new Error(
-        `${label} was quoted a ${receiver.sats} sat carrier, not the ${request.physicalSats} it authorised`,
-      )
+    const { quote, params, descriptor } = request.quote
+    if (descriptor.physicalSats !== request.physicalSats || params.topup !== request.contributionSats) {
+      throw new Error(`${label} receive quote changed its authorised carrier or loan`)
     }
-    const sponsor = sponsorLegFrom(wire, recoverJointFunding(wire, label), label, request, request.proceedsScript)
+    if (quote.fare.currency !== 'sats') throw new Error(`${label} authorises only a sats fare`)
+    const fare = canonicalDecimal(quote.fare.units, `${label} fare`)
+    if (fare > request.maxFareSats) throw new Error(`${label} fare exceeds its authorised cap`)
+    const changeScript = hex.decode(quote.operatorScript)
+    const sponsor = {
+      fund: quote.operatorInputs.map((input, index) => {
+        const value = canonicalDecimal(input.value, `${label} Taxi input ${index}`)
+        if (value <= 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`${label} invalid Taxi input value`)
+        if (input.assetPacket !== undefined) throw new Error(`${label} Taxi funding carries assets`)
+        const tree = VtxoScript.decode(hex.decode(input.tapTree))
+        return {
+          txid: input.txid,
+          vout: input.vout,
+          value: Number(value),
+          tapTree: tree.encode(),
+          tapLeafScript: tree.findLeaf(input.spendLeaf),
+        }
+      }),
+      netContributionSats: params.topup,
+      changeScript,
+      ...(fare === 0n ? {} : { fare: { script: changeScript, sats: fare }, combineSatsFareWithChange: true }),
+    }
     const built = await buildOfferFillPlan(deps.wallet, deps.arkServerUrl, request.offerHex, {
       fund: request.inputs.map((coin) => solverFunding(coin, label)),
       payoutScript: request.proceedsScript,
       fundingOutpoint: { txid: request.row.depositTxid!, vout: request.row.depositVout! },
       assetCarrierSats: request.physicalSats,
-      ...(sponsor === undefined ? {} : { sponsor }),
+      sponsor,
     })
-    // Enforce the floor on built bytes; quoted output amounts are not in the digest.
+
     assertBuiltGraph(built, request, label)
     return built
   }

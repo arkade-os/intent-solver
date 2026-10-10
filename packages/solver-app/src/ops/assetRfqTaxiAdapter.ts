@@ -3,7 +3,13 @@ import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reserva
 import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import type { ReceiveCarrierQuotes } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import { taxiClientCache, type CarrierCoin, type CarrierOutpoint, type CarrierPinLedger } from './assetRfqTaxi.js'
+import {
+  taxiClientCache,
+  type CarrierCoin,
+  type CarrierOutpoint,
+  type CarrierPinLedger,
+  type TaxiReceiveCarrierReader,
+} from './assetRfqTaxi.js'
 import {
   carrierFillSigner,
   createTaxiReceiveCarrierSettler,
@@ -56,16 +62,16 @@ export const carrierTaxiFor = (
           { cause },
         )
       }
-      return { provider, providerKey: terms.taxiKey, swapFills: clientFor(provider, 'fill') }
+      return { provider, providerKey: terms.taxiKey, fills: clientFor(provider, 'fill') }
     }
     // Throws first when no Taxi is configured, so `configured` is set below.
-    const swapFills = clientFor(undefined)
-    return { provider: configured!, swapFills }
+    const fills = clientFor(undefined)
+    return { provider: configured!, fills }
   }
 }
 
 export const completeTaxiReceiveCarrier = (
-  reader: Pick<ReceiveCarrierQuotes, 'resolve' | 'available'>,
+  reader: TaxiReceiveCarrierReader,
   deps: TaxiCarrierFillComposition,
 ): ReceiveCarrierQuotes => {
   const proceedsScript = ArkAddress.decode(deps.proceedsAddress).pkScript
@@ -75,6 +81,7 @@ export const completeTaxiReceiveCarrier = (
       store: deps.store,
       taxiFor: carrierTaxiFor(deps),
       resolve: reader.resolve,
+      receiveQuote: reader.verified,
       coins: deps.coins,
       reserved: deps.reserved,
       reserve: deps.reserve,
@@ -89,7 +96,6 @@ export const completeTaxiReceiveCarrier = (
         sign: carrierFillSigner(deps.identity),
       },
       now: deps.now,
-      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     }),
     ...createTaxiReceiveCarrierObserver({
       store: deps.store,

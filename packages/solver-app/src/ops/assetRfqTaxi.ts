@@ -50,10 +50,7 @@ export interface CarrierCoin {
   script?: string
 }
 
-export type TaxiCarrierClient = Pick<
-  TaxiClient,
-  'info' | 'getReceiveQuote' | 'requestVerifiedSwapFillQuote' | 'submitSwapFill'
->
+export type TaxiCarrierClient = Pick<TaxiClient, 'info' | 'getReceiveQuote' | 'submitFill'>
 
 export interface TaxiReceiveCarrierDeps {
   /** Absent resolves the configured Taxi, which no budget limits; throws when none is configured. */
@@ -191,7 +188,7 @@ const verifiedQuoteFor = async (
     expect: {
       // The offer pays the covenant, not this address; still pinned to the trusted server and `params.receiverKey`.
       receiverAddress: quote.receiverAddress,
-      makerPublicKey: hex.decode(request.makerPublicKey),
+      senderKey: hex.decode(request.makerPublicKey),
       assetId,
       fundingExpiry: floor,
       ...(request.receiverPaid
@@ -215,7 +212,7 @@ const carrierQuoteFrom = (from: { verified: VerifiedReceiveQuote; operatorKey: s
     quoteId: verified.descriptor.quoteId,
     // From the VERIFIED covenant, never echoed back off the request.
     makerPkScript: hex.encode(verified.script.pkScript),
-    makerPublicKey: verified.descriptor.makerPublicKey,
+    makerPublicKey: verified.descriptor.senderKey,
     assetId: verified.descriptor.assetId,
     physicalSats: verified.descriptor.physicalSats,
     loanSats: verified.descriptor.loanSats,
@@ -283,9 +280,11 @@ export const carrierAdmissionSlack = (domain: 'height' | 'time', quoteValiditySe
   return BigInt(2 * Math.ceil(window / CARRIER_FAST_BLOCK_SECONDS) + CARRIER_SLACK_FLOOR_BLOCKS)
 }
 
-export const createTaxiReceiveCarrierReader = (
-  deps: TaxiReceiveCarrierDeps,
-): Pick<ReceiveCarrierQuotes, 'resolve' | 'available'> => {
+export interface TaxiReceiveCarrierReader extends Pick<ReceiveCarrierQuotes, 'resolve' | 'available'> {
+  verified: (request: ReceiveCarrierQuoteRequest) => Promise<VerifiedReceiveQuote>
+}
+
+export const createTaxiReceiveCarrierReader = (deps: TaxiReceiveCarrierDeps): TaxiReceiveCarrierReader => {
   const tip = deps.trust.locktimeDomain === 'height' ? deps.tipHeight : undefined
   const slack = carrierAdmissionSlack(deps.trust.locktimeDomain, deps.quoteValiditySeconds)
   const anchoredFloor = async (now: number, admission: boolean) => {
@@ -300,11 +299,14 @@ export const createTaxiReceiveCarrierReader = (
         (admission ? slack : 0n),
     }
   }
+  const checkedQuote = async (request: ReceiveCarrierQuoteRequest) =>
+    verifiedQuoteFor(deps, request, await anchoredFloor(request.now, request.admission))
   const quoteFor = async (request: ReceiveCarrierQuoteRequest): Promise<ReceiveCarrierQuote> =>
-    carrierQuoteFrom(await verifiedQuoteFor(deps, request, await anchoredFloor(request.now, request.admission)))
+    carrierQuoteFrom(await checkedQuote(request))
 
   return {
     resolve: quoteFor,
+    verified: async (request) => (await checkedQuote(request)).verified,
 
     available: async (request) => {
       const floor = (await quoteFor(request)).inputExpiryFloor
@@ -405,9 +407,7 @@ export const taxiClientCache = (deps: {
   }
 }
 
-export const taxiReceiveCarrier = async (
-  deps: TaxiCarrierComposition,
-): Promise<Pick<ReceiveCarrierQuotes, 'resolve' | 'available'>> =>
+export const taxiReceiveCarrier = async (deps: TaxiCarrierComposition): Promise<TaxiReceiveCarrierReader> =>
   createTaxiReceiveCarrierReader({
     clientFor: taxiClientCache({
       configuredUrl: deps.taxiUrl?.trim() || undefined,
