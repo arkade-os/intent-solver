@@ -15,42 +15,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # This repository is the public LND reference solver. A proprietary Lightning
-  # backend lives in a separate private repo, and no trace of it may appear here
-  # — not an import, not a type, not a comment, not a doc line.
-  #
-  # A one-time scrub is not a guarantee; a merge or a copied comment reintroduces
-  # a name in seconds and nothing else would notice. This job is the guarantee.
-  # It runs first and takes ~2s.
-  #
-  # `grep -r` over the tree minus the directories git does not track. If this
-  # fails, do not weaken the pattern: rewrite the offending line to describe the
-  # CAPABILITY rather than the vendor ("a backend that cannot pre-commit a
-  # payment id"), which is what the rest of this codebase already does.
+  # Names that must never appear in this tree come from the FORBIDDEN_NAMES
+  # secret (comma-separated extended regexes), so the list is not published; a
+  # hit reports file:line only. Fork PRs get no secrets, so only they may skip.
   vendor-names:
     runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
-      - name: No proprietary backend names anywhere in the tree
+      - name: No forbidden names anywhere in the tree
+        env:
+          FORBIDDEN_NAMES: ${{ secrets.FORBIDDEN_NAMES }}
+          FROM_FORK: ${{ github.event.pull_request.head.repo.fork == true }}
         run: |
           set -eu
-          # The names live in a data file, not in this pattern, for one reason:
-          # a literal here would match ITSELF and fail the job on a clean tree.
-          # That file is therefore the only thing excluded from the scan, and
-          # holding the list is its entire purpose — a reviewer sees the whole
-          # exclusion in one place rather than as a flag on a grep.
-          pattern=$(paste -sd'|' .github/forbidden-names.txt)
-          # `|| true`: grep exits 1 for "no matches", which is the SUCCESS case
-          # here, and `set -e` would otherwise kill the step on it.
-          found=$(grep -rniE "$pattern" . \
-            --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist \
-            --exclude=forbidden-names.txt \
-            || true)
+          if [ -z "$FORBIDDEN_NAMES" ]; then
+            if [ "$FROM_FORK" = "true" ]; then echo "skipped: no secrets on fork PRs"; exit 0; fi
+            echo "FORBIDDEN_NAMES secret is not set"; exit 1
+          fi
+          pattern=$(printf '%s' "$FORBIDDEN_NAMES" | tr ',' '|')
+          found=$({ grep -rnoiE "$pattern" . \
+            --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist || true; } \
+            | cut -d: -f1,2 | sort -u)
           if [ -n "$found" ]; then
-            echo "Proprietary backend names must not appear in this repository."
-            echo "Rewrite the line to describe the CAPABILITY rather than the"
-            echo "vendor — e.g. 'a backend that cannot pre-commit a payment id'"
-            echo "— which is what the rest of this codebase already does."
+            echo "Forbidden names must not appear in this repository. Rewrite each"
+            echo "line to describe the CAPABILITY rather than the vendor — e.g."
+            echo "'a backend that cannot pre-commit a payment id'."
             echo
             echo "$found"
             exit 1
