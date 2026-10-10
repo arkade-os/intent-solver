@@ -76,7 +76,8 @@ export const completeTaxiReceiveCarrier = (
 ): ReceiveCarrierQuotes => {
   const proceedsScript = ArkAddress.decode(deps.proceedsAddress).pkScript
   return {
-    ...reader,
+    available: reader.available,
+    resolve: reader.resolve,
     ...createTaxiReceiveCarrierSettler({
       store: deps.store,
       taxiFor: carrierTaxiFor(deps),
