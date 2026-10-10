@@ -948,6 +948,9 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
       { ...terms, lock: { ...terms.lock, tokenAddress: accounts[3]! } },
       { ...terms, lock: { ...terms.lock, claimAddress: SWAP } },
       { ...terms, lock: { ...terms.lock, refundAddress: terms.lock.tokenAddress } },
+      { ...terms, swapContract: terms.lock.tokenAddress },
+      { ...terms, lock: { ...terms.lock, refundAddress: SWAP } },
+      { ...terms, lock: { ...terms.lock, claimAddress: terms.lock.tokenAddress } },
     ]) {
       const receiver = await deployReceiver(bad)
       await transfer(receiver, AMOUNT)

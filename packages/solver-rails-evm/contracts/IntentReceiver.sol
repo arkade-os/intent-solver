@@ -83,6 +83,7 @@ contract IntentReceiver {
     function activate() external guarded {
         Binding memory b = _binding();
         if (block.chainid != b.chainId) revert WrongChain();
+        if (activated) revert AlreadyActivated();
         if (
             b.swapContract.code.length == 0 || b.token.code.length == 0 ||
             b.amount == 0 || b.preimageHash == bytes32(0) || b.claimAddress == address(0) ||
@@ -93,7 +94,6 @@ contract IntentReceiver {
             b.token == address(this) || b.swapContract == address(this) ||
             b.timelock <= b.activationCutoff
         ) revert InvalidBinding();
-        if (activated) revert AlreadyActivated();
         if (block.number >= b.activationCutoff || block.timestamp >= b.activationCutoffTimestamp) revert ActivationClosed();
         IERC20ReceiverToken asset = IERC20ReceiverToken(b.token);
         uint256 beforeBalance = asset.balanceOf(address(this));
@@ -116,6 +116,7 @@ contract IntentReceiver {
         emit Activated(key);
     }
 
+    /// Chain-agnostic by design: a clone can exist on chains its binding never named.
     function recover(address recoveredToken) external guarded {
         Binding memory b = _binding();
         if (b.refundAddress == address(0)) revert InvalidBinding();
@@ -175,6 +176,7 @@ contract IntentReceiverFactory {
         IntentReceiver(receiver).activate();
     }
 
+    /// Atomic: if `recover` reverts, the deploy is undone too.
     function deployAndRecover(bytes calldata args, address recoveredToken) external returns (address receiver) {
         receiver = deploy(args);
         IntentReceiver(receiver).recover(recoveredToken);
