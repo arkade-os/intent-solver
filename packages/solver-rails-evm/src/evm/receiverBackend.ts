@@ -270,6 +270,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
       throw new Error('receiver implementation mismatch')
     return true
   }
+  // Check-only on activate and recover: the operator runs `ensureFactory` at startup, and the deploy path runs it per receiver.
   const requireFactory = async (): Promise<void> => {
     if (!(await factoryReady('latest'))) throw new Error('receiver factory is not deployed')
   }
