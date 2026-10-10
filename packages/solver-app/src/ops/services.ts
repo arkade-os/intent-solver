@@ -451,6 +451,10 @@ export const createServices = async (
   config: Config,
   opts?: { allCorridors?: boolean; corridors?: readonly CorridorPlugin[] },
 ): Promise<Services> => {
+  const taxiReceiverAllowPrivate = process.env.TAXI_RECEIVER_ALLOW_PRIVATE === '1'
+  if (config.arkade.isMainnet && taxiReceiverAllowPrivate) {
+    throw new Error('TAXI_RECEIVER_ALLOW_PRIVATE=1 is not allowed on mainnet')
+  }
   // One file on a fresh install, the five it already has on an existing one —
   // see src/db/layout.ts for why nothing ever moves rows between them.
   const layout = resolveDbLayout(config.swapDbPath)
@@ -669,7 +673,7 @@ export const createServices = async (
    */
   const taxiUrlPolicy: TaxiUrlPolicy = {
     isMainnet: config.arkade.isMainnet,
-    allowPrivate: process.env.TAXI_RECEIVER_ALLOW_PRIVATE === '1',
+    allowPrivate: taxiReceiverAllowPrivate,
   }
   const taxiCarrier = await taxiReceiveCarrier({
     taxiUrl: config.taxiUrl,
