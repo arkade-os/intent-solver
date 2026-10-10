@@ -681,30 +681,39 @@ describe('replaceMarkets', () => {
       newId: sequentialIds(),
       deriveOffer: perClientOffer,
     })
-    const quoted = service.quote(request())
-    const swapping = service.replaceMarkets([{ ...MARKET, carrierSats: 0n }])
-    const outcome = await quoted
+    const outcome = await service.quote(request())
+    await service.replaceMarkets([{ ...MARKET, carrierSats: 0n }])
     expect(outcome.accepted && outcome.carrierSats).toBe(330n)
-    await swapping
     // Premise: the swap really landed, so the 330n above is a captured figure and not a no-op.
     const next = await service.quote(request({ rfqId: 'f'.repeat(64), makerPublicKey: 'c'.repeat(64) }))
     expect(next.accepted && next.carrierSats).toBe(0n)
   })
 
   it('waits for an in-flight quote before swapping the list', async () => {
-    let release!: (price: { mantissa: bigint; scale: number }) => void
-    const blocked = new Promise<{ mantissa: bigint; scale: number }>((resolve) => {
+    let release!: () => void
+    let entered!: () => void
+    const blocked = new Promise<void>((resolve) => {
       release = resolve
     })
-    const { service } = await harness({ fetchPrice: () => blocked })
+    const inserting = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const { service, store } = await harness()
+    const insertQuote = store.insertQuote.bind(store)
+    vi.spyOn(store, 'insertQuote').mockImplementationOnce(async (record) => {
+      entered()
+      await blocked
+      return insertQuote(record)
+    })
     const quoting = service.quote(request())
+    await inserting
     let replaced = false
     const replacing = service.replaceMarkets([]).then(() => {
       replaced = true
     })
     await Promise.resolve()
     expect(replaced).toBe(false)
-    release({ mantissa: 100_000n, scale: 0 })
+    release()
     expect(await quoting).toMatchObject({ accepted: true })
     await replacing
     expect(replaced).toBe(true)

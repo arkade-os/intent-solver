@@ -15,10 +15,23 @@ import ts from 'typescript'
 // this guard exists to close.
 export const COMPILED = /\.(?:m|c)?ts$/
 
-export const compiledFilesUnder = (dir: string): string[] =>
-  readdirSync(dir, { recursive: true, withFileTypes: true })
-    .filter((entry) => entry.isFile() && COMPILED.test(entry.name))
-    .map((entry) => join(entry.parentPath, entry.name))
+export const compiledFilesUnder = (dir: string, excludedDirectories: ReadonlySet<string> = new Set()): string[] => {
+  const directories = [dir]
+  const files: string[] = []
+  for (let index = 0; index < directories.length; index += 1) {
+    const current = directories[index]!
+    const entries = readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))
+    for (const entry of entries) {
+      const path = join(current, entry.name)
+      if (entry.isDirectory()) {
+        if (!excludedDirectories.has(entry.name)) directories.push(path)
+      } else if (entry.isFile() && COMPILED.test(entry.name)) {
+        files.push(path)
+      }
+    }
+  }
+  return files.sort()
+}
 
 const isBare = (specifier: string): boolean => !specifier.startsWith('.') && !specifier.startsWith('node:')
 

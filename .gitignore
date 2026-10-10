@@ -38,3 +38,6 @@ slopo*
 # TLC model-checker output (spec/tla) — state queues and fingerprints,
 # regenerable on every run, never source.
 spec/tla/states/
+
+.local-tests/taxi/
+scripts/taxi-wallet-fixture.mjs

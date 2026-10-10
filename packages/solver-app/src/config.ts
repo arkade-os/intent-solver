@@ -16,6 +16,7 @@ import { MAX_BIP68_BLOCKS, MAX_BIP68_SECONDS, relativeDelayFrom } from '@arkade-
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
 import { FREE, type Corridor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { ALL_DESCRIPTORS } from '@arkade-os/solver-corridors/corridors/index.js'
+import { MAX_ASSET_QUOTE_VALIDITY_SECONDS } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
   evmCorridorPolicies,
   evmMarkets,
@@ -29,7 +30,7 @@ import { parseAssetMarkets, type AssetMarket } from './ops/assetOffers.js'
 import { parseAssetRfqTokens, type AssetRfqToken } from './ops/assetRfqMarkets.js'
 import type { ArkadeWalletConfig } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
-import { parseSentryDsn, type SentryOptions } from './ops/sentry.js'
+import { isLoopback, parseSentryDsn, type SentryOptions } from './ops/sentry.js'
 
 /** The network a deployment that sets nothing runs as. */
 const DEFAULT_NETWORK = 'regtest'
@@ -352,6 +353,10 @@ export interface Config {
    *  sealed claim packets to the claim daemon (offline clients). Unset = the
    *  client claims its own lockup. */
   covclaimdUrl?: string
+  /** Taxi operator base URL — the receive-carrier rail, off unless set, and the
+   *  ONLY knob it adds: every identity a quote is verified against comes from
+   *  the context this process already trusts, never from here. */
+  taxiUrl?: string
   /**
    * Which BTC rail this deployment moves money on — the Lightning AND the
    * onchain leg, since both come out of one wallet (@see ops/rails.ts).
@@ -879,6 +884,23 @@ const sendHintScidDenylistFromEnv = (): ReadonlySet<string> => {
   return new Set(entries)
 }
 
+const operatorUrlFromEnv = (name: string, isMainnet: boolean): string | undefined => {
+  const raw = process.env[name]?.trim()
+  if (!raw) return undefined
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    throw new Error(`${name} must be an absolute URL, got "${raw}"`)
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`${name} must be http or https, got "${url.protocol}"`)
+  }
+  // Mainnet-gated, not loopback-only: regtest stacks reach these over a container network.
+  if (url.protocol === 'https:' || isLoopback(url.hostname) || !isMainnet) return raw
+  throw new Error(`${name} must use https on mainnet, got "${url.protocol}//${url.host}"`)
+}
+
 export const loadConfig = (): Config => {
   const raw = process.env.SWAP_NETWORK ?? DEFAULT_NETWORK
   if (!isSwapNetwork(raw)) {
@@ -998,7 +1020,7 @@ export const loadConfig = (): Config => {
     // What each named asset is WORTH still comes from the console's market rows,
     // which `createServices` joins to these.
     assetRfqTokens: parseAssetRfqTokens(process.env.ASSET_MARKETS, (name) => process.env[name]),
-    assetQuoteValiditySeconds: intFromEnv('ASSET_QUOTE_VALIDITY_SECONDS', 30, 5, 900),
+    assetQuoteValiditySeconds: intFromEnv('ASSET_QUOTE_VALIDITY_SECONDS', 30, 5, MAX_ASSET_QUOTE_VALIDITY_SECONDS),
     swapDbPath: swapDbPath(),
     poolAutoMint: poolAutoMintFromEnv(),
     lnReceiveAcceptUnilateralGap: lnReceiveAcceptUnilateralGapFromEnv(raw),
@@ -1053,26 +1075,9 @@ export const loadConfig = (): Config => {
     emulatorUrl: required('EMULATOR_URL'),
     // Optional: the non-interactive claim daemon the receive legs reveal funded
     // lockups to (its Reveal API). Unset keeps the client-claims-itself default.
-    covclaimdUrl: (() => {
-      const raw = process.env.COVCLAIMD_URL?.trim()
-      if (!raw) return undefined
-      let url: URL
-      try {
-        url = new URL(raw)
-      } catch {
-        throw new Error(`COVCLAIMD_URL must be an absolute URL, got "${raw}"`)
-      }
-      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-        throw new Error(`COVCLAIMD_URL must be http or https, got "${url.protocol}"`)
-      }
-      if (url.protocol === 'https:') return raw
-      const host = url.hostname.replace(/^\[|\]$/g, '')
-      // Every octet, not a `127.` prefix: that would read 127.evil.com as loopback.
-      const loopback = host === 'localhost' || host === '::1' || /^127(\.\d{1,3}){3}$/.test(host)
-      // Mainnet-gated, not loopback-only: regtest stacks reach covclaimd over a container network.
-      if (loopback || !profile.isMainnet) return raw
-      throw new Error(`COVCLAIMD_URL must use https on mainnet, got "${url.protocol}//${url.host}"`)
-    })(),
+    covclaimdUrl: operatorUrlFromEnv('COVCLAIMD_URL', profile.isMainnet),
+    // A plaintext operator on mainnet is a quote anyone on the path can rewrite.
+    taxiUrl: operatorUrlFromEnv('TAXI_URL', profile.isMainnet),
     arkade: {
       mnemonic: required('ARK_MNEMONIC'),
       arkServerUrl: required('ARK_SERVER_URL'),

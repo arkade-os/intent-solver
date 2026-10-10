@@ -13,6 +13,7 @@
  */
 
 import { createCorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
+import { canRecoverOnchain, canSpendOffchain, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { describe, it, expect, vi } from 'vitest'
 import { mintPool, poolPlan, committedAcrossCorridors, resplitFloat } from '@arkade-os/solver-app/ops/pool.js'
 import { usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
@@ -417,6 +418,48 @@ describe('mintPool — the spend gate', () => {
 })
 
 describe('mintPool — named, pinned inputs', () => {
+  it.each([
+    ['mint', mintPool],
+    ['resplit', resplitFloat],
+  ] as const)('%s leaves swept height-denominated inventory to recovery', async (_name, reshape) => {
+    const now = { timestamp: new Date(), height: 1 }
+    const live = {
+      ...({
+        txid: '11'.repeat(32),
+        vout: 0,
+        value: 300_000,
+        createdAt: now.timestamp,
+        expiresAtHeight: 100,
+      } as ExtendedVirtualCoin),
+      isSwept: false,
+      isPreconfirmed: false,
+      isSpent: false,
+      spentBy: '',
+      commitmentTxIds: [],
+    }
+    const swept = { ...live, txid: '22'.repeat(32), value: 1_000_000, isSwept: true }
+    const coins = [swept, live]
+    const ledger = createReservationLedger()
+    const seen: string[][] = []
+    const send = vi.fn(async (_params: { selectedVtxos: readonly ExtendedVirtualCoin[] }) => {
+      seen.push([...ledger.reserved()])
+      return 'ark-txid'
+    })
+    const services = servicesWith({ coins, ledger, send })
+    const read = vi.mocked(services.arkade.wallet.getSpendableVtxos)
+    read.mockImplementation(async (filter) =>
+      coins.filter((coin) => filter?.withRecoverable !== false || !canRecoverOnchain(coin, now)),
+    )
+    expect(canSpendOffchain(swept, now)).toBe(false)
+    expect(canSpendOffchain(live, now)).toBe(true)
+    expect(await reshape(services)).toMatchObject({ txid: 'ark-txid' })
+    expect([...ledger.reserved()]).toEqual([])
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0]![0].selectedVtxos).toEqual([live])
+    expect(seen).toEqual([[`${live.txid}:0`]])
+    expect(read).toHaveBeenCalledWith({ withRecoverable: false, genericallySpendableOnly: true })
+  })
+
   it('spends exactly the planned coins, never a reserved one', async () => {
     const send = vi.fn().mockResolvedValue('ark-txid')
     await mintPool(servicesWith({ spendable: [300_000, 250_000], reserved: ['coin0:0'], send }))

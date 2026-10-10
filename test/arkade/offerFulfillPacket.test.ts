@@ -85,6 +85,7 @@ const ctx = (spendable: unknown[]): ArkadeContext =>
       getContractManager: async () => null,
     },
     identity,
+    reservations: { reserved: () => new Set<string>(), reserve: () => () => {} },
     arkServerUrl: 'http://ark',
   }) as unknown as ArkadeContext
 

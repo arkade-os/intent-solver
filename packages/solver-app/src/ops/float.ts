@@ -28,6 +28,8 @@
  */
 
 import { hex } from '@scure/base'
+import type { SettleParams } from '@arkade-os/sdk'
+import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import {
   liveLockupRows,
@@ -45,7 +47,31 @@ import { poolTarget } from '@arkade-os/solver-arkade/arkade/vtxoPool.js'
 import { poolPlan, resplitFloat } from './pool.js'
 import { summariseSignerMigration } from '@arkade-os/solver-arkade/arkade/signerMigration.js'
 import { planBoardingSettle } from '@arkade-os/solver-arkade/arkade/boardingSettle.js'
+import { spendableCarrierCoins } from './assetRfqTaxi.js'
 import type { Services } from './services.js'
+
+export const settleReservedRenewal = async (arkade: ArkadeContext, params: SettleParams): Promise<string> => {
+  const reserved = arkade.reservations.reserved()
+  if (params.inputs.some((coin) => reserved.has(`${coin.txid}:${coin.vout}`))) {
+    throw new Error('renewal input is reserved by another operation')
+  }
+  const release = arkade.reservations.reserve(params.inputs)
+  let preparing = false
+  let registrationAttempted = false
+  try {
+    const txid = await arkade.wallet.settle(params, undefined, {
+      onPhase: (phase) => {
+        if (phase === 'preparing') preparing = true
+        if (phase === 'registration_attempt') registrationAttempted = true
+      },
+    })
+    release()
+    return txid
+  } catch (error) {
+    if (preparing && !registrationAttempted) release()
+    throw error
+  }
+}
 
 /**
  * Every registered lockup's refund deadline, for the recovery guard.
@@ -179,22 +205,23 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
     // direction, since a failed funding is a dead swap.
     let release: ReleaseReservation = () => {}
     try {
-      const contracts = await (
-        await wallet.getContractManager()
-      ).getContractsWithVtxos({
-        type: ['default', 'delegate'],
-      })
-      const candidates = contracts.flatMap(({ vtxos }) =>
-        vtxos.filter((vtxo) => !vtxo.isSwept && !(vtxo.isSpent || vtxo.spentBy || vtxo.settledBy)),
-      )
-      release = services.arkade.reservations.reserve(candidates)
-      const outcome = summariseSignerMigration(await vtxoManager.migrateDeprecatedSignerVtxos())
-      migration.migrated = outcome.migrated
-      migration.failures.push(...outcome.failures)
-      if (outcome.failures.length === 0) migrationThrottle.consecutiveFailures = 0
-      else {
-        migrationThrottle.consecutiveFailures += 1
-        migrationThrottle.lastFailure = migrationClock.nowMs()
+      const candidates = await spendableCarrierCoins(await wallet.getContractManager())
+      const reserved = services.arkade.reservations.reserved()
+      const held = candidates.filter((coin) => reserved.has(`${coin.txid}:${coin.vout}`))
+      if (held.length > 0) {
+        migration.failures.push(
+          `deprecated-signer migration deferred: ${held.length} candidate coin(s) reserved by another operation`,
+        )
+      } else {
+        release = services.arkade.reservations.reserve(candidates)
+        const outcome = summariseSignerMigration(await vtxoManager.migrateDeprecatedSignerVtxos())
+        migration.migrated = outcome.migrated
+        migration.failures.push(...outcome.failures)
+        if (outcome.failures.length === 0) migrationThrottle.consecutiveFailures = 0
+        else {
+          migrationThrottle.consecutiveFailures += 1
+          migrationThrottle.lastFailure = migrationClock.nowMs()
+        }
       }
     } catch (error) {
       migrationThrottle.consecutiveFailures += 1
@@ -230,12 +257,13 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
           return { intentFee: info.fees.intentFee, vtxoMaxAmount: info.vtxoMaxAmount, dust: info.dust }
         },
         expiringVtxos: async () => {
-          const reserved = services.arkade.reservations.reserved()
           const expiring = await vtxoManager.getExpiringVtxos(RENEWAL_THRESHOLD_MS)
+          const reserved = services.arkade.reservations.reserved()
           return expiring.filter((vtxo) => !reserved.has(`${vtxo.txid}:${vtxo.vout}`))
         },
         destination: () => wallet.getAddress(),
-        settle: (inputs, outputs) => wallet.settle({ inputs: [...inputs], outputs: [...outputs] }),
+        settle: (inputs, outputs) =>
+          settleReservedRenewal(services.arkade, { inputs: [...inputs], outputs: [...outputs] }),
         // The shape a renewal should carve its proceeds into, so the float
         // comes back able to fund several swaps at once rather than one.
         // Same target `pool`/`mintPool` work from, so the two cannot drift.

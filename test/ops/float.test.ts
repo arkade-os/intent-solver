@@ -155,7 +155,15 @@ const floatServices = (
   ({
     arkade: {
       wallet: {
-        settle: boarding.settle ?? (async () => 'settle-txid'),
+        settle: async (
+          params: SettleParams,
+          _eventCallback: unknown,
+          hooks?: { onPhase?: (phase: 'preparing' | 'registration_attempt') => void },
+        ) => {
+          hooks?.onPhase?.('preparing')
+          hooks?.onPhase?.('registration_attempt')
+          return (boarding.settle ?? (async () => 'settle-txid'))(params)
+        },
         getBoardingUtxos: async () => boarding.boarded ?? [],
         // Read by resplitFloat after a renewal; empty means the float needs no reshaping.
         getSpendableVtxos: async () => [],

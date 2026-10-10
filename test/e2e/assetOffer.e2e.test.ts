@@ -50,13 +50,21 @@ const NEEDED_SATS = 40_000
 
 let arkade: E2eArkade
 
-/** The first asset this wallet actually holds, or null when it holds none. */
-const heldAsset = async (): Promise<{ assetId: string; amount: bigint } | null> => {
-  const balance = await arkade.ctx.wallet.getBalance()
-  const held = (balance.availableAssets ?? []) as { assetId: string; amount: bigint }[]
-  const usable = held.find((entry) => BigInt(entry.amount) > 0n)
-  return usable ? { assetId: usable.assetId, amount: BigInt(usable.amount) } : null
-}
+/** The first asset this wallet holds; polled, as arkd indexes a fill's outputs just after spending its inputs. */
+const heldAsset = (): Promise<{ assetId: string; amount: bigint }> =>
+  poll(
+    async () => {
+      const balance = await arkade.ctx.wallet.getBalance()
+      const held = (balance.availableAssets ?? []) as { assetId: string; amount: bigint }[]
+      const usable = held.find((entry) => BigInt(entry.amount) > 0n)
+      return usable ? { assetId: usable.assetId, amount: BigInt(usable.amount) } : null
+    },
+    {
+      attempts: 10,
+      intervalMs: 500,
+      whenExhausted: 'this wallet holds no asset; mint one before running the offer e2e',
+    },
+  )
 
 beforeAll(async () => {
   arkade = await openArkade()
@@ -70,7 +78,6 @@ describe('e2e arkade offers — publish, discover, settle', () => {
     'discovers a published offer on the filtered stream and settles it',
     async () => {
       const held = await heldAsset()
-      if (!held) throw new Error('this wallet holds no asset; mint one before running the offer e2e')
 
       // The maker deposits sats and wants an ASSET, so the fill exercises the
       // asset packet and the group-index-0 rule the covenant depends on.
@@ -173,7 +180,6 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
 
   beforeAll(async () => {
     const held = await heldAsset()
-    if (!held) throw new Error('this wallet holds no asset; mint one before running the offer e2e')
     if (held.amount < WANT_UNITS) throw new Error(`wallet holds ${held.amount} units, needs ${WANT_UNITS}`)
     assetId = held.assetId
 
@@ -386,7 +392,6 @@ describe('e2e arkade offers — what OFFER_MARKETS actually builds', () => {
 
   beforeAll(async () => {
     const held = await heldAsset()
-    if (!held) throw new Error('this wallet holds no asset; mint one before running the offer e2e')
     assetId = held.assetId
     dir = tempStoreDir()
   }, SETUP_TIMEOUT_MS)
