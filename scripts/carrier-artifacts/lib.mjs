@@ -13,15 +13,15 @@ export const MANIFEST_PATH = `${VENDOR_DIR}/manifest.json`
 
 const TS_SDK = 'https://github.com/arkade-os/ts-sdk.git'
 const ARKADE_TAXI = 'https://github.com/ArkLabsHQ/arkade-taxi.git'
-const SDK_COMMIT = 'e614c953d6ce929a04698d6e72bdc73f3d4bc29d'
-const TAXI_COMMIT = 'f445a800977775d46d6145599b4f618d876ed75a'
+const SDK_COMMIT = '99313fa7f44edb835c386fb88d1fd64878059683'
+const TAXI_COMMIT = 'f27ae4b6238569ff496d11a05faba32344b55245'
 
 // Every package whose resolution must come from a frozen archive, and the exact
 // source each was packed from. Moving to a new candidate is an edit HERE, so a
 // re-pack is an auditable act and `verify.mjs` can refuse an archive whose
 // manifest names any other commit.
 export const PINNED_SOURCES = {
-  '@arkade-os/sdk': { repository: TS_SDK, commit: SDK_COMMIT, directory: 'packages/ts-sdk' },
+  '@arkade-os/sdk': { repository: TS_SDK, commit: SDK_COMMIT, directory: 'packages/sdk' },
   '@arkade-os/swap': { repository: TS_SDK, commit: SDK_COMMIT, directory: 'packages/swap' },
   '@arkade-taxi/covenant': { repository: ARKADE_TAXI, commit: TAXI_COMMIT, directory: 'packages/covenant' },
   '@arkade-taxi/protocol': { repository: ARKADE_TAXI, commit: TAXI_COMMIT, directory: 'packages/protocol' },

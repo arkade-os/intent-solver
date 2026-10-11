@@ -9,7 +9,7 @@
  * that matters: it is the actual attack.
  */
 import { describe, it, expect } from 'vitest'
-import { offerVtxoScript, type Offer } from '@arkade-os/swap'
+import { offerContract, type Offer } from '@arkade-os/swap/protocol'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { offerIsConsistent } from '@arkade-os/solver-arkade/arkade/offerConsistency.js'
 
@@ -30,7 +30,7 @@ const terms = {
 const offerWith = (over: Record<string, unknown>): Offer => ({ ...terms, ...over }) as unknown as Offer
 
 /** What those terms actually compile to. */
-const honest = offerVtxoScript(offerWith({ swapPkScript: new Uint8Array(34) }), SERVER).pkScript
+const honest = offerContract(offerWith({ swapPkScript: new Uint8Array(34) }), SERVER).pkScript
 
 describe('offerIsConsistent', () => {
   it('accepts an offer claiming the script its terms compile to', () => {

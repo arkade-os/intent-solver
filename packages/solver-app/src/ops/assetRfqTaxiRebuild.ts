@@ -69,12 +69,21 @@ export const createCarrierFillRebuilder =
         if (value <= 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`${label} invalid Taxi input value`)
         if (input.assetPacket !== undefined) throw new Error(`${label} Taxi funding carries assets`)
         const tree = VtxoScript.decode(hex.decode(input.tapTree))
+        let tapLeafScript: ReturnType<VtxoScript['findLeaf']>
+        try {
+          tapLeafScript = tree.findLeaf(input.spendLeaf)
+        } catch (cause) {
+          throw new Error(
+            `${label} Taxi input ${input.txid}:${input.vout} spend leaf ${input.spendLeaf} is not in its tap tree`,
+            { cause },
+          )
+        }
         return {
           txid: input.txid,
           vout: input.vout,
           value: Number(value),
           tapTree: tree.encode(),
-          tapLeafScript: tree.findLeaf(input.spendLeaf),
+          tapLeafScript,
         }
       }),
       netContributionSats: params.topup,

@@ -9,7 +9,7 @@ import { generateMnemonic } from '@scure/bip39'
 import { wordlist } from '@scure/bip39/wordlists/english.js'
 import { ArkAddress, asset, RestIndexerProvider } from '@arkade-os/sdk'
 import { TaxiClient } from '@arkade-taxi/client'
-import { requestArkadeSwap } from '@arkade-os/swap'
+import { requestArkadeSwap } from '@arkade-os/swap/protocol'
 import { receiverPaidTransport } from './support/receiverPaidTransport.js'
 import { nostrRfqTransport } from '@arkade-os/swap/nostr'
 import { hex } from '@scure/base'
@@ -411,7 +411,7 @@ describe('running solver to Taxi on regtest', () => {
         process.env.ARK_SERVER_URL!,
       )
       const rfqId = randomBytes(32).toString('hex')
-      const swap = await requestArkadeSwap(buyer.wallet, process.env.ARK_SERVER_URL!, carrier.transport, {
+      const swap = await requestArkadeSwap(buyer.wallet, carrier.transport, {
         rfqId,
         amount: 10_000,
         wantAsset: asset.AssetId.fromString(assetId),

@@ -6,7 +6,7 @@
  * `test/e2e/assetOffer.e2e.test.ts` settles a real offer instead.
  */
 import { describe, it, expect } from 'vitest'
-import { offerVtxoScript, type Offer } from '@arkade-os/swap'
+import { offerContract, type Offer } from '@arkade-os/swap/protocol'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { asset } from '@arkade-os/sdk'
 import { fulfillOffer, ASSET_CARRIER_SATS, makerScriptHex } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
@@ -27,7 +27,7 @@ const terms = {
   emulatorPubkey: xonly(4),
 }
 const offerWith = (over: Record<string, unknown> = {}): Offer => ({ ...terms, ...over }) as unknown as Offer
-const honest = offerVtxoScript(offerWith({ swapPkScript: new Uint8Array(34) }), SERVER).pkScript
+const honest = offerContract(offerWith({ swapPkScript: new Uint8Array(34) }), SERVER).pkScript
 
 /** Only what the guards reach before any network call. */
 const ctx = (over: Record<string, unknown> = {}): ArkadeContext =>
@@ -75,7 +75,7 @@ describe('fulfillOffer refuses before it spends', () => {
       wantAsset: asset.AssetId.fromString(ASSET_ID),
       offerAsset: asset.AssetId.fromString(ASSET_ID_B),
     })
-    const consistent = offerVtxoScript(both, SERVER).pkScript
+    const consistent = offerContract(both, SERVER).pkScript
     await expect(
       fulfillOffer(ctx(), 'http://emulator.test', offerWith({ ...both, swapPkScript: consistent }), deposit),
     ).rejects.toThrow(/exactly one leg/)

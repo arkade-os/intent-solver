@@ -22,8 +22,9 @@ import { createServer, type Server } from 'node:http'
 import { randomBytes, randomInt } from 'node:crypto'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { ArkAddress, hasTerminalSpend, asset } from '@arkade-os/sdk'
-import { createOffer, cancelOffer, InMemoryAssetSwapRepository, type Offer } from '@arkade-os/swap'
+import { ArkAddress, isVtxoSpent, asset } from '@arkade-os/sdk'
+import { InMemoryAssetSwapRepository } from '@arkade-os/swap'
+import { createOffer, cancelOffer, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { GiveUp, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
@@ -173,7 +174,7 @@ const termsOf = (row: AssetRfqSwapRow): OfferTerms => ({
 /** ONE outpoint, never a sum across the script: `fulfill` spends one input. */
 const depositAt = async (offerPkScript: string): Promise<ObservedDeposit | null> => {
   const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ scripts: [offerPkScript] })
-  const live = (vtxos ?? []).filter((vtxo) => !hasTerminalSpend(vtxo) && vtxo.isSwept !== true)
+  const live = (vtxos ?? []).filter((vtxo) => !isVtxoSpent(vtxo) && vtxo.isSwept !== true)
   const biggest = live.sort((a, b) => Number(b.value) - Number(a.value))[0]
   if (!biggest) return null
   const assets = ((biggest as { assets?: { assetId: string; amount: bigint }[] }).assets ?? []).map((entry) => ({
@@ -317,7 +318,7 @@ const requestFor = (pair: string, amount: bigint, rfqId = randomBytes(32).toStri
 const depositSats = (base: number): bigint => BigInt(base + randomInt(1, 400))
 
 const clientOffer = async (wantAmount: bigint) =>
-  createOffer(arkade.ctx.wallet, ARKD_URL, { wantAmount, wantAsset: asset.AssetId.fromString(assetId) })
+  createOffer(arkade.ctx.wallet, { wantAmount, wantAsset: asset.AssetId.fromString(assetId) })
 
 /** Bound, then released: a refused connection. Port 1 would not do — fetch refuses it as a "bad port". */
 const closedPort = async (): Promise<number> => {
@@ -488,7 +489,7 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       })
       expect(stranded.txid).toBe(fundingTxid)
 
-      const cancelTxid = await cancelOffer(arkade.ctx.wallet, ARKD_URL, mine.offerHex, {
+      const cancelTxid = await cancelOffer(arkade.ctx.wallet, mine.offerHex, {
         repository: new InMemoryAssetSwapRepository(),
         fundingTxid,
         swapAddress: mine.address,
@@ -532,7 +533,7 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       expect(row.fillTxid).toBeNull()
       expect((await depositAt(row.offerPkScript))?.txid).toBe(fundingTxid)
 
-      await cancelOffer(arkade.ctx.wallet, ARKD_URL, mine.offerHex, {
+      await cancelOffer(arkade.ctx.wallet, mine.offerHex, {
         repository: new InMemoryAssetSwapRepository(),
         fundingTxid,
         swapAddress: mine.address,

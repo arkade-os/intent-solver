@@ -19,8 +19,9 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { generateMnemonic } from '@scure/bip39'
 import { wordlist } from '@scure/bip39/wordlists/english.js'
-import { ArkAddress, asset, hasTerminalSpend, Transaction } from '@arkade-os/sdk'
-import { cancelOffer, InMemoryAssetSwapRepository, requestArkadeSwap, type Offer } from '@arkade-os/swap'
+import { ArkAddress, asset, isVtxoSpent, Transaction } from '@arkade-os/sdk'
+import { InMemoryAssetSwapRepository } from '@arkade-os/swap'
+import { cancelOffer, requestArkadeSwap, type Offer } from '@arkade-os/swap/protocol'
 import { nostrRfqTransport } from '@arkade-os/swap/nostr'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
@@ -182,7 +183,7 @@ const termsOf = (row: AssetRfqSwapRow): OfferTerms => ({
 
 const depositAt = async (offerPkScript: string): Promise<ObservedDeposit | null> => {
   const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ scripts: [offerPkScript] })
-  const live = (vtxos ?? []).filter((vtxo) => !hasTerminalSpend(vtxo) && vtxo.isSwept !== true)
+  const live = (vtxos ?? []).filter((vtxo) => !isVtxoSpent(vtxo) && vtxo.isSwept !== true)
   const biggest = live.sort((a, b) => Number(b.value) - Number(a.value))[0]
   if (!biggest) return null
   const assets = ((biggest as { assets?: { assetId: string; amount: bigint }[] }).assets ?? []).map((entry) => ({
@@ -207,7 +208,7 @@ const depositSpent = async (offerPkScript: string): Promise<'spent'> =>
     async () => {
       const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ scripts: [offerPkScript] })
       if (!vtxos?.length) return null
-      return vtxos.every((vtxo) => hasTerminalSpend(vtxo) || vtxo.isSwept === true) ? 'spent' : null
+      return vtxos.every((vtxo) => isVtxoSpent(vtxo) || vtxo.isSwept === true) ? 'spent' : null
     },
     {
       attempts: 15,
@@ -329,7 +330,7 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
         const transport = openTransport()
         const amount = depositSats(20_000)
         const rfqId = randomBytes(32).toString('hex')
-        const swap = await requestArkadeSwap(alice.wallet, ARKD_URL, transport, {
+        const swap = await requestArkadeSwap(alice.wallet, transport, {
           amount,
           rfqId,
           wantAsset: asset.AssetId.fromString(assetId),
@@ -415,8 +416,8 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
         )
         depositOutpoint ??= { txid: deposited.txid, vout: deposited.vout }
         if (!cancelTxid) {
-          if (hasTerminalSpend(deposited)) return
-          cancelTxid = await cancelOffer(client, ARKD_URL, offer.offerHex, {
+          if (isVtxoSpent(deposited)) return
+          cancelTxid = await cancelOffer(client, offer.offerHex, {
             repository: new InMemoryAssetSwapRepository(),
             fundingTxid: originalTxid,
             fundingOutpoint: depositOutpoint,
@@ -428,7 +429,7 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
           async () => {
             const { vtxos } = await client.indexerProvider.getVtxos({ outpoints: [depositOutpoint!] })
             const spent = vtxos.find((coin) => coin.txid === originalTxid && coin.vout === depositOutpoint!.vout)
-            if (!spent || !hasTerminalSpend(spent) || spent.arkTxId !== refundTxid) return null
+            if (!spent || !isVtxoSpent(spent) || spent.arkTxId !== refundTxid) return null
             return (
               (await client.getSpendableVtxos({ withRecoverable: false, genericallySpendableOnly: true })).find(
                 (coin) => coin.txid === refundTxid && coin.vout === 0,
@@ -459,7 +460,7 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
               (coin) => coin.txid === incomingTxid && coin.vout === 0 && coin.script === actorScript,
             )
             if (!incoming) return null
-            return hasTerminalSpend(incoming) || spendable.some((coin) => coin.txid === incomingTxid && coin.vout === 0)
+            return isVtxoSpent(incoming) || spendable.some((coin) => coin.txid === incomingTxid && coin.vout === 0)
               ? spendable
               : null
           },
@@ -508,7 +509,7 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
         const rfqId = randomBytes(32).toString('hex')
         const transport = openTransport()
         try {
-          swap = await requestArkadeSwap(alice.wallet, ARKD_URL, transport, {
+          swap = await requestArkadeSwap(alice.wallet, transport, {
             amount: depositSats(6_000),
             rfqId,
             wantAsset: asset.AssetId.fromString(assetId),
@@ -550,7 +551,7 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
         await poll(
           async () => {
             const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ outpoints: originalInputs })
-            const spent = vtxos.some((coin) => hasTerminalSpend(coin) && coin.arkTxId === drainTxid)
+            const spent = vtxos.some((coin) => isVtxoSpent(coin) && coin.arkTxId === drainTxid)
             const received = (await sink!.wallet.getSpendableVtxos({ withRecoverable: false })).some(
               (coin) =>
                 coin.txid === drainTxid &&
@@ -576,7 +577,7 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
         const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ outpoints: [depositOutpoint] })
         const live = vtxos.find((coin) => coin.txid === fundingTxid && coin.vout === depositOutpoint!.vout)
         expect(live).toBeDefined()
-        expect(hasTerminalSpend(live!)).toBe(false)
+        expect(isVtxoSpent(live!)).toBe(false)
         expect(live!.isSwept).toBe(false)
         expect(BigInt(live!.value)).toBe(funded.fromAmount)
         const statusTransport = openTransport()
@@ -650,7 +651,7 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
         const amount = BigInt(2000 + randomInt(1, 500))
         expect(held!.amount).toBeGreaterThanOrEqual(amount)
         const rfqId = randomBytes(32).toString('hex')
-        const swap = await requestArkadeSwap(arkade.ctx.wallet, ARKD_URL, transport, {
+        const swap = await requestArkadeSwap(arkade.ctx.wallet, transport, {
           amount,
           rfqId,
           offerAsset: asset.AssetId.fromString(assetId),

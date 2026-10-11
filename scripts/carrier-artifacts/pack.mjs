@@ -94,17 +94,22 @@ try {
   const npmUserConfig = join(scratch, 'pack.npmrc')
   writeFileSync(npmUserConfig, 'registry=https://registry.npmjs.org/\n@arkade-taxi:registry=http://127.0.0.1:9/\n')
 
-  const sdkPackDir = join(scratch, 'sdk-packs')
-  mkdirSync(sdkPackDir)
+  const frozenSdkDir = join(taxiRoot, 'vendor', 'carrier')
+  const frozenSdkManifest = readJson(join(frozenSdkDir, 'manifest.json'))
+  const frozenSdkArtifacts = new Map(frozenSdkManifest.artifacts.map((artifact) => [artifact.package, artifact]))
   const packed = []
   for (const name of SDK_PACKAGES) {
-    // The SDK's `prepack` builds and tsup writes to stdout, so `pack --json`
-    // output is not parseable here. The new file in the destination is.
-    const before = new Set(readdirSync(sdkPackDir))
-    runPnpm(sdkRoot, ['--filter', name, 'pack', '--pack-destination', sdkPackDir], npmUserConfig)
-    const produced = readdirSync(sdkPackDir).filter((entry) => entry.endsWith('.tgz') && !before.has(entry))
-    if (produced.length !== 1) throw new Error(`packing ${name} produced ${produced.length} archives, expected one`)
-    packed.push({ name, path: join(sdkPackDir, produced[0]) })
+    const artifact = frozenSdkArtifacts.get(name)
+    const mismatch = pinnedSourceMismatch(artifact)
+    if (mismatch) throw new Error(mismatch)
+    const path = join(frozenSdkDir, artifact.file)
+    const bytes = readFileSync(path)
+    if (sha256(bytes) !== artifact.sha256 || bytes.length !== artifact.bytes)
+      throw new Error(`${name}: frozen SDK archive bytes do not match their manifest`)
+    const manifest = archiveManifest(path)
+    if (manifest.name !== name || manifest.version !== artifact.version)
+      throw new Error(`${name}: frozen SDK archive manifest does not match its provenance`)
+    packed.push({ name, path })
   }
   const candidate = Object.fromEntries(packed.map((entry) => [entry.name, entry.path]))
 
@@ -184,17 +189,24 @@ try {
       file,
       package: manifest.name,
       version: manifest.version,
-      ...artifactLicense(manifest, sourceRoot),
+      ...(SDK_PACKAGES.includes(entry.name)
+        ? {
+            license: frozenSdkArtifacts.get(entry.name).license,
+            licenseFrom: frozenSdkArtifacts.get(entry.name).licenseFrom,
+          }
+        : artifactLicense(manifest, sourceRoot)),
       sha256: sha256(bytes),
       bytes: bytes.length,
       source: { ...source },
-      toolchain: {
-        node: process.version,
-        pnpm: pnpmVersion[sourceRoot],
-        declaredPackageManager: readJson(join(sourceRoot, 'package.json')).packageManager,
-        command: `pnpm --filter ${manifest.name} pack`,
-        platform: `${process.platform}-${process.arch}`,
-      },
+      toolchain: SDK_PACKAGES.includes(entry.name)
+        ? frozenSdkArtifacts.get(entry.name).toolchain
+        : {
+            node: process.version,
+            pnpm: pnpmVersion[sourceRoot],
+            declaredPackageManager: readJson(join(sourceRoot, 'package.json')).packageManager,
+            command: `pnpm --filter ${manifest.name} pack`,
+            platform: `${process.platform}-${process.arch}`,
+          },
     })
   }
 
@@ -212,7 +224,7 @@ try {
     join(outDir, 'manifest.json'),
     `${JSON.stringify(
       {
-        note: 'Frozen candidate packages, built from source and never published to any registry. These digests are of THIS bundle: repacking @arkade-os/sdk from the same commit emits different declaration-chunk names, though no runtime module differs, so a re-pack is a deliberate re-freeze — run scripts/carrier-artifacts/pack.mjs, then pnpm install, then scripts/carrier-artifacts/verify.mjs.',
+        note: 'Frozen candidate packages, built from source and never published to any registry. SDK archives are copied byte-for-byte from the pinned Taxi vendor manifest; this command packs only the clean Taxi source packages. Replacing an archive is a deliberate new freeze followed by pnpm install and artifact verification.',
         packedAtUtc: new Date().toISOString(),
         artifacts,
       },

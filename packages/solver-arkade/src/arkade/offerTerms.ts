@@ -12,7 +12,7 @@
  */
 import { asset, type RelativeTimelock } from '@arkade-os/sdk'
 import { isEncodableRelativeDelay, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
-import { encodeOffer, offerVtxoScript, type Offer } from '@arkade-os/swap'
+import { encodeOffer, offerContract, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 
 /**
@@ -108,7 +108,7 @@ export const offerScriptFrom = (
 ): ((terms: QuotedOfferTerms) => { pkScript: string; address: string }) => {
   const emulatorPubkey = xOnlyPubkey(deps.emulatorPubkey)
   return (terms) => {
-    const script = offerVtxoScript(offerFromTerms(terms, emulatorPubkey, deps.exitDelay), deps.serverPubkey)
+    const script = offerContract(offerFromTerms(terms, emulatorPubkey, deps.exitDelay), deps.serverPubkey)
     // Both from the SAME compiled script: the address is what the client is
     // told and the pkScript is what the deposit is recognised by, so two
     // compilations could disagree about one covenant.

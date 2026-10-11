@@ -1,7 +1,7 @@
 import { hex } from '@scure/base'
 import { RestArkProvider, type asset } from '@arkade-os/sdk'
 import type { RecycleCarrierQuote } from '@arkade-taxi/client'
-import { assertArkadeFundable, type RfqQuote, type RfqTransport } from '@arkade-os/swap'
+import { assertArkadeFundable, type RfqQuote, type RfqTransport } from '@arkade-os/swap/protocol'
 import { carrierTermsFromJson } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 
 export const receiverPaidTransport = (

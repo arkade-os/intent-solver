@@ -12,7 +12,7 @@ import { AssetOfferService, parseAssetMarkets, type AssetOfferDeps } from '@arka
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
-import { encodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap'
+import { encodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap/protocol'
 import { Extension, UnknownPacket, asset } from '@arkade-os/sdk'
 import { Transaction } from '@scure/btc-signer'
 import { base64 } from '@scure/base'

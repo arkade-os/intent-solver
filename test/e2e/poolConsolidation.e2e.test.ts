@@ -7,7 +7,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { hasTerminalSpend, type VirtualCoin } from '@arkade-os/sdk'
+import { isVtxoSpent, type VirtualCoin } from '@arkade-os/sdk'
 import { createCorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
 import { mintPool, poolPlan } from '@arkade-os/solver-app/ops/pool.js'
 import type { Services } from '@arkade-os/solver-app/ops/services.js'
@@ -73,9 +73,9 @@ describe('e2e pool consolidation', () => {
             return (
               local.value === projected.value &&
               (expected.vout === PER_SEND ? local.value > 0 : local.value === COIN_SATS) &&
-              !hasTerminalSpend(local) &&
+              !isVtxoSpent(local) &&
               local.isSwept !== true &&
-              !hasTerminalSpend(projected) &&
+              !isVtxoSpent(projected) &&
               projected.isSwept !== true
             )
           })
