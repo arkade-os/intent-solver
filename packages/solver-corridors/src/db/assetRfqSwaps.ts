@@ -37,6 +37,7 @@
  * took and cannot take.
  */
 
+import type { DirectFillParentProof } from './offerFills.js'
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import {
   decodeCarrierAttempt,
@@ -658,6 +659,66 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       throw new Error(`fail() cannot act on ${from}: it is terminal, so there is nothing left to fail`)
     }
     await super.fail(id, from, reason)
+  }
+
+  async recoverDirectFill(proof: DirectFillParentProof, fillTxid: string): Promise<boolean> {
+    return this.resolveDirectFill(proof, fillTxid, false)
+  }
+
+  async cancelDirectFill(proof: DirectFillParentProof, conflictTxid: string): Promise<boolean> {
+    return this.resolveDirectFill(proof, conflictTxid, true)
+  }
+
+  private async resolveDirectFill(proof: DirectFillParentProof, txid: string, cancelled: boolean): Promise<boolean> {
+    if (!/^[0-9a-f]{64}$/.test(txid)) return false
+    return this.driver.transaction(async () => {
+      const row = await this.findById(proof.id)
+      if (
+        !row ||
+        row.depositTxid !== proof.depositTxid ||
+        row.depositVout !== proof.depositVout ||
+        row.offerPkScript !== proof.offerPkScript
+      )
+        return false
+      const carrier = await this.driver.get<{ carrier_attempt: string | null }>(
+        `SELECT carrier_attempt FROM asset_rfq_swap WHERE id = ?`,
+        [proof.id],
+      )
+      if (
+        row.carrierTerms?.mode === 'recycle' ||
+        row.carrierTerms?.mode === 'recycle_receiver' ||
+        carrier?.carrier_attempt != null
+      )
+        return false
+      const reason = `direct fill cancelled by confirmed conflict ${txid}`
+      if (cancelled && row.state === 'refused' && row.fillTxid === null && row.failureReason === reason) return true
+      if (!cancelled && row.state === 'filled' && row.fillTxid === txid) return true
+      if (row.state !== 'filling' && row.state !== 'stuck') return false
+      if (row.failureReason?.startsWith('direct fill cancelled by confirmed conflict ')) return false
+      if (row.fillTxid !== null && (cancelled || row.fillTxid !== txid)) return false
+      const next: AssetRfqSwapState = cancelled ? 'refused' : 'filled'
+      const result = await this.driver.run(
+        `UPDATE asset_rfq_swap SET state = ?, updated_at = ?, fill_txid = ?, failure_reason = ?
+         WHERE id = ? AND state = ? AND deposit_txid = ? AND deposit_vout = ? AND offer_pk_script = ?
+         AND fill_txid IS ? AND failure_reason IS ? AND carrier_attempt IS NULL`,
+        [
+          next,
+          this.now(),
+          cancelled ? null : txid,
+          cancelled ? reason : null,
+          proof.id,
+          row.state,
+          proof.depositTxid,
+          proof.depositVout,
+          proof.offerPkScript,
+          row.fillTxid,
+          row.failureReason,
+        ],
+      )
+      if (result.changes !== 1) return false
+      await this.recordEvent(proof.id, row.state, next, cancelled ? reason : txid)
+      return true
+    })
   }
 
   /** Its own read, because {@link AssetRfqSwapRow} is projected to the client. */

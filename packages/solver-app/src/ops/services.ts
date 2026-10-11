@@ -112,8 +112,10 @@ import {
 } from './assetRfqTaxi.js'
 import { completeTaxiReceiveCarrier } from './assetRfqTaxiAdapter.js'
 import type { TaxiUrlPolicy } from './taxiUrlGuard.js'
+import { directFillRecoveryFor } from './directFillRecovery.js'
 
 export interface Services {
+  directFillRecovery?: Awaited<ReturnType<typeof directFillRecoveryFor>>
   /**
    * The ENVIRONMENT's configuration, exactly as `loadConfig()` read it.
    *
@@ -604,44 +606,46 @@ export const createServices = async (
   // either reaches `assetOffers?.replaceMarkets` on a NULL service and no-ops.
   const servesOffers = policy.offerMarkets.length > 0 || marketRows.some((row) => row.enabled && row.servesOffer)
   const liveOfferMarkets = offerMarketsFrom(assetMarkets.pricing)
-  const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
+  const recoverOffers = (await arkade.directFills.list()).some((attempt) => attempt.parent.kind === 'offer')
+  const offerStore = servesOffers || recoverOffers ? await OfferFillStore.open(swapFile) : null
   const offerRefusals = createOfferRefusalTail()
   const rfqRefusals = createRfqRefusalTail()
-  const assetOffers = offerStore
-    ? new AssetOfferService({
-        store: offerStore,
-        markets: liveOfferMarkets,
-        // The console's market rows, in the shape this service consumes. Every
-        // served market is in here by construction — see the serve list above.
-        pricing: assetMarkets.pricing,
-        // Same reader the EVM corridors price from — the market config
-        // deliberately speaks `evmCorridorConfig.ts`'s feed-plus-pointer dialect
-        // so one implementation serves both.
-        fetchPrice: createPriceFeed(),
-        carrierSats: arkade.dustSats,
-        chargesDeliveredCarrier: policy.offerChargesDeliveredCarrier,
-        minFillAmount: policy.offerMinFillAmount,
-        maxFillAmount: policy.offerMaxFillAmount,
-        // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
-        balance: () => arkade.wallet.getBalance(),
-        outputsAt: (offerPkScript) => offerOutputsAt(arkade, offerPkScript),
-        // Swap Protocol V1 § 5.1 is a MUST, and the key it needs is one this
-        // process already holds — so it is passed rather than left optional.
-        // Absent, `consider()` documents itself as skipping that check.
-        serverPubkey: arkade.wallet.arkServerPublicKey,
-        // THE SPEND. Wired here because this is where the wallet and the
-        // emulator meet; every guard on it lives in `arkade/offerSettle.ts`.
-        settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
-        onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
-        // Refusals are NOT errors, so they never reached `onError` above. The log
-        // line alone is invisible to an operator in a browser, so the console's
-        // tail is fed from the same handler.
-        onRefused: (outpoint, reason, detail) => {
-          log(`offer ${outpoint} refused: ${reason} — ${detail}`)
-          offerRefusals.record({ at: nowSeconds(), outpoint, reason, detail })
-        },
-      })
-    : null
+  const assetOffers =
+    servesOffers && offerStore
+      ? new AssetOfferService({
+          store: offerStore,
+          markets: liveOfferMarkets,
+          // The console's market rows, in the shape this service consumes. Every
+          // served market is in here by construction — see the serve list above.
+          pricing: assetMarkets.pricing,
+          // Same reader the EVM corridors price from — the market config
+          // deliberately speaks `evmCorridorConfig.ts`'s feed-plus-pointer dialect
+          // so one implementation serves both.
+          fetchPrice: createPriceFeed(),
+          carrierSats: arkade.dustSats,
+          chargesDeliveredCarrier: policy.offerChargesDeliveredCarrier,
+          minFillAmount: policy.offerMinFillAmount,
+          maxFillAmount: policy.offerMaxFillAmount,
+          // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
+          balance: () => arkade.wallet.getBalance(),
+          outputsAt: (offerPkScript) => offerOutputsAt(arkade, offerPkScript),
+          // Swap Protocol V1 § 5.1 is a MUST, and the key it needs is one this
+          // process already holds — so it is passed rather than left optional.
+          // Absent, `consider()` documents itself as skipping that check.
+          serverPubkey: arkade.wallet.arkServerPublicKey,
+          // THE SPEND. Wired here because this is where the wallet and the
+          // emulator meet; every guard on it lives in `arkade/offerSettle.ts`.
+          settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
+          onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
+          // Refusals are NOT errors, so they never reached `onError` above. The log
+          // line alone is invisible to an operator in a browser, so the console's
+          // tail is fed from the same handler.
+          onRefused: (outpoint, reason, detail) => {
+            log(`offer ${outpoint} refused: ${reason} — ${detail}`)
+            offerRefusals.record({ at: nowSeconds(), outpoint, reason, detail })
+          },
+        })
+      : null
 
   /**
    * The atomic class over RFQ. Always constructed, even with an empty list, so
@@ -768,6 +772,18 @@ export const createServices = async (
     receiveCarrierQuotes: receiveCarrier,
     onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
   })
+  const directFillRecovery = await directFillRecoveryFor(
+    arkade,
+    (kind) =>
+      kind === 'offer'
+        ? offerStore
+        : {
+            recoverDirectFill: (proof, txid) => assetRfqService.recoverDirectFill(proof, txid),
+            cancelDirectFill: (proof, txid) => assetRfqStore.cancelDirectFill(proof, txid),
+          },
+    (key, error) => log(`direct fill ${key} recovery failed:`, messageOf(error)),
+  )
+  await directFillRecovery.sweep()
 
   /**
    * Whether to build a BTC corridor's service — its own switch, and a rail to
@@ -1381,6 +1397,7 @@ export const createServices = async (
     config,
     policy,
     bootPolicy: policy,
+    directFillRecovery,
     bootOverrides,
     assetMarkets: assetMarkets.pricing,
     store,

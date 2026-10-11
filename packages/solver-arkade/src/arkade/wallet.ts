@@ -47,6 +47,7 @@ import type { CovenantSwapScript } from './covenant.js'
 import { vtxoPages } from './indexerPaging.js'
 import { TimedArkProvider, TimedIndexerProvider } from './latencyProviders.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
+import { DirectFillAttempts } from './directFillAttempts.js'
 
 /** The two views any spend below needs; CovenantSwapScript satisfies it (as would any VtxoScript wrapper). */
 export interface ClaimableScript {
@@ -173,6 +174,7 @@ export interface ArkadeContext {
    * agree on nothing. @see reservations.ts
    */
   reservations: ReservationLedger
+  directFills: DirectFillAttempts
   /** Checkpoint and release the SQLite handle. */
   close(): void
 }
@@ -344,6 +346,13 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   })
   for (const notice of notices) log(notice)
 
+  const reservations = createReservationLedger()
+  const directFills = await DirectFillAttempts.open(
+    executor,
+    reservations,
+    `${config.arkServerUrl}:${hex.encode(wallet.arkServerPublicKey)}:${hex.encode(await identity.xOnlyPublicKey())}`,
+    hex.encode(ArkAddress.decode(await wallet.getAddress()).pkScript),
+  )
   return {
     wallet,
     identity,
@@ -354,7 +363,8 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     vtxoMinSats,
     timelockUnit: advertisedUnit,
     hrp: config.arkadeHrp,
-    reservations: createReservationLedger(),
+    reservations,
+    directFills,
     close: () => executor.close(),
   }
 }

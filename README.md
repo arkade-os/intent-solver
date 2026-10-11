@@ -998,6 +998,15 @@ it appears in a claim witness — after the Arkade side is already funded.
 
 ## Known limits
 
+Direct fills journal their selected funding and signed graph before contacting
+the emulator. Recovery runs even when the original market is disabled;
+`/api/diagnostics` reports unresolved attempts, held inputs and recovery errors.
+A lost reply retains those inputs until the original fill or a recorded
+conflicting self-spend is positively proven finalized. Ambiguous fills created
+before this journal still require operator resolution: their exact selected
+funding was never stored and cannot be inferred reliably. This change does not
+perform a production cutover or infer holds for those older rows.
+
 Stated in full in `docs/environment.md` § "Known trust assumptions and limits":
 no server-independent claim implemented yet (the leaf exists; the unroll flow
 is TODO — a censoring Arkade server after payment is the one unmitigated loss);

@@ -61,6 +61,7 @@ const ctx = {} as unknown as ArkadeContext
 
 /** The row `consider()` would have written for `published`. */
 const intentFor = (published: Offer, raw: string, over: Partial<OfferFillIntent> = {}): OfferFillIntent => ({
+  id: 'public-offer',
   offerTxid: txidOf(raw),
   offerVout: 0,
   offerPkScript: hex.encode(published.swapPkScript),

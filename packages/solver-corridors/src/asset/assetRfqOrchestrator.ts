@@ -52,6 +52,7 @@ import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 import type { AssetRfqCarrierTerms } from '../db/assetRfqSwaps.js'
+import type { DirectFillParentProof } from '../db/offerFills.js'
 import type { AssetRfqCarrierChoice } from '../wire/assetRfqPayloads.js'
 
 /**
@@ -957,6 +958,17 @@ export class AssetRfqSwapService {
       this.deps.onError?.(row.id, error)
       await this.deps.store.fail(row.id, 'filling', error instanceof Error ? error.message : String(error))
     }
+  }
+
+  async recoverDirectFill(proof: DirectFillParentProof, fillTxid: string): Promise<boolean> {
+    return this.serialiseFills(async () => {
+      const before = await this.deps.store.get(proof.id)
+      const recovered = await this.deps.store.recoverDirectFill(proof, fillTxid)
+      if (recovered && (before.state === 'filling' || before.state === 'stuck') && before.fillPriceMantissa === null) {
+        await this.recordFillMark(before)
+      }
+      return recovered
+    })
   }
 
   /**

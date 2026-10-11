@@ -39,6 +39,7 @@ import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
  * dependency, and `OfferFillRow` satisfies them.
  */
 export interface OfferFillIntent {
+  id: string
   offerTxid: string
   offerVout: number
   offerPkScript: string
@@ -160,11 +161,17 @@ export const offerSettleFor = (deps: OfferSettleDeps): ((intent: OfferFillIntent
       }
     }
 
-    return fulfill(deps.ctx, deps.emulatorUrl, found.offer, {
-      txid: found.txid,
-      vout: found.vout,
-      value: found.value,
-      assetAmount,
-    })
+    return fulfill(
+      deps.ctx,
+      deps.emulatorUrl,
+      found.offer,
+      {
+        txid: found.txid,
+        vout: found.vout,
+        value: found.value,
+        assetAmount,
+      },
+      { kind: 'offer', id: intent.id },
+    )
   }
 }

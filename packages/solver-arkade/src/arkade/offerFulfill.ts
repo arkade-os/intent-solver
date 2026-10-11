@@ -26,6 +26,8 @@
  */
 import {
   RestEmulatorProvider,
+  ArkAddress,
+  VtxoScript,
   selectVirtualCoins,
   selectCoinsWithAsset,
   type ExtendedVirtualCoin,
@@ -35,6 +37,8 @@ import { hex } from '@scure/base'
 import { type ArkadeContext } from './wallet.js'
 import { offerIsConsistent } from './offerConsistency.js'
 import { outpointKey } from './lockupFunding.js'
+import type { DirectFillAttempt, DirectFillParent } from './directFillAttempts.js'
+import { assertDirectFillResponse, directFillFinalized, validateDirectFillGraph } from './directFillGraph.js'
 
 /** The dust carrier output[0] takes when the maker is paid in an ASSET, not sats.
  * Re-exported from the SDK rather than restated: it is a covenant constant, and a
@@ -68,6 +72,7 @@ export const fulfillOffer = async (
   emulatorUrl: string,
   offer: Offer,
   deposit: OfferDepositOutpoint,
+  parent: DirectFillParent = { kind: 'standalone', id: `${deposit.txid}:${deposit.vout}` },
 ): Promise<string> => {
   const serverPubkey = ctx.wallet.arkServerPublicKey
   if (!offerIsConsistent(offer, serverPubkey)) {
@@ -122,15 +127,38 @@ export const fulfillOffer = async (
   if (funding.length === 0) throw new Error(`no spendable coins to pay the maker ${wantAmount} sats`)
 
   const release = ctx.reservations.reserve(funding)
-  let submitted = false
-  let completed = false
+  let attempt: DirectFillAttempt | undefined
+  let enteredProvider = false
   const emulator = new RestEmulatorProvider(emulatorUrl)
   const submitTx = emulator.submitTx.bind(emulator)
-  emulator.submitTx = (...args) => {
-    submitted = true
-    return submitTx(...args)
+  emulator.submitTx = async (arkTx, checkpoints) => {
+    if (!attempt || attempt.phase !== 'prepared') throw new Error('direct fill has no prepared journal')
+    const graph = { arkTx, checkpoints }
+    validateDirectFillGraph(graph, [attempt.deposit, ...attempt.funding])
+    const submitting: DirectFillAttempt = { ...attempt, phase: 'submitting', graph }
+    if (!(await ctx.directFills.change(attempt, submitting))) throw new Error('direct fill submission CAS lost')
+    attempt = submitting
+    enteredProvider = true
+    const response = await submitTx(arkTx, checkpoints)
+    assertDirectFillResponse(graph, response)
+    return response
   }
   try {
+    if (!ctx.directFills) throw new Error('direct fill journal unavailable')
+    attempt = await ctx.directFills.prepare({
+      parent,
+      deposit: { txid: deposit.txid, vout: deposit.vout },
+      funding: funding.map((coin) => ({
+        txid: coin.txid,
+        vout: coin.vout,
+        value: coin.value,
+        script: hex.encode(VtxoScript.decode(coin.tapTree).pkScript),
+        assets: assetsOn(coin).map(({ assetId, amount }) => ({ assetId, amount: amount.toString() })),
+      })),
+      offerPkScript: hex.encode(offer.swapPkScript),
+      proceedsScript: hex.encode(ArkAddress.decode(await ctx.wallet.getAddress()).pkScript),
+    })
+    release()
     const txid = await fillOffer(ctx.wallet, ctx.arkServerUrl, hex.encode(encodeOffer(offer)), {
       // Inputs 1..n, in this order. Every asset a coin carries is declared, not
       // just the two the swap is about: arkd refuses with ASSET_NOT_FOUND when an
@@ -155,10 +183,41 @@ export const fulfillOffer = async (
       // rebuilt from the offer's, and a mismatch fails loudly against
       // `swapPkScript` rather than silently.
     })
-    completed = true
+    const committed = await ctx.directFills.read(attempt.key)
+    if (
+      !committed?.graph ||
+      !(await directFillFinalized(ctx.wallet.indexerProvider, committed.graph, [
+        committed.deposit,
+        ...committed.funding,
+      ]))
+    )
+      throw new Error(`direct fill ${attempt.key} finalization is not yet proven`)
+    if (committed.phase === 'submitting' || committed.phase === 'cancelling') {
+      if (!(await ctx.directFills.change(committed, { ...committed, phase: 'settled', outcomeTxid: txid }))) {
+        throw new Error(`direct fill ${attempt.key} outcome CAS lost`)
+      }
+    } else if (committed.phase !== 'settled' || committed.outcomeTxid !== txid) {
+      throw new Error(`direct fill ${attempt.key} has a conflicting outcome`)
+    }
+    if (parent.kind === 'standalone') {
+      const settled = await ctx.directFills.read(attempt.key)
+      if (!settled || settled.phase !== 'settled' || settled.outcomeTxid !== txid) {
+        throw new Error(`direct fill ${attempt.key} lost its proven standalone outcome`)
+      }
+      if (!settled.acknowledged) await ctx.directFills.acknowledge(settled)
+    }
     return txid
   } finally {
-    if (completed || !submitted) release()
+    if (attempt) {
+      ctx.directFills.finishInvocation(attempt.key)
+      if (!enteredProvider) {
+        const stored = await ctx.directFills.read(attempt.key)
+        if (stored?.phase === 'prepared') {
+          const abandoned: DirectFillAttempt = { ...stored, phase: 'abandoned' }
+          if (await ctx.directFills.change(stored, abandoned)) await ctx.directFills.acknowledge(abandoned)
+        }
+      }
+    } else release()
   }
 }
 

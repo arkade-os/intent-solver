@@ -119,6 +119,40 @@ const deposit = (over: Partial<ObservedDeposit> = {}): ObservedDeposit => ({
 })
 
 describe('quote', () => {
+  it.each(['filling', 'stuck'] as const)('recovers a direct %s fill and records its price only once', async (state) => {
+    const price = vi.fn(async () => ({ mantissa: 100_000n, scale: 0 }))
+    const { service, store } = await harness({ fetchPrice: price })
+    await service.quote(request())
+    await store.transition('swap-1', 'quoted', 'funded', { deposit_txid: 'ff'.repeat(32), deposit_vout: 0 })
+    await store.transition('swap-1', 'funded', 'filling')
+    if (state === 'stuck') await store.fail('swap-1', 'filling', 'reply lost')
+    const proof = { id: 'swap-1', depositTxid: 'ff'.repeat(32), depositVout: 0, offerPkScript: OFFER_SCRIPT }
+    const reads = price.mock.calls.length
+    expect(await service.recoverDirectFill(proof, 'fa'.repeat(32))).toBe(true)
+    expect(price.mock.calls.length).toBe(reads + 1)
+    const marked = await store.get('swap-1')
+    expect(marked).toMatchObject({ state: 'filled', fillPriceMantissa: 100_000n, fillTxid: 'fa'.repeat(32) })
+    expect(await service.recoverDirectFill(proof, 'fa'.repeat(32))).toBe(true)
+    expect(price.mock.calls.length).toBe(reads + 1)
+    expect((await store.get('swap-1')).updatedAt).toBe(marked.updatedAt)
+  })
+
+  it('recovers an original fill with its market disabled without inventing a price mark', async () => {
+    const errors: unknown[] = []
+    const { service, store } = await harness({ onError: (_id, error) => errors.push(error) })
+    await service.quote(request())
+    await store.transition('swap-1', 'quoted', 'funded', { deposit_txid: 'ff'.repeat(32), deposit_vout: 0 })
+    await store.transition('swap-1', 'funded', 'filling')
+    await service.replaceMarkets([])
+    expect(
+      await service.recoverDirectFill(
+        { id: 'swap-1', depositTxid: 'ff'.repeat(32), depositVout: 0, offerPkScript: OFFER_SCRIPT },
+        'fa'.repeat(32),
+      ),
+    ).toBe(true)
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillPriceMantissa: null })
+    expect(errors).toHaveLength(1)
+  })
   it('resolves both amounts and records the terms before answering', async () => {
     const { service, store } = await harness()
     const outcome = await service.quote(request())

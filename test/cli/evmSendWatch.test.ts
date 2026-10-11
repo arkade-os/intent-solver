@@ -119,6 +119,34 @@ describe('the watch loop during slow wallet maintenance', () => {
 })
 
 describe('disabling the EVM send corridor', () => {
+  it('recovers direct fills at startup and on full sweeps with all asset markets disabled', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_800_000_000_000)
+    const signals = new EventEmitter()
+    const sweep = vi.fn(async () => {})
+    const services = {
+      config: { corridorEnabled: {}, contractRetentionMs: 0, poolAutoMint: false, offerMarkets: [] },
+      policy: { evmCorridors: [], offerMarkets: [] },
+      arkade: { wallet: { getContractManager: async () => ({}) } },
+      readers: [],
+      corridors: [],
+      assetRfqMarkets: [],
+      assetOffers: null,
+      assetRfqService: { tickAll: async () => [], stop: async () => {} },
+      directFillRecovery: { sweep },
+    }
+    const watching = watchLoopIn(signals)(services)
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(sweep).toHaveBeenCalledOnce()
+      await vi.advanceTimersByTimeAsync(6000)
+      expect(sweep.mock.calls.length).toBeGreaterThan(1)
+    } finally {
+      signals.emit('SIGTERM')
+      await vi.advanceTimersByTimeAsync(250)
+      await watching
+    }
+  })
   it('stops the corridor quoting without stopping the sweep that watches what it already locked', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_800_000_000_000)

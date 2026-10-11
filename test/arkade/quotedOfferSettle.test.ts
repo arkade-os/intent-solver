@@ -32,6 +32,7 @@ const TXID = 'a'.repeat(64)
 /** A BTC deposit buying the asset — the direction the e2e drives. */
 const intent = (over: Partial<QuotedOfferIntent> = {}): QuotedOfferIntent => {
   const base = {
+    id: 'quoted-offer',
     fromAssetId: null,
     fromAmount: 20_000n,
     toAssetId: USDA,
@@ -122,12 +123,18 @@ describe('quotedOfferSettleFor', () => {
   it('spends the outpoint the row recorded, at the value the chain reports', async () => {
     const { settle, fulfill } = settleWith([funded({ vout: 0, sats: 999n }), funded()])
     await settle(intent())
-    expect(fulfill).toHaveBeenCalledWith(expect.anything(), 'http://emulator.test', expect.anything(), {
-      txid: TXID,
-      vout: 1,
-      value: 20_000,
-      assetAmount: undefined,
-    })
+    expect(fulfill).toHaveBeenCalledWith(
+      expect.anything(),
+      'http://emulator.test',
+      expect.anything(),
+      {
+        txid: TXID,
+        vout: 1,
+        value: 20_000,
+        assetAmount: undefined,
+      },
+      { kind: 'rfq', id: 'quoted-offer' },
+    )
   })
 
   it('hands `fulfill` an offer whose script is the DERIVED one', async () => {

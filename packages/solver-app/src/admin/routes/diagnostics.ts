@@ -89,6 +89,7 @@ export const registerDiagnosticsRoutes = (app: Hono, deps: AdminDeps): void => {
     })
 
     return c.json({
+      directFills: (await services.directFillRecovery?.diagnostics()) ?? null,
       backends,
       relay: deps.relay ? { url: deps.relay.url, connected: deps.relay.isConnected() } : null,
       // Whether the solver is DISCOVERABLE, beside whether it is fundable: a
