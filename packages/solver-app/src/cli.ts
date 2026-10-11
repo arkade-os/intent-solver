@@ -216,7 +216,11 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // may also start with ASSET_. The service's own `tickAll` covers them all.
   const tickEveryCorridor = async (phase: string): Promise<number> => {
     let ticked = 0
-    await services.directFillRecovery?.sweep()
+    try {
+      await services.directFillRecovery?.sweep()
+    } catch (error) {
+      log(`direct fill ${phase} failed:`, error instanceof Error ? error.message : String(error))
+    }
     const assetRfqPairs = new Set(
       services.assetRfqMarkets.flatMap(({ base, quote }) => [
         assetRfqPairFor(base, quote),

@@ -79,8 +79,8 @@ export const createDirectFillRecovery = (deps: DirectFillRecoveryDeps) => {
 
   const recover = async (attempt: DirectFillAttempt): Promise<void> => {
     if (['settled', 'cancelled', 'abandoned'].includes(attempt.phase)) return acknowledge(attempt)
+    if (deps.attempts.invocationActive(attempt.key)) return
     if (attempt.phase === 'prepared') {
-      if (deps.attempts.invocationActive(attempt.key)) return
       const abandoned: DirectFillAttempt = { ...attempt, phase: 'abandoned' }
       if (await deps.attempts.change(attempt, abandoned)) await acknowledge(abandoned)
       return

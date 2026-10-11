@@ -85,6 +85,54 @@ const recoveryFor = (attempts: DirectFillAttempts) =>
   })
 
 describe('durable direct-fill attempts', () => {
+  it('leaves an active submitting invocation alone, then recovers its exact finalized graph after it finishes', async () => {
+    const { db } = database()
+    const pins = createReservationLedger()
+    const store = await DirectFillAttempts.open(db, pins, 'wallet', script)
+    const prepared = await store.prepare(input)
+    const sent: DirectFillAttempt = { ...prepared, phase: 'submitting', graph }
+    await store.change(prepared, sent)
+    const chain = {
+      getVtxos: vi.fn(async ({ outpoints }: { outpoints: Array<{ txid: string; vout: number }> }) => ({
+        vtxos: outpoints.map((point) => {
+          const index = [deposit, ...funding].findIndex((coin) => coin.txid === point.txid && coin.vout === point.vout)
+          return index >= 0
+            ? { ...point, spentBy: fixture.checkpoints[index]!.id, arkTxId: fixture.arkTx.id }
+            : { ...point, script, value: 10000 }
+        }),
+      })),
+      getVirtualTxs: vi.fn(async () => ({ txs: [graph.arkTx, ...graph.checkpoints] })),
+    }
+    const ark = { getPendingTxs: vi.fn(), submitTx: vi.fn(), finalizeTx: vi.fn() }
+    const parent = { recoverDirectFill: vi.fn(async () => true), cancelDirectFill: vi.fn() }
+    const coins = vi.fn(async () => [])
+    const recovery = createDirectFillRecovery({
+      attempts: store,
+      chain,
+      graph: { ark, signer: solver, serverKey, solverKeys: [hex.encode(solverKey)] },
+      parent: () => parent,
+      coins,
+      serverUnrollScript: unroll,
+      conflictAfterSeconds: 0,
+    })
+    await recovery.sweep()
+    for (const call of [...Object.values(chain), ...Object.values(ark), ...Object.values(parent), coins]) {
+      expect(call).not.toHaveBeenCalled()
+    }
+    expect((await store.read(sent.key))?.phase).toBe('submitting')
+    expect(pins.reserved().size).toBe(1)
+    store.finishInvocation(sent.key)
+    await recovery.sweep()
+    expect(chain.getVirtualTxs).toHaveBeenCalledOnce()
+    expect(parent.recoverDirectFill).toHaveBeenCalledWith(
+      { id: 'row', depositTxid: deposit.txid, depositVout: 0, offerPkScript: script },
+      fixture.arkTx.id,
+    )
+    expect(await store.list()).toEqual([])
+    expect(pins.reserved().size).toBe(0)
+    for (const call of Object.values(ark)) expect(call).not.toHaveBeenCalled()
+  })
+
   it('keeps rejected-fill inputs pinned across restart until its exact conflict is positively finalized', async () => {
     const { db } = database()
     const pins = createReservationLedger()
