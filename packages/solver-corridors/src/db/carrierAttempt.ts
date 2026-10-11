@@ -2,7 +2,7 @@
  * The PRIVATE record of one in-flight carrier fill attempt, as it is stored:
  * what lets a restarted solver tell "never submitted" from "possibly
  * submitted". Deliberately not on `AssetRfqSwapRow` and not in `carrier_terms`,
- * which are a promise to the CLIENT and emitted to it verbatim.
+ * which retain the original Taxi deadline for settlement.
  *
  * The store owns the phase and the byte-stable identity; the app adapter owns
  * what a snapshot and a binding MEAN. So both payloads are opaque here beyond

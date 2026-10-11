@@ -15,7 +15,11 @@
  *   18-decimal asset is a hundred times what a double represents exactly.
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+import { ArkAddress, SingleKey, asset, type IWallet } from '@arkade-os/sdk'
+import { createSwapClient } from '@arkade-os/swap'
+import { offerContract, type RfqQuote } from '@arkade-os/swap/protocol'
+import { hex } from '@scure/base'
 import {
   AssetRfqRequest,
   assetRfqQuotePayload,
@@ -190,6 +194,137 @@ const row = (over: Partial<AssetRfqSwapRow> = {}): AssetRfqSwapRow => ({
 })
 
 describe('assetRfqQuotePayload', () => {
+  it('is accepted by the native receiver-paid client without losing the settlement margin', async () => {
+    const now = 1_800_000_000
+    vi.useFakeTimers()
+    vi.setSystemTime(now * 1000)
+    try {
+      const identity = SingleKey.fromPrivateKey(new Uint8Array(32).fill(9))
+      const server = await SingleKey.fromPrivateKey(new Uint8Array(32).fill(2)).xOnlyPublicKey()
+      const emulator = await SingleKey.fromPrivateKey(new Uint8Array(32).fill(4)).xOnlyPublicKey()
+      const address = new ArkAddress(server, await identity.xOnlyPublicKey(), 'tark').encode()
+      const descriptor = {
+        quoteId: 'taxi-quote',
+        receiveAddress: address,
+        senderKey: hex.encode(await identity.xOnlyPublicKey()),
+        assetId: ASSET_A,
+        physicalSats: 330n,
+        loanSats: 330n,
+        expiresAt: now + 120,
+      }
+      const taxi = { url: 'https://taxi.example', operatorKey: hex.encode(server) }
+      const terms = {
+        mode: 'recycle_receiver' as const,
+        quoteId: descriptor.quoteId,
+        physicalSats: 330n,
+        loanSats: 330n,
+        receiptSats: 0n,
+        serviceFareSats: 0n,
+        pricedSats: 0n,
+        expiresAt: descriptor.expiresAt,
+        taxiUrl: taxi.url,
+        taxiKey: taxi.operatorKey,
+      }
+      const requests: Record<string, unknown>[] = []
+      const card = {
+        pair: 'BTC/ASSET',
+        base_asset: { id: 'btc', name: 'Bitcoin', ticker: 'BTC', decimals: 8 },
+        quote_asset: { id: ASSET_A, name: 'Asset', ticker: 'ASSET', decimals: 2 },
+        price_feed: 'https://feed.example',
+        price_feed_schema: { type: 'json' as const, price_path: '/price' },
+        price_decimals: 6,
+        fee_bps: 0,
+        min_base_amount: '1',
+        max_base_amount: '1000000',
+        min_quote_amount: '1',
+        max_quote_amount: '1000000',
+        solver: 'interop',
+        source: 'https://registry.example/regtest.json',
+        sourceType: 'registry' as const,
+        discovery_pubkey: hex.encode(server),
+        transports: { nostr: { relays: ['wss://relay.example'] } },
+      }
+      const client = createSwapClient({
+        wallet: {
+          identity,
+          getAddress: async () => address,
+          getArkadeInfo: async () => ({
+            network: 'regtest',
+            signerPubkey: hex.encode(server),
+            unilateralExitDelay: 512n,
+            deprecatedSigners: [],
+            dust: 330n,
+          }),
+          getContractManager: async () => ({ createContract: async () => undefined }),
+        } as unknown as IWallet,
+        discovery: { snapshot: [card] },
+        emulatorPubkey: `02${hex.encode(emulator)}`,
+        fetchImpl: (async () => new Response(JSON.stringify({ price: 100_000 }))) as typeof fetch,
+        transportFor: () => ({
+          attestedResponder: card.discovery_pubkey,
+          status: async () => null,
+          close: async () => {},
+          requestQuote: async (request) => {
+            requests.push(request)
+            const profile = request.profile as Record<string, string>
+            const script = offerContract(
+              {
+                wantAmount: 1000n,
+                wantAsset: asset.AssetId.fromString(ASSET_A),
+                makerPkScript: hex.decode(profile.maker_pk_script!),
+                makerPublicKey: hex.decode(profile.maker_public_key!),
+                emulatorPubkey: emulator,
+                exitDelay: { type: 'seconds', value: 512n },
+              },
+              server,
+            )
+            return assetRfqQuotePayload(
+              row({
+                rfqId: String(request.rfq_id),
+                fromAmount: 10_000n,
+                toAmount: 1000n,
+                validUntil: terms.expiresAt - 30,
+                carrierTerms: terms,
+                solverPubkey: hex.encode(server),
+                offerAddress: script.address('tark', server).encode(),
+                offerPkScript: hex.encode(script.pkScript),
+              }),
+              String(request.rfq_id),
+            ) as unknown as RfqQuote
+          },
+        }),
+      })
+      const quote = await client.quote({
+        give: 'BTC',
+        take: 'ASSET',
+        amount: 1000n,
+        amountOn: 'take',
+        assetPayment: {
+          carrier: {
+            mode: 'recycleReceiver',
+            quote: descriptor,
+            taxi,
+            inputExpiryFloor: { kind: 'time', value: BigInt(now + 600) },
+          },
+        },
+      })
+      expect(requests).toHaveLength(1)
+      expect(requests[0]!.profile).toMatchObject({
+        carrier: { mode: 'recycle_receiver', quote_id: descriptor.quoteId },
+      })
+      expect(quote.give.amount).toBe(10_000n)
+      expect(quote.assetPayment?.carrier).toMatchObject({
+        mode: 'recycle_receiver',
+        pricedSats: 0n,
+        expiresAt: now + 90,
+      })
+      expect(quote.assetPayment?.validUntil).toBe(now + 60)
+      expect(terms.expiresAt).toBe(now + 120)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('resolves both amounts as canonical decimal strings', () => {
     const quote = assetRfqQuotePayload(row(), RFQ_ID)
     expect(quote).toMatchObject({
@@ -255,7 +390,7 @@ describe('assetRfqQuotePayload', () => {
       receipt_sats: '1',
       service_fare_sats: '4',
       priced_sats: '5',
-      expires_at: 5_000,
+      expires_at: 2_000,
     })
   })
 

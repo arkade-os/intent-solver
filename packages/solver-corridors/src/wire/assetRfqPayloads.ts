@@ -196,7 +196,14 @@ export const assetRfqQuotePayload = (
     offer_pk_script: row.offerPkScript,
     // The full decimal-string terms, so the client can verify the pinned Taxi
     // split. Absent on a legacy row, whose profile shape is unchanged.
-    ...(row.carrierTerms === null ? {} : { carrier: carrierTermsToJson(row.carrierTerms) }),
+    ...(row.carrierTerms === null
+      ? {}
+      : {
+          carrier: {
+            ...carrierTermsToJson(row.carrierTerms),
+            expires_at: Math.min(row.carrierTerms.expiresAt, row.validUntil),
+          },
+        }),
   },
 })
 

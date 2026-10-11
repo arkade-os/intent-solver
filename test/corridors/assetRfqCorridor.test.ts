@@ -431,7 +431,7 @@ describe('profile.carrier through the corridor', () => {
       receipt_sats: '1',
       service_fare_sats: '0',
       priced_sats: '1',
-      expires_at: 1_600,
+      expires_at: 1_030,
     })
   })
 
