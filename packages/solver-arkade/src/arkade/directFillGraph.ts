@@ -292,7 +292,7 @@ const finalizeResponse = async (
   mergeSignatures(finalArk, parse(graph.arkTx))
   assertFullySigned(finalArk, deps.serverKey)
   const ownedKeys = new Set(owned.map(key))
-  const final = []
+  const final: string[] = []
   for (const { server, local } of matchServerCheckpoints(
     response.signedCheckpointTxs,
     graph.checkpoints.map(parse),
