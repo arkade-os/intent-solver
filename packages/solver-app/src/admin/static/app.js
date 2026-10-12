@@ -273,6 +273,7 @@ const readVerdict = (swapId) => {
 const state = {
   view: 'overview',
   overview: null,
+  overviewError: null,
   banner: null,
   data: {},
   activityErrors: {},
@@ -311,6 +312,8 @@ const fail = (error) => {
 /* ---- status bar --------------------------------------------------------- */
 
 const statusBar = () => {
+  if (state.overviewError)
+    return h('div.status', h('span.phase.phase-failed', 'status unavailable'), h('span.muted', state.overviewError))
   const o = state.overview
   if (!o) return h('div.status', h('span.muted', 'connecting…'))
   const exposed = o.exposure.exposedCount
@@ -532,9 +535,37 @@ const marketsPanel = (o) => {
   return markets.length === 0 ? null : h('div.panels', ...markets.map(marketCard))
 }
 
+const overviewBalancesPanel = () => {
+  const balances = state.data.overviewBalances ?? state.overview?.balances
+  return h(
+    'section.panel',
+    { id: 'overview-balances' },
+    h('h2', 'balances'),
+    balances
+      ? h(
+          'dl.kv',
+          h('dt', 'lightning'),
+          h('dd', balances.lightningError ? h('span.muted', balances.lightningError) : sats(balances.lightningSats)),
+          h('dt', 'arkade'),
+          h('dd', balances.arkadeError ? h('span.muted', balances.arkadeError) : balanceRows(balances.arkade)),
+          ...(balances.arkadeError ? [] : assetRowsPair(balances.arkade)),
+          h('dt', 'pubkey'),
+          h('dd.faint', shortId(state.overview?.providerPubkey)),
+        )
+      : h('p.muted', state.data.overviewBalanceError ?? 'loading balances…'),
+  )
+}
+
+const paintOverviewBalances = () => {
+  document.getElementById('overview-balances')?.replaceWith(overviewBalancesPanel())
+}
+
 const overviewView = () => {
   const o = state.overview
-  if (!o) return h('p.muted', 'loading…')
+  if (!o)
+    return state.overviewError
+      ? h('p.banner', state.overviewError, ' ', h('button.act', { onclick: () => load('overview') }, 'retry'))
+      : h('p.muted', 'loading…')
   return h(
     'div',
     attentionPanel(o),
@@ -570,25 +601,7 @@ const overviewView = () => {
         ),
         h('p.muted', `${sats(o.exposure.committedSats)} of ${sats(o.exposure.capSats)} sat cap`),
       ),
-      h(
-        'section.panel',
-        h('h2', 'balances'),
-        h(
-          'dl.kv',
-          h('dt', 'lightning'),
-          h(
-            'dd',
-            o.balances.lightningError ? h('span.muted', o.balances.lightningError) : sats(o.balances.lightningSats),
-          ),
-          h('dt', 'arkade'),
-          h('dd', o.balances.arkadeError ? h('span.muted', o.balances.arkadeError) : balanceRows(o.balances.arkade)),
-          /* assets: begin */
-          ...(o.balances.arkadeError ? [] : assetRowsPair(o.balances.arkade)),
-          /* assets: end */
-          h('dt', 'pubkey'),
-          h('dd.faint', shortId(o.providerPubkey)),
-        ),
-      ),
+      overviewBalancesPanel(),
     ),
     marketsPanel(o),
   )
@@ -3888,13 +3901,69 @@ const ENDPOINTS = {
 }
 
 const activityLoadGenerations = {}
+const pendingViewReads = new Map()
+const readView = (path) => {
+  if (!pendingViewReads.has(path)) {
+    pendingViewReads.set(
+      path,
+      api(path).finally(() => pendingViewReads.delete(path)),
+    )
+  }
+  return pendingViewReads.get(path)
+}
+let overviewLoadGeneration = 0
+let overviewBalanceRead = null
+const readOverviewBalances = () => {
+  if (!overviewBalanceRead) {
+    overviewBalanceRead = api('/api/overview')
+      .then((overview) => overview.balances)
+      .finally(() => {
+        overviewBalanceRead = null
+      })
+  }
+  return overviewBalanceRead
+}
+
 const load = async (view) => {
+  const overviewGeneration = ++overviewLoadGeneration
   const sections = view === 'activity' ? ACTIVITY_SECTIONS : ACTIVITY_SECTIONS.includes(view) ? [view] : []
   const generations = Object.fromEntries(
     sections.map((key) => [key, (activityLoadGenerations[key] = (activityLoadGenerations[key] ?? 0) + 1)]),
   )
-  try {
-    state.overview = await api('/api/overview')
+  const ownsView = () => state.view === view || (state.view === 'activity' && ACTIVITY_SECTIONS.includes(view))
+  if (ownsView()) state.banner = null
+  const overviewRead = api('/api/overview?balances=false').then(
+    (overview) => {
+      if (overviewGeneration !== overviewLoadGeneration) return
+      state.overview = overview
+      state.overviewError = null
+      paintStatus()
+    },
+    (error) => {
+      if (overviewGeneration !== overviewLoadGeneration) return
+      state.overview = null
+      state.overviewError = error instanceof Error ? error.message : String(error)
+      paintStatus()
+    },
+  )
+  let balancesRead = Promise.resolve()
+  if (view === 'overview') {
+    delete state.data.overviewBalances
+    delete state.data.overviewBalanceError
+    balancesRead = readOverviewBalances().then(
+      (balances) => {
+        if (overviewGeneration !== overviewLoadGeneration || state.view !== 'overview') return
+        state.data.overviewBalances = balances
+        paintOverviewBalances()
+      },
+      (error) => {
+        if (overviewGeneration !== overviewLoadGeneration || state.view !== 'overview') return
+        state.data.overviewBalanceError = error instanceof Error ? error.message : String(error)
+        paintOverviewBalances()
+      },
+    )
+  }
+  const viewRead = (async () => {
     if (sections.length) {
       await Promise.all(
         sections.map(async (key) => {
@@ -3910,17 +3979,23 @@ const load = async (view) => {
           }
         }),
       )
-    } else if (ENDPOINTS[view]) state.data[view] = await api(ENDPOINTS[view]())
-    if (view === 'pricing') {
+    } else if (ENDPOINTS[view]) {
+      const data = await readView(ENDPOINTS[view]())
+      if (overviewGeneration !== overviewLoadGeneration) return
+      state.data[view] = data
+    } else if (view === 'pricing') {
       const [markets, settings] = await Promise.all([api('/api/markets'), api('/api/settings')])
+      if (overviewGeneration !== overviewLoadGeneration) return
       state.data.markets = markets
       state.data.settings = settings
-    }
-    state.banner = null
-  } catch (error) {
+    } else return
+    if (ownsView()) render()
+  })().catch((error) => {
+    if (overviewGeneration !== overviewLoadGeneration || !ownsView()) return
     state.banner = error instanceof Error ? error.message : String(error)
-  }
-  render()
+    render()
+  })
+  await Promise.all([overviewRead, viewRead, balancesRead])
 }
 
 const viewFromHash = () => {
@@ -4003,6 +4078,18 @@ const restartBanner = () => {
           'restart disabled',
         ),
   )
+}
+
+const paintStatus = () => {
+  if (state.view === 'overview') return render()
+  const root = document.getElementById('root')
+  root.querySelector('.status')?.replaceWith(statusBar())
+  const old = root.querySelector('.restart-banner')
+  const next = restartBanner()
+  if (old) {
+    if (next) old.replaceWith(next)
+    else old.remove()
+  } else if (next) root.querySelector('nav')?.after(next)
 }
 
 const render = () => {

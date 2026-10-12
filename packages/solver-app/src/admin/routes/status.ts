@@ -121,6 +121,19 @@ const stuckSwaps = async (deps: AdminDeps): Promise<{ rows: AdminSwap[]; total: 
   }
 }
 
+const overviewBalances = async (services: AdminDeps['services']) => {
+  const [lightning, arkade] = await Promise.all([
+    attempt(async () => (await requireLn(services.ln).getBalance()).availableSats),
+    attempt(async () => await services.arkade.wallet.getBalance()),
+  ])
+  return {
+    lightningSats: lightning.value,
+    lightningError: lightning.error,
+    arkade: arkade.value ? consoleBalance(arkade.value, assetSource(services.arkade.wallet)) : null,
+    arkadeError: arkade.error,
+  }
+}
+
 export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/overview', async (c) => {
     const { services } = deps
@@ -138,12 +151,7 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
     ])
     const committedSats = committed.reduce((sum, value) => sum + value, 0)
 
-    // Balances are best-effort: the overview is the first thing an operator
-    // loads, and it must render even when a backend is down.
-    const [lightning, arkade] = await Promise.all([
-      attempt(async () => (await requireLn(services.ln).getBalance()).availableSats),
-      attempt(async () => await services.arkade.wallet.getBalance()),
-    ])
+    const balances = c.req.query('balances') === 'false' ? null : await overviewBalances(services)
 
     return c.json({
       mode: deps.mode,
@@ -212,15 +220,7 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
         })),
         failing: services.tickErrors.failing,
       },
-      balances: {
-        lightningSats: lightning.value,
-        lightningError: lightning.error,
-        // Projected, never passed through: the raw balance carries `bigint` asset
-        // amounts and `c.json` throws on one, which took this whole route — and so
-        // every view of the console — down for any solver holding an asset.
-        arkade: arkade.value ? consoleBalance(arkade.value, assetSource(services.arkade.wallet)) : null,
-        arkadeError: arkade.error,
-      },
+      balances,
     })
   })
 
