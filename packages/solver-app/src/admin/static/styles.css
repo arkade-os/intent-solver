@@ -173,6 +173,22 @@ main {
   max-width: 1400px;
 }
 
+.activity-section {
+  border-top: 1px solid var(--line);
+  padding: 1rem 0;
+  scroll-margin-top: 5rem;
+  min-width: 0;
+}
+
+.activity-content {
+  overflow-x: auto;
+}
+
+.activity .toolbar h1 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
 /* ---- tables ------------------------------------------------------------ */
 /* Dense on purpose. An operator scanning for the one bad row wants as many
    rows on screen as will fit, not generous padding. */

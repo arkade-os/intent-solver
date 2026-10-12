@@ -84,6 +84,17 @@ const apply = (app: ReturnType<typeof buildAdminApp>, payload: unknown) =>
 type Answer = { revision: string; applied: string[]; unapplied: { key: string; reason: string }[] }
 const answered = async (res: Response) => (await res.json()) as Answer
 
+it.each(['USDT', 'USDC', 'DePix'])(
+  'refuses ticker %s as an asset-market leg before applying anything',
+  async (quote) => {
+    const { app, adminStore } = await build()
+    const answer = await answered(await apply(app, { markets: [body({ quote })] }))
+    expect(answer.applied).toEqual([])
+    expect(answer.unapplied[0]?.reason).toContain('68-character Arkade asset id')
+    expect(await adminStore.listMarkets()).toEqual([])
+  },
+)
+
 /** Fail the SECOND putMarket, which is the widening pass. */
 const failWideningPass = (adminStore: AdminStore) => {
   const real = adminStore.putMarket.bind(adminStore)

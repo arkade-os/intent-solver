@@ -52,6 +52,8 @@ const harness = (answer = { revision: 'r', applied: [] as string[], unapplied: [
     ${definitions}
     ${view}
     return { selectPricing, syncPricingMarket, pricingKnobField, pricingPreviewRequest, applyPricingDraft, pricingDraft,
+      stagePricingOverride, removeKnobs: () => state.data.settings.knobs = [],
+      setOutcome: value => pricingOutcome = value, outcome: () => pricingOutcome,
       current: () => marketDraft }
   `,
   )(
@@ -73,12 +75,31 @@ const harness = (answer = { revision: 'r', applied: [] as string[], unapplied: [
     applyPricingDraft: () => Promise<void>
     pricingDraft: PricingDraft
     current: () => Record<string, unknown>
+    stagePricingOverride: (key: string, value: string | null) => void
+    removeKnobs: () => void
+    setOutcome: (value: unknown) => void
+    outcome: () => unknown
   }
   const carrierInput = () => built.pricingKnobField(knob, 'carrier', '')[1]!.children[0]!
   return { ...built, markets, sent, carrierInput }
 }
 
 describe('the unified pricing editor', () => {
+  it('ignores a stale control whose knob is no longer advertised', () => {
+    const ui = harness()
+    ui.removeKnobs()
+    ui.stagePricingOverride('ASSET_CARRIER_PRICING', 'true')
+    expect(ui.pricingDraft.size).toBe(0)
+  })
+
+  it('clears the previous outcome while a follow-on apply is in flight', async () => {
+    const ui = harness()
+    ui.setOutcome({ message: 'previous apply succeeded' })
+    ui.pricingDraft.stageOverride('ASSET_CARRIER_PRICING', 'true')
+    const applying = ui.applyPricingDraft()
+    expect(ui.outcome()).toBeNull()
+    await applying
+  })
   it('keeps unrelated corridor drafts out of market previews but includes them in corridor previews', () => {
     const ui = harness()
     ui.pricingDraft.stageOverride('LN_SEND_MIN_SATS', '200000')

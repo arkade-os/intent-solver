@@ -275,6 +275,7 @@ const state = {
   overview: null,
   banner: null,
   data: {},
+  activityErrors: {},
   filters: { corridor: '', phase: '', q: '' },
   /**
    * The P&L view's own controls. Bucket empty means "let the server choose from
@@ -293,10 +294,7 @@ const state = {
 const VIEWS = [
   ['overview', 'overview'],
   ['pnl', 'p&l'],
-  ['swaps', 'swaps'],
-  ['offers', 'offers'],
-  ['quotes', 'quotes'],
-  ['refusals', 'request refusals'],
+  ['activity', 'activity'],
   ['wallet', 'wallet'],
   ['backends', 'backends'],
   ['diagnostics', 'diagnostics'],
@@ -605,6 +603,7 @@ const swapsView = () => {
       h(
         'select',
         {
+          'aria-label': 'swap corridor',
           onchange: (e) => {
             state.filters.corridor = e.target.value
             load('swaps')
@@ -621,6 +620,7 @@ const swapsView = () => {
       h(
         'select',
         {
+          'aria-label': 'swap phase',
           onchange: (e) => {
             state.filters.phase = e.target.value
             load('swaps')
@@ -633,6 +633,7 @@ const swapsView = () => {
       ),
       h('input.search', {
         type: 'search',
+        'aria-label': 'find swaps',
         value: state.filters.q,
         placeholder: 'find: id, payment hash, invoice, address, txid, rfq id',
         title: `Substring match across every identifier the row carries. At least ${MIN_SEARCH} characters.`,
@@ -651,43 +652,47 @@ const swapsView = () => {
       h('span.spacer'),
       h('span.muted', `${rows.length} rows`),
     ),
-    rows.length === 0
-      ? h('p.muted', 'no swaps match')
-      : h(
-          'table',
-          h(
-            'thead',
-            h(
-              'tr',
-              h('th', 'phase'),
-              h('th', 'state'),
-              h('th', 'corridor'),
-              h('th', 'id'),
-              h('th.right', 'amount'),
-              h('th.right', 'payout'),
-              h('th', 'age'),
-              h('th', 'updated'),
-            ),
-          ),
-          h(
-            'tbody',
-            rows.map((row) =>
+    state.activityErrors.swaps
+      ? activityError('swaps')
+      : !state.data.swaps
+        ? h('p.muted', 'loading…')
+        : rows.length === 0
+          ? h('p.muted', 'no swaps match')
+          : h(
+              'table',
               h(
-                'tr.clickable',
-                { onclick: () => openDetail(row) },
-                // Phase first and state second, deliberately: see the module header.
-                h('td', phaseChip(row.phase)),
-                h('td', stateWord(row.state)),
-                h('td.muted', corridorLabel(row.corridor)),
-                h('td.faint', shortId(row.id)),
-                h('td.num', sats(row.amountSats)),
-                h('td.num.muted', sats(row.payoutSats)),
-                h('td.muted', ago(row.createdAt)),
-                h('td.muted', ago(row.updatedAt)),
+                'thead',
+                h(
+                  'tr',
+                  h('th', 'phase'),
+                  h('th', 'state'),
+                  h('th', 'corridor'),
+                  h('th', 'id'),
+                  h('th.right', 'amount'),
+                  h('th.right', 'payout'),
+                  h('th', 'age'),
+                  h('th', 'updated'),
+                ),
+              ),
+              h(
+                'tbody',
+                rows.map((row) =>
+                  h(
+                    'tr.clickable',
+                    { onclick: () => openDetail(row) },
+                    // Phase first and state second, deliberately: see the module header.
+                    h('td', phaseChip(row.phase)),
+                    h('td', stateWord(row.state)),
+                    h('td.muted', corridorLabel(row.corridor)),
+                    h('td.faint', shortId(row.id)),
+                    h('td.num', sats(row.amountSats)),
+                    h('td.num.muted', sats(row.payoutSats)),
+                    h('td.muted', ago(row.createdAt)),
+                    h('td.muted', ago(row.updatedAt)),
+                  ),
+                ),
               ),
             ),
-          ),
-        ),
   )
 }
 
@@ -800,7 +805,7 @@ const offersView = () => {
             ),
           ),
         ),
-    h('h2.sans', 'recent refusals'),
+    h('h2.sans', 'recent offer refusals'),
     h(
       'p.notice',
       `Offers this solver declined. Held in memory only and cleared on restart (keeps the last ${d.refusals.capacity}) — ` +
@@ -834,7 +839,6 @@ const refusalsView = () => {
     'div',
     h('h2.sans', 'request refusals'),
     h('p.notice', `The latest ${d.capacity} RFQ refusals, newest first. Cleared when this solver restarts.`),
-    h('button.act', { onclick: () => load('refusals') }, 'refresh'),
     d.entries.length === 0
       ? h('p.muted', 'no request refusals recorded since this process started')
       : h(
@@ -856,6 +860,35 @@ const refusalsView = () => {
             ),
           ),
         ),
+  )
+}
+
+const ACTIVITY_SECTIONS = ['swaps', 'quotes', 'offers', 'refusals']
+const activityError = (key) =>
+  h('p.banner', state.activityErrors[key], ' ', h('button.act', { onclick: () => load(key) }, 'retry'))
+
+const activityView = () => {
+  const bodies = { swaps: swapsView, quotes: quotesView, offers: offersView, refusals: refusalsView }
+  const labels = { swaps: 'swaps', quotes: 'open quotes', offers: 'offer fills', refusals: 'request refusals' }
+  return h(
+    'div.activity',
+    h(
+      'div.toolbar',
+      h('h1.sans', 'activity'),
+      ...ACTIVITY_SECTIONS.map((key) =>
+        h('button.act', { onclick: () => document.getElementById(`activity-${key}`)?.scrollIntoView() }, labels[key]),
+      ),
+      h('span.spacer'),
+      h('button.act', { onclick: () => load('activity') }, 'refresh activity'),
+    ),
+    ...ACTIVITY_SECTIONS.map((key) =>
+      h(
+        'section.activity-section',
+        { id: `activity-${key}`, 'aria-label': labels[key] },
+        key === 'swaps' || state.activityErrors[key] ? h('h2.sans', labels[key]) : null,
+        state.activityErrors[key] && key !== 'swaps' ? activityError(key) : h('div.activity-content', bodies[key]()),
+      ),
+    ),
   )
 }
 
@@ -2055,6 +2088,7 @@ const syncPricingMarket = () => {
 
 const stagePricingOverride = (key, value) => {
   const knob = pricingKnobs().find((item) => item.key === key)
+  if (!knob) return
   if (value !== null && value === String(knob.value)) delete pricingDraft.overrides[key]
   else pricingDraft.stageOverride(key, value)
 }
@@ -2089,6 +2123,7 @@ const pricingPreviewRequest = () =>
 const applyPricingDraft = async () => {
   syncPricingMarket()
   if (!pricingDraft.size || pricingDraft.busy) return
+  pricingOutcome = null
   const applying = pricingDraft.apply(api)
   render()
   try {
@@ -3855,7 +3890,19 @@ const ENDPOINTS = {
 const load = async (view) => {
   try {
     state.overview = await api('/api/overview')
-    if (ENDPOINTS[view]) state.data[view] = await api(ENDPOINTS[view]())
+    if (view === 'activity' || ACTIVITY_SECTIONS.includes(view)) {
+      await Promise.all(
+        (view === 'activity' ? ACTIVITY_SECTIONS : [view]).map(async (key) => {
+          try {
+            state.data[key] = await api(ENDPOINTS[key]())
+            delete state.activityErrors[key]
+          } catch (error) {
+            delete state.data[key]
+            state.activityErrors[key] = error instanceof Error ? error.message : String(error)
+          }
+        }),
+      )
+    } else if (ENDPOINTS[view]) state.data[view] = await api(ENDPOINTS[view]())
     if (view === 'pricing') {
       const [markets, settings] = await Promise.all([api('/api/markets'), api('/api/settings')])
       state.data.markets = markets
@@ -3871,6 +3918,7 @@ const load = async (view) => {
 const viewFromHash = () => {
   const view = (location.hash || '#overview').slice(1)
   if (view === 'markets' || view === 'settings') return 'pricing'
+  if (ACTIVITY_SECTIONS.includes(view)) return 'activity'
   return BODIES[view] ? view : 'overview'
 }
 
@@ -3890,10 +3938,7 @@ const BODIES = {
   pricing: pricingView,
   overview: overviewView,
   pnl: pnlView,
-  swaps: swapsView,
-  offers: offersView,
-  refusals: refusalsView,
-  quotes: quotesView,
+  activity: activityView,
   wallet: walletView,
   backends: backendsView,
   diagnostics: diagnosticsView,

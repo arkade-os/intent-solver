@@ -101,6 +101,13 @@ describe('the shared pricing draft', () => {
     expect(draft.busy).toBe(false)
   })
 
+  it('preserves an override whose knob disappeared without inventing its environment value for previews', () => {
+    const draft = new PricingDraft()
+    draft.stageOverride('LN_SEND_FEE_BPS', null)
+    expect(draft.previewOverrides([])).toEqual({})
+    expect(draft.payload().overrides).toEqual({ LN_SEND_FEE_BPS: null })
+  })
+
   it('snapshots market bodies so later form edits cannot change a queued request', () => {
     const draft = new PricingDraft()
     const body = { symbol: 'A', sellBase: { min: '100', max: '1000' } }
