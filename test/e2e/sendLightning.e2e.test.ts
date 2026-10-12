@@ -105,7 +105,11 @@ import { refundLocktimeFor } from '@arkade-os/solver-core/core/send.js'
 import { HOUR, MINUTE } from '@arkade-os/solver-core/core/timelocks.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { arkadeOpsFromContext } from '@arkade-os/solver-corridors/send/arkadeOps.js'
-import { SendSwapService, type ArkadeOps } from '@arkade-os/solver-corridors/send/orchestrator.js'
+import {
+  NO_RECORD_GRACE_SECONDS,
+  SendSwapService,
+  type ArkadeOps,
+} from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import {
   cancelCounterpartyInvoice,
@@ -476,7 +480,7 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       await store.transition(swap.id, 'quoted', 'funded', { lockup_value: swap.amountSats })
       await store.transition(swap.id, 'funded', 'paying', {
         idempotency_key: `e2e-poll-${swap.id}`,
-        pay_attempted_at: nowSeconds(),
+        pay_attempted_at: nowSeconds() - NO_RECORD_GRACE_SECONDS,
         payment_id: 'ff'.repeat(32),
       })
 

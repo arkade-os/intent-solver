@@ -31,7 +31,7 @@ export type PaymentStatus = 'pending' | 'succeeded' | 'failed'
  * so an empty read would flag healthy payments as stalled far more often than stalled
  * ones.
  *
- * Diagnostic only. Nothing decides whether money moves on this.
+ * Nothing moves money on this; `no_record` only ever WITHHOLDS a refund.
  */
 export type PaymentEvidence = 'no_record' | 'in_flight' | 'terminal'
 
