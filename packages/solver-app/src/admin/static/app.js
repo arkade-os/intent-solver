@@ -3887,16 +3887,21 @@ const ENDPOINTS = {
   audit: () => '/api/audit',
 }
 
+let swapsLoadGeneration = 0
 const load = async (view) => {
+  const swapsGeneration = view === 'activity' || view === 'swaps' ? ++swapsLoadGeneration : null
   try {
     state.overview = await api('/api/overview')
     if (view === 'activity' || ACTIVITY_SECTIONS.includes(view)) {
       await Promise.all(
         (view === 'activity' ? ACTIVITY_SECTIONS : [view]).map(async (key) => {
           try {
-            state.data[key] = await api(ENDPOINTS[key]())
+            const data = await api(ENDPOINTS[key]())
+            if (key === 'swaps' && swapsGeneration !== swapsLoadGeneration) return
+            state.data[key] = data
             delete state.activityErrors[key]
           } catch (error) {
+            if (key === 'swaps' && swapsGeneration !== swapsLoadGeneration) return
             delete state.data[key]
             state.activityErrors[key] = error instanceof Error ? error.message : String(error)
           }

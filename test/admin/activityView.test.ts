@@ -1,15 +1,16 @@
 import { readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 const source = readFileSync(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url), 'utf8')
 const loading = source.slice(source.indexOf('const ENDPOINTS'), source.indexOf('const go ='))
 const activitySections = ['swaps', 'quotes', 'offers', 'refusals']
-const harness = (hash = '#activity', failOffers = false) => {
+const harness = (hash = '#activity', failOffers = false, response?: (path: string) => Promise<unknown>) => {
   const state = { data: {} as Record<string, unknown>, activityErrors: {}, filters: { q: '', corridor: '', phase: '' } }
   const requests: string[] = []
   const api = async (path: string) => {
     requests.push(path)
     if (failOffers && path === '/api/offers') throw new Error('offer store unavailable')
+    if (response) return response(path)
     return { path }
   }
   const ui = new Function(
@@ -39,6 +40,30 @@ const harness = (hash = '#activity', failOffers = false) => {
 }
 
 describe('one activity page', () => {
+  it.each(['activity', 'swaps'])(
+    'ignores older %s swap results and errors after a newer filtered load',
+    async (olderView) => {
+      for (const staleError of [false, true]) {
+        const pending: { resolve: (value: unknown) => void; reject: (error: Error) => void }[] = []
+        const ui = harness('#activity', false, async (path) => {
+          if (!path.startsWith('/api/swaps?')) return { path }
+          return new Promise((resolve, reject) => pending.push({ resolve, reject }))
+        })
+        const older = ui.load(olderView)
+        await vi.waitFor(() => expect(pending).toHaveLength(1))
+        ui.state.filters.phase = 'exposed'
+        const newer = ui.load('swaps')
+        await vi.waitFor(() => expect(pending).toHaveLength(2))
+        pending[1]!.resolve({ swaps: [{ id: 'newer', phase: 'exposed' }] })
+        await newer
+        if (staleError) pending[0]!.reject(new Error('old request failed'))
+        else pending[0]!.resolve({ swaps: [{ id: 'older', phase: 'done' }] })
+        await older
+        expect(ui.state.data.swaps).toEqual({ swaps: [{ id: 'newer', phase: 'exposed' }] })
+        expect(ui.state.activityErrors).toEqual({})
+      }
+    },
+  )
   it('loads swaps, awaiting quotes, offer fills and request refusals together', async () => {
     const ui = harness()
     await ui.load('activity')
