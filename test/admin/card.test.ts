@@ -175,7 +175,13 @@ const getCard = async (deps: ReturnType<typeof makeDeps>): Promise<{ status: num
 }
 
 const postAd = async (deps: ReturnType<typeof makeDeps>) => {
-  const response = await buildAdminApp(deps).fetch(new Request('http://admin/api/actions/post-ad', { method: 'POST' }))
+  const response = await buildAdminApp(deps).fetch(
+    new Request('http://admin/api/actions/post-ad', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    }),
+  )
   return { status: response.status, body: (await response.json()) as Record<string, unknown> }
 }
 

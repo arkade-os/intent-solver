@@ -338,6 +338,13 @@ What follows from that:
   in `config.ts` refuses rather than guessing; this one cannot, because the
   container case legitimately needs the wider bind. The check that matters is
   in your proxy config, not here.
+- Mutating `/api` requests must be same-site JSON: a POST/PUT/PATCH without
+  `content-type: application/json` gets 415, and any mutation carrying
+  `Sec-Fetch-Site: cross-site` or an `Origin` naming another host gets 403.
+  The proxy must forward the browser's `Host`: behind **nginx** add
+  `proxy_set_header Host $host;` to the location block — its default rewrites
+  `Host` to the upstream, so every console mutation would be refused as
+  cross-origin. Caddy and Traefik preserve `Host` by default.
 
 ### Why it runs inside the provider process
 
