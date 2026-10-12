@@ -32,7 +32,7 @@ import type { AssetMarketRow } from '../db.js'
 import type { FeedCache } from '../feedCache.js'
 import { resolveDraftPolicy, type DraftRefusal } from '../draftPolicy.js'
 import { marketFrom, type MarketBody } from './markets.js'
-import { samePair } from '../../ops/assetRfqMarkets.js'
+import { carrierSatsFor, samePair } from '../../ops/assetRfqMarkets.js'
 
 const MAX_SAMPLES = 6
 
@@ -209,7 +209,10 @@ const priceLadder = (
     direction === 'sell_base' ? { from: market.base, to: market.quote } : { from: market.quote, to: market.base }
   const bounds = (direction === 'sell_base' ? market.sellBase : market.buyBase) ?? { min: 0n, max: 0n }
   const priced: AssetQuoteMarket = { ...market, minPayout: bounds.min, maxPayout: bounds.max }
-  const carrierSats = deps.services.policy.assetCarrierPricing ? deps.services.arkade.dustSats : 0n
+  const carrierSats = carrierSatsFor(market.carrierMode, {
+    dustSats: deps.services.arkade.dustSats,
+    pricedByDefault: deps.services.policy.assetCarrierPricing,
+  })
   const dustSats = deps.services.arkade.dustSats
   const { charged, returned } = carrierLegs(pair, carrierSats)
   const shared = { pair, market: priced, feed, carrierSats, dustSats }
