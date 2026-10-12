@@ -85,6 +85,28 @@ const save = (app: ReturnType<typeof buildAdminApp>, body: unknown) =>
   )
 
 describe('POST /api/pricing/preview — asset markets', () => {
+  it.each([
+    ['off', undefined, false],
+    ['priced', undefined, true],
+    ['inherit', 'false', false],
+    ['inherit', 'true', true],
+  ])('prices carrier mode %s against the draft default %s', async (carrierMode, defaultValue, priced) => {
+    const { app, adminStore } = await build({
+      policy: { offerMarkets: [], assetRfqTokens: [], assetCarrierPricing: false, offerChargesDeliveredCarrier: false },
+    })
+    await save(app, marketBody())
+    const { body } = await preview(app, {
+      target: 'market',
+      market: marketBody({ carrierMode }),
+      direction: 'sell_base',
+      side: 'from',
+      overrides: defaultValue === undefined ? {} : { ASSET_CARRIER_PRICING: defaultValue },
+    })
+    expect(body.carrier).toMatchObject({ priced, charged: priced ? '330' : '0' })
+    expect(await adminStore.getOverrides()).toEqual({})
+    await adminStore.close()
+  })
+
   it('prices a ladder against the saved feed, without fetching again', async () => {
     const { app, adminStore, fetchPrice } = await build()
     await save(app, marketBody())

@@ -152,6 +152,10 @@ const corridorPreview = (deps: AdminDeps, body: Record<string, unknown>, side: '
 }
 
 const marketPreview = async (deps: AdminDeps, feeds: FeedCache, body: Record<string, unknown>, side: 'from' | 'to') => {
+  const parsed = stringOverrides(body.overrides)
+  if (!parsed.ok) return { invalid: parsed.invalid, samples: [] }
+  const resolved = resolveDraftPolicy(deps.services.config, parsed.draft)
+  if (!resolved.ok) return { invalid: resolved.invalid, samples: [] }
   let market: AssetMarketConfig
   try {
     market = marketFrom((body.market ?? {}) as MarketBody)
@@ -194,6 +198,9 @@ const marketPreview = async (deps: AdminDeps, feeds: FeedCache, body: Record<str
     read.readAt,
     body.direction === 'buy_base' ? 'buy_base' : 'sell_base',
     side,
+    parsed.draft.ASSET_CARRIER_PRICING === undefined
+      ? deps.services.policy.assetCarrierPricing
+      : resolved.config.assetCarrierPricing,
   )
 }
 
@@ -204,15 +211,13 @@ const priceLadder = (
   readAt: number,
   direction: 'sell_base' | 'buy_base',
   side: 'from' | 'to',
+  pricedByDefault: boolean,
 ) => {
   const pair: AssetPair =
     direction === 'sell_base' ? { from: market.base, to: market.quote } : { from: market.quote, to: market.base }
   const bounds = (direction === 'sell_base' ? market.sellBase : market.buyBase) ?? { min: 0n, max: 0n }
   const priced: AssetQuoteMarket = { ...market, minPayout: bounds.min, maxPayout: bounds.max }
-  const carrierSats = carrierSatsFor(market.carrierMode, {
-    dustSats: deps.services.arkade.dustSats,
-    pricedByDefault: deps.services.policy.assetCarrierPricing,
-  })
+  const carrierSats = carrierSatsFor(market.carrierMode, { dustSats: deps.services.arkade.dustSats, pricedByDefault })
   const dustSats = deps.services.arkade.dustSats
   const { charged, returned } = carrierLegs(pair, carrierSats)
   const shared = { pair, market: priced, feed, carrierSats, dustSats }

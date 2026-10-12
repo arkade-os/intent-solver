@@ -31,6 +31,7 @@ export type KnobSource = 'env' | 'override'
 export interface KnobView {
   key: string
   value: string | number | boolean
+  envValue?: string | number | boolean
   source: KnobSource
   /** False for knobs the console shows but cannot change. */
   editable: boolean
@@ -329,11 +330,13 @@ export const describeSettings = (
 ): KnobView[] => {
   const effective = applyOverrides(config, overrides)
   const values = editableKnobValues(effective)
+  const envValues = editableKnobValues(config)
   const waiting = new Set(pending)
   const sourceOf = (key: string): KnobSource => (overrides[key] === undefined ? 'env' : 'override')
   const knob = (key: string, editable = true): KnobView => ({
     key,
     value: values[key]!,
+    envValue: envValues[key]!,
     source: sourceOf(key),
     editable,
     restartRequired: !LIVE_KEYS.has(key),

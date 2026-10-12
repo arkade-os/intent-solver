@@ -173,6 +173,22 @@ main {
   max-width: 1400px;
 }
 
+.activity-section {
+  border-top: 1px solid var(--line);
+  padding: 1rem 0;
+  scroll-margin-top: 5rem;
+  min-width: 0;
+}
+
+.activity-content {
+  overflow-x: auto;
+}
+
+.activity .toolbar h1 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
 /* ---- tables ------------------------------------------------------------ */
 /* Dense on purpose. An operator scanning for the one bad row wants as many
    rows on screen as will fit, not generous padding. */
@@ -957,4 +973,94 @@ tr.note td {
 .seg button[aria-pressed='true'] {
   background: var(--line);
   color: var(--text);
+}
+
+.pricing-page {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+.pricing-apply {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 0;
+  border-block: 1px solid var(--line-strong);
+}
+
+.pricing-apply p {
+  margin: 0.25rem 0 0;
+}
+
+.pricing-changes {
+  margin: 1rem 0;
+}
+
+.pricing-table {
+  overflow-x: auto;
+}
+
+.pricing-input {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.pricing-input input {
+  min-width: 0;
+}
+
+.pricing-input button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.pricing-page details {
+  padding: 0.6rem 0;
+}
+
+.pricing-page summary {
+  cursor: pointer;
+  color: var(--text-dim);
+}
+
+@media (max-width: 700px) {
+  .pricing-page .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pricing-page .panel {
+    min-width: 0;
+  }
+
+  .pricing-page .sticky {
+    overflow-x: auto;
+  }
+
+  .pricing-page .form-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  }
+
+  .pricing-page .form-grid > .hint,
+  .pricing-page .form-grid > .group {
+    grid-column: 1 / -1;
+  }
+
+  .pricing-page .form-grid .span2 {
+    grid-column: 2 / -1;
+  }
+
+  .pricing-apply {
+    align-items: start;
+    flex-direction: column;
+  }
+
+  .tip .bubble {
+    left: 0;
+    top: 1.2rem;
+    width: min(25rem, 70vw);
+  }
 }
