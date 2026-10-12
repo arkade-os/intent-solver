@@ -79,6 +79,20 @@ const harness = (answer = { revision: 'r', applied: [] as string[], unapplied: [
 }
 
 describe('the unified pricing editor', () => {
+  it('keeps unrelated corridor drafts out of market previews but includes them in corridor previews', () => {
+    const ui = harness()
+    ui.pricingDraft.stageOverride('LN_SEND_MIN_SATS', '200000')
+    ui.pricingDraft.stageOverride('LN_SEND_MAX_SATS', '100000')
+    ui.selectPricing({ kind: 'market', key: ui.markets[0]!.marketKey })
+    expect(ui.pricingPreviewRequest().overrides).toEqual({ ASSET_CARRIER_PRICING: 'false' })
+    ui.selectPricing({ kind: 'corridor', key: 'arkade:BTC->lightning:BTC' })
+    expect(ui.pricingPreviewRequest().overrides).toEqual({
+      ASSET_CARRIER_PRICING: 'false',
+      LN_SEND_MIN_SATS: '200000',
+      LN_SEND_MAX_SATS: '100000',
+    })
+  })
+
   it('keeps both market edits across selection changes and applies them with the carrier default', async () => {
     const keys = [saved('aa', 'A').marketKey, saved('bb', 'B').marketKey]
     const ui = harness({ revision: 'r', applied: [...keys, 'ASSET_CARRIER_PRICING'], unapplied: [] })

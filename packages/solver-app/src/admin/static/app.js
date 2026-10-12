@@ -2083,7 +2083,7 @@ const pricingPreviewRequest = () =>
         market: marketBody(marketDraft),
         direction: previewDirection,
         side: previewSide,
-        overrides: pricingOverrides(),
+        overrides: { ASSET_CARRIER_PRICING: pricingOverrides().ASSET_CARRIER_PRICING },
       }
 
 const applyPricingDraft = async () => {
