@@ -40,26 +40,27 @@ const harness = (hash = '#activity', failOffers = false, response?: (path: strin
 }
 
 describe('one activity page', () => {
-  it.each(['activity', 'swaps'])(
-    'ignores older %s swap results and errors after a newer filtered load',
-    async (olderView) => {
+  it.each(activitySections.flatMap((key) => ['activity', key].map((olderView) => ({ key, olderView }))))(
+    'ignores older $olderView results and errors for $key after a newer section load',
+    async ({ key, olderView }) => {
       for (const staleError of [false, true]) {
         const pending: { resolve: (value: unknown) => void; reject: (error: Error) => void }[] = []
         const ui = harness('#activity', false, async (path) => {
-          if (!path.startsWith('/api/swaps?')) return { path }
+          const endpoint = key === 'swaps' ? '/api/swaps?' : key === 'refusals' ? '/api/rfq-refusals' : `/api/${key}`
+          if (!path.startsWith(endpoint)) return { path }
           return new Promise((resolve, reject) => pending.push({ resolve, reject }))
         })
         const older = ui.load(olderView)
         await vi.waitFor(() => expect(pending).toHaveLength(1))
         ui.state.filters.phase = 'exposed'
-        const newer = ui.load('swaps')
+        const newer = ui.load(key)
         await vi.waitFor(() => expect(pending).toHaveLength(2))
-        pending[1]!.resolve({ swaps: [{ id: 'newer', phase: 'exposed' }] })
+        pending[1]!.resolve({ revision: 'newer' })
         await newer
         if (staleError) pending[0]!.reject(new Error('old request failed'))
-        else pending[0]!.resolve({ swaps: [{ id: 'older', phase: 'done' }] })
+        else pending[0]!.resolve({ revision: 'older' })
         await older
-        expect(ui.state.data.swaps).toEqual({ swaps: [{ id: 'newer', phase: 'exposed' }] })
+        expect(ui.state.data[key]).toEqual({ revision: 'newer' })
         expect(ui.state.activityErrors).toEqual({})
       }
     },

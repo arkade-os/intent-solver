@@ -37,7 +37,10 @@ export class PricingDraft {
     const values = Object.fromEntries(knobs.filter((k) => k.editable).map((k) => [k.key, String(k.value)]))
     for (const [key, value] of Object.entries(this.overrides)) {
       const knob = knobs.find((k) => k.key === key)
-      if (value === null && !knob) continue
+      if (value === null && knob?.envValue === undefined) {
+        delete values[key]
+        continue
+      }
       values[key] = value === null ? String(knob.envValue) : value
     }
     return values
