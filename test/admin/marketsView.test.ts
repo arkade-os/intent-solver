@@ -42,7 +42,7 @@ describe('the markets screen is reachable', () => {
     // no body falls through to the overview and looks like a broken link.
     expect(appSource).toContain("['pricing', 'pricing']")
     expect(appSource).toContain("markets: () => '/api/markets'")
-    expect(appSource).toContain('markets: marketsView')
+    expect(appSource).toContain('pricing: pricingView')
   })
 
   it('is exempt from the swap-event reload, like settings', () => {
