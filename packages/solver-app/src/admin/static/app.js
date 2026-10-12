@@ -562,7 +562,10 @@ const paintOverviewBalances = () => {
 
 const overviewView = () => {
   const o = state.overview
-  if (!o) return h('p.muted', 'loading…')
+  if (!o)
+    return state.overviewError
+      ? h('p.banner', state.overviewError, ' ', h('button.act', { onclick: () => load('overview') }, 'retry'))
+      : h('p.muted', 'loading…')
   return h(
     'div',
     attentionPanel(o),

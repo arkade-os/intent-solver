@@ -72,6 +72,28 @@ const harness = (hash = '#activity', failOffers = false, response?: (path: strin
 }
 
 describe('one activity page', () => {
+  it('shows an Overview status error with a working retry instead of perpetual loading', () => {
+    const controls: { spec: string; args: unknown[] }[] = []
+    const h = (spec: string, ...args: unknown[]) => {
+      const node = { spec, args }
+      controls.push(node)
+      return node
+    }
+    const load = vi.fn()
+    const overview = source.slice(source.indexOf('const overviewView'), source.indexOf('const swapsView'))
+    new Function('state', 'h', 'load', `${overview}; overviewView()`)(
+      { overview: null, overviewError: 'status offline' },
+      h,
+      load,
+    )
+    expect(controls.some((node) => node.spec === 'p.banner' && node.args.includes('status offline'))).toBe(true)
+    const retry = controls.find((node) => node.spec === 'button.act')
+    expect(retry).toBeDefined()
+    const props = retry!.args[0] as { onclick: () => void }
+    props.onclick()
+    expect(load).toHaveBeenCalledWith('overview')
+  })
+
   it('keeps changed P&L filters separate and ignores their older response', async () => {
     const pending: ((value: unknown) => void)[] = []
     const ui = harness('#activity', false, async (path) => {
