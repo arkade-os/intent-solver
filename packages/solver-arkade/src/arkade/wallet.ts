@@ -29,6 +29,7 @@ import {
   Wallet,
   type Recipient,
   type TapLeafScript,
+  type VirtualCoin,
 } from '@arkade-os/sdk'
 import { SQLiteContractRepository, SQLiteWalletRepository, type SQLExecutor } from '@arkade-os/sdk/repositories/sqlite'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -43,7 +44,7 @@ import { log } from '@arkade-os/solver-core/util/poll.js'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import { claimIdentity } from './claimIdentity.js'
 import type { CovenantSwapScript } from './covenant.js'
-import { vtxoPages } from './indexerPaging.js'
+import { virtualTxPages, vtxoPages } from './indexerPaging.js'
 import { TimedArkProvider, TimedIndexerProvider } from './latencyProviders.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
 
@@ -439,27 +440,33 @@ export const findClaimPreimage = async (
   paymentHashHex: string,
 ): Promise<Uint8Array | null> => {
   if (outpoints.length === 0) return null
-  const { vtxos } = await ctx.wallet.indexerProvider.getVtxos({ outpoints: [...outpoints] })
+  // Paged: `arkd` clamps a page below the size the SDK asks for, so one read of a
+  // long outpoint list stops short and a claim past the ceiling never reveals `P`.
+  const vtxos: VirtualCoin[] = []
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { outpoints: [...outpoints] })) {
+    vtxos.push(...batch)
+  }
 
   // Both spend facts, not just `spentBy` — see lockupSpendEvidence. Truthiness, never
   // presence: both are "" rather than absent for an output they do not apply to.
   const spendingTxids = [...new Set(vtxos.flatMap((v) => [v.spentBy, v.settledBy]).filter((id): id is string => !!id))]
   if (spendingTxids.length === 0) return null
 
-  const { txs } = await ctx.wallet.indexerProvider.getVirtualTxs(spendingTxids)
-  for (const raw of txs) {
-    // No options object, matching every other Transaction.fromPSBT call in
-    // this file (claimSwapScript, refundSwapScript) — confirmed against the
-    // pinned SDK build that the default already preserves Ark's proprietary
-    // PSBT fields (ConditionWitness among them) through this exact round trip.
-    const tx = Transaction.fromPSBT(base64.decode(raw))
-    for (let i = 0; i < tx.inputsLength; i++) {
-      const input = tx.getInput(i)
-      if (!input.txid) continue
-      const matchesOurOutpoint = outpoints.some((o) => hex.encode(input.txid!) === o.txid && input.index === o.vout)
-      if (!matchesOurOutpoint) continue
-      for (const candidate of candidateWitnessItems(tx, i)) {
-        if (hashMatches(candidate, paymentHashHex)) return candidate
+  // Same reason the vtxo read above is paged: a padded script names more spending
+  // transactions than one request carries back. A match stops the later chunks too.
+  for await (const batch of virtualTxPages(ctx.wallet.indexerProvider, spendingTxids)) {
+    for (const raw of batch) {
+      // No options object, as everywhere else in this file: confirmed against the
+      // pinned SDK that the default preserves ConditionWitness through this trip.
+      const tx = Transaction.fromPSBT(base64.decode(raw))
+      for (let i = 0; i < tx.inputsLength; i++) {
+        const input = tx.getInput(i)
+        if (!input.txid) continue
+        const matchesOurOutpoint = outpoints.some((o) => hex.encode(input.txid!) === o.txid && input.index === o.vout)
+        if (!matchesOurOutpoint) continue
+        for (const candidate of candidateWitnessItems(tx, i)) {
+          if (hashMatches(candidate, paymentHashHex)) return candidate
+        }
       }
     }
   }
@@ -504,15 +511,20 @@ export type LockupSpendEvidence = 'unknown' | 'unspent' | 'spent'
  * spent outputs. `isVtxoSpent`, not a `spentBy` test: the wire contract permits
  * `isSpent: true` with an empty `spentBy`. A SWEPT output is not a terminal spend, so a
  * swept batch stays actionable; no output at all is `unknown` (lag), never proof.
+ * `spent` needs every page, being the one answer that lets a caller stop collecting.
  */
 export const lockupSpendEvidence = async (
   ctx: Pick<ArkadeContext, 'wallet'>,
   pkScriptHex: string,
 ): Promise<LockupSpendEvidence> => {
-  const { vtxos } = await ctx.wallet.indexerProvider.getVtxos({ scripts: [pkScriptHex] })
-  const all = vtxos ?? []
-  if (all.length === 0) return 'unknown'
-  return all.every((vtxo) => isVtxoSpent(vtxo)) ? 'spent' : 'unspent'
+  let seen = false
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
+    for (const vtxo of batch) {
+      seen = true
+      if (!isVtxoSpent(vtxo)) return 'unspent'
+    }
+  }
+  return seen ? 'spent' : 'unknown'
 }
 
 /**
