@@ -38,8 +38,15 @@ out of scope for this spec — the Lightning legs use RFQ permanently.
   Broadcasts are never refused at all (§ 4.6). **Responses are tolerant**:
   clients MUST ignore unknown fields in quotes, bids, refusals and statuses,
   so solvers can extend responses without a version bump.
+- **Versions.** The envelope's `v` names the protocol version. The reference
+  implementation speaks `v: 1`. `v: 2` makes two breaking changes: amounts
+  are strings only (§ 2.1), and pairs and topics use CAIP-19 identifiers
+  (§ 2.2).
 
 ## 2. Corridors, assets, pairs
+
+This section describes `v: 1` identifiers. `v: 2` replaces them with CAIP-19
+identifiers (§ 2.2).
 
 A **leg** is `<corridor>:<asset>`. A **pair** is directional:
 `<from-leg>-><to-leg>`. Direction matters — `arkade:BTC->lightning:BTC` and
@@ -199,7 +206,84 @@ imposes no order there; § 12). Examples: `arkade:btc/lightning:btc`,
 non-BTC asset the id is the 68-hex AssetId, so a cross-asset market key is
 network-scoped. Where this spec needs the market key — the open-RFQ
 subscription tag, § 4.6 — it says so explicitly; everywhere else `pair` means
-the directional form above.
+the directional form above. `v: 2` replaces this market key with the § 2.2
+topic key.
+
+### 2.2 Identifiers in `v: 2` _(specified; NOT yet implemented)_
+
+`v: 2` legs are the CAIP-19 asset ids that solver-registry cards already use.
+One id holds the corridor, the network and the asset.
+
+**Legs.** A leg is `<corridor>:<network>/<asset-namespace>:<asset-reference>`:
+
+| leg                 | form                                      | example                                                     |
+| ------------------- | ----------------------------------------- | ----------------------------------------------------------- |
+| BTC within Arkade   | `arkade:<network>/slip44:<coin-type>`     | `arkade:bitcoin/slip44:0`                                   |
+| Arkade-issued asset | `arkade:<network>/asset:<asset-id>`       | `arkade:bitcoin/asset:<asset-id>`                           |
+| BTC over Lightning  | `bolt11:<network>/slip44:<coin-type>`     | `bolt11:mutinynet/slip44:1`                                 |
+| BTC onchain         | `bitcoin:<network>/slip44:<coin-type>`    | `bitcoin:bitcoin/slip44:0`                                  |
+| ERC-20 token        | `eip155:<chain-id>/erc20:<token-address>` | `eip155:1/erc20:0xdac17f958d2ee523a2206206994597c13d831ec7` |
+
+- `<network>` is the network the leg settles on: `bitcoin` (mainnet),
+  `signet`, `mutinynet` or `regtest`.
+- BTC is coin type `0` on `bitcoin` and `1` on every test network. Any other
+  coin type is malformed.
+- `<asset-id>` is the 68-hex Arkade AssetId from § 2.
+- `<chain-id>` is the EIP-155 chain id: 1 or higher, at most 32 digits.
+  `<token-address>` is the token's own contract, never a swap contract.
+- Every character is lowercase, including hex and ERC-20 addresses. Receivers
+  compare ids byte for byte.
+
+**Pairs.** A pair is `<from-leg>-><to-leg>`, directional as in `v: 1`:
+
+```text
+arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0
+```
+
+- A receiver MUST accept pairs up to 184 characters, the longest the grammar
+  allows (two Arkade-issued asset legs on `mutinynet`).
+- A solver refuses a pair for a network it does not serve, with
+  `unsupported_pair`.
+- A client SHOULD send canonical pairs. Every pair a solver sends is
+  canonical, whatever spelling the request used.
+
+**Aliases.** A `v: 2` solver accepts these `v: 1` spellings in `rfq_request`
+and `rfq_open`. It resolves each one on its own network:
+
+| alias               | canonical leg                          |
+| ------------------- | -------------------------------------- |
+| `arkade:BTC`        | `arkade:<network>/slip44:<coin-type>`  |
+| `lightning:BTC`     | `bolt11:<network>/slip44:<coin-type>`  |
+| `onchain:BTC`       | `bitcoin:<network>/slip44:<coin-type>` |
+| `arkade:<asset-id>` | `arkade:<network>/asset:<asset-id>`    |
+
+- Any other non-canonical spelling gets `unsupported_pair`.
+- A client compares the quoted pair with the canonical form of the pair it
+  sent.
+
+**Topic key.** The open-RFQ tag (§ 4.6) and the broker topic (§ 3.2) carry a
+topic key: the two canonical legs of the pair, joined with `~`. A topic key
+has no direction, so the leg order is fixed:
+
+- When exactly one leg is on `arkade`, the `arkade` leg comes first.
+- Otherwise the legs sort in byte order.
+
+```text
+arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0
+arkade:bitcoin/asset:<asset-id>~arkade:bitcoin/slip44:0
+```
+
+`~` never appears in a CAIP-19 id, so a topic key always splits into its two
+legs. A client derives the topic key from the pair, never from a registry
+card: the registry's market key joins the card's ids with `/`, in the card's
+own order.
+
+**Migration.** `v: 1` clients compare the quoted pair byte for byte with the
+pair they sent, so a solver answers each request in the request's own version.
+
+1. Solvers add `v: 2` and keep serving `v: 1` unchanged.
+2. Clients move to `v: 2`.
+3. Solvers drop `v: 1` once no client sends it.
 
 ## 3. Transport
 
@@ -532,6 +616,8 @@ Relays redeliver, clients retry, and networks duplicate. The rules:
   re-quoted only after every prior swap on it is `refused`/`expired` without
   exposure (a hash whose preimage the solver may already know is burned
   forever).
+- In `v: 2` these comparisons use canonical pairs (§ 2.2). A retry that
+  spells the same pair with an alias is the same request.
 
 ### 4.6 Open RFQ — broadcast bidding _(solver side implemented — `packages/solver-core/src/core/openRfq.ts`, `packages/solver-transport/src/ingress/relay.ts`; the client side lives in the ts-sdk)_
 
@@ -561,7 +647,8 @@ corridors resolved, canonical asset ids, deterministic leg order:
 `arkade:btc/lightning:btc` — never the card's display label and never an
 unordered variant; a subscription keyed to any other form silently misses
 every event. Solvers subscribe by this tag, one subscription per served
-market, alongside their directed subscription.
+market, alongside their directed subscription. In `v: 2` the tag is the § 2.2
+topic key, for example `arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0`.
 
 ```json
 {
@@ -1916,7 +2003,8 @@ have a tested reference in this repo.
   dormant v1 quote layer plus a matcher — and the exact granularity of the
   § 4.6 size-bucket ladder. The § 2 leg-ordering rule for markets the
   registry leaves unordered (both or neither side arkade) is this spec's
-  extension and should be upstreamed so the two documents cannot drift.
+  extension and should be upstreamed so the two documents cannot drift. The
+  § 2.2 topic key reuses that rule.
 - **Key separation.** v1 assumes one solver key for transport identity and
   settlement; splitting them (hot Nostr key, cold settlement key) needs a
   binding proof in the ad or quote.
@@ -1931,7 +2019,8 @@ have a tested reference in this repo.
   registry, never derived from chain metadata (§ 2.1). Until that exists a
   solver serving a cross-corridor same-asset pair is trusting its own config,
   and a wrong-issuer id is a swap into a worthless lookalike rather than a
-  refusal.
+  refusal. `v: 2` (§ 2.2) removes the shared ticker: each leg names its own
+  native id. Whether two native ids are one asset is still configuration.
 - **Routing.** § 2 says new corridors and assets extend the registries without
   changing the protocol. That holds for EDGES and not for ROUTES. Every
   message here names exactly one `pair`, so a trade that transits an
