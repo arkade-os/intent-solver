@@ -252,6 +252,21 @@ describe('GET /api/backends', () => {
 })
 
 describe('GET /api/overview', () => {
+  it('can read risk and policy without probing remote balances', async () => {
+    const lightning = vi.fn().mockRejectedValue(new Error('must not probe lightning'))
+    const arkade = vi.fn().mockRejectedValue(new Error('must not probe arkade'))
+    const response = await get('/api/overview?balances=false', {
+      ln: { getBalance: lightning },
+      arkade: { wallet: { getBalance: arkade } },
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      exposure: { committedSats: 0, capSats: 300_000 },
+      balances: null,
+    })
+    expect(lightning).not.toHaveBeenCalled()
+    expect(arkade).not.toHaveBeenCalled()
+  })
   it('reports exposure against the cap', async () => {
     const body = await (await get('/api/overview')).json()
     expect(body).toMatchObject({
