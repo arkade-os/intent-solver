@@ -40,7 +40,7 @@ describe('the markets screen is reachable', () => {
   it('is in the nav, the endpoint table and the view table', () => {
     // All three, because two of the three renders a dead tab: a nav entry with
     // no body falls through to the overview and looks like a broken link.
-    expect(appSource).toContain("['markets', 'markets']")
+    expect(appSource).toContain("['pricing', 'pricing']")
     expect(appSource).toContain("markets: () => '/api/markets'")
     expect(appSource).toContain('markets: marketsView')
   })

@@ -17,6 +17,7 @@
 
 import { barsChart, categoryChart, cumulativeChart, decayChart } from './charts.js'
 import { applyPricing } from './pricingSave.js'
+import { PricingDraft } from './pricingDraft.js'
 
 /* ---- tiny element helper ------------------------------------------------ */
 
@@ -300,8 +301,7 @@ const VIEWS = [
   ['backends', 'backends'],
   ['diagnostics', 'diagnostics'],
   ['discovery', 'discovery'],
-  ['settings', 'settings'],
-  ['markets', 'markets'],
+  ['pricing', 'pricing'],
   ['audit', 'audit'],
 ]
 
@@ -1333,7 +1333,12 @@ let carrierDefaultDraft = false
 const carrierDefaultOverride = () =>
   carrierDefaultDraft === carrierRfqPriced() ? {} : { ASSET_CARRIER_PRICING: String(carrierDefaultDraft) }
 
-const openMarketForm = (draft) => ((marketDraft = draft), (carrierDefaultDraft = carrierRfqPriced()), render())
+const openMarketForm = (draft) => {
+  marketDraft = draft
+  carrierDefaultDraft =
+    state.view === 'pricing' ? pricingOverrides().ASSET_CARRIER_PRICING === 'true' : carrierRfqPriced()
+  render()
+}
 
 const blankMarket = () => ({
   base: 'BTC',
@@ -1447,6 +1452,11 @@ const group = (title) => h('span.group', title)
 const field = (label, key, hint, explain) => [
   h('span.label', label, explain ? tip(explain) : null),
   h('input', {
+    'aria-label': label,
+    readonly:
+      state.view === 'pricing' &&
+      state.data.markets?.markets.some((row) => row.marketKey === pricingSelection?.key) &&
+      (key === 'base' || key === 'quote'),
     value: String(marketDraft[key] ?? ''),
     oninput: (e) => ((marketDraft[key] = e.target.value), schedulePreview()),
   }),
@@ -1476,7 +1486,7 @@ const carrierDefaultField = () =>
     h('input', {
       type: 'checkbox',
       ...(carrierDefaultDraft ? { checked: true } : {}),
-      oninput: (e) => (carrierDefaultDraft = e.target.checked),
+      oninput: (e) => ((carrierDefaultDraft = e.target.checked), schedulePreview()),
     }),
     h('span.faint', 'ASSET_CARRIER_PRICING, deployment-wide — saved with this market, in one ordered save'),
   )
@@ -1531,9 +1541,18 @@ let previewError = null
 let previewTimer = null
 let previewDirection = 'sell_base'
 let previewSide = 'from'
+let previewRequest = 0
 
 // Assigned only: Task 10 declares `schedulePreview`, a second declaration is a load-time SyntaxError.
 schedulePreview = () => {
+  if (state.view === 'pricing') {
+    syncPricingMarket()
+    paintPricingChanges()
+    paintPricingTable()
+    previewRequest++
+    previewData = null
+    if (previewNode) paintPreview()
+  }
   if (previewTimer) clearTimeout(previewTimer)
   previewTimer = setTimeout(() => {
     previewTimer = null
@@ -1542,20 +1561,28 @@ schedulePreview = () => {
 }
 
 const refreshPreview = async () => {
-  if (!marketDraft || !previewNode) return
+  if ((!marketDraft && !(state.view === 'pricing' && pricingSelection?.kind === 'corridor')) || !previewNode) return
+  const request = ++previewRequest
   try {
-    previewData = await api('/api/pricing/preview', {
+    const next = await api('/api/pricing/preview', {
       method: 'POST',
-      body: JSON.stringify({
-        target: 'market',
-        market: marketBody(marketDraft),
-        marketKey: marketDraft.marketKey,
-        direction: previewDirection,
-        side: previewSide,
-      }),
+      body: JSON.stringify(
+        state.view === 'pricing'
+          ? pricingPreviewRequest()
+          : {
+              target: 'market',
+              market: marketBody(marketDraft),
+              marketKey: marketDraft.marketKey,
+              direction: previewDirection,
+              side: previewSide,
+            },
+      ),
     })
+    if (request !== previewRequest) return
+    previewData = next
     previewError = null
   } catch (error) {
+    if (request !== previewRequest) return
     previewData = null
     previewError = error instanceof Error ? error.message : String(error)
   }
@@ -1651,6 +1678,7 @@ const previewBody = () => {
       previewData.invalid.map((item) => h('p.faint', `${item.key} — ${item.reason}`)),
     )
   }
+  if (state.view === 'pricing' && pricingSelection?.kind === 'corridor') return corridorPreviewBody()
   const feed = previewData.feed ?? { state: 'unresolved', reason: '' }
   const controls = h(
     'p.toolbar',
@@ -1735,7 +1763,7 @@ const rfqDirectionLine = () => {
 const boundsHint =
   'Bounds on what we pay out in this direction, not on what the customer sends. Set both to 0 to close this direction while leaving everything else configured.'
 
-const marketForm = () =>
+const marketForm = (save = saveMarket, close = () => ((marketDraft = null), render()), saveLabel = 'save') =>
   h(
     'section.panel',
     h('h2', 'market'),
@@ -1874,17 +1902,17 @@ const marketForm = () =>
       ),
       h('span.span2', h('span.muted', rfqDirectionLine())),
     ),
-    checkbox('serves offer', 'servesOffer', 'takes maker offer packets — needs a restart to start or stop'),
+    checkbox(
+      'serves offer',
+      'servesOffer',
+      'takes maker offer packets — live on a running offer path; starting a missing path needs a restart',
+    ),
     checkbox('serves rfq', 'servesRfq', 'answers RFQ quote requests — live'),
     checkbox('rfq sell base', 'rfqSellBase', 'open, per direction; false is CLOSED'),
     checkbox('rfq buy base', 'rfqBuyBase'),
     carrierModeField(),
-    carrierDefaultField(),
-    h(
-      'p.toolbar',
-      h('button.act', { onclick: saveMarket }, 'save'),
-      h('button.act', { onclick: () => ((marketDraft = null), render()) }, 'cancel'),
-    ),
+    state.view === 'pricing' ? null : carrierDefaultField(),
+    h('p.toolbar', h('button.act', { onclick: save }, saveLabel), h('button.act', { onclick: close }, 'close editor')),
   )
 
 const NOTHING_TITLE =
@@ -1970,6 +1998,482 @@ const marketsView = () => {
 }
 
 /* ==== asset markets — END ================================================= */
+
+/* ---- unified pricing ---------------------------------------------------- */
+
+const pricingDraft = new PricingDraft()
+const pricingMarketForms = new Map()
+let pricingSelection = null
+let pricingOriginal = null
+let pricingChangesNode = null
+let pricingTableNode = null
+let pricingOutcome = null
+
+const BTC_CORRIDORS = [
+  { key: 'arkade:BTC->lightning:BTC', stem: 'LN_SEND', label: 'Arkade → Lightning' },
+  { key: 'lightning:BTC->arkade:BTC', stem: 'LN_RECEIVE', label: 'Lightning → Arkade' },
+  { key: 'arkade:BTC->onchain:BTC', stem: 'ONCHAIN_SEND', label: 'Arkade → onchain' },
+  { key: 'onchain:BTC->arkade:BTC', stem: 'ONCHAIN_RECEIVE', label: 'Onchain → Arkade' },
+]
+
+const pricingKnobs = () => state.data.settings?.knobs ?? []
+const pricingOverrides = () => pricingDraft.previewOverrides(pricingKnobs())
+const pricingMarketKey = (body) =>
+  [body.base, body.quote]
+    .map(
+      (leg) =>
+        `arkade:${
+          String(leg ?? '')
+            .trim()
+            .toUpperCase() === 'BTC' || !String(leg ?? '').trim()
+            ? 'btc'
+            : String(leg).trim()
+        }`,
+    )
+    .sort()
+    .join('/')
+
+const syncPricingMarket = () => {
+  if (!marketDraft || pricingDraft.busy || pricingSelection?.kind !== 'market') return
+  const body = marketBody(marketDraft)
+  const stored = state.data.markets.markets.some((row) => row.marketKey === pricingSelection.key)
+  const key = stored ? pricingSelection.key : pricingMarketKey(body)
+  if (JSON.stringify(body) === pricingOriginal) {
+    const stagedKey = pricingSelection.draftKey ?? key
+    pricingDraft.markets.delete(stagedKey)
+    pricingMarketForms.delete(stagedKey)
+  } else {
+    if (pricingSelection.draftKey && pricingSelection.draftKey !== key) {
+      pricingDraft.markets.delete(pricingSelection.draftKey)
+      pricingMarketForms.delete(pricingSelection.draftKey)
+    }
+    pricingSelection.draftKey = key
+    pricingDraft.stageMarket(key, body)
+    pricingMarketForms.set(key, { ...marketDraft })
+  }
+}
+
+const stagePricingOverride = (key, value) => {
+  const knob = pricingKnobs().find((item) => item.key === key)
+  if (value !== null && value === String(knob.value)) delete pricingDraft.overrides[key]
+  else pricingDraft.stageOverride(key, value)
+}
+
+const selectPricing = (selection, draft = null) => {
+  syncPricingMarket()
+  previewRequest++
+  previewData = null
+  previewError = null
+  pricingSelection = selection
+  if (selection?.key && pricingDraft.markets.has(selection.key)) selection.draftKey = selection.key
+  if (selection?.kind === 'market') {
+    const saved = state.data.markets.markets.find((row) => row.marketKey === selection.key)
+    pricingOriginal = JSON.stringify(marketBody(saved ? draftFrom(saved) : blankMarket()))
+    marketDraft = { ...(pricingMarketForms.get(selection.key) ?? draft ?? (saved ? draftFrom(saved) : blankMarket())) }
+    carrierDefaultDraft = pricingOverrides().ASSET_CARRIER_PRICING === 'true'
+  } else marketDraft = null
+  render()
+}
+
+const pricingPreviewRequest = () =>
+  pricingSelection?.kind === 'corridor'
+    ? { target: 'corridor', corridor: pricingSelection.key, side: previewSide, overrides: pricingOverrides() }
+    : {
+        target: 'market',
+        market: marketBody(marketDraft),
+        direction: previewDirection,
+        side: previewSide,
+        overrides: pricingOverrides(),
+      }
+
+const applyPricingDraft = async () => {
+  syncPricingMarket()
+  if (!pricingDraft.size || pricingDraft.busy) return
+  const applying = pricingDraft.apply(api)
+  render()
+  try {
+    const result = await applying
+    pricingOutcome = { message: `${result.applied.length} changes applied.`, revision: result.revision }
+  } catch (error) {
+    pricingOutcome = { message: error.message, revision: error.revision, failed: true }
+  } finally {
+    for (const key of pricingMarketForms.keys()) {
+      if (!pricingDraft.markets.has(key)) pricingMarketForms.delete(key)
+    }
+    marketDraft = null
+    pricingSelection = null
+    previewRequest++
+    await load('pricing')
+  }
+}
+
+const discardPricingDraft = () => {
+  pricingDraft.discard()
+  pricingMarketForms.clear()
+  marketDraft = null
+  pricingSelection = null
+  pricingOutcome = null
+  previewRequest++
+  render()
+}
+
+const removePricingMarket = async (market) => {
+  if (pricingDraft.size || pricingDraft.busy) return
+  if (
+    !window.confirm(
+      `Remove ${market.symbol || shortId(market.marketKey)}? This immediately stops new quotes for this market. In-flight swaps remain recoverable.`,
+    )
+  )
+    return
+  try {
+    await api(`/api/markets/${encodeURIComponent(market.marketKey)}`, { method: 'DELETE' })
+    marketDraft = null
+    pricingSelection = null
+    await load('pricing')
+  } catch (error) {
+    fail(error)
+  }
+}
+
+const paintPricingChanges = () => {
+  if (!pricingChangesNode) return
+  clear(pricingChangesNode)
+  const entries = [
+    ...[...pricingDraft.markets].map(([key, row]) => ({
+      key,
+      label: row.symbol || shortId(key),
+      value: 'market edited',
+    })),
+    ...Object.entries(pricingDraft.overrides).map(([key, value]) => ({
+      key,
+      label: key,
+      value: value === null ? 'use environment value' : value,
+    })),
+  ]
+  pricingChangesNode.appendChild(
+    h(
+      'div.pricing-apply',
+      h(
+        'div',
+        h('b', pricingDraft.busy ? 'Applying changes…' : `${entries.length} pending changes`),
+        h(
+          'p.faint',
+          'Changes stay in this tab until you apply or discard them. Restrictions are applied before relaxations.',
+        ),
+      ),
+      h(
+        'div.toolbar',
+        h(
+          'button.act',
+          { disabled: !entries.length || pricingDraft.busy, onclick: applyPricingDraft },
+          'apply changes',
+        ),
+        h(
+          'button.act',
+          { disabled: !entries.length || pricingDraft.busy, onclick: discardPricingDraft },
+          'discard changes',
+        ),
+      ),
+    ),
+  )
+  if (entries.length)
+    pricingChangesNode.appendChild(
+      h(
+        'details',
+        h('summary', 'review pending changes'),
+        h(
+          'ul',
+          entries.map((entry) => h('li', h('span.mono', entry.label), `: ${entry.value}`)),
+        ),
+      ),
+    )
+  if (pricingOutcome)
+    pricingChangesNode.appendChild(
+      h(
+        'p.notice',
+        { role: 'status' },
+        pricingOutcome.message,
+        entries.length ? ` ${entries.length} changes remain in the draft; review before retrying.` : '',
+        pricingOutcome.revision ? ` Audit revision: ${pricingOutcome.revision}.` : '',
+      ),
+    )
+}
+
+const pricingKnobField = (knob, label, explanation) => {
+  const value = pricingOverrides()[knob.key] ?? String(knob.value)
+  const change = (next) => {
+    stagePricingOverride(knob.key, next)
+    if (knob.key === 'ASSET_CARRIER_PRICING' && marketDraft) {
+      carrierDefaultDraft = next === 'true'
+    }
+    schedulePreview()
+  }
+  return [
+    h('label.label', { for: `pricing-${knob.key}` }, label, tip(explanation)),
+    h(
+      'span.pricing-input',
+      h('input', {
+        id: `pricing-${knob.key}`,
+        'aria-label': label,
+        ...(typeof knob.value === 'boolean'
+          ? { type: 'checkbox', checked: value === 'true', onchange: (event) => change(String(event.target.checked)) }
+          : { value, inputmode: 'numeric', oninput: (event) => change(event.target.value) }),
+        disabled: !knob.editable,
+      }),
+      knob.source === 'override'
+        ? h(
+            'button.act',
+            {
+              onclick: () => {
+                stagePricingOverride(knob.key, null)
+                if (knob.key === 'ASSET_CARRIER_PRICING' && marketDraft) {
+                  carrierDefaultDraft = String(knob.envValue) === 'true'
+                }
+                render()
+              },
+            },
+            'use env',
+          )
+        : null,
+    ),
+    h('span.hint', !knob.editable ? 'environment only' : knob.restartRequired ? 'after restart' : 'live after apply'),
+  ]
+}
+
+const corridorForm = () => {
+  const corridor = pricingSelection
+  const definitions = [
+    [
+      'ENABLED',
+      'enabled',
+      'Whether this direction accepts new swaps. A direction absent at boot must be enabled in the environment first.',
+    ],
+    ['FEE_BPS', 'fee bps', 'The percentage fee taken from the customer payout. 50 bps is half of one percent.'],
+    ['FEE_FLAT_SATS', 'flat fee sats', 'A fixed fee per swap, added to the percentage fee.'],
+    ['MIN_SATS', 'minimum sats', 'The smallest amount the customer may send, in satoshis.'],
+    ['MAX_SATS', 'maximum sats', 'The largest amount the customer may send, in satoshis.'],
+  ]
+  return h(
+    'section.panel',
+    h('h2', corridor.label),
+    h(
+      'p.notice',
+      'Stored fees, limits and enabled flags take effect after a solver restart. The preview shows the draft configuration.',
+    ),
+    h(
+      'div.form-grid',
+      definitions.flatMap(([suffix, label, explanation]) => {
+        const knob = pricingKnobs().find((item) => item.key === `${corridor.stem}_${suffix}`)
+        return knob ? pricingKnobField(knob, label, explanation) : []
+      }),
+    ),
+    h('p.toolbar', h('button.act', { onclick: () => selectPricing(null) }, 'close editor')),
+  )
+}
+
+const corridorPreviewBody = () =>
+  h(
+    'div',
+    h(
+      'p.toolbar',
+      segment(
+        [
+          ['from', 'they name what they send'],
+          ['to', 'they name what they get'],
+        ],
+        previewSide,
+        (value) => (previewSide = value),
+      ),
+    ),
+    !previewData.enabled
+      ? h('p.notice', 'This direction is disabled. The amounts below show its pricing if enabled.')
+      : null,
+    h(
+      'table.ladder',
+      h(
+        'thead',
+        h('tr', h('th', 'they send'), h('th.num', 'they receive'), h('th.num', 'spread fee'), h('th.num', 'flat fee')),
+      ),
+      h(
+        'tbody',
+        previewData.samples.map((row) =>
+          row.ok
+            ? h(
+                'tr',
+                h('td', `${sats(row.giveSats)} sats`),
+                h('td.num', `${sats(row.payoutSats)} sats`),
+                h('td.num', `${sats(row.spreadSats)} sats`),
+                h('td.num', `${sats(row.flatSats)} sats`),
+              )
+            : h('tr.refused', h('td', `${sats(row.amountSats)} sats`), h('td', { colspan: 3 }, row.reason)),
+        ),
+      ),
+    ),
+    h(
+      'p.faint',
+      'Fees are not profit: network costs are separate. This preview does not check inventory or Lightning routing.',
+    ),
+  )
+
+const pricingRows = () => {
+  const rows = new Map(state.data.markets.markets.map((row) => [row.marketKey, row]))
+  for (const [key, body] of pricingDraft.markets) rows.set(key, { ...rows.get(key), ...body, marketKey: key })
+  return rows
+}
+
+const pricingTable = (overrides, marketRows) =>
+  h(
+    'tbody',
+    BTC_CORRIDORS.map((corridor) =>
+      h(
+        'tr',
+        h('td', corridor.label),
+        h('td', `${overrides[`${corridor.stem}_FEE_BPS`]} bps + ${overrides[`${corridor.stem}_FEE_FLAT_SATS`]} sats`),
+        h('td', overrides[`${corridor.stem}_ENABLED`] === 'true' ? 'enabled' : 'disabled'),
+        h('td.muted', 'after restart'),
+        h('td', h('button.act', { onclick: () => selectPricing({ kind: 'corridor', ...corridor }) }, 'edit & preview')),
+      ),
+    ),
+    [...marketRows].map(([key, row]) =>
+      h(
+        'tr',
+        h('td', row.symbol || `${legLabel(row.base)} / ${legLabel(row.quote)}`),
+        h('td', `${row.feeBps} bps`),
+        h(
+          'td',
+          row.enabled
+            ? `${row.servesRfq ? 'RFQ ' : ''}${row.servesOffer ? 'offers' : ''}`.trim() || 'no serving path'
+            : 'disabled',
+        ),
+        h('td.muted', pricingDraft.markets.has(key) ? 'draft; market terms live after apply' : 'market terms live'),
+        h(
+          'td',
+          h(
+            'button.act',
+            {
+              onclick: () => selectPricing({ kind: 'market', key }, pricingMarketForms.get(key) ?? draftFrom(row)),
+            },
+            'edit & preview',
+          ),
+          state.data.markets.markets.some((saved) => saved.marketKey === key)
+            ? h(
+                'button.act',
+                {
+                  disabled: pricingDraft.size > 0,
+                  title: 'Remove immediately. Apply or discard pending changes first.',
+                  onclick: () => removePricingMarket(row),
+                },
+                'remove',
+              )
+            : null,
+        ),
+      ),
+    ),
+  )
+
+const paintPricingTable = () => {
+  if (!pricingTableNode) return
+  const next = pricingTable(pricingOverrides(), pricingRows())
+  clear(pricingTableNode)
+  while (next.firstChild) pricingTableNode.appendChild(next.firstChild)
+}
+
+const pricingView = () => {
+  const settings = state.data.settings
+  const markets = state.data.markets
+  if (!settings || !markets) return h('p.muted', 'loading pricing…')
+  const overrides = pricingOverrides()
+  const marketRows = pricingRows()
+  pricingTableNode = pricingTable(overrides, marketRows)
+  pricingChangesNode = h('section.pricing-changes')
+  paintPricingChanges()
+  const close = () => selectPricing(null)
+  return h(
+    'fieldset.pricing-page',
+    { disabled: pricingDraft.busy },
+    h('h1', 'Pricing'),
+    h('p.muted', 'Configure markets and Bitcoin corridors together. Preview customer amounts before applying.'),
+    pricingChangesNode,
+    h(
+      'div.pricing-table',
+      h(
+        'table',
+        h(
+          'thead',
+          h(
+            'tr',
+            h('th', 'market or corridor'),
+            h('th', 'fees'),
+            h('th', 'state'),
+            h('th', 'takes effect'),
+            h('th', ''),
+          ),
+        ),
+        pricingTableNode,
+      ),
+    ),
+    h(
+      'p.toolbar',
+      h('button.act', { onclick: () => selectPricing({ kind: 'market', key: null }, blankMarket()) }, 'add market'),
+    ),
+    marketRows.size === 0
+      ? h('p.faint', 'No asset markets configured. Bitcoin corridors can still be configured above.')
+      : null,
+    pricingSelection
+      ? h(
+          'div.split',
+          pricingSelection.kind === 'corridor' ? corridorForm() : marketForm(close, close, 'keep in draft'),
+          previewPanel(),
+        )
+      : null,
+    h(
+      'section.panel',
+      h('h2', 'Deployment limits & carrier default'),
+      h(
+        'div.form-grid',
+        [
+          [
+            'MAX_EXPOSED_SATS',
+            'exposure cap sats',
+            'The most bitcoin the solver may have committed across swaps at once.',
+          ],
+          ['LOCKUP_TIMEOUT_SECONDS', 'funding window seconds', 'How long a customer has to fund a quoted swap.'],
+          [
+            'ASSET_CARRIER_PRICING',
+            'price the RFQ carrier',
+            'Charge the bitcoin carrier cost when a market uses inherit. Per-market off and priced modes override this default.',
+          ],
+        ].flatMap(([key, label, explanation]) => {
+          const knob = pricingKnobs().find((item) => item.key === key)
+          return knob ? pricingKnobField(knob, label, explanation) : []
+        }),
+      ),
+    ),
+    h(
+      'details',
+      h('summary', 'environment & serving capabilities'),
+      h('p.notice', markets.restartNotice),
+      h(
+        'table',
+        h(
+          'tbody',
+          pricingKnobs()
+            .filter((knob) => !knob.editable)
+            .map((knob) => h('tr', h('td', knob.key), h('td', String(knob.value)))),
+        ),
+      ),
+      h(
+        'table',
+        h(
+          'tbody',
+          markets.markets.map((row) =>
+            h('tr', h('td', row.symbol || shortId(row.marketKey)), capabilityCell(row.serving ?? [], row.gaps ?? [])),
+          ),
+        ),
+      ),
+    ),
+  )
+}
 
 const auditView = () => {
   const a = state.data.audit
@@ -3352,6 +3856,11 @@ const load = async (view) => {
   try {
     state.overview = await api('/api/overview')
     if (ENDPOINTS[view]) state.data[view] = await api(ENDPOINTS[view]())
+    if (view === 'pricing') {
+      const [markets, settings] = await Promise.all([api('/api/markets'), api('/api/settings')])
+      state.data.markets = markets
+      state.data.settings = settings
+    }
     state.banner = null
   } catch (error) {
     state.banner = error instanceof Error ? error.message : String(error)
@@ -3361,6 +3870,7 @@ const load = async (view) => {
 
 const viewFromHash = () => {
   const view = (location.hash || '#overview').slice(1)
+  if (view === 'markets' || view === 'settings') return 'pricing'
   return BODIES[view] ? view : 'overview'
 }
 
@@ -3377,6 +3887,7 @@ const go = (view) => {
 }
 
 const BODIES = {
+  pricing: pricingView,
   overview: overviewView,
   pnl: pnlView,
   swaps: swapsView,
@@ -3619,7 +4130,14 @@ const listen = () => {
     // the one endpoint built to avoid that, and drops keyboard focus off its
     // toolbar each time (`render` restores focus only for `.search`). An
     // operator who wants it fresher re-picks the window, which reloads.
-    if (state.view !== 'settings' && state.view !== 'markets' && state.view !== 'pnl' && !state.dialog) load(state.view)
+    if (
+      state.view !== 'pricing' &&
+      state.view !== 'settings' &&
+      state.view !== 'markets' &&
+      state.view !== 'pnl' &&
+      !state.dialog
+    )
+      load(state.view)
   })
   // EventSource reconnects on its own; nothing to do but not treat it as fatal.
   source.addEventListener('error', () => {})
@@ -3633,6 +4151,12 @@ window.addEventListener('hashchange', () => {
   if (view === state.view) return
   state.view = view
   load(view)
+})
+
+window.addEventListener('beforeunload', (event) => {
+  if (pricingDraft.size === 0) return
+  event.preventDefault()
+  event.returnValue = ''
 })
 
 state.view = viewFromHash()
