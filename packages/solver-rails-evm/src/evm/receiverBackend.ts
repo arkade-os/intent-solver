@@ -189,11 +189,12 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
     receiverAddress: Uint8Array,
     binding: IntentReceiverBinding,
     policy: ReceiverReadPolicy = {},
+    seen?: Awaited<ReturnType<typeof view>>,
   ): Promise<ReceiverInspection> => {
     if (binding.chainId !== deps.chainId) throw new Error('receiver binding chain mismatch')
     if (binding.lock.timelock - binding.activationCutoff < deps.minClaimWindowBlocks)
       throw new Error('receiver destination claim window is too short')
-    const { current, observed, tip, target, tag, ageSeconds } = await view(policy)
+    const { current, observed, tip, target, tag, ageSeconds } = seen ?? (await view(policy))
     const runtimeHash = expectedReceiverRuntimeHash(binding)
     await verifyReceiverBinding(rpc, receiverAddress, binding, runtimeHash, {
       blockTag: tag,
@@ -287,7 +288,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
         if (transactionHash) await canonicalReceipt(transactionHash, observationView.target)
         return { address, transactionHash, verified: false }
       }
-      const observation = await inspect(address, binding)
+      const observation = await inspect(address, binding, {}, observationView)
       if (observation.activated) throw new Error('receiver already activated before provider dispatch')
       return { address, transactionHash, verified: true }
     },

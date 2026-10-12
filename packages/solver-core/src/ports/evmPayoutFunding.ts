@@ -47,6 +47,7 @@ export interface EvmPayoutFundingResult {
 export interface EvmPayoutFundingAdapter {
   readonly identity: string
   prepareQuote?(context: EvmPayoutFundingQuoteContext): Promise<{ validUntil: number } | void>
+  /** Gets the binding with `prepareQuote`'s own `validUntil`; find the reservation by `intentId`. */
   abandonQuote?(binding: EvmPayoutFundingBinding): Promise<void>
   /**
    * Persist binding, receiver, cutoff, reservations and attempt before dispatch;
