@@ -41,6 +41,7 @@ import {
   signOnchainRefundTx,
   type OnchainSigner,
 } from '@arkade-os/solver-rails/onchain/refund.js'
+import { refundSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 import type { OnchainSendBackend, ReceiveSettlement } from '@arkade-os/solver-core/ports/onchain.js'
 import type { OnchainSendSwapRow, OnchainSendSwapStore } from '../db/onchainSwaps.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
@@ -78,6 +79,8 @@ export interface OnchainSendServiceDeps {
     read(): { sats: number; ageMs: number } | null
     fundingFeeSats(): number
   }
+  /** Sampled sat/vB — never an upstream call per quote. Null or absent falls back to {@link MIN_RELAY_FEE_RATE}. */
+  feeRate?: () => number | null
   /** Signs the solver's own onchain refund spend — matches `ArkadeContext.identity`'s shape exactly. */
   signer: OnchainSigner
   /** Where the solver's own refunded onchain sats go. A P2TR pkScript the solver controls. */
@@ -168,7 +171,12 @@ const unrefundableReason = (evidence: 'unknown' | 'unspent', row: OnchainSendSwa
  * refund is impossible" — the distinction that keeps a network blip from
  * permanently sticking a row that only needed the next sweep.
  */
-type OnchainHtlcRefundAttempt = { broadcast: true; txid: string } | { broadcast: false; reason: string }
+type OnchainHtlcRefundAttempt =
+  | { broadcast: true; txid: string }
+  /** `retry`: a fee this payout cannot carry is a verdict about one moment's mempool; a bad rebuild is not. */
+  | { broadcast: false; reason: string; retry: boolean }
+
+const MIN_RELAY_FEE_RATE = 1
 
 /**
  * Re-exported, not defined here: `core/onchainSend.ts` owns it now, because
@@ -213,6 +221,7 @@ export class OnchainSendSwapService {
   private readonly pricing: PricingStrategy
 
   private readonly admission: AdmissionStrategy
+  private refundVsize?: number
 
   constructor(private readonly deps: OnchainSendServiceDeps) {
     this.now = deps.now ?? nowSeconds
@@ -286,7 +295,7 @@ export class OnchainSendSwapService {
     if (request.amountSide !== 'to' && payoutSats <= 0) {
       return { accepted: false, reason: 'fee_consumes_swap' }
     }
-    if (payoutSats < ONCHAIN_DUST_SATS) {
+    if (payoutSats < this.refundablePayoutFloor()) {
       return { accepted: false, reason: 'payout_below_dust' }
     }
 
@@ -422,6 +431,16 @@ export class OnchainSendSwapService {
     }
   }
 
+  // Dust PLUS the refund's own fee: under it an unclaimed HTLC cannot be returned, and its claim leaf never expires.
+  private refundablePayoutFloor(): number {
+    this.refundVsize ??= refundSpendVsize({
+      network: ONCHAIN_NETWORKS[this.deps.network],
+      destinationScript: this.deps.refundDestinationScript,
+    })
+    const rate = Math.max(this.deps.feeRate?.() ?? 0, MIN_RELAY_FEE_RATE)
+    return ONCHAIN_DUST_SATS + Math.ceil(this.refundVsize * rate)
+  }
+
   /**
    * The smallest payout this corridor would fund — the floor under a float that
    * can serve at all. Answered here because a second derivation in a caller
@@ -429,7 +448,7 @@ export class OnchainSendSwapService {
    */
   minimumPayoutSats(): number {
     return Math.max(
-      ONCHAIN_DUST_SATS,
+      this.refundablePayoutFloor(),
       this.pricing.payoutFor({ pair: RFQ_PAIR_ONCHAIN_SEND, giveSats: this.deps.limits.minSats }),
     )
   }
@@ -509,8 +528,9 @@ export class OnchainSendSwapService {
    * a swap that was ever EXPOSED — and here `stuck` conflates outcomes that are
    * opposites. `whenClaiming` reaches it holding a preimage the client already
    * revealed, so the solver has PAID OUT and refunding would pay the client twice;
-   * `whenRefundingOnchain`'s dust case reaches it having just confirmed the client did
-   * NOT claim, where refunding is correct. Nothing on the row separates the two —
+   * `whenRefundingOnchain`'s dust case reaches it with that output UNSPENT, which the claim
+   * leaf's missing locktime makes "not yet" rather than "never" — so reclaim that leg first
+   * ({@link reclaimOnchainHtlc}) or refunding hands over BOTH. Nothing on the row separates the two —
    * `failure_reason` is free text, and even the "spent by something other than a
    * matching claim" verdict is a guess, since `preimageFromClaimWitness` reads
    * `witness[1]`. A human reads the chain; this is how they act on it.
@@ -914,6 +934,9 @@ export class OnchainSendSwapService {
 
     const attempt = await this.pushOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)
     if (!attempt.broadcast) {
+      // Parking before refundLocktime would end both the claim re-check above and the
+      // retry; `refunding_onchain` is recoverable, so the next sweep re-reads the rate.
+      if (attempt.retry && this.now() < row.refundLocktime) throw new Error(attempt.reason)
       await store.fail(row.id, 'refunding_onchain', attempt.reason)
       return false
     }
@@ -964,7 +987,11 @@ export class OnchainSendSwapService {
       // parameters and the funded output have genuinely diverged, and only a
       // human reading both can say which one is wrong — hence a refusal that
       // says so, rather than a loop.
-      return { broadcast: false, reason: 'onchain HTLC rebuilt from row does not match the funded pkScript' }
+      return {
+        broadcast: false,
+        reason: 'onchain HTLC rebuilt from row does not match the funded pkScript',
+        retry: false,
+      }
     }
 
     const feeRate = await onchain.estimateFeeRate()
@@ -987,16 +1014,17 @@ export class OnchainSendSwapService {
       // The one lever a human has here is the fee rate, and it is a real one:
       // `estimateFeeRate` is re-read on every attempt, so an HTLC priced out
       // by a mempool spike becomes refundable again once fees fall, and
-      // {@link reclaimOnchainHtlc} is how that retry is driven. Below that,
+      // both {@link whenRefundingOnchain} and {@link reclaimOnchainHtlc} retry. Below that,
       // nothing in this module helps — dust is a floor on the OUTPUT value,
       // so an HTLC too small to cover its own spend at ANY plausible rate can
       // only be recovered by batching it with other inputs, which the
       // deliberately single-input builder in `src/onchain/refund.ts` cannot
-      // express. An accepted limit, not a TODO in disguise; the rate goes in
+      // express — the case {@link refundablePayoutFloor} refuses; the rate goes in
       // the reason so the two cases can be told apart from the row alone.
       return {
         broadcast: false,
         reason: `refund fee ${fee} at ${feeRate} sat/vB leaves ${payoutAmountSats} sats from a ${row.payoutSats} sat HTLC — below the ${ONCHAIN_DUST_SATS} sat dust limit`,
+        retry: true,
       }
     }
 
