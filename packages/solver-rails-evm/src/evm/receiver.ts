@@ -120,6 +120,7 @@ export const encodeFactoryDeployAndActivate = (binding: IntentReceiverBinding): 
 export const encodeFactoryDeployAndRecover = (binding: IntentReceiverBinding, tokenAddress: Uint8Array): Uint8Array =>
   factoryCall('deployAndRecover(bytes,address)', binding, addressWord(tokenAddress, 'tokenAddress'))
 
+/** Direct calls on an already-deployed clone, for any party; the backend goes through the factory instead. */
 export const encodeReceiverActivate = (): Uint8Array => selectorFor('activate()')
 export const encodeReceiverRecover = (tokenAddress: Uint8Array): Uint8Array =>
   concatBytes(selectorFor('recover(address)'), addressWord(tokenAddress, 'tokenAddress'))

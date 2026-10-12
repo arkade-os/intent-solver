@@ -270,7 +270,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
       throw new Error('receiver implementation mismatch')
     return true
   }
-  // Check-only on activate and recover: the operator runs `ensureFactory` at startup, and the deploy path runs it per receiver.
+  // Check-only on activate, which is time-bound; the deploy path already ran `ensureFactory` for the same receiver.
   const requireFactory = async (): Promise<void> => {
     if (!(await factoryReady('latest'))) throw new Error('receiver factory is not deployed')
   }
@@ -373,7 +373,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
     },
     async recover(id: string, address: Uint8Array, binding: IntentReceiverBinding, token = binding.lock.tokenAddress) {
       await inspect(address, binding)
-      await requireFactory()
+      await ensureFactory('latest')
       return deps.transactions.submit(id, { to: RECEIVER_FACTORY, data: encodeFactoryDeployAndRecover(binding, token) })
     },
     async refund(id: string, binding: IntentReceiverBinding) {

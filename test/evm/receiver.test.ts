@@ -446,15 +446,20 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
     }
   })
 
-  chainTest('refuses to activate or recover through a factory that is not deployed', async () => {
+  chainTest('refuses to activate through a missing factory, but deploys it to recover', async () => {
     const driver = betterSqliteDriver(':memory:')
     try {
       const { backend } = await testBackend(driver)
       const terms = await binding()
-      await transfer(receiverAddress(terms), AMOUNT)
-      await rpc('anvil_setCode', [hx(RECEIVER_FACTORY), '0x'])
+      await transfer(receiverAddress(terms), 2n * AMOUNT)
+      for (const address of [RECEIVER_FACTORY, RECEIVER_IMPLEMENTATION]) {
+        await rpc('anvil_setCode', [hx(address), '0x'])
+        await rpc('anvil_setNonce', [hx(address), '0x0'])
+      }
       await expect(backend.activate('no-factory', receiverAddress(terms), terms)).rejects.toThrow('factory')
-      await expect(backend.recover('no-factory-recovery', receiverAddress(terms), terms)).rejects.toThrow('factory')
+      const before = await tokenBalance(WETH, terms.lock.refundAddress)
+      await backend.recover('no-factory-recovery', receiverAddress(terms), terms)
+      expect(await tokenBalance(WETH, terms.lock.refundAddress)).toBe(before + AMOUNT)
     } finally {
       await driver.close()
     }
