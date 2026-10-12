@@ -1622,6 +1622,12 @@ export class SendSwapService {
       // claim and a crash ate the record) costs a glance; a false `claimed` costs
       // the funds. The only path that ever records `claimed` is the one below,
       // which has our own claim txid in hand.
+      // Nor is it proof the lockup is GONE, and `stuck` is terminal — so parking
+      // on a lagging view ends collection of an invoice we already paid.
+      const evidence = await arkade.lockupSpendEvidence(row.pkScript)
+      if (evidence !== 'spent' && !(await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))) {
+        throw new Error(`swap ${row.id}: lockup reads empty while claiming but no spend is provable (${evidence})`)
+      }
       await store.fail(row.id, 'claiming', 'lockup empty while claiming with no claim txid recorded; needs review')
       return false
     }
