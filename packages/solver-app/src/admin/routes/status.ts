@@ -1,5 +1,5 @@
 /**
- * The at-a-glance routes: overview, backends, wallet, quotes.
+ * The at-a-glance routes: overview, backends, wallet, asset labels, quotes.
  *
  * Grouped because they answer one question between them — "what is this solver
  * doing right now" — and each is small. Splitting four ~20-line handlers into
@@ -17,7 +17,8 @@ import { marketCapability } from '../marketCapability.js'
 import { assetMarketKey, type AssetMarketBounds } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import type { AssetMarketRow } from '../db.js'
 import { probeBackends } from '../probes.js'
-import { consoleBalance, type AssetDetailSource } from '../assets.js'
+import { consoleBalance, describeAssetId, type AssetDetailSource } from '../assets.js'
+import { ASSET_ID_HEX } from '@arkade-os/solver-core/core/marketKey.js'
 import { marketServingDivergence } from '../../ops/marketDivergence.js'
 import { poolPlan } from '../../ops/pool.js'
 import { requireLn, requireOnchain } from '../../ops/rails.js'
@@ -225,6 +226,14 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
   })
 
   app.get('/api/backends', async (c) => c.json({ backends: await probeBackends(deps.services, deps.relay) }))
+
+  app.get('/api/assets/:assetId', async (c) => {
+    const assetId = c.req.param('assetId')
+    if (!ASSET_ID_HEX.test(assetId)) {
+      return c.json({ error: 'bad_request', message: 'not a lowercase 68-character asset id' }, 400)
+    }
+    return c.json(await describeAssetId(assetId, assetSource(deps.services.arkade.wallet)))
+  })
 
   app.get('/api/wallet', async (c) => {
     const { services } = deps

@@ -298,6 +298,39 @@ describe('asset metadata', () => {
   })
 })
 
+describe('GET /api/assets/:assetId', () => {
+  it('waits for the indexer, so a market leg is labelled on the first read', async () => {
+    const getAssetDetails = vi.fn().mockResolvedValue({
+      assetId: ASSET,
+      supply: 1n,
+      metadata: { ticker: 'USDX', name: 'Dollar X', decimals: 6 },
+    })
+    const response = await get(`/api/assets/${ASSET}`, { assetManager: { getAssetDetails } })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      assetId: ASSET,
+      shortId: '46dc4479…0000',
+      ticker: 'USDX',
+      name: 'Dollar X',
+      decimals: 6,
+    })
+  })
+
+  it('answers with the id alone when the indexer refuses', async () => {
+    const getAssetDetails = vi.fn().mockRejectedValue(new Error('indexer down'))
+    const response = await get(`/api/assets/${ASSET}`, { assetManager: { getAssetDetails } })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ assetId: ASSET, shortId: '46dc4479…0000' })
+  })
+
+  it('refuses anything that is not an asset id before asking the indexer', async () => {
+    const getAssetDetails = vi.fn()
+    const response = await get(`/api/assets/${ASSET.toUpperCase()}`, { assetManager: { getAssetDetails } })
+    expect(response.status).toBe(400)
+    expect(getAssetDetails).not.toHaveBeenCalled()
+  })
+})
+
 describe('consoleBalance', () => {
   it('converts a bigint nested anywhere, not just the two fields known today', () => {
     // Generic on purpose: naming `assets`/`availableAssets` would be shorter and would
