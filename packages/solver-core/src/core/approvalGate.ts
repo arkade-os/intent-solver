@@ -39,7 +39,7 @@ export const askApprovalFor = async (
   quantity: ApprovalQuantity,
 ): Promise<boolean> => (gate === undefined ? true : (await gate({ swapId, ...quantity })).proceed)
 
-/** The BTC legs' form, unchanged so their three call sites are untouched. */
+/** The BTC legs' form: sats as a `number`. */
 export const askApproval = (gate: ApprovalCheck | undefined, swapId: string, amountSats: number): Promise<boolean> =>
   askApprovalFor(gate, swapId, { assetId: null, amount: BigInt(amountSats) })
 

@@ -700,9 +700,7 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'funded', decision.reason)
       return false
     }
-    // After the funding decision, before the compare-and-swap that precedes the
-    // broadcast — the same ordering the Lightning send leg uses, and for the
-    // same reason: a held swap must still reach its own deadline and refuse.
+    // After the funding decision, before the CAS: a held swap still reaches its deadline and refuses.
     if (!(await askApproval(this.deps.approvalGate, row.id, row.amountSats))) return false
     const won = await store.transition(row.id, 'funded', 'funding_onchain', {})
     if (!won) return false

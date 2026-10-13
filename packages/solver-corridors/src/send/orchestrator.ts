@@ -1077,10 +1077,8 @@ export class SendSwapService {
       return false
     }
 
-    // AFTER the payment decision, BEFORE the compare-and-swap. That order is the
-    // fail-closed guarantee: a held swap whose invoice lapses meets
-    // `decision.pay === false` on a later tick and is REFUSED to the refund
-    // sweep, rather than waiting on a human who may never answer.
+    // AFTER the payment decision, BEFORE the CAS: a held swap whose invoice lapses
+    // meets `decision.pay === false` on a later tick and is refused to the refund sweep.
     if (!(await askApproval(this.deps.approvalGate, row.id, row.amountSats))) return false
 
     // Commit intent before the irreversible call. The idempotency key is
