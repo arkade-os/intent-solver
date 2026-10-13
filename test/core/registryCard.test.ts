@@ -710,6 +710,13 @@ describe('canonical form and signature', () => {
     expect(bytesToHex(cardDigest(card))).toBe(bytesToHex(cardDigest({ ...card, sig: undefined })))
   })
 
+  it('counts a parsed "__proto__" key in the signed bytes, as the registry verifier does', async () => {
+    const card = await signSolverCard(buildSolverCard(inputs()), sign)
+    const tampered = JSON.parse(JSON.stringify(card).replace('"nostr":{', '"nostr":{"__proto__":{"x":1},'))
+    expect(Object.keys(tampered.transports.nostr)).toContain('__proto__')
+    expect(verifyCardSig(tampered)).toBe(false)
+  })
+
   it('signs the CAIP-19 bytes, and one perturbed byte of them fails to verify', async () => {
     // Asserted over the canonicalization itself rather than by swapping a
     // field, so a canonicalize() that silently dropped a key could not pass.
