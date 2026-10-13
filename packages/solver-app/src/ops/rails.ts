@@ -34,8 +34,10 @@
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import type { OnchainSendBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import type { Config } from '../config.js'
+import type { RebalanceBackend } from '@arkade-os/solver-core/ports/rebalance.js'
 
 export interface LightningRail {
+  rebalance?: RebalanceBackend
   /**
    * Both legs, not just `SendBackend`: the receive corridor needs the
    * hold-invoice half (`createHoldInvoice`/`getHoldState`/`settleHold`).

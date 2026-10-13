@@ -18,6 +18,7 @@
 import { barsChart, categoryChart, cumulativeChart, decayChart } from './charts.js'
 import { applyPricing } from './pricingSave.js'
 import { PricingDraft } from './pricingDraft.js'
+import { RebalancePanel } from './rebalance.js'
 
 /* ---- tiny element helper ------------------------------------------------ */
 
@@ -1198,6 +1199,10 @@ const fundsPanel = () => {
 
 /* ---- fund sources: END --------------------------------------------------- */
 
+const rebalancePanel = new RebalancePanel(api, () => {
+  if (state.view === 'wallet') render()
+})
+
 const walletView = () => {
   const w = state.data.wallet
   if (!w) return h('p.muted', 'loading…')
@@ -1243,6 +1248,7 @@ const walletView = () => {
     ),
     /* fund sources: the one call into the block above. */
     fundsPanel(),
+    rebalancePanel.render(h),
     h('h2.sans', 'vtxo pool'),
     // The number that actually constrains throughput: funding pins the coins it
     // spends, so one fat coin funds one swap and refuses the next however large.
@@ -4006,6 +4012,7 @@ const viewFromHash = () => {
 }
 
 const go = (view) => {
+  if (view === 'wallet' && state.view !== 'wallet') rebalancePanel.loaded = false
   state.view = view
   // A result belongs to the view it happened on; carrying it across would have
   // an operator reading a refund's outcome on the settings page.
