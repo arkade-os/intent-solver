@@ -301,6 +301,8 @@ export type QuoteRefusal =
    * corridor gets this answer until the delay comes down.
    */
   | 'recourse_window_unservable'
+  /** No hold could be minted whose PUBLISHED invoice asks exactly the exact-in give. */
+  | 'payable_amount_unmatchable'
 
 export type QuoteOutcome =
   { accepted: true; swap: ReceiveSwapRow; validUntil: number } | { accepted: false; reason: QuoteRefusal }
@@ -387,7 +389,7 @@ export class ReceiveSwapService {
     // "the fee ate the swap", refused by its own name rather than folded into
     // `amount_out_of_range` — the amount was inside the range, it just cannot
     // be priced.
-    const payoutSats =
+    let payoutSats =
       request.amountSide === 'to' ? request.amountSats : this.pricing.payoutFor({ pair: RFQ_PAIR_RECEIVE, giveSats })
     if (request.amountSide !== 'to' && payoutSats <= 0) {
       return { accepted: false, reason: 'fee_consumes_swap' }
@@ -515,15 +517,38 @@ export class ReceiveSwapService {
       }
       const invoiceBackendName = ln.getKnownInvoiceState ? (this.deps.backendName ?? null) : null
       const holdStarted = performance.now()
-      const held = await ln.createHoldInvoice({
-        // The HTLC we HOLD is worth the give — on an exact-out request that is
-        // the solved-up amount, not the payout they named. It is what `payoutSats`
-        // above was priced against, so it is what the backend must be asked for.
-        amountSats: giveSats,
-        paymentHash: request.paymentHash,
-        expirySeconds: DEFAULT_HOLD_INVOICE_WINDOW,
-        minFinalCltvBlocks,
-      })
+      const mint = (amountSats: number) =>
+        ln.createHoldInvoice({
+          // What the HTLC we HOLD is worth, which `payoutSats` is always priced
+          // against — never the payout an exact-out request named.
+          amountSats,
+          paymentHash: request.paymentHash,
+          expirySeconds: DEFAULT_HOLD_INVOICE_WINDOW,
+          minFinalCltvBlocks,
+        })
+      let held = await mint(giveSats)
+      // EXACT-IN MUST ASK EXACTLY THE GIVE: a client that fixed what it pays
+      // cannot take a wrapping backend's reserve on top (LUD-06 requires the
+      // bolt11 to equal the amount requested). So hold LESS by that reserve, and
+      // price the payout off what we then HOLD rather than a give we never get.
+      if (request.amountSide !== 'to' && held.payableSats !== giveSats) {
+        const holdSats = 2 * giveSats - held.payableSats
+        // BEFORE the re-mint, never after one that worked: `cancelHold` is keyed
+        // by payment hash, which both invoices share.
+        await this.retireInvoice(request.paymentHash)
+        // Over the give is a wrapper asking LESS than the hold it covers, so
+        // re-minting there would fund a payout off sats nobody is asked to send.
+        if (holdSats <= 0 || holdSats > giveSats) {
+          return { accepted: false, reason: 'payable_amount_unmatchable' }
+        }
+        payoutSats = this.pricing.payoutFor({ pair: RFQ_PAIR_RECEIVE, giveSats: holdSats })
+        if (payoutSats <= 0) return { accepted: false, reason: 'fee_consumes_swap' }
+        held = await mint(holdSats)
+        if (held.payableSats !== giveSats) {
+          await this.retireInvoice(request.paymentHash)
+          return { accepted: false, reason: 'payable_amount_unmatchable' }
+        }
+      }
       const holdMs = Math.round(performance.now() - holdStarted)
 
       try {
@@ -531,15 +556,9 @@ export class ReceiveSwapService {
         const swap = await store.insertQuote({
           id: randomUUID(),
           paymentHash: request.paymentHash,
-          // What the CLIENT pays, read off the invoice they are actually handed
-          // rather than assumed to be the give. A backend that wraps its hold
-          // invoice hands out one asking slightly more — a routing reserve for the
-          // wrapper, which the payer covers — and quoting the give there would
-          // hand the client a `from_amount` their own invoice contradicts.
-          //
-          // The two are the same number on every backend that does not wrap, and
-          // `payoutSats` is unaffected either way: the reserve is the wrapper's,
-          // never ours to fund against.
+          // What the CLIENT pays, read off the invoice they are handed rather than
+          // assumed to be the give: a wrapping backend adds a routing reserve. On
+          // exact-in the branch above has already equalised them or refused.
           amountSats: held.payableSats,
           // Persisted, not recomputed later: once the client has paid the hold
           // invoice, the fee that priced their payout is a fact, whatever the

@@ -203,7 +203,10 @@ export interface HoldInvoice {
    * because a backend may hand out an invoice that WRAPS the one it minted — same
    * payment hash, so both settle atomically on one preimage, but asking slightly more
    * to cover the wrapper's routing reserve. The client pays THIS number, so this is
-   * what the corridor must quote.
+   * what the corridor must quote — on an EXACT-OUT request, where the give is the
+   * solver's to solve. Exact-in fixes what the client pays, so a corridor serving it
+   * must instead mint until this equals the requested give (see the receive
+   * orchestrator's `quote`), never quote the larger number.
    *
    * NOT what the provider receives: the held HTLC is still worth `amountSats` and the
    * payout was priced off that, so nothing downstream may substitute this for it.
