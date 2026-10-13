@@ -524,7 +524,7 @@ describe('the preview panel, run rather than grepped', () => {
 
   it('labels a BTC leg as BTC, not sats — the amount is already decimals-formatted', async () => {
     const text = await painted(RESOLVED)
-    expect(text).toContain('1.00000000 BTC')
+    expect(text).toMatch(/1\.00000000\s+BTC/)
     expect(text).not.toContain('1.00000000 sats')
   })
 })

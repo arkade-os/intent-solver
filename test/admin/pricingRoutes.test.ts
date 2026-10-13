@@ -384,6 +384,47 @@ describe('POST /api/pricing/preview — asset markets', () => {
     expect(body.breakEven).toEqual({ kind: 'none' })
     await adminStore.close()
   })
+
+  it('fetches an unsaved draft’s feed only when the operator asks', async () => {
+    const { app, adminStore, fetchPrice } = await build()
+    const ask = (readDraftFeed: boolean) =>
+      preview(app, { target: 'market', market: marketBody(), direction: 'sell_base', side: 'from', readDraftFeed })
+    expect((await ask(false)).body.feed).toMatchObject({ state: 'unresolved' })
+    expect(fetchPrice).not.toHaveBeenCalled()
+    const { body } = await ask(true)
+    expect(body.feed).toMatchObject({ state: 'resolved', mantissa: '100000', scale: 0 })
+    expect((body.samples as unknown[]).length).toBeGreaterThan(2)
+    expect(fetchPrice).toHaveBeenCalledWith(FEED, '/price')
+    await adminStore.close()
+  })
+
+  it('refuses to read a private draft feed even when asked', async () => {
+    const { app, adminStore, fetchPrice } = await build()
+    const { body } = await preview(app, {
+      target: 'market',
+      market: marketBody({ feedUrl: 'http://127.0.0.1:8080/price' }),
+      direction: 'sell_base',
+      side: 'from',
+      readDraftFeed: true,
+    })
+    expect(body.feed).toMatchObject({ state: 'unresolved', reason: expect.stringMatching(/private/) })
+    expect(fetchPrice).not.toHaveBeenCalled()
+    await adminStore.close()
+  })
+
+  it('still shows the live price while an unrelated field is refused', async () => {
+    const { app, adminStore } = await build()
+    await save(app, marketBody())
+    const { body } = await preview(app, {
+      target: 'market',
+      market: marketBody({ feeBps: 10_000 }),
+      direction: 'sell_base',
+      side: 'from',
+    })
+    expect(body.invalid).toMatchObject([{ key: 'feeBps' }])
+    expect(body.feed).toMatchObject({ state: 'resolved', mantissa: '100000' })
+    await adminStore.close()
+  })
 })
 
 describe('POST /api/pricing/preview — BTC corridors', () => {

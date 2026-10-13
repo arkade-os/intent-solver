@@ -298,14 +298,23 @@ export const validateAssetMarket = (market: AssetMarketConfig, options: AssetMar
   checkBounds('sellBase', market.sellBase)
   checkBounds('buyBase', market.buyBase)
   checkServing(market)
+  validateFeed(market.feedUrl, market.pricePath, options)
 
-  const feedUrl = market.feedUrl.trim()
+  // Last, because it is the only rule that is about the PAIR rather than a
+  // field, and because `marketKeyForPair` throws with its own vocabulary — a
+  // reader who got here has already been told about anything simpler.
+  assetMarketKey(market.base, market.quote)
+}
+
+/** The feed half of {@link validateAssetMarket}, alone: the preview reads a draft's feed before the rest is valid. */
+export const validateFeed = (rawFeedUrl: string, pricePath: string, options: AssetMarketValidation = {}): void => {
+  const feedUrl = rawFeedUrl.trim()
   if (!feedUrl) throw new Error('feedUrl is required: a configured market without one cannot be priced')
   let parsed: URL
   try {
     parsed = new URL(feedUrl)
   } catch {
-    throw new Error(`feedUrl must be an absolute URL, got ${JSON.stringify(market.feedUrl)}`)
+    throw new Error(`feedUrl must be an absolute URL, got ${JSON.stringify(rawFeedUrl)}`)
   }
   // `createPriceFeed` calls `fetch`, which speaks these two and nothing else. A
   // `file:` feed would also read the solver's own disk through an admin port
@@ -323,15 +332,10 @@ export const validateAssetMarket = (market: AssetMarketConfig, options: AssetMar
 
   // Shape first, so a pointer missing its leading slash is named as such rather
   // than reported as an underivable feed.
-  validatePricePath(market.pricePath)
-  if (market.pricePath === '' && defaultPricePath(feedUrl) === null) {
+  validatePricePath(pricePath)
+  if (pricePath === '' && defaultPricePath(feedUrl) === null) {
     throw new Error(`pricePath is required: it cannot be derived from ${JSON.stringify(feedUrl)}`)
   }
-
-  // Last, because it is the only rule that is about the PAIR rather than a
-  // field, and because `marketKeyForPair` throws with its own vocabulary — a
-  // reader who got here has already been told about anything simpler.
-  assetMarketKey(market.base, market.quote)
 }
 
 /** The unordered pair `ops/assetOffers.ts` matches an offer's legs against. `null` is BTC. */

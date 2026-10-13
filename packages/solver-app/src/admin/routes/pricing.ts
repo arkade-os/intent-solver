@@ -8,6 +8,7 @@ import { isCorridor, payoutSatsFor } from '@arkade-os/solver-core/core/corridorP
 import {
   assetMarketKey,
   validateAssetMarket,
+  validateFeed,
   type AssetMarketConfig,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import {
@@ -27,9 +28,10 @@ import {
   type BreakEven,
 } from '@arkade-os/solver-core/core/pricingPreview.js'
 import type { Price } from '@arkade-os/solver-core/core/priceFeed.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import type { AdminDeps } from '../server.js'
 import type { AssetMarketRow } from '../db.js'
-import type { FeedCache } from '../feedCache.js'
+import type { FeedCache, FeedRead } from '../feedCache.js'
 import { resolveDraftPolicy, type DraftRefusal } from '../draftPolicy.js'
 import { marketFrom, type MarketBody } from './markets.js'
 import { carrierSatsFor, samePair } from '../../ops/assetRfqMarkets.js'
@@ -172,25 +174,16 @@ const marketPreview = async (deps: AdminDeps, feeds: FeedCache, body: Record<str
     lookup = null
   }
   const saved = lookup
+  // Read before validating, so a live price shows while an unrelated field is still refused.
+  const { read, feed } = await feedFor(feeds, saved, market, body.readDraftFeed === true)
 
   try {
     validateAssetMarket(market, { allowPrivateFeedHost: saved !== null })
   } catch (error) {
-    return { invalid: [refusalFor(error)], samples: [] }
+    return { invalid: [refusalFor(error)], samples: [], feed }
   }
 
-  const resolvable = saved !== null && saved.feedUrl === market.feedUrl && saved.pricePath === market.pricePath
-  const read = resolvable ? await feeds.read(saved.feedUrl, saved.pricePath) : null
-  if (!read) {
-    return {
-      invalid: [],
-      samples: [],
-      feed: {
-        state: 'unresolved',
-        reason: resolvable ? 'the saved feed did not answer' : 'save this market to price against its feed',
-      },
-    }
-  }
+  if (!read) return { invalid: [], samples: [], feed }
   return priceLadder(
     deps,
     market,
@@ -202,6 +195,36 @@ const marketPreview = async (deps: AdminDeps, feeds: FeedCache, body: Record<str
       ? deps.services.policy.assetCarrierPricing
       : resolved.config.assetCarrierPricing,
   )
+}
+
+const unresolved = (reason: string) => ({ read: null, feed: { state: 'unresolved' as const, reason } })
+
+const resolvedFeed = (read: FeedRead) => ({
+  state: 'resolved' as const,
+  mantissa: str(read.price.mantissa),
+  scale: read.price.scale,
+  readAt: read.readAt,
+})
+
+/** A typed URL is fetched only on an explicit `readDraftFeed`: a debounced form would otherwise fetch every prefix. */
+const feedFor = async (
+  feeds: FeedCache,
+  saved: AssetMarketRow | null,
+  market: AssetMarketConfig,
+  readDraft: boolean,
+) => {
+  const savedFeed = saved !== null && saved.feedUrl === market.feedUrl && saved.pricePath === market.pricePath
+  if (!savedFeed && !readDraft) return unresolved('save this market, or read its feed, to price against it')
+  if (!savedFeed) {
+    try {
+      validateFeed(market.feedUrl, market.pricePath)
+    } catch (error) {
+      return unresolved(messageOf(error))
+    }
+  }
+  const read = await feeds.read(market.feedUrl, market.pricePath)
+  if (!read) return unresolved(savedFeed ? 'the saved feed did not answer' : 'the feed did not answer')
+  return { read, feed: resolvedFeed(read) }
 }
 
 const priceLadder = (
@@ -269,7 +292,7 @@ const priceLadder = (
       toDecimals: pair.to === market.base ? market.baseDecimals : market.quoteDecimals,
     },
     carrier: { sats: str(dustSats), charged: str(charged), returned: str(returned), priced: carrierSats > 0n },
-    feed: { state: 'resolved', mantissa: str(feed.mantissa), scale: feed.scale, readAt },
+    feed: resolvedFeed({ price: feed, readAt }),
     samples: points,
     samplesReason,
     // The other path's question, and only where this deployment serves it —
