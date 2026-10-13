@@ -505,6 +505,11 @@ export const cardDigest = (card: object): Uint8Array => sha256(new TextEncoder()
 /** BIP340-signs a 32-byte digest. The identity's `signMessage(d, 'schnorr')` fits. */
 export type DigestSigner = (digest: Uint8Array) => Promise<Uint8Array>
 
+/** A registry entry naming a solver whose markets ride its own transports: the card with no `markets`. */
+export type SolverCardPointer = Omit<SolverCard, 'markets'>
+
+export const cardPointer = ({ markets: _markets, sig: _sig, ...pointer }: SolverCard): SolverCardPointer => pointer
+
 /**
  * Sign the card with the discovery key and return a new card carrying `sig`.
  * Verifies the result against the card's own `discovery_pubkey` before
@@ -513,7 +518,7 @@ export type DigestSigner = (digest: Uint8Array) => Promise<Uint8Array>
  * surfaces here as an error instead of as a registry-rejected — or worse,
  * merged-but-dead — listing.
  */
-export const signSolverCard = async (card: SolverCard, sign: DigestSigner): Promise<SolverCard> => {
+export const signSolverCard = async <T extends SolverCardPointer>(card: T, sign: DigestSigner): Promise<T> => {
   const signed = { ...card, sig: bytesToHex(await sign(cardDigest(card))) }
   if (!verifyCardSig(signed)) {
     throw new Error('card signature does not verify against discovery_pubkey — is the pubkey derived from this key?')
@@ -521,7 +526,7 @@ export const signSolverCard = async (card: SolverCard, sign: DigestSigner): Prom
   return signed
 }
 
-export const verifyCardSig = (card: SolverCard): boolean => {
+export const verifyCardSig = (card: SolverCardPointer): boolean => {
   if (!card.sig) return false
   try {
     return schnorr.verify(hexToBytes(card.sig), cardDigest(card), hexToBytes(card.discovery_pubkey))

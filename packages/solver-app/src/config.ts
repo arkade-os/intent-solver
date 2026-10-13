@@ -461,8 +461,8 @@ export interface Config {
    * `off` (the default) means the solver touches no relay for discovery, and
    * the console's "post now" action is REFUSED rather than honoured — a policy
    * an action can override is advisory, and an operator who set it would have
-   * no guarantee. `manual` publishes only when asked; `auto` also republishes
-   * when the ad changes or the heartbeat falls due.
+   * no guarantee. `manual` publishes only when asked, then re-sends that same
+   * card on the heartbeat; `auto` also republishes when the card changes.
    *
    * Read once, here, like every other knob in this file: the console reports
    * the mode, it does not change it.

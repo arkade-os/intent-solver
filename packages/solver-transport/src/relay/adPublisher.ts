@@ -1,23 +1,22 @@
 /**
- * Keeps the relay's copy of this solver's kind-38859 ad current.
+ * Keeps the relay's copy of this solver's signed card current, as kind 38859.
  *
- * Change detection is a digest of the ad payload, not a hand-rolled comparison
- * of fees, limits and relays: there is then no way for the comparison and the
- * document to drift apart. `cardDigest` takes `object`, so the ad reuses it.
+ * Change detection is `cardDigest`, which excludes `sig`: every build re-signs
+ * with a fresh BIP340 nonce, and that must not read as a change.
  *
  * A failure never advances the published digest — believing a failed publish
  * succeeded is how a solver goes quietly undiscoverable.
  */
 import { hex } from '@scure/base'
-import { cardDigest } from '@arkade-os/solver-core/core/registryCard.js'
-import type { SolverAd } from '@arkade-os/solver-core/core/solverAd.js'
+import { cardDigest, type SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
+import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { eventId, type RelayConnection } from './connection.js'
 
 export type AdPublishMode = 'off' | 'manual' | 'auto'
 
-/** docs/rfq-protocol.md § 3: kind 38859, `d` tag `"rfq1"`. */
-export const SOLVER_AD_KEY = { kind: 38859, d: 'rfq1' } as const
+/** docs/rfq-protocol.md § 3.1: the `d` tag is the card's network, so one key holds one card per network. */
+export const SOLVER_CARD_KIND = 38859
 export const AD_HEARTBEAT_SECONDS = 1800
 const AD_TICK_MS = 30_000
 
@@ -29,14 +28,14 @@ export interface AdPublishState {
 
 export interface AdPublisherOptions {
   mode: AdPublishMode
-  buildAd: () => SolverAd
-  publish: (ad: SolverAd) => Promise<void>
+  buildAd: () => Promise<SolverCard>
+  publish: (card: SolverCard) => Promise<void>
   now: () => number
   heartbeatSeconds: number
 }
 
 export class AdPublisher {
-  private publishedDigest: string | null = null
+  private published: { card: SolverCard; digest: string } | null = null
   private lastPublishedAt: number | null = null
   private lastError: string | null = null
 
@@ -46,23 +45,24 @@ export class AdPublisher {
     return { mode: this.opts.mode, lastPublishedAt: this.lastPublishedAt, lastError: this.lastError }
   }
 
-  /** The ad as it would be published right now. */
-  currentAd(): SolverAd {
-    return this.opts.buildAd()
-  }
-
   heartbeatSeconds(): number {
     return this.opts.heartbeatSeconds
   }
 
-  /** Publish if the ad changed, or if the heartbeat is due. `auto` only. */
+  /** Publish if the card changed, or if the heartbeat is due. */
   async publishIfDue(): Promise<void> {
-    if (this.opts.mode !== 'auto') return
-    const ad = this.opts.buildAd()
-    const digest = hex.encode(cardDigest(ad))
+    if (this.opts.mode === 'off') return
     const due = this.lastPublishedAt !== null && this.opts.now() - this.lastPublishedAt >= this.opts.heartbeatSeconds
-    if (digest === this.publishedDigest && !due) return
-    await this.send(ad, digest)
+    if (this.opts.mode === 'manual') {
+      // Clients drop a card older than two hours, so manual re-sends too — but only the card the operator
+      // published, byte for byte: a rebuilt one could carry terms they have not seen.
+      if (due && this.published) await this.send(this.published.card, this.published.digest)
+      return
+    }
+    const card = await this.build()
+    const digest = hex.encode(cardDigest(card))
+    if (digest === this.published?.digest && !due) return
+    await this.send(card, digest)
   }
 
   /** Publish regardless of change. Refused when `off`. */
@@ -70,14 +70,24 @@ export class AdPublisher {
     if (this.opts.mode === 'off') {
       throw new Error('NOSTR_AD_PUBLISH is off: this solver is configured not to publish to Nostr')
     }
-    const ad = this.opts.buildAd()
-    await this.send(ad, hex.encode(cardDigest(ad)))
+    const card = await this.build()
+    await this.send(card, hex.encode(cardDigest(card)))
   }
 
-  private async send(ad: SolverAd, digest: string): Promise<void> {
+  /** A card that cannot be built (`SOLVER_NAME` unset, nothing served) is a failed publish, reported as one. */
+  private async build(): Promise<SolverCard> {
     try {
-      await this.opts.publish(ad)
-      this.publishedDigest = digest
+      return await this.opts.buildAd()
+    } catch (error) {
+      this.lastError = messageOf(error)
+      throw error
+    }
+  }
+
+  private async send(card: SolverCard, digest: string): Promise<void> {
+    try {
+      await this.opts.publish(card)
+      this.published = { card, digest }
       this.lastPublishedAt = this.opts.now()
       this.lastError = null
     } catch (error) {
@@ -93,7 +103,7 @@ export interface AdPublishing {
 }
 
 /**
- * The publisher `NOSTR_AD_PUBLISH` asks for, or none under `off`. `auto` also
+ * The publisher `NOSTR_AD_PUBLISH` asks for, or none under `off`. Either mode
  * ticks {@link AdPublisher.publishIfDue}, skipping while disconnected.
  */
 export const startAdPublishing = (opts: {
@@ -101,7 +111,8 @@ export const startAdPublishing = (opts: {
   connection: Pick<RelayConnection, 'publish' | 'isConnected'>
   /** The wallet identity; the codec refuses to sign as anyone else. */
   author: string
-  buildAd: () => SolverAd
+  network: SwapNetwork
+  buildAd: () => Promise<SolverCard>
   onError: (error: unknown) => void
   nowMs?: () => number
 }): AdPublishing | undefined => {
@@ -111,23 +122,22 @@ export const startAdPublishing = (opts: {
   const publisher = new AdPublisher({
     mode: opts.mode,
     buildAd: opts.buildAd,
-    publish: async (ad) => {
+    publish: async (card) => {
       // `publish` resolves on QUEUEING, so a disconnected publish would be
       // recorded as a success the relay never saw.
-      if (!connection.isConnected()) throw new Error('relay is not connected; the ad was not published')
+      if (!connection.isConnected()) throw new Error('relay is not connected; the card was not published')
       const at = nowMs()
       await connection.publish({
         id: eventId(author, at),
         author,
         createdAtMs: at,
-        payload: ad,
-        replaceable: SOLVER_AD_KEY,
+        payload: card,
+        replaceable: { kind: SOLVER_CARD_KIND, d: opts.network },
       })
     },
     now: () => Math.floor(nowMs() / 1000),
     heartbeatSeconds: AD_HEARTBEAT_SECONDS,
   })
-  if (opts.mode !== 'auto') return { publisher, stop: () => {} }
   const tick = (): void => {
     if (connection.isConnected()) publisher.publishIfDue().catch(opts.onError)
   }

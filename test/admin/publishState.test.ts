@@ -18,6 +18,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
+import type { SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { AdPublisher, type AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 
 const SECRET = hexToBytes('B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF'.toLowerCase())
@@ -31,10 +32,10 @@ const allCorridors = <T>(value: T) => ({
   'onchain:BTC->arkade:BTC': value,
 })
 
-const ad = { v: 1 as const, type: 'solver_ad' as const, pairs: [], relays: ['wss://relay.example'] }
+const card = { version: 0, name: 'test-solver', discovery_pubkey: PUBKEY, markets: [] } as unknown as SolverCard
 
 const publisherWith = (mode: AdPublishMode, publish = vi.fn(async () => {})) =>
-  new AdPublisher({ mode, buildAd: () => ad, publish, now: () => 1_800_000_000, heartbeatSeconds: 1800 })
+  new AdPublisher({ mode, buildAd: async () => card, publish, now: () => 1_800_000_000, heartbeatSeconds: 1800 })
 
 /**
  * A double complete for BOTH routes — every member either handler reaches.

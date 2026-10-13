@@ -169,17 +169,8 @@ export {
   type RevealParams,
 } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 
-// Discovery: the git-reviewed registry card and the kind-38859 ad are
-// different documents with different audiences, but both are indicative
-// rendezvous data rather than terms. `AdPublishMode` is exported because the
-// exported `Config` now carries one, so a consumer reading `nostrAdPublish`
-// would otherwise have no way to name its type.
-export {
-  buildSolverAd,
-  type SolverAd,
-  type SolverAdInputs,
-  type SolverAdPair,
-} from '@arkade-os/solver-core/core/solverAd.js'
+// The kind-38859 card publisher. `AdPublishMode` is exported because the exported
+// `Config` carries one, which a consumer could otherwise not name.
 export {
   AdPublisher,
   type AdPublishMode,
