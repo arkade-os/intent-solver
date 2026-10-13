@@ -98,7 +98,6 @@ lockup. An unavailable counterparty prevents the Lightning route from quoting.
 | `submitting`           | Inputs and maximum debit are claimed before the source call.                        |
 | `pending`              | Source funding is recorded; destination confirmation or settlement is still needed. |
 | `needs_reconciliation` | Submission outcome is uncertain. The transfer blocks another source spend.          |
-| `refunding`            | Source refund recovery remains active.                                              |
 | `completed`            | The destination proves credit of at least the promised minimum.                     |
 | `refunded`             | Returned source funds have been observed.                                           |
 | `failed`               | Definitive failure before spending; no source debit remains charged.                |

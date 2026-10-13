@@ -47,15 +47,7 @@ export interface RebalancePolicy {
 }
 
 export type RebalanceState =
-  | 'quoted'
-  | 'submitting'
-  | 'pending'
-  | 'needs_reconciliation'
-  | 'refunding'
-  | 'completed'
-  | 'refunded'
-  | 'failed'
-  | 'cancelled'
+  'quoted' | 'submitting' | 'pending' | 'needs_reconciliation' | 'completed' | 'refunded' | 'failed' | 'cancelled'
 
 export interface RebalanceTransfer {
   id: string

@@ -290,6 +290,14 @@ describe('Arkade rebalance source routes', () => {
     await expect(source.quote(deposit, policy)).rejects.toThrow(/surplus/)
   })
 
+  it('drops the stored RFQ when the source cannot cover a Lightning quote', async () => {
+    const receiving = lightningDeposit()
+    mockRequest(receiving)
+    services.readers = [{ committedSats: async () => 2_100 }] as unknown as Services['readers']
+    await expect(source.quote(receiving, policy)).rejects.toThrow(/surplus/)
+    expect(await driver.all('SELECT * FROM rebalance_rfq')).toEqual([])
+  })
+
   it('pins exact inputs before asynchronous revalidation and releases both holds', async () => {
     const row = rowFrom(await source.quote(deposit, policy))
     mocks.route.mockImplementationOnce(async ({ amount }: { amount: number }) => {

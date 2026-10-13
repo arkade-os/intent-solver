@@ -1,7 +1,7 @@
 import type { SqlDriver } from '@arkade-os/solver-core/core/driver.js'
 import type { RebalanceTransfer } from '@arkade-os/solver-core/ports/rebalance.js'
 
-const ACTIVE = "'submitting', 'pending', 'needs_reconciliation', 'refunding'"
+const ACTIVE = "'submitting', 'pending', 'needs_reconciliation'"
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS rebalance_transfer (
   id TEXT PRIMARY KEY,

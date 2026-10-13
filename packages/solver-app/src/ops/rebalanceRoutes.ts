@@ -337,21 +337,28 @@ export const createArkadeRebalanceSource = async (
           transport.close?.()
         }
       }
-      const coins = await snapshot()
-      const pinned = reservations.reserved()
-      const candidates = coins.filter((coin) => !pinned.has(outpointKey(coin.txid, coin.vout)))
-      const { quote, selected } = await selectQuote(destination, amount, kind, candidates)
-      if (
-        quote.total + policy.reserveSats + (await owed()) + admission.outstandingInventorySats('arkade') >
-        sum(candidates)
-      )
-        throw new Error('source reserve or outstanding payouts leave insufficient surplus')
-      return {
-        debitSats: quote.total,
-        feeSats: quote.total - deposit.netSats,
-        inputs: selected.map(({ txid, vout, value }) => ({ txid, vout, value })),
-        expiresAt,
-        routeData,
+      try {
+        const coins = await snapshot()
+        const pinned = reservations.reserved()
+        const candidates = coins.filter((coin) => !pinned.has(outpointKey(coin.txid, coin.vout)))
+        const { quote, selected } = await selectQuote(destination, amount, kind, candidates)
+        if (
+          quote.total + policy.reserveSats + (await owed()) + admission.outstandingInventorySats('arkade') >
+          sum(candidates)
+        )
+          throw new Error('source reserve or outstanding payouts leave insufficient surplus')
+        return {
+          debitSats: quote.total,
+          feeSats: quote.total - deposit.netSats,
+          inputs: selected.map(({ txid, vout, value }) => ({ txid, vout, value })),
+          expiresAt,
+          routeData,
+        }
+      } catch (error) {
+        // No transfer row references this RFQ yet, so it can never be funded. Not a time-based
+        // sweep: a funded lockup whose txid was never recorded also has no fundingArkTxid.
+        if (routeData) await repository.removeRfqSwap(routeData.rfqId as string)
+        throw error
       }
     },
 

@@ -72,7 +72,7 @@ describe('rebalance journal', () => {
     await store.create(first)
     await store.create(second)
     await expect(store.save({ ...second, state: 'pending', chargedAt: 120 })).rejects.toThrow()
-    await expect(store.create(transfer('3', { state: 'refunding', chargedAt: 120 }))).rejects.toThrow()
+    await expect(store.create(transfer('3', { state: 'needs_reconciliation', chargedAt: 120 }))).rejects.toThrow()
     expect(await store.get(second.id)).toEqual(second)
     await store.save({ ...first, state: 'refunded' })
     await store.save({ ...second, state: 'needs_reconciliation', chargedAt: 120 })
@@ -144,7 +144,6 @@ describe('rebalance journal', () => {
     }
     await store.save({ ...row, state: 'needs_reconciliation' })
     await store.save({ ...row, state: 'pending' })
-    await store.save({ ...row, state: 'refunding' })
     await store.save({ ...row, state: 'refunded' })
     await expect(store.save({ ...row, state: 'failed' })).rejects.toThrow()
     expect(await store.rollingDebit(110)).toBe(row.debitSats)
