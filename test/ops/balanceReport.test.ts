@@ -1,5 +1,9 @@
-import { describe, it, expect } from 'vitest'
-import { formatBalanceReport, readBalanceReport } from '@arkade-os/solver-app/ops/balanceReport.js'
+import { describe, it, expect, vi } from 'vitest'
+import {
+  createBalanceReportReader,
+  formatBalanceReport,
+  type BalanceReportInput,
+} from '@arkade-os/solver-app/ops/balanceReport.js'
 import type { FundBalance, FundSource } from '@arkade-os/solver-app/ops/fundSources.js'
 
 const source = (label: string, readBalance: () => Promise<FundBalance>): FundSource => ({
@@ -14,8 +18,8 @@ const sats = (...figures: Array<[string, string | null, string?]>): FundBalance 
   figures: figures.map(([label, amount, note]) => ({ label, amount, ...(note === undefined ? {} : { note }) })),
 })
 
-const read = (overrides: Partial<Parameters<typeof readBalanceReport>[0]> = {}) =>
-  readBalanceReport({
+const read = (overrides: Partial<BalanceReportInput> = {}, reader = createBalanceReportReader()) =>
+  reader({
     network: 'mutinynet',
     sources: [
       source('arkade float', async () =>
@@ -107,6 +111,20 @@ describe('balance report', () => {
     expect(text).toContain('BTC rail: unreadable (no answer within 10ms)')
     expect(text).toContain('arkade float (sats): available 5')
     expect(text).toContain('committed to live swaps: unreadable (no answer within 10ms)')
+  })
+
+  it('joins a read still running from an earlier report instead of starting another', async () => {
+    const reader = createBalanceReportReader()
+    const hung = vi.fn(() => new Promise<FundBalance>(() => {}))
+    const healthy = vi.fn(async () => sats(['available', '5']))
+    const overrides = { sources: [source('BTC rail', hung), source('arkade float', healthy)], deadlineMs: 10 }
+
+    const first = formatBalanceReport(await read(overrides, reader))
+    const second = formatBalanceReport(await read(overrides, reader))
+
+    expect(second).toBe(first)
+    expect(hung).toHaveBeenCalledTimes(1)
+    expect(healthy).toHaveBeenCalledTimes(2)
   })
 
   it('leaves a non-sats amount exactly as the source wrote it', async () => {

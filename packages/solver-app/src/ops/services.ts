@@ -74,7 +74,7 @@ import { AdminStore, type SwapApprovalRequest } from '../admin/db.js'
 import { createNotifier } from './notify.js'
 import { sinksFrom } from './notifySinks.js'
 import { createBalanceSampler, createSwapOutcomeReporter } from './businessEvents.js'
-import { formatBalanceReport, readBalanceReport } from './balanceReport.js'
+import { createBalanceReportReader, formatBalanceReport } from './balanceReport.js'
 import { fundSources } from './fundSources.js'
 import { assetSource, describeAssetId } from '../admin/assets.js'
 import { approvalGateFor } from './approvals.js'
@@ -1462,7 +1462,7 @@ export const createServices = async (
       })
   }
 
-  // No in-flight guard: every read carries a deadline far below the 5-minute floor, so reports cannot overlap.
+  const readBalanceReport = createBalanceReportReader()
   const postBalanceReport = async (): Promise<void> => {
     const report = await readBalanceReport({
       network: config.network,

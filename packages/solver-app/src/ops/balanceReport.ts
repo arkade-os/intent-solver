@@ -46,16 +46,37 @@ const within =
     }
   }
 
-export const readBalanceReport = async (input: BalanceReportInput): Promise<BalanceReport> => {
-  const ms = input.deadlineMs ?? READ_DEADLINE_MS
-  const [sources, assets, committedSats] = await Promise.all([
-    Promise.all(
-      input.sources.map(async (s) => ({ label: s.label, balance: await attempt(within(() => s.readBalance(), ms)) })),
-    ),
-    attempt(within(input.readAssets, ms)),
-    attempt(within(input.readCommittedSats, ms)),
-  ])
-  return { network: input.network, sources, assets, committedSats }
+/** The deadline ends a report, not its reads: one still running is joined by the next report, never repeated. */
+export const createBalanceReportReader = (): ((input: BalanceReportInput) => Promise<BalanceReport>) => {
+  const running = new Map<string, Promise<unknown>>()
+  const joined =
+    <T>(key: string, read: () => Promise<T>) =>
+    (): Promise<T> => {
+      let pending = running.get(key) as Promise<T> | undefined
+      if (pending === undefined) {
+        pending = Promise.resolve()
+          .then(read)
+          .finally(() => running.delete(key))
+        running.set(key, pending)
+      }
+      return pending
+    }
+
+  return async (input) => {
+    const ms = input.deadlineMs ?? READ_DEADLINE_MS
+    const guarded = <T>(key: string, read: () => Promise<T>) => attempt(within(joined(key, read), ms))
+    const [sources, assets, committedSats] = await Promise.all([
+      Promise.all(
+        input.sources.map(async (s) => ({
+          label: s.label,
+          balance: await guarded(`source:${s.id}`, () => s.readBalance()),
+        })),
+      ),
+      guarded('assets', () => input.readAssets()),
+      guarded('committed', () => input.readCommittedSats()),
+    ])
+    return { network: input.network, sources, assets, committedSats }
+  }
 }
 
 const amountOf = (unit: string, amount: string): string => {
