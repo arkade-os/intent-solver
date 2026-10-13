@@ -486,7 +486,7 @@ export const buildSolverCard = (inputs: SolverCardInputs): SolverCard => {
 const canonicalize = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(canonicalize)
   if (value !== null && typeof value === 'object') {
-    // Null prototype, as the registry verifier: on `{}` a parsed `__proto__` key would vanish from the digest.
+    // Null prototype, as the registry client verifier (solver-registry#40): on `{}` a parsed `__proto__` key would vanish from the digest.
     const out: Record<string, unknown> = Object.create(null)
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
       out[key] = canonicalize((value as Record<string, unknown>)[key])

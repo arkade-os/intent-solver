@@ -710,7 +710,7 @@ describe('canonical form and signature', () => {
     expect(bytesToHex(cardDigest(card))).toBe(bytesToHex(cardDigest({ ...card, sig: undefined })))
   })
 
-  it('counts a parsed "__proto__" key in the signed bytes, as the registry verifier does', async () => {
+  it('counts a parsed "__proto__" key in the signed bytes, as the registry client verifier (solver-registry#40) does', async () => {
     const card = await signSolverCard(buildSolverCard(inputs()), sign)
     const tampered = JSON.parse(JSON.stringify(card).replace('"nostr":{', '"nostr":{"__proto__":{"x":1},'))
     expect(Object.keys(tampered.transports.nostr)).toContain('__proto__')

@@ -1302,6 +1302,11 @@ card without its markets — filed once; the markets then stay current on the
 relay. Until those wallets are out, keep the full card in the registry: older
 wallets read only that.
 
+Wallets drop a relay card more than two hours old. `auto` keeps it fresh on
+its own; `manual` re-sends only a card the operator published since the
+process started, so after any restart, publish again from the console
+(**Publish now**) within two hours or the solver drops out of discovery.
+
 Two gotchas:
 
 - **Submit only after solver-registry PR #12 has merged** — that PR adds
