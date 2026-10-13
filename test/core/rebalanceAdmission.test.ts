@@ -1,7 +1,108 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
+import type { AdmissionRequest } from '@arkade-os/solver-core/core/admissionStrategy.js'
+
+const deferred = <T>() => {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+const request = (): AdmissionRequest => ({
+  pair: 'lightning:BTC->arkade:BTC',
+  giveSats: 4000,
+  capSats: 100000,
+  committedSats: async () => 0,
+})
+
+const inventory = (sats = 10000): NonNullable<AdmissionRequest['inventory']> => ({
+  poolId: 'arkade',
+  requiredSats: 4000,
+  available: { sats, ageMs: 0 },
+  owedSats: async () => 0,
+})
 
 describe('rebalance and quote inventory admission', () => {
+  it('does not block unrelated admissions while the wallet balance read is pending', async () => {
+    const balance = deferred<AdmissionRequest['inventory']>()
+    const read = vi.fn(async (req: AdmissionRequest) => (req.pair === request().pair ? balance.promise : undefined))
+    const gate = new AdmissionControl(read)
+    const pending = gate.admit(request())
+    await vi.waitFor(() => expect(read).toHaveBeenCalledOnce())
+    let admitted = false
+    const unrelated = gate.admit({ ...request(), pair: 'arkade:BTC->lightning:BTC' }).then((held) => {
+      admitted = held !== null
+      held?.release()
+    })
+    try {
+      await vi.waitFor(() => expect(admitted).toBe(true), { timeout: 100 })
+    } finally {
+      balance.resolve(inventory())
+      ;(await pending)?.release()
+      await unrelated
+    }
+  })
+
+  it.each([0, -1, NaN])('rejects invalid size %s before reading the wallet', async (giveSats) => {
+    const read = vi.fn(async () => inventory())
+    const gate = new AdmissionControl(read)
+    await expect(gate.admit({ ...request(), giveSats })).rejects.toThrow(RangeError)
+    expect(read).not.toHaveBeenCalled()
+    expect(gate.outstandingSats).toBe(0)
+  })
+
+  it.each(['wallet', 'committed', 'owed'] as const)(
+    'refuses a stale balance when a source hold is spent and released during the %s read',
+    async (stage) => {
+      const barrier = deferred<void>()
+      const reached = deferred<void>()
+      const pause = async () => {
+        reached.resolve()
+        await barrier.promise
+      }
+      const read = vi.fn(async () => {
+        if (stage === 'wallet') await pause()
+        return {
+          ...inventory(),
+          owedSats: async () => {
+            if (stage === 'owed') await pause()
+            return 0
+          },
+        }
+      })
+      const gate = new AdmissionControl(read)
+      let source = stage === 'wallet' ? undefined : gate.restoreInventory('arkade', 7000)
+      const onRefused = vi.fn()
+      const pending = gate.admit({
+        ...request(),
+        committedSats: async () => {
+          if (stage === 'committed') await pause()
+          return 0
+        },
+        onRefused,
+      })
+      await reached.promise
+      if (stage === 'wallet') {
+        source = (await gate.reserveInventory('arkade', 7000, 10000, async () => 0)) ?? undefined
+        expect(source).toBeDefined()
+      }
+      source!.release()
+      expect(gate.outstandingInventorySats('arkade')).toBe(0)
+      barrier.resolve()
+      expect(await pending).toBeNull()
+      expect(onRefused).toHaveBeenCalledWith('float')
+      expect(gate.outstandingSats).toBe(0)
+      read.mockImplementation(async () => inventory(3000))
+      expect(await gate.admit(request())).toBeNull()
+      read.mockImplementation(async () => inventory(8000))
+      const fresh = await gate.admit(request())
+      expect(fresh).not.toBeNull()
+      fresh?.release()
+    },
+  )
+
   it('failed obligation reads release every acquired reservation', async () => {
     const gate = new AdmissionControl()
     const base = { pair: 'lightning:BTC->arkade:BTC', giveSats: 4000, capSats: 100000, committedSats: async () => 0 }

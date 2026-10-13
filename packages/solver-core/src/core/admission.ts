@@ -46,6 +46,7 @@ export class AdmissionControl implements AdmissionStrategy {
   /** The same against the WALLET, apart from `reserved` because it is a different ceiling. */
   private reservedFloat = 0
   private readonly inventory = new Map<string, number>()
+  private inventoryGeneration = 0n
 
   /**
    * Serialises read-modify-write on both counters. A promise chain rather than a lock
@@ -98,7 +99,13 @@ export class AdmissionControl implements AdmissionStrategy {
     const next = this.outstandingInventorySats(poolId) + requiredSats
     if (!Number.isSafeInteger(next)) throw new RangeError('inventory reservation exceeds safe integer range')
     this.inventory.set(poolId, next)
-    return releasing([() => this.inventory.set(poolId, this.outstandingInventorySats(poolId) - requiredSats)])
+    this.inventoryGeneration++
+    return releasing([
+      () => {
+        this.inventory.set(poolId, this.outstandingInventorySats(poolId) - requiredSats)
+        this.inventoryGeneration++
+      },
+    ])
   }
 
   reserveInventory(
@@ -125,9 +132,10 @@ export class AdmissionControl implements AdmissionStrategy {
    * involved at all.
    */
   async admit(request: AdmissionRequest): Promise<Reservation | null> {
+    if (!(request.giveSats > 0)) throw new RangeError(`admit() needs a positive size, got ${request.giveSats}`)
+    const generation = this.inventoryGeneration
+    const guardedInventory = request.inventory ?? (await this.inventoryFor?.(request))
     return this.serialise(async (): Promise<Reservation | null> => {
-      const guardedInventory = request.inventory ?? (await this.inventoryFor?.(request))
-      if (!(request.giveSats > 0)) throw new RangeError(`admit() needs a positive size, got ${request.giveSats}`)
       const exposure = this.claimExposure(request.giveSats, request.capSats, await request.committedSats())
       if (exposure === null) {
         request.onRefused?.('exposure')
@@ -150,6 +158,8 @@ export class AdmissionControl implements AdmissionStrategy {
             throw new RangeError('invalid inventory requirement')
           }
           if (
+            // A released source hold may already have spent the balance read outside this queue.
+            generation !== this.inventoryGeneration ||
             inventory.available === null ||
             owed + this.outstandingInventorySats(inventory.poolId) + inventory.requiredSats > inventory.available.sats
           ) {

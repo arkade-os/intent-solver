@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { generateMnemonic } from '@scure/bip39'
+import { wordlist } from '@scure/bip39/wordlists/english.js'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { createCorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
@@ -27,6 +29,7 @@ import {
 } from './support/stack.js'
 
 const AMOUNT_SATS = 50_000
+const SOURCE_SATS = 100_000
 const policy: RebalancePolicy = {
   enabled: false,
   reserveSats: 10_000,
@@ -40,6 +43,7 @@ const policy: RebalancePolicy = {
 }
 
 let arkade: E2eArkade
+let donor: E2eArkade
 let onchain: Awaited<ReturnType<typeof openOnchainBackend>>
 let ln: Awaited<ReturnType<typeof openSolverLightning>>
 let driver: SqlDriver
@@ -55,11 +59,16 @@ describe('e2e Arkade surplus rebalance to own onchain wallet', () => {
   beforeAll(async () => {
     expect(e2eNetwork()).toBe('regtest')
     await requireStack('Arkade onchain rebalance', ['arkd', 'emulator', 'lnd', 'esplora'])
-    arkade = await openRebalanceArkade()
+    donor = await openRebalanceArkade()
+    const dir = tempStoreDir()
+    arkade = await openRebalanceArkade({
+      mnemonic: generateMnemonic(wordlist),
+      databasePath: join(dir, 'source-wallet.sqlite'),
+    })
     expect(arkade.network).toBe('regtest')
     onchain = await openOnchainBackend()
     ln = await openSolverLightning()
-    driver = betterSqliteDriver(join(tempStoreDir(), 'rebalance.sqlite'))
+    driver = betterSqliteDriver(join(dir, 'rebalance.sqlite'))
     store = await RebalanceStore.open(driver)
     const source = await createArkadeRebalanceSource(
       {
@@ -87,11 +96,23 @@ describe('e2e Arkade surplus rebalance to own onchain wallet', () => {
     await ln?.close()
     await onchain?.close?.()
     arkade?.close()
+    donor?.close()
   })
 
   it(
     'settles the collaborative exit, confirms the exact backend credit, and persists completion',
     async () => {
+      await assertArkadeSpendable(donor, SOURCE_SATS)
+      expect(await sourceBalance()).toBe(0)
+      const sourceFundingTxid = await donor.ctx.wallet.send({
+        address: await arkade.ctx.wallet.getAddress(),
+        amount: SOURCE_SATS,
+      })
+      await poll(async () => ((await sourceBalance()) === SOURCE_SATS ? true : null), {
+        attempts: 40,
+        intervalMs: 3000,
+        whenExhausted: 'fresh rebalance source did not receive its controlled input',
+      })
       await assertArkadeSpendable(arkade, policy.maxDebitSats + policy.reserveSats)
       const sourceBefore = await sourceBalance()
       const destinationBefore = (await onchain.getBalance()).confirmedSats
@@ -103,7 +124,10 @@ describe('e2e Arkade surplus rebalance to own onchain wallet', () => {
       })
       expect(quoted.state).toBe('quoted')
       expect(quoted.deposit.netSats).toBe(AMOUNT_SATS)
-      expect(quoted.inputs.length).toBeGreaterThan(0)
+      expect(quoted.inputs).toHaveLength(1)
+      expect(quoted.inputs[0]).toMatchObject({ txid: sourceFundingTxid, value: SOURCE_SATS })
+      expect(quoted.feeSats).toBeLessThanOrEqual(policy.maxFeeSats)
+      expect(quoted.debitSats).toBeLessThanOrEqual(policy.maxDebitSats)
       expect(await sourceBalance()).toBe(sourceBefore)
       expect(await onchain.findOutputs({ address: quoted.deposit.destination })).toEqual([])
 

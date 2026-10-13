@@ -6,19 +6,21 @@ import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
 import { esploraUrl, loadE2eEnv } from './preflight.js'
 import { e2eNetwork, type E2eArkade } from './stack.js'
 
-export const openRebalanceArkade = async (): Promise<E2eArkade> => {
+export const openRebalanceArkade = async (
+  options: { mnemonic?: string; databasePath?: string } = {},
+): Promise<E2eArkade> => {
   loadE2eEnv()
   const network = e2eNetwork()
   if (network !== 'regtest') throw new Error('rebalance e2e requires regtest')
   const profile = NETWORKS[network]
-  const mnemonic = process.env.ARK_MNEMONIC
+  const mnemonic = options.mnemonic ?? process.env.ARK_MNEMONIC
   const arkServerUrl = process.env.ARK_SERVER_URL
   const emulatorUrl = process.env.EMULATOR_URL
   if (!mnemonic || !arkServerUrl || !emulatorUrl) throw new Error('rebalance e2e requires wallet and stack settings')
   const ctx = await createArkadeContext({
     mnemonic,
     arkServerUrl,
-    databasePath: arkDbPath(),
+    databasePath: options.databasePath ?? arkDbPath(),
     isMainnet: false,
     arkadeHrp: profile.arkadeHrp,
     expectedArkdNetwork: profile.arkdNetwork,
