@@ -130,7 +130,7 @@ describe('a consumer rail joins the shipped daemon', () => {
     expect(Math.min(lookup, fake, lnd)).toBeGreaterThan(-1)
     expect(fake).toBeLessThan(lookup)
     expect(lnd).toBeLessThan(lookup)
-    expect(servicesSource).toContain('rail.create(config)')
+    expect(servicesSource).toContain('rail.create(config, host)')
   })
 
   it('is admitted by the config validator, not just by the registry', () => {

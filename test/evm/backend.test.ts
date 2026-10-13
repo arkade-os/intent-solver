@@ -3,6 +3,7 @@ import { hex } from '@scure/base'
 import { sha256 } from '@noble/hashes/sha2.js'
 import {
   claimEventTopic,
+  encodeClaim,
   encodeRefund,
   encodeRefundFor,
   refundEventTopic,
@@ -25,6 +26,38 @@ const lock: Erc20SwapLock = {
 
 const TIP = 9_000n
 const TIP_HEX = `0x${TIP.toString(16)}`
+const CLAIM_TX = `0x${'55'.repeat(32)}`
+const CLAIM_BLOCK = `0x${'66'.repeat(32)}`
+const claimLog = (data: string) => ({
+  address: `0x${hex.encode(CONTRACT)}`,
+  removed: false,
+  transactionHash: CLAIM_TX,
+  blockHash: CLAIM_BLOCK,
+  blockNumber: '0x1f40',
+  logIndex: '0x0',
+  topics: [`0x${hex.encode(claimEventTopic())}`, `0x${hex.encode(lock.preimageHash)}`],
+  data,
+})
+const claimRpcAnswers: Record<string, unknown> = {
+  eth_getTransactionReceipt: {
+    transactionHash: CLAIM_TX,
+    blockHash: CLAIM_BLOCK,
+    blockNumber: '0x1f40',
+    status: '0x1',
+    to: `0x${hex.encode(CONTRACT)}`,
+    from: `0x${hex.encode(lock.claimAddress)}`,
+    logs: [claimLog(`0x${hex.encode(PREIMAGE)}`)],
+  },
+  eth_getTransactionByHash: {
+    hash: CLAIM_TX,
+    blockHash: CLAIM_BLOCK,
+    blockNumber: '0x1f40',
+    to: `0x${hex.encode(CONTRACT)}`,
+    from: `0x${hex.encode(lock.claimAddress)}`,
+    input: `0x${hex.encode(encodeClaim(PREIMAGE, lock))}`,
+  },
+  eth_getBlockByNumber: { hash: CLAIM_BLOCK, number: '0x1f40', timestamp: '0x64' },
+}
 
 type LogFilter = { address: string; fromBlock: string; toBlock: string; topics: string[] }
 
@@ -40,7 +73,7 @@ const rpcOf = (answers: Record<string, unknown>) => {
 }
 
 const backendWith = (answers: Record<string, unknown>, logScanRange?: number) => {
-  const { rpc, calls } = rpcOf({ eth_blockNumber: TIP_HEX, ...answers })
+  const { rpc, calls } = rpcOf({ eth_blockNumber: TIP_HEX, ...claimRpcAnswers, ...answers })
   return { backend: createEvmHtlcBackend({ contractAddress: CONTRACT, rpc, logScanRange }), calls }
 }
 
@@ -103,8 +136,6 @@ describe('isLocked', () => {
 })
 
 describe('findClaimPreimage', () => {
-  const claimLog = (data: string) => ({ topics: [hex.encode(claimEventTopic()), 'irrelevant'], data })
-
   it('filters on the indexed preimageHash so the node returns only this swap', async () => {
     const { backend, calls } = backendWith({ eth_getLogs: [] })
     await backend.findClaimPreimage(lock, 100n)
@@ -144,18 +175,13 @@ describe('findClaimPreimage', () => {
     await expect(backend.findClaimPreimage(lock, 0n)).resolves.toEqual(PREIMAGE)
   })
 
-  it('accepts a log carrying a valid preimage even with no usable topics', async () => {
-    // The topics are the node's own filter echoed back, so they prove nothing
-    // the sha256 check does not. An earlier cut required `topics` to be an
-    // array before looking at `data`, which read like a security guard while
-    // filtering nothing — and would have discarded a real, provable claim on
-    // the say-so of a field nobody reads.
+  it('requires a complete claim event even when its preimage hashes correctly', async () => {
     for (const shape of [
       { data: `0x${hex.encode(PREIMAGE)}` },
       { topics: 'not-an-array', data: `0x${hex.encode(PREIMAGE)}` },
     ]) {
       const { backend } = backendWith({ eth_getLogs: [shape] })
-      await expect(backend.findClaimPreimage(lock, 0n)).resolves.toEqual(PREIMAGE)
+      await expect(backend.findClaimPreimage(lock, 0n)).resolves.toBeNull()
     }
   })
 
@@ -550,8 +576,6 @@ describe('findRefund', () => {
 })
 
 describe('the scan is paged, and pages all the way to the tip', () => {
-  const claimLog = (data: string) => ({ topics: [hex.encode(claimEventTopic()), 'irrelevant'], data })
-
   it('never asks for more blocks in one request than the provider allows', async () => {
     const { backend, calls } = backendWith({ eth_getLogs: [] }, 1_000)
     await backend.findClaimPreimage(lock, 5_000n)
@@ -566,6 +590,7 @@ describe('the scan is paged, and pages all the way to the tip', () => {
     let pages = 0
     const rpc: JsonRpc = async (method) => {
       if (method === 'eth_blockNumber') return TIP_HEX
+      if (method in claimRpcAnswers) return claimRpcAnswers[method]
       if (method !== 'eth_getLogs') throw new Error(`unexpected RPC ${method}`)
       pages += 1
       return pages < 10 ? [] : [claimLog(`0x${hex.encode(PREIMAGE)}`)]

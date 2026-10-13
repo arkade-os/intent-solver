@@ -45,7 +45,7 @@ export interface Eip1559Fields {
   maxPriorityFeePerGas: bigint
   maxFeePerGas: bigint
   gas: bigint
-  /** 20 bytes. Contract creation is not supported — this corridor only calls. */
+  /** 20 bytes for a call, or empty for contract creation. */
   to: Uint8Array
   /** Native currency, in wei. */
   value: bigint
@@ -58,7 +58,7 @@ const assertAddress = (address: Uint8Array, label: string): void => {
 
 /** The nine signed fields, in the order EIP-1559 fixes. */
 const unsignedFields = (tx: Eip1559Fields): RlpInput[] => {
-  assertAddress(tx.to, 'to')
+  validateFields(tx)
   return [
     rlpQuantity(tx.chainId),
     rlpQuantity(tx.nonce),
@@ -163,6 +163,9 @@ export const recoverSender = (
   tx: Eip1559Fields,
   signature: { yParity: bigint; r: Uint8Array; s: Uint8Array },
 ): Uint8Array => {
+  if (signature.yParity !== 0n && signature.yParity !== 1n) throw new Error('yParity must be zero or one')
+  const parsed = new secp256k1.Signature(bytesToBigint(signature.r), bytesToBigint(signature.s))
+  if (parsed.hasHighS()) throw new Error('transaction signature must use low s')
   const recovered = new Uint8Array(65)
   recovered[0] = Number(signature.yParity)
   recovered.set(padLeft(signature.r, 32), 1)
@@ -192,4 +195,119 @@ const bytesToBigint = (bytes: Uint8Array): bigint => {
   let v = 0n
   for (const byte of bytes) v = (v << 8n) | BigInt(byte)
   return v
+}
+
+const UINT256_LIMIT = 1n << 256n
+const NONCE_LIMIT = (1n << 64n) - 1n
+
+const validateFields = (tx: Eip1559Fields): void => {
+  if (!(tx.to instanceof Uint8Array) || (tx.to.length !== 0 && tx.to.length !== 20)) {
+    throw new Error('to must be 20 bytes or empty for contract creation')
+  }
+  if (!(tx.data instanceof Uint8Array)) throw new Error('data must be bytes')
+  for (const field of ['chainId', 'nonce', 'maxPriorityFeePerGas', 'maxFeePerGas', 'gas', 'value'] as const) {
+    if (typeof tx[field] === 'bigint' && tx[field] < 0n) throw new Error(`${field} must not be negative (uint256)`)
+    if (typeof tx[field] !== 'bigint' || tx[field] >= UINT256_LIMIT) {
+      throw new Error(`${field} must be a uint256`)
+    }
+  }
+  if (tx.chainId === 0n || tx.gas === 0n) throw new Error('chainId and gas must be positive')
+  if (tx.gas >= 1n << 64n) throw new Error('gas exceeds uint64')
+  if (tx.nonce >= NONCE_LIMIT) throw new Error('nonce exceeds the transaction nonce limit')
+  if (tx.maxPriorityFeePerGas > tx.maxFeePerGas) throw new Error('priority fee exceeds maximum fee')
+}
+
+interface RlpHeader {
+  list: boolean
+  start: number
+  end: number
+}
+
+const rlpHeader = (raw: Uint8Array, offset: number, limit: number): RlpHeader => {
+  if (offset >= limit) throw new Error('truncated RLP item')
+  const prefix = raw[offset]!
+  if (prefix < 0x80) return { list: false, start: offset, end: offset + 1 }
+  const list = prefix >= 0xc0
+  const shortLimit = list ? 0xf7 : 0xb7
+  const shortBase = list ? 0xc0 : 0x80
+  let start = offset + 1
+  let length: number
+  if (prefix <= shortLimit) {
+    length = prefix - shortBase
+  } else {
+    const lengthBytes = prefix - shortLimit
+    if (start + lengthBytes > limit || raw[start] === 0) throw new Error('invalid RLP length')
+    length = 0
+    for (let index = 0; index < lengthBytes; index++) {
+      length = length * 256 + raw[start + index]!
+      if (!Number.isSafeInteger(length)) throw new Error('RLP length exceeds safe bounds')
+    }
+    start += lengthBytes
+    if (length < 56) throw new Error('noncanonical long RLP item')
+  }
+  const end = start + length
+  if (!Number.isSafeInteger(end) || end > limit) throw new Error('truncated RLP payload')
+  if (!list && length === 1 && raw[start]! < 0x80) throw new Error('noncanonical single-byte RLP item')
+  return { list, start, end }
+}
+
+const quantityFromRlp = (value: RlpInput, name: string): bigint => {
+  if (!(value instanceof Uint8Array) || value.length > 32 || (value.length > 0 && value[0] === 0)) {
+    throw new Error(`${name} must be a canonical uint256 quantity`)
+  }
+  return bytesToBigint(value)
+}
+
+const bytesFromRlp = (value: RlpInput, name: string): Uint8Array => {
+  if (!(value instanceof Uint8Array)) throw new Error(`${name} must be an RLP byte string`)
+  return value
+}
+
+export interface DecodedSignedTransaction extends SignedTransaction {
+  fields: Eip1559Fields
+  yParity: bigint
+  r: Uint8Array
+  s: Uint8Array
+}
+
+export const decodeSignedTransaction = (input: Uint8Array): DecodedSignedTransaction => {
+  if (!(input instanceof Uint8Array) || input[0] !== TYPE_2) throw new Error('expected an EIP-1559 transaction')
+  const raw = Uint8Array.from(input)
+  const root = rlpHeader(raw, 1, raw.length)
+  if (!root.list || root.end !== raw.length) throw new Error('transaction must be one complete RLP list')
+  const items: RlpInput[] = []
+  for (let offset = root.start; offset < root.end;) {
+    const item = rlpHeader(raw, offset, root.end)
+    if (item.list) {
+      if (items.length !== 8 || item.start !== item.end) throw new Error('only an empty access list is supported')
+      items.push([])
+    } else items.push(raw.slice(item.start, item.end))
+    offset = item.end
+    if (items.length > 12) throw new Error('transaction must contain twelve fields')
+  }
+  if (items.length !== 12 || items[8] instanceof Uint8Array) throw new Error('transaction must contain twelve fields')
+  const fields: Eip1559Fields = {
+    chainId: quantityFromRlp(items[0]!, 'chainId'),
+    nonce: quantityFromRlp(items[1]!, 'nonce'),
+    maxPriorityFeePerGas: quantityFromRlp(items[2]!, 'maxPriorityFeePerGas'),
+    maxFeePerGas: quantityFromRlp(items[3]!, 'maxFeePerGas'),
+    gas: quantityFromRlp(items[4]!, 'gas'),
+    to: bytesFromRlp(items[5]!, 'to'),
+    value: quantityFromRlp(items[6]!, 'value'),
+    data: bytesFromRlp(items[7]!, 'data'),
+  }
+  validateFields(fields)
+  const yParity = quantityFromRlp(items[9]!, 'yParity')
+  const r = bytesFromRlp(items[10]!, 'r')
+  const s = bytesFromRlp(items[11]!, 's')
+  quantityFromRlp(r, 'r')
+  quantityFromRlp(s, 's')
+  const from = recoverSender(fields, { yParity, r, s })
+  return { raw, hash: keccak_256(raw), from, fields, yParity, r, s }
+}
+
+export const createAddress = (sender: Uint8Array, nonce: bigint): Uint8Array => {
+  assertAddress(sender, 'sender')
+  if (typeof nonce !== 'bigint' || nonce < 0n || nonce >= NONCE_LIMIT) throw new Error('invalid CREATE nonce')
+  return keccak_256(rlpEncode([sender, rlpQuantity(nonce)])).slice(-20)
 }
