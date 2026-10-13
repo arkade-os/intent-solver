@@ -72,6 +72,18 @@ export interface AssetDetailSource {
 }
 
 /**
+ * The wallet's asset-metadata reader, when there is one.
+ *
+ * Optional rather than assumed: `assetManager` is on the SDK's wallet interface, but a
+ * route must not 500 because something stood a narrower wallet in its place. Labels
+ * are decoration — {@link consoleBalance} renders ids without them.
+ */
+export const assetSource = (wallet: unknown): AssetDetailSource | undefined => {
+  const manager = (wallet as { assetManager?: Partial<AssetDetailSource> } | null)?.assetManager
+  return typeof manager?.getAssetDetails === 'function' ? (manager as AssetDetailSource) : undefined
+}
+
+/**
  * Asset metadata, at most once per asset per process.
  *
  * A PROCESS-LIFETIME CACHE IS CORRECT HERE, not merely cheap. The id is

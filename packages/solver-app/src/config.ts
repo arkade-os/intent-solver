@@ -333,6 +333,8 @@ export interface Config {
     telegramChatId: string | null
     slackWebhookUrl: string | null
   }
+  /** Minutes between balance reports to the notify sinks; `null` (the default) sends none. */
+  balanceReportIntervalMinutes: number | null
   /**
    * How long a disabled contract is kept before its row is deleted, ms.
    *
@@ -1040,6 +1042,7 @@ export const loadConfig = (): Config => {
       telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || null,
       slackWebhookUrl: process.env.SLACK_WEBHOOK_URL?.trim() || null,
     },
+    balanceReportIntervalMinutes: optionalIntFromEnv('BALANCE_REPORT_INTERVAL_MINUTES', 5),
     contractRetentionMs: contractRetentionDays * 86_400_000,
     sweepConcurrency,
     chainTipEsploraUrl: process.env.CHAIN_TIP_ESPLORA_URL?.trim() || process.env.LND_ESPLORA_URL?.trim(),

@@ -1,0 +1,101 @@
+import { describe, it, expect } from 'vitest'
+import { formatBalanceReport, readBalanceReport } from '@arkade-os/solver-app/ops/balanceReport.js'
+import type { FundBalance, FundSource } from '@arkade-os/solver-app/ops/fundSources.js'
+
+const source = (label: string, readBalance: () => Promise<FundBalance>): FundSource => ({
+  id: label,
+  label,
+  unit: 'sats',
+  readBalance,
+})
+
+const sats = (...figures: Array<[string, string | null, string?]>): FundBalance => ({
+  unit: 'sats',
+  figures: figures.map(([label, amount, note]) => ({ label, amount, ...(note === undefined ? {} : { note }) })),
+})
+
+const read = (overrides: Partial<Parameters<typeof readBalanceReport>[0]> = {}) =>
+  readBalanceReport({
+    network: 'mutinynet',
+    sources: [
+      source('arkade float', async () =>
+        sats(['available', '1234567', 'What can fund a swap now.'], ['total', '1300000']),
+      ),
+    ],
+    readAssets: async () => [],
+    readCommittedSats: async () => 150_000,
+    ...overrides,
+  })
+
+describe('balance report', () => {
+  it('lists every source, its figures, the assets and the committed total', async () => {
+    const text = formatBalanceReport(
+      await read({
+        sources: [
+          source('arkade float', async () => sats(['available', '1234567'], ['total', '1300000'])),
+          source('BTC rail', async () => sats(['channel out', '2000000'], ['onchain confirmed', '300000'])),
+        ],
+        readAssets: async () => [
+          { assetId: 'a'.repeat(64), shortId: 'aaaaaaaa…aaaa', amount: '1250000000', ticker: 'USDA' },
+          { assetId: 'b'.repeat(64), shortId: 'bbbbbbbb…bbbb', amount: '42' },
+        ],
+      }),
+    )
+    expect(text).toBe(
+      [
+        'Balance report — mutinynet',
+        'arkade float (sats): available 1,234,567 · total 1,300,000',
+        'BTC rail (sats): channel out 2,000,000 · onchain confirmed 300,000',
+        'arkade assets (base units): USDA 1250000000 · bbbbbbbb…bbbb 42',
+        'committed to live swaps: 150,000 sats',
+      ].join('\n'),
+    )
+  })
+
+  it('reports a source that failed to read, and still reports the rest', async () => {
+    const text = formatBalanceReport(
+      await read({
+        sources: [
+          source('BTC rail', async () => {
+            throw new Error('node unreachable')
+          }),
+          source('arkade float', async () => sats(['available', '5'])),
+        ],
+        readAssets: async () => {
+          throw new Error('indexer down')
+        },
+      }),
+    )
+    expect(text).toContain('BTC rail: unreadable (node unreachable)')
+    expect(text).toContain('arkade float (sats): available 5')
+    expect(text).toContain('arkade assets: unreadable (indexer down)')
+  })
+
+  // A backend that keeps ONE pool says so with a null-amount figure; that is a caveat, not a zero or a failure.
+  it('renders a figure without an amount as its note, never as 0', async () => {
+    const text = formatBalanceReport(
+      await read({
+        sources: [
+          source('BTC rail', async () =>
+            sats(['channel out', '700'], ['channel in', null, 'lnd timed out'], ['pools', null, 'ONE pool.']),
+          ),
+        ],
+      }),
+    )
+    expect(text).toContain('BTC rail (sats): channel out 700 · channel in: lnd timed out · pools: ONE pool.')
+  })
+
+  it('leaves a non-sats amount exactly as the source wrote it', async () => {
+    const big = '115792089237316195423570985008687907853269984665640564039457584007913129639935'
+    const text = formatBalanceReport(
+      await read({
+        sources: [source('usdc', async () => ({ unit: 'USDC', figures: [{ label: 'held', amount: big }] }))],
+      }),
+    )
+    expect(text).toContain(`usdc (USDC): held ${big}`)
+  })
+
+  it('omits the assets line when the float holds none', async () => {
+    expect(formatBalanceReport(await read())).not.toContain('assets')
+  })
+})
