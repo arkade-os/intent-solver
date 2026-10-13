@@ -1552,7 +1552,10 @@ const paintLegHint = (key) => {
   const entry = assetEntry(leg)
   if (!entry.label) {
     refill(node, 'looking up the asset…')
-    return void entry.ready.then(() => paintLegHint(key))
+    // A failed lookup is dropped from the cache, so repainting here would ask again at once.
+    return void entry.ready.then(() =>
+      entry.label ? paintLegHint(key) : refill(node, 'asset lookup failed — the id is used as typed'),
+    )
   }
   const { ticker, name, decimals } = entry.label
   const said = Number(marketDraft[LEG_DECIMALS[key]])
@@ -1674,6 +1677,7 @@ let previewTimer = null
 let previewDirection = 'sell_base'
 let previewSide = 'from'
 let previewRequest = 0
+let previewInFlight = false
 /** The draft feed the operator asked to read. Never sent unasked: the form would otherwise fetch every typed prefix. */
 let previewFeedFor = null
 const feedKey = () => `${marketDraft.feedUrl}\0${marketDraft.pricePath}`
@@ -1682,7 +1686,7 @@ const readDraftFeed = () => previewFeedFor === feedKey()
 // Feed fetches stay bounded by the server's 15s cache; this only decides how soon a fresh read shows.
 const PREVIEW_REFRESH_MS = 5_000
 setInterval(() => {
-  if (marketDraft && previewNode?.isConnected && !previewTimer) void refreshPreview()
+  if (marketDraft && previewNode?.isConnected && !previewTimer && !previewInFlight) void refreshPreview()
 }, PREVIEW_REFRESH_MS)
 
 // Assigned only: Task 10 declares `schedulePreview`, a second declaration is a load-time SyntaxError.
@@ -1705,6 +1709,7 @@ schedulePreview = () => {
 const refreshPreview = async () => {
   if ((!marketDraft && !(state.view === 'pricing' && pricingSelection?.kind === 'corridor')) || !previewNode) return
   const request = ++previewRequest
+  previewInFlight = true
   try {
     const next = await api('/api/pricing/preview', {
       method: 'POST',
@@ -1728,6 +1733,8 @@ const refreshPreview = async () => {
     if (request !== previewRequest) return
     previewData = null
     previewError = error instanceof Error ? error.message : String(error)
+  } finally {
+    if (request === previewRequest) previewInFlight = false
   }
   paintPreview()
 }

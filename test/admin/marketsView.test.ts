@@ -362,7 +362,7 @@ const helperBlock = (): string => {
 }
 
 // Same new-Function + named-error pattern as marketRoutes.test.ts:33-46: run rather than grepped.
-const previewHarness = (response: unknown) => {
+const previewHarness = (response: unknown, draft: Record<string, unknown> = {}) => {
   const pending: (() => void)[] = []
   const sent: (string | undefined)[] = []
   const params = [
@@ -379,12 +379,20 @@ const previewHarness = (response: unknown) => {
     'clearTimeout',
   ]
   const body = `${helperBlock()}\n${marketsBlock()}
-    marketDraft = { ...blankMarket(), marketKey: 'k' }
+    marketDraft = { ...blankMarket(), marketKey: 'k', ...${JSON.stringify(draft)} }
     return { previewPanel, refreshPreview, schedulePreview, marketsView }`
   const args = [
     stubDoc(),
     StubNode,
-    async (_path: string, init?: { body?: string }) => (sent.push(init?.body), response),
+    async (path: string, init?: { body?: string }) => {
+      sent.push(init?.body ?? path)
+      if (path.startsWith('/api/assets/')) {
+        // A macrotask, so a retry loop fails this test instead of starving the event loop.
+        await new Promise((resolve) => setImmediate(resolve))
+        throw new Error('500')
+      }
+      return response
+    },
     (value: unknown) => String(value),
     () => '1m',
     { data: { markets: { carrier: { sats: '330', rfqPriced: false, offerCharged: false }, markets: [] } } },
@@ -526,6 +534,16 @@ describe('the preview panel, run rather than grepped', () => {
     const text = await painted(RESOLVED)
     expect(text).toMatch(/1\.00000000\s+BTC/)
     expect(text).not.toContain('1.00000000 sats')
+  })
+})
+
+describe('asset labels in the form', () => {
+  it('asks once for an asset whose lookup fails, rather than re-asking on every repaint', async () => {
+    const panel = previewHarness(RESOLVED, { quote: 'ab'.repeat(34) })
+    const view = panel.marketsView()
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve))
+    expect(panel.sent.filter((sent) => sent?.startsWith('/api/assets/'))).toHaveLength(1)
+    expect(textOf(view)).toContain('asset lookup failed')
   })
 })
 
