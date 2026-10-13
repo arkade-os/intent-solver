@@ -77,12 +77,36 @@ describe('balance report', () => {
       await read({
         sources: [
           source('BTC rail', async () =>
-            sats(['channel out', '700'], ['channel in', null, 'lnd timed out'], ['pools', null, 'ONE pool.']),
+            sats(
+              ['channel out', '700'],
+              ['channel in', null, 'lnd timed out'],
+              ['pools', null, 'ONE pool.'],
+              ['x', null],
+            ),
           ),
         ],
       }),
     )
-    expect(text).toContain('BTC rail (sats): channel out 700 · channel in: lnd timed out · pools: ONE pool.')
+    expect(text).toContain(
+      'BTC rail (sats): channel out 700 · channel in: lnd timed out · pools: ONE pool. · x: unread',
+    )
+  })
+
+  // A hung read would otherwise hold the report forever, and every later one behind it.
+  it('reports a source that never answers as timed out, and still sends the rest', async () => {
+    const text = formatBalanceReport(
+      await read({
+        sources: [
+          source('BTC rail', () => new Promise(() => {})),
+          source('arkade float', async () => sats(['available', '5'])),
+        ],
+        readCommittedSats: () => new Promise(() => {}),
+        deadlineMs: 10,
+      }),
+    )
+    expect(text).toContain('BTC rail: unreadable (no answer within 10ms)')
+    expect(text).toContain('arkade float (sats): available 5')
+    expect(text).toContain('committed to live swaps: unreadable (no answer within 10ms)')
   })
 
   it('leaves a non-sats amount exactly as the source wrote it', async () => {

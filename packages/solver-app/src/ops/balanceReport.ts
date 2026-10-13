@@ -23,13 +23,37 @@ export interface BalanceReportInput {
   sources: readonly FundSource[]
   readAssets(): Promise<ConsoleAsset[]>
   readCommittedSats(): Promise<number>
+  deadlineMs?: number
 }
 
+// Above the LND adapter's own 30s read deadline, so its more specific error wins where it has one.
+const READ_DEADLINE_MS = 60_000
+
+const within =
+  <T>(read: () => Promise<T>, ms: number) =>
+  async (): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`no answer within ${ms}ms`)), ms)
+          timer.unref()
+        }),
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
 export const readBalanceReport = async (input: BalanceReportInput): Promise<BalanceReport> => {
+  const ms = input.deadlineMs ?? READ_DEADLINE_MS
   const [sources, assets, committedSats] = await Promise.all([
-    Promise.all(input.sources.map(async (s) => ({ label: s.label, balance: await attempt(() => s.readBalance()) }))),
-    attempt(input.readAssets),
-    attempt(input.readCommittedSats),
+    Promise.all(
+      input.sources.map(async (s) => ({ label: s.label, balance: await attempt(within(() => s.readBalance(), ms)) })),
+    ),
+    attempt(within(input.readAssets, ms)),
+    attempt(within(input.readCommittedSats, ms)),
   ])
   return { network: input.network, sources, assets, committedSats }
 }

@@ -1462,8 +1462,7 @@ export const createServices = async (
       })
   }
 
-  // One at a time: a rail read has no deadline, and a hung one must not stack a report per interval.
-  let reporting: Promise<void> | null = null
+  // No in-flight guard: every read carries a deadline far below the 5-minute floor, so reports cannot overlap.
   const postBalanceReport = async (): Promise<void> => {
     const report = await readBalanceReport({
       network: config.network,
@@ -1528,12 +1527,7 @@ export const createServices = async (
     // deployment the ~951ms wallet read.
     sampleBalances: notifySinks.length > 0 ? () => balances.sample() : undefined,
     reportBalances:
-      notifySinks.length > 0 && config.balanceReportIntervalMinutes !== null
-        ? () =>
-            (reporting ??= postBalanceReport().finally(() => {
-              reporting = null
-            }))
-        : undefined,
+      notifySinks.length > 0 && config.balanceReportIntervalMinutes !== null ? postBalanceReport : undefined,
     tickErrors,
     emulatorPubkey: emulatorInfo.signerPubkey,
     providerPubkey: arkadeOps.providerPubkey,

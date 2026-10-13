@@ -578,7 +578,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
       lastBalanceSample = Date.now()
       void services.sampleBalances().catch((error: unknown) => log('balance sample failed:', messageOf(error)))
     }
-    const reportEveryMs = (services.config.balanceReportIntervalMinutes ?? 0) * 60_000
+    const reportEveryMs = (services.config.balanceReportIntervalMinutes ?? Infinity) * 60_000
     if (services.reportBalances && Date.now() - lastBalanceReport > reportEveryMs) {
       lastBalanceReport = Date.now()
       void services.reportBalances().catch((error: unknown) => log('balance report failed:', messageOf(error)))
