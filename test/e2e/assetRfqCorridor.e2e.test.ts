@@ -515,7 +515,10 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
  */
 describe('e2e arkade asset RFQ — the approval gate', () => {
   /** The payout the quote will oblige, by the formula the fill test pins. */
-  const payoutFor = (amount: bigint): bigint => amount - (amount * BigInt(FEE_BPS) + 9_999n) / 10_000n
+  const payoutFor = (amount: bigint): bigint => {
+    const net = amount - arkade.ctx.dustSats
+    return net - (net * BigInt(FEE_BPS) + 9_999n) / 10_000n
+  }
 
   const gated = async (thresholdUnits: bigint) => {
     const admin = await AdminStore.open(join(dir, `admin-${randomBytes(6).toString('hex')}.sqlite`))
