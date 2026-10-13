@@ -9,7 +9,7 @@
  * context or is one SDK constructor call.
  */
 
-import { OnchainWallet, UnilateralExit, type ExitMode, type NetworkName } from '@arkade-os/sdk'
+import { OnchainWallet, UnilateralExit, type NetworkName } from '@arkade-os/sdk'
 import { findLockups, type ArkadeContext } from './wallet.js'
 import type { ExitContractAccess, UnilateralExitDeps } from './unilateralExit.js'
 
@@ -19,9 +19,9 @@ import type { ExitContractAccess, UnilateralExitDeps } from './unilateralExit.js
  *
  * The SDK's `resolveNetworkName` restated rather than imported — it is not
  * exported — and it carries the SDK's own caveat verbatim: exact for `bitcoin`
- * and `regtest`, while the whole `tb` family collapses to `testnet`. So signet
- * and mutinynet must be named explicitly by the caller. Getting it wrong is not
- * silent: the executor checks the label before it relays anything.
+ * and `regtest`, while the whole `tb` family collapses to `testnet`, signet and
+ * mutinynet included. Getting it wrong is not silent: the executor checks the
+ * label before it relays anything.
  */
 export const exitNetworkName = (bech32: string): NetworkName => {
   if (bech32 === 'bc') return 'bitcoin'
@@ -54,35 +54,6 @@ const contractAccessFor = (ctx: ArkadeContext): ExitContractAccess => ({
   },
 })
 
-export interface UnilateralExitWiring {
-  /**
-   * Where the exited sats land — a Bitcoin L1 address, not an Arkade one: the
-   * sweep is an ordinary onchain transaction.
-   *
-   * Defaults to the solver's own onchain address, derived from the same identity
-   * the wallet signs with. That is the right default and not merely a
-   * convenient one: an exit is the solver recovering its OWN capital, and any
-   * other destination is a decision an operator has to make explicitly.
-   */
-  sweepAddress?: string
-  /** sat/vB. Unset takes the onchain provider's estimate, floored at the SDK's minimum. */
-  feeRate?: number
-  /**
-   * Fee-funding strategy. `funded` (the SDK's default) broadcasts a splitter at
-   * prepare time and pre-signs the fee children, so the package then executes
-   * with no keys at all; `graph` transports only the graph and funds the bumps
-   * at execution time. `funded` is the one that makes a package handable to a
-   * watchtower, so it is what this service means by an exit.
-   */
-  mode?: ExitMode
-  /**
-   * The network label stamped on the package. Unset reads it off the wallet's
-   * own prefix, which is exact except on the `tb` family — see
-   * {@link exitNetworkName}.
-   */
-  networkName?: NetworkName
-}
-
 /**
  * Assemble the dependencies a server-independent exit needs from a live wallet.
  *
@@ -92,21 +63,18 @@ export interface UnilateralExitWiring {
  * because in `funded` mode the splitter's change has to be recoverable by the
  * wallet key.
  */
-export const unilateralExitDepsFor = async (
-  ctx: ArkadeContext,
-  wiring: UnilateralExitWiring = {},
-): Promise<UnilateralExitDeps> => {
-  const networkName = wiring.networkName ?? exitNetworkName(ctx.wallet.network.bech32)
+export const unilateralExitDepsFor = async (ctx: ArkadeContext): Promise<UnilateralExitDeps> => {
+  const networkName = exitNetworkName(ctx.wallet.network.bech32)
   const onchainWallet = await OnchainWallet.create(ctx.identity, networkName, ctx.wallet.onchainProvider)
   return {
     exit: UnilateralExit,
     options: {
       wallet: ctx.wallet,
       onchainWallet,
-      sweepAddress: wiring.sweepAddress ?? onchainWallet.address,
+      // The solver's own L1 address: an exit recovers its OWN capital. `mode` is
+      // left to the SDK's `funded` default, the one a watchtower can execute.
+      sweepAddress: onchainWallet.address,
       networkName,
-      ...(wiring.feeRate === undefined ? {} : { feeRate: wiring.feeRate }),
-      ...(wiring.mode === undefined ? {} : { mode: wiring.mode }),
     },
     contracts: contractAccessFor(ctx),
     findLockups: (pkScriptHex) => findLockups(ctx, pkScriptHex),

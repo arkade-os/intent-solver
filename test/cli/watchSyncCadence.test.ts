@@ -16,7 +16,12 @@ import { fileURLToPath } from 'node:url'
 
 const cliSource = readFileSync(fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)), 'utf8')
 
-/** The cadence guard the adoption call actually sits under: the nearest one above it. */
+/**
+ * The cadence guard the adoption call sits under: the nearest one above it.
+ *
+ * Relies on the cadence blocks being siblings — the last guard before the call
+ * is the enclosing one only while no other opens between that header and it.
+ */
 const guardOverAdoption = (): string => {
   const call = cliSource.indexOf('await resyncWatchedScripts()')
   if (call === -1) throw new Error('the watch loop no longer resyncs the watched scripts at all')
@@ -44,5 +49,13 @@ describe('the watch loop — adopting a script is not the indexer sweep', () => 
 
   it('leaves the indexer sweep at 3s, which is the deadline safety net and the EVM legs only driver', () => {
     expect(constant('FULL_SWEEP_MS')).toBe(3000)
+  })
+
+  // A throw here reached the `while (running)` body and ended the whole loop.
+  it('contains a throwing sync, so one bad store read cannot end the watch loop', () => {
+    const header = cliSource.indexOf('if (Date.now() - lastWatchSync >= WATCH_SYNC_MS)')
+    const call = cliSource.indexOf('await resyncWatchedScripts()', header)
+    expect(header).toBeGreaterThan(-1)
+    expect(cliSource.slice(header, call)).toContain('try {')
   })
 })

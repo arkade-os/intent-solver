@@ -4,6 +4,10 @@ import { fileURLToPath } from 'node:url'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
+import { deploymentAd } from '@arkade-os/solver-app/admin/routes/card.js'
+import { DEFAULT_ONCHAIN_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/onchainSend.js'
+import { DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/onchainReceive.js'
+import { DEFAULT_HOLD_INVOICE_WINDOW } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { verifyCardSig, type SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { AdPublisher, type AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 // `AdPublishMode` is imported for the double's `nostrAdPublish`, which is now
@@ -80,41 +84,46 @@ const makeDeps = (
     nostrAdPublish?: AdPublishMode
     adPublisher?: AdPublisher
     assetMarkets?: unknown[]
+    assetRfqMarkets?: unknown[]
+    offerMarkets?: Array<{ a: string | null; b: string | null }>
     evmCorridors?: { corridor: string; enabled: boolean }[]
     offerFill?: { min: bigint; max: bigint }
+    livePolicy?: Record<string, unknown>
     /** Collects the audit rows the route writes, so they can be asserted. */
     audit?: Record<string, unknown>[]
   } = {},
-) =>
-  ({
+) => {
+  const bootPolicy = {
+    corridorEnabled: over.allDisabled
+      ? allCorridors(false)
+      : { ...allCorridors(true), 'arkade:BTC->lightning:BTC': over.lnSendEnabled ?? true },
+    corridorLimits: allCorridors({ minSats: 1_000, maxSats: 50_000 }),
+    corridorFees: {
+      ...allCorridors({ bps: 0, flatSats: 0 }),
+      'arkade:BTC->lightning:BTC': { bps: 30, flatSats: over.lnSendFlatSats ?? 0 },
+      'lightning:BTC->arkade:BTC': { bps: 10, flatSats: 0 },
+    },
+    evmCorridors: over.evmCorridors ?? [],
+    offerMarkets: over.offerMarkets ?? [],
+    offerMinFillAmount: over.offerFill?.min ?? 5_000n,
+    offerMaxFillAmount: over.offerFill?.max ?? 900_000n,
+  }
+  return {
     services: {
       config: {
         relayUrl: over.relayUrl === undefined ? 'wss://relay.example' : over.relayUrl,
+        lockupTimeoutSeconds: 600,
         limits: { minSats: 1_000, maxSats: 50_000 },
         network: 'mutinynet',
         // What the OPERATOR configured, which is the only source for the
         // reported mode — see the `publish` tests below.
         nostrAdPublish: over.nostrAdPublish ?? 'off',
       },
-      // The EFFECTIVE policy, which is what the card must state — deliberately
-      // the object the route reads fees and corridor toggles from.
-      policy: {
-        corridorEnabled: over.allDisabled
-          ? allCorridors(false)
-          : { ...allCorridors(true), 'arkade:BTC->lightning:BTC': over.lnSendEnabled ?? true },
-        // Per-corridor bounds now reach the card, so an admin override that
-        // narrows a corridor shows up in the listing.
-        corridorLimits: allCorridors({ minSats: 1_000, maxSats: 50_000 }),
-        corridorFees: {
-          ...allCorridors({ bps: 0, flatSats: 0 }),
-          'arkade:BTC->lightning:BTC': { bps: 30, flatSats: over.lnSendFlatSats ?? 0 },
-          'lightning:BTC->arkade:BTC': { bps: 10, flatSats: 0 },
-        },
-        evmCorridors: over.evmCorridors ?? [],
-        offerMinFillAmount: over.offerFill?.min ?? 5_000n,
-        offerMaxFillAmount: over.offerFill?.max ?? 900_000n,
-      },
+      policy: { ...bootPolicy, ...(over.livePolicy ?? {}) },
+      bootPolicy,
       assetMarkets: over.assetMarkets ?? [],
+      liveOfferMarkets: over.offerMarkets ?? [],
+      assetRfqMarkets: over.assetRfqMarkets ?? [],
       providerPubkey: PUBKEY,
       emulatorPubkey: EMULATOR_PUBKEY,
       arkade: {
@@ -132,7 +141,8 @@ const makeDeps = (
     mode: 'relay',
     now: () => 1_800_000_060,
     ...(over.adPublisher ? { adPublisher: over.adPublisher } : {}),
-  }) as never
+  } as never
+}
 
 const ASSET = `${'9c'.repeat(32)}0001`
 const GUCCI = `f394dcbf${'e9'.repeat(30)}`
@@ -165,7 +175,13 @@ const getCard = async (deps: ReturnType<typeof makeDeps>): Promise<{ status: num
 }
 
 const postAd = async (deps: ReturnType<typeof makeDeps>) => {
-  const response = await buildAdminApp(deps).fetch(new Request('http://admin/api/actions/post-ad', { method: 'POST' }))
+  const response = await buildAdminApp(deps).fetch(
+    new Request('http://admin/api/actions/post-ad', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    }),
+  )
   return { status: response.status, body: (await response.json()) as Record<string, unknown> }
 }
 
@@ -210,6 +226,7 @@ describe('GET /api/card', () => {
     // A market the deployment serves and the card omits is the whole bug.
     const { body } = await getCard(
       makeDeps({
+        offerMarkets: [{ a: null, b: ASSET }],
         assetMarkets: [
           {
             base: null,
@@ -239,11 +256,37 @@ describe('GET /api/card', () => {
     expect(verifyCardSig(body.card!)).toBe(true)
   })
 
+  it('publishes only the asset directions enabled by the effective RFQ policy', async () => {
+    const configured = {
+      base: null,
+      quote: ASSET,
+      baseDecimals: 8,
+      quoteDecimals: 6,
+      feedUrl: 'https://feed.test/price',
+      pricePath: '/price',
+      toleranceBps: 10,
+      feeBps: 25,
+      sellBaseFeeFlat: 330n,
+      buyBaseFeeFlat: 1_000_000n,
+      sellBase: { min: 1n, max: 100n },
+      buyBase: { min: 2n, max: 200n },
+    }
+    const { body } = await getCard(
+      makeDeps({
+        assetMarkets: [configured],
+        assetRfqMarkets: [{ ...configured, symbol: 'ASSET', sellBase: { min: 0n, max: 0n } }],
+      }),
+    )
+    expect(body.cardOmitted).toEqual([])
+    const asset = body.card!.markets.find((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)!
+    expect(asset).toMatchObject({ fee_flat: '1000000', min_quote_amount: '0', max_quote_amount: '0' })
+  })
+
   /**
    * The mutinynet report: four corridors served, one asset market saved with
    * every bound blank, and no OFFER_MARKETS — so the card used to die whole.
    */
-  it('publishes the four BTC corridors when one asset market cannot be published', async () => {
+  it('publishes the four BTC corridors without advertising an unserved saved asset market', async () => {
     const { status, body } = await getCard(
       makeDeps({
         offerFill: { min: 0n, max: 0n },
@@ -270,9 +313,7 @@ describe('GET /api/card', () => {
       expect([market.min_quote_amount, market.max_quote_amount]).toEqual(['1000', '50000'])
     }
     expect(verifyCardSig(body.card!)).toBe(true)
-    expect(body.cardOmitted).toHaveLength(1)
-    expect(body.cardOmitted[0]).toContain(GUCCI)
-    expect(body.cardOmitted[0]).toContain('OFFER_MIN_FILL_AMOUNT')
+    expect(body.cardOmitted).toEqual([])
     expect(JSON.stringify(body.card)).not.toContain(GUCCI)
   })
 
@@ -293,6 +334,32 @@ describe('GET /api/card', () => {
     expect(body.cardOmitted).toEqual([])
   })
 
+  // `replacePolicy` rewrites `policy` from EVERY stored override, so a pending knob lands there on a LIVE flip.
+  it('advertises the bounds the corridor enforces, not a pending override', async () => {
+    const { body } = await getCard(
+      makeDeps({ livePolicy: { corridorLimits: allCorridors({ minSats: 1_000, maxSats: 500_000 }) } }),
+    )
+    expect(body.cardError).toBeNull()
+    for (const market of body.card!.markets) {
+      expect([market.min_base_amount, market.max_base_amount]).toEqual(['1000', '50000'])
+    }
+  })
+
+  it('advertises no corridor a pending toggle would have switched on', async () => {
+    const { body } = await getCard(
+      makeDeps({ lnSendEnabled: false, livePolicy: { corridorEnabled: allCorridors(true) } }),
+    )
+    expect(body.card!.markets.find((m) => quoteId(m) === BOLT11_BTC)).toMatchObject({ max_quote_amount: '0' })
+  })
+
+  it('still follows the LIVE policy for a field `rebuild` really does re-read', async () => {
+    const { body } = await getCard(
+      makeDeps({ livePolicy: { evmCorridors: [{ corridor: 'arkade:BTC->ethereum:0xdac1', enabled: true }] } }),
+    )
+    expect(body.cardOmitted).toHaveLength(1)
+    expect(body.cardOmitted[0]).toContain('arkade:BTC->ethereum:0xdac1')
+  })
+
   it('adds SOLVER_CARD_RELAYS beyond RELAY_URL, exactly as `cli card` does', async () => {
     process.env.SOLVER_CARD_RELAYS = 'wss://second.example, wss://third.example'
     const { body } = await getCard(makeDeps())
@@ -301,6 +368,12 @@ describe('GET /api/card', () => {
       'wss://second.example',
       'wss://third.example',
     ])
+  })
+
+  it('strips credentials from a relay URL before advertising it', async () => {
+    process.env.SOLVER_CARD_RELAYS = 'wss://user:pw@second.example/nostr?token=secret'
+    const { body } = await getCard(makeDeps())
+    expect(body.card?.transports.nostr.relays).toEqual(['wss://relay.example', 'wss://second.example/nostr'])
   })
 
   /**
@@ -498,6 +571,12 @@ describe('POST /api/actions/post-ad', () => {
     const { status, body } = await postAd(makeDeps({ nostrAdPublish: 'auto' }))
     expect(status).toBe(409)
     expect(body['error']).toBe('no_publisher')
+    expect(body['detail']).toBe('no ad publisher is wired')
+  })
+
+  it('blames the missing relay connection only in a mode that has none', async () => {
+    const serve = { ...(makeDeps({ nostrAdPublish: 'auto' }) as object), mode: 'serve' } as never
+    expect((await postAd(serve)).body['detail']).toBe('serve mode has no relay connection to publish on')
   })
 
   /** A relay outage is reported, never fatal — advertising is not on the money path. */
@@ -603,5 +682,50 @@ describe('the discovery screen', () => {
     expect(panel).toContain('d.cardOmitted')
     // Outside the cardError ternary: true whether or not this card built.
     expect(panel.indexOf('d.cardOmitted')).toBeLessThan(panel.indexOf('d.cardError'))
+  })
+})
+
+describe('deploymentAd', () => {
+  const adOf = (deps: ReturnType<typeof makeDeps>) =>
+    deploymentAd((deps as unknown as { services: Parameters<typeof deploymentAd>[0] }).services)
+
+  it('advertises each enabled corridor on its own terms and quote window, over the card relays', () => {
+    process.env.SOLVER_CARD_RELAYS = 'wss://b.example, wss://c.example'
+    const ad = adOf(makeDeps({ lnSendFlatSats: 50 }))
+    expect(ad.relays).toEqual(['wss://relay.example', 'wss://b.example', 'wss://c.example'])
+    const bounds = { min: '1000', max: '50000' }
+    expect(ad.pairs).toEqual([
+      {
+        pair: 'arkade:BTC->lightning:BTC',
+        ...bounds,
+        fee_bps_indicative: 30,
+        fee_flat_indicative: '50',
+        quote_validity_s_typical: 600,
+      },
+      {
+        pair: 'lightning:BTC->arkade:BTC',
+        ...bounds,
+        fee_bps_indicative: 10,
+        quote_validity_s_typical: DEFAULT_HOLD_INVOICE_WINDOW,
+      },
+      {
+        pair: 'arkade:BTC->onchain:BTC',
+        ...bounds,
+        fee_bps_indicative: 0,
+        quote_validity_s_typical: DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
+      },
+      {
+        pair: 'onchain:BTC->arkade:BTC',
+        ...bounds,
+        fee_bps_indicative: 0,
+        quote_validity_s_typical: DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT,
+      },
+    ])
+  })
+
+  it('leaves out a disabled corridor', () => {
+    const pairs = adOf(makeDeps({ lnSendEnabled: false })).pairs.map((p) => p['pair'])
+    expect(pairs).not.toContain('arkade:BTC->lightning:BTC')
+    expect(pairs).toHaveLength(3)
   })
 })

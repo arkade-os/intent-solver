@@ -21,12 +21,12 @@ const offersView = (): string => {
 }
 
 describe('the offers screen is reachable', () => {
-  it('is in the nav, so an operator finds it without knowing the URL', () => {
-    expect(appSource).toMatch(/VIEWS\s*=\s*\[[\s\S]*?\['offers', 'offers'\]/)
+  it('is in activity, so an operator finds it without knowing the URL', () => {
+    expect(appSource).toMatch(/VIEWS\s*=\s*\[[\s\S]*?\['activity', 'activity'\]/)
   })
 
   it('is routed to a body, so the tab renders something', () => {
-    expect(appSource).toMatch(/BODIES\s*=\s*\{[\s\S]*?offers:\s*offersView/)
+    expect(appSource).toMatch(/bodies\s*=\s*\{[^\n]*offers:\s*offersView/)
   })
 
   it('loads from the offers endpoint', () => {
@@ -52,10 +52,10 @@ describe('the offers screen shows a fill', () => {
 
 describe('the offers screen shows a refusal', () => {
   // Sliced: the whole function would let the fills table satisfy these.
-  const refusalHalf = (): string => offersView().slice(offersView().indexOf('recent refusals'))
+  const refusalHalf = (): string => offersView().slice(offersView().indexOf('recent offer refusals'))
 
   it('has a refusals section at all', () => {
-    expect(offersView()).toContain('recent refusals')
+    expect(offersView()).toContain('recent offer refusals')
   })
 
   it('renders the reason the offer was declined', () => {

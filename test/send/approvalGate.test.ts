@@ -5,6 +5,7 @@ import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import {
+  NO_RECORD_GRACE_SECONDS,
   SendSwapService,
   type ArkadeOps,
   type CoupledReceiveRow,
@@ -63,6 +64,7 @@ const fakeLn = () => ({
   getSendHtlcState: async () => null,
   getOwnInvoiceState: async () => null,
   walletFingerprint: async () => 'w',
+  getBalance: async () => ({ availableSats: Number.MAX_SAFE_INTEGER, incomingSats: 0 }),
 })
 
 const fakeArkade = () =>
@@ -177,7 +179,7 @@ describe('the approval gate on arkade:BTC->lightning:BTC', () => {
     await store.transition(id, 'quoted', 'funded', {})
     // `submitPayment` refuses to pay without an idempotency key.
     await store.transition(id, 'funded', 'paying', {
-      pay_attempted_at: clock,
+      pay_attempted_at: clock - NO_RECORD_GRACE_SECONDS,
       idempotency_key: `swap-${(await store.get(id)).paymentHash}`,
     })
     asked.length = 0
@@ -197,7 +199,7 @@ describe('the approval gate on arkade:BTC->lightning:BTC', () => {
     const service = serviceWith(
       recording(() => holds),
       {
-        receiveStore: { findLiveByPaymentHash: async () => coupled },
+        receiveStore: { findLiveByPaymentHash: async () => coupled, findByPaymentHash: async () => coupled },
         findLockupOutpoints: async () => [{ txid: 'a'.repeat(64), vout: 0 }],
         findClaimPreimage: async () => FORGED.preimage,
       },
@@ -210,6 +212,7 @@ describe('the approval gate on arkade:BTC->lightning:BTC', () => {
       refundLocktime: 1_800_000_000,
       pkScript: 'aa'.repeat(34),
       htlcExpiresAt: null,
+      fundStartedAt: null,
     }
     asked.length = 0
 

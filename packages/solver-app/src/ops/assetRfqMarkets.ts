@@ -2,22 +2,20 @@
  * Which asset markets this deployment serves over RFQ, and under which env
  * stems.
  *
- * TWO SOURCES, joined here, and neither is redundant. The console's market rows
- * already hold everything about a market's ECONOMICS — the feed, each leg's
- * precision, the spread, the payout bounds — and `assetMarketConfig.ts` explains
- * why a second spelling of those would let two directions disagree about one
- * price. What they do not hold is a SYMBOL, and a symbol is what a corridor's
- * env stem is made of: `ASSET_<68 hex>_BUY` is legal shell and unusable, the
- * same argument `evmCorridorConfig.ts` makes for naming a token.
- *
- * So `ASSET_MARKETS` names the assets served and labels them, exactly as
- * `EVM_TOKENS` does; the console prices them. Unset serves none, which is the
- * default and leaves the deployment as it was.
+ * Console rows are the serve list, symbol included. `ASSET_MARKETS` is still
+ * parsed — it seeds those columns once — but nothing below reads it.
  */
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
-import { assetRfqEnvStem, type AssetRfqDirection } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import {
+  assetRfqEnvStem,
+  type AssetRfqDirection,
+  type ReadableAssetRfqMarket,
+} from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import type { AssetMarketPricingView } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { rfqSymbolFor } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import type { AssetMarketPricingView, CarrierMode } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { assetCardMarkets, type AssetCardMarket } from '@arkade-os/solver-core/core/registryCard.js'
+import type { AssetMarket } from './assetOffers.js'
 
 /** One served asset, its operator-facing label, and whether each direction is open. */
 export interface AssetRfqToken {
@@ -58,11 +56,8 @@ export const ungatedAssetSymbols = (tokens: readonly AssetRfqToken[]): readonly 
   tokens.filter((token) => token.approvalThresholdUnits === null).map((token) => token.symbol)
 
 /**
- * `SYMBOL:<asset id>`, comma separated. Empty or unset means no asset RFQ
- * corridors.
- *
- * `read` supplies `<STEM>_ENABLED` per direction, defaulting to on, and takes
- * only the exact strings for the reason `corridorEnabledFrom` gives.
+ * `SYMBOL:<asset id>`, comma separated. Empty or unset names no symbols; the
+ * console rows are still the serve list.
  */
 export const parseAssetRfqTokens = (
   raw: string | undefined,
@@ -102,63 +97,147 @@ export const parseAssetRfqTokens = (
   })
 }
 
+/** What `carrier_mode` resolves against: the chain's dust floor and the deployment default. */
+export interface AssetRfqCarrier {
+  dustSats: bigint
+  /** `ASSET_CARRIER_PRICING`, which `'inherit'` follows. */
+  pricedByDefault: boolean
+}
+
+export const carrierSatsFor = (mode: CarrierMode, carrier: AssetRfqCarrier): bigint => {
+  const priced = mode === 'inherit' ? carrier.pricedByDefault : mode === 'priced'
+  return priced ? carrier.dustSats : 0n
+}
+
 /**
- * The markets the corridors are built from: a named asset joined to the console
- * row that prices it.
- *
- * THROWS on a named asset the console does not price, rather than dropping it.
- * An operator who wrote `ASSET_MARKETS` meant to trade that pair, and a solver
- * that came up serving nothing would look like a quiet market instead of a
- * misconfiguration — the same call `assertMarketsPriced` makes for the packet
- * path, and for the same reason.
- *
- * Bounds are REQUIRED, with no deployment-wide fallback. The packet path has one
- * (`OFFER_MIN_FILL_AMOUNT`), and it is a sats figure: applying it to a payout leg
- * denominated in an asset's atomic units would bound one unit with another. An
- * operator states both directions or serves neither.
+ * A closed direction becomes `{ min: 0n, max: 0n }` — registered, refusing by
+ * amount — not an unbounded payout. The reader for a hand-edited database:
+ * `validateAssetMarket` already refuses an incoherent row at write time.
  */
 export const assetRfqMarketsFrom = (
-  tokens: readonly AssetRfqToken[],
   pricing: readonly AssetMarketPricingView[],
+  carrier: AssetRfqCarrier,
 ): readonly AssetRfqMarket[] =>
-  tokens.map((token) => {
-    const market = pricing.find((m) => m.base === token.assetId || m.quote === token.assetId)
-    if (!market) {
-      throw new Error(
-        `ASSET_MARKETS names ${token.symbol} (${token.assetId}) but no enabled market in the console prices it. ` +
-          `Add the market and its price feed in the console, or stop serving the asset.`,
-      )
-    }
-    // Exactly one leg may be an asset: `parseAssetPair` refuses the rest, and
-    // the offer packet cannot express an asset-to-asset swap at all. A market
-    // configured that way is quotable on neither direction of this corridor.
-    if (market.base !== null && market.quote !== null) {
-      throw new Error(
-        `the market for ${token.symbol} names an asset on both legs, which the offer covenant cannot express`,
-      )
-    }
-    const boundsFor = (direction: AssetRfqDirection) => {
-      if (!token.enabled[direction]) return CLOSED
-      const bounds = direction === 'sell_base' ? market.sellBase : market.buyBase
-      if (!bounds) {
-        throw new Error(
-          `the market for ${token.symbol} states no ${direction === 'sell_base' ? 'sellBase' : 'buyBase'} bounds, ` +
-            `so ${assetRfqEnvStem(token, direction)} would quote an unbounded payout. Set them in the console, ` +
-            `or close the direction with ${assetRfqEnvStem(token, direction)}_ENABLED=false.`,
-        )
-      }
-      return bounds
-    }
-    return {
-      base: market.base,
-      quote: market.quote,
-      symbol: token.symbol,
-      baseDecimals: market.baseDecimals,
-      quoteDecimals: market.quoteDecimals,
-      feeBps: market.feeBps,
-      sellBase: boundsFor('sell_base'),
-      buyBase: boundsFor('buy_base'),
-      feedUrl: market.feedUrl,
-      pricePath: market.pricePath,
-    }
+  pricing.flatMap((market) => {
+    if (!market.servesRfq || market.symbol === null) return []
+    if (market.base !== null && market.quote !== null) return []
+    const sellBase = market.rfqSellBase ? (market.sellBase ?? CLOSED) : CLOSED
+    const buyBase = market.rfqBuyBase ? (market.buyBase ?? CLOSED) : CLOSED
+    if (sellBase.max === 0n && buyBase.max === 0n) return []
+    return [
+      {
+        base: market.base,
+        quote: market.quote,
+        symbol: market.symbol,
+        baseDecimals: market.baseDecimals,
+        quoteDecimals: market.quoteDecimals,
+        feeBps: market.feeBps,
+        sellBaseFeeBps: market.sellBaseFeeBps,
+        buyBaseFeeBps: market.buyBaseFeeBps,
+        sellBaseFeeFlat: market.sellBaseFeeFlat,
+        buyBaseFeeFlat: market.buyBaseFeeFlat,
+        sellBase,
+        buyBase,
+        feedUrl: market.feedUrl,
+        pricePath: market.pricePath,
+        carrierSats: carrierSatsFor(market.carrierMode, carrier),
+      },
+    ]
+  })
+
+/** The offer path's serve list: the row IS the pricing, so the declaration is the whole filter. */
+export const offerMarketsFrom = (pricing: readonly AssetMarketPricingView[]): readonly AssetMarket[] =>
+  pricing.filter((market) => market.servesOffer).map((market) => ({ a: market.base, b: market.quote }))
+
+/**
+ * This market's pair, in EITHER order: a configured market is oriented by its
+ * console row and a recovered one by a swap row, so an ordered compare here
+ * registers one pair twice — which `createCorridorReaderSet` refuses.
+ */
+const covers = (market: ReadableAssetRfqMarket, from: string | null, to: string | null): boolean =>
+  (market.base === from && market.quote === to) || (market.base === to && market.quote === from)
+
+/** Serving list plus previous markets that still have a non-terminal row. */
+export const retainReadableMarkets = (
+  serving: readonly ReadableAssetRfqMarket[],
+  previous: readonly ReadableAssetRfqMarket[],
+  live: readonly { fromAssetId: string | null; toAssetId: string | null }[],
+): readonly ReadableAssetRfqMarket[] => [
+  ...serving,
+  ...previous.filter(
+    (market) =>
+      !serving.some((row) => covers(row, market.base, market.quote)) &&
+      live.some((row) => covers(market, row.fromAssetId, row.toAssetId)),
+  ),
+]
+
+/**
+ * The readable list plus a market per live pair nothing in it covers — what a
+ * RESTART needs and {@link retainReadableMarkets} cannot give it, carrying a
+ * market forward from a previous list that at boot does not exist. The symbol
+ * is derived: a deleted market has no row to read one off, and it reaches only
+ * `descriptor.envStem`, which no reader path consults.
+ */
+export const recoverReadableMarkets = (
+  readable: readonly ReadableAssetRfqMarket[],
+  live: readonly { fromAssetId: string | null; toAssetId: string | null }[],
+): readonly ReadableAssetRfqMarket[] => {
+  const recovered: ReadableAssetRfqMarket[] = []
+  for (const row of live) {
+    const assetId = row.fromAssetId ?? row.toAssetId
+    if (assetId === null) continue
+    if ([...readable, ...recovered].some((market) => covers(market, row.fromAssetId, row.toAssetId))) continue
+    recovered.push({ base: row.fromAssetId, quote: row.toAssetId, symbol: rfqSymbolFor(assetId) })
+  }
+  return recovered.length === 0 ? readable : [...readable, ...recovered]
+}
+
+type Bounds = { min: bigint; max: bigint }
+
+export const samePair = (
+  market: { base: string | null; quote: string | null },
+  pair: { a: string | null; b: string | null },
+): boolean => (market.base === pair.a && market.quote === pair.b) || (market.base === pair.b && market.quote === pair.a)
+
+const unionBounds = (...bounds: Array<Bounds | null | undefined>): Bounds | undefined => {
+  const present = bounds.filter((bound): bound is Bounds => bound !== null && bound !== undefined)
+  const enabled = present.filter((bound) => bound.max > 0n)
+  if (enabled.length === 0) return present.length === 0 ? undefined : { min: 0n, max: 0n }
+  return {
+    min: enabled.reduce((value, bound) => (bound.min < value ? bound.min : value), enabled[0]!.min),
+    max: enabled.reduce((value, bound) => (bound.max > value ? bound.max : value), enabled[0]!.max),
+  }
+}
+
+/** Projects console rows onto the union of directions the offer and RFQ paths actually serve. */
+export const assetCardMarketsFromPolicy = (args: {
+  pricing: readonly AssetMarketPricingView[]
+  offerMarkets: readonly AssetMarket[]
+  offerBounds: Bounds
+  rfqMarkets: readonly AssetRfqMarket[]
+  /** @see Config.offerChargesDeliveredCarrier. REQUIRED, not optional: `cli card`
+   * and `/api/card` both publish through here and the CLI silently omitted it once,
+   * which prices a maker without a charge we apply — funded, then refused. */
+  chargesDeliveredCarrier: boolean | undefined
+}): AssetCardMarket[] =>
+  assetCardMarkets(args.pricing, args.offerBounds).flatMap((market) => {
+    const pricing = args.pricing.find(
+      (candidate) => candidate.base === market.base && candidate.quote === market.quote,
+    )!
+    const servesOffers = args.offerMarkets.some((pair) => samePair(pricing, pair))
+    const rfq = args.rfqMarkets.find((candidate) => candidate.base === market.base && candidate.quote === market.quote)
+    if (!servesOffers && !rfq) return []
+
+    const sellBase = unionBounds(servesOffers ? market.sellBase : undefined, rfq?.sellBase)
+    const buyBase = unionBounds(servesOffers ? market.buyBase : undefined, rfq?.buyBase)
+    return [
+      {
+        ...market,
+        ...(servesOffers && args.chargesDeliveredCarrier === true ? { chargesDeliveredCarrier: true } : {}),
+        sellBase,
+        buyBase,
+        sellBaseFeeFlat: sellBase && sellBase.max > 0n ? market.sellBaseFeeFlat : 0n,
+        buyBaseFeeFlat: buyBase && buyBase.max > 0n ? market.buyBaseFeeFlat : 0n,
+      },
+    ]
   })

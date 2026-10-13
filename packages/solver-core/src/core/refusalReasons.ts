@@ -41,6 +41,7 @@ export interface RefusalExplanation {
 type OrchestratorRefusal =
   | 'duplicate_swap'
   | 'provider_at_capacity'
+  | 'insufficient_float'
   | 'invalid_refund_address'
   | 'invalid_payout_address'
   | 'rate_limited'
@@ -50,11 +51,16 @@ type OrchestratorRefusal =
   | 'fee_consumes_swap'
   | 'payout_below_dust'
   | 'amount_out_of_range'
+  | 'execution_unavailable'
 
 export type RefusalReason =
   SendAcceptanceRefusal | SendPaymentRefusal | ReceiveFundingRefusal | OrchestratorRefusal | InvoiceRejection
 
 export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
+  execution_unavailable: {
+    meaning: 'The payout execution could not be prepared at the requested terms.',
+    whatToDo: 'Check the execution adapter and its capacity before accepting new quotes.',
+  },
   // --- the invoice itself, before any swap exists ---
   too_long: {
     meaning: 'The BOLT11 string was longer than we will parse at all (2048 chars), so it was rejected unread.',
@@ -146,6 +152,12 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
       'Another live swap already holds this payment hash, in this corridor or a peer one. Two lockups and one payment means whichever client loses the race is claimed with no refund.',
     whatToDo:
       'Nothing. Check the other row if the client insists they only asked once — a live RECEIVE swap on the same hash is us being asked to pay our own hold invoice.',
+  },
+  insufficient_float: {
+    meaning:
+      'The payout rail does not hold enough spendable sats to fund this swap and its execution fee, counting payouts already owed by swaps that have not funded yet.',
+    whatToDo:
+      'Deposit into the rail. Unlike `provider_at_capacity` there is no cap to relax: the corridor keeps refusing until spendable balance covers this payout and those already owed.',
   },
   provider_at_capacity: {
     meaning: 'Serving this swap would push total exposure across live swaps past MAX_EXPOSED_SATS.',

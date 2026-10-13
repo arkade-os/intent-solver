@@ -32,7 +32,7 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
-import { BaseSwapStore, type RawRow, type StoreShape } from './baseSwapStore.js'
+import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
 export type OnchainReceiveSwapState =
@@ -84,6 +84,9 @@ const TRANSITION_COLUMNS = new Set([
   'onchain_claim_txid',
   'arkade_refund_txid',
   'failure_reason',
+  // Same edge as funding_txid/funding_vout: learned in the read that finds it.
+  'funded_value_sats',
+  'funded_payout_sats',
 ])
 /**
  * `arkade_refund_txid` is deliberately in BOTH sets — same reason
@@ -218,6 +221,18 @@ export interface OnchainReceiveSwapRow {
   fundStartedAt: number | null
   /** Set once THIS service funded a stamped lockup — @see receive/receiveSwaps.ts */
   stampedAt: number | null
+  /** What the output ACTUALLY holds. NULL is not a default — it is the fact that this swap was never amended. */
+  fundedValueSats: number | null
+  /** {@link payoutSats} re-derived against {@link fundedValueSats}. Persisted for the reason {@link payoutSats} is. */
+  fundedPayoutSats: number | null
+  /**
+   * The band the quote is bound to, narrowed to what this operator underwrites.
+   * Both NULL together, and absent is strict equality. Persisted because the
+   * quote is rebuilt from the row on every `rfq_status_request`, so a band held
+   * only in the request could not survive a restart.
+   */
+  minFromSats: number | null
+  maxFromSats: number | null
 }
 
 const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
@@ -259,12 +274,19 @@ const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
   failure_reason                   TEXT,
   rfq_id                           TEXT,
   fund_started_at                  INTEGER,
-  stamped_at                       INTEGER
+  stamped_at                       INTEGER,
+  funded_value_sats                INTEGER,
+  funded_payout_sats               INTEGER,
+  min_from_sats                    INTEGER,
+  max_from_sats                    INTEGER
 `
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS receive_onchain_swap (${RECEIVE_ONCHAIN_SWAP_COLUMNS});
 CREATE INDEX IF NOT EXISTS idx_receive_onchain_swap_state ON receive_onchain_swap(state);
+CREATE INDEX IF NOT EXISTS idx_receive_onchain_swap_live_recovery_order
+  ON receive_onchain_swap(created_at)
+  WHERE state IN ('quoted','awaiting_confirmations','funding_arkade','awaiting_claim','claimed','refunding_arkade');
 CREATE UNIQUE INDEX IF NOT EXISTS idx_receive_onchain_swap_live_hash
   ON receive_onchain_swap(payment_hash) WHERE state != 'refused';
 -- Partial for the same reason as send_swap's: findByRfqId runs on every
@@ -294,8 +316,7 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   amountSats: Number(raw.amount_sats),
   // Rows quoted before fees existed have no payout_sats; they charged nothing,
   // so the payout WAS the amount. The fallback is that fact, not a default.
-  payoutSats:
-    raw.payout_sats === null || raw.payout_sats === undefined ? Number(raw.amount_sats) : Number(raw.payout_sats),
+  payoutSats: numberOrNull(raw.payout_sats) ?? Number(raw.amount_sats),
   htlcLocktime: Number(raw.htlc_locktime),
   refundLocktime: Number(raw.refund_locktime),
   minConfirmations: Number(raw.min_confirmations),
@@ -319,12 +340,9 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   onchainAddress: String(raw.onchain_address),
   onchainPkScript: String(raw.onchain_pk_script),
   // '' is the stored form of absence — see `receiveSwaps.ts`'s `toRow` for why.
-  claimPacket:
-    raw.claim_packet === null || raw.claim_packet === undefined || raw.claim_packet === ''
-      ? null
-      : String(raw.claim_packet),
+  claimPacket: raw.claim_packet === '' ? null : text(raw.claim_packet),
   fundingTxid: raw.funding_txid === null ? null : String(raw.funding_txid),
-  fundingVout: raw.funding_vout === null || raw.funding_vout === undefined ? null : Number(raw.funding_vout),
+  fundingVout: numberOrNull(raw.funding_vout),
   arkadeFundTxid: raw.arkade_fund_txid === null ? null : String(raw.arkade_fund_txid),
   preimage: raw.preimage === null ? null : String(raw.preimage),
   arkadeClaimTxid: raw.arkade_claim_txid === null ? null : String(raw.arkade_claim_txid),
@@ -332,9 +350,14 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   arkadeRefundTxid: raw.arkade_refund_txid === null ? null : String(raw.arkade_refund_txid),
   refundOutcome: raw.refund_outcome === null ? null : (String(raw.refund_outcome) as 'pushed' | 'external'),
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
-  rfqId: raw.rfq_id === null || raw.rfq_id === undefined ? null : String(raw.rfq_id),
-  fundStartedAt: raw.fund_started_at === null || raw.fund_started_at === undefined ? null : Number(raw.fund_started_at),
-  stampedAt: raw.stamped_at === null || raw.stamped_at === undefined ? null : Number(raw.stamped_at),
+  rfqId: text(raw.rfq_id),
+  fundStartedAt: numberOrNull(raw.fund_started_at),
+  stampedAt: numberOrNull(raw.stamped_at),
+  // Unlike `payout_sats`, missing here means "never amended".
+  fundedValueSats: numberOrNull(raw.funded_value_sats),
+  fundedPayoutSats: numberOrNull(raw.funded_payout_sats),
+  minFromSats: numberOrNull(raw.min_from_sats),
+  maxFromSats: numberOrNull(raw.max_from_sats),
 })
 
 export interface OnchainReceiveQuoteRecord {
@@ -371,6 +394,9 @@ export interface OnchainReceiveQuoteRecord {
   onchainPkScript: string
   claimPacket: string | null
   rfqId?: string
+  /** @see OnchainReceiveSwapRow.minFromSats — both or neither, and absent is strict equality. */
+  minFromSats?: number
+  maxFromSats?: number
 }
 
 /**
@@ -403,12 +429,12 @@ const SHAPE: StoreShape<OnchainReceiveSwapRow, OnchainReceiveSwapState> = {
   noun: 'onchain receive swap',
   lifecycleLabel: 'onchain receive lifecycle',
   searchColumns: ONCHAIN_RECEIVE_SEARCH_COLUMNS,
+  recoveryOrderIndex: 'idx_receive_onchain_swap_live_recovery_order',
   legalEdges: LEGAL_EDGES,
   transitionColumns: TRANSITION_COLUMNS,
   patchColumns: PATCH_COLUMNS,
   live: NON_TERMINAL,
   exposed: EXPOSED,
-  failStates: { exposed: 'stuck', clean: 'refused' },
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 
@@ -423,6 +449,21 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
   }
 
   /**
+   * The base sums `amount_sats`, which here is the quote rather than the
+   * exposure: a row funded above it under-reports against `MAX_EXPOSED_SATS`.
+   * Overridden rather than fixed in the base, whose other tables lack the column.
+   */
+  override async committedSats(): Promise<number> {
+    const placeholders = this.shape.live.map(() => '?').join(',')
+    const row = await this.driver.get<{ total: number }>(
+      `SELECT COALESCE(SUM(COALESCE(funded_value_sats, amount_sats)), 0) AS total
+       FROM ${this.shape.table} WHERE state IN (${placeholders})`,
+      [...this.shape.live],
+    )
+    return Number(row?.total ?? 0)
+  }
+
+  /**
    * Additive migration for databases created before a column existed — same
    * rule and same technique `SwapStore.migrate()` (src/db/swaps.ts) uses:
    * `CREATE TABLE IF NOT EXISTS` never alters an existing table. Added
@@ -433,73 +474,24 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
    * `toRow`, not fabricated here.
    */
   private async migrate(): Promise<void> {
-    const columns = await this.driver.all<{ name: string }>(`PRAGMA table_info(receive_onchain_swap)`)
-    const existing = new Set(columns.map((c) => c.name))
-    if (!existing.has('payout_sats')) {
-      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN payout_sats INTEGER`)
-    }
-    if (!existing.has('stamped_at')) {
-      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN stamped_at INTEGER`)
-    }
-    if (!existing.has('fund_started_at')) {
-      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN fund_started_at INTEGER`)
-    }
-    if (!existing.has('non_interactive_parameters')) {
-      await this.driver.exec(`ALTER TABLE receive_onchain_swap ADD COLUMN non_interactive_parameters TEXT`)
-    }
+    await addColumns(this.driver, 'receive_onchain_swap', [
+      ['payout_sats', 'INTEGER'],
+      ['stamped_at', 'INTEGER'],
+      ['fund_started_at', 'INTEGER'],
+      ['non_interactive_parameters', 'TEXT'],
+      ['funded_value_sats', 'INTEGER'],
+      ['funded_payout_sats', 'INTEGER'],
+      ['min_from_sats', 'INTEGER'],
+      ['max_from_sats', 'INTEGER'],
+    ])
   }
 
-  /**
-   * Claim the exclusive right to pay this swap's Arkade lockup.
-   *
-   * Returns true to exactly ONE caller. The compare-and-swap is on
-   * `fund_started_at IS NULL`, so a second worker reaching the same row loses
-   * here — before it spends, which is the only place losing is free.
-   *
-   * ## Why the chain read is not enough
-   *
-   * `whenFundingArkade` already asks `findLockups` whether this swap's script
-   * is funded, and adopts it if so. That closes the CRASH case: a restart sees
-   * what landed. It does not close the CONCURRENT case, and its comment saying
-   * a persisted flag is unnecessary is true only of the former. Two workers in
-   * the same window both read an empty script — the first one's payment has not
-   * landed yet, which is precisely why the second is still running — and both
-   * pay. Coin selection is per-process, so they select DIFFERENT vtxos and both
-   * succeed, leaving two lockup outputs where the swap needs one. The
-   * compare-and-swap on `state` that follows the payment gates RECORDING, not
-   * spending.
-   *
-   * ## What it does not close
-   *
-   * A crash between winning the lease and the payment landing. The row then
-   * holds a lease with no `arkade_fund_txid`, and this service cannot tell from
-   * its own state whether the transaction is in flight or was never sent. That
-   * is deliberately left STUCK and visible rather than retried: retrying is the
-   * double-fund this exists to prevent, and `findLockups` will adopt the lockup
-   * on the next tick if the payment did land. Closing it properly needs
-   * idempotency at the wallet, which `sendBitcoin` does not offer.
-   *
-   * No TTL, for the same reason. A lease that expires is a lease that lets a
-   * second worker pay while the first may still be in flight, which reinstates
-   * the bug on a timer.
-   */
-  async claimFundLease(id: string, from: OnchainReceiveSwapState): Promise<boolean> {
-    const result = await this.driver.run(
-      `UPDATE receive_onchain_swap SET fund_started_at = ?, updated_at = ?
-       WHERE id = ? AND state = ? AND fund_started_at IS NULL`,
-      [this.now(), this.now(), id, from],
-    )
-    return result.changes === 1
+  override async claimFundLease(id: string, from: OnchainReceiveSwapState): Promise<boolean> {
+    return super.claimFundLease(id, from)
   }
 
-  /**
-   * Give the lease back when the payment provably did not happen.
-   *
-   * Called only for a `FundNotSubmittedError`, never on a bare throw and never
-   * as an expiry: an ambiguous failure joins the crash case above and stays stuck.
-   */
-  async releaseFundLease(id: string): Promise<void> {
-    await this.driver.run(`UPDATE receive_onchain_swap SET fund_started_at = NULL WHERE id = ?`, [id])
+  override async releaseFundLease(id: string): Promise<void> {
+    await super.releaseFundLease(id)
   }
 
   /**
@@ -517,8 +509,9 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
         pk_script, lockup_address, refund_pk_script, client_payout_pk_script,
         non_interactive_parameters,
         htlc_pubkey, client_onchain_refund_pubkey,
-        onchain_address, onchain_pk_script, claim_packet, rfq_id
-      ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        onchain_address, onchain_pk_script, claim_packet, rfq_id,
+        min_from_sats, max_from_sats
+      ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         quote.id,
         at,
@@ -540,24 +533,18 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
         quote.lockupAddress,
         quote.refundPkScript,
         quote.clientPayoutPkScript,
-        quote.nonInteractiveParameters === undefined ? null : quote.nonInteractiveParameters ? '1' : null,
+        quote.nonInteractiveParameters ? '1' : null,
         quote.htlcPubkey,
         quote.clientOnchainRefundPubkey,
         quote.onchainAddress,
         quote.onchainPkScript,
         quote.claimPacket ?? '',
         quote.rfqId ?? null,
+        quote.minFromSats ?? null,
+        quote.maxFromSats ?? null,
       ],
     )
     await this.recordEvent(quote.id, null, 'quoted', null)
     return this.get(quote.id)
-  }
-
-  async findLiveByPaymentHash(paymentHash: string): Promise<OnchainReceiveSwapRow | null> {
-    const raw = await this.driver.get<Raw>(
-      `SELECT * FROM receive_onchain_swap WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
-      [paymentHash],
-    )
-    return raw ? toRow(raw) : null
   }
 }

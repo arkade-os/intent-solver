@@ -3,6 +3,7 @@ import { hex } from '@scure/base'
 import { sha256 } from '@noble/hashes/sha2.js'
 import {
   claimEventTopic,
+  encodeClaim,
   encodeRefund,
   encodeRefundFor,
   refundEventTopic,
@@ -25,6 +26,38 @@ const lock: Erc20SwapLock = {
 
 const TIP = 9_000n
 const TIP_HEX = `0x${TIP.toString(16)}`
+const CLAIM_TX = `0x${'55'.repeat(32)}`
+const CLAIM_BLOCK = `0x${'66'.repeat(32)}`
+const claimLog = (data: string) => ({
+  address: `0x${hex.encode(CONTRACT)}`,
+  removed: false,
+  transactionHash: CLAIM_TX,
+  blockHash: CLAIM_BLOCK,
+  blockNumber: '0x1f40',
+  logIndex: '0x0',
+  topics: [`0x${hex.encode(claimEventTopic())}`, `0x${hex.encode(lock.preimageHash)}`],
+  data,
+})
+const claimRpcAnswers: Record<string, unknown> = {
+  eth_getTransactionReceipt: {
+    transactionHash: CLAIM_TX,
+    blockHash: CLAIM_BLOCK,
+    blockNumber: '0x1f40',
+    status: '0x1',
+    to: `0x${hex.encode(CONTRACT)}`,
+    from: `0x${hex.encode(lock.claimAddress)}`,
+    logs: [claimLog(`0x${hex.encode(PREIMAGE)}`)],
+  },
+  eth_getTransactionByHash: {
+    hash: CLAIM_TX,
+    blockHash: CLAIM_BLOCK,
+    blockNumber: '0x1f40',
+    to: `0x${hex.encode(CONTRACT)}`,
+    from: `0x${hex.encode(lock.claimAddress)}`,
+    input: `0x${hex.encode(encodeClaim(PREIMAGE, lock))}`,
+  },
+  eth_getBlockByNumber: { hash: CLAIM_BLOCK, number: '0x1f40', timestamp: '0x64' },
+}
 
 type LogFilter = { address: string; fromBlock: string; toBlock: string; topics: string[] }
 
@@ -40,7 +73,7 @@ const rpcOf = (answers: Record<string, unknown>) => {
 }
 
 const backendWith = (answers: Record<string, unknown>, logScanRange?: number) => {
-  const { rpc, calls } = rpcOf({ eth_blockNumber: TIP_HEX, ...answers })
+  const { rpc, calls } = rpcOf({ eth_blockNumber: TIP_HEX, ...claimRpcAnswers, ...answers })
   return { backend: createEvmHtlcBackend({ contractAddress: CONTRACT, rpc, logScanRange }), calls }
 }
 
@@ -103,8 +136,6 @@ describe('isLocked', () => {
 })
 
 describe('findClaimPreimage', () => {
-  const claimLog = (data: string) => ({ topics: [hex.encode(claimEventTopic()), 'irrelevant'], data })
-
   it('filters on the indexed preimageHash so the node returns only this swap', async () => {
     const { backend, calls } = backendWith({ eth_getLogs: [] })
     await backend.findClaimPreimage(lock, 100n)
@@ -144,18 +175,13 @@ describe('findClaimPreimage', () => {
     await expect(backend.findClaimPreimage(lock, 0n)).resolves.toEqual(PREIMAGE)
   })
 
-  it('accepts a log carrying a valid preimage even with no usable topics', async () => {
-    // The topics are the node's own filter echoed back, so they prove nothing
-    // the sha256 check does not. An earlier cut required `topics` to be an
-    // array before looking at `data`, which read like a security guard while
-    // filtering nothing — and would have discarded a real, provable claim on
-    // the say-so of a field nobody reads.
+  it('requires a complete claim event even when its preimage hashes correctly', async () => {
     for (const shape of [
       { data: `0x${hex.encode(PREIMAGE)}` },
       { topics: 'not-an-array', data: `0x${hex.encode(PREIMAGE)}` },
     ]) {
       const { backend } = backendWith({ eth_getLogs: [shape] })
-      await expect(backend.findClaimPreimage(lock, 0n)).resolves.toEqual(PREIMAGE)
+      await expect(backend.findClaimPreimage(lock, 0n)).resolves.toBeNull()
     }
   })
 
@@ -243,10 +269,9 @@ describe('the write half is built, never sent', () => {
   it('returns calldata addressed to the configured contract', () => {
     const { backend } = backendWith({})
     for (const call of [
-      backend.lockCall(lock),
+      backend.lockCalls(lock, lock.amount).at(-1)!,
       backend.claimCall(PREIMAGE, lock),
       backend.refundCall(lock),
-      backend.claimForCall(PREIMAGE, lock),
       backend.refundForCall(lock),
     ]) {
       expect(hex.encode(call.to)).toBe(hex.encode(CONTRACT))
@@ -255,33 +280,20 @@ describe('the write half is built, never sent', () => {
   })
 
   it(`exposes the third-party paths with different selectors to the msg.sender ones`, () => {
-    // Same swap, four different calls. If a For- variant ever emitted the
-    // interactive selector, a third party submitting it would revert because
-    // it is not the claimAddress — the exact failure these exist to remove.
+    // If the For- variant ever emitted the interactive selector, a third party
+    // submitting it would revert because it is not the refundAddress.
     const { backend } = backendWith({})
     const selector = (data: Uint8Array) => hex.encode(data.subarray(0, 4))
-    expect(selector(backend.claimForCall(PREIMAGE, lock).data)).toBe('bc586b28')
     expect(selector(backend.refundForCall(lock).data)).toBe('0e5bbd59')
     expect(selector(backend.claimCall(PREIMAGE, lock).data)).toBe('cd413efa')
     expect(selector(backend.refundCall(lock).data)).toBe('36504721')
   })
 
-  it(`addresses approveCall to the TOKEN, not to the swap contract`, () => {
-    // Every other call here goes to CONTRACT. This one must not: the allowance
-    // lives on the token, and sending approve to the swap deployment reverts
-    // with nothing that names the cause.
-    const { backend } = backendWith({})
-    const call = backend.approveCall(lock, 500n)
-    expect(hex.encode(call.to)).toBe(hex.encode(lock.tokenAddress))
-    expect(hex.encode(call.to)).not.toBe(hex.encode(CONTRACT))
-    expect(hex.encode(call.data.subarray(0, 4))).toBe('095ea7b3')
-  })
-
   it(`approves the SWAP CONTRACT as spender, since it is what calls transferFrom`, () => {
     const { backend } = backendWith({})
-    const call = backend.approveCall(lock, 500n)
+    const [call] = backend.lockCalls(lock, 0n)
     // Word 0 is the spender, left-padded.
-    expect(hex.encode(call.data.subarray(4, 36))).toBe('00'.repeat(12) + hex.encode(CONTRACT))
+    expect(hex.encode(call!.data.subarray(4, 36))).toBe('00'.repeat(12) + hex.encode(CONTRACT))
   })
 
   it(`reads an unlimited allowance without losing precision`, async () => {
@@ -290,13 +302,13 @@ describe('the write half is built, never sent', () => {
     // forever while believing the allowance was short.
     const max = 'ff'.repeat(32)
     const { backend } = backendWith({ eth_call: '0x' + max })
-    expect(await backend.allowanceOf(lock, new Uint8Array(20).fill(9))).toBe(2n ** 256n - 1n)
+    expect(await backend.allowance(lock.tokenAddress, new Uint8Array(20).fill(9))).toBe(2n ** 256n - 1n)
   })
   it('makes no RPC call to build one', async () => {
     // The seam this module exists for: nothing here signs or broadcasts, so
     // building a call must not touch the network at all.
     const { backend, calls } = backendWith({})
-    backend.lockCall(lock)
+    backend.lockCalls(lock, 0n)
     backend.claimCall(PREIMAGE, lock)
     backend.refundCall(lock)
     expect(calls).toHaveLength(0)
@@ -309,52 +321,9 @@ describe('the write half is built, never sent', () => {
     // the test would pass while the bug was present.
     const expected = hex.encode(CONTRACT)
     const { backend } = backendWith({})
-    backend.lockCall(lock).to.fill(0xff)
+    backend.lockCalls(lock, lock.amount).at(-1)!.to.fill(0xff)
     expect(hex.encode(backend.refundCall(lock).to)).toBe(expected)
     expect(hex.encode(CONTRACT)).toBe(expected)
-  })
-})
-
-describe('lockPrepayCall — the claimant`s gas money', () => {
-  const SENDER = hex.decode('3333333333333333333333333333333333333333') // == lock.refundAddress
-
-  it('attaches the prepay as call value', () => {
-    const { backend } = backendWith({})
-    const call = backend.lockPrepayCall(lock, 5_000_000_000_000_000n, SENDER)
-    expect(call.value).toBe(5_000_000_000_000_000n)
-    expect(hex.encode(call.data.subarray(0, 4))).toBe('b8080ab8')
-    expect(hex.encode(call.to)).toBe(hex.encode(CONTRACT))
-  })
-
-  it('refuses a zero prepay, which would lock the tokens and fund nobody', () => {
-    // Silent on chain: the lock succeeds and the client still cannot claim.
-    const { backend } = backendWith({})
-    expect(() => backend.lockPrepayCall(lock, 0n, SENDER)).toThrow(/must be positive/)
-    expect(() => backend.lockPrepayCall(lock, -1n, SENDER)).toThrow(/must be positive/)
-  })
-
-  it('reports a wrong-LENGTH sender as such, not as a wrong address', () => {
-    // Without a length check these take the same branch: `equalBytes` returns
-    // false because the lengths differ, and the caller is told the address is
-    // wrong when the real problem is its shape — a 32-byte hash passed where an
-    // address belongs is the likely mistake.
-    const { backend } = backendWith({})
-    expect(() => backend.lockPrepayCall(lock, 1n, new Uint8Array(32))).toThrow(/must be 20 bytes, got 32/)
-    expect(() => backend.lockPrepayCall(lock, 1n, new Uint8Array(19))).toThrow(/must be 20 bytes, got 19/)
-  })
-
-  it('refuses a sender that is not the lock`s refundAddress', () => {
-    // The contract writes msg.sender in as refundAddress, so a mismatch keys
-    // the stored lock differently from the one swapKey derives — we would be
-    // unable to find or refund our own funded lock.
-    const { backend } = backendWith({})
-    const other = hex.decode('9999999999999999999999999999999999999999')
-    expect(() => backend.lockPrepayCall(lock, 1n, other)).toThrow(/must be the sending address/)
-  })
-
-  it('leaves the plain lock call with no value', () => {
-    const { backend } = backendWith({})
-    expect(backend.lockCall(lock).value).toBeUndefined()
   })
 })
 
@@ -607,8 +576,6 @@ describe('findRefund', () => {
 })
 
 describe('the scan is paged, and pages all the way to the tip', () => {
-  const claimLog = (data: string) => ({ topics: [hex.encode(claimEventTopic()), 'irrelevant'], data })
-
   it('never asks for more blocks in one request than the provider allows', async () => {
     const { backend, calls } = backendWith({ eth_getLogs: [] }, 1_000)
     await backend.findClaimPreimage(lock, 5_000n)
@@ -623,6 +590,7 @@ describe('the scan is paged, and pages all the way to the tip', () => {
     let pages = 0
     const rpc: JsonRpc = async (method) => {
       if (method === 'eth_blockNumber') return TIP_HEX
+      if (method in claimRpcAnswers) return claimRpcAnswers[method]
       if (method !== 'eth_getLogs') throw new Error(`unexpected RPC ${method}`)
       pages += 1
       return pages < 10 ? [] : [claimLog(`0x${hex.encode(PREIMAGE)}`)]

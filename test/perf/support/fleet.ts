@@ -44,6 +44,7 @@ import { entropyToMnemonic } from '@scure/bip39'
 import { wordlist } from '@scure/bip39/wordlists/english.js'
 import { createArkadeContext, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { poll } from '@arkade-os/solver-core/util/poll.js'
+import { LOCKUP_FUNDING_FILTER } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import type { E2eArkade } from '../../e2e/support/stack.js'
 
 /**
@@ -103,7 +104,7 @@ export const openFleet = async (arkade: E2eArkade, size: number): Promise<Fleet>
         databasePath: `${FLEET_DIR}/wallet-${index}.sqlite`,
         isMainnet: arkade.profile.isMainnet,
         arkadeHrp: arkade.profile.arkadeHrp,
-        // Same guard the solver and the e2e stack use (#58): every wallet here
+        // Same guard the solver and the e2e stack use: every wallet here
         // refuses an arkd reporting a different network. A fleet is a hundred
         // chances to point at the wrong server by accident, so it is worth more
         // here than anywhere, not less.
@@ -257,11 +258,11 @@ export const splitSolverFloat = async (
   perCoinSats: number,
 ): Promise<{ before: number; after: number; ms: number }> => {
   const started = performance.now()
-  // `getSpendableVtxos`, the same GATED read `fundLockup` itself uses — counting
-  // coins the funder cannot actually select would report a split that does not
-  // exist.
+  // Count the same candidate set the lockup funder reads.
   const held = async (): Promise<number> =>
-    (await arkade.ctx.wallet.getSpendableVtxos()).filter((vtxo) => Number(vtxo.value) >= perCoinSats).length
+    (await arkade.ctx.wallet.getSpendableVtxos(LOCKUP_FUNDING_FILTER)).filter(
+      (vtxo) => Number(vtxo.value) >= perCoinSats,
+    ).length
   const before = await held()
   const address = await arkade.ctx.wallet.getAddress()
   for (let made = before; made < coins; made += 1) {

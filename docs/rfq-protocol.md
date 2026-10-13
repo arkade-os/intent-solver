@@ -38,8 +38,15 @@ out of scope for this spec — the Lightning legs use RFQ permanently.
   Broadcasts are never refused at all (§ 4.6). **Responses are tolerant**:
   clients MUST ignore unknown fields in quotes, bids, refusals and statuses,
   so solvers can extend responses without a version bump.
+- **Versions.** The envelope's `v` names the protocol version. The reference
+  implementation speaks `v: 1`. `v: 2` makes two breaking changes: amounts
+  are strings only (§ 2.1), and pairs and topics use CAIP-19 identifiers
+  (§ 2.2).
 
 ## 2. Corridors, assets, pairs
+
+This section describes `v: 1` identifiers. `v: 2` replaces them with CAIP-19
+identifiers (§ 2.2).
 
 A **leg** is `<corridor>:<asset>`. A **pair** is directional:
 `<from-leg>-><to-leg>`. Direction matters — `arkade:BTC->lightning:BTC` and
@@ -199,7 +206,84 @@ imposes no order there; § 12). Examples: `arkade:btc/lightning:btc`,
 non-BTC asset the id is the 68-hex AssetId, so a cross-asset market key is
 network-scoped. Where this spec needs the market key — the open-RFQ
 subscription tag, § 4.6 — it says so explicitly; everywhere else `pair` means
-the directional form above.
+the directional form above. `v: 2` replaces this market key with the § 2.2
+topic key.
+
+### 2.2 Identifiers in `v: 2` _(specified; NOT yet implemented)_
+
+`v: 2` legs are the CAIP-19 asset ids that solver-registry cards already use.
+One id holds the corridor, the network and the asset.
+
+**Legs.** A leg is `<corridor>:<network>/<asset-namespace>:<asset-reference>`:
+
+| leg                 | form                                      | example                                                     |
+| ------------------- | ----------------------------------------- | ----------------------------------------------------------- |
+| BTC within Arkade   | `arkade:<network>/slip44:<coin-type>`     | `arkade:bitcoin/slip44:0`                                   |
+| Arkade-issued asset | `arkade:<network>/asset:<asset-id>`       | `arkade:bitcoin/asset:<asset-id>`                           |
+| BTC over Lightning  | `bolt11:<network>/slip44:<coin-type>`     | `bolt11:mutinynet/slip44:1`                                 |
+| BTC onchain         | `bitcoin:<network>/slip44:<coin-type>`    | `bitcoin:bitcoin/slip44:0`                                  |
+| ERC-20 token        | `eip155:<chain-id>/erc20:<token-address>` | `eip155:1/erc20:0xdac17f958d2ee523a2206206994597c13d831ec7` |
+
+- `<network>` is the network the leg settles on: `bitcoin` (mainnet),
+  `signet`, `mutinynet` or `regtest`.
+- BTC is coin type `0` on `bitcoin` and `1` on every test network. Any other
+  coin type is malformed.
+- `<asset-id>` is the 68-hex Arkade AssetId from § 2.
+- `<chain-id>` is the EIP-155 chain id: 1 or higher, at most 32 digits.
+  `<token-address>` is the token's own contract, never a swap contract.
+- Every character is lowercase, including hex and ERC-20 addresses. Receivers
+  compare ids byte for byte.
+
+**Pairs.** A pair is `<from-leg>-><to-leg>`, directional as in `v: 1`:
+
+```text
+arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0
+```
+
+- A receiver MUST accept pairs up to 184 characters, the longest the grammar
+  allows (two Arkade-issued asset legs on `mutinynet`).
+- A solver refuses a pair for a network it does not serve, with
+  `unsupported_pair`.
+- A client SHOULD send canonical pairs. Every pair a solver sends is
+  canonical, whatever spelling the request used.
+
+**Aliases.** A `v: 2` solver accepts these `v: 1` spellings in `rfq_request`
+and `rfq_open`. It resolves each one on its own network:
+
+| alias               | canonical leg                          |
+| ------------------- | -------------------------------------- |
+| `arkade:BTC`        | `arkade:<network>/slip44:<coin-type>`  |
+| `lightning:BTC`     | `bolt11:<network>/slip44:<coin-type>`  |
+| `onchain:BTC`       | `bitcoin:<network>/slip44:<coin-type>` |
+| `arkade:<asset-id>` | `arkade:<network>/asset:<asset-id>`    |
+
+- Any other non-canonical spelling gets `unsupported_pair`.
+- A client compares the quoted pair with the canonical form of the pair it
+  sent.
+
+**Topic key.** The open-RFQ tag (§ 4.6) and the broker topic (§ 3.2) carry a
+topic key: the two canonical legs of the pair, joined with `~`. A topic key
+has no direction, so the leg order is fixed:
+
+- When exactly one leg is on `arkade`, the `arkade` leg comes first.
+- Otherwise the legs sort in byte order.
+
+```text
+arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0
+arkade:bitcoin/asset:<asset-id>~arkade:bitcoin/slip44:0
+```
+
+`~` never appears in a CAIP-19 id, so a topic key always splits into its two
+legs. A client derives the topic key from the pair, never from a registry
+card: the registry's market key joins the card's ids with `/`, in the card's
+own order.
+
+**Migration.** `v: 1` clients compare the quoted pair byte for byte with the
+pair they sent, so a solver answers each request in the request's own version.
+
+1. Solvers add `v: 2` and keep serving `v: 1` unchanged.
+2. Clients move to `v: 2`.
+3. Solvers drop `v: 1` once no client sends it.
 
 ## 3. Transport
 
@@ -297,10 +381,15 @@ same-asset corridor market the two denominations coincide; on a
 cross-asset one they are different assets, so a card's `fee_flat` and a
 bid's are not comparable numbers. That costs nothing today precisely
 because the card is indicative: the bid and the quote carry the terms.
-Where a card advertises one market standing for both directions of a
-corridor, its `fee_bps` and `fee_flat` are each the **maximum** across the
+Where a same-asset card advertises one market standing for both directions of
+a corridor, its `fee_bps` and `fee_flat` are each the **maximum** across the
 directions it stands for — overstating a fee is the safe direction, and a
 client expects worse than it gets; understating one is a card that lies.
+An Arkade cross-asset market may charge a direction-specific flat amount in
+either input leg. A quote-leg input amount fits this card field directly; an
+enabled base-leg input amount does not, so the reference solver omits that
+market from its card with an operator-visible diagnostic rather than publish a
+false zero.
 
 Rendezvous is keyed by **protocol**, not by a bare list of URLs:
 
@@ -387,7 +476,10 @@ one.
   "pair": "arkade:BTC->lightning:BTC",
   "amount_side": "to",
   "amount": "50000",
-  "profile": { "…": "per-profile fields, § 7" }
+  "profile": {
+    "refund_without_receiver_delay": 606208,
+    "…": "per-profile fields, § 7"
+  }
 }
 ```
 
@@ -422,20 +514,39 @@ one.
 }
 ```
 
+- An Arkade asset rides on sats, and an asset-swap quote MAY carry
+  `carrier_sats` — the canonical decimal string of that dust. It is **not a fee**
+  and is already netted into the two amounts: returned inside `to_amount` when
+  the payout leg is BTC (the maker fronted it on their deposit), and charged out
+  of `from_amount` when the payout leg is an asset (the solver fronts it at
+  output 0). A client funding an asset deposit sends `from_amount` of the asset
+  plus `carrier_sats` in sats, and a client aiming at a target payout adds
+  `carrier_sats` to the input it asks to be quoted on. Absent means zero.
+- The Arkade asset corridor serves `amount_side: "to"` as well as `"from"`.
+  Exact-out resolves `from_amount` to the LEAST input whose exact-in payout
+  reaches the requested `to_amount`, so the two sides share one rounding
+  convention rather than inverting the rate a second way, and the rounding
+  still falls to the solver. Any carrier is included in the `from_amount`
+  returned. The EVM corridors continue to refuse exact-out (§ 7.1.5).
 - A quote resolves **both** `from_amount` and `to_amount`. The solver's fee
   lives in the spread between them; there is **no separate fee field**.
   Both are canonical decimal strings of atomic units (§ 2.1), each in the
   asset of its own leg — so on a cross-asset pair they are denominated in
   different assets and are not comparable as numbers.
+  For an exact-in cross-asset quote with a flat input fee, pricing first removes
+  that fee from `from_amount`, converts the remainder at the reference price,
+  then applies the proportional spread to the converted payout. The quote still
+  carries only the two resolved amounts.
 - `solver_pubkey` — the solver's settlement key (x-only). In v1 it SHOULD
   equal the transport identity key that signed the event.
 - `valid_until` — § 5.
 - `refund_locktime` — HTLC-class quotes only (absent for atomic class): the
   absolute unix-seconds time the client's refund path opens.
 - The top-level fields `solver_pubkey`, `valid_until`, `from_amount`,
-  `to_amount` and `refund_locktime` are the **binding fields** — the only
-  fields a client trusts (§ 6). Everything in `profile` is compare-only or
-  informational.
+  `to_amount` and `refund_locktime` are **binding fields**. HTLC send quotes
+  also bind `profile.refund_without_receiver_delay`: the exact BIP68 delay the
+  client must put in its solo-refund leaf. Other profile fields are
+  compare-only or informational.
 
 ### 4.3 `rfq_refusal`
 
@@ -505,8 +616,10 @@ Relays redeliver, clients retry, and networks duplicate. The rules:
   re-quoted only after every prior swap on it is `refused`/`expired` without
   exposure (a hash whose preimage the solver may already know is burned
   forever).
+- In `v: 2` these comparisons use canonical pairs (§ 2.2). A retry that
+  spells the same pair with an alias is the same request.
 
-### 4.6 Open RFQ — broadcast bidding _(solver side implemented — `packages/solver-core/src/core/openRfq.ts`, `packages/solver-transport/src/ingress/relay.ts`; the client side lives in the ts-sdk, tracked in issue #4)_
+### 4.6 Open RFQ — broadcast bidding _(solver side implemented — `packages/solver-core/src/core/openRfq.ts`, `packages/solver-transport/src/ingress/relay.ts`; the client side lives in the ts-sdk)_
 
 Directed negotiation (§ 4.1–4.5) presumes the client has already picked a
 solver from discovery data. When several solvers serve a pair — and
@@ -534,7 +647,8 @@ corridors resolved, canonical asset ids, deterministic leg order:
 `arkade:btc/lightning:btc` — never the card's display label and never an
 unordered variant; a subscription keyed to any other form silently misses
 every event. Solvers subscribe by this tag, one subscription per served
-market, alongside their directed subscription.
+market, alongside their directed subscription. In `v: 2` the tag is the § 2.2
+topic key, for example `arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0`.
 
 ```json
 {
@@ -854,11 +968,20 @@ server and the emulator are ever both unavailable, by the client's own
 unilateral broadcast using `client_refund_pubkey`'s key, which is state the
 client itself now holds by design (see `docs/integration-js.md`).
 
-The client-side leaves' CSV delays (`unilateral_refund_delay`,
-`unilateral_refund_without_receiver_delay`) are not carried on the wire: they
-derive purely from the Arkade operator's own public `/v1/info`, the same
-source `unilateral_claim_delay` already comes from, so both sides reach the
-same numbers independently.
+`unilateral_refund_delay` still derives from the Arkade operator's public
+`/v1/info`. The solo `unilateral_refund_without_receiver_delay` is instead the
+quote's required `profile.refund_without_receiver_delay`, because it may need
+to extend beyond the operator's base ladder to stay behind `refund_locktime`.
+The client validates that value, builds it into its local derivation, and
+refuses a quote that omits it or opens the solo refund too early.
+
+When the horizon overflows a block-typed ladder the solver re-clocks the whole
+ladder to seconds rather than refusing: a seconds-typed
+`profile.refund_without_receiver_delay` against block-typed `/v1/info` delays
+means `unilateral_claim_delay` and `unilateral_refund_delay` moved clocks too,
+each converted as blocks × 600 climbed to a 512-second boundary. A client that
+re-derives with the base values mixes units and its address will not match —
+derive the other two rungs with that same rule.
 
 ##### 7.1.1.1 The covenant script: eight leaves, nine with the timelocked non-interactive refund leaf
 
@@ -1007,7 +1130,7 @@ The client is paid over Lightning and the sats land on Arkade
 
   - the sealed ciphertext above, fixed at **93 bytes** decoded. The solver hands
     it to covclaimd over the Reveal API, which requires the solver and the client
-    to have been pointed at the *same* covclaimd — an agreement nothing on this
+    to have been pointed at the _same_ covclaimd — an agreement nothing on this
     wire expresses, and whose absence funds a lockup that is never claimed.
   - covclaimd's serialised `ClaimPacket` body (`pkg/preimage/packet.go`): TLVs
     `0x01` ciphertext, `0x02` arkade_script, `0x03` covclaimd_pub_key, each a
@@ -1034,6 +1157,7 @@ The client is paid over Lightning and the sats land on Arkade
   unchanged — this is additive in both directions. Senders SHOULD prefer the
   packet shape; the `0x03` TLV is REQUIRED when sending it, because covclaimd's
   extension filter selects on that TLV.
+
 - **quote.profile**: `payment_hash` (echo), the hold `invoice` on `H` (its
   expiry SHOULD equal `valid_until`), `lockup_address` (compare-only — the
   solver's derivation of the funding contract) and `solver_refund_pk_script`
@@ -1200,7 +1324,7 @@ A client needs it for **two distinct purposes**, and neither is optional:
 1. **It is the sixth field of the swap hash.** `ERC20Swap` stores no per-swap
    struct — it keeps `mapping(bytes32 => bool)` keyed by
    `keccak256(abi.encode(preimageHash, amount, tokenAddress, claimAddress,
-   refundAddress, timelock))`. With five of the six a client cannot compute the
+refundAddress, timelock))`. With five of the six a client cannot compute the
    key, so it cannot read `swaps(key)` to prove the solver ever locked, and has
    no way to check the lock before parting with its preimage.
 2. **`claim` takes it as an explicit argument.** In
@@ -1478,10 +1602,8 @@ both a want asset and an offer asset, or neither, so an `arkade:<A>->arkade:<B>`
 offer is not expressible at all. A solver MUST refuse such a pair with
 `unsupported_pair` at quote time rather than discovering it at fill time.
 
-**Exact-in only.** `amount_side` MUST be `"from"`; `"to"` is refused with
-`unsupported_payload`. Every pair here is cross-asset by construction, and
-§ 7.1.5 already gives the reason for the EVM legs: exact-out "would mean
-inverting a fetched, rounded, directional rate".
+**Both amount sides.** `amount_side` is `"from"` or `"to"`. § 4.2 gives how
+exact-out resolves `from_amount`.
 
 **Amounts are the § 2.1 string form and nothing else.** A JSON number is refused
 rather than accepted under the `v: 1` carve-out, because that carve-out is
@@ -1604,15 +1726,15 @@ The other three corridors (`packages/solver-corridors/src/db/receiveSwaps.ts`, `
 
 The atomic class over RFQ (`packages/solver-corridors/src/db/assetRfqSwaps.ts`):
 
-| RFQ state  | asset-RFQ state | note                                                                                                                                                  |
-| ---------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `quoted`   | `quoted`        | terms issued; awaiting the client's deposit until `valid_until`                                                                                       |
-| `funded`   | `funded`        | a deposit matching the quoted terms sits at the offer's script. Funding is still how a client accepts here, so the word is exact despite § 8's HTLC gloss |
-| `filling`  | `filling`       | `fulfill` submitted — the only state in which solver capital is committed                                                                              |
-| `settled`  | `filled`        | NOT `filled`: `fulfill` pays the client and takes the deposit in ONE transaction, so there is no interval of "fill landed, solver still collecting"    |
-| `expired`  | `refused`       | folded into `refused` and distinguished by the reason, as the send leg does                                                                           |
-| `refused`  | `refused`       |                                                                                                                                                       |
-| `stuck`    | `stuck`         |                                                                                                                                                       |
+| RFQ state | asset-RFQ state | note                                                                                                                                                      |
+| --------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `quoted`  | `quoted`        | terms issued; awaiting the client's deposit until `valid_until`                                                                                           |
+| `funded`  | `funded`        | a deposit matching the quoted terms sits at the offer's script. Funding is still how a client accepts here, so the word is exact despite § 8's HTLC gloss |
+| `filling` | `filling`       | `fulfill` submitted — the only state in which solver capital is committed                                                                                 |
+| `settled` | `filled`        | NOT `filled`: `fulfill` pays the client and takes the deposit in ONE transaction, so there is no interval of "fill landed, solver still collecting"       |
+| `expired` | `refused`       | folded into `refused` and distinguished by the reason, as the send leg does                                                                               |
+| `refused` | `refused`       |                                                                                                                                                           |
+| `stuck`   | `stuck`         |                                                                                                                                                           |
 
 There is deliberately **no `refunded`** state on this corridor. The refund is
 `cancel`, a 2-of-2 of the funder and the Arkade Service, which the solver cannot
@@ -1668,7 +1790,7 @@ the invoice) and both refused ordinary payee invoices.
 | `ONCHAIN_CLAIM_MARGIN_SECONDS` | 90 min                    | onchain send: the client's claim-window floor, doubled into `htlcLocktimeFor` so the client's own `claim_window_too_short` guardrail passes with margin                                                                                                                                                                     |
 | `ONCHAIN_ORDER_MARGIN_SECONDS` | 2 h                       | onchain corridors: the timelock-ordering margin — the client's Arkade refund opens at least this long after the onchain HTLC's deadline (send), and the solver's Arkade refund opens before the HTLC deadline minus margin (receive)                                                                                        |
 | `MAX_MIN_CONFIRMATIONS`        | 6                         | cap on the `min_confirmations` a quote may carry                                                                                                                                                                                                                                                                            |
-| `ONCHAIN_DUST_SATS`            | 330                       | onchain corridors: a payout below the taproot dust floor is unquotable (`pricing_unavailable`) and a claim/refund spend that would leave a sub-dust output is refused rather than broadcast                                                                                                                                 |
+| `ONCHAIN_DUST_SATS`            | 330                       | onchain corridors: a payout below the taproot dust floor is unquotable (`pricing_unavailable`) and a claim/refund spend that would leave a sub-dust output is refused rather than broadcast; the send corridor additionally reserves the refund spend's own fee at quote time                                               |
 
 Additionally:
 
@@ -1693,7 +1815,7 @@ reason as a generic decline (no retry semantics inferred).
 
 | reason                | meaning                                                                                                                                                                                                      |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `unsupported_pair`    | pair not served (includes wrong network for the asset)                                                                                                                                                       |
+| `unsupported_pair`    | pair not served (including asset/network combinations the solver does not offer)                                                                                                                             |
 | `unsupported_payload` | malformed request, unknown fields, or a profile input the solver cannot serve (e.g. a zero-amount invoice, an undecodable refund address)                                                                    |
 | `amount_out_of_range` | outside the solver's min/max for the pair                                                                                                                                                                    |
 | `exposure_cap`        | solver at aggregate capacity right now                                                                                                                                                                       |
@@ -1702,13 +1824,59 @@ reason as a generic decline (no retry semantics inferred).
 | `pricing_unavailable` | the solver cannot price this swap — no market data, or the corridor's configured fee leaves nothing servable at this size (the fee consumes the amount, or the payout would be under the onchain dust floor) |
 | `rate_limited`        | the requester has opened too many quotes recently — back off and retry later                                                                                                                                 |
 
+A refusal MAY add client-safe diagnostic fields without changing `reason`:
+
+```json
+{
+  "v": 1,
+  "type": "rfq_refusal",
+  "rfq_id": "9f2c…a1",
+  "reason": "unsupported_payload",
+  "error_code": "invoice_cltv_too_large",
+  "field": "profile.invoice",
+  "actual": 624,
+  "limit": 288,
+  "unit": "blocks"
+}
+```
+
+`error_code` is OPTIONAL and comes from the closed set below. Clients that do
+not recognise it MUST fall back to `reason`; response tolerance (§ 1) requires
+older clients to ignore every added field. `field` is an OPTIONAL dotted request
+path. `actual`, `expected` and `limit` are OPTIONAL integers whose meaning is
+fixed by the code; `unit`, when present, is `blocks`, `characters` or `sats`.
+
+| `error_code`                   | client action                                                                                         |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `amount_side_unsupported`      | use the amount side required by this profile                                                          |
+| `exact_out_unsupported`        | request exact-in terms for this pair (the EVM corridors; the Arkade asset corridor serves both sides) |
+| `invalid_amount`               | correct the amount's encoding or value                                                                |
+| `invalid_payout_address`       | provide a payout address valid for the requested corridor                                             |
+| `invalid_refund_address`       | provide a refund address valid for the requested corridor                                             |
+| `invoice_amount_mismatch`      | make `amount` equal the BOLT11 amount, or omit the restatement                                        |
+| `invoice_cltv_too_large`       | use another solver or an invoice whose CLTV is within `limit`                                         |
+| `invoice_malformed`            | replace the BOLT11                                                                                    |
+| `invoice_missing_amount`       | provide an amount-bearing BOLT11                                                                      |
+| `invoice_missing_network`      | provide a BOLT11 that names a network                                                                 |
+| `invoice_missing_payment_hash` | provide a BOLT11 containing a payment hash                                                            |
+| `invoice_missing_timestamp`    | provide a BOLT11 containing a timestamp                                                               |
+| `invoice_mixed_case`           | use one Bech32 case consistently                                                                      |
+| `invoice_sub_satoshi_amount`   | use an invoice whose amount is a whole number of sats                                                 |
+| `invoice_too_long`             | use an invoice no longer than `limit` characters                                                      |
+| `invoice_wrong_network`        | use an invoice for the pair's network                                                                 |
+
+Solvers MUST NOT return free-form diagnostic text, raw request values, backend
+errors, inventory levels or pricing configuration in a refusal. Those belong in
+operator diagnostics. The structured fields above describe only the requester's
+own input and stable public validation bounds.
+
 The reference implementation's internal refusal names map onto the closed set
 (`toRfqReason`, `packages/solver-corridors/src/wire/payloads.ts` — anything unrecognised degrades to
 `unsupported_payload` rather than leaking a non-spec string):
 
 | internal                     | RFQ v1                |
 | ---------------------------- | --------------------- |
-| `wrong_network`              | `unsupported_pair`    |
+| `wrong_network`              | `unsupported_payload` |
 | `zero_amount_invoice`        | `unsupported_payload` |
 | `invalid_refund_address`     | `unsupported_payload` |
 | `invalid_payout_address`     | `unsupported_payload` |
@@ -1807,8 +1975,6 @@ have a tested reference in this repo.
   both-legs-arkade reads as spot and therefore as packet-only, and no field means
   "also negotiable over RFQ" (§ 7.2.1). Until one exists, a taker must already
   know the solver's pubkey, a relay, and the exact pair string.
-- **Atomic-class fill format.** The exact partially-signed Arkade transaction
-  encoding for `rfq_fill` (and who broadcasts) is unspecified.
 - **Canonical Ethereum HTLC contract — RESOLVED for 7.1.5**: Boltz
   `ERC20Swap`, addressed by configuration so any EVM chain can serve it. Still
   open: whether a published third-party audit is required before mainnet.
@@ -1823,8 +1989,6 @@ have a tested reference in this repo.
   the decision this entry gates, and answering the audit question is what closes
   it. Also open: per-chain `min_confirmations` / `min_age_seconds` norms, which
   cannot be a single figure across chains.
-  funds". Also open: per-chain `min_confirmations` / `min_age_seconds` norms,
-  which cannot be a single figure across chains.
 - **Multi-solver fan-out** is resolved by the open-RFQ flow (§ 4.6):
   broadcast, sealed bids, directed close; losing bids expire with no
   notification. Still open from that design: whether a shared bus may
@@ -1833,7 +1997,8 @@ have a tested reference in this repo.
   dormant v1 quote layer plus a matcher — and the exact granularity of the
   § 4.6 size-bucket ladder. The § 2 leg-ordering rule for markets the
   registry leaves unordered (both or neither side arkade) is this spec's
-  extension and should be upstreamed so the two documents cannot drift.
+  extension and should be upstreamed so the two documents cannot drift. The
+  § 2.2 topic key reuses that rule.
 - **Key separation.** v1 assumes one solver key for transport identity and
   settlement; splitting them (hot Nostr key, cold settlement key) needs a
   binding proof in the ad or quote.
@@ -1848,7 +2013,8 @@ have a tested reference in this repo.
   registry, never derived from chain metadata (§ 2.1). Until that exists a
   solver serving a cross-corridor same-asset pair is trusting its own config,
   and a wrong-issuer id is a swap into a worthless lookalike rather than a
-  refusal.
+  refusal. `v: 2` (§ 2.2) removes the shared ticker: each leg names its own
+  native id. Whether two native ids are one asset is still configuration.
 - **Routing.** § 2 says new corridors and assets extend the registries without
   changing the protocol. That holds for EDGES and not for ROUTES. Every
   message here names exactly one `pair`, so a trade that transits an

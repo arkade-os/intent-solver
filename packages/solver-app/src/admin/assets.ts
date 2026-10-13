@@ -22,6 +22,7 @@
  */
 
 import type { Asset, AssetDetails, KnownMetadata, WalletBalance } from '@arkade-os/sdk'
+import { json } from '@arkade-os/solver-core/util/poll.js'
 
 /**
  * Enough of each end of an id to tell two apart at a glance, while staying short
@@ -63,27 +64,6 @@ export interface ConsoleAsset {
 export type ConsoleBalance = Omit<WalletBalance, 'assets' | 'availableAssets'> & {
   assets: ConsoleAsset[]
   availableAssets: ConsoleAsset[]
-}
-
-/**
- * Every `bigint` anywhere in `value`, as a decimal string.
- *
- * GENERIC RATHER THAN NAMING `assets`/`availableAssets`, which would be shorter and
- * would break again silently. The balance is "an object whose keys vary by SDK
- * version" — the console renders it key-by-key for that reason — so naming today's two
- * bigint-bearing fields means the next bigint the SDK adds takes the whole console
- * down again, as a 500 on every view, with nothing naming the new field.
- */
-const jsonSafe = (value: unknown): unknown => {
-  if (typeof value === 'bigint') return value.toString()
-  // Left whole: recursing into one would flatten it to `{}`, and a date is already
-  // something `JSON.stringify` knows how to encode.
-  if (value instanceof Date) return value
-  if (Array.isArray(value)) return value.map(jsonSafe)
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, jsonSafe(inner)]))
-  }
-  return value
 }
 
 /** What {@link describeAssets} needs from the wallet — `IReadonlyAssetManager`'s one read. */
@@ -177,10 +157,8 @@ export const describeAssets = (assets: readonly Asset[] | undefined, source?: As
  * than copied per route.
  */
 export const consoleBalance = (balance: WalletBalance, source?: AssetDetailSource): ConsoleBalance => ({
-  // Cast because the sweep is value-level: it cannot express "the same shape with
-  // every bigint widened to string" in the type system, and every field the routes
-  // actually read back off this is a number either way.
-  ...(jsonSafe(balance) as Omit<ConsoleBalance, 'assets' | 'availableAssets'>),
+  // Every bigint as a string, not just today's fields: the keys vary by SDK version. Cast: types can't say so.
+  ...(JSON.parse(json(balance)) as Omit<ConsoleBalance, 'assets' | 'availableAssets'>),
   assets: describeAssets(balance.assets, source),
   availableAssets: describeAssets(balance.availableAssets, source),
 })

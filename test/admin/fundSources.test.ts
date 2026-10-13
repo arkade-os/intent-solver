@@ -26,9 +26,11 @@ import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { Address } from '@scure/btc-signer'
+import { ArkAddress } from '@arkade-os/sdk'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
+import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import {
   capabilitiesOf,
   fundSources,
@@ -49,14 +51,8 @@ const REGTEST_ADDRESS = addressOn('regtest', 0x11)
 const OTHER_REGTEST_ADDRESS = addressOn('regtest', 0x22)
 const MAINNET_ADDRESS = addressOn('bitcoin', 0x11)
 
-/**
- * A placeholder, unlike the three above, and the asymmetry mirrors the code: an
- * Arkade address is handed over WITHOUT a decode, because it encodes the server
- * key of the service this wallet is connected to and has no wrong-chain form for
- * a guard to catch. Nothing here parses it, so a real one would prove nothing
- * the short string does not.
- */
-const ARKADE_ADDRESS = 'tark1solverfloat'
+/** Real, not a placeholder: a withdrawal prices its change output against this address's script. */
+const ARKADE_ADDRESS = new ArkAddress(new Uint8Array(32).fill(9), new Uint8Array(32).fill(8), 'tark').encode()
 
 /**
  * The option a test is about, by KIND rather than by index.
@@ -112,7 +108,7 @@ const fakeServices = (over: Record<string, unknown> = {}) =>
     config: { network: 'regtest' },
     ln: lnBackend(),
     onchain: onchainBackend(),
-    arkade: { wallet: arkadeWallet() },
+    arkade: { wallet: arkadeWallet(), reservations: createReservationLedger() },
     ...over,
   }) as never as Fake
 
@@ -230,9 +226,7 @@ describe('capability, not requirement', () => {
 
   it('reads what a source can do off its METHODS', () => {
     expect(capabilitiesOf(railFundSource(services)!)).toEqual({ deposit: true, settle: false, withdraw: true })
-    // The Arkade float: it has a boarding address, and it deliberately offers
-    // neither of the other two. @see ops/arkadeFunds.ts
-    expect(capabilitiesOf(arkadeFundSource(services))).toEqual({ deposit: true, settle: false, withdraw: false })
+    expect(capabilitiesOf(arkadeFundSource(services))).toEqual({ deposit: true, settle: false, withdraw: true })
   })
 
   it('turns the rail’s settle step on only where the backend has one', () => {
@@ -253,18 +247,15 @@ describe('capability, not requirement', () => {
   })
 
   it('refuses a withdrawal from a source that cannot withdraw, by name', async () => {
-    // The Arkade float. Paying an arbitrary address out of it would spend coins
-    // outside the process-local reservation ledger, taking one out from under an
-    // in-flight lockup funding.
     const response = await post(
       'fund-withdraw',
-      { source: 'arkade', address: REGTEST_ADDRESS, amount: '1000', confirm: REGTEST_ADDRESS },
+      { source: 'drained-vault', address: REGTEST_ADDRESS, amount: '1000', confirm: REGTEST_ADDRESS },
       fakeServices(),
     )
 
     expect(response.status).toBe(500)
     expect(await response.json()).toMatchObject({
-      message: expect.stringContaining('arkade float source cannot withdraw'),
+      message: expect.stringContaining('drained vault source cannot withdraw'),
     })
   })
 
@@ -325,7 +316,7 @@ describe('capability, not requirement', () => {
     expect(body.sources.find((s) => s.id === 'arkade')?.can).toEqual({
       deposit: true,
       settle: false,
-      withdraw: false,
+      withdraw: true,
     })
   })
 })
@@ -358,6 +349,20 @@ describe('the lightning rail source', () => {
     expect(byLabel['channel out']!.amount).toBeNull()
     expect(byLabel['channel out']!.note).toBe('node unreachable')
     expect(byLabel['onchain confirmed']!.amount).toBe('1000000')
+  })
+
+  it('drops the float reading after a withdrawal, which leaves no row to count', async () => {
+    const invalidate = vi.fn()
+    const services = fakeServices({ onchainFloat: { read: () => ({ sats: 1_000_000, ageMs: 0 }), invalidate } })
+    await railFundSource(services)!.withdraw!({ address: REGTEST_ADDRESS, amount: '1000' })
+    expect(invalidate).toHaveBeenCalledTimes(1)
+  })
+
+  it('withdraws unchanged on a deployment running no onchain corridor', async () => {
+    const services = fakeServices()
+    await expect(
+      railFundSource(services)!.withdraw!({ address: REGTEST_ADDRESS, amount: '1000' }),
+    ).resolves.toMatchObject({ amount: '1000' })
   })
 
   it('warns about a shared pool only when the backend says so', async () => {
@@ -664,6 +669,299 @@ describe('withdrawing from the rail — the checks that run before the backend i
   })
 })
 
+describe('withdrawing from the arkade float — both rails out, routed by the destination', () => {
+  // REAL addresses: the withdraw path decodes the destination to pick its
+  // route, so a placeholder would exercise the refusal, never the spend.
+  const TARK_ADDRESS = new ArkAddress(new Uint8Array(32).fill(2), new Uint8Array(32).fill(3), 'tark').encode()
+
+  const coin = (fill: number, value: number, over: Record<string, unknown> = {}) => ({
+    txid: fill.toString(16).padStart(2, '0').repeat(32),
+    vout: 0,
+    value,
+    createdAt: new Date('2026-09-01T00:00:00Z'),
+    ...over,
+  })
+
+  const withdrawingWallet = (coins: unknown[], over: Record<string, unknown> = {}) =>
+    arkadeWallet({
+      getSpendableVtxos: vi.fn().mockResolvedValue(coins),
+      arkProvider: {
+        getInfo: vi.fn().mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee: {} } }),
+      },
+      send: vi.fn().mockResolvedValue('ee'.repeat(32)),
+      settle: vi.fn().mockResolvedValue('ff'.repeat(32)),
+      ...over,
+    }) as ReturnType<typeof arkadeWallet> & { send: ReturnType<typeof vi.fn>; settle: ReturnType<typeof vi.fn> }
+
+  const servicesWith = (wallet: unknown, reservations = createReservationLedger()) =>
+    fakeServices({ arkade: { wallet, reservations } })
+
+  const withdraw = (services: Fake, params: { address: string; amount: string }) =>
+    arkadeFundSource(services).withdraw!(params)
+
+  it('pays an Arkade address offchain, exactly the typed amount', async () => {
+    const wallet = withdrawingWallet([coin(0x01, 100_000)])
+
+    const result = await withdraw(servicesWith(wallet), { address: TARK_ADDRESS, amount: '50000' })
+
+    expect(wallet.send).toHaveBeenCalledWith({
+      recipients: [{ address: TARK_ADDRESS, amount: 50_000 }],
+      selectedVtxos: [expect.objectContaining({ value: 100_000 })],
+    })
+    expect(wallet.settle).not.toHaveBeenCalled()
+    expect(result).toMatchObject({ reference: 'ee'.repeat(32), amount: '50000', detail: { route: 'arkade' } })
+  })
+
+  it('pays a bitcoin address by collaborative exit, with the fee out of the change', async () => {
+    // Flat CEL fees make the arithmetic exact: 100 for the exit output, 7 per input.
+    const intentFee = { onchainOutput: '100.0', offchainInput: '7.0' }
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], {
+      arkProvider: { getInfo: vi.fn().mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee } }) },
+    })
+
+    const result = await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    // Params, not the whole call: the exit goes through the SDK's ramp now, which
+    // passes its (absent) settlement-event callback explicitly.
+    expect(wallet.settle.mock.calls[0]![0]).toEqual({
+      inputs: [expect.objectContaining({ value: 100_000 })],
+      outputs: [
+        { address: REGTEST_ADDRESS, amount: 50_000n },
+        { address: ARKADE_ADDRESS, amount: 49_893n },
+      ],
+    })
+    expect(wallet.send).not.toHaveBeenCalled()
+    expect(result).toMatchObject({ reference: 'ff'.repeat(32), detail: { route: 'onchain', feeSats: '107' } })
+  })
+
+  it('pays for the change output too, so the settlement is not underfunded', async () => {
+    // 100 exit + 7 input + 50 change = 157, so the float keeps 49_843 rather than 49_893.
+    const intentFee = { onchainOutput: '100.0', offchainInput: '7.0', offchainOutput: '50.0' }
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], {
+      arkProvider: { getInfo: vi.fn().mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee } }) },
+    })
+
+    const result = await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    const outputs: { address: string; amount: bigint }[] = wallet.settle.mock.calls[0]![0].outputs
+    expect(outputs).toEqual([
+      { address: REGTEST_ADDRESS, amount: 50_000n },
+      { address: ARKADE_ADDRESS, amount: 49_843n },
+    ])
+    expect(outputs.reduce((sum, o) => sum + o.amount, 157n)).toBe(100_000n)
+    expect(result).toMatchObject({ detail: { route: 'onchain', feeSats: '157' } })
+  })
+
+  it('settles the change the selection budgeted, on a percentage exit fee too', async () => {
+    // The exit is charged on the DESTINATION output — 1% of the 50_000 the
+    // recipient is handed, not of the 50_500 the float gives up — so the change
+    // is the 49_500 the selection above budgeted for. Until ts-sdk#956 the SDK
+    // deducted its fee from its own grossed-up figure instead: measured against
+    // the released 0.4.74 this settles 49_495 of change and 49_999 to the
+    // recipient, so the exit kept five sats and short-paid the destination one.
+    const intentFee = { onchainOutput: 'amount * 0.01' }
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], {
+      arkProvider: { getInfo: vi.fn().mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee } }) },
+    })
+
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.settle.mock.calls[0]![0].outputs).toEqual([
+      { address: REGTEST_ADDRESS, amount: 50_000n },
+      { address: ARKADE_ADDRESS, amount: 49_500n },
+    ])
+  })
+
+  it('refuses a change fee that never settles, rather than underfunding the exit', async () => {
+    // Charging the whole output oscillates change → 0 → change, never reaching a fixpoint.
+    const intentFee = { onchainOutput: '100.0', offchainOutput: 'amount' }
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], {
+      arkProvider: { getInfo: vi.fn().mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee } }) },
+    })
+
+    await expect(withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })).rejects.toThrow(
+      /change fee/i,
+    )
+    expect(wallet.settle).not.toHaveBeenCalled()
+  })
+
+  it('hands the router every unpinned coin, and the exit returns the rest as one change coin', async () => {
+    const coins = [coin(0x01, 60_000), coin(0x02, 60_000)]
+    const wallet = withdrawingWallet(coins)
+
+    await withdraw(servicesWith(wallet), { address: TARK_ADDRESS, amount: '50000' })
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.send).toHaveBeenCalledWith(expect.objectContaining({ selectedVtxos: coins }))
+    expect(wallet.settle.mock.calls[0]![0]).toEqual({
+      inputs: coins,
+      outputs: [
+        { address: REGTEST_ADDRESS, amount: 50_000n },
+        { address: ARKADE_ADDRESS, amount: 70_000n },
+      ],
+    })
+  })
+
+  it('leaves an asset-bearing coin out of both routes, and refuses when nothing else is free', async () => {
+    const assetCoin = coin(0x01, 60_000, { assets: [{ assetId: 'aa'.repeat(32), amount: 5n }] })
+    const plain = coin(0x02, 60_000)
+    const wallet = withdrawingWallet([assetCoin, plain])
+
+    await withdraw(servicesWith(wallet), { address: TARK_ADDRESS, amount: '50000' })
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.send).toHaveBeenCalledWith(expect.objectContaining({ selectedVtxos: [plain] }))
+    expect(wallet.settle.mock.calls[0]![0].inputs).toEqual([plain])
+    await expect(
+      withdraw(servicesWith(withdrawingWallet([assetCoin])), { address: TARK_ADDRESS, amount: '1000' }),
+    ).rejects.toThrow(/asset-free coin/)
+  })
+
+  it('never selects a coin a funding has pinned, and releases its own pin afterwards', async () => {
+    const reservations = createReservationLedger()
+    const pinned = coin(0x01, 100_000)
+    reservations.reserve([pinned])
+    const free = coin(0x02, 100_000)
+    const wallet = withdrawingWallet([pinned, free])
+
+    await withdraw(servicesWith(wallet, reservations), { address: TARK_ADDRESS, amount: '50000' })
+
+    expect(wallet.send).toHaveBeenCalledWith(expect.objectContaining({ selectedVtxos: [free] }))
+    expect([...reservations.reserved()]).toEqual([`${pinned.txid}:0`])
+  })
+
+  it('releases the pin when the spend throws', async () => {
+    const reservations = createReservationLedger()
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], {
+      send: vi.fn().mockRejectedValue(new Error('server unreachable')),
+    })
+
+    await expect(
+      withdraw(servicesWith(wallet, reservations), { address: TARK_ADDRESS, amount: '50000' }),
+    ).rejects.toThrow('server unreachable')
+    expect(reservations.reserved().size).toBe(0)
+  })
+
+  it('releases the pin when the exit throws', async () => {
+    const reservations = createReservationLedger()
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], {
+      settle: vi.fn().mockRejectedValue(new Error('batch rejected')),
+    })
+
+    await expect(
+      withdraw(servicesWith(wallet, reservations), { address: REGTEST_ADDRESS, amount: '50000' }),
+    ).rejects.toThrow('batch rejected')
+    expect(reservations.reserved().size).toBe(0)
+  })
+
+  it.each([
+    { rail: 'ark', spend: 'send', address: TARK_ADDRESS },
+    { rail: 'onchain', spend: 'settle', address: REGTEST_ADDRESS },
+  ])('refuses a $rail spend that settles without a transaction id', async ({ rail, spend, address }) => {
+    const reservations = createReservationLedger()
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], { [spend]: vi.fn().mockResolvedValue('') })
+
+    await expect(withdraw(servicesWith(wallet, reservations), { address, amount: '50000' })).rejects.toThrow(
+      `the ${rail} rail settled without a transaction id`,
+    )
+    expect(reservations.reserved().size).toBe(0)
+  })
+
+  it('refuses when every coin is pinned, and says who holds them', async () => {
+    const reservations = createReservationLedger()
+    reservations.reserve([coin(0x01, 100_000)])
+    const wallet = withdrawingWallet([coin(0x01, 100_000)])
+
+    await expect(
+      withdraw(servicesWith(wallet, reservations), { address: TARK_ADDRESS, amount: '50000' }),
+    ).rejects.toThrow(/pinned by a live swap's funding/)
+    expect(wallet.send).not.toHaveBeenCalled()
+  })
+
+  it('refuses a bitcoin address for another network without touching the wallet', async () => {
+    const wallet = withdrawingWallet([coin(0x01, 100_000)])
+
+    await expect(withdraw(servicesWith(wallet), { address: MAINNET_ADDRESS, amount: '1000' })).rejects.toThrow(
+      /bitcoin address for another network, not regtest/,
+    )
+    expect(wallet.send).not.toHaveBeenCalled()
+    expect(wallet.settle).not.toHaveBeenCalled()
+  })
+
+  it('refuses an address that is neither Arkade nor bitcoin', async () => {
+    const wallet = withdrawingWallet([coin(0x01, 100_000)])
+
+    await expect(withdraw(servicesWith(wallet), { address: 'not-an-address', amount: '1000' })).rejects.toThrow(
+      /no rail for: not-an-address/,
+    )
+    expect(wallet.send).not.toHaveBeenCalled()
+  })
+
+  it('refuses more than the unpinned coins net, and names both numbers', async () => {
+    const wallet = withdrawingWallet([coin(0x01, 100_000)])
+
+    await expect(withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '300001' })).rejects.toThrow(
+      /net 100000 sats, 300001 needed/,
+    )
+    expect(wallet.settle).not.toHaveBeenCalled()
+  })
+
+  it('refuses anything that is not exactly a whole positive sat count', async () => {
+    const wallet = withdrawingWallet([coin(0x01, 100_000)])
+    for (const amount of ['0', '-1', '0.5', 'abc', '1e3', '  ', '9007199254740993', HUGE]) {
+      await expect(withdraw(servicesWith(wallet), { address: TARK_ADDRESS, amount }), amount).rejects.toThrow(
+        /whole positive number of sats/i,
+      )
+    }
+    expect(wallet.send).not.toHaveBeenCalled()
+  })
+
+  it('refuses when the change would be below dust', async () => {
+    const wallet = withdrawingWallet([coin(0x01, 50_200)])
+
+    await expect(withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })).rejects.toThrow(
+      /change 200 sats is below dust threshold 330/,
+    )
+    expect(wallet.settle).not.toHaveBeenCalled()
+  })
+
+  it('drains a coin exactly, with no change output', async () => {
+    const wallet = withdrawingWallet([coin(0x01, 50_000)])
+
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.settle.mock.calls[0]![0]).toEqual({
+      inputs: [expect.objectContaining({ value: 50_000 })],
+      outputs: [{ address: REGTEST_ADDRESS, amount: 50_000n }],
+    })
+  })
+
+  it('refuses when the change would exceed the server’s per-output ceiling', async () => {
+    const info = { dust: 330n, vtxoMaxAmount: 40_000n, fees: { intentFee: {} } }
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], {
+      arkProvider: { getInfo: vi.fn().mockResolvedValue(info) },
+    })
+
+    await expect(withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })).rejects.toThrow(
+      /per-output ceiling/,
+    )
+    expect(wallet.settle).not.toHaveBeenCalled()
+  })
+
+  it('pays out of the arkade float through the action once the typed address matches', async () => {
+    const wallet = withdrawingWallet([coin(0x01, 100_000)])
+
+    const response = await post(
+      'fund-withdraw',
+      { source: 'arkade', address: TARK_ADDRESS, amount: '1000', confirm: TARK_ADDRESS },
+      servicesWith(wallet),
+    )
+
+    expect(response.status).toBe(200)
+    expect(wallet.send).toHaveBeenCalledTimes(1)
+  })
+})
+
 /**
  * The gate, asserted at the API — the way an operator scripting around the
  * console at 3am reaches it, with no browser and no dialog in the way.
@@ -795,6 +1093,63 @@ describe('the withdrawal confirmation', () => {
     // The send legs' hazard is a different one; claiming it here would train an
     // operator to discount the warning that does apply.
     expect(warning).not.toMatch(/DOUBLE-PAYOUT/i)
+  })
+})
+
+/** The confirmation proves the operator meant this destination, never that they sent the request. */
+describe('a mutating request from another origin', () => {
+  const WITHDRAWAL = JSON.stringify({
+    source: 'rail',
+    address: REGTEST_ADDRESS,
+    amount: '1000',
+    confirm: REGTEST_ADDRESS,
+  })
+
+  const send = (headers: Record<string, string>, services: Fake) =>
+    buildAdminApp({ services: services as never, startedAt: 1_000_000, mode: 'relay' }).fetch(
+      new Request('http://admin/api/actions/fund-withdraw', { method: 'POST', headers, body: WITHDRAWAL }),
+    )
+
+  it('refuses a body that is not declared JSON, without paying', async () => {
+    // What a form post sends, on a browser volunteering neither header below.
+    const onchain = onchainBackend()
+    const response = await send({ 'content-type': 'text/plain' }, fakeServices({ onchain }))
+
+    expect(response.status).toBe(415)
+    expect(onchain.fund).not.toHaveBeenCalled()
+  })
+
+  it('refuses a cross-site request that does declare JSON, without paying', async () => {
+    const onchain = onchainBackend()
+    const response = await send(
+      { 'content-type': 'application/json', 'sec-fetch-site': 'cross-site' },
+      fakeServices({ onchain }),
+    )
+
+    expect(response.status).toBe(403)
+    expect(onchain.fund).not.toHaveBeenCalled()
+  })
+
+  it('refuses a foreign Origin, which is all an older browser sends', async () => {
+    const onchain = onchainBackend()
+    const response = await send(
+      { 'content-type': 'application/json', origin: 'https://another.example' },
+      fakeServices({ onchain }),
+    )
+
+    expect(response.status).toBe(403)
+    expect(onchain.fund).not.toHaveBeenCalled()
+  })
+
+  it('still pays for the console’s own request', async () => {
+    const onchain = onchainBackend()
+    const response = await send(
+      { 'content-type': 'application/json', origin: 'http://admin', 'sec-fetch-site': 'same-origin' },
+      fakeServices({ onchain }),
+    )
+
+    expect(response.status).toBe(200)
+    expect(onchain.fund).toHaveBeenCalledTimes(1)
   })
 })
 

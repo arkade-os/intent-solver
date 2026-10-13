@@ -12,7 +12,9 @@
  * that costs money. An operator enabling a new chain must state what it does.
  */
 
+import { hexToBytes } from '@noble/hashes/utils.js'
 import { assertCadence, type EvmBlockCadence } from './blockTime.js'
+import { EVM_ORDER_MARGIN_SECONDS } from '@arkade-os/solver-core/core/evmSend.js'
 
 /** What the adapter and the corridor need to know about one chain. */
 export interface EvmChainConfig {
@@ -89,12 +91,22 @@ export interface EvmChainConfig {
    * vol the embedded option is ~20 bps of notional before any spread.
    */
   quoteValiditySeconds: number
+  /** Recourse margin between the EVM expiry and the Arkade refund, in seconds. */
+  orderMarginSeconds: number
   /**
    * Blocks per `eth_getLogs` request, defaulted to the 10k cap Alchemy and
-   * Infura publish. Settable: some cap at 2k, and a rejected scan reads as
-   * an unclaimed lock rather than as an error.
+   * Infura publish. Settable: some cap at 2k, and a rejected scan reads as an
+   * unclaimed lock rather than as an error. Above the endpoint's cap is
+   * therefore silent, and shows only once a scan is long enough to use the
+   * full span — a page is `min(this, tip - floor + 1)`, so recent swaps fit
+   * whatever you set. Below only costs round trips.
    */
   logScanRange: number
+  /**
+   * Skip the claim-trace probe at quote time. Direct `claim` calls are still
+   * verified without a trace; an indirect claim holds its row for the operator.
+   */
+  directClaimsOnly: boolean
 }
 
 const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/
@@ -110,26 +122,27 @@ const required = (env: NodeJS.ProcessEnv, name: string): string => {
  * `intFromEnv`: `Number('')` is 0, so a set-but-empty variable would otherwise
  * become zero while the logs claim otherwise.
  *
- * Allows non-integers, because a sub-second block cadence is a real value on
- * chains this must support.
+ * `numberFrom` allows non-integers, because a sub-second block cadence is a real
+ * value on chains this must support.
  */
-const numberFrom = (env: NodeJS.ProcessEnv, name: string, min: number): number => {
+const boundedFrom = (
+  env: NodeJS.ProcessEnv,
+  name: string,
+  min: number,
+  valid: (value: number) => boolean,
+  kind: string,
+): number => {
   const raw = required(env, name)
   const value = Number(raw)
-  if (!Number.isFinite(value) || value < min) {
-    throw new Error(`${name} must be a finite number >= ${min}, got ${JSON.stringify(raw)}`)
-  }
+  if (!valid(value) || value < min) throw new Error(`${name} must be ${kind} >= ${min}, got ${JSON.stringify(raw)}`)
   return value
 }
 
-const intFrom = (env: NodeJS.ProcessEnv, name: string, min: number): number => {
-  const raw = required(env, name)
-  const value = Number(raw)
-  if (!Number.isInteger(value) || value < min) {
-    throw new Error(`${name} must be an integer >= ${min}, got ${JSON.stringify(raw)}`)
-  }
-  return value
-}
+const numberFrom = (env: NodeJS.ProcessEnv, name: string, min: number): number =>
+  boundedFrom(env, name, min, Number.isFinite, 'a finite number')
+
+const intFrom = (env: NodeJS.ProcessEnv, name: string, min: number): number =>
+  boundedFrom(env, name, min, Number.isInteger, 'an integer')
 
 /**
  * An integer knob WITH a default, and a ceiling as well as a floor. Set-but-empty
@@ -147,22 +160,19 @@ const intFromOptional = (env: NodeJS.ProcessEnv, name: string, def: number, min:
   return value
 }
 
+const booleanFromOptional = (env: NodeJS.ProcessEnv, name: string): boolean => {
+  const raw = env[name]?.trim()
+  if (raw === undefined || raw === '' || raw === 'false') return false
+  if (raw === 'true') return true
+  throw new Error(`${name} must be true or false, got ${JSON.stringify(raw)}`)
+}
+
 /** `0x`-prefixed 20-byte address to bytes. Case-insensitive; checksum is not verified. */
 export const addressFromHex = (value: string, name: string): Uint8Array => {
   if (!HEX_ADDRESS.test(value)) throw new Error(`${name} must be a 0x-prefixed 20-byte address, got ${value}`)
-  const body = value.slice(2)
-  const out = new Uint8Array(20)
-  for (let i = 0; i < 20; i++) out[i] = Number.parseInt(body.slice(i * 2, i * 2 + 2), 16)
-  return out
+  return hexToBytes(value.slice(2))
 }
 
-/**
- * Read one chain's configuration, or null when the corridor is not enabled.
- *
- * Absent `EVM_RPC_URL` means "not serving this corridor" and is not an error.
- * Anything else missing IS an error: a half-configured chain must not start,
- * because the missing half is always a safety knob.
- */
 /**
  * A 32-byte signing key from hex.
  *
@@ -171,14 +181,12 @@ export const addressFromHex = (value: string, name: string): Uint8Array => {
  * it would look like a chain problem rather than a missing setting.
  */
 const privateKeyFrom = (env: NodeJS.ProcessEnv, name: string): Uint8Array => {
-  const raw = required(env, name).trim()
+  const raw = required(env, name)
   const body = raw.startsWith('0x') ? raw.slice(2) : raw
   if (body.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(body)) {
     throw new Error(name + ' must be 32 bytes of hex')
   }
-  const out = new Uint8Array(32)
-  for (let i = 0; i < 32; i++) out[i] = Number.parseInt(body.slice(i * 2, i * 2 + 2), 16)
-  return out
+  return hexToBytes(body)
 }
 
 /**
@@ -192,13 +200,20 @@ const privateKeyFrom = (env: NodeJS.ProcessEnv, name: string): Uint8Array => {
  * every price.
  */
 const bigintFrom = (env: NodeJS.ProcessEnv, name: string): bigint => {
-  const raw = required(env, name).trim()
+  const raw = required(env, name)
   if (!/^[0-9]+$/.test(raw)) throw new Error(name + ' must be a decimal integer, got ' + raw)
   const value = BigInt(raw)
   if (value <= 0n) throw new Error(name + ' must be positive, got ' + raw)
   return value
 }
 
+/**
+ * Read one chain's configuration, or null when the corridor is not enabled.
+ *
+ * Absent `EVM_RPC_URL` means "not serving this corridor" and is not an error.
+ * Anything else missing IS an error: a half-configured chain must not start,
+ * because the missing half is always a safety knob.
+ */
 export const loadEvmChainConfig = (env: NodeJS.ProcessEnv = process.env): EvmChainConfig | null => {
   if (!env.EVM_RPC_URL?.trim()) return null
 
@@ -232,6 +247,14 @@ export const loadEvmChainConfig = (env: NodeJS.ProcessEnv = process.env): EvmCha
     maxFeeCeilingPerGas: bigintFrom(env, 'EVM_MAX_FEE_PER_GAS_CEILING'),
     headroomSeconds: numberFrom(env, 'EVM_FEE_HEADROOM_SECONDS', Number.MIN_VALUE),
     quoteValiditySeconds: intFromOptional(env, 'EVM_QUOTE_VALIDITY_SECONDS', 60, 10, 900),
+    orderMarginSeconds: intFromOptional(
+      env,
+      'EVM_ORDER_MARGIN_SECONDS',
+      EVM_ORDER_MARGIN_SECONDS,
+      EVM_ORDER_MARGIN_SECONDS,
+      Number.MAX_SAFE_INTEGER,
+    ),
     logScanRange: intFromOptional(env, 'EVM_LOG_SCAN_RANGE', 10_000, 1, 10_000_000),
+    directClaimsOnly: booleanFromOptional(env, 'EVM_DIRECT_CLAIMS_ONLY'),
   }
 }

@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest'
 import {
   EVM_MIN_CLAIM_WINDOW_SECONDS,
   EVM_ORDER_MARGIN_SECONDS,
+  evaluateEvmSendAcceptance,
   evaluateEvmSendLock,
-  evmTimeoutFor,
 } from '@arkade-os/solver-core/core/evmSend.js'
 import {
   EVM_MAX_CLIENT_TIMEOUT_SECONDS,
@@ -183,8 +183,15 @@ describe('send and receive are mirrors of one another', () => {
     // — a different margin, or a floor instead of a ceiling — this diverges.
     const fixed = NOW + 24 * HOUR
 
-    // Send proposes an evmTimeout against a fixed refundLocktime.
-    const sendProposal = evmTimeoutFor({ refundLocktime: fixed, nowSeconds: NOW })
+    // Send proposes an evmTimeout against a refundLocktime anchored at `fixed`.
+    const send = evaluateEvmSendAcceptance({
+      amountSats: 50_000,
+      limits: { minSats: 1, maxSats: 1_000_000 },
+      unilateralClaimDelay: fixed - NOW - EVM_ORDER_MARGIN_SECONDS,
+      nowSeconds: NOW,
+    })
+    expect(send.accept && send.refundLocktime).toBe(fixed)
+    const sendProposal = send.accept ? send.evmTimeout : null
     // Receive proposes a refundLocktime against a fixed evmTimeout.
     const receiveProposal = arkadeRefundLocktimeFor({ evmTimeout: fixed, nowSeconds: NOW })
 

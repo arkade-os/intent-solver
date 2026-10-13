@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -17,6 +17,7 @@ import {
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { FakeLightningBackend } from '@arkade-os/solver-rails-fake/ln/fake/backend.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
@@ -202,6 +203,7 @@ beforeEach(async () => {
     acceptUnilateralGap: false,
     store,
     ln,
+    backendName: 'probe-backend',
     arkade: arkade.ops,
     covclaimd: covclaimd.client,
     limits: LIMITS,
@@ -227,7 +229,57 @@ const quoteRequest = (over: Partial<Parameters<ReceiveSwapService['quote']>[0]> 
 })
 
 describe('ReceiveSwapService.quote', () => {
+  it('persists the wallet that minted the hold invoice', async () => {
+    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'probe-wallet' })
+    Object.defineProperty(ln, 'getKnownInvoiceState', { value: async () => ({ status: 'pending', expiresAt: null }) })
+
+    const outcome = await service.quote(quoteRequest())
+
+    if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+    expect(outcome.swap.invoiceWalletFingerprint).toBe('probe-wallet')
+    expect(outcome.swap.invoiceBackendName).toBe('probe-backend')
+  })
+
+  it('still mints a quote when the optional wallet identity lookup fails', async () => {
+    Object.defineProperty(ln, 'walletFingerprint', {
+      value: async () => {
+        throw new Error('wallet info unavailable')
+      },
+    })
+    Object.defineProperty(ln, 'getKnownInvoiceState', { value: async () => ({ status: 'pending', expiresAt: null }) })
+
+    const outcome = await service.quote(quoteRequest())
+
+    if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+    expect(outcome.swap.invoice).toBeTruthy()
+    expect(outcome.swap.invoiceWalletFingerprint).toBeNull()
+    expect(outcome.swap.invoiceBackendName).toBe('probe-backend')
+  })
+
+  it('does not query wallet identity for backends with their own invoice probe', async () => {
+    const fingerprint = vi.fn(async () => 'lnd-wallet')
+    Object.defineProperty(ln, 'walletFingerprint', { value: fingerprint })
+
+    const outcome = await service.quote(quoteRequest())
+
+    if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+    expect(fingerprint).not.toHaveBeenCalled()
+    expect(outcome.swap.invoiceWalletFingerprint).toBeNull()
+    expect(outcome.swap.invoiceBackendName).toBeNull()
+  })
+
+  it('meters new requester quotes while preserving duplicate and other-client outcomes', async () => {
+    const request = (n: number, requesterKey = 'client') =>
+      quoteRequest({ paymentHash: n.toString(16).padStart(64, '0'), requesterKey })
+    for (let i = 1; i <= 5; i++) expect((await service.quote(request(i))).accepted).toBe(true)
+    expect(await service.quote(request(6))).toEqual({ accepted: false, reason: 'rate_limited' })
+    expect(await service.quote(request(1))).toEqual({ accepted: false, reason: 'duplicate_swap' })
+    expect((await service.quote(request(6, 'other-client'))).accepted).toBe(true)
+  })
+
   it('accepts a valid request, mints a hold invoice, and persists a quoted row', async () => {
+    const timings: unknown[] = []
+    service.onQuoteTiming = (sample) => timings.push(sample)
     const outcome = await service.quote(quoteRequest())
     expect(outcome.accepted).toBe(true)
     if (!outcome.accepted) throw new Error('expected acceptance')
@@ -236,6 +288,7 @@ describe('ReceiveSwapService.quote', () => {
     expect(outcome.swap.invoice).toMatch(/^lnbcrt/)
     // The hold invoice really exists against the fake backend under this hash.
     await expect(ln.getHoldState(paymentHash)).resolves.toMatchObject({ status: 'pending' })
+    expect(timings).toEqual([expect.objectContaining({ swapId: outcome.swap.id, holdMs: expect.any(Number) })])
   })
 
   it('stamps refund_locktime and valid_until from one clock read', async () => {
@@ -302,7 +355,7 @@ describe('ReceiveSwapService.quote', () => {
 
   it('refuses a hash live in ANOTHER corridor’s store BEFORE minting the hold invoice', async () => {
     // A hash a live send swap of ours is paying: minting a hold invoice on it
-    // would loop that payment back to ourselves (issue #41). The refusal must
+    // would loop that payment back to ourselves. The refusal must
     // precede the mint — the external side effect — not follow it.
     const crossChecked = new ReceiveSwapService({
       acceptUnilateralGap: false,
@@ -348,6 +401,9 @@ describe('ReceiveSwapService.quote', () => {
           state: 'quoted',
           pkScript: hex.encode(p2tr(keyBytes(11))),
           amountSats: 1_000,
+          refundLocktime: now + 3600,
+          refundWithoutReceiverDelay: 5120,
+          createdAt: now,
         }),
       },
     })
@@ -386,6 +442,7 @@ describe('ReceiveSwapService.quote', () => {
         paymentHash: 'aa'.repeat(32),
         amountSats: 50_000,
         invoiceExpiresAt: now + 3600,
+        quotedRefundDeadline: now + 7200,
         refundLocktime: now + 7200,
         senderPubkey: '01'.repeat(32),
         receiverPubkey: '02'.repeat(32),
@@ -661,6 +718,102 @@ describe('ReceiveSwapService.quote', () => {
   })
 })
 
+describe('ReceiveSwapService — an arriving HTLC drives its row', () => {
+  it('funds as soon as the backend reports the hold accepted, with no sweep', async () => {
+    let onHeld: (() => void) | undefined
+    const notifying = {
+      createHoldInvoice: ln.createHoldInvoice.bind(ln),
+      getHoldState: ln.getHoldState.bind(ln),
+      settleHold: ln.settleHold.bind(ln),
+      onHoldAccepted: (hash: string, callback: () => void) => {
+        if (hash === paymentHash) onHeld = callback
+        return () => {}
+      },
+    }
+    const svc = new ReceiveSwapService({
+      acceptUnilateralGap: false,
+      store,
+      ln: notifying,
+      arkade: arkade.ops,
+      covclaimd: covclaimd.client,
+      limits: LIMITS,
+      maxExposedSats: 1_000_000,
+      totalCommitted: () => store.committedSats(),
+      admission: new AdmissionControl(),
+      now: clock,
+    })
+    const outcome = await svc.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+    expect(onHeld).toBeDefined()
+
+    ln.armHold(paymentHash, now + 4 * 3600)
+    onHeld?.()
+
+    await vi.waitFor(async () => expect((await store.get(outcome.swap.id)).state).toBe('funded'))
+    expect(arkade.state.fundCalls).toHaveLength(1)
+  })
+
+  it('keeps a persisted quote and its invoice when subscribing to the hold throws', async () => {
+    const failing = {
+      createHoldInvoice: ln.createHoldInvoice.bind(ln),
+      getHoldState: ln.getHoldState.bind(ln),
+      settleHold: ln.settleHold.bind(ln),
+      cancelHold: ln.cancelHold.bind(ln),
+      onHoldAccepted: (): (() => void) => {
+        throw new Error('subscription refused')
+      },
+    }
+    const svc = new ReceiveSwapService({
+      acceptUnilateralGap: false,
+      store,
+      ln: failing,
+      arkade: arkade.ops,
+      covclaimd: covclaimd.client,
+      limits: LIMITS,
+      maxExposedSats: 1_000_000,
+      totalCommitted: () => store.committedSats(),
+      admission: new AdmissionControl(),
+      now: clock,
+    })
+    const onTickError = vi.fn()
+    svc.onTickError = onTickError
+
+    const outcome = await svc.quote(quoteRequest())
+
+    expect(outcome.accepted).toBe(true)
+    expect((await ln.getHoldState(paymentHash)).status).not.toBe('cancelled')
+    expect(onTickError).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ message: 'subscription refused' }),
+    )
+  })
+})
+
+describe('ReceiveSwapService.tick — confirming its own funding', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('gives up within the time budget however slow each indexer read is', async () => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    let reads = 0
+    arkade.ops.findLockupOutpoints = async () => {
+      reads += 1
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      return []
+    }
+    vi.useFakeTimers()
+
+    const failed = expect(service.tick(outcome.swap.id)).rejects.toThrow('funded output never appeared at the indexer')
+    await vi.advanceTimersByTimeAsync(12_000)
+    await failed
+    expect(arkade.state.fundCalls).toHaveLength(1)
+    expect(reads).toBeLessThanOrEqual(10)
+  })
+})
+
 describe('ReceiveSwapService.tick — funding gate reuse (evaluateReceiveFunding)', () => {
   it('does not fund when armed with too short a settle window — settle_window_too_short', async () => {
     const outcome = await service.quote(quoteRequest())
@@ -762,7 +915,7 @@ describe('ReceiveSwapService.tick — crash recovery: no double-funding', () => 
   })
 
   /**
-   * Issue #97. The pre-fund guard used to read `findLockups`, which is
+   * The pre-fund guard used to read `findLockups`, which is
    * `spendableOnly`: a first funding that had already been CLAIMED was
    * invisible to it, so a row still sitting at `armed` funded the same lockup a
    * second time — out of the provider's own pocket, into a script whose one
@@ -945,6 +1098,9 @@ describe('ReceiveSwapService.tick — concurrent workers: no double-funding', ()
 
     await service.tick(outcome.swap.id)
     expect(arkade.state.fundCalls).toHaveLength(1)
+
+    now = outcome.swap.invoiceExpiresAt + 1
+    expect((await service.tick(outcome.swap.id)).state).toBe('armed')
 
     arkade.state.outputs = landed
     const row = await service.tick(outcome.swap.id)
@@ -1243,7 +1399,7 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
   })
 
   /**
-   * The third corner, which arkana's review of #163 named as the one the other
+   * The third corner, which arkana's review named as the one the other
    * two miss: a REPEAT attempt that errors, the hold reading non-settled, and
    * `E` still in the future.
    *
@@ -1495,7 +1651,7 @@ describe('ReceiveSwapService.tick — refund path', () => {
    * script's outpoints rather than the one the row happens to record.
    *
    * A funding attempt that crashed after paying but before recording leaves a
-   * second output on the same script (#97). `whenArmed` adopts one of them and
+   * second output on the same script. `whenArmed` adopts one of them and
    * writes THAT outpoint to the row — so the row's recorded outpoint and the
    * outpoint a client's claim actually spends need not be the same one. Search
    * only the recorded outpoint and the claim is invisible: the refund is pushed
@@ -1535,7 +1691,26 @@ describe('ReceiveSwapService.tick — refund path', () => {
     expect((await store.history(funded.id)).map((e) => e.to)).not.toContain('stuck')
   })
 
-  it('escalates to stuck if the lockup is gone and no claim can be found once past the refund deadline', async () => {
+  it('keeps looking for the claim while the held payment can still be settled', async () => {
+    // Escalating discards the recheck above, the only thing that still recovers it.
+    const funded = await armAndFund()
+    const row0 = await store.get(funded.id)
+    expect(row0.htlcExpiresAt!).toBeGreaterThan(row0.refundLocktime + EMPTY_LOCKUP_GRACE)
+    now = row0.refundLocktime
+    arkade.state.outputs = []
+    arkade.state.claimPreimage = null
+
+    expect((await service.tick(funded.id)).state).toBe('refunding')
+    now = row0.htlcExpiresAt! - 1
+    expect((await service.tick(funded.id)).state).toBe('refunding')
+
+    arkade.state.claimPreimage = P
+    const row = await service.tick(funded.id)
+    expect(row.state).toBe('settled')
+    expect(row.preimage).toBe(hex.encode(P))
+  })
+
+  it('escalates to stuck if the lockup is gone and no claim can be found by the time the payment expires', async () => {
     const funded = await armAndFund()
     const row0 = await store.get(funded.id)
     now = row0.refundLocktime
@@ -1548,7 +1723,9 @@ describe('ReceiveSwapService.tick — refund path', () => {
     // to PERSIST to be judged inexplicable rather than merely early.
     expect((await service.tick(funded.id)).state).toBe('refunding')
     now += EMPTY_LOCKUP_GRACE
+    expect((await service.tick(funded.id)).state).toBe('refunding')
 
+    now = row0.htlcExpiresAt!
     const row = await service.tick(funded.id)
     expect(row.state).toBe('stuck')
     expect(row.failureReason).toMatch(/no matching claim found/)
@@ -1562,19 +1739,17 @@ describe('ReceiveSwapService.tick — refund path', () => {
     arkade.state.outputs = []
     arkade.state.claimPreimage = null
 
-    // Ticking inside the grace must not be able to postpone the escalation
-    // indefinitely: the clock runs from the row's own entry into `refunding`,
-    // not from the last attempt, so polling it cannot starve the human.
-    for (let elapsed = 0; elapsed < EMPTY_LOCKUP_GRACE; elapsed += 10) {
-      now = row0.refundLocktime + elapsed
+    // Neither clock runs from the last attempt, so polling cannot starve the human.
+    for (let at = row0.refundLocktime; at < row0.htlcExpiresAt!; at += 600) {
+      now = at
       expect((await service.tick(funded.id)).state).toBe('refunding')
     }
-    now = row0.refundLocktime + EMPTY_LOCKUP_GRACE
+    now = row0.htlcExpiresAt!
     expect((await service.tick(funded.id)).state).toBe('stuck')
   })
 
   /**
-   * TLA+ finding F5 (#38). `LightningReceive_Censored.cfg` reports a Liveness
+   * TLA+ finding F5. `LightningReceive_Censored.cfg` reports a Liveness
    * violation for a row whose refund can never be co-signed: it retries for
    * ever and never reaches a terminal state, so nothing tells an operator the
    * server has stopped answering.
@@ -1691,6 +1866,15 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
   let sendRow: CoupledSendRow | null
   let sendLockups: FundedOutput[]
 
+  const coupledSendRow = (state: CoupledSendRow['state'], amountSats = SEND_AMOUNT): CoupledSendRow => ({
+    state,
+    pkScript: SEND_PKSCRIPT,
+    amountSats,
+    refundLocktime: now + 3600,
+    refundWithoutReceiverDelay: 5120,
+    createdAt: now,
+  })
+
   beforeEach(() => {
     // No send row AT QUOTE TIME, because that is the only state a coupling is
     // ever quoted from: the receive leg mints the bolt11 first and the send
@@ -1701,9 +1885,10 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     sendLockups = []
   })
 
-  const coupledService = (): ReceiveSwapService => {
+  const coupledService = (fund: ReceiveArkadeOps['fund'] = arkade.ops.fund): ReceiveSwapService => {
     const ops: ReceiveArkadeOps = {
       ...arkade.ops,
+      fund,
       // Script-aware: this path reads the OTHER leg's lockup, so the fake has
       // to tell the two scripts apart rather than answering the same list.
       findLockups: async (pkScriptHex) => (pkScriptHex === SEND_PKSCRIPT ? sendLockups : arkade.state.outputs),
@@ -1737,12 +1922,51 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
     // Their leg has not been funded yet: we must not go first.
-    sendRow = { state: 'quoted', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('quoted')
 
     const row = await svc.tick(swap.id)
 
     expect(row.state).toBe('quoted')
     expect(arkade.state.fundCalls).toHaveLength(0)
+  })
+
+  it('refuses a coupled payout when funding was provably never submitted', async () => {
+    let fundFailed = false
+    const svc = coupledService(async () => {
+      fundFailed = true
+      throw new FundNotSubmittedError('no valid funding inputs')
+    })
+    const swap = await quotedCoupled(svc)
+    sendRow = coupledSendRow('funded')
+    sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
+    const cancelHold = ln.cancelHold.bind(ln)
+    let competingClaim: boolean | undefined
+    ln.cancelHold = async (hash) => {
+      if (fundFailed) competingClaim = await store.claimFundLease(swap.id, 'armed')
+      await cancelHold(hash)
+    }
+
+    const row = await svc.tick(swap.id)
+
+    expect(competingClaim).toBe(false)
+    expect(row.state).toBe('refused')
+    expect(row.fundStartedAt).toBeNull()
+    expect(row.arkadeLockupTxid).toBeNull()
+    expect(row.failureReason).toContain('no valid funding inputs')
+  })
+
+  it('keeps a coupled payout armed when funding submission is ambiguous', async () => {
+    const svc = coupledService(async () => {
+      throw new Error('funding response lost')
+    })
+    const swap = await quotedCoupled(svc)
+    sendRow = coupledSendRow('funded')
+    sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
+
+    await expect(svc.tick(swap.id)).rejects.toThrow('funding response lost')
+    const row = await store.get(swap.id)
+    expect(row.state).toBe('armed')
+    expect(row.fundStartedAt).not.toBeNull()
   })
 
   it('refuses to fund when the coupled send lockup cannot cover the payout', async () => {
@@ -1755,7 +1979,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     expect(swap.payoutSats).toBe(5_000)
     // Funded, and holding exactly what it promised: every pre-existing gate on
     // this path is satisfied. Only the two amounts are wrong against each other.
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: 1_000 }
+    sendRow = coupledSendRow('funded', 1_000)
     sendLockups = [{ txid: 's1', vout: 0, value: 1_000 }]
 
     const row = await svc.tick(swap.id)
@@ -1794,7 +2018,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
           // has to see nothing: a coupling is always quoted before its send
           // leg exists. Then `whenQuoted`, then `whenArmed`.
           if (answered === 1) return null
-          return { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: answered === 2 ? SEND_AMOUNT : 1_000 }
+          return coupledSendRow('funded', answered === 2 ? SEND_AMOUNT : 1_000)
         },
       },
     })
@@ -1814,7 +2038,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
   it('funds once the coupled send lockup is funded and holds the quoted amount', async () => {
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('funded')
     sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
 
     const row = await svc.tick(swap.id)
@@ -1825,10 +2049,27 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     expect(row.htlcExpiresAt).toBeNull()
   })
 
+  it('does not pay out against a legacy coupled send whose solo refund opens too early', async () => {
+    const svc = coupledService()
+    const swap = await quotedCoupled(svc)
+    sendRow = {
+      ...coupledSendRow('funded'),
+      refundLocktime: now + 10_000,
+      refundWithoutReceiverDelay: 5120,
+    }
+    sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
+
+    const row = await svc.tick(swap.id)
+
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toContain('refund timing is unsafe')
+    expect(arkade.state.fundCalls).toHaveLength(0)
+  })
+
   it('does not fund when the coupled send lockup holds the wrong amount', async () => {
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('funded')
     // A sat short is not a smaller swap — it is a swap whose collect leg would
     // not cover this payout.
     sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT - 1 }]
@@ -1857,7 +2098,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     // lockup — twice off one preimage.
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('funded')
     sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
 
     expect((await ln.getHoldState(paymentHash)).status).toBe('pending')
@@ -1895,7 +2136,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
       coupledSendStore: { findLiveByPaymentHash: async () => sendRow },
     })
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('funded')
     sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
 
     const row = await svc.tick(swap.id)
@@ -1909,7 +2150,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     // point only means a late htlc fails back at E instead of immediately.
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('funded')
     sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
     ln.cancelHold = async () => {
       throw new Error('backend unreachable')
@@ -1926,7 +2167,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     // a legitimate thing for the client to do.
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'quoted', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('quoted')
 
     await svc.tick(swap.id)
 
@@ -1938,7 +2179,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     // be funded against a send lockup while an htlc it must settle is also live.
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
-    sendRow = { state: 'funded', pkScript: SEND_PKSCRIPT, amountSats: SEND_AMOUNT }
+    sendRow = coupledSendRow('funded')
     sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT }]
     const e = now + 4 * 3600
     ln.armHold(paymentHash, e)
@@ -1952,7 +2193,7 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
 })
 
 /**
- * Gate (d) — the solver's own unilateral recourse against `E` (#69) — at the
+ * Gate (d) — the solver's own unilateral recourse against `E` — at the
  * ORCHESTRATOR level rather than the core level.
  *
  * `test/core/receive.test.ts` already pins the arithmetic at both boundaries.
@@ -2065,7 +2306,7 @@ describe("ReceiveSwapService — the solver's own recourse window", () => {
 })
 
 /**
- * Issue #99 — a minted hold invoice must not outlive the quote that minted it.
+ * A minted hold invoice must not outlive the quote that minted it.
  *
  * `createHoldInvoice` runs BEFORE the row is inserted, so a quote that fails
  * after the mint leaves an invoice on the backend that nothing on our side will
@@ -2078,7 +2319,7 @@ describe("ReceiveSwapService — the solver's own recourse window", () => {
  * wrong: an invoice is keyed BY PAYMENT HASH, so a duplicate insert means
  * another LIVE row owns this hash and a cancel would close ITS invoice.
  */
-describe('retiring a hold invoice the quote never used (#99)', () => {
+describe('retiring a hold invoice the quote never used', () => {
   it('cancels the mint when the insert fails for any reason but uniqueness', async () => {
     const quoted = await service.quote(quoteRequest())
     expect(quoted.accepted).toBe(true)
@@ -2107,7 +2348,7 @@ describe('retiring a hold invoice the quote never used (#99)', () => {
     // Simulate the loser: past the pre-check, refused by the index.
     store.findLiveByPaymentHash = async () => null
     store.insertQuote = async () => {
-      throw new Error('UNIQUE constraint failed: receive_swap.payment_hash')
+      throw new UniqueConstraintError('UNIQUE constraint failed: receive_swap.payment_hash')
     }
     const loser = await service.quote(quoteRequest())
     expect(loser.accepted).toBe(false)
@@ -2116,6 +2357,17 @@ describe('retiring a hold invoice the quote never used (#99)', () => {
     // The winner's invoice is untouched.
     expect((await ln.getHoldState(paymentHash)).status).toBe('pending')
   })
+
+  it('cancels the mint when the failure only SAYS uniqueness', async () => {
+    const otherHash = hex.encode(sha256(new Uint8Array(32).fill(22)))
+    store.findLiveByPaymentHash = async () => null
+    store.insertQuote = async () => {
+      throw new TypeError('UNIQUE quote construction failed')
+    }
+    await expect(service.quote(quoteRequest({ paymentHash: otherHash }))).rejects.toThrow(TypeError)
+    expect((await ln.getHoldState(otherHash)).status).toBe('cancelled')
+  })
+
   it('cancels the mint when an unpaid quote expires', async () => {
     const quoted = await service.quote(quoteRequest())
     if (!quoted.accepted) throw new Error('quote refused')
@@ -2232,5 +2484,45 @@ describe('ReceiveSwapService — block-typed timelocks', () => {
     if (!outcome.accepted) throw new Error('expected acceptance')
     const row = await store.get(outcome.swap.id)
     expect(row.refundLocktime).toBe(now + MAX_REFUND_HORIZON)
+  })
+})
+
+describe('the CLTV headroom note at the armed edge', () => {
+  const noteOn = async (id: string): Promise<string | null> =>
+    (await store.history(id)).find((e) => e.from === 'armed' && e.to === 'armed')?.detail ?? null
+
+  const armAt = async (htlcExpiresAt: number) => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error(`expected acceptance, got ${outcome.reason}`)
+    ln.armHold(paymentHash, htlcExpiresAt)
+    return { row: await service.tick(outcome.swap.id), invoice: outcome.swap.invoice }
+  }
+
+  it('records what the route delivered, and the room left for a longer horizon', async () => {
+    const { row } = await armAt(now + 6 * 3600)
+    // Gate (c) wants E >= quote + MAX_REFUND_HORIZON + SETTLE_SAFETY_MARGIN, so 8100s of the 21600 is spent.
+    expect(await noteOn(row.id)).toBe('cltv headroom 21600s — 13500s spare')
+  })
+
+  it('goes negative on exactly the payment gate (c) then refuses, which is #161’s remaining cost', async () => {
+    const { row } = await armAt(now + 2 * 3600)
+    expect(await noteOn(row.id)).toBe('cltv headroom 7200s — -900s spare')
+    expect(row.failureReason).toBe('refused to fund: refund_deadline_too_late')
+  })
+
+  it('writes no note when the arm carries no E to measure', async () => {
+    ln.getHoldState = async () => ({ status: 'armed' as const, amountSats: 5_000, expiresAt: null })
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    await service.tick(outcome.swap.id)
+    expect((await store.history(outcome.swap.id)).map((e) => e.to)).toContain('armed')
+    expect(await noteOn(outcome.swap.id)).toBeNull()
+  })
+
+  it('carries two integers and nothing else — no preimage, no payment hash, no bolt11', async () => {
+    const { row, invoice } = await armAt(now + 6 * 3600)
+    const detail = await noteOn(row.id)
+    expect(detail).toMatch(/^cltv headroom -?\d+s — -?\d+s spare$/)
+    for (const secret of [hex.encode(P), paymentHash, invoice]) expect(detail).not.toContain(secret)
   })
 })

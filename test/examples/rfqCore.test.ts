@@ -27,10 +27,14 @@ import {
 } from '@arkade-os/solver-transport/relay/connection.js'
 import { forgeInvoice } from '@arkade-os/solver-rails-fake/ln/fake/bolt11.js'
 import { ROUTE_CLTV_BUDGET_BLOCKS } from '@arkade-os/solver-core/core/send.js'
+import { relativeDelayFrom, secondsForBlockRung } from '@arkade-os/solver-core/core/timelocks.js'
+import { RFQ_REFUSAL_ERROR_CODE_VALUES } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import {
   AddressMismatch,
+  RFQ_REFUSAL_ERROR_CODES,
   SwapRefusal,
   assertFundable,
+  expectQuote,
   httpTransport,
   newRfqId,
   pollStatus,
@@ -114,21 +118,30 @@ const arkade: ArkadeOps = {
  * docs/rfq-protocol.md § 7.1.1.1), so `verifyLockupAddress` must be given
  * both and pick whichever the quote's own address matches.
  */
-const traderDerivation = (quote: {
-  solver_pubkey: string
-  refund_locktime: number
-  profile: Record<string, unknown>
-}) => {
+const traderDerivation = (
+  quote: {
+    solver_pubkey: string
+    refund_locktime: number
+    profile: Record<string, unknown>
+  },
+  delays = { claimDelay: 4096, refundWithoutServerDelay: arkade.delays.unilateralRefundDelay },
+) => {
+  // Mirrors deriveLockup's re-clocking: a seconds-typed solo rung on a
+  // block-typed base means the service flipped the ladder, so the other two
+  // rungs convert by the same rule or the addresses diverge.
+  const soloUnit = relativeDelayFrom(quote.profile.refund_without_receiver_delay as number).unit
+  const rung = (base: number): number =>
+    soloUnit === 'seconds' && relativeDelayFrom(base).unit === 'blocks' ? secondsForBlockRung(base) : base
   const build = (nineLeaf: boolean) =>
     new CovenantSwapScript({
       receiver: hex.decode(quote.solver_pubkey),
       refundLocktime: quote.refund_locktime,
       server: keyBytes(3),
       preimageHash: scriptHashFromPaymentHash(PAYMENT_HASH),
-      claimDelay: 4096,
+      claimDelay: rung(delays.claimDelay),
       client: keyBytes(20),
-      clientRefundDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
-      refundWithoutServerDelay: arkade.delays.unilateralRefundDelay,
+      clientRefundDelay: quote.profile.refund_without_receiver_delay as number,
+      refundWithoutServerDelay: rung(delays.refundWithoutServerDelay),
       nonInteractiveParameters: {
         emulatorPubkey: keyBytes(9),
         // Compare-only, from the quote — see rfqQuotePayload's own doc comment
@@ -160,6 +173,7 @@ beforeEach(async () => {
     ln: {
       routeCltvBudgetBlocks: ROUTE_CLTV_BUDGET_BLOCKS,
       enforcesRouteCltv: true,
+      getBalance: async () => ({ availableSats: 1_000_000, incomingSats: 0 }),
       payInvoice: async () => ({ id: 'p', status: 'pending' as const }),
       getPayment: async () => ({ id: 'p', status: 'pending' as const }),
     },
@@ -262,7 +276,10 @@ describe('rfq-core.d.mts', () => {
     const quote = {
       solver_pubkey: key(1),
       refund_locktime: 1_800_000_000,
-      profile: { receiver_pk_script: hex.encode(Uint8Array.from([0x51, 0x20, ...keyBytes(1)])) },
+      profile: {
+        receiver_pk_script: hex.encode(Uint8Array.from([0x51, 0x20, ...keyBytes(1)])),
+        refund_without_receiver_delay: 5120,
+      },
     }
 
     const mine = deriveLockup({
@@ -290,6 +307,39 @@ describe('rfq-core.d.mts', () => {
     // compared a shorter list to itself.
     expect(theirs).toHaveLength(2)
     expect(traderDerivation(quote)).toEqual(theirs)
+
+    // And flipped: block-typed base with a seconds-typed solo rung — both
+    // sides must re-clock the other two rungs identically.
+    const flippedQuote = {
+      ...quote,
+      profile: { ...quote.profile, refund_without_receiver_delay: 314_880 },
+    }
+    const flippedDelays = {
+      unilateralClaimDelay: 5,
+      unilateralRefundDelay: 5,
+      unilateralRefundWithoutReceiverDelay: 13,
+    }
+    const flippedInput = {
+      quote: flippedQuote,
+      invoice: { paymentHash: PAYMENT_HASH },
+      refundAddress: REFUND_ADDRESS,
+      arkade: {
+        wallet: { arkServerPublicKey: keyBytes(3) },
+        unilateralDelays: flippedDelays,
+        hrp: 'ark',
+      },
+      emulatorPubkey: key(9),
+      clientRefundPubkey: key(20),
+    }
+    const flippedTheirs = deriveLockup(flippedInput).candidates.map((candidate) => candidate.address)
+    expect(flippedTheirs).toHaveLength(2)
+    expect(traderDerivation(flippedQuote, { claimDelay: 5, refundWithoutServerDelay: 5 })).toEqual(flippedTheirs)
+  })
+})
+
+describe('client-visible refusal details', () => {
+  it('keeps the reference client error-code set in sync with the protocol', () => {
+    expect(RFQ_REFUSAL_ERROR_CODES).toEqual(RFQ_REFUSAL_ERROR_CODE_VALUES)
   })
 })
 
@@ -341,6 +391,54 @@ describe('rfq-core over HTTP against the real service', () => {
         clientRefundPubkey: CLIENT_REFUND_PUBKEY,
       }),
     ).rejects.toMatchObject({ reason: 'amount_out_of_range' })
+  })
+
+  it('surfaces a recognised diagnostic but ignores an unknown one', () => {
+    const refusal = {
+      v: 1,
+      type: 'rfq_refusal',
+      rfq_id: 'ab'.repeat(32),
+      reason: 'unsupported_payload',
+      error_code: 'invoice_cltv_too_large',
+      field: 'profile.invoice',
+      actual: 624,
+      limit: 288,
+      unit: 'blocks',
+    }
+    expect(() => expectQuote(refusal, refusal.rfq_id)).toThrow(/624 blocks, limit 288/)
+    try {
+      expectQuote(refusal, refusal.rfq_id)
+    } catch (error) {
+      expect(error).toMatchObject({
+        errorCode: 'invoice_cltv_too_large',
+        field: 'profile.invoice',
+        actual: 624,
+        limit: 288,
+        unit: 'blocks',
+      })
+    }
+    expect(() => expectQuote({ ...refusal, error_code: 'backend_exception' }, refusal.rfq_id)).toThrow(
+      'solver refused: unsupported_payload',
+    )
+  })
+
+  it('ignores a unit outside the closed set', () => {
+    const refusal = {
+      type: 'rfq_refusal',
+      rfq_id: 'ab'.repeat(32),
+      reason: 'unsupported_payload',
+      error_code: 'invoice_amount_mismatch',
+      actual: 2200,
+      expected: 2100,
+      unit: 'widgets',
+    }
+    expect(() => expectQuote(refusal, refusal.rfq_id)).toThrow(/2200, expected 2100/)
+    expect(() => expectQuote(refusal, refusal.rfq_id)).not.toThrow(/widgets/)
+    try {
+      expectQuote(refusal, refusal.rfq_id)
+    } catch (error) {
+      expect(error).toMatchObject({ errorCode: 'invoice_amount_mismatch', unit: undefined })
+    }
   })
 
   it('refuses to fund past valid_until or under the headroom gate', async () => {

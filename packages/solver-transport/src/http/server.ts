@@ -28,6 +28,7 @@
 import { Hono, type Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { respondToRfqRequest, respondToRfqStatus } from '../ingress/rfq.js'
+import { reportRfqRefusal, type RfqRefusalObserver } from '../ingress/refusals.js'
 import type { CorridorReaderSet, CorridorSet } from '@arkade-os/solver-core/core/corridor.js'
 import { rfqRefusalPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
 
@@ -54,7 +55,7 @@ export interface HttpDeps {
    */
   clientKey?: (c: Context) => string
   /** A request this host turned away, and why. See `RelayIngressDeps.onRefusal`. */
-  onRefusal?: (context: string, detail: string) => void
+  onRefusal?: RfqRefusalObserver
   /** A request that FAULTED. Separate from {@link onRefusal}, which is this host answering correctly. */
   onError?: (context: string, error: unknown) => void
 }
@@ -62,6 +63,11 @@ export interface HttpDeps {
 export const buildApp = (deps: HttpDeps): Hono => {
   const { corridors, readers } = deps
   const app = new Hono()
+  const rejectPayload = (detail: string, requestType: 'rfq_request' | 'rfq_status_request' = 'rfq_request') => {
+    const payload = rfqRefusalPayload(undefined, 'unsupported_payload')
+    reportRfqRefusal(deps.onRefusal, 'http', requestType, { kind: 'invalid', payload, detail })
+    return payload
+  }
 
   app.get('/healthz', (c) => c.json({ ok: true, network: deps.network }))
 
@@ -70,13 +76,13 @@ export const buildApp = (deps: HttpDeps): Hono => {
   // (a 2048-char invoice plus framing), so no real client ever meets it.
   app.post(
     '/v1/swap',
-    bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.json(rfqRefusalPayload(undefined, 'unsupported_payload'), 413) }),
+    bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.json(rejectPayload('request body exceeds 64 KiB'), 413) }),
     async (c) => {
       let body: unknown
       try {
         body = await c.req.json()
       } catch {
-        return c.json(rfqRefusalPayload(undefined, 'unsupported_payload'), 400)
+        return c.json(rejectPayload('request body is not valid JSON'), 400)
       }
 
       // The RFQ family — the only family. Same payloads as the relay, byte for
@@ -93,15 +99,13 @@ export const buildApp = (deps: HttpDeps): Hono => {
           const rfqId = (body as { rfq_id?: unknown }).rfq_id
           return c.json(rfqRefusalPayload(typeof rfqId === 'string' ? rfqId : undefined, 'pricing_unavailable'), 422)
         }
-        if (outcome.kind !== 'quote' && outcome.detail) {
-          deps.onRefusal?.('http refused', `${outcome.kind}: ${outcome.detail}`)
-        }
+        reportRfqRefusal(deps.onRefusal, 'http', 'rfq_request', outcome)
         return c.json(outcome.payload, outcome.kind === 'quote' ? 201 : outcome.kind === 'invalid' ? 400 : 422)
       }
 
       // Anything else — including the removed pre-RFQ `ln_send_*` shape — is
       // not a request this host serves.
-      return c.json(rfqRefusalPayload(undefined, 'unsupported_payload'), 400)
+      return c.json(rejectPayload('unsupported request type'), 400)
     },
   )
 
@@ -110,7 +114,9 @@ export const buildApp = (deps: HttpDeps): Hono => {
   // corridors' stores, same as the relay transport.
   app.get('/v1/rfq/:rfqId', async (c) => {
     const rfqId = c.req.param('rfqId')
-    if (!/^[0-9a-f]{64}$/.test(rfqId)) return c.json(rfqRefusalPayload(undefined, 'unsupported_payload'), 400)
+    if (!/^[0-9a-f]{64}$/.test(rfqId)) {
+      return c.json(rejectPayload('invalid rfq_id', 'rfq_status_request'), 400)
+    }
     let outcome
     try {
       outcome = await respondToRfqStatus(readers, { v: 1, type: 'rfq_status_request', rfq_id: rfqId })
@@ -121,6 +127,7 @@ export const buildApp = (deps: HttpDeps): Hono => {
       deps.onError?.('http status', error)
       return c.json({ v: 1, type: 'error' }, 500)
     }
+    reportRfqRefusal(deps.onRefusal, 'http', 'rfq_status_request', outcome)
     if (outcome.kind === 'unknown') return c.json({ v: 1, type: 'not_found' }, 404)
     return c.json(outcome.payload, outcome.kind === 'invalid' ? 400 : 200)
   })

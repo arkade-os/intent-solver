@@ -19,6 +19,7 @@ const quote = () => ({
   paymentHash: 'aa'.repeat(32),
   amountSats: 1_000,
   invoiceExpiresAt: NOW + 3600,
+  quotedRefundDeadline: NOW + 86_400,
   refundLocktime: NOW + 86_400,
   senderPubkey: 'bb'.repeat(32),
   receiverPubkey: 'bb'.repeat(32),

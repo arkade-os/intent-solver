@@ -45,3 +45,9 @@ describe('the offer refusal tail', () => {
     expect(tail.recent().entries).toHaveLength(1)
   })
 })
+
+describe('the refusal tail capacity', () => {
+  it('refuses a capacity that would drop every entry', () => {
+    expect(() => createOfferRefusalTail(0)).toThrow('refusal capacity must be positive')
+  })
+})

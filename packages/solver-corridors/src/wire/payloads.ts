@@ -12,8 +12,6 @@
  */
 
 import { z } from 'zod'
-import { WIRE_AMOUNT } from '@arkade-os/solver-core/core/wireAmount.js'
-import { MAX_PAIR_LENGTH } from '@arkade-os/solver-core/core/marketKey.js'
 import type { SendSwapRow } from '../db/swaps.js'
 import { amountSatsOf } from '@arkade-os/solver-core/invoice/decode.js'
 
@@ -27,20 +25,17 @@ import { amountSatsOf } from '@arkade-os/solver-core/invoice/decode.js'
 export const RFQ_PAIR_SEND = 'arkade:BTC->lightning:BTC'
 
 export {
-  RFQ_ID,
-  RFQ_PAIR,
-  AMOUNT_SIDE,
-  RFQ_AMOUNT,
   RfqStatusRequest,
   RfqOpen,
   rfqBidPayload,
-  RFQ_REFUSAL_REASON_VALUES,
-  isRfqRefusalReason,
+  RFQ_REFUSAL_ERROR_CODE_VALUES,
+  isRfqRefusalErrorCode,
   RFQ_REFUSAL_REASONS,
   toRfqReason,
   rfqRefusalPayload,
-  type RfqOpenPayload,
   type RfqRefusalReason,
+  type RfqRefusalError,
+  type RfqRefusalErrorCode,
 } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import { RFQ_ID, RFQ_PAIR, AMOUNT_SIDE, RFQ_AMOUNT } from '@arkade-os/solver-core/core/rfqProtocol.js'
 
@@ -102,6 +97,7 @@ export const rfqQuotePayload = (row: SendSwapRow, validUntil: number, rfqId: str
   profile: {
     payment_hash: row.paymentHash,
     lockup_address: row.lockupAddress,
+    refund_without_receiver_delay: row.refundWithoutReceiverDelay,
     // Compare-only, same as lockup_address: the solver's own claim
     // destination, needed only so the client's local script reconstruction
     // (which must include EVERY leaf to compute a matching merkle root) can

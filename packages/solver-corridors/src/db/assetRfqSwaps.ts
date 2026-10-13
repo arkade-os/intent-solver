@@ -36,9 +36,10 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
+import { BaseSwapStore, addColumns, numberOrNull, type RawRow, type StoreShape } from './baseSwapStore.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
-import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
+import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
 export type AssetRfqSwapState = 'quoted' | 'funded' | 'filling' | 'filled' | 'refused' | 'stuck'
 
@@ -81,12 +82,6 @@ const LEGAL_EDGES: Record<AssetRfqSwapState, readonly AssetRfqSwapState[]> = {
  */
 const TRANSITION_COLUMNS = new Set(['deposit_txid', 'deposit_vout', 'fill_txid', 'failure_reason'])
 
-const assertColumns = (columns: string[], allowed: Set<string>, method: string): void => {
-  for (const column of columns) {
-    if (!allowed.has(column)) throw new Error(`${method} may not set column '${column}'`)
-  }
-}
-
 export interface AssetRfqSwapRow {
   id: string
   state: AssetRfqSwapState
@@ -114,6 +109,32 @@ export interface AssetRfqSwapRow {
   depositVout: number | null
   fillTxid: string | null
   failureReason: string | null
+  /**
+   * THIS QUOTE'S OWN PRICE at the moment it was issued — quote-asset per
+   * base-asset, `mantissa / 10 ** scale`, never a float. TEXT because it is a
+   * bigint, for the reason the amount columns beside it are TEXT.
+   *
+   * Deliberately NOT the feed price it was derived from. Storing that and
+   * comparing the two is a tautology: `resolveAssetQuote` computes the payout
+   * from the feed, so the difference is always the configured spread.
+   */
+  quoteImpliedMantissa: bigint | null
+  quoteImpliedScale: number | null
+  /**
+   * Whether the CLIENT gave the base asset. The one bit that makes the mark
+   * directional: paying less quote per base is good when the solver buys base
+   * and bad when it sells, so without it one subtraction means opposite things
+   * on the two legs of one market.
+   */
+  quoteGivesBase: boolean | null
+  /**
+   * WHAT THE MARKET SAID WHEN THE FILL LANDED — the other half of the mark.
+   *
+   * Null on every row quoted before this shipped, on a fill whose feed read
+   * failed, and on every row that never filled. Unmeasured, never zero.
+   */
+  fillPriceMantissa: bigint | null
+  fillPriceScale: number | null
 }
 
 export interface AssetRfqQuoteRecord {
@@ -130,6 +151,15 @@ export interface AssetRfqQuoteRecord {
   offerAddress: string
   solverPubkey: string
   validUntil: number
+  /**
+   * The quote's own price and direction, recorded with the terms that fixed it.
+   *
+   * Omitted together or not at all: a price with no direction beside it cannot
+   * be signed, and an unsigned mark means opposite things on the two legs of one
+   * market.
+   * @see AssetRfqSwapRow.quoteImpliedMantissa
+   */
+  quotePrice?: { impliedMantissa: bigint; scale: number; givesBase: boolean }
 }
 
 const COLUMNS = `
@@ -152,7 +182,12 @@ const COLUMNS = `
   deposit_txid     TEXT,
   deposit_vout     INTEGER,
   fill_txid        TEXT,
-  failure_reason   TEXT
+  failure_reason   TEXT,
+  quote_implied_mantissa TEXT,
+  quote_implied_scale    INTEGER,
+  quote_gives_base       INTEGER,
+  fill_price_mantissa    TEXT,
+  fill_price_scale       INTEGER
 `
 
 const SCHEMA = `
@@ -213,18 +248,95 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
   depositVout: raw.deposit_vout === null ? null : Number(raw.deposit_vout),
   fillTxid: raw.fill_txid === null ? null : String(raw.fill_txid),
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
+  // `?? null` on every one: a row read from a database that has not been
+  // migrated yet answers `undefined`, not null, and the analytics layer reads
+  // null as "unmeasured" and undefined as a missing field.
+  quoteImpliedMantissa: bigIntOrNull(raw.quote_implied_mantissa),
+  quoteImpliedScale: numberOrNull(raw.quote_implied_scale),
+  quoteGivesBase:
+    raw.quote_gives_base === null || raw.quote_gives_base === undefined ? null : Number(raw.quote_gives_base) === 1,
+  fillPriceMantissa: bigIntOrNull(raw.fill_price_mantissa),
+  fillPriceScale: numberOrNull(raw.fill_price_scale),
 })
 
-export class AssetRfqSwapStore {
-  private constructor(
-    readonly driver: SqlDriver,
-    private readonly now: () => number,
-  ) {}
+const bigIntOrNull = (value: string | number | null | undefined): bigint | null =>
+  value === null || value === undefined ? null : BigInt(String(value))
+
+const SHAPE: StoreShape<AssetRfqSwapRow, AssetRfqSwapState> = {
+  table: 'asset_rfq_swap',
+  eventTable: 'asset_rfq_swap_event',
+  noun: 'asset rfq swap',
+  lifecycleLabel: 'asset rfq lifecycle',
+  searchColumns: [],
+  legalEdges: LEGAL_EDGES,
+  transitionColumns: TRANSITION_COLUMNS,
+  patchColumns: new Set(),
+  live: NON_TERMINAL,
+  exposed: EXPOSED,
+  toRow: (raw: RawRow) => toRow(raw as Raw),
+}
+
+export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSwapState> {
+  protected readonly shape = SHAPE
 
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<AssetRfqSwapStore> {
     const store = new AssetRfqSwapStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
     await store.driver.exec(SCHEMA)
+    await store.migrate()
     return store
+  }
+
+  /** A READ-ONLY caller's licence to open, since {@link open} CREATES the table
+   * and a report must add no DDL to a deployment that never served this
+   * corridor. `PRAGMA table_info` answers empty for a missing table rather than
+   * throwing, which `migrate` already relies on. */
+  static async tableExists(driver: SqlDriver): Promise<boolean> {
+    return (await driver.all<{ name: string }>(`PRAGMA table_info(asset_rfq_swap)`)).length > 0
+  }
+
+  /**
+   * Additive migration, for the reason the other stores state: `CREATE TABLE IF
+   * NOT EXISTS` never alters an existing table, so a column added above must be
+   * added here too.
+   *
+   * This store's FIRST, and its failure mode is why it is tested rather than
+   * assumed: `insertQuote` names its columns explicitly, so a missing ALTER
+   * throws inside the orchestrator's try — whose catch maps everything to
+   * `duplicate_swap`. Every quote on every market would be refused, and the
+   * operator told it was a duplicate-id problem.
+   */
+  private async migrate(): Promise<void> {
+    await addColumns(this.driver, 'asset_rfq_swap', [
+      ['quote_implied_mantissa', 'TEXT'],
+      ['quote_implied_scale', 'INTEGER'],
+      ['quote_gives_base', 'INTEGER'],
+      ['fill_price_mantissa', 'TEXT'],
+      ['fill_price_scale', 'INTEGER'],
+    ])
+  }
+
+  /**
+   * The market price observed just AFTER a fill landed.
+   *
+   * A named writer rather than a general `patch`: these two columns are pure
+   * observation with no bearing on the state machine, and a general column
+   * setter on a money table is a larger surface than this needs. Never touches
+   * `state`, so it cannot race a transition — the worst case is landing on a row
+   * another worker has already moved on, and the value is still true.
+   */
+  async recordFillMark(id: string, mark: { mantissa: bigint; scale: number }): Promise<void> {
+    // `updated_at` is deliberately NOT touched. On this corridor it is
+    // settlement time — `assetRfqEconomics` reads it as `settledAt`, so it sets
+    // `durationSeconds`, the x-axis of the very chart this mark is plotted on.
+    // Bumping it would stretch every marked fill's duration by the feed's
+    // latency, and ONLY the marked ones, biasing exactly the rows being
+    // compared. It also windows `ledgerRows` (a fill could fall out of the
+    // window it settled in) and is published to the client in `rfq_status`.
+    await this.driver.run(`UPDATE asset_rfq_swap SET fill_price_mantissa = ?, fill_price_scale = ? WHERE id = ?`, [
+      mark.mantissa.toString(),
+      mark.scale,
+      id,
+    ])
   }
 
   /**
@@ -241,8 +353,9 @@ export class AssetRfqSwapStore {
       `INSERT INTO asset_rfq_swap (
          id, state, created_at, updated_at, rfq_id, pair, from_asset_id, from_amount,
          to_asset_id, to_amount, maker_pk_script, maker_public_key, offer_pk_script,
-         offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)`,
+         offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason,
+         quote_implied_mantissa, quote_implied_scale, quote_gives_base
+       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?)`,
       [
         record.id,
         at,
@@ -259,6 +372,11 @@ export class AssetRfqSwapStore {
         record.offerAddress,
         record.solverPubkey,
         record.validUntil,
+        // All three or none — the spread at the call site is all-or-nothing, so
+        // a half-recorded mark cannot reach the column.
+        record.quotePrice?.impliedMantissa.toString() ?? null,
+        record.quotePrice?.scale ?? null,
+        record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
       ],
     )
     await this.recordEvent(record.id, null, 'quoted', null)
@@ -267,26 +385,16 @@ export class AssetRfqSwapStore {
     return row
   }
 
-  async close(): Promise<void> {
-    await this.driver.close()
-  }
-
   async findById(id: string): Promise<AssetRfqSwapRow | undefined> {
     const raw = await this.driver.get<Raw>(`SELECT * FROM asset_rfq_swap WHERE id = ?`, [id])
     return raw ? toRow(raw) : undefined
   }
 
   /** Throws on an unknown id, matching the shape `parkVia` and `detail` expect. */
-  async get(id: string): Promise<AssetRfqSwapRow> {
+  override async get(id: string): Promise<AssetRfqSwapRow> {
     const row = await this.findById(id)
     if (!row) throw new Error(`no asset rfq swap ${id}`)
     return row
-  }
-
-  /** The negotiation for an rfq id. UNIQUE, so there is at most one. */
-  async findByRfqId(rfqId: string): Promise<AssetRfqSwapRow | undefined> {
-    const raw = await this.driver.get<Raw>(`SELECT * FROM asset_rfq_swap WHERE rfq_id = ?`, [rfqId])
-    return raw ? toRow(raw) : undefined
   }
 
   /** The live negotiation watching an offer script, if this solver has one. */
@@ -299,23 +407,7 @@ export class AssetRfqSwapStore {
   }
 
   async listNonTerminal(): Promise<AssetRfqSwapRow[]> {
-    const placeholders = NON_TERMINAL.map(() => '?').join(', ')
-    const raws = await this.driver.all<Raw>(
-      `SELECT * FROM asset_rfq_swap WHERE state IN (${placeholders}) ORDER BY created_at ASC`,
-      [...NON_TERMINAL],
-    )
-    return raws.map(toRow)
-  }
-
-  /**
-   * Rows the sweep should drive, with the script worth watching.
-   *
-   * The offer script rather than a lockup of ours, because on this corridor the
-   * funded contract is the CLIENT's deposit — that is the script whose activity
-   * means anything has happened.
-   */
-  async findRecoverable(): Promise<AssetRfqSwapRow[]> {
-    return this.listNonTerminal()
+    return this.findRecoverable()
   }
 
   /**
@@ -331,7 +423,7 @@ export class AssetRfqSwapStore {
    * One table backs every market, so a corridor asks for its own `pair` and a
    * caller summing whole STORES omits it. Both callers exist.
    */
-  async committedSats(pair?: string): Promise<number> {
+  override async committedSats(pair?: string): Promise<number> {
     const raws = await this.driver.all<Raw>(
       `SELECT to_amount FROM asset_rfq_swap WHERE state = 'filling' AND to_asset_id IS NULL` +
         (pair === undefined ? '' : ' AND pair = ?'),
@@ -340,83 +432,42 @@ export class AssetRfqSwapStore {
     return raws.reduce((total, raw) => total + Number(String(raw.to_amount)), 0)
   }
 
-  async page(options: PageOptions = {}): Promise<{ rows: AssetRfqSwapRow[]; nextCursor: string | null }> {
+  /**
+   * Rows whose last movement falls in a window. @see BaseSwapStore.ledgerRows
+   *
+   * `pair` NARROWS IN SQL, AND MUST. One table backs every asset market, so a
+   * caller that took the whole window and filtered afterwards would be applying
+   * `LIMIT` across every market and then discarding — a busy market's rows push
+   * a quiet one's out of the result entirely, and the quiet corridor reports no
+   * profit for a window in which it settled fills. Silent, and the screen looks
+   * healthy. The same reason `committedSats` above takes a pair.
+   */
+  override async ledgerRows(
+    window: LedgerWindow,
+    pair?: string,
+  ): Promise<{ rows: AssetRfqSwapRow[]; truncated: boolean }> {
+    const limit = clampLedgerLimit(window.limit)
+    const raw = await this.driver.all<Raw>(
+      `SELECT * FROM asset_rfq_swap WHERE updated_at >= ? AND updated_at < ?` +
+        (pair === undefined ? '' : ' AND pair = ?') +
+        ` ORDER BY updated_at DESC LIMIT ?`,
+      pair === undefined ? [window.since, window.until, limit + 1] : [window.since, window.until, pair, limit + 1],
+    )
+    return { rows: raw.slice(0, limit).map(toRow), truncated: raw.length > limit }
+  }
+
+  // Not the base's, which would turn `searchTerm` into a search this store never ran.
+  override async page(options: PageOptions = {}): Promise<{ rows: AssetRfqSwapRow[]; nextCursor: string | null }> {
     const { sql, params, limit } = pageQuery('asset_rfq_swap', options)
     const raw = await this.driver.all<Raw & PageRawFields>(sql, params)
     const { page, nextCursor } = takePage(raw, limit)
     return { rows: page.map(toRow), nextCursor }
   }
 
-  async history(id: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]> {
-    const raws = await this.driver.all<Raw>(
-      `SELECT at, from_state, to_state, detail FROM asset_rfq_swap_event WHERE swap_id = ? ORDER BY id ASC`,
-      [id],
-    )
-    return raws.map((raw) => ({
-      at: Number(raw.at),
-      from: raw.from_state === null ? null : String(raw.from_state),
-      to: String(raw.to_state),
-      detail: raw.detail === null ? null : String(raw.detail),
-    }))
-  }
-
-  /**
-   * Compare-and-swap on `state`, so two ticks racing one row cannot both win.
-   * Returns whether this caller was the one that moved it.
-   */
-  async transition(
-    id: string,
-    from: AssetRfqSwapState,
-    to: AssetRfqSwapState,
-    fields: Partial<Record<string, unknown>> = {},
-  ): Promise<boolean> {
-    if (!LEGAL_EDGES[from].includes(to)) {
-      throw new Error(`illegal transition ${from} -> ${to}: not an edge of the asset rfq lifecycle`)
-    }
-    const columns = Object.keys(fields)
-    assertColumns(columns, TRANSITION_COLUMNS, 'transition()')
-    const assignments = ['state = ?', 'updated_at = ?', ...columns.map((c) => `${c} = ?`)].join(', ')
-    const result = await this.driver.run(`UPDATE asset_rfq_swap SET ${assignments} WHERE id = ? AND state = ?`, [
-      to,
-      this.now(),
-      ...columns.map((c) => fields[c]),
-      id,
-      from,
-    ])
-    if (result.changes === 1) {
-      await this.recordEvent(id, from, to, null)
-      announceTransition(this.onTransition, id, from, to)
-    }
-    return result.changes === 1
-  }
-
-  /** @see BaseSwapStore.onTransition — this store carries its own `transition`. */
-  onTransition?: TransitionHook
-
-  /**
-   * Terminal failure with a reason a human will read.
-   *
-   * Routed by EXPOSURE, which is the distinction an operator acts on: a row
-   * that never submitted anything is `refused` and needs nobody, while one
-   * that did is `stuck` and needs a human to find out what became of it.
-   */
-  async fail(id: string, from: AssetRfqSwapState, reason: string): Promise<void> {
+  override async fail(id: string, from: AssetRfqSwapState, reason: string): Promise<void> {
     if (!NON_TERMINAL.includes(from)) {
       throw new Error(`fail() cannot act on ${from}: it is terminal, so there is nothing left to fail`)
     }
-    const to: AssetRfqSwapState = EXPOSED.includes(from) ? 'stuck' : 'refused'
-    await this.transition(id, from, to, { failure_reason: reason })
-  }
-
-  private async recordEvent(
-    id: string,
-    from: AssetRfqSwapState | null,
-    to: AssetRfqSwapState,
-    detail: string | null,
-  ): Promise<void> {
-    await this.driver.run(
-      `INSERT INTO asset_rfq_swap_event (swap_id, at, from_state, to_state, detail) VALUES (?, ?, ?, ?, ?)`,
-      [id, this.now(), from, to, detail],
-    )
+    await super.fail(id, from, reason)
   }
 }

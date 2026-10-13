@@ -21,13 +21,55 @@ export const MIN_HEADROOM_SECONDS = 90 * 60
 /** Lifecycle states after which nothing more will happen (docs/rfq-protocol.md § 8). */
 export const TERMINAL_STATES = ['settled', 'refused', 'expired', 'refunded', 'stuck']
 
+export const RFQ_REFUSAL_ERROR_CODES = [
+  'amount_side_unsupported',
+  'exact_out_unsupported',
+  'invalid_amount',
+  'invalid_payout_address',
+  'invalid_refund_address',
+  'invoice_amount_mismatch',
+  'invoice_cltv_too_large',
+  'invoice_malformed',
+  'invoice_missing_amount',
+  'invoice_missing_network',
+  'invoice_missing_payment_hash',
+  'invoice_missing_timestamp',
+  'invoice_mixed_case',
+  'invoice_sub_satoshi_amount',
+  'invoice_too_long',
+  'invoice_wrong_network',
+]
+
+const REFUSAL_ERROR_CODES = new Set(RFQ_REFUSAL_ERROR_CODES)
+const REFUSAL_UNITS = new Set(['blocks', 'characters', 'sats'])
+
+const refusalMessage = (reason, detail) => {
+  if (!REFUSAL_ERROR_CODES.has(detail.errorCode)) return `solver refused: ${reason}`
+  const where = typeof detail.field === 'string' ? ` at ${detail.field}` : ''
+  const unit = REFUSAL_UNITS.has(detail.unit) ? ` ${detail.unit}` : ''
+  if (Number.isFinite(detail.actual) && Number.isFinite(detail.limit)) {
+    return `solver refused: ${reason} (${detail.errorCode}${where}: ${detail.actual}${unit}, limit ${detail.limit})`
+  }
+  if (Number.isFinite(detail.actual) && Number.isFinite(detail.expected)) {
+    return `solver refused: ${reason} (${detail.errorCode}${where}: ${detail.actual}${unit}, expected ${detail.expected})`
+  }
+  return `solver refused: ${reason} (${detail.errorCode}${where})`
+}
+
 /** A refusal from the solver, carrying a reason from the CLOSED set (§ 10). */
 export class SwapRefusal extends Error {
-  constructor(reason, rfqId) {
-    super(`solver refused: ${reason}`)
+  constructor(reason, rfqId, detail = {}) {
+    super(refusalMessage(reason, detail))
     this.name = 'SwapRefusal'
     this.reason = reason
     this.rfqId = rfqId
+    const known = REFUSAL_ERROR_CODES.has(detail.errorCode)
+    this.errorCode = known ? detail.errorCode : undefined
+    this.field = known && typeof detail.field === 'string' ? detail.field : undefined
+    this.actual = known && Number.isFinite(detail.actual) ? detail.actual : undefined
+    this.expected = known && Number.isFinite(detail.expected) ? detail.expected : undefined
+    this.limit = known && Number.isFinite(detail.limit) ? detail.limit : undefined
+    this.unit = known && REFUSAL_UNITS.has(detail.unit) ? detail.unit : undefined
   }
 }
 
@@ -162,7 +204,16 @@ export const assertFundable = ({ quote, invoiceExpiresAt, now, maxFee }) => {
  * clients already catch) never thrown.
  */
 export const expectQuote = (payload, rfqId) => {
-  if (payload?.type === 'rfq_refusal') throw new SwapRefusal(payload.reason, payload.rfq_id ?? rfqId)
+  if (payload?.type === 'rfq_refusal') {
+    throw new SwapRefusal(payload.reason, payload.rfq_id ?? rfqId, {
+      errorCode: payload.error_code,
+      field: payload.field,
+      actual: payload.actual,
+      expected: payload.expected,
+      limit: payload.limit,
+      unit: payload.unit,
+    })
+  }
   if (payload?.type !== 'rfq_quote' || payload.rfq_id !== rfqId) {
     throw new Error(`unexpected reply: ${payload?.type ?? 'no payload'}`)
   }

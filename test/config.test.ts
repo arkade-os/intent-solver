@@ -106,6 +106,10 @@ const CONFIG_KEYS = [
   'FAKE_LN_STATE_PATH',
   'POOL_AUTO_MINT',
   'CONTRACT_RETENTION_DAYS',
+  // Listed for the same reason the rest are: a leaked bad value makes every
+  // later `loadConfig()` in the file throw.
+  'ONCHAIN_RECEIVE_MAX_BAND_SATS',
+  'ONCHAIN_RECEIVE_BAND_BELOW_SHARE',
   'LN_SEND_HINT_SCID_DENYLIST',
   // Listed for the same reason `EVM_TOKENS` is: a leaked `OFFER_MARKETS` would
   // give every later test in the run an offer path it never asked for, and one
@@ -619,6 +623,52 @@ describe('CONTRACT_RETENTION_DAYS', () => {
   })
 })
 
+describe('ONCHAIN_RECEIVE_BAND_BELOW_SHARE', () => {
+  it('defaults to the whole retained width below the quote', () => {
+    expect(loadConfig().onchainReceiveBandBelowShare).toBe(1)
+  })
+
+  it.each(['0', '0.5', '1'])('accepts %s', (raw) => {
+    process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE = raw
+    expect(loadConfig().onchainReceiveBandBelowShare).toBe(Number(raw))
+  })
+
+  it.each(['-0.1', '1.1', 'abc', 'Infinity'])('rejects %s rather than clamping silently', (raw) => {
+    process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE = raw
+    expect(() => loadConfig()).toThrow(/ONCHAIN_RECEIVE_BAND_BELOW_SHARE must be a number between 0 and 1/)
+  })
+})
+
+describe('ONCHAIN_RECEIVE_MAX_BAND_SATS', () => {
+  it('defaults to the range that corridor already serves, so nothing new is offered or withheld', () => {
+    const config = loadConfig()
+    const limits = config.corridorLimits['onchain:BTC->arkade:BTC']
+    expect(config.onchainReceiveMaxBandSats).toBe(limits.maxSats - limits.minSats)
+  })
+
+  it('narrows how far a funded amount may drift from its quote', () => {
+    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '5000'
+    expect(loadConfig().onchainReceiveMaxBandSats).toBe(5_000)
+  })
+
+  it('accepts zero, which is exactly the strict equality shipped today', () => {
+    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '0'
+    expect(loadConfig().onchainReceiveMaxBandSats).toBe(0)
+  })
+
+  it('may only ever narrow, never widen past the corridor range', () => {
+    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '999999999999'
+    const config = loadConfig()
+    const limits = config.corridorLimits['onchain:BTC->arkade:BTC']
+    expect(config.onchainReceiveMaxBandSats).toBe(limits.maxSats - limits.minSats)
+  })
+
+  it.each(['-1', 'abc', '1.5', 'Infinity'])('rejects %s', (raw) => {
+    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = raw
+    expect(() => loadConfig()).toThrow(/ONCHAIN_RECEIVE_MAX_BAND_SATS must be a non-negative integer/)
+  })
+})
+
 /**
  * The one knob that makes the daemon spend without a human.
  *
@@ -804,7 +854,7 @@ describe('ARK_UNILATERAL_EXIT_DELAY', () => {
  * number you are prepared to lose.
  */
 describe('LN_RECEIVE_ACCEPT_UNILATERAL_GAP', () => {
-  it('is off when unset, so no deployment accepts the #69 window by omission', () => {
+  it('is off when unset, so no deployment accepts the unilateral gap by omission', () => {
     expect(loadConfig().lnReceiveAcceptUnilateralGap).toBe(false)
   })
 

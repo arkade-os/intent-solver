@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { hex } from '@scure/base'
 import { addressFromHex, loadEvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
+import { EVM_ORDER_MARGIN_SECONDS } from '@arkade-os/solver-core/core/evmSend.js'
 
 const ADDRESS = '0x1234567890abcdef1234567890abcdef12345678'
 
@@ -75,6 +76,24 @@ describe('loadEvmChainConfig', () => {
     // gets a conversion built for a slow one.
     const config = loadEvmChainConfig(env({ EVM_FASTEST_SECONDS_PER_BLOCK: '0.25' }))
     expect(config!.cadence.fastestSecondsPerBlock).toBe(0.25)
+  })
+
+  it('loads the advertised EVM deadline margin and keeps the documented default', () => {
+    expect(loadEvmChainConfig(env())!.orderMarginSeconds).toBe(EVM_ORDER_MARGIN_SECONDS)
+    expect(loadEvmChainConfig(env({ EVM_ORDER_MARGIN_SECONDS: '7500' }))!.orderMarginSeconds).toBe(7500)
+    expect(
+      loadEvmChainConfig(env({ EVM_ORDER_MARGIN_SECONDS: String(EVM_ORDER_MARGIN_SECONDS) }))!.orderMarginSeconds,
+    ).toBe(EVM_ORDER_MARGIN_SECONDS)
+    expect(() => loadEvmChainConfig(env({ EVM_ORDER_MARGIN_SECONDS: String(EVM_ORDER_MARGIN_SECONDS - 1) }))).toThrow(
+      /EVM_ORDER_MARGIN_SECONDS/,
+    )
+  })
+
+  it('requires the claim-trace probe unless the chain opts into direct claims only', () => {
+    expect(loadEvmChainConfig(env())!.directClaimsOnly).toBe(false)
+    expect(loadEvmChainConfig(env({ EVM_DIRECT_CLAIMS_ONLY: 'true' }))!.directClaimsOnly).toBe(true)
+    expect(loadEvmChainConfig(env({ EVM_DIRECT_CLAIMS_ONLY: 'false' }))!.directClaimsOnly).toBe(false)
+    expect(() => loadEvmChainConfig(env({ EVM_DIRECT_CLAIMS_ONLY: 'yes' }))).toThrow(/EVM_DIRECT_CLAIMS_ONLY/)
   })
 
   it('refuses nonsense numbers', () => {

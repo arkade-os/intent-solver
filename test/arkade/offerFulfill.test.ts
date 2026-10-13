@@ -9,12 +9,7 @@ import { describe, it, expect } from 'vitest'
 import { offerVtxoScript, type Offer } from '@arkade-os/swap'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { asset } from '@arkade-os/sdk'
-import {
-  fulfillOffer,
-  buildAssetPacket,
-  ASSET_CARRIER_SATS,
-  makerScriptHex,
-} from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import { fulfillOffer, ASSET_CARRIER_SATS, makerScriptHex } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
@@ -102,76 +97,6 @@ describe('fulfillOffer refuses before it spends', () => {
       fulfillOffer(offered, 'http://emulator.test', offerWith({ swapPkScript: honest }), deposit),
     )
     expect(message).not.toMatch(/no spendable coins/)
-  })
-})
-
-describe('the asset packet', () => {
-  const groupIds = (packet: unknown): string[] =>
-    ((packet as { groups?: { assetId: { toString(): string } }[] }).groups ?? []).map((g) => g.assetId.toString())
-
-  const inputs = (entries: [number, { assetId: string; amount: bigint }[]][]) => new Map(entries)
-
-  it('puts the WANTED asset at group index 0', () => {
-    // The fulfill script's OP_INSPECTOUTASSETLOOKUP uses lookup_index = 0, so a
-    // wanted asset anywhere else makes the covenant fail. Group order follows
-    // insertion order, which is why the holder of the wanted asset is inserted
-    // first — reordering that silently breaks the covenant.
-    const packet = buildAssetPacket({
-      wantedAssetId: ASSET_ID,
-      wantAmount: 500n,
-      inputAssets: inputs([
-        [0, [{ assetId: ASSET_ID_B, amount: 900n }]],
-        [1, [{ assetId: ASSET_ID, amount: 600n }]],
-      ]),
-    })
-    expect(groupIds(packet)[0]).toBe(ASSET_ID)
-  })
-
-  it('puts it first even when ONE COIN carries it second', () => {
-    // Entry order is not enough: a single input can hold an unrelated asset
-    // ahead of the wanted one, and the group order follows the first id seen.
-    const packet = buildAssetPacket({
-      wantedAssetId: ASSET_ID,
-      wantAmount: 100n,
-      inputAssets: inputs([
-        [
-          1,
-          [
-            { assetId: ASSET_ID_B, amount: 50n },
-            { assetId: ASSET_ID, amount: 300n },
-          ],
-        ],
-      ]),
-    })
-    expect(groupIds(packet)[0]).toBe(ASSET_ID)
-  })
-
-  it('DECLARES an asset a funding coin merely happens to carry', () => {
-    // arkd refuses with ASSET_NOT_FOUND when an input owns an asset the packet
-    // does not mention. Coin selection picks for the wanted asset; whatever
-    // else those coins hold comes along.
-    const packet = buildAssetPacket({
-      wantedAssetId: ASSET_ID,
-      wantAmount: 100n,
-      inputAssets: inputs([
-        [1, [{ assetId: ASSET_ID, amount: 100n }]],
-        [2, [{ assetId: ASSET_ID_B, amount: 7n }]],
-      ]),
-    })
-    expect(groupIds(packet)).toEqual([ASSET_ID, ASSET_ID_B])
-  })
-
-  it('routes a deposit asset to us when the maker wants sats', () => {
-    const packet = buildAssetPacket({
-      wantedAssetId: undefined,
-      wantAmount: 1_000n,
-      inputAssets: inputs([[0, [{ assetId: ASSET_ID_B, amount: 900n }]]]),
-    })
-    expect(groupIds(packet)).toEqual([ASSET_ID_B])
-  })
-
-  it('builds nothing when no asset moves', () => {
-    expect(buildAssetPacket({ wantedAssetId: undefined, wantAmount: 1_000n, inputAssets: new Map() })).toBeNull()
   })
 })
 

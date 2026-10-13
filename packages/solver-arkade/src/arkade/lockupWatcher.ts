@@ -44,6 +44,7 @@ export interface LockupWatcherDeps {
   contracts: ContractSource
   /** Called with the scripts an event named. Never awaited; may throw. */
   onScripts: (scripts: string[]) => void
+  onEvent?: (event: ContractEvent, scripts: string[]) => void
   onError?: (error: unknown) => void
 }
 
@@ -55,18 +56,6 @@ export class LockupWatcher {
   private reconciling?: Promise<void>
 
   constructor(private readonly deps: LockupWatcherDeps) {}
-
-  /**
-   * True between {@link start} and {@link stop}. Diagnostics only.
-   *
-   * Says nothing about whether the source behind it has actually attached: with
-   * a lazy source (`arkade/lazyContractSource.ts`) that resolves the manager on
-   * first use, this is true from the moment `start()` returns while the attach
-   * is still in flight, or retrying.
-   */
-  isSubscribed(): boolean {
-    return this.unsubscribe !== undefined
-  }
 
   /**
    * Record which scripts a swap is waiting on, and put them on the stream.
@@ -117,7 +106,10 @@ export class LockupWatcher {
         this.asked.add(script)
       } catch (error) {
         this.deps.onError?.(error)
+        continue
       }
+      // Catch-up: a funding from before the watch landed produces no event.
+      if (this.unsubscribe && this.watched.includes(script)) this.nudge([script])
     }
     for (const script of [...this.asked]) {
       if (wanted.has(script)) continue
@@ -136,6 +128,9 @@ export class LockupWatcher {
   start(): void {
     if (this.unsubscribe) return
     this.unsubscribe = this.deps.contracts.onContractEvent((event) => this.handle(event))
+    // Watches that landed while nothing listened: a funding in that gap produced no event.
+    const unheard = this.watched.filter((script) => this.asked.has(script))
+    if (unheard.length > 0) this.nudge(unheard)
   }
 
   /** Stop listening. Safe to call twice. */
@@ -156,6 +151,15 @@ export class LockupWatcher {
           ? [event.contractScript]
           : []
     if (scripts.length === 0) return
+    try {
+      this.deps.onEvent?.(event, scripts)
+    } catch (error) {
+      this.deps.onError?.(error)
+    }
+    this.nudge(scripts)
+  }
+
+  private nudge(scripts: string[]): void {
     try {
       // Scripts only. The event's `vtxos` are deliberately not passed on.
       this.deps.onScripts(scripts)

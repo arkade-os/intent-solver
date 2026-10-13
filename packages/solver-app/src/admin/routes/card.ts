@@ -7,7 +7,6 @@
  */
 import type { Hono } from 'hono'
 import {
-  assetCardMarkets,
   buildSolverCard,
   publishableAssetMarkets,
   signSolverCard,
@@ -15,13 +14,67 @@ import {
   type AssetCardMarket,
   type SolverCard,
 } from '@arkade-os/solver-core/core/registryCard.js'
-import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
-import type { SolverAd } from '@arkade-os/solver-core/core/solverAd.js'
+import { CORRIDORS, type Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
+import { buildSolverAd, type SolverAd } from '@arkade-os/solver-core/core/solverAd.js'
+import { DEFAULT_ONCHAIN_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/onchainSend.js'
+import { DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/onchainReceive.js'
+import { DEFAULT_HOLD_INVOICE_WINDOW } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import type { Services } from '../../ops/services.js'
+import type { Config } from '../../config.js'
 import { publishStateOf } from '../publishState.js'
 import type { AdminDeps } from '../server.js'
+import { assetCardMarketsFromPolicy } from '../../ops/assetRfqMarkets.js'
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+/** `RELAY_URL` then `SOLVER_CARD_RELAYS` — shared so `cli card`, the console card and the ad cannot disagree. */
+export const advertisedRelays = (relayUrl: string | null): string[] => {
+  const extra = (process.env.SOLVER_CARD_RELAYS ?? '')
+    .split(',')
+    .map((r) => r.trim())
+    .filter(Boolean)
+  return [...(relayUrl ? [relayUrl] : []), ...extra].map(withoutCredentials)
+}
+
+/** The ad goes out with no human reading it, so a `?token=` or `user:pass@` in a relay URL must not ride along. */
+const withoutCredentials = (relay: string): string => {
+  try {
+    const url = new URL(relay)
+    return url.username || url.password || url.search || url.hash
+      ? `${url.protocol}//${url.host}${url.pathname}`
+      : relay
+  } catch {
+    return relay
+  }
+}
+
+/** The `valid_until` window each corridor stamps on its quotes. */
+const QUOTE_VALIDITY_SECONDS: Record<Corridor, (config: Config) => number> = {
+  // `config`, not policy: `SendSwapService` is built from `config.lockupTimeoutSeconds`.
+  'arkade:BTC->lightning:BTC': (config) => config.lockupTimeoutSeconds,
+  'lightning:BTC->arkade:BTC': () => DEFAULT_HOLD_INVOICE_WINDOW,
+  'arkade:BTC->onchain:BTC': () => DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
+  'onchain:BTC->arkade:BTC': () => DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT,
+}
+
+/**
+ * The kind-38859 ad for this deployment: the enabled BTC corridors, on the BOOT
+ * policy for the reason {@link deploymentCard} gives. Same-asset, so the sats
+ * limits are to-leg bounds and `flatSats` is from-leg, as § 3 asks.
+ */
+export const deploymentAd = (services: Pick<Services, 'config' | 'bootPolicy'>): SolverAd => {
+  const { config, bootPolicy } = services
+  return buildSolverAd({
+    pairs: CORRIDORS.filter((corridor) => bootPolicy.corridorEnabled[corridor]).map((pair) => ({
+      pair,
+      min: bootPolicy.corridorLimits[pair].minSats,
+      max: bootPolicy.corridorLimits[pair].maxSats,
+      feeBpsIndicative: bootPolicy.corridorFees[pair].bps,
+      feeFlatIndicative: bootPolicy.corridorFees[pair].flatSats,
+      quoteValiditySeconds: QUOTE_VALIDITY_SECONDS[pair](config),
+    })),
+    relays: advertisedRelays(config.relayUrl),
+  })
+}
 
 /**
  * This deployment's signed registry card, built exactly as `cli card` builds it.
@@ -41,7 +94,7 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
  * reason instead of publishing it.
  */
 const deploymentCard = async (services: Services, assetMarkets: readonly AssetCardMarket[]): Promise<SolverCard> => {
-  const { config, policy } = services
+  const { config, bootPolicy } = services
   const name = process.env.SOLVER_NAME?.trim()
   // Guarded here rather than left to `buildSolverCard`: an absent variable
   // reaches its name rule as the string "undefined", which matches
@@ -49,29 +102,19 @@ const deploymentCard = async (services: Services, assetMarkets: readonly AssetCa
   if (!name) {
     throw new Error('SOLVER_NAME is not set — it becomes the registry filename solvers/<network>/<name>.json')
   }
-  // Extra relays beyond RELAY_URL, for a deployment listening on several — the
-  // same two sources `cli card` reads, so the two cannot print different cards.
-  const extra = (process.env.SOLVER_CARD_RELAYS ?? '')
-    .split(',')
-    .map((r) => r.trim())
-    .filter(Boolean)
-  const relays = [...(config.relayUrl ? [config.relayUrl] : []), ...extra]
+  const relays = advertisedRelays(config.relayUrl)
 
-  // Effective policy, not the raw environment: the card states terms, and a
-  // card quoting a corridor this process has overridden into silence is a
-  // listing that lies. Both the toggles AND the bounds come from `policy` now
-  // that the card publishes per-corridor limits — an override that narrows a
-  // corridor has to reach the listing, which reading `config.limits` would
-  // have hidden.
+  // BOOT, not live: the card is SIGNED, none of these three is in `LIVE_KEYS`, and each is snapshotted into a
+  // `private readonly` deps at construction — so boot is what the corridor will honour.
   //
   // The old hard refusal for a disabled LN_SEND is gone with the hardcoded
   // market it protected: an onchain-only deployment now has an honest card to
   // publish rather than none. `buildSolverCard` still refuses when NOTHING is
   // served.
   const served = Object.fromEntries(
-    CORRIDORS.filter((corridor) => policy.corridorEnabled[corridor]).map((corridor) => [
+    CORRIDORS.filter((corridor) => bootPolicy.corridorEnabled[corridor]).map((corridor) => [
       corridor,
-      { limits: policy.corridorLimits[corridor], fee: policy.corridorFees[corridor] },
+      { limits: bootPolicy.corridorLimits[corridor], fee: bootPolicy.corridorFees[corridor] },
     ]),
   )
 
@@ -95,9 +138,16 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
     // Outside the try: an unadvertisable market is still reported when the card
     // fails for another reason. ENABLED already — `assetMarketPolicy` drops a pause.
     const { publishable, omitted } = publishableAssetMarkets(
-      assetCardMarkets(deps.services.assetMarkets, {
-        min: deps.services.policy.offerMinFillAmount,
-        max: deps.services.policy.offerMaxFillAmount,
+      assetCardMarketsFromPolicy({
+        pricing: deps.services.assetMarkets,
+        offerMarkets: deps.services.liveOfferMarkets,
+        // BOOT: `AssetOfferService` reads these off constructor deps. `rfqMarkets` below is LIVE by contrast.
+        offerBounds: {
+          min: deps.services.bootPolicy.offerMinFillAmount,
+          max: deps.services.bootPolicy.offerMaxFillAmount,
+        },
+        rfqMarkets: deps.services.assetRfqMarkets,
+        chargesDeliveredCarrier: deps.services.bootPolicy.offerChargesDeliveredCarrier,
       }),
       deps.services.config.network,
     )
@@ -131,6 +181,7 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
       cardError,
       // Reported even when the card failed: it describes the deployment, not the card.
       cardOmitted: [
+        // LIVE unlike the corridor map: `rebuild` builds the corridor set from `livePolicy.evmCorridors`.
         ...unpublishableCorridors(
           deps.services.policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
         ),
@@ -168,7 +219,8 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
       return c.json({ error: 'refused', detail }, 409)
     }
     if (!deps.adPublisher) {
-      const detail = 'this mode has no relay connection'
+      const detail =
+        deps.mode === 'relay' ? 'no ad publisher is wired' : `${deps.mode} mode has no relay connection to publish on`
       await audit('error', detail)
       return c.json({ error: 'no_publisher', detail }, 409)
     }

@@ -47,7 +47,7 @@
  * `findLockups` once and took an empty answer as proof that "the client (or
  * another watcher) already moved it", writing `refund_outcome: 'external'`.
  * But `findLockups` is `getVtxos({ spendableOnly: true })` — the same read
- * whose lag PR #21 fixed on the receive leg, where `whenRefunding` had the
+ * whose lag the receive leg already fixed, where `whenRefunding` had the
  * identical single-read empty-lockup branch and sent COMPLETED swaps to a
  * terminal `stuck`. That fix's own message audits `send/onchainOrchestrator.ts`
  * and clears it (it needs positive evidence, not two reads disagreeing); this
@@ -105,7 +105,11 @@ import { refundLocktimeFor } from '@arkade-os/solver-core/core/send.js'
 import { HOUR, MINUTE } from '@arkade-os/solver-core/core/timelocks.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { arkadeOpsFromContext } from '@arkade-os/solver-corridors/send/arkadeOps.js'
-import { SendSwapService, type ArkadeOps } from '@arkade-os/solver-corridors/send/orchestrator.js'
+import {
+  NO_RECORD_GRACE_SECONDS,
+  SendSwapService,
+  type ArkadeOps,
+} from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import {
   cancelCounterpartyInvoice,
@@ -249,7 +253,11 @@ const clientDerivedAddress = (swap: SendSwapRow, invoice: string, refundAddress:
     // here would only agree with it while the regtest stack happened to be
     // configured the way they were written — and the assertion below would then
     // be comparing two addresses derived from different parameters.
-    clientRefundDelay: arkade.ctx.unilateralDelays.unilateralRefundWithoutReceiverDelay,
+    // This delay is part of the quote because the absolute refund horizon can
+    // grow with the invoice's CLTV exposure. Reusing the Arkade base delay
+    // would reconstruct the pre-change script, not the script the client is
+    // being asked to fund.
+    clientRefundDelay: swap.refundWithoutReceiverDelay,
     refundWithoutServerDelay: arkade.ctx.unilateralDelays.unilateralRefundDelay,
     nonInteractiveParameters: {
       emulatorPubkey: hex.decode(arkade.emulator.pubkey),
@@ -302,7 +310,7 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
 
       const fundTxid = await arkade.ctx.wallet.send({
         address: swap.lockupAddress,
-        amount: decodeInvoice(invoice).amountSats,
+        amount: swap.amountSats,
       })
       expect(fundTxid).toBeTruthy()
 
@@ -369,8 +377,8 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       expect(swap.refundLocktime).toBeLessThan(nowSeconds())
 
       expect(clientDerivedAddress(swap, invoice, refundAddress)).toBe(swap.lockupAddress)
-      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: AMOUNT_SATS })
-      await awaitFunding(swap.pkScript, AMOUNT_SATS)
+      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: swap.amountSats })
+      await awaitFunding(swap.pkScript, swap.amountSats)
 
       // The solver tries the payment for real and it fails terminally. Driven
       // from just after the quote: inside `DEFAULT_LOCKUP_TIMEOUT` (15m), so
@@ -378,7 +386,7 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       // out, so the pay gate lets the attempt happen.
       const paying = serviceWith(() => quoteClock() + PAY_AFTER_QUOTE)
       const row = await driveToTerminal(paying, swap.id)
-      // `refused`, not `stuck`: #182 — a terminal payment failure whose refund
+      // `refused`, not `stuck`: a terminal payment failure whose refund
       // has LANDED is finished business, and `stuck` is reserved for rows a
       // human must read. The reason records the failure either way.
       // One object, not four: asserting `state` first hid which branch (#102).
@@ -421,7 +429,7 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       // `refundLocktime` to have matured, which is what the three-clock idiom
       // above buys.
       //
-      // `refused` now — #182. The client is whole, so nothing needs a human:
+      // `refused` now. The client is whole, so nothing needs a human:
       // `stuck` is reserved for rows where the refund did NOT land or the
       // self-payment probe withheld it. `refund_outcome` tells the client they
       // were refunded; the state tells the operator there is nothing to do.
@@ -440,7 +448,7 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
     async () => {
       await assertArkadeSpendable(arkade, AMOUNT_SATS)
 
-      // THE OTHER FAILURE PATH, and the one #46 missed. Every other test here
+      // THE OTHER FAILURE PATH, and the one the immediate refund missed. Every other test here
       // reaches a terminal failure through `submitPayment`, because
       // `payViaPaymentRequest` answers before the call returns. A payment whose
       // id is on disk while its outcome is not takes `whenPaying` ->
@@ -461,18 +469,18 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
       const swap = outcome.swap
 
-      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: AMOUNT_SATS })
-      await awaitFunding(swap.pkScript, AMOUNT_SATS)
+      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: swap.amountSats })
+      await awaitFunding(swap.pkScript, swap.amountSats)
 
       // The crash, written onto the row rather than simulated by killing a
       // process: funded, `paying`, and carrying a payment id THIS LND has never
       // heard of. A real crash produces the same row — and the id being unknown
       // is itself the strongest fact available, since a payment LND has no
       // record of provably never left.
-      await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT_SATS })
+      await store.transition(swap.id, 'quoted', 'funded', { lockup_value: swap.amountSats })
       await store.transition(swap.id, 'funded', 'paying', {
         idempotency_key: `e2e-poll-${swap.id}`,
-        pay_attempted_at: nowSeconds(),
+        pay_attempted_at: nowSeconds() - NO_RECORD_GRACE_SECONDS,
         payment_id: 'ff'.repeat(32),
       })
 
@@ -483,7 +491,7 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       // since `failed` reads identically for a payment that was attempted and
       // died.
       expect(row.paymentEvidence).toBe('no_record')
-      // `refused`, not `stuck`: #182 reserves `stuck` for rows a human must
+      // `refused`, not `stuck`: `stuck` is reserved for rows a human must
       // read. Grouped as above, and for the same reason.
       expect({
         state: row.state,
@@ -534,8 +542,8 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
       const swap = outcome.swap
 
-      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: AMOUNT_SATS })
-      await awaitFunding(swap.pkScript, AMOUNT_SATS)
+      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: swap.amountSats })
+      await awaitFunding(swap.pkScript, swap.amountSats)
 
       const row = await driveToTerminal(serviceWith(), swap.id)
       // REFUSED, not stuck: the row was never really exposed, because the one
@@ -563,9 +571,6 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
   it(
     'records a refund the client pushed first as external, and pushes nothing of its own',
     async () => {
-      const overfunded = AMOUNT_SATS + OVERFUND_BY
-      await assertArkadeSpendable(arkade, overfunded)
-
       const { invoice } = await counterpartyInvoice(AMOUNT_SATS)
       const refundAddress = await arkade.ctx.wallet.getAddress()
 
@@ -577,6 +582,8 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
       const swap = outcome.swap
       expect(swap.refundLocktime).toBeLessThan(nowSeconds())
+      const overfunded = swap.amountSats + OVERFUND_BY
+      await assertArkadeSpendable(arkade, overfunded)
 
       await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: overfunded })
       await awaitFunding(swap.pkScript, overfunded)
@@ -613,9 +620,6 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
   it(
     'does not write a still-funded lockup off as externally refunded on one stale read',
     async () => {
-      const overfunded = AMOUNT_SATS + OVERFUND_BY
-      await assertArkadeSpendable(arkade, overfunded)
-
       const { invoice } = await counterpartyInvoice(AMOUNT_SATS)
       const refundAddress = await arkade.ctx.wallet.getAddress()
 
@@ -625,6 +629,8 @@ describe('e2e arkade:BTC->lightning:BTC (send)', () => {
       if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
       const swap = outcome.swap
       expect(swap.refundLocktime).toBeLessThan(nowSeconds())
+      const overfunded = swap.amountSats + OVERFUND_BY
+      await assertArkadeSpendable(arkade, overfunded)
 
       await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: overfunded })
       await awaitFunding(swap.pkScript, overfunded)

@@ -12,6 +12,8 @@ import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { EvmSendSwapStore, type EvmSendQuoteRecord } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { APPROVAL_REFUSAL } from '@arkade-os/solver-core/core/approvalGate.js'
+import { EvmClaimVerificationError } from '@arkade-os/solver-core/ports/evm.js'
+import { EvmPayoutFundingQuarantinedError } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
 
 const NOW = 1_800_000_000
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
@@ -60,6 +62,17 @@ const LOCK_CALL = { to: new Uint8Array(20), data: Uint8Array.of(0xcd, 0x41, 0x30
 
 const LOCK_BLOCK = 19_000_000n
 const TIMELOCK = 21_000_000n
+const payoutLockForQuote = () => {
+  const saved = quote()
+  return {
+    preimageHash: Uint8Array.from(Buffer.from(saved.paymentHash, 'hex')),
+    amount: BigInt(saved.evmAmount),
+    tokenAddress: Uint8Array.from(Buffer.from(saved.tokenAddress.slice(2), 'hex')),
+    claimAddress: Uint8Array.from(Buffer.from(saved.evmClaimAddress.slice(2), 'hex')),
+    refundAddress: Uint8Array.from(Buffer.from(saved.evmRefundAddress.slice(2), 'hex')),
+    timelock: BigInt(saved.evmTimeout),
+  }
+}
 
 const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
   const store = await EvmSendSwapStore.open(betterSqliteDriver(':memory:'), () => NOW)
@@ -76,11 +89,8 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
     transactionBlock: vi.fn().mockResolvedValue(LOCK_BLOCK),
     allowance: vi.fn().mockResolvedValue(0n),
     lockCalls: vi.fn().mockReturnValue([APPROVE_CALL, LOCK_CALL]),
-    approveCall: vi.fn(),
-    lockCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
     refundCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
     claimCall: vi.fn(),
-    lockPrepayCall: vi.fn(),
     ...(over.evm ?? {}),
   } as unknown as EvmSendServiceDeps['evm']
   const deps: EvmSendServiceDeps = {
@@ -111,6 +121,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
     admission: new AdmissionControl(),
     totalCommitted: vi.fn().mockResolvedValue(0),
     markets: new Map(),
+    assertClaimTraceSupport: vi.fn().mockResolvedValue(undefined),
     fetchPrice: vi.fn().mockRejectedValue(new Error('no price in a tick test')),
     chain: {
       contractAddress: '0x' + 'de'.repeat(20),
@@ -205,6 +216,17 @@ describe('the approval gate on arkade:BTC->ethereum', () => {
 })
 
 describe('the row enters the exposed state BEFORE the lock is broadcast', () => {
+  it('continues settlement ticks when fresh-quote trace admission is unavailable', async () => {
+    const assertClaimTraceSupport = vi.fn().mockRejectedValue(new Error('trace unavailable'))
+    const { store, service } = await build({ assertClaimTraceSupport })
+
+    const row = await service.tick('swap-1')
+
+    expect(row.state).toBe('locking_evm')
+    expect(assertClaimTraceSupport).not.toHaveBeenCalled()
+    await store.close()
+  })
+
   it('is already locking_evm by the time broadcast is called', async () => {
     // A crash between the two must not leave a lock nobody knows about. Better
     // to re-observe a row claiming to be locking and find no lock, than to have
@@ -422,6 +444,123 @@ describe('a preimage scan the node refuses must not strand the solver’s tokens
     // swap; a stall needs a cause an operator can read.
     expect(errors, 'the scan failure never reached the operator log').toHaveLength(1)
   })
+
+  it.each(['native', 'provider'] as const)(
+    'keeps a timed-out live lock open in %s mode when claim verification is bounded, then claims after proof recovers',
+    async (mode) => {
+      const proofError = new EvmClaimVerificationError('claim trace exceeded its verification bound')
+      const preimage = new Uint8Array(32).fill(0x7b)
+      const findClaimPreimage = vi.fn().mockRejectedValueOnce(proofError).mockResolvedValueOnce(preimage)
+      const broadcast = vi.fn().mockResolvedValue('0xrefund')
+      const ensure = vi.fn().mockResolvedValue({})
+      const onTickError = vi.fn()
+      const payoutFunding = mode === 'provider' ? { identity: 'test-provider', ensure } : undefined
+      const { store, service, deps } = await build({
+        evm: { isLocked: vi.fn().mockResolvedValue(true), findClaimPreimage } as never,
+        blockHeight: vi.fn().mockResolvedValue(21_000_000),
+        broadcast,
+        ...(payoutFunding ? { payoutFunding: payoutFunding as never } : {}),
+        onTickError,
+      })
+      await store.transition('swap-1', 'quoted', 'funded')
+      await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+      await store.transition('swap-1', 'locking_evm', 'awaiting_claim')
+
+      await service.tickAll()
+
+      let row = await store.get('swap-1')
+      expect(row.state).toBe('awaiting_claim')
+      expect(row.preimage).toBeNull()
+      expect(broadcast).not.toHaveBeenCalled()
+      expect(deps.claimArkade).not.toHaveBeenCalled()
+      expect(deps.payoutFunding).toBe(payoutFunding)
+      expect(ensure).not.toHaveBeenCalled()
+      expect(onTickError).toHaveBeenCalledTimes(1)
+      expect(onTickError).toHaveBeenCalledWith('swap-1', proofError)
+
+      await service.tickAll()
+
+      row = await store.get('swap-1')
+      expect(deps.claimArkade).toHaveBeenCalledWith(expect.anything(), '7b'.repeat(32))
+      expect(row.state).toBe('claimed')
+      expect(broadcast).not.toHaveBeenCalled()
+      await store.close()
+    },
+  )
+})
+
+describe('a quarantined receiver invariant closes only the public live row', () => {
+  it.each(['start', 'reconcile'] as const)(
+    'alerts once, releases live capacity, and preserves late-lock monitoring from %s',
+    async (mode) => {
+      const invariant = new EvmPayoutFundingQuarantinedError('receiver invariant was quarantined')
+      const ensure = vi.fn().mockRejectedValue(invariant)
+      const onTickError = vi.fn()
+      const { store, service } = await build({
+        evm: {
+          isLocked: vi.fn().mockResolvedValue(false),
+          isLockedAt: vi.fn().mockResolvedValue(false),
+          transactionOutcome: vi.fn().mockResolvedValue('pending'),
+          findClaimPreimage: vi.fn().mockResolvedValue(null),
+        } as never,
+        blockHeight: vi.fn().mockResolvedValue(20_000_000),
+        lockFor: vi.fn().mockReturnValue(payoutLockForQuote()) as never,
+        payoutFunding: { identity: 'test-provider', ensure } as never,
+        onTickError,
+      })
+      if (mode === 'start') {
+        await store.transition('swap-1', 'quoted', 'funded')
+      } else {
+        await store.transition('swap-1', 'quoted', 'funded')
+        await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+      }
+      const lateLockQuery = vi.spyOn(store, 'findClosedOverLock')
+
+      await service.tickAll()
+
+      const row = await store.get('swap-1')
+      expect(ensure).toHaveBeenCalledWith(expect.anything(), mode)
+      expect(onTickError).toHaveBeenCalledTimes(1)
+      expect(onTickError).toHaveBeenCalledWith('swap-1', invariant)
+      expect(row.state).toBe('stuck')
+      expect(row.preimage).toBeNull()
+      expect(await store.findLive()).toEqual([])
+      expect(await store.findClosedOverLock(NOW)).toEqual([row])
+      expect(lateLockQuery).toHaveBeenCalled()
+      await store.close()
+    },
+  )
+
+  it('keeps retrying generic reconciliation failures without closing the live row', async () => {
+    const failure = new Error('receiver RPC unavailable')
+    const ensure = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue({})
+    const onTickError = vi.fn()
+    const { store, service } = await build({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(false),
+        isLockedAt: vi.fn().mockResolvedValue(false),
+        transactionOutcome: vi.fn().mockResolvedValue('pending'),
+      } as never,
+      blockHeight: vi.fn().mockResolvedValue(20_000_000),
+      lockFor: vi.fn().mockReturnValue(payoutLockForQuote()) as never,
+      payoutFunding: { identity: 'test-provider', ensure } as never,
+      onTickError,
+    })
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+
+    await service.tickAll()
+    expect((await store.get('swap-1')).state).toBe('locking_evm')
+    expect(await store.findLive()).toHaveLength(1)
+    expect(onTickError).toHaveBeenCalledOnce()
+
+    await service.tickAll()
+    expect(ensure).toHaveBeenCalledTimes(2)
+    expect((await store.get('swap-1')).state).toBe('locking_evm')
+    expect(await store.findLive()).toHaveLength(1)
+    expect(onTickError).toHaveBeenCalledOnce()
+    await store.close()
+  })
 })
 
 /**
@@ -445,7 +584,11 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
     })
     await service.tick('swap-1')
     expect(transactionBlock).toHaveBeenCalledWith('0xlock')
-    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), LOCK_BLOCK - BigInt(quote().minConfirmations))
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), LOCK_BLOCK - BigInt(quote().minConfirmations), {
+      minConfirmations: 1,
+      minAgeSeconds: 0,
+      nowSeconds: NOW,
+    })
   })
 
   it('does not move the floor when the chain advances', async () => {
@@ -479,7 +622,7 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
     expect(findRefund).toHaveBeenCalledWith(expect.anything(), TIMELOCK)
   })
 
-  it('falls back to genesis rather than skipping a row whose txid patch was lost', async () => {
+  it('falls back to the row`s own creation height rather than skipping a row whose txid patch was lost', async () => {
     const findClaimPreimage = vi.fn().mockResolvedValue(null)
     const { store, service } = await build({
       evm: { isLocked: vi.fn().mockResolvedValue(true), findClaimPreimage } as never,
@@ -487,10 +630,14 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
     await store.transition('swap-1', 'quoted', 'funded')
     await store.transition('swap-1', 'funded', 'locking_evm')
     await service.tick('swap-1')
-    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n)
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 20_000_000n - BigInt(quote().minConfirmations), {
+      minConfirmations: 1,
+      minAgeSeconds: 0,
+      nowSeconds: NOW,
+    })
   })
 
-  it('falls back to genesis when the lock txid resolves to no receipt', async () => {
+  it('falls back to the row`s own creation height when the lock txid resolves to no receipt', async () => {
     const findClaimPreimage = vi.fn().mockResolvedValue(null)
     const { service } = await exposed({
       evm: {
@@ -500,7 +647,54 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
       } as never,
     })
     await service.tick('swap-1')
-    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n)
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 20_000_000n - BigInt(quote().minConfirmations), {
+      minConfirmations: 1,
+      minAgeSeconds: 0,
+      nowSeconds: NOW,
+    })
+  })
+
+  it('still finds a Claim mined in the row`s own creation block', async () => {
+    // At exactly `fastestSecondsPerBlock`: the worst case for this bound.
+    const CREATED_AT_HEIGHT = 20_000_000n
+    const ELAPSED = 43_200
+    const preimage = Uint8Array.from(Buffer.from('cd'.repeat(32), 'hex'))
+    let scannedFrom: bigint | undefined
+    const findClaimPreimage = vi.fn().mockImplementation(async (_lock: unknown, from: bigint) => {
+      scannedFrom = from
+      return from <= CREATED_AT_HEIGHT ? preimage : null
+    })
+    const { store, service } = await exposed({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(true),
+        findClaimPreimage,
+        transactionBlock: vi.fn().mockResolvedValue(null),
+      } as never,
+      blockHeight: vi.fn().mockResolvedValue(Number(CREATED_AT_HEIGHT) + ELAPSED / 12),
+      now: () => NOW + ELAPSED,
+    })
+    await service.tick('swap-1')
+    expect(scannedFrom, 'a genesis walk, not a bound').toBeGreaterThan(0n)
+    expect(scannedFrom).toBeLessThanOrEqual(CREATED_AT_HEIGHT)
+    expect((await store.get('swap-1')).preimage).toBe('cd'.repeat(32))
+  })
+
+  it('falls back to genesis, never to the tip, when the clock is behind the row', async () => {
+    const findClaimPreimage = vi.fn().mockResolvedValue(null)
+    const { service } = await exposed({
+      evm: {
+        isLocked: vi.fn().mockResolvedValue(true),
+        findClaimPreimage,
+        transactionBlock: vi.fn().mockResolvedValue(null),
+      } as never,
+      now: () => NOW - 600,
+    })
+    await service.tick('swap-1')
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n, {
+      minConfirmations: 1,
+      minAgeSeconds: 0,
+      nowSeconds: NOW - 600,
+    })
   })
 
   it('clamps at genesis on a chain shallower than the margin', async () => {
@@ -513,7 +707,11 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
       } as never,
     })
     await service.tick('swap-1')
-    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n)
+    expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 0n, {
+      minConfirmations: 1,
+      minAgeSeconds: 0,
+      nowSeconds: NOW,
+    })
   })
 })
 
@@ -530,10 +728,8 @@ describe('the preimage is persisted BEFORE the Arkade claim is attempted', () =>
 
         isLockedAt: vi.fn().mockResolvedValue(true),
         blockTimestampAt: vi.fn().mockResolvedValue(0),
-        lockCall: vi.fn().mockReturnValue({ to: new Uint8Array(20), data: new Uint8Array(4) }),
         refundCall: vi.fn(),
         claimCall: vi.fn(),
-        lockPrepayCall: vi.fn(),
       } as unknown as EvmSendServiceDeps['evm'],
       claimArkade: vi.fn().mockImplementation(async () => {
         preimageAtClaim = (await store.get('swap-1')).preimage
@@ -550,6 +746,43 @@ describe('the preimage is persisted BEFORE the Arkade claim is attempted', () =>
 })
 
 describe('tickAll', () => {
+  it('coalesces overlapping sweeps until the active rows finish', async () => {
+    let release!: () => void
+    let entered!: () => void
+    const blocked = new Promise<void>((resolve) => (release = resolve))
+    const started = new Promise<void>((resolve) => (entered = resolve))
+    const { store, service } = await build({
+      arkadeLockupFunded: async () => {
+        entered()
+        await blocked
+        return false
+      },
+    })
+    const findLive = vi.spyOn(store, 'findLive')
+    const first = service.tickAll()
+    try {
+      await started
+      const second = service.tickAll()
+      expect(second).toBe(first)
+      expect(findLive).toHaveBeenCalledOnce()
+    } finally {
+      release()
+      await first
+      await store.close()
+    }
+  })
+
+  it('allows a new sweep after a store read rejects', async () => {
+    const { store, service } = await build({ arkadeLockupFunded: async () => false })
+    vi.spyOn(store, 'findLive').mockRejectedValueOnce(new Error('store unavailable'))
+    try {
+      await expect(service.tickAll()).rejects.toThrow('store unavailable')
+      await expect(service.tickAll()).resolves.toHaveLength(1)
+    } finally {
+      await store.close()
+    }
+  })
+
   it('does not let one failing row stop the others', async () => {
     // Shared loop with every other corridor: one stuck swap taking the sweep
     // down would stall all of them.
@@ -574,6 +807,124 @@ describe('tickAll', () => {
     expect((await store.get('swap-1')).evmLockTxid).toBe(null)
     expect((await store.get('swap-2')).evmLockTxid).toBe('0xtx')
     expect(calls).toBeGreaterThan(1)
+  })
+})
+
+describe('concurrent EVM lock submissions', () => {
+  const concurrent = async (over: Partial<EvmSendServiceDeps> = {}, failFirst = false) => {
+    let release!: () => void
+    let entered!: () => void
+    const blocked = new Promise<void>((resolve) => (release = resolve))
+    const started = new Promise<void>((resolve) => (entered = resolve))
+    const sequence: string[] = []
+    let allowance = 0n
+    const { store, service } = await build({
+      lockFor: (row) => ({ amount: BigInt(row.id.slice(-1)), timelock: TIMELOCK }) as never,
+      evm: {
+        allowance: async () => {
+          sequence.push(`allowance:${allowance}`)
+          return allowance
+        },
+        lockCalls: (lock: { amount: bigint }) => [
+          { to: new Uint8Array(20), data: Uint8Array.of(Number(lock.amount), 0) },
+          { to: new Uint8Array(20), data: Uint8Array.of(Number(lock.amount), 1) },
+        ],
+      } as unknown as EvmSendServiceDeps['evm'],
+      broadcast: async (call) => {
+        const [id, action] = call.data
+        sequence.push(`${action === 0 ? 'approve' : 'lock'}:${id}`)
+        if (id === 1 && action === 0) {
+          entered()
+          await blocked
+          if (failFirst) throw new Error('rpc unavailable')
+        }
+        if (action === 1) allowance = 9n
+        return `tx-${id}-${action}`
+      },
+      ...over,
+    })
+    await store.insertQuote({ ...quote(), id: 'swap-2', paymentHash: 'ab'.repeat(32), rfqId: 'rfq-2' })
+    return { store, service, sequence, release, started }
+  }
+
+  it('keeps a watcher tick from interleaving another row between approval and lock', async () => {
+    const h = await concurrent()
+    const first = h.service.tickAll()
+    let second: Promise<unknown> | undefined
+    try {
+      await h.started
+      second = h.service.tick('swap-2')
+      await new Promise((resolve) => setImmediate(resolve))
+      expect([...h.sequence]).toEqual(['allowance:0', 'approve:1'])
+      h.release()
+      await Promise.all([first, second])
+      expect(h.sequence).toEqual(['allowance:0', 'approve:1', 'lock:1', 'allowance:9', 'approve:2', 'lock:2'])
+    } finally {
+      h.release()
+      await Promise.allSettled([first, second])
+      await h.store.close()
+    }
+  })
+
+  it('rechecks a queued row before committing an approval', async () => {
+    const h = await concurrent()
+    const first = h.service.tick('swap-1')
+    let second: Promise<unknown> | undefined
+    try {
+      await h.started
+      second = h.service.tick('swap-2')
+      await new Promise((resolve) => setImmediate(resolve))
+      await h.store.transition('swap-2', 'quoted', 'refused', { failure_reason: 'operator stopped the swap' })
+      h.release()
+      await Promise.all([first, second])
+      expect(h.sequence).toEqual(['allowance:0', 'approve:1', 'lock:1'])
+      expect((await h.store.get('swap-2')).evmLockTxid).toBeNull()
+    } finally {
+      h.release()
+      await Promise.allSettled([first, second])
+      await h.store.close()
+    }
+  })
+
+  it('refuses a quote that expires while waiting to submit its lock', async () => {
+    let now = NOW
+    const h = await concurrent({ now: () => now })
+    const first = h.service.tick('swap-1')
+    let second: Promise<unknown> | undefined
+    try {
+      await h.started
+      second = h.service.tick('swap-2')
+      await new Promise((resolve) => setImmediate(resolve))
+      now += 61
+      h.release()
+      await Promise.all([first, second])
+      expect(h.sequence).toEqual(['allowance:0', 'approve:1', 'lock:1'])
+      expect((await h.store.get('swap-2')).state).toBe('refused')
+    } finally {
+      h.release()
+      await Promise.allSettled([first, second])
+      await h.store.close()
+    }
+  })
+
+  it('releases the submission queue when an earlier approval fails', async () => {
+    const h = await concurrent({}, true)
+    const first = h.service.tick('swap-1').catch((error: unknown) => error)
+    let second: Promise<unknown> | undefined
+    try {
+      await h.started
+      second = h.service.tick('swap-2')
+      await new Promise((resolve) => setImmediate(resolve))
+      h.release()
+      expect(await first).toMatchObject({ message: 'rpc unavailable' })
+      await second
+      expect(h.sequence).toEqual(['allowance:0', 'approve:1', 'allowance:0', 'approve:2', 'lock:2'])
+      expect((await h.store.get('swap-2')).evmLockTxid).toBe('tx-2-1')
+    } finally {
+      h.release()
+      await Promise.allSettled([first, second])
+      await h.store.close()
+    }
   })
 })
 
@@ -729,6 +1080,35 @@ describe('a lock transaction that reverted is not a lock that has not landed', (
     await service.tick('swap-1')
     expect((await store.get('swap-1')).state).toBe('locking_evm')
     expect(errors, 'the failed receipt read never reached the operator log').toHaveLength(1)
+  })
+})
+
+describe('provider recovery without an EVM lock', () => {
+  it('hands recovery to the adapter, then quarantines without triggering a client refund', async () => {
+    const q = quote()
+    const ensure = vi.fn().mockResolvedValue({})
+    const { store, service } = await build({
+      payoutFunding: { identity: 'test-provider', ensure } as never,
+      lockFor: vi.fn().mockReturnValue({
+        amount: BigInt(q.evmAmount),
+        tokenAddress: Uint8Array.from(Buffer.from(q.tokenAddress.slice(2), 'hex')),
+        preimageHash: Uint8Array.from(Buffer.from(q.paymentHash, 'hex')),
+        claimAddress: Uint8Array.from(Buffer.from(q.evmClaimAddress.slice(2), 'hex')),
+        refundAddress: Uint8Array.from(Buffer.from(q.evmRefundAddress.slice(2), 'hex')),
+        timelock: BigInt(q.evmTimeout),
+      }),
+      blockHeight: vi.fn().mockResolvedValue(q.evmTimeout),
+    })
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'locking_evm')
+
+    await service.tick('swap-1')
+
+    expect(ensure).toHaveBeenCalledWith(expect.anything(), 'recover')
+    expect((await store.get('swap-1')).state).toBe('stuck')
+    expect(await store.committedSats()).toBe(0)
+    expect(await store.findRefundable()).toEqual([])
+    expect((await store.findClosedOverLock(1_800_000_000)).map((row) => row.id)).toEqual(['swap-1'])
   })
 })
 
@@ -1102,5 +1482,160 @@ describe('refundSweep', () => {
     const { service } = await build({ arkade: sweepableArkade() })
     // swap-1 is still `quoted` — the sweep must leave it alone.
     expect(await service.refundSweep()).toEqual([])
+  })
+})
+
+describe('a lock that lands after the books closed', () => {
+  const PREIMAGE = new Uint8Array(32).fill(0x7b)
+
+  const closedOverLock = async (over: Partial<EvmSendServiceDeps> = {}) => {
+    const onTickError = vi.fn()
+    const evm = {
+      isLocked: vi.fn().mockResolvedValue(false),
+      findClaimPreimage: vi.fn().mockResolvedValue(null),
+      findRefund: vi.fn().mockResolvedValue(false),
+      transactionOutcome: vi.fn().mockResolvedValue('pending'),
+      ...((over.evm ?? {}) as object),
+    }
+    const built = await build({
+      blockHeight: vi.fn().mockResolvedValue(21_000_000),
+      onTickError,
+      ...over,
+      evm: evm as unknown as EvmSendServiceDeps['evm'],
+    })
+    await built.store.transition('swap-1', 'quoted', 'locking_evm')
+    await built.service.tickAll()
+    expect((await built.store.get('swap-1')).state).toBe('refunding_evm')
+
+    evm.transactionOutcome.mockResolvedValue('reverted')
+    evm.isLocked.mockResolvedValue(true)
+    await built.service.tickAll()
+    expect((await built.store.get('swap-1')).state).toBe('stuck')
+
+    return { ...built, evm, onTickError }
+  }
+
+  it('persists the preimage the client revealed and says so', async () => {
+    const { store, service, evm, onTickError } = await closedOverLock()
+    evm.isLocked.mockResolvedValue(false)
+    evm.findClaimPreimage.mockResolvedValue(PREIMAGE)
+
+    await service.tickAll()
+
+    expect((await store.get('swap-1')).preimage).toBe('7b'.repeat(32))
+    expect(onTickError.mock.calls.at(-1)?.[1].message).toContain('claimed the ERC20 after this row was closed')
+    await store.close()
+  })
+
+  it('reports a still-funded late lock once, not once per sweep', async () => {
+    const { store, service, onTickError } = await closedOverLock()
+
+    await service.tickAll()
+    await service.tickAll()
+
+    expect(onTickError).toHaveBeenCalledTimes(1)
+    expect(onTickError.mock.calls[0]?.[1].message).toContain('the ERC20 lock is funded on a closed row')
+    await store.close()
+  })
+
+  it('alerts but never invents a preimage when late-lock proof hits a verification bound', async () => {
+    const { store, service, evm, onTickError } = await closedOverLock()
+    const proofError = new EvmClaimVerificationError('ambiguous claim trace')
+    evm.findClaimPreimage.mockRejectedValue(proofError)
+    onTickError.mockClear()
+
+    await service.tickAll()
+
+    const row = await store.get('swap-1')
+    expect(row.state).toBe('stuck')
+    expect(row.preimage).toBeNull()
+    expect(onTickError).toHaveBeenCalledWith('swap-1', proofError)
+    await store.close()
+  })
+
+  it('stops watching once the client can take its sats back', async () => {
+    const { store, service, evm, onTickError } = await closedOverLock({
+      now: () => NOW + 86_400,
+    })
+    evm.isLocked.mockClear()
+
+    await service.tickAll()
+
+    expect(evm.isLocked).not.toHaveBeenCalled()
+    expect(onTickError).not.toHaveBeenCalled()
+    await store.close()
+  })
+
+  it('scans a still-pending lock from the row`s creation height, not from genesis', async () => {
+    const { store, service, evm } = await closedOverLock({
+      evm: { transactionBlock: vi.fn().mockResolvedValue(null) } as never,
+    })
+    await store.patch('swap-1', { evm_lock_txid: '0xlock' })
+    evm.findClaimPreimage.mockClear()
+
+    await service.tickAll()
+
+    expect(evm.findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 20_999_999n, {
+      minConfirmations: 1,
+      minAgeSeconds: 0,
+      nowSeconds: NOW,
+    })
+    await store.close()
+  })
+
+  it('leaves a row that never reached a lock call alone', async () => {
+    const isLocked = vi.fn().mockResolvedValue(true)
+    const { store, service } = await build({ evm: { isLocked } as unknown as EvmSendServiceDeps['evm'] })
+    await store.transition('swap-1', 'quoted', 'stuck')
+
+    await service.tickAll()
+
+    expect(isLocked).not.toHaveBeenCalled()
+    await store.close()
+  })
+
+  const refundedOverLock = async () => {
+    const onTickError = vi.fn()
+    const evm = {
+      isLocked: vi.fn().mockResolvedValue(false),
+      findClaimPreimage: vi.fn().mockResolvedValue(null),
+      findRefund: vi.fn().mockResolvedValue(false),
+      transactionOutcome: vi.fn().mockResolvedValue('pending'),
+    }
+    const built = await build({
+      blockHeight: vi.fn().mockResolvedValue(21_000_000),
+      onTickError,
+      evm: evm as unknown as EvmSendServiceDeps['evm'],
+    })
+    await built.store.transition('swap-1', 'quoted', 'locking_evm')
+    await built.service.tickAll()
+    expect((await built.store.get('swap-1')).state).toBe('refunding_evm')
+
+    evm.transactionOutcome.mockResolvedValue('success')
+    await built.service.tickAll()
+    expect((await built.store.get('swap-1')).state).toBe('refunded')
+    onTickError.mockClear()
+
+    return { ...built, evm, onTickError }
+  }
+
+  it('reports a live lock under a refunded row, which the receipt alone cannot rule out', async () => {
+    const { store, service, evm, onTickError } = await refundedOverLock()
+    evm.isLocked.mockResolvedValue(true)
+
+    await service.tickAll()
+
+    expect(onTickError).toHaveBeenCalledTimes(1)
+    expect(onTickError.mock.calls[0]?.[1].message).toContain('the ERC20 lock is funded on a closed row')
+    await store.close()
+  })
+
+  it('leaves a refunded row whose lock is gone alone', async () => {
+    const { store, service, onTickError } = await refundedOverLock()
+
+    await service.tickAll()
+
+    expect(onTickError).not.toHaveBeenCalled()
+    await store.close()
   })
 })

@@ -124,7 +124,7 @@ export type ReceiveFundingRefusal =
   | 'settle_window_too_short'
   /** The committed refund deadline opens too close to `E`. Nothing can move it. */
   | 'refund_deadline_too_late'
-  /** The solver's own recourse opens after `E` — the #69 both-sides window. */
+  /** The solver's own recourse opens after `E` — the both-sides window. */
   | 'unilateral_recourse_after_htlc'
 
 export interface ReceiveFundingInput {
@@ -145,7 +145,7 @@ export interface ReceiveFundingInput {
    * confirmation. The only recourse when the Arkade server is unreachable.
    */
   unilateralRefundWithoutReceiverDelay: number
-  /** Whether the operator accepted the #69 window — gate (d) is skipped when true. */
+  /** Whether the operator accepted the unilateral-gap window — gate (d) is skipped when true. */
   acceptUnilateralGap: boolean
   /** Current time, unix seconds. Injected — this module owns no clock. */
   now: number
@@ -194,7 +194,7 @@ export const evaluateReceiveFunding = (input: ReceiveFundingInput): ReceiveFundi
   // (d) the solver's SOLO recourse must open before `E`. With the Arkade server gone
   // the trader's `unilateralClaim` opens first, so if `E` passes before our own leaf
   // opens they can let the htlc fail back for free and then claim the payout — both
-  // sides, one preimage (#69). Checked LAST, so accepting it changes exactly one
+  // sides, one preimage. Checked LAST, so accepting it changes exactly one
   // thing and every gate above still declines.
   if (!acceptUnilateralGap && now + unilateralRefundWithoutReceiverDelay + UNILATERAL_RECOURSE_MARGIN > htlcExpiresAt) {
     return { fund: false, reason: 'unilateral_recourse_after_htlc' }

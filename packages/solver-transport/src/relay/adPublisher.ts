@@ -11,8 +11,15 @@
 import { hex } from '@scure/base'
 import { cardDigest } from '@arkade-os/solver-core/core/registryCard.js'
 import type { SolverAd } from '@arkade-os/solver-core/core/solverAd.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
+import { eventId, type RelayConnection } from './connection.js'
 
 export type AdPublishMode = 'off' | 'manual' | 'auto'
+
+/** docs/rfq-protocol.md § 3: kind 38859, `d` tag `"rfq1"`. */
+export const SOLVER_AD_KEY = { kind: 38859, d: 'rfq1' } as const
+export const AD_HEARTBEAT_SECONDS = 1800
+const AD_TICK_MS = 30_000
 
 export interface AdPublishState {
   mode: AdPublishMode
@@ -27,8 +34,6 @@ export interface AdPublisherOptions {
   now: () => number
   heartbeatSeconds: number
 }
-
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 export class AdPublisher {
   private publishedDigest: string | null = null
@@ -80,4 +85,54 @@ export class AdPublisher {
       throw error
     }
   }
+}
+
+export interface AdPublishing {
+  publisher: AdPublisher
+  stop(): void
+}
+
+/**
+ * The publisher `NOSTR_AD_PUBLISH` asks for, or none under `off`. `auto` also
+ * ticks {@link AdPublisher.publishIfDue}, skipping while disconnected.
+ */
+export const startAdPublishing = (opts: {
+  mode: AdPublishMode
+  connection: Pick<RelayConnection, 'publish' | 'isConnected'>
+  /** The wallet identity; the codec refuses to sign as anyone else. */
+  author: string
+  buildAd: () => SolverAd
+  onError: (error: unknown) => void
+  nowMs?: () => number
+}): AdPublishing | undefined => {
+  if (opts.mode === 'off') return undefined
+  const nowMs = opts.nowMs ?? Date.now
+  const { connection, author } = opts
+  const publisher = new AdPublisher({
+    mode: opts.mode,
+    buildAd: opts.buildAd,
+    publish: async (ad) => {
+      // `publish` resolves on QUEUEING, so a disconnected publish would be
+      // recorded as a success the relay never saw.
+      if (!connection.isConnected()) throw new Error('relay is not connected; the ad was not published')
+      const at = nowMs()
+      await connection.publish({
+        id: eventId(author, at),
+        author,
+        createdAtMs: at,
+        payload: ad,
+        replaceable: SOLVER_AD_KEY,
+      })
+    },
+    now: () => Math.floor(nowMs() / 1000),
+    heartbeatSeconds: AD_HEARTBEAT_SECONDS,
+  })
+  if (opts.mode !== 'auto') return { publisher, stop: () => {} }
+  const tick = (): void => {
+    if (connection.isConnected()) publisher.publishIfDue().catch(opts.onError)
+  }
+  const timer = setInterval(tick, AD_TICK_MS)
+  timer.unref?.()
+  tick()
+  return { publisher, stop: () => clearInterval(timer) }
 }

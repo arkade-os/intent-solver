@@ -71,6 +71,8 @@ beforeAll(async () => {
     maxExposedSats: 1_000_000_000,
     admission: new AdmissionControl(),
     totalCommitted: async () => 0,
+    // This suite exercises the Arkade quote path without an EVM RPC stack.
+    assertClaimTraceSupport: async () => {},
     markets: new Map([
       [
         TOKEN,

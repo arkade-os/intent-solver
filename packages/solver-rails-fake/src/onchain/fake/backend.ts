@@ -35,8 +35,6 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
   private readonly outputs: Output[] = []
   private readonly broadcasts = new Map<string, number | null>()
   private currentBlock = 0
-  private readonly feeRateSatsPerVbyte: number
-  private readonly fundingVout: number
   private readonly receiveAddress: string
 
   // fundingVout defaults to 0, but is configurable: a fake that always
@@ -48,9 +46,11 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
   // `network` only shapes newReceiveAddress()'s HRP, but it has to be right:
   // the CLI decodes that address against the CONFIGURED network, and a
   // regtest address handed to a mainnet deployment would throw at startup.
-  constructor(feeRateSatsPerVbyte = 5, fundingVout = 0, network: OnchainNetworkProfile = ONCHAIN_NETWORKS.regtest) {
-    this.feeRateSatsPerVbyte = feeRateSatsPerVbyte
-    this.fundingVout = fundingVout
+  constructor(
+    private readonly feeRateSatsPerVbyte = 5,
+    private readonly fundingVout = 0,
+    network: OnchainNetworkProfile = ONCHAIN_NETWORKS.regtest,
+  ) {
     // A fixed P2WPKH rather than a random one: deterministic, so a test can
     // assert the exact address a refund is expected to pay.
     this.receiveAddress = Address(network).encode({ type: 'wpkh', hash: new Uint8Array(20).fill(0x11) })
@@ -62,16 +62,7 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
     amountSats: number
     idempotencyKey: string
   }): Promise<{ txid: string; vout: number }> {
-    const txid = fakeTxid()
-    this.outputs.push({
-      txid,
-      vout: this.fundingVout,
-      address: params.address,
-      valueSats: params.amountSats,
-      minedAtBlock: null,
-      spentByWitness: null,
-    })
-    return { txid, vout: this.fundingVout }
+    return this.receiveExternal({ address: params.address, amountSats: params.amountSats, vout: this.fundingVout })
   }
 
   /**

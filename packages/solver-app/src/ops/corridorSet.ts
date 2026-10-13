@@ -16,6 +16,7 @@ import {
   type CorridorSet,
 } from '@arkade-os/solver-core/core/corridor.js'
 import type { EvmCorridorPolicy } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
+import { extractRfqId, rfqRefusalPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import {
   lightningSendCorridor,
   lightningReceiveCorridor,
@@ -51,6 +52,7 @@ import {
   assetRfqDescriptor,
   assetRfqReader,
   type AssetRfqDirection,
+  type ReadableAssetRfqMarket,
 } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetRfqMarket, AssetRfqSwapService } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import type { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
@@ -96,6 +98,34 @@ export interface FlatCorridorDeps {
   assetRfqService?: AssetRfqSwapService | null
   assetRfqStore?: AssetRfqSwapStore | null
   assetRfqMarkets?: readonly AssetRfqMarket[]
+  /** Whether the four BTC corridors' LND answers. Unset means always. */
+  railUp?: () => boolean
+}
+
+/**
+ * One gate rather than each quote's own LND read: the onchain legs make none before the client has funded, so
+ * they would quote a swap the solver cannot complete.
+ */
+const whileRailUp = (corridor: Corridor, railUp: (() => boolean) | undefined): Corridor =>
+  railUp === undefined
+    ? corridor
+    : {
+        ...corridor,
+        quote: async (payload, options) =>
+          railUp()
+            ? corridor.quote(payload, options)
+            : {
+                kind: 'refused',
+                payload: rfqRefusalPayload(extractRfqId(payload), 'pricing_unavailable'),
+                detail: 'LND unreachable',
+              },
+      }
+
+/** The same deps, narrowed to what a READER uses. Its extra entries come from
+ * swap rows, which know a pair and no pricing: `AssetRfqMarket` here would make
+ * the caller invent a feed url and bounds to fill it. */
+export interface FlatReaderDeps extends Omit<FlatCorridorDeps, 'assetRfqMarkets'> {
+  assetRfqMarkets?: readonly ReadableAssetRfqMarket[]
 }
 
 /**
@@ -114,13 +144,16 @@ export interface FlatCorridorDeps {
  */
 export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corridor[] = []): CorridorSet => {
   const corridors: Corridor[] = []
-  if (deps.service) corridors.push(lightningSendCorridor(deps.service, deps.store))
-  if (deps.onchainService) corridors.push(onchainSendCorridor(deps.onchainService, deps.onchainStore))
+  const { railUp } = deps
+  if (deps.service) corridors.push(whileRailUp(lightningSendCorridor(deps.service, deps.store), railUp))
+  if (deps.onchainService) {
+    corridors.push(whileRailUp(onchainSendCorridor(deps.onchainService, deps.onchainStore), railUp))
+  }
   if (deps.receiveService && deps.receiveStore) {
-    corridors.push(lightningReceiveCorridor(deps.receiveService, deps.receiveStore))
+    corridors.push(whileRailUp(lightningReceiveCorridor(deps.receiveService, deps.receiveStore), railUp))
   }
   if (deps.onchainReceiveService && deps.onchainReceiveStore) {
-    corridors.push(onchainReceiveCorridor(deps.onchainReceiveService, deps.onchainReceiveStore))
+    corridors.push(whileRailUp(onchainReceiveCorridor(deps.onchainReceiveService, deps.onchainReceiveStore), railUp))
   }
   // EVM last, after the four built-ins: one corridor per ENABLED policy, and a
   // corridor registers only when its leg's service exists — absent means the
@@ -134,10 +167,9 @@ export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corr
       corridors.push(evmReceiveCorridor(policy, deps.evmReceiveService, deps.evmReceiveStore))
     }
   }
-  // The atomic class, on the same rule as the EVM family: a corridor per market
-  // per DIRECTION, registered only when both the service and the store exist.
-  // No service means no market was configured, and every asset pair then
-  // refuses by name as `unsupported_pair`.
+  // A corridor per market per DIRECTION. The service is always constructed, so
+  // an empty list (no console row yet) registers nothing and every asset pair
+  // refuses by name as `unsupported_pair` until replaceMarkets feeds one in.
   if (deps.assetRfqService && deps.assetRfqStore) {
     for (const market of deps.assetRfqMarkets ?? []) {
       for (const direction of ASSET_RFQ_DIRECTIONS) {
@@ -163,7 +195,7 @@ export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corr
  * negotiations answerable, or an operator who turned a corridor off would watch
  * its live swaps disappear from the only screen that shows them.
  */
-export const readerSetFromDeps = (deps: FlatCorridorDeps, extra: readonly CorridorReader[] = []): CorridorReaderSet => {
+export const readerSetFromDeps = (deps: FlatReaderDeps, extra: readonly CorridorReader[] = []): CorridorReaderSet => {
   const readers: CorridorReader[] = [lightningSendReader(deps.store), onchainSendReader(deps.onchainStore)]
   if (deps.receiveStore) readers.push(lightningReceiveReader(deps.receiveStore))
   if (deps.onchainReceiveStore) readers.push(onchainReceiveReader(deps.onchainReceiveStore))

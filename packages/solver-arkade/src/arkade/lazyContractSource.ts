@@ -1,3 +1,4 @@
+import { sleep as wait } from '@arkade-os/solver-core/util/poll.js'
 import type { ContractEvent, ContractSource } from './lockupWatcher.js'
 
 /** The manager as this file uses it; the watch pair is optional as the SDK declares it. */
@@ -29,8 +30,6 @@ export interface LazyContractSourceDeps {
 
 const DEFAULT_RETRY_MS = 1000
 const DEFAULT_MAX_RETRY_MS = 30_000
-
-const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
  * A {@link ContractSource} that resolves the contract manager on first use, and

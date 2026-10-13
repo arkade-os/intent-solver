@@ -18,13 +18,14 @@ import {
   getWalletInfo as lndGetWalletInfo,
   payViaPaymentRequest,
   settleHodlInvoice,
+  subscribeToInvoice,
   type AuthenticatedLnd,
 } from 'lightning'
 import { deadlined, LND_READ_TIMEOUT_MS } from '../../deadline.js'
 import { htlcDeadlineFromHeight } from '@arkade-os/solver-core/core/receive.js'
 import { ROUTE_CLTV_BUDGET_BLOCKS } from '@arkade-os/solver-core/core/send.js'
 import { expiresAtOf, paymentHashOf } from '@arkade-os/solver-core/invoice/decode.js'
-import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { messageOf, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import type {
   PaymentEvidence,
   PaymentFailureReason,
@@ -49,34 +50,22 @@ const getRoutingFeeEstimate = deadlined('getRoutingFeeEstimate', lndGetRoutingFe
 const getWalletInfo = deadlined('getWalletInfo', lndGetWalletInfo)
 
 /**
- * Payment-outcome reasons `payViaPaymentRequest` (from the `lightning`
- * package) rejects with that mean the payment provably did not leave — not a
- * transport error, not a timeout. Anything else stays `pending`: the costly
- * error here is calling a live payment dead.
- *
- * All but the last come from that package's `finished_payment.js`
- * terminal-failure branch, i.e. LND's own state machine settled the payment as
- * failed. A route refused for exceeding `max_timeout_height` arrives as
- * `PaymentPathfindingFailedToFindPossibleRoute`, so the CLTV ceiling's normal
- * failure needs nothing special here.
- *
- * `MaxTimeoutTooNearCurrentHeightToMakePayment` is the exception, and comes
- * from the vendor's own pre-flight guard in `subscribe_to_pay.js` — raised
- * when the ceiling leaves less than the invoice's final delta plus 3, BEFORE
- * `sendPaymentV2` is called at all. It is only reachable because we now pass a
- * ceiling. Terminal rather than `pending` because nothing was ever sent:
- * `getPayment` answers `SentPaymentNotFound` for it, so leaving it pending
- * would only poll a rejection that cannot change.
+ * `payViaPaymentRequest` rejections meaning the payment provably did not leave, each mapped to the reason the
+ * vendor's `checkFailure` gives the matching `failed{}` flag (`finished_payment.js`), so `getPayment` agrees.
+ * Anything else stays `pending`: the costly error is calling a live payment dead. The last is the vendor's
+ * pre-flight CLTV guard, raised before `sendPaymentV2`: nothing was sent, and no route fits the ceiling.
  */
-export const FAILED_PAYMENT_REASONS: Set<string> = new Set([
-  'PaymentExecutionCanceled',
-  'InsufficientBalanceToAttemptPayment',
-  'PaymentRejectedByDestination',
-  'PaymentAttemptsTimedOut',
-  'PaymentPathfindingFailedToFindPossibleRoute',
-  'FailedToFindPayableRouteToDestination',
-  'MaxTimeoutTooNearCurrentHeightToMakePayment',
-])
+const REJECTION_FAILURE_REASONS: Record<string, PaymentFailureReason> = {
+  PaymentExecutionCanceled: 'canceled',
+  InsufficientBalanceToAttemptPayment: 'insufficient_balance',
+  PaymentRejectedByDestination: 'rejected_by_destination',
+  PaymentAttemptsTimedOut: 'pathfinding_timeout',
+  PaymentPathfindingFailedToFindPossibleRoute: 'route_not_found',
+  FailedToFindPayableRouteToDestination: 'route_not_found',
+  MaxTimeoutTooNearCurrentHeightToMakePayment: 'route_not_found',
+}
+
+export const FAILED_PAYMENT_REASONS: Set<string> = new Set(Object.keys(REJECTION_FAILURE_REASONS))
 
 /**
  * `lightning`'s promise rejections are `[code, reason, details?]` tuples, not
@@ -86,7 +75,20 @@ export const FAILED_PAYMENT_REASONS: Set<string> = new Set([
 export const rejectionReason = (error: unknown): string | undefined =>
   Array.isArray(error) && typeof error[1] === 'string' ? error[1] : undefined
 
-export const isoToUnixSeconds = (iso: string): number => Math.floor(new Date(iso).getTime() / 1000)
+/**
+ * The boot round-trip, so a bad cert/macaroon/socket fails at startup. Rethrown as an `Error`: the vendor's
+ * tuple prints as `503,GetWalletInfoErr,[object Object]`, hiding the gRPC status that names the cause.
+ */
+export const probeLnd = async (lnd: AuthenticatedLnd, socket: string): Promise<void> => {
+  try {
+    await getWalletInfo({ lnd })
+  } catch (error) {
+    const inner = Array.isArray(error) ? (error[2] as { err?: unknown } | undefined)?.err : undefined
+    const reason = rejectionReason(error) ?? messageOf(error)
+    const detail = inner instanceof Error ? `${reason}: ${inner.message}` : reason
+    throw new Error(`LND at ${socket} did not answer getWalletInfo: ${detail}`, { cause: error })
+  }
+}
 
 export const toExpiresAt = (fromSeconds: number, expirySeconds: number): string =>
   new Date((fromSeconds + expirySeconds) * 1000).toISOString()
@@ -142,30 +144,12 @@ type PaymentOutcome = {
   is_failed?: boolean
   is_pending?: boolean
   failed?: PaymentFailureFlags
-  payment?: { secret: string }
-}
-
-/**
- * The rejection-string half of the flag mapping below.
- *
- * `payInvoice` learns a failure as one of {@link FAILED_PAYMENT_REASONS} while
- * `getPayment` learns it as the `failed{}` flags, but they are two views of one
- * fact: the vendor's `checkFailure` turns each flag into exactly the string
- * below (`finished_payment.js:114-134`). Mapping both keeps a client's
- * `failure_reason` the same whichever call happened to notice.
- *
- * `MaxTimeoutTooNearCurrentHeightToMakePayment` has no flag of its own — it is
- * the vendor's pre-flight CLTV guard — and lands on `route_not_found` because
- * that is what it means: no route we would accept exists inside the ceiling.
- */
-const REJECTION_FAILURE_REASONS: Record<string, PaymentFailureReason> = {
-  PaymentExecutionCanceled: 'canceled',
-  InsufficientBalanceToAttemptPayment: 'insufficient_balance',
-  PaymentRejectedByDestination: 'rejected_by_destination',
-  PaymentAttemptsTimedOut: 'pathfinding_timeout',
-  PaymentPathfindingFailedToFindPossibleRoute: 'route_not_found',
-  FailedToFindPayableRouteToDestination: 'route_not_found',
-  MaxTimeoutTooNearCurrentHeightToMakePayment: 'route_not_found',
+  /**
+   * `fee_mtokens` is the routing fee actually paid. Not `safe_fee`, the vendor's whole-sat rounding:
+   * `feeSatsFromMtokens` rounds UP from millisats. Optional because older vendor versions omit it, and an
+   * absent fee must read as unmeasured, never free.
+   */
+  payment?: { secret: string; fee_mtokens?: string }
 }
 
 export const rejectionFailureReason = (reason: string): PaymentFailureReason =>
@@ -191,6 +175,21 @@ export const toFailureReason = (failed: PaymentFailureFlags | undefined): Paymen
   return 'unknown'
 }
 
+/**
+ * The realized fee as a spreadable fragment, `{}` when absent. Swallows an unreadable figure, unlike the ESTIMATE
+ * path: the payment settled and the preimage is in hand, so throwing would strand a successful swap over a report.
+ * KNOWN IMPRECISION (#155): rounding UP overstates realized cost by up to a sat each. The fix is carrying millisats
+ * through analytics, NOT round-to-nearest, which would report a real sub-sat fee as free.
+ */
+const realizedFeeSats = (mtokens: string | undefined): { feePaidSats?: number } => {
+  if (mtokens === undefined) return {}
+  try {
+    return { feePaidSats: feeSatsFromMtokens(mtokens) }
+  } catch {
+    return {}
+  }
+}
+
 export const toPaymentResult = (id: string, result: PaymentOutcome): PaymentResult => {
   if (result.is_confirmed) {
     // `is_confirmed` comes from the vendor as `!!payment`, so a confirmed
@@ -201,7 +200,18 @@ export const toPaymentResult = (id: string, result: PaymentOutcome): PaymentResu
     // payment gets anywhere in this tree.
     if (!result.payment) throw new Error(`LND reported payment ${id} confirmed with no preimage`)
     const status: PaymentStatus = 'succeeded'
-    return { id, status, preimage: result.payment.secret, evidence: 'terminal' }
+    return {
+      id,
+      status,
+      preimage: result.payment.secret,
+      evidence: 'terminal',
+      // Omitted, never zeroed, when the vendor did not report one — a payment
+      // whose cost is unknown must not read as a payment that was free. The
+      // read is guarded because this is the SUCCESS path: an unparseable fee is
+      // not worth failing a settled payment over, and the rest of this result
+      // (the preimage above all) is what the swap actually needs to proceed.
+      ...realizedFeeSats(result.payment.fee_mtokens),
+    }
   }
   if (result.is_failed) {
     return { id, status: 'failed', evidence: 'terminal', failureReason: toFailureReason(result.failed) }
@@ -282,8 +292,16 @@ export const probeTimeoutMs = (timeoutMs: number): number => Math.max(MIN_ROUTE_
  * where a response this adapter cannot read belongs.
  */
 export const feeSatsFromMtokens = (mtokens: string): number => {
+  // DIGITS ONLY, because `Number('')`, `Number(' ')` and `Number('\t')` are all
+  // 0 — so a blank figure read as a route that cost NOTHING rather than one that
+  // could not be read. Zero is a fact here and blank is the absence of one, and
+  // both callers need them apart: an estimate that cannot be read must stop a
+  // quote priced on it, and a realized cost that cannot be read is unmeasured,
+  // never free. The same test rejects `1e3` and `0x10`, which `Number` accepts
+  // and a wire integer should never be.
+  if (!/^\d+$/.test(mtokens)) throw new Error(`LND reported an unreadable routing fee: ${mtokens}`)
   const msat = Number(mtokens)
-  if (!Number.isFinite(msat) || msat < 0) throw new Error(`LND reported an unreadable routing fee: ${mtokens}`)
+  if (!Number.isFinite(msat)) throw new Error(`LND reported an unreadable routing fee: ${mtokens}`)
   return Math.ceil(msat / 1000)
 }
 
@@ -291,7 +309,7 @@ export const feeSatsFromMtokens = (mtokens: string): number => {
  * Whether a `getRoutingFeeEstimate` rejection is one of the ordinary misses the port
  * answers null for, rather than a fault to re-throw.
  *
- * Two shapes, and both mean "no number for this payment" rather than "the node is
+ * These shapes mean "no number for this payment" rather than "the node is
  * broken":
  *
  *  - `RouteToDestinationNotFound` — the vendor's own mapping of any
@@ -302,6 +320,8 @@ export const feeSatsFromMtokens = (mtokens: string): number => {
  *  - a nested gRPC UNIMPLEMENTED — `estimateRouteFee` does not exist before LND 0.18.4,
  *    so an older node rejects every call. A permanent, knowable absence of the
  *    capability, which is precisely what null is for.
+ *  - LND rejecting a probe to its own node. The existing self-payment path decides
+ *    that swap from the payee-side invoice state; the probe has no fee to add.
  *
  * UNAVAILABLE is deliberately NOT here. A node that cannot be reached is the same fault
  * every other call on this adapter would hit, and reporting it as "no estimate" would
@@ -313,7 +333,8 @@ export const isNoFeeEstimate = (error: unknown): boolean => {
   if (!Array.isArray(error)) return false
   if (error[1] === 'RouteToDestinationNotFound') return true
   if (error[1] !== 'UnexpectedGetRoutingFeeEstimateError') return false
-  return (error[2] as { err?: { code?: number } } | undefined)?.err?.code === 12
+  const cause = (error[2] as { err?: { code?: number; details?: string } } | undefined)?.err
+  return cause?.code === 12 || (cause?.code === 2 && cause.details === 'self-payments not allowed')
 }
 
 export interface AdapterConfig {
@@ -349,19 +370,27 @@ export class LndLightningBackendAdapter implements LightningBackend {
 
   private constructor(
     private readonly lnd: AuthenticatedLnd,
-    private readonly now: () => number = nowSeconds,
+    private readonly socket: string,
   ) {}
 
-  static async create(config: AdapterConfig): Promise<LndLightningBackendAdapter> {
+  /** No round-trip: the gRPC channel connects on its first call, so this succeeds with the node down. */
+  static open(config: AdapterConfig): LndLightningBackendAdapter {
     const { lnd } = authenticatedLndGrpc({
       socket: config.socket,
       cert: config.cert,
       macaroon: config.macaroon,
     })
-    // Round-trip once so a bad cert/macaroon/socket fails here, at boot,
-    // rather than on the first swap.
-    await getWalletInfo({ lnd })
-    return new LndLightningBackendAdapter(lnd)
+    return new LndLightningBackendAdapter(lnd, config.socket)
+  }
+
+  static async create(config: AdapterConfig): Promise<LndLightningBackendAdapter> {
+    const adapter = LndLightningBackendAdapter.open(config)
+    await adapter.probe()
+    return adapter
+  }
+
+  probe(): Promise<void> {
+    return probeLnd(this.lnd, this.socket)
   }
 
   async getBalance(): Promise<Balance> {
@@ -395,7 +424,20 @@ export class LndLightningBackendAdapter implements LightningBackend {
         // paying over an over-long route is what loses the money.
         max_timeout_height: current_block_height + params.maxCltvBlocks,
       })
-      return { id: result.id, status: 'succeeded', preimage: result.secret }
+      // A payment that settles inside this call never reaches `getPayment`, so
+      // capturing the fee only on the polled path would lose it for every fast
+      // route — which is most of them.
+      return {
+        id: result.id,
+        status: 'succeeded',
+        preimage: result.secret,
+        // `result.fee_mtokens`, NOT a cast. `PayViaPaymentRequestResult` declares
+        // it top-level and required (`lightning@12.2.3`), so reading it through
+        // the vendor's own type means a rename in a future version fails the
+        // build — where a cast keeps compiling and quietly reports every
+        // payment as having cost nothing.
+        ...realizedFeeSats(result.fee_mtokens),
+      }
     } catch (error) {
       const reason = rejectionReason(error)
       if (reason !== undefined && FAILED_PAYMENT_REASONS.has(reason)) {
@@ -418,36 +460,10 @@ export class LndLightningBackendAdapter implements LightningBackend {
   }
 
   /**
-   * LND can answer, so it does — by PROBING the invoice it would pay.
-   *
-   * ## Why this call and not `queryroutes`
-   *
-   * Both exist and only one is asked the port's question. `queryroutes` prices a
-   * destination, an amount and a hint list that this adapter would have to rebuild out
-   * of the BOLT11 itself, and the rebuild is where a wrong answer gets in: drop a route
-   * hint and it reports no route for an invoice that pays fine, miss the payment address
-   * that permits splitting and it prices a single route the payment would never take.
-   * `estimateRouteFee` is handed the payment request whole and drives LND's own
-   * pathfinding with the invoice's own parameters, so what is measured is what will
-   * later be paid. Given a choice between a cheap number about a different payment and a
-   * costly one about this payment, the port wants the second — a wrong estimate is worse
-   * than none, and the reconstruction is the wrong one.
-   *
-   * ## What it costs, and what the answer is worth
-   *
-   * It is a probe. Real HTLCs go to the destination and fail there, which takes seconds,
-   * briefly ties up outbound liquidity, and is traffic somebody else's node absorbs. LND
-   * is explicit that the `timeout` is not a hard stop either — "the probing process
-   * itself can take longer than the timeout if the HTLC becomes delayed or stuck" — so
-   * {@link EstimateSendFeeParams.timeoutMs} bounds the loop, not the call. A caller that
-   * asks this once per quote, for anything a taker can trigger, has built a free probing
-   * service; the port says as much, and this is the adapter that makes it true.
-   *
-   * LND also documents `routing_fee_msat` as a LOWER BOUND: the successful probe's route
-   * is priced, and a payment that has to retry past a failure pays more. Still worth
-   * having. The number it replaces is a flat an operator guessed at boot, and a measured
-   * floor for this invoice beats a guess about every invoice — the guess is what left
-   * `MIN_ROUTING_FEE_CAP_SATS` sitting one sat under a real backend's minimum.
+   * PROBES the invoice via `estimateRouteFee`, not `queryroutes`: that would need the route hints and payment
+   * address rebuilt from the BOLT11, and a dropped one prices a different payment. A probe sends real HTLCs that
+   * fail at the destination; LND documents that it can outlast its `timeout` and that `routing_fee_msat` is a
+   * LOWER bound. Still better than the flat an operator guessed at boot.
    */
   async estimateSendFee(params: EstimateSendFeeParams): Promise<SendFeeEstimate | null> {
     try {
@@ -458,9 +474,6 @@ export class LndLightningBackendAdapter implements LightningBackend {
         // the timeout it was given, so a deadline at it would cut a live probe.
         probeMs + LND_READ_TIMEOUT_MS,
       )
-      // No `feeHandle`. LND reserves nothing: this probe and the later
-      // `payViaPaymentRequest` are unconnected calls, and minting a token would claim a
-      // link between them that does not exist.
       return { feeSats: feeSatsFromMtokens(estimate.fee_mtokens) }
     } catch (error) {
       if (isNoFeeEstimate(error)) return null
@@ -489,7 +502,7 @@ export class LndLightningBackendAdapter implements LightningBackend {
       lnd: this.lnd,
       id: params.paymentHash,
       tokens: params.amountSats,
-      expires_at: toExpiresAt(this.now(), params.expirySeconds),
+      expires_at: toExpiresAt(nowSeconds(), params.expirySeconds),
       // The invoice's own final delta, which a payer must honour. Omitted
       // rather than defaulted when the caller does not ask, so LND keeps
       // whatever its own default is.
@@ -515,6 +528,21 @@ export class LndLightningBackendAdapter implements LightningBackend {
       expiresAt: status === 'armed' ? await this.heldHtlcDeadline(invoice.payments) : null,
       amountSats: invoice.tokens,
     }
+  }
+
+  /** Per-invoice stream: only LND's single-invoice subscription reports ACCEPTED for a hold. */
+  onHoldAccepted(paymentHash: string, onHeld: () => void): () => void {
+    const sub = subscribeToInvoice({ lnd: this.lnd, id: paymentHash })
+    const stop = (): void => {
+      sub.removeAllListeners()
+    }
+    sub.on('invoice_updated', (invoice: { is_held?: boolean; is_confirmed?: boolean; is_canceled?: boolean }) => {
+      if (invoice.is_held) onHeld()
+      if (invoice.is_held || invoice.is_confirmed || invoice.is_canceled) stop()
+    })
+    // A dropped stream only loses the fast path; the sweep still finds the hold.
+    sub.on('error', stop)
+    return stop
   }
 
   /**
@@ -557,7 +585,7 @@ export class LndLightningBackendAdapter implements LightningBackend {
     // armed" and declines, which is the safe direction.
     if (timeoutHeight === null) return null
     const { current_block_height } = await getWalletInfo({ lnd: this.lnd })
-    return htlcDeadlineFromHeight(timeoutHeight, current_block_height, this.now())
+    return htlcDeadlineFromHeight(timeoutHeight, current_block_height, nowSeconds())
   }
 
   async settleHold(preimage: string): Promise<void> {
@@ -568,27 +596,9 @@ export class LndLightningBackendAdapter implements LightningBackend {
   }
 
   /**
-   * Retire an unpaid invoice so nothing can pay it later.
-   *
-   * LND's own `cancelHodlInvoice` would also fail an ARMED htlc back, but the
-   * port promises nothing about armed invoices — a backend exposing no cancel
-   * at all cannot do it — so this stays inside the narrower contract the
-   * caller is written against.
-   * Nothing here re-checks `armed`: that is the caller's gate, and duplicating
-   * it would add a round trip that races anyway.
-   *
-   * Idempotency is matched on the error TEXT, which is the weak part of this
-   * and is deliberately written wide. LND has several ways of saying "there is
-   * nothing here to cancel" — an unknown hash, an invoice already cancelled, a
-   * settled one, an htlc already in a terminal state — and only the unknown-hash
-   * shape has been observed against a live node. Matching narrowly would turn a
-   * second cancel into a throw, which is exactly what the port promises it is
-   * not; matching wide costs only that a genuinely novel failure is swallowed,
-   * and the sole caller (`retireCoupledInvoice`) swallows everything anyway
-   * because a failed cancel must never cost a payout.
-   *
-   * If this ever needs to be tightened, tighten it against strings captured
-   * from a real node rather than guessed.
+   * Retire an unpaid invoice. Does not re-check `armed`: that is the caller's gate, and a re-check races anyway.
+   * Idempotency matches LND's error TEXT, deliberately wide: only the unknown-hash shape was observed live, and a
+   * narrow match would turn a second cancel into a throw. Tighten only against strings captured from a real node.
    */
   async cancelHold(paymentHash: string): Promise<void> {
     try {
@@ -601,27 +611,9 @@ export class LndLightningBackendAdapter implements LightningBackend {
   }
 
   /**
-   * A plain invoice, for an operator funding this node — never for a swap.
-   *
-   * `createInvoice`, not `createHodlInvoice`: the receive corridor holds an HTLC
-   * because it must not settle before the Arkade side is funded, and that is
-   * exactly wrong for a deposit. A held deposit is the operator's own money
-   * parked in flight, waiting on a preimage this side would have to store and
-   * settle. Nothing here does that, so it would simply never arrive.
-   *
-   * `expiresAt` is read back OFF THE BOLT11 rather than from a value this side
-   * chose or the call echoed. Two reasons, and the second is why the obvious
-   * version of this is wrong:
-   *
-   *  - the invoice string is the contract. Its encoded expiry is what a payer's
-   *    node enforces, so decoding it reports the deadline that will actually be
-   *    applied rather than one this side believes;
-   *  - `createInvoice`'s result does not carry the expiry AT ALL — neither in
-   *    its type nor at run time, where the resolved object is built field by
-   *    field and `expires_at` is not among them. Reaching for it yields
-   *    `undefined`, and `new Date(undefined)` is `NaN`, so a console would count
-   *    down from a number that is not one. The node's own default applies when
-   *    none is requested, which is exactly the case that has no value to echo.
+   * A plain invoice for an operator funding this node, never a swap — so not a hold, which would wait forever on
+   * a preimage nothing here stores. `expiresAt` is decoded OFF THE BOLT11: that is what a payer enforces, and
+   * `createInvoice`'s result carries no expiry at all (reading it gives `NaN`).
    */
   async createInvoice(params: { amountSats?: number; memo?: string }): Promise<{
     invoice: string

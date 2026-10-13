@@ -25,10 +25,9 @@ const DEFAULT_MIN_FINAL_CLTV = 18
  * PARSING — a length bound and decodability — and none of the send leg's
  * ceilings.
  *
- * Every reader built on it exists for the reason {@link finalCltvBlocksOf}
- * gives at length: {@link decodeInvoice} bundles parsing with the send leg's
- * CLTV defences, and a caller that wants one scalar off a string it already
- * holds is not asking for those defences to run again.
+ * {@link decodeInvoice} bundles parsing with the send leg's CLTV defences, and a
+ * caller that wants one scalar off a string it already holds is not asking for
+ * those defences to run again.
  */
 const parseBolt11 = (raw: string): ReturnType<typeof bolt11.decode> => {
   if (raw.length > MAX_INVOICE_LENGTH) throw new InvalidInvoice('too_long')
@@ -45,39 +44,8 @@ const sectionReader = (raw: string): ((name: string) => unknown) => {
 }
 
 /**
- * The final CLTV delta on an invoice THIS SOLVER MINTED, read without the
- * client-invoice defences {@link decodeInvoice} applies.
- *
- * ## Why this exists rather than a call to `decodeInvoice`
- *
- * Every CLTV ceiling in this file is a SEND-leg protection, and their own
- * comments say so: a large delta "lets the payee hold our outbound HTLC well
- * past any refund deadline we would quote", and the combined bound guards the
- * double-collect window — a client whose invoice outlives their own Arkade
- * refund, so they take the lockup back AND settle the payment.
- *
- * On the RECEIVE leg every term of that inverts. We are the payee, the HTLC is
- * inbound, and a larger delta pushes `E` LATER — which every gate in
- * `core/receive.ts` wants rather than fears. There is no hostile invoice here,
- * because the invoice is ours.
- *
- * Applying those ceilings to our own invoice was not merely pointless, it was
- * fatal: the mainnet privacy wrapper mints 420 blocks against a
- * `MAX_CLIENT_CLTV_BLOCKS` of 288, so the receive corridor threw
- * `cltv_too_large` on every quote it ever made.
- *
- * ## Why not just raise the bound
- *
- * Because 288 is load-bearing where it stands. It caps what a CLIENT's invoice
- * may demand of us, and the comment below is explicit that the combined check —
- * not the `c`-only one — is the one that matters. Raising it to admit our own
- * 420 would widen the double-collect window on every client invoice, to fix a
- * leg the bound was never written about.
- *
- * So the bound stays, and stops being applied where its threat cannot arise.
- *
- * Returns BOLT11's default of 18 when there is no `c` tag, exactly as
- * {@link decodeInvoice} does: an absent tag is a real 18, not "unknown".
+ * The `c` tag alone, BOLT11's 18 when absent — read through the section reader, not `decodeInvoice`,
+ * so an invoice this repo would refuse still yields its delta. No caller here; a downstream fork imports it.
  */
 export const finalCltvBlocksOf = (raw: string): number => {
   const value = sectionReader(raw)('min_final_cltv_expiry')
@@ -104,8 +72,7 @@ export const finalCltvBlocksOf = (raw: string): number => {
  * That requirement is correct where it lives. `decodeInvoice` reads CLIENT
  * invoices for the send leg, where an amount is what is being quoted and priced
  * and an absent one is a malformed request. It is simply not a general-purpose
- * BOLT11 reader, which is the same lesson {@link finalCltvBlocksOf} above
- * records for the CLTV ceilings.
+ * BOLT11 reader.
  *
  * Returns BOLT11's default of 3600 seconds when there is no `x` tag, exactly as
  * {@link decodeInvoice} does: an absent tag is a real hour, not "unknown".
@@ -282,18 +249,20 @@ export type InvoiceRejection =
   | 'missing_timestamp'
   | 'cltv_too_large'
 
+export interface InvoiceRejectionContext {
+  actual: number
+  limit: number
+  unit: 'blocks' | 'characters'
+}
+
 export class InvalidInvoice extends Error {
   constructor(
     readonly reason: InvoiceRejection,
     /**
      * The numbers behind the reason, for the operator's log.
      *
-     * Deliberately NOT part of {@link reason}, which is a closed enum the wire
-     * mapping and `src/core/refusalReasons.ts` both switch on. This rides in
-     * the message instead, and every catch site puts the message in a log
-     * `detail` while answering the client from the enum — so a bound and the
-     * value that broke it never reach a client, and adding one here cannot
-     * change what any client is told.
+     * Kept separate from {@link context}: this free-form text is for operators,
+     * while the bounded numeric context is safe to return to the requester.
      *
      * Worth having because a reason alone can be ambiguous about WHICH check
      * fired: two separate ceilings raise `cltv_too_large`, and telling them
@@ -301,6 +270,7 @@ export class InvalidInvoice extends Error {
      * bound is too tight for ordinary invoices".
      */
     detail?: string,
+    readonly context?: InvoiceRejectionContext,
   ) {
     super(detail ? `invoice rejected: ${reason} (${detail})` : `invoice rejected: ${reason}`)
     this.name = 'InvalidInvoice'
@@ -343,8 +313,18 @@ const NO_DENIED_SCIDS: ReadonlySet<string> = new Set()
  * deadline is priced from, and quote, funding and payment disagreeing about
  * them is the stale-second-copy failure this decode is pure to avoid.
  */
-export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DENIED_SCIDS): DecodedInvoice => {
-  if (raw.length > MAX_INVOICE_LENGTH) throw new InvalidInvoice('too_long')
+const decodeInvoiceWithPolicy = (
+  raw: string,
+  denylist: ReadonlySet<string>,
+  enforceClientCltv: boolean,
+): DecodedInvoice => {
+  if (raw.length > MAX_INVOICE_LENGTH) {
+    throw new InvalidInvoice('too_long', undefined, {
+      actual: raw.length,
+      limit: MAX_INVOICE_LENGTH,
+      unit: 'characters',
+    })
+  }
 
   // BOLT11 is case-insensitive but must not be mixed; bech32 checksums are
   // defined over a single case.
@@ -400,8 +380,12 @@ export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DE
   // one that is load-bearing, because an invoice can demand unbounded CLTV
   // through `r` fields without touching `c` at all. If either goes, this is the
   // one that goes.
-  if (minFinalCltvBlocks > MAX_CLIENT_FINAL_CLTV_BLOCKS) {
-    throw new InvalidInvoice('cltv_too_large', `final delta ${minFinalCltvBlocks} > ${MAX_CLIENT_FINAL_CLTV_BLOCKS}`)
+  if (enforceClientCltv && minFinalCltvBlocks > MAX_CLIENT_FINAL_CLTV_BLOCKS) {
+    throw new InvalidInvoice('cltv_too_large', `final delta ${minFinalCltvBlocks} > ${MAX_CLIENT_FINAL_CLTV_BLOCKS}`, {
+      actual: minFinalCltvBlocks,
+      limit: MAX_CLIENT_FINAL_CLTV_BLOCKS,
+      unit: 'blocks',
+    })
   }
 
   // Every `r` field, not just the first: each is one alternative hint, and the
@@ -464,11 +448,16 @@ export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DE
   // 40000 is one alternative among several. Whether THIS deployment's rail can
   // steer around it is `evaluateSendAcceptance`'s question; decode knows no
   // backend, which is why the bound that lives here is the backend-blind one.
-  if (minFinalCltvBlocks + bestRouteHintCltvBlocks > MAX_CLIENT_CLTV_BLOCKS) {
+  if (enforceClientCltv && minFinalCltvBlocks + bestRouteHintCltvBlocks > MAX_CLIENT_CLTV_BLOCKS) {
     throw new InvalidInvoice(
       'cltv_too_large',
       `final delta ${minFinalCltvBlocks} + best route hint ${bestRouteHintCltvBlocks} = ` +
         `${minFinalCltvBlocks + bestRouteHintCltvBlocks} > ${MAX_CLIENT_CLTV_BLOCKS} (best-hint floor)`,
+      {
+        actual: minFinalCltvBlocks + bestRouteHintCltvBlocks,
+        limit: MAX_CLIENT_CLTV_BLOCKS,
+        unit: 'blocks',
+      },
     )
   }
 
@@ -489,3 +478,10 @@ export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DE
     ...(dropped.length > 0 ? { droppedHints: dropped } : {}),
   }
 }
+
+export const decodeInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DENIED_SCIDS): DecodedInvoice =>
+  decodeInvoiceWithPolicy(raw, denylist, true)
+
+/** Decode an exact invoice this solver minted for a coupled send, without external-send CLTV policy. */
+export const decodeCoupledInvoice = (raw: string, denylist: ReadonlySet<string> = NO_DENIED_SCIDS): DecodedInvoice =>
+  decodeInvoiceWithPolicy(raw, denylist, false)

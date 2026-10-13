@@ -9,9 +9,9 @@
  * and can fund nothing. Every corridor then refuses for a reason that names the
  * corridor rather than the float.
  *
- * **Shape** — split one fat coin into several. Funding PINS the coins it spends,
- * so a float of one coin funds one swap and refuses the next however large it
- * is. `poolPlan` answers "how many swaps can this fund at once", which is not
+ * **Shape** — split one fat coin into several, or merge a cluttered float into
+ * pieces. Funding PINS the coins it spends, so a float of one coin funds one swap
+ * and refuses the next however large it is. `poolPlan` answers "how many swaps can this fund at once", which is not
  * the same question as how many sats it holds.
  *
  * Here rather than inline in the watch loop so the console and the CLI drive the SAME
@@ -28,11 +28,14 @@
  */
 
 import { hex } from '@scure/base'
+import { log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import {
   liveLockupRows,
   recoverableVtxosFrom,
+  registeredLockupDeadlines,
   renewExpiringVtxos,
   runVtxoLifecycle,
+  LOCKUP_CONTRACT_TYPE,
   RENEWAL_THRESHOLD_MS,
   type LockupDeadline,
   type VtxoLifecycleReport,
@@ -45,13 +48,14 @@ import { planBoardingSettle } from '@arkade-os/solver-arkade/arkade/boardingSett
 import type { Services } from './services.js'
 
 /**
- * Every live lockup's refund deadline, for the recovery guard.
+ * Every registered lockup's refund deadline, for the recovery guard.
  *
- * Derived from `liveLockupRows` exactly as the daemon's contract registration
- * derives it, rather than being handed over as that registration's by-product.
- * Registration and this guard want the same rows for different reasons, and
- * coupling them would mean a manual recovery could only be as safe as whatever
- * the last registration pass happened to leave behind.
+ * TWO SOURCES. Live rows are derived from `liveLockupRows` exactly as the
+ * daemon's contract registration derives them, rather than being handed over as
+ * that registration's by-product: registration and this guard want the same rows
+ * for different reasons, and coupling them would mean a manual recovery could
+ * only be as safe as whatever the last registration pass happened to leave
+ * behind. They are not enough on their own — @see registeredLockupDeadlines
  *
  * The ROLE travels with the deadline, because the deadline alone answers the
  * wrong question on a send leg — see {@link LockupDeadline.refundable}. The
@@ -73,16 +77,24 @@ export const lockupDeadlinesOf = async (services: Services): Promise<readonly Lo
   // send leg — so case can only ever confirm the correct outcome, never
   // invert it.
   const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
-  return rows.map((row) => ({
-    script: row.pkScript,
-    refundLocktime: row.refundLocktime,
-    // NULL IS "NO OPINION", not "not ours". A row carrying no client refund
-    // key at all predates that leaf, and `covenantScriptFromRow` refuses to
-    // rebuild it — so it is never registered, never in the contract snapshot,
-    // and never in the sweep set to block anything. Answering `false` for it
-    // would be inventing a refusal about a lockup this guard cannot see.
-    refundable: row.clientRefundPubkey === null ? undefined : row.clientRefundPubkey === solverPubkey,
-  }))
+  const manager = await services.arkade.wallet.getContractManager()
+  // `getContracts`, never `getContractsWithVtxos`: that one re-syncs against
+  // the indexer (every call, with `vtxoSyncMaxAgeMs` unset) and rethrows a
+  // non-retryable answer. Only the stored params are read here, already local.
+  const registered = await manager.getContracts({ type: [LOCKUP_CONTRACT_TYPE] })
+  return [
+    ...rows.map((row) => ({
+      script: row.pkScript,
+      refundLocktime: row.refundLocktime,
+      // NULL IS "NO OPINION", not "not ours". A row carrying no client refund
+      // key at all predates that leaf, and `covenantScriptFromRow` refuses to
+      // rebuild it — so it is never registered, never in the contract snapshot,
+      // and never in the sweep set to block anything. Answering `false` for it
+      // would be inventing a refusal about a lockup this guard cannot see.
+      refundable: row.clientRefundPubkey === null ? undefined : row.clientRefundPubkey === solverPubkey,
+    })),
+    ...registeredLockupDeadlines(registered, solverPubkey, log),
+  ]
 }
 
 /**
@@ -139,7 +151,6 @@ const migrationDue = (failed: boolean): boolean => {
 export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> => {
   const wallet = services.arkade.wallet
   const vtxoManager = await wallet.getVtxoManager()
-  const deadlines = await lockupDeadlinesOf(services)
 
   // OURS BECAUSE IT IS NO LONGER THEIRS. The SDK ran this inside the boarding
   // poll that `settlementConfig: false` turns off, so it moves here rather than
@@ -200,7 +211,7 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
   // is float by the end of the same pass. @see arkade/boardingSettle.ts
   const boarding = { txid: null as string | null, failures: [] as string[] }
   try {
-    boarding.txid = await settleBoardedSats(services)
+    boarding.txid = await settleBoardedSats(services, (message) => boarding.failures.push(`boarding: ${message}`))
   } catch (error) {
     boarding.failures.push(`boarding settle failed: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -234,12 +245,18 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
     // A SAFETY NET rather than the mechanism: the renewal settles straight into the
     // pool's shape above, so the float does not come back as one coin. This covers what
     // that cannot reach — too little to carve, or a float reshaped by something other
-    // than a renewal. @see #123
-    resplitFloat: async () => (await resplitFloat(services))?.txid ?? null,
+    // than a renewal.
+    resplitFloat: async () => {
+      const result = await resplitFloat(services)
+      if (result !== null && 'skipped' in result) log('float re-split after renewal skipped:', result.skipped)
+      return result !== null && 'txid' in result ? result.txid : null
+    },
     recoverVtxos: () => vtxoManager.recoverVtxos(),
     recoverableVtxos: () => recoverableVtxosFrom(wallet),
-    lockupDeadlines: async () => deadlines,
-    nowSeconds: () => Math.floor(Date.now() / 1000),
+    // Lazy, so a throw from either source costs only recovery — which then
+    // fails closed — instead of migration, boarding and renewal before it.
+    lockupDeadlines: () => lockupDeadlinesOf(services),
+    nowSeconds,
   })
 
   // Folded in rather than returned separately: `failures` is already the one
@@ -262,7 +279,7 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
  * comes from the SDK rather than being re-derived: that judgement needs the exit
  * timelock and, in block mode, a chain tip.
  */
-const settleBoardedSats = async (services: Services): Promise<string | null> => {
+const settleBoardedSats = async (services: Services, warn: (message: string) => void): Promise<string | null> => {
   const wallet = services.arkade.wallet
   const utxos = await wallet.getBoardingUtxos()
   if (utxos.length === 0) return null
@@ -281,7 +298,16 @@ const settleBoardedSats = async (services: Services): Promise<string | null> => 
     address,
     target: poolTarget(services.config.limits.maxSats, services.config.maxExposedSats),
   })
-  if (!plan.settle) return null
+  if (!plan.settle) {
+    // Said not thrown, like a renewal's: every other reason clears itself later.
+    if (plan.reason === 'over-capacity') {
+      warn(
+        `a deposit exceeds what one settlement can carry at the operator's ${info.vtxoMaxAmount} sat per-output ` +
+          'ceiling and was left at the boarding address; split it on L1 and board the pieces',
+      )
+    }
+    return null
+  }
 
   return wallet.settle({
     inputs: plan.inputs,
@@ -295,7 +321,7 @@ export type AutoMintSkip = 'disabled' | 'shape_is_fine'
 export type AutoMintOutcome = { minted: false; skipped: AutoMintSkip } | { minted: true; result: unknown }
 
 /**
- * Split the float only when its SHAPE needs it — the automatic half of minting.
+ * Reshape the float only when its SHAPE needs it — the automatic half of minting.
  *
  * **Opt-in, off by default.** Renewal preserves what the solver already has; this
  * SPENDS on a timer with no human present, which is not a decision to make silently.

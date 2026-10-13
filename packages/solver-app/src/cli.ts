@@ -60,6 +60,7 @@ import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { lockupSource, runContractLifecycle } from '@arkade-os/solver-arkade/arkade/contractLifecycle.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { RFQ_PAIR_SEND } from '@arkade-os/solver-corridors/wire/payloads.js'
+import { assetRfqPairFor } from '@arkade-os/solver-corridors/wire/assetRfqPayloads.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { assetMarketPolicy } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import type { Corridor } from '@arkade-os/solver-core/core/corridor.js'
@@ -69,6 +70,7 @@ import {
   minFinalCltvBlocksFor,
 } from '@arkade-os/solver-core/core/receive.js'
 import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
+import { relativeDelayFrom, secondsForBlockRung } from '@arkade-os/solver-core/core/timelocks.js'
 import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
 import { FakeLightningBackend } from '@arkade-os/solver-rails-fake/ln/fake/backend.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
@@ -77,6 +79,9 @@ import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchain
 import { AdminStore } from './admin/db.js'
 import { applyOverrides } from './admin/settings.js'
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
+import { recordRfqRefusals } from './admin/rfqRefusals.js'
+import { createBidTail, recordBidsIn, type BidRecorder } from './admin/bids.js'
+import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import type { Services } from './ops/services.js'
 import { refundNow, onchainRefundNow, reclaimL1Htlc } from './ops/refunds.js'
 import { planExitForSwap } from './ops/unilateralExit.js'
@@ -85,6 +90,7 @@ import { unilateralExitDepsFor } from '@arkade-os/solver-arkade/arkade/unilatera
 import { claimNow } from './ops/claims.js'
 import { poolPlan, mintPool } from './ops/pool.js'
 import { maybeMintPool, runFloatLifecycle } from './ops/float.js'
+import { withEvmSendSweep } from './ops/evmSendSweep.js'
 import { lightningRailFor, requireLn, requireOnchain } from './ops/rails.js'
 
 /**
@@ -139,7 +145,9 @@ const bar = (deltaSeconds: number, slowestSeconds: number, width = 30): string =
   return '#'.repeat(Math.max(1, Math.round((deltaSeconds / slowestSeconds) * width)))
 }
 
-import { createServices } from './ops/services.js'
+import { createServices, openReportReaders } from './ops/services.js'
+import { DEFAULT_LEDGER_LIMIT, type SwapEconomics } from '@arkade-os/solver-core/analytics/economics.js'
+import { PNL_WINDOWS, pnlReportLines } from './ops/pnlReport.js'
 
 /**
  * The watch loop's four cadences, fastest first.
@@ -175,21 +183,60 @@ const VTXO_LIFECYCLE_MS = 300_000
 /** How often the notification balance is refreshed. @see Services.sampleBalances */
 const BALANCE_SAMPLE_MS = 60_000
 
+const VTXO_SYNC_MAX_AGE_MS = 2_000
+
 /** Recover, then drive every swap and sweep refunds until SIGINT/SIGTERM. */
 const watchUntilStopped = async (services: Services): Promise<void> => {
-  let running = true
-  const stop = (): void => {
-    running = false
-  }
+  const controller = new AbortController()
+  const stop = (): void => controller.abort()
   process.once('SIGINT', stop)
   process.once('SIGTERM', stop)
+  try {
+    await withEvmSendSweep({
+      service: services.evmSendService,
+      recoverySweep: services.evmSendService ? () => services.evmSendService!.payoutFundingRecoverySweep() : undefined,
+      intervalMs: FULL_SWEEP_MS,
+      signal: controller.signal,
+      run: (startSweep) => watchSwaps(services, startSweep, controller.signal),
+      onError: (error) => log('EVM send sweep failed:', error instanceof Error ? error.message : String(error)),
+    })
+  } finally {
+    process.removeListener('SIGINT', stop)
+    process.removeListener('SIGTERM', stop)
+  }
+}
 
+const watchSwaps = async (services: Services, startEvmSendSweep: () => void, signal: AbortSignal): Promise<void> => {
   log('recovering...')
   // Every registered corridor, not the two that used to be named here — a
   // corridor left out of recovery starts the process with its non-terminal rows
   // untouched until the first full sweep comes round.
-  let recovered = 0
-  for (const corridor of services.corridors) recovered += await corridor.tickAll()
+  //
+  // EXCEPT the generated asset-RFQ corridors: every one wraps the SAME service, so
+  // ticking per corridor would drive each row once per market per pass. The
+  // exact pair set distinguishes them from injected corridors whose env stem
+  // may also start with ASSET_. The service's own `tickAll` covers them all.
+  const tickEveryCorridor = async (phase: string): Promise<number> => {
+    let ticked = 0
+    const assetRfqPairs = new Set(
+      services.assetRfqMarkets.flatMap(({ base, quote }) => [
+        assetRfqPairFor(base, quote),
+        assetRfqPairFor(quote, base),
+      ]),
+    )
+    for (const corridor of services.corridors) {
+      if (assetRfqPairs.has(corridor.descriptor.pair)) continue
+      ticked += await corridor.tickAll()
+    }
+    try {
+      ticked += (await services.assetRfqService.tickAll()).length
+    } catch (error) {
+      log(`asset rfq ${phase} failed:`, error instanceof Error ? error.message : String(error))
+    }
+    return ticked
+  }
+  const recovered = await tickEveryCorridor('recovery')
+  startEvmSendSweep()
   log(`recovered ${recovered} swap(s) across ${services.corridors.size} corridor(s); watching`)
   const served = CORRIDORS.filter((corridor) => services.config.corridorEnabled[corridor])
   log(`serving ${served.length === CORRIDORS.length ? 'all four corridors' : served.join(', ')}`)
@@ -209,7 +256,7 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       `lightning receive will refuse EVERY quote: this server's ${services.arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay}s ` +
         `solo recourse needs more final CLTV than a payer will route. Serve it by lowering the exit delay to ` +
         `${cliff}s or less (ARK_UNILATERAL_EXIT_DELAY, if the server enforces less than it advertises), ` +
-        `or by accepting the #69 window (LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true)`,
+        `or by accepting the gap where the trader's recourse opens first (LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true)`,
     )
   }
   // Said out loud at every boot, not just recorded in the console. This is the
@@ -218,8 +265,9 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
   // Only when it is ON: a line printed either way is a line nobody reads.
   if (services.config.lnReceiveAcceptUnilateralGap && services.config.corridorEnabled['lightning:BTC->arkade:BTC']) {
     log(
-      `LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true: funding lightning receive without a solo-recourse guarantee, ` +
-        `up to ${services.policy.corridorLimits['lightning:BTC->arkade:BTC'].maxSats} sats per swap (#69)`,
+      `LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true: funding lightning receive without a solo-recourse guarantee. ` +
+        `If the Arkade server censors past its exit delay a trader can take both sides, putting up to ` +
+        `${services.policy.corridorLimits['lightning:BTC->arkade:BTC'].maxSats} sats at risk per swap`,
     )
   }
 
@@ -235,7 +283,12 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
   // documents: obtaining the manager reconciles against the indexer, and the
   // money path does not wait on that. @see arkade/lazyContractSource.ts
   const contractEvents = lazyContractSource({
-    getContractManager: () => services.arkade.wallet.getContractManager(),
+    getContractManager: async () => {
+      const manager = await services.arkade.wallet.getContractManager()
+      // Process-wide on the shared manager. Safe: one spender, and the event stream keeps the repository current.
+      manager.setVtxoSyncMaxAge(VTXO_SYNC_MAX_AGE_MS)
+      return manager
+    },
     onError: (error, retryInMs) =>
       log(
         `lockup watcher: contract stream unavailable, retrying in ${retryInMs}ms:`,
@@ -245,6 +298,17 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
 
   const watcher = new LockupWatcher({
     contracts: contractEvents,
+    onEvent: (event, scripts) => {
+      if (process.env.SOLVER_LATENCY_DIAGNOSTICS !== '1') return
+      for (const script of scripts) {
+        const watched = swapByScript.get(script)
+        if (!watched) continue
+        log(
+          'lockup_stream_event_timing',
+          json({ swapId: watched.id, eventType: event.type, sdkToSolverMs: Math.max(0, Date.now() - event.timestamp) }),
+        )
+      }
+    },
     // An event is a nudge, never evidence: tick re-reads the lockup from the
     // indexer exactly as the sweep does, so a wrong or replayed script costs one
     // redundant tick and decides nothing.
@@ -252,11 +316,28 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       for (const script of scripts) {
         const watched = swapByScript.get(script)
         if (!watched) continue
-        void watched.tick().catch((error) => {
-          // The sweep retries this row regardless; losing the fast path is not
-          // worth taking the watcher down.
-          log(`lockup-triggered tick ${watched.id} failed:`, error instanceof Error ? error.message : String(error))
-        })
+        const started = performance.now()
+        void watched
+          .tick()
+          .then(() => {
+            if (process.env.SOLVER_LATENCY_DIAGNOSTICS === '1') {
+              log(
+                'lockup_event_timing',
+                json({ swapId: watched.id, tickMs: Math.round(performance.now() - started), outcome: 'ok' }),
+              )
+            }
+          })
+          .catch((error) => {
+            if (process.env.SOLVER_LATENCY_DIAGNOSTICS === '1') {
+              log(
+                'lockup_event_timing',
+                json({ swapId: watched.id, tickMs: Math.round(performance.now() - started), outcome: 'failed' }),
+              )
+            }
+            // The sweep retries this row regardless; losing the fast path is not
+            // worth taking the watcher down.
+            log(`lockup-triggered tick ${watched.id} failed:`, error instanceof Error ? error.message : String(error))
+          })
       }
     },
     onError: (error) => log('lockup watcher:', error instanceof Error ? error.message : String(error)),
@@ -409,7 +490,7 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
   let lastVtxoLifecycle = 0
   let lastBalanceSample = 0
   let lastWatchSync = 0
-  while (running) {
+  while (!signal.aborted) {
     await sleep(HOT_TICK_MS)
     // Money already in flight, checked on its own cadence: waiting for the full
     // sweep here rounds a sub-second Lightning payment up to that sweep's
@@ -430,7 +511,7 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       // The EVM legs ride this same loop: no hot tick (an EVM confirmation
       // depth is minutes wide, so a sub-second cadence would buy nothing but
       // RPC calls), and their rows are driven by the sweep alone.
-      for (const corridor of services.corridors) await corridor.tickAll()
+      await tickEveryCorridor('sweep')
       // The offer path rides the same cadence and needs no other: a fill is one
       // Arkade transaction with no confirmation to wait on, so there is nothing
       // a faster loop could observe.
@@ -448,9 +529,17 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
     }
     // After the sweep, so a swap it just retired is dropped before this reads.
     // Cheap enough to run often: local reads, and `watchScript` is asked once.
+    //
+    // Caught, unlike the corridor sweep above: the watcher is best-effort by
+    // contract, so a store that throws here must degrade to the sweep rather
+    // than end the loop every corridor depends on.
     if (Date.now() - lastWatchSync >= WATCH_SYNC_MS) {
       lastWatchSync = Date.now()
-      await resyncWatchedScripts()
+      try {
+        await resyncWatchedScripts()
+      } catch (error) {
+        log('watched-script sync failed:', error instanceof Error ? error.message : String(error))
+      }
     }
     if (Date.now() - lastRefundSweep > REFUND_SWEEP_MS) {
       lastRefundSweep = Date.now()
@@ -646,7 +735,7 @@ const startAdminServer = async (
    * which is the one thing a port-less solver cannot otherwise be asked — see
    * `RelayConnection.isConnected`'s own docstring.
    */
-  extras?: { relay?: { url: string; isConnected(): boolean } },
+  extras?: { relay?: { url: string; isConnected(): boolean }; bids?: BidRecorder; adPublisher?: AdPublisher },
 ): Promise<{ close(): void } | null> => {
   if (config.adminPort === null) return null
   const { buildAdminApp } = await import('./admin/server.js')
@@ -658,7 +747,15 @@ const startAdminServer = async (
     onError: (error) => log('admin change feed:', error instanceof Error ? error.message : String(error)),
   })
   changes.start()
-  const app = buildAdminApp({ services, startedAt: nowSeconds(), mode, relay: extras?.relay, changes })
+  const app = buildAdminApp({
+    services,
+    startedAt: nowSeconds(),
+    mode,
+    relay: extras?.relay,
+    bids: extras?.bids,
+    adPublisher: extras?.adPublisher,
+    changes,
+  })
   const server = serve({ fetch: app.fetch, port: config.adminPort, hostname: config.adminHost, ...HONO_SERVE_OPTIONS })
   log(`admin console on ${config.adminHost}:${config.adminPort}`)
   return {
@@ -692,36 +789,45 @@ const corridorHolding = async (services: Services, id: string): Promise<Corridor
   return null
 }
 
+/** `allCorridors`: commands that unwind EXISTING rows open no ingress, so the enable flags must not gate them. */
+const withServices = async (
+  opts: { allCorridors?: boolean },
+  run: (services: Services, config: Config) => Promise<void>,
+): Promise<void> => {
+  const config = loadConfig()
+  const services = await createServices(config, opts)
+  try {
+    await run(services, config)
+  } finally {
+    await services.close()
+  }
+}
+
+/** A fresh, discarded client refund key, because every real RFQ quote builds the EXTENDED covenant. */
+const quoteAsClient = async (services: Services, invoice: string, refundAddress: string) => {
+  const clientRefundPub = schnorr.getPublicKey(schnorr.utils.randomSecretKey())
+  const outcome = await services.service!.quote(invoice, refundAddress, {
+    clientRefundPubkey: hex.encode(clientRefundPub),
+  })
+  if (!outcome.accepted) {
+    log('refused:', outcome.reason)
+    process.exitCode = 2
+    return null
+  }
+  return { ...outcome, clientRefundPub }
+}
+
 const commands: Record<string, (args: string[]) => Promise<void>> = {
   async quote([invoice, refundAddress]) {
     if (!invoice || !refundAddress) throw new GiveUp('usage: quote <bolt11> <refund-address>')
-    const config = loadConfig()
-    const services = await createServices(config)
-    try {
+    await withServices({}, async (services) => {
       if (!services.service)
         throw new GiveUp('the arkade:BTC->lightning:BTC corridor is disabled (LN_SEND_ENABLED=false)')
-      // The RFQ family requires a client refund pubkey on every quote, so a
-      // real client always gets the EXTENDED covenant. Generated fresh here and
-      // discarded, exactly as the onchain self-test already does: without it
-      // this command quoted the base three-leaf script, and a deployment check
-      // that exercises a covenant shape no client ever receives is checking the
-      // wrong thing. This self-test never spends the client-unilateral leaf —
-      // that is the client's own out-of-band recourse — it only needs the key
-      // for the script to be built the way production builds it.
-      const clientRefundPub = schnorr.getPublicKey(schnorr.utils.randomSecretKey())
-      const outcome = await services.service.quote(invoice, refundAddress, {
-        clientRefundPubkey: hex.encode(clientRefundPub),
-      })
-      if (!outcome.accepted) {
-        log('refused:', outcome.reason)
-        process.exitCode = 2
-        return
-      }
-      log(json({ ...printable(outcome.swap), lockupDeadline: outcome.lockupDeadline }))
-      log('fund the lockup address, then run: drive', outcome.swap.id)
-    } finally {
-      await services.close()
-    }
+      const quoted = await quoteAsClient(services, invoice, refundAddress)
+      if (!quoted) return
+      log(json({ ...printable(quoted.swap), lockupDeadline: quoted.lockupDeadline }))
+      log('fund the lockup address, then run: drive', quoted.swap.id)
+    })
   },
 
   async status([id]) {
@@ -847,16 +953,79 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
   async drive([id]) {
     if (!id) throw new GiveUp('usage: drive <id>')
-    const config = loadConfig()
-    const services = await createServices(config)
-    try {
+    await withServices({}, async (services) => {
       if (!services.service)
         throw new GiveUp('the arkade:BTC->lightning:BTC corridor is disabled (LN_SEND_ENABLED=false)')
       const row = await driveToTerminal(services.service, id)
       log('terminal:', json(printable(row)))
       if (row.state !== 'claimed') process.exitCode = 2
+    })
+  },
+
+  /**
+   * The book, in a terminal.
+   *
+   * The console and `GET /api/pnl` already answer this, and both need
+   * `ADMIN_PORT` set and reachable — which an operator ssh'd into a box has
+   * neither. Same aggregation and the same honesty rules: this reads each
+   * corridor's `economics()` and hands the records to the same pure functions
+   * the screen uses, so the two cannot disagree on any corridor this binary
+   * serves (an embedder's injected corridors reach `/api/pnl` and not this).
+   *
+   * Read-only, and deliberately thin: everything that FORMATS money lives in
+   * `ops/pnlReport.ts`, where a test can reach it.
+   */
+  async pnl([windowArg]) {
+    const label = windowArg ?? '7d'
+    // `hasOwn`, not an undefined check: the presets are an object literal, so
+    // `PNL_WINDOWS['constructor']` answers with an inherited value and `pnl
+    // constructor` would print a well-formed EMPTY book instead of the usage.
+    if (!Object.hasOwn(PNL_WINDOWS, label)) throw new GiveUp(`usage: pnl [${Object.keys(PNL_WINDOWS).join('|')}]`)
+    const seconds = PNL_WINDOWS[label]!
+    const config = loadConfig()
+    // READERS ONLY, and no network. `createServices` would create the Lightning
+    // rail, the Arkade context and call the emulator before returning — so a
+    // report of what the book DID would refuse to run whenever a rail is down,
+    // which is exactly when an operator reaches for it. `timeline` already opens
+    // its store directly for the same reason.
+    const { readers, close } = await openReportReaders(config)
+    try {
+      const until = nowSeconds()
+      const window = { since: until - seconds, until, limit: DEFAULT_LEDGER_LIMIT }
+      const records: SwapEconomics[] = []
+      const unmeasured: string[] = []
+      const failed: { corridor: string; reason: string }[] = []
+      const truncated: string[] = []
+      for (const reader of readers) {
+        if (!reader.economics) {
+          // Named, never counted as zero — the rule the screen follows too.
+          unmeasured.push(reader.descriptor.pair)
+          continue
+        }
+        try {
+          const ledger = await reader.economics(window)
+          records.push(...ledger.records)
+          if (ledger.truncated) truncated.push(reader.descriptor.pair)
+        } catch (error) {
+          // One broken store must not take the other corridors' book down with
+          // it: the operator reaching for this is on the degraded box already.
+          const reason = error instanceof Error ? error.message : String(error)
+          failed.push({ corridor: reader.descriptor.pair, reason })
+        }
+      }
+      for (const line of pnlReportLines({
+        records,
+        label,
+        since: window.since,
+        until,
+        unmeasured,
+        failed,
+        truncated,
+      })) {
+        log(line)
+      }
     } finally {
-      await services.close()
+      await close()
     }
   },
 
@@ -886,20 +1055,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const { buildApp } = await import('@arkade-os/solver-transport/http/server.js')
     const { serve } = await import('@hono/node-server')
     const { getConnInfo } = await import('@hono/node-server/conninfo')
-    // THE SET `createServices` ALREADY BUILT, not a second one derived here.
-    //
-    // This used to hand `buildApp` the flat services and stores and let it call
-    // `corridorSetFromDeps` on them. That re-derivation was narrower than the
-    // real registry in a way nobody could see from the call site: it passed no
-    // `evmSendStore`, `evmReceiveStore` or `evmCorridors`, and the EVM family
-    // registers only when its store AND its policy are present — so every EVM
-    // corridor silently failed to register, and the pair a client asked for was
-    // refused as `unsupported_pair` by a solver that was in fact sweeping those
-    // very swaps. Two sets, one of them wrong.
-    //
-    // `services.corridors` is the one the sweep drives, so quoting and driving
-    // can no longer disagree. It remains opt-in: a corridor is in it only if a
-    // chain is configured and the operator enabled that token's policy.
+    // THE SET the sweep drives, never a second one derived here, so quoting and driving cannot disagree.
     const app = buildApp({
       corridors: services.corridors,
       readers: services.readers,
@@ -908,7 +1064,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       // becomes the proxy's address for everyone — deploy direct, or the quota
       // is shared by all clients (fail-closed, never spoofable).
       clientKey: (c) => getConnInfo(c).remote.address ?? 'unknown',
-      onRefusal: (context, detail) => log(`${context}:`, detail),
+      onRefusal: recordRfqRefusals(services.rfqRefusals, log),
       // Same sink, different word: `onRefusal` above is this host answering
       // correctly, so a fault must not read as ordinary business.
       onError: (context, error) => {
@@ -947,6 +1103,14 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const services = await createServices(config)
     const { webSocketRelayConnection, isRelayFault } = await import('@arkade-os/solver-transport/relay/connection.js')
     const { RelayIngress, OpenRfqBidder } = await import('@arkade-os/solver-transport/ingress/relay.js')
+    const latencyDiagnostics = process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
+    if (latencyDiagnostics && services.receiveService) {
+      services.receiveService.onQuoteTiming = (sample) => log('receive_quote_timing', json(sample))
+      services.receiveService.onStepTiming = (sample) => log('receive_step_timing', json(sample))
+    }
+    if (latencyDiagnostics && services.service) {
+      services.service.onFundingTiming = (sample) => log('send_funding_tick_timing', json(sample))
+    }
 
     // The factory asserts the derived key IS the wallet identity — the pubkey
     // on the registry card, the one makers address — and refuses to start on
@@ -977,7 +1141,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     }
     // A refusal is an ANSWER, not a fault, so it never reaches `onError` — and
     // for a long time that meant a turned-away request left no trace at all.
-    const onRefusal = (context: string, detail: string): void => log(`${context}:`, detail)
+    const onRefusal = recordRfqRefusals(services.rfqRefusals, log)
     // Only the ENABLED corridors reach the ingress; the rest refuse their pair
     // by name. The services still exist and the sweep still drives them, so
     // switching a corridor off stops new quotes without stranding a swap that
@@ -991,6 +1155,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       providerPubkey: services.providerPubkey,
       onError,
       onRefusal,
+      onQuoteTiming: latencyDiagnostics ? (sample) => log('rfq_relay_timing', json(sample)) : undefined,
     })
     await ingress.start()
     log(
@@ -1004,7 +1169,9 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     // corridor — the bidder only ever bids on that one pair, and a bid on a
     // corridor that then refuses the directed RFQ is worse than no bid.
     let bidder
+    let bids: BidRecorder | undefined
     if (config.openRfqMaxBidsPerMinute > 0 && services.service) {
+      bids = createBidTail()
       bidder = new OpenRfqBidder({
         connection,
         providerPubkey: services.providerPubkey,
@@ -1015,11 +1182,24 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         limits: services.policy.corridorLimits['arkade:BTC->lightning:BTC'],
         fee: services.policy.corridorFees['arkade:BTC->lightning:BTC'],
         maxBidsPerMinute: config.openRfqMaxBidsPerMinute,
+        onBid: recordBidsIn(bids),
         onError,
       })
       await bidder.start()
       log('open-RFQ bidding on, capped at', config.openRfqMaxBidsPerMinute, 'bids/min')
     }
+
+    // Undefined under `off`: nothing is constructed, so nothing can publish.
+    const { startAdPublishing } = await import('@arkade-os/solver-transport/relay/adPublisher.js')
+    const { deploymentAd } = await import('./admin/routes/card.js')
+    const ads = startAdPublishing({
+      mode: config.nostrAdPublish,
+      connection,
+      author: services.providerPubkey,
+      buildAd: () => deploymentAd(services),
+      onError: (error) => onError('solver ad publish', error),
+    })
+    if (ads) log('solver ad publishing', config.nostrAdPublish)
 
     // Liveness for a container with no port to probe: the file's mtime, touched
     // only while the relay socket is up, so a solver that is running but
@@ -1075,12 +1255,15 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     // and this is the only surface that can say otherwise.
     const admin = await startAdminServer(services, config, 'relay', {
       relay: { url: config.relayUrl, isConnected: () => connection.isConnected() },
+      bids,
+      adPublisher: ads?.publisher,
     })
 
     try {
       await watchUntilStopped(services)
     } finally {
       clearInterval(heartbeat)
+      ads?.stop()
       try {
         await bidder?.stop()
       } catch (error) {
@@ -1099,32 +1282,15 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
   async send([invoice]) {
     if (!invoice) throw new GiveUp('usage: send <bolt11>')
-    const config = loadConfig()
-    const services = await createServices(config)
-    try {
+    await withServices({}, async (services) => {
       if (!services.service)
         throw new GiveUp('the arkade:BTC->lightning:BTC corridor is disabled (LN_SEND_ENABLED=false)')
       // The self-test plays the client, so its refund destination is our own
       // wallet — exactly what a real client would pass as theirs.
       const refundAddress = await services.arkade.wallet.getAddress()
-      // The RFQ family requires a client refund pubkey on every quote, so a
-      // real client always gets the EXTENDED covenant. Generated fresh here and
-      // discarded, exactly as the onchain self-test already does: without it
-      // this command quoted the base three-leaf script, and a deployment check
-      // that exercises a covenant shape no client ever receives is checking the
-      // wrong thing. This self-test never spends the client-unilateral leaf —
-      // that is the client's own out-of-band recourse — it only needs the key
-      // for the script to be built the way production builds it.
-      const clientRefundPub = schnorr.getPublicKey(schnorr.utils.randomSecretKey())
-      const outcome = await services.service.quote(invoice, refundAddress, {
-        clientRefundPubkey: hex.encode(clientRefundPub),
-      })
-      if (!outcome.accepted) {
-        log('refused:', outcome.reason)
-        process.exitCode = 2
-        return
-      }
-      const swap = outcome.swap
+      const quoted = await quoteAsClient(services, invoice, refundAddress)
+      if (!quoted) return
+      const { swap, clientRefundPub } = quoted
       log('quoted', swap.id)
 
       // CLIENT RULE, exercised here so the reference flow embodies it: the
@@ -1141,12 +1307,20 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       // accepted, one state after the client would have funded it.
       const decoded = decodeInvoice(invoice, services.service.sendHintScidDenylist)
       const serverKey = services.arkade.wallet.arkServerPublicKey
+      // A flipped quote re-clocked the whole ladder: the solo rung arrives in
+      // seconds on a block-typed deployment, and the other two rungs must be
+      // converted with the service's exact rule or this derivation mixes units
+      // and the addresses diverge. The unit rides on the quoted value, so a
+      // seconds deployment needs no branch — its base is seconds already.
+      const soloUnit = relativeDelayFrom(swap.refundWithoutReceiverDelay).unit
+      const rung = (base: number): number =>
+        soloUnit === 'seconds' && relativeDelayFrom(base).unit === 'blocks' ? secondsForBlockRung(base) : base
       const local = new CovenantSwapScript({
         receiver: hex.decode(swap.receiverPubkey), // trusted from quote: provider key
         server: serverKey,
         preimageHash: scriptHashFromPaymentHash(decoded.paymentHash),
         refundLocktime: swap.refundLocktime, // trusted from quote: deadline
-        claimDelay: services.arkade.unilateralDelays.unilateralClaimDelay,
+        claimDelay: rung(services.arkade.unilateralDelays.unilateralClaimDelay),
         nonInteractiveParameters: {
           emulatorPubkey: hex.decode(services.emulatorPubkey),
           // The one field here that does come from the quote, and the rule above
@@ -1159,8 +1333,8 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         },
         // The client's OWN key, generated above — not taken from the quote.
         client: clientRefundPub,
-        clientRefundDelay: services.arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay,
-        refundWithoutServerDelay: services.arkade.unilateralDelays.unilateralRefundDelay,
+        clientRefundDelay: swap.refundWithoutReceiverDelay,
+        refundWithoutServerDelay: rung(services.arkade.unilateralDelays.unilateralRefundDelay),
         // Every quote the service issues now carries the full covenant suite;
         // matching that here is what makes `localAddress` below agree with
         // `swap.lockupAddress`.
@@ -1185,9 +1359,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       const row = await driveToTerminal(services.service, swap.id)
       log('terminal:', json(printable(row)))
       if (row.state !== 'claimed') process.exitCode = 2
-    } finally {
-      await services.close()
-    }
+    })
   },
 
   /**
@@ -1205,11 +1377,11 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
   async 'send-onchain'([sats]) {
     const amountSats = Number(sats)
     if (!Number.isInteger(amountSats) || amountSats <= 0) throw new GiveUp('usage: send-onchain <sats>')
-    const config = loadConfig()
-    const services = await createServices(config)
-    try {
+    await withServices({}, async (services, config) => {
       if (!services.onchainService) {
-        throw new GiveUp('the arkade:BTC->onchain:BTC corridor is disabled (ONCHAIN_SEND_ENABLED=false)')
+        throw new GiveUp(
+          'the arkade:BTC->onchain:BTC corridor is unavailable: disabled (ONCHAIN_SEND_ENABLED=false), or LND did not answer at boot',
+        )
       }
       const onchainService = services.onchainService
       // The "client" role needs its own onchain keypair to claim with — a real
@@ -1346,23 +1518,19 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       const claimed = await driveOnchainUntil(onchainService, swap.id, ONCHAIN_TERMINAL)
       log('terminal:', json(claimed))
       if (claimed.state !== 'claimed') process.exitCode = 2
-    } finally {
-      await services.close()
-    }
+    })
   },
 
   async refund() {
-    const config = loadConfig()
-    // `allCorridors`: a one-shot operator command opens no ingress, so the
-    // enable flags gate nothing here — and a corridor disabled with live rows
-    // still needs its refunds swept.
-    const services = await createServices(config, { allCorridors: true })
-    try {
+    await withServices({ allCorridors: true }, async (services) => {
       // BOTH sweeps, same as watchUntilStopped: an operator running this by
       // hand is asking for every eligible refund, and the onchain corridor has
       // its own store and its own sweep.
       const pushed = await services.service!.refundSweep()
-      const onchainPushed = await services.onchainService!.refundSweep()
+      const onchainPushed = (await services.onchainService?.refundSweep()) ?? []
+      // `allCorridors` builds it whenever there is a rail, so its absence here means LND did not answer at boot.
+      if (!services.onchainService)
+        log('onchain refunds NOT checked: LND did not answer at boot; run this again once it does')
       const evmPushed = (await services.evmSendService?.refundSweep()) ?? []
       if (pushed.length === 0 && onchainPushed.length === 0 && evmPushed.length === 0) {
         log('nothing eligible: refunds need a failed swap past its deadline with funds at the script')
@@ -1375,9 +1543,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       for (const id of evmPushed) {
         log('evm refunded', id, json((await services.evmSendStore!.get(id)).refundArkTxid))
       }
-    } finally {
-      await services.close()
-    }
+    })
   },
 
   /**
@@ -1396,18 +1562,14 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    */
   async 'refund-now'([id]) {
     if (!id) throw new GiveUp('usage: refund-now <id>')
-    const config = loadConfig()
-    const services = await createServices(config)
-    try {
+    await withServices({}, async (services) => {
       const result = await refundNow(services, id)
       if ('skipped' in result) {
         log('nothing at the script — already spent or never funded')
         return
       }
       log('COVENANT REFUND PUSHED, arkTxid', result.txid)
-    } finally {
-      await services.close()
-    }
+    })
   },
 
   /**
@@ -1428,18 +1590,12 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    */
   async 'claim-now'([id, preimage]) {
     if (!id) throw new GiveUp('usage: claim-now <id> [preimage]')
-    const config = loadConfig()
-    // `allCorridors` for the same reason the refund commands use it: this
-    // unwinds EXISTING rows, including a corridor since disabled.
-    const services = await createServices(config, { allCorridors: true })
-    try {
+    await withServices({ allCorridors: true }, async (services) => {
       const row = await services.store.get(id)
       log('swap', row.id, 'is', row.state, row.failureReason ? `— ${row.failureReason}` : '')
       await claimNow(services, id, preimage)
       log('PREIMAGE RECORDED, swap returned to claiming — the sweep will push the claim')
-    } finally {
-      await services.close()
-    }
+    })
   },
 
   /**
@@ -1458,7 +1614,8 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    * WITHOUT the Arkade Service, by landing the VTXO on Bitcoin first.
    *
    * Reach for it when a row is parked with `claim failing past the refund
-   * deadline` or `refund failing past the refund deadline` — the failure detail
+   * deadline`, `refund failing past the refund deadline` or (onchain receive)
+   * `refund failing for …s` — the failure detail
    * on such a row already names which leaf this would spend. Both mean the
    * Service is censoring or gone, which is the only situation an exit is worth
    * its cost: it is slow (the leaf's CSV runs from when the lockup CONFIRMS
@@ -1480,11 +1637,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     if (!id) throw new GiveUp('usage: unilateral-exit <id> [preimage] [--go]')
     const go = rest.includes('--go')
     const preimage = rest.find((arg) => !arg.startsWith('--'))
-    const config = loadConfig()
-    // `allCorridors`: this unwinds an EXISTING row, including one belonging to a
-    // corridor since switched off — the same reasoning every refund command uses.
-    const services = await createServices(config, { allCorridors: true })
-    try {
+    await withServices({ allCorridors: true }, async (services) => {
       const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
       const { pair, plan } = await planExitForSwap(services.corridors, id, { solverPubkey, preimage })
       log('swap', id, 'on', pair)
@@ -1505,17 +1658,13 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       log('EXIT PREPARED,', started.result.steps.length, 'step(s), funding splitter broadcast')
       log('package:', json(started.result))
       log('drive it with UnilateralExit.Executor against any Esplora endpoint; it is keyless from here')
-    } finally {
-      await services.close()
-    }
+    })
   },
 
   async 'park-swap'([id, ...reason]) {
     const why = reason.join(' ').trim()
     if (!id || !why) throw new GiveUp('usage: park-swap <id> <reason...>')
-    const config = loadConfig()
-    const services = await createServices(config, { allCorridors: true })
-    try {
+    await withServices({ allCorridors: true }, async (services) => {
       // Which corridor holds it has to be DISCOVERED here, unlike in the console
       // where every rendered row carries its own. Searching the stores is safe
       // in a way `tick`'s doc rules out for itself: ids are `randomUUID()`, so
@@ -1528,9 +1677,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       log('swap', id, 'is', detail?.swap.state, 'on', owner.descriptor.pair)
       const { state } = await owner.park(id, why)
       log('PARKED ->', state, '—', why)
-    } finally {
-      await services.close()
-    }
+    })
   },
 
   /**
@@ -1555,11 +1702,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    */
   async 'onchain-refund-now'([id]) {
     if (!id) throw new GiveUp('usage: onchain-refund-now <id>')
-    const config = loadConfig()
-    // `allCorridors`: this command exists to unwind rows, including rows of a
-    // corridor that has since been disabled — see createServices.
-    const services = await createServices(config, { allCorridors: true })
-    try {
+    await withServices({ allCorridors: true }, async (services) => {
       const row = await services.onchainStore.get(id)
       log('swap', row.id, 'is', row.state, row.failureReason ? `— ${row.failureReason}` : '')
       const result = await onchainRefundNow(services, id)
@@ -1568,9 +1711,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         return
       }
       log('COVENANT REFUND PUSHED, arkTxid', result.txid)
-    } finally {
-      await services.close()
-    }
+    })
   },
 
   /**
@@ -1596,18 +1737,13 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    */
   async 'reclaim-l1-htlc'([id]) {
     if (!id) throw new GiveUp('usage: reclaim-l1-htlc <id>')
-    const config = loadConfig()
-    // `allCorridors`: same unwind-existing-rows reasoning as onchain-refund-now.
-    const services = await createServices(config, { allCorridors: true })
-    try {
+    await withServices({ allCorridors: true }, async (services) => {
       const row = await services.onchainStore.get(id)
       log('swap', row.id, 'is', row.state, row.failureReason ? `— ${row.failureReason}` : '')
       log('onchain HTLC', row.fundingTxid ? `${row.fundingTxid}:${row.fundingVout}` : '(never funded)')
       const { txid } = await reclaimL1Htlc(services, id)
       log('L1 HTLC REFUND BROADCAST, txid', txid)
-    } finally {
-      await services.close()
-    }
+    })
   },
 
   /**
@@ -1635,9 +1771,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const offset = offsetArg !== undefined ? Number(offsetArg) : -3 * 60 * 60
     if (!Number.isFinite(offset)) throw new GiveUp('locktimeOffsetSeconds must be a number')
 
-    const config = loadConfig()
-    const services = await createServices(config)
-    try {
+    await withServices({}, async (services, config) => {
       const { arkade } = services
       const destination = await arkade.wallet.getAddress()
       const refundPkScript = ArkAddress.decode(destination).pkScript
@@ -1717,9 +1851,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         { attempts: 6, intervalMs: 30_000, whenExhausted: 'refund not accepted within 6 attempts; re-run later' },
       )
       log('COVENANT REFUND PUSHED, arkTxid', txid)
-    } finally {
-      await services.close()
-    }
+    })
   },
 
   async invoice([sats]) {
@@ -1762,12 +1894,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const name = nameArg ?? process.env.SOLVER_NAME
     if (!name) throw new GiveUp('usage: card <name>   (or set SOLVER_NAME; becomes solvers/<network>/<name>.json)')
     const config = loadConfig()
-    // Extra relays beyond RELAY_URL, for a deployment listening on several.
-    const extra = (process.env.SOLVER_CARD_RELAYS ?? '')
-      .split(',')
-      .map((r) => r.trim())
-      .filter(Boolean)
-    const relays = [...(config.relayUrl ? [config.relayUrl] : []), ...extra]
+    const relays = (await import('./admin/routes/card.js')).advertisedRelays(config.relayUrl)
     // This command does not build the service stack, but the card it writes
     // must state the terms the stack would actually enforce — so it resolves
     // the same effective policy `createServices` does, from the same store.
@@ -1786,10 +1913,20 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     }
     const { MnemonicIdentity } = await import('@arkade-os/sdk')
     const identity = MnemonicIdentity.fromMnemonic(config.arkade.mnemonic, { isMainnet: config.arkade.isMainnet })
-    const { assetCardMarkets, buildSolverCard, publishableAssetMarkets, signSolverCard, unpublishableCorridors } =
+    const { buildSolverCard, publishableAssetMarkets, signSolverCard, unpublishableCorridors } =
       await import('@arkade-os/solver-core/core/registryCard.js')
+    const { assetCardMarketsFromPolicy, assetRfqMarketsFrom } = await import('./ops/assetRfqMarkets.js')
     const { publishable, omitted } = publishableAssetMarkets(
-      assetCardMarkets(assetMarkets, { min: policy.offerMinFillAmount, max: policy.offerMaxFillAmount }),
+      assetCardMarketsFromPolicy({
+        pricing: assetMarkets,
+        offerMarkets: policy.offerMarkets,
+        offerBounds: { min: policy.offerMinFillAmount, max: policy.offerMaxFillAmount },
+        rfqMarkets: assetRfqMarketsFrom(assetMarkets, {
+          dustSats: 0n,
+          pricedByDefault: policy.assetCarrierPricing,
+        }),
+        chargesDeliveredCarrier: policy.offerChargesDeliveredCarrier,
+      }),
       config.network,
     )
     const card = await signSolverCard(
@@ -1837,9 +1974,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
   },
 
   async balances() {
-    const config = loadConfig()
-    const services = await createServices(config)
-    try {
+    await withServices({}, async (services, config) => {
       log('lightning:', json(await requireLn(services.ln).getBalance()))
       log('arkade address:', await services.arkade.wallet.getAddress())
       log('arkade balance:', json(await services.arkade.wallet.getBalance()))
@@ -1853,14 +1988,12 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       const { spendable, target, plan } = await poolPlan(services)
       log('pool pieces:', spendable.length, 'sizes:', json([...spendable].sort((a, b) => b - a).slice(0, 12)))
       log('pool target:', json(target), '->', plan.reason)
-    } finally {
-      await services.close()
-    }
+    })
   },
 
   /**
-   * Split the float into the shape {@link poolTarget} asks for. Dry unless
-   * `--mint`, because this is the one read-only-adjacent command that spends.
+   * Reshape the float toward {@link poolTarget}: split below the coin ceiling, merge at
+   * it. Dry unless `--mint`, because this is the one read-only-adjacent command that spends.
    *
    * The mechanism is one Arkade transaction paying the solver's own address
    * several times over: `send` takes a list of recipients, so N pieces cost one
@@ -1885,15 +2018,13 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    * guessing from a row's state would be a worse lie than asking.
    */
   async pool(args) {
-    const config = loadConfig()
-    const services = await createServices(config)
-    try {
+    await withServices({}, async (services) => {
       const { spendable, plan } = await poolPlan(services)
       log('pool pieces:', spendable.length, '->', plan.reason)
       if (plan.outputs.length === 0) return
 
       if (!args.includes('--mint')) {
-        log('dry run:', json(plan.outputs), 'would be minted. Pass --mint to execute')
+        log('dry run: would spend', plan.inputs.length, 'coin(s) into', json(plan.outputs), '— pass --mint to execute')
         return
       }
 
@@ -1903,12 +2034,14 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         process.exitCode = 1
         return
       }
-      if ('skipped' in result) return
+      if ('skipped' in result) {
+        log('skipped:', result.skipped)
+        return
+      }
       if (result.committedSats > 0) log(`--force: minting with ${result.committedSats} sat committed`)
-      log('minted', result.minted.length, 'piece(s):', json(result.minted), 'arkTxid', result.txid)
-    } finally {
-      await services.close()
-    }
+      log('minted', result.minted.length, 'output(s) from', result.spent.length, 'coin(s):', json(result.minted))
+      log('arkTxid', result.txid)
+    })
   },
 }
 

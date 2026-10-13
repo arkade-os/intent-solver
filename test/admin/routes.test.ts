@@ -4,6 +4,7 @@ import { readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/
 import { PageRequestError } from '@arkade-os/solver-core/core/page.js'
 
 const emptyPage = { rows: [], nextCursor: null }
+const USDA = '1a'.repeat(34)
 
 const store = (over: Record<string, unknown> = {}) => ({
   page: vi.fn().mockResolvedValue(emptyPage),
@@ -40,6 +41,10 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
     // real Config, so a double without it reads `undefined.maxSats` and 500s
     // the moment any route consults it.
     limits: { minSats: 1_000, maxSats: 100_000 },
+    // The two env lists the overview diffs the stored rows against. Both on the
+    // real Config, so a double without them reads `undefined.some` and 500s.
+    offerMarkets: [],
+    assetRfqTokens: [],
     corridorEnabled: {
       'arkade:BTC->lightning:BTC': true,
       'lightning:BTC->arkade:BTC': true,
@@ -65,13 +70,17 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
     config,
     // Boot snapshots, equal to the store so the quiet case is the default.
     policy: config,
+    bootPolicy: config,
     assetMarkets: [],
+    liveOfferMarkets: [],
+    assetRfqMarkets: [],
     ...stores,
     readers: readerSetFromDeps(stores as unknown as FlatCorridorDeps),
     adminStore: {
       getOverrides: vi.fn().mockResolvedValue({}),
       listMarkets: vi.fn().mockResolvedValue([]),
       listPendingApprovals: vi.fn().mockResolvedValue([]),
+      repairedServing: [],
     },
     bootOverrides: {},
     ln: { getBalance: vi.fn().mockResolvedValue({ availableSats: 500_000, incomingSats: 0 }) },
@@ -244,6 +253,21 @@ describe('GET /api/backends', () => {
 })
 
 describe('GET /api/overview', () => {
+  it('can read risk and policy without probing remote balances', async () => {
+    const lightning = vi.fn().mockRejectedValue(new Error('must not probe lightning'))
+    const arkade = vi.fn().mockRejectedValue(new Error('must not probe arkade'))
+    const response = await get('/api/overview?balances=false', {
+      ln: { getBalance: lightning },
+      arkade: { wallet: { getBalance: arkade } },
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      exposure: { committedSats: 0, capSats: 300_000 },
+      balances: null,
+    })
+    expect(lightning).not.toHaveBeenCalled()
+    expect(arkade).not.toHaveBeenCalled()
+  })
   it('reports exposure against the cap', async () => {
     const body = await (await get('/api/overview')).json()
     expect(body).toMatchObject({
@@ -264,6 +288,45 @@ describe('GET /api/overview', () => {
   it('lists all four corridors with their effective policy', async () => {
     const body = (await (await get('/api/overview')).json()) as { corridors: { corridor: string }[] }
     expect(body.corridors).toHaveLength(4)
+  })
+
+  // A repair an operator is never told about leaves a healthy deployment and one
+  // quoting under a synthesised symbol looking identical on this page.
+  it('carries a boot repair and an env disagreement in one list, the repair first', async () => {
+    const adminStore = {
+      getOverrides: vi.fn().mockResolvedValue({}),
+      listPendingApprovals: vi.fn().mockResolvedValue([]),
+      listMarkets: vi.fn().mockResolvedValue([
+        {
+          marketKey: `arkade:BTC->arkade:${USDA}`,
+          base: null,
+          quote: USDA,
+          baseDecimals: 8,
+          quoteDecimals: 6,
+          feedUrl: 'https://feed.test/p',
+          pricePath: '/p',
+          toleranceBps: 10,
+          feeBps: 25,
+          sellBaseFeeFlat: 0n,
+          buyBaseFeeFlat: 0n,
+          sellBase: null,
+          buyBase: null,
+          symbol: 'USDA',
+          servesOffer: true,
+          servesRfq: true,
+          rfqSellBase: true,
+          rfqBuyBase: true,
+          carrierMode: 'inherit',
+          enabled: true,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ]),
+      repairedServing: [`arkade:BTC->arkade:${USDA}: no symbol stored; wrote symbol = A1A1A1A1A1A1 to the row.`],
+    }
+    const body = (await (await get('/api/overview', { adminStore })).json()) as { servingDivergence: string[] }
+    expect(body.servingDivergence[0]).toContain('wrote symbol =')
+    expect(body.servingDivergence.some((line) => line.includes('OFFER_MARKETS omits this pair'))).toBe(true)
   })
 })
 

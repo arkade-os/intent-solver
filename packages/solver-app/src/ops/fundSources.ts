@@ -3,19 +3,7 @@
  *
  * A solver holds money in more than one place and always has: the Arkade float
  * every corridor pays out of, the BTC rail's channel and onchain balances, and —
- * once a chain is configured — token liquidity for the EVM corridors. Until this
- * existed, the console could only READ one of them and could move none, so
- * topping any of them up meant leaving for a node's own CLI, a faucet script or
- * a vendor dashboard.
- *
- * ## Why a seam rather than a Lightning-shaped pair of buttons
- *
- * The first cut of this was "fund the Lightning backend". That is one source of
- * four, and its shape is not the general shape: an Arkade wallet has a boarding
- * address and no arbitrary-destination withdrawal, an EVM rail's deposit is a
- * plain account address and its balance is a token, and each of them splits its
- * balance into a different set of numbers. Anything the console hardcodes about
- * one of them is a thing the next source has to be bent into.
+ * once a chain is configured — token liquidity for the EVM corridors, each shaped differently.
  *
  * So a source declares three things and nothing more: what it is, what it holds,
  * and which of the three operations it can perform.
@@ -330,3 +318,16 @@ export const requireFundSource = (sources: readonly FundSource[], id: unknown): 
 /** What an operator gets for pressing a button a source does not offer. */
 export const capabilityRefusal = (source: FundSource, operation: string, because: string): Error =>
   new Error(`the ${source.label} source cannot ${operation}: ${because}`)
+
+/**
+ * The seam's string amount as a whole positive sat count — the rule both BTC
+ * sources apply before a withdrawal touches a backend. Round-tripped, not merely
+ * coerced: `Number('1e3')` is 1000, and a 256-bit quantity would silently lose precision.
+ */
+export const parseWholeSats = (amount: string): number => {
+  const sats = Number(amount)
+  if (!Number.isSafeInteger(sats) || sats <= 0 || String(sats) !== amount.trim()) {
+    throw new Error(`amount must be a whole positive number of sats, got ${JSON.stringify(amount)}`)
+  }
+  return sats
+}

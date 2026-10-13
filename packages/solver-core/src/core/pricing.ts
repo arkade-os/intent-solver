@@ -55,40 +55,11 @@ export interface NetworkFeeInputs {
   /** The spread, and the flat used when no estimate is available. */
   base: Fee
   /**
-   * What executing THIS swap is expected to cost the solver, in sats, or null
-   * when unknown.
-   *
-   * A COST, not a rate, and that is the whole generality. Chain cost is
-   * `vsize x sats/vbyte` and is the same for every amount; a Lightning routing
-   * fee depends on the amount and the destination and is not expressible as a
-   * rate at all. Both backends can answer "what will this one cost me" — LND
-   * already answers it, though only by REFUSING with `maxFeeSats does not
-   * cover fee estimate [value: 10, expected: 11 sats]` — so that is the
-   * question to ask. See {@link onchainCostSats} for the chain shape.
-   *
-   * SYNCHRONOUS, which does NOT mean the number has to come from a cache.
-   * It means the asking happens BEFORE pricing is consulted, and that the
-   * corridor owns it rather than this.
-   *
-   * Two shapes both fit, and they are quite different:
-   *
-   *  - A REFRESHED value. Chain cost is `vsize x sats/vbyte`; the rate moves
-   *    slowly, is the same for every swap, and is worth sampling on a schedule
-   *    rather than per quote. `onchainCostSats` closes over such a value.
-   *  - A PREPARED one. Some backends split a send into prepare-then-execute:
-   *    the first call returns the fee for THIS payment, the second spends
-   *    against it. A corridor that awaits the prepare at quote time can close
-   *    over the exact figure it was quoted — no rate, no modelling, no
-   *    sampling — and this reads it synchronously because by then it is just a
-   *    number.
-   *
-   * What it must not become is an upstream call made from inside pricing, on
-   * the hot path, once per quote request, by anything a taker can trigger.
-   *
-   * A prepared fee is still not a promise. A quote is followed by the client
-   * funding a lockup, which takes as long as it takes, so the fee can move
-   * before the corridor executes. That gap is what `maxFeeSats` guards at
-   * payment time; this only makes the QUOTE honest.
+   * What executing THIS swap is expected to cost the solver, in sats, or null when
+   * unknown. A COST, not a rate: a Lightning routing fee varies with amount and
+   * destination. SYNCHRONOUS — the corridor fetches before pricing is consulted
+   * (see {@link onchainCostSats}); it must never become an upstream call per quote a
+   * taker can trigger. Not a promise: `maxFeeSats` guards payment time.
    */
   costSats: (input: { pair: string; giveSats: number }) => number | null
   /**

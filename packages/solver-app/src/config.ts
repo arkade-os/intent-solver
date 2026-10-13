@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { base64 } from '@scure/base'
 import { narrow, resolveLimits, type Limits } from '@arkade-os/solver-core/core/limits.js'
+import { defaultMaxBandWidthSats, DEFAULT_BAND_BELOW_SHARE } from '@arkade-os/solver-core/core/onchainReceive.js'
 import { DEFAULT_LOCKUP_TIMEOUT, MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { MAX_BIP68_BLOCKS, MAX_BIP68_SECONDS, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
@@ -146,6 +147,15 @@ export interface Config {
    */
   corridorFees: Record<Corridor, Fee>
   /**
+   * How far a funded `onchain:BTC->arkade:BTC` amount may sit from its quote,
+   * from `ONCHAIN_RECEIVE_MAX_BAND_SATS`. Separate from `corridorLimits` on
+   * purpose: how far an amount may DRIFT is a different risk from how large it
+   * may be, and an operator may want the first tight and the second wide.
+   */
+  onchainReceiveMaxBandSats: number
+  /** From `ONCHAIN_RECEIVE_BAND_BELOW_SHARE`. Only reachable when `ONCHAIN_RECEIVE_MAX_BAND_SATS` binds. */
+  onchainReceiveBandBelowShare: number
+  /**
    * The bounds a corridor prices its own EXECUTION COST inside, or null to keep
    * charging {@link Config.corridorFees}' flat and nothing else.
    *
@@ -182,7 +192,8 @@ export interface Config {
    */
   corridorEnabled: Record<Corridor, boolean>
   /**
-   * Whether the daemon may SPLIT the float on its own, without an operator.
+   * Whether the daemon may RESHAPE the float on its own — split it, or merge small
+   * coins at the coin ceiling — without an operator.
    *
    * Off by default, and not for symmetry with renewal. Renewal preserves what
    * the solver already has; a mint SPENDS, on a timer, with nobody watching —
@@ -238,6 +249,18 @@ export interface Config {
   offerMinFillAmount: bigint
   offerMaxFillAmount: bigint
   /**
+   * `OFFER_CHARGE_CARRIER`. Off by default: the MAKER prices this path and the
+   * card has no field to tell them the carrier exists, so charging would refuse
+   * an already-funded offer with no channel to say why. Off costs us the carrier.
+   */
+  offerChargesDeliveredCarrier: boolean
+  /**
+   * `ASSET_CARRIER_PRICING`. Off by default so quoted prices move when an
+   * operator decides, not on upgrade. On, realised margin equals the advertised
+   * fee on both legs. The dust floor applies either way, being a chain rule.
+   */
+  assetCarrierPricing: boolean
+  /**
    * Assets this solver QUOTES against over RFQ (`ASSET_MARKETS`), each with the
    * symbol its env stems are built from.
    *
@@ -259,7 +282,7 @@ export interface Config {
   assetQuoteValiditySeconds: number
   /**
    * Whether `lightning:BTC->arkade:BTC` may be served when the solver's own
-   * solo recourse opens AFTER the incoming htlc's `E` — the #69 window.
+   * solo recourse opens AFTER the incoming htlc's `E` — the unilateral-gap window.
    *
    * Off by default, and the default is the safe one.
    *
@@ -599,6 +622,33 @@ const corridorLimitsFromEnv = (base: Limits): Record<Corridor, Limits> => {
   return Object.fromEntries(entries) as Record<Corridor, Limits>
 }
 
+/** Defaults to all of it below the quote, the side that cannot cost the operator. A policy default, not a correctness property. */
+const onchainReceiveBandBelowShareFromEnv = (): number => {
+  const raw = process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE?.trim()
+  if (!raw) return DEFAULT_BAND_BELOW_SHARE
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error(
+      `ONCHAIN_RECEIVE_BAND_BELOW_SHARE must be a number between 0 and 1, got ${process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE}`,
+    )
+  }
+  return value
+}
+
+/** Absent, the whole range that corridor already serves. Same one-way rule as every amount knob here: it may only reduce. */
+const onchainReceiveMaxBandSatsFromEnv = (onchainReceiveLimits: Limits): number => {
+  const fallback = defaultMaxBandWidthSats(onchainReceiveLimits)
+  const raw = process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS?.trim()
+  if (!raw) return fallback
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(
+      `ONCHAIN_RECEIVE_MAX_BAND_SATS must be a non-negative integer, got ${process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS}`,
+    )
+  }
+  return Math.min(fallback, value)
+}
+
 /**
  * What each corridor charges, from `<STEM>_FEE_BPS` and `<STEM>_FEE_FLAT_SATS`.
  *
@@ -611,16 +661,7 @@ const corridorLimitsFromEnv = (base: Limits): Record<Corridor, Limits> => {
  */
 const corridorFeesFromEnv = (): Record<Corridor, Fee> => {
   const entries = ALL_DESCRIPTORS.map(({ pair, envStem: stem }) => {
-    const component = (suffix: string, max: number): number => {
-      const name = `${stem}_${suffix}`
-      const raw = process.env[name]?.trim()
-      if (!raw) return 0
-      const value = Number(raw)
-      if (!Number.isInteger(value) || value < 0 || value > max) {
-        throw new Error(`${name} must be an integer between 0 and ${max}, got ${process.env[name]}`)
-      }
-      return value
-    }
+    const component = (suffix: string, max: number): number => intFromEnv(`${stem}_${suffix}`, 0, 0, max)
     // bps is capped at 10_000 (100%) because a spread at or above it leaves the
     // taker nothing; the flat cap is a sanity bound, not a policy — a flat fee
     // in the millions is a typo, and one that would quietly refuse every swap
@@ -665,21 +706,10 @@ const NETWORK_FEE_CAPABLE: readonly Corridor[] = ['arkade:BTC->onchain:BTC', 'on
  */
 const corridorNetworkFeesFromEnv = (): Record<Corridor, NetworkFeeBounds | null> => {
   const entries = ALL_DESCRIPTORS.map(({ pair, envStem: stem }) => {
-    // Same shape as `corridorLimitsFromEnv`'s `bound`, not `corridorFeesFromEnv`'s
-    // `component`: absence has to survive as `undefined` here rather than
-    // collapsing to 0, because absence is what keeps the old pricing.
+    // Unset stays `undefined`, not 0: absence is what keeps the old pricing.
     const sats = (suffix: string, min: number): number | undefined => {
       const name = `${stem}_${suffix}`
-      const raw = process.env[name]?.trim()
-      if (!raw) return undefined
-      const value = Number(raw)
-      // Same 1_000_000 sanity bound `<STEM>_FEE_FLAT_SATS` carries, and for the
-      // same reason: an execution charge in the millions is a typo, and one
-      // that would refuse every swap as unquotable rather than fail here.
-      if (!Number.isInteger(value) || value < min || value > 1_000_000) {
-        throw new Error(`${name} must be an integer between ${min} and 1000000, got ${process.env[name]}`)
-      }
-      return value
+      return process.env[name]?.trim() ? intFromEnv(name, 0, min, 1_000_000) : undefined
     }
     // A cap of 0 would mean "charge nothing for execution, ever", which is
     // `<STEM>_FEE_FLAT_SATS=0` written so that it looks like it does something.
@@ -789,7 +819,7 @@ const lnReceiveAcceptUnilateralGapFromEnv = (network: SwapNetwork): boolean => {
   if (raw === 'true' && network === 'bitcoin' && !process.env.LN_RECEIVE_MAX_SATS?.trim()) {
     throw new Error(
       'LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true on bitcoin also needs LN_RECEIVE_MAX_SATS set explicitly: ' +
-        'it accepts a bounded loss (#69), and the bound is that cap. Set it to the most you are prepared ' +
+        'it accepts a bounded loss, and the bound is that cap. Set it to the most you are prepared ' +
         'to lose on one swap if the Arkade server censors for longer than its exit delay.',
     )
   }
@@ -897,6 +927,8 @@ export const loadConfig = (): Config => {
 
   // Default: three max-size swaps in flight. The same non-finite rule as the
   // per-swap limits — absorbing NaN here silently removes the cap.
+  const corridorLimits = corridorLimitsFromEnv(limits)
+
   const maxExposedSats =
     process.env.MAX_EXPOSED_SATS !== undefined ? Number(process.env.MAX_EXPOSED_SATS) : limits.maxSats * 3
   if (!Number.isFinite(maxExposedSats) || maxExposedSats <= 0) {
@@ -954,6 +986,8 @@ export const loadConfig = (): Config => {
   const offerMarkets = parseAssetMarkets(process.env.OFFER_MARKETS)
   const offerMinFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv('OFFER_MIN_FILL_AMOUNT') : 0n
   const offerMaxFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv('OFFER_MAX_FILL_AMOUNT') : 0n
+  const offerChargesDeliveredCarrier = process.env.OFFER_CHARGE_CARRIER?.trim() === 'true'
+  const assetCarrierPricing = process.env.ASSET_CARRIER_PRICING?.trim() === 'true'
   // Refused at boot rather than per offer: inverted bounds refuse every offer,
   // which is indistinguishable from a quiet market and would be diagnosed as
   // one. `evaluateOfferFill` compares against both, so it cannot report this.
@@ -970,8 +1004,10 @@ export const loadConfig = (): Config => {
     // resolveLimits refuses to widen, so an override here can only ever make the
     // amount at risk smaller.
     limits,
-    corridorLimits: corridorLimitsFromEnv(limits),
+    corridorLimits,
     corridorFees: corridorFeesFromEnv(),
+    onchainReceiveMaxBandSats: onchainReceiveMaxBandSatsFromEnv(corridorLimits['onchain:BTC->arkade:BTC']),
+    onchainReceiveBandBelowShare: onchainReceiveBandBelowShareFromEnv(),
     corridorNetworkFees: corridorNetworkFeesFromEnv(),
     onchainFeeRateRefreshMs,
     onchainFeeRateStaleMs,
@@ -986,6 +1022,8 @@ export const loadConfig = (): Config => {
     offerMarkets,
     offerMinFillAmount,
     offerMaxFillAmount,
+    offerChargesDeliveredCarrier,
+    assetCarrierPricing,
     // Read here so a malformed list refuses at boot beside every other knob.
     // What each named asset is WORTH still comes from the console's market rows,
     // which `createServices` joins to these.
@@ -1005,15 +1043,8 @@ export const loadConfig = (): Config => {
     contractRetentionMs: contractRetentionDays * 86_400_000,
     sweepConcurrency,
     chainTipEsploraUrl: process.env.CHAIN_TIP_ESPLORA_URL?.trim() || process.env.LND_ESPLORA_URL?.trim(),
-    // Ceiling is `MAX_LOCKUP_TIMEOUT` (= REFUND_SAFETY_MARGIN), DERIVED there and
-    // imported rather than written as a number here, so it cannot drift from the
-    // margin it is the same quantity as. This is NOT the 3480 that used to sit
-    // here: that one was justified by an invoice-expiry floor which no longer
-    // exists, and removing it for that reason was right — but it had also been
-    // holding this window under the safety margin by accident, which is the bound
-    // that actually matters. `payableCltvBlocks` enforces the invariant properly,
-    // at payment time; this refuses at boot a window that could only ever produce
-    // swaps refusing themselves. The 60s floor still rules out one nobody can fund.
+    // Ceiling imported (= REFUND_SAFETY_MARGIN) so it cannot drift: a longer window only yields swaps that
+    // refuse themselves at payment time. The 60s floor rules out one nobody can fund.
     lockupTimeoutSeconds: intFromEnv('LOCKUP_TIMEOUT_SECONDS', DEFAULT_LOCKUP_TIMEOUT, 60, MAX_LOCKUP_TIMEOUT),
     sendHintScidDenylist: sendHintScidDenylistFromEnv(),
     lnBackend,

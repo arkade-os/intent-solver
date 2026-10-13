@@ -32,14 +32,15 @@ export interface SolverAd {
 export const buildSolverAd = (inputs: SolverAdInputs): SolverAd => ({
   v: 1,
   type: 'solver_ad',
+  // Amounts are § 2.1 decimal strings; the bps rate stays a number.
   pairs: inputs.pairs.map((p) => ({
     pair: p.pair,
-    min: p.min,
-    max: p.max,
+    min: String(p.min),
+    max: String(p.max),
     fee_bps_indicative: p.feeBpsIndicative,
     // Omitted means zero (§ 3). Emitting an explicit 0 says the same thing in
     // a different document, and would change the digest for no change in terms.
-    ...(p.feeFlatIndicative > 0 ? { fee_flat_indicative: p.feeFlatIndicative } : {}),
+    ...(p.feeFlatIndicative > 0 ? { fee_flat_indicative: String(p.feeFlatIndicative) } : {}),
     quote_validity_s_typical: p.quoteValiditySeconds,
   })),
   relays: [...inputs.relays],

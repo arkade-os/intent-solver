@@ -12,13 +12,19 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { assetMarketPolicy, type AssetMarketConfig } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import {
+  assetMarketPolicy,
+  DEFAULT_SERVING,
+  type AssetMarketConfig,
+} from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { createServicesBody } from '../support/createServicesBody.js'
 
 const USDT = 'aa'.repeat(34)
 
 const market = (over: Partial<AssetMarketConfig> = {}): AssetMarketConfig => ({
+  ...DEFAULT_SERVING,
+  symbol: 'USDT',
   base: null,
   quote: USDT,
   baseDecimals: 8,
@@ -36,25 +42,19 @@ const market = (over: Partial<AssetMarketConfig> = {}): AssetMarketConfig => ({
 describe('createServices — asset markets', () => {
   it('reads them from the admin store at startup', () => {
     const body = createServicesBody()
-    expect(body).toContain('assetMarketPolicy(await adminStore.listMarkets())')
+    expect(body).toContain('const marketRows = await adminStore.listMarkets()')
   })
 
-  it('hands BOTH derived lists to Services, from the one call', () => {
-    // Never assembled separately at this call site. `assetMarketPolicy` derives
-    // the pair list and the pricing list from one filter precisely so that a
-    // market cannot leave one without the other — reconstructing either here
-    // would put that back.
+  it('hands the derived pricing list to Services, from the one call', () => {
     const body = createServicesBody()
     expect(body).toContain('assetMarkets: assetMarkets.pricing')
-    expect(body).toContain('assetMarketPairs: assetMarkets.pairs')
     expect(body).not.toMatch(/assetMarkets:.*\.filter\(/)
   })
 
   it('does not swallow a bad market the way it deliberately swallows a bad override', () => {
     // `applyOverrides` skips what it cannot validate, and is right to: refusing
     // to boot over a preference takes a solver down for nothing. Markets get
-    // the opposite treatment and the asymmetry must stay visible — a `try`
-    // around this call would restore the silent-empty-pricing path.
+    // the opposite treatment so invalid stored operator state stays visible.
     const body = createServicesBody()
     const at = body.indexOf('assetMarketPolicy(')
     expect(at).toBeGreaterThan(-1)
@@ -73,10 +73,9 @@ describe('createServices — asset markets', () => {
     const at = body.indexOf('assetMarketPolicy(')
     expect(at).toBeGreaterThan(-1)
     const call = body.slice(at, body.indexOf('\n', at))
-    expect(call).toBe('assetMarketPolicy(await adminStore.listMarkets())')
-    // Exactly once: a second resolution could disagree with the first, and only
-    // one of them reaches `Services`.
-    expect(body.match(/assetMarketPolicy\(/g)).toHaveLength(1)
+    expect(call).toBe('assetMarketPolicy(marketRows)')
+    // Boot plus replaceMarkets: both read the same store.
+    expect(body.match(/assetMarketPolicy\(/g)).toHaveLength(2)
   })
 })
 
@@ -114,10 +113,8 @@ describe('what startup does with a stored market', () => {
 
   it('refuses to start on a market that no longer validates, rather than dropping it', async () => {
     // Reachable only by a hand-edited database or a bound tightened in a later
-    // release — the route refuses this before it is ever written. It matters
-    // because dropping it would empty `pricing`, and an empty `pricing` is read
-    // by `AssetOfferService` as "not opted into price gating": it fills at
-    // whatever a maker asks. Loud beats silent-and-generous.
+    // release — the route refuses this before it is ever written. Dropping it
+    // would hide operator state and make the configured market silently vanish.
     const store = await AdminStore.open(':memory:', () => 1)
     await store.putMarket(market())
     // Straight past the store's own API, which is the only way to produce it.

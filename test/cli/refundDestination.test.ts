@@ -32,7 +32,7 @@ const servicesSource = readFileSync(
  * read twice cannot drift the way two copies would.
  */
 const refundDestinationBinding = (): string => {
-  const start = servicesSource.indexOf('const onchainRefundDestinationScript')
+  const start = servicesSource.indexOf('onchainRefundAddress ??=')
   if (start === -1) throw new Error('createServices no longer resolves a refund destination at all')
   return servicesSource.slice(start, start + 300)
 }

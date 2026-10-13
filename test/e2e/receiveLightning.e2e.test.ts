@@ -90,6 +90,8 @@ import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive
 import { DEFAULT_HOLD_INVOICE_WINDOW, ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import type { CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import { evaluateReceiveFunding, MIN_SETTLE_WINDOW } from '@arkade-os/solver-core/core/receive.js'
+import type { Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { amountSatsOf } from '@arkade-os/solver-core/invoice/decode.js'
 import { HOUR } from '@arkade-os/solver-core/core/timelocks.js'
 import { nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { newSealedPreimage } from './support/claimPacket.js'
@@ -126,6 +128,14 @@ const AMOUNT_SATS = Number(process.env.E2E_AMOUNT_SATS ?? 5000)
  */
 const QUOTE_LAG = 60
 
+// bps-only, as a Lightning corridor's must be (a flat charge costs it its registry
+// card). PRICED_SWAP_SATS is fixed where AMOUNT_SATS is overridable, and the two
+// results are written out, not derived with the pricing code under test.
+const PRICED_FEE: Fee = { bps: 100, flatSats: 0 }
+const PRICED_SWAP_SATS = 5000
+const EXACT_OUT_INVOICE_SATS = 5051
+const EXACT_IN_PAYOUT_SATS = 4950
+
 let arkade: E2eArkade
 let store: ReceiveSwapStore
 /** The shipped adapter, exactly as production builds it, and unwrapped. */
@@ -135,8 +145,8 @@ let dir: string
 /** Payments left running by a test, stopped in `afterAll` so no fork is held open. */
 const payers: CounterpartyPayment[] = []
 
-/** Build a service over the shared store, with an injectable clock and an optional covclaimd. */
-const serviceWith = (covclaimd: CovclaimdClient | null, now?: () => number): ReceiveSwapService =>
+/** Build a service over the shared store, with an injectable clock, fee and optional covclaimd. */
+const serviceWith = (covclaimd: CovclaimdClient | null, now?: () => number, fee?: Fee): ReceiveSwapService =>
   new ReceiveSwapService({
     acceptUnilateralGap: false,
     store,
@@ -148,6 +158,7 @@ const serviceWith = (covclaimd: CovclaimdClient | null, now?: () => number): Rec
     totalCommitted: () => store.committedSats(),
     admission: new AdmissionControl(),
     ...(now ? { now } : {}),
+    ...(fee ? { fee } : {}),
   })
 
 /** Pay `invoice` from the counterparty and remember the child so it can be stopped. */
@@ -451,6 +462,100 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
       const abandoned = await solverInvoice(sealed.paymentHash)
       expect(abandoned.state).toBe('CANCELED')
       expect(abandoned.settled).toBe(false)
+    },
+    SWAP_TIMEOUT_MS,
+  )
+
+  // THE PRICED PATH, which every other test here leaves at zero: they build the
+  // service with no fee, so `payout == give` and a corridor that mispriced either
+  // side would still pass all of them. Exact-out is what receive-client.mjs sends.
+  it(
+    'exact-out: the payer covers the fee on top, and the lockup carries exactly the payout asked for',
+    async () => {
+      await requireStack('lightning:BTC->arkade:BTC exact-out', ['arkd', 'emulator', 'lnd', 'ln-counterparty'])
+      await assertArkadeSpendable(arkade, PRICED_SWAP_SATS)
+
+      const service = serviceWith(null, undefined, PRICED_FEE)
+      const quoting = serviceWith(null, () => nowSeconds() - QUOTE_LAG, PRICED_FEE)
+
+      const sealed = newSealedPreimage(hex.encode(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true)))
+      const outcome = await quoting.quote({
+        paymentHash: sealed.paymentHash,
+        amountSats: PRICED_SWAP_SATS,
+        amountSide: 'to',
+        payoutAddress: await arkade.ctx.wallet.getAddress(),
+        payoutPubkey: hex.encode(await arkade.ctx.identity.xOnlyPublicKey()),
+        claimPacket: sealed.packet,
+      })
+      if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
+      const swap = outcome.swap
+      expect(swap.amountSats).toBe(EXACT_OUT_INVOICE_SATS)
+      expect(swap.payoutSats).toBe(PRICED_SWAP_SATS)
+
+      // `amountSatsOf`: `decodeInvoice` enforces a CLTV ceiling our own hold invoice asks past.
+      expect(amountSatsOf(swap.invoice)).toBe(EXACT_OUT_INVOICE_SATS)
+
+      payFromCounterpartyNode(swap.invoice)
+      const held = await awaitHeld(sealed.paymentHash)
+      expect(Number(held.amt_paid_sat)).toBe(EXACT_OUT_INVOICE_SATS)
+
+      const funded = await driveUntil(service, swap.id, new Set(['funded', ...TERMINAL]))
+      expect(funded.state).toBe('funded')
+      expect(funded.arkadeLockupValue).toBe(PRICED_SWAP_SATS)
+
+      const claimTxid = await clientClaimLockup(
+        arkade.ctx,
+        {
+          payoutPubkey: funded.payoutPubkey,
+          payoutAddress: funded.payoutAddress,
+          payoutPkScript: funded.payoutPkScript,
+          solverPubkey: funded.solverPubkey,
+          solverRefundPkScript: funded.solverRefundPkScript,
+          serverPubkey: funded.serverPubkey,
+          emulatorPubkey: funded.emulatorPubkey,
+          paymentHash: funded.paymentHash,
+          refundLocktime: funded.refundLocktime,
+          claimDelay: funded.claimDelay,
+          refundDelay: funded.refundDelay,
+          refundWithoutReceiverDelay: funded.refundWithoutReceiverDelay,
+          pkScript: funded.pkScript,
+          nonInteractiveParameters: funded.nonInteractiveParameters ?? false,
+        },
+        sealed.preimage,
+      )
+      expect(claimTxid).toBeTruthy()
+
+      const settled = await driveUntil(service, swap.id, new Set(['settled', ...TERMINAL]))
+      expect(settled.state).toBe('settled')
+
+      const payment = await awaitPaymentStatus(sealed.paymentHash, 'SUCCEEDED')
+      expect(Number(payment.value_sat)).toBe(EXACT_OUT_INVOICE_SATS)
+    },
+    SWAP_TIMEOUT_MS,
+  )
+
+  it(
+    'exact-in: the invoice is the amount the client named, and the fee comes out of the payout',
+    async () => {
+      await requireStack('lightning:BTC->arkade:BTC exact-in', ['arkd', 'emulator', 'lnd'])
+
+      const sealed = newSealedPreimage(hex.encode(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true)))
+      const outcome = await serviceWith(null, undefined, PRICED_FEE).quote({
+        paymentHash: sealed.paymentHash,
+        amountSats: PRICED_SWAP_SATS,
+        amountSide: 'from',
+        payoutAddress: await arkade.ctx.wallet.getAddress(),
+        payoutPubkey: hex.encode(await arkade.ctx.identity.xOnlyPublicKey()),
+        claimPacket: sealed.packet,
+      })
+      if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
+      const swap = outcome.swap
+      expect(swap.amountSats).toBe(PRICED_SWAP_SATS)
+      expect(swap.payoutSats).toBe(EXACT_IN_PAYOUT_SATS)
+      expect(amountSatsOf(swap.invoice)).toBe(PRICED_SWAP_SATS)
+
+      // Stops at the mint: nobody pays this one, so no capital leaves the float.
+      await cancelSolverHold(sealed.paymentHash)
     },
     SWAP_TIMEOUT_MS,
   )

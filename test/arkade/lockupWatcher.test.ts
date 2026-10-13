@@ -87,6 +87,19 @@ const build = (over: Partial<ConstructorParameters<typeof LockupWatcher>[0]> = {
 }
 
 describe('LockupWatcher — events into nudges', () => {
+  it('passes event timing to diagnostics without letting a diagnostics failure drop the nudge', () => {
+    const onEvent = vi.fn(() => {
+      throw new Error('diagnostics failed')
+    })
+    const { contracts, onScripts, onError, watcher } = build({ onEvent })
+    watcher.start()
+    watcher.sync(['aa'])
+    contracts.emit(received('aa'))
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ timestamp: 1 }), ['aa'])
+    expect(onError).toHaveBeenCalledWith(expect.any(Error))
+    expect(onScripts).toHaveBeenCalledWith(['aa'])
+  })
+
   it('nudges the swap whose script an arrival names', () => {
     const { contracts, onScripts, watcher } = build()
     watcher.start()
@@ -248,6 +261,45 @@ describe('LockupWatcher — asking is watching', () => {
     expect(contracts.watchCalls).toEqual(['aa'])
     contracts.release()
     await watcher.reconcile()
+  })
+
+  it('nudges a newly watched script once, catching a funding from before the watch', async () => {
+    const { onScripts, watcher } = build()
+    watcher.start()
+    watcher.sync(['aa'])
+    await watcher.reconcile()
+    watcher.sync(['aa'])
+    await watcher.reconcile()
+    expect(onScripts).toHaveBeenCalledTimes(1)
+    expect(onScripts).toHaveBeenCalledWith(['aa'])
+  })
+
+  it('does not nudge a script whose watch failed', async () => {
+    const { contracts, onScripts, watcher } = build()
+    contracts.failNextWatch = new Error('manager unavailable')
+    watcher.start()
+    watcher.sync(['aa'])
+    await watcher.reconcile()
+    expect(onScripts).not.toHaveBeenCalled()
+  })
+
+  it('does not nudge while it is not listening', async () => {
+    const { onScripts, watcher } = build()
+    watcher.sync(['aa'])
+    await watcher.reconcile()
+    expect(onScripts).not.toHaveBeenCalled()
+  })
+
+  it('nudges what it already watches once it starts listening, including after a restart', async () => {
+    const { onScripts, watcher } = build()
+    watcher.sync(['aa'])
+    await watcher.reconcile()
+    watcher.start()
+    expect(onScripts).toHaveBeenCalledTimes(1)
+    await watcher.stop()
+    watcher.start()
+    expect(onScripts).toHaveBeenCalledTimes(2)
+    expect(onScripts).toHaveBeenLastCalledWith(['aa'])
   })
 
   it('keeps delivering events when the watch call fails', async () => {

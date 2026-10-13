@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { RateLimiter, QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS } from '@arkade-os/solver-core/core/rateLimit.js'
+import { RateLimiter, QUOTE_RATE_WINDOW_SECONDS } from '@arkade-os/solver-core/core/rateLimit.js'
 import { DEFAULT_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 
 let clock: number

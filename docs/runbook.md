@@ -9,7 +9,7 @@ deployment shapes, one hybrid.
 | Piece                   | What it does                                         | Where it can run                                                           |
 | ----------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------- |
 | API (`buildApp`)        | quotes + status, bus-shaped payloads                 | Node (`serve`) or Cloudflare Workers (`fetch`)                             |
-| Ingress (`SwapIngress`) | how swap requests REACH the provider                 | HTTP (`serve`, inbound) or relay (`relay`, outbound-only)                  |
+| Ingress                 | how swap requests REACH the provider                 | HTTP (`serve`, inbound) or relay (`relay`, outbound-only)                  |
 | Money-mover             | drives swaps: fund-watch → pay → claim; refund sweep | Node (`watch`/`serve`/`relay`) or Workers `scheduled`+`queue` (see caveat) |
 | Store                   | durable swap state, compare-and-swap transitions     | better-sqlite3 file (Node) or D1 (Workers)                                 |
 | CLI                     | every operation by hand; the reproducibility surface | Node                                                                       |
@@ -161,6 +161,14 @@ the container does — quote ingestion, LN payment, claim, refund, fund-watch
 polling — is now an outbound connection. **Zero listening ports.** Proven end to
 end on regtest with a distinct client wallet: `scripts/e2e-relay.sh`.
 
+Set `SOLVER_LATENCY_DIAGNOSTICS=1` on the `relay` process to log
+`rfq_relay_timing` for each answered RFQ and `receive_quote_timing` for each
+successful Lightning receive quote. Both include an RFQ ID prefix for
+correlation. The receive record splits preparation, hold-invoice creation,
+and persistence; the relay record splits quote handling and reply publish.
+Neither record includes invoices, payment hashes, preimages, or wallet keys.
+Funding already logs `receive_fund_call_timing` and `receive_fund_timing`.
+
 That script defaults to `scripts/mock-relay.mjs`, which needs no relay running
 but speaks a broker framing (`{op:'sub'}`) that only it understands. To prove
 the flow against a REAL Nostr relay — which is the only way the framing is
@@ -279,8 +287,27 @@ for edge/TLS/rate-limiting.
 
 ## The admin console
 
-An operator console — swaps, quotes, settings, wallet, backend status, audit —
-on **its own port**, served from inside the running provider.
+### Request refusals
+
+The **request refusals** tab (`#refusals`, data at `GET /api/rfq-refusals`)
+shows RFQs rejected before a swap exists, including schema and invoice checks.
+For example, a wallet may receive `unsupported_payload` while the console shows
+`cltv_too_large (final delta 624 > 288)`. Entries include the transport, request
+type, valid RFQ ID, UTC time and diagnostic detail. Use **refresh** after a retry.
+Relay status refusals appear here too; HTTP status lookups returning a normal
+404 are not treated as refusals.
+
+The latest 200 entries are held in memory and cleared on restart. Details are
+capped at 1024 characters; raw request bodies, invoices, refund addresses and
+client keys are not retained by the recorder. The public refusal's `reason`
+stays unchanged; selected input failures add the client-safe structured fields
+defined by RFQ protocol § 10. This endpoint uses the same access boundary as the
+rest of the admin console.
+
+### Access and deployment
+
+An operator console — swaps, quotes, asset markets, settings, wallet, backend
+status, audit — on **its own port**, served from inside the running provider.
 
 ```bash
 ADMIN_PORT=8788 pnpm cli relay     # or serve, or watch
@@ -311,6 +338,13 @@ What follows from that:
   in `config.ts` refuses rather than guessing; this one cannot, because the
   container case legitimately needs the wider bind. The check that matters is
   in your proxy config, not here.
+- Mutating `/api` requests must be same-site JSON: a POST/PUT/PATCH without
+  `content-type: application/json` gets 415, and any mutation carrying
+  `Sec-Fetch-Site: cross-site` or an `Origin` naming another host gets 403.
+  The proxy must forward the browser's `Host`: behind **nginx** add
+  `proxy_set_header Host $host;` to the location block — its default rewrites
+  `Host` to the upstream, so every console mutation would be refused as
+  cross-origin. Caddy and Traefik preserve `Host` by default.
 
 ### Why it runs inside the provider process
 
@@ -380,7 +414,7 @@ alike — any amount is accepted and you choose at pay time.
 | source            | balance split                                          | deposit options                                     | settle                      | withdraw |
 | ----------------- | ------------------------------------------------------ | --------------------------------------------------- | --------------------------- | -------- |
 | `rail` (BTC rail) | channel out/in, onchain confirmed/unconfirmed, fee rate | invoice (if the backend mints one), onchain address | if the backend has the step | yes      |
-| `arkade` (float)  | available, boarding, recoverable, total                 | Arkade address, boarding address                    | no — use `float-lifecycle`  | no       |
+| `arkade` (float)  | available, boarding, recoverable, total                 | Arkade address, boarding address                    | no — use `float-lifecycle`  | yes — Arkade address (offchain) or bitcoin address (collaborative exit) |
 
 The rail's invoice comes from `LightningBackend.createInvoice`, itself optional —
 a backend without it keeps its onchain option rather than losing both. The same
@@ -396,11 +430,20 @@ enforces. The console renders the time remaining and replaces it with a banner
 once it has passed; press the button again for a fresh one.
 
 `rail` is absent entirely on a deployment with no `LN_BACKEND`, the same way the
-four BTC corridors are. `arkade` declines to settle or withdraw on purpose:
-settling boarded sats is `float-lifecycle`'s job (it carries the CLTV guard, and
-a bare `settle()` would merge the whole float into one coin), and paying an
-arbitrary address out of the float would spend coins outside the process-local
-reservation ledger.
+four BTC corridors are. `arkade` declines to settle on purpose: settling boarded
+sats is `float-lifecycle`'s job (it carries the CLTV guard, and a bare
+`settle()` would merge the whole float into one coin). It does withdraw, and the
+destination's form picks the rail — an Arkade address is paid offchain at once,
+a bitcoin address by collaborative exit at the server's next batch. Either way
+the withdrawal spends **every asset-free coin no live swap's funding has pinned**,
+holding all of them until it settles — for a bitcoin address that is the next
+batch, and until then no swap can be funded from the float — and
+returns the rest as one change coin, so the float's piece count drops to one
+until `pool-mint` splits it again — on its own only with `POOL_AUTO_MINT=true`,
+otherwise at the next renewal or by hand. The pinned coins are left alone, because
+the SDK's own selection cannot be told "not that one". The destination receives
+exactly the typed amount; the exit's intent fees — one per coin spent — come out
+of the change back to the float.
 
 **Nothing here opens Lightning channels.** Neither port has a channel primitive,
 so a rail deposit lands in its onchain wallet and whether it becomes inbound or
@@ -412,13 +455,15 @@ the entrypoint — same shape and same reasoning as `registerLightningRail`.
 `fund-withdraw` is the only action in the console whose destination is not fixed
 by a swap, which is why it is confirmed with the destination address rather than
 a fixed word: a literal becomes muscle memory, and a confirmation that differs
-per request cannot. The source then applies its own checks before touching a
-backend — the rail decodes the address against this deployment's network (the
-one mistake retyping cannot catch, since an operator confirming a wrong-chain
-address types the same wrong string twice) and refuses an amount above the
-**confirmed** balance. It is **not safe to repeat**: nothing persists or
-re-drives it, so each attempt is a separate payment and a withdrawal that timed
-out must be checked against the chain before retrying.
+per request cannot. Each source checks the address against this deployment's
+network before any money moves (the one mistake retyping cannot catch, since an
+operator confirming a wrong-chain address types the same wrong string twice) —
+the float's Arkade addresses inside the SDK's `wallet.send`, everything else in
+the source. The rail refuses an amount above the **confirmed** balance; the float
+refuses when a live swap's funding pins every coin, or when the unpinned coins
+cannot cover the amount and the exit fee. It is **not safe to repeat**: nothing
+persists or re-drives it, so each attempt is a separate payment and a withdrawal
+that timed out must be checked against the chain before retrying.
 
 Remember what `ADMIN_HOST` is: with the console reachable, `fund-withdraw` lets
 anything that can reach the port send a source's balance to an address of its
@@ -440,6 +485,11 @@ every service, so an override takes effect **at the next restart** — not
 before. Nothing re-reads a running service's policy. The Settings view shows
 what THIS process is quoting; a pending override is what the next one will.
 Every API response says so and the UI badges it.
+
+Asset **markets** are the exception: PUT/DELETE on the **markets** tab persist,
+probe the feed, then rebuild this process's RFQ serve list. The next RFQ quotes
+a new pair; disable or delete refuses new quotes. In-flight swaps keep the terms
+they were quoted with. Rails, mnemonic and relay URL still need a restart.
 
 Everything that has to agree with what gets quoted reads the same resolved
 policy: the ingress corridor gate, the open-RFQ bidder, and the registry card.
@@ -470,21 +520,14 @@ un-redact.
 
 ### What the restart banner names
 
-Two sources, not one. `createServices` takes both snapshots at startup and the
-console diffs the store against each:
+Overrides only. `createServices` snapshots `bootOverrides` at startup and the
+console diffs the store against that snapshot, with each knob's running and
+stored values (`LN_SEND_FEE_BPS 0 → 25`). A key whose effective value did not
+move is dropped: an override equal to the environment's own value changes
+nothing a restart would apply.
 
-- **overrides** — `bootOverrides` against what `AdminStore` holds now, with each
-  knob's running and stored values (`LN_SEND_FEE_BPS 0 → 25`). A key whose
-  effective value did not move is dropped: an override equal to the
-  environment's own value changes nothing a restart would apply.
-- **asset markets** — `assetMarkets` against the `admin_market` rows, reported
-  as added, edited or no longer trading. A paused market reads as leaving,
-  because the next process will not trade it either.
-
-Markets are the half worth stating out loud: they are ROWS rather than
-overrides, so a diff of the override map cannot see one — and the markets tab is
-where the staleness matters most, since a market added since boot is not one this
-process is filling against.
+Asset markets are not in the banner. They apply live (see above), so a
+"restart to trade this pair" item would be a lie.
 
 **restart solver** sits in that banner. Before the confirmation the console
 states what a restart would interrupt: swaps live, swaps exposed, sats committed
@@ -540,8 +583,8 @@ the reasons to take one.
   could spend). Verify once by hand if you care about the txid.
 - **`claimed` carrying an `onchain_claim_txid`, or `refunding_onchain` carrying
   an `onchain_refund_txid`, is a row WAITING FOR A BLOCK** and needs nothing.
-  The spend is broadcast and the row stays non-terminal until it confirms
-  (#204), which is what makes `settled`/`refunded` mean the money actually
+  The spend is broadcast and the row stays non-terminal until it confirms,
+  which is what makes `settled`/`refunded` mean the money actually
   moved. If one sits for many blocks, look the txid up: still in the mempool is
   a fee-rate problem, and absent from the chain entirely means the broadcast
   never stuck — the next sweep rebuilds it at today's rate on its own.
@@ -592,15 +635,24 @@ the reasons to take one.
   regtest: nine coins (eight of them plain sats) became one 8,550,951-sat
   asset-bearing coin after a single settle, with no swap traffic at all.
 
-  `cli pool --mint` works because the split isolates the asset: it lands on
-  exactly one piece and the rest come out clean. It is a recovery, not a fix —
-  nothing re-splits automatically after a renewal consolidates. Tracked in
-  the solver's own tracker.
+  `cli pool --mint` works because the reshape isolates the asset: every asset
+  its inputs carry lands on one small change output, and the pieces come out
+  clean. Renewal settles into the pool's shape and re-plans after itself, so
+  this is a recovery for whatever reaches the float between renewals.
 
   The refusal reason is true (there really are no spendable sats) but names the
   wrong cause, which is why this is worth recognising by its signature: a large
   `total` beside a dead corridor. `cli balances` prints `assets` separately, so
   an asset in the float is visible there.
+
+- **Hundreds of coins in the float.** Swap proceeds and refunds land as
+  separate coins, so a busy solver fragments between renewals. `cli balances`
+  and the console's pool line then read `consolidating M of N coins…`. Each
+  `cli pool --mint` (or console `pool-mint`) merges up to 50 of them into the
+  pool's pieces plus one remainder, in one Arkade transaction and at no intent
+  fee; repeat until the reason stops saying `consolidating`. With
+  `POOL_AUTO_MINT=true` the watch loop does one pass per lifecycle cadence
+  while no swap is in flight.
 
 - **Exposure**: `cli balances` shows current exposed sats vs the cap. The cap
   counts every non-terminal swap including bare quotes, and quote creation is
@@ -1012,7 +1064,7 @@ before the solver's `unilateralRefundWithoutReceiver` — that ordering is
 mandatory and must not be "fixed", since a funder whose refund opened first
 could take the money from a claimant holding the preimage. So if `E` passes
 first, a trader can let the htlc fail back to the payer at no cost and only
-then claim the Arkade payout, taking both sides (issue #69).
+then claim the Arkade payout, taking both sides.
 
 Two things follow that an operator will meet in the wild.
 
@@ -1153,7 +1205,7 @@ settle window too little to use, and a committed refund deadline past `E`.
 What you accept, plainly: with the Arkade server **gone or censoring for longer
 than its exit delay** AND `E` already passed, a trader can let the htlc fail back
 to its payer at no cost and only then claim the Arkade payout unilaterally —
-both sides, one preimage (#69). It is bounded by `LN_RECEIVE_MAX_SATS` per swap
+both sides, one preimage. It is bounded by `LN_RECEIVE_MAX_SATS` per swap
 and `MAX_EXPOSED_SATS` in aggregate, which is why `bitcoin` refuses to accept the
 window unless you have set the former by hand.
 
@@ -1532,8 +1584,9 @@ covers separately — see "covclaimd" below.
   `test/e2e/support/preflight.ts` so `pnpm test:e2e` stays one command.
   Anything already exported wins, so a one-off override still works.
   `COVCLAIMD_URL` (default `http://localhost:7271`) and `ESPLORA_URL` (default
-  `http://localhost:3000/api`) are e2e-only knobs — no `packages/solver-app/src/config.ts` setting
-  exists for covclaimd yet, because the receive legs are not wired into the CLI.
+  `http://localhost:3000/api`) carry e2e defaults here; `COVCLAIMD_URL` is also
+  a real `packages/solver-app/src/config.ts` setting, so an exported one wires
+  the deployed receive legs to it too — see § covclaimd before you do.
 - **A missing dependency FAILS, it never skips.** A suite that runs this rarely
   and skips quietly is a suite that rots into one that cannot pass at all. The
   preflight probes every dependency and prints the whole stack as a table,
@@ -1567,8 +1620,8 @@ covers separately — see "covclaimd" below.
 
 ### covclaimd
 
-Optional, and still unwired here — but the reason has an expiry date on it now,
-so read the version before repeating the old conclusion.
+Optional, and unwired unless `COVCLAIMD_URL` names one — but the reason has an
+expiry date on it now, so read the version before repeating the old conclusion.
 
 **What was observed (regtest, 2026-08-07).** Against a live
 `ghcr.io/arkade-os/covclaimd:v0.0.1-rc.1`, `POST /v1/reveal` returned **200**
@@ -1603,8 +1656,10 @@ the timelocked non-interactive refund leaf is on unverified ground until this
 note says otherwise.
 
 **Required operator action: leave covclaimd unwired.** There is no safe middle
-setting to pick here. `createServices` leaves `covclaimd` unset on purpose
-(`packages/solver-app/src/cli.ts:444`), and every quote path now writes
+setting to pick here, and nothing in the code enforces it: `createServices`
+wires covclaimd whenever `COVCLAIMD_URL` is set
+(`packages/solver-app/src/ops/services.ts`), so leaving it unwired means
+leaving that variable unset. Every quote path now writes
 `nonInteractiveParameters: true` unconditionally — all six `insertQuote` call
 sites, with no config gate and no per-swap opt-out — so wiring covclaimd would
 put it against a nine-leaf tree on EVERY newly funded lockup, not on some

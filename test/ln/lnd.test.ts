@@ -34,7 +34,6 @@ const {
   heldTimeoutHeight,
   isInvoiceNotFound,
   isNoFeeEstimate,
-  isoToUnixSeconds,
   probeTimeoutMs,
   rejectionReason,
   toExpiresAt,
@@ -62,12 +61,6 @@ describe('rejectionReason', () => {
     expect(rejectionReason('plain string')).toBeUndefined()
     expect(rejectionReason(undefined)).toBeUndefined()
     expect(rejectionReason([])).toBeUndefined()
-  })
-})
-
-describe('isoToUnixSeconds', () => {
-  it('converts an LND ISO 8601 date to unix seconds', () => {
-    expect(isoToUnixSeconds('2026-08-06T00:00:00.000Z')).toBe(1785974400)
   })
 })
 
@@ -248,6 +241,31 @@ describe('isInvoiceNotFound', () => {
       isInvoiceNotFound([503, 'UnexpectedServiceError', { err: { details: 'there are no existing invoices' } }]),
     ).toBe(false)
     expect(isInvoiceNotFound(new Error('network error'))).toBe(false)
+  })
+})
+
+describe('LndLightningBackendAdapter.create', () => {
+  const create = () => LndLightningBackendAdapter.create({ socket: 'lnd:10009', cert: 'c', macaroon: 'm' })
+
+  it('names the gRPC status a failed boot probe carries, not `[object Object]`', async () => {
+    const err = new Error('14 UNAVAILABLE: No connection established. Last error: Error: connect ECONNREFUSED')
+    getWalletInfo.mockRejectedValueOnce([503, 'GetWalletInfoErr', { err }])
+    await expect(create()).rejects.toThrow(
+      `LND at lnd:10009 did not answer getWalletInfo: GetWalletInfoErr: ${err.message}`,
+    )
+  })
+
+  it('keeps the bare reason when the vendor attaches no gRPC error', async () => {
+    getWalletInfo.mockRejectedValueOnce([503, 'LndLocked'])
+    await expect(create()).rejects.toThrow('LND at lnd:10009 did not answer getWalletInfo: LndLocked')
+  })
+
+  it('opens without asking the node, and probes it on demand', async () => {
+    getWalletInfo.mockClear()
+    const adapter = LndLightningBackendAdapter.open({ socket: 'lnd:10009', cert: 'c', macaroon: 'm' })
+    expect(getWalletInfo).not.toHaveBeenCalled()
+    getWalletInfo.mockRejectedValueOnce([503, 'LndLocked'])
+    await expect(adapter.probe()).rejects.toThrow('LND at lnd:10009 did not answer getWalletInfo: LndLocked')
   })
 })
 
@@ -519,6 +537,29 @@ describe('feeSatsFromMtokens', () => {
     expect(feeSatsFromMtokens('0')).toBe(0)
   })
 
+  /**
+   * The gap `Number.isFinite` does not close. `Number('')` is 0, not NaN — so a
+   * blank figure read as a route that cost NOTHING, which is the one thing a
+   * missing number must never become on a screen built to keep unmeasured and
+   * free apart.
+   */
+  it('refuses a BLANK figure rather than reading it as a free route', () => {
+    for (const blank of ['', ' ', '\t', '\n']) {
+      expect(() => feeSatsFromMtokens(blank)).toThrow(/unreadable routing fee/)
+    }
+  })
+
+  // `Number` accepts these; a wire integer is never spelled either way, and both
+  // land a hundredfold or more off the real figure.
+  it('refuses exponent and hex spellings', () => {
+    expect(() => feeSatsFromMtokens('1e3')).toThrow(/unreadable routing fee/)
+    expect(() => feeSatsFromMtokens('0x10')).toThrow(/unreadable routing fee/)
+  })
+
+  it('refuses a negative figure, which no routing fee is', () => {
+    expect(() => feeSatsFromMtokens('-1')).toThrow(/unreadable routing fee/)
+  })
+
   // NaN compares false against every cap and floor downstream, and a coerced 0
   // would quote a free execution. Both are silent; the throw is not.
   it('throws on a figure it cannot read rather than coercing one', () => {
@@ -564,6 +605,15 @@ describe('isNoFeeEstimate', () => {
     expect(isNoFeeEstimate([503, 'UnexpectedGetRoutingFeeEstimateError', {}])).toBe(false)
     expect(isNoFeeEstimate([503, 'ExpectedFeeInGetRoutingFeeEstimateResponse'])).toBe(false)
     expect(isNoFeeEstimate(new Error('network error'))).toBe(false)
+  })
+
+  it('recognises only the exact self-payment code and detail', () => {
+    expect(
+      isNoFeeEstimate([503, 'UnexpectedGetRoutingFeeEstimateError', { err: { code: 2, details: 'other failure' } }]),
+    ).toBe(false)
+    expect(
+      isNoFeeEstimate([503, 'UnexpectedGetRoutingFeeEstimateError', { err: { details: 'self-payments not allowed' } }]),
+    ).toBe(false)
   })
 })
 
@@ -618,17 +668,19 @@ describe('LndLightningBackendAdapter.estimateSendFee', () => {
     await expect(estimate()).resolves.toBeNull()
   })
 
+  it('answers null when LND cannot estimate a payment to its own node', async () => {
+    getRoutingFeeEstimate.mockRejectedValue([
+      503,
+      'UnexpectedGetRoutingFeeEstimateError',
+      { err: { code: 2, details: 'self-payments not allowed' } },
+    ])
+    await expect(estimate()).resolves.toBeNull()
+  })
+
   // Null here would hide a dead node behind "every quote falls back to the flat".
   it('re-throws a fault it does not recognise rather than quoting around it', async () => {
     getRoutingFeeEstimate.mockRejectedValue([503, 'UnexpectedGetRoutingFeeEstimateError', { err: { code: 14 } }])
     await expect(estimate()).rejects.toBeDefined()
-  })
-
-  // LND reserves nothing: the probe and the later payment are unconnected calls,
-  // and a token would claim a link between them that does not exist.
-  it('mints no handle, because nothing here is prepared to be spent against', async () => {
-    getRoutingFeeEstimate.mockResolvedValue({ fee_mtokens: '10500', timeout: 144 })
-    await expect(estimate()).resolves.not.toHaveProperty('feeHandle')
   })
 })
 

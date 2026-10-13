@@ -11,25 +11,27 @@
 import type { Hono } from 'hono'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
-import { applyOverrides, pendingRestartKeys } from '../settings.js'
-import { marketDrift, settingsDrift } from '../drift.js'
-import { servedBy } from '../servedBy.js'
+import { applyOverrides, pendingRestartKeys, LIVE_KEYS } from '../settings.js'
+import { settingsDrift } from '../drift.js'
+import { marketCapability } from '../marketCapability.js'
 import { assetMarketKey, type AssetMarketBounds } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import type { AssetMarketRow } from '../db.js'
 import { probeBackends } from '../probes.js'
 import { consoleBalance, type AssetDetailSource } from '../assets.js'
+import { marketServingDivergence } from '../../ops/marketDivergence.js'
 import { poolPlan } from '../../ops/pool.js'
 import { requireLn, requireOnchain } from '../../ops/rails.js'
+import { attempt } from '../../ops/attempt.js'
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import type { AdminSwap } from '@arkade-os/solver-core/core/swapView.js'
 import {
   projectSend,
   projectReceive,
   projectOnchainSend,
   projectOnchainReceive,
-  type AdminSwap,
-} from '../projection.js'
+} from '@arkade-os/solver-corridors/corridors/projections.js'
+import { liveSwaps } from '../projection.js'
 import type { AdminDeps } from '../server.js'
-
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 /**
  * The wallet's asset-metadata reader, when there is one.
@@ -41,23 +43,6 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 const assetSource = (wallet: unknown): AssetDetailSource | undefined => {
   const manager = (wallet as { assetManager?: Partial<AssetDetailSource> } | null)?.assetManager
   return typeof manager?.getAssetDetails === 'function' ? (manager as AssetDetailSource) : undefined
-}
-
-/**
- * Read a value that depends on a backend, or report why it could not be read.
- *
- * Same discipline as `probes.ts`: an unreachable Lightning node must not take
- * the wallet page down, it must show as unreadable beside the parts that DID
- * answer.
- */
-const attempt = async <T>(
-  read: () => Promise<T>,
-): Promise<{ value: T; error: null } | { value: null; error: string }> => {
-  try {
-    return { value: await read(), error: null }
-  } catch (error) {
-    return { value: null, error: messageOf(error) }
-  }
 }
 
 /**
@@ -98,10 +83,12 @@ const marketCards = (rows: readonly AssetMarketRow[], services: AdminDeps['servi
     baseDecimals: row.baseDecimals,
     quoteDecimals: row.quoteDecimals,
     feeBps: row.feeBps,
+    sellBaseFeeFlat: String(row.sellBaseFeeFlat ?? 0n),
+    buyBaseFeeFlat: String(row.buyBaseFeeFlat ?? 0n),
     toleranceBps: row.toleranceBps,
     enabled: row.enabled,
     active: active.has(row.marketKey),
-    servedBy: servedBy(row, services.policy),
+    ...marketCapability(row, services),
     sellBase: boundsJson(row.sellBase),
     buyBase: boundsJson(row.buyBase),
   }))
@@ -134,21 +121,17 @@ const stuckSwaps = async (deps: AdminDeps): Promise<{ rows: AdminSwap[]; total: 
   }
 }
 
-/** Every non-terminal swap, projected — the live set across all four corridors. */
-const liveSwaps = async (deps: AdminDeps): Promise<AdminSwap[]> => {
-  const { services } = deps
-  const [send, receive, onchainSend, onchainReceive] = await Promise.all([
-    services.store.findRecoverable(),
-    services.receiveStore.findRecoverable(),
-    services.onchainStore.findRecoverable(),
-    services.onchainReceiveStore.findRecoverable(),
+const overviewBalances = async (services: AdminDeps['services']) => {
+  const [lightning, arkade] = await Promise.all([
+    attempt(async () => (await requireLn(services.ln).getBalance()).availableSats),
+    attempt(async () => await services.arkade.wallet.getBalance()),
   ])
-  return [
-    ...send.map(projectSend),
-    ...receive.map(projectReceive),
-    ...onchainSend.map(projectOnchainSend),
-    ...onchainReceive.map(projectOnchainReceive),
-  ]
+  return {
+    lightningSats: lightning.value,
+    lightningError: lightning.error,
+    arkade: arkade.value ? consoleBalance(arkade.value, assetSource(services.arkade.wallet)) : null,
+    arkadeError: arkade.error,
+  }
 }
 
 export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
@@ -157,7 +140,7 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
     const overrides = await services.adminStore.getOverrides()
     const effective = applyOverrides(services.config, overrides)
     const storedMarkets = await services.adminStore.listMarkets()
-    const live = await liveSwaps(deps)
+    const live = await liveSwaps(deps.services)
     const stuck = await stuckSwaps(deps)
 
     const committed = await Promise.all([
@@ -168,12 +151,7 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
     ])
     const committedSats = committed.reduce((sum, value) => sum + value, 0)
 
-    // Balances are best-effort: the overview is the first thing an operator
-    // loads, and it must render even when a backend is down.
-    const [lightning, arkade] = await Promise.all([
-      attempt(async () => (await requireLn(services.ln).getBalance()).availableSats),
-      attempt(async () => await services.arkade.wallet.getBalance()),
-    ])
+    const balances = c.req.query('balances') === 'false' ? null : await overviewBalances(services)
 
     return c.json({
       mode: deps.mode,
@@ -182,15 +160,25 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       // of per-network facts, and a second copy in untyped browser code is a
       // copy that will eventually point a mainnet swap at a signet explorer.
       explorers: NETWORKS[services.config.network].explorers,
-      uptimeSeconds: Math.max(0, (deps.now?.() ?? Math.floor(Date.now() / 1000)) - deps.startedAt),
-      /** Overrides AND markets: both are resolved once at boot. @see admin/drift.ts */
-      pendingRestart: [
-        ...settingsDrift(services.policy, effective, pendingRestartKeys(services.bootOverrides, overrides)),
-        ...marketDrift(services.assetMarkets, storedMarkets),
-      ],
+      uptimeSeconds: Math.max(0, (deps.now?.() ?? nowSeconds()) - deps.startedAt),
+      /** What `routes/settings.ts`'s `pendingKeys` derives, independently — and for the reasons stated there. */
+      pendingRestart: settingsDrift(
+        services.bootPolicy,
+        effective,
+        pendingRestartKeys(services.bootOverrides, overrides),
+      ).filter((item) => !LIVE_KEYS.has(item.key)),
       restartEnabled: services.config.adminRestartEnabled,
       providerPubkey: services.providerPubkey,
       markets: marketCards(storedMarkets, services),
+      servingDivergence: [
+        // The boot repairs first: a row this process REWROTE outranks a row it
+        // merely disagrees with the environment about.
+        ...services.adminStore.repairedServing,
+        ...marketServingDivergence(storedMarkets, {
+          offerMarkets: services.config.offerMarkets,
+          tokens: services.config.assetRfqTokens,
+        }),
+      ],
       corridors: CORRIDORS.map((corridor) => ({
         corridor,
         enabled: effective.corridorEnabled[corridor],
@@ -242,15 +230,7 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
         })),
         failing: services.tickErrors.failing,
       },
-      balances: {
-        lightningSats: lightning.value,
-        lightningError: lightning.error,
-        // Projected, never passed through: the raw balance carries `bigint` asset
-        // amounts and `c.json` throws on one, which took this whole route — and so
-        // every view of the console — down for any solver holding an asset.
-        arkade: arkade.value ? consoleBalance(arkade.value, assetSource(services.arkade.wallet)) : null,
-        arkadeError: arkade.error,
-      },
+      balances,
     })
   })
 
@@ -298,7 +278,7 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/quotes', async (c) => {
     // A quote IS a swap in `quoted` state — insertQuote writes the row — so
     // this is a projection of the same tables rather than a separate store.
-    const quoted = (await liveSwaps(deps)).filter((swap) => swap.state === 'quoted')
+    const quoted = (await liveSwaps(deps.services)).filter((swap) => swap.state === 'quoted')
     return c.json({ quoted, bids: deps.bids?.recent() ?? { entries: [], ephemeral: true, capacity: 0 } })
   })
 }

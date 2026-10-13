@@ -23,10 +23,10 @@ describe('buildSolverAd', () => {
     expect(ad.type).toBe('solver_ad')
     expect(ad.pairs[0]).toEqual({
       pair: 'arkade:BTC->lightning:BTC',
-      min: 1000,
-      max: 100_000,
+      min: '1000',
+      max: '100000',
       fee_bps_indicative: 30,
-      fee_flat_indicative: 50,
+      fee_flat_indicative: '50',
       quote_validity_s_typical: 900,
     })
     expect(ad.relays).toEqual(['wss://relay.example'])

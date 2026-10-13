@@ -63,6 +63,26 @@ export const priceFrom = (value: unknown): Price => {
 
 const TEN = 10n
 
+/** The widest precision a leg may declare. Config validators import it so a market they accept is never refused here. */
+export const MAX_DECIMALS = 36
+
+const checkDecimals = (baseDecimals: number, quoteDecimals: number): void => {
+  for (const [name, value] of [
+    ['baseDecimals', baseDecimals],
+    ['quoteDecimals', quoteDecimals],
+  ] as const) {
+    if (!Number.isInteger(value) || value < 0 || value > MAX_DECIMALS) {
+      throw new Error(`${name} must be an integer in 0..${MAX_DECIMALS}, got ${value}`)
+    }
+  }
+}
+
+// Exact division needs no rounding either way; only a remainder does.
+const divRound = (numerator: bigint, denominator: bigint, rounding: Rounding): bigint => {
+  const quotient = numerator / denominator
+  return rounding === 'up' && numerator % denominator !== 0n ? quotient + 1n : quotient
+}
+
 /**
  * Convert an amount of the BASE asset into the QUOTE asset, exactly.
  *
@@ -85,20 +105,11 @@ export const convertAmount = (args: {
 }): bigint => {
   const { baseAmount, price, baseDecimals, quoteDecimals, rounding } = args
   if (baseAmount < 0n) throw new Error(`baseAmount must not be negative, got ${baseAmount}`)
-  for (const [name, value] of [
-    ['baseDecimals', baseDecimals],
-    ['quoteDecimals', quoteDecimals],
-  ] as const) {
-    if (!Number.isInteger(value) || value < 0 || value > 36) {
-      throw new Error(`${name} must be an integer in 0..36, got ${value}`)
-    }
-  }
+  checkDecimals(baseDecimals, quoteDecimals)
 
   const numerator = baseAmount * price.mantissa * TEN ** BigInt(quoteDecimals)
   const denominator = TEN ** BigInt(price.scale) * TEN ** BigInt(baseDecimals)
-  const quotient = numerator / denominator
-  // Exact division needs no rounding either way; only a remainder does.
-  return rounding === 'up' && numerator % denominator !== 0n ? quotient + 1n : quotient
+  return divRound(numerator, denominator, rounding)
 }
 
 /**
@@ -205,17 +216,9 @@ export const convertQuoteToBase = (args: {
 }): bigint => {
   const { quoteAmount, price, baseDecimals, quoteDecimals, rounding } = args
   if (quoteAmount < 0n) throw new Error(`quoteAmount must not be negative, got ${quoteAmount}`)
-  for (const [name, value] of [
-    ['baseDecimals', baseDecimals],
-    ['quoteDecimals', quoteDecimals],
-  ] as const) {
-    if (!Number.isInteger(value) || value < 0 || value > 36) {
-      throw new Error(`${name} must be an integer in 0..36, got ${value}`)
-    }
-  }
+  checkDecimals(baseDecimals, quoteDecimals)
 
   const numerator = quoteAmount * TEN ** BigInt(price.scale) * TEN ** BigInt(baseDecimals)
   const denominator = price.mantissa * TEN ** BigInt(quoteDecimals)
-  const quotient = numerator / denominator
-  return rounding === 'up' && numerator % denominator !== 0n ? quotient + 1n : quotient
+  return divRound(numerator, denominator, rounding)
 }

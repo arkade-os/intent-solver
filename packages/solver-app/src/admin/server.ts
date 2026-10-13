@@ -25,13 +25,18 @@ import { registerStatusRoutes } from './routes/status.js'
 import { registerDiagnosticsRoutes } from './routes/diagnostics.js'
 import { registerSettingsRoutes } from './routes/settings.js'
 import { registerMarketRoutes } from './routes/markets.js'
+import { registerPricingRoutes } from './routes/pricing.js'
+import { registerPricingApplyRoutes } from './routes/pricingApply.js'
+import { registerPnlRoutes } from './routes/pnl.js'
 import { registerActionRoutes } from './routes/actions.js'
 import { registerCardRoutes } from './routes/card.js'
 import { registerEventRoutes } from './routes/events.js'
 import type { ChangeFeed } from './events.js'
 import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
-import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
+import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { readStaticFile } from './static.js'
+import { createFeedCache } from './feedCache.js'
 
 /** Which long-lived command the console is running inside. */
 export type AdminMode = 'serve' | 'relay' | 'watch'
@@ -52,10 +57,9 @@ export interface AdminDeps {
   /** Recent open-RFQ bids. Absent when bidding is off (`OPEN_RFQ_MAX_BIDS_PER_MIN=0`). */
   bids?: BidRecorder
   /**
-   * The kind-38859 ad publisher. Absent in a mode with no relay connection —
-   * exactly the treatment {@link AdminDeps.relay} and {@link AdminDeps.bids}
-   * get, and for the same reason: reporting a publisher as `off` where none
-   * could exist reads as a policy an operator chose rather than an absence.
+   * The kind-38859 ad publisher. Present only in `relay` mode with
+   * `NOSTR_AD_PUBLISH` manual or auto — the treatment {@link AdminDeps.relay}
+   * and {@link AdminDeps.bids} get.
    *
    * Absent means `POST /api/actions/post-ad` answers 409 rather than 500.
    */
@@ -73,9 +77,33 @@ export interface AdminDeps {
   fetchPrice?: FetchPrice
 }
 
+const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
 export const buildAdminApp = (deps: AdminDeps): Hono => {
   const app = new Hono()
-  const now = deps.now ?? ((): number => Math.floor(Date.now() / 1000))
+  const now = deps.now ?? nowSeconds
+
+  /**
+   * Same-site JSON only, ahead of every route: Hono runs handlers in
+   * registration order, so a guard added later runs later. Host rather than
+   * whole origin — a proxy terminating TLS changes the scheme, not the host.
+   */
+  app.use('/api/*', async (c, next) => {
+    if (!MUTATING.has(c.req.method)) return next()
+    const origin = c.req.header('origin')
+    if (
+      c.req.header('sec-fetch-site') === 'cross-site' ||
+      (origin !== undefined && URL.parse(origin)?.host !== new URL(c.req.url).host)
+    ) {
+      return c.json({ error: 'cross_origin', message: 'a cross-origin request cannot change this solver' }, 403)
+    }
+    // A form post cannot set this header; `DELETE` is the one the console sends bodiless.
+    const mediaType = (c.req.header('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
+    if (c.req.method !== 'DELETE' && mediaType !== 'application/json') {
+      return c.json({ error: 'unsupported_media_type', message: 'content-type must be application/json' }, 415)
+    }
+    return next()
+  })
 
   app.get('/api/healthz', (c) =>
     c.json({ ok: true, mode: deps.mode, uptimeSeconds: Math.max(0, now() - deps.startedAt) }),
@@ -86,8 +114,19 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   registerSwapRoutes(app, deps)
   // Beside the swaps route, not inside it. @see routes/offers.ts
   registerOfferRoutes(app, deps)
+  app.get('/api/rfq-refusals', (c) => c.json(deps.services.rfqRefusals.recent()))
   registerSettingsRoutes(app, deps)
-  registerMarketRoutes(app, deps)
+  // Built once and shared: `feeds.read` is for the preview, never the write probe.
+  const fetchPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
+  const feeds = createFeedCache(fetchPrice)
+  registerMarketRoutes(app, { ...deps, fetchPrice }, feeds)
+  registerPricingRoutes(app, deps, feeds)
+  // The ordered save across both of the two routes above. @see routes/pricingApply.ts
+  registerPricingApplyRoutes(app, { ...deps, fetchPrice })
+  // BEFORE the actions route, for the reason the card route states below: that
+  // route claims `/api/actions/:name` only, but registration order is what
+  // keeps the `*` fallback at the very bottom from shadowing anything.
+  registerPnlRoutes(app, deps)
   // BEFORE the actions route, and it must stay there: that route claims
   // `/api/actions/:name`, which matches `/api/actions/post-ad` too, and Hono runs
   // handlers in registration order — so registering afterwards yields a 404

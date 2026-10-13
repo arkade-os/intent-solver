@@ -1,6 +1,6 @@
 /**
  * A source-level guard that `createServices` constructs ONLY the enabled
- * corridors' services — the mechanism issue #43 asks for, in the one place a
+ * corridors' services — the mechanism a deployment's corridor choice needs, in the one place a
  * regression would reappear. Asserted against the source text because
  * constructing the stack needs live backends, which a unit test has none of.
  *
@@ -24,9 +24,7 @@ const cliSource = readFileSync(fileURLToPath(new URL('../../packages/solver-app/
 describe('createServices — corridor enablement', () => {
   it.each([
     ['arkade:BTC->lightning:BTC', 'SendSwapService'],
-    ['arkade:BTC->onchain:BTC', 'OnchainSendSwapService'],
     ['lightning:BTC->arkade:BTC', 'ReceiveSwapService'],
-    ['onchain:BTC->arkade:BTC', 'OnchainReceiveSwapService'],
   ])('constructs %s only when enabled', (corridor, serviceClass) => {
     const body = createServicesBody()
     expect(body).toContain(`enabled('${corridor}')`)
@@ -35,6 +33,17 @@ describe('createServices — corridor enablement', () => {
     // with its knob off.
     expect(body).toMatch(
       new RegExp(`enabled\\('${corridor.replace(/[:>]/g, (c) => `\\${c}`)}'\\)[^;]*\\? new ${serviceClass}`),
+    )
+  })
+
+  // Built lazily, as LND may be down at boot: the guard opens the builder and the `new` may not leave it.
+  it.each([
+    ['arkade:BTC->onchain:BTC', 'OnchainSendSwapService'],
+    ['onchain:BTC->arkade:BTC', 'OnchainReceiveSwapService'],
+  ])('builds %s only when enabled', (corridor, serviceClass) => {
+    const escaped = corridor.replace(/[:>]/g, (c) => `\\${c}`)
+    expect(createServicesBody()).toMatch(
+      new RegExp(`if \\(!enabled\\('${escaped}'\\)[^\\n]*return\\n(?:(?!\\n  \\})[\\s\\S])*?= new ${serviceClass}\\(`),
     )
   })
 

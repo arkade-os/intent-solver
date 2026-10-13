@@ -21,7 +21,7 @@ import { createServer, type Server } from 'node:http'
 import { randomBytes, randomInt } from 'node:crypto'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { ArkAddress, hasTerminalSpend, asset, Transaction } from '@arkade-os/sdk'
+import { ArkAddress, isVtxoSpent, asset, Transaction } from '@arkade-os/sdk'
 import { createOffer, cancelOffer, InMemoryAssetSwapRepository, type Offer } from '@arkade-os/swap'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
@@ -131,6 +131,7 @@ const market = (over: Partial<AssetRfqMarket> = {}): AssetRfqMarket => ({
   buyBase: { min: 1n, max: 10n ** 12n },
   feedUrl,
   pricePath: '/price',
+  carrierSats: arkade.ctx.dustSats,
   ...over,
 })
 
@@ -162,7 +163,7 @@ const termsOf = (row: AssetRfqSwapRow): OfferTerms => ({
 /** ONE outpoint, never a sum across the script: `fulfill` spends one input. */
 const depositAt = async (offerPkScript: string): Promise<ObservedDeposit | null> => {
   const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ scripts: [offerPkScript] })
-  const live = (vtxos ?? []).filter((vtxo) => !hasTerminalSpend(vtxo) && vtxo.isSwept !== true)
+  const live = (vtxos ?? []).filter((vtxo) => !isVtxoSpent(vtxo) && vtxo.isSwept !== true)
   const biggest = live.sort((a, b) => Number(b.value) - Number(a.value))[0]
   if (!biggest) return null
   const assets = ((biggest as { assets?: { assetId: string; amount: bigint }[] }).assets ?? []).map((entry) => ({
@@ -210,6 +211,7 @@ const harness = async (
     markets,
     solverPubkey: makerPublicKey,
     quoteValiditySeconds: over.quoteValiditySeconds ?? 600,
+    dustSats: arkade.ctx.dustSats,
     deriveOffer,
     depositAt,
     balance: over.balance ?? balance,
@@ -273,7 +275,8 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
         profile: { offer_address: string; offer_pk_script: string }
       }
       expect(BigInt(quote.from_amount)).toBe(amount)
-      expect(BigInt(quote.to_amount)).toBe(amount - (amount * BigInt(FEE_BPS) + 9_999n) / 10_000n)
+      const net = amount - arkade.ctx.dustSats
+      expect(BigInt(quote.to_amount)).toBe(net - (net * BigInt(FEE_BPS) + 9_999n) / 10_000n)
 
       // § 6 compare-only, and why this corridor needs no accept message: the
       // client derives the covenant itself and funds only its own derivation.
@@ -296,7 +299,11 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
       expect(filled.fillTxid).not.toBe(fundingTxid)
 
-      expect(await depositAt(filled.offerPkScript)).toBeNull()
+      await poll(async () => ((await depositAt(filled.offerPkScript)) === null ? true : null), {
+        attempts: 30,
+        intervalMs: 2000,
+        whenExhausted: 'asset deposit remained spendable after the fill',
+      })
 
       // The asset rides the emulator packet, so an output can only show the
       // maker's script and the carrier the covenant obliges; the emulator
@@ -326,14 +333,15 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       expect(tooBig.kind).toBe('refused')
       expect(tooBig.payload).toMatchObject({ reason: 'amount_out_of_range' })
 
-      const exactOut = await corridor.quote({ ...requestFor(pair, 50n), amount_side: 'to' })
-      expect(exactOut.kind).toBe('refused')
-      expect(exactOut.payload).toMatchObject({ reason: 'unsupported_payload' })
+      const exactOut = await corridor.quote({ ...requestFor(pair, 60n), amount_side: 'to' })
+      expect(exactOut.kind, JSON.stringify(exactOut)).toBe('quote')
+      expect(exactOut.payload).toMatchObject({ to_amount: '60' })
 
       // § 4.5: one rfq_id names one negotiation, whatever became of it.
       const id = randomBytes(32).toString('hex')
-      expect((await corridor.quote(requestFor(pair, 50n, id))).kind).toBe('quote')
-      const twice = await corridor.quote(requestFor(pair, 50n, id))
+      const buy = 50n + arkade.ctx.dustSats
+      expect((await corridor.quote(requestFor(pair, buy, id))).kind).toBe('quote')
+      const twice = await corridor.quote(requestFor(pair, buy, id))
       expect(twice.kind).toBe('refused')
       expect(twice.payload).toMatchObject({ reason: 'quote_conflict' })
     },
@@ -406,7 +414,12 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
         swapAddress: mine.address,
       })
       expect(cancelTxid).toMatch(/^[0-9a-f]{64}$/)
-      expect(await depositAt(hex.encode(mine.swapPkScript))).toBeNull()
+      // Polled like the appearance above: one read asserts indexer speed, not the cancel.
+      await poll(async () => ((await depositAt(hex.encode(mine.swapPkScript))) === null ? true : null), {
+        attempts: 20,
+        intervalMs: 2000,
+        whenExhausted: 'the cancelled deposit never left the offer script',
+      })
       await store.close()
     },
     SWAP_TIMEOUT_MS,

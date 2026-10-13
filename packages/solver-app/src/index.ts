@@ -52,10 +52,16 @@ export {
   evaluateSendAcceptance,
   evaluateSendPayment,
   refundLocktimeFor,
+  unilateralLadderFor,
   type SendAcceptanceDecision,
   type SendPaymentDecision,
 } from '@arkade-os/solver-core/core/send.js'
-export { deriveUnilateralDelays, type UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
+export {
+  deriveUnilateralDelays,
+  relativeDelayFrom,
+  secondsForBlockRung,
+  type UnilateralDelays,
+} from '@arkade-os/solver-core/core/timelocks.js'
 export { resolveLimits, maxRoutingFeeSats, type Limits } from '@arkade-os/solver-core/core/limits.js'
 export { NETWORKS, type SwapNetwork, type NetworkProfile } from '@arkade-os/solver-core/core/networks.js'
 export { loadConfig, type Config } from './config.js'
@@ -70,13 +76,21 @@ export {
   rfqStateFromRow,
   toRfqReason,
   type RfqRefusalReason,
+  type RfqRefusalError,
+  type RfqRefusalErrorCode,
   type RfqState,
 } from '@arkade-os/solver-corridors/wire/payloads.js'
 /**
  * What a corridor's own `quote` needs to refuse a payload it cannot parse:
  * the rfq_id off an unparseable request, and a readable schema detail.
  */
-export { extractRfqId, zodDetail, isRfqRefusalReason } from '@arkade-os/solver-core/core/rfqProtocol.js'
+export {
+  extractRfqId,
+  zodDetail,
+  isRfqRefusalReason,
+  isRfqRefusalErrorCode,
+  RFQ_REFUSAL_ERROR_CODE_VALUES,
+} from '@arkade-os/solver-core/core/rfqProtocol.js'
 /** The SHARED exposure cap. A corridor that builds its own is uncapped against the rest. */
 export { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 export {
@@ -85,7 +99,6 @@ export {
   type RfqOutcome,
   type RfqStatusOutcome,
 } from '@arkade-os/solver-transport/ingress/rfq.js'
-export type { SwapIngress } from '@arkade-os/solver-transport/ingress/port.js'
 export { RelayIngress, type RelayIngressDeps } from '@arkade-os/solver-transport/ingress/relay.js'
 export {
   webSocketRelayConnection,
@@ -260,6 +273,9 @@ export {
   lightningRailFor,
   type LightningRail,
   type LightningRailModule,
+  type LightningRailHost,
+  type EvmPayoutFundingHost,
+  type EvmPayoutFundingRegistration,
 } from './ops/rails.js'
 /**
  * Arkade asset-swap offers — asset↔BTC and asset↔asset. Not a corridor: both

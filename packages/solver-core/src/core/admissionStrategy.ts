@@ -8,7 +8,7 @@
  * free to be narrower or wider.
  *
  * What a replacement may NOT drop is the reserve/release PAIRING. A strategy
- * that admits without reserving reintroduces issue #105: two concurrent quotes
+ * that admits without reserving reintroduces the cap race: two concurrent quotes
  * both read the same committed total, both see headroom, and both take it — the
  * solver ends up committed past a bound an operator set deliberately. That
  * window exists because a quote is invisible to `committedSats()` between the
@@ -34,6 +34,22 @@ export interface AdmissionRequest {
    */
   capSats: number
   committedSats: () => Promise<number>
+  /**
+   * A SECOND ceiling: sats the corridor must HOLD, measured not configured. On
+   * the request rather than claimed separately so ONE critical section decides
+   * both — two reservations per quote multiply the release paths.
+   */
+  float?: FloatRequirement
+  /** Which ceiling refused. Uncalled leaves the caller reporting the cap, as before. */
+  onRefused?: (ceiling: 'exposure' | 'float') => void
+}
+
+export interface FloatRequirement {
+  /** Payout PLUS the fee to broadcast it: a wallet holding exactly the payout cannot fund. */
+  requiredSats: number
+  /** Null only when none has ever landed. A stale reading is still evidence; an absent one is not. */
+  available: { sats: number; ageMs: number } | null
+  owedSats: () => Promise<number>
 }
 
 export interface AdmissionStrategy {
