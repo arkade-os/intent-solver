@@ -26,20 +26,25 @@ export interface BalanceSamplerOptions {
 
 export const createBalanceSampler = (options: BalanceSamplerOptions): BalanceSampler & { sample(): Promise<void> } => {
   let reading: BalanceReading | null = null
+  // `getBalance()` has no deadline, so a caller that does not await must not stack reads behind a hung one.
+  let inFlight: Promise<void> | null = null
+  const read = async () => {
+    try {
+      const [availableSats, committedSats] = await Promise.all([
+        options.readAvailableSats(),
+        options.readCommittedSats(),
+      ])
+      reading = { availableSats, committedSats, at: options.now() }
+    } catch (error) {
+      // A stale reading beats none, and a throw would kill the driving interval.
+      options.onError?.(error)
+    } finally {
+      inFlight = null
+    }
+  }
   return {
     current: () => reading,
-    sample: async () => {
-      try {
-        const [availableSats, committedSats] = await Promise.all([
-          options.readAvailableSats(),
-          options.readCommittedSats(),
-        ])
-        reading = { availableSats, committedSats, at: options.now() }
-      } catch (error) {
-        // A stale reading beats none, and a throw would kill the driving interval.
-        options.onError?.(error)
-      }
-    },
+    sample: () => (inFlight ??= read()),
   }
 }
 

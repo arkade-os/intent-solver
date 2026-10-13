@@ -185,6 +185,22 @@ describe('createBalanceSampler', () => {
     await expect(s.sample()).resolves.toBeUndefined()
     expect(s.current()).toMatchObject({ availableSats: 900 })
   })
+
+  it('shares one wallet read between overlapping samples', async () => {
+    let release!: (sats: number) => void
+    const readAvailableSats = vi.fn(() => new Promise<number>((resolve) => (release = resolve)))
+    const s = createBalanceSampler({ readAvailableSats, readCommittedSats: async () => 1, now: () => 10 })
+    const first = s.sample()
+    const second = s.sample()
+    expect(readAvailableSats).toHaveBeenCalledTimes(1)
+    release(7)
+    await Promise.all([first, second])
+    expect(s.current()).toMatchObject({ availableSats: 7 })
+    const third = s.sample()
+    expect(readAvailableSats).toHaveBeenCalledTimes(2)
+    release(8)
+    await third
+  })
 })
 
 // A sampler nobody drives reports `unread` forever, and that is invisible at run
@@ -202,6 +218,7 @@ describe('the balance sampler is DRIVEN on the shipped daemon', () => {
 
   it('the watch loop calls it on its own cadence', () => {
     expect(cliSource).toMatch(/services\.sampleBalances && Date\.now\(\) - lastBalanceSample > BALANCE_SAMPLE_MS/)
-    expect(cliSource).toMatch(/await services\.sampleBalances\(\)/)
+    expect(cliSource).toMatch(/void services\.sampleBalances\(\)\.catch\(/)
+    expect(cliSource).not.toMatch(/await services\.sampleBalances\(\)/)
   })
 })
