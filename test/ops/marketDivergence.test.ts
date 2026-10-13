@@ -50,7 +50,9 @@ describe('marketServingDivergence', () => {
   })
   const env: ServingSeed = {
     offerMarkets: [],
-    tokens: [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } }],
+    tokens: [
+      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true }, approvalThresholdUnits: null },
+    ],
   }
 
   it('says nothing when the rows match the environment', () => {

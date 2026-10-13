@@ -91,6 +91,7 @@ const fakeServices = (over: { balance?: unknown; assetManager?: unknown; vtxos?:
     adminStore: {
       getOverrides: vi.fn().mockResolvedValue({}),
       listMarkets: vi.fn().mockResolvedValue([]),
+      listPendingApprovals: vi.fn().mockResolvedValue([]),
       repairedServing: [],
     },
     bootOverrides: {},

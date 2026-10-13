@@ -33,6 +33,7 @@ import { provenDepth } from '@arkade-os/solver-rails-evm/evm/lockDepth.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
+import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { payoutSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { EvmMarket, EvmToken } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
 import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
@@ -85,6 +86,8 @@ export interface EvmSendServiceDeps {
    * than the one the contract will pull from.
    */
   solverEvmAddress: Uint8Array
+  /** The large-swap approval gate. Absent means no gate. @see core/approvalGate.ts */
+  approvalGate?: ApprovalCheck
 
   // ---- quote-time only ------------------------------------------------------
   // Everything below is read when a quote is admitted and never again: the row
@@ -432,6 +435,9 @@ export class EvmSendSwapService {
         const locking = this.lockSequence.then(async () => {
           const current = await store.get(row.id)
           if (planEvmSend(current, await this.observe(current)).do !== 'lock_evm') return true
+          // Operator approval (not the ERC20 one below) precedes exposure; `planEvmSend`
+          // refuses past the quote deadline, so an unanswered hold still terminates.
+          if (!(await askApproval(this.deps.approvalGate, current.id, current.amountSats))) return false
           if (this.deps.payoutFunding !== undefined) {
             payoutFundingBinding(this.deps.payoutFunding.identity, current, this.deps.lockFor(current))
           }

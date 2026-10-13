@@ -95,6 +95,7 @@ const services = (over: Record<string, unknown> = {}) =>
     adminStore: {
       getOverrides: vi.fn().mockResolvedValue({}),
       listMarkets: vi.fn().mockResolvedValue([]),
+      listPendingApprovals: vi.fn().mockResolvedValue([]),
       repairedServing: [],
     },
     ln: { getBalance: vi.fn().mockResolvedValue({ availableSats: 1, incomingSats: 0 }) },
@@ -201,6 +202,7 @@ describe('GET /api/overview — pendingRestart', () => {
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({}),
         listMarkets: vi.fn().mockResolvedValue([market()]),
+        listPendingApprovals: vi.fn().mockResolvedValue([]),
         repairedServing: [],
       },
     })
@@ -212,6 +214,7 @@ describe('GET /api/overview — pendingRestart', () => {
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({ LN_SEND_FEE_BPS: '25' }),
         listMarkets: vi.fn().mockResolvedValue([]),
+        listPendingApprovals: vi.fn().mockResolvedValue([]),
         repairedServing: [],
       },
     })
@@ -223,6 +226,7 @@ describe('GET /api/overview — pendingRestart', () => {
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({ MAX_EXPOSED_SATS: '900000' }),
         listMarkets: vi.fn().mockResolvedValue([market()]),
+        listPendingApprovals: vi.fn().mockResolvedValue([]),
         repairedServing: [],
       },
     })
@@ -238,6 +242,7 @@ describe('GET /api/overview — pendingRestart', () => {
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({ LN_SEND_FEE_BPS: '25' }),
         listMarkets: vi.fn().mockResolvedValue([]),
+        listPendingApprovals: vi.fn().mockResolvedValue([]),
         repairedServing: [],
       },
     })

@@ -3,6 +3,7 @@
 import type { SqlDriver } from '@arkade-os/solver-db/driver.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
+import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
 
 export type Raw = Record<string, string | number | null>
 
@@ -260,7 +261,11 @@ export abstract class EvmSwapStore<Row, State extends string> {
       from,
       to,
     ])
+    announceTransition(this.onTransition, id, from, to)
   }
+
+  /** @see BaseSwapStore.onTransition */
+  onTransition?: TransitionHook
 
   /** Set fields WITHOUT moving the row: via `transition` a txid would log a self-transition. */
   async patch(id: string, fields: Record<string, unknown>): Promise<void> {

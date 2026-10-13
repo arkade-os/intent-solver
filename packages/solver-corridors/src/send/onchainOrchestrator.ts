@@ -47,6 +47,7 @@ import type { OnchainSendSwapRow, OnchainSendSwapStore } from '../db/onchainSwap
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
@@ -99,6 +100,8 @@ export interface OnchainSendServiceDeps {
    * closes.
    */
   peerStores?: readonly { findLiveByPaymentHash(paymentHash: string): Promise<unknown> }[]
+  /** The large-swap approval gate. Absent means no gate. @see core/approvalGate.ts */
+  approvalGate?: ApprovalCheck
   now?: () => number
 }
 
@@ -697,6 +700,8 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'funded', decision.reason)
       return false
     }
+    // After the funding decision, before the CAS: a held swap still reaches its deadline and refuses.
+    if (!(await askApproval(this.deps.approvalGate, row.id, row.amountSats))) return false
     const won = await store.transition(row.id, 'funded', 'funding_onchain', {})
     if (!won) return false
     return this.submitFunding(await store.get(row.id))

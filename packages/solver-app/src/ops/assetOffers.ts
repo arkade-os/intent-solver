@@ -35,6 +35,7 @@ import {
   offerWithinTolerance,
   type OfferDirection,
 } from '@arkade-os/solver-core/core/assetOfferPrice.js'
+import { askApprovalFor, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { offerFillInputFrom } from '@arkade-os/solver-arkade/arkade/offerFill.js'
@@ -123,6 +124,8 @@ export interface AssetOfferDeps {
    * Returns the fill txid. Absent means this deployment decides but never fills.
    */
   settle?: (row: OfferFillRow) => Promise<string>
+  /** The large-swap approval gate. Absent means no gate. @see ops/approvals.ts */
+  approvalGate?: ApprovalCheck
   onError?: (id: string, error: unknown) => void
   /**
    * Every offer this service DECLINES. `onError` reports a throw; a refusal is
@@ -375,6 +378,10 @@ export class AssetOfferService {
         await this.deps.store.fail(row.id, 'fillable', `price_out_of_tolerance; ${amountsOf(terms)}`)
         continue
       }
+      // AFTER the price decision, BEFORE the CAS. The solver pays the WANT leg.
+      // A hold needs no deadline here: the row stays `fillable` and nothing is spent.
+      if (!(await askApprovalFor(this.deps.approvalGate, row.id, { assetId: row.wantAssetId, amount: row.wantAmount })))
+        continue
       if (!(await this.deps.store.transition(row.id, 'fillable', 'filling'))) continue
       try {
         const txid = await this.deps.settle(row)
