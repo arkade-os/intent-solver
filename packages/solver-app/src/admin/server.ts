@@ -34,6 +34,7 @@ import { registerEventRoutes } from './routes/events.js'
 import type { ChangeFeed } from './events.js'
 import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
+import { createGuardedFetch } from '@arkade-os/solver-core/price/guardedFetch.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { readStaticFile } from './static.js'
 import { createFeedCache } from './feedCache.js'
@@ -117,12 +118,14 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   app.get('/api/rfq-refusals', (c) => c.json(deps.services.rfqRefusals.recent()))
   registerSettingsRoutes(app, deps)
   // Built once and shared: `feeds.read` is for the preview, never the write probe.
-  const fetchPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
-  const feeds = createFeedCache(fetchPrice)
-  registerMarketRoutes(app, { ...deps, fetchPrice }, feeds)
-  registerPricingRoutes(app, deps, feeds)
+  // Two readers: a saved row may be a grandfathered private feed, a typed URL may not.
+  const savedPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
+  const typedPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed({ fetch: createGuardedFetch() })
+  const feeds = createFeedCache(savedPrice)
+  registerMarketRoutes(app, { ...deps, fetchPrice: typedPrice }, feeds)
+  registerPricingRoutes(app, deps, feeds, createFeedCache(typedPrice))
   // The ordered save across both of the two routes above. @see routes/pricingApply.ts
-  registerPricingApplyRoutes(app, { ...deps, fetchPrice })
+  registerPricingApplyRoutes(app, { ...deps, fetchPrice: typedPrice })
   // BEFORE the actions route, for the reason the card route states below: that
   // route claims `/api/actions/:name` only, but registration order is what
   // keeps the `*` fallback at the very bottom from shadowing anything.

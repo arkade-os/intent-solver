@@ -94,7 +94,7 @@ const stringOverrides = (
   return invalid.length > 0 ? { ok: false, invalid } : { ok: true, draft: raw as Record<string, string> }
 }
 
-export const registerPricingRoutes = (app: Hono, deps: AdminDeps, feeds: FeedCache): void => {
+export const registerPricingRoutes = (app: Hono, deps: AdminDeps, feeds: FeedCache, draftFeeds = feeds): void => {
   app.post('/api/pricing/preview', async (c) => {
     let body: Record<string, unknown>
     try {
@@ -105,7 +105,7 @@ export const registerPricingRoutes = (app: Hono, deps: AdminDeps, feeds: FeedCac
     const side = body.side === 'to' ? 'to' : 'from'
     return body.target === 'corridor'
       ? c.json(corridorPreview(deps, body, side))
-      : c.json(await marketPreview(deps, feeds, body, side))
+      : c.json(await marketPreview(deps, { saved: feeds, draft: draftFeeds }, body, side))
   })
 }
 
@@ -153,7 +153,12 @@ const corridorPreview = (deps: AdminDeps, body: Record<string, unknown>, side: '
   }
 }
 
-const marketPreview = async (deps: AdminDeps, feeds: FeedCache, body: Record<string, unknown>, side: 'from' | 'to') => {
+const marketPreview = async (
+  deps: AdminDeps,
+  feeds: { saved: FeedCache; draft: FeedCache },
+  body: Record<string, unknown>,
+  side: 'from' | 'to',
+) => {
   const parsed = stringOverrides(body.overrides)
   if (!parsed.ok) return { invalid: parsed.invalid, samples: [] }
   const resolved = resolveDraftPolicy(deps.services.config, parsed.draft)
@@ -208,7 +213,7 @@ const resolvedFeed = (read: FeedRead) => ({
 
 /** A typed URL is fetched only on an explicit `readDraftFeed`: a debounced form would otherwise fetch every prefix. */
 const feedFor = async (
-  feeds: FeedCache,
+  feeds: { saved: FeedCache; draft: FeedCache },
   saved: AssetMarketRow | null,
   market: AssetMarketConfig,
   readDraft: boolean,
@@ -222,7 +227,7 @@ const feedFor = async (
       return unresolved(messageOf(error))
     }
   }
-  const read = await feeds.read(market.feedUrl, market.pricePath)
+  const read = await (savedFeed ? feeds.saved : feeds.draft).read(market.feedUrl, market.pricePath)
   if (!read) return unresolved(savedFeed ? 'the saved feed did not answer' : 'the feed did not answer')
   return { read, feed: resolvedFeed(read) }
 }

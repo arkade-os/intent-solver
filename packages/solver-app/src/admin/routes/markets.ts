@@ -42,6 +42,7 @@ import {
   type CarrierMode,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
+import { createGuardedFetch } from '@arkade-os/solver-core/price/guardedFetch.js'
 import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetMarketRow } from '../db.js'
 import { marketCapability } from '../marketCapability.js'
@@ -222,7 +223,7 @@ export const marketJson = (row: AssetMarketRow) => ({
 export const registerMarketRoutes = (app: Hono, deps: AdminDeps, feeds?: FeedCache): void => {
   // Built once per registration, not per request: `createPriceFeed` validates
   // its timeout eagerly, which is the whole point of that check.
-  const fetchPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
+  const fetchPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed({ fetch: createGuardedFetch() })
 
   app.get('/api/markets', async (c) => {
     const rows = await deps.services.adminStore.listMarkets()

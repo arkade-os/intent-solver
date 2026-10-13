@@ -230,7 +230,7 @@ const checkServing = (market: AssetMarketConfig): void => {
 
 const V4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
 
-/** LITERALS ONLY: a hostname that resolves to one of these needs DNS, which this module has none of. */
+/** LITERALS ONLY here; `price/guardedFetch.ts` applies it to every resolved address and redirect hop. */
 export const isPrivateFeedHost = (hostname: string): boolean => {
   const host = hostname
     .toLowerCase()
