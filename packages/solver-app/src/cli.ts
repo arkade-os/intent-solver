@@ -78,7 +78,7 @@ import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.j
 import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
 import { AdminStore } from './admin/db.js'
 import { applyOverrides } from './admin/settings.js'
-import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
+import { GiveUp, json, log, messageOf, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import { recordRfqRefusals } from './admin/rfqRefusals.js'
 import { createBidTail, recordBidsIn, type BidRecorder } from './admin/bids.js'
 import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
@@ -180,6 +180,8 @@ const REFUND_SWEEP_MS = 60_000
  * one sees the same coins, a little closer to expiry.
  */
 const VTXO_LIFECYCLE_MS = 300_000
+/** How often the notification balance is refreshed. @see Services.sampleBalances */
+const BALANCE_SAMPLE_MS = 60_000
 
 const VTXO_SYNC_MAX_AGE_MS = 2_000
 
@@ -192,6 +194,7 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
   try {
     await withEvmSendSweep({
       service: services.evmSendService,
+      recoverySweep: services.evmSendService ? () => services.evmSendService!.payoutFundingRecoverySweep() : undefined,
       intervalMs: FULL_SWEEP_MS,
       signal: controller.signal,
       run: (startSweep) => watchSwaps(services, startSweep, controller.signal),
@@ -485,6 +488,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   let lastFullSweep = 0
   let lastRefundSweep = 0
   let lastVtxoLifecycle = 0
+  let lastBalanceSample = 0
   let lastWatchSync = 0
   while (!signal.aborted) {
     await sleep(HOT_TICK_MS)
@@ -564,6 +568,13 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
       } catch (error) {
         log('onchain refund deposit sweep failed:', error instanceof Error ? error.message : String(error))
       }
+    }
+    // Refreshed here and NOWHERE on the money path: the read costs ~951ms and a
+    // business event must never pay it. Absent unless a sink is configured.
+    // Not awaited: a hung wallet read must not stall the ticks below.
+    if (services.sampleBalances && Date.now() - lastBalanceSample > BALANCE_SAMPLE_MS) {
+      lastBalanceSample = Date.now()
+      void services.sampleBalances().catch((error: unknown) => log('balance sample failed:', messageOf(error)))
     }
     if (Date.now() - lastVtxoLifecycle > VTXO_LIFECYCLE_MS) {
       lastVtxoLifecycle = Date.now()

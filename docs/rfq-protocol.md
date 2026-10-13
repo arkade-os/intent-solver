@@ -1165,6 +1165,13 @@ The client is paid over Lightning and the sats land on Arkade
   reconstructing the full tree needs it). Amounts: the client pays the
   invoice in full (`from_amount`); the solver funds the lockup with
   `to_amount` — the amount minus this corridor's fee, fixed at quote time.
+  On an exact-in request the invoice MUST ask exactly `from_amount`, which
+  equals the requested `amount`. A deployment whose backend WRAPS the invoice
+  it publishes — asking a routing reserve above the hold it covers — must
+  therefore hold correspondingly less and price `to_amount` off that smaller
+  hold, or refuse `payable_amount_unmatchable`; it may never pass the reserve
+  on as a larger `from_amount`. Exact-out is unaffected: there the client fixed
+  `to_amount` and the reserve rides on the solved-up `from_amount`.
 - **Fill**: a payer pays the invoice; the incoming HTLC is now **held**, not
   settled. The solver reads `E` — the real deadline by which the held HTLC
   must be settled — **from its Lightning backend for this payment hash. It
@@ -1887,9 +1894,15 @@ The reference implementation's internal refusal names map onto the closed set
 | `fee_consumes_swap`          | `pricing_unavailable` |
 | `payout_below_dust`          | `pricing_unavailable` |
 | `recourse_window_unservable` | `pricing_unavailable` |
+| `payable_amount_unmatchable` | `pricing_unavailable` |
 | `duplicate_swap`             | `quote_conflict`      |
 | `provider_at_capacity`       | `exposure_cap`        |
 | `rate_limited`               | `rate_limited`        |
+
+`payable_amount_unmatchable` is the Lightning receive leg's exact-in guard: a
+deployment whose backend wraps the hold invoice it publishes could not find a
+hold amount whose wrapped invoice asks exactly the requested `amount`. Unlike
+`recourse_window_unservable` it is per-request, so a client may retry.
 
 `recourse_window_unservable` is the one mapping that is a judgement rather than
 a rename. It means the operator's Arkade exit delay is too long for any invoice

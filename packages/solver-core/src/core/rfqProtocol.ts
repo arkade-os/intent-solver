@@ -225,6 +225,9 @@ export const RFQ_REFUSAL_REASONS: Record<string, RfqRefusalReason> = {
   // true thing the set can express: no quote is available right now, and it is
   // ours, not yours. The operator still sees the precise name in the logs.
   recourse_window_unservable: 'pricing_unavailable',
+  // The same choice among imperfect fits as above, except per-request rather
+  // than per-deployment: a client seeing this may retry rather than back off.
+  payable_amount_unmatchable: 'pricing_unavailable',
   // Nothing about the request is malformed, but the closed set has no name for
   // "this deployment's rail cannot contain the CLTV your invoice's worst route
   // hint permits". The coarse reason remains `unsupported_payload`; a

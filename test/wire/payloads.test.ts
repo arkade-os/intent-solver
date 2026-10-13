@@ -91,6 +91,7 @@ const QUOTE_REFUSALS = [
   'invalid_refund_address',
   'invoice_expired',
   'invoice_expires_too_soon',
+  'payable_amount_unmatchable',
   'payout_below_dust',
   'provider_at_capacity',
   'rate_limited',

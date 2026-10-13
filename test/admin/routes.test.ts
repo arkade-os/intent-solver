@@ -79,6 +79,7 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
     adminStore: {
       getOverrides: vi.fn().mockResolvedValue({}),
       listMarkets: vi.fn().mockResolvedValue([]),
+      listPendingApprovals: vi.fn().mockResolvedValue([]),
       repairedServing: [],
     },
     bootOverrides: {},
@@ -294,6 +295,7 @@ describe('GET /api/overview', () => {
   it('carries a boot repair and an env disagreement in one list, the repair first', async () => {
     const adminStore = {
       getOverrides: vi.fn().mockResolvedValue({}),
+      listPendingApprovals: vi.fn().mockResolvedValue([]),
       listMarkets: vi.fn().mockResolvedValue([
         {
           marketKey: `arkade:BTC->arkade:${USDA}`,

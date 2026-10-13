@@ -15,8 +15,12 @@ const CARRIER = { dustSats: 330n, pricedByDefault: false }
 
 const USDA = 'aa'.repeat(34)
 const OTHER = 'bb'.repeat(34)
-const NAMED = [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } }]
-const BOTH_CLOSED = [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: false, buy_base: false } }]
+const NAMED = [
+  { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true }, approvalThresholdUnits: null },
+]
+const BOTH_CLOSED = [
+  { symbol: 'USDA', assetId: USDA, enabled: { sell_base: false, buy_base: false }, approvalThresholdUnits: null },
+]
 // Shares USDA's derived stem: `rfqSymbolFor` reads only the first 7 and last 4 hex.
 const TWIN = 'aaaaaaa' + 'b'.repeat(57) + 'aaaa'
 
@@ -32,9 +36,9 @@ const LEG_A = 'ee'.repeat(34)
 const LEG_B = 'ff'.repeat(34)
 // Named/unnamed x both-open/one-closed/both-closed, plus an asset on both legs.
 const SHAPES = [
-  { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } },
-  { symbol: 'USDB', assetId: ONE_CLOSED, enabled: { sell_base: true, buy_base: false } },
-  { symbol: 'USDC', assetId: OTHER, enabled: { sell_base: false, buy_base: false } },
+  { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true }, approvalThresholdUnits: null },
+  { symbol: 'USDB', assetId: ONE_CLOSED, enabled: { sell_base: true, buy_base: false }, approvalThresholdUnits: null },
+  { symbol: 'USDC', assetId: OTHER, enabled: { sell_base: false, buy_base: false }, approvalThresholdUnits: null },
 ]
 
 // An INSERT from a binary predating the serving columns: it names none of them.
@@ -208,7 +212,9 @@ describe('admin_market gains the serving columns', () => {
 describe('the one-shot serving seed', () => {
   const seed = {
     offerMarkets: [{ a: null, b: USDA }],
-    tokens: [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: false } }],
+    tokens: [
+      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: false }, approvalThresholdUnits: null },
+    ],
   }
 
   const withRow = async () => {
@@ -288,7 +294,14 @@ describe('the one-shot serving seed', () => {
     for (const asset of [USDA, OTHER]) await driver.run(OLD_BINARY_INSERT, [assetMarketKey(null, asset), asset])
     const store = await AdminStore.open(driver, () => 2_000, {
       offerMarkets: [],
-      tokens: [{ symbol: rfqSymbolFor(USDA), assetId: OTHER, enabled: { sell_base: true, buy_base: true } }],
+      tokens: [
+        {
+          symbol: rfqSymbolFor(USDA),
+          assetId: OTHER,
+          enabled: { sell_base: true, buy_base: true },
+          approvalThresholdUnits: null,
+        },
+      ],
     })
     const rows = await store.listMarkets()
     for (const row of rows) expect(() => validateAssetMarket(row), row.marketKey).not.toThrow()
@@ -484,7 +497,9 @@ describe('an incoherent serving row cannot brick startup', () => {
     const driver = await preUpgradeDriver()
     const store = await AdminStore.open(driver, () => 2_000, {
       offerMarkets: [],
-      tokens: [{ symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: false } }],
+      tokens: [
+        { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: false }, approvalThresholdUnits: null },
+      ],
     })
     const rows = await store.listMarkets()
     expect(rows[0]).toMatchObject({ rfqSellBase: true, rfqBuyBase: false })

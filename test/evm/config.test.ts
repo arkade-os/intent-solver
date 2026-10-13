@@ -89,6 +89,13 @@ describe('loadEvmChainConfig', () => {
     )
   })
 
+  it('requires the claim-trace probe unless the chain opts into direct claims only', () => {
+    expect(loadEvmChainConfig(env())!.directClaimsOnly).toBe(false)
+    expect(loadEvmChainConfig(env({ EVM_DIRECT_CLAIMS_ONLY: 'true' }))!.directClaimsOnly).toBe(true)
+    expect(loadEvmChainConfig(env({ EVM_DIRECT_CLAIMS_ONLY: 'false' }))!.directClaimsOnly).toBe(false)
+    expect(() => loadEvmChainConfig(env({ EVM_DIRECT_CLAIMS_ONLY: 'yes' }))).toThrow(/EVM_DIRECT_CLAIMS_ONLY/)
+  })
+
   it('refuses nonsense numbers', () => {
     expect(() => loadEvmChainConfig(env({ EVM_CHAIN_ID: '0' }))).toThrow(/must be an integer >= 1/)
     expect(() => loadEvmChainConfig(env({ EVM_CHAIN_ID: '1.5' }))).toThrow(/must be an integer/)

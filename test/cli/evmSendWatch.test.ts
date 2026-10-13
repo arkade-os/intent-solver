@@ -209,6 +209,53 @@ describe('the independent EVM send sweep', () => {
     })
   })
 
+  it('runs funding recovery in the background without blocking or overlapping live ticks', async () => {
+    const { input, tickAll } = harness()
+    const recovery = deferred()
+    const recoverySweep = vi.fn(() => recovery.promise)
+    await withEvmSendSweep({
+      ...input,
+      recoverySweep,
+      run: async (start) => {
+        start()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(recoverySweep).toHaveBeenCalledOnce()
+        await vi.advanceTimersByTimeAsync(3000)
+        expect(tickAll).toHaveBeenCalledOnce()
+        await vi.advanceTimersByTimeAsync(3000)
+        expect(recoverySweep).toHaveBeenCalledOnce()
+        recovery.resolve()
+      },
+    })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('drains active funding recovery before returning to close services', async () => {
+    const { input, controller } = harness()
+    const recovery = deferred()
+    const loop = deferred()
+    let closed = false
+    const watching = withEvmSendSweep({
+      ...input,
+      recoverySweep: () => recovery.promise,
+      run: async (start) => {
+        start()
+        await vi.advanceTimersByTimeAsync(0)
+        await loop.promise
+      },
+    }).then(() => {
+      closed = true
+    })
+    controller.abort()
+    loop.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(closed).toBe(false)
+    recovery.resolve()
+    await watching
+    expect(closed).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('stops on abort and drains active work before returning to close services', async () => {
     const { input, controller, tickAll } = harness()
     const sweep = deferred()

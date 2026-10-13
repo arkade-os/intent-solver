@@ -68,6 +68,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
     admission: new AdmissionControl(),
     totalCommitted: vi.fn().mockResolvedValue(0),
     markets: new Map([[TOKEN, market()]]),
+    assertClaimTraceSupport: vi.fn().mockResolvedValue(undefined),
     // 50,000 quote-units per whole BTC — a round number so the arithmetic below
     // is checkable by eye.
     fetchPrice: vi.fn().mockResolvedValue({ mantissa: 50_000n, scale: 0 }),
@@ -172,6 +173,33 @@ describe('the happy path', () => {
       expect(outcome.swap.evmTimeout).toBeGreaterThan(20_000_000)
       expect(outcome.swap.refundLocktime).toBe(NOW + DELAY + 7_500)
     }
+  })
+})
+
+describe('claim trace admission', () => {
+  it('refuses before pricing, payout preparation, or row insertion when traces are unsupported', async () => {
+    const unsupported = new Error('canonical token call trace unavailable')
+    const assertClaimTraceSupport = vi.fn().mockRejectedValue(unsupported)
+    const prepareQuote = vi.fn()
+    const abandonQuote = vi.fn()
+    const onTickError = vi.fn()
+    const { store, deps, service } = await build({
+      assertClaimTraceSupport,
+      payoutFunding: { identity: 'test', prepareQuote, abandonQuote } as never,
+      onTickError,
+    })
+
+    const outcome = await service.quote(request())
+
+    expect(outcome).toEqual({ accepted: false, reason: 'execution_unavailable' })
+    expect(assertClaimTraceSupport).toHaveBeenCalledOnce()
+    expect(assertClaimTraceSupport).toHaveBeenCalledWith(hex.decode(TOKEN.slice(2)))
+    expect(onTickError).toHaveBeenCalledWith('aa'.repeat(32), unsupported)
+    expect(deps.fetchPrice).not.toHaveBeenCalled()
+    expect(deps.totalCommitted).not.toHaveBeenCalled()
+    expect(prepareQuote).not.toHaveBeenCalled()
+    expect(abandonQuote).not.toHaveBeenCalled()
+    expect(await store.findLive()).toEqual([])
   })
 })
 
@@ -418,5 +446,144 @@ describe('quote admission control', () => {
       markets: new Map([[TOKEN, { ...market(), tokenLimits: { minUnits: 1n, maxUnits: 100_000_000n } }]]),
     } as never)
     expect((await wide.service.quote(request())).accepted).toBe(true)
+  })
+})
+
+describe('external payout preparation at quote admission', () => {
+  const adapter = () => ({
+    identity: 'external-payout-v1',
+    prepareQuote: vi.fn(async () => ({ validUntil: NOW + 45 })),
+    abandonQuote: vi.fn(async () => {}),
+    ensure: vi.fn(async () => ({})),
+    sweepRecovery: vi.fn(async () => {}),
+  })
+
+  it('prepares immutable economic and lock terms before publishing the quote', async () => {
+    const funding = adapter()
+    const { store, service } = await build({ payoutFunding: funding })
+    const insert = vi.spyOn(store, 'insertQuote')
+    funding.prepareQuote.mockImplementation(async () => {
+      expect(insert).not.toHaveBeenCalled()
+      expect(await store.findLive()).toEqual([])
+      return { validUntil: NOW + 45 }
+    })
+    const result = await service.quote(request())
+    expect(result.accepted).toBe(true)
+    if (!result.accepted) throw new Error('expected quote')
+    expect(result.swap.validUntil).toBe(NOW + 45)
+    const [context] = funding.prepareQuote.mock.calls[0] as unknown as [
+      import('@arkade-os/solver-core/ports/evmPayoutFunding.js').EvmPayoutFundingQuoteContext,
+    ]
+    expect(context.binding).toMatchObject({
+      intentId: result.swap.id,
+      paymentHash: result.swap.paymentHash,
+      chainId: result.swap.evmChainId,
+      contractAddress: result.swap.evmContractAddress,
+      tokenAddress: TOKEN,
+      amount: result.swap.evmAmount,
+      payoutSats: '99000',
+      arkadeAmountSats: '100000',
+      claimAddress: result.swap.evmClaimAddress,
+    })
+    expect(context.tokenDecimals).toBe(6)
+    expect(context.orderMarginSeconds).toBe(7500)
+    expect(funding.abandonQuote).not.toHaveBeenCalled()
+    expect(funding.ensure).not.toHaveBeenCalled()
+  })
+
+  it('refuses failed provider preparation, awaits cleanup, and releases admission', async () => {
+    const funding = adapter()
+    funding.prepareQuote.mockRejectedValueOnce(new Error('provider preparation unavailable'))
+    const { store, service } = await build({ payoutFunding: funding, maxExposedSats: 100_000 })
+    const insert = vi.spyOn(store, 'insertQuote')
+    expect(await service.quote(request())).toEqual({ accepted: false, reason: 'execution_unavailable' })
+    expect(funding.abandonQuote).toHaveBeenCalledOnce()
+    expect(insert).not.toHaveBeenCalled()
+    expect((await service.quote(request())).accepted).toBe(true)
+  })
+
+  it('cleans the prepared payout when durable customer insertion fails', async () => {
+    const funding = adapter()
+    const { store, service } = await build({ payoutFunding: funding })
+    vi.spyOn(store, 'insertQuote').mockRejectedValueOnce(new Error('database write failed'))
+    await expect(service.quote(request())).rejects.toThrow('database write failed')
+    expect(funding.abandonQuote).toHaveBeenCalledOnce()
+    const [binding] = funding.abandonQuote.mock.calls[0] as unknown as [
+      import('@arkade-os/solver-core/ports/evmPayoutFunding.js').EvmPayoutFundingBinding,
+    ]
+    expect(binding.quoteValidUntil).toBe(NOW + 45)
+  })
+
+  it.each([NOW, NOW - 1, NOW + 61, Number.NaN, NOW + 0.5])(
+    'rejects malformed or expired prepared expiry %s',
+    async (validUntil) => {
+      const funding = adapter()
+      funding.prepareQuote.mockResolvedValue({ validUntil })
+      const { store, service } = await build({ payoutFunding: funding })
+      expect(await service.quote(request())).toEqual({ accepted: false, reason: 'execution_unavailable' })
+      expect(await store.findLive()).toEqual([])
+      expect(funding.abandonQuote).toHaveBeenCalledOnce()
+    },
+  )
+
+  it('accepts an expiry refreshed after slow preparation against the current clock', async () => {
+    let time = NOW
+    const funding = adapter()
+    funding.prepareQuote.mockImplementation(async () => {
+      time += 75
+      return { validUntil: time + 30 }
+    })
+    const { service } = await build({ payoutFunding: funding, now: () => time })
+    const result = await service.quote(request())
+    expect(result.accepted).toBe(true)
+    if (result.accepted) expect(result.swap.validUntil).toBe(time + 30)
+  })
+
+  it('refuses a void preparation response after the original quote window elapsed', async () => {
+    let time = NOW
+    const funding = adapter()
+    const prepareQuote = vi.fn(async () => {
+      time += 60
+    })
+    const { service } = await build({ payoutFunding: { ...funding, prepareQuote }, now: () => time })
+    expect(await service.quote(request())).toEqual({ accepted: false, reason: 'execution_unavailable' })
+    expect(funding.abandonQuote).toHaveBeenCalledOnce()
+  })
+
+  it('reports cleanup errors while preserving refusal and releasing shared exposure', async () => {
+    const funding = adapter()
+    funding.prepareQuote.mockRejectedValueOnce(new Error('prepare failed'))
+    funding.abandonQuote.mockRejectedValueOnce(new Error('recovery requires operator'))
+    const onTickError = vi.fn()
+    const { service } = await build({ payoutFunding: funding, maxExposedSats: 100_000, onTickError })
+    expect(await service.quote(request())).toEqual({ accepted: false, reason: 'execution_unavailable' })
+    expect(onTickError.mock.calls.map(([, error]) => (error as Error).message)).toEqual([
+      'prepare failed',
+      'recovery requires operator',
+    ])
+    expect((await service.quote(request())).accepted).toBe(true)
+  })
+
+  it('releases exposure on early pricing failure without preparing any external execution', async () => {
+    const funding = adapter()
+    const fetchPrice = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('feed unavailable'))
+      .mockResolvedValue({ mantissa: 50_000n, scale: 0 })
+    const { service } = await build({ payoutFunding: funding, fetchPrice, maxExposedSats: 100_000 })
+    expect(await service.quote(request())).toEqual({ accepted: false, reason: 'price_unavailable' })
+    expect(funding.prepareQuote).not.toHaveBeenCalled()
+    expect(funding.abandonQuote).not.toHaveBeenCalled()
+    expect((await service.quote(request())).accepted).toBe(true)
+  })
+
+  it('requires paired preparation and cleanup hooks at construction', async () => {
+    const funding = adapter()
+    await expect(build({ payoutFunding: { ...funding, abandonQuote: undefined } })).rejects.toThrow(
+      'must be configured together',
+    )
+    await expect(build({ payoutFunding: { ...funding, prepareQuote: undefined } })).rejects.toThrow(
+      'must be configured together',
+    )
   })
 })

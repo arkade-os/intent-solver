@@ -39,6 +39,7 @@ import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { arkadeOpsFromContext } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import { evmSendArkadeDeps } from '@arkade-os/solver-corridors-evm/send/evmArkadeDeps.js'
 import { createEvmHtlcBackend } from '@arkade-os/solver-rails-evm/evm/backend.js'
+import { assertEvmClaimTraceSupport } from '@arkade-os/solver-rails-evm/evm/claimTraceProbe.js'
 import { encodeClaim } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import { createEvmBroadcaster } from '@arkade-os/solver-rails-evm/evm/broadcast.js'
 import { createNonceSource } from '@arkade-os/solver-rails-evm/evm/nonce.js'
@@ -152,6 +153,7 @@ beforeAll(async () => {
     maxExposedSats: 1_000_000_000,
     admission: new AdmissionControl(),
     totalCommitted: async () => 0,
+    assertClaimTraceSupport: (tokenAddress) => assertEvmClaimTraceSupport(rpc, tokenAddress),
     markets: new Map([
       [
         `0x${hex.encode(WETH)}`,

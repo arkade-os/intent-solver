@@ -53,6 +53,11 @@ const clear = (node) => {
   while (node.firstChild) node.removeChild(node.firstChild)
 }
 
+const refill = (node, ...children) => {
+  clear(node)
+  node.appendChild(h('span', ...children))
+}
+
 /* ---- api ---------------------------------------------------------------- */
 
 /**
@@ -136,7 +141,7 @@ const assetLabel = (asset) =>
   h(
     'span',
     asset.ticker ? h('span', asset.ticker, ' ') : null,
-    h('span.faint', { title: asset.assetId }, asset.shortId),
+    h('span.faint', { title: asset.name ? `${asset.name} — ${asset.assetId}` : asset.assetId }, asset.shortId),
   )
 
 /**
@@ -495,7 +500,7 @@ const marketState = (market) =>
 const marketCard = (market) =>
   h(
     'section.panel',
-    h('h2', `market ${legLabel(market.base)} / ${legLabel(market.quote)}`),
+    h('h2', 'market ', legNode(market.base), ' / ', legNode(market.quote)),
     h(
       'dl.kv',
       h('dt', 'served by'),
@@ -523,8 +528,11 @@ const marketCard = (market) =>
       h('dt', 'fee'),
       h(
         'dd',
-        `${market.feeBps} bps; flat ${market.sellBaseFeeFlat} ${legLabel(market.base)} atomic units when selling base, ` +
-          `${market.buyBaseFeeFlat} ${legLabel(market.quote)} atomic units when buying base; ${market.toleranceBps} bps band`,
+        `${market.feeBps} bps; flat ${market.sellBaseFeeFlat} `,
+        legName(market.base),
+        ` atomic units when selling base, ${market.buyBaseFeeFlat} `,
+        legName(market.quote),
+        ` atomic units when buying base; ${market.toleranceBps} bps band`,
       ),
     ),
   )
@@ -1372,9 +1380,45 @@ let marketDraft = null
 // Assigned by the preview panel; a second declaration there is a load-time SyntaxError.
 let schedulePreview = () => {}
 
-/** `null` is the BTC leg everywhere below the wire; `BTC` is what an operator types.
- *  The preview's `legs.from/to` arrive pre-stringified to `'BTC'`, so they need only `shortId`, never this. */
-const legLabel = (leg) => (leg === null ? 'BTC' : shortId(leg))
+const ASSET_ID = /^[0-9a-f]{68}$/
+
+/** Labels per asset id, for the page's lifetime: the id is content-addressed and its metadata immutable. */
+const assetLabels = new Map()
+
+const assetEntry = (assetId) => {
+  let entry = assetLabels.get(assetId)
+  if (!entry) {
+    entry = { label: null }
+    // A failed lookup is forgotten so the next paint asks again; the id renders meanwhile.
+    entry.ready = api(`/api/assets/${assetId}`).then(
+      (label) => (entry.label = label),
+      () => assetLabels.delete(assetId),
+    )
+    assetLabels.set(assetId, entry)
+  }
+  return entry
+}
+
+/**
+ * A market leg, painted now from what is known and again in place when the lookup
+ * lands — never via `render()`, which would take the caret out of a half-typed form.
+ */
+const liveLeg = (leg, paint) => {
+  if (leg === null || leg === 'BTC') return h('span', 'BTC')
+  if (!ASSET_ID.test(leg)) return h('span', { title: leg }, shortId(leg))
+  const entry = assetEntry(leg)
+  const node = h('span')
+  const fill = () => refill(node, paint(entry.label ?? { assetId: leg, shortId: shortId(leg) }))
+  fill()
+  if (!entry.label) entry.ready.then(fill)
+  return node
+}
+
+/** Ticker and short id: where the pair is the identity being read. */
+const legNode = (leg) => liveLeg(leg, assetLabel)
+
+/** Ticker alone, id on hover: where the leg only names a unit. */
+const legName = (leg) => liveLeg(leg, (asset) => h('span', { title: asset.assetId }, asset.ticker ?? asset.shortId))
 
 const carrierRfqPriced = () => state.data.markets?.carrier?.rfqPriced === true
 
@@ -1501,6 +1545,46 @@ const tip = (text) => h('span.tip', { tabindex: '0', role: 'note' }, '?', h('spa
 
 const group = (title) => h('span.group', title)
 
+const LEG_DECIMALS = { base: 'baseDecimals', quote: 'quoteDecimals' }
+
+/** Hint nodes for the two leg fields, repainted on every keystroke since decimals feed their warning. */
+const legHints = {}
+
+const paintLegHint = (key) => {
+  const node = legHints[key]
+  const leg = String(marketDraft?.[key] ?? '').trim()
+  if (!node || !marketDraft) return
+  if (!ASSET_ID.test(leg)) return refill(node, 'BTC, or a 68-character asset id')
+  const entry = assetEntry(leg)
+  if (!entry.label) {
+    refill(node, 'looking up the asset…')
+    // A failed lookup is dropped from the cache, so repainting here would ask again at once.
+    return void entry.ready.then(() =>
+      entry.label ? paintLegHint(key) : refill(node, 'asset lookup failed — the id is used as typed'),
+    )
+  }
+  const { ticker, name, decimals } = entry.label
+  const said = Number(marketDraft[LEG_DECIMALS[key]])
+  refill(
+    node,
+    ticker || name ? [ticker, name].filter(Boolean).join(' · ') : 'the indexer has no metadata for this asset',
+    typeof decimals === 'number' ? ` · ${decimals} decimals` : '',
+    typeof decimals === 'number' && decimals !== said
+      ? h(
+          'span.phase.phase-failed',
+          `issuer says ${decimals} decimals, this form says ${marketDraft[LEG_DECIMALS[key]]}`,
+        )
+      : null,
+  )
+}
+
+const legHint = (key) => {
+  if (!(key in LEG_DECIMALS)) return null
+  legHints[key] = h('span.hint')
+  paintLegHint(key)
+  return legHints[key]
+}
+
 const field = (label, key, hint, explain) => [
   h('span.label', label, explain ? tip(explain) : null),
   h('input', {
@@ -1510,9 +1594,14 @@ const field = (label, key, hint, explain) => [
       state.data.markets?.markets.some((row) => row.marketKey === pricingSelection?.key) &&
       (key === 'base' || key === 'quote'),
     value: String(marketDraft[key] ?? ''),
-    oninput: (e) => ((marketDraft[key] = e.target.value), schedulePreview()),
+    oninput: (e) => (
+      (marketDraft[key] = e.target.value),
+      paintLegHint('base'),
+      paintLegHint('quote'),
+      schedulePreview()
+    ),
   }),
-  h('span.hint', hint ?? ''),
+  legHint(key) ?? h('span.hint', hint ?? ''),
 ]
 
 const checkbox = (label, key, hint) =>
@@ -1594,6 +1683,17 @@ let previewTimer = null
 let previewDirection = 'sell_base'
 let previewSide = 'from'
 let previewRequest = 0
+let previewInFlight = false
+/** The draft feed the operator asked to read. Never sent unasked: the form would otherwise fetch every typed prefix. */
+let previewFeedFor = null
+const feedKey = () => `${marketDraft.feedUrl}\0${marketDraft.pricePath}`
+const readDraftFeed = () => previewFeedFor === feedKey()
+
+// Feed fetches stay bounded by the server's 15s cache; this only decides how soon a fresh read shows.
+const PREVIEW_REFRESH_MS = 5_000
+setInterval(() => {
+  if (marketDraft && previewNode?.isConnected && !previewTimer && !previewInFlight) void refreshPreview()
+}, PREVIEW_REFRESH_MS)
 
 // Assigned only: Task 10 declares `schedulePreview`, a second declaration is a load-time SyntaxError.
 schedulePreview = () => {
@@ -1615,6 +1715,7 @@ schedulePreview = () => {
 const refreshPreview = async () => {
   if ((!marketDraft && !(state.view === 'pricing' && pricingSelection?.kind === 'corridor')) || !previewNode) return
   const request = ++previewRequest
+  previewInFlight = true
   try {
     const next = await api('/api/pricing/preview', {
       method: 'POST',
@@ -1627,6 +1728,7 @@ const refreshPreview = async () => {
               marketKey: marketDraft.marketKey,
               direction: previewDirection,
               side: previewSide,
+              readDraftFeed: readDraftFeed(),
             },
       ),
     })
@@ -1637,6 +1739,8 @@ const refreshPreview = async () => {
     if (request !== previewRequest) return
     previewData = null
     previewError = error instanceof Error ? error.message : String(error)
+  } finally {
+    if (request === previewRequest) previewInFlight = false
   }
   paintPreview()
 }
@@ -1673,13 +1777,42 @@ const unit = (amount, decimals, label) => {
   return `${negative ? '-' : ''}${whole}.${raw.slice(-digits)} ${label}`
 }
 
+const priceText = (mantissa, scale) => {
+  const text = unit(mantissa, scale, '').trim()
+  return text.includes('.') ? text.replace(/\.?0+$/, '') : text
+}
+
+/** The feed's number, stated the way the form defines it: this many quote units buy one whole base unit. */
+const feedLine = (feed) => {
+  if (!feed) return null
+  if (feed.state === 'resolved') {
+    return h(
+      'p.price',
+      '1 ',
+      legName(marketDraft.base),
+      ` = ${priceText(feed.mantissa, feed.scale)} `,
+      legName(marketDraft.quote),
+      h('span.faint', ` · feed read ${ago(Math.floor(feed.readAt / 1000))} ago · live`),
+    )
+  }
+  return h(
+    'p.notice',
+    `feed-unresolved — ${feed.reason} `,
+    readDraftFeed()
+      ? null
+      : h('button.act', { onclick: () => ((previewFeedFor = feedKey()), void refreshPreview()) }, 'read feed now'),
+  )
+}
+
+const amountIn = (amount, decimals, leg) => [unit(amount, decimals, ''), legName(leg)]
+
 const ladderRow = (sample, legs, loss) =>
   sample.ok
     ? h(
         `tr${loss ? '.loss' : ''}`,
-        h('td', unit(sample.fromAmount, legs.fromDecimals, shortId(legs.from))),
-        h('td.num', unit(sample.toAmount, legs.toDecimals, shortId(legs.to))),
-        h('td.num', unit(sample.spreadFee, legs.toDecimals, shortId(legs.to))),
+        h('td', amountIn(sample.fromAmount, legs.fromDecimals, legs.from)),
+        h('td.num', amountIn(sample.toAmount, legs.toDecimals, legs.to)),
+        h('td.num', amountIn(sample.spreadFee, legs.toDecimals, legs.to)),
         h('td.num', sample.marginBps === null ? '—' : `${sample.marginBps} bps`),
       )
     : h(
@@ -1687,8 +1820,8 @@ const ladderRow = (sample, legs, loss) =>
         h(
           'td',
           previewSide === 'from'
-            ? unit(sample.amount, legs.fromDecimals, shortId(legs.from))
-            : unit(sample.amount, legs.toDecimals, shortId(legs.to)),
+            ? amountIn(sample.amount, legs.fromDecimals, legs.from)
+            : amountIn(sample.amount, legs.toDecimals, legs.to),
         ),
         h('td.num', { colspan: 3 }, h('span.phase.phase-failed', sample.reason)),
       )
@@ -1726,6 +1859,7 @@ const previewBody = () => {
   if (previewData.invalid.length > 0) {
     return h(
       'div',
+      feedLine(previewData.feed),
       h('p.muted', 'nothing is priced while a field is refused:'),
       previewData.invalid.map((item) => h('p.faint', `${item.key} — ${item.reason}`)),
     )
@@ -1736,8 +1870,8 @@ const previewBody = () => {
     'p.toolbar',
     segment(
       [
-        ['sell_base', 'customer gives base'],
-        ['buy_base', 'customer gives quote'],
+        ['sell_base', h('span', 'customer gives ', legName(marketDraft.base))],
+        ['buy_base', h('span', 'customer gives ', legName(marketDraft.quote))],
       ],
       previewDirection,
       (value) => (previewDirection = value),
@@ -1752,7 +1886,7 @@ const previewBody = () => {
     ),
   )
   if (feed.state === 'unresolved') {
-    return h('div', controls, h('p.notice', `feed-unresolved — ${feed.reason}`))
+    return h('div', controls, feedLine(feed))
   }
 
   const { legs, samples, samplesReason, breakEven, carrier } = previewData
@@ -1765,6 +1899,7 @@ const previewBody = () => {
   return h(
     'div',
     controls,
+    feedLine(feed),
     h(
       'table.ladder',
       h(
@@ -1780,7 +1915,6 @@ const previewBody = () => {
     scopeLine(),
     h(
       'div.feedline',
-      h('span', `feed read ${ago(Math.floor(feed.readAt / 1000))} ago`),
       h('span', `carrier ${carrier.sats} sats — ${carrier.priced ? 'priced into the quote' : 'paid out of margin'}`),
       h('span.faint', 'preview only — nothing is quoted or stored'),
     ),
@@ -2015,13 +2149,16 @@ const marketsView = () => {
             m.markets.map((market) =>
               h(
                 'tr',
-                h('td', { title: market.marketKey }, `${legLabel(market.base)} / ${legLabel(market.quote)}`),
+                h('td', { title: market.marketKey }, legNode(market.base), ' / ', legNode(market.quote)),
                 h('td.faint', { title: `${market.feedUrl} ${market.pricePath}` }, shortId(market.feedUrl)),
                 h('td.num', `${market.toleranceBps} bps`),
                 h(
                   'td.num',
-                  `${market.feeBps} bps + ${market.sellBaseFeeFlat} ${legLabel(market.base)} atomic / ` +
-                    `${market.buyBaseFeeFlat} ${legLabel(market.quote)} atomic`,
+                  `${market.feeBps} bps + ${market.sellBaseFeeFlat} `,
+                  legName(market.base),
+                  ` atomic / ${market.buyBaseFeeFlat} `,
+                  legName(market.quote),
+                  ' atomic',
                 ),
                 h(
                   'td',
@@ -2136,6 +2273,7 @@ const pricingPreviewRequest = () =>
         market: marketBody(marketDraft),
         direction: previewDirection,
         side: previewSide,
+        readDraftFeed: readDraftFeed(),
         overrides: { ASSET_CARRIER_PRICING: pricingOverrides().ASSET_CARRIER_PRICING },
       }
 
@@ -2391,7 +2529,7 @@ const pricingTable = (overrides, marketRows) =>
     [...marketRows].map(([key, row]) =>
       h(
         'tr',
-        h('td', row.symbol || `${legLabel(row.base)} / ${legLabel(row.quote)}`),
+        h('td', row.symbol ? h('b', row.symbol, ' ') : null, legNode(row.base), ' / ', legNode(row.quote)),
         h('td', `${row.feeBps} bps`),
         h(
           'td',

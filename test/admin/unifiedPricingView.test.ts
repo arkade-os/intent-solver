@@ -48,6 +48,7 @@ const harness = (answer = { revision: 'r', applied: [] as string[], unapplied: [
     `
     let marketDraft = null, carrierDefaultDraft = false, previewData = null, previewError = null, previewRequest = 0
     let previewSide = 'from', previewDirection = 'sell_base'
+    const readDraftFeed = () => false
     const schedulePreview = () => syncPricingMarket()
     ${definitions}
     ${view}
