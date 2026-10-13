@@ -503,12 +503,22 @@ describe('ReceiveSwapService.quote', () => {
       await expect(ln.getHoldState(paymentHash)).resolves.toMatchObject({ status: 'pending', amountSats: 5_000 })
     })
 
-    /** A backend that WRAPS: its published invoice asks a reserve above the hold it covers. */
+    /** A backend that WRAPS, and inverts its reserve by probing on THROWAWAY hashes. */
     const wrappingLn = (reserveFor: (amountSats: number) => number) => {
       const calls: string[] = []
       return {
         calls,
         port: {
+          holdForPayable: async (payableSats: number) => {
+            let hold = payableSats
+            for (let probe = 0; probe < 3; probe++) {
+              calls.push(`probe:${hold}`)
+              const asked = hold + reserveFor(hold)
+              if (asked === payableSats) return hold
+              hold -= asked - payableSats
+            }
+            throw new Error(`no hold asks exactly ${payableSats}`)
+          },
           createHoldInvoice: async (params: Parameters<typeof ln.createHoldInvoice>[0]) => {
             calls.push(`mint:${params.amountSats}`)
             return {
@@ -550,9 +560,7 @@ describe('ReceiveSwapService.quote', () => {
       // 4_994 held at {100bps + 50 flat}: 4_994 - ceil(49.94) - 50 = 4_894.
       expect(outcome.swap.payoutSats).toBe(4_894)
       await expect(ln.getHoldState(paymentHash)).resolves.toMatchObject({ amountSats: 4_994 })
-      // Retired BEFORE the re-mint, so no orphan is left and the hash is free
-      // for a backend that keys invoices by it.
-      expect(wrapping.calls).toEqual(['mint:5000', 'cancel', 'mint:4994'])
+      expect(wrapping.calls).toEqual(['probe:5000', 'probe:4994', 'mint:4994'])
 
       // And the lockup is funded off the HELD amount, never the give: the solver
       // must not pay out more than the HTLC it holds is worth, less its fee.
@@ -562,40 +570,58 @@ describe('ReceiveSwapService.quote', () => {
       expect(arkade.state.fundCalls).toEqual([{ address: row.lockupAddress, amountSats: 4_894 }])
     })
 
-    it('exact-in: refuses by name when the reserve does not converge', async () => {
-      let mint = 0
-      const wrapping = wrappingLn(() => (mint++ === 0 ? 6 : 5))
+    it('exact-in: refuses by name when the reserve does not converge, minting nothing', async () => {
+      let probe = 0
+      const wrapping = wrappingLn(() => (probe++ % 2 === 0 ? 6 : 5))
       const outcome = await withLn(wrapping.port).quote(quoteRequest())
 
       expect(outcome).toEqual({ accepted: false, reason: 'payable_amount_unmatchable' })
-      expect(wrapping.calls).toEqual(['mint:5000', 'cancel', 'mint:4994', 'cancel'])
-      await expect(store.findLiveByPaymentHash(paymentHash)).resolves.toBeNull()
-    })
-
-    it('exact-in: refuses by name when the backend will not re-mint the hash', async () => {
-      const wrapping = wrappingLn(() => 6)
-      const create = wrapping.port.createHoldInvoice
-      wrapping.port.createHoldInvoice = async (params) => {
-        if (wrapping.calls.length > 1) throw new Error('payment hash already registered')
-        return create(params)
-      }
-      const outcome = await withLn(wrapping.port).quote(quoteRequest())
-
-      expect(outcome).toEqual({ accepted: false, reason: 'payable_amount_unmatchable' })
+      expect(wrapping.calls).toEqual(['probe:5000', 'probe:4994', 'probe:4995'])
       await expect(store.findLiveByPaymentHash(paymentHash)).resolves.toBeNull()
     })
 
     it('exact-in: refuses rather than hold more than the payer is asked for', async () => {
-      const wrapping = wrappingLn(() => -4)
+      const wrapping = wrappingLn(() => 6)
+      wrapping.port.holdForPayable = async (payableSats) => payableSats + 4
+      const outcome = await withLn(wrapping.port).quote(quoteRequest())
+
+      expect(outcome).toEqual({ accepted: false, reason: 'payable_amount_unmatchable' })
+      expect(wrapping.calls).toEqual([])
+    })
+
+    it('exact-in: refuses a hold of nothing rather than minting it', async () => {
+      const wrapping = wrappingLn(() => 6)
+      wrapping.port.holdForPayable = async () => 0
+      const outcome = await withLn(wrapping.port).quote(quoteRequest())
+
+      expect(outcome).toEqual({ accepted: false, reason: 'payable_amount_unmatchable' })
+      expect(wrapping.calls).toEqual([])
+    })
+
+    it('exact-in: retires the hold and refuses when the minted invoice asks something else', async () => {
+      // A reserve that moved between the probe and the real mint.
+      const wrapping = wrappingLn(() => 6)
+      wrapping.port.holdForPayable = async (payableSats) => payableSats
       const outcome = await withLn(wrapping.port).quote(quoteRequest())
 
       expect(outcome).toEqual({ accepted: false, reason: 'payable_amount_unmatchable' })
       expect(wrapping.calls).toEqual(['mint:5000', 'cancel'])
+      await expect(store.findLiveByPaymentHash(paymentHash)).resolves.toBeNull()
+    })
+
+    it('exact-in on a wrapping backend that cannot invert its reserve: one mint, then refusal', async () => {
+      const wrapping = wrappingLn(() => 6)
+      const { createHoldInvoice, getHoldState, settleHold, cancelHold } = wrapping.port
+      const outcome = await withLn({ createHoldInvoice, getHoldState, settleHold, cancelHold }).quote(quoteRequest())
+
+      expect(outcome).toEqual({ accepted: false, reason: 'payable_amount_unmatchable' })
+      expect(wrapping.calls).toEqual(['mint:5000', 'cancel'])
+      await expect(store.findLiveByPaymentHash(paymentHash)).resolves.toBeNull()
     })
 
     it('exact-out on a WRAPPING backend: still quotes what the invoice asks', async () => {
       // Deliberately unchanged: the client named the PAYOUT, so the give is
-      // ours to solve and the reserve rides on it in one mint.
+      // ours to solve and the reserve rides on it in one mint — no probe.
       const wrapping = wrappingLn(() => 7)
       const outcome = await withLn(wrapping.port).quote(quoteRequest({ amountSats: 4_900, amountSide: 'to' }))
 
