@@ -27,6 +27,7 @@ import {
   type IntentReceiverBinding,
 } from './receiver.js'
 import type { DurableEvmSender } from './durableSender.js'
+import { decodeSignedTransaction } from './transaction.js'
 import { verifyEvmClaimEvidence } from './claimEvidence.js'
 
 type Header = { number: string; hash: string; timestamp: string }
@@ -352,6 +353,31 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
         throw new Error('receiver is not safely activatable')
       await requireFactory()
       return deps.transactions.prepare(id, activationRequest(binding))
+    },
+    // Re-signs and rebroadcasts the same nonce once the base fee leaves less than 2x headroom;
+    // null when unneeded, past the cutoff, or over the ceiling.
+    async bumpActivation(id: string, binding: IntentReceiverBinding, maxFeeCeiling: bigint) {
+      const request = activationRequest(binding)
+      const current = await deps.transactions.getPrepared(id, request)
+      if (!current || current.state === 'success' || current.state === 'reverted') return null
+      const signed = decodeSignedTransaction(hexToBytes(current.rawTransaction.slice(2))).fields
+      const [latest, networkTip] = await Promise.all([header('latest'), rpc('eth_maxPriorityFeePerGas', [])])
+      if (
+        quantity(latest.number) >= binding.activationCutoff ||
+        quantity(latest.timestamp) >= binding.activationCutoffTimestamp ||
+        BigInt(finality.nowSeconds()) >= binding.activationCutoffTimestamp
+      )
+        return null
+      const baseFee = (latest as { baseFeePerGas?: unknown }).baseFeePerGas
+      if (typeof baseFee !== 'string') return null
+      const wanted = 2n * quantity(baseFee)
+      if (signed.maxFeePerGas >= wanted) return null
+      const bumped = (value: bigint): bigint => (value * 110n + 99n) / 100n
+      const max = (a: bigint, b: bigint): bigint => (a > b ? a : b)
+      const tip = max(bumped(signed.maxPriorityFeePerGas), quantity(networkTip))
+      const fees = { maxPriorityFeePerGas: tip, maxFeePerGas: max(bumped(signed.maxFeePerGas), wanted + tip) }
+      if (fees.maxFeePerGas > maxFeeCeiling) return null
+      return deps.transactions.replace(id, request, fees, maxFeeCeiling)
     },
     broadcastRawTransaction: (raw: string) => deps.transactions.broadcastRawTransaction(raw),
     pendingTransactions: () => deps.transactions.pending(),

@@ -186,7 +186,7 @@ const mint = (token: Uint8Array, receiver: Uint8Array, amount = AMOUNT) =>
 const mode = (token: Uint8Array, value: bigint) =>
   send(accounts[0]!, token, concatBytes(selectorFor('setMode(uint256)'), uintWord(value, 'mode')))
 
-const testBackend = async (driver: SqlDriver, confirmations = 1) => {
+const testBackend = async (driver: SqlDriver, confirmations = 1, backendRpc = rpc) => {
   const transactions = await createDurableEvmSender({
     driver,
     rpc,
@@ -197,7 +197,7 @@ const testBackend = async (driver: SqlDriver, confirmations = 1) => {
     maxPriorityFeePerGas: 1_000_000_000n,
   })
   const backend = createReceiverBackend({
-    rpc,
+    rpc: backendRpc,
     chainId: 31337n,
     transactions,
     minClaimWindowBlocks: 5n,
@@ -425,6 +425,85 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
         htlcPresent: true,
       })
       expect(await locked(terms)).toBe(1n)
+    } finally {
+      await driver.close()
+    }
+  })
+
+  const preparedBump = async (driver: SqlDriver, backendRpc = rpc) => {
+    const { backend } = await testBackend(driver, 1, backendRpc)
+    const terms = await binding()
+    const address = receiverAddress(terms)
+    await transfer(address, AMOUNT)
+    const prepared = await backend.prepareActivation('bump', address, terms)
+    return { backend, terms, prepared }
+  }
+  const raiseBaseFee = async () => {
+    await rpc('anvil_setNextBlockBaseFeePerGas', ['0xee6b2800'])
+    await rpc('evm_mine', [])
+  }
+
+  chainTest('leaves a signed activation alone while the base fee has headroom', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend, terms } = await preparedBump(driver)
+      expect(await backend.bumpActivation('bump', terms, 50_000_000_000n)).toBeNull()
+    } finally {
+      await driver.close()
+    }
+  })
+
+  chainTest('refuses a bump over the fee ceiling', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend, terms } = await preparedBump(driver)
+      await raiseBaseFee()
+      expect(await backend.bumpActivation('bump', terms, 9_000_000_000n)).toBeNull()
+    } finally {
+      await driver.close()
+    }
+  })
+
+  chainTest('re-signs a signed activation over a rising base fee, then stops once it mined', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend, terms, prepared } = await preparedBump(driver)
+      await raiseBaseFee()
+      const bumped = await backend.bumpActivation('bump', terms, 10_000_000_000n)
+      expect(bumped?.nonce).toBe(prepared.nonce)
+      expect(bumped?.hash).not.toBe(prepared.hash)
+      expect((await receiptFor(bumped!.hash)).status).toBe('0x1')
+      expect(await locked(terms)).toBe(1n)
+      expect(await backend.bumpActivation('bump', terms, 10_000_000_000n)).toBeNull()
+    } finally {
+      await driver.close()
+    }
+  })
+
+  chainTest('does not bump an activation past its cutoff', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const { backend, terms } = await preparedBump(driver)
+      await mineTo(terms.activationCutoff)
+      await raiseBaseFee()
+      expect(await backend.bumpActivation('bump', terms, 10_000_000_000n)).toBeNull()
+    } finally {
+      await driver.close()
+    }
+  })
+
+  chainTest('does not bump when the head reports no base fee', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const noBaseFee = async (method: string, params: readonly unknown[]) => {
+        const result = await rpc(method, params)
+        if (method !== 'eth_getBlockByNumber' || params[0] !== 'latest') return result
+        const { baseFeePerGas: _, ...rest } = result as Record<string, unknown>
+        return rest
+      }
+      const { backend, terms } = await preparedBump(driver, noBaseFee)
+      await raiseBaseFee()
+      expect(await backend.bumpActivation('bump', terms, 10_000_000_000n)).toBeNull()
     } finally {
       await driver.close()
     }
