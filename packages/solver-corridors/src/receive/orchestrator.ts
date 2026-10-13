@@ -543,7 +543,11 @@ export class ReceiveSwapService {
         }
         payoutSats = this.pricing.payoutFor({ pair: RFQ_PAIR_RECEIVE, giveSats: holdSats })
         if (payoutSats <= 0) return { accepted: false, reason: 'fee_consumes_swap' }
-        held = await mint(holdSats)
+        // A backend that keeps a retired hash refuses this mint; that is the
+        // same answer as a reserve that will not converge, not a crashed quote.
+        const remint = await mint(holdSats).catch(() => undefined)
+        if (!remint) return { accepted: false, reason: 'payable_amount_unmatchable' }
+        held = remint
         if (held.payableSats !== giveSats) {
           await this.retireInvoice(request.paymentHash)
           return { accepted: false, reason: 'payable_amount_unmatchable' }

@@ -572,6 +572,19 @@ describe('ReceiveSwapService.quote', () => {
       await expect(store.findLiveByPaymentHash(paymentHash)).resolves.toBeNull()
     })
 
+    it('exact-in: refuses by name when the backend will not re-mint the hash', async () => {
+      const wrapping = wrappingLn(() => 6)
+      const create = wrapping.port.createHoldInvoice
+      wrapping.port.createHoldInvoice = async (params) => {
+        if (wrapping.calls.length > 1) throw new Error('payment hash already registered')
+        return create(params)
+      }
+      const outcome = await withLn(wrapping.port).quote(quoteRequest())
+
+      expect(outcome).toEqual({ accepted: false, reason: 'payable_amount_unmatchable' })
+      await expect(store.findLiveByPaymentHash(paymentHash)).resolves.toBeNull()
+    })
+
     it('exact-in: refuses rather than hold more than the payer is asked for', async () => {
       const wrapping = wrappingLn(() => -4)
       const outcome = await withLn(wrapping.port).quote(quoteRequest())
