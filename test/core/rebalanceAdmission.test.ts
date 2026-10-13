@@ -103,6 +103,24 @@ describe('rebalance and quote inventory admission', () => {
     },
   )
 
+  it('admits overlapping Arkade payouts that both fit the balance read before either was held', async () => {
+    const balance = deferred<void>()
+    const read = vi.fn(async () => {
+      await balance.promise
+      return inventory()
+    })
+    const gate = new AdmissionControl(read)
+    const onRefused = vi.fn()
+    const pending = [gate.admit({ ...request(), onRefused }), gate.admit({ ...request(), onRefused })]
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2))
+    balance.resolve()
+    const held = await Promise.all(pending)
+    expect(onRefused).not.toHaveBeenCalled()
+    expect(gate.outstandingInventorySats('arkade')).toBe(8000)
+    held.forEach((reservation) => reservation?.release())
+    expect(gate.outstandingInventorySats('arkade')).toBe(0)
+  })
+
   it('failed obligation reads release every acquired reservation', async () => {
     const gate = new AdmissionControl()
     const base = { pair: 'lightning:BTC->arkade:BTC', giveSats: 4000, capSats: 100000, committedSats: async () => 0 }

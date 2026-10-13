@@ -99,7 +99,7 @@ export class AdmissionControl implements AdmissionStrategy {
     const next = this.outstandingInventorySats(poolId) + requiredSats
     if (!Number.isSafeInteger(next)) throw new RangeError('inventory reservation exceeds safe integer range')
     this.inventory.set(poolId, next)
-    this.inventoryGeneration++
+    // Release-only: a new hold is counted by outstandingInventorySats inside the queue.
     return releasing([
       () => {
         this.inventory.set(poolId, this.outstandingInventorySats(poolId) - requiredSats)
