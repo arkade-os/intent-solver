@@ -205,8 +205,9 @@ export interface HoldInvoice {
    * to cover the wrapper's routing reserve. The client pays THIS number, so this is
    * what the corridor must quote — on an EXACT-OUT request, where the give is the
    * solver's to solve. Exact-in fixes what the client pays, so a corridor serving it
-   * must instead mint until this equals the requested give (see the receive
-   * orchestrator's `quote`), never quote the larger number.
+   * must hold LESS by the reserve and price its payout off that: it asks {@link
+   * ReceiveBackend.holdForPayable} what to mint BEFORE minting, and never quotes the
+   * larger number.
    *
    * NOT what the provider receives: the held HTLC is still worth `amountSats` and the
    * payout was priced off that, so nothing downstream may substitute this for it.
@@ -514,6 +515,13 @@ export interface SendBackend {
 /** The receive leg's view: issue a hold invoice and settle it with the preimage. */
 export interface ReceiveBackend {
   createHoldInvoice(params: CreateHoldInvoiceParams): Promise<HoldInvoice>
+
+  /**
+   * The hold whose PUBLISHED invoice would ask exactly `payableSats`, answered
+   * BEFORE the real mint. Must not touch the swap's payment hash, which gets
+   * exactly one invoice. Throws when no such hold exists.
+   */
+  holdForPayable?(payableSats: number): Promise<number>
 
   /** Read the hold's status and, once armed, its settle deadline `E`. */
   getHoldState(paymentHash: string): Promise<HoldState>

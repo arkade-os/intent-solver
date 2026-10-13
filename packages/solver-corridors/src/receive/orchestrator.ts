@@ -57,7 +57,7 @@ import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveSwapRow, ReceiveSwapStore } from '../db/receiveSwaps.js'
 import type { SendSwapRow } from '../db/swaps.js'
-import { GiveUp, json, log, nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
+import { GiveUp, json, log, messageOf, nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
@@ -169,6 +169,7 @@ export interface ReceiveServiceDeps {
   ln: Pick<
     LightningBackend,
     | 'createHoldInvoice'
+    | 'holdForPayable'
     | 'getHoldState'
     | 'settleHold'
     | 'cancelHold'
@@ -526,32 +527,33 @@ export class ReceiveSwapService {
           expirySeconds: DEFAULT_HOLD_INVOICE_WINDOW,
           minFinalCltvBlocks,
         })
-      let held = await mint(giveSats)
       // EXACT-IN MUST ASK EXACTLY THE GIVE: a client that fixed what it pays
       // cannot take a wrapping backend's reserve on top (LUD-06 requires the
       // bolt11 to equal the amount requested). So hold LESS by that reserve, and
       // price the payout off what we then HOLD rather than a give we never get.
-      if (request.amountSide !== 'to' && held.payableSats !== giveSats) {
-        const holdSats = 2 * giveSats - held.payableSats
-        // BEFORE the re-mint, never after one that worked: `cancelHold` is keyed
-        // by payment hash, which both invoices share.
-        await this.retireInvoice(request.paymentHash)
+      const rfqRef = request.rfqId?.slice(0, 12)
+      let holdSats = giveSats
+      if (request.amountSide !== 'to' && ln.holdForPayable) {
+        try {
+          holdSats = await ln.holdForPayable(giveSats)
+        } catch (error) {
+          log('receive_payable_unmatchable', json({ rfqRef, giveSats, error: messageOf(error) }))
+          return { accepted: false, reason: 'payable_amount_unmatchable' }
+        }
         // Over the give is a wrapper asking LESS than the hold it covers, so
-        // re-minting there would fund a payout off sats nobody is asked to send.
+        // holding there would fund a payout off sats nobody is asked to send.
         if (holdSats <= 0 || holdSats > giveSats) {
+          log('receive_payable_unmatchable', json({ rfqRef, giveSats, holdSats }))
           return { accepted: false, reason: 'payable_amount_unmatchable' }
         }
         payoutSats = this.pricing.payoutFor({ pair: RFQ_PAIR_RECEIVE, giveSats: holdSats })
         if (payoutSats <= 0) return { accepted: false, reason: 'fee_consumes_swap' }
-        // A backend that keeps a retired hash refuses this mint; that is the
-        // same answer as a reserve that will not converge, not a crashed quote.
-        const remint = await mint(holdSats).catch(() => undefined)
-        if (!remint) return { accepted: false, reason: 'payable_amount_unmatchable' }
-        held = remint
-        if (held.payableSats !== giveSats) {
-          await this.retireInvoice(request.paymentHash)
-          return { accepted: false, reason: 'payable_amount_unmatchable' }
-        }
+      }
+      const held = await mint(holdSats)
+      if (request.amountSide !== 'to' && held.payableSats !== giveSats) {
+        await this.retireInvoice(request.paymentHash)
+        log('receive_payable_unmatchable', json({ rfqRef, giveSats, holdSats, payableSats: held.payableSats }))
+        return { accepted: false, reason: 'payable_amount_unmatchable' }
       }
       const holdMs = Math.round(performance.now() - holdStarted)
 
