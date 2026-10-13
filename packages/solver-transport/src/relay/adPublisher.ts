@@ -138,8 +138,20 @@ export const startAdPublishing = (opts: {
     now: () => Math.floor(nowMs() / 1000),
     heartbeatSeconds: AD_HEARTBEAT_SECONDS,
   })
+  // One misconfiguration would otherwise log every tick; `lastError` keeps it on the console meanwhile.
+  let reported: string | null = null
   const tick = (): void => {
-    if (connection.isConnected()) publisher.publishIfDue().catch(opts.onError)
+    if (!connection.isConnected()) return
+    publisher.publishIfDue().then(
+      () => {
+        reported = null
+      },
+      (error: unknown) => {
+        if (messageOf(error) === reported) return
+        reported = messageOf(error)
+        opts.onError(error)
+      },
+    )
   }
   const timer = setInterval(tick, AD_TICK_MS)
   timer.unref?.()

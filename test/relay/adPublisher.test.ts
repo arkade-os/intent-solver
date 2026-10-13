@@ -262,4 +262,27 @@ describe('startAdPublishing', () => {
     expect(published).toHaveLength(1)
     expect(handle!.publisher.state().lastError).toBeNull()
   })
+
+  it('reports a failure repeating every tick once, and again only when it changes or after a clean tick', async () => {
+    vi.useFakeTimers()
+    let failure: string | null = 'SOLVER_NAME is not set'
+    const errors: unknown[] = []
+    const { advance } = start('auto', {
+      build: async () => {
+        if (failure) throw new Error(failure)
+        return signedCard()
+      },
+      onError: (error) => errors.push(error),
+    })
+    await advance(5 * 30_000)
+    expect(errors).toHaveLength(1)
+    failure = 'no corridor is enabled'
+    await advance(30_000)
+    expect(errors).toHaveLength(2)
+    failure = null
+    await advance(30_000)
+    failure = 'no corridor is enabled'
+    await advance(30_000)
+    expect(errors).toHaveLength(3)
+  })
 })
