@@ -8,6 +8,8 @@ import { formatSats } from '@arkade-os/solver-core/core/businessEvent.js'
 import { attempt } from './attempt.js'
 import type { FundBalance, FundFigure, FundSource } from './fundSources.js'
 import type { ConsoleAsset } from '../admin/assets.js'
+import { formatSwapSummary, type SwapSummary } from './swapSummary.js'
+import { createJoin, within } from './guardedRead.js'
 
 type Read<T> = Awaited<ReturnType<typeof attempt<T>>>
 
@@ -16,6 +18,7 @@ export interface BalanceReport {
   sources: Array<{ label: string; balance: Read<FundBalance> }>
   assets: Read<ConsoleAsset[]>
   committedSats: Read<number>
+  swaps?: Read<SwapSummary>
 }
 
 export interface BalanceReportInput {
@@ -23,49 +26,24 @@ export interface BalanceReportInput {
   sources: readonly FundSource[]
   readAssets(): Promise<ConsoleAsset[]>
   readCommittedSats(): Promise<number>
+  readSwaps?(): Promise<SwapSummary>
   deadlineMs?: number
 }
+
+// Under Telegram's 4096: a longer message is refused outright, losing the whole report.
+const MAX_MESSAGE_CHARS = 4000
 
 // Above the LND adapter's own 30s read deadline, so its more specific error wins where it has one.
 const READ_DEADLINE_MS = 60_000
 
-const within =
-  <T>(read: () => Promise<T>, ms: number) =>
-  async (): Promise<T> => {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      return await Promise.race([
-        read(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`no answer within ${ms}ms`)), ms)
-          timer.unref()
-        }),
-      ])
-    } finally {
-      clearTimeout(timer)
-    }
-  }
-
 /** The deadline ends a report, not its reads: one still running is joined by the next report, never repeated. */
 export const createBalanceReportReader = (): ((input: BalanceReportInput) => Promise<BalanceReport>) => {
-  const running = new Map<string, Promise<unknown>>()
-  const joined =
-    <T>(key: string, read: () => Promise<T>) =>
-    (): Promise<T> => {
-      let pending = running.get(key) as Promise<T> | undefined
-      if (pending === undefined) {
-        pending = Promise.resolve()
-          .then(read)
-          .finally(() => running.delete(key))
-        running.set(key, pending)
-      }
-      return pending
-    }
-
+  const joined = createJoin()
   return async (input) => {
     const ms = input.deadlineMs ?? READ_DEADLINE_MS
     const guarded = <T>(key: string, read: () => Promise<T>) => attempt(within(joined(key, read), ms))
-    const [sources, assets, committedSats] = await Promise.all([
+    const { readSwaps } = input
+    const [sources, assets, committedSats, swaps] = await Promise.all([
       Promise.all(
         input.sources.map(async (s) => ({
           label: s.label,
@@ -74,8 +52,9 @@ export const createBalanceReportReader = (): ((input: BalanceReportInput) => Pro
       ),
       guarded('assets', () => input.readAssets()),
       guarded('committed', () => input.readCommittedSats()),
+      readSwaps ? guarded('swaps', () => readSwaps()) : undefined,
     ])
-    return { network: input.network, sources, assets, committedSats }
+    return { network: input.network, sources, assets, committedSats, ...(swaps ? { swaps } : {}) }
   }
 }
 
@@ -111,5 +90,10 @@ export const formatBalanceReport = (report: BalanceReport): string => {
       ? unreadable('committed to live swaps', committedSats.error)
       : `committed to live swaps: ${formatSats(committedSats.value)} sats`,
   )
-  return lines.join('\n')
+  const { swaps } = report
+  if (swaps) lines.push(...(swaps.error !== null ? [unreadable('swaps', swaps.error)] : formatSwapSummary(swaps.value)))
+  const text = lines.join('\n')
+  if (text.length <= MAX_MESSAGE_CHARS) return text
+  const cut = `… (message cut at ${MAX_MESSAGE_CHARS} characters)`
+  return text.slice(0, MAX_MESSAGE_CHARS - cut.length) + cut
 }

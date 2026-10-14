@@ -5,6 +5,7 @@ import {
   type BalanceReportInput,
 } from '@arkade-os/solver-app/ops/balanceReport.js'
 import type { FundBalance, FundSource } from '@arkade-os/solver-app/ops/fundSources.js'
+import type { SwapSummary } from '@arkade-os/solver-app/ops/swapSummary.js'
 
 const source = (label: string, readBalance: () => Promise<FundBalance>): FundSource => ({
   id: label,
@@ -139,5 +140,48 @@ describe('balance report', () => {
 
   it('omits the assets line when the float holds none', async () => {
     expect(formatBalanceReport(await read())).not.toContain('assets')
+  })
+
+  const summary = (over: Partial<SwapSummary> = {}): SwapSummary => ({
+    since: 1_760_421_600,
+    until: 1_760_443_200,
+    corridors: [],
+    unreadable: [],
+    unmeasured: [],
+    ...over,
+  })
+
+  it('appends the swap summary after the balances, and only when asked for one', async () => {
+    expect(formatBalanceReport(await read())).not.toContain('Swaps')
+    const text = formatBalanceReport(await read({ readSwaps: async () => summary() }))
+    expect(text.split('\n').at(-1)).toBe('Swaps 2025-10-14 06:00 to 12:00 UTC: none finished')
+  })
+
+  it('reports a summary that could not be read without losing the balances', async () => {
+    const text = formatBalanceReport(
+      await read({
+        readSwaps: async () => {
+          throw new Error('db locked')
+        },
+      }),
+    )
+    expect(text).toContain('arkade float (sats): available 1,234,567')
+    expect(text).toContain('swaps: unreadable (db locked)')
+  })
+
+  // Telegram refuses a message over 4096 characters, which would drop the whole report.
+  it('caps the message below the Telegram limit and says it was cut', async () => {
+    const many = Array.from({ length: 200 }, (_, i) => ({
+      corridor: `corridor-${i}-${'x'.repeat(30)}`,
+      since: 1_760_421_600,
+      fulfilled: 1,
+      failed: 0,
+      unfunded: 0,
+      reasons: new Map<string, number>(),
+      truncated: false,
+    }))
+    const text = formatBalanceReport(await read({ readSwaps: async () => summary({ corridors: many }) }))
+    expect(text.length).toBeLessThanOrEqual(4000)
+    expect(text.endsWith('… (message cut at 4000 characters)')).toBe(true)
   })
 })

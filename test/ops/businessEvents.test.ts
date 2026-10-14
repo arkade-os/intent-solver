@@ -292,4 +292,9 @@ describe('the balance sampler is DRIVEN on the shipped daemon', () => {
     expect(cliSource).toMatch(/services\.reportBalances && Date\.now\(\) - lastBalanceReport > reportEveryMs/)
     expect(cliSource).toMatch(/void services\.reportBalances\(\)\.catch\(/)
   })
+
+  it('the balance report carries the swap summary over every corridor reader', () => {
+    expect(servicesSource).toMatch(/const readSwapSummary = createSwapSummaryReader\(\{/)
+    expect(servicesSource).toMatch(/readSwaps: \(\) => readSwapSummary\(services\.readers\)/)
+  })
 })
