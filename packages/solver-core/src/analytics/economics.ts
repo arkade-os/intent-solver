@@ -59,6 +59,8 @@ export interface SwapEconomics {
   /** The corridor's own state word, carried through verbatim. */
   readonly state: string
   readonly phase: CorridorPhase
+  /** The row's own `failure_reason`. Optional so a consumer's hand-built record still compiles. */
+  readonly failureReason?: string | null
   /** Unix seconds the quote was written. */
   readonly quotedAt: number
   /** Unix seconds the row last moved — settlement time, on a terminal row. */
@@ -297,6 +299,7 @@ export const economicsOf = (parts: {
   corridor: string
   state: string
   phase: CorridorPhase
+  failureReason?: string | null
   quotedAt: number
   settledAt: number
   inbound: EconomicsLeg
@@ -357,6 +360,7 @@ export const economicsOf = (parts: {
     corridor: parts.corridor,
     state: parts.state,
     phase: parts.phase,
+    failureReason: parts.failureReason ?? null,
     quotedAt: parts.quotedAt,
     settledAt: parts.settledAt,
     // Clamped at zero: `updated_at` is a second-resolution clock and the two
