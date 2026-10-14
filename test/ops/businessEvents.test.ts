@@ -5,9 +5,7 @@ import {
   btcSwapSize,
   createBalanceSampler,
   createSwapOutcomeReporter,
-  formatAmount,
   type BalanceReading,
-  type SwapTerms,
 } from '@arkade-os/solver-app/ops/businessEvents.js'
 
 const LN_SEND = {
@@ -25,7 +23,6 @@ const LN_RECEIVE = {
 const reading = (over: Partial<BalanceReading> = {}): BalanceReading => ({
   arkade: { value: 1_000_000, at: 1_000 },
   lightning: { value: { availableSats: 2_000_000, incomingSats: 3_000_000 }, at: 1_000 },
-  onchain: null,
   ...over,
 })
 
@@ -33,10 +30,7 @@ const sampler = (over: Partial<BalanceReading> = {}) => ({
   current: () => reading(over),
 })
 
-const terms = (size = 'amount 10,000 sats', failureReason: string | null = null): SwapTerms => ({
-  size,
-  failureReason,
-})
+const terms = (size = 'amount 10,000 sats') => size
 
 const reporter = (over: Record<string, unknown> = {}) => {
   const posted: string[] = []
@@ -114,7 +108,7 @@ describe('createSwapOutcomeReporter', () => {
         arkade: { value: 5_074_074, at: 1_960 },
         lightning: { value: { availableSats: 1_200_000, incomingSats: 800_000 }, at: 1_960 },
       }),
-      terms: async () => terms(btcSwapSize(80_362, 80_000), 'could not settle the hold'),
+      terms: async () => terms(btcSwapSize(80_362, 80_000)),
     })
     report({ id: '29975e63-b613-44fe-a392-43d5025b1f11', from: 'funded', to: 'stuck' })
     await vi.waitFor(() => expect(posted).toHaveLength(1))
@@ -122,19 +116,10 @@ describe('createSwapOutcomeReporter', () => {
       [
         'Swap STUCK — lightning:BTC->arkade:BTC — 29975e63-b613-44fe-a392-43d5025b1f11',
         'amount 80,362 sats -> payout 80,000 sats',
-        'reason: could not settle the hold',
         'Lightning (spark): 1,200,000 sats available, 800,000 sats incoming (40s old)',
         'Arkade: 5,074,074 sats available (40s old)',
       ].join('\n'),
     )
-  })
-
-  it('does not call the in-flight exposure a balance', async () => {
-    const { report, posted } = reporter()
-    report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
-    await vi.waitFor(() => expect(posted).toHaveLength(1))
-    expect(posted[0]).not.toContain('committed')
-    expect(posted[0]).not.toContain('change since')
   })
 
   it('names the Lightning rail, and the send leg omits a payout it does not record', async () => {
@@ -145,27 +130,6 @@ describe('createSwapOutcomeReporter', () => {
     expect(posted[0]).not.toContain('payout')
     expect(posted[0]).toContain('Lightning (spark): 2,000,000 sats available, 3,000,000 sats incoming')
     expect(posted[0]).toContain('Arkade: 1,000,000 sats available')
-  })
-
-  it('shows the onchain float on an onchain corridor, including a shared pool', async () => {
-    const { report, posted } = reporter({
-      corridor: 'arkade:BTC->onchain:BTC',
-      balances: sampler({
-        onchain: { value: { confirmedSats: 500_000, sharedWithLightning: true }, at: 1_000 },
-      }),
-    })
-    report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
-    await vi.waitFor(() => expect(posted).toHaveLength(1))
-    expect(posted[0]).toContain('Onchain: 500,000 sats confirmed, same pool as Lightning (spark)')
-    expect(posted[0]).toContain('Arkade: 1,000,000 sats available')
-    expect(posted[0]).not.toContain('sats incoming')
-  })
-
-  it('still pages a terminal state it has never heard of', async () => {
-    const { report, posted } = reporter()
-    report({ id: 'swap-9', from: 'funded', to: 'invented' })
-    await vi.waitFor(() => expect(posted).toHaveLength(1))
-    expect(posted[0]).toContain('ended in invented')
   })
 
   it('says how stale each float reading is', async () => {
@@ -212,15 +176,6 @@ describe('createSwapOutcomeReporter', () => {
     expect(errors).toHaveLength(1)
   })
 
-  it('leaves a fulfilled swap without a failure reason', async () => {
-    const { report, posted } = reporter({
-      terms: async () => terms('amount 5 sats', 'old failure that is not why this ended'),
-    })
-    report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
-    await vi.waitFor(() => expect(posted).toHaveLength(1))
-    expect(posted[0]).not.toContain('reason:')
-  })
-
   // The money path calls this synchronously; nothing it does may surface there.
   it('never throws at the caller, even when the swap row is unreadable', () => {
     const { report } = reporter({
@@ -244,13 +199,6 @@ describe('createSwapOutcomeReporter', () => {
   })
 })
 
-describe('formatAmount', () => {
-  it('groups a safe integer and leaves a larger one exact', () => {
-    expect(formatAmount(1_000n, 'sats')).toBe('1,000 sats')
-    expect(formatAmount(9007199254740993n, 'USDC')).toBe('9007199254740993 USDC')
-  })
-})
-
 describe('createBalanceSampler', () => {
   it('has no reading before the first sample', () => {
     const s = createBalanceSampler({
@@ -266,14 +214,12 @@ describe('createBalanceSampler', () => {
     const s = createBalanceSampler({
       readArkadeAvailableSats,
       readLightning,
-      readOnchain: async () => ({ confirmedSats: 30, sharedWithLightning: false }),
       now: () => 10,
     })
     await s.sample()
     expect(s.current()).toEqual({
       arkade: { value: 900, at: 10 },
       lightning: { value: { availableSats: 10, incomingSats: 20 }, at: 10 },
-      onchain: { value: { confirmedSats: 30, sharedWithLightning: false }, at: 10 },
     })
     s.current()
     s.current()

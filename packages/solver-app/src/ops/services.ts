@@ -73,13 +73,7 @@ import { OnchainReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainR
 import { AdminStore, type SwapApprovalRequest } from '../admin/db.js'
 import { createNotifier } from './notify.js'
 import { sinksFrom } from './notifySinks.js'
-import {
-  btcSwapSize,
-  createBalanceSampler,
-  createSwapOutcomeReporter,
-  formatAmount,
-  type SwapTerms,
-} from './businessEvents.js'
+import { btcSwapSize, createBalanceSampler, createSwapOutcomeReporter } from './businessEvents.js'
 import { approvalGateFor } from './approvals.js'
 import { formatSats, type CorridorStates, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
 import { LN_SEND } from '@arkade-os/solver-corridors/corridors/lnSend.js'
@@ -525,8 +519,8 @@ export const createServices = async (
 
   // Sampled on a timer, never on the event path: `getBalance()` awaits the same
   // unfiltered `contractSnapshot()` as `getSpendableVtxos()` (~951ms measured)
-  // and races a `getBoardingUtxos()`. Lightning and onchain are the same class
-  // of call. The swap's own amount is read off its row later, not here.
+  // and races a `getBoardingUtxos()`. The Lightning read is the same class of
+  // call. The swap's own amount is read off its row later, not here.
   const balances = createBalanceSampler({
     readArkadeAvailableSats: async () => (await arkade.wallet.getBalance()).available,
     ...(config.lnBackend === null
@@ -537,39 +531,23 @@ export const createServices = async (
             const balance = await rail.ln.getBalance()
             return { availableSats: balance.availableSats, incomingSats: balance.incomingSats }
           },
-          readOnchain: async () => {
-            if (rail === null) throw new Error('onchain balance sampled with no rail')
-            const balance = await rail.onchain.getBalance()
-            return { confirmedSats: balance.confirmedSats, sharedWithLightning: balance.sharedWithLightning === true }
-          },
         }),
     now: nowSeconds,
     onError: (error) => log('balance sample failed:', error instanceof Error ? error.message : String(error)),
   })
 
-  const tokenUnit = (address: string): string =>
-    config.evmCorridors.find((corridor) => corridor.token.address === address)?.token.symbol ??
-    `${address.slice(0, 8)}…`
-
   const satsTerms =
-    (
-      load: (
-        id: string,
-      ) => Promise<{ amountSats: number; payoutSats: number | null; failureReason: string | null; note?: string }>,
-    ) =>
-    async (id: string): Promise<SwapTerms> => {
+    (load: (id: string) => Promise<{ amountSats: number; payoutSats: number | null }>) =>
+    async (id: string): Promise<string> => {
       const row = await load(id)
-      const size = row.note
-        ? `${btcSwapSize(row.amountSats, row.payoutSats)}; ${row.note}`
-        : btcSwapSize(row.amountSats, row.payoutSats)
-      return { size, failureReason: row.failureReason }
+      return btcSwapSize(row.amountSats, row.payoutSats)
     }
 
   const announceOutcomes = (
     target: { onTransition?: TransitionHook },
     corridor: string,
     states: CorridorStates,
-    terms: (id: string) => Promise<SwapTerms>,
+    terms: (id: string) => Promise<string>,
   ) => {
     target.onTransition = createSwapOutcomeReporter({
       corridor,
@@ -591,7 +569,7 @@ export const createServices = async (
     LN_SEND.states,
     satsTerms(async (id) => {
       const row = await store.get(id)
-      return { amountSats: row.amountSats, payoutSats: null, failureReason: row.failureReason }
+      return { amountSats: row.amountSats, payoutSats: null }
     }),
   )
   announceOutcomes(
@@ -600,7 +578,7 @@ export const createServices = async (
     ONCHAIN_SEND.states,
     satsTerms(async (id) => {
       const row = await onchainStore.get(id)
-      return { amountSats: row.amountSats, payoutSats: row.payoutSats, failureReason: row.failureReason }
+      return { amountSats: row.amountSats, payoutSats: row.payoutSats }
     }),
   )
   announceOutcomes(
@@ -609,7 +587,7 @@ export const createServices = async (
     LN_RECEIVE.states,
     satsTerms(async (id) => {
       const row = await receiveStore.get(id)
-      return { amountSats: row.amountSats, payoutSats: row.payoutSats, failureReason: row.failureReason }
+      return { amountSats: row.amountSats, payoutSats: row.payoutSats }
     }),
   )
   announceOutcomes(
@@ -618,11 +596,10 @@ export const createServices = async (
     ONCHAIN_RECEIVE.states,
     satsTerms(async (id) => {
       const row = await onchainReceiveStore.get(id)
-      return { amountSats: row.amountSats, payoutSats: row.payoutSats, failureReason: row.failureReason }
+      return { amountSats: row.amountSats, payoutSats: row.payoutSats }
     }),
   )
-  // Both EVM stores serve every token, so the label names the LEG. The sats
-  // columns are what the activity table shows; the token amount is the other leg.
+  // Both EVM stores serve every token, so the label names the LEG.
   if (evmSendStore) {
     announceOutcomes(
       evmSendStore,
@@ -634,12 +611,7 @@ export const createServices = async (
       },
       satsTerms(async (id) => {
         const row = await evmSendStore.get(id)
-        return {
-          amountSats: row.amountSats,
-          payoutSats: row.payoutSats,
-          failureReason: row.failureReason,
-          note: `token ${row.evmAmount} ${tokenUnit(row.tokenAddress)}`,
-        }
+        return { amountSats: row.amountSats, payoutSats: row.payoutSats }
       }),
     )
   }
@@ -654,12 +626,7 @@ export const createServices = async (
       },
       satsTerms(async (id) => {
         const row = await evmReceiveStore.get(id)
-        return {
-          amountSats: row.amountSats,
-          payoutSats: row.payoutSats,
-          failureReason: row.failureReason,
-          note: `token ${row.evmAmount} ${tokenUnit(row.tokenAddress)}`,
-        }
+        return { amountSats: row.amountSats, payoutSats: row.payoutSats }
       }),
     )
   }
@@ -842,8 +809,8 @@ export const createServices = async (
   const servesOffers = policy.offerMarkets.length > 0 || marketRows.some((row) => row.enabled && row.servesOffer)
   const liveOfferMarkets = offerMarketsFrom(assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
-  const assetAmount = (assetId: string | null, amount: bigint): string =>
-    formatAmount(amount, assetId === null ? 'sats' : (assetSymbols.get(assetId) ?? `${assetId.slice(0, 8)}…`))
+  const leg = (assetId: string | null, amount: bigint) =>
+    `${amount} ${assetId === null ? 'sats' : (assetSymbols.get(assetId) ?? assetId.slice(0, 8))}`
   // NOT a corridor, so no descriptor: an offer fill has no HTLC, deadline or
   // refund, hence no exposed set. `lost` — someone else took it — is `failed`.
   if (offerStore) {
@@ -858,10 +825,7 @@ export const createServices = async (
       async (id) => {
         const row = await offerStore.findById(id)
         if (!row) throw new Error(`offer fill ${id} not found`)
-        return {
-          size: `receive ${assetAmount(row.offerAssetId, row.offerAmount)} -> pay ${assetAmount(row.wantAssetId, row.wantAmount)}`,
-          failureReason: row.failureReason,
-        }
+        return `receive ${leg(row.offerAssetId, row.offerAmount)} -> pay ${leg(row.wantAssetId, row.wantAmount)}`
       },
     )
   }
@@ -928,10 +892,7 @@ export const createServices = async (
     },
     async (id) => {
       const row = await assetRfqStore.get(id)
-      return {
-        size: `amount ${assetAmount(row.fromAssetId, row.fromAmount)} -> payout ${assetAmount(row.toAssetId, row.toAmount)}`,
-        failureReason: row.failureReason,
-      }
+      return `amount ${leg(row.fromAssetId, row.fromAmount)} -> payout ${leg(row.toAssetId, row.toAmount)}`
     },
   )
   const assetRfqDerivation = {
