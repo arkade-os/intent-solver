@@ -1,6 +1,6 @@
 export interface RfqRefusalMetadata {
   transport: 'http' | 'relay'
-  requestType: 'rfq_request' | 'rfq_status_request'
+  requestType: 'rfq_request' | 'rfq_status_request' | 'rfq_reveal'
   rfqId: string | null
   reason: string
 }

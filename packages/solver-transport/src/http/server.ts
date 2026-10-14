@@ -27,7 +27,7 @@
 
 import { Hono, type Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
-import { respondToRfqRequest, respondToRfqStatus } from '../ingress/rfq.js'
+import { respondToRfqRequest, respondToRfqReveal, respondToRfqStatus } from '../ingress/rfq.js'
 import { reportRfqRefusal, type RfqRefusalObserver } from '../ingress/refusals.js'
 import type { CorridorReaderSet, CorridorSet } from '@arkade-os/solver-core/core/corridor.js'
 import { rfqRefusalPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
@@ -101,6 +101,19 @@ export const buildApp = (deps: HttpDeps): Hono => {
         }
         reportRfqRefusal(deps.onRefusal, 'http', 'rfq_request', outcome)
         return c.json(outcome.payload, outcome.kind === 'quote' ? 201 : outcome.kind === 'invalid' ? 400 : 422)
+      }
+
+      if ((body as { type?: unknown } | null)?.type === 'rfq_reveal') {
+        let outcome
+        try {
+          outcome = await respondToRfqReveal(corridors, body)
+        } catch (error) {
+          deps.onError?.('http reveal', error)
+          return c.json({ v: 1, type: 'error' }, 500)
+        }
+        reportRfqRefusal(deps.onRefusal, 'http', 'rfq_reveal', outcome)
+        const status = { ack: 202, invalid: 400, unknown: 404, refused: 422 } as const
+        return c.json(outcome.payload, status[outcome.kind])
       }
 
       // Anything else — including the removed pre-RFQ `ln_send_*` shape — is
