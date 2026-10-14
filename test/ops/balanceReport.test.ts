@@ -173,6 +173,7 @@ describe('balance report', () => {
   it('caps the message below the Telegram limit and says it was cut', async () => {
     const many = Array.from({ length: 200 }, (_, i) => ({
       corridor: `corridor-${i}-${'x'.repeat(30)}`,
+      since: 1_760_421_600,
       fulfilled: 1,
       failed: 0,
       unfunded: 0,

@@ -75,7 +75,7 @@ import { createNotifier } from './notify.js'
 import { sinksFrom } from './notifySinks.js'
 import { btcSwapSize, createBalanceSampler, createSwapOutcomeReporter } from './businessEvents.js'
 import { createBalanceReportReader, formatBalanceReport } from './balanceReport.js'
-import { readSwapSummary } from './swapSummary.js'
+import { createSwapSummaryReader } from './swapSummary.js'
 import { fundSources } from './fundSources.js'
 import { assetSource, describeAssetId } from '../admin/assets.js'
 import { approvalGateFor } from './approvals.js'
@@ -1553,8 +1553,11 @@ export const createServices = async (
   }
 
   const readBalanceReport = createBalanceReportReader()
-  // Each report covers what finished since the one before; the boot report, the interval before boot.
-  let swapsSince = nowSeconds() - (config.balanceReportIntervalMinutes ?? 0) * 60
+  // The boot report covers the interval before boot; each later one, what finished since.
+  const readSwapSummary = createSwapSummaryReader({
+    now: nowSeconds,
+    firstSince: nowSeconds() - (config.balanceReportIntervalMinutes ?? 0) * 60,
+  })
   const postBalanceReport = async (): Promise<void> => {
     const report = await readBalanceReport({
       network: config.network,
@@ -1570,12 +1573,7 @@ export const createServices = async (
         )
       },
       readCommittedSats: () => totalCommitted(),
-      readSwaps: async () => {
-        const until = nowSeconds()
-        const summary = await readSwapSummary(services.readers, { since: swapsSince, until })
-        swapsSince = until
-        return summary
-      },
+      readSwaps: () => readSwapSummary(services.readers),
     })
     notifier.post(formatBalanceReport(report))
   }

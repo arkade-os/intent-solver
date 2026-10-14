@@ -9,6 +9,7 @@ import { attempt } from './attempt.js'
 import type { FundBalance, FundFigure, FundSource } from './fundSources.js'
 import type { ConsoleAsset } from '../admin/assets.js'
 import { formatSwapSummary, type SwapSummary } from './swapSummary.js'
+import { createJoin, within } from './guardedRead.js'
 
 type Read<T> = Awaited<ReturnType<typeof attempt<T>>>
 
@@ -35,39 +36,9 @@ const MAX_MESSAGE_CHARS = 4000
 // Above the LND adapter's own 30s read deadline, so its more specific error wins where it has one.
 const READ_DEADLINE_MS = 60_000
 
-const within =
-  <T>(read: () => Promise<T>, ms: number) =>
-  async (): Promise<T> => {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      return await Promise.race([
-        read(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`no answer within ${ms}ms`)), ms)
-          timer.unref()
-        }),
-      ])
-    } finally {
-      clearTimeout(timer)
-    }
-  }
-
 /** The deadline ends a report, not its reads: one still running is joined by the next report, never repeated. */
 export const createBalanceReportReader = (): ((input: BalanceReportInput) => Promise<BalanceReport>) => {
-  const running = new Map<string, Promise<unknown>>()
-  const joined =
-    <T>(key: string, read: () => Promise<T>) =>
-    (): Promise<T> => {
-      let pending = running.get(key) as Promise<T> | undefined
-      if (pending === undefined) {
-        pending = Promise.resolve()
-          .then(read)
-          .finally(() => running.delete(key))
-        running.set(key, pending)
-      }
-      return pending
-    }
-
+  const joined = createJoin()
   return async (input) => {
     const ms = input.deadlineMs ?? READ_DEADLINE_MS
     const guarded = <T>(key: string, read: () => Promise<T>) => attempt(within(joined(key, read), ms))

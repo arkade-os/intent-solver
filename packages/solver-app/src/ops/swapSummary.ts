@@ -10,14 +10,16 @@ import {
   type LedgerWindow,
 } from '@arkade-os/solver-core/analytics/economics.js'
 import { messageOf } from '@arkade-os/solver-core/util/poll.js'
+import { createJoin, within } from './guardedRead.js'
 
 export interface SummaryReader {
   readonly descriptor: { readonly pair: string }
   economics?(window: LedgerWindow): Promise<CorridorLedger>
 }
 
-interface CorridorCount {
+export interface CorridorCount {
   corridor: string
+  since: number
   fulfilled: number
   failed: number
   unfunded: number
@@ -36,8 +38,8 @@ export interface SwapSummary {
 const MAX_REASONS = 5
 const MAX_REASON_CHARS = 80
 
-const count = (ledger: CorridorLedger): CorridorCount => {
-  const c: CorridorCount = {
+const count = (ledger: CorridorLedger): Omit<CorridorCount, 'since'> => {
+  const c: Omit<CorridorCount, 'since'> = {
     corridor: ledger.corridor,
     fulfilled: 0,
     failed: 0,
@@ -59,29 +61,66 @@ const count = (ledger: CorridorLedger): CorridorCount => {
   return c
 }
 
-export const readSwapSummary = async (
-  readers: Iterable<SummaryReader>,
-  window: { since: number; until: number },
-): Promise<SwapSummary> => {
-  const summary: SwapSummary = { ...window, corridors: [], unreadable: [], unmeasured: [] }
-  const ledgerWindow = { ...window, limit: DEFAULT_LEDGER_LIMIT }
-  for (const reader of readers) {
-    const corridor = reader.descriptor.pair
-    if (!reader.economics) {
-      summary.unmeasured.push(corridor)
-      continue
-    }
-    try {
-      summary.corridors.push(count(await reader.economics(ledgerWindow)))
-    } catch (error) {
-      summary.unreadable.push({ corridor, error: messageOf(error) })
-    }
-  }
-  return summary
+export interface SwapSummaryReaderOptions {
+  now(): number
+  /** Where every corridor's first window starts. */
+  firstSince: number
+  /** Per corridor; under the balance report's own 60s so a late read can never advance a window. */
+  deadlineMs?: number
 }
 
-const shorten = (text: string): string =>
-  text.length > MAX_REASON_CHARS ? `${text.slice(0, MAX_REASON_CHARS - 1)}…` : text
+const CORRIDOR_DEADLINE_MS = 30_000
+
+/**
+ * Each corridor keeps its OWN window start, advanced only by a read that answered.
+ * A failed or timed-out corridor is re-read from the same start next report, so its
+ * swaps are late rather than lost.
+ */
+export const createSwapSummaryReader = (options: SwapSummaryReaderOptions) => {
+  const since = new Map<string, number>()
+  const joined = createJoin()
+  const ms = options.deadlineMs ?? CORRIDOR_DEADLINE_MS
+
+  return async (readers: Iterable<SummaryReader>): Promise<SwapSummary> => {
+    const until = options.now()
+    const outcomes = await Promise.all(
+      [...readers].map(async (reader) => {
+        const corridor = reader.descriptor.pair
+        const { economics } = reader
+        if (!economics) return { kind: 'unmeasured' as const, corridor }
+        const from = since.get(corridor) ?? options.firstSince
+        // A joined read answers for the window it was started with, so the start advances to ITS end.
+        const read = joined(corridor, async () => ({
+          ledger: await economics.call(reader, { since: from, until, limit: DEFAULT_LEDGER_LIMIT }),
+          from,
+          until,
+        }))
+        try {
+          const done = await within(read, ms)()
+          since.set(corridor, done.until)
+          return { kind: 'counted' as const, count: { ...count(done.ledger), since: done.from } }
+        } catch (error) {
+          return { kind: 'unreadable' as const, corridor, error: messageOf(error) }
+        }
+      }),
+    )
+    const summary: SwapSummary = { since: options.firstSince, until, corridors: [], unreadable: [], unmeasured: [] }
+    for (const o of outcomes) {
+      if (o.kind === 'unmeasured') summary.unmeasured.push(o.corridor)
+      else if (o.kind === 'unreadable') summary.unreadable.push({ corridor: o.corridor, error: o.error })
+      else summary.corridors.push(o.count)
+    }
+    const starts = summary.corridors.map((c) => c.since)
+    if (starts.length > 0) summary.since = Math.min(...starts)
+    return summary
+  }
+}
+
+// Code points, not UTF-16 units, so a cut never splits a surrogate pair.
+const shorten = (text: string): string => {
+  const chars = Array.from(text)
+  return chars.length > MAX_REASON_CHARS ? `${chars.slice(0, MAX_REASON_CHARS - 1).join('')}…` : text
+}
 
 const stamp = (seconds: number): string => new Date(seconds * 1000).toISOString().slice(0, 16).replace('T', ' ')
 
@@ -96,15 +135,18 @@ export const formatSwapSummary = (s: SwapSummary): string[] => {
       c.failed > 0 ? `${c.failed} failed` : null,
       c.unfunded > 0 ? `${c.unfunded} never funded` : null,
     ].filter((p) => p !== null)
-    if (parts.length === 0) continue
-    lines.push(`${c.corridor}: ${parts.join(' · ')}${c.truncated ? ' (partial: row cap reached)' : ''}`)
+    // A capped read with nothing counted is still partial: the unread rows may have finished.
+    if (parts.length === 0 && !c.truncated) continue
+    const window = c.since === s.since ? '' : ` (since ${stamp(c.since)})`
+    const partial = c.truncated ? ' (partial: row cap reached)' : ''
+    lines.push(`${c.corridor}: ${parts.join(' · ') || 'none counted'}${window}${partial}`)
     if (c.failed === 0) continue
     const ranked = [...c.reasons].sort((a, b) => b[1] - a[1])
     const shown = ranked.slice(0, MAX_REASONS).map(([reason, n]) => `${n}× ${shorten(reason)}`)
     if (ranked.length > MAX_REASONS) shown.push(`+${ranked.length - MAX_REASONS} more`)
     lines.push(`  failed: ${shown.join(' · ')}`)
   }
-  for (const u of s.unreadable) lines.push(`${u.corridor}: unreadable (${u.error})`)
+  for (const u of s.unreadable) lines.push(`${u.corridor}: unreadable (${u.error}), retried next report`)
   if (s.unmeasured.length > 0) lines.push(`not counted (no ledger): ${s.unmeasured.join(', ')}`)
   return lines.length === 0 ? [`${header}: none finished`] : [header, ...lines]
 }

@@ -294,7 +294,7 @@ describe('the balance sampler is DRIVEN on the shipped daemon', () => {
   })
 
   it('the balance report carries the swap summary over every corridor reader', () => {
-    expect(servicesSource).toMatch(/readSwaps: async \(\) => \{/)
-    expect(servicesSource).toMatch(/readSwapSummary\(services\.readers, \{ since: swapsSince, until \}\)/)
+    expect(servicesSource).toMatch(/const readSwapSummary = createSwapSummaryReader\(\{/)
+    expect(servicesSource).toMatch(/readSwaps: \(\) => readSwapSummary\(services\.readers\)/)
   })
 })
