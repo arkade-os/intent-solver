@@ -558,7 +558,7 @@ export const createServices = async (
       corridor,
       states,
       balances,
-      lightningName: config.lnBackend,
+      lightning: config.lnBackend !== null,
       terms,
       post: (text) => notifier.post(text),
       now: nowSeconds,

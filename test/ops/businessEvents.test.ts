@@ -38,7 +38,7 @@ const reporter = (over: Record<string, unknown> = {}) => {
     corridor: 'arkade:BTC->lightning:BTC',
     states: LN_SEND,
     balances: sampler(),
-    lightningName: 'breez',
+    lightning: true,
     terms: async () => terms(),
     post: (text: string) => posted.push(text),
     now: () => 2_000,
@@ -116,7 +116,7 @@ describe('createSwapOutcomeReporter', () => {
       [
         'Swap STUCK — lightning:BTC->arkade:BTC — 29975e63-b613-44fe-a392-43d5025b1f11',
         'amount 80,362 sats -> payout 80,000 sats',
-        'Lightning (breez): 1,200,000 sats available, 800,000 sats incoming (40s old)',
+        'Lightning: 1,200,000 sats available, 800,000 sats incoming (40s old)',
         'Arkade: 5,074,074 sats available (40s old)',
       ].join('\n'),
     )
@@ -128,7 +128,7 @@ describe('createSwapOutcomeReporter', () => {
     await vi.waitFor(() => expect(posted).toHaveLength(1))
     expect(posted[0]).toContain('amount 71,945 sats')
     expect(posted[0]).not.toContain('payout')
-    expect(posted[0]).toContain('Lightning (breez): 2,000,000 sats available, 3,000,000 sats incoming')
+    expect(posted[0]).toContain('Lightning: 2,000,000 sats available, 3,000,000 sats incoming')
     expect(posted[0]).toContain('Arkade: 1,000,000 sats available')
   })
 
@@ -157,7 +157,7 @@ describe('createSwapOutcomeReporter', () => {
     })
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
     await vi.waitFor(() => expect(posted).toHaveLength(1))
-    expect(posted[0]).toContain('Lightning (breez): unread')
+    expect(posted[0]).toContain('Lightning: unread')
     expect(posted[0]).toContain('Arkade: 1,000,000 sats available')
   })
 

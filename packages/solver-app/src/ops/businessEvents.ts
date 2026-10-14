@@ -72,8 +72,8 @@ export interface SwapOutcomeReporterOptions {
   corridor: string
   states: CorridorStates
   balances: BalanceSampler
-  /** `LN_BACKEND`. Null when this deployment has no rail. */
-  lightningName: string | null
+  /** False when this deployment has no Lightning rail. */
+  lightning: boolean
   /** The swap's amount line. Called only after the reporter has decided to post. */
   terms(id: string): Promise<string>
   post(text: string): void
@@ -99,14 +99,14 @@ const message = (
   size: string | null,
   reading: BalanceReading | null,
 ): string => {
-  const { corridor, lightningName, now } = options
+  const { corridor, lightning: hasLightning, now } = options
   const headline =
     outcome === 'fulfilled' ? `Swap fulfilled — ${corridor} — ${swapId}` : `Swap STUCK — ${corridor} — ${swapId}`
   const age = (at: number) => `${Math.max(0, now() - at)}s old`
   const lines = [headline, size ?? 'amount unread']
-  if (lightningName !== null) {
+  if (hasLightning) {
     const lightning = reading?.lightning ?? null
-    const label = `Lightning (${lightningName})`
+    const label = 'Lightning'
     lines.push(
       lightning === null
         ? `${label}: unread`
