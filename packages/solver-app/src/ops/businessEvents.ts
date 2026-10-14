@@ -1,16 +1,21 @@
 /**
- * The balance is CACHED and timer-refreshed because `wallet.getBalance()` awaits
- * the same unfiltered `contractSnapshot()` as `getSpendableVtxos()`
- * (`chunk-JVHO6XHG.js` 12825, 12887, 12980) — measured at ~951ms.
+ * Balances are cached and timer-refreshed. `wallet.getBalance()` awaits the same
+ * unfiltered snapshot as `getSpendableVtxos()` (~951ms). Neither it nor the
+ * Lightning read may run on the transition that just committed.
  */
 
-import { outcomeOfTransition, percentChange, formatSats } from '@arkade-os/solver-core/core/businessEvent.js'
+import { outcomeOfTransition, formatSats } from '@arkade-os/solver-core/core/businessEvent.js'
 import type { CorridorStates } from '@arkade-os/solver-core/core/businessEvent.js'
 
-export interface BalanceReading {
-  availableSats: number
-  committedSats: number
+export interface Sampled<T> {
+  value: T
+  /** Unix seconds, the same clock `now()` uses. */
   at: number
+}
+
+export interface BalanceReading {
+  arkade: Sampled<number> | null
+  lightning: Sampled<{ availableSats: number; incomingSats: number }> | null
 }
 
 export interface BalanceSampler {
@@ -18,8 +23,9 @@ export interface BalanceSampler {
 }
 
 export interface BalanceSamplerOptions {
-  readAvailableSats(): Promise<number>
-  readCommittedSats(): Promise<number>
+  readArkadeAvailableSats(): Promise<number>
+  /** Absent when this deployment has no Lightning rail. */
+  readLightning?(): Promise<{ availableSats: number; incomingSats: number }>
   now(): number
   onError?(error: unknown): void
 }
@@ -28,16 +34,30 @@ export const createBalanceSampler = (options: BalanceSamplerOptions): BalanceSam
   let reading: BalanceReading | null = null
   // `getBalance()` has no deadline, so a caller that does not await must not stack reads behind a hung one.
   let inFlight: Promise<void> | null = null
+  const readSide = async <T>(read: (() => Promise<T>) | undefined, label: string): Promise<T | undefined> => {
+    if (!read) return undefined
+    try {
+      return await read()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      options.onError?.(new Error(`${label} balance: ${message}`, { cause: error }))
+      return undefined
+    }
+  }
+  // `undefined` from a configured side means the read failed: keep the previous sample.
+  const remember = <T>(previous: Sampled<T> | null, next: T | undefined, at: number): Sampled<T> | null =>
+    next === undefined ? previous : { value: next, at }
   const read = async () => {
     try {
-      const [availableSats, committedSats] = await Promise.all([
-        options.readAvailableSats(),
-        options.readCommittedSats(),
+      const at = options.now()
+      const [arkade, lightning] = await Promise.all([
+        readSide(options.readArkadeAvailableSats, 'arkade'),
+        readSide(options.readLightning, 'lightning'),
       ])
-      reading = { availableSats, committedSats, at: options.now() }
-    } catch (error) {
-      // A stale reading beats none, and a throw would kill the driving interval.
-      options.onError?.(error)
+      reading = {
+        arkade: remember(reading?.arkade ?? null, arkade, at),
+        lightning: options.readLightning ? remember(reading?.lightning ?? null, lightning, at) : null,
+      }
     } finally {
       inFlight = null
     }
@@ -48,16 +68,14 @@ export const createBalanceSampler = (options: BalanceSamplerOptions): BalanceSam
   }
 }
 
-export interface AnnouncedBalanceStore {
-  getLastAnnouncedBalance(): Promise<number | null>
-  setLastAnnouncedBalance(sats: number): Promise<void>
-}
-
 export interface SwapOutcomeReporterOptions {
   corridor: string
   states: CorridorStates
   balances: BalanceSampler
-  store: AnnouncedBalanceStore
+  /** False when this deployment has no Lightning rail. */
+  lightning: boolean
+  /** The swap's amount line. Called only after the reporter has decided to post. */
+  terms(id: string): Promise<string>
   post(text: string): void
   now(): number
   onError?(error: unknown): void
@@ -69,33 +87,51 @@ export interface SwapTransition {
   to: string
 }
 
-const line = (
-  corridor: string,
+export const btcSwapSize = (amountSats: number, payoutSats: number | null): string =>
+  payoutSats === null
+    ? `amount ${formatSats(amountSats)} sats`
+    : `amount ${formatSats(amountSats)} sats -> payout ${formatSats(payoutSats)} sats`
+
+const message = (
+  options: SwapOutcomeReporterOptions,
   swapId: string,
   outcome: 'fulfilled' | 'failed',
-  state: string,
+  size: string | null,
   reading: BalanceReading | null,
-  change: string,
-  ageSeconds: number,
 ): string => {
-  const verdict = outcome === 'fulfilled' ? 'Swap fulfilled' : 'Swap FAILED to be fulfilled'
-  const balances =
-    reading === null
-      ? 'balances: unread (no sample taken yet)'
-      : `balances: ${formatSats(reading.availableSats)} sats available, ` +
-        `${formatSats(reading.committedSats)} sats committed (${ageSeconds}s old)`
-  return `${verdict} — ${corridor} — ${swapId} — ended in ${state}\n${balances}, change since last event: ${change}`
+  const { corridor, lightning: hasLightning, now } = options
+  const headline =
+    outcome === 'fulfilled' ? `Swap fulfilled — ${corridor} — ${swapId}` : `Swap STUCK — ${corridor} — ${swapId}`
+  const age = (at: number) => `${Math.max(0, now() - at)}s old`
+  const lines = [headline, size ?? 'amount unread']
+  if (hasLightning) {
+    const lightning = reading?.lightning ?? null
+    const label = 'Lightning'
+    lines.push(
+      lightning === null
+        ? `${label}: unread`
+        : `${label}: ${formatSats(lightning.value.availableSats)} sats available, ` +
+            `${formatSats(lightning.value.incomingSats)} sats incoming (${age(lightning.at)})`,
+    )
+  }
+  const arkade = reading?.arkade ?? null
+  lines.push(
+    arkade === null ? 'Arkade: unread' : `Arkade: ${formatSats(arkade.value)} sats available (${age(arkade.at)})`,
+  )
+  return lines.join('\n')
 }
 
 /** Never rejects: the store calls this from the money path. */
 export const createSwapOutcomeReporter = (
   options: SwapOutcomeReporterOptions,
 ): ((transition: SwapTransition) => void) => {
-  const { corridor, states, balances, store, post, now, onError } = options
+  const { states, balances, terms, post, onError } = options
 
   return ({ id, from, to }) => {
     const outcome = outcomeOfTransition(states, from ?? '', to)
     if (outcome === null) return
+    // `refused` never funded. Anything but `stuck` is not a pager.
+    if (outcome === 'failed' && to !== 'stuck') return
 
     const reading = balances.current()
     // DEFERRED, not merely un-awaited: an async body runs synchronously to its
@@ -103,13 +139,13 @@ export const createSwapOutcomeReporter = (
     queueMicrotask(() => {
       void (async () => {
         try {
-          const previous = await store.getLastAnnouncedBalance()
-          const change = reading === null ? 'n/a' : percentChange(previous, reading.availableSats)
-          const age = reading === null ? 0 : Math.max(0, now() - reading.at)
-          post(line(corridor, id, outcome, to, reading, change, age))
-          // AFTER posting: a failed write costs one repeated comparison, not a
-          // missing event.
-          if (reading !== null) await store.setLastAnnouncedBalance(reading.availableSats)
+          let size: string | null = null
+          try {
+            size = await terms(id)
+          } catch (error) {
+            onError?.(error)
+          }
+          post(message(options, id, outcome, size, reading))
         } catch (error) {
           onError?.(error)
         }
