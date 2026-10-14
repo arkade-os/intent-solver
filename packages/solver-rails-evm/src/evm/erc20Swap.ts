@@ -129,8 +129,12 @@ export const encodeLock = (lock: Erc20SwapLock): Uint8Array => concatBytes(LOCK_
  */
 export const CLAIM_SIGNATURE = 'claim(bytes32,uint256,address,address,uint256)'
 
-/** Boltz's long claim form. Nothing here encodes it; a downstream fork's e2e checks its contract ABI against it. */
+/** Boltz's long claim form: anyone may send it, and the tokens still go to `claimAddress`. */
 export const CLAIM_FOR_SIGNATURE = 'claim(bytes32,uint256,address,address,address,uint256)'
+const CLAIM_FOR_SELECTOR = selectorFor(CLAIM_FOR_SIGNATURE)
+
+export const encodeClaimFor = (preimage: Uint8Array, lock: Erc20SwapLock): Uint8Array =>
+  concatBytes(CLAIM_FOR_SELECTOR, bytes32Word(preimage, 'preimage'), ...lockWords(lock).slice(1))
 const CLAIM_SELECTOR = selectorFor(CLAIM_SIGNATURE)
 
 export const encodeClaim = (preimage: Uint8Array, lock: Erc20SwapLock): Uint8Array =>

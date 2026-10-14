@@ -422,6 +422,8 @@ Every payload carries the envelope `{"v": 1, "type": …}`. Types:
 | `rfq_status`         | solver → client                  | all                      |
 | `rfq_open` (§ 4.6)   | client → all solvers (broadcast) | all                      |
 | `rfq_bid` (§ 4.6)    | solver → client                  | all                      |
+| `rfq_reveal` (§ 4.7) | client → solver                  | HTLC, EVM send           |
+| `rfq_reveal_ack`     | solver → client                  | HTLC, EVM send           |
 
 An inbound event whose payload `type` is a known request type but fails
 validation MUST be answered with `rfq_refusal` reason `unsupported_payload` —
@@ -805,6 +807,25 @@ contract locally and funds only its own derivation, so neither a bus relay
 nor a lying bidder can redirect funds — a malicious bus can censor, or
 misdirect into silence, the same failure class as a wrong registry
 rendezvous.
+
+### 4.7 `rfq_reveal` — hand the solver a claim to send
+
+```json
+{ "v": 1, "type": "rfq_reveal", "rfq_id": "9f2c…a1", "preimage": "<64 hex>" }
+```
+
+Sent where the HTLC the client would claim pays a fixed address whoever sends the claim, so the solver can
+send it and the client needs no gas (§ 7.1.5). Like `rfq_status_request` it carries no `pair`; the `rfq_id`
+finds the swap. Over HTTP it is posted to `/v1/swap`.
+
+The solver answers `{"v": 1, "type": "rfq_reveal_ack", "rfq_id": …}` (HTTP 202) once its claim is broadcast,
+and again for a repeat. Anything else is `rfq_refusal` with reason `unsupported_payload`: a preimage that does
+not hash to the swap's `payment_hash`, a swap whose lock is not yet confirmed, or one too close to the EVM
+timeout (HTTP 422); an `rfq_id` no served corridor relays for (HTTP 404); a malformed payload (HTTP 400).
+
+The reveal gives the solver the preimage before the client's payout has landed, so the client MUST keep
+watching: if the claim has not landed with enough margin before the EVM timeout, it claims itself. The
+solver cannot redirect the tokens — the claim pays `claimAddress` — it can only fail to send.
 
 ## 5. Quote validity — `valid_until`
 
@@ -1445,7 +1466,9 @@ such swap by timeout. Two mechanisms are compatible with this profile:
 `lockPrepayMinerfee`, which forwards native currency to the claim address in the
 same transaction that locks, or a solver-operated claim address that claims and
 forwards. A solver serving the `arkade:BTC->ethereum:<asset>` direction SHOULD
-implement one and say which.
+implement one and say which. The reference solver takes a third: the client hands it the preimage with
+`rfq_reveal` (§ 4.7) and the solver sends the long `claim(bytes32,uint256,address,address,address,uint256)`,
+which pays `claimAddress`, before claiming the Arkade lockup with the same preimage.
 
 ### 7.2 Atomic class (`arkade:X->arkade:Y`) — settlement confirmed; served over RFQ today (§ 7.2.1)
 

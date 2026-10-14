@@ -1,7 +1,7 @@
 import { sha256 } from '@noble/hashes/sha2.js'
-import { bytesToHex, concatBytes, hexToBytes } from '@noble/hashes/utils.js'
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { EvmClaimVerificationError, type Erc20SwapLock, type JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
-import { CLAIM_FOR_SIGNATURE, addressWord, claimEventTopic, encodeClaim, selectorFor, uintWord } from './erc20Swap.js'
+import { claimEventTopic, encodeClaim, encodeClaimFor } from './erc20Swap.js'
 
 export interface EvmClaimFinalityPolicy {
   minConfirmations: number
@@ -114,17 +114,7 @@ export const verifyEvmClaimEvidence = async (
   if (sender === null || fixedHex(receipt.from, 20) !== sender) return null
   const preimage = hexToBytes(preimageHex.slice(2))
   const claimSelf = hex(encodeClaim(preimage, lock))
-  const claimFor = hex(
-    concatBytes(
-      selectorFor(CLAIM_FOR_SIGNATURE),
-      preimage,
-      uintWord(lock.amount, 'amount'),
-      addressWord(lock.tokenAddress, 'tokenAddress'),
-      addressWord(lock.claimAddress, 'claimAddress'),
-      addressWord(lock.refundAddress, 'refundAddress'),
-      uintWord(lock.timelock, 'timelock'),
-    ),
-  )
+  const claimFor = hex(encodeClaimFor(preimage, lock))
   const input = typeof transaction.input === 'string' ? transaction.input.toLowerCase() : null
   const directClaim =
     transactionTo === contract && (input === claimFor || (input === claimSelf && sender === hex(lock.claimAddress)))

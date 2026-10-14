@@ -7,6 +7,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { sha256 } from '@noble/hashes/sha2.js'
 import { EvmSendSwapService, type EvmSendServiceDeps } from '@arkade-os/solver-corridors-evm/send/evmOrchestrator.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { EvmSendSwapStore, type EvmSendQuoteRecord } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
@@ -1651,5 +1652,70 @@ describe('a lock that lands after the books closed', () => {
 
     expect(onTickError).not.toHaveBeenCalled()
     await store.close()
+  })
+})
+
+describe('reveal: the solver sends the client claim', () => {
+  const P = '07'.repeat(32)
+  const CLAIM_FOR_CALL = { to: new Uint8Array(20), data: Uint8Array.of(0xc3, 0xc3, 0x7f, 0xbc) }
+  const revealable = async (over: Partial<EvmSendServiceDeps> = {}, confirmed = true) => {
+    const claimForCall = vi.fn().mockReturnValue(CLAIM_FOR_CALL)
+    const built = await build({ ...over, evm: { isLocked: vi.fn().mockResolvedValue(true), claimForCall } as never })
+    await built.store.insertQuote({
+      ...quote(),
+      id: 'swap-2',
+      rfqId: 'rfq-2',
+      paymentHash: Buffer.from(sha256(Buffer.from(P, 'hex'))).toString('hex'),
+      pkScript: '5120' + '99'.repeat(32),
+    })
+    await built.store.transition('swap-2', 'quoted', 'locking_evm')
+    if (confirmed) await built.store.transition('swap-2', 'locking_evm', 'awaiting_claim')
+    return { ...built, claimForCall }
+  }
+
+  it('broadcasts the claim before recording P, then claims the Arkade lockup', async () => {
+    const { service, store, deps, claimForCall } = await revealable()
+    const order: string[] = []
+    vi.mocked(deps.broadcast).mockImplementation(async () => {
+      order.push(`broadcast:${(await store.get('swap-2')).preimage}`)
+      return '0xclaim'
+    })
+    await expect(service.reveal('rfq-2', P, TOKEN)).resolves.toEqual({ kind: 'accepted', claimTxid: '0xclaim' })
+    expect(claimForCall.mock.calls[0]![0]).toEqual(Uint8Array.from(Buffer.from(P, 'hex')))
+    expect(order).toEqual(['broadcast:null'])
+    await vi.waitFor(async () => expect((await store.get('swap-2')).state).toBe('claimed'))
+    expect(deps.claimArkade).toHaveBeenCalledWith(expect.objectContaining({ id: 'swap-2' }), P)
+  })
+
+  it('records nothing when the broadcast fails, so the client still holds the only copy that matters', async () => {
+    const { service, store, deps } = await revealable()
+    vi.mocked(deps.broadcast).mockRejectedValue(new Error('nonce too low'))
+    await expect(service.reveal('rfq-2', P, TOKEN)).rejects.toThrow(/nonce too low/)
+    expect((await store.get('swap-2')).preimage).toBeNull()
+  })
+
+  it.each([
+    ['a preimage that does not hash to the payment hash', 'rfq-2', '08'.repeat(32), { kind: 'refused' }],
+    ['another token', 'rfq-2', P, { kind: 'unknown' }, '0x' + '00'.repeat(20)],
+    ['an unknown id', 'rfq-9', P, { kind: 'unknown' }],
+  ])('turns away %s without broadcasting', async (_name, rfqId, preimage, expected, token = TOKEN) => {
+    const { service, deps } = await revealable()
+    await expect(service.reveal(rfqId, preimage, token)).resolves.toMatchObject(expected)
+    expect(deps.broadcast).not.toHaveBeenCalled()
+  })
+
+  it('refuses before the lock is confirmed and too close to the timeout', async () => {
+    const early = await revealable({}, false)
+    await expect(early.service.reveal('rfq-2', P, TOKEN)).resolves.toMatchObject({ kind: 'refused' })
+    const late = await revealable({ timelockHeight: vi.fn().mockResolvedValue(Number(TIMELOCK) - 40) })
+    await expect(late.service.reveal('rfq-2', P, TOKEN)).resolves.toMatchObject({ kind: 'refused' })
+    expect(late.deps.broadcast).not.toHaveBeenCalled()
+  })
+
+  it('acknowledges a repeat without sending a second claim', async () => {
+    const { service, store, deps } = await revealable()
+    await store.patch('swap-2', { preimage: P })
+    await expect(service.reveal('rfq-2', P, TOKEN)).resolves.toEqual({ kind: 'accepted' })
+    expect(deps.broadcast).not.toHaveBeenCalled()
   })
 })

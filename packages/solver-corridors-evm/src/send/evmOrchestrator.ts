@@ -46,7 +46,7 @@ import {
 } from '@arkade-os/solver-core/core/evmSend.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { evmSendCovenantRowFor } from '../evm/covenantRow.js'
-import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
+import { preimageMatchesHash, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { EvmPayoutFundingQuarantinedError } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
@@ -211,8 +211,16 @@ export type EvmSendQuoteRefusal =
 export type EvmSendQuoteOutcome =
   { accepted: true; swap: EvmSendSwapRow } | { accepted: false; reason: EvmSendQuoteRefusal }
 
+/** `unknown`: no row of this token under the id, so another corridor may own it. */
+export type EvmSendRevealOutcome =
+  { kind: 'accepted'; claimTxid?: string } | { kind: 'refused'; detail: string } | { kind: 'unknown' }
+
+/** Blocks a relayed claim needs to land ahead of the solver's own refund at `evmTimeout`. */
+export const EVM_SEND_RELAY_MARGIN_BLOCKS = 40
+
 export class EvmSendSwapService {
   private readonly inFlight = new Set<string>()
+  private readonly revealing = new Set<string>()
   private readonly lateLockReported = new Set<string>()
   private sweepInFlight: Promise<EvmSendSwapRow[]> | undefined
   private lockSequence: Promise<void> = Promise.resolve()
@@ -771,6 +779,35 @@ export class EvmSendSwapService {
       }
     } finally {
       reservation.release()
+    }
+  }
+
+  /**
+   * The client hands over `P` instead of claiming itself; the solver sends the claim, which pays `claimAddress`
+   * whoever sends it, so the client needs no gas. The claim goes out BEFORE `P` is recorded, so the Arkade
+   * claim the planner takes on the next tick never precedes the client's payout broadcast.
+   */
+  async reveal(rfqId: string, preimageHex: string, tokenAddress: string): Promise<EvmSendRevealOutcome> {
+    const { store } = this.deps
+    const row = await store.findByRfqId(rfqId)
+    if (row === null || row.tokenAddress.toLowerCase() !== tokenAddress.toLowerCase()) return { kind: 'unknown' }
+    if (!preimageMatchesHash(preimageHex, row.paymentHash)) return { kind: 'refused', detail: 'preimage mismatch' }
+    if (row.preimage !== null) return { kind: 'accepted' }
+    if (row.state !== 'awaiting_claim') return { kind: 'refused', detail: `swap is ${row.state}` }
+    if ((await this.deps.timelockHeight()) + EVM_SEND_RELAY_MARGIN_BLOCKS >= row.evmTimeout) {
+      return { kind: 'refused', detail: 'too close to the EVM timeout to relay' }
+    }
+    if (this.revealing.has(row.id)) return { kind: 'accepted' }
+    this.revealing.add(row.id)
+    try {
+      const claimTxid = await this.deps.broadcast(
+        this.deps.evm.claimForCall(hex.decode(preimageHex), this.deps.lockFor(row)),
+      )
+      await store.patch(row.id, { preimage: preimageHex })
+      this.tick(row.id).catch((error) => this.deps.onTickError?.(row.id, error))
+      return { kind: 'accepted', claimTxid }
+    } finally {
+      this.revealing.delete(row.id)
     }
   }
 

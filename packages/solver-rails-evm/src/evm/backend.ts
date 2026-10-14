@@ -28,6 +28,7 @@ import { verifyEvmClaimEvidence, type EvmClaimFinalityPolicy } from './claimEvid
 import {
   claimEventTopic,
   encodeClaim,
+  encodeClaimFor,
   decodeUint256,
   encodeLock,
   encodeRefund,
@@ -262,6 +263,7 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
     },
 
     claimCall: (preimage, lock) => call(encodeClaim(preimage, lock)),
+    claimForCall: (preimage, lock) => call(encodeClaimFor(preimage, lock)),
     refundCall: (lock) => call(encodeRefund(lock)),
     refundForCall: (lock) => call(encodeRefundFor(lock)),
   }

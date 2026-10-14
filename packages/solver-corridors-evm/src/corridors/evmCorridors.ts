@@ -218,6 +218,10 @@ export const evmSendCorridor = (
 ): Corridor => ({
   ...evmSendReader(evmSendDescriptor(policy.token), store),
   quote: (payload, options) => respondToEvmSendRfqRequest(service, payload, options),
+  reveal: async (rfqId, preimage) => {
+    const outcome = await service.reveal(rfqId, preimage, policy.token.address)
+    return outcome.kind === 'accepted' ? { kind: 'accepted' } : outcome
+  },
   tick: async (id) => {
     await service.tick(id)
   },
