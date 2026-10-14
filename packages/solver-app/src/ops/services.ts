@@ -74,6 +74,9 @@ import { AdminStore, type SwapApprovalRequest } from '../admin/db.js'
 import { createNotifier } from './notify.js'
 import { sinksFrom } from './notifySinks.js'
 import { btcSwapSize, createBalanceSampler, createSwapOutcomeReporter } from './businessEvents.js'
+import { createBalanceReportReader, formatBalanceReport } from './balanceReport.js'
+import { fundSources } from './fundSources.js'
+import { assetSource, describeAssetId } from '../admin/assets.js'
 import { approvalGateFor } from './approvals.js'
 import { formatSats, type CorridorStates, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
 import { LN_SEND } from '@arkade-os/solver-corridors/corridors/lnSend.js'
@@ -297,6 +300,8 @@ export interface Services {
    * it; nothing on the money path does. @see ops/businessEvents.ts
    */
   sampleBalances?: () => Promise<void>
+  /** Post every fund source's balance to the sinks. ABSENT without a sink or `BALANCE_REPORT_INTERVAL_MINUTES`. */
+  reportBalances?: () => Promise<void>
   /** Emulator signer key (compressed hex), fetched once at startup. */
   emulatorPubkey: string
   /** Provider x-only pubkey (hex) — the relay address clients send offers to. */
@@ -1546,6 +1551,26 @@ export const createServices = async (
       })
   }
 
+  const readBalanceReport = createBalanceReportReader()
+  const postBalanceReport = async (): Promise<void> => {
+    const report = await readBalanceReport({
+      network: config.network,
+      sources: fundSources(services),
+      readAssets: async () => {
+        const source = assetSource(arkade.wallet)
+        const { assets } = await arkade.wallet.getBalance()
+        return Promise.all(
+          (assets ?? []).map(async (a) => ({
+            ...(await describeAssetId(a.assetId, source)),
+            amount: a.amount.toString(),
+          })),
+        )
+      },
+      readCommittedSats: () => totalCommitted(),
+    })
+    notifier.post(formatBalanceReport(report))
+  }
+
   const services: Services = {
     config,
     policy,
@@ -1590,6 +1615,8 @@ export const createServices = async (
     // ABSENT with no sink configured, which is what spares an unconfigured
     // deployment the ~951ms wallet read.
     sampleBalances: notifySinks.length > 0 ? () => balances.sample() : undefined,
+    reportBalances:
+      notifySinks.length > 0 && config.balanceReportIntervalMinutes !== null ? postBalanceReport : undefined,
     tickErrors,
     emulatorPubkey: emulatorInfo.signerPubkey,
     providerPubkey: arkadeOps.providerPubkey,

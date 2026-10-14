@@ -489,6 +489,8 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   let lastRefundSweep = 0
   let lastVtxoLifecycle = 0
   let lastBalanceSample = 0
+  // Zero, so the first report goes out at boot and confirms the sinks are wired.
+  let lastBalanceReport = 0
   let lastWatchSync = 0
   while (!signal.aborted) {
     await sleep(HOT_TICK_MS)
@@ -575,6 +577,11 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
     if (services.sampleBalances && Date.now() - lastBalanceSample > BALANCE_SAMPLE_MS) {
       lastBalanceSample = Date.now()
       void services.sampleBalances().catch((error: unknown) => log('balance sample failed:', messageOf(error)))
+    }
+    const reportEveryMs = (services.config.balanceReportIntervalMinutes ?? Infinity) * 60_000
+    if (services.reportBalances && Date.now() - lastBalanceReport > reportEveryMs) {
+      lastBalanceReport = Date.now()
+      void services.reportBalances().catch((error: unknown) => log('balance report failed:', messageOf(error)))
     }
     if (Date.now() - lastVtxoLifecycle > VTXO_LIFECYCLE_MS) {
       lastVtxoLifecycle = Date.now()

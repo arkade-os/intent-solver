@@ -87,6 +87,7 @@ const CONFIG_KEYS = [
   'EVM_SEND_USDC_FEE_BPS',
   'EVM_RECEIVE_USDC_ENABLED',
   'APPROVAL_THRESHOLD_SATS',
+  'BALANCE_REPORT_INTERVAL_MINUTES',
   'LN_BACKEND',
   // Listed for the same reason `EVM_TOKENS` is: a leaked `LN_SEND_ENABLED=false`
   // would silently exempt every later test from needing a rail at all.
@@ -1107,5 +1108,23 @@ describe('APPROVAL_THRESHOLD_SATS', () => {
   it('refuses a non-integer rather than truncating it', () => {
     process.env.APPROVAL_THRESHOLD_SATS = '1.5'
     expect(() => loadConfig()).toThrow(/APPROVAL_THRESHOLD_SATS/)
+  })
+})
+
+describe('BALANCE_REPORT_INTERVAL_MINUTES', () => {
+  it('is null when unset or blank, so no report is sent', () => {
+    expect(loadConfig().balanceReportIntervalMinutes).toBeNull()
+    process.env.BALANCE_REPORT_INTERVAL_MINUTES = '  '
+    expect(loadConfig().balanceReportIntervalMinutes).toBeNull()
+  })
+
+  it('reads a configured interval', () => {
+    process.env.BALANCE_REPORT_INTERVAL_MINUTES = '360'
+    expect(loadConfig().balanceReportIntervalMinutes).toBe(360)
+  })
+
+  it('refuses an interval short enough to flood the channel', () => {
+    process.env.BALANCE_REPORT_INTERVAL_MINUTES = '1'
+    expect(() => loadConfig()).toThrow(/BALANCE_REPORT_INTERVAL_MINUTES/)
   })
 })
