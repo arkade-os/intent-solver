@@ -58,7 +58,7 @@ export interface AdminDeps {
   /** Recent open-RFQ bids. Absent when bidding is off (`OPEN_RFQ_MAX_BIDS_PER_MIN=0`). */
   bids?: BidRecorder
   /**
-   * The kind-38859 ad publisher. Present only in `relay` mode with
+   * The kind-38859 card publisher. Present only in `relay` mode with
    * `NOSTR_AD_PUBLISH` manual or auto — the treatment {@link AdminDeps.relay}
    * and {@link AdminDeps.bids} get.
    *

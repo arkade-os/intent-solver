@@ -2690,15 +2690,7 @@ const auditView = () => {
 
 /* ---- swap detail -------------------------------------------------------- */
 
-/**
- * Discovery: the registry card an operator copies, and the state of the Nostr
- * ad the solver publishes.
- *
- * Both on one page because an operator asking "am I discoverable?" does not
- * care that discovery has two mechanisms — a git-reviewed card in
- * solver-registry and a kind-38859 ad on a relay. They care whether each one
- * is current.
- */
+/** Discovery: the signed card, and the state of its kind-38859 publish. */
 const discoveryView = () => {
   const d = state.data.discovery
   if (!d) return h('p.muted', 'loading…')
@@ -2708,7 +2700,7 @@ const discoveryView = () => {
     'div.panels',
     h(
       'section.panel',
-      h('h2', 'registry card'),
+      h('h2', 'solver card'),
       // Whatever the card did: an unnameable corridor otherwise reads as unserved.
       (d.cardOmitted ?? []).map((note) => h('p.muted', note)),
       d.cardError
@@ -2749,7 +2741,13 @@ const discoveryView = () => {
     ),
     h(
       'section.panel',
-      h('h2', 'nostr advertisement'),
+      h('h2', 'nostr'),
+      h(
+        'p.muted',
+        publish.mode === 'manual'
+          ? 'post now publishes the card above as kind 38859; every 30 min the last posted card is re-sent unchanged'
+          : 'publishes the card above as kind 38859',
+      ),
       h(
         'dl.kv',
         h('dt', 'mode'),
@@ -2758,19 +2756,6 @@ const discoveryView = () => {
         h('dd.faint', publish.lastPublishedAt ? ago(publish.lastPublishedAt) : 'never'),
         h('dt', 'last error'),
         h('dd', publish.lastError ? h('span.sans', publish.lastError) : h('span.muted', '—')),
-        // What WOULD be published, so an operator can check the terms before
-        // posting rather than after. `adError` is reported rather than left
-        // blank: an ad that cannot be built is a different fact from a solver
-        // with nothing to advertise, and only one of them needs acting on.
-        h('dt', 'payload'),
-        h(
-          'dd',
-          d.adError
-            ? h('span.sans', d.adError)
-            : d.ad
-              ? h('pre.faint', JSON.stringify(d.ad, null, 2))
-              : h('span.muted', '—'),
-        ),
       ),
       h(
         'p.toolbar',
@@ -2798,7 +2783,7 @@ const discoveryView = () => {
 }
 
 /**
- * Publish the ad on demand.
+ * Publish the card on demand.
  *
  * Not `runAction`: a 409 here is a POLICY answer, not a fault. Refusing because
  * the operator set `off`, or because this mode has no relay, is the setting
@@ -2877,7 +2862,7 @@ const diagnosticsView = () => {
     d.publish
       ? h(
           'p.muted',
-          `ads ${d.publish.mode}`,
+          `nostr card ${d.publish.mode}`,
           d.publish.publisher ? '' : ' (nothing wired to publish)',
           ` · last ${d.publish.lastPublishedAt ? ago(d.publish.lastPublishedAt) : 'never'}`,
           d.publish.heartbeatSeconds ? ` · heartbeat ${duration(d.publish.heartbeatSeconds)}` : '',

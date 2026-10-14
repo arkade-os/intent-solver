@@ -1295,6 +1295,18 @@ key change — the old card keeps quoting stale bounds until replaced.
 (Generated here rather than by `solverd` because its card RPC predates
 corridors: arkade-os/solver-registry#13.)
 
+The `relay` command also publishes this same card to its relay as kind 38859
+(`NOSTR_AD_PUBLISH`, `SOLVER_NAME` required). Once wallets read cards from
+relays, the registry needs only a pointer — `cli card <name> --pointer`, the
+card without its markets — filed once; the markets then stay current on the
+relay. Until those wallets are out, keep the full card in the registry: older
+wallets read only that.
+
+Wallets drop a relay card more than two hours old. `auto` keeps it fresh on
+its own; `manual` re-sends only a card the operator published since the
+process started, so after any restart, publish again from the console
+(**Publish now**) within two hours or the solver drops out of discovery.
+
 Two gotchas:
 
 - **Submit only after solver-registry PR #12 has merged** — that PR adds

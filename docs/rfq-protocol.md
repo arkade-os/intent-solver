@@ -301,8 +301,8 @@ anywhere in the protocol, which is what makes a fleet of solvers a config
 change rather than a rewrite.
 
 Three event kinds. The two negotiation kinds are **ephemeral** (NIP-01's
-20000–29999 range); the advertisement is **addressable** (30000–39999, one
-current version per solver). Neither negotiation kind is retained by a
+20000–29999 range); the solver card is **addressable** (30000–39999, one
+current version per solver and network). Neither negotiation kind is retained by a
 conforming relay, which is deliberate: a request nobody answered inside the
 client's 30-second patience, and a quote past its `valid_until`, are worthless
 to everyone, while a stored copy of either is a permanent public record of
@@ -321,53 +321,30 @@ trade intent. See `docs/relay-transport.md` § 4(b) for the measurements.
   can subscribe by pair. Nothing secret ever rides this kind — § 4.6 defines
   exactly what may appear. Ephemerality matters most here, because this is the
   one kind whose contents are public by design.
-- **Kind `38859` (provisional) — solver advertisement.** A replaceable event
-  (`d` tag SHOULD be `"rfq1"`), **unencrypted** and **indicative only**:
+- **Kind `38859` (provisional) — solver card.** An addressable event whose
+  `d` tag is the network the card describes (`bitcoin`, `signet`,
+  `mutinynet`, `regtest`). `content` is the signed card JSON (below),
+  unencrypted; the author is the card's own `discovery_pubkey`. The event
+  signature authenticates delivery and the card's `sig` its content, so a
+  card lifted out of the event still verifies on its own. The solver
+  re-sends it at least every 30 minutes; clients drop a card older than two
+  hours.
 
-  ```json
-  {
-    "v": 1,
-    "type": "solver_ad",
-    "pairs": [
-      {
-        "pair": "arkade:BTC->lightning:BTC",
-        "min": "1000",
-        "max": "100000",
-        "fee_bps_indicative": 30,
-        "fee_flat_indicative": "50",
-        "quote_validity_s_typical": 900
-      }
-    ],
-    "relays": ["wss://relay.example"]
-  }
-  ```
+  **Trust rule.** A card delivered over a transport counts only when its
+  `discovery_pubkey` is listed in a solver-registry the client follows — as
+  a full card, or as a pointer (the card without `markets`). An unlisted
+  key's card is ignored. Listing reviews the identity once; the markets are
+  then the solver's own signed statement. Nothing in a card binds: terms
+  bind only through an `rfq_quote` (an `rfq_bid`, § 4.6, is a per-request
+  price commitment, but settlement terms still bind only through a quote).
 
-  `min`, `max` and `fee_flat_indicative` are canonical decimal strings of
-  atomic units (§ 2.1) on the same legs their `rfq_bid` counterparts use;
-  `fee_bps_indicative` is a rate and stays a JSON number. An ad is
-  indicative, but it is the surface a client filters on, so an ad that
-  rounded its bounds would hide a solver from exactly the large requests it
-  wanted.
-
-  Nothing in an ad is binding; only an `rfq_quote` binds (an `rfq_bid`,
-  § 4.6, is a per-request price commitment, but settlement terms still bind
-  only through a quote). Clients use ads for discovery and pre-filtering,
-  then confirm terms by requesting a quote.
-
-  Both price components appear, for the same reason the bid carries both
-  (§ 4.6): pre-filtering on the spread alone would rank a solver with a flat
-  fee ahead of a cheaper one, and non-binding is not the same as free to
-  mislead. `fee_flat_indicative` is atomic units of the from leg and MAY be
-  omitted, which means zero — an ad is a hint, not a schema to conform to.
-
-In practice discovery today runs primarily through the **solver-registry
-corridor card** rather than the kind-38859 ad: a git-reviewed, BIP340-signed
-listing carrying the solver's `discovery_pubkey`, its **transport map**, and
-per-market `fee_bps`, `fee_flat` and limits (`schema/card.schema.json` in
-`arkade-os/solver-registry`; this deployment emits its own card from live
-config via `cli card` — `packages/solver-core/src/core/registryCard.ts`). Card and ad share the
-same key model — the card's `discovery_pubkey` is the pubkey RFQ traffic is
-addressed to — and both are **indicative**: rendezvous data, never terms.
+The card is the **solver-registry corridor card**: a BIP340-signed listing
+carrying the solver's `discovery_pubkey` — the pubkey RFQ traffic is
+addressed to — its **transport map**, and per-market `fee_bps`, `fee_flat`
+and limits (`schema/card.schema.json` in `arkade-os/solver-registry`). This
+deployment builds it from live config in one place
+(`packages/solver-app/src/admin/routes/card.ts`) for `cli card`, the console
+and the kind-38859 publisher; `cli card --pointer` prints the pointer.
 
 A card's `fee_flat` is OPTIONAL — omitted means `"0"` — and is denominated
 in **quote-asset** atomic units to match the card's own `min_quote_amount` /
@@ -794,7 +771,7 @@ fee_bps))` for exact-in — ceiling and floor chosen so a boundary quote
 - The bid's author pubkey is the solver identity the close is addressed to
   (v1 key model, § 4.2; splitting keys is the § 12 question). Solver-signed,
   a bid is a **non-repudiable per-request price commitment** — strictly
-  stronger than the indicative kind-38859 ad — but enforcement is
+  stronger than the non-binding kind-38859 card — but enforcement is
   reputational: the client's recourse against a reneging solver is
   publishable evidence (signed bid + worse signed quote), not a bond
   (§ 12).
@@ -1950,9 +1927,10 @@ have a tested reference in this repo.
    quoted, watch THAT address, and never fill a deposit observed after
    `valid_until` — you cannot refund it, and the client does not need you to
    (ref: `packages/solver-corridors/src/asset/assetRfqOrchestrator.ts`).
-9. **Solver ad** — publish and refresh kind 38859; keep it honest and
-   indicative. In practice, also file the solver-registry corridor card
-   (§ 3.1) — today it is the discovery path clients actually use.
+9. **Solver card** — publish the signed card as kind 38859, `d` = network,
+   and re-send it at least every 30 minutes; list its key in the
+   solver-registry as a full card or a pointer (§ 3.1) — an unlisted key's
+   card is ignored.
 10. **(Optional) Open-RFQ bidding** (§ 4.6) — a second subscription per
     served market keyed by the canonical market-key tag; a bid handler that
     prices from config (no invoice decode) and seals `rfq_bid` to the
@@ -2014,7 +1992,7 @@ have a tested reference in this repo.
   § 2.2 topic key reuses that rule.
 - **Key separation.** v1 assumes one solver key for transport identity and
   settlement; splitting them (hot Nostr key, cold settlement key) needs a
-  binding proof in the ad or quote.
+  binding proof in the card or quote.
 - **Cross-corridor asset identity.** § 2 gives each asset one canonical id,
   but the same economic asset has a different native identity on every
   corridor it exists on: an ERC20 contract address on `ethereum`, an Arkade
