@@ -115,6 +115,7 @@ const solverConfig = (): Config => {
     // Off, which is the default an operator who configures nothing gets.
     approvalThresholdSats: null,
     notify: { telegramBotToken: null, telegramChatId: null, slackWebhookUrl: null },
+    balanceReportIntervalMinutes: null,
     contractRetentionMs: 86_400_000,
     sweepConcurrency: 4,
     lockupTimeoutSeconds: 3600,

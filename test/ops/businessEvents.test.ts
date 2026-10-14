@@ -221,4 +221,13 @@ describe('the balance sampler is DRIVEN on the shipped daemon', () => {
     expect(cliSource).toMatch(/void services\.sampleBalances\(\)\.catch\(/)
     expect(cliSource).not.toMatch(/await services\.sampleBalances\(\)/)
   })
+
+  it('the balance report is gated on a sink AND an interval, and driven unawaited from boot', () => {
+    expect(servicesSource).toMatch(
+      /reportBalances:\s+notifySinks\.length > 0 && config\.balanceReportIntervalMinutes !== null/,
+    )
+    expect(cliSource).toMatch(/let lastBalanceReport = 0\n/)
+    expect(cliSource).toMatch(/services\.reportBalances && Date\.now\(\) - lastBalanceReport > reportEveryMs/)
+    expect(cliSource).toMatch(/void services\.reportBalances\(\)\.catch\(/)
+  })
 })

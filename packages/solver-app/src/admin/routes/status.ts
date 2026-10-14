@@ -17,7 +17,7 @@ import { marketCapability } from '../marketCapability.js'
 import { assetMarketKey, type AssetMarketBounds } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import type { AssetMarketRow } from '../db.js'
 import { probeBackends } from '../probes.js'
-import { consoleBalance, describeAssetId, type AssetDetailSource } from '../assets.js'
+import { assetSource, consoleBalance, describeAssetId } from '../assets.js'
 import { ASSET_ID_HEX } from '@arkade-os/solver-core/core/marketKey.js'
 import { marketServingDivergence } from '../../ops/marketDivergence.js'
 import { poolPlan } from '../../ops/pool.js'
@@ -33,18 +33,6 @@ import {
 } from '@arkade-os/solver-corridors/corridors/projections.js'
 import { liveSwaps } from '../projection.js'
 import type { AdminDeps } from '../server.js'
-
-/**
- * The wallet's asset-metadata reader, when there is one.
- *
- * Optional rather than assumed: `assetManager` is on the SDK's wallet interface, but a
- * route must not 500 because something stood a narrower wallet in its place. Labels
- * are decoration — {@link consoleBalance} renders ids without them.
- */
-const assetSource = (wallet: unknown): AssetDetailSource | undefined => {
-  const manager = (wallet as { assetManager?: Partial<AssetDetailSource> } | null)?.assetManager
-  return typeof manager?.getAssetDetails === 'function' ? (manager as AssetDetailSource) : undefined
-}
 
 /**
  * Every swap parked in `stuck`, across all four corridors.
