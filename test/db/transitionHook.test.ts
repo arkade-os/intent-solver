@@ -190,6 +190,9 @@ describe('every store carrying the hook is WIRED on the shipped daemon', () => {
     ['offerStore', "'arkade offer fill'"],
     ['assetRfqStore', "'arkade asset RFQ'"],
   ])('%s announces as %s', (storeName, label) => {
-    expect(servicesSource).toContain(`announceOutcomes(${storeName}, ${label},`)
+    const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    // The call is split across lines once it takes the swap-size reader. The pin
+    // is that THIS store is passed, not that the call fits on one line.
+    expect(servicesSource).toMatch(new RegExp(`announceOutcomes\\(\\s*${escape(storeName)},\\s*${escape(label)},`))
   })
 })

@@ -107,9 +107,9 @@ CREATE TABLE IF NOT EXISTS admin_swap_approval (
   approved_at  INTEGER
 );
 
--- Scalar notifier state that must survive a restart. In memory the first event
--- after every deploy would compare against nothing. Not a row in admin_override:
--- getOverrides() hands settings.ts a Record it layers onto Config.
+-- Scalar notifier state. Not a row in admin_override: getOverrides() hands
+-- settings.ts a Record it layers onto Config. The balance-change key is no
+-- longer written; the table stays so a database that has it still opens.
 CREATE TABLE IF NOT EXISTS admin_notify_state (
   key        TEXT PRIMARY KEY,
   value      TEXT NOT NULL,
@@ -579,7 +579,7 @@ export class AdminStore {
     return row !== undefined && row !== null && row.approved_at !== null
   }
 
-  /** Null and zero differ: never-announced has no percentage, an emptied float has a real -100%. */
+  /** Nothing in the notifier reads this anymore. Zero stays distinct from absent. */
   async getLastAnnouncedBalance(): Promise<number | null> {
     const row = await this.driver.get<{ value: string }>('SELECT value FROM admin_notify_state WHERE key = ?', [
       LAST_BALANCE_KEY,

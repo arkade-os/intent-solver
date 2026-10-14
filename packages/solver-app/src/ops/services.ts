@@ -73,7 +73,13 @@ import { OnchainReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainR
 import { AdminStore, type SwapApprovalRequest } from '../admin/db.js'
 import { createNotifier } from './notify.js'
 import { sinksFrom } from './notifySinks.js'
-import { createBalanceSampler, createSwapOutcomeReporter } from './businessEvents.js'
+import {
+  btcSwapSize,
+  createBalanceSampler,
+  createSwapOutcomeReporter,
+  formatAmount,
+  type SwapTerms,
+} from './businessEvents.js'
 import { approvalGateFor } from './approvals.js'
 import { formatSats, type CorridorStates, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
 import { LN_SEND } from '@arkade-os/solver-corridors/corridors/lnSend.js'
@@ -519,21 +525,58 @@ export const createServices = async (
 
   // Sampled on a timer, never on the event path: `getBalance()` awaits the same
   // unfiltered `contractSnapshot()` as `getSpendableVtxos()` (~951ms measured)
-  // and races a `getBoardingUtxos()`. The committed half is cheap SQLite.
+  // and races a `getBoardingUtxos()`. Lightning and onchain are the same class
+  // of call. The swap's own amount is read off its row later, not here.
   const balances = createBalanceSampler({
-    readAvailableSats: async () => (await arkade.wallet.getBalance()).available,
-    // The same house-wide figure the exposure cap reads; only called at sample time.
-    readCommittedSats: () => totalCommitted(),
+    readArkadeAvailableSats: async () => (await arkade.wallet.getBalance()).available,
+    ...(config.lnBackend === null
+      ? {}
+      : {
+          readLightning: async () => {
+            if (rail === null) throw new Error('lightning balance sampled with no rail')
+            const balance = await rail.ln.getBalance()
+            return { availableSats: balance.availableSats, incomingSats: balance.incomingSats }
+          },
+          readOnchain: async () => {
+            if (rail === null) throw new Error('onchain balance sampled with no rail')
+            const balance = await rail.onchain.getBalance()
+            return { confirmedSats: balance.confirmedSats, sharedWithLightning: balance.sharedWithLightning === true }
+          },
+        }),
     now: nowSeconds,
     onError: (error) => log('balance sample failed:', error instanceof Error ? error.message : String(error)),
   })
 
-  const announceOutcomes = (target: { onTransition?: TransitionHook }, corridor: string, states: CorridorStates) => {
+  const tokenUnit = (address: string): string =>
+    config.evmCorridors.find((corridor) => corridor.token.address === address)?.token.symbol ??
+    `${address.slice(0, 8)}…`
+
+  const satsTerms =
+    (
+      load: (
+        id: string,
+      ) => Promise<{ amountSats: number; payoutSats: number | null; failureReason: string | null; note?: string }>,
+    ) =>
+    async (id: string): Promise<SwapTerms> => {
+      const row = await load(id)
+      const size = row.note
+        ? `${btcSwapSize(row.amountSats, row.payoutSats)}; ${row.note}`
+        : btcSwapSize(row.amountSats, row.payoutSats)
+      return { size, failureReason: row.failureReason }
+    }
+
+  const announceOutcomes = (
+    target: { onTransition?: TransitionHook },
+    corridor: string,
+    states: CorridorStates,
+    terms: (id: string) => Promise<SwapTerms>,
+  ) => {
     target.onTransition = createSwapOutcomeReporter({
       corridor,
       states,
       balances,
-      store: adminStore,
+      lightningName: config.lnBackend,
+      terms,
       post: (text) => notifier.post(text),
       now: nowSeconds,
       onError: (error) => log('business event failed:', error instanceof Error ? error.message : String(error)),
@@ -541,24 +584,84 @@ export const createServices = async (
   }
 
   // Against each store's OWN descriptor, never a shared word list.
-  announceOutcomes(store, LN_SEND.pair, LN_SEND.states)
-  announceOutcomes(onchainStore, ONCHAIN_SEND.pair, ONCHAIN_SEND.states)
-  announceOutcomes(receiveStore, LN_RECEIVE.pair, LN_RECEIVE.states)
-  announceOutcomes(onchainReceiveStore, ONCHAIN_RECEIVE.pair, ONCHAIN_RECEIVE.states)
-  // Both EVM stores serve every token, so the label names the LEG.
+  // Lightning send quotes the invoice and has no payout column.
+  announceOutcomes(
+    store,
+    LN_SEND.pair,
+    LN_SEND.states,
+    satsTerms(async (id) => {
+      const row = await store.get(id)
+      return { amountSats: row.amountSats, payoutSats: null, failureReason: row.failureReason }
+    }),
+  )
+  announceOutcomes(
+    onchainStore,
+    ONCHAIN_SEND.pair,
+    ONCHAIN_SEND.states,
+    satsTerms(async (id) => {
+      const row = await onchainStore.get(id)
+      return { amountSats: row.amountSats, payoutSats: row.payoutSats, failureReason: row.failureReason }
+    }),
+  )
+  announceOutcomes(
+    receiveStore,
+    LN_RECEIVE.pair,
+    LN_RECEIVE.states,
+    satsTerms(async (id) => {
+      const row = await receiveStore.get(id)
+      return { amountSats: row.amountSats, payoutSats: row.payoutSats, failureReason: row.failureReason }
+    }),
+  )
+  announceOutcomes(
+    onchainReceiveStore,
+    ONCHAIN_RECEIVE.pair,
+    ONCHAIN_RECEIVE.states,
+    satsTerms(async (id) => {
+      const row = await onchainReceiveStore.get(id)
+      return { amountSats: row.amountSats, payoutSats: row.payoutSats, failureReason: row.failureReason }
+    }),
+  )
+  // Both EVM stores serve every token, so the label names the LEG. The sats
+  // columns are what the activity table shows; the token amount is the other leg.
   if (evmSendStore) {
-    announceOutcomes(evmSendStore, 'arkade:BTC->ethereum', {
-      live: EVM_SEND_NON_TERMINAL,
-      exposed: EVM_SEND_EXPOSED,
-      delivered: ['claimed'],
-    })
+    announceOutcomes(
+      evmSendStore,
+      'arkade:BTC->ethereum',
+      {
+        live: EVM_SEND_NON_TERMINAL,
+        exposed: EVM_SEND_EXPOSED,
+        delivered: ['claimed'],
+      },
+      satsTerms(async (id) => {
+        const row = await evmSendStore.get(id)
+        return {
+          amountSats: row.amountSats,
+          payoutSats: row.payoutSats,
+          failureReason: row.failureReason,
+          note: `token ${row.evmAmount} ${tokenUnit(row.tokenAddress)}`,
+        }
+      }),
+    )
   }
   if (evmReceiveStore) {
-    announceOutcomes(evmReceiveStore, 'ethereum->arkade:BTC', {
-      live: EVM_RECEIVE_NON_TERMINAL,
-      exposed: EVM_RECEIVE_EXPOSED,
-      delivered: ['claimed'],
-    })
+    announceOutcomes(
+      evmReceiveStore,
+      'ethereum->arkade:BTC',
+      {
+        live: EVM_RECEIVE_NON_TERMINAL,
+        exposed: EVM_RECEIVE_EXPOSED,
+        delivered: ['claimed'],
+      },
+      satsTerms(async (id) => {
+        const row = await evmReceiveStore.get(id)
+        return {
+          amountSats: row.amountSats,
+          payoutSats: row.payoutSats,
+          failureReason: row.failureReason,
+          note: `token ${row.evmAmount} ${tokenUnit(row.tokenAddress)}`,
+        }
+      }),
+    )
   }
 
   /**
@@ -739,14 +842,28 @@ export const createServices = async (
   const servesOffers = policy.offerMarkets.length > 0 || marketRows.some((row) => row.enabled && row.servesOffer)
   const liveOfferMarkets = offerMarketsFrom(assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
+  const assetAmount = (assetId: string | null, amount: bigint): string =>
+    formatAmount(amount, assetId === null ? 'sats' : (assetSymbols.get(assetId) ?? `${assetId.slice(0, 8)}…`))
   // NOT a corridor, so no descriptor: an offer fill has no HTLC, deadline or
   // refund, hence no exposed set. `lost` — someone else took it — is `failed`.
   if (offerStore) {
-    announceOutcomes(offerStore, 'arkade offer fill', {
-      live: OFFER_FILL_NON_TERMINAL,
-      exposed: [],
-      delivered: ['filled'],
-    })
+    announceOutcomes(
+      offerStore,
+      'arkade offer fill',
+      {
+        live: OFFER_FILL_NON_TERMINAL,
+        exposed: [],
+        delivered: ['filled'],
+      },
+      async (id) => {
+        const row = await offerStore.findById(id)
+        if (!row) throw new Error(`offer fill ${id} not found`)
+        return {
+          size: `receive ${assetAmount(row.offerAssetId, row.offerAmount)} -> pay ${assetAmount(row.wantAssetId, row.wantAmount)}`,
+          failureReason: row.failureReason,
+        }
+      },
+    )
   }
   const offerRefusals = createOfferRefusalTail()
   const rfqRefusals = createRfqRefusalTail()
@@ -801,11 +918,22 @@ export const createServices = async (
   const assetRfqMarkets = assetRfqMarketsFrom(assetMarkets.pricing, rfqCarrier)
   const assetRfqStore = await AssetRfqSwapStore.open(swapFile)
   // One store serves every asset pair, so the label names the LEG.
-  announceOutcomes(assetRfqStore, 'arkade asset RFQ', {
-    live: ASSET_RFQ_NON_TERMINAL,
-    exposed: ASSET_RFQ_EXPOSED,
-    delivered: ['filled'],
-  })
+  announceOutcomes(
+    assetRfqStore,
+    'arkade asset RFQ',
+    {
+      live: ASSET_RFQ_NON_TERMINAL,
+      exposed: ASSET_RFQ_EXPOSED,
+      delivered: ['filled'],
+    },
+    async (id) => {
+      const row = await assetRfqStore.get(id)
+      return {
+        size: `amount ${assetAmount(row.fromAssetId, row.fromAmount)} -> payout ${assetAmount(row.toAssetId, row.toAmount)}`,
+        failureReason: row.failureReason,
+      }
+    },
+  )
   const assetRfqDerivation = {
     serverPubkey: arkade.wallet.arkServerPublicKey,
     // X-ONLY. The emulator advertises a compressed key and the covenant takes
