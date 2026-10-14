@@ -39,6 +39,7 @@ import { loadEvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
 import { createJsonRpc } from '@arkade-os/solver-rails-evm/evm/rpc.js'
 import { createEvmHtlcBackend } from '@arkade-os/solver-rails-evm/evm/backend.js'
 import { probeLogScanRange } from '@arkade-os/solver-rails-evm/evm/logScanProbe.js'
+import { probeTimelockClock } from '@arkade-os/solver-rails-evm/evm/timelockClock.js'
 import { assertEvmClaimTraceSupport } from '@arkade-os/solver-rails-evm/evm/claimTraceProbe.js'
 import { createEvmBroadcaster, nonceSourceFor } from '@arkade-os/solver-rails-evm/evm/broadcast.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
@@ -1321,6 +1322,7 @@ export const createServices = async (
       contractAddress: evmChain.contractAddress,
       rpc,
       logScanRange: evmChain.logScanRange,
+      timelockClockIsHeight: evmChain.timelockCadence === null,
     })
     // @see logScanProbe.ts on why this is asked at boot, and on the split.
     const probe = await probeLogScanRange({
@@ -1344,10 +1346,23 @@ export const createServices = async (
     } else if (probe.blocks < BigInt(evmChain.logScanRange)) {
       log(`evm: EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} unproven — the chain is only ${probe.blocks} blocks long`)
     }
+    // Boot only fails fast; every timelock read re-checks, so an inconclusive probe cannot let a mismatch through.
+    const clock = await probeTimelockClock(rpc)
+    if (clock.kind === 'distinct' && evmChain.timelockCadence === null) {
+      throw new Error(
+        `${endpointHost(evmChain.rpcUrl)} is at block ${clock.height} but contracts read block.number ${clock.clock}: ` +
+          'set EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK and EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK for that clock',
+      )
+    }
+    if (clock.kind === 'inconclusive') {
+      log(`evm: could not compare block.number with the height of ${endpointHost(evmChain.rpcUrl)}`, clock.message)
+    }
     // Number, not bigint, because that is what both orchestrators' deps take.
     // Safe for as long as block heights stay under 2^53 — nine orders of
     // magnitude away on every chain this could serve.
     const blockHeight = async (): Promise<number> => Number(await evm.currentBlock())
+    const timelockHeight = () => evm.timelockClock()
+    const timelockCadence = evmChain.timelockCadence ?? evmChain.cadence
     // ONE broadcaster across both legs, and the nonce source is why. It is
     // per-ACCOUNT, not per-corridor: both legs sign with the same key, so two
     // sources would hand out the same nonce twice and one of the two
@@ -1408,6 +1423,7 @@ export const createServices = async (
         ? async () => {}
         : (tokenAddress) => assertEvmClaimTraceSupport(rpc, tokenAddress),
       blockHeight,
+      timelockHeight,
       ...evmSendArkadeDeps(arkadeOps),
       arkade: arkadeOps,
       // The account the broadcaster signs from, so the allowance read below
@@ -1428,6 +1444,7 @@ export const createServices = async (
         minConfirmations: evmChain.minConfirmations,
         minAgeSeconds: evmChain.minAgeSeconds,
         cadence: evmChain.cadence,
+        timelockCadence,
         quoteValiditySeconds: evmChain.quoteValiditySeconds,
         orderMarginSeconds: evmChain.orderMarginSeconds,
       },
@@ -1441,6 +1458,7 @@ export const createServices = async (
       evm,
       broadcast,
       blockHeight,
+      timelockHeight,
       ...evmReceiveArkadeDeps(receiveOps),
       arkade: receiveOps,
       markets: marketsFor('receive'),
@@ -1453,7 +1471,7 @@ export const createServices = async (
         chainId: evmChain.chainId,
         minConfirmations: evmChain.minConfirmations,
         minAgeSeconds: evmChain.minAgeSeconds,
-        cadence: evmChain.cadence,
+        timelockCadence,
         quoteValiditySeconds: evmChain.quoteValiditySeconds,
         orderMarginSeconds: evmChain.orderMarginSeconds,
       },

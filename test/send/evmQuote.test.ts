@@ -48,6 +48,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
     claimArkade: vi.fn(),
     lockFor: vi.fn(),
     blockHeight: vi.fn().mockResolvedValue(20_000_000),
+    timelockHeight: vi.fn().mockResolvedValue(20_000_000),
     arkade: {
       providerPubkey: key(1),
       serverPubkey: key(2),
@@ -78,6 +79,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
       minConfirmations: 12,
       minAgeSeconds: 780,
       cadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 15 },
+      timelockCadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 15 },
       quoteValiditySeconds: 60,
       orderMarginSeconds: 7_500,
     },
@@ -173,6 +175,25 @@ describe('the happy path', () => {
       expect(outcome.swap.evmTimeout).toBeGreaterThan(20_000_000)
       expect(outcome.swap.refundLocktime).toBe(NOW + DELAY + 7_500)
     }
+  })
+
+  it('sizes the timeout on the block.number clock where it is not the chain height', async () => {
+    const { service } = await build({
+      blockHeight: vi.fn().mockResolvedValue(514_431_756),
+      timelockHeight: vi.fn().mockResolvedValue(26_193_574),
+      chain: {
+        contractAddress: '0x' + 'de'.repeat(20),
+        chainId: 42161,
+        minConfirmations: 12,
+        minAgeSeconds: 780,
+        cadence: { fastestSecondsPerBlock: 0.25, slowestSecondsPerBlock: 0.5 },
+        timelockCadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 24 },
+        quoteValiditySeconds: 60,
+        orderMarginSeconds: 7_500,
+      },
+    })
+    const outcome = await service.quote(request())
+    expect(outcome.accepted && outcome.swap.evmTimeout).toBe(26_193_574 + Math.floor(DELAY / 24))
   })
 })
 
