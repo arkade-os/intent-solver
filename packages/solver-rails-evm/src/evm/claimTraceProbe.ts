@@ -88,36 +88,46 @@ const includesReceiptLog = (
     )
   })
 
+const SAMPLE_WINDOWS = [4n, 32n, 128n] as const
+
 export const assertEvmClaimTraceSupport = async (rpc: JsonRpc, emitterAddress: Uint8Array): Promise<void> => {
   const emitter = fixedHex(`0x${bytesToHex(emitterAddress)}`, 20)
   if (!emitter) throw new Error('Trace probe emitter must be a 20-byte address')
   const tip = quantity(await rpc('eth_blockNumber', []))
   if (tip === null) throw new Error('EVM callTracer withLog probe could not read the chain tip')
-  const fromBlock = tip > 127n ? tip - 127n : 0n
-  const fromTag = `0x${fromBlock.toString(16)}`
-  const toTag = `0x${tip.toString(16)}`
-  const logs = await rpc('eth_getLogs', [{ address: emitter, fromBlock: fromTag, toBlock: toTag }])
-  if (!Array.isArray(logs)) throw new Error('EVM callTracer withLog probe received an invalid log sample')
-  const seen = new Set<string>()
-  const candidates = logs
-    .slice(-128)
-    .slice()
-    .reverse()
-    .filter((entry) => {
-      const identity = logIdentity(entry)
-      const payload = eventPayload(entry)
-      if (
-        !identity ||
-        payload?.address !== emitter ||
-        identity.blockNumber < fromBlock ||
-        identity.blockNumber > tip ||
-        seen.has(identity.txHash)
-      )
-        return false
-      seen.add(identity.txHash)
-      return true
-    })
-    .slice(0, 3)
+  const sampleFrom = async (width: bigint): Promise<unknown[]> => {
+    const fromBlock = tip >= width ? tip - width + 1n : 0n
+    const logs = await rpc('eth_getLogs', [
+      { address: emitter, fromBlock: `0x${fromBlock.toString(16)}`, toBlock: `0x${tip.toString(16)}` },
+    ])
+    if (!Array.isArray(logs)) throw new Error('EVM callTracer withLog probe received an invalid log sample')
+    const seen = new Set<string>()
+    return logs
+      .slice(-128)
+      .slice()
+      .reverse()
+      .filter((entry) => {
+        const identity = logIdentity(entry)
+        const payload = eventPayload(entry)
+        if (
+          !identity ||
+          payload?.address !== emitter ||
+          identity.blockNumber < fromBlock ||
+          identity.blockNumber > tip ||
+          seen.has(identity.txHash)
+        )
+          return false
+        seen.add(identity.txHash)
+        return true
+      })
+      .slice(0, 3)
+  }
+  // A busy token fills a wide window past the endpoint's log-count cap, so widen only on an empty one.
+  let candidates: unknown[] = []
+  for (const width of SAMPLE_WINDOWS) {
+    candidates = await sampleFrom(width)
+    if (candidates.length > 0) break
+  }
   for (const sample of candidates) {
     const identity = logIdentity(sample)
     if (!identity) continue

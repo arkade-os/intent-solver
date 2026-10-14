@@ -8,14 +8,14 @@ const hash = (value: string) => `0x${value.repeat(64)}`
 const bytes = (value: string) => hex.decode(value.slice(2))
 const emitter = bytes(address('4'))
 
-const fixture = () => {
+const fixture = (block = '0x64') => {
   const log = {
     address: address('4'),
     topics: [hash('1')],
     data: '0x00',
     transactionHash: hash('5'),
     blockHash: hash('6'),
-    blockNumber: '0x64',
+    blockNumber: block,
     logIndex: '0x0',
     removed: false,
   }
@@ -30,7 +30,7 @@ const fixture = () => {
       status: '0x1',
       transactionHash: hash('5'),
       blockHash: hash('6'),
-      blockNumber: '0x64',
+      blockNumber: block,
       to: router,
       from: wallet,
       logs: [log],
@@ -38,7 +38,7 @@ const fixture = () => {
     eth_getTransactionByHash: {
       hash: hash('5'),
       blockHash: hash('6'),
-      blockNumber: '0x64',
+      blockNumber: block,
       to: router,
       from: wallet,
       input,
@@ -50,7 +50,7 @@ const fixture = () => {
       input,
       calls: [{ type: 'DELEGATECALL', from: router, to: address('9'), input, logs: [frameLog] }],
     },
-    eth_getBlockByNumber: { number: '0x64', hash: hash('6') },
+    eth_getBlockByNumber: { number: block, hash: hash('6') },
   }
   const rpc: JsonRpc = async (method) => answers[method]
   return { answers, log, rpc }
@@ -59,12 +59,26 @@ const fixture = () => {
 describe('EVM callTracer withLog admission probe', () => {
   it('verifies a real canonical emitter log from a successful proxy trace', async () => {
     const f = fixture()
+    const windows: unknown[] = []
     const rpc: JsonRpc = async (method, params) => {
-      if (method === 'eth_getLogs') {
-        expect(params).toEqual([{ address: address('4'), fromBlock: '0x1', toBlock: '0x80' }])
-      }
+      if (method === 'eth_getLogs') windows.push(params)
       if (method === 'debug_traceTransaction') {
         expect(params).toEqual([hash('5'), { tracer: 'callTracer', tracerConfig: { withLog: true } }])
+      }
+      return f.rpc(method, params)
+    }
+    await expect(assertEvmClaimTraceSupport(rpc, emitter)).resolves.toBeUndefined()
+    expect(windows).toEqual([
+      [{ address: address('4'), fromBlock: '0x7d', toBlock: '0x80' }],
+      [{ address: address('4'), fromBlock: '0x61', toBlock: '0x80' }],
+    ])
+  })
+
+  it('verifies a busy emitter from the tip window without asking for a wider one', async () => {
+    const f = fixture('0x7f')
+    const rpc: JsonRpc = async (method, params) => {
+      if (method === 'eth_getLogs' && (params as [{ fromBlock: string }])[0].fromBlock !== '0x7d') {
+        throw new Error('query exceeds max results 20000')
       }
       return f.rpc(method, params)
     }
@@ -74,7 +88,13 @@ describe('EVM callTracer withLog admission probe', () => {
   it('fails when there is no recent canonical emitter log to sample', async () => {
     const f = fixture()
     f.answers.eth_getLogs = []
-    await expect(assertEvmClaimTraceSupport(f.rpc, emitter)).rejects.toThrow(/recent canonical emitter log/)
+    const froms: string[] = []
+    const rpc: JsonRpc = async (method, params) => {
+      if (method === 'eth_getLogs') froms.push((params as [{ fromBlock: string }])[0].fromBlock)
+      return f.rpc(method, params)
+    }
+    await expect(assertEvmClaimTraceSupport(rpc, emitter)).rejects.toThrow(/recent canonical emitter log/)
+    expect(froms).toEqual(['0x7d', '0x61', '0x1'])
   })
 
   it.each([
