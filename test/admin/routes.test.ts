@@ -220,6 +220,15 @@ describe('GET /api/swaps/:corridor/:id', () => {
       history: [{ to: 'quoted' }],
     })
   })
+
+  // Asset RFQ rows carry their amounts as bigints, which `JSON.stringify` refuses.
+  it('answers a row with bigint amounts, as decimal strings', async () => {
+    const row = { id: 'a', state: 'claimed', createdAt: 1, updatedAt: 2, amountSats: 1_000, toAmount: 2n ** 70n }
+    const withRow = store({ get: vi.fn().mockResolvedValue(row) })
+    const response = await get('/api/swaps/arkade%3ABTC-%3Elightning%3ABTC/a', { store: withRow })
+    expect(response.status).toBe(200)
+    expect(((await response.json()) as { raw: { toAmount: unknown } }).raw.toAmount).toBe((2n ** 70n).toString())
+  })
 })
 
 describe('GET /api/backends', () => {

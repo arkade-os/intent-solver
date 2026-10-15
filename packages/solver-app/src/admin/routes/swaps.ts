@@ -15,6 +15,7 @@ import type { AdminPhase } from '@arkade-os/solver-core/core/swapView.js'
 import type { CorridorSwapView } from '@arkade-os/solver-core/core/corridor.js'
 import type { AdminDeps } from '../server.js'
 import { PageRequestError, type PageOptions } from '@arkade-os/solver-core/core/page.js'
+import { json } from '@arkade-os/solver-core/util/poll.js'
 
 const PHASES: readonly AdminPhase[] = ['open', 'exposed', 'done', 'failed']
 
@@ -121,6 +122,6 @@ export const registerSwapRoutes = (app: Hono, deps: AdminDeps): void => {
     if (!deps.services.readers.get(corridor)) return c.json({ error: 'unknown_corridor', corridor }, 400)
     const detail = await detailOf(deps, corridor, c.req.param('id'))
     if (!detail) return c.json({ error: 'not_found' }, 404)
-    return c.json(detail)
+    return c.json(JSON.parse(json(detail)))
   })
 }
