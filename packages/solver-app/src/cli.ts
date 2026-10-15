@@ -1541,7 +1541,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         log('onchain refunds NOT checked: LND did not answer at boot; run this again once it does')
       const evmPushed = (await services.evmSendService?.refundSweep()) ?? []
       if (pushed.length === 0 && onchainPushed.length === 0 && evmPushed.length === 0) {
-        log('nothing eligible: refunds need a failed swap past its deadline with funds at the script')
+        log('nothing eligible: no failed swap has funds at its lockup that its refund leaf can move yet')
         return
       }
       for (const id of pushed) log('refunded', id, json((await services.store.get(id)).refundArkTxid))
