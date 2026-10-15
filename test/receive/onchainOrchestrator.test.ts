@@ -8,6 +8,8 @@ import { SigHash, Transaction } from '@scure/btc-signer'
 import { ArkAddress } from '@arkade-os/sdk'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { EMPTY_LOCKUP_GRACE, REFUND_CENSORSHIP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
+import { FEE_BUMP_FACTOR, FEE_BUMP_INTERVAL_SECONDS } from '@arkade-os/solver-rails/onchain/feeBump.js'
+import { ONCHAIN_DUST_SATS } from '@arkade-os/solver-core/core/onchainReceive.js'
 import {
   OnchainReceiveSwapStore,
   type OnchainReceiveSwapRow,
@@ -1269,6 +1271,119 @@ describe('OnchainReceiveSwapService', () => {
       expect(await deps.onchain.transactionOutcome(retried.onchainClaimTxid!)).toBe('mempool')
       deps.onchain.mineBlocks(1)
       expect((await service.tick(claimed.id)).state).toBe('settled')
+    })
+
+    /**
+     * Fee-bumping the L1 claim (#160: "an L1 claim has neither a retry nor
+     * fee-bump room").
+     *
+     * By `claimed` the solver has already paid the Arkade lockup and `P` is
+     * public, so a claim that sits in the mempool past `htlc_locktime` loses
+     * the whole HTLC to the client's own refund. These pin the terms of the
+     * replacement rather than the fact of one.
+     */
+    describe('replacing a claim the mempool has not taken', () => {
+      /** Every raw transaction handed to the backend, still broadcast. */
+      const captureBroadcasts = (): string[] => {
+        const broadcasts: string[] = []
+        const original = deps.onchain.broadcastRaw.bind(deps.onchain)
+        deps.onchain.broadcastRaw = async (txHex) => {
+          broadcasts.push(txHex)
+          return original(txHex)
+        }
+        return broadcasts
+      }
+
+      it('leaves a claim alone until the bump interval is up', async () => {
+        const claimed = await driveToClaimed()
+        const first = await service.tick(claimed.id)
+        expect(first.onchainClaimFeeRate).toBe(5)
+        expect(first.onchainClaimBroadcastAt).toBe(now)
+        const broadcasts = captureBroadcasts()
+
+        now += FEE_BUMP_INTERVAL_SECONDS - 1
+        const after = await service.tick(claimed.id)
+
+        expect(broadcasts).toEqual([])
+        expect(after.onchainClaimTxid).toBe(first.onchainClaimTxid)
+        expect(after.onchainClaimPriorTxids).toEqual([])
+      })
+
+      it('replaces it at the factor once the interval is up, keeping the old version tracked', async () => {
+        const claimed = await driveToClaimed()
+        const first = await service.tick(claimed.id)
+
+        now += FEE_BUMP_INTERVAL_SECONDS
+        const bumped = await service.tick(claimed.id)
+
+        expect(bumped.state).toBe('claimed')
+        expect(bumped.onchainClaimTxid).not.toBe(first.onchainClaimTxid)
+        expect(bumped.onchainClaimFeeRate).toBe(5 * FEE_BUMP_FACTOR)
+        expect(bumped.onchainClaimPriorTxids).toEqual([first.onchainClaimTxid])
+        expect(bumped.onchainClaimBroadcastAt).toBe(now)
+      })
+
+      it('settles on an OLDER version when that is the one a miner took', async () => {
+        const claimed = await driveToClaimed()
+        const first = await service.tick(claimed.id)
+        now += FEE_BUMP_INTERVAL_SECONDS
+        const bumped = await service.tick(claimed.id)
+
+        // The replacement never made it; the version it replaced did.
+        deps.onchain.dropFromMempool(bumped.onchainClaimTxid!)
+        deps.onchain.mineBlocks(1)
+
+        expect((await service.tick(claimed.id)).state).toBe('settled')
+      })
+
+      it('bumps a row broadcast before these columns existed, off updated_at', async () => {
+        const claimed = await driveToClaimed()
+        const first = await service.tick(claimed.id)
+        await deps.driver.run(
+          `UPDATE receive_onchain_swap SET onchain_claim_fee_rate = NULL, onchain_claim_broadcast_at = NULL, updated_at = ? WHERE id = ?`,
+          [now, claimed.id],
+        )
+
+        now += FEE_BUMP_INTERVAL_SECONDS
+        const bumped = await service.tick(claimed.id)
+
+        expect(bumped.onchainClaimTxid).not.toBe(first.onchainClaimTxid)
+        expect(bumped.onchainClaimPriorTxids).toEqual([first.onchainClaimTxid])
+        expect(bumped.onchainClaimFeeRate).toBe(5 * FEE_BUMP_FACTOR)
+      })
+
+      it('claims at the fee the HTLC can carry rather than parking it in stuck', async () => {
+        const claimed = await driveToClaimed()
+        // A rate whose honest fee would eat the whole HTLC. Parking here gives
+        // the client back an output whose preimage is already public.
+        deps.onchain.setFeeRate(1_000)
+        const broadcasts = captureBroadcasts()
+
+        const row = await service.tick(claimed.id)
+
+        expect(row.state).toBe('claimed')
+        expect(row.onchainClaimTxid).toBeTruthy()
+        const claimTx = Transaction.fromRaw(hex.decode(broadcasts[0]!), {
+          allowUnknownOutputs: true,
+          allowUnknownInputs: true,
+        })
+        expect(claimTx.getOutput(0).amount).toBe(BigInt(ONCHAIN_DUST_SATS))
+      })
+
+      it('does not replace a claim already paying everything above dust', async () => {
+        const claimed = await driveToClaimed()
+        deps.onchain.setFeeRate(1_000)
+        const first = await service.tick(claimed.id)
+        const broadcasts = captureBroadcasts()
+
+        now += FEE_BUMP_INTERVAL_SECONDS
+        deps.onchain.setFeeRate(5_000)
+        const after = await service.tick(claimed.id)
+
+        expect(broadcasts).toEqual([])
+        expect(after.onchainClaimTxid).toBe(first.onchainClaimTxid)
+        expect(after.onchainClaimPriorTxids).toEqual([])
+      })
     })
 
     /**
