@@ -1014,6 +1014,9 @@ export class OnchainReceiveSwapService {
       await store.fail(row.id, 'refunding_arkade', 'lockup empty with no matching claim; needs review')
       return false
     }
+    // Before `refundLocktime` the server answers FORFEIT_CLOSURE_LOCKED, and
+    // unlike the Lightning leg this one arrives up to a fund window early.
+    if (this.now() < row.refundLocktime) return false
     try {
       const txid = await arkade.refund(receiveCovenantRowFor(row), outputs)
       return store.transition(row.id, 'refunding_arkade', 'refunded', { arkade_refund_txid: txid })
@@ -1023,7 +1026,8 @@ export class OnchainReceiveSwapService {
       // the deadline is `refundLocktime` rather than a grace, and why this is
       // only safe now that `onchain-receive-refund-now` gives a human somewhere
       // to take the row.
-      if (this.now() - row.updatedAt >= REFUND_CENSORSHIP_GRACE) {
+      // From whichever came later: entry can predate the deadline here.
+      if (this.now() - Math.max(row.updatedAt, row.refundLocktime) >= REFUND_CENSORSHIP_GRACE) {
         const detail = error instanceof Error ? error.message : String(error)
         const recourse = unilateralExitRecourse(receiveCovenantRowFor(row), { solverPubkey: arkade.providerPubkey })
         await store.fail(

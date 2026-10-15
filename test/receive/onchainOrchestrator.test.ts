@@ -957,6 +957,39 @@ describe('OnchainReceiveSwapService', () => {
       expect(deps.arkadeFake.refundCalls).toBe(1)
     })
 
+    // The funding gate shuts MIN_ARKADE_FUND_WINDOW before `refundLocktime`, so
+    // this leg enters `refunding_arkade` with its own CLTV still immature.
+    it('does not push a refund before refundLocktime matures', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+
+      now = awaitingClaim.refundLocktime - 1
+      const waiting = await service.tick(awaitingClaim.id)
+      expect(waiting.state).toBe('refunding_arkade')
+      expect(deps.arkadeFake.refundCalls).toBe(0)
+
+      now = awaitingClaim.refundLocktime
+      expect((await service.tick(awaitingClaim.id)).state).toBe('refunded')
+      expect(deps.arkadeFake.refundCalls).toBe(1)
+    })
+
+    it('counts the censorship grace from the deadline, not from an entry that predates it', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      deps.arkadeFake.arkade.refund = async () => {
+        throw new Error('server refused to co-sign')
+      }
+
+      now = awaitingClaim.refundLocktime - 1800
+      const entered = await service.tick(awaitingClaim.id)
+      expect(entered.state).toBe('refunding_arkade')
+
+      // A grace after entry, but not after the first push that could succeed.
+      now = entered.updatedAt + REFUND_CENSORSHIP_GRACE
+      await expect(service.tick(awaitingClaim.id)).rejects.toThrow('server refused to co-sign')
+
+      now = awaitingClaim.refundLocktime + REFUND_CENSORSHIP_GRACE
+      expect((await service.tick(awaitingClaim.id)).state).toBe('stuck')
+    })
+
     it('recovers to claimed when a late-but-valid claim lands during the refund attempt', async () => {
       const awaitingClaim = await driveToAwaitingClaim()
       now = awaitingClaim.refundLocktime + 1

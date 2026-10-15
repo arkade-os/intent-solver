@@ -2,28 +2,27 @@
  * Production {@link OnchainReceiveArkadeOps}: the bridge from the receive
  * orchestrator's row-shaped world to the real Arkade wallet.
  *
- * Reuses `send/arkadeOps.ts`'s `arkadeOpsFromContext` WHOLESALE rather than
- * reimplementing `refund` here: that factory's `refund` already does exactly
- * what this leg needs (rebuild the covenant from the row via
- * `covenantScriptFromRow`, refuse a mismatch via `assertScriptMatchesRow`,
- * then spend the `nonInteractiveRefund` leaf through the emulator) — see
- * `db/onchainReceiveSwaps.ts`'s `providerPubkey` doc comment for why that
- * leaf, proven on the send leg where `receiver` is the solver too, is safely
- * reusable here with zero changes: the covenant's signing role (`receiver`)
- * and its non-interactive-claim payout pin (`receiverPkScript`) are
- * independent VHTLC.ScriptV2 params, so reusing the solver's own identity
- * for the signing role does not touch where the client's own payout lands.
- *
- * Only two capabilities are genuinely new on this leg: funding the Arkade
- * lockup at all (the solver's own action here, never the send leg's) and
- * reading a spend witness back off it (covclaimd's autonomous claim is the
- * one thing that ever spends it besides the solver's own refund).
+ * Reuses `send/arkadeOps.ts`'s `arkadeOpsFromContext` except for `refund`: that
+ * one spends `nonInteractiveRefund`, signed by server + RECEIVER + emulator,
+ * and here the receiver is the CLIENT. `refundWithoutReceiver` is this leg's
+ * recourse, as it is the Lightning receive leg's (`receive/arkadeOps.ts`).
  */
 
-import { arkadeOpsFromContext, type EmulatorInfo } from '../send/arkadeOps.js'
+import { hex } from '@scure/base'
+import {
+  arkadeOpsFromContext,
+  assertScriptMatchesRow,
+  covenantScriptFromRow,
+  type EmulatorInfo,
+} from '../send/arkadeOps.js'
 import { fundLockup } from './fundLockup.js'
 import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
-import { findClaimPreimage, findLockupOutpoints, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import {
+  findClaimPreimage,
+  findLockupOutpoints,
+  refundWithoutReceiverSwapScript,
+  type ArkadeContext,
+} from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { ArkadeOps } from '../send/orchestrator.js'
 
 export interface OnchainReceiveArkadeOps extends Pick<
@@ -77,7 +76,11 @@ export const onchainReceiveArkadeOpsFromContext = async (
     delays: base.delays,
     hrp: base.hrp,
     findLockups: base.findLockups,
-    refund: base.refund,
+    refund: async (row, outputs) => {
+      const script = covenantScriptFromRow(row)
+      assertScriptMatchesRow(script, row)
+      return refundWithoutReceiverSwapScript(ctx, script, [...outputs], hex.decode(row.refundPkScript!))
+    },
     findLockupOutpoints: (pkScriptHex) => findLockupOutpoints(ctx, pkScriptHex),
     findClaimPreimage: (outpoints, paymentHashHex) => findClaimPreimage(ctx, outpoints, paymentHashHex),
     // The SHARED funding path, not `wallet.send`: coin selection and the
