@@ -16,6 +16,7 @@
     "typecheck:examples": "tsc -p tsconfig.examples.json",
     "start": "node --enable-source-maps --experimental-eventsource --env-file=.env packages/solver-app/dist/cli.js watch",
     "cli": "pnpm build && node --enable-source-maps --experimental-eventsource --env-file=.env packages/solver-app/dist/cli.js",
+    "admin:dev": "pnpm build && node --enable-source-maps scripts/admin-dev.mjs",
     "test": "vitest run --exclude e2e",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:watch": "vitest",

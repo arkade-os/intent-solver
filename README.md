@@ -208,7 +208,8 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   port, from inside the running provider. Off unless `ADMIN_PORT` is set. **It
   has no authentication: anything that can reach that port can move money.** Put
   a reverse proxy in front of it, or tunnel to the default loopback bind. See
-  `docs/runbook.md` § "The admin console".
+  `docs/runbook.md` § "The admin console". To work on the console itself,
+  `pnpm admin:dev` serves it over seeded data with nothing else running.
 
   The wallet's manual transfers and automatic backend refills are documented in
   [Wallet rebalancing](docs/wallet-rebalancing.md), including policy limits and
