@@ -62,6 +62,9 @@ export const htlcLocktimeFor = (minConfirmations: number, now: number): number =
  */
 export const HTLC_REFUND_MTP_MARGIN = 90 * MINUTE
 
+/** Reorg depth (~6 blocks) under the solver's own L1 refund before the client's lockup goes back. */
+export const CLIENT_LOCKUP_RELEASE_DELAY_SECONDS = 60 * MINUTE
+
 /**
  * What the solver needs after learning `P` to get its Arkade claim landed (TLA+ F7).
  * A DEADLINE BUDGET, not a timeout: the room

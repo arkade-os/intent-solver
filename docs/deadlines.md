@@ -97,6 +97,12 @@ number's job is to agree with whoever derives the same script.
 | `ONCHAIN_ORDER_MARGIN_SECONDS` | `core/onchainSend.ts` | Ordering margin between the two legs' deadlines. |
 | `EVM_ORDER_MARGIN_SECONDS` | `core/evmSend.ts` | Same role on the EVM corridors. |
 
+### 1 hour
+
+| Constant | Where | Why |
+|---|---|---|
+| `CLIENT_LOCKUP_RELEASE_DELAY_SECONDS` | `core/onchainSend.ts` | Reorg depth (~6 blocks) under the solver's own L1 refund before the client's Arkade lockup is handed back. **Not a race margin**: once that refund stands the client can never reveal `P`, so the lockup is unclaimable and worth nothing to the solver. What is being waited out is a reorg replacing our refund with their claim, which would turn the release into a double payout. |
+
 ### 15 minutes
 
 | Constant | Where | Why |

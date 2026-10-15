@@ -505,10 +505,37 @@ export class OnchainSendSwapService {
     return txid
   }
 
+  /**
+   * Unspent means our refund was reorged out and their claim may yet replace
+   * it; a matching preimage means it already did — worth more than the lockup,
+   * so it goes to an operator rather than out with it.
+   */
+  private async onchainRefundIsFinal(row: OnchainSendSwapRow): Promise<boolean> {
+    const { onchain } = this.deps
+    if (!row.fundingTxid || row.fundingVout === null) return false
+    const witness = await onchain.findSpendWitness({
+      txid: row.fundingTxid,
+      vout: row.fundingVout,
+      outputScript: hex.decode(row.onchainPkScript),
+    })
+    if (!witness) return false
+    const preimage = preimageFromClaimWitness(witness)
+    if (preimage && paymentHashFromPreimage(preimage) === row.paymentHash) {
+      throw new Error(
+        `swap ${row.id}: the onchain HTLC this row refunded now reads as claimed, preimage ${hex.encode(preimage)} — ` +
+          'claim the arkade lockup with it instead of releasing it to the client',
+      )
+    }
+    return true
+  }
+
   async refundSweep(): Promise<string[]> {
     const pushed: string[] = []
-    for (const row of await this.deps.store.findRefundable(this.now())) {
+    const now = this.now()
+    const rows = [...(await this.deps.store.findRefundable(now)), ...(await this.deps.store.findReleasable(now))]
+    for (const row of rows) {
       try {
+        if (row.state === 'refunded' && !(await this.onchainRefundIsFinal(row))) continue
         if (await this.pushRefund(row)) pushed.push(row.id)
       } catch (error) {
         this.onTickError?.(row.id, error)

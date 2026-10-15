@@ -24,6 +24,7 @@
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { CLIENT_LOCKUP_RELEASE_DELAY_SECONDS } from '@arkade-os/solver-core/core/onchainSend.js'
 
 export type OnchainSendSwapState =
   | 'quoted'
@@ -483,6 +484,17 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
          AND (client_refund_pubkey IS NOT NULL OR refund_locktime <= ?)
        ORDER BY created_at`,
       [now],
+    )
+    return rows.map(toRow)
+  }
+
+  /** Still-held client lockups behind a landed L1 refund — the preimage can never arrive now. */
+  async findReleasable(now: number): Promise<OnchainSendSwapRow[]> {
+    const rows = await this.driver.all<Raw>(
+      `SELECT * FROM send_onchain_swap
+       WHERE state = 'refunded' AND refund_outcome IS NULL AND updated_at <= ?
+       ORDER BY created_at`,
+      [now - CLIENT_LOCKUP_RELEASE_DELAY_SECONDS],
     )
     return rows.map(toRow)
   }

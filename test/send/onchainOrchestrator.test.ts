@@ -7,6 +7,7 @@ import { SigHash } from '@scure/btc-signer'
 import { OnchainSendSwapService, HTLC_REFUND_MTP_MARGIN } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
 import {
   ARKADE_CLAIM_WINDOW_SECONDS,
+  CLIENT_LOCKUP_RELEASE_DELAY_SECONDS,
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
   ONCHAIN_DUST_SATS,
   ONCHAIN_CLAIM_MARGIN_SECONDS,
@@ -1282,6 +1283,16 @@ describe('OnchainSendSwapService', () => {
       new Uint8Array([0xcc]),
     ])
 
+  /** `spent: false` leaves the funding output unspent — a refund the chain reorged away. */
+  const driveToRefunded = async (spent = true): Promise<OnchainSendSwapRow> => {
+    const row = await driveToBroadcastRefund()
+    if (spent) plantRefundLeafWitness(row)
+    deps.onchain.mineBlocks(1)
+    const refunded = await service.tick(row.id)
+    expect(refunded.state).toBe('refunded')
+    return refunded
+  }
+
   it('recognises its own confirmed refund by txid rather than failing the row to stuck', async () => {
     const row = await driveToBroadcastRefund()
     plantRefundLeafWitness(row)
@@ -1672,6 +1683,60 @@ describe('OnchainSendSwapService', () => {
     // The escalation is in the words, not in a verdict about where money went.
     expect((await deps.store.get(row.id)).refundOutcome).toBeNull()
     expect(await deps.store.findRefundable(now)).toHaveLength(1)
+  })
+
+  it('refundSweep() releases the client lockup of a refunded row, but only once the refund is reorg-deep', async () => {
+    const row = await driveToRefunded()
+
+    expect(await service.refundSweep()).toEqual([])
+    now += CLIENT_LOCKUP_RELEASE_DELAY_SECONDS
+    expect(now).toBeLessThan(row.refundLocktime)
+    expect(await service.refundSweep()).toEqual([row.id])
+
+    const after = await deps.store.get(row.id)
+    expect(after.refundArkTxid).toBe('refund-ark-txid')
+    expect(after.refundOutcome).toBe('pushed')
+    expect(after.state).toBe('refunded')
+  })
+
+  it('refundSweep() hands the operator the preimage instead of releasing, when a reorg swapped our refund for their claim', async () => {
+    const row = await driveToRefunded()
+    deps.onchain.spendClaim(row.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      P,
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+    now += CLIENT_LOCKUP_RELEASE_DELAY_SECONDS
+
+    const errors: unknown[] = []
+    service.onTickError = (_id, error) => errors.push(error)
+    expect(await service.refundSweep()).toEqual([])
+    expect(String(errors[0])).toContain(hex.encode(P))
+
+    expect((await deps.store.get(row.id)).refundOutcome).toBeNull()
+    expect(await deps.arkade.findLockups(row.pkScript)).toHaveLength(1)
+  })
+
+  it('refundSweep() never releases the lockup while the funding output reads unspent', async () => {
+    const row = await driveToRefunded(false)
+    now += CLIENT_LOCKUP_RELEASE_DELAY_SECONDS
+
+    expect(await service.refundSweep()).toEqual([])
+    expect((await deps.store.get(row.id)).refundOutcome).toBeNull()
+    expect(await deps.arkade.findLockups(row.pkScript)).toHaveLength(1)
+  })
+
+  it('refundSweep() records a refunded row whose lockup is already empty as external', async () => {
+    const row = await driveToRefunded()
+    deps.outputs.set(row.pkScript, [])
+    deps.spent.add(row.pkScript)
+    now += CLIENT_LOCKUP_RELEASE_DELAY_SECONDS
+
+    expect(await service.refundSweep()).toEqual([])
+    const after = await deps.store.get(row.id)
+    expect(after.refundOutcome).toBe('external')
+    expect(after.refundArkTxid).toBeNull()
   })
 
   it('does not time out the onchain HTLC before htlcLocktime', async () => {
