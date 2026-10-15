@@ -71,8 +71,8 @@
       "@foundry-rs/anvil"
     ],
     "overrides": {
-      "@arkade-os/sdk": "file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.5.0-rc.22-57512284.tgz",
-      "@arkade-os/swap": "file:packages/solver-app/vendor/carrier/arkade-os-swap-0.1.0-rc.25-57512284.tgz",
+      "@arkade-os/sdk": "file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.5.0-rc.22-3c369d3a.tgz",
+      "@arkade-os/swap": "file:packages/solver-app/vendor/carrier/arkade-os-swap-0.1.0-rc.25-3c369d3a.tgz",
       "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.0.0-f27ae4b6.tgz",
       "@arkade-taxi/covenant": "file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-0.0.0-f27ae4b6.tgz",
       "@arkade-taxi/protocol": "file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-0.0.0-f27ae4b6.tgz"
