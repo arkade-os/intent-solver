@@ -21,6 +21,7 @@ import {
   VENDOR_DIR,
   archiveManifest,
   assertCandidateExport,
+  assertInstalledPackages,
   fileSpec,
   packageRootFrom,
   pinnedSourceMismatch,
@@ -35,6 +36,12 @@ const failures = []
 const check = (condition, message) => {
   if (!condition) failures.push(message)
   return condition
+}
+
+const failIfInvalid = () => {
+  if (!failures.length) return
+  process.stderr.write(`carrier artifacts FAILED:\n${failures.map((line) => `  - ${line}`).join('\n')}\n`)
+  process.exit(1)
 }
 
 const manifest = readJson(at(MANIFEST_PATH))
@@ -163,8 +170,7 @@ for (const name of PINNED_PACKAGES) {
   check(resolution.test(lock), `pnpm-lock.yaml does not bind ${name} to its archive bytes`)
 }
 
-// What actually resolved, when there is an install to ask. The unit suite
-// asserts the same thing unconditionally.
+failIfInvalid()
 let entry
 try {
   entry = createRequire(at(TAXI_CONSUMER, 'package.json')).resolve('@arkade-taxi/client')
@@ -172,6 +178,12 @@ try {
   entry = undefined
 }
 if (entry) {
+  try {
+    assertInstalledPackages([at('package.json'), at(TAXI_CONSUMER, 'package.json')], manifest.artifacts, at(VENDOR_DIR))
+  } catch (error) {
+    failures.push(error.message)
+  }
+  failIfInvalid()
   for (const [from, name, symbol] of [
     [entry, '@arkade-os/sdk', CANDIDATE_SDK_SYMBOL],
     [at(TAXI_CONSUMER, 'package.json'), '@arkade-os/swap', CANDIDATE_SWAP_SYMBOL],
@@ -199,10 +211,8 @@ if (entry) {
   )
 }
 
-if (failures.length) {
-  process.stderr.write(`carrier artifacts FAILED:\n${failures.map((line) => `  - ${line}`).join('\n')}\n`)
-  process.exit(1)
-}
+failIfInvalid()
+
 process.stdout.write(
   `carrier artifacts verified: ${manifest.artifacts.length} archives, lock pinned to their bytes, ` +
     `${entry ? 'candidate exports confirmed in the installed tree' : 'no install to inspect yet'}\n`,
