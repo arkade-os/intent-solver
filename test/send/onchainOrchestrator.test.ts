@@ -1395,6 +1395,16 @@ describe('OnchainSendSwapService', () => {
     expect(after.onchainRefundPriorTxids).toEqual([])
   })
 
+  it('asks for no fee estimate before a refund bump is due', async () => {
+    const row = await driveToBroadcastRefund()
+    deps.onchain.estimateFeeRate = async () => {
+      throw new Error('estimator down')
+    }
+
+    now += FEE_BUMP_INTERVAL_SECONDS - 1
+    await expect(service.tick(row.id)).resolves.toMatchObject({ state: 'refunding_onchain' })
+  })
+
   it('replaces a refund at the factor once the interval is up, keeping the old version tracked', async () => {
     const first = await driveToBroadcastRefund()
 

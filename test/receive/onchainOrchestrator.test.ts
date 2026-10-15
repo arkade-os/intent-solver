@@ -1306,6 +1306,17 @@ describe('OnchainReceiveSwapService', () => {
         expect(after.onchainClaimPriorTxids).toEqual([])
       })
 
+      it('asks for no fee estimate before a bump is due', async () => {
+        const claimed = await driveToClaimed()
+        await service.tick(claimed.id)
+        deps.onchain.estimateFeeRate = async () => {
+          throw new Error('estimator down')
+        }
+
+        now += FEE_BUMP_INTERVAL_SECONDS - 1
+        await expect(service.tick(claimed.id)).resolves.toMatchObject({ state: 'claimed' })
+      })
+
       it('replaces it at the factor once the interval is up, keeping the old version tracked', async () => {
         const claimed = await driveToClaimed()
         const first = await service.tick(claimed.id)
@@ -1322,7 +1333,7 @@ describe('OnchainReceiveSwapService', () => {
 
       it('settles on an OLDER version when that is the one a miner took', async () => {
         const claimed = await driveToClaimed()
-        const first = await service.tick(claimed.id)
+        await service.tick(claimed.id)
         now += FEE_BUMP_INTERVAL_SECONDS
         const bumped = await service.tick(claimed.id)
 

@@ -52,7 +52,7 @@ import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { buildOnchainClaimTx, estimateClaimTxVsize, signOnchainClaimTx } from '@arkade-os/solver-rails/onchain/claim.js'
-import { affordableFee, outcomeOfAny, replacementFeeRate } from '@arkade-os/solver-rails/onchain/feeBump.js'
+import { affordableFee, bumpDue, outcomeOfAny, replacementFeeRate } from '@arkade-os/solver-rails/onchain/feeBump.js'
 import { onchainClaimSizing, onchainReceiveFundedAmounts, bandOf, hasBand } from './onchainFundedAmounts.js'
 import { claimSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
@@ -870,15 +870,13 @@ export class OnchainReceiveSwapService {
     fundingTxid: string,
     fundingVout: number,
   ): Promise<string | null> {
-    const estimate = await this.deps.onchain.estimateFeeRate()
     // A row broadcast before these columns existed has neither figure: its
     // `updatedAt` is when the pre-commit wrote the txid.
+    const broadcastAt = row.onchainClaimBroadcastAt ?? row.updatedAt
+    if (!bumpDue(broadcastAt, this.now())) return null
+    const estimate = await this.deps.onchain.estimateFeeRate()
     const previousFeeRate = row.onchainClaimFeeRate ?? estimate
-    const feeRate = replacementFeeRate(
-      { feeRate: previousFeeRate, broadcastAt: row.onchainClaimBroadcastAt ?? row.updatedAt },
-      estimate,
-      this.now(),
-    )
+    const feeRate = replacementFeeRate({ feeRate: previousFeeRate, broadcastAt }, estimate, this.now())
     if (feeRate === null) return null
     const attempt = await this.pushOnchainClaim(row, preimage, fundingTxid, fundingVout, { feeRate, previousFeeRate })
     return attempt.broadcast ? attempt.txid : null

@@ -17,6 +17,9 @@ export interface BroadcastVersion {
   broadcastAt: number
 }
 
+/** Asked before the fee estimate, so a waiting spend costs no backend call until a bump is due. */
+export const bumpDue = (broadcastAt: number, now: number): boolean => now - broadcastAt >= FEE_BUMP_INTERVAL_SECONDS
+
 /**
  * The rate a replacement must pay, or null while it is too early for one.
  *
@@ -24,7 +27,7 @@ export interface BroadcastVersion {
  * versions, so a factor that rounds to the same sat/vB relays as a duplicate.
  */
 export const replacementFeeRate = (last: BroadcastVersion, estimate: number, now: number): number | null => {
-  if (now - last.broadcastAt < FEE_BUMP_INTERVAL_SECONDS) return null
+  if (!bumpDue(last.broadcastAt, now)) return null
   return Math.max(estimate, last.feeRate * FEE_BUMP_FACTOR, last.feeRate + MIN_RELAY_FEE_RATE)
 }
 

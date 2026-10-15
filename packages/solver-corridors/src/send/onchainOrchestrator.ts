@@ -42,7 +42,7 @@ import {
   type OnchainSigner,
 } from '@arkade-os/solver-rails/onchain/refund.js'
 import { refundSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
-import { affordableFee, outcomeOfAny, replacementFeeRate } from '@arkade-os/solver-rails/onchain/feeBump.js'
+import { affordableFee, bumpDue, outcomeOfAny, replacementFeeRate } from '@arkade-os/solver-rails/onchain/feeBump.js'
 import type { OnchainSendBackend, ReceiveSettlement } from '@arkade-os/solver-core/ports/onchain.js'
 import type { OnchainSendSwapRow, OnchainSendSwapStore } from '../db/onchainSwaps.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
@@ -1026,15 +1026,13 @@ export class OnchainSendSwapService {
     fundingTxid: string,
     fundingVout: number,
   ): Promise<string | null> {
-    const estimate = await this.deps.onchain.estimateFeeRate()
     // A row broadcast before these columns existed has neither figure: its
     // `updatedAt` is when the pre-commit wrote the txid.
+    const broadcastAt = row.onchainRefundBroadcastAt ?? row.updatedAt
+    if (!bumpDue(broadcastAt, this.now())) return null
+    const estimate = await this.deps.onchain.estimateFeeRate()
     const previousFeeRate = row.onchainRefundFeeRate ?? estimate
-    const feeRate = replacementFeeRate(
-      { feeRate: previousFeeRate, broadcastAt: row.onchainRefundBroadcastAt ?? row.updatedAt },
-      estimate,
-      this.now(),
-    )
+    const feeRate = replacementFeeRate({ feeRate: previousFeeRate, broadcastAt }, estimate, this.now())
     if (feeRate === null) return null
     const attempt = await this.pushOnchainHtlcRefund(row, fundingTxid, fundingVout, { feeRate, previousFeeRate })
     return attempt.broadcast ? attempt.txid : null
