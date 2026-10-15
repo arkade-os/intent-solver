@@ -1162,11 +1162,9 @@ describe('OnchainSendSwapService', () => {
   }
 
   /**
-   * A funded swap whose HTLC cannot pay for its own refund spend at ANY rate.
-   *
-   * Written through the driver because `refundablePayoutFloor` refuses to
-   * quote one: the fee is capped at what leaves dust now, so this is the only
-   * shape left that the cap cannot rescue.
+   * A funded swap whose HTLC cannot pay for its own refund at ANY rate — the
+   * one shape the fee cap cannot rescue, and written through the driver
+   * because `refundablePayoutFloor` refuses to quote it.
    */
   const driveToUnrefundableHtlc = async (): Promise<OnchainSendSwapRow> => {
     const row = await driveToCappedRefund()
@@ -1178,8 +1176,6 @@ describe('OnchainSendSwapService', () => {
   }
 
   it('refunds at the fee the HTLC can carry rather than parking the exposed row', async () => {
-    // Parking it leaves the client able to claim that same output: the claim
-    // leaf carries no timelock, so an unconfirmed refund never closes it.
     const funded = await driveToCappedRefund()
     now = funded.htlcLocktime + HTLC_REFUND_MTP_MARGIN + 1
     const broadcasts = captureBroadcasts()
@@ -1348,12 +1344,9 @@ describe('OnchainSendSwapService', () => {
   })
 
   /**
-   * Fee-bumping the L1 refund, the send leg's half of the same race.
-   *
-   * The claim leaf carries no timelock, so until the refund CONFIRMS the
-   * client can still claim — and an unconfirmed one stretches that window
-   * towards `refund_locktime`, where they can pull their Arkade lockup back
-   * and take the L1 output too.
+   * Fee-bumping the L1 refund. The claim leaf has no timelock, so until the
+   * refund CONFIRMS the client can still claim — and an unconfirmed one
+   * stretches that window towards `refund_locktime`.
    */
   it('leaves a refund alone until the bump interval is up', async () => {
     const row = await driveToBroadcastRefund()
@@ -1387,7 +1380,6 @@ describe('OnchainSendSwapService', () => {
     now += FEE_BUMP_INTERVAL_SECONDS
     const bumped = await service.tick(first.id)
 
-    // The replacement never made it; the version it replaced did.
     deps.onchain.dropFromMempool(bumped.onchainRefundTxid!)
     deps.onchain.mineBlocks(1)
 
@@ -1556,9 +1548,8 @@ describe('OnchainSendSwapService', () => {
 
   it('reclaimOnchainHtlc() still refuses it at the relay minimum — the fee rate is no longer the lever', async () => {
     const row = await driveToStuck()
-    // It was, while the refund was refused for leaving a sub-dust output. The
-    // fee is capped at what leaves dust now, so what is left here is an HTLC
-    // too small to buy relay at 1 sat/vB, which no mempool makes affordable.
+    // It was, while a sub-dust output was the refusal. With the fee capped at
+    // what leaves dust, what reaches here is too small to buy relay at all.
     deps.onchain.setFeeRate(1)
 
     await expect(service.reclaimOnchainHtlc(row.id)).rejects.toThrow(/cannot pay for its own/)

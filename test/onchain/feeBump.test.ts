@@ -1,11 +1,4 @@
-/**
- * The arithmetic behind replacing an L1 spend that is not confirming.
- *
- * Both onchain corridors broadcast once and then wait, and a wait that outlasts
- * the other side's timelock loses the money rather than the swap. These three
- * answer "may we replace yet", "what can this output pay" and "did any version
- * of ours land" — the whole of the policy, with no chain in sight.
- */
+/** The whole of the fee-bump policy, with no chain in sight. */
 
 import { describe, it, expect } from 'vitest'
 import {
@@ -45,7 +38,6 @@ describe('replacementFeeRate', () => {
     expect(replacementFeeRate(last, 200, last.broadcastAt + FEE_BUMP_INTERVAL_SECONDS)).toBe(200)
   })
 
-  /** BIP125 rule 4: a replacement must beat the old fee by the incremental relay fee, which the factor alone cannot promise at the bottom of the range. */
   it('always clears the previous rate by a whole sat/vB', () => {
     const tiny = { feeRate: 1, broadcastAt: last.broadcastAt }
     expect(replacementFeeRate(tiny, 1, tiny.broadcastAt + FEE_BUMP_INTERVAL_SECONDS)).toBe(2)

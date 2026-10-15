@@ -97,11 +97,7 @@ const TRANSITION_COLUMNS = new Set([
  * along. Same shape as `refund_ark_txid` above: a fact about money that moved,
  * recorded without rewriting the state machine's verdict.
  */
-/**
- * `onchain_refund_fee_rate`/`_broadcast_at`/`_prior_txids` are PATCH-only: the
- * refund is re-broadcast at a higher fee while the row stays in
- * `refunding_onchain`, so every write of them happens off any edge.
- */
+/** The `onchain_refund_fee_rate`/`_broadcast_at`/`_prior_txids` trio is PATCH-only: a fee bump writes them with the row standing still in `refunding_onchain`. */
 const PATCH_COLUMNS = new Set([
   'onchain_lockup_value',
   'refund_ark_txid',
@@ -184,16 +180,8 @@ export interface OnchainSendSwapRow {
   onchainRefundTxid: string | null
   /** The sat/vB {@link onchainRefundTxid} was built at, so the next version can be priced above it. */
   onchainRefundFeeRate: number | null
-  /** When it went out — the clock the fee-bump interval runs on, independent of `updatedAt`. */
   onchainRefundBroadcastAt: number | null
-  /**
-   * The txids of the refund versions this one replaced, newest first.
-   *
-   * Kept because a replacement does not revoke what it replaces: until one
-   * confirms, ANY of them can be the one that does, and a row that tracked
-   * only the latest would read `unknown` and rebroadcast against a version
-   * already in the chain.
-   */
+  /** The refund versions {@link onchainRefundTxid} replaced, newest first: until one confirms, ANY of them can be the one that does. */
   onchainRefundPriorTxids: string[]
   refundArkTxid: string | null
   refundOutcome: 'pushed' | 'external' | null

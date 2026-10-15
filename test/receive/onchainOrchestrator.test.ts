@@ -1274,16 +1274,11 @@ describe('OnchainReceiveSwapService', () => {
     })
 
     /**
-     * Fee-bumping the L1 claim (#160: "an L1 claim has neither a retry nor
-     * fee-bump room").
-     *
-     * By `claimed` the solver has already paid the Arkade lockup and `P` is
-     * public, so a claim that sits in the mempool past `htlc_locktime` loses
-     * the whole HTLC to the client's own refund. These pin the terms of the
-     * replacement rather than the fact of one.
+     * Fee-bumping the L1 claim (#160). By `claimed` the lockup is paid and `P`
+     * is public, so a claim still in the mempool at `htlc_locktime` loses the
+     * whole HTLC to the client's refund.
      */
     describe('replacing a claim the mempool has not taken', () => {
-      /** Every raw transaction handed to the backend, still broadcast. */
       const captureBroadcasts = (): string[] => {
         const broadcasts: string[] = []
         const original = deps.onchain.broadcastRaw.bind(deps.onchain)
@@ -1354,8 +1349,6 @@ describe('OnchainReceiveSwapService', () => {
 
       it('claims at the fee the HTLC can carry rather than parking it in stuck', async () => {
         const claimed = await driveToClaimed()
-        // A rate whose honest fee would eat the whole HTLC. Parking here gives
-        // the client back an output whose preimage is already public.
         deps.onchain.setFeeRate(1_000)
         const broadcasts = captureBroadcasts()
 

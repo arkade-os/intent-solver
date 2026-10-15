@@ -111,11 +111,7 @@ const TRANSITION_COLUMNS = new Set([
  * finding F4 — runs against a `stuck` row with no outgoing edge and must record
  * the txid without a transition.
  */
-/**
- * `onchain_claim_fee_rate`/`_broadcast_at`/`_prior_txids` are PATCH-only: the
- * claim is re-broadcast at a higher fee while the row stays in `claimed`, so
- * every write of them happens off any edge.
- */
+/** The `onchain_claim_fee_rate`/`_broadcast_at`/`_prior_txids` trio is PATCH-only: a fee bump writes them with the row standing still in `claimed`. */
 const PATCH_COLUMNS = new Set([
   'refund_outcome',
   'arkade_refund_txid',
@@ -230,16 +226,8 @@ export interface OnchainReceiveSwapRow {
   onchainClaimTxid: string | null
   /** The sat/vB {@link onchainClaimTxid} was built at, so the next version can be priced above it. */
   onchainClaimFeeRate: number | null
-  /** When it went out — the clock the fee-bump interval runs on, independent of `updatedAt`. */
   onchainClaimBroadcastAt: number | null
-  /**
-   * The txids of the claim versions this one replaced, newest first.
-   *
-   * Kept because a replacement does not revoke what it replaces: until one
-   * confirms, ANY of them can be the one that does, and a row that tracked
-   * only the latest would read `unknown` and rebroadcast against a version
-   * already in the chain.
-   */
+  /** The claim versions {@link onchainClaimTxid} replaced, newest first: until one confirms, ANY of them can be the one that does. */
   onchainClaimPriorTxids: string[]
   arkadeRefundTxid: string | null
   refundOutcome: 'pushed' | 'external' | null

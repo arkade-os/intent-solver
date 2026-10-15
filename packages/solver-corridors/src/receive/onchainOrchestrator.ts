@@ -70,22 +70,11 @@ import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 const DEFAULT_RECOVERY_SWEEP_ROW_BUDGET = 25
 
-/**
- * Every version of our claim that could still be the one that confirms,
- * newest first. A replacement does not revoke what it replaced.
- */
+/** Every version of our claim that could still confirm, newest first: a replacement does not revoke what it replaced. */
 const trackedClaimTxids = (row: OnchainReceiveSwapRow): string[] =>
   row.onchainClaimTxid === null ? row.onchainClaimPriorTxids : [row.onchainClaimTxid, ...row.onchainClaimPriorTxids]
 
-/**
- * One attempt at the solver's own L1 claim — see
- * {@link OnchainReceiveSwapService.pushOnchainClaim}.
- *
- * `wait` separates "the mempool has to move" from "this row is finished":
- * the first is what the next due bump retries, the second is what `stuck` is
- * for. A TRANSIENT fault still throws, so neither is mistaken for an
- * unreachable backend.
- */
+/** `wait` is "the mempool has to move", not "this row is finished" — only the second is what `stuck` is for. */
 type OnchainClaimAttempt = { broadcast: true; txid: string } | { broadcast: false; reason: string; wait: boolean }
 
 export interface OnchainReceiveServiceDeps {
@@ -809,17 +798,13 @@ export class OnchainReceiveSwapService {
       await store.fail(row.id, 'claimed', 'claimed state with no funding txid/vout')
       return false
     }
-    // A BROADCAST CLAIM IS NOT A LANDED ONE, and `settled` is terminal. Asked
-    // of EVERY version we have broadcast: a replacement does not revoke the
-    // one it replaced, so an older txid confirming is the ordinary end of a
-    // bump rather than something to rebroadcast against.
+    // A BROADCAST CLAIM IS NOT A LANDED ONE, and `settled` is terminal.
     const tracked = trackedClaimTxids(row)
     if (tracked.length > 0) {
       const outcome = await outcomeOfAny(onchain, tracked)
       if (outcome === 'confirmed') return store.transition(row.id, 'claimed', 'settled', {})
-      // Sitting in the mempool is not waiting it out: `P` is already public,
-      // so a claim that has not confirmed by `htlcLocktime` loses the HTLC to
-      // the client's own refund. Replace it at a rate that can beat theirs.
+      // Not a wait worth sitting out: `P` is already public, so a claim still
+      // unconfirmed at `htlcLocktime` loses the HTLC to the client's refund.
       if (outcome === 'mempool') {
         await this.replaceOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout)
         return false
@@ -875,18 +860,9 @@ export class OnchainReceiveSwapService {
   }
 
   /**
-   * Replace a claim the mempool has not taken, once it has sat there long
-   * enough to be worth replacing.
-   *
-   * Does nothing — and says nothing — before the interval, and nothing when
-   * the fee is already everything this output can pay above dust: a
-   * replacement that cannot pay MORE is the same transaction, and
-   * broadcasting it would put its own txid in its own prior list. A
-   * replacement the network rejects THROWS, which is the safe direction: the
-   * version it was replacing is still tracked, so the next due bump tries
-   * higher.
-   *
-   * @returns the replacement's txid, or null if none went out.
+   * Replace a claim the mempool has not taken; null if none went out. A
+   * rejected replacement THROWS, safely: the version it would have replaced
+   * is still tracked, so the next due bump tries higher.
    */
   private async replaceOnchainClaim(
     row: OnchainReceiveSwapRow,
@@ -895,9 +871,8 @@ export class OnchainReceiveSwapService {
     fundingVout: number,
   ): Promise<string | null> {
     const estimate = await this.deps.onchain.estimateFeeRate()
-    // A row broadcast before these columns existed has neither figure. Its
-    // `updatedAt` is when the pre-commit wrote the txid, and treating the old
-    // rate as today's estimate makes the first replacement a plain bump of it.
+    // A row broadcast before these columns existed has neither figure: its
+    // `updatedAt` is when the pre-commit wrote the txid.
     const previousFeeRate = row.onchainClaimFeeRate ?? estimate
     const feeRate = replacementFeeRate(
       { feeRate: previousFeeRate, broadcastAt: row.onchainClaimBroadcastAt ?? row.updatedAt },
@@ -911,15 +886,9 @@ export class OnchainReceiveSwapService {
 
   /**
    * Rebuild, size, sign, record and broadcast ONE version of the solver's
-   * claim of the client-funded HTLC.
-   *
-   * The single definition of "collect this HTLC", shared by the automatic
-   * {@link whenClaimed}, its fee bump and the operator's {@link claimNow} —
-   * the same reason the send leg shares `pushOnchainHtlcRefund`.
-   *
-   * `previousFeeRate` is what makes it safe to call for a replacement: the fee
-   * is capped at what leaves a dust output, so past that cap a higher rate
-   * buys nothing and the attempt waits instead.
+   * claim of the client-funded HTLC — the single definition of "collect this
+   * HTLC", shared by {@link whenClaimed}, its fee bump and {@link claimNow}
+   * so the automatic and manual paths cannot drift.
    */
   private async pushOnchainClaim(
     row: OnchainReceiveSwapRow,
@@ -938,10 +907,9 @@ export class OnchainReceiveSwapService {
     })
     if (hex.encode(htlc.pkScript) !== row.onchainPkScript) {
       // Unreachable by construction — same defensive check
-      // send/onchainOrchestrator.ts's pushOnchainHtlcRefund makes for its
-      // own rebuild. Refusing to sign against a script that doesn't match
-      // what was actually funded is the safe failure, and a rebuild from
-      // columns fixed at quote time can only ever fail it again.
+      // send/onchainOrchestrator.ts's pushOnchainHtlcRefund makes. Signing
+      // against a script that is not what was funded is the one thing this
+      // must never do, and a rebuild from quote-time columns refuses again.
       return {
         broadcast: false,
         reason: 'onchain HTLC rebuilt from row does not match the funded pkScript',
@@ -960,9 +928,8 @@ export class OnchainReceiveSwapService {
     const vsize = estimateClaimTxVsize(sizing.params)
     const fee = affordableFee(vsize, version.feeRate, sizing.fundingValueSats, ONCHAIN_DUST_SATS)
     if (fee === null) {
-      // The fee is CAPPED at what leaves dust, so reaching here means the HTLC
-      // cannot buy relay at the 1 sat/vB minimum however the mempool moves —
-      // unlike the old dust refusal, no later rate recovers it.
+      // The fee is CAPPED at what leaves dust, so this is not a fee spike: the
+      // HTLC cannot buy relay at the 1 sat/vB minimum, and no later rate can.
       return {
         broadcast: false,
         reason: `a ${sizing.fundingValueSats} sat HTLC cannot pay for its own ${vsize} vB claim and still clear the ${ONCHAIN_DUST_SATS} sat dust limit`,
@@ -973,6 +940,8 @@ export class OnchainReceiveSwapService {
       version.previousFeeRate === null
         ? null
         : affordableFee(vsize, version.previousFeeRate, sizing.fundingValueSats, ONCHAIN_DUST_SATS)
+    // Already at the cap: a "replacement" that pays no more is the same
+    // transaction, and sending it would put its own txid in its own prior list.
     if (previous !== null && fee <= previous) {
       return { broadcast: false, reason: `claim already paying the ${previous} sats this HTLC can carry`, wait: true }
     }
@@ -1025,9 +994,8 @@ export class OnchainReceiveSwapService {
     if (latest !== undefined) {
       const outcome = await outcomeOfAny(onchain, tracked)
       if (outcome === 'confirmed') return { txid: latest }
-      // One already waiting is not a reason to decline: in a fee spike it is
-      // exactly what has to be replaced. Null means it went out too recently
-      // for a replacement to relay, so the one out there is still the answer.
+      // One already waiting is what a fee spike makes worth REPLACING rather
+      // than declining over. Null is "too soon", so that one is still the answer.
       if (outcome === 'mempool') {
         const bumped = await this.replaceOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout)
         return { txid: bumped ?? latest }
@@ -1050,8 +1018,7 @@ export class OnchainReceiveSwapService {
         refused: "onchain HTLC output is already spent — most likely the client's own refund past htlc_locktime",
       }
     }
-    // The same defensive rebuild and dust checks the automatic path makes, and
-    // the same build: an operator override is exactly when the two must not drift.
+    // The automatic path's own build: an override is exactly when the two must not drift.
     const attempt = await this.pushOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout, {
       feeRate: await onchain.estimateFeeRate(),
       previousFeeRate: null,
