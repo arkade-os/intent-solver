@@ -23,9 +23,11 @@ import {
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
   HTLC_REFUND_MTP_MARGIN,
   ONCHAIN_DUST_SATS,
+  arkadeClaimDeadline,
   arkadeClaimTimeLeft,
   evaluateOnchainSendAcceptance,
   evaluateOnchainSendFunding,
+  expiryBeforeClaimDeadline,
   type OnchainSendAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/onchainSend.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
@@ -720,7 +722,7 @@ export class OnchainSendSwapService {
   }
 
   private async whenQuoted(row: OnchainSendSwapRow): Promise<boolean> {
-    const { store, arkade } = this.deps
+    const { store, arkade, network } = this.deps
     const outputs = await arkade.findLockups(row.pkScript)
     const locked = outputs.reduce((sum, o) => sum + o.value, 0)
     const timedOut = this.now() >= row.createdAt + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
@@ -730,6 +732,17 @@ export class OnchainSendSwapService {
       return false
     }
     if (locked === row.amountSats && !timedOut) {
+      // Off regtest only: that stack expires batches (ARKD_VTXO_TREE_EXPIRY=6144, SDK floor 6000s) sooner than any claim deadline.
+      const expiresTooSoon = network === 'regtest' ? null : expiryBeforeClaimDeadline(outputs, row.htlcLocktime)
+      if (expiresTooSoon !== null) {
+        await store.fail(
+          row.id,
+          'quoted',
+          `lockup expires at ${expiresTooSoon}, before ${arkadeClaimDeadline(row.htlcLocktime)} — the last moment ` +
+            'a claim answering this swap could still need it',
+        )
+        return false
+      }
       const [first] = outputs
       return store.transition(row.id, 'quoted', 'funded', {
         onchain_lockup_txid: first?.txid ?? null,

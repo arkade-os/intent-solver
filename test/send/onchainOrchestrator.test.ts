@@ -9,6 +9,7 @@ import { FEE_BUMP_FACTOR, FEE_BUMP_INTERVAL_SECONDS } from '@arkade-os/solver-ra
 import {
   ARKADE_CLAIM_WINDOW_SECONDS,
   CLIENT_LOCKUP_RELEASE_DELAY_SECONDS,
+  arkadeClaimDeadline,
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
   ONCHAIN_DUST_SATS,
   ONCHAIN_CLAIM_MARGIN_SECONDS,
@@ -99,7 +100,7 @@ const buildDeps = async (fundingVout = 0) => {
   const driver = betterSqliteDriver(':memory:')
   const store = await OnchainSendSwapStore.open(driver, clock)
   const onchain = new FakeOnchainBackend(5, fundingVout)
-  const outputs = new Map<string, { txid: string; vout: number; value: number }[]>()
+  const outputs = new Map<string, { txid: string; vout: number; value: number; expiresAt?: number }[]>()
   // Scripts whose outputs are PROVABLY spent. Deliberately separate from
   // `outputs` going empty: telling "the money was spent" apart from "the
   // spendable view has not caught up" is the whole point of the second read,
@@ -465,6 +466,65 @@ describe('OnchainSendSwapService', () => {
     expect(row.onchainLockupTxid).toBe('lockup-tx')
     expect(row.onchainLockupVout).toBe(0)
     expect(row.onchainLockupValue).toBe(50_000)
+  })
+
+  // Regtest is exempt from the lockup-expiry gate, so these go through a network that is not.
+  const gated = () =>
+    new OnchainSendSwapService({
+      store: deps.store,
+      onchain: deps.onchain,
+      arkade: deps.arkade,
+      limits: { minSats: 1_000, maxSats: 1_000_000 },
+      maxExposedSats: 1_000_000,
+      totalCommitted: () => deps.store.committedSats(),
+      admission: new AdmissionControl(),
+      network: 'mutinynet',
+      signer,
+      refundDestinationScript,
+      now: clock,
+    })
+
+  const quoteThenFund = async (svc: OnchainSendSwapService, expiry: (deadline: number) => number | undefined) => {
+    const outcome = await svc.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const expiresAt = expiry(arkadeClaimDeadline(outcome.swap.htlcLocktime))
+    deps.outputs.set(outcome.swap.pkScript, [
+      { txid: 'lockup-tx', vout: 0, value: 50_000, ...(expiresAt === undefined ? {} : { expiresAt }) },
+    ])
+    return svc.tick(outcome.swap.id)
+  }
+
+  it('refuses a lockup whose batch expires before the solver could still need to claim it', async () => {
+    const funds: string[] = []
+    const fund = deps.onchain.fund.bind(deps.onchain)
+    deps.onchain.fund = async (params) => {
+      funds.push(params.address)
+      return fund(params)
+    }
+
+    const row = await quoteThenFund(gated(), (deadline) => deadline - 1)
+
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toMatch(/lockup expires at \d+, before \d+/)
+    expect(funds).toEqual([])
+    expect(row.fundingTxid).toBeNull()
+  })
+
+  it.each([
+    ['outlives the deadline', (deadline: number) => deadline + 86_400],
+    ['carries no expiry at all', () => undefined],
+  ])('still adopts a lockup that %s', async (_case, expiry) => {
+    expect((await quoteThenFund(gated(), expiry)).state).toBe('awaiting_claim')
+  })
+
+  it('leaves the gate off on regtest, where the stack expires batches sooner than any claim deadline', async () => {
+    expect((await quoteThenFund(service, (deadline) => deadline - 1)).state).toBe('awaiting_claim')
   })
 
   it('drives funded -> funding_onchain -> awaiting_claim once the onchain HTLC is funded', async () => {
