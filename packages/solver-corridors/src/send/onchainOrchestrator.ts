@@ -1091,7 +1091,7 @@ export class OnchainSendSwapService {
       version.previousFeeRate === null
         ? null
         : affordableFee(vsize, version.previousFeeRate, row.payoutSats, ONCHAIN_DUST_SATS)
-    // At or near the cap. BIP125 rule 3 wants the incremental relay fee on top
+    // At or near the cap. BIP125 rule 4 wants the incremental relay fee on top
     // (1 sat/vB over an identical vsize), so a replacement the cap holds under
     // that is not one — the node rejects it, and at equality it is the very
     // same transaction, whose txid would land in its own prior list.

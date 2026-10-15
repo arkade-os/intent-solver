@@ -1196,7 +1196,7 @@ describe('OnchainSendSwapService', () => {
   it('does not replace a refund when the cap leaves less than the relay increment to add', async () => {
     const funded = await driveToCappedRefund()
     // A payout whose cap sits one sat above what 1 sat/vB already pays: the
-    // replacement can only add that sat, which BIP125 rule 3 rejects.
+    // replacement can only add that sat, which BIP125 rule 4 rejects.
     await deps.driver.run('UPDATE send_onchain_swap SET payout_sats = ? WHERE id = ?', [
       ONCHAIN_DUST_SATS + REFUND_VSIZE + 1,
       funded.id,

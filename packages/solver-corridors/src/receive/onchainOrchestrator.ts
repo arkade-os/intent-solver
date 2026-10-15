@@ -940,7 +940,7 @@ export class OnchainReceiveSwapService {
       version.previousFeeRate === null
         ? null
         : affordableFee(vsize, version.previousFeeRate, sizing.fundingValueSats, ONCHAIN_DUST_SATS)
-    // At or near the cap. BIP125 rule 3 wants the incremental relay fee on top
+    // At or near the cap. BIP125 rule 4 wants the incremental relay fee on top
     // (1 sat/vB over an identical vsize), so a replacement the cap holds under
     // that is not one — the node rejects it, and at equality it is the very
     // same transaction, whose txid would land in its own prior list.
@@ -970,10 +970,10 @@ export class OnchainReceiveSwapService {
    * Operator override: try the client's L1 HTLC claim again, at TODAY's fee
    * rate. TLA+ finding F4.
    *
-   * The row is `stuck` with a dust refusal: not a lost claim, but one that was
-   * uneconomic at a moment when the payout after fees fell under
-   * {@link ONCHAIN_DUST_SATS}. The fee rate is the one lever, and `stuck` is terminal
-   * with no case in `step()`, so this is what retries it.
+   * The row is `stuck` holding an unclaimed HTLC. Now that the fee is CAPPED at
+   * what leaves {@link ONCHAIN_DUST_SATS} rather than refused over it, the automatic
+   * path no longer parks a claim over fees — but `stuck` is terminal with no case
+   * in `step()`, so this stays the only way back out of one.
    *
    * NOT the refund. By `claimed` the client has already taken the Arkade lockup and
    * revealed `P`, so there is nothing at that script to give back. The solver has PAID
@@ -983,8 +983,8 @@ export class OnchainReceiveSwapService {
    * double-spend the network rejects rather than a second payout. No judgement call —
    * unlike the refunds, there is no direction to get wrong.
    *
-   * Refuses rather than throws when the fee still eats the payout, and says both
-   * numbers, so an operator knows to come back later rather than that something broke.
+   * Refuses rather than throws when the HTLC cannot pay for its own spend at all,
+   * so an operator reads a verdict rather than that something broke.
    */
   async claimNow(id: string): Promise<{ txid: string } | { refused: string }> {
     const { store, onchain } = this.deps

@@ -1368,7 +1368,7 @@ describe('OnchainReceiveSwapService', () => {
       it('does not replace when the cap leaves less than the relay increment to add', async () => {
         const claimed = await driveToClaimed()
         // An HTLC whose cap sits one sat above what 1 sat/vB already pays: the
-        // replacement can only add that sat, which BIP125 rule 3 rejects.
+        // replacement can only add that sat, which BIP125 rule 4 rejects.
         const vsize = claimSpendVsize({ network: ONCHAIN_NETWORKS.regtest, destinationScript: claimDestinationScript })
         await deps.driver.run('UPDATE receive_onchain_swap SET funded_value_sats = ? WHERE id = ?', [
           ONCHAIN_DUST_SATS + vsize + 1,
