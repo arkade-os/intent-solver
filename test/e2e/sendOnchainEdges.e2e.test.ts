@@ -191,7 +191,7 @@ describe('e2e arkade:BTC->onchain:BTC (send) — refusals, wrong preimages and t
       const outcome = await (await serviceWith(() => quoteAt)).quote(request)
       if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
       const swap = outcome.swap
-      // Backdating is what makes the refund below pushable at all.
+      // Not what makes the refund below pushable — nonInteractiveRefund has no timelock.
       expect(swap.refundLocktime).toBeLessThan(nowSeconds())
 
       const overfunded = AMOUNT_SATS + 1000

@@ -1550,7 +1550,7 @@ describe('OnchainSendSwapService', () => {
     },
   )
 
-  it('refundSweep() still refunds a refused row once its deadline passes, and records the push', async () => {
+  it('refundSweep() refunds a refused row at once rather than at its deadline, and records the push', async () => {
     const outcome = await service.quote({
       paymentHash,
       amountSats: 50_000,
@@ -1565,8 +1565,7 @@ describe('OnchainSendSwapService', () => {
     let row = await service.tick(outcome.swap.id)
     expect(row.state).toBe('refused')
 
-    expect(await service.refundSweep()).toEqual([]) // deadline not reached yet
-    now = row.refundLocktime + 1
+    expect(now).toBeLessThan(row.refundLocktime)
     expect(await service.refundSweep()).toEqual([row.id])
 
     row = await deps.store.get(row.id)

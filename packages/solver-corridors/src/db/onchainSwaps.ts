@@ -474,10 +474,13 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
     return this.get(quote.id)
   }
 
+  /** `refused` only (never exposed); `client_refund_pubkey` means an untimelocked refund leaf. */
   async findRefundable(now: number): Promise<OnchainSendSwapRow[]> {
     const rows = await this.driver.all<Raw>(
       `SELECT * FROM send_onchain_swap
-       WHERE state = 'refused' AND refund_outcome IS NULL AND refund_locktime <= ?
+       WHERE state = 'refused'
+         AND refund_outcome IS NULL
+         AND (client_refund_pubkey IS NOT NULL OR refund_locktime <= ?)
        ORDER BY created_at`,
       [now],
     )
