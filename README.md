@@ -177,6 +177,22 @@ exact boundaries. The orchestrator holds the one rule that matters
 operationally: **the row is the truth**; every step commits intent before the
 irreversible side effect and is safe to re-run from any crash.
 
+### Freezing carrier packages
+
+The maintainer command accepts a verified SDK bundle containing `manifest.json`
+and its pinned SDK/swap archives:
+
+```
+node scripts/carrier-artifacts/pack.mjs --sdk <clean-sdk-checkout> --taxi <clean-taxi-checkout> --sdk-bundle <verified-sdk-bundle>
+```
+
+Both checkouts must be clean and match the source pins. Omitting `--sdk-bundle`
+uses the Taxi checkout's vendor manifest. Source, digest, size and installed-export
+checks still apply. This command also rebuilds the three Taxi libraries; an SDK-only
+refresh instead copies the canonical SDK pair and retains the existing Taxi bytes.
+Run `pnpm install` and `node scripts/carrier-artifacts/verify.mjs --installed`
+after updating the pins, manifest and package overrides together.
+
 ## Running it
 
 - **Node 22 or 24** (`engines.node` is `>=22.6.0 <27`). Both ends are exercised

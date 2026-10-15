@@ -2,7 +2,7 @@
 /**
  * Freeze the accepted candidate packages into `packages/solver-app/vendor/carrier`.
  *
- *   node scripts/carrier-artifacts/pack.mjs --sdk <ts-sdk checkout> --taxi <arkade-taxi checkout>
+ *   node scripts/carrier-artifacts/pack.mjs --sdk <ts-sdk checkout> --taxi <arkade-taxi checkout> [--sdk-bundle <dir>]
  *
  * MAINTAINER COMMAND — nothing installs, builds or ships it, and both source
  * checkouts stay read-only. The Taxi leg runs that repository's own harness
@@ -52,9 +52,12 @@ const flag = (name) => {
 
 const sdkRoot = flag('sdk') && resolve(flag('sdk'))
 const taxiRoot = flag('taxi') && resolve(flag('taxi'))
+const sdkBundle = flag('sdk-bundle')
 const outDir = resolve(REPO, flag('out') ?? VENDOR_DIR)
-if (!sdkRoot || !taxiRoot) {
-  process.stderr.write('usage: pack.mjs --sdk <ts-sdk checkout> --taxi <arkade-taxi checkout> [--out <dir>]\n')
+if (!sdkRoot || !taxiRoot || (args.includes('--sdk-bundle') && !sdkBundle)) {
+  process.stderr.write(
+    'usage: pack.mjs --sdk <ts-sdk checkout> --taxi <arkade-taxi checkout> [--sdk-bundle <dir>] [--out <dir>]\n',
+  )
   process.exit(2)
 }
 
@@ -94,7 +97,7 @@ try {
   const npmUserConfig = join(scratch, 'pack.npmrc')
   writeFileSync(npmUserConfig, 'registry=https://registry.npmjs.org/\n@arkade-taxi:registry=http://127.0.0.1:9/\n')
 
-  const frozenSdkDir = join(taxiRoot, 'vendor', 'carrier')
+  const frozenSdkDir = sdkBundle ? resolve(sdkBundle) : join(taxiRoot, 'vendor', 'carrier')
   const frozenSdkManifest = readJson(join(frozenSdkDir, 'manifest.json'))
   const frozenSdkArtifacts = new Map(frozenSdkManifest.artifacts.map((artifact) => [artifact.package, artifact]))
   const packed = []
@@ -224,7 +227,7 @@ try {
     join(outDir, 'manifest.json'),
     `${JSON.stringify(
       {
-        note: 'Frozen candidate packages, built from source and never published to any registry. SDK archives are copied byte-for-byte from the pinned Taxi vendor manifest; this command packs only the clean Taxi source packages. Replacing an archive is a deliberate new freeze followed by pnpm install and artifact verification.',
+        note: 'Frozen candidate packages, built from source and never published to any registry. SDK archives are copied byte-for-byte from the supplied SDK bundle or pinned Taxi vendor manifest; this command packs only the clean Taxi source packages. Replacing an archive is a deliberate new freeze followed by pnpm install and artifact verification.',
         packedAtUtc: new Date().toISOString(),
         artifacts,
       },
