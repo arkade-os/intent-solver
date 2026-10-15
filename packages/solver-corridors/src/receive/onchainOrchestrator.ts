@@ -334,8 +334,7 @@ export class OnchainReceiveSwapService {
     })
     if (!acceptance.accept) return { accepted: false, reason: acceptance.reason }
 
-    // The SAME gate funding will apply: refusing only in
-    // `awaiting_confirmations` strands an L1 HTLC the client has already funded.
+    // Funding's own gate: refused only there, it strands an L1 HTLC already funded.
     const recourse = evaluateOnchainReceiveFunding({
       arkadeRefundLocktime: acceptance.arkadeRefundLocktime,
       htlcLocktime: acceptance.htlcLocktime,
@@ -587,8 +586,7 @@ export class OnchainReceiveSwapService {
     }
     const outputs = await onchain.findOutputs({ address: row.onchainAddress })
     const output = outputs.find((o) => o.txid === row.fundingTxid && o.vout === row.fundingVout)
-    // The adopted output is GONE — a fee-bumped funding leaves a different txid
-    // at the same address. Nothing is exposed here, so re-adopting is safe.
+    // Gone: a fee-bumped funding has a new txid. Nothing is exposed yet, so re-adopt.
     if (!output) {
       const replacement = evaluateOnchainReceiveFill({
         outputs,
@@ -725,11 +723,7 @@ export class OnchainReceiveSwapService {
     return store.transition(row.id, 'funding_arkade', 'awaiting_claim', { arkade_fund_txid: txid })
   }
 
-  /**
-   * `P` out of whatever spent this lockup: the Arkade read, then — for an
-   * outpoint that has LEFT Arkade — the L1 one, a client that unrolls claiming
-   * on Bitcoin. A throw there is "could not find out", so the tick retries.
-   */
+  /** An unrolled outpoint was spent on Bitcoin, so its `P` is in an L1 witness the Arkade read never sees. */
   private async findPreimage(
     row: OnchainReceiveSwapRow,
     outpoints: readonly { txid: string; vout: number; unrolled: boolean }[],
@@ -873,8 +867,7 @@ export class OnchainReceiveSwapService {
     if (tracked.length > 0) {
       const outcome = await outcomeOfAny(onchain, tracked)
       if (outcome === 'confirmed') return store.transition(row.id, 'claimed', 'settled', {})
-      // Not a wait worth sitting out: `P` is already public, so a claim still
-      // unconfirmed at `htlcLocktime` loses the HTLC to the client's refund.
+      // `P` is public: still unconfirmed at `htlcLocktime`, the client's refund replaces it.
       if (outcome === 'mempool') {
         await this.replaceOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout)
         return false
@@ -929,19 +922,14 @@ export class OnchainReceiveSwapService {
     return false
   }
 
-  /**
-   * Replace a claim the mempool has not taken; null if none went out. A
-   * rejected replacement THROWS, safely: the version it would have replaced
-   * is still tracked, so the next due bump tries higher.
-   */
+  /** A rejected replacement throws safely: the version it would have replaced stays tracked. */
   private async replaceOnchainClaim(
     row: OnchainReceiveSwapRow,
     preimage: string,
     fundingTxid: string,
     fundingVout: number,
   ): Promise<string | null> {
-    // A row broadcast before these columns existed has neither figure: its
-    // `updatedAt` is when the pre-commit wrote the txid.
+    // A legacy row has neither column; its `updatedAt` is the pre-commit of its txid.
     const broadcastAt = row.onchainClaimBroadcastAt ?? row.updatedAt
     if (!bumpDue(broadcastAt, this.now())) return null
     const estimate = await this.deps.onchain.estimateFeeRate()
@@ -952,12 +940,7 @@ export class OnchainReceiveSwapService {
     return attempt.broadcast ? attempt.txid : null
   }
 
-  /**
-   * Rebuild, size, sign, record and broadcast ONE version of the solver's
-   * claim of the client-funded HTLC — the single definition of "collect this
-   * HTLC", shared by {@link whenClaimed}, its fee bump and {@link claimNow}
-   * so the automatic and manual paths cannot drift.
-   */
+  /** The one build of a claim version, shared by {@link whenClaimed}, its bump and {@link claimNow}. */
   private async pushOnchainClaim(
     row: OnchainReceiveSwapRow,
     preimage: string,
@@ -975,9 +958,9 @@ export class OnchainReceiveSwapService {
     })
     if (hex.encode(htlc.pkScript) !== row.onchainPkScript) {
       // Unreachable by construction — same defensive check
-      // send/onchainOrchestrator.ts's pushOnchainHtlcRefund makes. Signing
-      // against a script that is not what was funded is the one thing this
-      // must never do, and a rebuild from quote-time columns refuses again.
+      // send/onchainOrchestrator.ts's pushOnchainHtlcRefund makes for its
+      // own rebuild. Refusing to sign against a script that doesn't match
+      // what was actually funded is the safe failure.
       return {
         broadcast: false,
         reason: 'onchain HTLC rebuilt from row does not match the funded pkScript',
@@ -996,8 +979,7 @@ export class OnchainReceiveSwapService {
     const vsize = estimateClaimTxVsize(sizing.params)
     const fee = affordableFee(vsize, version.feeRate, sizing.fundingValueSats, ONCHAIN_DUST_SATS)
     if (fee === null) {
-      // The fee is CAPPED at what leaves dust, so this is not a fee spike: the
-      // HTLC cannot buy relay at the 1 sat/vB minimum, and no later rate can.
+      // Capped at what leaves dust, so not a fee spike: no later rate can relay it.
       return {
         broadcast: false,
         reason: `a ${sizing.fundingValueSats} sat HTLC cannot pay for its own ${vsize} vB claim and still clear the ${ONCHAIN_DUST_SATS} sat dust limit`,
@@ -1008,10 +990,7 @@ export class OnchainReceiveSwapService {
       version.previousFeeRate === null
         ? null
         : affordableFee(vsize, version.previousFeeRate, sizing.fundingValueSats, ONCHAIN_DUST_SATS)
-    // At or near the cap. BIP125 rule 4 wants the incremental relay fee on top
-    // (1 sat/vB over an identical vsize), so a replacement the cap holds under
-    // that is not one — the node rejects it, and at equality it is the very
-    // same transaction, whose txid would land in its own prior list.
+    // At the cap: BIP125 rule 4 wants +1 sat/vB over an identical vsize, so less relays as nothing.
     if (previous !== null && fee - previous < vsize) {
       return {
         broadcast: false,
@@ -1022,8 +1001,7 @@ export class OnchainReceiveSwapService {
 
     const unsigned = buildOnchainClaimTx({ ...sizing.params, payoutAmountSats: sizing.payoutAfterFee(BigInt(fee)) })
     const signed = await signOnchainClaimTx(unsigned, signer, claimPreimage)
-    // Recorded BEFORE the broadcast, so a resumed process has a key to ask
-    // about — every version, not just this one, since any of them can confirm.
+    // Recorded BEFORE the broadcast, so a resumed process has a key to ask about.
     await store.patch(row.id, {
       onchain_claim_txid: signed.id,
       onchain_claim_prior_txids: [...new Set(trackedClaimTxids(row))].filter((txid) => txid !== signed.id).join(' '),
@@ -1038,10 +1016,7 @@ export class OnchainReceiveSwapService {
    * Operator override: try the client's L1 HTLC claim again, at TODAY's fee
    * rate. TLA+ finding F4.
    *
-   * The row is `stuck` holding an unclaimed HTLC. Now that the fee is CAPPED at
-   * what leaves {@link ONCHAIN_DUST_SATS} rather than refused over it, the automatic
-   * path no longer parks a claim over fees — but `stuck` is terminal with no case
-   * in `step()`, so this stays the only way back out of one.
+   * The row is `stuck` holding an unclaimed HTLC, and `stuck` has no case in `step()`.
    *
    * NOT the refund. By `claimed` the client has already taken the Arkade lockup and
    * revealed `P`, so there is nothing at that script to give back. The solver has PAID
@@ -1051,8 +1026,7 @@ export class OnchainReceiveSwapService {
    * double-spend the network rejects rather than a second payout. No judgement call —
    * unlike the refunds, there is no direction to get wrong.
    *
-   * Refuses rather than throws when the HTLC cannot pay for its own spend at all,
-   * so an operator reads a verdict rather than that something broke.
+   * Refuses rather than throws when the HTLC cannot pay for its own spend at all.
    */
   async claimNow(id: string): Promise<{ txid: string } | { refused: string }> {
     const { store, onchain } = this.deps
@@ -1068,8 +1042,7 @@ export class OnchainReceiveSwapService {
     if (latest !== undefined) {
       const outcome = await outcomeOfAny(onchain, tracked)
       if (outcome === 'confirmed') return { txid: latest }
-      // One already waiting is what a fee spike makes worth REPLACING rather
-      // than declining over. Null is "too soon", so that one is still the answer.
+      // A waiting one is replaced, not declined; null is "too soon" and it still stands.
       if (outcome === 'mempool') {
         const bumped = await this.replaceOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout)
         return { txid: bumped ?? latest }
@@ -1139,8 +1112,7 @@ export class OnchainReceiveSwapService {
       await store.fail(row.id, 'refunding_arkade', 'lockup empty with no matching claim; needs review')
       return false
     }
-    // Before `refundLocktime` the server answers FORFEIT_CLOSURE_LOCKED, and
-    // unlike the Lightning leg this one arrives up to a fund window early.
+    // This leg enters a fund window early, and the leaf is CLTV-locked until then.
     if (this.now() < row.refundLocktime) return false
     try {
       const txid = await arkade.refund(receiveCovenantRowFor(row), outputs)

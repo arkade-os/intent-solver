@@ -510,11 +510,7 @@ export class OnchainSendSwapService {
     return txid
   }
 
-  /**
-   * Unspent means our refund was reorged out and their claim may yet replace
-   * it; a matching preimage means it already did — worth more than the lockup,
-   * so it goes to an operator rather than out with it.
-   */
+  /** Unspent: our refund was reorged out. A matching preimage: their claim replaced it, so claim, don't release. */
   private async onchainRefundIsFinal(row: OnchainSendSwapRow): Promise<boolean> {
     const { onchain } = this.deps
     if (!row.fundingTxid || row.fundingVout === null) return false
@@ -659,9 +655,7 @@ export class OnchainSendSwapService {
     if (this.inFlight.has(id)) throw new Error(`swap ${id} is already being ticked; retry once that tick finishes`)
     this.inFlight.add(id)
     try {
-      // One of ours already waiting is worth REPLACING rather than repeating:
-      // a rebuild at today's estimate can price below it and relay as nothing
-      // at all. Null is "too soon", so that one is still the answer.
+      // Replaced, not repeated: today's estimate can price below it. Null: too soon, it stands.
       if (waiting !== null) {
         return (await this.replaceOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)) ?? waiting
       }
@@ -969,9 +963,7 @@ export class OnchainSendSwapService {
     if (tracked.length > 0) {
       const outcome = await outcomeOfAny(onchain, tracked)
       if (outcome === 'confirmed') return store.transition(row.id, 'refunding_onchain', 'refunded', {})
-      // Not a wait worth sitting out: the claim leaf has no timelock, so the
-      // client can claim this output until the refund CONFIRMS, and an
-      // unconfirmed one stretches that window towards `refundLocktime`.
+      // Until it confirms the untimelocked claim leaf stays open, stretching toward `refundLocktime`.
       if (outcome === 'mempool') {
         await this.replaceOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)
         return false
@@ -1016,18 +1008,13 @@ export class OnchainSendSwapService {
     return false
   }
 
-  /**
-   * Replace a refund the mempool has not taken; null if none went out. A
-   * rejected replacement THROWS, safely: the version it would have replaced
-   * is still tracked, so the next due bump tries higher.
-   */
+  /** A rejected replacement throws safely: the version it would have replaced stays tracked. */
   private async replaceOnchainHtlcRefund(
     row: OnchainSendSwapRow,
     fundingTxid: string,
     fundingVout: number,
   ): Promise<string | null> {
-    // A row broadcast before these columns existed has neither figure: its
-    // `updatedAt` is when the pre-commit wrote the txid.
+    // A legacy row has neither column; its `updatedAt` is the pre-commit of its txid.
     const broadcastAt = row.onchainRefundBroadcastAt ?? row.updatedAt
     if (!bumpDue(broadcastAt, this.now())) return null
     const estimate = await this.deps.onchain.estimateFeeRate()
@@ -1103,9 +1090,7 @@ export class OnchainSendSwapService {
     const vsize = estimateRefundTxVsize(sizingParams)
     const fee = affordableFee(vsize, version.feeRate, row.payoutSats, ONCHAIN_DUST_SATS)
     if (fee === null) {
-      // The fee is CAPPED at what leaves dust, so this is not a fee spike: the
-      // HTLC cannot buy relay at the 1 sat/vB minimum. Only batching it with
-      // other inputs would, which the single-input builder cannot express.
+      // Capped at what leaves dust, so no later rate relays it; only batching would.
       return {
         broadcast: false,
         reason: `a ${row.payoutSats} sat HTLC cannot pay for its own ${vsize} vB refund and still clear the ${ONCHAIN_DUST_SATS} sat dust limit`,
@@ -1116,10 +1101,7 @@ export class OnchainSendSwapService {
       version.previousFeeRate === null
         ? null
         : affordableFee(vsize, version.previousFeeRate, row.payoutSats, ONCHAIN_DUST_SATS)
-    // At or near the cap. BIP125 rule 4 wants the incremental relay fee on top
-    // (1 sat/vB over an identical vsize), so a replacement the cap holds under
-    // that is not one — the node rejects it, and at equality it is the very
-    // same transaction, whose txid would land in its own prior list.
+    // At the cap: BIP125 rule 4 wants +1 sat/vB over an identical vsize, so less relays as nothing.
     if (previous !== null && fee - previous < vsize) {
       return {
         broadcast: false,
@@ -1132,7 +1114,6 @@ export class OnchainSendSwapService {
     const signed = await signOnchainRefundTx(unsigned, signer)
     // PRE-COMMITTED, here so both callers get it. Holding the id of a
     // broadcast that threw is the safe direction: `unknown`, then rebuild.
-    // Every version, not just this one, since any of them can confirm.
     await this.deps.store.patch(row.id, {
       onchain_refund_txid: signed.id,
       onchain_refund_prior_txids: [...new Set(trackedRefundTxids(row))].filter((txid) => txid !== signed.id).join(' '),

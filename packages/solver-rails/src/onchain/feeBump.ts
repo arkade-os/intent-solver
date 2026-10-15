@@ -1,7 +1,4 @@
-/**
- * Replacing an L1 spend the mempool has not confirmed — the lever both
- * onchain corridors were missing. Terms and reasoning: docs/deadlines.md.
- */
+/** Replacing an L1 spend the mempool has not confirmed. Terms and reasoning: docs/deadlines.md. */
 
 import type { OnchainBackend, OnchainTxOutcome } from '@arkade-os/solver-core/ports/onchain.js'
 
@@ -20,22 +17,13 @@ export interface BroadcastVersion {
 /** Asked before the fee estimate, so a waiting spend costs no backend call until a bump is due. */
 export const bumpDue = (broadcastAt: number, now: number): boolean => now - broadcastAt >= FEE_BUMP_INTERVAL_SECONDS
 
-/**
- * The rate a replacement must pay, or null while it is too early for one.
- *
- * The `+ MIN_RELAY_FEE_RATE` term is BIP125 rule 4: vsize is identical across
- * versions, so a factor that rounds to the same sat/vB relays as a duplicate.
- */
+/** Null while too early. The `+ MIN_RELAY_FEE_RATE` is BIP125 rule 4: the vsize never changes between versions. */
 export const replacementFeeRate = (last: BroadcastVersion, estimate: number, now: number): number | null => {
   if (!bumpDue(last.broadcastAt, now)) return null
   return Math.max(estimate, last.feeRate * FEE_BUMP_FACTOR, last.feeRate + MIN_RELAY_FEE_RATE)
 }
 
-/**
- * The asked rate, capped so the spend still leaves a dust-sized output: a
- * smaller payout confirms, where refusing to broadcast never does. Null only
- * where even the cap cannot buy relay, and no later rate helps.
- */
+/** Capped to leave dust: a smaller payout confirms, a refusal never does. Null when even the cap cannot relay. */
 export const affordableFee = (vsize: number, feeRate: number, valueSats: number, dustSats: number): number | null => {
   const cap = valueSats - dustSats
   if (cap < Math.ceil(vsize * MIN_RELAY_FEE_RATE)) return null
