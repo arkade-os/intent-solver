@@ -365,6 +365,8 @@ export interface FundedOutput {
   value: number
   /** Assets carried, when any. Absent rather than empty on a sats lockup. */
   assets?: readonly FundedAsset[]
+  /** Batch expiry in unix seconds, when the server gave a wall-clock one. The block-typed `expiresAtHeight` needs a chain tip, and stays unmapped. */
+  expiresAt?: number
 }
 
 /** One asset balance on a funded output. `assetId` is the canonical 68-hex serialization. */
@@ -403,6 +405,7 @@ export const findLockups = async (ctx: ArkadeContext, pkScriptHex: string): Prom
         vout: vtxo.vout,
         value: Number(vtxo.value),
         ...(assets.length > 0 ? { assets } : {}),
+        ...(vtxo.expiresAt ? { expiresAt: Math.floor(vtxo.expiresAt.getTime() / 1000) } : {}),
       })
     }
   }
