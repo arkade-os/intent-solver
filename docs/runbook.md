@@ -317,6 +317,25 @@ ADMIN_PORT=8788 pnpm cli relay     # or serve, or watch
 Off unless `ADMIN_PORT` is set. A deployment that sets nothing opens no new
 socket and behaves exactly as before.
 
+### Working on the console without a stack
+
+```bash
+pnpm admin:dev            # http://127.0.0.1:8788, seeded data, nothing else running
+pnpm admin:dev --live     # also walks one new swap through its states every 15s
+```
+
+The routes and stores are the real ones, in memory; the wallet, the Lightning
+and onchain rails and the price feed are stand-ins
+(`packages/solver-app/src/ops/adminDemo.ts`). The seed is fixed, so every run shows
+the same week of swaps: stuck ones, money in flight, a pending approval, a
+restart-gated override and an asset market. The client is served from
+`src/admin/static/`, so an edit there shows on reload; a server change needs the
+script's build. Actions reach their real handlers: reads and approvals answer
+from the in-memory stores, anything that would drive a swap or move money fails
+with that handler's own error, and the confirmation dialogs open as they would
+in production. Restart is off, since it would stop the demo itself. `ADMIN_PORT`
+and `ADMIN_HOST` move it.
+
 ### There is no authentication on this port
 
 **Anything that can reach it can move money.** It can push covenant refunds,
