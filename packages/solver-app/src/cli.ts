@@ -282,7 +282,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
         `onchain receive will refuse EVERY quote: this server's ${soloRecourse}s solo recourse opens after the ` +
           `${htlcLocktime - at}s onchain htlc this leg quotes at ${DEFAULT_MIN_CONFIRMATIONS} confirmation(s). ` +
           `Serve it by lowering the exit delay (ARK_UNILATERAL_EXIT_DELAY, if the server enforces less than it ` +
-          `advertises); there is no gap to accept here, since the client's own L1 refund is not ours to extend`,
+          `advertises). Quotes are refused rather than funded: funding would strand the client's L1 HTLC`,
       )
     }
   }
