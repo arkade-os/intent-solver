@@ -143,7 +143,7 @@ const marketsApp = (policy: Record<string, unknown>, rows: unknown[] = [market()
       assetMarkets: [],
       liveOfferMarkets: policy.liveOfferMarkets ?? [],
       assetRfqMarkets: policy.assetRfqMarkets ?? [],
-      adminStore: { listMarkets: vi.fn().mockResolvedValue(rows) },
+      adminStore: { listMarkets: vi.fn().mockResolvedValue(rows), listPendingApprovals: vi.fn().mockResolvedValue([]) },
     } as never,
     startedAt: 1,
     mode: 'relay',
@@ -273,6 +273,7 @@ const overview = async (policy: Record<string, unknown>, rows: unknown[] = [mark
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({}),
         listMarkets: vi.fn().mockResolvedValue(rows),
+        listPendingApprovals: vi.fn().mockResolvedValue([]),
         repairedServing: [],
       },
       ln: { getBalance: vi.fn().mockResolvedValue({ availableSats: 1, incomingSats: 0 }) },

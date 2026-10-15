@@ -40,13 +40,14 @@ const LOST = 'stuck'
 
 const common = (
   descriptor: CorridorDescriptor,
-  row: { id: string; state: string; createdAt: number; updatedAt: number },
+  row: { id: string; state: string; createdAt: number; updatedAt: number; failureReason: string | null },
   state: string = row.state,
 ) => ({
   id: row.id,
   corridor: descriptor.pair,
   state,
   phase: phaseOfStates(descriptor.states, state),
+  failureReason: row.failureReason,
   quotedAt: row.createdAt,
   settledAt: row.updatedAt,
   lost: row.state === LOST,

@@ -1174,6 +1174,25 @@ describe('OnchainReceiveSwapService', () => {
       now += EMPTY_LOCKUP_GRACE
       expect((await service.tick(awaitingClaim.id)).state).toBe('stuck')
     })
+
+    // The client's own HTLC refund opens on schedule whatever the reveal does.
+    it('reclaims its arkade capital past the deadline while every reveal is failing', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+      const awaitingClaim = await service.tick(outcome.swap.id)
+      expect(awaitingClaim.state).toBe('awaiting_claim')
+
+      deps.covclaimd.reveal = async () => {
+        throw new Error('covclaimd unreachable')
+      }
+      now = awaitingClaim.refundLocktime + 1
+
+      const row = await service.tick(awaitingClaim.id)
+      expect(row.state).toBe('refunded')
+      expect(deps.arkadeFake.refundCalls).toBe(1)
+    })
   })
 
   describe('whenClaimed safety checks', () => {

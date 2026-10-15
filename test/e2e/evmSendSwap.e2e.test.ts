@@ -39,6 +39,7 @@ import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { arkadeOpsFromContext } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import { evmSendArkadeDeps } from '@arkade-os/solver-corridors-evm/send/evmArkadeDeps.js'
 import { createEvmHtlcBackend } from '@arkade-os/solver-rails-evm/evm/backend.js'
+import { assertEvmClaimTraceSupport } from '@arkade-os/solver-rails-evm/evm/claimTraceProbe.js'
 import { encodeClaim } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import { createEvmBroadcaster } from '@arkade-os/solver-rails-evm/evm/broadcast.js'
 import { createNonceSource } from '@arkade-os/solver-rails-evm/evm/nonce.js'
@@ -152,6 +153,7 @@ beforeAll(async () => {
     maxExposedSats: 1_000_000_000,
     admission: new AdmissionControl(),
     totalCommitted: async () => 0,
+    assertClaimTraceSupport: (tokenAddress) => assertEvmClaimTraceSupport(rpc, tokenAddress),
     markets: new Map([
       [
         `0x${hex.encode(WETH)}`,
@@ -251,6 +253,10 @@ describe('e2e arkade:BTC->ethereum:<token> (send) — both stacks', () => {
       //    if the test only ever asks once.
       const locked = await tickUntil(row.id, (r) => r.state !== 'quoted')
       expect(['locking_evm', 'awaiting_claim'], `row did not lock: ${JSON.stringify(locked)}`).toContain(locked.state)
+      expect(
+        (await store.history(row.id)).map((step) => step.to),
+        'lock was not journaled',
+      ).toContain('locking_evm')
       expect(locked.evmLockTxid, 'no lock txid recorded').toMatch(/^0x[0-9a-f]+$/)
 
       // 4. AND THE CHAIN AGREES. The contract's own `swaps` mapping, addressed

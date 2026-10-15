@@ -21,6 +21,7 @@ import {
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { savePassFor, type SaveField, type SavePass } from '@arkade-os/solver-core/core/saveOrder.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
+import { createGuardedFetch } from '@arkade-os/solver-core/price/guardedFetch.js'
 import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { carrierSatsFor } from '../../ops/assetRfqMarkets.js'
 import { applyOverrides, editableKnobValues, validateOverride, LIVE_KEYS } from '../settings.js'
@@ -141,7 +142,7 @@ const interimMarket = (
 }
 
 export const registerPricingApplyRoutes = (app: Hono, deps: AdminDeps): void => {
-  const fetchPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
+  const fetchPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed({ fetch: createGuardedFetch() })
 
   app.post('/api/pricing/apply', async (c) => {
     let body: ApplyBody

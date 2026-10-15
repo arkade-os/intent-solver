@@ -30,7 +30,7 @@ export interface RelayEvent {
   topic?: string
   /**
    * A stored, replaceable document (Nostr's addressable range, keyed by author,
-   * kind and `d` tag) — the kind-38859 solver ad. Ignored when `recipient` is
+   * kind and `d` tag) — the kind-38859 solver card. Ignored when `recipient` is
    * set: a sealed event must never be downgraded to a public one.
    */
   replaceable?: { kind: number; d: string }

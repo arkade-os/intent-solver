@@ -72,6 +72,18 @@ export interface AssetDetailSource {
 }
 
 /**
+ * The wallet's asset-metadata reader, when there is one.
+ *
+ * Optional rather than assumed: `assetManager` is on the SDK's wallet interface, but a
+ * route must not 500 because something stood a narrower wallet in its place. Labels
+ * are decoration — {@link consoleBalance} renders ids without them.
+ */
+export const assetSource = (wallet: unknown): AssetDetailSource | undefined => {
+  const manager = (wallet as { assetManager?: Partial<AssetDetailSource> } | null)?.assetManager
+  return typeof manager?.getAssetDetails === 'function' ? (manager as AssetDetailSource) : undefined
+}
+
+/**
  * Asset metadata, at most once per asset per process.
  *
  * A PROCESS-LIFETIME CACHE IS CORRECT HERE, not merely cheap. The id is
@@ -88,7 +100,7 @@ export interface AssetDetailSource {
  * immutable field, so re-asking could only cost round trips.
  */
 const metadataCache = new Map<string, KnownMetadata>()
-const inFlight = new Set<string>()
+const inFlight = new Map<string, Promise<void>>()
 
 /** Test seam: module state, and one suite's fixtures must not label the next suite's ids. */
 export const resetAssetMetadata = (): void => {
@@ -108,10 +120,11 @@ export const resetAssetMetadata = (): void => {
  * `inFlight` is what keeps that honest: without it, every request during the first
  * fetch starts another, so a page opened while the indexer is slow fans out.
  */
-const warmMetadata = (assetId: string, source: AssetDetailSource): void => {
-  if (metadataCache.has(assetId) || inFlight.has(assetId)) return
-  inFlight.add(assetId)
-  void source
+const warmMetadata = (assetId: string, source: AssetDetailSource): Promise<void> => {
+  if (metadataCache.has(assetId)) return Promise.resolve()
+  const existing = inFlight.get(assetId)
+  if (existing) return existing
+  const pending = source
     .getAssetDetails(assetId)
     .then((details) => {
       metadataCache.set(assetId, details.metadata ?? {})
@@ -123,6 +136,32 @@ const warmMetadata = (assetId: string, source: AssetDetailSource): void => {
     .finally(() => {
       inFlight.delete(assetId)
     })
+  inFlight.set(assetId, pending)
+  return pending
+}
+
+/** Whatever is known about an id now, never an amount. */
+const labelled = (assetId: string): Omit<ConsoleAsset, 'amount'> => {
+  const metadata = metadataCache.get(assetId)
+  return {
+    assetId,
+    shortId: shortAssetId(assetId),
+    ticker: metadata?.ticker,
+    name: metadata?.name,
+    decimals: metadata?.decimals,
+  }
+}
+
+/**
+ * One id's labels, WAITING for the indexer — unlike {@link describeAssets}. Only the
+ * console's own label lookup calls this, a request nothing else on the page blocks on.
+ */
+export const describeAssetId = async (
+  assetId: string,
+  source?: AssetDetailSource,
+): Promise<Omit<ConsoleAsset, 'amount'>> => {
+  if (source) await warmMetadata(assetId, source)
+  return labelled(assetId)
 }
 
 /**
@@ -137,16 +176,8 @@ const warmMetadata = (assetId: string, source: AssetDetailSource): void => {
  */
 export const describeAssets = (assets: readonly Asset[] | undefined, source?: AssetDetailSource): ConsoleAsset[] =>
   (assets ?? []).map((asset) => {
-    if (source) warmMetadata(asset.assetId, source)
-    const metadata = metadataCache.get(asset.assetId)
-    return {
-      assetId: asset.assetId,
-      amount: asset.amount.toString(),
-      shortId: shortAssetId(asset.assetId),
-      ticker: metadata?.ticker,
-      name: metadata?.name,
-      decimals: metadata?.decimals,
-    }
+    if (source) void warmMetadata(asset.assetId, source)
+    return { ...labelled(asset.assetId), amount: asset.amount.toString() }
   })
 
 /**

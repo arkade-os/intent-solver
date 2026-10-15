@@ -38,8 +38,15 @@ out of scope for this spec — the Lightning legs use RFQ permanently.
   Broadcasts are never refused at all (§ 4.6). **Responses are tolerant**:
   clients MUST ignore unknown fields in quotes, bids, refusals and statuses,
   so solvers can extend responses without a version bump.
+- **Versions.** The envelope's `v` names the protocol version. The reference
+  implementation speaks `v: 1`. `v: 2` makes two breaking changes: amounts
+  are strings only (§ 2.1), and pairs and topics use CAIP-19 identifiers
+  (§ 2.2).
 
 ## 2. Corridors, assets, pairs
+
+This section describes `v: 1` identifiers. `v: 2` replaces them with CAIP-19
+identifiers (§ 2.2).
 
 A **leg** is `<corridor>:<asset>`. A **pair** is directional:
 `<from-leg>-><to-leg>`. Direction matters — `arkade:BTC->lightning:BTC` and
@@ -199,7 +206,84 @@ imposes no order there; § 12). Examples: `arkade:btc/lightning:btc`,
 non-BTC asset the id is the 68-hex AssetId, so a cross-asset market key is
 network-scoped. Where this spec needs the market key — the open-RFQ
 subscription tag, § 4.6 — it says so explicitly; everywhere else `pair` means
-the directional form above.
+the directional form above. `v: 2` replaces this market key with the § 2.2
+topic key.
+
+### 2.2 Identifiers in `v: 2` _(specified; NOT yet implemented)_
+
+`v: 2` legs are the CAIP-19 asset ids that solver-registry cards already use.
+One id holds the corridor, the network and the asset.
+
+**Legs.** A leg is `<corridor>:<network>/<asset-namespace>:<asset-reference>`:
+
+| leg                 | form                                      | example                                                     |
+| ------------------- | ----------------------------------------- | ----------------------------------------------------------- |
+| BTC within Arkade   | `arkade:<network>/slip44:<coin-type>`     | `arkade:bitcoin/slip44:0`                                   |
+| Arkade-issued asset | `arkade:<network>/asset:<asset-id>`       | `arkade:bitcoin/asset:<asset-id>`                           |
+| BTC over Lightning  | `bolt11:<network>/slip44:<coin-type>`     | `bolt11:mutinynet/slip44:1`                                 |
+| BTC onchain         | `bitcoin:<network>/slip44:<coin-type>`    | `bitcoin:bitcoin/slip44:0`                                  |
+| ERC-20 token        | `eip155:<chain-id>/erc20:<token-address>` | `eip155:1/erc20:0xdac17f958d2ee523a2206206994597c13d831ec7` |
+
+- `<network>` is the network the leg settles on: `bitcoin` (mainnet),
+  `signet`, `mutinynet` or `regtest`.
+- BTC is coin type `0` on `bitcoin` and `1` on every test network. Any other
+  coin type is malformed.
+- `<asset-id>` is the 68-hex Arkade AssetId from § 2.
+- `<chain-id>` is the EIP-155 chain id: 1 or higher, at most 32 digits.
+  `<token-address>` is the token's own contract, never a swap contract.
+- Every character is lowercase, including hex and ERC-20 addresses. Receivers
+  compare ids byte for byte.
+
+**Pairs.** A pair is `<from-leg>-><to-leg>`, directional as in `v: 1`:
+
+```text
+arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0
+```
+
+- A receiver MUST accept pairs up to 184 characters, the longest the grammar
+  allows (two Arkade-issued asset legs on `mutinynet`).
+- A solver refuses a pair for a network it does not serve, with
+  `unsupported_pair`.
+- A client SHOULD send canonical pairs. Every pair a solver sends is
+  canonical, whatever spelling the request used.
+
+**Aliases.** A `v: 2` solver accepts these `v: 1` spellings in `rfq_request`
+and `rfq_open`. It resolves each one on its own network:
+
+| alias               | canonical leg                          |
+| ------------------- | -------------------------------------- |
+| `arkade:BTC`        | `arkade:<network>/slip44:<coin-type>`  |
+| `lightning:BTC`     | `bolt11:<network>/slip44:<coin-type>`  |
+| `onchain:BTC`       | `bitcoin:<network>/slip44:<coin-type>` |
+| `arkade:<asset-id>` | `arkade:<network>/asset:<asset-id>`    |
+
+- Any other non-canonical spelling gets `unsupported_pair`.
+- A client compares the quoted pair with the canonical form of the pair it
+  sent.
+
+**Topic key.** The open-RFQ tag (§ 4.6) and the broker topic (§ 3.2) carry a
+topic key: the two canonical legs of the pair, joined with `~`. A topic key
+has no direction, so the leg order is fixed:
+
+- When exactly one leg is on `arkade`, the `arkade` leg comes first.
+- Otherwise the legs sort in byte order.
+
+```text
+arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0
+arkade:bitcoin/asset:<asset-id>~arkade:bitcoin/slip44:0
+```
+
+`~` never appears in a CAIP-19 id, so a topic key always splits into its two
+legs. A client derives the topic key from the pair, never from a registry
+card: the registry's market key joins the card's ids with `/`, in the card's
+own order.
+
+**Migration.** `v: 1` clients compare the quoted pair byte for byte with the
+pair they sent, so a solver answers each request in the request's own version.
+
+1. Solvers add `v: 2` and keep serving `v: 1` unchanged.
+2. Clients move to `v: 2`.
+3. Solvers drop `v: 1` once no client sends it.
 
 ## 3. Transport
 
@@ -217,8 +301,8 @@ anywhere in the protocol, which is what makes a fleet of solvers a config
 change rather than a rewrite.
 
 Three event kinds. The two negotiation kinds are **ephemeral** (NIP-01's
-20000–29999 range); the advertisement is **addressable** (30000–39999, one
-current version per solver). Neither negotiation kind is retained by a
+20000–29999 range); the solver card is **addressable** (30000–39999, one
+current version per solver and network). Neither negotiation kind is retained by a
 conforming relay, which is deliberate: a request nobody answered inside the
 client's 30-second patience, and a quote past its `valid_until`, are worthless
 to everyone, while a stored copy of either is a permanent public record of
@@ -237,53 +321,30 @@ trade intent. See `docs/relay-transport.md` § 4(b) for the measurements.
   can subscribe by pair. Nothing secret ever rides this kind — § 4.6 defines
   exactly what may appear. Ephemerality matters most here, because this is the
   one kind whose contents are public by design.
-- **Kind `38859` (provisional) — solver advertisement.** A replaceable event
-  (`d` tag SHOULD be `"rfq1"`), **unencrypted** and **indicative only**:
+- **Kind `38859` (provisional) — solver card.** An addressable event whose
+  `d` tag is the network the card describes (`bitcoin`, `signet`,
+  `mutinynet`, `regtest`). `content` is the signed card JSON (below),
+  unencrypted; the author is the card's own `discovery_pubkey`. The event
+  signature authenticates delivery and the card's `sig` its content, so a
+  card lifted out of the event still verifies on its own. The solver
+  re-sends it at least every 30 minutes; clients drop a card older than two
+  hours.
 
-  ```json
-  {
-    "v": 1,
-    "type": "solver_ad",
-    "pairs": [
-      {
-        "pair": "arkade:BTC->lightning:BTC",
-        "min": "1000",
-        "max": "100000",
-        "fee_bps_indicative": 30,
-        "fee_flat_indicative": "50",
-        "quote_validity_s_typical": 900
-      }
-    ],
-    "relays": ["wss://relay.example"]
-  }
-  ```
+  **Trust rule.** A card delivered over a transport counts only when its
+  `discovery_pubkey` is listed in a solver-registry the client follows — as
+  a full card, or as a pointer (the card without `markets`). An unlisted
+  key's card is ignored. Listing reviews the identity once; the markets are
+  then the solver's own signed statement. Nothing in a card binds: terms
+  bind only through an `rfq_quote` (an `rfq_bid`, § 4.6, is a per-request
+  price commitment, but settlement terms still bind only through a quote).
 
-  `min`, `max` and `fee_flat_indicative` are canonical decimal strings of
-  atomic units (§ 2.1) on the same legs their `rfq_bid` counterparts use;
-  `fee_bps_indicative` is a rate and stays a JSON number. An ad is
-  indicative, but it is the surface a client filters on, so an ad that
-  rounded its bounds would hide a solver from exactly the large requests it
-  wanted.
-
-  Nothing in an ad is binding; only an `rfq_quote` binds (an `rfq_bid`,
-  § 4.6, is a per-request price commitment, but settlement terms still bind
-  only through a quote). Clients use ads for discovery and pre-filtering,
-  then confirm terms by requesting a quote.
-
-  Both price components appear, for the same reason the bid carries both
-  (§ 4.6): pre-filtering on the spread alone would rank a solver with a flat
-  fee ahead of a cheaper one, and non-binding is not the same as free to
-  mislead. `fee_flat_indicative` is atomic units of the from leg and MAY be
-  omitted, which means zero — an ad is a hint, not a schema to conform to.
-
-In practice discovery today runs primarily through the **solver-registry
-corridor card** rather than the kind-38859 ad: a git-reviewed, BIP340-signed
-listing carrying the solver's `discovery_pubkey`, its **transport map**, and
-per-market `fee_bps`, `fee_flat` and limits (`schema/card.schema.json` in
-`arkade-os/solver-registry`; this deployment emits its own card from live
-config via `cli card` — `packages/solver-core/src/core/registryCard.ts`). Card and ad share the
-same key model — the card's `discovery_pubkey` is the pubkey RFQ traffic is
-addressed to — and both are **indicative**: rendezvous data, never terms.
+The card is the **solver-registry corridor card**: a BIP340-signed listing
+carrying the solver's `discovery_pubkey` — the pubkey RFQ traffic is
+addressed to — its **transport map**, and per-market `fee_bps`, `fee_flat`
+and limits (`schema/card.schema.json` in `arkade-os/solver-registry`). This
+deployment builds it from live config in one place
+(`packages/solver-app/src/admin/routes/card.ts`) for `cli card`, the console
+and the kind-38859 publisher; `cli card --pointer` prints the pointer.
 
 A card's `fee_flat` is OPTIONAL — omitted means `"0"` — and is denominated
 in **quote-asset** atomic units to match the card's own `min_quote_amount` /
@@ -532,6 +593,8 @@ Relays redeliver, clients retry, and networks duplicate. The rules:
   re-quoted only after every prior swap on it is `refused`/`expired` without
   exposure (a hash whose preimage the solver may already know is burned
   forever).
+- In `v: 2` these comparisons use canonical pairs (§ 2.2). A retry that
+  spells the same pair with an alias is the same request.
 
 ### 4.6 Open RFQ — broadcast bidding _(solver side implemented — `packages/solver-core/src/core/openRfq.ts`, `packages/solver-transport/src/ingress/relay.ts`; the client side lives in the ts-sdk)_
 
@@ -561,7 +624,8 @@ corridors resolved, canonical asset ids, deterministic leg order:
 `arkade:btc/lightning:btc` — never the card's display label and never an
 unordered variant; a subscription keyed to any other form silently misses
 every event. Solvers subscribe by this tag, one subscription per served
-market, alongside their directed subscription.
+market, alongside their directed subscription. In `v: 2` the tag is the § 2.2
+topic key, for example `arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0`.
 
 ```json
 {
@@ -707,7 +771,7 @@ fee_bps))` for exact-in — ceiling and floor chosen so a boundary quote
 - The bid's author pubkey is the solver identity the close is addressed to
   (v1 key model, § 4.2; splitting keys is the § 12 question). Solver-signed,
   a bid is a **non-repudiable per-request price commitment** — strictly
-  stronger than the indicative kind-38859 ad — but enforcement is
+  stronger than the non-binding kind-38859 card — but enforcement is
   reputational: the client's recourse against a reneging solver is
   publishable evidence (signed bid + worse signed quote), not a bond
   (§ 12).
@@ -1078,6 +1142,13 @@ The client is paid over Lightning and the sats land on Arkade
   reconstructing the full tree needs it). Amounts: the client pays the
   invoice in full (`from_amount`); the solver funds the lockup with
   `to_amount` — the amount minus this corridor's fee, fixed at quote time.
+  On an exact-in request the invoice MUST ask exactly `from_amount`, which
+  equals the requested `amount`. A deployment whose backend WRAPS the invoice
+  it publishes — asking a routing reserve above the hold it covers — must
+  therefore hold correspondingly less and price `to_amount` off that smaller
+  hold, or refuse `payable_amount_unmatchable`; it may never pass the reserve
+  on as a larger `from_amount`. Exact-out is unaffected: there the client fixed
+  `to_amount` and the reserve rides on the solved-up `from_amount`.
 - **Fill**: a payer pays the invoice; the incoming HTLC is now **held**, not
   settled. The solver reads `E` — the real deadline by which the held HTLC
   must be settled — **from its Lightning backend for this payment hash. It
@@ -1515,10 +1586,8 @@ both a want asset and an offer asset, or neither, so an `arkade:<A>->arkade:<B>`
 offer is not expressible at all. A solver MUST refuse such a pair with
 `unsupported_pair` at quote time rather than discovering it at fill time.
 
-**Exact-in only.** `amount_side` MUST be `"from"`; `"to"` is refused with
-`unsupported_payload`. Every pair here is cross-asset by construction, and
-§ 7.1.5 already gives the reason for the EVM legs: exact-out "would mean
-inverting a fetched, rounded, directional rate".
+**Both amount sides.** `amount_side` is `"from"` or `"to"`. § 4.2 gives how
+exact-out resolves `from_amount`.
 
 **Amounts are the § 2.1 string form and nothing else.** A JSON number is refused
 rather than accepted under the `v: 1` carve-out, because that carve-out is
@@ -1705,7 +1774,7 @@ the invoice) and both refused ordinary payee invoices.
 | `ONCHAIN_CLAIM_MARGIN_SECONDS` | 90 min                    | onchain send: the client's claim-window floor, doubled into `htlcLocktimeFor` so the client's own `claim_window_too_short` guardrail passes with margin                                                                                                                                                                     |
 | `ONCHAIN_ORDER_MARGIN_SECONDS` | 2 h                       | onchain corridors: the timelock-ordering margin — the client's Arkade refund opens at least this long after the onchain HTLC's deadline (send), and the solver's Arkade refund opens before the HTLC deadline minus margin (receive)                                                                                        |
 | `MAX_MIN_CONFIRMATIONS`        | 6                         | cap on the `min_confirmations` a quote may carry                                                                                                                                                                                                                                                                            |
-| `ONCHAIN_DUST_SATS`            | 330                       | onchain corridors: a payout below the taproot dust floor is unquotable (`pricing_unavailable`) and a claim/refund spend that would leave a sub-dust output is refused rather than broadcast                                                                                                                                 |
+| `ONCHAIN_DUST_SATS`            | 330                       | onchain corridors: a payout below the taproot dust floor is unquotable (`pricing_unavailable`) and a claim/refund spend that would leave a sub-dust output is refused rather than broadcast; the send corridor additionally reserves the refund spend's own fee at quote time                                               |
 
 Additionally:
 
@@ -1802,9 +1871,15 @@ The reference implementation's internal refusal names map onto the closed set
 | `fee_consumes_swap`          | `pricing_unavailable` |
 | `payout_below_dust`          | `pricing_unavailable` |
 | `recourse_window_unservable` | `pricing_unavailable` |
+| `payable_amount_unmatchable` | `pricing_unavailable` |
 | `duplicate_swap`             | `quote_conflict`      |
 | `provider_at_capacity`       | `exposure_cap`        |
 | `rate_limited`               | `rate_limited`        |
+
+`payable_amount_unmatchable` is the Lightning receive leg's exact-in guard: a
+deployment whose backend wraps the hold invoice it publishes could not find a
+hold amount whose wrapped invoice asks exactly the requested `amount`. Unlike
+`recourse_window_unservable` it is per-request, so a client may retry.
 
 `recourse_window_unservable` is the one mapping that is a judgement rather than
 a rename. It means the operator's Arkade exit delay is too long for any invoice
@@ -1852,9 +1927,10 @@ have a tested reference in this repo.
    quoted, watch THAT address, and never fill a deposit observed after
    `valid_until` — you cannot refund it, and the client does not need you to
    (ref: `packages/solver-corridors/src/asset/assetRfqOrchestrator.ts`).
-9. **Solver ad** — publish and refresh kind 38859; keep it honest and
-   indicative. In practice, also file the solver-registry corridor card
-   (§ 3.1) — today it is the discovery path clients actually use.
+9. **Solver card** — publish the signed card as kind 38859, `d` = network,
+   and re-send it at least every 30 minutes; list its key in the
+   solver-registry as a full card or a pointer (§ 3.1) — an unlisted key's
+   card is ignored.
 10. **(Optional) Open-RFQ bidding** (§ 4.6) — a second subscription per
     served market keyed by the canonical market-key tag; a bid handler that
     prices from config (no invoice decode) and seals `rfq_bid` to the
@@ -1890,8 +1966,6 @@ have a tested reference in this repo.
   both-legs-arkade reads as spot and therefore as packet-only, and no field means
   "also negotiable over RFQ" (§ 7.2.1). Until one exists, a taker must already
   know the solver's pubkey, a relay, and the exact pair string.
-- **Atomic-class fill format.** The exact partially-signed Arkade transaction
-  encoding for `rfq_fill` (and who broadcasts) is unspecified.
 - **Canonical Ethereum HTLC contract — RESOLVED for 7.1.5**: Boltz
   `ERC20Swap`, addressed by configuration so any EVM chain can serve it. Still
   open: whether a published third-party audit is required before mainnet.
@@ -1906,8 +1980,6 @@ have a tested reference in this repo.
   the decision this entry gates, and answering the audit question is what closes
   it. Also open: per-chain `min_confirmations` / `min_age_seconds` norms, which
   cannot be a single figure across chains.
-  funds". Also open: per-chain `min_confirmations` / `min_age_seconds` norms,
-  which cannot be a single figure across chains.
 - **Multi-solver fan-out** is resolved by the open-RFQ flow (§ 4.6):
   broadcast, sealed bids, directed close; losing bids expire with no
   notification. Still open from that design: whether a shared bus may
@@ -1916,10 +1988,11 @@ have a tested reference in this repo.
   dormant v1 quote layer plus a matcher — and the exact granularity of the
   § 4.6 size-bucket ladder. The § 2 leg-ordering rule for markets the
   registry leaves unordered (both or neither side arkade) is this spec's
-  extension and should be upstreamed so the two documents cannot drift.
+  extension and should be upstreamed so the two documents cannot drift. The
+  § 2.2 topic key reuses that rule.
 - **Key separation.** v1 assumes one solver key for transport identity and
   settlement; splitting them (hot Nostr key, cold settlement key) needs a
-  binding proof in the ad or quote.
+  binding proof in the card or quote.
 - **Cross-corridor asset identity.** § 2 gives each asset one canonical id,
   but the same economic asset has a different native identity on every
   corridor it exists on: an ERC20 contract address on `ethereum`, an Arkade
@@ -1931,7 +2004,8 @@ have a tested reference in this repo.
   registry, never derived from chain metadata (§ 2.1). Until that exists a
   solver serving a cross-corridor same-asset pair is trusting its own config,
   and a wrong-issuer id is a swap into a worthless lookalike rather than a
-  refusal.
+  refusal. `v: 2` (§ 2.2) removes the shared ticker: each leg names its own
+  native id. Whether two native ids are one asset is still configuration.
 - **Routing.** § 2 says new corridors and assets extend the registries without
   changing the protocol. That holds for EDGES and not for ROUTES. Every
   message here names exactly one `pair`, so a trade that transits an

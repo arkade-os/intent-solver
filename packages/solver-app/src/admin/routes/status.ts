@@ -1,5 +1,5 @@
 /**
- * The at-a-glance routes: overview, backends, wallet, quotes.
+ * The at-a-glance routes: overview, backends, wallet, asset labels, quotes.
  *
  * Grouped because they answer one question between them — "what is this solver
  * doing right now" — and each is small. Splitting four ~20-line handlers into
@@ -17,7 +17,8 @@ import { marketCapability } from '../marketCapability.js'
 import { assetMarketKey, type AssetMarketBounds } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import type { AssetMarketRow } from '../db.js'
 import { probeBackends } from '../probes.js'
-import { consoleBalance, type AssetDetailSource } from '../assets.js'
+import { assetSource, consoleBalance, describeAssetId } from '../assets.js'
+import { ASSET_ID_HEX } from '@arkade-os/solver-core/core/marketKey.js'
 import { marketServingDivergence } from '../../ops/marketDivergence.js'
 import { poolPlan } from '../../ops/pool.js'
 import { requireLn, requireOnchain } from '../../ops/rails.js'
@@ -32,18 +33,6 @@ import {
 } from '@arkade-os/solver-corridors/corridors/projections.js'
 import { liveSwaps } from '../projection.js'
 import type { AdminDeps } from '../server.js'
-
-/**
- * The wallet's asset-metadata reader, when there is one.
- *
- * Optional rather than assumed: `assetManager` is on the SDK's wallet interface, but a
- * route must not 500 because something stood a narrower wallet in its place. Labels
- * are decoration — {@link consoleBalance} renders ids without them.
- */
-const assetSource = (wallet: unknown): AssetDetailSource | undefined => {
-  const manager = (wallet as { assetManager?: Partial<AssetDetailSource> } | null)?.assetManager
-  return typeof manager?.getAssetDetails === 'function' ? (manager as AssetDetailSource) : undefined
-}
 
 /**
  * Every swap parked in `stuck`, across all four corridors.
@@ -121,6 +110,19 @@ const stuckSwaps = async (deps: AdminDeps): Promise<{ rows: AdminSwap[]; total: 
   }
 }
 
+const overviewBalances = async (services: AdminDeps['services']) => {
+  const [lightning, arkade] = await Promise.all([
+    attempt(async () => (await requireLn(services.ln).getBalance()).availableSats),
+    attempt(async () => await services.arkade.wallet.getBalance()),
+  ])
+  return {
+    lightningSats: lightning.value,
+    lightningError: lightning.error,
+    arkade: arkade.value ? consoleBalance(arkade.value, assetSource(services.arkade.wallet)) : null,
+    arkadeError: arkade.error,
+  }
+}
+
 export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/overview', async (c) => {
     const { services } = deps
@@ -138,12 +140,7 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
     ])
     const committedSats = committed.reduce((sum, value) => sum + value, 0)
 
-    // Balances are best-effort: the overview is the first thing an operator
-    // loads, and it must render even when a backend is down.
-    const [lightning, arkade] = await Promise.all([
-      attempt(async () => (await requireLn(services.ln).getBalance()).availableSats),
-      attempt(async () => await services.arkade.wallet.getBalance()),
-    ])
+    const balances = c.req.query('balances') === 'false' ? null : await overviewBalances(services)
 
     return c.json({
       mode: deps.mode,
@@ -201,6 +198,16 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
        * failures, which the log now collapses rather than repeating 98 times.
        */
       attention: {
+        // Beside `stuck` because it is the same kind of fact: a row that will not
+        // move until a human acts. Self-limiting, unlike `stuck` — but an
+        // operator who never looks still loses the swap. `requestedAt` is the
+        // remaining window.
+        // Projected for the reason `balances` gives below: `c.json` throws on a
+        // bigint, taking down the very page the approval is granted from.
+        pendingApprovals: (await services.adminStore.listPendingApprovals()).map((row) => ({
+          ...row,
+          amount: row.amount.toString(),
+        })),
         // The true total, not the length of the capped list below.
         stuckCount: stuck.total,
         stuck: stuck.rows.map((row) => ({
@@ -212,19 +219,19 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
         })),
         failing: services.tickErrors.failing,
       },
-      balances: {
-        lightningSats: lightning.value,
-        lightningError: lightning.error,
-        // Projected, never passed through: the raw balance carries `bigint` asset
-        // amounts and `c.json` throws on one, which took this whole route — and so
-        // every view of the console — down for any solver holding an asset.
-        arkade: arkade.value ? consoleBalance(arkade.value, assetSource(services.arkade.wallet)) : null,
-        arkadeError: arkade.error,
-      },
+      balances,
     })
   })
 
   app.get('/api/backends', async (c) => c.json({ backends: await probeBackends(deps.services, deps.relay) }))
+
+  app.get('/api/assets/:assetId', async (c) => {
+    const assetId = c.req.param('assetId')
+    if (!ASSET_ID_HEX.test(assetId)) {
+      return c.json({ error: 'bad_request', message: 'not a lowercase 68-character asset id' }, 400)
+    }
+    return c.json(await describeAssetId(assetId, assetSource(deps.services.arkade.wallet)))
+  })
 
   app.get('/api/wallet', async (c) => {
     const { services } = deps

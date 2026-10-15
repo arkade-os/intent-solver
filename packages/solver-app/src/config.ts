@@ -58,6 +58,20 @@ const intFromEnv = (name: string, fallback: number, min: number, max = Infinity)
 }
 
 /**
+ * An integer knob whose ABSENCE is meaningful. `intFromEnv`'s fallback is wrong
+ * wherever zero is itself valid: the approval threshold's zero gates everything.
+ */
+const optionalIntFromEnv = (name: string, min: number): number | null => {
+  const raw = process.env[name]?.trim()
+  if (!raw) return null
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < min) {
+    throw new Error(`${name} must be an integer >= ${min}, got ${process.env[name]}`)
+  }
+  return value
+}
+
+/**
  * A whole, non-negative amount in the want leg's own units — asset units, or
  * sats when the leg is BTC.
  *
@@ -305,6 +319,24 @@ export interface Config {
   /** Cap on the summed amount across all concurrently-exposed swaps. */
   maxExposedSats: number
   /**
+   * Sats at or above which a SEND leg waits for an operator; `null` is off and is
+   * the default. Unlike `maxExposedSats` it holds rather than refuses, and a swap
+   * nobody answers about is refused by its own deadline. @see ops/approvals.ts
+   */
+  approvalThresholdSats: number | null
+  /**
+   * All null is the default: no sink, no network call. SECRETS — a Slack webhook
+   * URL is the credential entire, so these are env-only and never in
+   * `admin/settings.ts`'s exposed list, a log or an error body.
+   */
+  notify: {
+    telegramBotToken: string | null
+    telegramChatId: string | null
+    slackWebhookUrl: string | null
+  }
+  /** Minutes between balance reports to the notify sinks; `null` (the default) sends none. */
+  balanceReportIntervalMinutes: number | null
+  /**
    * How long a disabled contract is kept before its row is deleted, ms.
    *
    * Two-stage retirement: a contract whose swap is over and whose script holds
@@ -436,8 +468,8 @@ export interface Config {
    * `off` (the default) means the solver touches no relay for discovery, and
    * the console's "post now" action is REFUSED rather than honoured — a policy
    * an action can override is advisory, and an operator who set it would have
-   * no guarantee. `manual` publishes only when asked; `auto` also republishes
-   * when the ad changes or the heartbeat falls due.
+   * no guarantee. `manual` publishes only when asked, then re-sends that same
+   * card on the heartbeat; `auto` also republishes when the card changes.
    *
    * Read once, here, like every other knob in this file: the console reports
    * the mode, it does not change it.
@@ -1025,6 +1057,14 @@ export const loadConfig = (): Config => {
     poolAutoMint: poolAutoMintFromEnv(),
     lnReceiveAcceptUnilateralGap: lnReceiveAcceptUnilateralGapFromEnv(raw),
     maxExposedSats,
+    approvalThresholdSats: optionalIntFromEnv('APPROVAL_THRESHOLD_SATS', 0),
+    notify: {
+      // `|| null`, not `?? null`: a blank variable is not a credential.
+      telegramBotToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || null,
+      telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || null,
+      slackWebhookUrl: process.env.SLACK_WEBHOOK_URL?.trim() || null,
+    },
+    balanceReportIntervalMinutes: optionalIntFromEnv('BALANCE_REPORT_INTERVAL_MINUTES', 5),
     contractRetentionMs: contractRetentionDays * 86_400_000,
     sweepConcurrency,
     chainTipEsploraUrl: process.env.CHAIN_TIP_ESPLORA_URL?.trim() || process.env.LND_ESPLORA_URL?.trim(),

@@ -17,6 +17,7 @@
 
 import { barsChart, categoryChart, cumulativeChart, decayChart } from './charts.js'
 import { applyPricing } from './pricingSave.js'
+import { PricingDraft } from './pricingDraft.js'
 
 /* ---- tiny element helper ------------------------------------------------ */
 
@@ -49,6 +50,11 @@ const h = (spec, ...rest) => {
 
 const clear = (node) => {
   while (node.firstChild) node.removeChild(node.firstChild)
+}
+
+const refill = (node, ...children) => {
+  clear(node)
+  node.appendChild(h('span', ...children))
 }
 
 /* ---- api ---------------------------------------------------------------- */
@@ -134,7 +140,7 @@ const assetLabel = (asset) =>
   h(
     'span',
     asset.ticker ? h('span', asset.ticker, ' ') : null,
-    h('span.faint', { title: asset.assetId }, asset.shortId),
+    h('span.faint', { title: asset.name ? `${asset.name} — ${asset.assetId}` : asset.assetId }, asset.shortId),
   )
 
 /**
@@ -272,8 +278,10 @@ const readVerdict = (swapId) => {
 const state = {
   view: 'overview',
   overview: null,
+  overviewError: null,
   banner: null,
   data: {},
+  activityErrors: {},
   filters: { corridor: '', phase: '', q: '' },
   /**
    * The P&L view's own controls. Bucket empty means "let the server choose from
@@ -292,16 +300,12 @@ const state = {
 const VIEWS = [
   ['overview', 'overview'],
   ['pnl', 'p&l'],
-  ['swaps', 'swaps'],
-  ['offers', 'offers'],
-  ['quotes', 'quotes'],
-  ['refusals', 'request refusals'],
+  ['activity', 'activity'],
   ['wallet', 'wallet'],
   ['backends', 'backends'],
   ['diagnostics', 'diagnostics'],
   ['discovery', 'discovery'],
-  ['settings', 'settings'],
-  ['markets', 'markets'],
+  ['pricing', 'pricing'],
   ['audit', 'audit'],
 ]
 
@@ -313,6 +317,8 @@ const fail = (error) => {
 /* ---- status bar --------------------------------------------------------- */
 
 const statusBar = () => {
+  if (state.overviewError)
+    return h('div.status', h('span.phase.phase-failed', 'status unavailable'), h('span.muted', state.overviewError))
   const o = state.overview
   if (!o) return h('div.status', h('span.muted', 'connecting…'))
   const exposed = o.exposure.exposedCount
@@ -493,7 +499,7 @@ const marketState = (market) =>
 const marketCard = (market) =>
   h(
     'section.panel',
-    h('h2', `market ${legLabel(market.base)} / ${legLabel(market.quote)}`),
+    h('h2', 'market ', legNode(market.base), ' / ', legNode(market.quote)),
     h(
       'dl.kv',
       h('dt', 'served by'),
@@ -521,8 +527,11 @@ const marketCard = (market) =>
       h('dt', 'fee'),
       h(
         'dd',
-        `${market.feeBps} bps; flat ${market.sellBaseFeeFlat} ${legLabel(market.base)} atomic units when selling base, ` +
-          `${market.buyBaseFeeFlat} ${legLabel(market.quote)} atomic units when buying base; ${market.toleranceBps} bps band`,
+        `${market.feeBps} bps; flat ${market.sellBaseFeeFlat} `,
+        legName(market.base),
+        ` atomic units when selling base, ${market.buyBaseFeeFlat} `,
+        legName(market.quote),
+        ` atomic units when buying base; ${market.toleranceBps} bps band`,
       ),
     ),
   )
@@ -534,9 +543,37 @@ const marketsPanel = (o) => {
   return markets.length === 0 ? null : h('div.panels', ...markets.map(marketCard))
 }
 
+const overviewBalancesPanel = () => {
+  const balances = state.data.overviewBalances ?? state.overview?.balances
+  return h(
+    'section.panel',
+    { id: 'overview-balances' },
+    h('h2', 'balances'),
+    balances
+      ? h(
+          'dl.kv',
+          h('dt', 'lightning'),
+          h('dd', balances.lightningError ? h('span.muted', balances.lightningError) : sats(balances.lightningSats)),
+          h('dt', 'arkade'),
+          h('dd', balances.arkadeError ? h('span.muted', balances.arkadeError) : balanceRows(balances.arkade)),
+          ...(balances.arkadeError ? [] : assetRowsPair(balances.arkade)),
+          h('dt', 'pubkey'),
+          h('dd.faint', shortId(state.overview?.providerPubkey)),
+        )
+      : h('p.muted', state.data.overviewBalanceError ?? 'loading balances…'),
+  )
+}
+
+const paintOverviewBalances = () => {
+  document.getElementById('overview-balances')?.replaceWith(overviewBalancesPanel())
+}
+
 const overviewView = () => {
   const o = state.overview
-  if (!o) return h('p.muted', 'loading…')
+  if (!o)
+    return state.overviewError
+      ? h('p.banner', state.overviewError, ' ', h('button.act', { onclick: () => load('overview') }, 'retry'))
+      : h('p.muted', 'loading…')
   return h(
     'div',
     attentionPanel(o),
@@ -572,25 +609,7 @@ const overviewView = () => {
         ),
         h('p.muted', `${sats(o.exposure.committedSats)} of ${sats(o.exposure.capSats)} sat cap`),
       ),
-      h(
-        'section.panel',
-        h('h2', 'balances'),
-        h(
-          'dl.kv',
-          h('dt', 'lightning'),
-          h(
-            'dd',
-            o.balances.lightningError ? h('span.muted', o.balances.lightningError) : sats(o.balances.lightningSats),
-          ),
-          h('dt', 'arkade'),
-          h('dd', o.balances.arkadeError ? h('span.muted', o.balances.arkadeError) : balanceRows(o.balances.arkade)),
-          /* assets: begin */
-          ...(o.balances.arkadeError ? [] : assetRowsPair(o.balances.arkade)),
-          /* assets: end */
-          h('dt', 'pubkey'),
-          h('dd.faint', shortId(o.providerPubkey)),
-        ),
-      ),
+      overviewBalancesPanel(),
     ),
     marketsPanel(o),
   )
@@ -605,6 +624,7 @@ const swapsView = () => {
       h(
         'select',
         {
+          'aria-label': 'swap corridor',
           onchange: (e) => {
             state.filters.corridor = e.target.value
             load('swaps')
@@ -621,6 +641,7 @@ const swapsView = () => {
       h(
         'select',
         {
+          'aria-label': 'swap phase',
           onchange: (e) => {
             state.filters.phase = e.target.value
             load('swaps')
@@ -633,6 +654,7 @@ const swapsView = () => {
       ),
       h('input.search', {
         type: 'search',
+        'aria-label': 'find swaps',
         value: state.filters.q,
         placeholder: 'find: id, payment hash, invoice, address, txid, rfq id',
         title: `Substring match across every identifier the row carries. At least ${MIN_SEARCH} characters.`,
@@ -651,43 +673,47 @@ const swapsView = () => {
       h('span.spacer'),
       h('span.muted', `${rows.length} rows`),
     ),
-    rows.length === 0
-      ? h('p.muted', 'no swaps match')
-      : h(
-          'table',
-          h(
-            'thead',
-            h(
-              'tr',
-              h('th', 'phase'),
-              h('th', 'state'),
-              h('th', 'corridor'),
-              h('th', 'id'),
-              h('th.right', 'amount'),
-              h('th.right', 'payout'),
-              h('th', 'age'),
-              h('th', 'updated'),
-            ),
-          ),
-          h(
-            'tbody',
-            rows.map((row) =>
+    state.activityErrors.swaps
+      ? activityError('swaps')
+      : !state.data.swaps
+        ? h('p.muted', 'loading…')
+        : rows.length === 0
+          ? h('p.muted', 'no swaps match')
+          : h(
+              'table',
               h(
-                'tr.clickable',
-                { onclick: () => openDetail(row) },
-                // Phase first and state second, deliberately: see the module header.
-                h('td', phaseChip(row.phase)),
-                h('td', stateWord(row.state)),
-                h('td.muted', corridorLabel(row.corridor)),
-                h('td.faint', shortId(row.id)),
-                h('td.num', sats(row.amountSats)),
-                h('td.num.muted', sats(row.payoutSats)),
-                h('td.muted', ago(row.createdAt)),
-                h('td.muted', ago(row.updatedAt)),
+                'thead',
+                h(
+                  'tr',
+                  h('th', 'phase'),
+                  h('th', 'state'),
+                  h('th', 'corridor'),
+                  h('th', 'id'),
+                  h('th.right', 'amount'),
+                  h('th.right', 'payout'),
+                  h('th', 'age'),
+                  h('th', 'updated'),
+                ),
+              ),
+              h(
+                'tbody',
+                rows.map((row) =>
+                  h(
+                    'tr.clickable',
+                    { onclick: () => openDetail(row) },
+                    // Phase first and state second, deliberately: see the module header.
+                    h('td', phaseChip(row.phase)),
+                    h('td', stateWord(row.state)),
+                    h('td.muted', corridorLabel(row.corridor)),
+                    h('td.faint', shortId(row.id)),
+                    h('td.num', sats(row.amountSats)),
+                    h('td.num.muted', sats(row.payoutSats)),
+                    h('td.muted', ago(row.createdAt)),
+                    h('td.muted', ago(row.updatedAt)),
+                  ),
+                ),
               ),
             ),
-          ),
-        ),
   )
 }
 
@@ -800,7 +826,7 @@ const offersView = () => {
             ),
           ),
         ),
-    h('h2.sans', 'recent refusals'),
+    h('h2.sans', 'recent offer refusals'),
     h(
       'p.notice',
       `Offers this solver declined. Held in memory only and cleared on restart (keeps the last ${d.refusals.capacity}) — ` +
@@ -834,7 +860,6 @@ const refusalsView = () => {
     'div',
     h('h2.sans', 'request refusals'),
     h('p.notice', `The latest ${d.capacity} RFQ refusals, newest first. Cleared when this solver restarts.`),
-    h('button.act', { onclick: () => load('refusals') }, 'refresh'),
     d.entries.length === 0
       ? h('p.muted', 'no request refusals recorded since this process started')
       : h(
@@ -856,6 +881,35 @@ const refusalsView = () => {
             ),
           ),
         ),
+  )
+}
+
+const ACTIVITY_SECTIONS = ['swaps', 'quotes', 'offers', 'refusals']
+const activityError = (key) =>
+  h('p.banner', state.activityErrors[key], ' ', h('button.act', { onclick: () => load(key) }, 'retry'))
+
+const activityView = () => {
+  const bodies = { swaps: swapsView, quotes: quotesView, offers: offersView, refusals: refusalsView }
+  const labels = { swaps: 'swaps', quotes: 'open quotes', offers: 'offer fills', refusals: 'request refusals' }
+  return h(
+    'div.activity',
+    h(
+      'div.toolbar',
+      h('h1.sans', 'activity'),
+      ...ACTIVITY_SECTIONS.map((key) =>
+        h('button.act', { onclick: () => document.getElementById(`activity-${key}`)?.scrollIntoView() }, labels[key]),
+      ),
+      h('span.spacer'),
+      h('button.act', { onclick: () => load('activity') }, 'refresh activity'),
+    ),
+    ...ACTIVITY_SECTIONS.map((key) =>
+      h(
+        'section.activity-section',
+        { id: `activity-${key}`, 'aria-label': labels[key] },
+        key === 'swaps' || state.activityErrors[key] ? h('h2.sans', labels[key]) : null,
+        state.activityErrors[key] && key !== 'swaps' ? activityError(key) : h('div.activity-content', bodies[key]()),
+      ),
+    ),
   )
 }
 
@@ -1320,9 +1374,45 @@ let marketDraft = null
 // Assigned by the preview panel; a second declaration there is a load-time SyntaxError.
 let schedulePreview = () => {}
 
-/** `null` is the BTC leg everywhere below the wire; `BTC` is what an operator types.
- *  The preview's `legs.from/to` arrive pre-stringified to `'BTC'`, so they need only `shortId`, never this. */
-const legLabel = (leg) => (leg === null ? 'BTC' : shortId(leg))
+const ASSET_ID = /^[0-9a-f]{68}$/
+
+/** Labels per asset id, for the page's lifetime: the id is content-addressed and its metadata immutable. */
+const assetLabels = new Map()
+
+const assetEntry = (assetId) => {
+  let entry = assetLabels.get(assetId)
+  if (!entry) {
+    entry = { label: null }
+    // A failed lookup is forgotten so the next paint asks again; the id renders meanwhile.
+    entry.ready = api(`/api/assets/${assetId}`).then(
+      (label) => (entry.label = label),
+      () => assetLabels.delete(assetId),
+    )
+    assetLabels.set(assetId, entry)
+  }
+  return entry
+}
+
+/**
+ * A market leg, painted now from what is known and again in place when the lookup
+ * lands — never via `render()`, which would take the caret out of a half-typed form.
+ */
+const liveLeg = (leg, paint) => {
+  if (leg === null || leg === 'BTC') return h('span', 'BTC')
+  if (!ASSET_ID.test(leg)) return h('span', { title: leg }, shortId(leg))
+  const entry = assetEntry(leg)
+  const node = h('span')
+  const fill = () => refill(node, paint(entry.label ?? { assetId: leg, shortId: shortId(leg) }))
+  fill()
+  if (!entry.label) entry.ready.then(fill)
+  return node
+}
+
+/** Ticker and short id: where the pair is the identity being read. */
+const legNode = (leg) => liveLeg(leg, assetLabel)
+
+/** Ticker alone, id on hover: where the leg only names a unit. */
+const legName = (leg) => liveLeg(leg, (asset) => h('span', { title: asset.assetId }, asset.ticker ?? asset.shortId))
 
 const carrierRfqPriced = () => state.data.markets?.carrier?.rfqPriced === true
 
@@ -1333,7 +1423,12 @@ let carrierDefaultDraft = false
 const carrierDefaultOverride = () =>
   carrierDefaultDraft === carrierRfqPriced() ? {} : { ASSET_CARRIER_PRICING: String(carrierDefaultDraft) }
 
-const openMarketForm = (draft) => ((marketDraft = draft), (carrierDefaultDraft = carrierRfqPriced()), render())
+const openMarketForm = (draft) => {
+  marketDraft = draft
+  carrierDefaultDraft =
+    state.view === 'pricing' ? pricingOverrides().ASSET_CARRIER_PRICING === 'true' : carrierRfqPriced()
+  render()
+}
 
 const blankMarket = () => ({
   base: 'BTC',
@@ -1444,13 +1539,63 @@ const tip = (text) => h('span.tip', { tabindex: '0', role: 'note' }, '?', h('spa
 
 const group = (title) => h('span.group', title)
 
+const LEG_DECIMALS = { base: 'baseDecimals', quote: 'quoteDecimals' }
+
+/** Hint nodes for the two leg fields, repainted on every keystroke since decimals feed their warning. */
+const legHints = {}
+
+const paintLegHint = (key) => {
+  const node = legHints[key]
+  const leg = String(marketDraft?.[key] ?? '').trim()
+  if (!node || !marketDraft) return
+  if (!ASSET_ID.test(leg)) return refill(node, 'BTC, or a 68-character asset id')
+  const entry = assetEntry(leg)
+  if (!entry.label) {
+    refill(node, 'looking up the asset…')
+    // A failed lookup is dropped from the cache, so repainting here would ask again at once.
+    return void entry.ready.then(() =>
+      entry.label ? paintLegHint(key) : refill(node, 'asset lookup failed — the id is used as typed'),
+    )
+  }
+  const { ticker, name, decimals } = entry.label
+  const said = Number(marketDraft[LEG_DECIMALS[key]])
+  refill(
+    node,
+    ticker || name ? [ticker, name].filter(Boolean).join(' · ') : 'the indexer has no metadata for this asset',
+    typeof decimals === 'number' ? ` · ${decimals} decimals` : '',
+    typeof decimals === 'number' && decimals !== said
+      ? h(
+          'span.phase.phase-failed',
+          `issuer says ${decimals} decimals, this form says ${marketDraft[LEG_DECIMALS[key]]}`,
+        )
+      : null,
+  )
+}
+
+const legHint = (key) => {
+  if (!(key in LEG_DECIMALS)) return null
+  legHints[key] = h('span.hint')
+  paintLegHint(key)
+  return legHints[key]
+}
+
 const field = (label, key, hint, explain) => [
   h('span.label', label, explain ? tip(explain) : null),
   h('input', {
+    'aria-label': label,
+    readonly:
+      state.view === 'pricing' &&
+      state.data.markets?.markets.some((row) => row.marketKey === pricingSelection?.key) &&
+      (key === 'base' || key === 'quote'),
     value: String(marketDraft[key] ?? ''),
-    oninput: (e) => ((marketDraft[key] = e.target.value), schedulePreview()),
+    oninput: (e) => (
+      (marketDraft[key] = e.target.value),
+      paintLegHint('base'),
+      paintLegHint('quote'),
+      schedulePreview()
+    ),
   }),
-  h('span.hint', hint ?? ''),
+  legHint(key) ?? h('span.hint', hint ?? ''),
 ]
 
 const checkbox = (label, key, hint) =>
@@ -1476,7 +1621,7 @@ const carrierDefaultField = () =>
     h('input', {
       type: 'checkbox',
       ...(carrierDefaultDraft ? { checked: true } : {}),
-      oninput: (e) => (carrierDefaultDraft = e.target.checked),
+      oninput: (e) => ((carrierDefaultDraft = e.target.checked), schedulePreview()),
     }),
     h('span.faint', 'ASSET_CARRIER_PRICING, deployment-wide — saved with this market, in one ordered save'),
   )
@@ -1531,9 +1676,29 @@ let previewError = null
 let previewTimer = null
 let previewDirection = 'sell_base'
 let previewSide = 'from'
+let previewRequest = 0
+let previewInFlight = false
+/** The draft feed the operator asked to read. Never sent unasked: the form would otherwise fetch every typed prefix. */
+let previewFeedFor = null
+const feedKey = () => `${marketDraft.feedUrl}\0${marketDraft.pricePath}`
+const readDraftFeed = () => previewFeedFor === feedKey()
+
+// Feed fetches stay bounded by the server's 15s cache; this only decides how soon a fresh read shows.
+const PREVIEW_REFRESH_MS = 5_000
+setInterval(() => {
+  if (marketDraft && previewNode?.isConnected && !previewTimer && !previewInFlight) void refreshPreview()
+}, PREVIEW_REFRESH_MS)
 
 // Assigned only: Task 10 declares `schedulePreview`, a second declaration is a load-time SyntaxError.
 schedulePreview = () => {
+  if (state.view === 'pricing') {
+    syncPricingMarket()
+    paintPricingChanges()
+    paintPricingTable()
+    previewRequest++
+    previewData = null
+    if (previewNode) paintPreview()
+  }
   if (previewTimer) clearTimeout(previewTimer)
   previewTimer = setTimeout(() => {
     previewTimer = null
@@ -1542,22 +1707,34 @@ schedulePreview = () => {
 }
 
 const refreshPreview = async () => {
-  if (!marketDraft || !previewNode) return
+  if ((!marketDraft && !(state.view === 'pricing' && pricingSelection?.kind === 'corridor')) || !previewNode) return
+  const request = ++previewRequest
+  previewInFlight = true
   try {
-    previewData = await api('/api/pricing/preview', {
+    const next = await api('/api/pricing/preview', {
       method: 'POST',
-      body: JSON.stringify({
-        target: 'market',
-        market: marketBody(marketDraft),
-        marketKey: marketDraft.marketKey,
-        direction: previewDirection,
-        side: previewSide,
-      }),
+      body: JSON.stringify(
+        state.view === 'pricing'
+          ? pricingPreviewRequest()
+          : {
+              target: 'market',
+              market: marketBody(marketDraft),
+              marketKey: marketDraft.marketKey,
+              direction: previewDirection,
+              side: previewSide,
+              readDraftFeed: readDraftFeed(),
+            },
+      ),
     })
+    if (request !== previewRequest) return
+    previewData = next
     previewError = null
   } catch (error) {
+    if (request !== previewRequest) return
     previewData = null
     previewError = error instanceof Error ? error.message : String(error)
+  } finally {
+    if (request === previewRequest) previewInFlight = false
   }
   paintPreview()
 }
@@ -1594,13 +1771,42 @@ const unit = (amount, decimals, label) => {
   return `${negative ? '-' : ''}${whole}.${raw.slice(-digits)} ${label}`
 }
 
+const priceText = (mantissa, scale) => {
+  const text = unit(mantissa, scale, '').trim()
+  return text.includes('.') ? text.replace(/\.?0+$/, '') : text
+}
+
+/** The feed's number, stated the way the form defines it: this many quote units buy one whole base unit. */
+const feedLine = (feed) => {
+  if (!feed) return null
+  if (feed.state === 'resolved') {
+    return h(
+      'p.price',
+      '1 ',
+      legName(marketDraft.base),
+      ` = ${priceText(feed.mantissa, feed.scale)} `,
+      legName(marketDraft.quote),
+      h('span.faint', ` · feed read ${ago(Math.floor(feed.readAt / 1000))} ago · live`),
+    )
+  }
+  return h(
+    'p.notice',
+    `feed-unresolved — ${feed.reason} `,
+    readDraftFeed()
+      ? null
+      : h('button.act', { onclick: () => ((previewFeedFor = feedKey()), void refreshPreview()) }, 'read feed now'),
+  )
+}
+
+const amountIn = (amount, decimals, leg) => [unit(amount, decimals, ''), legName(leg)]
+
 const ladderRow = (sample, legs, loss) =>
   sample.ok
     ? h(
         `tr${loss ? '.loss' : ''}`,
-        h('td', unit(sample.fromAmount, legs.fromDecimals, shortId(legs.from))),
-        h('td.num', unit(sample.toAmount, legs.toDecimals, shortId(legs.to))),
-        h('td.num', unit(sample.spreadFee, legs.toDecimals, shortId(legs.to))),
+        h('td', amountIn(sample.fromAmount, legs.fromDecimals, legs.from)),
+        h('td.num', amountIn(sample.toAmount, legs.toDecimals, legs.to)),
+        h('td.num', amountIn(sample.spreadFee, legs.toDecimals, legs.to)),
         h('td.num', sample.marginBps === null ? '—' : `${sample.marginBps} bps`),
       )
     : h(
@@ -1608,8 +1814,8 @@ const ladderRow = (sample, legs, loss) =>
         h(
           'td',
           previewSide === 'from'
-            ? unit(sample.amount, legs.fromDecimals, shortId(legs.from))
-            : unit(sample.amount, legs.toDecimals, shortId(legs.to)),
+            ? amountIn(sample.amount, legs.fromDecimals, legs.from)
+            : amountIn(sample.amount, legs.toDecimals, legs.to),
         ),
         h('td.num', { colspan: 3 }, h('span.phase.phase-failed', sample.reason)),
       )
@@ -1647,17 +1853,19 @@ const previewBody = () => {
   if (previewData.invalid.length > 0) {
     return h(
       'div',
+      feedLine(previewData.feed),
       h('p.muted', 'nothing is priced while a field is refused:'),
       previewData.invalid.map((item) => h('p.faint', `${item.key} — ${item.reason}`)),
     )
   }
+  if (state.view === 'pricing' && pricingSelection?.kind === 'corridor') return corridorPreviewBody()
   const feed = previewData.feed ?? { state: 'unresolved', reason: '' }
   const controls = h(
     'p.toolbar',
     segment(
       [
-        ['sell_base', 'customer gives base'],
-        ['buy_base', 'customer gives quote'],
+        ['sell_base', h('span', 'customer gives ', legName(marketDraft.base))],
+        ['buy_base', h('span', 'customer gives ', legName(marketDraft.quote))],
       ],
       previewDirection,
       (value) => (previewDirection = value),
@@ -1672,7 +1880,7 @@ const previewBody = () => {
     ),
   )
   if (feed.state === 'unresolved') {
-    return h('div', controls, h('p.notice', `feed-unresolved — ${feed.reason}`))
+    return h('div', controls, feedLine(feed))
   }
 
   const { legs, samples, samplesReason, breakEven, carrier } = previewData
@@ -1685,6 +1893,7 @@ const previewBody = () => {
   return h(
     'div',
     controls,
+    feedLine(feed),
     h(
       'table.ladder',
       h(
@@ -1700,7 +1909,6 @@ const previewBody = () => {
     scopeLine(),
     h(
       'div.feedline',
-      h('span', `feed read ${ago(Math.floor(feed.readAt / 1000))} ago`),
       h('span', `carrier ${carrier.sats} sats — ${carrier.priced ? 'priced into the quote' : 'paid out of margin'}`),
       h('span.faint', 'preview only — nothing is quoted or stored'),
     ),
@@ -1735,7 +1943,7 @@ const rfqDirectionLine = () => {
 const boundsHint =
   'Bounds on what we pay out in this direction, not on what the customer sends. Set both to 0 to close this direction while leaving everything else configured.'
 
-const marketForm = () =>
+const marketForm = (save = saveMarket, close = () => ((marketDraft = null), render()), saveLabel = 'save') =>
   h(
     'section.panel',
     h('h2', 'market'),
@@ -1874,17 +2082,17 @@ const marketForm = () =>
       ),
       h('span.span2', h('span.muted', rfqDirectionLine())),
     ),
-    checkbox('serves offer', 'servesOffer', 'takes maker offer packets — needs a restart to start or stop'),
+    checkbox(
+      'serves offer',
+      'servesOffer',
+      'takes maker offer packets — live on a running offer path; starting a missing path needs a restart',
+    ),
     checkbox('serves rfq', 'servesRfq', 'answers RFQ quote requests — live'),
     checkbox('rfq sell base', 'rfqSellBase', 'open, per direction; false is CLOSED'),
     checkbox('rfq buy base', 'rfqBuyBase'),
     carrierModeField(),
-    carrierDefaultField(),
-    h(
-      'p.toolbar',
-      h('button.act', { onclick: saveMarket }, 'save'),
-      h('button.act', { onclick: () => ((marketDraft = null), render()) }, 'cancel'),
-    ),
+    state.view === 'pricing' ? null : carrierDefaultField(),
+    h('p.toolbar', h('button.act', { onclick: save }, saveLabel), h('button.act', { onclick: close }, 'close editor')),
   )
 
 const NOTHING_TITLE =
@@ -1935,13 +2143,16 @@ const marketsView = () => {
             m.markets.map((market) =>
               h(
                 'tr',
-                h('td', { title: market.marketKey }, `${legLabel(market.base)} / ${legLabel(market.quote)}`),
+                h('td', { title: market.marketKey }, legNode(market.base), ' / ', legNode(market.quote)),
                 h('td.faint', { title: `${market.feedUrl} ${market.pricePath}` }, shortId(market.feedUrl)),
                 h('td.num', `${market.toleranceBps} bps`),
                 h(
                   'td.num',
-                  `${market.feeBps} bps + ${market.sellBaseFeeFlat} ${legLabel(market.base)} atomic / ` +
-                    `${market.buyBaseFeeFlat} ${legLabel(market.quote)} atomic`,
+                  `${market.feeBps} bps + ${market.sellBaseFeeFlat} `,
+                  legName(market.base),
+                  ` atomic / ${market.buyBaseFeeFlat} `,
+                  legName(market.quote),
+                  ' atomic',
                 ),
                 h(
                   'td',
@@ -1970,6 +2181,485 @@ const marketsView = () => {
 }
 
 /* ==== asset markets — END ================================================= */
+
+/* ---- unified pricing ---------------------------------------------------- */
+
+const pricingDraft = new PricingDraft()
+const pricingMarketForms = new Map()
+let pricingSelection = null
+let pricingOriginal = null
+let pricingChangesNode = null
+let pricingTableNode = null
+let pricingOutcome = null
+
+const BTC_CORRIDORS = [
+  { key: 'arkade:BTC->lightning:BTC', stem: 'LN_SEND', label: 'Arkade → Lightning' },
+  { key: 'lightning:BTC->arkade:BTC', stem: 'LN_RECEIVE', label: 'Lightning → Arkade' },
+  { key: 'arkade:BTC->onchain:BTC', stem: 'ONCHAIN_SEND', label: 'Arkade → onchain' },
+  { key: 'onchain:BTC->arkade:BTC', stem: 'ONCHAIN_RECEIVE', label: 'Onchain → Arkade' },
+]
+
+const pricingKnobs = () => state.data.settings?.knobs ?? []
+const pricingOverrides = () => pricingDraft.previewOverrides(pricingKnobs())
+const pricingMarketKey = (body) =>
+  [body.base, body.quote]
+    .map(
+      (leg) =>
+        `arkade:${
+          String(leg ?? '')
+            .trim()
+            .toUpperCase() === 'BTC' || !String(leg ?? '').trim()
+            ? 'btc'
+            : String(leg).trim()
+        }`,
+    )
+    .sort()
+    .join('/')
+
+const syncPricingMarket = () => {
+  if (!marketDraft || pricingDraft.busy || pricingSelection?.kind !== 'market') return
+  const body = marketBody(marketDraft)
+  const stored = state.data.markets.markets.some((row) => row.marketKey === pricingSelection.key)
+  const key = stored ? pricingSelection.key : pricingMarketKey(body)
+  if (JSON.stringify(body) === pricingOriginal) {
+    const stagedKey = pricingSelection.draftKey ?? key
+    pricingDraft.markets.delete(stagedKey)
+    pricingMarketForms.delete(stagedKey)
+  } else {
+    if (pricingSelection.draftKey && pricingSelection.draftKey !== key) {
+      pricingDraft.markets.delete(pricingSelection.draftKey)
+      pricingMarketForms.delete(pricingSelection.draftKey)
+    }
+    pricingSelection.draftKey = key
+    pricingDraft.stageMarket(key, body)
+    pricingMarketForms.set(key, { ...marketDraft })
+  }
+}
+
+const stagePricingOverride = (key, value) => {
+  const knob = pricingKnobs().find((item) => item.key === key)
+  if (!knob) return
+  if (value !== null && value === String(knob.value)) delete pricingDraft.overrides[key]
+  else pricingDraft.stageOverride(key, value)
+}
+
+const selectPricing = (selection, draft = null) => {
+  syncPricingMarket()
+  previewRequest++
+  previewData = null
+  previewError = null
+  pricingSelection = selection
+  if (selection?.key && pricingDraft.markets.has(selection.key)) selection.draftKey = selection.key
+  if (selection?.kind === 'market') {
+    const saved = state.data.markets.markets.find((row) => row.marketKey === selection.key)
+    pricingOriginal = JSON.stringify(marketBody(saved ? draftFrom(saved) : blankMarket()))
+    marketDraft = { ...(pricingMarketForms.get(selection.key) ?? draft ?? (saved ? draftFrom(saved) : blankMarket())) }
+    carrierDefaultDraft = pricingOverrides().ASSET_CARRIER_PRICING === 'true'
+  } else marketDraft = null
+  render()
+}
+
+const pricingPreviewRequest = () =>
+  pricingSelection?.kind === 'corridor'
+    ? { target: 'corridor', corridor: pricingSelection.key, side: previewSide, overrides: pricingOverrides() }
+    : {
+        target: 'market',
+        market: marketBody(marketDraft),
+        direction: previewDirection,
+        side: previewSide,
+        readDraftFeed: readDraftFeed(),
+        overrides: { ASSET_CARRIER_PRICING: pricingOverrides().ASSET_CARRIER_PRICING },
+      }
+
+const applyPricingDraft = async () => {
+  syncPricingMarket()
+  if (!pricingDraft.size || pricingDraft.busy) return
+  pricingOutcome = null
+  const applying = pricingDraft.apply(api)
+  render()
+  try {
+    const result = await applying
+    pricingOutcome = { message: `${result.applied.length} changes applied.`, revision: result.revision }
+  } catch (error) {
+    pricingOutcome = { message: error.message, revision: error.revision, failed: true }
+  } finally {
+    for (const key of pricingMarketForms.keys()) {
+      if (!pricingDraft.markets.has(key)) pricingMarketForms.delete(key)
+    }
+    marketDraft = null
+    pricingSelection = null
+    previewRequest++
+    await load('pricing')
+  }
+}
+
+const discardPricingDraft = () => {
+  pricingDraft.discard()
+  pricingMarketForms.clear()
+  marketDraft = null
+  pricingSelection = null
+  pricingOutcome = null
+  previewRequest++
+  render()
+}
+
+const removePricingMarket = async (market) => {
+  if (pricingDraft.size || pricingDraft.busy) return
+  if (
+    !window.confirm(
+      `Remove ${market.symbol || shortId(market.marketKey)}? This immediately stops new quotes for this market. In-flight swaps remain recoverable.`,
+    )
+  )
+    return
+  try {
+    await api(`/api/markets/${encodeURIComponent(market.marketKey)}`, { method: 'DELETE' })
+    marketDraft = null
+    pricingSelection = null
+    await load('pricing')
+  } catch (error) {
+    fail(error)
+  }
+}
+
+const paintPricingChanges = () => {
+  if (!pricingChangesNode) return
+  clear(pricingChangesNode)
+  const entries = [
+    ...[...pricingDraft.markets].map(([key, row]) => ({
+      key,
+      label: row.symbol || shortId(key),
+      value: 'market edited',
+    })),
+    ...Object.entries(pricingDraft.overrides).map(([key, value]) => ({
+      key,
+      label: key,
+      value: value === null ? 'use environment value' : value,
+    })),
+  ]
+  pricingChangesNode.appendChild(
+    h(
+      'div.pricing-apply',
+      h(
+        'div',
+        h('b', pricingDraft.busy ? 'Applying changes…' : `${entries.length} pending changes`),
+        h(
+          'p.faint',
+          'Changes stay in this tab until you apply or discard them. Restrictions are applied before relaxations.',
+        ),
+      ),
+      h(
+        'div.toolbar',
+        h(
+          'button.act',
+          { disabled: !entries.length || pricingDraft.busy, onclick: applyPricingDraft },
+          'apply changes',
+        ),
+        h(
+          'button.act',
+          { disabled: !entries.length || pricingDraft.busy, onclick: discardPricingDraft },
+          'discard changes',
+        ),
+      ),
+    ),
+  )
+  if (entries.length)
+    pricingChangesNode.appendChild(
+      h(
+        'details',
+        h('summary', 'review pending changes'),
+        h(
+          'ul',
+          entries.map((entry) => h('li', h('span.mono', entry.label), `: ${entry.value}`)),
+        ),
+      ),
+    )
+  if (pricingOutcome)
+    pricingChangesNode.appendChild(
+      h(
+        'p.notice',
+        { role: 'status' },
+        pricingOutcome.message,
+        entries.length ? ` ${entries.length} changes remain in the draft; review before retrying.` : '',
+        pricingOutcome.revision ? ` Audit revision: ${pricingOutcome.revision}.` : '',
+      ),
+    )
+}
+
+const pricingKnobField = (knob, label, explanation) => {
+  const value = pricingOverrides()[knob.key] ?? String(knob.value)
+  const change = (next) => {
+    stagePricingOverride(knob.key, next)
+    if (knob.key === 'ASSET_CARRIER_PRICING' && marketDraft) {
+      carrierDefaultDraft = next === 'true'
+    }
+    schedulePreview()
+  }
+  return [
+    h('label.label', { for: `pricing-${knob.key}` }, label, tip(explanation)),
+    h(
+      'span.pricing-input',
+      h('input', {
+        id: `pricing-${knob.key}`,
+        'aria-label': label,
+        ...(typeof knob.value === 'boolean'
+          ? { type: 'checkbox', checked: value === 'true', onchange: (event) => change(String(event.target.checked)) }
+          : { value, inputmode: 'numeric', oninput: (event) => change(event.target.value) }),
+        disabled: !knob.editable,
+      }),
+      knob.source === 'override'
+        ? h(
+            'button.act',
+            {
+              onclick: () => {
+                stagePricingOverride(knob.key, null)
+                if (knob.key === 'ASSET_CARRIER_PRICING' && marketDraft) {
+                  carrierDefaultDraft = String(knob.envValue) === 'true'
+                }
+                render()
+              },
+            },
+            'use env',
+          )
+        : null,
+    ),
+    h('span.hint', !knob.editable ? 'environment only' : knob.restartRequired ? 'after restart' : 'live after apply'),
+  ]
+}
+
+const corridorForm = () => {
+  const corridor = pricingSelection
+  const definitions = [
+    [
+      'ENABLED',
+      'enabled',
+      'Whether this direction accepts new swaps. A direction absent at boot must be enabled in the environment first.',
+    ],
+    ['FEE_BPS', 'fee bps', 'The percentage fee taken from the customer payout. 50 bps is half of one percent.'],
+    ['FEE_FLAT_SATS', 'flat fee sats', 'A fixed fee per swap, added to the percentage fee.'],
+    ['MIN_SATS', 'minimum sats', 'The smallest amount the customer may send, in satoshis.'],
+    ['MAX_SATS', 'maximum sats', 'The largest amount the customer may send, in satoshis.'],
+  ]
+  return h(
+    'section.panel',
+    h('h2', corridor.label),
+    h(
+      'p.notice',
+      'Stored fees, limits and enabled flags take effect after a solver restart. The preview shows the draft configuration.',
+    ),
+    h(
+      'div.form-grid',
+      definitions.flatMap(([suffix, label, explanation]) => {
+        const knob = pricingKnobs().find((item) => item.key === `${corridor.stem}_${suffix}`)
+        return knob ? pricingKnobField(knob, label, explanation) : []
+      }),
+    ),
+    h('p.toolbar', h('button.act', { onclick: () => selectPricing(null) }, 'close editor')),
+  )
+}
+
+const corridorPreviewBody = () =>
+  h(
+    'div',
+    h(
+      'p.toolbar',
+      segment(
+        [
+          ['from', 'they name what they send'],
+          ['to', 'they name what they get'],
+        ],
+        previewSide,
+        (value) => (previewSide = value),
+      ),
+    ),
+    !previewData.enabled
+      ? h('p.notice', 'This direction is disabled. The amounts below show its pricing if enabled.')
+      : null,
+    h(
+      'table.ladder',
+      h(
+        'thead',
+        h('tr', h('th', 'they send'), h('th.num', 'they receive'), h('th.num', 'spread fee'), h('th.num', 'flat fee')),
+      ),
+      h(
+        'tbody',
+        previewData.samples.map((row) =>
+          row.ok
+            ? h(
+                'tr',
+                h('td', `${sats(row.giveSats)} sats`),
+                h('td.num', `${sats(row.payoutSats)} sats`),
+                h('td.num', `${sats(row.spreadSats)} sats`),
+                h('td.num', `${sats(row.flatSats)} sats`),
+              )
+            : h('tr.refused', h('td', `${sats(row.amountSats)} sats`), h('td', { colspan: 3 }, row.reason)),
+        ),
+      ),
+    ),
+    h(
+      'p.faint',
+      'Fees are not profit: network costs are separate. This preview does not check inventory or Lightning routing.',
+    ),
+  )
+
+const pricingRows = () => {
+  const rows = new Map(state.data.markets.markets.map((row) => [row.marketKey, row]))
+  for (const [key, body] of pricingDraft.markets) rows.set(key, { ...rows.get(key), ...body, marketKey: key })
+  return rows
+}
+
+const pricingTable = (overrides, marketRows) =>
+  h(
+    'tbody',
+    BTC_CORRIDORS.map((corridor) =>
+      h(
+        'tr',
+        h('td', corridor.label),
+        h('td', `${overrides[`${corridor.stem}_FEE_BPS`]} bps + ${overrides[`${corridor.stem}_FEE_FLAT_SATS`]} sats`),
+        h('td', overrides[`${corridor.stem}_ENABLED`] === 'true' ? 'enabled' : 'disabled'),
+        h('td.muted', 'after restart'),
+        h('td', h('button.act', { onclick: () => selectPricing({ kind: 'corridor', ...corridor }) }, 'edit & preview')),
+      ),
+    ),
+    [...marketRows].map(([key, row]) =>
+      h(
+        'tr',
+        h('td', row.symbol ? h('b', row.symbol, ' ') : null, legNode(row.base), ' / ', legNode(row.quote)),
+        h('td', `${row.feeBps} bps`),
+        h(
+          'td',
+          row.enabled
+            ? `${row.servesRfq ? 'RFQ ' : ''}${row.servesOffer ? 'offers' : ''}`.trim() || 'no serving path'
+            : 'disabled',
+        ),
+        h('td.muted', pricingDraft.markets.has(key) ? 'draft; market terms live after apply' : 'market terms live'),
+        h(
+          'td',
+          h(
+            'button.act',
+            {
+              onclick: () => selectPricing({ kind: 'market', key }, pricingMarketForms.get(key) ?? draftFrom(row)),
+            },
+            'edit & preview',
+          ),
+          state.data.markets.markets.some((saved) => saved.marketKey === key)
+            ? h(
+                'button.act',
+                {
+                  disabled: pricingDraft.size > 0,
+                  title: 'Remove immediately. Apply or discard pending changes first.',
+                  onclick: () => removePricingMarket(row),
+                },
+                'remove',
+              )
+            : null,
+        ),
+      ),
+    ),
+  )
+
+const paintPricingTable = () => {
+  if (!pricingTableNode) return
+  const next = pricingTable(pricingOverrides(), pricingRows())
+  clear(pricingTableNode)
+  while (next.firstChild) pricingTableNode.appendChild(next.firstChild)
+}
+
+const pricingView = () => {
+  const settings = state.data.settings
+  const markets = state.data.markets
+  if (!settings || !markets) return h('p.muted', 'loading pricing…')
+  const overrides = pricingOverrides()
+  const marketRows = pricingRows()
+  pricingTableNode = pricingTable(overrides, marketRows)
+  pricingChangesNode = h('section.pricing-changes')
+  paintPricingChanges()
+  const close = () => selectPricing(null)
+  return h(
+    'fieldset.pricing-page',
+    { disabled: pricingDraft.busy },
+    h('h1', 'Pricing'),
+    h('p.muted', 'Configure markets and Bitcoin corridors together. Preview customer amounts before applying.'),
+    pricingChangesNode,
+    h(
+      'div.pricing-table',
+      h(
+        'table',
+        h(
+          'thead',
+          h(
+            'tr',
+            h('th', 'market or corridor'),
+            h('th', 'fees'),
+            h('th', 'state'),
+            h('th', 'takes effect'),
+            h('th', ''),
+          ),
+        ),
+        pricingTableNode,
+      ),
+    ),
+    h(
+      'p.toolbar',
+      h('button.act', { onclick: () => selectPricing({ kind: 'market', key: null }, blankMarket()) }, 'add market'),
+    ),
+    marketRows.size === 0
+      ? h('p.faint', 'No asset markets configured. Bitcoin corridors can still be configured above.')
+      : null,
+    pricingSelection
+      ? h(
+          'div.split',
+          pricingSelection.kind === 'corridor' ? corridorForm() : marketForm(close, close, 'keep in draft'),
+          previewPanel(),
+        )
+      : null,
+    h(
+      'section.panel',
+      h('h2', 'Deployment limits & carrier default'),
+      h(
+        'div.form-grid',
+        [
+          [
+            'MAX_EXPOSED_SATS',
+            'exposure cap sats',
+            'The most bitcoin the solver may have committed across swaps at once.',
+          ],
+          ['LOCKUP_TIMEOUT_SECONDS', 'funding window seconds', 'How long a customer has to fund a quoted swap.'],
+          [
+            'ASSET_CARRIER_PRICING',
+            'price the RFQ carrier',
+            'Charge the bitcoin carrier cost when a market uses inherit. Per-market off and priced modes override this default.',
+          ],
+        ].flatMap(([key, label, explanation]) => {
+          const knob = pricingKnobs().find((item) => item.key === key)
+          return knob ? pricingKnobField(knob, label, explanation) : []
+        }),
+      ),
+    ),
+    h(
+      'details',
+      h('summary', 'environment & serving capabilities'),
+      h('p.notice', markets.restartNotice),
+      h(
+        'table',
+        h(
+          'tbody',
+          pricingKnobs()
+            .filter((knob) => !knob.editable)
+            .map((knob) => h('tr', h('td', knob.key), h('td', String(knob.value)))),
+        ),
+      ),
+      h(
+        'table',
+        h(
+          'tbody',
+          markets.markets.map((row) =>
+            h('tr', h('td', row.symbol || shortId(row.marketKey)), capabilityCell(row.serving ?? [], row.gaps ?? [])),
+          ),
+        ),
+      ),
+    ),
+  )
+}
 
 const auditView = () => {
   const a = state.data.audit
@@ -2000,15 +2690,7 @@ const auditView = () => {
 
 /* ---- swap detail -------------------------------------------------------- */
 
-/**
- * Discovery: the registry card an operator copies, and the state of the Nostr
- * ad the solver publishes.
- *
- * Both on one page because an operator asking "am I discoverable?" does not
- * care that discovery has two mechanisms — a git-reviewed card in
- * solver-registry and a kind-38859 ad on a relay. They care whether each one
- * is current.
- */
+/** Discovery: the signed card, and the state of its kind-38859 publish. */
 const discoveryView = () => {
   const d = state.data.discovery
   if (!d) return h('p.muted', 'loading…')
@@ -2018,7 +2700,7 @@ const discoveryView = () => {
     'div.panels',
     h(
       'section.panel',
-      h('h2', 'registry card'),
+      h('h2', 'solver card'),
       // Whatever the card did: an unnameable corridor otherwise reads as unserved.
       (d.cardOmitted ?? []).map((note) => h('p.muted', note)),
       d.cardError
@@ -2059,7 +2741,13 @@ const discoveryView = () => {
     ),
     h(
       'section.panel',
-      h('h2', 'nostr advertisement'),
+      h('h2', 'nostr'),
+      h(
+        'p.muted',
+        publish.mode === 'manual'
+          ? 'post now publishes the card above as kind 38859; every 30 min the last posted card is re-sent unchanged'
+          : 'publishes the card above as kind 38859',
+      ),
       h(
         'dl.kv',
         h('dt', 'mode'),
@@ -2068,19 +2756,6 @@ const discoveryView = () => {
         h('dd.faint', publish.lastPublishedAt ? ago(publish.lastPublishedAt) : 'never'),
         h('dt', 'last error'),
         h('dd', publish.lastError ? h('span.sans', publish.lastError) : h('span.muted', '—')),
-        // What WOULD be published, so an operator can check the terms before
-        // posting rather than after. `adError` is reported rather than left
-        // blank: an ad that cannot be built is a different fact from a solver
-        // with nothing to advertise, and only one of them needs acting on.
-        h('dt', 'payload'),
-        h(
-          'dd',
-          d.adError
-            ? h('span.sans', d.adError)
-            : d.ad
-              ? h('pre.faint', JSON.stringify(d.ad, null, 2))
-              : h('span.muted', '—'),
-        ),
       ),
       h(
         'p.toolbar',
@@ -2108,7 +2783,7 @@ const discoveryView = () => {
 }
 
 /**
- * Publish the ad on demand.
+ * Publish the card on demand.
  *
  * Not `runAction`: a 409 here is a POLICY answer, not a fault. Refusing because
  * the operator set `off`, or because this mode has no relay, is the setting
@@ -2187,7 +2862,7 @@ const diagnosticsView = () => {
     d.publish
       ? h(
           'p.muted',
-          `ads ${d.publish.mode}`,
+          `nostr card ${d.publish.mode}`,
           d.publish.publisher ? '' : ' (nothing wired to publish)',
           ` · last ${d.publish.lastPublishedAt ? ago(d.publish.lastPublishedAt) : 'never'}`,
           d.publish.heartbeatSeconds ? ` · heartbeat ${duration(d.publish.heartbeatSeconds)}` : '',
@@ -3348,19 +4023,108 @@ const ENDPOINTS = {
   audit: () => '/api/audit',
 }
 
-const load = async (view) => {
-  try {
-    state.overview = await api('/api/overview')
-    if (ENDPOINTS[view]) state.data[view] = await api(ENDPOINTS[view]())
-    state.banner = null
-  } catch (error) {
-    state.banner = error instanceof Error ? error.message : String(error)
+const activityLoadGenerations = {}
+const pendingViewReads = new Map()
+const readView = (path) => {
+  if (!pendingViewReads.has(path)) {
+    pendingViewReads.set(
+      path,
+      api(path).finally(() => pendingViewReads.delete(path)),
+    )
   }
-  render()
+  return pendingViewReads.get(path)
+}
+let overviewLoadGeneration = 0
+let overviewBalanceRead = null
+const readOverviewBalances = () => {
+  if (!overviewBalanceRead) {
+    overviewBalanceRead = api('/api/overview')
+      .then((overview) => overview.balances)
+      .finally(() => {
+        overviewBalanceRead = null
+      })
+  }
+  return overviewBalanceRead
+}
+
+const load = async (view) => {
+  const overviewGeneration = ++overviewLoadGeneration
+  const sections = view === 'activity' ? ACTIVITY_SECTIONS : ACTIVITY_SECTIONS.includes(view) ? [view] : []
+  const generations = Object.fromEntries(
+    sections.map((key) => [key, (activityLoadGenerations[key] = (activityLoadGenerations[key] ?? 0) + 1)]),
+  )
+  const ownsView = () => state.view === view || (state.view === 'activity' && ACTIVITY_SECTIONS.includes(view))
+  if (ownsView()) state.banner = null
+  const overviewRead = api('/api/overview?balances=false').then(
+    (overview) => {
+      if (overviewGeneration !== overviewLoadGeneration) return
+      state.overview = overview
+      state.overviewError = null
+      paintStatus()
+    },
+    (error) => {
+      if (overviewGeneration !== overviewLoadGeneration) return
+      state.overview = null
+      state.overviewError = error instanceof Error ? error.message : String(error)
+      paintStatus()
+    },
+  )
+  let balancesRead = Promise.resolve()
+  if (view === 'overview') {
+    delete state.data.overviewBalances
+    delete state.data.overviewBalanceError
+    balancesRead = readOverviewBalances().then(
+      (balances) => {
+        if (overviewGeneration !== overviewLoadGeneration || state.view !== 'overview') return
+        state.data.overviewBalances = balances
+        paintOverviewBalances()
+      },
+      (error) => {
+        if (overviewGeneration !== overviewLoadGeneration || state.view !== 'overview') return
+        state.data.overviewBalanceError = error instanceof Error ? error.message : String(error)
+        paintOverviewBalances()
+      },
+    )
+  }
+  const viewRead = (async () => {
+    if (sections.length) {
+      await Promise.all(
+        sections.map(async (key) => {
+          try {
+            const data = await api(ENDPOINTS[key]())
+            if (generations[key] !== activityLoadGenerations[key]) return
+            state.data[key] = data
+            delete state.activityErrors[key]
+          } catch (error) {
+            if (generations[key] !== activityLoadGenerations[key]) return
+            delete state.data[key]
+            state.activityErrors[key] = error instanceof Error ? error.message : String(error)
+          }
+        }),
+      )
+    } else if (ENDPOINTS[view]) {
+      const data = await readView(ENDPOINTS[view]())
+      if (overviewGeneration !== overviewLoadGeneration) return
+      state.data[view] = data
+    } else if (view === 'pricing') {
+      const [markets, settings] = await Promise.all([api('/api/markets'), api('/api/settings')])
+      if (overviewGeneration !== overviewLoadGeneration) return
+      state.data.markets = markets
+      state.data.settings = settings
+    } else return
+    if (ownsView()) render()
+  })().catch((error) => {
+    if (overviewGeneration !== overviewLoadGeneration || !ownsView()) return
+    state.banner = error instanceof Error ? error.message : String(error)
+    render()
+  })
+  await Promise.all([overviewRead, viewRead, balancesRead])
 }
 
 const viewFromHash = () => {
   const view = (location.hash || '#overview').slice(1)
+  if (view === 'markets' || view === 'settings') return 'pricing'
+  if (ACTIVITY_SECTIONS.includes(view)) return 'activity'
   return BODIES[view] ? view : 'overview'
 }
 
@@ -3377,12 +4141,10 @@ const go = (view) => {
 }
 
 const BODIES = {
+  pricing: pricingView,
   overview: overviewView,
   pnl: pnlView,
-  swaps: swapsView,
-  offers: offersView,
-  refusals: refusalsView,
-  quotes: quotesView,
+  activity: activityView,
   wallet: walletView,
   backends: backendsView,
   diagnostics: diagnosticsView,
@@ -3439,6 +4201,18 @@ const restartBanner = () => {
           'restart disabled',
         ),
   )
+}
+
+const paintStatus = () => {
+  if (state.view === 'overview') return render()
+  const root = document.getElementById('root')
+  root.querySelector('.status')?.replaceWith(statusBar())
+  const old = root.querySelector('.restart-banner')
+  const next = restartBanner()
+  if (old) {
+    if (next) old.replaceWith(next)
+    else old.remove()
+  } else if (next) root.querySelector('nav')?.after(next)
 }
 
 const render = () => {
@@ -3619,7 +4393,14 @@ const listen = () => {
     // the one endpoint built to avoid that, and drops keyboard focus off its
     // toolbar each time (`render` restores focus only for `.search`). An
     // operator who wants it fresher re-picks the window, which reloads.
-    if (state.view !== 'settings' && state.view !== 'markets' && state.view !== 'pnl' && !state.dialog) load(state.view)
+    if (
+      state.view !== 'pricing' &&
+      state.view !== 'settings' &&
+      state.view !== 'markets' &&
+      state.view !== 'pnl' &&
+      !state.dialog
+    )
+      load(state.view)
   })
   // EventSource reconnects on its own; nothing to do but not treat it as fatal.
   source.addEventListener('error', () => {})
@@ -3633,6 +4414,12 @@ window.addEventListener('hashchange', () => {
   if (view === state.view) return
   state.view = view
   load(view)
+})
+
+window.addEventListener('beforeunload', (event) => {
+  if (pricingDraft.size === 0) return
+  event.preventDefault()
+  event.returnValue = ''
 })
 
 state.view = viewFromHash()

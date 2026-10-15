@@ -34,6 +34,7 @@ import { registerEventRoutes } from './routes/events.js'
 import type { ChangeFeed } from './events.js'
 import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
+import { createGuardedFetch } from '@arkade-os/solver-core/price/guardedFetch.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { readStaticFile } from './static.js'
 import { createFeedCache } from './feedCache.js'
@@ -57,7 +58,7 @@ export interface AdminDeps {
   /** Recent open-RFQ bids. Absent when bidding is off (`OPEN_RFQ_MAX_BIDS_PER_MIN=0`). */
   bids?: BidRecorder
   /**
-   * The kind-38859 ad publisher. Present only in `relay` mode with
+   * The kind-38859 card publisher. Present only in `relay` mode with
    * `NOSTR_AD_PUBLISH` manual or auto — the treatment {@link AdminDeps.relay}
    * and {@link AdminDeps.bids} get.
    *
@@ -77,9 +78,33 @@ export interface AdminDeps {
   fetchPrice?: FetchPrice
 }
 
+const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
 export const buildAdminApp = (deps: AdminDeps): Hono => {
   const app = new Hono()
   const now = deps.now ?? nowSeconds
+
+  /**
+   * Same-site JSON only, ahead of every route: Hono runs handlers in
+   * registration order, so a guard added later runs later. Host rather than
+   * whole origin — a proxy terminating TLS changes the scheme, not the host.
+   */
+  app.use('/api/*', async (c, next) => {
+    if (!MUTATING.has(c.req.method)) return next()
+    const origin = c.req.header('origin')
+    if (
+      c.req.header('sec-fetch-site') === 'cross-site' ||
+      (origin !== undefined && URL.parse(origin)?.host !== new URL(c.req.url).host)
+    ) {
+      return c.json({ error: 'cross_origin', message: 'a cross-origin request cannot change this solver' }, 403)
+    }
+    // A form post cannot set this header; `DELETE` is the one the console sends bodiless.
+    const mediaType = (c.req.header('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
+    if (c.req.method !== 'DELETE' && mediaType !== 'application/json') {
+      return c.json({ error: 'unsupported_media_type', message: 'content-type must be application/json' }, 415)
+    }
+    return next()
+  })
 
   app.get('/api/healthz', (c) =>
     c.json({ ok: true, mode: deps.mode, uptimeSeconds: Math.max(0, now() - deps.startedAt) }),
@@ -93,12 +118,14 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   app.get('/api/rfq-refusals', (c) => c.json(deps.services.rfqRefusals.recent()))
   registerSettingsRoutes(app, deps)
   // Built once and shared: `feeds.read` is for the preview, never the write probe.
-  const fetchPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
-  const feeds = createFeedCache(fetchPrice)
-  registerMarketRoutes(app, { ...deps, fetchPrice }, feeds)
-  registerPricingRoutes(app, deps, feeds)
+  // Two readers: a saved row may be a grandfathered private feed, a typed URL may not.
+  const savedPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
+  const typedPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed({ fetch: createGuardedFetch() })
+  const feeds = createFeedCache(savedPrice)
+  registerMarketRoutes(app, { ...deps, fetchPrice: typedPrice }, feeds)
+  registerPricingRoutes(app, deps, feeds, createFeedCache(typedPrice))
   // The ordered save across both of the two routes above. @see routes/pricingApply.ts
-  registerPricingApplyRoutes(app, { ...deps, fetchPrice })
+  registerPricingApplyRoutes(app, { ...deps, fetchPrice: typedPrice })
   // BEFORE the actions route, for the reason the card route states below: that
   // route claims `/api/actions/:name` only, but registration order is what
   // keeps the `*` fallback at the very bottom from shadowing anything.

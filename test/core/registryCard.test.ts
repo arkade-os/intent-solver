@@ -8,6 +8,7 @@ import {
   buildSolverCard,
   canonicalCardJson,
   cardDigest,
+  cardPointer,
   publishableAssetMarkets,
   signSolverCard,
   unpublishableCorridors,
@@ -709,6 +710,13 @@ describe('canonical form and signature', () => {
     expect(bytesToHex(cardDigest(card))).toBe(bytesToHex(cardDigest({ ...card, sig: undefined })))
   })
 
+  it('counts a parsed "__proto__" key in the signed bytes, as the registry client verifier (solver-registry#40) does', async () => {
+    const card = await signSolverCard(buildSolverCard(inputs()), sign)
+    const tampered = JSON.parse(JSON.stringify(card).replace('"nostr":{', '"nostr":{"__proto__":{"x":1},'))
+    expect(Object.keys(tampered.transports.nostr)).toContain('__proto__')
+    expect(verifyCardSig(tampered)).toBe(false)
+  })
+
   it('signs the CAIP-19 bytes, and one perturbed byte of them fails to verify', async () => {
     // Asserted over the canonicalization itself rather than by swapping a
     // field, so a canonicalize() that silently dropped a key could not pass.
@@ -734,5 +742,30 @@ describe('canonical form and signature', () => {
     const otherPubkey = bytesToHex(schnorr.getPublicKey(schnorr.utils.randomSecretKey()))
     const card = buildSolverCard(inputs({ discoveryPubkey: otherPubkey }))
     await expect(signSolverCard(card, sign)).rejects.toThrow(/does not verify/)
+  })
+})
+
+describe('the registry pointer', () => {
+  it('is the card without markets, signed over its own canonical JSON', async () => {
+    const card = await signSolverCard(buildSolverCard(inputs()), sign)
+    const pointer = await signSolverCard(cardPointer(card), sign)
+    expect(Object.keys(pointer).sort()).toEqual(['discovery_pubkey', 'name', 'sig', 'transports', 'version'])
+    expect(pointer).toMatchObject({
+      version: 0,
+      name: card.name,
+      discovery_pubkey: PUBKEY,
+      transports: card.transports,
+    })
+    expect(verifyCardSig(pointer)).toBe(true)
+    const bytes = new TextEncoder().encode(canonicalCardJson(pointer))
+    expect(schnorr.verify(hexToBytes(pointer.sig!), sha256(bytes), hexToBytes(PUBKEY))).toBe(true)
+    expect(verifyCardSig({ ...pointer, sig: card.sig })).toBe(false)
+    expect(verifyCardSig({ ...pointer, name: 'other-name' })).toBe(false)
+  })
+
+  it('refuses a pointer whose pubkey is not the signing key', async () => {
+    const otherPubkey = bytesToHex(schnorr.getPublicKey(schnorr.utils.randomSecretKey()))
+    const pointer = cardPointer(buildSolverCard(inputs({ discoveryPubkey: otherPubkey })))
+    await expect(signSolverCard(pointer, sign)).rejects.toThrow(/does not verify/)
   })
 })

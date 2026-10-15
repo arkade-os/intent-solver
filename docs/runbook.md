@@ -52,6 +52,27 @@ the API on Workers if you want Workers at all.
 | `<CORRIDOR>_ENABLED`                 | no (`true`)                                                  | `false` darkens that corridor (`LN_SEND`, `LN_RECEIVE`, `ONCHAIN_SEND`, `ONCHAIN_RECEIVE`): never constructed, and its pair is refused `unsupported_pair` at the ingress. Rows already on disk stay readable, but the sweep stops driving them. **Exactly `true` or `false` once trimmed** — unset, empty or whitespace is on, anything else refuses to boot; see "When the solver refuses to boot on an _ENABLED value"                                                                                                               |
 | `PAYEE_MNEMONIC`                     | test-only                                                    | payee wallet for `invoice` self-tests, which mint from a wallet of their own                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
+## Direct-fill journal startup refusal
+
+`ARK_DB_PATH` also holds the wallet's `direct_fill_attempt` journal. Errors such as
+`invalid direct fill journal row`, `funding commitment changed`, or
+`pinned journal row vanished` stop startup because the solver cannot establish
+which inputs remain liable. Restarting does not resolve corrupt or missing evidence.
+
+Stop admission and retain the failing database, its `-wal`/`-shm` files, the exact
+solver revision and the full error. Take a SQLite-consistent backup before
+investigation. Do not delete a journal row, set `acknowledged`, clear reservations,
+or start with an empty wallet database to bypass the refusal. Those actions can
+admit a second spend while the original fill remains unresolved.
+
+Reconstruct the row from a consistent backup and its recorded wallet identity,
+deposit, funding and signed graph. Confirm the original or recorded conflict's
+settlement using the configured Arkade provider and indexer; a missing indexer
+entry or an expired quote is insufficient. If the evidence cannot be restored,
+keep the affected wallet offline and escalate for operator/protocol review.
+After evidence repair, restart the same wallet and let the normal reconciler
+verify settlement and acknowledge the matching parent before releasing holds.
+
 ## Shape 1 — single Node process
 
 ```
@@ -338,6 +359,13 @@ What follows from that:
   in `config.ts` refuses rather than guessing; this one cannot, because the
   container case legitimately needs the wider bind. The check that matters is
   in your proxy config, not here.
+- Mutating `/api` requests must be same-site JSON: a POST/PUT/PATCH without
+  `content-type: application/json` gets 415, and any mutation carrying
+  `Sec-Fetch-Site: cross-site` or an `Origin` naming another host gets 403.
+  The proxy must forward the browser's `Host`: behind **nginx** add
+  `proxy_set_header Host $host;` to the location block — its default rewrites
+  `Host` to the upstream, so every console mutation would be refused as
+  cross-origin. Caddy and Traefik preserve `Host` by default.
 
 ### Why it runs inside the provider process
 
@@ -1288,6 +1316,18 @@ key change — the old card keeps quoting stale bounds until replaced.
 (Generated here rather than by `solverd` because its card RPC predates
 corridors: arkade-os/solver-registry#13.)
 
+The `relay` command also publishes this same card to its relay as kind 38859
+(`NOSTR_AD_PUBLISH`, `SOLVER_NAME` required). Once wallets read cards from
+relays, the registry needs only a pointer — `cli card <name> --pointer`, the
+card without its markets — filed once; the markets then stay current on the
+relay. Until those wallets are out, keep the full card in the registry: older
+wallets read only that.
+
+Wallets drop a relay card more than two hours old. `auto` keeps it fresh on
+its own; `manual` re-sends only a card the operator published since the
+process started, so after any restart, publish again from the console
+(**Publish now**) within two hours or the solver drops out of discovery.
+
 Two gotchas:
 
 - **Submit only after solver-registry PR #12 has merged** — that PR adds
@@ -1577,8 +1617,9 @@ covers separately — see "covclaimd" below.
   `test/e2e/support/preflight.ts` so `pnpm test:e2e` stays one command.
   Anything already exported wins, so a one-off override still works.
   `COVCLAIMD_URL` (default `http://localhost:7271`) and `ESPLORA_URL` (default
-  `http://localhost:3000/api`) are e2e-only knobs — no `packages/solver-app/src/config.ts` setting
-  exists for covclaimd yet, because the receive legs are not wired into the CLI.
+  `http://localhost:3000/api`) carry e2e defaults here; `COVCLAIMD_URL` is also
+  a real `packages/solver-app/src/config.ts` setting, so an exported one wires
+  the deployed receive legs to it too — see § covclaimd before you do.
 - **A missing dependency FAILS, it never skips.** A suite that runs this rarely
   and skips quietly is a suite that rots into one that cannot pass at all. The
   preflight probes every dependency and prints the whole stack as a table,
@@ -1612,8 +1653,8 @@ covers separately — see "covclaimd" below.
 
 ### covclaimd
 
-Optional, and still unwired here — but the reason has an expiry date on it now,
-so read the version before repeating the old conclusion.
+Optional, and unwired unless `COVCLAIMD_URL` names one — but the reason has an
+expiry date on it now, so read the version before repeating the old conclusion.
 
 **What was observed (regtest, 2026-08-07).** Against a live
 `ghcr.io/arkade-os/covclaimd:v0.0.1-rc.1`, `POST /v1/reveal` returned **200**
@@ -1648,8 +1689,10 @@ the timelocked non-interactive refund leaf is on unverified ground until this
 note says otherwise.
 
 **Required operator action: leave covclaimd unwired.** There is no safe middle
-setting to pick here. `createServices` leaves `covclaimd` unset on purpose
-(`packages/solver-app/src/cli.ts:444`), and every quote path now writes
+setting to pick here, and nothing in the code enforces it: `createServices`
+wires covclaimd whenever `COVCLAIMD_URL` is set
+(`packages/solver-app/src/ops/services.ts`), so leaving it unwired means
+leaving that variable unset. Every quote path now writes
 `nonInteractiveParameters: true` unconditionally — all six `insertQuote` call
 sites, with no config gate and no per-swap opt-out — so wiring covclaimd would
 put it against a nine-leaf tree on EVERY newly funded lockup, not on some

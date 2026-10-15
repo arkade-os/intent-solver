@@ -21,7 +21,8 @@ import { hex } from '@scure/base'
 import { OutScript, p2tr } from '@scure/btc-signer'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { estimateClaimTxVsize } from '@arkade-os/solver-rails/onchain/claim.js'
-import { claimSpendVsize, fundingTxVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
+import { estimateRefundTxVsize } from '@arkade-os/solver-rails/onchain/refund.js'
+import { claimSpendVsize, fundingTxVsize, refundSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 
 const network = ONCHAIN_NETWORKS.regtest
 const p2trScript = p2tr(schnorr.getPublicKey(new Uint8Array(32).fill(3)), undefined, network).script
@@ -66,6 +67,31 @@ describe('claimSpendVsize', () => {
     // plus one P2TR output. Written down so a change in any of those is a
     // deliberate edit here rather than a silent reprice.
     expect(claimSpendVsize({ network, destinationScript: p2trScript })).toBe(152)
+  })
+})
+
+describe('refundSpendVsize', () => {
+  it('measures exactly what a real swap-specific refund will, so a quote floor is not sized off a fiction', () => {
+    const real = buildOnchainHtlc({
+      network,
+      paymentHash: hex.encode(new Uint8Array(32).fill(9)),
+      claimPubkey: schnorr.getPublicKey(new Uint8Array(32).fill(1)),
+      refundPubkey: schnorr.getPublicKey(new Uint8Array(32).fill(2)),
+      refundLocktime: 2_100_000_000,
+    })
+    const swapSpecific = estimateRefundTxVsize({
+      htlc: real,
+      fundingTxid: 'f'.repeat(64),
+      fundingVout: 1,
+      fundingValueSats: 50_000,
+      destinationScript: p2trScript,
+      payoutAmountSats: 49_500n,
+    })
+    expect(refundSpendVsize({ network, destinationScript: p2trScript })).toBe(swapSpecific)
+  })
+
+  it('is the size a script-path refund actually occupies', () => {
+    expect(refundSpendVsize({ network, destinationScript: p2trScript })).toBe(138)
   })
 })
 

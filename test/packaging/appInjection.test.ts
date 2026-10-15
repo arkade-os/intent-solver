@@ -112,6 +112,10 @@ const solverConfig = (): Config => {
     assetQuoteValiditySeconds: 30,
     lnReceiveAcceptUnilateralGap: false,
     maxExposedSats: 1_000_000,
+    // Off, which is the default an operator who configures nothing gets.
+    approvalThresholdSats: null,
+    notify: { telegramBotToken: null, telegramChatId: null, slackWebhookUrl: null },
+    balanceReportIntervalMinutes: null,
     contractRetentionMs: 86_400_000,
     sweepConcurrency: 4,
     lockupTimeoutSeconds: 3600,
@@ -171,7 +175,7 @@ describe('a deployment described in code rather than in the environment', () => 
     // The branch that makes `lnBackend: null` a supported deployment rather than
     // a crash. Without it the registry would be mandatory for everyone, and with
     // it a consumer serving their own corridors never mutates module state.
-    expect(servicesSource).toContain('config.lnBackend === null ? null : await createRail(config)')
+    expect(servicesSource).toMatch(/config\.lnBackend === null\s*\? null\s*:\s*await createRail\(config,\s*\{/)
   })
 
   it('takes corridors as a PARAMETER, with no global to mutate first', () => {

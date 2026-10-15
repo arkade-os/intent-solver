@@ -86,6 +86,8 @@ const CONFIG_KEYS = [
   'EVM_SEND_USDC_MIN_SATS',
   'EVM_SEND_USDC_FEE_BPS',
   'EVM_RECEIVE_USDC_ENABLED',
+  'APPROVAL_THRESHOLD_SATS',
+  'BALANCE_REPORT_INTERVAL_MINUTES',
   'LN_BACKEND',
   // Listed for the same reason `EVM_TOKENS` is: a leaked `LN_SEND_ENABLED=false`
   // would silently exempt every later test from needing a rail at all.
@@ -124,6 +126,7 @@ const CONFIG_KEYS = [
   'ASSET_QUOTE_VALIDITY_SECONDS',
   'ASSET_USDA_BUY_ENABLED',
   'ASSET_USDA_SELL_ENABLED',
+  'ASSET_USDA_APPROVAL_THRESHOLD',
 ]
 
 /**
@@ -1044,8 +1047,14 @@ describe('ASSET_MARKETS', () => {
   it('parses SYMBOL:<asset id> with both directions open', () => {
     process.env.ASSET_MARKETS = `USDA:${USDA}`
     expect(loadConfig().assetRfqTokens).toEqual([
-      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } },
+      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true }, approvalThresholdUnits: null },
     ])
+  })
+
+  it('reads ASSET_USDA_APPROVAL_THRESHOLD off the environment', () => {
+    process.env.ASSET_MARKETS = `USDA:${USDA}`
+    process.env.ASSET_USDA_APPROVAL_THRESHOLD = '250000'
+    expect(loadConfig().assetRfqTokens[0]!.approvalThresholdUnits).toBe(250_000n)
   })
 
   it('ASSET_USDA_BUY_ENABLED=false closes sell_base — the client GIVES the base leg', () => {
@@ -1075,5 +1084,56 @@ describe('ASSET_MARKETS', () => {
     expect(() => loadConfig()).toThrow(/ASSET_QUOTE_VALIDITY_SECONDS/)
     process.env.ASSET_QUOTE_VALIDITY_SECONDS = '901'
     expect(() => loadConfig()).toThrow(/ASSET_QUOTE_VALIDITY_SECONDS/)
+  })
+})
+
+// Beside `LN_BACKEND` for the same reason: unset must not resolve to a working
+// value. Here `Number('') === 0` would be a threshold of ZERO, gating everything.
+describe('APPROVAL_THRESHOLD_SATS', () => {
+  it('is NULL when unset, so a deployment that configures nothing has no gate', () => {
+    expect(loadConfig().approvalThresholdSats).toBeNull()
+  })
+
+  it('is null when set but blank, rather than becoming a zero threshold', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '   '
+    expect(loadConfig().approvalThresholdSats).toBeNull()
+  })
+
+  it('reads a configured threshold', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '1000000'
+    expect(loadConfig().approvalThresholdSats).toBe(1_000_000)
+  })
+
+  it('accepts an explicit zero, which gates everything', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '0'
+    expect(loadConfig().approvalThresholdSats).toBe(0)
+  })
+
+  it('refuses a negative threshold', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '-1'
+    expect(() => loadConfig()).toThrow(/APPROVAL_THRESHOLD_SATS/)
+  })
+
+  it('refuses a non-integer rather than truncating it', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '1.5'
+    expect(() => loadConfig()).toThrow(/APPROVAL_THRESHOLD_SATS/)
+  })
+})
+
+describe('BALANCE_REPORT_INTERVAL_MINUTES', () => {
+  it('is null when unset or blank, so no report is sent', () => {
+    expect(loadConfig().balanceReportIntervalMinutes).toBeNull()
+    process.env.BALANCE_REPORT_INTERVAL_MINUTES = '  '
+    expect(loadConfig().balanceReportIntervalMinutes).toBeNull()
+  })
+
+  it('reads a configured interval', () => {
+    process.env.BALANCE_REPORT_INTERVAL_MINUTES = '360'
+    expect(loadConfig().balanceReportIntervalMinutes).toBe(360)
+  })
+
+  it('refuses an interval short enough to flood the channel', () => {
+    process.env.BALANCE_REPORT_INTERVAL_MINUTES = '1'
+    expect(() => loadConfig()).toThrow(/BALANCE_REPORT_INTERVAL_MINUTES/)
   })
 })

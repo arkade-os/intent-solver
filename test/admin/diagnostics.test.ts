@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { Hono } from 'hono'
 import { registerDiagnosticsRoutes } from '@arkade-os/solver-app/admin/routes/diagnostics.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
+import type { SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { AdPublisher, type AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 
 /** Every corridor at the same cap, so a test that cares about caps must say so. */
@@ -397,10 +398,9 @@ describe('GET /api/diagnostics', () => {
    * the fact the operator most wants confirmed: that their setting took.
    */
   it('reports the configured mode and whether anything can publish', async () => {
-    const ad = { v: 1 as const, type: 'solver_ad' as const, pairs: [], relays: [] }
     const publisher = new AdPublisher({
       mode: 'auto',
-      buildAd: () => ad,
+      buildAd: async () => ({}) as SolverCard,
       publish: vi.fn(async () => {}),
       now: () => 1_800_000_000,
       heartbeatSeconds: 1800,

@@ -4,15 +4,9 @@ import { fileURLToPath } from 'node:url'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
-import { deploymentAd } from '@arkade-os/solver-app/admin/routes/card.js'
-import { DEFAULT_ONCHAIN_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/onchainSend.js'
-import { DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/onchainReceive.js'
-import { DEFAULT_HOLD_INVOICE_WINDOW } from '@arkade-os/solver-corridors/receive/orchestrator.js'
+import { deploymentCard, type CardSource } from '@arkade-os/solver-app/admin/routes/card.js'
 import { verifyCardSig, type SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { AdPublisher, type AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
-// `AdPublishMode` is imported for the double's `nostrAdPublish`, which is now
-// the only source of the reported mode.
-import { buildSolverAd } from '@arkade-os/solver-core/core/solverAd.js'
 
 // BIP340 test vector 1, as `test/core/registryCard.test.ts` uses it. The
 // console signs with the WALLET identity, so `providerPubkey` below must be
@@ -29,40 +23,19 @@ const allCorridors = <T>(value: T) => ({
   'onchain:BTC->arkade:BTC': value,
 })
 
-const ad = buildSolverAd({
-  pairs: [
-    {
-      pair: 'arkade:BTC->lightning:BTC',
-      min: 1_000,
-      max: 50_000,
-      feeBpsIndicative: 0,
-      feeFlatIndicative: 0,
-      quoteValiditySeconds: 900,
-    },
-  ],
-  relays: ['wss://relay.example'],
-})
+const STUB_CARD = {
+  version: 0,
+  name: 'test-solver',
+  discovery_pubkey: PUBKEY,
+  transports: { nostr: { relays: ['wss://relay.example'] } },
+  markets: [],
+} as SolverCard
 
-const publisher = (mode: AdPublishMode, publish = vi.fn(async () => {})) =>
-  new AdPublisher({ mode, buildAd: () => ad, publish, now: () => 1_800_000_000, heartbeatSeconds: 1800 })
-
-/**
- * A publisher whose `buildAd` throws.
- *
- * Not contrived: in any real wiring `buildAd` closes over live policy and
- * corridor limits, so it is exactly as capable of throwing as the card builder
- * beside it.
- */
-const publisherWithUnbuildableAd = (mode: AdPublishMode) =>
-  new AdPublisher({
-    mode,
-    buildAd: () => {
-      throw new Error('corridor policy unreadable')
-    },
-    publish: vi.fn(async () => {}),
-    now: () => 1_800_000_000,
-    heartbeatSeconds: 1800,
-  })
+const publisher = (
+  mode: AdPublishMode,
+  publish = vi.fn(async () => {}),
+  buildAd = async (): Promise<SolverCard> => STUB_CARD,
+) => new AdPublisher({ mode, buildAd, publish, now: () => 1_800_000_000, heartbeatSeconds: 1800 })
 
 /**
  * A COMPLETE service double — every member the card route actually reaches,
@@ -155,8 +128,6 @@ interface CardBody {
   card: SolverCard | null
   cardError: string | null
   cardOmitted: string[]
-  ad: unknown
-  adError: string | null
   publish: { mode: string; publisher: boolean; lastPublishedAt: number | null; lastError: string | null }
 }
 
@@ -175,7 +146,13 @@ const getCard = async (deps: ReturnType<typeof makeDeps>): Promise<{ status: num
 }
 
 const postAd = async (deps: ReturnType<typeof makeDeps>) => {
-  const response = await buildAdminApp(deps).fetch(new Request('http://admin/api/actions/post-ad', { method: 'POST' }))
+  const response = await buildAdminApp(deps).fetch(
+    new Request('http://admin/api/actions/post-ad', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    }),
+  )
   return { status: response.status, body: (await response.json()) as Record<string, unknown> }
 }
 
@@ -373,7 +350,7 @@ describe('GET /api/card', () => {
   /**
    * AN UNBUILDABLE CARD MUST NOT BLANK THE PAGE.
    *
-   * The same rule the rest of this console runs on. The ad half of the answer
+   * The same rule the rest of this console runs on. The rest of the answer
    * is still worth showing, and 500-ing over an unset environment variable is
    * the failure the console exists to end.
    */
@@ -432,16 +409,21 @@ describe('GET /api/card', () => {
     expect(body.card!.markets[0]!.fee_flat).toBe('50')
   })
 
-  it('reports no publisher as off, with no ad, rather than as a fault', async () => {
+  it('answers with the card and its nostr publish state, and no second document', async () => {
+    for (const deps of [makeDeps(), makeDeps({ nostrAdPublish: 'manual', adPublisher: publisher('manual') })]) {
+      const { body } = await getCard(deps)
+      expect(Object.keys(body).sort()).toEqual(['card', 'cardError', 'cardOmitted', 'publish'])
+    }
+  })
+
+  it('reports no publisher as off rather than as a fault', async () => {
     const { body } = await getCard(makeDeps())
-    expect(body.ad).toBeNull()
     expect(body.publish).toEqual({ mode: 'off', publisher: false, lastPublishedAt: null, lastError: null })
   })
 
-  it('reports the ad and the publish mode when a publisher is present', async () => {
+  it('reports the publish mode when a publisher is present', async () => {
     const { body } = await getCard(makeDeps({ nostrAdPublish: 'manual', adPublisher: publisher('manual') }))
     expect(body.publish.mode).toBe('manual')
-    expect(body.ad).toEqual(ad)
   })
 
   /**
@@ -492,33 +474,19 @@ describe('GET /api/card', () => {
     expect((await postAd(wired)).body['error']).toBeUndefined()
   })
 
-  /**
-   * THE AD HALF IS GUARDED TOO, which the surrounding comment already promises.
-   *
-   * `currentAd()` calls `buildAd()`, which in a real wiring closes over live
-   * policy — as capable of throwing as the card builder beside it. Unwrapped, it
-   * would escape to `app.onError` as a 500 and take down the CARD, which built
-   * perfectly, along with the whole panel. That is "one dead backend must not
-   * blank the page" inverted: the half that failed silences the half that did
-   * not.
-   */
-  it('reports an unbuildable ad beside a card that built fine', async () => {
-    const { status, body } = await getCard(
-      makeDeps({ nostrAdPublish: 'auto', adPublisher: publisherWithUnbuildableAd('auto') }),
-    )
-    expect(status).toBe(200)
-    expect(body.ad).toBeNull()
-    expect(body.adError).toContain('corridor policy unreadable')
-    // The half that worked is still delivered, and still valid.
-    expect(body.cardError).toBeNull()
-    expect(verifyCardSig(body.card!)).toBe(true)
-  })
+  it('refuses to publish without SOLVER_NAME, and says why in the publish state', async () => {
+    delete process.env.SOLVER_NAME
+    const deps = makeDeps({ nostrAdPublish: 'manual' }) as { services: CardSource; adPublisher?: AdPublisher }
+    const publish = vi.fn(async () => {})
+    deps.adPublisher = publisher('manual', publish, () => deploymentCard(deps.services))
 
-  it('reports a null adError when the ad builds, and when there is no publisher', async () => {
-    expect(
-      (await getCard(makeDeps({ nostrAdPublish: 'auto', adPublisher: publisher('auto') }))).body.adError,
-    ).toBeNull()
-    expect((await getCard(makeDeps())).body.adError).toBeNull()
+    const posted = await postAd(deps as never)
+    expect(posted.status).toBe(409)
+    expect(String(posted.body['detail'])).toContain('SOLVER_NAME')
+    expect(publish).not.toHaveBeenCalled()
+    const { status, body } = await getCard(deps as never)
+    expect(status).toBe(200)
+    expect(body.publish.lastError).toContain('SOLVER_NAME')
   })
 })
 
@@ -670,7 +638,7 @@ describe('the discovery screen', () => {
       'utf8',
     )
     const start = source.indexOf('const discoveryView = () => {')
-    const end = source.indexOf("h('h2', 'nostr ad')", start)
+    const end = source.indexOf("h('h2', 'nostr')", start)
     expect(start, 'discoveryView is gone from app.js').toBeGreaterThan(-1)
     const panel = end === -1 ? source.slice(start) : source.slice(start, end)
     expect(panel).toContain('d.cardOmitted')
@@ -679,47 +647,12 @@ describe('the discovery screen', () => {
   })
 })
 
-describe('deploymentAd', () => {
-  const adOf = (deps: ReturnType<typeof makeDeps>) =>
-    deploymentAd((deps as unknown as { services: Parameters<typeof deploymentAd>[0] }).services)
+describe('deploymentCard', () => {
+  const sourceOf = (deps: ReturnType<typeof makeDeps>) => (deps as { services: CardSource }).services
 
-  it('advertises each enabled corridor on its own terms and quote window, over the card relays', () => {
-    process.env.SOLVER_CARD_RELAYS = 'wss://b.example, wss://c.example'
-    const ad = adOf(makeDeps({ lnSendFlatSats: 50 }))
-    expect(ad.relays).toEqual(['wss://relay.example', 'wss://b.example', 'wss://c.example'])
-    const bounds = { min: '1000', max: '50000' }
-    expect(ad.pairs).toEqual([
-      {
-        pair: 'arkade:BTC->lightning:BTC',
-        ...bounds,
-        fee_bps_indicative: 30,
-        fee_flat_indicative: '50',
-        quote_validity_s_typical: 600,
-      },
-      {
-        pair: 'lightning:BTC->arkade:BTC',
-        ...bounds,
-        fee_bps_indicative: 10,
-        quote_validity_s_typical: DEFAULT_HOLD_INVOICE_WINDOW,
-      },
-      {
-        pair: 'arkade:BTC->onchain:BTC',
-        ...bounds,
-        fee_bps_indicative: 0,
-        quote_validity_s_typical: DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
-      },
-      {
-        pair: 'onchain:BTC->arkade:BTC',
-        ...bounds,
-        fee_bps_indicative: 0,
-        quote_validity_s_typical: DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT,
-      },
-    ])
-  })
-
-  it('leaves out a disabled corridor', () => {
-    const pairs = adOf(makeDeps({ lnSendEnabled: false })).pairs.map((p) => p['pair'])
-    expect(pairs).not.toContain('arkade:BTC->lightning:BTC')
-    expect(pairs).toHaveLength(3)
+  it('names the card from its argument before SOLVER_NAME', async () => {
+    const card = await deploymentCard(sourceOf(makeDeps()), 'other-solver')
+    expect(card.name).toBe('other-solver')
+    expect(verifyCardSig(card)).toBe(true)
   })
 })

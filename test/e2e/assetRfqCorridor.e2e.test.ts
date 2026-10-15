@@ -22,15 +22,15 @@ import { createServer, type Server } from 'node:http'
 import { randomBytes, randomInt } from 'node:crypto'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { ArkAddress, isVtxoSpent, asset } from '@arkade-os/sdk'
+import { ArkAddress, isVtxoSpent, asset, Transaction } from '@arkade-os/sdk'
 import { InMemoryAssetSwapRepository } from '@arkade-os/swap'
 import { createOffer, cancelOffer, type Offer } from '@arkade-os/swap/protocol'
-import { hex } from '@scure/base'
+import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { GiveUp, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
-import { fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import { ASSET_CARRIER_SATS, fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import {
   offerExitDelay,
   offerFromTerms,
@@ -58,6 +58,9 @@ import {
 } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
 import { completeTaxiReceiveCarrier } from '@arkade-os/solver-app/ops/assetRfqTaxiAdapter.js'
 import type { TaxiUrlPolicy } from '@arkade-os/solver-app/ops/taxiUrlGuard.js'
+import { AdminStore, type SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
+import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
+import type { ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { esploraUrl, requireStack } from './support/preflight.js'
 import {
   assertArkadeSpendable,
@@ -261,6 +264,8 @@ const harness = async (
     quoteValiditySeconds?: number
     carrier?: TaxiUrlPolicy
     onError?: AssetRfqDeps['onError']
+    balance?: () => Promise<ReadonlyMap<AssetLeg, bigint>>
+    approvalGate?: ApprovalCheck
   } = {},
 ): Promise<Harness> => {
   const markets = over.markets ?? [market()]
@@ -274,11 +279,12 @@ const harness = async (
     dustSats: arkade.ctx.dustSats,
     deriveOffer,
     depositAt,
-    balance,
+    balance: over.balance ?? balance,
     fetchPrice: createPriceFeed(),
     settle,
     ...(over.carrier ? { receiveCarrierQuotes: await shippedCarrier(store, over.carrier, quoteValiditySeconds) } : {}),
     ...(over.onError ? { onError: over.onError } : {}),
+    ...(over.approvalGate ? { approvalGate: over.approvalGate } : {}),
   })
   const descriptor = assetRfqDescriptor(markets[0]!, 'sell_base')
   return { corridor: assetRfqCorridor(descriptor, service, store), store, pair: descriptor.pair }
@@ -355,6 +361,66 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       await store.close()
     }
   })
+
+  it(
+    'quotes a BTC->asset swap, recognises the deposit and fills it',
+    async () => {
+      const { corridor, store, pair } = await harness()
+      const amount = depositSats(20_000)
+
+      const outcome = await corridor.quote(requestFor(pair, amount))
+      expect(outcome.kind, JSON.stringify(outcome)).toBe('quote')
+      const quote = outcome.payload as {
+        from_amount: string
+        to_amount: string
+        valid_until: number
+        profile: { offer_address: string; offer_pk_script: string }
+      }
+      expect(BigInt(quote.from_amount)).toBe(amount)
+      const net = amount - arkade.ctx.dustSats
+      expect(BigInt(quote.to_amount)).toBe(net - (net * BigInt(FEE_BPS) + 9_999n) / 10_000n)
+
+      // § 6 compare-only, and why this corridor needs no accept message: the
+      // client derives the covenant itself and funds only its own derivation.
+      const mine = await clientOffer(BigInt(quote.to_amount))
+      expect(hex.encode(mine.swapPkScript)).toBe(quote.profile.offer_pk_script)
+      expect(mine.address).toBe(quote.profile.offer_address)
+
+      const fundingTxid = await arkade.ctx.wallet.send({
+        address: mine.address,
+        amount: Number(amount),
+        extensions: [mine.extension],
+      })
+      expect(fundingTxid).toMatch(/^[0-9a-f]{64}$/)
+
+      const id = (await store.listNonTerminal())[0]!.id
+      const funded = await driveTo({ corridor, store }, id, 'funded')
+      expect(funded.depositTxid).toBe(fundingTxid)
+
+      const filled = await driveTo({ corridor, store }, id, 'filled')
+      expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
+      expect(filled.fillTxid).not.toBe(fundingTxid)
+
+      await poll(async () => ((await depositAt(filled.offerPkScript)) === null ? true : null), {
+        attempts: 30,
+        intervalMs: 2000,
+        whenExhausted: 'asset deposit remained spendable after the fill',
+      })
+
+      // The asset rides the emulator packet, so an output can only show the
+      // maker's script and the carrier the covenant obliges; the emulator
+      // refusing anything else is what makes the rest of the payment true.
+      const { txs } = await arkade.ctx.wallet.indexerProvider.getVirtualTxs([filled.fillTxid!])
+      const fill = Transaction.fromPSBT(base64.decode(txs[0]!))
+      expect(hex.encode(fill.getOutput(0)!.script!)).toBe(makerPkScript)
+      expect(fill.getOutput(0)!.amount).toBe(ASSET_CARRIER_SATS)
+
+      const status = await corridor.statusFor(filled.rfqId)
+      expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
+      await store.close()
+    },
+    SWAP_TIMEOUT_MS,
+  )
 
   it(
     'refuses what it cannot quote, in the closed RFQ vocabulary',
@@ -539,6 +605,105 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
         swapAddress: mine.address,
       })
       await store.close()
+    },
+    SWAP_TIMEOUT_MS,
+  )
+})
+
+/**
+ * The gate on an ASSET payout, live. The sats threshold cannot express this leg:
+ * the solver pays `to_amount` of the minted asset.
+ */
+describe('e2e arkade asset RFQ — the approval gate', () => {
+  /** The payout the quote will oblige, by the formula the fill test pins. */
+  const payoutFor = (amount: bigint): bigint => {
+    const net = amount - arkade.ctx.dustSats
+    return net - (net * BigInt(FEE_BPS) + 9_999n) / 10_000n
+  }
+
+  const gated = async (thresholdUnits: bigint) => {
+    const admin = await AdminStore.open(join(dir, `admin-${randomBytes(6).toString('hex')}.sqlite`))
+    const held: SwapApprovalRequest[] = []
+    const built = await harness({
+      approvalGate: approvalGateFor({
+        thresholdSats: null,
+        assetThresholds: new Map([[assetId, thresholdUnits]]),
+        corridor: 'arkade asset RFQ',
+        store: admin,
+        onHeld: (request) => held.push(request),
+      }),
+    })
+    return { ...built, admin, held }
+  }
+
+  const quoteAndFund = async (corridor: Corridor, pair: string, amount: bigint) => {
+    const outcome = await corridor.quote(requestFor(pair, amount))
+    expect(outcome.kind, JSON.stringify(outcome)).toBe('quote')
+    const quote = outcome.payload as { to_amount: string; profile: { offer_address: string } }
+    expect(BigInt(quote.to_amount)).toBe(payoutFor(amount))
+    const mine = await clientOffer(BigInt(quote.to_amount))
+    await arkade.ctx.wallet.send({ address: mine.address, amount: Number(amount), extensions: [mine.extension] })
+  }
+
+  it(
+    'holds an asset payout AT its threshold, then fills it once approved',
+    async () => {
+      const amount = depositSats(20_000)
+      const { corridor, store, pair, admin, held } = await gated(payoutFor(amount))
+      expect(await admin.listPendingApprovals()).toEqual([])
+
+      await quoteAndFund(corridor, pair, amount)
+      const id = (await store.listNonTerminal())[0]!.id
+      await driveTo({ corridor, store }, id, 'funded')
+
+      // The approval ROW, never the state: `funded` is true before AND after.
+      const pending = await poll(
+        async () => {
+          await corridor.tickAll()
+          // GiveUp, not a plain throw: `poll` retries one and would hide this.
+          const state = (await store.get(id)).state
+          if (state !== 'funded') throw new GiveUp(`${id} reached ${state} instead of being held`)
+          const rows = await admin.listPendingApprovals()
+          return rows.length > 0 ? rows : null
+        },
+        { attempts: 20, intervalMs: 1000, whenExhausted: `${id} was never recorded as awaiting approval` },
+      )
+      const expected = [{ swapId: id, corridor: 'arkade asset RFQ', assetId, amount: payoutFor(amount) }]
+      expect(
+        pending.map(({ swapId, corridor: c, assetId: a, amount: n }) => ({
+          swapId,
+          corridor: c,
+          assetId: a,
+          amount: n,
+        })),
+      ).toEqual(expected)
+      expect(held).toEqual(expected)
+
+      for (let i = 0; i < 3; i++) await corridor.tickAll()
+      expect(await store.get(id)).toMatchObject({ state: 'funded', fillTxid: null })
+
+      expect(await admin.approveSwap(id)).toBe(true)
+      const filled = await driveTo({ corridor, store }, id, 'filled')
+      expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
+      expect(await admin.listPendingApprovals()).toEqual([])
+    },
+    SWAP_TIMEOUT_MS,
+  )
+
+  it(
+    'fills a payout ONE UNIT below the threshold, recording nothing',
+    async () => {
+      const amount = depositSats(20_000)
+      const { corridor, store, pair, admin, held } = await gated(payoutFor(amount) + 1n)
+
+      await quoteAndFund(corridor, pair, amount)
+      const id = (await store.listNonTerminal())[0]!.id
+      await driveTo({ corridor, store }, id, 'funded')
+      const filled = await driveTo({ corridor, store }, id, 'filled')
+
+      expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
+      expect(await admin.listPendingApprovals()).toEqual([])
+      expect(held).toEqual([])
     },
     SWAP_TIMEOUT_MS,
   )

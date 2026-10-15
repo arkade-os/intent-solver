@@ -33,7 +33,7 @@ const createServices = createServicesBody
 
 /** The body of the `card` command, up to the command that follows it. */
 const cardCommand = (): string => {
-  const start = cliSource.indexOf('  async card([nameArg]) {')
+  const start = cliSource.indexOf('  async card(args) {')
   if (start === -1) throw new Error('the card command is gone')
   const rest = cliSource.slice(start)
   const end = rest.indexOf('\n  async ', 1)
@@ -116,9 +116,9 @@ describe('what must agree with the quoted terms reads policy, not env', () => {
     // gated anything still carried those exact strings. A whole-file substring
     // cannot tell the code under test from the code about to be deleted.
     const body = cardCommand()
-    expect(body).toContain('policy.corridorEnabled[corridor]')
-    expect(body).toContain('limits: policy.corridorLimits[corridor]')
-    expect(body).toContain('fee: policy.corridorFees[corridor]')
+    expect(body).toContain('policy = applyOverrides(config, await cardAdminStore.getOverrides())')
+    expect(body).toMatch(/\bpolicy,\s+bootPolicy: policy,/)
+    expect(body).not.toContain('bootPolicy: config')
     // The raw environment must not reach the published card: an override that
     // narrows a corridor, or silences one, has to show up in the listing.
     // Otherwise `cli card` and the console's `/api/card` print different cards
@@ -135,18 +135,21 @@ describe('what must agree with the quoted terms reads policy, not env', () => {
     expect(body).not.toContain("corridorEnabled['arkade:BTC->lightning:BTC']")
   })
 
-  it('the asset markets, through the same resolver the console uses', () => {
+  it('the asset markets, through the one builder the console and the nostr publisher use', () => {
     // Resolving pointers and inherited bounds twice is how the two cards drift.
     const body = cardCommand()
     // The resolver does not constrain what is fed to it, so pin the source too.
     expect(body).toContain('assetMarketPolicy(await cardAdminStore.listMarkets()).pricing')
-    expect(body).toContain('assetCardMarketsFromPolicy({')
-    expect(body).toContain('rfqMarkets: assetRfqMarketsFrom(assetMarkets,')
-    expect(body).toContain('policy.offerMinFillAmount')
-    expect(body).toContain('policy.offerMaxFillAmount')
-    expect(body).toContain('unpublishableCorridors(')
-    expect(body).toContain('publishableAssetMarkets(')
-    expect(body).toContain('assetMarkets: publishable')
-    expect(body).toContain('...omitted,')
+    expect(body).toContain('liveOfferMarkets: offerMarketsFrom(assetMarkets)')
+    expect(body).toContain('assetRfqMarkets: assetRfqMarketsFrom(assetMarkets,')
+    expect(body).toContain('deploymentCard(source,')
+    expect(body).toContain('cardOmissions(source)')
+    expect(cliSource).toContain('buildAd: () => deploymentCard(services)')
+  })
+
+  it('the registry pointer, signed by the key the card is', () => {
+    const body = cardCommand()
+    expect(body).toContain("args.includes('--pointer')")
+    expect(body).toContain('signSolverCard(cardPointer(card)')
   })
 })

@@ -40,9 +40,9 @@ describe('the markets screen is reachable', () => {
   it('is in the nav, the endpoint table and the view table', () => {
     // All three, because two of the three renders a dead tab: a nav entry with
     // no body falls through to the overview and looks like a broken link.
-    expect(appSource).toContain("['markets', 'markets']")
+    expect(appSource).toContain("['pricing', 'pricing']")
     expect(appSource).toContain("markets: () => '/api/markets'")
-    expect(appSource).toContain('markets: marketsView')
+    expect(appSource).toContain('pricing: pricingView')
   })
 
   it('is exempt from the swap-event reload, like settings', () => {
@@ -362,7 +362,7 @@ const helperBlock = (): string => {
 }
 
 // Same new-Function + named-error pattern as marketRoutes.test.ts:33-46: run rather than grepped.
-const previewHarness = (response: unknown) => {
+const previewHarness = (response: unknown, draft: Record<string, unknown> = {}) => {
   const pending: (() => void)[] = []
   const sent: (string | undefined)[] = []
   const params = [
@@ -379,12 +379,20 @@ const previewHarness = (response: unknown) => {
     'clearTimeout',
   ]
   const body = `${helperBlock()}\n${marketsBlock()}
-    marketDraft = { ...blankMarket(), marketKey: 'k' }
+    marketDraft = { ...blankMarket(), marketKey: 'k', ...${JSON.stringify(draft)} }
     return { previewPanel, refreshPreview, schedulePreview, marketsView }`
   const args = [
     stubDoc(),
     StubNode,
-    async (_path: string, init?: { body?: string }) => (sent.push(init?.body), response),
+    async (path: string, init?: { body?: string }) => {
+      sent.push(init?.body ?? path)
+      if (path.startsWith('/api/assets/')) {
+        // A macrotask, so a retry loop fails this test instead of starving the event loop.
+        await new Promise((resolve) => setImmediate(resolve))
+        throw new Error('500')
+      }
+      return response
+    },
     (value: unknown) => String(value),
     () => '1m',
     { data: { markets: { carrier: { sats: '330', rfqPriced: false, offerCharged: false }, markets: [] } } },
@@ -524,8 +532,18 @@ describe('the preview panel, run rather than grepped', () => {
 
   it('labels a BTC leg as BTC, not sats — the amount is already decimals-formatted', async () => {
     const text = await painted(RESOLVED)
-    expect(text).toContain('1.00000000 BTC')
+    expect(text).toMatch(/1\.00000000\s+BTC/)
     expect(text).not.toContain('1.00000000 sats')
+  })
+})
+
+describe('asset labels in the form', () => {
+  it('asks once for an asset whose lookup fails, rather than re-asking on every repaint', async () => {
+    const panel = previewHarness(RESOLVED, { quote: 'ab'.repeat(34) })
+    const view = panel.marketsView()
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve))
+    expect(panel.sent.filter((sent) => sent?.startsWith('/api/assets/'))).toHaveLength(1)
+    expect(textOf(view)).toContain('asset lookup failed')
   })
 })
 

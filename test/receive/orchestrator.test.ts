@@ -503,24 +503,43 @@ describe('ReceiveSwapService.quote', () => {
       await expect(ln.getHoldState(paymentHash)).resolves.toMatchObject({ status: 'pending', amountSats: 5_000 })
     })
 
-    it('quotes what the WRAPPED invoice asks, while pricing the payout off the hold', async () => {
-      // A backend that wraps its hold invoice hands out one asking slightly
-      // more — a routing reserve the payer covers. `from_amount` is read off
-      // that invoice, or the client gets a quote their own invoice contradicts.
-      // The payout is untouched: the reserve is the wrapper's, never ours to
-      // fund against.
-      const wrapping = {
-        createHoldInvoice: async (params: Parameters<typeof ln.createHoldInvoice>[0]) => ({
-          ...(await ln.createHoldInvoice(params)),
-          payableSats: params.amountSats + 7,
-        }),
-        getHoldState: ln.getHoldState.bind(ln),
-        settleHold: ln.settleHold.bind(ln),
+    /** A backend that WRAPS, and inverts its reserve by probing on THROWAWAY hashes. */
+    const wrappingLn = (reserveFor: (amountSats: number) => number) => {
+      const calls: string[] = []
+      return {
+        calls,
+        port: {
+          holdForPayable: async (payableSats: number) => {
+            let hold = payableSats
+            for (let probe = 0; probe < 3; probe++) {
+              calls.push(`probe:${hold}`)
+              const asked = hold + reserveFor(hold)
+              if (asked === payableSats) return hold
+              hold -= asked - payableSats
+            }
+            throw new Error(`no hold asks exactly ${payableSats}`)
+          },
+          createHoldInvoice: async (params: Parameters<typeof ln.createHoldInvoice>[0]) => {
+            calls.push(`mint:${params.amountSats}`)
+            return {
+              ...(await ln.createHoldInvoice(params)),
+              payableSats: params.amountSats + reserveFor(params.amountSats),
+            }
+          },
+          getHoldState: ln.getHoldState.bind(ln),
+          settleHold: ln.settleHold.bind(ln),
+          cancelHold: async () => {
+            calls.push('cancel')
+          },
+        },
       }
-      const svc = new ReceiveSwapService({
+    }
+
+    const withLn = (port: ConstructorParameters<typeof ReceiveSwapService>[0]['ln']) =>
+      new ReceiveSwapService({
         acceptUnilateralGap: false,
         store,
-        ln: wrapping,
+        ln: port,
         arkade: arkade.ops,
         covclaimd: covclaimd.client,
         limits: LIMITS,
@@ -531,12 +550,99 @@ describe('ReceiveSwapService.quote', () => {
         fee: FEE,
       })
 
+    it('exact-in on a WRAPPING backend: the invoice asks exactly the requested give', async () => {
+      const wrapping = wrappingLn(() => 6)
+      const svc = withLn(wrapping.port)
       const outcome = await svc.quote(quoteRequest())
+
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      expect(outcome.swap.amountSats).toBe(5_000)
+      // 4_994 held at {100bps + 50 flat}: 4_994 - ceil(49.94) - 50 = 4_894.
+      expect(outcome.swap.payoutSats).toBe(4_894)
+      await expect(ln.getHoldState(paymentHash)).resolves.toMatchObject({ amountSats: 4_994 })
+      expect(wrapping.calls).toEqual(['probe:5000', 'probe:4994', 'mint:4994'])
+
+      // And the lockup is funded off the HELD amount, never the give: the solver
+      // must not pay out more than the HTLC it holds is worth, less its fee.
+      ln.armHold(paymentHash, now + 4 * 3600)
+      const row = await svc.tick(outcome.swap.id)
+      expect(row.state).toBe('funded')
+      expect(arkade.state.fundCalls).toEqual([{ address: row.lockupAddress, amountSats: 4_894 }])
+    })
+
+    it('exact-in: refuses by name when the reserve does not converge, minting nothing', async () => {
+      let probe = 0
+      const wrapping = wrappingLn(() => (probe++ % 2 === 0 ? 6 : 5))
+      const outcome = await withLn(wrapping.port).quote(quoteRequest())
+
+      expect(outcome).toEqual({ accepted: false, reason: 'payable_amount_unmatchable' })
+      expect(wrapping.calls).toEqual(['probe:5000', 'probe:4994', 'probe:4995'])
+      await expect(store.findLiveByPaymentHash(paymentHash)).resolves.toBeNull()
+    })
+
+    it('exact-in: refuses rather than hold more than the payer is asked for', async () => {
+      const wrapping = wrappingLn(() => 6)
+      wrapping.port.holdForPayable = async (payableSats) => payableSats + 4
+      const outcome = await withLn(wrapping.port).quote(quoteRequest())
+
+      expect(outcome).toEqual({ accepted: false, reason: 'payable_amount_unmatchable' })
+      expect(wrapping.calls).toEqual([])
+    })
+
+    it('exact-in: refuses a hold of nothing rather than minting it', async () => {
+      const wrapping = wrappingLn(() => 6)
+      wrapping.port.holdForPayable = async () => 0
+      const outcome = await withLn(wrapping.port).quote(quoteRequest())
+
+      expect(outcome).toEqual({ accepted: false, reason: 'payable_amount_unmatchable' })
+      expect(wrapping.calls).toEqual([])
+    })
+
+    it('exact-in: retires the hold and refuses when the minted invoice asks something else', async () => {
+      // A reserve that moved between the probe and the real mint.
+      const wrapping = wrappingLn(() => 6)
+      wrapping.port.holdForPayable = async (payableSats) => payableSats
+      const outcome = await withLn(wrapping.port).quote(quoteRequest())
+
+      expect(outcome).toEqual({ accepted: false, reason: 'payable_amount_unmatchable' })
+      expect(wrapping.calls).toEqual(['mint:5000', 'cancel'])
+      await expect(store.findLiveByPaymentHash(paymentHash)).resolves.toBeNull()
+    })
+
+    it('exact-in on a wrapping backend that cannot invert its reserve: one mint, then refusal', async () => {
+      const wrapping = wrappingLn(() => 6)
+      const { createHoldInvoice, getHoldState, settleHold, cancelHold } = wrapping.port
+      const outcome = await withLn({ createHoldInvoice, getHoldState, settleHold, cancelHold }).quote(quoteRequest())
+
+      expect(outcome).toEqual({ accepted: false, reason: 'payable_amount_unmatchable' })
+      expect(wrapping.calls).toEqual(['mint:5000', 'cancel'])
+      await expect(store.findLiveByPaymentHash(paymentHash)).resolves.toBeNull()
+    })
+
+    it('exact-out on a WRAPPING backend: still quotes what the invoice asks', async () => {
+      // Deliberately unchanged: the client named the PAYOUT, so the give is
+      // ours to solve and the reserve rides on it in one mint — no probe.
+      const wrapping = wrappingLn(() => 7)
+      const outcome = await withLn(wrapping.port).quote(quoteRequest({ amountSats: 4_900, amountSide: 'to' }))
+
       if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
       expect(outcome.swap.amountSats).toBe(5_007)
       expect(outcome.swap.payoutSats).toBe(4_900)
-      // And the HTLC we hold is still the un-wrapped amount.
-      await expect(ln.getHoldState(paymentHash)).resolves.toMatchObject({ amountSats: 5_000 })
+      expect(wrapping.calls).toEqual(['mint:5000'])
+    })
+
+    it('mints exactly once on a backend that does not wrap', async () => {
+      const mint = vi.fn(ln.createHoldInvoice.bind(ln))
+      const outcome = await withLn({
+        createHoldInvoice: mint,
+        getHoldState: ln.getHoldState.bind(ln),
+        settleHold: ln.settleHold.bind(ln),
+      }).quote(quoteRequest())
+
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      expect(mint).toHaveBeenCalledTimes(1)
+      expect(outcome.swap.amountSats).toBe(5_000)
+      expect(outcome.swap.payoutSats).toBe(4_900)
     })
 
     it('funds the lockup with the persisted payout, not the invoice amount', async () => {
@@ -1691,7 +1797,26 @@ describe('ReceiveSwapService.tick — refund path', () => {
     expect((await store.history(funded.id)).map((e) => e.to)).not.toContain('stuck')
   })
 
-  it('escalates to stuck if the lockup is gone and no claim can be found once past the refund deadline', async () => {
+  it('keeps looking for the claim while the held payment can still be settled', async () => {
+    // Escalating discards the recheck above, the only thing that still recovers it.
+    const funded = await armAndFund()
+    const row0 = await store.get(funded.id)
+    expect(row0.htlcExpiresAt!).toBeGreaterThan(row0.refundLocktime + EMPTY_LOCKUP_GRACE)
+    now = row0.refundLocktime
+    arkade.state.outputs = []
+    arkade.state.claimPreimage = null
+
+    expect((await service.tick(funded.id)).state).toBe('refunding')
+    now = row0.htlcExpiresAt! - 1
+    expect((await service.tick(funded.id)).state).toBe('refunding')
+
+    arkade.state.claimPreimage = P
+    const row = await service.tick(funded.id)
+    expect(row.state).toBe('settled')
+    expect(row.preimage).toBe(hex.encode(P))
+  })
+
+  it('escalates to stuck if the lockup is gone and no claim can be found by the time the payment expires', async () => {
     const funded = await armAndFund()
     const row0 = await store.get(funded.id)
     now = row0.refundLocktime
@@ -1704,7 +1829,9 @@ describe('ReceiveSwapService.tick — refund path', () => {
     // to PERSIST to be judged inexplicable rather than merely early.
     expect((await service.tick(funded.id)).state).toBe('refunding')
     now += EMPTY_LOCKUP_GRACE
+    expect((await service.tick(funded.id)).state).toBe('refunding')
 
+    now = row0.htlcExpiresAt!
     const row = await service.tick(funded.id)
     expect(row.state).toBe('stuck')
     expect(row.failureReason).toMatch(/no matching claim found/)
@@ -1718,14 +1845,12 @@ describe('ReceiveSwapService.tick — refund path', () => {
     arkade.state.outputs = []
     arkade.state.claimPreimage = null
 
-    // Ticking inside the grace must not be able to postpone the escalation
-    // indefinitely: the clock runs from the row's own entry into `refunding`,
-    // not from the last attempt, so polling it cannot starve the human.
-    for (let elapsed = 0; elapsed < EMPTY_LOCKUP_GRACE; elapsed += 10) {
-      now = row0.refundLocktime + elapsed
+    // Neither clock runs from the last attempt, so polling cannot starve the human.
+    for (let at = row0.refundLocktime; at < row0.htlcExpiresAt!; at += 600) {
+      now = at
       expect((await service.tick(funded.id)).state).toBe('refunding')
     }
-    now = row0.refundLocktime + EMPTY_LOCKUP_GRACE
+    now = row0.htlcExpiresAt!
     expect((await service.tick(funded.id)).state).toBe('stuck')
   })
 

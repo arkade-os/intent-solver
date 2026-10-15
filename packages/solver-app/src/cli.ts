@@ -31,7 +31,7 @@
  *   test-refund <sats>                fund a short-deadline covenant script, then refund it
  *   invoice <sats>                    issue a test invoice: forged locally on the fake backend, otherwise
  *                                     minted from the rail's own payee wallet where it has one
- *   card <name>                       this deployment's signed solver-registry corridor card, on stdout
+ *   card [name] [--pointer]           this deployment's signed solver card on stdout; --pointer: the registry pointer
  *   balances                          both wallet balances
  *
  * Secrets come only from the environment; errors are printed as messages, never
@@ -78,7 +78,7 @@ import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.j
 import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
 import { AdminStore } from './admin/db.js'
 import { applyOverrides } from './admin/settings.js'
-import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
+import { GiveUp, json, log, messageOf, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import { recordRfqRefusals } from './admin/rfqRefusals.js'
 import { createBidTail, recordBidsIn, type BidRecorder } from './admin/bids.js'
 import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
@@ -180,6 +180,8 @@ const REFUND_SWEEP_MS = 60_000
  * one sees the same coins, a little closer to expiry.
  */
 const VTXO_LIFECYCLE_MS = 300_000
+/** How often the notification balance is refreshed. @see Services.sampleBalances */
+const BALANCE_SAMPLE_MS = 60_000
 
 const VTXO_SYNC_MAX_AGE_MS = 2_000
 
@@ -192,6 +194,7 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
   try {
     await withEvmSendSweep({
       service: services.evmSendService,
+      recoverySweep: services.evmSendService ? () => services.evmSendService!.payoutFundingRecoverySweep() : undefined,
       intervalMs: FULL_SWEEP_MS,
       signal: controller.signal,
       run: (startSweep) => watchSwaps(services, startSweep, controller.signal),
@@ -491,6 +494,9 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   let lastFullSweep = 0
   let lastRefundSweep = 0
   let lastVtxoLifecycle = 0
+  let lastBalanceSample = 0
+  // Zero, so the first report goes out at boot and confirms the sinks are wired.
+  let lastBalanceReport = 0
   let lastWatchSync = 0
   try {
     while (!signal.aborted) {
@@ -571,6 +577,18 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
         } catch (error) {
           log('onchain refund deposit sweep failed:', error instanceof Error ? error.message : String(error))
         }
+      }
+      // Refreshed here and NOWHERE on the money path: the read costs ~951ms and a
+      // business event must never pay it. Absent unless a sink is configured.
+      // Not awaited: a hung wallet read must not stall the ticks below.
+      if (services.sampleBalances && Date.now() - lastBalanceSample > BALANCE_SAMPLE_MS) {
+        lastBalanceSample = Date.now()
+        void services.sampleBalances().catch((error: unknown) => log('balance sample failed:', messageOf(error)))
+      }
+      const reportEveryMs = (services.config.balanceReportIntervalMinutes ?? Infinity) * 60_000
+      if (services.reportBalances && Date.now() - lastBalanceReport > reportEveryMs) {
+        lastBalanceReport = Date.now()
+        void services.reportBalances().catch((error: unknown) => log('balance report failed:', messageOf(error)))
       }
       if (Date.now() - lastVtxoLifecycle > VTXO_LIFECYCLE_MS) {
         lastVtxoLifecycle = Date.now()
@@ -1190,15 +1208,16 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
     // Undefined under `off`: nothing is constructed, so nothing can publish.
     const { startAdPublishing } = await import('@arkade-os/solver-transport/relay/adPublisher.js')
-    const { deploymentAd } = await import('./admin/routes/card.js')
+    const { deploymentCard } = await import('./admin/routes/card.js')
     const ads = startAdPublishing({
       mode: config.nostrAdPublish,
       connection,
       author: services.providerPubkey,
-      buildAd: () => deploymentAd(services),
-      onError: (error) => onError('solver ad publish', error),
+      network: config.network,
+      buildAd: () => deploymentCard(services),
+      onError: (error) => onError('solver card publish', error),
     })
-    if (ads) log('solver ad publishing', config.nostrAdPublish)
+    if (ads) log('solver card publishing (kind 38859)', config.nostrAdPublish)
 
     // Liveness for a container with no port to probe: the file's mtime, touched
     // only while the relay socket is up, so a solver that is running but
@@ -1883,17 +1902,16 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
   },
 
   /**
-   * The solver-registry corridor card for THIS deployment, signed by the
-   * wallet identity — the key makers already address RFQs to. Built from the
-   * live config so the published listing cannot drift from what the service
-   * enforces. Needed because `solverd` cannot emit corridor cards yet
-   * (arkade-os/solver-registry#13).
+   * The signed card for THIS deployment, from the builder the console and the relay publisher share.
+   * `--pointer` prints the registry pointer instead: the card without its markets.
    */
-  async card([nameArg]) {
-    const name = nameArg ?? process.env.SOLVER_NAME
-    if (!name) throw new GiveUp('usage: card <name>   (or set SOLVER_NAME; becomes solvers/<network>/<name>.json)')
+  async card(args) {
+    const pointer = args.includes('--pointer')
+    const name = args.find((arg) => !arg.startsWith('--')) ?? process.env.SOLVER_NAME
+    if (!name) {
+      throw new GiveUp('usage: card [name] [--pointer]   (or set SOLVER_NAME; becomes solvers/<network>/<name>.json)')
+    }
     const config = loadConfig()
-    const relays = (await import('./admin/routes/card.js')).advertisedRelays(config.relayUrl)
     // This command does not build the service stack, but the card it writes
     // must state the terms the stack would actually enforce — so it resolves
     // the same effective policy `createServices` does, from the same store.
@@ -1912,64 +1930,30 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     }
     const { MnemonicIdentity } = await import('@arkade-os/sdk')
     const identity = MnemonicIdentity.fromMnemonic(config.arkade.mnemonic, { isMainnet: config.arkade.isMainnet })
-    const { buildSolverCard, publishableAssetMarkets, signSolverCard, unpublishableCorridors } =
-      await import('@arkade-os/solver-core/core/registryCard.js')
-    const { assetCardMarketsFromPolicy, assetRfqMarketsFrom } = await import('./ops/assetRfqMarkets.js')
-    const { publishable, omitted } = publishableAssetMarkets(
-      assetCardMarketsFromPolicy({
-        pricing: assetMarkets,
-        offerMarkets: policy.offerMarkets,
-        offerBounds: { min: policy.offerMinFillAmount, max: policy.offerMaxFillAmount },
-        rfqMarkets: assetRfqMarketsFrom(assetMarkets, {
-          dustSats: 0n,
-          pricedByDefault: policy.assetCarrierPricing,
-        }),
-        chargesDeliveredCarrier: policy.offerChargesDeliveredCarrier,
-      }),
-      config.network,
-    )
-    const card = await signSolverCard(
-      buildSolverCard({
-        name,
-        network: config.network,
-        discoveryPubkey: hex.encode(await identity.xOnlyPublicKey()),
-        relays,
-        // What this deployment actually serves, so discovery cannot describe a
-        // corridor the config has disabled. Limits AND fees per corridor, so a
-        // market cannot be stamped with terms belonging to another one.
-        //
-        // From `policy`, NOT `config` — the same source the admin route reads,
-        // and the reason this command resolved effective policy above. Reading
-        // the raw environment here would drop every console override, so `cli
-        // card` and `/api/card` would print different cards for one deployment.
-        //
-        // There is deliberately no hard refusal for a disabled LN_SEND any
-        // more: it protected the hardcoded single market, and an onchain-only
-        // deployment now has an honest card to publish rather than none.
-        // `buildSolverCard` still refuses when NOTHING is served.
-        corridors: Object.fromEntries(
-          CORRIDORS.filter((corridor) => policy.corridorEnabled[corridor]).map((corridor) => [
-            corridor,
-            { limits: policy.corridorLimits[corridor], fee: policy.corridorFees[corridor] },
-          ]),
-        ),
-        assetMarkets: publishable,
-      }),
-      (digest) => identity.signMessage(digest, 'schnorr'),
-    )
+    const { cardPointer, signSolverCard } = await import('@arkade-os/solver-core/core/registryCard.js')
+    const { assetRfqMarketsFrom, offerMarketsFrom } = await import('./ops/assetRfqMarkets.js')
+    const { cardOmissions, deploymentCard } = await import('./admin/routes/card.js')
+    const source = {
+      config,
+      // The policy a boot would resolve, NOT `config`, so every console override reaches the card.
+      policy,
+      bootPolicy: policy,
+      assetMarkets,
+      // What `createServices` serves offers from: the console rows, not OFFER_MARKETS.
+      liveOfferMarkets: offerMarketsFrom(assetMarkets),
+      assetRfqMarkets: assetRfqMarketsFrom(assetMarkets, { dustSats: 0n, pricedByDefault: policy.assetCarrierPricing }),
+      providerPubkey: hex.encode(await identity.xOnlyPublicKey()),
+      arkade: { identity },
+    }
+    const card = await deploymentCard(source, name)
+    const printed = pointer
+      ? await signSolverCard(cardPointer(card), (digest) => identity.signMessage(digest, 'schnorr'))
+      : card
     // Only the card on stdout, so it can be piped straight into the registry
     // checkout; the destination hint goes to stderr.
-    console.log(JSON.stringify(card, null, 2))
-    console.error(`registry path: solvers/${config.network}/${name}.json`)
-    // Stderr, beside the path: stdout is piped into the registry checkout.
-    for (const note of [
-      ...unpublishableCorridors(
-        policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
-      ),
-      ...omitted,
-    ]) {
-      console.error(note)
-    }
+    console.log(JSON.stringify(printed, null, 2))
+    console.error(`registry path: solvers/${config.network}/${card.name}.json`)
+    for (const note of cardOmissions(source)) console.error(note)
   },
 
   async balances() {

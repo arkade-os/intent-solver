@@ -31,7 +31,7 @@ describe('createServices — the asset RFQ service', () => {
     const db = sqliteExecutor(':memory:')
     const directFills = await DirectFillAttempts.open(db, createReservationLedger(), 'wallet', '5120' + '33'.repeat(32))
     const source = body()
-    const branch = source.slice(source.indexOf('const recoverOffers ='), source.indexOf('const offerRefusals ='))
+    const branch = source.slice(source.indexOf('const recoverOffers ='), source.indexOf('const leg ='))
     expect(branch).toContain('await OfferFillStore.open(swapFile)')
     const open = () =>
       runInNewContext(`(async () => { ${branch}; return offerStore })()`, {

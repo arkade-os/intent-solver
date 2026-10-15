@@ -46,6 +46,7 @@ import {
 } from '@arkade-os/solver-core/core/assetRfq.js'
 import type { Price } from '@arkade-os/solver-core/core/priceFeed.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { askApprovalFor, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
@@ -223,6 +224,7 @@ export interface AssetRfqDeps {
   /** The internal Taxi adapter, reached only for an explicit `recycle`.
    * OPTIONAL, and its absence is a REFUSAL rather than a default. */
   receiveCarrierQuotes?: ReceiveCarrierQuotes
+  approvalGate?: ApprovalCheck
   onError?: (id: string, error: unknown) => void
   now?: () => number
   newId?: () => string
@@ -921,6 +923,10 @@ export class AssetRfqSwapService {
       return
     }
 
+    // AFTER the fill decision, BEFORE the CAS. The TO leg is what the solver pays,
+    // and `decision.fill` is false past `validUntil`, so a hold still terminates.
+    if (!(await askApprovalFor(this.deps.approvalGate, row.id, { assetId: row.toAssetId, amount: row.toAmount })))
+      return
     // Intent BEFORE the irreversible step. A crash between this CAS and the
     // submission leaves a row that says something may be in flight, rather than
     // one that still reads fillable and would be submitted twice.
