@@ -137,6 +137,8 @@ export type QuoteRefusal =
   | 'duplicate_swap'
   | 'provider_at_capacity'
   | 'invalid_payout_address'
+  /** The operator's exit delay is too long for the solo recourse to open before the client's L1 CLTV. A deployment fact, not a request fault — the Lightning receive leg refuses under this same name. */
+  | 'recourse_window_unservable'
 
 export type QuoteOutcome =
   { accepted: true; swap: OnchainReceiveSwapRow; lockupDeadline: number } | { accepted: false; reason: QuoteRefusal }
@@ -314,13 +316,24 @@ export class OnchainReceiveSwapService {
       request.amountSide === 'to'
         ? this.pricing.giveFor({ pair: RFQ_PAIR_ONCHAIN_RECEIVE, payoutSats: request.amountSats })
         : request.amountSats
+    const now = this.now()
     const acceptance = evaluateOnchainReceiveAcceptance({
       amountSats: giveSats,
       limits,
-      now: this.now(),
+      now,
       minConfirmations: request.minConfirmations,
     })
     if (!acceptance.accept) return { accepted: false, reason: acceptance.reason }
+
+    // The SAME gate funding will apply: refusing only in
+    // `awaiting_confirmations` strands an L1 HTLC the client has already funded.
+    const recourse = evaluateOnchainReceiveFunding({
+      arkadeRefundLocktime: acceptance.arkadeRefundLocktime,
+      htlcLocktime: acceptance.htlcLocktime,
+      unilateralRefundWithoutReceiverDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
+      now,
+    })
+    if (!recourse.fund) return { accepted: false, reason: 'recourse_window_unservable' }
 
     // The client funds the onchain HTLC with the full give; the solver funds
     // the Arkade lockup with the give MINUS this corridor's fee.

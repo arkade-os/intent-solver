@@ -8,6 +8,7 @@ import { SigHash, Transaction } from '@scure/btc-signer'
 import { ArkAddress } from '@arkade-os/sdk'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { EMPTY_LOCKUP_GRACE, REFUND_CENSORSHIP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
+import { deriveUnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
 import {
   OnchainReceiveSwapStore,
   type OnchainReceiveSwapRow,
@@ -389,6 +390,16 @@ describe('OnchainReceiveSwapService', () => {
     it('refuses an amount outside limits', async () => {
       const outcome = await service.quote(quoteRequest({ amountSats: 10 }))
       expect(outcome).toEqual({ accepted: false, reason: 'amount_out_of_range' })
+    })
+
+    // Mainnet's own advertised exit delay (605184s).
+    it('refuses the quote outright when the solo recourse could never open before the htlc timeout', async () => {
+      deps.arkadeFake.arkade.delays = deriveUnilateralDelays(605_184)
+
+      const outcome = await service.quote(quoteRequest())
+
+      expect(outcome).toEqual({ accepted: false, reason: 'recourse_window_unservable' })
+      expect(await store.findLiveByPaymentHash(paymentHash)).toBeNull()
     })
 
     it('refuses an invalid payout address', async () => {

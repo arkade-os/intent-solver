@@ -70,13 +70,14 @@ that way end to end. That is true even when the covenant's own CSV leaves count
 BLOCKS, which they do against a block-typed arkd (see the runbook's "Block-typed
 timelocks").
 
-The two meet at exactly three bounds, and each converts before it adds:
+The two meet at exactly four bounds, and each converts before it adds:
 
 | bound | where |
 |---|---|
 | `refundLocktimeFor`'s unilateral bound | `core/send.ts` |
 | `onchainRefundLocktimeFor`'s server-independent bound | `core/onchainSend.ts` |
 | `minHtlcWindowFor`'s gate (d) | `core/receive.ts` |
+| `evaluateOnchainReceiveFunding`'s gate (d) | `core/onchainReceive.ts` |
 
 Conversion is at `NOMINAL_BLOCK_SECONDS` (600), the SDK's own figure — this
 number's job is to agree with whoever derives the same script.
