@@ -52,6 +52,7 @@ import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { buildOnchainClaimTx, estimateClaimTxVsize, signOnchainClaimTx } from '@arkade-os/solver-rails/onchain/claim.js'
+import { affordableFee, outcomeOfAny, replacementFeeRate } from '@arkade-os/solver-rails/onchain/feeBump.js'
 import { onchainClaimSizing, onchainReceiveFundedAmounts, bandOf, hasBand } from './onchainFundedAmounts.js'
 import { claimSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
@@ -68,6 +69,13 @@ import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkad
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 const DEFAULT_RECOVERY_SWEEP_ROW_BUDGET = 25
+
+/** Every version of our claim that could still confirm, newest first: a replacement does not revoke what it replaced. */
+const trackedClaimTxids = (row: OnchainReceiveSwapRow): string[] =>
+  row.onchainClaimTxid === null ? row.onchainClaimPriorTxids : [row.onchainClaimTxid, ...row.onchainClaimPriorTxids]
+
+/** `wait` is "the mempool has to move", not "this row is finished" — only the second is what `stuck` is for. */
+type OnchainClaimAttempt = { broadcast: true; txid: string } | { broadcast: false; reason: string; wait: boolean }
 
 export interface OnchainReceiveServiceDeps {
   quoteLimiter?: RateLimiter
@@ -781,7 +789,7 @@ export class OnchainReceiveSwapService {
    * broadcast that could never confirm.
    */
   private async whenClaimed(row: OnchainReceiveSwapRow): Promise<boolean> {
-    const { store, onchain, signer, network, claimDestinationScript } = this.deps
+    const { store, onchain } = this.deps
     if (!row.preimage) {
       await store.fail(row.id, 'claimed', 'claimed state with no preimage')
       return false
@@ -791,10 +799,16 @@ export class OnchainReceiveSwapService {
       return false
     }
     // A BROADCAST CLAIM IS NOT A LANDED ONE, and `settled` is terminal.
-    if (row.onchainClaimTxid) {
-      const outcome = await onchain.transactionOutcome(row.onchainClaimTxid)
+    const tracked = trackedClaimTxids(row)
+    if (tracked.length > 0) {
+      const outcome = await outcomeOfAny(onchain, tracked)
       if (outcome === 'confirmed') return store.transition(row.id, 'claimed', 'settled', {})
-      if (outcome === 'mempool') return false
+      // Not a wait worth sitting out: `P` is already public, so a claim still
+      // unconfirmed at `htlcLocktime` loses the HTLC to the client's refund.
+      if (outcome === 'mempool') {
+        await this.replaceOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout)
+        return false
+      }
     }
     const priorSpend = await onchain.findSpendWitness({
       txid: row.fundingTxid,
@@ -837,6 +851,53 @@ export class OnchainReceiveSwapService {
       return false
     }
 
+    const attempt = await this.pushOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout, {
+      feeRate: await onchain.estimateFeeRate(),
+      previousFeeRate: null,
+    })
+    if (!attempt.broadcast && !attempt.wait) await store.fail(row.id, 'claimed', attempt.reason)
+    return false
+  }
+
+  /**
+   * Replace a claim the mempool has not taken; null if none went out. A
+   * rejected replacement THROWS, safely: the version it would have replaced
+   * is still tracked, so the next due bump tries higher.
+   */
+  private async replaceOnchainClaim(
+    row: OnchainReceiveSwapRow,
+    preimage: string,
+    fundingTxid: string,
+    fundingVout: number,
+  ): Promise<string | null> {
+    const estimate = await this.deps.onchain.estimateFeeRate()
+    // A row broadcast before these columns existed has neither figure: its
+    // `updatedAt` is when the pre-commit wrote the txid.
+    const previousFeeRate = row.onchainClaimFeeRate ?? estimate
+    const feeRate = replacementFeeRate(
+      { feeRate: previousFeeRate, broadcastAt: row.onchainClaimBroadcastAt ?? row.updatedAt },
+      estimate,
+      this.now(),
+    )
+    if (feeRate === null) return null
+    const attempt = await this.pushOnchainClaim(row, preimage, fundingTxid, fundingVout, { feeRate, previousFeeRate })
+    return attempt.broadcast ? attempt.txid : null
+  }
+
+  /**
+   * Rebuild, size, sign, record and broadcast ONE version of the solver's
+   * claim of the client-funded HTLC — the single definition of "collect this
+   * HTLC", shared by {@link whenClaimed}, its fee bump and {@link claimNow}
+   * so the automatic and manual paths cannot drift.
+   */
+  private async pushOnchainClaim(
+    row: OnchainReceiveSwapRow,
+    preimage: string,
+    fundingTxid: string,
+    fundingVout: number,
+    version: { feeRate: number; previousFeeRate: number | null },
+  ): Promise<OnchainClaimAttempt> {
+    const { store, onchain, signer, network, claimDestinationScript } = this.deps
     const htlc = buildOnchainHtlc({
       network: ONCHAIN_NETWORKS[network],
       paymentHash: row.paymentHash,
@@ -846,55 +907,73 @@ export class OnchainReceiveSwapService {
     })
     if (hex.encode(htlc.pkScript) !== row.onchainPkScript) {
       // Unreachable by construction — same defensive check
-      // send/onchainOrchestrator.ts's pushOnchainHtlcRefund makes for its
-      // own rebuild. Refusing to sign against a script that doesn't match
-      // what was actually funded is the safe failure.
-      await store.fail(row.id, 'claimed', 'onchain HTLC rebuilt from row does not match the funded pkScript')
-      return false
+      // send/onchainOrchestrator.ts's pushOnchainHtlcRefund makes. Signing
+      // against a script that is not what was funded is the one thing this
+      // must never do, and a rebuild from quote-time columns refuses again.
+      return {
+        broadcast: false,
+        reason: 'onchain HTLC rebuilt from row does not match the funded pkScript',
+        wait: false,
+      }
     }
 
-    const feeRate = await onchain.estimateFeeRate()
-    const preimage = hex.decode(row.preimage)
+    const claimPreimage = hex.decode(preimage)
     const sizing = onchainClaimSizing(row, {
       htlc,
-      preimage,
-      fundingTxid: row.fundingTxid,
-      fundingVout: row.fundingVout,
+      preimage: claimPreimage,
+      fundingTxid,
+      fundingVout,
       destinationScript: claimDestinationScript,
     })
-    const fee = BigInt(Math.ceil(estimateClaimTxVsize(sizing.params) * feeRate))
-    const payoutAmountSats = sizing.payoutAfterFee(fee)
-    if (payoutAmountSats < BigInt(ONCHAIN_DUST_SATS)) {
-      // Below dust is as unbroadcastable as negative — refuse rather than
-      // build a non-standard transaction no relay policy will forward. Same
-      // "the fee rate is the one lever, retry once it falls" situation
-      // send/onchainOrchestrator.ts's pushOnchainHtlcRefund documents; this
-      // leg has no operator-retry command yet, so `stuck` is where it
-      // parks pending one.
-      await store.fail(
-        row.id,
-        'claimed',
-        `claim fee ${fee} at ${feeRate} sat/vB leaves ${payoutAmountSats} sats from a ${sizing.fundingValueSats} sat HTLC — below the ${ONCHAIN_DUST_SATS} sat dust limit`,
-      )
-      return false
+    const vsize = estimateClaimTxVsize(sizing.params)
+    const fee = affordableFee(vsize, version.feeRate, sizing.fundingValueSats, ONCHAIN_DUST_SATS)
+    if (fee === null) {
+      // The fee is CAPPED at what leaves dust, so this is not a fee spike: the
+      // HTLC cannot buy relay at the 1 sat/vB minimum, and no later rate can.
+      return {
+        broadcast: false,
+        reason: `a ${sizing.fundingValueSats} sat HTLC cannot pay for its own ${vsize} vB claim and still clear the ${ONCHAIN_DUST_SATS} sat dust limit`,
+        wait: false,
+      }
+    }
+    const previous =
+      version.previousFeeRate === null
+        ? null
+        : affordableFee(vsize, version.previousFeeRate, sizing.fundingValueSats, ONCHAIN_DUST_SATS)
+    // At or near the cap. BIP125 rule 4 wants the incremental relay fee on top
+    // (1 sat/vB over an identical vsize), so a replacement the cap holds under
+    // that is not one — the node rejects it, and at equality it is the very
+    // same transaction, whose txid would land in its own prior list.
+    if (previous !== null && fee - previous < vsize) {
+      return {
+        broadcast: false,
+        reason: `claim at ${previous} sats cannot be raised by the ${vsize} sat relay increment: this HTLC carries ${fee}`,
+        wait: true,
+      }
     }
 
-    const unsigned = buildOnchainClaimTx({ ...sizing.params, payoutAmountSats })
-    const signed = await signOnchainClaimTx(unsigned, signer, preimage)
-    // Recorded BEFORE the broadcast, so a resumed process has a key to ask about.
-    await store.patch(row.id, { onchain_claim_txid: signed.id })
+    const unsigned = buildOnchainClaimTx({ ...sizing.params, payoutAmountSats: sizing.payoutAfterFee(BigInt(fee)) })
+    const signed = await signOnchainClaimTx(unsigned, signer, claimPreimage)
+    // Recorded BEFORE the broadcast, so a resumed process has a key to ask
+    // about — every version, not just this one, since any of them can confirm.
+    await store.patch(row.id, {
+      onchain_claim_txid: signed.id,
+      onchain_claim_prior_txids: [...new Set(trackedClaimTxids(row))].filter((txid) => txid !== signed.id).join(' '),
+      onchain_claim_fee_rate: version.feeRate,
+      onchain_claim_broadcast_at: this.now(),
+    })
     await onchain.broadcastRaw(hex.encode(signed.extract()))
-    return false
+    return { broadcast: true, txid: signed.id }
   }
 
   /**
    * Operator override: try the client's L1 HTLC claim again, at TODAY's fee
    * rate. TLA+ finding F4.
    *
-   * The row is `stuck` with a dust refusal: not a lost claim, but one that was
-   * uneconomic at a moment when the payout after fees fell under
-   * {@link ONCHAIN_DUST_SATS}. The fee rate is the one lever, and `stuck` is terminal
-   * with no case in `step()`, so this is what retries it.
+   * The row is `stuck` holding an unclaimed HTLC. Now that the fee is CAPPED at
+   * what leaves {@link ONCHAIN_DUST_SATS} rather than refused over it, the automatic
+   * path no longer parks a claim over fees — but `stuck` is terminal with no case
+   * in `step()`, so this stays the only way back out of one.
    *
    * NOT the refund. By `claimed` the client has already taken the Arkade lockup and
    * revealed `P`, so there is nothing at that script to give back. The solver has PAID
@@ -904,21 +983,29 @@ export class OnchainReceiveSwapService {
    * double-spend the network rejects rather than a second payout. No judgement call —
    * unlike the refunds, there is no direction to get wrong.
    *
-   * Refuses rather than throws when the fee still eats the payout, and says both
-   * numbers, so an operator knows to come back later rather than that something broke.
+   * Refuses rather than throws when the HTLC cannot pay for its own spend at all,
+   * so an operator reads a verdict rather than that something broke.
    */
   async claimNow(id: string): Promise<{ txid: string } | { refused: string }> {
-    const { store, onchain, signer, network, claimDestinationScript } = this.deps
+    const { store, onchain } = this.deps
     const row = await store.get(id)
     if (!row.preimage) return { refused: 'no preimage on the row: nothing to claim with' }
     if (!row.fundingTxid || row.fundingVout === null) {
       return { refused: 'no funding txid/vout on the row: nothing to claim from' }
     }
-    // OUR OWN EARLIER ATTEMPT, BY NAME, and BEFORE the spend read below,
+    // OUR OWN EARLIER ATTEMPTS, BY NAME, and BEFORE the spend read below,
     // which cannot tell whose spend it found. `unknown` never went out: rebuild.
-    if (row.onchainClaimTxid) {
-      const outcome = await onchain.transactionOutcome(row.onchainClaimTxid)
-      if (outcome !== 'unknown') return { txid: row.onchainClaimTxid }
+    const tracked = trackedClaimTxids(row)
+    const [latest] = tracked
+    if (latest !== undefined) {
+      const outcome = await outcomeOfAny(onchain, tracked)
+      if (outcome === 'confirmed') return { txid: latest }
+      // One already waiting is what a fee spike makes worth REPLACING rather
+      // than declining over. Null is "too soon", so that one is still the answer.
+      if (outcome === 'mempool') {
+        const bumped = await this.replaceOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout)
+        return { txid: bumped ?? latest }
+      }
     }
     // The already-spent check `whenClaimed` makes, and the one this method
     // shipped without. Past `htlc_locktime` the CLIENT can sweep the HTLC on
@@ -937,42 +1024,12 @@ export class OnchainReceiveSwapService {
         refused: "onchain HTLC output is already spent — most likely the client's own refund past htlc_locktime",
       }
     }
-    const htlc = buildOnchainHtlc({
-      network: ONCHAIN_NETWORKS[network],
-      paymentHash: row.paymentHash,
-      claimPubkey: hex.decode(row.htlcPubkey),
-      refundPubkey: hex.decode(row.clientOnchainRefundPubkey),
-      refundLocktime: row.htlcLocktime,
+    // The automatic path's own build: an override is exactly when the two must not drift.
+    const attempt = await this.pushOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout, {
+      feeRate: await onchain.estimateFeeRate(),
+      previousFeeRate: null,
     })
-    // The same defensive rebuild check the automatic path makes. An operator
-    // override is exactly when a mismatched script must NOT be signed against.
-    if (hex.encode(htlc.pkScript) !== row.onchainPkScript) {
-      return { refused: 'onchain HTLC rebuilt from row does not match the funded pkScript' }
-    }
-    const feeRate = await onchain.estimateFeeRate()
-    const preimage = hex.decode(row.preimage)
-    const sizing = onchainClaimSizing(row, {
-      htlc,
-      preimage,
-      fundingTxid: row.fundingTxid,
-      fundingVout: row.fundingVout,
-      destinationScript: claimDestinationScript,
-    })
-    const fee = BigInt(Math.ceil(estimateClaimTxVsize(sizing.params) * feeRate))
-    const payoutAmountSats = sizing.payoutAfterFee(fee)
-    if (payoutAmountSats < BigInt(ONCHAIN_DUST_SATS)) {
-      return {
-        refused:
-          `still uneconomic: fee ${fee} at ${feeRate} sat/vB leaves ${payoutAmountSats} sats ` +
-          `from a ${sizing.fundingValueSats} sat HTLC, under the ${ONCHAIN_DUST_SATS} sat dust limit`,
-      }
-    }
-    const unsigned = buildOnchainClaimTx({ ...sizing.params, payoutAmountSats })
-    const signed = await signOnchainClaimTx(unsigned, signer, preimage)
-    // Recorded BEFORE the broadcast, so a resumed process has a key to ask about.
-    await store.patch(row.id, { onchain_claim_txid: signed.id })
-    await onchain.broadcastRaw(hex.encode(signed.extract()))
-    return { txid: signed.id }
+    return attempt.broadcast ? { txid: attempt.txid } : { refused: attempt.reason }
   }
 
   /**

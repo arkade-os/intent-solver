@@ -47,7 +47,7 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
   // the CLI decodes that address against the CONFIGURED network, and a
   // regtest address handed to a mainnet deployment would throw at startup.
   constructor(
-    private readonly feeRateSatsPerVbyte = 5,
+    private feeRateSatsPerVbyte = 5,
     private readonly fundingVout = 0,
     network: OnchainNetworkProfile = ONCHAIN_NETWORKS.regtest,
   ) {
@@ -160,6 +160,11 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
       spentByWitness: null,
     })
     return { txid, vout }
+  }
+
+  /** Move the mempool under a swap already in flight — what a fee spike looks like from here. */
+  setFeeRate(satsPerVbyte: number): void {
+    this.feeRateSatsPerVbyte = satsPerVbyte
   }
 
   /** Advance the fake chain tip so previously-funded outputs gain confirmations. */

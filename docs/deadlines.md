@@ -112,6 +112,24 @@ number's job is to agree with whoever derives the same script.
 | `DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT` | `core/onchainReceive.ts` | The same, client-funded side. |
 | `SETTLE_SAFETY_MARGIN` | `core/receive.ts`, `core/onchainReceive.ts` | Slack between the solver's Arkade refund and the cross-side deadline. |
 
+### 20 minutes
+
+| Constant | Where | Why |
+|---|---|---|
+| `FEE_BUMP_INTERVAL_SECONDS` | `onchain/feeBump.ts` | How long an L1 spend of ours may sit in the mempool before it is replaced at a higher fee. About two blocks, so an ordinary confirmation beats the replacement rather than racing it. |
+
+### Not a duration: the fee-bump factor
+
+`FEE_BUMP_FACTOR` (`onchain/feeBump.ts`) is **1.5**, and a replacement pays
+`max(estimate, 1.5 x previous, previous + 1 sat/vB)`. The `+ 1` is BIP125 rule
+4: the vsize is identical across versions, so a factor that rounded to the same
+sat/vB would relay as a duplicate rather than as a replacement.
+
+It belongs on this page because it answers the same question everything else
+here does. Both onchain legs race a deadline they cannot move — `htlc_locktime`
+for the receive claim, `refund_locktime` for the send refund — and once the
+spend is broadcast the fee is the only lever left.
+
 ### 2 minutes
 
 | Constant | Where | Why |
