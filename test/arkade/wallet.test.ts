@@ -771,8 +771,8 @@ describe('findClaimPreimage', () => {
 })
 
 describe('findLockupOutpoints', () => {
-  const SPENT = { txid: 'a'.repeat(64), vout: 0, value: 50_000, spent: true }
-  const UNSPENT = { txid: 'b'.repeat(64), vout: 3, value: 1_000, spent: false }
+  const SPENT = { txid: 'a'.repeat(64), vout: 0, value: 50_000, spent: true, unrolled: false }
+  const UNSPENT = { txid: 'b'.repeat(64), vout: 3, value: 1_000, spent: false, unrolled: false }
 
   const ctxReturning = (vtxos: unknown[]): ArkadeContext =>
     ({
@@ -801,8 +801,19 @@ describe('findLockupOutpoints', () => {
       { txid: UNSPENT.txid, vout: 1, value: 10, isSpent: false, spentBy: '', settledBy: '' },
     ])
     await expect(findLockupOutpoints(ctx, 'aa'.repeat(17))).resolves.toEqual([
-      { txid: SPENT.txid, vout: 0, value: 4_900, spent: true },
-      { txid: UNSPENT.txid, vout: 1, value: 10, spent: false },
+      { txid: SPENT.txid, vout: 0, value: 4_900, spent: true, unrolled: false },
+      { txid: UNSPENT.txid, vout: 1, value: 10, spent: false, unrolled: false },
+    ])
+  })
+
+  it('carries isUnrolled, the fact that decides whether a claim is readable offchain at all', async () => {
+    // Separate from `spent`: an unrolled output is spent on BITCOIN, where
+    // findClaimPreimage's read of virtual transactions cannot follow it.
+    const ctx = ctxReturning([
+      { txid: SPENT.txid, vout: 0, value: 4_900, isSpent: false, spentBy: '', isUnrolled: true },
+    ])
+    await expect(findLockupOutpoints(ctx, 'aa'.repeat(17))).resolves.toEqual([
+      { txid: SPENT.txid, vout: 0, value: 4_900, spent: false, unrolled: true },
     ])
   })
 
@@ -832,8 +843,8 @@ describe('findLockupOutpoints', () => {
     )
     const ctx = { wallet: { indexerProvider: { getVtxos } } as unknown as ArkadeContext['wallet'] } as ArkadeContext
     await expect(findLockupOutpoints(ctx, 'dd'.repeat(17))).resolves.toEqual([
-      { txid: SPENT.txid, vout: 0, value: 4_900, spent: true },
-      { txid: UNSPENT.txid, vout: 1, value: 4_900, spent: false },
+      { txid: SPENT.txid, vout: 0, value: 4_900, spent: true, unrolled: false },
+      { txid: UNSPENT.txid, vout: 1, value: 4_900, spent: false, unrolled: false },
     ])
     expect(getVtxos).toHaveBeenCalledTimes(2)
   })

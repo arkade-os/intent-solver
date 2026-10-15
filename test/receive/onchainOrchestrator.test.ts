@@ -94,6 +94,8 @@ interface ArkadeFake {
    * is `findClaimPreimage`'s problem, and covered by its own tests.
    */
   spendLockup: (pkScriptHex: string, preimage: Uint8Array | null) => void
+  /** Out of Arkade: no longer spendable offchain, and its outpoints now live on L1 under the same txid/vout. */
+  unrollLockup: (pkScriptHex: string) => void
   refundCalls: number
 }
 
@@ -103,6 +105,7 @@ const buildArkadeFake = (): ArkadeFake => {
   // `findLockupOutpoints` serves, and the reason a claim stays readable after
   // it has already spent the output.
   const everSeen = new Map<string, { txid: string; vout: number }[]>()
+  const unrolled = new Set<string>()
   const claimed = new Map<string, Uint8Array>()
   let fundCounter = 0
   const fundStamps: ArkadeFake['fundStamps'] = []
@@ -118,6 +121,10 @@ const buildArkadeFake = (): ArkadeFake => {
       lockups.delete(pkScriptHex)
       if (preimage) claimed.set(pkScriptHex, preimage)
     },
+    unrollLockup: (pkScriptHex) => {
+      for (const seen of everSeen.get(pkScriptHex) ?? []) unrolled.add(`${seen.txid}:${seen.vout}`)
+      lockups.delete(pkScriptHex)
+    },
     refundCalls: 0,
     arkade: {
       providerPubkey,
@@ -127,7 +134,11 @@ const buildArkadeFake = (): ArkadeFake => {
       delays: { unilateralClaimDelay: 512, unilateralRefundDelay: 1024, unilateralRefundWithoutReceiverDelay: 1536 },
       hrp: 'tark',
       findLockups: async (pkScriptHex) => lockups.get(pkScriptHex) ?? [],
-      findLockupOutpoints: async (pkScriptHex) => everSeen.get(pkScriptHex) ?? [],
+      findLockupOutpoints: async (pkScriptHex) =>
+        (everSeen.get(pkScriptHex) ?? []).map((seen) => ({
+          ...seen,
+          unrolled: unrolled.has(`${seen.txid}:${seen.vout}`),
+        })),
       findClaimPreimage: async (outpoints, paymentHashHex) => {
         // Resolve the outpoints back to their script the way the indexer does,
         // then answer only for a preimage that actually hashes right — the
@@ -1236,6 +1247,80 @@ describe('OnchainReceiveSwapService', () => {
       const row = await service.tick(awaitingClaim.id)
       expect(row.state).toBe('refunded')
       expect(deps.arkadeFake.refundCalls).toBe(1)
+    })
+  })
+
+  // `P` is then in an L1 witness and nowhere the Arkade read can see it — and
+  // past `htlc_locktime` the client refunds its L1 HTLC too.
+  describe('a lockup the client unrolled onto L1', () => {
+    const driveToAwaitingClaim = async (): Promise<OnchainReceiveSwapRow> => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+      return service.tick(outcome.swap.id)
+    }
+
+    /** The unroll puts the vtxo on L1 at the outpoint it already had; the claim spends it there. */
+    const unrollAndClaimOnL1 = (row: OnchainReceiveSwapRow, witness: Uint8Array[]) => {
+      const outpoint = deps.arkadeFake.lockups.get(row.pkScript)![0]!
+      deps.arkadeFake.unrollLockup(row.pkScript)
+      deps.onchain.receiveExternal({
+        address: row.lockupAddress,
+        amountSats: outpoint.value,
+        txid: outpoint.txid,
+        vout: outpoint.vout,
+      })
+      deps.onchain.spendClaim(outpoint.txid, outpoint.vout, witness)
+    }
+
+    it('reads P off the L1 witness and claims the htlc with it', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      const reported: string[] = []
+      service.onTickError = (_id, error) => reported.push(error instanceof Error ? error.message : String(error))
+      unrollAndClaimOnL1(awaitingClaim, [new Uint8Array(64), P, new Uint8Array(33).fill(2)])
+
+      const row = await service.tick(awaitingClaim.id)
+
+      expect(row.state).toBe('claimed')
+      expect(row.preimage).toBe(hex.encode(P))
+      expect(row.onchainClaimTxid).toBeTruthy()
+      expect(reported).toHaveLength(1)
+      expect(reported[0]).toMatch(/unrolled/)
+    })
+
+    it('ignores a witness that does not open the payment hash', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      unrollAndClaimOnL1(awaitingClaim, [new Uint8Array(32).fill(0xff)])
+
+      const row = await service.tick(awaitingClaim.id)
+
+      expect(row.state).toBe('awaiting_claim')
+      expect(row.preimage).toBeNull()
+    })
+
+    it('recovers the late claim instead of refunding a lockup that has left arkade', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      now = awaitingClaim.refundLocktime + 1
+      await store.transition(awaitingClaim.id, 'awaiting_claim', 'refunding_arkade', {})
+      unrollAndClaimOnL1(awaitingClaim, [P])
+
+      const row = await service.tick(awaitingClaim.id)
+
+      expect(row.state).toBe('claimed')
+      expect(row.preimage).toBe(hex.encode(P))
+      expect(deps.arkadeFake.refundCalls).toBe(0)
+    })
+
+    it('retries rather than reading an unanswered L1 query as unspent', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      unrollAndClaimOnL1(awaitingClaim, [P])
+      deps.onchain.findSpendWitness = async () => {
+        throw new Error('esplora unreachable')
+      }
+
+      await expect(service.tick(awaitingClaim.id)).rejects.toThrow('esplora unreachable')
+      expect((await store.get(awaitingClaim.id)).state).toBe('awaiting_claim')
     })
   })
 

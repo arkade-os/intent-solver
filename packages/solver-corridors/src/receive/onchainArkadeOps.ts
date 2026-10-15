@@ -47,8 +47,10 @@ export interface OnchainReceiveArkadeOps extends Pick<
    * Every outpoint this lockup script has ever held, spent ones included —
    * what {@link findClaimPreimage} has to be given once covclaimd's claim has
    * already spent the output, since a spendable-only view no longer shows it.
+   * `unrolled` means it has left Arkade, so a spend of it reveals `P` in an L1
+   * witness {@link findClaimPreimage} cannot read.
    */
-  findLockupOutpoints(pkScriptHex: string): Promise<{ txid: string; vout: number }[]>
+  findLockupOutpoints(pkScriptHex: string): Promise<{ txid: string; vout: number; unrolled: boolean }[]>
 
   /**
    * The preimage out of whatever claimed one of `outpoints`, verified against

@@ -147,9 +147,14 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
    * client funds their own onchain HTLC directly, outside this service), so
    * receive-side tests need a way to seed that deposit without going through
    * a send-only method.
+   * `txid` is for the deposit whose outpoint is not this backend's to choose:
+   * an unrolled Arkade vtxo arrives on L1 at the one it already had.
    */
-  receiveExternal(params: { address: string; amountSats: number; vout?: number }): { txid: string; vout: number } {
-    const txid = fakeTxid()
+  receiveExternal(params: { address: string; amountSats: number; vout?: number; txid?: string }): {
+    txid: string
+    vout: number
+  } {
+    const txid = params.txid ?? fakeTxid()
     const vout = params.vout ?? 0
     this.outputs.push({
       txid,

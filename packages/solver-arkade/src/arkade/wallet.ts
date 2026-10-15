@@ -481,15 +481,23 @@ export const totalValue = (outputs: readonly FundedOutput[]): number =>
  * so {@link findClaimPreimage} can still find the claimed outpoint. `value` lets the receive
  * leg tell its own funding from a dust payment to a public address. Paged like findLockups;
  * unfiltered and `isVtxoSpent` for the reasons at {@link lockupSpendEvidence}.
+ * `unrolled` is the SDK's `isUnrolled` — where the output lives, not whether it was
+ * consumed: an unrolled one is spent on BITCOIN, out of {@link findClaimPreimage}'s reach.
  */
 export const findLockupOutpoints = async (
   ctx: Pick<ArkadeContext, 'wallet'>,
   pkScriptHex: string,
-): Promise<{ txid: string; vout: number; value: number; spent: boolean }[]> => {
-  const outpoints: { txid: string; vout: number; value: number; spent: boolean }[] = []
+): Promise<{ txid: string; vout: number; value: number; spent: boolean; unrolled: boolean }[]> => {
+  const outpoints: { txid: string; vout: number; value: number; spent: boolean; unrolled: boolean }[] = []
   for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
     for (const vtxo of batch) {
-      outpoints.push({ txid: vtxo.txid, vout: vtxo.vout, value: Number(vtxo.value), spent: isVtxoSpent(vtxo) })
+      outpoints.push({
+        txid: vtxo.txid,
+        vout: vtxo.vout,
+        value: Number(vtxo.value),
+        spent: isVtxoSpent(vtxo),
+        unrolled: vtxo.isUnrolled === true,
+      })
     }
   }
   return outpoints
