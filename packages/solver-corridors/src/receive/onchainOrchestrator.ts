@@ -45,7 +45,7 @@ import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { RFQ_PAIR_ONCHAIN_RECEIVE } from '../wire/onchainReceivePayloads.js'
-import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
+import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
@@ -145,6 +145,8 @@ export type QuoteRefusal =
   | 'duplicate_swap'
   | 'provider_at_capacity'
   | 'invalid_payout_address'
+  /** The operator's exit delay is too long for the solo recourse to open before the client's L1 CLTV. A deployment fact, not a request fault — the Lightning receive leg refuses under this same name. */
+  | 'recourse_window_unservable'
 
 export type QuoteOutcome =
   { accepted: true; swap: OnchainReceiveSwapRow; lockupDeadline: number } | { accepted: false; reason: QuoteRefusal }
@@ -235,6 +237,7 @@ export class OnchainReceiveSwapService {
 
   private readonly admission: AdmissionStrategy
   private claimVsize?: number
+  private readonly unrolledReported = new Set<string>()
 
   constructor(private readonly deps: OnchainReceiveServiceDeps) {
     this.admission = deps.admission
@@ -322,13 +325,24 @@ export class OnchainReceiveSwapService {
       request.amountSide === 'to'
         ? this.pricing.giveFor({ pair: RFQ_PAIR_ONCHAIN_RECEIVE, payoutSats: request.amountSats })
         : request.amountSats
+    const now = this.now()
     const acceptance = evaluateOnchainReceiveAcceptance({
       amountSats: giveSats,
       limits,
-      now: this.now(),
+      now,
       minConfirmations: request.minConfirmations,
     })
     if (!acceptance.accept) return { accepted: false, reason: acceptance.reason }
+
+    // The SAME gate funding will apply: refusing only in
+    // `awaiting_confirmations` strands an L1 HTLC the client has already funded.
+    const recourse = evaluateOnchainReceiveFunding({
+      arkadeRefundLocktime: acceptance.arkadeRefundLocktime,
+      htlcLocktime: acceptance.htlcLocktime,
+      unilateralRefundWithoutReceiverDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
+      now,
+    })
+    if (!recourse.fund) return { accepted: false, reason: 'recourse_window_unservable' }
 
     // The client funds the onchain HTLC with the full give; the solver funds
     // the Arkade lockup with the give MINUS this corridor's fee.
@@ -573,6 +587,25 @@ export class OnchainReceiveSwapService {
     }
     const outputs = await onchain.findOutputs({ address: row.onchainAddress })
     const output = outputs.find((o) => o.txid === row.fundingTxid && o.vout === row.fundingVout)
+    // The adopted output is GONE — a fee-bumped funding leaves a different txid
+    // at the same address. Nothing is exposed here, so re-adopting is safe.
+    if (!output) {
+      const replacement = evaluateOnchainReceiveFill({
+        outputs,
+        quote: { amountSats: row.amountSats, payoutSats: row.payoutSats },
+        band: bandOf(row),
+        limits: this.deps.limits,
+        claimFeeSats: await this.claimFeeSatsFor(row),
+      })
+      if (replacement.fill === 'adopt') {
+        return store.transition(row.id, 'awaiting_confirmations', 'awaiting_confirmations', {
+          funding_txid: replacement.output.txid,
+          funding_vout: replacement.output.vout,
+          funded_value_sats: replacement.fundedValueSats,
+          funded_payout_sats: replacement.fundedPayoutSats,
+        })
+      }
+    }
     const confirmed = (output?.confirmations ?? 0) >= row.minConfirmations
 
     const decision = evaluateOnchainReceiveFunding({
@@ -693,6 +726,43 @@ export class OnchainReceiveSwapService {
   }
 
   /**
+   * `P` out of whatever spent this lockup: the Arkade read, then — for an
+   * outpoint that has LEFT Arkade — the L1 one, a client that unrolls claiming
+   * on Bitcoin. A throw there is "could not find out", so the tick retries.
+   */
+  private async findPreimage(
+    row: OnchainReceiveSwapRow,
+    outpoints: readonly { txid: string; vout: number; unrolled: boolean }[],
+  ): Promise<Uint8Array | null> {
+    if (outpoints.length === 0) return null
+    const claimed = await this.deps.arkade.findClaimPreimage(outpoints, row.paymentHash)
+    if (claimed) return claimed
+
+    const unrolled = outpoints.filter((outpoint) => outpoint.unrolled)
+    if (unrolled.length === 0) return null
+    // Once per row per process: this is re-read on every tick of the wait.
+    if (!this.unrolledReported.has(row.id)) {
+      this.unrolledReported.add(row.id)
+      const named = unrolled.map((outpoint) => `${outpoint.txid}:${outpoint.vout}`).join(', ')
+      this.onTickError?.(
+        row.id,
+        new Error(`arkade lockup unrolled onto L1 (${named}) — reading the claim witness onchain`),
+      )
+    }
+    const outputScript = hex.decode(row.pkScript)
+    for (const outpoint of unrolled) {
+      const witness = await this.deps.onchain.findSpendWitness({
+        txid: outpoint.txid,
+        vout: outpoint.vout,
+        outputScript,
+      })
+      const revealed = witness?.find((item) => item.length === 32 && paymentHashFromPreimage(item) === row.paymentHash)
+      if (revealed) return revealed
+    }
+    return null
+  }
+
+  /**
    * Wait for the claim to land, and — when covclaimd is configured — (re)ask
    * it to push one on every tick it hasn't.
    *
@@ -718,7 +788,7 @@ export class OnchainReceiveSwapService {
     // the whole point: by the time covclaimd's claim is worth reading, the
     // output it spent is gone from any spendable-only view.
     const outpoints = await arkade.findLockupOutpoints(row.pkScript)
-    const preimage = outpoints.length > 0 ? await arkade.findClaimPreimage(outpoints, row.paymentHash) : null
+    const preimage = await this.findPreimage(row, outpoints)
     if (preimage) {
       return store.transition(row.id, 'awaiting_claim', 'claimed', { preimage: hex.encode(preimage) })
     }
@@ -1043,7 +1113,7 @@ export class OnchainReceiveSwapService {
     // it, same reasoning send's whenRefundingOnchain documents for the
     // identical race on the other leg.
     const outpoints = await arkade.findLockupOutpoints(row.pkScript)
-    const preimage = outpoints.length > 0 ? await arkade.findClaimPreimage(outpoints, row.paymentHash) : null
+    const preimage = await this.findPreimage(row, outpoints)
     if (preimage) {
       return store.transition(row.id, 'refunding_arkade', 'claimed', { preimage: hex.encode(preimage) })
     }
@@ -1069,6 +1139,9 @@ export class OnchainReceiveSwapService {
       await store.fail(row.id, 'refunding_arkade', 'lockup empty with no matching claim; needs review')
       return false
     }
+    // Before `refundLocktime` the server answers FORFEIT_CLOSURE_LOCKED, and
+    // unlike the Lightning leg this one arrives up to a fund window early.
+    if (this.now() < row.refundLocktime) return false
     try {
       const txid = await arkade.refund(receiveCovenantRowFor(row), outputs)
       return store.transition(row.id, 'refunding_arkade', 'refunded', { arkade_refund_txid: txid })
@@ -1078,7 +1151,8 @@ export class OnchainReceiveSwapService {
       // the deadline is `refundLocktime` rather than a grace, and why this is
       // only safe now that `onchain-receive-refund-now` gives a human somewhere
       // to take the row.
-      if (this.now() - row.updatedAt >= REFUND_CENSORSHIP_GRACE) {
+      // From whichever came later: entry can predate the deadline here.
+      if (this.now() - Math.max(row.updatedAt, row.refundLocktime) >= REFUND_CENSORSHIP_GRACE) {
         const detail = error instanceof Error ? error.message : String(error)
         const recourse = unilateralExitRecourse(receiveCovenantRowFor(row), { solverPubkey: arkade.providerPubkey })
         await store.fail(

@@ -1,4 +1,5 @@
 import { UNILATERAL_RECOURSE_MARGIN } from '@arkade-os/solver-core/core/receive.js'
+import { NOMINAL_BLOCK_SECONDS } from '@arkade-os/solver-core/core/timelocks.js'
 import { describe, it, expect } from 'vitest'
 import {
   ONCHAIN_SECONDS_PER_BLOCK,
@@ -206,6 +207,20 @@ describe('evaluateOnchainReceiveFunding', () => {
       fundingInput({ htlcLocktime: now + LADDER + UNILATERAL_RECOURSE_MARGIN - 1 }),
     )
     expect(result.fund).toBe(false)
+  })
+
+  it('reads a BLOCK-typed solo recourse in seconds, so the gate still binds', () => {
+    // 20 blocks is 12000s; added raw to a unix timestamp it reads as 20.
+    const result = evaluateOnchainReceiveFunding(
+      fundingInput({
+        unilateralRefundWithoutReceiverDelay: 20,
+        htlcLocktime: now + 20 * NOMINAL_BLOCK_SECONDS,
+      }),
+    )
+    expect(result).toEqual({
+      fund: false,
+      reason: 'refused to fund: solver unilateral recourse opens after the onchain htlc timeout',
+    })
   })
 })
 
