@@ -1091,10 +1091,16 @@ export class OnchainSendSwapService {
       version.previousFeeRate === null
         ? null
         : affordableFee(vsize, version.previousFeeRate, row.payoutSats, ONCHAIN_DUST_SATS)
-    // Already at the cap: a "replacement" that pays no more is the same
-    // transaction, and sending it would put its own txid in its own prior list.
-    if (previous !== null && fee <= previous) {
-      return { broadcast: false, reason: `refund already paying the ${previous} sats this HTLC can carry`, retry: true }
+    // At or near the cap. BIP125 rule 3 wants the incremental relay fee on top
+    // (1 sat/vB over an identical vsize), so a replacement the cap holds under
+    // that is not one — the node rejects it, and at equality it is the very
+    // same transaction, whose txid would land in its own prior list.
+    if (previous !== null && fee - previous < vsize) {
+      return {
+        broadcast: false,
+        reason: `refund at ${previous} sats cannot be raised by the ${vsize} sat relay increment: this HTLC carries ${fee}`,
+        retry: true,
+      }
     }
 
     const unsigned = buildOnchainRefundTx({ ...sizingParams, payoutAmountSats: BigInt(row.payoutSats - fee) })

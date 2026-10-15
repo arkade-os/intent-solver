@@ -9,6 +9,8 @@ import { ArkAddress } from '@arkade-os/sdk'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { EMPTY_LOCKUP_GRACE, REFUND_CENSORSHIP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { FEE_BUMP_FACTOR, FEE_BUMP_INTERVAL_SECONDS } from '@arkade-os/solver-rails/onchain/feeBump.js'
+import { claimSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
+import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { ONCHAIN_DUST_SATS } from '@arkade-os/solver-core/core/onchainReceive.js'
 import {
   OnchainReceiveSwapStore,
@@ -1361,6 +1363,28 @@ describe('OnchainReceiveSwapService', () => {
           allowUnknownInputs: true,
         })
         expect(claimTx.getOutput(0).amount).toBe(BigInt(ONCHAIN_DUST_SATS))
+      })
+
+      it('does not replace when the cap leaves less than the relay increment to add', async () => {
+        const claimed = await driveToClaimed()
+        // An HTLC whose cap sits one sat above what 1 sat/vB already pays: the
+        // replacement can only add that sat, which BIP125 rule 3 rejects.
+        const vsize = claimSpendVsize({ network: ONCHAIN_NETWORKS.regtest, destinationScript: claimDestinationScript })
+        await deps.driver.run('UPDATE receive_onchain_swap SET funded_value_sats = ? WHERE id = ?', [
+          ONCHAIN_DUST_SATS + vsize + 1,
+          claimed.id,
+        ])
+        deps.onchain.setFeeRate(1)
+        const first = await service.tick(claimed.id)
+        expect(first.onchainClaimTxid).toBeTruthy()
+        const broadcasts = captureBroadcasts()
+
+        now += FEE_BUMP_INTERVAL_SECONDS
+        deps.onchain.setFeeRate(1_000)
+        const after = await service.tick(claimed.id)
+
+        expect(broadcasts).toEqual([])
+        expect(after.onchainClaimTxid).toBe(first.onchainClaimTxid)
       })
 
       it('does not replace a claim already paying everything above dust', async () => {

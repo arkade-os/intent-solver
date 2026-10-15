@@ -1193,6 +1193,28 @@ describe('OnchainSendSwapService', () => {
     expect((await service.tick(funded.id)).state).toBe('refunded')
   })
 
+  it('does not replace a refund when the cap leaves less than the relay increment to add', async () => {
+    const funded = await driveToCappedRefund()
+    // A payout whose cap sits one sat above what 1 sat/vB already pays: the
+    // replacement can only add that sat, which BIP125 rule 3 rejects.
+    await deps.driver.run('UPDATE send_onchain_swap SET payout_sats = ? WHERE id = ?', [
+      ONCHAIN_DUST_SATS + REFUND_VSIZE + 1,
+      funded.id,
+    ])
+    now = funded.htlcLocktime + HTLC_REFUND_MTP_MARGIN + 1
+    deps.onchain.setFeeRate(1)
+    const first = await service.tick(funded.id)
+    expect(first.onchainRefundTxid).toBeTruthy()
+    const broadcasts = captureBroadcasts()
+
+    now += FEE_BUMP_INTERVAL_SECONDS
+    deps.onchain.setFeeRate(5_000)
+    const after = await service.tick(funded.id)
+
+    expect(broadcasts).toEqual([])
+    expect(after.onchainRefundTxid).toBe(first.onchainRefundTxid)
+  })
+
   it('does not replace a refund already paying everything above dust', async () => {
     const funded = await driveToCappedRefund()
     now = funded.htlcLocktime + HTLC_REFUND_MTP_MARGIN + 1
