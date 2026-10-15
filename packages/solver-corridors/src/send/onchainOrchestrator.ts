@@ -42,6 +42,7 @@ import {
   type OnchainSigner,
 } from '@arkade-os/solver-rails/onchain/refund.js'
 import { refundSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
+import { affordableFee, outcomeOfAny, replacementFeeRate } from '@arkade-os/solver-rails/onchain/feeBump.js'
 import type { OnchainSendBackend, ReceiveSettlement } from '@arkade-os/solver-core/ports/onchain.js'
 import type { OnchainSendSwapRow, OnchainSendSwapStore } from '../db/onchainSwaps.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
@@ -146,6 +147,13 @@ export interface OnchainQuoteRequest {
 
 /** Extract the preimage from a claim witness: `[signature, preimage, claimScript, controlBlock]`. */
 const preimageFromClaimWitness = (witness: Uint8Array[]): Uint8Array | null => witness[1] ?? null
+
+/**
+ * Every version of our refund that could still be the one that confirms,
+ * newest first. A replacement does not revoke what it replaced.
+ */
+const trackedRefundTxids = (row: OnchainSendSwapRow): string[] =>
+  row.onchainRefundTxid === null ? row.onchainRefundPriorTxids : [row.onchainRefundTxid, ...row.onchainRefundPriorTxids]
 
 /**
  * Why {@link OnchainSendSwapService.pushRefund} could not act on an empty
@@ -582,6 +590,17 @@ export class OnchainSendSwapService {
       throw new Error(`swap ${id} has no funding txid/vout: nothing was ever broadcast to the onchain HTLC`)
     }
 
+    // OUR OWN EARLIER ATTEMPTS, BY NAME, before the witness read — which
+    // cannot say whose spend it found, and would see one of ours.
+    let waiting: string | null = null
+    const tracked = trackedRefundTxids(row)
+    const [latest] = tracked
+    if (latest !== undefined) {
+      const outcome = await outcomeOfAny(onchain, tracked)
+      if (outcome === 'confirmed') return latest
+      if (outcome === 'mempool') waiting = latest
+    }
+
     // Re-read the chain even though the operator asked for a refund. Not to
     // second-guess them about the double-spend — that is harmless here — but
     // because a matching claim means there is something strictly better to do
@@ -617,7 +636,17 @@ export class OnchainSendSwapService {
     if (this.inFlight.has(id)) throw new Error(`swap ${id} is already being ticked; retry once that tick finishes`)
     this.inFlight.add(id)
     try {
-      const attempt = await this.pushOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)
+      // One of ours already waiting is what a fee spike makes worth REPLACING
+      // rather than repeating — a rebuild at today's estimate can price below
+      // it, which relays as nothing at all. Null is "too soon to replace", and
+      // the version out there is still the answer.
+      if (waiting !== null) {
+        return (await this.replaceOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)) ?? waiting
+      }
+      const attempt = await this.pushOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout, {
+        feeRate: await onchain.estimateFeeRate(),
+        previousFeeRate: null,
+      })
       if (!attempt.broadcast) throw new Error(attempt.reason)
       return attempt.txid
     } finally {
@@ -910,14 +939,23 @@ export class OnchainSendSwapService {
       return false
     }
 
-    // OUR OWN EARLIER ATTEMPT, BY NAME: the pre-committed txid stops
+    // OUR OWN EARLIER ATTEMPTS, BY NAME: the pre-committed txids stop
     // a refund that went out before a crash being written off as a foreign spend
     // below. Before the claim read, because a CONFIRMED refund of this outpoint
-    // means no claim can exist; the reverse is not true.
-    if (row.onchainRefundTxid) {
-      const outcome = await onchain.transactionOutcome(row.onchainRefundTxid)
+    // means no claim can exist; the reverse is not true. EVERY version, since a
+    // replacement does not revoke the one it replaced.
+    const tracked = trackedRefundTxids(row)
+    if (tracked.length > 0) {
+      const outcome = await outcomeOfAny(onchain, tracked)
       if (outcome === 'confirmed') return store.transition(row.id, 'refunding_onchain', 'refunded', {})
-      if (outcome === 'mempool') return false
+      // Not a wait worth sitting out: the claim leaf has no timelock, so the
+      // client can claim this same output until the refund CONFIRMS, and an
+      // unconfirmed one stretches that window towards `refundLocktime` —
+      // where they take their Arkade lockup back as well.
+      if (outcome === 'mempool') {
+        await this.replaceOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)
+        return false
+      }
     }
 
     // The client can still land a valid claim right up to (and, within
@@ -944,7 +982,10 @@ export class OnchainSendSwapService {
       return false
     }
 
-    const attempt = await this.pushOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)
+    const attempt = await this.pushOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout, {
+      feeRate: await onchain.estimateFeeRate(),
+      previousFeeRate: null,
+    })
     if (!attempt.broadcast) {
       // Parking before refundLocktime would end both the claim re-check above and the
       // retry; `refunding_onchain` is recoverable, so the next sweep re-reads the rate.
@@ -953,6 +994,38 @@ export class OnchainSendSwapService {
       return false
     }
     return false
+  }
+
+  /**
+   * Replace a refund the mempool has not taken, once it has sat there long
+   * enough to be worth replacing.
+   *
+   * Does nothing before the interval, and nothing when the fee is already
+   * everything this output can pay above dust: a replacement that cannot pay
+   * MORE is the same transaction. A replacement the network rejects THROWS,
+   * which is the safe direction — the version it was replacing is still
+   * tracked, so the next due bump tries higher.
+   *
+   * @returns the replacement's txid, or null if none went out.
+   */
+  private async replaceOnchainHtlcRefund(
+    row: OnchainSendSwapRow,
+    fundingTxid: string,
+    fundingVout: number,
+  ): Promise<string | null> {
+    const estimate = await this.deps.onchain.estimateFeeRate()
+    // A row broadcast before these columns existed has neither figure. Its
+    // `updatedAt` is when the pre-commit wrote the txid, and treating the old
+    // rate as today's estimate makes the first replacement a plain bump of it.
+    const previousFeeRate = row.onchainRefundFeeRate ?? estimate
+    const feeRate = replacementFeeRate(
+      { feeRate: previousFeeRate, broadcastAt: row.onchainRefundBroadcastAt ?? row.updatedAt },
+      estimate,
+      this.now(),
+    )
+    if (feeRate === null) return null
+    const attempt = await this.pushOnchainHtlcRefund(row, fundingTxid, fundingVout, { feeRate, previousFeeRate })
+    return attempt.broadcast ? attempt.txid : null
   }
 
   /**
@@ -977,6 +1050,7 @@ export class OnchainSendSwapService {
     row: OnchainSendSwapRow,
     fundingTxid: string,
     fundingVout: number,
+    version: { feeRate: number; previousFeeRate: number | null },
   ): Promise<OnchainHtlcRefundAttempt> {
     const { onchain, signer, refundDestinationScript, network } = this.deps
 
@@ -1006,7 +1080,6 @@ export class OnchainSendSwapService {
       }
     }
 
-    const feeRate = await onchain.estimateFeeRate()
     const sizingParams = {
       htlc,
       fundingTxid,
@@ -1017,34 +1090,43 @@ export class OnchainSendSwapService {
       destinationScript: refundDestinationScript,
       payoutAmountSats: BigInt(row.payoutSats),
     }
-    const fee = BigInt(Math.ceil(estimateRefundTxVsize(sizingParams) * feeRate))
-    const payoutAmountSats = BigInt(row.payoutSats) - fee
-    if (payoutAmountSats < BigInt(ONCHAIN_DUST_SATS)) {
-      // Below dust is as unbroadcastable as negative — refuse rather than
-      // build a non-standard transaction no relay policy will forward.
-      //
-      // The one lever a human has here is the fee rate, and it is a real one:
-      // `estimateFeeRate` is re-read on every attempt, so an HTLC priced out
-      // by a mempool spike becomes refundable again once fees fall, and
-      // both {@link whenRefundingOnchain} and {@link reclaimOnchainHtlc} retry. Below that,
-      // nothing in this module helps — dust is a floor on the OUTPUT value,
-      // so an HTLC too small to cover its own spend at ANY plausible rate can
-      // only be recovered by batching it with other inputs, which the
-      // deliberately single-input builder in `src/onchain/refund.ts` cannot
-      // express — the case {@link refundablePayoutFloor} refuses; the rate goes in
-      // the reason so the two cases can be told apart from the row alone.
+    const vsize = estimateRefundTxVsize(sizingParams)
+    const fee = affordableFee(vsize, version.feeRate, row.payoutSats, ONCHAIN_DUST_SATS)
+    if (fee === null) {
+      // The fee is CAPPED at what leaves dust, so a mempool spike no longer
+      // reaches here: what does is an HTLC too small to cover its own spend
+      // at the 1 sat/vB relay minimum, which no later rate recovers. Only
+      // batching it with other inputs would, and the deliberately
+      // single-input builder in `onchain/refund.ts` cannot express that — the
+      // case {@link refundablePayoutFloor} refuses at quote time.
       return {
         broadcast: false,
-        reason: `refund fee ${fee} at ${feeRate} sat/vB leaves ${payoutAmountSats} sats from a ${row.payoutSats} sat HTLC — below the ${ONCHAIN_DUST_SATS} sat dust limit`,
+        reason: `a ${row.payoutSats} sat HTLC cannot pay for its own ${vsize} vB refund and still clear the ${ONCHAIN_DUST_SATS} sat dust limit`,
         retry: true,
       }
     }
+    const previous =
+      version.previousFeeRate === null
+        ? null
+        : affordableFee(vsize, version.previousFeeRate, row.payoutSats, ONCHAIN_DUST_SATS)
+    if (previous !== null && fee <= previous) {
+      // Already paying the cap: a "replacement" at a higher rate is the same
+      // transaction, and broadcasting it would put its own txid in its own
+      // prior list.
+      return { broadcast: false, reason: `refund already paying the ${previous} sats this HTLC can carry`, retry: true }
+    }
 
-    const unsigned = buildOnchainRefundTx({ ...sizingParams, payoutAmountSats })
+    const unsigned = buildOnchainRefundTx({ ...sizingParams, payoutAmountSats: BigInt(row.payoutSats - fee) })
     const signed = await signOnchainRefundTx(unsigned, signer)
     // PRE-COMMITTED, here so both callers get it. Holding the id of a
     // broadcast that threw is the safe direction: `unknown`, then rebuild.
-    await this.deps.store.patch(row.id, { onchain_refund_txid: signed.id })
+    // Every version, not just this one, since any of them can confirm.
+    await this.deps.store.patch(row.id, {
+      onchain_refund_txid: signed.id,
+      onchain_refund_prior_txids: [...new Set(trackedRefundTxids(row))].filter((txid) => txid !== signed.id).join(' '),
+      onchain_refund_fee_rate: version.feeRate,
+      onchain_refund_broadcast_at: this.now(),
+    })
     await onchain.broadcastRaw(hex.encode(signed.extract()))
     return { broadcast: true, txid: signed.id }
   }

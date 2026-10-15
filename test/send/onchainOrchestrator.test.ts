@@ -3,8 +3,9 @@ import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
-import { SigHash } from '@scure/btc-signer'
+import { SigHash, Transaction } from '@scure/btc-signer'
 import { OnchainSendSwapService, HTLC_REFUND_MTP_MARGIN } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
+import { FEE_BUMP_FACTOR, FEE_BUMP_INTERVAL_SECONDS } from '@arkade-os/solver-rails/onchain/feeBump.js'
 import {
   ARKADE_CLAIM_WINDOW_SECONDS,
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
@@ -1144,8 +1145,8 @@ describe('OnchainSendSwapService', () => {
     expect(await deps.onchain.transactionOutcome(row.onchainRefundTxid!)).toBe('unknown')
   })
 
-  /** A funded swap whose payout cannot cover its own refund at the fake's 5 sat/vB. */
-  const driveToUnrefundableHtlc = async (): Promise<OnchainSendSwapRow> => {
+  /** A funded 1_000 sat HTLC: at the fake's 5 sat/vB the honest fee eats past dust, so the refund is capped. */
+  const driveToCappedRefund = async (): Promise<OnchainSendSwapRow> => {
     const outcome = await service.quote({
       paymentHash,
       amountSats: 1_000,
@@ -1160,23 +1161,58 @@ describe('OnchainSendSwapService', () => {
     return row
   }
 
-  it('retries a sub-dust refund before the deadline instead of parking the exposed row', async () => {
-    const funded = await driveToUnrefundableHtlc()
+  /**
+   * A funded swap whose HTLC cannot pay for its own refund spend at ANY rate.
+   *
+   * Written through the driver because `refundablePayoutFloor` refuses to
+   * quote one: the fee is capped at what leaves dust now, so this is the only
+   * shape left that the cap cannot rescue.
+   */
+  const driveToUnrefundableHtlc = async (): Promise<OnchainSendSwapRow> => {
+    const row = await driveToCappedRefund()
+    await deps.driver.run('UPDATE send_onchain_swap SET payout_sats = ? WHERE id = ?', [
+      ONCHAIN_DUST_SATS + REFUND_VSIZE - 1,
+      row.id,
+    ])
+    return deps.store.get(row.id)
+  }
 
+  it('refunds at the fee the HTLC can carry rather than parking the exposed row', async () => {
+    // Parking it leaves the client able to claim that same output: the claim
+    // leaf carries no timelock, so an unconfirmed refund never closes it.
+    const funded = await driveToCappedRefund()
     now = funded.htlcLocktime + HTLC_REFUND_MTP_MARGIN + 1
-    await expect(service.tick(funded.id)).rejects.toThrow(/below the 330 sat dust limit/)
-    let row = await deps.store.get(funded.id)
-    expect(row.state).toBe('refunding_onchain')
-    expect(row.onchainRefundTxid).toBeNull() // never broadcast
+    const broadcasts = captureBroadcasts()
 
-    deps.onchain.estimateFeeRate = async () => 1
-    row = await service.tick(funded.id)
+    const row = await service.tick(funded.id)
+
+    expect(row.state).toBe('refunding_onchain')
     expect(row.onchainRefundTxid).toBeTruthy()
+    const refundTx = Transaction.fromRaw(hex.decode(broadcasts[0]!), {
+      allowUnknownOutputs: true,
+      allowUnknownInputs: true,
+    })
+    expect(refundTx.getOutput(0).amount).toBe(BigInt(ONCHAIN_DUST_SATS))
     deps.onchain.mineBlocks(1)
     expect((await service.tick(funded.id)).state).toBe('refunded')
   })
 
-  /** `stuck` through the orchestrator's own logic: a sub-dust refund past `refundLocktime`, the only clock that parks it. */
+  it('does not replace a refund already paying everything above dust', async () => {
+    const funded = await driveToCappedRefund()
+    now = funded.htlcLocktime + HTLC_REFUND_MTP_MARGIN + 1
+    const first = await service.tick(funded.id)
+    const broadcasts = captureBroadcasts()
+
+    now += FEE_BUMP_INTERVAL_SECONDS
+    deps.onchain.setFeeRate(5_000)
+    const after = await service.tick(funded.id)
+
+    expect(broadcasts).toEqual([])
+    expect(after.onchainRefundTxid).toBe(first.onchainRefundTxid)
+    expect(after.onchainRefundPriorTxids).toEqual([])
+  })
+
+  /** `stuck` through the orchestrator's own logic: an unrefundable HTLC past `refundLocktime`, the only clock that parks it. */
   const driveToStuck = async (): Promise<OnchainSendSwapRow> => {
     const funded = await driveToUnrefundableHtlc()
     now = funded.refundLocktime + 1
@@ -1187,8 +1223,8 @@ describe('OnchainSendSwapService', () => {
     return row
   }
 
-  it('parks a sub-dust refund once the client could pull their lockup back, where a human weighs both legs', async () => {
-    expect((await driveToStuck()).failureReason).toMatch(/at 5 sat\/vB/)
+  it('parks an unrefundable HTLC once the client could pull their lockup back, where a human weighs both legs', async () => {
+    expect((await driveToStuck()).failureReason).toMatch(/cannot pay for its own/)
   })
 
   it('never auto-refunds a stuck swap, however far past its refund deadline', async () => {
@@ -1309,6 +1345,80 @@ describe('OnchainSendSwapService', () => {
     expect(after.state).toBe('refunding_onchain')
     deps.onchain.mineBlocks(1)
     expect((await service.tick(row.id)).state).toBe('refunded')
+  })
+
+  /**
+   * Fee-bumping the L1 refund, the send leg's half of the same race.
+   *
+   * The claim leaf carries no timelock, so until the refund CONFIRMS the
+   * client can still claim — and an unconfirmed one stretches that window
+   * towards `refund_locktime`, where they can pull their Arkade lockup back
+   * and take the L1 output too.
+   */
+  it('leaves a refund alone until the bump interval is up', async () => {
+    const row = await driveToBroadcastRefund()
+    expect(row.onchainRefundFeeRate).toBe(5)
+    expect(row.onchainRefundBroadcastAt).toBe(now)
+    const broadcasts = captureBroadcasts()
+
+    now += FEE_BUMP_INTERVAL_SECONDS - 1
+    const after = await service.tick(row.id)
+
+    expect(broadcasts).toEqual([])
+    expect(after.onchainRefundTxid).toBe(row.onchainRefundTxid)
+    expect(after.onchainRefundPriorTxids).toEqual([])
+  })
+
+  it('replaces a refund at the factor once the interval is up, keeping the old version tracked', async () => {
+    const first = await driveToBroadcastRefund()
+
+    now += FEE_BUMP_INTERVAL_SECONDS
+    const bumped = await service.tick(first.id)
+
+    expect(bumped.state).toBe('refunding_onchain')
+    expect(bumped.onchainRefundTxid).not.toBe(first.onchainRefundTxid)
+    expect(bumped.onchainRefundFeeRate).toBe(5 * FEE_BUMP_FACTOR)
+    expect(bumped.onchainRefundPriorTxids).toEqual([first.onchainRefundTxid])
+    expect(bumped.onchainRefundBroadcastAt).toBe(now)
+  })
+
+  it('refunds on an OLDER version when that is the one a miner took', async () => {
+    const first = await driveToBroadcastRefund()
+    now += FEE_BUMP_INTERVAL_SECONDS
+    const bumped = await service.tick(first.id)
+
+    // The replacement never made it; the version it replaced did.
+    deps.onchain.dropFromMempool(bumped.onchainRefundTxid!)
+    deps.onchain.mineBlocks(1)
+
+    expect((await service.tick(first.id)).state).toBe('refunded')
+  })
+
+  it('bumps a refund broadcast before these columns existed, off updated_at', async () => {
+    const first = await driveToBroadcastRefund()
+    await deps.driver.run(
+      `UPDATE send_onchain_swap SET onchain_refund_fee_rate = NULL, onchain_refund_broadcast_at = NULL, updated_at = ? WHERE id = ?`,
+      [now, first.id],
+    )
+
+    now += FEE_BUMP_INTERVAL_SECONDS
+    const bumped = await service.tick(first.id)
+
+    expect(bumped.onchainRefundTxid).not.toBe(first.onchainRefundTxid)
+    expect(bumped.onchainRefundPriorTxids).toEqual([first.onchainRefundTxid])
+    expect(bumped.onchainRefundFeeRate).toBe(5 * FEE_BUMP_FACTOR)
+  })
+
+  it('reclaimOnchainHtlc() replaces a refund still in the mempool rather than repeating it', async () => {
+    const first = await driveToBroadcastRefund()
+    now += FEE_BUMP_INTERVAL_SECONDS
+
+    const txid = await service.reclaimOnchainHtlc(first.id)
+
+    expect(txid).not.toBe(first.onchainRefundTxid)
+    const after = await deps.store.get(first.id)
+    expect(after.onchainRefundTxid).toBe(txid)
+    expect(after.onchainRefundPriorTxids).toEqual([first.onchainRefundTxid])
   })
 
   /**
@@ -1434,27 +1544,25 @@ describe('OnchainSendSwapService', () => {
     expect((await deps.store.get(row.id)).onchainRefundTxid).toBeNull()
   })
 
-  it('reclaimOnchainHtlc() refuses a still-sub-dust refund rather than pretending the retry helped', async () => {
+  it('reclaimOnchainHtlc() refuses an unrefundable HTLC rather than pretending the retry helped', async () => {
     const row = await driveToStuck()
     const broadcasts = captureBroadcasts()
 
-    // Names the rate it refused at, so "fees spiked" stays separable from
-    // "this HTLC is too small at any rate" — the difference between a retry
-    // worth making later and one that never will be.
-    await expect(service.reclaimOnchainHtlc(row.id)).rejects.toThrow(/at 5 sat\/vB/)
-    await expect(service.reclaimOnchainHtlc(row.id)).rejects.toThrow(/below the 330 sat dust limit/)
+    await expect(service.reclaimOnchainHtlc(row.id)).rejects.toThrow(/cannot pay for its own/)
+    await expect(service.reclaimOnchainHtlc(row.id)).rejects.toThrow(/330 sat dust limit/)
     expect(broadcasts).toEqual([])
     expect((await deps.store.get(row.id)).onchainRefundTxid).toBeNull()
   })
 
-  it('reclaimOnchainHtlc() succeeds on that same dust-stuck row once fees fall — the one lever there is', async () => {
+  it('reclaimOnchainHtlc() still refuses it at the relay minimum — the fee rate is no longer the lever', async () => {
     const row = await driveToStuck()
-    // estimateFeeRate is re-read on every attempt, so the refusal above is a
-    // verdict about that moment's mempool, not a permanent one.
-    deps.onchain.estimateFeeRate = async () => 1
+    // It was, while the refund was refused for leaving a sub-dust output. The
+    // fee is capped at what leaves dust now, so what is left here is an HTLC
+    // too small to buy relay at 1 sat/vB, which no mempool makes affordable.
+    deps.onchain.setFeeRate(1)
 
-    const txid = await service.reclaimOnchainHtlc(row.id)
-    expect((await deps.store.get(row.id)).onchainRefundTxid).toBe(txid)
+    await expect(service.reclaimOnchainHtlc(row.id)).rejects.toThrow(/cannot pay for its own/)
+    expect((await deps.store.get(row.id)).onchainRefundTxid).toBeNull()
   })
 
   it('reclaimOnchainHtlc() refuses a row that never funded an onchain HTLC rather than inventing an outpoint', async () => {

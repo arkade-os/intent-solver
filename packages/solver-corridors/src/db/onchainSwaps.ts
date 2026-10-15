@@ -22,7 +22,15 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
-import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
+import {
+  BaseSwapStore,
+  addColumns,
+  numberOrNull,
+  text,
+  txidList,
+  type RawRow,
+  type StoreShape,
+} from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
 export type OnchainSendSwapState =
@@ -89,7 +97,20 @@ const TRANSITION_COLUMNS = new Set([
  * along. Same shape as `refund_ark_txid` above: a fact about money that moved,
  * recorded without rewriting the state machine's verdict.
  */
-const PATCH_COLUMNS = new Set(['onchain_lockup_value', 'refund_ark_txid', 'refund_outcome', 'onchain_refund_txid'])
+/**
+ * `onchain_refund_fee_rate`/`_broadcast_at`/`_prior_txids` are PATCH-only: the
+ * refund is re-broadcast at a higher fee while the row stays in
+ * `refunding_onchain`, so every write of them happens off any edge.
+ */
+const PATCH_COLUMNS = new Set([
+  'onchain_lockup_value',
+  'refund_ark_txid',
+  'refund_outcome',
+  'onchain_refund_txid',
+  'onchain_refund_fee_rate',
+  'onchain_refund_broadcast_at',
+  'onchain_refund_prior_txids',
+])
 
 export interface OnchainSendSwapRow {
   id: string
@@ -161,6 +182,19 @@ export interface OnchainSendSwapRow {
   claimArkTxid: string | null
   /** Written BEFORE the broadcast: the refund ATTEMPTED, not one that landed. */
   onchainRefundTxid: string | null
+  /** The sat/vB {@link onchainRefundTxid} was built at, so the next version can be priced above it. */
+  onchainRefundFeeRate: number | null
+  /** When it went out — the clock the fee-bump interval runs on, independent of `updatedAt`. */
+  onchainRefundBroadcastAt: number | null
+  /**
+   * The txids of the refund versions this one replaced, newest first.
+   *
+   * Kept because a replacement does not revoke what it replaces: until one
+   * confirms, ANY of them can be the one that does, and a row that tracked
+   * only the latest would read `unknown` and rebroadcast against a version
+   * already in the chain.
+   */
+  onchainRefundPriorTxids: string[]
   refundArkTxid: string | null
   refundOutcome: 'pushed' | 'external' | null
   failureReason: string | null
@@ -209,6 +243,9 @@ const SEND_ONCHAIN_SWAP_COLUMNS = `
   preimage                      TEXT,
   claim_ark_txid                TEXT,
   onchain_refund_txid           TEXT,
+  onchain_refund_fee_rate       REAL,
+  onchain_refund_broadcast_at   INTEGER,
+  onchain_refund_prior_txids    TEXT,
   refund_ark_txid               TEXT,
   refund_outcome                TEXT,
   failure_reason                TEXT,
@@ -279,6 +316,9 @@ const toRow = (raw: Raw): OnchainSendSwapRow => ({
   preimage: raw.preimage === null ? null : String(raw.preimage),
   claimArkTxid: raw.claim_ark_txid === null ? null : String(raw.claim_ark_txid),
   onchainRefundTxid: raw.onchain_refund_txid === null ? null : String(raw.onchain_refund_txid),
+  onchainRefundFeeRate: numberOrNull(raw.onchain_refund_fee_rate),
+  onchainRefundBroadcastAt: numberOrNull(raw.onchain_refund_broadcast_at),
+  onchainRefundPriorTxids: txidList(raw.onchain_refund_prior_txids),
   refundArkTxid: raw.refund_ark_txid === null ? null : String(raw.refund_ark_txid),
   refundOutcome: raw.refund_outcome === null ? null : (String(raw.refund_outcome) as 'pushed' | 'external'),
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
@@ -405,6 +445,9 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
       ['payout_sats', 'INTEGER'],
       ['fund_started_at', 'INTEGER'],
       ['non_interactive_parameters', 'TEXT'],
+      ['onchain_refund_fee_rate', 'REAL'],
+      ['onchain_refund_broadcast_at', 'INTEGER'],
+      ['onchain_refund_prior_txids', 'TEXT'],
     ])
   }
 
