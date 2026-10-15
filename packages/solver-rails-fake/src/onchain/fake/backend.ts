@@ -185,6 +185,13 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
     if (!this.broadcasts.delete(txid)) throw new Error(`no broadcast ${txid} to drop`)
   }
 
+  /** The client RBF-bumped its own funding: this output's transaction was replaced and it is gone. */
+  dropOutput(txid: string, vout: number): void {
+    const at = this.outputs.findIndex((o) => o.txid === txid && o.vout === vout)
+    if (at === -1) throw new Error(`no such output ${txid}:${vout}`)
+    this.outputs.splice(at, 1)
+  }
+
   /** Record a claim/refund spend of `(txid, vout)`, with the given witness stack. */
   spendClaim(txid: string, vout: number, witness: Uint8Array[]): void {
     const output = this.outputs.find((o) => o.txid === txid && o.vout === vout)

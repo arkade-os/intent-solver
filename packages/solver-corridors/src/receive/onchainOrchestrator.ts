@@ -579,6 +579,25 @@ export class OnchainReceiveSwapService {
     }
     const outputs = await onchain.findOutputs({ address: row.onchainAddress })
     const output = outputs.find((o) => o.txid === row.fundingTxid && o.vout === row.fundingVout)
+    // The adopted output is GONE — a fee-bumped funding leaves a different txid
+    // at the same address. Nothing is exposed here, so re-adopting is safe.
+    if (!output) {
+      const replacement = evaluateOnchainReceiveFill({
+        outputs,
+        quote: { amountSats: row.amountSats, payoutSats: row.payoutSats },
+        band: bandOf(row),
+        limits: this.deps.limits,
+        claimFeeSats: await this.claimFeeSatsFor(row),
+      })
+      if (replacement.fill === 'adopt') {
+        return store.transition(row.id, 'awaiting_confirmations', 'awaiting_confirmations', {
+          funding_txid: replacement.output.txid,
+          funding_vout: replacement.output.vout,
+          funded_value_sats: replacement.fundedValueSats,
+          funded_payout_sats: replacement.fundedPayoutSats,
+        })
+      }
+    }
     const confirmed = (output?.confirmations ?? 0) >= row.minConfirmations
 
     const decision = evaluateOnchainReceiveFunding({

@@ -775,6 +775,37 @@ describe('OnchainReceiveSwapService', () => {
       expect(row.state).toBe('refused')
       expect(deps.arkadeFake.lockups.size).toBe(0) // never funded — nothing exposed
     })
+
+    it('re-adopts the replacement when the client RBFs its funding', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      const first = deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      expect((await service.tick(outcome.swap.id)).fundingTxid).toBe(first.txid)
+
+      deps.onchain.dropOutput(first.txid, first.vout)
+      const bumped = deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+
+      const readopted = await service.tick(outcome.swap.id)
+      expect(readopted.state).toBe('awaiting_confirmations')
+      expect(readopted.fundingTxid).toBe(bumped.txid)
+
+      deps.onchain.mineBlocks(1)
+      expect((await service.tick(outcome.swap.id)).state).toBe('awaiting_claim')
+    })
+
+    it('keeps waiting rather than adopting a replacement the fill rules refuse', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      const first = deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      await service.tick(outcome.swap.id)
+
+      deps.onchain.dropOutput(first.txid, first.vout)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 1_000 })
+
+      const row = await service.tick(outcome.swap.id)
+      expect(row.state).toBe('awaiting_confirmations')
+      expect(row.fundingTxid).toBe(first.txid)
+    })
   })
 
   describe('whenFundingArkade re-checks the funding gate', () => {
