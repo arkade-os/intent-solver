@@ -219,6 +219,11 @@ export const sweptRefundBatchHandler = (deps: {
     },
 
     onBatchFinalization: async (event, _vtxoTree, connectorTree) => {
+      // Our outputs are checked only at tree signing: without it, a txid returned from here would
+      // record a refund nobody showed paid the client, and a forfeit would sign blind.
+      if (validatedCommitmentTxid === undefined) {
+        throw new Error('swept refund reached finalization without signing the tree that pays it; refusing')
+      }
       if (connectorTree) validateConnectorsTxGraph(event.commitmentTx, connectorTree)
       const commitmentTx = Transaction.fromPSBT(base64.decode(event.commitmentTx))
       assertFinalCommitmentMatchesValidated(commitmentTx, validatedCommitmentTxid, 'swept refund finalization')
@@ -250,6 +255,10 @@ export const refundSweptSwapScript = async (
   refundPkScript: Uint8Array,
 ): Promise<string> => {
   if (swept.length === 0) throw new Error('nothing to refund: no swept outputs')
+  const committed = script.vhtlcOptions.nonInteractiveParameters?.senderPkScript
+  if (!committed || hex.encode(committed) !== hex.encode(refundPkScript)) {
+    throw new Error(`refund destination ${hex.encode(refundPkScript)} is not the one this covenant pays out to`)
+  }
   // REFUSED, not carried: an asset packet declares a per-output split this
   // covenant pins one input at a time, and nothing here verifies they agree.
   const withAssets = swept.filter((output) => (output.assets ?? []).length > 0)
@@ -276,6 +285,7 @@ export const refundSweptSwapScript = async (
     const message: Intent.RegisterMessage = {
       type: 'register',
       onchain_output_indexes: [],
+      // No window, as the SDK's own settle sends. arkd evicts an intent left unconfirmed.
       valid_at: 0,
       expire_at: 0,
       cosigners_public_keys: [cosigner],

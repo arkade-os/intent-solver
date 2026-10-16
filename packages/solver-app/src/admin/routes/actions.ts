@@ -301,9 +301,7 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       if (corridor !== 'arkade:BTC->lightning:BTC') {
         throw new Error(`read-payment is for the Lightning send corridor; ${corridor} pays over a different rail`)
       }
-      // Read once: this action is entirely about the Lightning send corridor,
-      // which cannot exist without a rail, so a missing one is a refusal here
-      // rather than a null check inside the verdict.
+      // Only for the console's standard no-rail refusal; the verdict reads the rail itself.
       requireLn(services.ln)
       // Shared with the float pass's reconciler, which makes the same money
       // decision; the response shape is unchanged. @see ops/paymentVerdict.ts

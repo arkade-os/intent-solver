@@ -22,6 +22,9 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
     ...actual,
     RestEmulatorProvider: vi.fn().mockImplementation(() => ({ submitIntent })),
     Batch: { ...actual.Batch, join },
+    // The handler tests sign a stub tree, which the real graph checks would reject.
+    validateVtxoTxGraph: vi.fn(),
+    validateBatchRecipients: vi.fn(),
   }
 })
 
@@ -264,32 +267,71 @@ describe('refundSweptSwapScript builds an intent the covenant can satisfy', () =
     expect(hex.encode(proofOf(registered).getInput(2).txid!)).toBe(sweptFloat.txid)
   })
 
-  it('submits no forfeit for a swept fee coin, which arkd does not ask one for', async () => {
-    const submitSignedForfeitTxs = vi.fn(async () => {})
-    const handler = sweptRefundBatchHandler({
-      intentId: 'intent-1',
-      arkProvider: { submitSignedForfeitTxs } as unknown as Parameters<
-        typeof sweptRefundBatchHandler
-      >[0]['arkProvider'],
-      identity,
-      session: identity.signerSession(),
-      network: { bech32: 'bcrt', pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef } as never,
-      recipients: [],
-      feeCoin: {
-        txid: 'f'.repeat(64),
-        vout: 0,
-        value: 50_000,
-        isSwept: true,
-        tapTree: FLOAT_TAPTREE,
-        forfeitTapLeafScript: FLOAT_LEAF,
-        intentTapLeafScript: FLOAT_LEAF,
-      } as never,
+  describe('the batch handler', () => {
+    const SESSION_KEY = key(31)
+    const handlerWith = (feeCoinSwept: boolean) => {
+      const submitSignedForfeitTxs = vi.fn(async () => {})
+      const getInfo = vi.fn(async () => ({}))
+      const handler = sweptRefundBatchHandler({
+        intentId: 'intent-1',
+        arkProvider: { submitSignedForfeitTxs, getInfo, submitTreeNonces: async () => {} } as never,
+        identity,
+        session: { getPublicKey: async () => SESSION_KEY, init: async () => {}, getNonces: async () => ({}) } as never,
+        network: { bech32: 'bcrt', pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef } as never,
+        recipients: [],
+        feeCoin: {
+          txid: 'f'.repeat(64),
+          vout: 0,
+          value: 50_000,
+          isSwept: feeCoinSwept,
+          tapTree: FLOAT_TAPTREE,
+          forfeitTapLeafScript: FLOAT_LEAF,
+          intentTapLeafScript: FLOAT_LEAF,
+        } as never,
+      })
+      return { handler, submitSignedForfeitTxs, getInfo, commitment: sourceTx(0, 1_000n) }
+    }
+    const signTree = (handler: ReturnType<typeof handlerWith>['handler'], commitmentB64: string) =>
+      handler.onTreeSigningStarted!(
+        { cosignersPublicKeys: [hex.encode(SESSION_KEY)], unsignedCommitmentTx: commitmentB64 } as never,
+        { leaves: () => [] } as never,
+      )
+
+    it('submits no forfeit for a swept fee coin, which arkd does not ask one for', async () => {
+      const { handler, submitSignedForfeitTxs, commitment } = handlerWith(true)
+      await signTree(handler, commitment.b64)
+
+      await handler.onBatchFinalization!({ commitmentTx: commitment.b64 } as never, undefined as never, undefined)
+
+      expect(submitSignedForfeitTxs).not.toHaveBeenCalled()
     })
-    const commitment = sourceTx(0, 1_000n)
 
-    await handler.onBatchFinalization!({ commitmentTx: commitment.b64 } as never, undefined as never, undefined)
+    it('refuses to finalize a batch whose tree it never signed, before any forfeit', async () => {
+      const { handler, submitSignedForfeitTxs, commitment } = handlerWith(false)
 
-    expect(submitSignedForfeitTxs).not.toHaveBeenCalled()
+      await expect(
+        handler.onBatchFinalization!({ commitmentTx: commitment.b64 } as never, undefined as never, undefined),
+      ).rejects.toThrow(/without signing the tree/)
+      expect(submitSignedForfeitTxs).not.toHaveBeenCalled()
+    })
+
+    it('stays out of a batch that does not name its intent', async () => {
+      const { handler, getInfo } = handlerWith(true)
+      await expect(handler.onBatchStarted!({ intentIdHashes: ['00'.repeat(32)] } as never)).resolves.toEqual({
+        skip: true,
+      })
+      expect(getInfo).not.toHaveBeenCalled()
+    })
+  })
+
+  it('refuses a refund destination other than the one the covenant pays', async () => {
+    const swept: FundedOutput[] = [{ txid: sourceTx(0, 1976n).id, vout: 0, value: 1976 }]
+    const { ctx, registered } = stack({ swept })
+
+    await expect(refundSweptSwapScript(ctx, 'http://emulator', swapScript(), swept, SOLVER_PAYOUT)).rejects.toThrow(
+      /not the one this covenant pays out to/,
+    )
+    expect(registered).toHaveLength(0)
   })
 
   it('releases the fee coin reservation once the batch is over', async () => {
