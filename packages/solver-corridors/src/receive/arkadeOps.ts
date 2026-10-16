@@ -44,7 +44,7 @@ export const refundReceiveLockup =
 
 export const refundUnrolledLockup =
   (refunder: UnrolledRefunder): NonNullable<ReceiveArkadeOps['refundUnrolled']> =>
-  async (row, lockup, record) => {
+  async (row, lockup, record, save) => {
     const script = covenantScriptFromRow(row)
     assertScriptMatchesRow(script, row)
     const exitDelaySeconds = Math.min(
@@ -53,6 +53,7 @@ export const refundUnrolledLockup =
     return refunder.advance(
       { script, txid: lockup.txid, vout: lockup.vout, refundLocktime: row.refundLocktime, exitDelaySeconds },
       record,
+      save,
     )
   }
 
