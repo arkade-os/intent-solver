@@ -189,25 +189,49 @@ describe('UnrolledRefunder', () => {
     expect(VALUE - Number(refund!.getOutput(0).amount)).toBe(Math.ceil(10 * refund!.vsize))
   })
 
-  it('outbids the client anchor child while the unroll is unconfirmed', async () => {
+  /** The client's anchor spend of the unroll, paying `fee` out of a coin of its own. */
+  const anchorChildPaying = async (fee: number): Promise<Uint8Array> => {
     const coin = new Transaction({ version: 2 })
     coin.addInput({ txid: 'cc'.repeat(32), index: 0 })
-    coin.addOutput({ script: p2tr(await keyOf(21)), amount: 50_000n })
+    coin.addOutput({ script: p2tr(await keyOf(21)), amount: BigInt(fee + 50_000) })
     chain.raw.set(coin.id, coin.toBytes(true, true))
-    const anchorFee = 20_000
     const child = new Transaction({ version: 3 })
     child.addInput({ txid: parent.id, index: 1 })
     child.addInput({ txid: coin.id, index: 0 })
-    child.addOutput({ script: p2tr(await keyOf(21)), amount: BigInt(50_000 - anchorFee) })
-    const childRaw = child.toBytes(true, true)
-    chain.raw.set(child.id, childRaw)
+    child.addOutput({ script: p2tr(await keyOf(21)), amount: 50_000n })
+    const raw = child.toBytes(true, true)
+    chain.raw.set(child.id, raw)
     chain.outspends.set(parent.id, [{ spent: false }, { spent: true, txid: child.id }])
+    return raw
+  }
+
+  it('outbids the client anchor child while the unroll is unconfirmed', async () => {
+    const childRaw = await anchorChildPaying(20_000)
 
     await pushed()
     const [refund] = cosigned
     const fee = VALUE - Number(refund!.getOutput(0).amount)
-    expect(fee).toBeGreaterThanOrEqual(anchorFee + refund!.vsize)
-    expect(fee / refund!.vsize).toBeGreaterThan(anchorFee / childRaw.length)
+    expect(fee).toBeGreaterThanOrEqual(20_000 + refund!.vsize)
+    expect(fee / refund!.vsize).toBeGreaterThan(20_000 / childRaw.length)
+  })
+
+  it('prices for the parent alone when the anchor child cannot be read', async () => {
+    const child = new Transaction({ version: 3 })
+    child.addInput({ txid: parent.id, index: 7 })
+    child.addOutput({ script: p2tr(await keyOf(21)), amount: 0n })
+    chain.raw.set(child.id, child.toBytes(true, true))
+    chain.outspends.set(parent.id, [{ spent: false }, { spent: true, txid: child.id }])
+
+    await pushed()
+    const [refund] = cosigned
+    expect(VALUE - Number(refund!.getOutput(0).amount)).toBe(Math.ceil(10 * (refund!.vsize + parent.vsize)))
+  })
+
+  it('asks arkd nothing when the anchor child outbids all the lockup holds', async () => {
+    await anchorChildPaying(VALUE)
+
+    await expect(refunder().advance(lockup, null, save)).rejects.toThrow('outbids all')
+    expect(order).toEqual([])
   })
 
   it('reports a lockup someone else spent instead of pushing', async () => {
@@ -225,6 +249,17 @@ describe('UnrolledRefunder', () => {
       record: { ...record, feeRate: 0, broadcastAt: now },
     })
     expect(cosigned).toHaveLength(1)
+  })
+
+  it('does not adopt a claim that adds a dust output to the boarding script beside its own', async () => {
+    const claim = new Transaction({ version: 3 })
+    claim.addInput({ txid: parent.id, index: 0 })
+    claim.addOutput({ script: boarding.pkScript, amount: 330n })
+    claim.addOutput({ script: p2tr(await keyOf(13)), amount: BigInt(VALUE - 1_000) })
+    chain.raw.set(claim.id, claim.toBytes(true, true))
+    chain.outspends.set(parent.id, [{ spent: true, txid: claim.id }])
+
+    expect(await refunder().advance(lockup, null, save)).toEqual({ kind: 'spent' })
   })
 
   it('reports the window closed once the client CSV is near, and rethrows before that', async () => {
@@ -256,10 +291,13 @@ describe('UnrolledRefunder', () => {
     expect(cosigned).toHaveLength(1)
   })
 
-  it('asks arkd again when an attempt never went out', async () => {
+  it('asks arkd again when an attempt never went out, once a lagging explorer had time to show it', async () => {
     cosignFails = new Error('arkd refused to co-sign (500)')
     await expect(refunder().advance(lockup, null, save)).rejects.toThrow('500')
     cosignFails = null
+    now += 60
+    expect(await refunder().advance(lockup, saved[0]!, save)).toEqual({ kind: 'pending', record: saved[0] })
+    expect(cosigned).toHaveLength(0)
     now += 60
 
     const step = await refunder().advance(lockup, saved[0]!, save)

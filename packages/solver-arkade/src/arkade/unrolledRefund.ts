@@ -70,6 +70,7 @@ const LOCKTIME_THRESHOLD = 500_000_000
 const COSIGN_EXIT_MARGIN_SECONDS = 300
 /** The sweep ticks every few seconds; arkd and the explorer hear from a lockup once a minute. */
 const ADVANCE_INTERVAL_SECONDS = 60
+const RETRY_AFTER_SECONDS = 2 * ADVANCE_INTERVAL_SECONDS
 const BUMP_AFTER_SECONDS = 20 * 60
 /** The bump is one shot, so it is priced above the estimate rather than at it. */
 const BUMP_FACTOR = 1.5
@@ -210,7 +211,11 @@ export class UnrolledRefunder {
       // feerate; arkd stays free to co-sign the client's claim past E until it does.
       fee = Math.ceil(feeRate * (vsize + vsizeOf(parentRaw)))
       const sibling = await this.anchorChild(lockup.txid, parent)
-      if (sibling) fee = Math.max(fee, sibling.fee + vsize, Math.ceil((sibling.fee / sibling.vsize + 1) * vsize))
+      if (sibling) {
+        fee = Math.max(fee, sibling.fee + vsize, Math.ceil((sibling.fee / sibling.vsize + 1) * vsize))
+        // No refund can replace a child bidding past the lockup, but a parent carried that high confirms.
+        if (fee > cap) throw new Error(`the client's anchor child outbids all ${cap} sats this refund can pay`)
+      }
     }
     const signed = await this.deps.signer.sign(build(Math.min(fee, cap)), [0])
     const record = { txid: signed.id, tx: null, feeRate, broadcastAt: this.deps.now(), cpfpTxid: null }
@@ -244,15 +249,21 @@ export class UnrolledRefunder {
       await chain.broadcastTransaction(record.tx)
       return { kind: 'pending', record }
     }
-    // Never seen: arkd refused it, or it left before any explorer kept it. Ask again;
-    // arkd refuses only if it did co-sign this outpoint.
+    // Never seen: arkd refused it, or it left before any explorer kept it. Ask again, once
+    // a lagging explorer has had time to show it; arkd refuses only if it did co-sign this outpoint.
+    if (this.deps.now() - record.broadcastAt < RETRY_AFTER_SECONDS) return { kind: 'pending', record }
     return this.start(lockup, save)
   }
 
-  /** A spend paying our boarding script is one of our refunds: a client paying it only gives the sats back. */
+  /**
+   * A spend whose one output pays our boarding script is one of our refunds: a client sending
+   * it there only gives the sats back. Exactly one, so a claim with a dust output to us beside
+   * its own cannot pass for a refund.
+   */
   private async adopt(txid: string): Promise<UnrolledRefundRecord | null> {
     const raw = await this.deps.chain.getRawTransaction(txid)
-    if (outputScript(Transaction.fromRaw(raw), 0) !== hex.encode(this.deps.boarding.pkScript)) return null
+    const tx = Transaction.fromRaw(raw)
+    if (tx.outputsLength !== 1 || outputScript(tx, 0) !== hex.encode(this.deps.boarding.pkScript)) return null
     return { txid, tx: hex.encode(raw), feeRate: 0, broadcastAt: this.deps.now(), cpfpTxid: null }
   }
 
@@ -268,9 +279,11 @@ export class UnrolledRefunder {
     let fee = 0
     for (let i = 0; i < child.inputsLength; i++) {
       const { txid, index } = child.getInput(i)
-      const prevTxid = hex.encode(txid!)
+      if (txid === undefined || index === undefined) return null
+      const prevTxid = hex.encode(txid)
       const prev = prevTxid === parentTxid ? parent : Transaction.fromRaw(await chain.getRawTransaction(prevTxid))
-      fee += Number(prev.getOutput(index!).amount)
+      if (index >= prev.outputsLength) return null
+      fee += Number(prev.getOutput(index).amount)
     }
     for (let i = 0; i < child.outputsLength; i++) fee -= Number(child.getOutput(i).amount)
     return { fee, vsize: vsizeOf(raw) }
