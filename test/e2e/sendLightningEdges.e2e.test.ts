@@ -95,6 +95,7 @@ const serviceWith = (now?: () => number): SendSwapService =>
     store,
     ln,
     arkade: arkadeOps,
+    network: arkade.network,
     limits: arkade.limits,
     invoicePrefix: arkade.profile.invoicePrefix,
     maxExposedSats: arkade.maxExposedSats,
