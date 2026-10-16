@@ -865,8 +865,10 @@ export class OnchainReceiveSwapService {
     // A BROADCAST CLAIM IS NOT A LANDED ONE, and `settled` is terminal.
     const tracked = trackedClaimTxids(row)
     if (tracked.length > 0) {
-      const outcome = await outcomeOfAny(onchain, tracked)
-      if (outcome === 'confirmed') return store.transition(row.id, 'claimed', 'settled', {})
+      const { outcome, txid } = await outcomeOfAny(onchain, tracked)
+      // Recorded, because the one that confirmed need not be the latest — and
+      // `settle_txid` goes out on the wire from this column.
+      if (outcome === 'confirmed') return store.transition(row.id, 'claimed', 'settled', { onchain_claim_txid: txid })
       // `P` is public: still unconfirmed at `htlcLocktime`, the client's refund replaces it.
       if (outcome === 'mempool') {
         await this.replaceOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout)
@@ -1040,8 +1042,8 @@ export class OnchainReceiveSwapService {
     const tracked = trackedClaimTxids(row)
     const [latest] = tracked
     if (latest !== undefined) {
-      const outcome = await outcomeOfAny(onchain, tracked)
-      if (outcome === 'confirmed') return { txid: latest }
+      const { outcome, txid } = await outcomeOfAny(onchain, tracked)
+      if (outcome === 'confirmed') return { txid }
       // A waiting one is replaced, not declined; null is "too soon" and it still stands.
       if (outcome === 'mempool') {
         const bumped = await this.replaceOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout)

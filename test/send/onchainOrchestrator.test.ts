@@ -1486,7 +1486,21 @@ describe('OnchainSendSwapService', () => {
     deps.onchain.dropFromMempool(bumped.onchainRefundTxid!)
     deps.onchain.mineBlocks(1)
 
-    expect((await service.tick(first.id)).state).toBe('refunded')
+    const refunded = await service.tick(first.id)
+    expect(refunded.state).toBe('refunded')
+    // The column must name the version that exists on chain. Left at the
+    // replacement it names a transaction nobody can ever look up.
+    expect(refunded.onchainRefundTxid).toBe(first.onchainRefundTxid)
+  })
+
+  it('reclaimOnchainHtlc() hands back the version that confirmed, not the latest broadcast', async () => {
+    const first = await driveToBroadcastRefund()
+    now += FEE_BUMP_INTERVAL_SECONDS
+    const bumped = await service.tick(first.id)
+    deps.onchain.dropFromMempool(bumped.onchainRefundTxid!)
+    deps.onchain.mineBlocks(1)
+
+    expect(await service.reclaimOnchainHtlc(first.id)).toBe(first.onchainRefundTxid)
   })
 
   it('bumps a refund broadcast before these columns existed, off updated_at', async () => {

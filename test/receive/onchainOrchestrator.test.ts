@@ -1541,7 +1541,7 @@ describe('OnchainReceiveSwapService', () => {
 
       it('settles on an OLDER version when that is the one a miner took', async () => {
         const claimed = await driveToClaimed()
-        await service.tick(claimed.id)
+        const first = await service.tick(claimed.id)
         now += FEE_BUMP_INTERVAL_SECONDS
         const bumped = await service.tick(claimed.id)
 
@@ -1549,7 +1549,11 @@ describe('OnchainReceiveSwapService', () => {
         deps.onchain.dropFromMempool(bumped.onchainClaimTxid!)
         deps.onchain.mineBlocks(1)
 
-        expect((await service.tick(claimed.id)).state).toBe('settled')
+        const settled = await service.tick(claimed.id)
+        expect(settled.state).toBe('settled')
+        // `settle_txid` goes out on the wire. Left at the replacement it names a
+        // transaction that never reached the chain.
+        expect(settled.onchainClaimTxid).toBe(first.onchainClaimTxid)
       })
 
       it('bumps a row broadcast before these columns existed, off updated_at', async () => {
@@ -1666,6 +1670,17 @@ describe('OnchainReceiveSwapService', () => {
         expect(await service.claimNow(claimed.id)).toMatchObject({
           refused: expect.stringContaining('does not match'),
         })
+      })
+
+      it('hands back the version that confirmed, not the latest one broadcast', async () => {
+        const claimed = await driveToClaimed()
+        const first = await service.tick(claimed.id)
+        now += FEE_BUMP_INTERVAL_SECONDS
+        const bumped = await service.tick(claimed.id)
+        deps.onchain.dropFromMempool(bumped.onchainClaimTxid!)
+        deps.onchain.mineBlocks(1)
+
+        expect(await service.claimNow(claimed.id)).toEqual({ txid: first.onchainClaimTxid })
       })
 
       it('recognises its OWN claim on re-entry rather than reporting the client refunded', async () => {

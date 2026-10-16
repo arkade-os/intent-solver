@@ -60,19 +60,19 @@ describe('affordableFee', () => {
 })
 
 describe('outcomeOfAny', () => {
-  it('reports confirmed when an OLDER version is the one that landed', async () => {
+  it('names the OLDER version when that is the one that landed', async () => {
     const backend = backendOver({ latest: 'mempool', older: 'confirmed' })
-    expect(await outcomeOfAny(backend, ['latest', 'older'])).toBe('confirmed')
+    expect(await outcomeOfAny(backend, ['latest', 'older'])).toEqual({ outcome: 'confirmed', txid: 'older' })
   })
 
-  it('reports mempool while any version is still pending', async () => {
+  it('reports mempool while any version is still pending, naming none', async () => {
     const backend = backendOver({ latest: 'mempool' })
-    expect(await outcomeOfAny(backend, ['latest', 'older'])).toBe('mempool')
+    expect(await outcomeOfAny(backend, ['latest', 'older'])).toEqual({ outcome: 'mempool', txid: null })
   })
 
   it('reports unknown when every version has gone', async () => {
     const backend = backendOver({})
-    expect(await outcomeOfAny(backend, ['latest', 'older'])).toBe('unknown')
-    expect(await outcomeOfAny(backend, [])).toBe('unknown')
+    expect(await outcomeOfAny(backend, ['latest', 'older'])).toEqual({ outcome: 'unknown', txid: null })
+    expect(await outcomeOfAny(backend, [])).toEqual({ outcome: 'unknown', txid: null })
   })
 })

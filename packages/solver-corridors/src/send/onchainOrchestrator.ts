@@ -617,8 +617,8 @@ export class OnchainSendSwapService {
     const tracked = trackedRefundTxids(row)
     const [latest] = tracked
     if (latest !== undefined) {
-      const outcome = await outcomeOfAny(onchain, tracked)
-      if (outcome === 'confirmed') return latest
+      const { outcome, txid } = await outcomeOfAny(onchain, tracked)
+      if (outcome === 'confirmed') return txid
       if (outcome === 'mempool') waiting = latest
     }
 
@@ -974,8 +974,10 @@ export class OnchainSendSwapService {
     // means no claim can exist; the reverse is not true.
     const tracked = trackedRefundTxids(row)
     if (tracked.length > 0) {
-      const outcome = await outcomeOfAny(onchain, tracked)
-      if (outcome === 'confirmed') return store.transition(row.id, 'refunding_onchain', 'refunded', {})
+      const { outcome, txid } = await outcomeOfAny(onchain, tracked)
+      // Recorded, because the one that confirmed need not be the latest.
+      if (outcome === 'confirmed')
+        return store.transition(row.id, 'refunding_onchain', 'refunded', { onchain_refund_txid: txid })
       // Until it confirms the untimelocked claim leaf stays open, stretching toward `refundLocktime`.
       if (outcome === 'mempool') {
         await this.replaceOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)

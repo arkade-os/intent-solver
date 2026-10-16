@@ -30,16 +30,24 @@ export const affordableFee = (vsize: number, feeRate: number, valueSats: number,
   return Math.min(Math.ceil(vsize * feeRate), cap)
 }
 
+/**
+ * A verdict over every version broadcast, naming WHICH one it is about: the
+ * caller records that txid, and recording the latest instead would name a
+ * version that never reached the chain. `txid` is set only on `confirmed`,
+ * where there is one answer; `mempool` can be true of several at once.
+ */
+export type TrackedOutcome = { outcome: 'confirmed'; txid: string } | { outcome: 'mempool' | 'unknown'; txid: null }
+
 /** Across every version broadcast: an older one confirming is the ordinary end of a bump. */
 export const outcomeOfAny = async (
   onchain: Pick<OnchainBackend, 'transactionOutcome'>,
   txids: readonly string[],
-): Promise<OnchainTxOutcome> => {
+): Promise<TrackedOutcome> => {
   let seen: OnchainTxOutcome = 'unknown'
   for (const txid of txids) {
     const outcome = await onchain.transactionOutcome(txid)
-    if (outcome === 'confirmed') return 'confirmed'
+    if (outcome === 'confirmed') return { outcome, txid }
     if (outcome === 'mempool') seen = 'mempool'
   }
-  return seen
+  return { outcome: seen === 'mempool' ? 'mempool' : 'unknown', txid: null }
 }
