@@ -519,6 +519,29 @@ describe('feeSatsFromMtokens', () => {
     expect(feeSatsFromMtokens('0')).toBe(0)
   })
 
+  /**
+   * The gap `Number.isFinite` does not close. `Number('')` is 0, not NaN — so a
+   * blank figure read as a route that cost NOTHING, which is the one thing a
+   * missing number must never become on a screen built to keep unmeasured and
+   * free apart.
+   */
+  it('refuses a BLANK figure rather than reading it as a free route', () => {
+    for (const blank of ['', ' ', '\t', '\n']) {
+      expect(() => feeSatsFromMtokens(blank)).toThrow(/unreadable routing fee/)
+    }
+  })
+
+  // `Number` accepts these; a wire integer is never spelled either way, and both
+  // land a hundredfold or more off the real figure.
+  it('refuses exponent and hex spellings', () => {
+    expect(() => feeSatsFromMtokens('1e3')).toThrow(/unreadable routing fee/)
+    expect(() => feeSatsFromMtokens('0x10')).toThrow(/unreadable routing fee/)
+  })
+
+  it('refuses a negative figure, which no routing fee is', () => {
+    expect(() => feeSatsFromMtokens('-1')).toThrow(/unreadable routing fee/)
+  })
+
   // NaN compares false against every cap and floor downstream, and a coerced 0
   // would quote a free execution. Both are silent; the throw is not.
   it('throws on a figure it cannot read rather than coercing one', () => {

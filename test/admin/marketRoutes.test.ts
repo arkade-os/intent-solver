@@ -45,6 +45,7 @@ const build = async (opts: { active?: { base: string | null; quote: string | nul
     policy: { offerMarkets: [], assetRfqTokens: [] },
     adminStore,
     assetMarkets: opts.active ?? [],
+    liveOfferMarkets: [] as { a: string | null; b: string | null }[],
     assetRfqMarkets: [] as { base: string | null; quote: string | null }[],
     replaceMarkets: async () => {
       const rows = await adminStore.listMarkets()

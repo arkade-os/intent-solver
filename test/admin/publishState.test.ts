@@ -70,6 +70,8 @@ const makeDeps = (over: { nostrAdPublish?: AdPublishMode; adPublisher?: AdPublis
         offerMaxFillAmount: 0n,
       },
       assetMarkets: [],
+      liveOfferMarkets: [],
+      assetRfqMarkets: [],
       ln: { getBalance: async () => ({ availableSats: 100_000, incomingSats: 0 }) },
       arkade: {
         wallet: {

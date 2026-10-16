@@ -42,6 +42,8 @@ import { receiveCovenantRowFor as onchainReceiveCovenantRowFor } from '../receiv
 import type { PageOptions } from '@arkade-os/solver-core/core/page.js'
 import { LN_SEND, LN_RECEIVE, ONCHAIN_SEND, ONCHAIN_RECEIVE } from './index.js'
 import { projectSend, projectReceive, projectOnchainSend, projectOnchainReceive } from './projections.js'
+import { sendEconomics, receiveEconomics, onchainSendEconomics, onchainReceiveEconomics } from './economics.js'
+import type { LedgerWindow, SwapEconomics } from '@arkade-os/solver-core/analytics/economics.js'
 import {
   respondToLightningRfqRequest,
   respondToLightningReceiveRfqRequest,
@@ -66,6 +68,7 @@ interface ReadableStore<Row> {
   findByRfqId(rfqId: string): Promise<Row | null>
   findRecoverable(): Promise<Row[]>
   committedSats(): Promise<number>
+  ledgerRows(window: LedgerWindow): Promise<{ rows: Row[]; truncated: boolean }>
   page(options: PageOptions): Promise<{ rows: Row[]; nextCursor: string | null }>
   get(id: string): Promise<Row>
   history(id: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>
@@ -95,6 +98,8 @@ const readerFor = <Row extends { id: string; pkScript: string; preimage: string 
    * own lockup, and the settlement layer only asks.
    */
   toCovenantRow: (row: Row) => CovenantScriptRow,
+  /** This corridor's row → the book's vocabulary. @see corridors/economics.ts */
+  toEconomics: (row: Row) => SwapEconomics,
 ): CorridorReader => ({
   descriptor,
   liveLockups: async () => (await store.findRecoverable()).map(toCovenantRow),
@@ -117,6 +122,10 @@ const readerFor = <Row extends { id: string; pkScript: string; preimage: string 
   },
   findRecoverable: () => store.findRecoverable(),
   committedSats: () => store.committedSats(),
+  economics: async (window) => {
+    const { rows, truncated } = await store.ledgerRows(window)
+    return { corridor: descriptor.pair, records: rows.map(toEconomics), truncated }
+  },
   page: async (options) => {
     const { rows, nextCursor } = await store.page(options)
     return { swaps: rows.map(project), nextCursor }
@@ -133,16 +142,30 @@ const readerFor = <Row extends { id: string; pkScript: string; preimage: string 
 })
 
 export const lightningSendReader = (store: SwapStore): CorridorReader =>
-  readerFor(LN_SEND, store, projectSend, rfqStatusPayload, (row) => row)
+  readerFor(LN_SEND, store, projectSend, rfqStatusPayload, (row) => row, sendEconomics)
 
 export const lightningReceiveReader = (store: ReceiveSwapStore): CorridorReader =>
-  readerFor(LN_RECEIVE, store, projectReceive, lightningReceiveRfqStatusPayload, receiveCovenantRowFor)
+  readerFor(
+    LN_RECEIVE,
+    store,
+    projectReceive,
+    lightningReceiveRfqStatusPayload,
+    receiveCovenantRowFor,
+    receiveEconomics,
+  )
 
 export const onchainSendReader = (store: OnchainSendSwapStore): CorridorReader =>
-  readerFor(ONCHAIN_SEND, store, projectOnchainSend, onchainRfqStatusPayload, covenantRowFor)
+  readerFor(ONCHAIN_SEND, store, projectOnchainSend, onchainRfqStatusPayload, covenantRowFor, onchainSendEconomics)
 
 export const onchainReceiveReader = (store: OnchainReceiveSwapStore): CorridorReader =>
-  readerFor(ONCHAIN_RECEIVE, store, projectOnchainReceive, onchainReceiveRfqStatusPayload, onchainReceiveCovenantRowFor)
+  readerFor(
+    ONCHAIN_RECEIVE,
+    store,
+    projectOnchainReceive,
+    onchainReceiveRfqStatusPayload,
+    onchainReceiveCovenantRowFor,
+    onchainReceiveEconomics,
+  )
 
 /**
  * Where a parked row lands, for all four BTC corridors.

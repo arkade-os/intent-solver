@@ -72,6 +72,7 @@ import {
   type AssetMarketPair,
   type AssetMarketPricingView,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { offerDirectionOn } from '@arkade-os/solver-core/core/assetOfferPrice.js'
 import { applyOverrides } from '../admin/settings.js'
 import { createOfferRefusalTail, type OfferRefusalRecorder } from '../admin/offerRefusals.js'
 import { createRfqRefusalTail, type RfqRefusalRecorder } from '../admin/rfqRefusals.js'
@@ -81,15 +82,16 @@ import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covcl
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
 import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
 import { GiveUp, json, log, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
+import { createSerialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { poolPlan, mintPool, committedAcrossCorridors } from './pool.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
-import { assertMarketsPriced, AssetOfferService, type AssetMarket } from './assetOffers.js'
+import { AssetOfferService, type AssetMarket } from './assetOffers.js'
 import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { offerSettleFor } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService, type AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import { assetRfqMarketsFrom } from './assetRfqMarkets.js'
+import { assetRfqMarketsFrom, retainReadableMarkets } from './assetRfqMarkets.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
@@ -124,14 +126,10 @@ export interface Services {
    *
    * Both halves together, and never one without the other — @see
    * `core/assetMarketConfig.ts`'s `assetMarketPolicy`, which derives them from
-   * one filter for exactly that reason. `assetMarketPairs` empty refuses every
-   * offer; `assetMarkets` empty means "this deployment has not opted into price
-   * gating" and fills at whatever a maker asks.
+   * one filter so the serve list and its economics cannot drift apart.
    *
-   * EMPTY on a deployment that has configured none, which is the default and the
-   * whole of the additive claim: no market rows means both lists are empty, the
-   * offer path serves no pair, and the solver behaves exactly as it did before
-   * markets could be configured at all.
+   * EMPTY on a deployment that has configured none: no market rows means both
+   * lists are empty and the offer path serves no pair.
    */
   assetMarkets: readonly AssetMarketPricingView[]
   assetMarketPairs: readonly AssetMarketPair[]
@@ -335,6 +333,91 @@ const createRail = async (config: Config): Promise<LightningRail> => {
 }
 
 /**
+ * The corridor READERS alone, over the swap stores, touching no network.
+ *
+ * For read-only reporting — `pnl` today. {@link createServices} cannot serve it:
+ * that function creates the Lightning rail, the Arkade context and calls
+ * `RestEmulatorProvider.getInfo()` before it returns, so a report of what the
+ * book DID would refuse to run whenever a rail is down. That is precisely when
+ * an operator wants it, and `timeline` already shows the lighter shape by
+ * opening its store directly.
+ *
+ * Nothing is CONTACTED: the overrides and the asset markets come out of the
+ * admin store exactly as `createServices` reads them, so a market an operator
+ * configured is reported on without a network call. Not read-only, though —
+ * every `open()` runs its own additive migration, so this writes DDL to a
+ * database the live solver may also have open.
+ *
+ * READERS, never corridors: a reader needs only a store, which is the whole
+ * reason `CorridorReader` is split from `Corridor`. Nothing returned here can
+ * quote or move money. Consumer corridors injected through
+ * `createServices({ corridors })` are absent — nothing in this binary passes
+ * any, but an embedder's would be counted by `/api/pnl` and not by the CLI.
+ */
+export const openReportReaders = async (
+  config: Config,
+): Promise<{ readers: CorridorReaderSet; close: () => Promise<void> }> => {
+  // Named as they open, so a throw partway through still closes what already
+  // did — and so each close is isolated the way `Services.close()` isolates its
+  // own. A close that throws out of the CLI's `finally` would otherwise replace
+  // the real error with itself.
+  const opened: Array<[string, { close: () => Promise<void> }]> = []
+  const track = <T extends { close: () => Promise<void> }>(name: string, store: T): T => {
+    opened.push([name, store])
+    return store
+  }
+  const close = async () => {
+    for (const [name, store] of [...opened].reverse()) {
+      try {
+        await store.close()
+      } catch (error) {
+        log(`close(${name}) failed:`, error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+
+  try {
+    const layout = resolveDbLayout(config.swapDbPath)
+    const swapFile = betterSqliteDriver(config.swapDbPath)
+    const shared = layout.consolidated ? swapFile : undefined
+    const store = track('store', await SwapStore.open(swapFile))
+    const onchainStore = track('onchainStore', await OnchainSendSwapStore.open(shared ?? layout.onchainSend))
+    const receiveStore = track('receiveStore', await ReceiveSwapStore.open(shared ?? layout.receive))
+    const onchainReceiveStore = track(
+      'onchainReceiveStore',
+      await OnchainReceiveSwapStore.open(shared ?? layout.onchainReceive),
+    )
+    const servesEvm = config.evmCorridors.length > 0
+    const evmSendStore = servesEvm ? track('evmSendStore', await EvmSendSwapStore.open(swapFile)) : null
+    const evmReceiveStore = servesEvm ? track('evmReceiveStore', await EvmReceiveSwapStore.open(swapFile)) : null
+    const adminStore = track('adminStore', await AdminStore.open(shared ?? layout.admin))
+
+    const policy = applyOverrides(config, await adminStore.getOverrides())
+    const assetMarkets = assetMarketPolicy(await adminStore.listMarkets())
+    const assetRfqMarkets = assetRfqMarketsFrom(policy.assetRfqTokens, assetMarkets.pricing)
+    const assetRfqStore =
+      assetRfqMarkets.length > 0 ? track('assetRfqStore', await AssetRfqSwapStore.open(swapFile)) : null
+
+    const readers = readerSetFromDeps({
+      store,
+      onchainStore,
+      receiveStore,
+      onchainReceiveStore,
+      ...(evmSendStore ? { evmSendStore } : {}),
+      ...(evmReceiveStore ? { evmReceiveStore } : {}),
+      evmCorridors: policy.evmCorridors,
+      ...(assetRfqStore ? { assetRfqStore } : {}),
+      assetRfqMarkets,
+    })
+
+    return { readers, close }
+  } catch (error) {
+    await close()
+    throw error
+  }
+}
+
+/**
  * Build the full service stack.
  *
  * The Lightning and Arkade wallets are initialised SEQUENTIALLY on purpose: two
@@ -431,17 +514,10 @@ export const createServices = async (
   /**
    * The asset markets, read once from the same store and validated HERE.
    *
-   * THROWS on a stored market that no longer validates, and that is the
-   * opposite treatment `applyOverrides` gives a bad override — where skipping is
-   * right, because refusing to start would take a solver down over a preference.
-   * A market is not a preference, and the asymmetry is a fund-loss one:
-   *
-   * `AssetOfferService.withinTolerance` reads an EMPTY pricing list as "this
-   * deployment has not opted into price gating" and returns true for every
-   * offer — it fills at whatever a maker names. So a startup that dropped bad
-   * markets one at a time could empty the list and, in doing so, silently turn
-   * the price gate OFF on a deployment that had configured it on. Refusing to
-   * start is loud, is recoverable from the console, and cannot mislead.
+   * THROWS on a stored market that no longer validates instead of silently
+   * dropping operator state. This is deliberately stricter than a bad override,
+   * which is only a preference and may be skipped without changing what markets
+   * the deployment trades.
    *
    * NO FEED PROBE. Whether the URL answers today is deliberately not a boot
    * condition: it was checked when the market was written, the runtime already
@@ -475,14 +551,14 @@ export const createServices = async (
    * is ever added, rather than something to remember at that point.
    */
   const servesOffers = policy.offerMarkets.length > 0
+  /**
+   * The environment permits offers; enabled console rows activate them. An env
+   * name the console does not price yet waits for its row instead of appearing
+   * live and refusing every offer at the price gate.
+   */
   const offerMarketsPricedBy = (pricing: readonly AssetMarketPricingView[]): readonly AssetMarket[] =>
-    policy.offerMarkets.filter((pair) =>
-      pricing.some((p) => (p.base === pair.a && p.quote === pair.b) || (p.base === pair.b && p.quote === pair.a)),
-    )
-  // Priced subset only: an env name without a console row waits for the dashboard
-  // rather than refusing to boot, and empty markets refuse every offer (safe).
+    policy.offerMarkets.filter((pair) => pricing.some((market) => offerDirectionOn(market, pair.a, pair.b) !== null))
   const liveOfferMarkets = offerMarketsPricedBy(assetMarkets.pricing)
-  if (liveOfferMarkets.length > 0) assertMarketsPriced(liveOfferMarkets, assetMarkets.pricing)
   const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
   const offerRefusals = createOfferRefusalTail()
   const rfqRefusals = createRfqRefusalTail()
@@ -490,9 +566,8 @@ export const createServices = async (
     ? new AssetOfferService({
         store: offerStore,
         markets: liveOfferMarkets,
-        // The console's market rows, in the shape this service consumes. The
-        // assertion above is what guarantees this covers every served market;
-        // without both, `withinTolerance` waves every offer through.
+        // The console's market rows, in the shape this service consumes. Every
+        // served market is in here by construction — see the serve list above.
         pricing: assetMarkets.pricing,
         // Same reader the EVM corridors price from — the market config
         // deliberately speaks `evmCorridorConfig.ts`'s feed-plus-pointer dialect
@@ -1086,6 +1161,8 @@ export const createServices = async (
     })
   }
 
+  let readableMarkets: readonly AssetRfqMarket[] = assetRfqMarkets
+  const replaceQueue = createSerialiser()
   const extraCorridors = opts?.corridors ?? []
   const setsFrom = (serving: readonly AssetRfqMarket[], readable: readonly AssetRfqMarket[] = serving) => {
     const shared = {
@@ -1135,35 +1212,24 @@ export const createServices = async (
     assetRfqStore,
     assetRfqService,
     assetRfqMarkets,
-    replaceMarkets: async () => {
-      const next = assetMarketPolicy(await adminStore.listMarkets())
-      const rfq = assetRfqMarketsFrom(policy.assetRfqTokens, next.pricing)
-      const offers = offerMarketsPricedBy(next.pricing)
-      if (offers.length > 0) assertMarketsPriced(offers, next.pricing)
-      const live = await assetRfqStore.listNonTerminal()
-      const readable = [...rfq]
-      for (const market of services.assetRfqMarkets) {
-        if (readable.some((row) => row.base === market.base && row.quote === market.quote)) continue
-        if (
-          live.some(
-            (row) =>
-              (row.fromAssetId === market.base && row.toAssetId === market.quote) ||
-              (row.fromAssetId === market.quote && row.toAssetId === market.base),
-          )
-        ) {
-          readable.push(market)
-        }
-      }
-      const nextSets = setsFrom(rfq, readable)
-      await assetRfqService.replaceMarkets(rfq)
-      await assetOffers?.replaceMarkets({ markets: offers, pricing: next.pricing })
-      services.corridors.replace([...nextSets.corridors])
-      services.readers.replace([...nextSets.readers])
-      services.assetMarkets = next.pricing
-      services.assetMarketPairs = next.pairs
-      services.assetRfqMarkets = rfq
-      services.liveOfferMarkets = offers
-    },
+    replaceMarkets: (): Promise<void> =>
+      replaceQueue(async () => {
+        const next = assetMarketPolicy(await adminStore.listMarkets())
+        const rfq = assetRfqMarketsFrom(policy.assetRfqTokens, next.pricing)
+        const offers = offerMarketsPricedBy(next.pricing)
+        const live = await assetRfqStore.listNonTerminal()
+        const readable = retainReadableMarkets(rfq, readableMarkets, live)
+        const nextSets = setsFrom(rfq, readable)
+        await assetRfqService.replaceMarkets(rfq)
+        await assetOffers?.replaceMarkets({ markets: offers, pricing: next.pricing })
+        services.corridors.replace([...nextSets.corridors])
+        services.readers.replace([...nextSets.readers])
+        services.assetMarkets = next.pricing
+        services.assetMarketPairs = next.pairs
+        services.assetRfqMarkets = rfq
+        services.liveOfferMarkets = offers
+        readableMarkets = readable
+      }),
     adminStore,
     arkade,
     ln: rail?.ln ?? null,

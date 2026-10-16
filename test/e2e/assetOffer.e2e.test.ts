@@ -36,7 +36,7 @@ import { fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { poll } from '@arkade-os/solver-core/util/poll.js'
 import { assetMarketPolicy } from '@arkade-os/solver-core/core/assetMarketConfig.js'
-import { AssetOfferService, assertMarketsPriced, parseAssetMarkets } from '@arkade-os/solver-app/ops/assetOffers.js'
+import { AssetOfferService, parseAssetMarkets } from '@arkade-os/solver-app/ops/assetOffers.js'
 import { createServices } from '@arkade-os/solver-app/ops/services.js'
 import { loadConfig } from '@arkade-os/solver-app/config.js'
 import { servedBy } from '@arkade-os/solver-app/admin/servedBy.js'
@@ -340,19 +340,26 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
     it('reports a configured market as served by NOTHING when OFFER_MARKETS is unset', async () => {
       const admin = await AdminStore.open(betterSqliteDriver(':memory:'))
       await admin.putMarket(rowFor())
-      const boot = { offerMarkets: parseAssetMarkets(undefined), assetRfqTokens: [] }
-      expect(boot.offerMarkets).toEqual([])
+      const boot = { liveOfferMarkets: parseAssetMarkets(undefined), assetRfqMarkets: [] }
+      expect(boot.liveOfferMarkets).toEqual([])
       expect(servedBy((await admin.listMarkets())[0]!, boot)).toEqual([])
       await admin.close()
     })
 
-    it('refuses to boot when a served market has been disabled', async () => {
-      // A disabled row leaves `pricing`, so the pair is served and priced nowhere.
+    it('serves a disabled market on no path, rather than filling it unpriced', async () => {
+      // A disabled row leaves `pricing` empty, and the serve list is the priced
+      // subset of `OFFER_MARKETS` — so the env name alone fills nothing.
       const admin = await AdminStore.open(betterSqliteDriver(':memory:'))
       await admin.putMarket(rowFor({ enabled: false }))
       const policy = assetMarketPolicy(await admin.listMarkets())
       expect(policy.pricing).toEqual([])
-      expect(() => assertMarketsPriced(parseAssetMarkets(`BTC/${assetId}`), policy.pricing)).toThrow(/no pricing/)
+      const named = parseAssetMarkets(`BTC/${assetId}`)
+      const live = named.filter((pair) =>
+        policy.pricing.some(
+          (p) => (p.base === pair.a && p.quote === pair.b) || (p.base === pair.b && p.quote === pair.a),
+        ),
+      )
+      expect(live).toEqual([])
       await admin.close()
     })
   })

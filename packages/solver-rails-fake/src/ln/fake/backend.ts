@@ -224,14 +224,66 @@ export class FakeLightningBackend implements LightningBackend {
     if (hex.encode(sha256(hex.decode(preimage))) !== paymentHash) {
       throw new Error('fake ln state corrupt: preimage does not match its hash')
     }
-    return { id: `fake-${paymentHash}`, status: 'succeeded', preimage }
+    // It charges what it quoted. A fake that estimated a fee and then reported a
+    // free payment would make every net-P&L assertion pass for the wrong reason
+    // — and the null branch stays reachable, because a backend built with no fee
+    // policy reports no fee here either.
+    const feePaidSats = this.quotedFee(params.invoice)
+    if (feePaidSats !== null) this.saveFees({ ...this.loadFees(), [paymentHash]: feePaidSats })
+    return {
+      id: `fake-${paymentHash}`,
+      status: 'succeeded',
+      preimage,
+      ...(feePaidSats === null ? {} : { feePaidSats }),
+    }
+  }
+
+  private get feeStatePath(): string {
+    return `${this.statePath}.fees.json`
+  }
+
+  /**
+   * The realized routing fee, by payment hash.
+   *
+   * A sidecar, mirroring `.holds.json`, and the only part of this fake that has
+   * to be STORED rather than derived. `getPayment` is given an id and nothing
+   * else — no invoice, so no amount, so no way to recompute what
+   * {@link fakeFeeSats} would have charged. The alternative was reporting a fee
+   * from `payInvoice` and not from `getPayment`, which breaks the regression
+   * lock that the two answer identically, and rightly: a real backend reports
+   * the same settled payment whichever way you ask.
+   */
+  private loadFees(): Record<string, number> {
+    try {
+      return JSON.parse(readFileSync(this.feeStatePath, 'utf8')) as Record<string, number>
+    } catch {
+      return {}
+    }
+  }
+
+  private saveFees(map: Record<string, number>): void {
+    mkdirSync(dirname(this.feeStatePath), { recursive: true })
+    writeFileSync(this.feeStatePath, JSON.stringify(map, null, 2))
+  }
+
+  /** What this backend would have quoted for an invoice, if it quotes at all. */
+  private quotedFee(invoice: string): number | null {
+    if (this.feePolicy === null) return null
+    try {
+      return fakeFeeSats(amountSatsOf(invoice), this.feePolicy)
+    } catch {
+      // Amountless invoice — the case `estimateSendFee` answers null for.
+      return null
+    }
   }
 
   async getPayment(id: string): Promise<PaymentResult> {
     const paymentHash = id.replace(/^fake-/, '')
     const preimage = this.load()[paymentHash]
     if (!preimage) return { id, status: 'failed' }
-    return { id, status: 'succeeded', preimage }
+    // The same fee `payInvoice` reported, so polling answers what paying did.
+    const feePaidSats = this.loadFees()[paymentHash]
+    return { id, status: 'succeeded', preimage, ...(feePaidSats === undefined ? {} : { feePaidSats }) }
   }
 
   async getBalance(): Promise<Balance> {

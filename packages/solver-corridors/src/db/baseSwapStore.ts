@@ -25,6 +25,7 @@ import {
   type PageOptions,
   type PageRawFields,
 } from '@arkade-os/solver-core/core/page.js'
+import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
 /** A row as the driver hands it back, before the store's own mapper narrows it. */
 export type RawRow = Record<string, unknown>
@@ -181,6 +182,30 @@ export abstract class BaseSwapStore<Row, State extends string> {
     )
     const { page, nextCursor } = takePage(raw, limit)
     return { rows: page.map((row) => this.shape.toRow(row)), nextCursor }
+  }
+
+  /**
+   * Every row whose LAST MOVEMENT falls in a window, newest first, capped.
+   *
+   * `updated_at` rather than `created_at`, because this backs the P&L read and
+   * a swap belongs to the day its money moved, not the day it was quoted. There
+   * is no index on that column and deliberately so: this is an operator screen
+   * over a table of at most tens of thousands of rows, a scan costs
+   * milliseconds, and an index on a column every transition writes would be paid
+   * for on the money path to save time on a dashboard.
+   *
+   * One row over the cap is fetched so `truncated` is a fact rather than a
+   * guess — `rows.length === limit` cannot tell a window that exactly filled
+   * from one that overflowed, and a partial book reported as a total is the one
+   * failure a profit screen must not have.
+   */
+  async ledgerRows(window: LedgerWindow): Promise<{ rows: Row[]; truncated: boolean }> {
+    const limit = clampLedgerLimit(window.limit)
+    const raw = await this.driver.all<RawRow>(
+      `SELECT * FROM ${this.shape.table} WHERE updated_at >= ? AND updated_at < ? ORDER BY updated_at DESC LIMIT ?`,
+      [window.since, window.until, limit + 1],
+    )
+    return { rows: raw.slice(0, limit).map((r) => this.shape.toRow(r)), truncated: raw.length > limit }
   }
 
   async page(options: PageOptions = {}): Promise<{ rows: Row[]; nextCursor: string | null }> {

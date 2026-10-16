@@ -26,8 +26,12 @@ import type { OnchainReceiveSwapRow } from '../db/onchainReceiveSwaps.js'
  * landed: on these corridors `stuck` means the solver paid out and was not
  * made whole, and that still needs an operator regardless of the client being
  * refunded (see `send/orchestrator.ts`).
+ *
+ * Exported for `economics.ts`, which buckets the same rows into the same
+ * phases: a second copy of this rule would let the P&L screen and the swap
+ * list disagree about whether a refunded row failed.
  */
-const presentedState = (state: string, refundOutcome: 'pushed' | 'external' | null): string =>
+export const presentedState = (state: string, refundOutcome: 'pushed' | 'external' | null): string =>
   state === 'refused' && refundOutcome !== null ? 'refunded' : state
 
 export const projectSend = (row: SendSwapRow): AdminSwap => {

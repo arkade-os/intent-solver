@@ -42,6 +42,7 @@ import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-db/driver.
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { EVM_SEND_NON_TERMINAL, type EvmSendSwapState } from '@arkade-os/solver-core/core/evmSwapState.js'
+import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
 export interface EvmSendSwapRow {
   id: string
@@ -460,6 +461,31 @@ export class EvmSendSwapStore {
       to: String(raw.to_state),
       detail: text(raw.detail),
     }))
+  }
+
+  /**
+   * Rows whose last movement falls in a window. @see BaseSwapStore.ledgerRows
+   *
+   * `tokenAddress` NARROWS IN SQL, and must, for the reason `committedSats`
+   * takes one: this table serves every token, so filtering AFTER the `LIMIT`
+   * would let a busy token's rows push a quiet one's out of the result — and
+   * the quiet corridor then reports no profit for a window in which it settled
+   * fills, silently, on a screen that looks healthy.
+   */
+  async ledgerRows(
+    window: LedgerWindow,
+    tokenAddress?: string,
+  ): Promise<{ rows: EvmSendSwapRow[]; truncated: boolean }> {
+    const limit = clampLedgerLimit(window.limit)
+    const raw = await this.driver.all<Raw>(
+      `SELECT * FROM send_evm_swap WHERE updated_at >= ? AND updated_at < ?` +
+        (tokenAddress === undefined ? '' : ' AND token_address = ?') +
+        ` ORDER BY updated_at DESC LIMIT ?`,
+      tokenAddress === undefined
+        ? [window.since, window.until, limit + 1]
+        : [window.since, window.until, tokenAddress, limit + 1],
+    )
+    return { rows: raw.slice(0, limit).map(toRow), truncated: raw.length > limit }
   }
 
   async page(options: PageOptions = {}): Promise<{ rows: EvmSendSwapRow[]; nextCursor: string | null }> {

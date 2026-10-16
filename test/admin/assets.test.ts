@@ -81,6 +81,8 @@ const fakeServices = (over: { balance?: unknown; assetManager?: unknown; vtxos?:
     // The boot snapshots the restart banner diffs the store against.
     policy: config,
     assetMarkets: [],
+    liveOfferMarkets: [],
+    assetRfqMarkets: [],
     ...stores,
     readers: readerSetFromDeps(stores as unknown as FlatCorridorDeps),
     adminStore: { getOverrides: vi.fn().mockResolvedValue({}), listMarkets: vi.fn().mockResolvedValue([]) },

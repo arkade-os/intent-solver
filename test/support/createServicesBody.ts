@@ -22,11 +22,13 @@ export const servicesSource = readFileSync(
  * the function indented, so the first unindented `}` after the declaration is
  * its end.
  */
-export const createServicesBody = (): string => {
+export const servicesBodyOf = (name: string): string => {
   const lines = servicesSource.split(/\r?\n/)
-  const start = lines.findIndex((line) => line.startsWith('export const createServices'))
-  if (start === -1) throw new Error('createServices is gone from packages/solver-app/src/ops/services.ts')
+  const start = lines.findIndex((line) => line.startsWith(`export const ${name}`))
+  if (start === -1) throw new Error(`${name} is gone from packages/solver-app/src/ops/services.ts`)
   const offset = lines.slice(start + 1).findIndex((line) => line === '}')
-  if (offset === -1) throw new Error('createServices has no closing brace at column 0; the bound is broken')
+  if (offset === -1) throw new Error(`${name} has no closing brace at column 0; the bound is broken`)
   return lines.slice(start, start + 1 + offset + 1).join('\n')
 }
+
+export const createServicesBody = (): string => servicesBodyOf('createServices')

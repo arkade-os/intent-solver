@@ -142,6 +142,7 @@ const PATCH_COLUMNS = new Set([
   'refund_attempt',
   'payment_backend',
   'payment_wallet',
+  'routing_fee_paid_sats',
 ])
 
 export interface SendSwapRow {
@@ -259,6 +260,22 @@ export interface SendSwapRow {
    */
   paymentFailureReason: string | null
   /**
+   * What routing this payment ACTUALLY cost, in sats, as the backend reported
+   * it once the payment settled.
+   *
+   * THE ONLY REALIZED EXECUTION COST THIS SERVICE RECORDS, and the difference
+   * from {@link SendSwapRow.quotedRoutingFeeSats} beside it is the whole point:
+   * that one is the budget this swap was quoted against and spent under as
+   * `maxFeeSats`, fixed before the payment was attempted. This is what came off
+   * the balance. A corridor priced at 30bps into a fee market that took 40 is a
+   * loss, and the two columns together are the only way to see it.
+   *
+   * NULL is UNMEASURED, never free: rows quoted before this column existed, and
+   * any backend that does not report a fee, both read null. Nothing nets a cost
+   * it was not given.
+   */
+  routingFeePaidSats: number | null
+  /**
    * Client-chosen RFQ correlation id (64 hex chars), when the swap arrived as an
    * `rfq_request`. Null for rows quoted by the CLI's own commands. NOT unique
    * across rows: a client retrying after its quote expired legitimately reuses
@@ -315,7 +332,8 @@ const SEND_SWAP_COLUMNS = `
   failure_reason                TEXT,
   rfq_id                        TEXT,
   payment_evidence              TEXT,
-  payment_failure_reason        TEXT
+  payment_failure_reason        TEXT,
+  routing_fee_paid_sats         INTEGER
 `
 
 const SCHEMA = `
@@ -406,6 +424,10 @@ const toRow = (raw: Raw): SendSwapRow => ({
       ? null
       : String(raw.payment_failure_reason),
   rfqId: raw.rfq_id === null || raw.rfq_id === undefined ? null : String(raw.rfq_id),
+  routingFeePaidSats:
+    raw.routing_fee_paid_sats === null || raw.routing_fee_paid_sats === undefined
+      ? null
+      : Number(raw.routing_fee_paid_sats),
 })
 
 export interface QuoteRecord {
@@ -528,6 +550,11 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
       ['non_interactive_parameters', 'TEXT'],
       ['quoted_routing_fee_sats', 'INTEGER'],
       ['fee_handle', 'TEXT'],
+      // INTEGER, matching the schema above rather than defaulting to TEXT: a
+      // migrated database would otherwise give this column TEXT affinity and
+      // store sats as strings, which reads back correctly through `Number()`
+      // and sorts and sums wrongly the day anything asks SQLite to do either.
+      ['routing_fee_paid_sats', 'INTEGER'],
     ] as const) {
       if (!existing.has(column)) await this.driver.exec(`ALTER TABLE send_swap ADD COLUMN ${column} ${type}`)
     }

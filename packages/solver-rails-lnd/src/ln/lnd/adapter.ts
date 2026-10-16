@@ -142,7 +142,18 @@ type PaymentOutcome = {
   is_failed?: boolean
   is_pending?: boolean
   failed?: PaymentFailureFlags
-  payment?: { secret: string }
+  /**
+   * `fee_mtokens` is the ROUTING FEE ACTUALLY PAID, and it was being discarded:
+   * this type narrowed the vendor's payment record to `{ secret }`, so the one
+   * realized execution cost the service can observe never left the adapter.
+   *
+   * `safe_fee` is the vendor's whole-sat rounding of the same figure and is
+   * deliberately not used — `feeSatsFromMtokens` rounds UP from the millisat
+   * truth, which is the conservative direction for a cost. Optional because it
+   * is absent on older vendor versions, and an absent fee must read as
+   * unmeasured rather than as free.
+   */
+  payment?: { secret: string; fee_mtokens?: string }
 }
 
 /**
@@ -191,6 +202,38 @@ export const toFailureReason = (failed: PaymentFailureFlags | undefined): Paymen
   return 'unknown'
 }
 
+/**
+ * The realized routing fee as a spreadable fragment, or nothing at all.
+ *
+ * Returns `{}` rather than `{ feePaidSats: undefined }` so the field is ABSENT
+ * on a result the vendor gave no fee for — `exactOptionalPropertyTypes` aside,
+ * an explicit `undefined` survives `JSON.stringify` as a missing key either way,
+ * but the distinction matters to anything reading the object directly.
+ *
+ * Swallows an unreadable figure instead of throwing, which is the opposite of
+ * what `feeSatsFromMtokens` does for an ESTIMATE and deliberately so. There, a
+ * fee that cannot be read must stop a quote from going out at a price built on
+ * it. Here the payment has already settled and the preimage is in hand: failing
+ * this mapping would strand a swap that succeeded over a number used only for
+ * reporting. Unmeasured is the honest degradation.
+ *
+ * KNOWN IMPRECISION, tracked in #155. `feeSatsFromMtokens` rounds UP, which is
+ * right for the estimate it was written for and conservative-in-the-wrong-
+ * direction here: summed over many payments it overstates realized cost by up
+ * to a sat each, so reported net profit is a floor rather than the figure.
+ * Round-to-nearest is NOT the fix — it would report a real sub-sat fee as zero,
+ * and zero means free on every surface this feeds. Carrying millisats through
+ * the analytics layer is.
+ */
+const realizedFeeSats = (mtokens: string | undefined): { feePaidSats?: number } => {
+  if (mtokens === undefined) return {}
+  try {
+    return { feePaidSats: feeSatsFromMtokens(mtokens) }
+  } catch {
+    return {}
+  }
+}
+
 export const toPaymentResult = (id: string, result: PaymentOutcome): PaymentResult => {
   if (result.is_confirmed) {
     // `is_confirmed` comes from the vendor as `!!payment`, so a confirmed
@@ -201,7 +244,18 @@ export const toPaymentResult = (id: string, result: PaymentOutcome): PaymentResu
     // payment gets anywhere in this tree.
     if (!result.payment) throw new Error(`LND reported payment ${id} confirmed with no preimage`)
     const status: PaymentStatus = 'succeeded'
-    return { id, status, preimage: result.payment.secret, evidence: 'terminal' }
+    return {
+      id,
+      status,
+      preimage: result.payment.secret,
+      evidence: 'terminal',
+      // Omitted, never zeroed, when the vendor did not report one — a payment
+      // whose cost is unknown must not read as a payment that was free. The
+      // read is guarded because this is the SUCCESS path: an unparseable fee is
+      // not worth failing a settled payment over, and the rest of this result
+      // (the preimage above all) is what the swap actually needs to proceed.
+      ...realizedFeeSats(result.payment.fee_mtokens),
+    }
   }
   if (result.is_failed) {
     return { id, status: 'failed', evidence: 'terminal', failureReason: toFailureReason(result.failed) }
@@ -282,8 +336,16 @@ export const probeTimeoutMs = (timeoutMs: number): number => Math.max(MIN_ROUTE_
  * where a response this adapter cannot read belongs.
  */
 export const feeSatsFromMtokens = (mtokens: string): number => {
+  // DIGITS ONLY, because `Number('')`, `Number(' ')` and `Number('\t')` are all
+  // 0 — so a blank figure read as a route that cost NOTHING rather than one that
+  // could not be read. Zero is a fact here and blank is the absence of one, and
+  // both callers need them apart: an estimate that cannot be read must stop a
+  // quote priced on it, and a realized cost that cannot be read is unmeasured,
+  // never free. The same test rejects `1e3` and `0x10`, which `Number` accepts
+  // and a wire integer should never be.
+  if (!/^\d+$/.test(mtokens)) throw new Error(`LND reported an unreadable routing fee: ${mtokens}`)
   const msat = Number(mtokens)
-  if (!Number.isFinite(msat) || msat < 0) throw new Error(`LND reported an unreadable routing fee: ${mtokens}`)
+  if (!Number.isFinite(msat)) throw new Error(`LND reported an unreadable routing fee: ${mtokens}`)
   return Math.ceil(msat / 1000)
 }
 
@@ -398,7 +460,20 @@ export class LndLightningBackendAdapter implements LightningBackend {
         // paying over an over-long route is what loses the money.
         max_timeout_height: current_block_height + params.maxCltvBlocks,
       })
-      return { id: result.id, status: 'succeeded', preimage: result.secret }
+      // A payment that settles inside this call never reaches `getPayment`, so
+      // capturing the fee only on the polled path would lose it for every fast
+      // route — which is most of them.
+      return {
+        id: result.id,
+        status: 'succeeded',
+        preimage: result.secret,
+        // `result.fee_mtokens`, NOT a cast. `PayViaPaymentRequestResult` declares
+        // it top-level and required (`lightning@12.2.3`), so reading it through
+        // the vendor's own type means a rename in a future version fails the
+        // build — where a cast keeps compiling and quietly reports every
+        // payment as having cost nothing.
+        ...realizedFeeSats(result.fee_mtokens),
+      }
     } catch (error) {
       const reason = rejectionReason(error)
       if (reason !== undefined && FAILED_PAYMENT_REASONS.has(reason)) {

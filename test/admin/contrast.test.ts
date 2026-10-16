@@ -74,6 +74,10 @@ const PAIRS: readonly (readonly [fg: string, bg: string, where: string])[] = [
   ['failed', 'failed-bg', 'the failed chip'],
   ['exposed', 'ground', 'exposed text'],
   ['exposed', 'exposed-bg', 'the exposed chip'],
+  // `.panel .at-risk` — sats outstanding in the p&l tables, which sit in a
+  // card. Clearing AA on --ground said nothing about the lighter --raised, so
+  // it is listed separately exactly as the note above this list requires.
+  ['exposed', 'raised', 'sats outstanding in a p&l table'],
   // The restart banner is --exposed-bg. `text` is its headline and `text-dim`
   // the pending items, which are its substance rather than decoration —
   // --text-faint reads 4.02:1 there and is deliberately not used for them.

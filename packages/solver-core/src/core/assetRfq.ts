@@ -109,6 +109,15 @@ export interface AssetQuoteMarket {
 export type AssetQuoteRefusal =
   'unsupported_pair' | 'exact_out_unsupported' | 'price_unavailable' | 'fee_consumes_swap' | 'amount_out_of_range'
 
+/**
+ * Taproot dust, in sats. A BTC-leg payout under this can never settle — arkd
+ * refuses the output — so quoting one strands the client's deposit: the sweep
+ * would fail the fill and the client would eat a cancel round trip for a swap
+ * that was never servable. An asset-leg payout has no such floor (an asset
+ * rides its carrier), so this binds only the sats leg.
+ */
+export const ARKADE_DUST_SATS = 330n
+
 export type AssetQuoteOutcome =
   { ok: true; fromAmount: bigint; toAmount: bigint } | { ok: false; reason: AssetQuoteRefusal }
 
@@ -176,7 +185,67 @@ export const resolveAssetQuote = (args: {
     return { ok: false, reason: 'amount_out_of_range' }
   }
 
+  // After the configured bounds: a payout the operator's own range admits but
+  // the chain cannot carry. A sats payout under dust is not a cheap swap, it
+  // is an unfillable one, and quoting it strands the client's deposit.
+  if (pair.to === null && toAmount < ARKADE_DUST_SATS) {
+    return { ok: false, reason: 'amount_out_of_range' }
+  }
+
   return { ok: true, fromAmount: amount, toAmount }
+}
+
+/**
+ * Extra decimal places the implied price carries beyond the feed's own.
+ *
+ * The implied price is a DIVISION, and at the feed's scale it quantises: a feed
+ * reporting `1.5` parses to `scale: 1`, so an implied price of 1.4955 truncates
+ * to `14` and the drift derived from it reads +714bp on a flat market and
+ * +607bp on a fill 70bp under water. CoinGecko returns unquoted JSON numbers and
+ * is a first-class provider here, so that is a real input, not a contrived one.
+ *
+ * Headroom is RELATIVE so the implied price can never be coarser than the feed
+ * that produced it, whatever scale that feed uses. Twelve places puts the
+ * quantisation floor (`10_000 / mantissa` bps) far below the basis point the
+ * figure is reported in.
+ */
+export const IMPLIED_PRICE_HEADROOM = 12
+
+/**
+ * This quote's OWN price — quote-asset per base-asset, as an exact integer
+ * mantissa at `scale + IMPLIED_PRICE_HEADROOM`.
+ *
+ * The half of a market mark that the solver controls. Compared against a feed
+ * read LATER, at fill time, it says how far the market moved while the quote was
+ * outstanding. Compared against the feed it was derived from it says nothing at
+ * all, which is the trap the first attempt at this fell into: `resolveAssetQuote`
+ * computes the payout FROM that feed, so the two cannot disagree by more than
+ * the configured spread.
+ *
+ * Both directions produce the same ratio, so a drift derived from it is
+ * comparable across them. Which direction is FAVOURABLE is not — see
+ * `marketDriftBps`.
+ *
+ * Null rather than zero on a degenerate result. A feed reporting `1.0` parses to
+ * `scale: 0`, and the division then truncates a real price to `0n`; storing that
+ * as valid reported a fill as +10000bp in the solver's favour.
+ */
+export const impliedQuotePrice = (args: {
+  fromAmount: bigint
+  toAmount: bigint
+  givesBase: boolean
+  baseDecimals: number
+  quoteDecimals: number
+  scale: number
+}): { mantissa: bigint; scale: number } | null => {
+  const { fromAmount, toAmount, givesBase, baseDecimals, quoteDecimals } = args
+  const baseAtomic = givesBase ? fromAmount : toAmount
+  const quoteAtomic = givesBase ? toAmount : fromAmount
+  if (baseAtomic <= 0n || quoteAtomic <= 0n || args.scale < 0) return null
+  const scale = args.scale + IMPLIED_PRICE_HEADROOM
+  const mantissa =
+    (quoteAtomic * 10n ** BigInt(baseDecimals) * 10n ** BigInt(scale)) / (baseAtomic * 10n ** BigInt(quoteDecimals))
+  return mantissa > 0n ? { mantissa, scale } : null
 }
 
 export type AssetFillRefusal = 'quote_expired' | 'deposit_short' | 'insufficient_inventory'

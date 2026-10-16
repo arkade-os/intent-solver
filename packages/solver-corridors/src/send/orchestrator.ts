@@ -1429,6 +1429,15 @@ export class SendSwapService {
       payment_id: result.id,
       ...(this.backendName ? { payment_backend: this.backendName } : {}),
       ...(wallet ? { payment_wallet: wallet } : {}),
+      // The fee, captured HERE and not only on the poll. A payment that settles
+      // inside `payInvoice` is claimed straight from the preimage it returned
+      // and NEVER reaches `getPayment` — `test/send/orchestrator.test.ts`'s
+      // "claims from the preimage payInvoice already returned, with no
+      // getPayment round trip" pins exactly that, with an empty payments map so
+      // a re-fetch would fail the test. Capturing only on the polled path would
+      // therefore lose the routing fee for every fast route, which is most of
+      // them, while the adapter had it in hand.
+      ...(result.feePaidSats === undefined ? {} : { routing_fee_paid_sats: result.feePaidSats }),
     })
     if (result.status === 'failed') {
       // Terminal per the adapter's allowlist, and that is a stronger fact than
@@ -1632,6 +1641,20 @@ export class SendSwapService {
     // settled this invoice".
     if (polled.failureReason !== undefined && polled.failureReason !== row.paymentFailureReason) {
       await store.patch(row.id, { payment_failure_reason: polled.failureReason })
+    }
+    // What routing ACTUALLY cost, recorded the moment the backend will say.
+    // The only realized execution cost this service has: `quotedRoutingFeeSats`
+    // beside it is the budget the swap was priced against, and the gap between
+    // the two is the difference between a corridor that made money and one that
+    // looked like it did.
+    //
+    // Same only-on-change rule as the two patches above, for the same reason —
+    // this poll runs every tick and the figure lands once. Undefined is left
+    // alone rather than written as null: a backend that does not report a fee
+    // has not told us the payment was free, and overwriting a fee we already
+    // captured with a null on a later poll would lose it.
+    if (polled.feePaidSats !== undefined && polled.feePaidSats !== row.routingFeePaidSats) {
+      await store.patch(row.id, { routing_fee_paid_sats: polled.feePaidSats })
     }
     if (polled.status === 'failed') {
       // The self-payment exception applies to the polled failure exactly as to
