@@ -85,9 +85,12 @@ export interface ReceiveArkadeOps {
    * The spend-aware read `findLockups` cannot be: it is `spendableOnly`, so a
    * lockup that was funded and then claimed vanishes from it — and on THIS leg
    * that blind spot is a double-spend of the provider's own capital, because
-   * the funding decision is made against it. See `whenArmed`.
+   * the funding decision is made against it. See `whenArmed`. `unrolled`: spent on
+   * BITCOIN, so a claim of it reveals `P` in an L1 witness only.
    */
-  findLockupOutpoints(pkScriptHex: string): Promise<{ txid: string; vout: number; value: number; spent: boolean }[]>
+  findLockupOutpoints(
+    pkScriptHex: string,
+  ): Promise<{ txid: string; vout: number; value: number; spent: boolean; unrolled: boolean }[]>
   /** Pay `amountSats` from the solver's own Arkade balance to `address` — funds the lockup. @returns the Arkade txid. */
   fund(address: string, amountSats: number, stamp?: ClaimPacketStamp): Promise<string>
   /** Push the covenant refund of the script the row describes, back to the solver's own address. Needs no client keys. */

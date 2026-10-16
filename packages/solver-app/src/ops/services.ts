@@ -1184,6 +1184,8 @@ export const createServices = async (
         ln: rail!.ln,
         backendName: config.lnBackend ?? undefined,
         arkade: receiveOps,
+        // LND reads a third party's spend through Esplora alone; without one that read throws every tick.
+        ...(config.lnBackend === 'lnd' && !config.lnd?.esploraUrl ? {} : { onchain: rail!.onchain }),
         limits: policy.corridorLimits['lightning:BTC->arkade:BTC'],
         fee: policy.corridorFees['lightning:BTC->arkade:BTC'],
         // From `config`, not `policy`: this is not a console-editable knob and

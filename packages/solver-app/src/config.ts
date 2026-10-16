@@ -101,8 +101,8 @@ export interface LndConfig {
   /** Base64-serialized macaroon. */
   macaroon: string
   /**
-   * Esplora base URL, for the ONCHAIN RECEIVE corridor only. LND's own chain
-   * view is wallet-scoped and carries no per-output values, so it cannot see a
+   * Esplora base URL, for the ONCHAIN RECEIVE corridor and the Lightning receive leg's L1 claim read.
+   * LND's own chain view is wallet-scoped and carries no per-output values, so it cannot see a
    * client's funding transaction — see `onchain/lnd/adapter.ts`'s `findOutputs`.
    * Optional: unset is fine for a send-only deployment, and the receive path
    * fails loudly rather than under-reporting.

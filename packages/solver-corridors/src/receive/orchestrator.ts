@@ -52,6 +52,8 @@ import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { claimPacketStamp } from './claimPacket.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
+import { LockupPreimageReader } from './lockupPreimage.js'
+import type { OnchainBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { FundNotSubmittedError } from './fundLockup.js'
 import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
@@ -178,6 +180,8 @@ export interface ReceiveServiceDeps {
     | 'getKnownInvoiceState'
   >
   arkade: ReceiveArkadeOps
+  /** Reads `P` off the L1 claim of a lockup the client unrolled. The rail's own wallet in production. */
+  onchain?: Pick<OnchainBackend, 'findSpendWitness'>
   /**
    * OPTIONAL. When set, the solver hands covclaimd the sealed packet so the
    * claim can be pushed with the client offline. When absent (or null), the
@@ -325,9 +329,11 @@ export class ReceiveSwapService {
   private readonly pricing: PricingStrategy
 
   private readonly admission: AdmissionStrategy
+  private readonly preimages: LockupPreimageReader
 
   constructor(private readonly deps: ReceiveServiceDeps) {
     this.admission = deps.admission
+    this.preimages = new LockupPreimageReader(deps.arkade, deps.onchain, (id, error) => this.onTickError?.(id, error))
     this.now = deps.now ?? nowSeconds
     this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
     this.fee = deps.fee ?? FREE
@@ -1079,7 +1085,7 @@ export class ReceiveSwapService {
     // empty, so indexer lag never narrows this to less than it was before.
     const historical = await arkade.findLockupOutpoints(row.pkScript)
     const searchable = historical.length > 0 ? historical : [{ txid: row.arkadeLockupTxid, vout: row.arkadeLockupVout }]
-    const preimage = await arkade.findClaimPreimage(searchable, row.paymentHash)
+    const preimage = await this.preimages.find(row, searchable)
     if (preimage) {
       const transitioned = await store.transition(row.id, 'funded', 'claimed', { preimage: hex.encode(preimage) })
       log(
@@ -1225,7 +1231,7 @@ export class ReceiveSwapService {
     // recheck exists to prevent.
     const historical = await arkade.findLockupOutpoints(row.pkScript)
     const searchable = historical.length > 0 ? historical : [{ txid: row.arkadeLockupTxid, vout: row.arkadeLockupVout }]
-    const late = await arkade.findClaimPreimage(searchable, row.paymentHash)
+    const late = await this.preimages.find(row, searchable)
     if (late) {
       return store.transition(row.id, 'refunding', 'claimed', { preimage: hex.encode(late) })
     }

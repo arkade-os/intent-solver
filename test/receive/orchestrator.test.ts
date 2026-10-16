@@ -82,6 +82,8 @@ interface FakeArkadeState {
    * spendable world it meant to.
    */
   spentOutputs: FundedOutput[]
+  /** Outputs a unilateral exit took onto Bitcoin: a claim of one reveals `P` only on L1. */
+  unrolledOutputs: FundedOutput[]
   fundCalls: { address: string; amountSats: number; stamp?: { packet: Uint8Array; tapTree: Uint8Array } }[]
   refundCalls: number
   claimPreimage: Uint8Array | null
@@ -102,6 +104,7 @@ const buildFakeArkade = (): { ops: ReceiveArkadeOps; state: FakeArkadeState } =>
   const state: FakeArkadeState = {
     outputs: [],
     spentOutputs: [],
+    unrolledOutputs: [],
     fundCalls: [],
     refundCalls: 0,
     claimPreimage: null,
@@ -119,8 +122,9 @@ const buildFakeArkade = (): { ops: ReceiveArkadeOps; state: FakeArkadeState } =>
     // spent. The real helper answers from one indexer read; the fake keeps the
     // two lists apart and unions them here.
     findLockupOutpoints: async () => [
-      ...state.outputs.map((o) => ({ ...o, spent: false })),
-      ...state.spentOutputs.map((o) => ({ ...o, spent: true })),
+      ...state.outputs.map((o) => ({ ...o, spent: false, unrolled: false })),
+      ...state.spentOutputs.map((o) => ({ ...o, spent: true, unrolled: false })),
+      ...state.unrolledOutputs.map((o) => ({ ...o, spent: true, unrolled: true })),
     ],
     fund: async (address, amountSats, stamp) => {
       state.fundCalls.push({ address, amountSats, ...(stamp ? { stamp } : {}) })
@@ -186,6 +190,8 @@ let store: ReceiveSwapStore
 let arkade: ReturnType<typeof buildFakeArkade>
 let covclaimd: ReturnType<typeof buildFakeCovclaimd>
 let service: ReceiveSwapService
+/** L1 spend witnesses by `txid:vout`, as `onchain.findSpendWitness` answers them. */
+let l1Witnesses: Map<string, Uint8Array[]>
 
 const LIMITS = { minSats: 1_000, maxSats: 1_000_000 }
 
@@ -199,12 +205,14 @@ beforeEach(async () => {
   store = await ReceiveSwapStore.open(driver, clock)
   arkade = buildFakeArkade()
   covclaimd = buildFakeCovclaimd()
+  l1Witnesses = new Map()
   service = new ReceiveSwapService({
     acceptUnilateralGap: false,
     store,
     ln,
     backendName: 'probe-backend',
     arkade: arkade.ops,
+    onchain: { findSpendWitness: async ({ txid, vout }) => l1Witnesses.get(`${txid}:${vout}`) ?? null },
     covclaimd: covclaimd.client,
     limits: LIMITS,
     maxExposedSats: 1_000_000,
@@ -1443,6 +1451,73 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
     await expect(ln.getHoldState(paymentHash)).resolves.toMatchObject({ status: 'settled' })
   })
 
+  describe('a lockup the client unrolled onto Bitcoin', () => {
+    const unroll = (funded: { id: string }, witness?: Uint8Array[]) => {
+      arkade.state.unrolledOutputs = arkade.state.outputs
+      arkade.state.outputs = []
+      const [lockup] = arkade.state.unrolledOutputs
+      if (lockup && witness) l1Witnesses.set(`${lockup.txid}:${lockup.vout}`, witness)
+      return funded.id
+    }
+
+    it('settles on P read off the L1 claim witness', async () => {
+      const id = unroll(await armAndFund(), [new Uint8Array(64), P, new Uint8Array(40)])
+
+      const row = await service.tick(id)
+      expect(row.state).toBe('settled')
+      expect(row.preimage).toBe(hex.encode(P))
+    })
+
+    it('settles from refunding when the L1 claim lands before E', async () => {
+      const funded = await armAndFund()
+      const id = unroll(funded)
+      now = funded.refundLocktime
+      expect((await service.tick(id)).state).toBe('refunding')
+
+      const [lockup] = arkade.state.unrolledOutputs
+      l1Witnesses.set(`${lockup!.txid}:${lockup!.vout}`, [P])
+      expect((await service.tick(id)).state).toBe('settled')
+    })
+
+    it('takes nothing from a witness item that does not open the payment hash', async () => {
+      const id = unroll(await armAndFund(), [new Uint8Array(32).fill(7)])
+
+      const row = await service.tick(id)
+      expect(row.state).toBe('funded')
+      expect(row.preimage).toBeNull()
+    })
+
+    it('with no L1 reader, reports the unroll and keeps waiting rather than throwing', async () => {
+      const reports: unknown[] = []
+      const blind = new ReceiveSwapService({
+        acceptUnilateralGap: false,
+        store,
+        ln,
+        arkade: arkade.ops,
+        limits: LIMITS,
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => store.committedSats(),
+        admission: new AdmissionControl(),
+        now: clock,
+      })
+      blind.onTickError = (_id, error) => reports.push(error)
+      const id = unroll(await armAndFund())
+
+      expect((await blind.tick(id)).state).toBe('funded')
+      expect(reports).toHaveLength(1)
+    })
+
+    it('reports the unroll once, not on every tick of the wait', async () => {
+      const reports: unknown[] = []
+      service.onTickError = (_id, error) => reports.push(error)
+      const id = unroll(await armAndFund())
+
+      await service.tick(id)
+      await service.tick(id)
+      expect(reports).toHaveLength(1)
+    })
+  })
+
   /**
    * The false-negative `stuck` the TLA+ model names in
    * `spec/tla/LightningReceive_SettleNotIdempotent.cfg`.
@@ -2000,8 +2075,12 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
       findLockups: async (pkScriptHex) => (pkScriptHex === SEND_PKSCRIPT ? sendLockups : arkade.state.outputs),
       findLockupOutpoints: async (pkScriptHex) =>
         (pkScriptHex === SEND_PKSCRIPT ? sendLockups : arkade.state.outputs)
-          .map((o) => ({ ...o, spent: false }))
-          .concat(pkScriptHex === SEND_PKSCRIPT ? [] : arkade.state.spentOutputs.map((o) => ({ ...o, spent: true }))),
+          .map((o) => ({ ...o, spent: false, unrolled: false }))
+          .concat(
+            pkScriptHex === SEND_PKSCRIPT
+              ? []
+              : arkade.state.spentOutputs.map((o) => ({ ...o, spent: true, unrolled: false })),
+          ),
     }
     return new ReceiveSwapService({
       acceptUnilateralGap: false,
