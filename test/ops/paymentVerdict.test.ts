@@ -10,7 +10,7 @@ import type { Services } from '@arkade-os/solver-app/ops/services.js'
 
 const ROW = {
   paymentHash: 'aa'.repeat(32),
-  paymentId: 'SparkLightningSendRequest:01a01c28',
+  paymentId: 'retired-backend-request:01a01c28',
   paymentBackend: null,
   paymentWallet: null,
 }
@@ -126,23 +126,23 @@ describe('paymentVerdict falls back to the payment hash when the id cannot settl
     const probe = vi.fn(async () => ({ status: 'returned' as const }))
     const services = servicesWith({ backend: 'lnd', byHash: { status: 'returned' } })
     ;(services.ln as unknown as { getSendHtlcState: unknown }).getSendHtlcState = probe
-    const verdict = await paymentVerdict(services, { ...ROW, paymentBackend: 'spark' })
+    const verdict = await paymentVerdict(services, { ...ROW, paymentBackend: 'other-backend' })
     expect(verdict.verdict).toBe('other-wallet-push-nothing')
     expect(probe).not.toHaveBeenCalled()
   })
 
   it('refuses to decide for an id minted from another seed on the same backend', async () => {
-    const services = servicesWith({ backend: 'spark-breez' })
+    const services = servicesWith({ backend: 'hosted-backend' })
     ;(services.ln as unknown as { walletFingerprint: unknown }).walletFingerprint = async () => 'wallet-now'
     const verdict = await paymentVerdict(services, {
       ...ROW,
-      paymentBackend: 'spark-breez',
+      paymentBackend: 'hosted-backend',
       paymentWallet: 'wallet-then',
     })
     expect(verdict).toMatchObject({
       verdict: 'other-wallet-push-nothing',
-      paidBy: { backend: 'spark-breez', wallet: 'wallet-then' },
-      runningNow: { backend: 'spark-breez', wallet: 'wallet-now' },
+      paidBy: { backend: 'hosted-backend', wallet: 'wallet-then' },
+      runningNow: { backend: 'hosted-backend', wallet: 'wallet-now' },
     })
   })
 

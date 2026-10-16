@@ -23,6 +23,10 @@ const SWEEP_TIMEOUT_MS = 20 * 60_000
 const SWEPT_POLL_TIMEOUT_MS = 8 * 60_000
 const SWEPT_POLL_MS = 5_000
 
+const MINE_STEP_BLOCKS = 50
+const MAX_MINED_BLOCKS = 400
+const SWEEP_STEP_WAIT_MS = 60_000
+
 const LOCKUP_SATS = 2_000
 
 let arkade: E2eArkade
@@ -85,13 +89,21 @@ describe('a swept send-leg lockup is refunded through a batch', () => {
       )
       expect(funded.reduce((sum, output) => sum + output.value, 0)).toBe(LOCKUP_SATS)
 
-      // Past the batch expiry plus a margin for the sweeper’s own schedule.
-      await mineBlocks(Number(info.vtxoTreeExpiry) + 10)
-      const swept = await poll(
-        () => findSweptLockups(ctx, pkScript),
-        (outputs) => outputs.length > 0,
-        `arkd to sweep the batch holding ${pkScript} (vtxoTreeExpiry ${info.vtxoTreeExpiry} blocks)`,
-      )
+      // arkd advertises no tree expiry (`vtxoTreeExpiry` is null here), so mine
+      // in steps until the sweep lands instead of computing a height.
+      let swept: Awaited<ReturnType<typeof findSweptLockups>> = []
+      for (let mined = 0; swept.length === 0 && mined < MAX_MINED_BLOCKS; mined += MINE_STEP_BLOCKS) {
+        await mineBlocks(MINE_STEP_BLOCKS)
+        swept = await poll(
+          () => findSweptLockups(ctx, pkScript),
+          (outputs) => outputs.length > 0,
+          'a sweep',
+          SWEEP_STEP_WAIT_MS,
+        ).catch(() => [])
+      }
+      if (swept.length === 0) {
+        throw new Error(`arkd never swept the batch holding ${pkScript} within ${MAX_MINED_BLOCKS} mined blocks`)
+      }
       // The blind spot itself: the spendable read is empty for an output still
       // unspent and still the client’s.
       expect(await findLockups(ctx, pkScript)).toEqual([])
@@ -113,8 +125,13 @@ describe('a swept send-leg lockup is refunded through a batch', () => {
   )
 })
 
-const poll = async <T>(read: () => Promise<T>, enough: (value: T) => boolean, what: string): Promise<T> => {
-  const deadline = Date.now() + SWEPT_POLL_TIMEOUT_MS
+const poll = async <T>(
+  read: () => Promise<T>,
+  enough: (value: T) => boolean,
+  what: string,
+  timeoutMs = SWEPT_POLL_TIMEOUT_MS,
+): Promise<T> => {
+  const deadline = Date.now() + timeoutMs
   let last = await read()
   while (!enough(last) && Date.now() < deadline) {
     await new Promise((settle) => setTimeout(settle, SWEPT_POLL_MS))
