@@ -149,8 +149,8 @@ const migrationDue = (failed: boolean): boolean => {
 }
 
 /**
- * A swept refund is a BATCH ROUND, minutes of a sequential watch loop, so one
- * script failing every pass costs every corridor that time. Shares
+ * A swept refund is a BATCH ROUND, minutes of a queued pass that also renews
+ * and recovers, so one script failing every pass delays both. Shares
  * {@link migrationClock}, this module's one seam for both throttles.
  */
 const SWEPT_REFUND_RETRY_MS = 5 * 60_000

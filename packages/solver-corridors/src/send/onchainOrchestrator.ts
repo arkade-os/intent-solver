@@ -493,8 +493,8 @@ export class OnchainSendSwapService {
     const { store, arkade } = this.deps
     const outputs = await arkade.findLockups(row.pkScript)
     if (outputs.length === 0) {
-      // Only a batch reaches a swept lockup, and only {@link refundNow} opts
-      // in — the unattended sweep shares the watch loop.
+      // Only a batch reaches a swept lockup. Unattended, the float pass finds
+      // one through the recovery guard; here only {@link refundNow} opts in.
       if (options.sweptToo) {
         const swept = (await arkade.findSweptLockups?.(row.pkScript)) ?? []
         if (swept.length > 0 && arkade.refundSwept) {

@@ -894,10 +894,10 @@ export class SendSwapService {
   }
 
   /**
-   * Deliberately NOT reachable from {@link refundSweep}: a batch round there
-   * would stall the hot tick driving in-flight Lightning payments, once a
-   * minute, for as long as it kept failing. `decide` is the caller's because
-   * the evidence lives on the Lightning rail.
+   * Not reachable from {@link refundSweep}, which never sees most of these: it
+   * skips a refused row with no recorded lockup value, the shape a funding seen
+   * too late leaves. The float pass finds them through the recovery guard.
+   * `decide` is the caller's because the evidence lives on the Lightning rail.
    */
   async refundSweptLockup(
     pkScript: string,

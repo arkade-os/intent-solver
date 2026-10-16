@@ -42,9 +42,9 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
   const script = covenantScriptFromRow(row)
   const pkScript = hex.encode(script.pkScript)
   const outputs = await findLockups(services.arkade, pkScript)
-  // A SWEPT lockup is invisible to `findLockups` and unspendable offchain. An
-  // operator is exactly who should pay for a batch round; the unattended 60s
-  // sweep is not, which is why that path is untouched. @see arkade/sweptRefund.ts
+  // A SWEPT lockup is invisible to `findLockups` and unspendable offchain, so
+  // it goes through a batch round. Unattended, the float pass does the same
+  // off the recovery guard. @see arkade/sweptRefund.ts
   if (outputs.length === 0) {
     const swept = await findSweptLockups(services.arkade, pkScript)
     if (swept.length === 0) return { skipped: NOTHING_AT_SCRIPT }

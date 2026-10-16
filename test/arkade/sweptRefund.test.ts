@@ -78,30 +78,34 @@ const stack = (options: {
   swept: readonly FundedOutput[]
   inputFee?: string
   floatCoins?: { txid: string; vout: number; value: number }[]
+  duringFloatRead?: (reservations: ReturnType<typeof createReservationLedger>) => void
 }): Stack => {
   const virtualTxs = new Map<string, string>()
   for (const output of options.swept) virtualTxs.set(output.txid, sourceTx(output.vout, BigInt(output.value)).b64)
   for (const coin of options.floatCoins ?? []) virtualTxs.set(coin.txid, sourceTx(coin.vout, BigInt(coin.value)).b64)
   const registered: { proof: string }[] = []
   const topics: string[][] = []
+  const reservations = createReservationLedger()
 
   const ctx = {
     identity,
     hrp: 'ark',
     dustSats: 330n,
     vtxoMinSats: 1n,
-    reservations: createReservationLedger(),
+    reservations,
     wallet: {
       arkServerPublicKey: SERVER,
       getAddress: async () => new ArkAddress(SERVER, key(21), 'ark').encode(),
-      getSpendableVtxos: async () =>
-        (options.floatCoins ?? []).map((coin) => ({
+      getSpendableVtxos: async () => {
+        options.duringFloatRead?.(reservations)
+        return (options.floatCoins ?? []).map((coin) => ({
           ...coin,
           createdAt: new Date(0),
           tapTree: FLOAT_TAPTREE,
           forfeitTapLeafScript: FLOAT_LEAF,
           intentTapLeafScript: FLOAT_LEAF,
-        })),
+        }))
+      },
       arkProvider: {
         getInfo: async () => ({
           network: 'regtest',
@@ -226,6 +230,22 @@ describe('refundSweptSwapScript builds an intent the covenant can satisfy', () =
     await refundSweptSwapScript(ctx, 'http://emulator', swapScript(), swept, CLIENT_REFUND)
 
     expect(topics.at(-1)).toEqual(expect.arrayContaining([`${swept[0]!.txid}:0`, `${feeCoin.txid}:9`]))
+  })
+
+  it('passes over a fee coin a funding pins while the float is being read', async () => {
+    const swept: FundedOutput[] = [{ txid: sourceTx(0, 1976n).id, vout: 0, value: 1976 }]
+    const cheapest = { txid: sourceTx(8, 40_000n).id, vout: 8, value: 40_000 }
+    const next = { txid: sourceTx(9, 50_000n).id, vout: 9, value: 50_000 }
+    const { ctx, registered } = stack({
+      swept,
+      inputFee: 'amount * 0.01',
+      floatCoins: [cheapest, next],
+      duringFloatRead: (reservations) => void reservations.reserve([cheapest]),
+    })
+
+    await refundSweptSwapScript(ctx, 'http://emulator', swapScript(), swept, CLIENT_REFUND)
+
+    expect(hex.encode(proofOf(registered).getInput(2).txid!)).toBe(next.txid)
   })
 
   it('releases the fee coin reservation once the batch is over', async () => {

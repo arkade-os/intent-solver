@@ -66,6 +66,7 @@ const FEE_COIN_FILTER = { withRecoverable: false, genericallySpendableOnly: true
 interface FeePlan {
   coin?: ExtendedVirtualCoin
   change: bigint
+  release: () => void
 }
 
 const priceIntent = (
@@ -98,16 +99,17 @@ const planFee = async (
   swept: readonly FundedOutput[],
   refundPkScript: Uint8Array,
 ): Promise<FeePlan> => {
-  if (priceIntent(estimator, swept, refundPkScript) === 0n) return { change: 0n }
+  if (priceIntent(estimator, swept, refundPkScript) === 0n) return { change: 0n, release: () => {} }
 
+  const candidates = await ctx.wallet.getSpendableVtxos(FEE_COIN_FILTER)
+  // Read and pinned with no await between: a funding runs beside this pass.
   const reserved = ctx.reservations.reserved()
-  const candidates = (await ctx.wallet.getSpendableVtxos(FEE_COIN_FILTER))
+  const free = candidates
     .filter((coin) => !reserved.has(`${coin.txid}:${coin.vout}`) && (coin.assets ?? []).length === 0)
     .sort((a, b) => a.value - b.value)
-
-  for (const coin of candidates) {
+  for (const coin of free) {
     const change = BigInt(coin.value) - priceIntent(estimator, swept, refundPkScript, coin)
-    if (change >= ctx.dustSats) return { coin, change }
+    if (change >= ctx.dustSats) return { coin, change, release: ctx.reservations.reserve([coin]) }
   }
   throw new Error(
     `no sats-only float coin can pay the intent fee for a swept refund of ${swept.length} output(s): ` +
@@ -252,8 +254,7 @@ export const refundSweptSwapScript = async (
 
   const info = await ctx.wallet.arkProvider.getInfo()
   const estimator = new Estimator(info.fees.intentFee)
-  const { coin: feeCoin, change } = await planFee(ctx, estimator, swept, refundPkScript)
-  const release = feeCoin ? ctx.reservations.reserve([feeCoin]) : () => {}
+  const { coin: feeCoin, change, release } = await planFee(ctx, estimator, swept, refundPkScript)
 
   try {
     const coins = await withPrevTxs(intentCoinsFor(script, swept, feeCoin), ctx.wallet.indexerProvider)
