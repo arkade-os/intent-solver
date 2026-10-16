@@ -5,22 +5,25 @@ import type { OnchainBackend, OnchainTxOutcome } from '@arkade-os/solver-core/po
 /** About two blocks, so an ordinary confirmation beats the replacement rather than racing it. */
 export const FEE_BUMP_INTERVAL_SECONDS = 20 * 60
 
-export const FEE_BUMP_FACTOR = 1.5
+/** From here to the deadline, pay everything above dust: missing it costs the whole HTLC. Two intervals, so one all-in version always lands inside it. */
+export const FEE_BUMP_ALL_IN_SECONDS = 2 * FEE_BUMP_INTERVAL_SECONDS
+
+/** Further out than this, a version only keeps up with the estimate: a spend that is merely waiting has time to. */
+export const FEE_BUMP_RAMP_SECONDS = 6 * FEE_BUMP_INTERVAL_SECONDS
 
 const MIN_RELAY_FEE_RATE = 1
-
-export interface BroadcastVersion {
-  feeRate: number
-  broadcastAt: number
-}
 
 /** Asked before the fee estimate, so a waiting spend costs no backend call until a bump is due. */
 export const bumpDue = (broadcastAt: number, now: number): boolean => now - broadcastAt >= FEE_BUMP_INTERVAL_SECONDS
 
-/** Null while too early. The `+ MIN_RELAY_FEE_RATE` is BIP125 rule 4: the vsize never changes between versions. */
-export const replacementFeeRate = (last: BroadcastVersion, estimate: number, now: number): number | null => {
-  if (!bumpDue(last.broadcastAt, now)) return null
-  return Math.max(estimate, last.feeRate * FEE_BUMP_FACTOR, last.feeRate + MIN_RELAY_FEE_RATE)
+/** What the time left calls for: the estimate far out, `capRate` at the deadline, geometric between. */
+export const urgencyFeeRate = (estimateRate: number, capRate: number, deadline: number, now: number): number => {
+  const estimate = Math.max(estimateRate, MIN_RELAY_FEE_RATE)
+  const left = deadline - now
+  if (capRate <= estimate || left <= FEE_BUMP_ALL_IN_SECONDS) return capRate
+  if (left >= FEE_BUMP_RAMP_SECONDS) return estimate
+  const progress = (FEE_BUMP_RAMP_SECONDS - left) / (FEE_BUMP_RAMP_SECONDS - FEE_BUMP_ALL_IN_SECONDS)
+  return estimate * (capRate / estimate) ** progress
 }
 
 /** Capped to leave dust: a smaller payout confirms, a refusal never does. Null when even the cap cannot relay. */
