@@ -1683,6 +1683,47 @@ describe('OnchainReceiveSwapService', () => {
         expect(await service.claimNow(claimed.id)).toEqual({ txid: first.onchainClaimTxid })
       })
 
+      /** Automatic tick and operator override on one row, the second entering mid-attempt. */
+      const raceClaimAttempts = async (first: 'tick' | 'claimNow'): Promise<OnchainReceiveSwapRow> => {
+        const claimed = await driveToClaimed()
+        let broadcasts = 0
+        const broadcastRaw = deps.onchain.broadcastRaw.bind(deps.onchain)
+        deps.onchain.broadcastRaw = async (txHex) => {
+          if (broadcasts++ > 0) throw new Error('txn-mempool-conflict')
+          return broadcastRaw(txHex)
+        }
+        // Hold the leader mid-attempt; the follower's rate is what makes the txids differ.
+        let entered: () => void = () => {}
+        let release: () => void = () => {}
+        const held = new Promise<void>((resolve) => (release = resolve))
+        const arrived = new Promise<void>((resolve) => (entered = resolve))
+        const estimateFeeRate = deps.onchain.estimateFeeRate.bind(deps.onchain)
+        deps.onchain.estimateFeeRate = async () => {
+          deps.onchain.estimateFeeRate = estimateFeeRate
+          entered()
+          await held
+          return 4
+        }
+
+        const run = (which: 'tick' | 'claimNow') =>
+          (which === 'tick' ? service.tick(claimed.id) : service.claimNow(claimed.id)).catch(() => null)
+        const leading = run(first)
+        await arrived
+        await run(first === 'tick' ? 'claimNow' : 'tick')
+        release()
+        await leading
+        return store.get(claimed.id)
+      }
+
+      it.each(['tick', 'claimNow'] as const)(
+        'never leaves a claim txid nobody broadcast when %s gets there first',
+        async (first) => {
+          const after = await raceClaimAttempts(first)
+          expect(after.onchainClaimTxid).toBeTruthy()
+          expect(await deps.onchain.transactionOutcome(after.onchainClaimTxid!)).not.toBe('unknown')
+        },
+      )
+
       it('recognises its OWN claim on re-entry rather than reporting the client refunded', async () => {
         const claimed = await driveToClaimed()
         // The claim reaches the network; the process dies before it is recorded.

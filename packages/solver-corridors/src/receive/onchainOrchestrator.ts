@@ -1037,42 +1037,60 @@ export class OnchainReceiveSwapService {
     if (!row.fundingTxid || row.fundingVout === null) {
       return { refused: 'no funding txid/vout on the row: nothing to claim from' }
     }
-    // OUR OWN EARLIER ATTEMPTS, BY NAME, and BEFORE the spend read below,
-    // which cannot tell whose spend it found. `unknown` never went out: rebuild.
-    const tracked = trackedClaimTxids(row)
-    const [latest] = tracked
-    if (latest !== undefined) {
-      const { outcome, txid } = await outcomeOfAny(onchain, tracked)
-      if (outcome === 'confirmed') return { txid }
-      // A waiting one is replaced, not declined; null is "too soon" and it still stands.
-      if (outcome === 'mempool') {
-        const bumped = await this.replaceOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout)
-        return { txid: bumped ?? latest }
-      }
+    // The SAME slot `tick()` takes, and the send leg's `reclaimOnchainHtlc`
+    // takes for the identical race: both branches below pre-commit a txid and
+    // broadcast, each at its own fee estimate, so two interleaved leave the row
+    // holding the loser's. The winner's is then readable only through the
+    // witness path, which settles a claim still sitting in the mempool.
+    //
+    // Held across the reads too, unlike the send leg's: the mempool branch here
+    // replaces before the spend read, and moving that read in front of it would
+    // turn "bump my own unconfirmed claim" into "already spent" the moment an
+    // explorer reports mempool spends.
+    if (this.inFlight.has(id)) {
+      return { refused: `swap ${id} is already being ticked; retry once that tick finishes` }
     }
-    // The already-spent check `whenClaimed` makes, and the one this method
-    // shipped without. Past `htlc_locktime` the CLIENT can sweep the HTLC on
-    // their own refund leaf; without this, `broadcastRaw` takes a double-spend
-    // rejection from the network and THROWS — the caller gets an exception
-    // where the whole point of the `refused` interface is that "come back when
-    // fees fall" and "somebody already took it" are different answers. At 3am
-    // on a stuck row they are very different answers.
-    const priorSpend = await onchain.findSpendWitness({
-      txid: row.fundingTxid,
-      vout: row.fundingVout,
-      outputScript: hex.decode(row.onchainPkScript),
-    })
-    if (priorSpend) {
-      return {
-        refused: "onchain HTLC output is already spent — most likely the client's own refund past htlc_locktime",
+    this.inFlight.add(id)
+    try {
+      // OUR OWN EARLIER ATTEMPTS, BY NAME, and BEFORE the spend read below,
+      // which cannot tell whose spend it found. `unknown` never went out: rebuild.
+      const tracked = trackedClaimTxids(row)
+      const [latest] = tracked
+      if (latest !== undefined) {
+        const { outcome, txid } = await outcomeOfAny(onchain, tracked)
+        if (outcome === 'confirmed') return { txid }
+        // A waiting one is replaced, not declined; null is "too soon" and it still stands.
+        if (outcome === 'mempool') {
+          const bumped = await this.replaceOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout)
+          return { txid: bumped ?? latest }
+        }
       }
+      // The already-spent check `whenClaimed` makes, and the one this method
+      // shipped without. Past `htlc_locktime` the CLIENT can sweep the HTLC on
+      // their own refund leaf; without this, `broadcastRaw` takes a double-spend
+      // rejection from the network and THROWS — the caller gets an exception
+      // where the whole point of the `refused` interface is that "come back when
+      // fees fall" and "somebody already took it" are different answers. At 3am
+      // on a stuck row they are very different answers.
+      const priorSpend = await onchain.findSpendWitness({
+        txid: row.fundingTxid,
+        vout: row.fundingVout,
+        outputScript: hex.decode(row.onchainPkScript),
+      })
+      if (priorSpend) {
+        return {
+          refused: "onchain HTLC output is already spent — most likely the client's own refund past htlc_locktime",
+        }
+      }
+      // The automatic path's own build: an override is exactly when the two must not drift.
+      const attempt = await this.pushOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout, {
+        feeRate: await onchain.estimateFeeRate(),
+        previousFeeRate: null,
+      })
+      return attempt.broadcast ? { txid: attempt.txid } : { refused: attempt.reason }
+    } finally {
+      this.inFlight.delete(id)
     }
-    // The automatic path's own build: an override is exactly when the two must not drift.
-    const attempt = await this.pushOnchainClaim(row, row.preimage, row.fundingTxid, row.fundingVout, {
-      feeRate: await onchain.estimateFeeRate(),
-      previousFeeRate: null,
-    })
-    return attempt.broadcast ? { txid: attempt.txid } : { refused: attempt.reason }
   }
 
   /**
