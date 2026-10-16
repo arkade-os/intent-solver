@@ -58,7 +58,7 @@ export const SLOW_BLOCK_ALLOWANCE = 30 * MINUTE
 /**
  * What the client gets to broadcast AND confirm in, since the gate above is measured
  * back from the END of it. TWICE the expected wait because inter-block intervals are
- * exponential; the flat 30 minutes this replaced lost that coin flip at 1 conf (#160).
+ * exponential.
  */
 export const onchainReceiveFundingBudget = (minConfirmations: number): number =>
   DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT + 2 * minConfirmations * ONCHAIN_SECONDS_PER_BLOCK + SLOW_BLOCK_ALLOWANCE

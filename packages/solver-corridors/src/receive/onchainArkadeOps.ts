@@ -29,7 +29,12 @@ export interface OnchainReceiveArkadeOps extends Pick<
    * Arkade-side action that belongs to the receive leg alone; the send leg
    * never calls anything like this (the CLIENT funds that side there).
    */
-  fund(params: { address: string; amountSats: number; stamp?: ClaimPacketStamp }): Promise<string>
+  fund(params: {
+    address: string
+    amountSats: number
+    stamp?: ClaimPacketStamp
+    horizonSeconds?: number
+  }): Promise<string>
 
   /**
    * Every outpoint this lockup script has ever held, spent ones included —
@@ -71,6 +76,6 @@ export const onchainReceiveArkadeOpsFromContext = async (
     findClaimPreimage: (outpoints, paymentHashHex) => findClaimPreimage(ctx, outpoints, paymentHashHex),
     // The SHARED funding path, not `wallet.send`: coin selection and the
     // reservation ledger apply here too. @see fundLockup.ts
-    fund: async (params) => fundLockup(ctx, params.address, params.amountSats, params.stamp),
+    fund: async (params) => fundLockup(ctx, params.address, params.amountSats, params.stamp, params.horizonSeconds),
   }
 }
