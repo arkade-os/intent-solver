@@ -997,6 +997,65 @@ describe('tick: refusals before money moves', () => {
     )
   })
 
+  describe("the lockup's batch expiry is a deadline too", () => {
+    it('caps the route so the HTLC ends a margin before the lockup is swept', async () => {
+      const outcome = await quoted()
+      const expiresAt = clock + 2 * 24 * 3600
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT, expiresAt }]
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+      await service.tick(outcome.swap.id)
+
+      const call = ln.payCalls[0]
+      if (call === undefined) throw new Error('expected the payment to be attempted')
+      const decoded = decodeInvoice(INVOICE)
+      expect(call.maxCltvBlocks).toBeLessThan(
+        worstCaseHtlcBlocks(cltvOf(decoded.minFinalCltvBlocks, decoded.worstRouteHintCltvBlocks)),
+      )
+      expect(clock + call.maxCltvBlocks * SECONDS_PER_BLOCK + REFUND_SAFETY_MARGIN).toBeLessThanOrEqual(expiresAt)
+    })
+
+    it('refuses to pay a lockup swept before a claim could land', async () => {
+      const outcome = await quoted()
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT, expiresAt: clock + 3600 }]
+      const row = await service.tick(outcome.swap.id)
+
+      expect(row.state).toBe('refused')
+      expect(row.failureReason).toContain('claim_window_too_short')
+      expect(ln.payCalls).toHaveLength(0)
+    })
+
+    it('refuses to pay a funded row whose lockup is no longer spendable', async () => {
+      const { swap } = await quoted()
+      await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+      const row = await service.tick(swap.id)
+
+      expect(row.state).toBe('refused')
+      expect(ln.payCalls).toHaveLength(0)
+    })
+
+    it('is not applied on regtest, whose batches are shorter than any HTLC', async () => {
+      const regtest = new SendSwapService({
+        store,
+        ln,
+        arkade,
+        limits: { minSats: 500, maxSats: 10_000 },
+        invoicePrefix: 'bc',
+        maxExposedSats: 5_000,
+        totalCommitted: () => store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        now: () => clock,
+      })
+      const outcome = await regtest.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+      if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT, expiresAt: clock + 3600 }]
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+      await regtest.tick(outcome.swap.id)
+
+      expect(ln.payCalls).toHaveLength(1)
+    })
+  })
+
   it('builds the ceiling from the same hint the deadline was sized on', async () => {
     // The third `HtlcCltv` literal, and the one no gate builds for it —
     // `submitPayment`'s own `cltv`, whose output IS `max_timeout_height`.
@@ -1312,8 +1371,7 @@ describe('tick: failure and recovery', () => {
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
     ln.payResult = { id: 'pay-1', status: 'failed' }
     const realFind = arkade.findLockups.bind(arkade)
-    let reads = 0
-    arkade.findLockups = async (pkScript: string) => (++reads === 1 ? realFind(pkScript) : [])
+    arkade.findLockups = async (pkScript: string) => (ln.payCalls.length === 0 ? realFind(pkScript) : [])
     const realPatch = store.patch.bind(store)
     store.patch = async (id, patch) => {
       if (patch.refund_attempt === 'nothing-at-script') throw new Error('SQLITE_BUSY')
@@ -1361,8 +1419,7 @@ describe('tick: failure and recovery', () => {
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
     ln.payResult = { id: 'pay-1', status: 'failed' }
     const realFind = arkade.findLockups.bind(arkade)
-    let reads = 0
-    arkade.findLockups = async (pkScript: string) => (++reads === 1 ? realFind(pkScript) : [])
+    arkade.findLockups = async (pkScript: string) => (ln.payCalls.length === 0 ? realFind(pkScript) : [])
 
     const row = await service.tick(swap.id)
     expect(row.refundAttempt).toBe('nothing-at-script')
@@ -1655,7 +1712,9 @@ describe('tick: failure and recovery', () => {
     // Funded per the row, but nothing spendable at the script by the time we
     // look — the one-way-door case refundSweep documents. Recording `pushed`
     // here would tell a client they were refunded when they were not.
-    arkade.lockups = []
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    const realFind = arkade.findLockups.bind(arkade)
+    arkade.findLockups = async (pkScript: string) => (ln.payCalls.length === 0 ? realFind(pkScript) : [])
     await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
     ln.payResult = { id: 'pay-1', status: 'failed' }
 
@@ -1899,6 +1958,22 @@ describe('tick: failure and recovery', () => {
 
     expect((await service.tick(swap.id)).state).toBe('paid')
     expect(ln.payCalls).toHaveLength(1)
+  })
+
+  it.each<[string, FundedOutput[]]>([
+    ['gone', []],
+    ['short of what funded it', [{ txid: 'f1', vout: 0, value: AMOUNT / 2 }]],
+  ])('refuses to re-submit a mid-payment row once its lockup is %s', async (_, lockups) => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    const swap = outcome.swap
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+    await store.transition(swap.id, 'funded', 'paying', { idempotency_key: `swap-${swap.paymentHash}` })
+    arkade.lockups = lockups
+
+    const row = await service.tick(swap.id)
+    expect(ln.payCalls).toHaveLength(0)
+    expect(row.failureReason).toContain('cltv_budget_too_short')
   })
 
   it('resumes a swap that died after payment by polling the recorded id', async () => {
@@ -3525,6 +3600,7 @@ describe('SendSwapService — block-typed timelocks', () => {
       })
       if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
       await seed.transition(outcome.swap.id, 'quoted', 'funded', { lockup_value: outcome.swap.amountSats })
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: outcome.swap.amountSats }]
       seed.close()
       // Funding is not instant, and the gate's whole subject is the gap.
       clock += 60
