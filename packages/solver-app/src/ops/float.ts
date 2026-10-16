@@ -45,9 +45,13 @@ import {
   runVtxoLifecycle,
   LOCKUP_CONTRACT_TYPE,
   RENEWAL_THRESHOLD_MS,
+  type BlockedLockupOutput,
   type LockupDeadline,
   type VtxoLifecycleReport,
 } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
+import type { SweptLockupRefund, SweptRefundDecision } from '@arkade-os/solver-arkade/arkade/sweptLockupRefund.js'
+import type { SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
+import { paymentVerdict } from './paymentVerdict.js'
 import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import { poolTarget } from '@arkade-os/solver-arkade/arkade/vtxoPool.js'
 import { pinInputs, poolPlan, resplitFloat } from './pool.js'
@@ -142,6 +146,93 @@ const migrationDue = (failed: boolean): boolean => {
   }
   migrationThrottle.lastAttempt = now
   return true
+}
+
+/**
+ * A swept refund is a BATCH ROUND, minutes of a sequential watch loop, so one
+ * script failing every pass costs every corridor that time. Shares
+ * {@link migrationClock}, this module's one seam for both throttles.
+ */
+const SWEPT_REFUND_RETRY_MS = 5 * 60_000
+const SWEPT_REFUND_RETRY_MAX_MS = 2 * 60 * 60_000
+const sweptRefundThrottle = new Map<string, { lastFailure: number; consecutiveFailures: number }>()
+
+export const resetSweptRefundThrottle = (): void => sweptRefundThrottle.clear()
+
+const sweptRefundDue = (script: string): boolean => {
+  const held = sweptRefundThrottle.get(script)
+  if (!held) return true
+  const backoff = Math.min(SWEPT_REFUND_RETRY_MS * 2 ** (held.consecutiveFailures - 1), SWEPT_REFUND_RETRY_MAX_MS)
+  return migrationClock.nowMs() - held.lastFailure >= backoff
+}
+
+const sweptRefundFailed = (script: string): void => {
+  const held = sweptRefundThrottle.get(script)
+  sweptRefundThrottle.set(script, {
+    lastFailure: migrationClock.nowMs(),
+    consecutiveFailures: (held?.consecutiveFailures ?? 0) + 1,
+  })
+}
+
+const sweptRefundDecision =
+  (services: Services) =>
+  async (row: SendSwapRow): Promise<SweptRefundDecision> => {
+    const verdict = await paymentVerdict(services, row)
+    const evidence = JSON.stringify(verdict)
+    if (verdict.verdict === 'not-paid-refund-is-safe') {
+      return { refund: true, reason: `swept lockup refunded: the Lightning payment never landed — ${evidence}` }
+    }
+    return { refund: false, why: evidence }
+  }
+
+/**
+ * THIS IS WHAT UN-WEDGES THE GUARD: a not-ours lockup never matures out of the
+ * recoverable set, so only spending it clears one. Asks each send corridor in
+ * turn; one that does not own the script answers null.
+ */
+const refundBlockingSweptLockups = async (
+  services: Services,
+  blocked: readonly BlockedLockupOutput[],
+  note: (line: string) => void,
+): Promise<void> => {
+  // NOT-OURS only: an immature lockup is ours and its clock does clear it, so
+  // refunding one would rob a swap still able to settle.
+  const scripts = [...new Set(blocked.filter((output) => output.notOurs).map((output) => output.script))]
+  const decide = sweptRefundDecision(services)
+  for (const script of scripts) {
+    if (!sweptRefundDue(script)) continue
+    const attempts: (() => Promise<SweptLockupRefund>)[] = [
+      ...(services.service ? [() => services.service!.refundSweptLockup(script, decide)] : []),
+      ...(services.onchainService ? [() => services.onchainService!.refundSweptLockup(script)] : []),
+      ...(services.evmSendService ? [() => services.evmSendService!.refundSweptLockup(script)] : []),
+    ]
+    try {
+      let outcome: SweptLockupRefund = null
+      for (const attempt of attempts) {
+        outcome = await attempt()
+        if (outcome) break
+      }
+      if (!outcome) {
+        note(`swept lockup at ${script} blocks recovery and no send swap of ours owns it`)
+        continue
+      }
+      if ('txid' in outcome) {
+        sweptRefundThrottle.delete(script)
+        log(
+          `refunded swept lockup at ${script} for swap ${outcome.swapId} in ${outcome.txid}`,
+          outcome.closedFrom === undefined ? '' : `(closed from ${outcome.closedFrom})`,
+        )
+        continue
+      }
+      note(
+        `swept lockup at ${script} blocks recovery and is held by send swap ${outcome.swapId} ` +
+          `(${outcome.heldInState})${outcome.why === undefined ? '' : `: ${outcome.why}`}`,
+      )
+    } catch (error) {
+      sweptRefundFailed(script)
+      note(`swept refund of ${script} failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
 }
 
 /**
@@ -305,6 +396,17 @@ const floatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> 
     nowSeconds,
   })
 
+  // Whatever this clears is recovered on the NEXT pass: the batch has not
+  // confirmed yet, and re-reading the set here would double the pass's cost.
+  const reconciled: string[] = []
+  if (report.recoveryBlockedBy && report.recoveryBlockedBy.length > 0) {
+    try {
+      await refundBlockingSweptLockups(services, report.recoveryBlockedBy, (line) => reconciled.push(line))
+    } catch (error) {
+      reconciled.push(`swept refund pass failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   // Folded in rather than returned separately: `failures` is already the one
   // place a caller looks, and a migration problem is a float problem. The
   // migrated count rides the same report so the watch loop logs it and the
@@ -316,7 +418,7 @@ const floatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> 
     ...report,
     boarded: boarding.txid,
     migrated: migration.migrated,
-    failures: [...migration.failures, ...boarding.failures, ...report.failures, ...renewalWarnings],
+    failures: [...migration.failures, ...boarding.failures, ...report.failures, ...renewalWarnings, ...reconciled],
   }
 }
 

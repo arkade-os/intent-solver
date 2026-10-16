@@ -36,6 +36,7 @@ import { requireLn } from '../../ops/rails.js'
 import { capabilityRefusal, fundSources, requireFundSource, summarise } from '../../ops/fundSources.js'
 import { committedAcrossCorridors, mintPool, poolPlan } from '../../ops/pool.js'
 import { runFloatLifecycle } from '../../ops/float.js'
+import { paymentVerdict } from '../../ops/paymentVerdict.js'
 import { requestRestart } from '../../ops/restart.js'
 import type { Services } from '../../ops/services.js'
 import type { AdminDeps } from '../server.js'
@@ -302,123 +303,11 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       }
       // Read once: this action is entirely about the Lightning send corridor,
       // which cannot exist without a rail, so a missing one is a refusal here
-      // rather than five null checks below.
-      const ln = requireLn(services.ln)
-      const row = await services.store.get(id)
-      if (!row.paymentId) {
-        // A missing id is NOT proof that nothing was submitted, and reading it
-        // that way is a double payout waiting to happen. A backend can commit
-        // our funds against the payment hash one call BEFORE the call that
-        // mints the id — observed on a production rail — so a failure in
-        // between leaves sats committed with no id naming them, which is the
-        // exact row an operator reads this action for. Ask by hash first.
-        const probe = ln.getSendHtlcState
-        if (!probe) {
-          // A backend that cannot be asked. Kept as the old answer because on a
-          // backend with no commit-before-id gap it is the true one, but the
-          // caveat is reported rather than hidden.
-          return { paymentId: null, commitment: 'probe-unavailable' as const, verdict: 'never-submitted' as const }
-        }
-        let committed
-        try {
-          committed = await probe.call(ln, row.paymentHash)
-        } catch {
-          // Could not tell. That is not "nothing committed", and must not
-          // authorise a refund.
-          return { paymentId: null, commitment: 'probe-failed' as const, verdict: 'undecided-push-nothing' as const }
-        }
-        if (committed === null) {
-          // Now earned: the backend holds nothing against this hash, so nothing
-          // was ever taken.
-          return { paymentId: null, commitment: 'none' as const, verdict: 'never-submitted' as const }
-        }
-        const seenByHash = {
-          paymentId: null,
-          commitment: committed.status,
-          hasPreimage: Boolean(committed.preimage),
-        }
-        // A commitment the payee revealed against IS settlement, with or
-        // without an id to name it.
-        if (committed.status === 'settled') return { ...seenByHash, verdict: 'paid-do-not-refund' as const }
-        if (committed.status === 'returned') return { ...seenByHash, verdict: 'not-paid-refund-is-safe' as const }
-        // `committed`: the sats are at stake and the payee has not revealed.
-        return { ...seenByHash, verdict: 'undecided-push-nothing' as const }
-      }
-      // Before blaming the backend: was this payment even made from the wallet
-      // we are running? A payment id is meaningful only to the backend that
-      // minted it, pointed at the seed it was minted from — and after a
-      // provider or seed change the lookup fails EXACTLY like a sick database.
-      // Reporting that as `undecided` sends an operator to debug a backend that
-      // is working perfectly.
-      //
-      // Null on either side is UNKNOWN, never a match: rows written before this
-      // was recorded must not be claimed as ours.
-      const running = await ln.walletFingerprint?.().catch(() => undefined)
-      const foreignWallet = Boolean(running && row.paymentWallet && row.paymentWallet !== running)
-      const foreignBackend = Boolean(row.paymentBackend && row.paymentBackend !== services.config.lnBackend)
-      if (foreignWallet || foreignBackend) {
-        return {
-          paymentId: row.paymentId,
-          paidBy: { backend: row.paymentBackend, wallet: row.paymentWallet },
-          runningNow: { backend: services.config.lnBackend, wallet: running ?? null },
-          verdict: 'other-wallet-push-nothing' as const,
-        }
-      }
-
-      let payment
-      try {
-        payment = await ln.getPayment(row.paymentId)
-      } catch (error) {
-        // The id was allocated but the backend has no record of it — one of the
-        // exact rows this action exists for, since `submitPayment` can fail
-        // between allocating an id and persisting it. NOT proof nothing was
-        // sent, though: a backend that has forgotten a payment looks identical
-        // from here. So no verdict that authorises a push.
-        return {
-          paymentId: row.paymentId,
-          error: error instanceof Error ? error.message : String(error),
-          verdict: 'undecided-push-nothing' as const,
-        }
-      }
-      const hasPreimage = Boolean(payment.preimage)
-      // Spelled out rather than left to the reader: this is the decision the
-      // operator is about to make with real money, and "succeeded" next to a
-      // refund button has been misread before.
-      const seen = { paymentId: row.paymentId, status: payment.status, hasPreimage }
-      // A preimage IS settlement, whatever the status word says.
-      if (payment.status === 'succeeded' || hasPreimage) {
-        return { ...seen, verdict: 'paid-do-not-refund' as const }
-      }
-      if (payment.status !== 'failed') return { ...seen, verdict: 'undecided-push-nothing' as const }
-
-      // A payer-side "failed" is not enough ON ITS OWN, and this is the case
-      // that parks in `stuck` — so it is the case an operator most often reads
-      // this action for. `refundProvenSelfPayment` withholds the refund when our
-      // OWN node holds an armed or settled htlc for this invoice, because the
-      // payee side may still collect. Answering `not-paid-refund-is-safe` here
-      // would steer the operator into exactly the double payout that withhold
-      // exists to prevent, so run the same probe and mirror its rule.
-      const probeOwnInvoice = ln.getOwnInvoiceState
-      let own = null
-      // Reported verbatim, because "we could not check" is a different fact
-      // from "we checked and it is not ours", and only one of them means the
-      // operator should go and look at the node themselves.
-      let probe: string
-      if (probeOwnInvoice === undefined) probe = 'probe-unavailable'
-      else {
-        try {
-          own = (await probeOwnInvoice.call(ln, row.paymentHash)) ?? null
-          probe = own === null ? 'not-ours' : own.status
-        } catch {
-          // Same as the orchestrator: a probe that could not run teaches nothing
-          // about the payee side, so the terminal-failure rule stands alone.
-          probe = 'probe-failed'
-        }
-      }
-      if (own !== null && own.status !== 'pending' && own.status !== 'cancelled') {
-        return { ...seen, ownInvoice: probe, verdict: 'self-payment-do-not-refund' as const }
-      }
-      return { ...seen, ownInvoice: probe, verdict: 'not-paid-refund-is-safe' as const }
+      // rather than a null check inside the verdict.
+      requireLn(services.ln)
+      // Shared with the float pass's reconciler, which makes the same money
+      // decision; the response shape is unchanged. @see ops/paymentVerdict.ts
+      return paymentVerdict(services, await services.store.get(id))
     },
   },
 

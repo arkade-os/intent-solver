@@ -67,6 +67,16 @@ export type { CovenantScriptRow }
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 export type { ArkadeOps }
 
+import {
+  refundSweptLockupFor,
+  sweptOpsFrom,
+  type SweptLockupRefund,
+  type SweptRefundDecision,
+} from '@arkade-os/solver-arkade/arkade/sweptLockupRefund.js'
+
+/** Each has a legal edge to `refused`. `claiming` must stay absent: it holds a revealed preimage, so a refund there pays twice. */
+export const RECONCILABLE_SWEPT_STATES: readonly SendSwapState[] = ['paying', 'paid', 'stuck']
+
 const SEND_FEE_ESTIMATE_TIMEOUT_MS = 5_000
 
 const DEADLINE_SECONDS_PURPOSE = 'size the remaining claim window'
@@ -881,6 +891,31 @@ export class SendSwapService {
     const txid = await arkade.refund(row, outputs)
     await store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
     return true
+  }
+
+  /**
+   * Deliberately NOT reachable from {@link refundSweep}: a batch round there
+   * would stall the hot tick driving in-flight Lightning payments, once a
+   * minute, for as long as it kept failing. `decide` is the caller's because
+   * the evidence lives on the Lightning rail.
+   */
+  async refundSweptLockup(
+    pkScript: string,
+    decide?: (row: SendSwapRow) => Promise<SweptRefundDecision>,
+  ): Promise<SweptLockupRefund> {
+    const { store, arkade } = this.deps
+    const ops = sweptOpsFrom<SendSwapRow>(arkade, (row) => row)
+    if (!ops) return null
+    return refundSweptLockupFor(pkScript, {
+      ...ops,
+      find: (script) => store.findByPkScript(script),
+      record: (row, fields) => store.patch(row.id, { ...fields }),
+      ...(decide ? { decide } : {}),
+      close: async (row, reason) => {
+        await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
+      },
+      closableStates: RECONCILABLE_SWEPT_STATES,
+    })
   }
 
   /** @returns true when the swap moved to a new state and the next step should run. */
