@@ -47,8 +47,10 @@ import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/co
 import { RFQ_PAIR_ONCHAIN_RECEIVE } from '../wire/onchainReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { LockupPreimageReader } from './lockupPreimage.js'
+import { applyUnrolledRefundStep } from './unrolledRefundStep.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
+import { parseUnrolledRefund } from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
@@ -1072,6 +1074,22 @@ export class OnchainReceiveSwapService {
     const preimage = await this.preimages.find(row, outpoints)
     if (preimage) {
       return store.transition(row.id, 'refunding_arkade', 'claimed', { preimage: hex.encode(preimage) })
+    }
+
+    // Ahead of `findLockups`, which reads an unrolled lockup as empty. An adopted
+    // row records no fund txid, and stays on the empty-lockup path below.
+    const unrolled = outpoints.find((o) => o.unrolled && o.txid === row.arkadeFundTxid)
+    if (unrolled && arkade.refundUnrolled) {
+      const covenantRow = receiveCovenantRowFor(row)
+      const step = await arkade.refundUnrolled(covenantRow, unrolled, parseUnrolledRefund(row.unrolledRefund))
+      return applyUnrolledRefundStep(
+        store,
+        row,
+        { from: 'refunding_arkade', to: 'refunded' },
+        step,
+        this.now() < row.htlcLocktime,
+        () => unilateralExitRecourse(covenantRow, { solverPubkey: arkade.providerPubkey }),
+      )
     }
 
     const outputs = await arkade.findLockups(row.pkScript)

@@ -12,6 +12,7 @@
 import type { UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
 import type { FundedOutput, LockupSpendEvidence } from './wallet.js'
 import type { CovenantScriptRow } from './covenantRow.js'
+import type { UnrolledRefundRecord, UnrolledRefundStep } from './unrolledRefund.js'
 
 /** The Arkade operations the send-side orchestrators need, shaped for injection. */
 export interface ArkadeOps {
@@ -100,4 +101,10 @@ export interface ReceiveArkadeOps {
     outpoints: readonly { txid: string; vout: number }[],
     paymentHashHex: string,
   ): Promise<Uint8Array | null>
+  /** One step of the co-signed L1 refund of a lockup the client unrolled. Absent: it waits for the operator. */
+  refundUnrolled?(
+    row: CovenantScriptRow,
+    lockup: { txid: string; vout: number },
+    record: UnrolledRefundRecord | null,
+  ): Promise<UnrolledRefundStep>
 }

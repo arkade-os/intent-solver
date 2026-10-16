@@ -262,7 +262,12 @@ CONSTANTS
     FundGateOneShot,       \* MUTATION: the funding gate is re-evaluated after funding
     AtomicAdmission,       \* MUTATION: quote() is one conditional INSERT
     SettleIsIdempotent,    \* settleHold on an already-settled hold is a no-op, not a throw
-    ServerMayCensor        \* let the Arkade server stop co-signing (see (A4))
+    ServerMayCensor,       \* let the Arkade server stop co-signing (see (A4))
+    ClientMayUnroll,       \* let the client land the lockup on Bitcoin with the server UP
+    ClientClaimDelay,      \* the CSV on the client's solo claim leaf, from the unroll's
+                           \* confirmation; shorter than UnilateralDelay by design
+    ServerCosignsOnchain,  \* MUTATION: arkd's CosignOnchainTx co-signs the L1 refund
+    MtpLag                 \* ticks median-time-past trails the clock, for an L1 CLTV
 
 (***************************************************************************)
 (* THE CONSTANT ORDERING IS THE WHOLE CONTENT OF THE TIMING GUARDS.        *)
@@ -293,6 +298,8 @@ ASSUME \E e \in EChoices : RefundLocktime + SettleSafetyMargin > e    \* gate (c
 \* is kept so the relation to (A3) stays visible: the grace must exceed the
 \* indexer skew, and (A3) is the formal statement that it does.
 ASSUME EmptyLockupGrace = 1
+\* SOLO_REFUND_HEADROOM: the trader's solo claim opens before the solver's solo refund.
+ASSUME ClientClaimDelay < UnilateralDelay
 
 VARIABLES
     funds,          \* [Swaps -> 0..2] amount-sized outputs the SOLVER paid into the
@@ -308,14 +315,17 @@ VARIABLES
     aged,            \* [Swaps -> BOOLEAN] a tick has passed while the row sat in
                     \* `refunding` (EMPTY_LOCKUP_GRACE) or sat in `armed` with the
                     \* solver's float already out (the recovery-sweep interval, (A2)).
-    fundedAt         \* [Swaps -> 0..MaxClock] the +1-shifted clock tick at which the
+    fundedAt,        \* [Swaps -> 0..MaxClock] the +1-shifted clock tick at which the
                     \* armed->funded CAS landed; 0 = not yet funded.  The solo
                     \* leaves' CSVs run from FUNDING CONFIRMATION and the +1 is the
                     \* confirm tick.  Gate (d) and SoloMatured both read it.
+    unrolledAt      \* [Swaps -> 0..MaxClock+1] the +1-shifted confirm tick of a
+                    \* client-initiated unroll; 0 = the lockup is still in Arkade.
+                    \* Both solo leaves' CSVs restart from it.
 
-LrVars == << funds, htlcE, settled, claimReadable, aged, fundedAt >>
+LrVars == << funds, htlcE, settled, claimReadable, aged, fundedAt, unrolledAt >>
 vars   == << clock, st, loc, conf, serverUp,
-             funds, htlcE, settled, claimReadable, aged, fundedAt >>
+             funds, htlcE, settled, claimReadable, aged, fundedAt, unrolledAt >>
 
 (***************************************************************************)
 (* SwapCore constants supplied by cfg definition override.                 *)
@@ -381,6 +391,20 @@ ClientTookLockup(s) == SpentBy(s, "clientClaim")
 \* this is a one-way door with no action of ours behind it.
 HtlcExpired(s) == htlcE[s] # 0 /\ clock >= htlcE[s]
 HtlcLost(s)    == HtlcExpired(s) /\ ~settled[s]
+
+\* The lockup left Arkade: no OFFCHAIN co-signed spend reaches it any more.
+Unrolled(s) == unrolledAt[s] # 0
+
+\* arkd's CosignOnchainTx window for the refundWithoutReceiver leaf on L1: the CLTV
+\* matures against median-time-past, and arkd refuses once the client's exit closure
+\* (the earliest CSV) is about to open.
+CosignWindow(s) ==
+    /\ ServerCosignsOnchain
+    /\ serverUp
+    /\ Unrolled(s)
+    /\ ~Spent(s)
+    /\ clock >= RefundLocktime + MtpLag
+    /\ clock < unrolledAt[s] + ClientClaimDelay
 
 --------------------------------------------------------------------------
 (***************************************************************************)
@@ -448,7 +472,10 @@ FundGateOpen(s) ==
 \* i.e. from confirmation, exactly like the shipped constant; the gate above
 \* evaluates at the fund tick, which is the same instant the shipped gate
 \* runs ("MUST be called immediately before funding").
-SoloMatured(s) == fundedAt[s] # 0 /\ clock >= fundedAt[s] + UnilateralDelay
+\* A client unroll restarts the CSV at ITS confirmation, a moment the client picks.
+SoloMatured(s) ==
+    IF Unrolled(s) THEN clock >= unrolledAt[s] + UnilateralDelay
+                   ELSE fundedAt[s] # 0 /\ clock >= fundedAt[s] + UnilateralDelay
 
 \* THE GATE'S SCOPE.  With FundGateOneShot the gate is asked once, at the
 \* decision to fund, and everything after the fund call is unconditional —
@@ -468,8 +495,9 @@ IndexerShowsFunded(s) == funds[s] > 0 /\ ~Spent(s)
 \* to the payment hash (arkade/wallet.ts findClaimPreimage).  Trails findLockups; see (A3).
 ClaimReadable(s) == SpentBy(s, "clientClaim") /\ claimReadable[s]
 
-\* EMPTY_LOCKUP_GRACE.  Realised as one tick; see the ASSUME above.
-GraceElapsed(s) == BreakEmptyGrace \/ aged[s]      \* <<< MUTATION POINT
+\* EMPTY_LOCKUP_GRACE, realised as one tick (see the ASSUME above), and since
+\* #240 E: before it the late-claim recheck can still recover the swap.
+GraceElapsed(s) == BreakEmptyGrace \/ (aged[s] /\ clock >= htlcE[s])   \* <<< MUTATION POINT
 
 --------------------------------------------------------------------------
 (***************************************************************************)
@@ -488,7 +516,7 @@ ArmHtlc(s, e) ==
     /\ e \in EChoices
     /\ htlcE' = [htlcE EXCEPT ![s] = e]
     /\ UNCHANGED << clock, st, loc, conf, serverUp >>
-    /\ UNCHANGED << funds, settled, claimReadable, aged, fundedAt >>
+    /\ UNCHANGED << funds, settled, claimReadable, aged, fundedAt, unrolledAt >>
 
 \* THE ADVERSARIAL SPEND.  Either the client's own `claim` leaf (P + receiver +
 \* server) or covclaimd's `nonInteractiveClaim` leaf (server + emulator, pinned
@@ -503,6 +531,7 @@ ArmHtlc(s, e) ==
 ClientClaims(s) ==
     /\ funds[s] > 0
     /\ serverUp
+    /\ ~Unrolled(s)
     /\ SpendAccepted(s, "clientClaim")
     /\ UNCHANGED << clock, st, loc, serverUp >>
     /\ UNCHANGED LrVars
@@ -525,12 +554,42 @@ ClientClaims(s) ==
 \* LightningReceive_Censored.cfg, whose "safety is untouched" narrative
 \* predates this action and no longer holds.
 ClientUnilateralClaim(s) ==
-    /\ ~serverUp
+    /\ \/ ~serverUp
+       \/ Unrolled(s) /\ clock >= unrolledAt[s] + ClientClaimDelay
     /\ funds[s] > 0
     /\ HtlcExpired(s)
     /\ SpendAccepted(s, "clientClaim")
     /\ UNCHANGED << clock, st, loc, serverUp >>
     /\ UNCHANGED LrVars
+
+\* The client's `claim` leaf on L1 through CosignOnchainTx.  No timelock, so it is
+\* open from the unroll until arkd co-signs any spend of the outpoint (Spent) or
+\* the client's own CSV is about to open.
+ClientCosignedClaim(s) ==
+    /\ ServerCosignsOnchain
+    /\ serverUp
+    /\ Unrolled(s)
+    /\ clock < unrolledAt[s] + ClientClaimDelay
+    /\ funds[s] > 0
+    /\ SpendAccepted(s, "clientClaim")
+    /\ UNCHANGED << clock, st, loc, serverUp >>
+    /\ UNCHANGED LrVars
+
+\* THE LATE UNROLL, with the server UP.  The client publishes the lockup's
+\* ancestry and lands it on Bitcoin at a tick of its choosing, any time the
+\* vtxo is still unspent.  Unfair: the environment owes us nothing.  From the
+\* confirmation on, both solo leaves count their CSVs afresh (SoloMatured),
+\* the client's ClientClaimDelay before the solver's UnilateralDelay, and gate
+\* (d) — priced from the FUNDING tick — no longer bounds when ours opens.
+ClientUnrolls(s) ==
+    /\ ClientMayUnroll
+    /\ serverUp
+    /\ funds[s] > 0
+    /\ ~Spent(s)
+    /\ ~Unrolled(s)
+    /\ unrolledAt' = [unrolledAt EXCEPT ![s] = clock + 1]
+    /\ UNCHANGED << clock, st, loc, conf, serverUp >>
+    /\ UNCHANGED << funds, htlcE, settled, claimReadable, aged, fundedAt >>
 
 \* The spending virtual transaction becomes fetchable, so findClaimPreimage can
 \* finally recover P.  This is the SECOND of the two Arkade reads and it always
@@ -540,7 +599,7 @@ IndexerCatchUp(s) ==
     /\ ~claimReadable[s]
     /\ claimReadable' = [claimReadable EXCEPT ![s] = TRUE]
     /\ UNCHANGED << clock, st, loc, conf, serverUp >>
-    /\ UNCHANGED << funds, htlcE, settled, aged, fundedAt >>
+    /\ UNCHANGED << funds, htlcE, settled, aged, fundedAt, unrolledAt >>
 
 Censor == ServerMayCensor /\ CensorCore /\ UNCHANGED LrVars
 
@@ -563,7 +622,8 @@ Urgent(s) ==
     \* exists — server censoring, solo leaf not open yet — no recovery action
     \* is available at all, so real time passes: Tick must run, or the both-sides
     \* window this gate family exists for could never be reached.
-    \/ (st[s] = "funded" /\ clock >= RefundLocktime /\ (serverUp \/ SoloMatured(s)))
+    \/ (st[s] = "funded" /\ clock >= RefundLocktime /\ ((serverUp /\ ~Unrolled(s)) \/ SoloMatured(s)))
+    \/ (st[s] = "funded" /\ Unrolled(s) /\ ~Spent(s) /\ SoloMatured(s))
     \/ (st[s] = "claimed" /\ ~settled[s])                   \* settle before E
     \* Same for the solo exit from a `refunding` row: with the Arkade server
     \* down a matured solo leaf is work the solver could finish RIGHT NOW, and
@@ -573,7 +633,8 @@ Urgent(s) ==
     \* default (the RecourseControl counterexample).
     \/ (st[s] = "refunding" /\ ~Spent(s) /\ SoloMatured(s))
     \/ (st[s] = "refunding" /\ ClaimReadable(s))            \* the late-claim recovery
-    \/ (st[s] = "refunding" /\ ~Spent(s) /\ serverUp)       \* push the refund
+    \/ (st[s] = "refunding" /\ ~Spent(s) /\ serverUp /\ ~Unrolled(s))  \* push the refund
+    \/ (st[s] \in { "funded", "refunding" } /\ CosignWindow(s))         \* push it on L1
 
 SolverBehind == \E s \in Swaps : Urgent(s)
 
@@ -583,7 +644,7 @@ Tick ==
     /\ ~LagOutstanding
     /\ aged' = [s \in Swaps |-> \/ st[s] = "refunding"
                                 \/ (st[s] = "armed" /\ funds[s] > 0)]
-    /\ UNCHANGED << funds, htlcE, settled, claimReadable, fundedAt >>
+    /\ UNCHANGED << funds, htlcE, settled, claimReadable, fundedAt, unrolledAt >>
 
 --------------------------------------------------------------------------
 (***************************************************************************)
@@ -663,7 +724,7 @@ SeeArmed(w, s) ==
               /\ UNCHANGED aged
     /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp >>
-    /\ UNCHANGED << funds, htlcE, settled, claimReadable, fundedAt >>
+    /\ UNCHANGED << funds, htlcE, settled, claimReadable, fundedAt, unrolledAt >>
 
 \* Nothing ever armed and the hold invoice has lapsed.  store.fail routes to
 \* `refused` because `quoted` is not in EXPOSED.  No capital was ever out.
@@ -731,7 +792,7 @@ FundLockup(w, s) ==
                ELSE UNCHANGED fundedAt
     /\ Advance(w, "fundSent", "none")
     /\ UNCHANGED << clock, st, conf, serverUp >>
-    /\ UNCHANGED << htlcE, settled, claimReadable, aged >>
+    /\ UNCHANGED << htlcE, settled, claimReadable, aged, unrolledAt >>
 \* The crash-recovery adoption branch: an exact-value output is already at the
 \* script, so fund() is skipped entirely (whenArmed).  This is
 \* what makes a crash between the send and the CAS free — but only while the
@@ -759,7 +820,7 @@ RecordFund(w, s) ==
        \/ CasLost(s, "armed")
     /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp >>
-    /\ UNCHANGED << funds, htlcE, settled, claimReadable, aged, fundedAt >>
+    /\ UNCHANGED << funds, htlcE, settled, claimReadable, aged, fundedAt, unrolledAt >>
 
 (***** whenFunded **********************************************************)
 
@@ -778,7 +839,7 @@ FundedToRefunding(w, s) ==
               /\ UNCHANGED aged
     /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp >>
-    /\ UNCHANGED << funds, htlcE, settled, claimReadable, fundedAt >>
+    /\ UNCHANGED << funds, htlcE, settled, claimReadable, fundedAt, unrolledAt >>
 
 \* whenFunded.  Someone spent the lockup and findClaimPreimage
 \* recovered a HASH-VERIFIED P.  This service does not care WHO — the client,
@@ -810,7 +871,7 @@ FundedEmptyToRefunding(w, s) ==
               /\ UNCHANGED aged
     /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp >>
-    /\ UNCHANGED << funds, htlcE, settled, claimReadable, fundedAt >>
+    /\ UNCHANGED << funds, htlcE, settled, claimReadable, fundedAt, unrolledAt >>
 
 \* THE SOLVER'S SOLO REFUND LEAF.  The covenant's unilateral exit
 \* (client=solver alone, no Arkade server) — the recourse gate (d) prices,
@@ -829,13 +890,13 @@ FundedEmptyToRefunding(w, s) ==
 \* fair and the trader's claim is not.
 FundedSoloRefund(w, s) ==
     /\ Saw(w, s, "funded")
-    /\ ~serverUp
+    /\ ~serverUp \/ Unrolled(s)
     /\ SoloMatured(s)
     /\ ~Spent(s)
     /\ SpendAccepted(s, "solverRefund")
     /\ Advance(w, "refundSent", "none")
     /\ UNCHANGED << clock, st, serverUp >>
-    /\ UNCHANGED << funds, htlcE, settled, claimReadable, aged, fundedAt >>
+    /\ UNCHANGED << funds, htlcE, settled, claimReadable, aged, fundedAt, unrolledAt >>
 
 \* The solo refund's record step, split from the act by the ActStep/RecordStep
 \* discipline: a crash between them must not be able to re-pay or lose the
@@ -857,7 +918,7 @@ FundedSoloRecord(w, s) ==
     /\ CasWon(s, "funded", "refunded")
     /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp >>
-    /\ UNCHANGED << funds, htlcE, settled, claimReadable, aged, fundedAt >>
+    /\ UNCHANGED << funds, htlcE, settled, claimReadable, aged, fundedAt, unrolledAt >>
 
 \* The same solo exit from a `refunding` row.  The row state is bookkeeping:
 \* the covenant leaf the solver can spend alone is the same vtxo from either
@@ -867,13 +928,23 @@ FundedSoloRecord(w, s) ==
 \* refunded IS a shipped edge, so no edge-table addition is needed here.
 RefundingSoloRefund(w, s) ==
     /\ Saw(w, s, "refunding")
-    /\ ~serverUp
+    /\ ~serverUp \/ Unrolled(s)
     /\ SoloMatured(s)
     /\ ~Spent(s)
     /\ SpendAccepted(s, "solverRefund")
     /\ Advance(w, "refundSent", "none")
     /\ UNCHANGED << clock, st, serverUp >>
-    /\ UNCHANGED << funds, htlcE, settled, claimReadable, aged, fundedAt >>
+    /\ UNCHANGED << funds, htlcE, settled, claimReadable, aged, fundedAt, unrolledAt >>
+
+\* The co-signed refundWithoutReceiver, pushed on L1 against an unrolled lockup.
+\* No CSV, so a late unroll cannot push it past E the way it pushes the solo leaf.
+RefundingCosignedRefund(w, s) ==
+    /\ Saw(w, s, "refunding")
+    /\ CosignWindow(s)
+    /\ SpendAccepted(s, "solverRefund")
+    /\ Advance(w, "refundSent", "none")
+    /\ UNCHANGED << clock, st, serverUp >>
+    /\ UNCHANGED LrVars
 
 (***** whenClaimed *********************************************************)
 
@@ -887,7 +958,7 @@ SettleHold(w, s) ==
     /\ settled' = [settled EXCEPT ![s] = TRUE]
     /\ Advance(w, "settleSent", "none")
     /\ UNCHANGED << clock, st, conf, serverUp >>
-    /\ UNCHANGED << funds, htlcE, claimReadable, aged, fundedAt >>
+    /\ UNCHANGED << funds, htlcE, claimReadable, aged, fundedAt, unrolledAt >>
 
 \* The crash-recovery retry.  There is no `settled_at` data fact analogous to
 \* `revealed_at`, so a resumed process CANNOT tell "settle not yet attempted"
@@ -962,6 +1033,7 @@ RefundAccepted(w, s) ==
     /\ ~ClaimReadable(s)
     /\ ~Spent(s)                            \* findLockups returned outputs
     /\ serverUp
+    /\ ~Unrolled(s)
     /\ clock >= RefundLocktime              \* the absolute CLTV has matured; see (A5)
     /\ SpendAccepted(s, "solverRefund")
     /\ Advance(w, "refundSent", "none")
@@ -1043,6 +1115,7 @@ ActStep(w, s) ==
     \/ RefundAccepted(w, s)
     \/ FundedSoloRefund(w, s)
     \/ RefundingSoloRefund(w, s)
+    \/ RefundingCosignedRefund(w, s)
 
 \* The compare-and-swaps that record an outcome the world already has.
 RecordStep(w, s) ==
@@ -1060,6 +1133,8 @@ Next ==
           \/ \E e \in EChoices : ArmHtlc(s, e)
           \/ ClientClaims(s)
           \/ ClientUnilateralClaim(s)
+          \/ ClientCosignedClaim(s)
+          \/ ClientUnrolls(s)
           \/ IndexerCatchUp(s)
     \/ Censor
     \/ Tick
@@ -1072,6 +1147,7 @@ Init ==
     /\ claimReadable = [s \in Swaps |-> FALSE]
     /\ aged          = [s \in Swaps |-> FALSE]
     /\ fundedAt      = [s \in Swaps |-> 0]
+    /\ unrolledAt    = [s \in Swaps |-> 0]
 
 (***************************************************************************)
 (* FAIRNESS.  Strong fairness per (swap, action group): a worker that      *)
@@ -1113,6 +1189,7 @@ TypeOK ==
     /\ claimReadable \in [Swaps -> BOOLEAN]
     /\ aged          \in [Swaps -> BOOLEAN]
     /\ fundedAt      \in [Swaps -> 0..(MaxClock+1)]
+    /\ unrolledAt    \in [Swaps -> 0..(MaxClock+1)]
 
 \* Every state change is an edge of LEGAL_EDGES.  An ACTION property.
 ForwardOnly == [][ ForwardOnlyStep(Edges) ]_vars
@@ -1186,19 +1263,21 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (* MUTATION CHECKS — RESULTS                                               *)
 (*                                                                         *)
 (* A spec that passes because it is too weak to fail is worse than none.   *)
-(* Seven behaviours were broken one at a time, each by a single constant,  *)
-(* each with its own .cfg.  All seven produce a counterexample.            *)
+(* Eight behaviours were broken one at a time, each by a single constant,  *)
+(* each with its own .cfg.  All eight produce a counterexample.  Counts    *)
+(* re-run 2026-10-16 with the unroll actions in; a violation's count       *)
+(* moves with worker scheduling.                                           *)
 (*                                                                         *)
 (*   LightningReceive_Broken.cfg      BreakSettleMargin = TRUE             *)
 (*                                    -> RecourseBeforeDeadline violated,  *)
-(*                                       13,700 gen / 3,557 distinct       *)
+(*                                       13,350 gen / 3,514 distinct       *)
 (*   LightningReceive_BrokenLoss.cfg  same mutation, money invariant only  *)
 (*                                    -> NoNetLoss violated,               *)
-(*                                       22,816 gen / 5,752 distinct       *)
+(*                                       27,348 gen / 6,991 distinct       *)
 (*   LightningReceive_RecourseMargin.cfg                                   *)
 (*                                    BreakRecourseMargin = TRUE           *)
 (*                                    -> NoNetLoss violated,               *)
-(*                                       277,839 gen / 58,370 distinct at  *)
+(*                                       313,309 gen / 66,227 distinct at  *)
 (*                                       the violation.  The shape:        *)
 (*                                       fund an E=4 HTLC late in the      *)
 (*                                       window, censor, and the trader's  *)
@@ -1207,16 +1286,23 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*                                       at fundedAt + UnilateralDelay.    *)
 (*   LightningReceive_DoubleFund.cfg  ArkadeHonoursFundKey = FALSE         *)
 (*                                    -> NoDoubleFund violated,            *)
-(*                                       3,396 gen / 917 distinct          *)
+(*                                       3,742 gen / 994 distinct          *)
 (*   LightningReceive_Stranded.cfg    FundGateOneShot = FALSE              *)
 (*                                    -> NoSilentLoss violated,            *)
-(*                                       22,114 gen / 5,445 distinct       *)
-(*   LightningReceive_Grace.cfg       BreakEmptyGrace = TRUE               *)
+(*                                       21,854 gen / 5,420 distinct       *)
+(*   LightningReceive_Grace.cfg       BreakEmptyGrace = TRUE, which since  *)
+(*                                    #240 also drops the wait for E       *)
 (*                                    -> NoNetLoss violated,               *)
-(*                                       228,850 gen / 46,865 distinct     *)
+(*                                       236,289 gen / 48,201 distinct     *)
 (*   LightningReceive_Overexposed.cfg AtomicAdmission = FALSE, MaxExposed 1*)
 (*                                    -> ExposureBounded violated,         *)
-(*                                       453 gen / 163 distinct            *)
+(*                                       327 gen / 129 distinct            *)
+(*   LightningReceive_LateUnroll.cfg  ServerCosignsOnchain = FALSE         *)
+(*                                    -> NoNetLoss violated,               *)
+(*                                       305,413 gen / 63,986 distinct at  *)
+(*                                       the violation: the client unrolls *)
+(*                                       at clock 2, its claim opens before*)
+(*                                       our solo leaf, and it claims at E.*)
 (*                                                                         *)
 (* plus two CONTROLs, which prove the fixes sufficient rather than merely  *)
 (* plausible:                                                              *)
@@ -1230,7 +1316,7 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*   LightningReceive_RecourseControl.cfg                                  *)
 (*                                    same constants as RecourseMargin,    *)
 (*                                    gate (d) intact                      *)
-(*                                    -> GREEN, 3,844,911 gen / 620,261    *)
+(*                                    -> GREEN, 3,660,239 gen / 586,065    *)
 (*                                       distinct, 7s.  Without it the     *)
 (*                                       mutation's counterexample could   *)
 (*                                       just mean the solo leaves were    *)

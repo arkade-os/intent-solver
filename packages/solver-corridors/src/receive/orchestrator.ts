@@ -48,11 +48,13 @@ import { RFQ_PAIR_RECEIVE } from '../wire/lightningReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
+import { parseUnrolledRefund } from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { claimPacketStamp } from './claimPacket.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
 import { LockupPreimageReader } from './lockupPreimage.js'
+import { applyUnrolledRefundStep } from './unrolledRefundStep.js'
 import type { OnchainBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { FundNotSubmittedError } from './fundLockup.js'
 import type { CovclaimdClient } from './covclaimd.js'
@@ -1234,6 +1236,24 @@ export class ReceiveSwapService {
     const late = await this.preimages.find(row, searchable)
     if (late) {
       return store.transition(row.id, 'refunding', 'claimed', { preimage: hex.encode(late) })
+    }
+
+    // Ahead of `findLockups`, which reads an unrolled lockup as empty, and of any
+    // offchain refund of a sibling output, which would record `refunded` over it.
+    const unrolled = historical.find(
+      (o) => o.unrolled && o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout,
+    )
+    if (unrolled && arkade.refundUnrolled) {
+      const covenantRow = receiveCovenantRowFor(row)
+      const step = await arkade.refundUnrolled(covenantRow, unrolled, parseUnrolledRefund(row.unrolledRefund))
+      return applyUnrolledRefundStep(
+        store,
+        row,
+        { from: 'refunding', to: 'refunded' },
+        step,
+        row.htlcExpiresAt !== null && this.now() < row.htlcExpiresAt,
+        () => unilateralExitRecourse(covenantRow, { solverPubkey: arkade.solverPubkey }),
+      )
     }
 
     const outputs = await arkade.findLockups(row.pkScript)
