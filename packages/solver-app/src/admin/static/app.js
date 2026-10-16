@@ -15,6 +15,10 @@
  * finished-looking row for a swap that is still at risk.
  */
 
+import { barsChart, categoryChart, cumulativeChart, decayChart } from './charts.js'
+import { applyPricing } from './pricingSave.js'
+import { PricingDraft } from './pricingDraft.js'
+
 /* ---- tiny element helper ------------------------------------------------ */
 
 /** h('td.num', 'text') | h('div', {onclick}, child, child) */
@@ -46,6 +50,11 @@ const h = (spec, ...rest) => {
 
 const clear = (node) => {
   while (node.firstChild) node.removeChild(node.firstChild)
+}
+
+const refill = (node, ...children) => {
+  clear(node)
+  node.appendChild(h('span', ...children))
 }
 
 /* ---- api ---------------------------------------------------------------- */
@@ -131,7 +140,7 @@ const assetLabel = (asset) =>
   h(
     'span',
     asset.ticker ? h('span', asset.ticker, ' ') : null,
-    h('span.faint', { title: asset.assetId }, asset.shortId),
+    h('span.faint', { title: asset.name ? `${asset.name} — ${asset.assetId}` : asset.assetId }, asset.shortId),
   )
 
 /**
@@ -269,9 +278,17 @@ const readVerdict = (swapId) => {
 const state = {
   view: 'overview',
   overview: null,
+  overviewError: null,
   banner: null,
   data: {},
+  activityErrors: {},
   filters: { corridor: '', phase: '', q: '' },
+  /**
+   * The P&L view's own controls. Bucket empty means "let the server choose from
+   * the window"; `focus` is the toolbar control to restore after a reload
+   * rebuilds the tree.
+   */
+  pnl: { window: '7d', bucket: '', focus: null },
   detail: null,
   dialog: null,
   /** The action currently in flight, or null. See `runAction`. */
@@ -282,15 +299,13 @@ const state = {
 
 const VIEWS = [
   ['overview', 'overview'],
-  ['swaps', 'swaps'],
-  ['offers', 'offers'],
-  ['quotes', 'quotes'],
+  ['pnl', 'p&l'],
+  ['activity', 'activity'],
   ['wallet', 'wallet'],
   ['backends', 'backends'],
   ['diagnostics', 'diagnostics'],
   ['discovery', 'discovery'],
-  ['settings', 'settings'],
-  ['markets', 'markets'],
+  ['pricing', 'pricing'],
   ['audit', 'audit'],
 ]
 
@@ -302,6 +317,8 @@ const fail = (error) => {
 /* ---- status bar --------------------------------------------------------- */
 
 const statusBar = () => {
+  if (state.overviewError)
+    return h('div.status', h('span.phase.phase-failed', 'status unavailable'), h('span.muted', state.overviewError))
   const o = state.overview
   if (!o) return h('div.status', h('span.muted', 'connecting…'))
   const exposed = o.exposure.exposedCount
@@ -477,28 +494,29 @@ const marketState = (market) =>
     ? h('span.muted', 'disabled')
     : market.active
       ? h('span.muted', 'trading')
-      : h('span.phase.phase-exposed', 'pending restart')
+      : h('span.phase.phase-exposed', 'not quoting')
 
 const marketCard = (market) =>
   h(
     'section.panel',
-    h('h2', `market ${legLabel(market.base)} / ${legLabel(market.quote)}`),
+    h('h2', 'market ', legNode(market.base), ' / ', legNode(market.quote)),
     h(
       'dl.kv',
       h('dt', 'served by'),
       h(
         'dd',
-        market.servedBy.length === 0
+        market.serving.length === 0
           ? h(
               'span.phase.phase-failed',
               {
                 title:
-                  'No path fills this market. OFFER_MARKETS drives the offer path and ASSET_MARKETS the RFQ ' +
-                  'corridors; neither names this pair. Both are on the settings page.',
+                  'No path fills this market. RFQ follows an enabled row with serves_rfq, a symbol and a bound; ' +
+                  'the offer path needs serves_offer and a restart.',
               },
               'nothing',
             )
-          : h('span.muted', market.servedBy.join(' + ')),
+          : h('span.muted', market.serving.join(' + ')),
+        ...(market.gaps ?? []).map((gap) => h('span.phase.phase-failed', { title: gap.detail }, gap.kind)),
       ),
       h('dt', 'state'),
       h('dd', marketState(market)),
@@ -507,7 +525,14 @@ const marketCard = (market) =>
       h('dt', 'buy base'),
       h('dd', marketBounds(market.buyBase, market.baseDecimals)),
       h('dt', 'fee'),
-      h('dd', `${market.feeBps} bps, ${market.toleranceBps} bps band`),
+      h(
+        'dd',
+        `${market.feeBps} bps; flat ${market.sellBaseFeeFlat} `,
+        legName(market.base),
+        ` atomic units when selling base, ${market.buyBaseFeeFlat} `,
+        legName(market.quote),
+        ` atomic units when buying base; ${market.toleranceBps} bps band`,
+      ),
     ),
   )
 
@@ -518,9 +543,37 @@ const marketsPanel = (o) => {
   return markets.length === 0 ? null : h('div.panels', ...markets.map(marketCard))
 }
 
+const overviewBalancesPanel = () => {
+  const balances = state.data.overviewBalances ?? state.overview?.balances
+  return h(
+    'section.panel',
+    { id: 'overview-balances' },
+    h('h2', 'balances'),
+    balances
+      ? h(
+          'dl.kv',
+          h('dt', 'lightning'),
+          h('dd', balances.lightningError ? h('span.muted', balances.lightningError) : sats(balances.lightningSats)),
+          h('dt', 'arkade'),
+          h('dd', balances.arkadeError ? h('span.muted', balances.arkadeError) : balanceRows(balances.arkade)),
+          ...(balances.arkadeError ? [] : assetRowsPair(balances.arkade)),
+          h('dt', 'pubkey'),
+          h('dd.faint', shortId(state.overview?.providerPubkey)),
+        )
+      : h('p.muted', state.data.overviewBalanceError ?? 'loading balances…'),
+  )
+}
+
+const paintOverviewBalances = () => {
+  document.getElementById('overview-balances')?.replaceWith(overviewBalancesPanel())
+}
+
 const overviewView = () => {
   const o = state.overview
-  if (!o) return h('p.muted', 'loading…')
+  if (!o)
+    return state.overviewError
+      ? h('p.banner', state.overviewError, ' ', h('button.act', { onclick: () => load('overview') }, 'retry'))
+      : h('p.muted', 'loading…')
   return h(
     'div',
     attentionPanel(o),
@@ -556,25 +609,7 @@ const overviewView = () => {
         ),
         h('p.muted', `${sats(o.exposure.committedSats)} of ${sats(o.exposure.capSats)} sat cap`),
       ),
-      h(
-        'section.panel',
-        h('h2', 'balances'),
-        h(
-          'dl.kv',
-          h('dt', 'lightning'),
-          h(
-            'dd',
-            o.balances.lightningError ? h('span.muted', o.balances.lightningError) : sats(o.balances.lightningSats),
-          ),
-          h('dt', 'arkade'),
-          h('dd', o.balances.arkadeError ? h('span.muted', o.balances.arkadeError) : balanceRows(o.balances.arkade)),
-          /* assets: begin */
-          ...(o.balances.arkadeError ? [] : assetRowsPair(o.balances.arkade)),
-          /* assets: end */
-          h('dt', 'pubkey'),
-          h('dd.faint', shortId(o.providerPubkey)),
-        ),
-      ),
+      overviewBalancesPanel(),
     ),
     marketsPanel(o),
   )
@@ -589,6 +624,7 @@ const swapsView = () => {
       h(
         'select',
         {
+          'aria-label': 'swap corridor',
           onchange: (e) => {
             state.filters.corridor = e.target.value
             load('swaps')
@@ -605,6 +641,7 @@ const swapsView = () => {
       h(
         'select',
         {
+          'aria-label': 'swap phase',
           onchange: (e) => {
             state.filters.phase = e.target.value
             load('swaps')
@@ -617,6 +654,7 @@ const swapsView = () => {
       ),
       h('input.search', {
         type: 'search',
+        'aria-label': 'find swaps',
         value: state.filters.q,
         placeholder: 'find: id, payment hash, invoice, address, txid, rfq id',
         title: `Substring match across every identifier the row carries. At least ${MIN_SEARCH} characters.`,
@@ -635,43 +673,47 @@ const swapsView = () => {
       h('span.spacer'),
       h('span.muted', `${rows.length} rows`),
     ),
-    rows.length === 0
-      ? h('p.muted', 'no swaps match')
-      : h(
-          'table',
-          h(
-            'thead',
-            h(
-              'tr',
-              h('th', 'phase'),
-              h('th', 'state'),
-              h('th', 'corridor'),
-              h('th', 'id'),
-              h('th.right', 'amount'),
-              h('th.right', 'payout'),
-              h('th', 'age'),
-              h('th', 'updated'),
-            ),
-          ),
-          h(
-            'tbody',
-            rows.map((row) =>
+    state.activityErrors.swaps
+      ? activityError('swaps')
+      : !state.data.swaps
+        ? h('p.muted', 'loading…')
+        : rows.length === 0
+          ? h('p.muted', 'no swaps match')
+          : h(
+              'table',
               h(
-                'tr.clickable',
-                { onclick: () => openDetail(row) },
-                // Phase first and state second, deliberately: see the module header.
-                h('td', phaseChip(row.phase)),
-                h('td', stateWord(row.state)),
-                h('td.muted', corridorLabel(row.corridor)),
-                h('td.faint', shortId(row.id)),
-                h('td.num', sats(row.amountSats)),
-                h('td.num.muted', sats(row.payoutSats)),
-                h('td.muted', ago(row.createdAt)),
-                h('td.muted', ago(row.updatedAt)),
+                'thead',
+                h(
+                  'tr',
+                  h('th', 'phase'),
+                  h('th', 'state'),
+                  h('th', 'corridor'),
+                  h('th', 'id'),
+                  h('th.right', 'amount'),
+                  h('th.right', 'payout'),
+                  h('th', 'age'),
+                  h('th', 'updated'),
+                ),
+              ),
+              h(
+                'tbody',
+                rows.map((row) =>
+                  h(
+                    'tr.clickable',
+                    { onclick: () => openDetail(row) },
+                    // Phase first and state second, deliberately: see the module header.
+                    h('td', phaseChip(row.phase)),
+                    h('td', stateWord(row.state)),
+                    h('td.muted', corridorLabel(row.corridor)),
+                    h('td.faint', shortId(row.id)),
+                    h('td.num', sats(row.amountSats)),
+                    h('td.num.muted', sats(row.payoutSats)),
+                    h('td.muted', ago(row.createdAt)),
+                    h('td.muted', ago(row.updatedAt)),
+                  ),
+                ),
               ),
             ),
-          ),
-        ),
   )
 }
 
@@ -784,7 +826,7 @@ const offersView = () => {
             ),
           ),
         ),
-    h('h2.sans', 'recent refusals'),
+    h('h2.sans', 'recent offer refusals'),
     h(
       'p.notice',
       `Offers this solver declined. Held in memory only and cleared on restart (keeps the last ${d.refusals.capacity}) — ` +
@@ -808,6 +850,66 @@ const offersView = () => {
             ),
           ),
         ),
+  )
+}
+
+const refusalsView = () => {
+  const d = state.data.refusals
+  if (!d) return h('p.muted', 'loading…')
+  return h(
+    'div',
+    h('h2.sans', 'request refusals'),
+    h('p.notice', `The latest ${d.capacity} RFQ refusals, newest first. Cleared when this solver restarts.`),
+    d.entries.length === 0
+      ? h('p.muted', 'no request refusals recorded since this process started')
+      : h(
+          'table.rfq-refusals',
+          h('thead', h('tr', h('th', 'time'), h('th', 'request'), h('th', 'reason and detail'))),
+          h(
+            'tbody',
+            d.entries.map((refusal) =>
+              h(
+                'tr',
+                h('td.muted', new Date(refusal.at * 1000).toISOString()),
+                h(
+                  'td',
+                  h('div', `${refusal.transport} / ${refusal.requestType}`),
+                  h('details', h('summary', shortId(refusal.rfqId)), h('code', refusal.rfqId ?? 'no valid request ID')),
+                ),
+                h('td', h('div', refusal.reason), h('p.muted', refusal.detail)),
+              ),
+            ),
+          ),
+        ),
+  )
+}
+
+const ACTIVITY_SECTIONS = ['swaps', 'quotes', 'offers', 'refusals']
+const activityError = (key) =>
+  h('p.banner', state.activityErrors[key], ' ', h('button.act', { onclick: () => load(key) }, 'retry'))
+
+const activityView = () => {
+  const bodies = { swaps: swapsView, quotes: quotesView, offers: offersView, refusals: refusalsView }
+  const labels = { swaps: 'swaps', quotes: 'open quotes', offers: 'offer fills', refusals: 'request refusals' }
+  return h(
+    'div.activity',
+    h(
+      'div.toolbar',
+      h('h1.sans', 'activity'),
+      ...ACTIVITY_SECTIONS.map((key) =>
+        h('button.act', { onclick: () => document.getElementById(`activity-${key}`)?.scrollIntoView() }, labels[key]),
+      ),
+      h('span.spacer'),
+      h('button.act', { onclick: () => load('activity') }, 'refresh activity'),
+    ),
+    ...ACTIVITY_SECTIONS.map((key) =>
+      h(
+        'section.activity-section',
+        { id: `activity-${key}`, 'aria-label': labels[key] },
+        key === 'swaps' || state.activityErrors[key] ? h('h2.sans', labels[key]) : null,
+        state.activityErrors[key] && key !== 'swaps' ? activityError(key) : h('div.activity-content', bodies[key]()),
+      ),
+    ),
   )
 }
 
@@ -1179,7 +1281,7 @@ const walletView = () => {
               actButton(
                 'button.act.armed',
                 { 'data-action': 'pool-mint', onclick: () => armDialog('pool-mint', {}) },
-                'mint pieces…',
+                'reshape pool…',
               ),
             ),
           )
@@ -1226,7 +1328,11 @@ const settingsView = () => {
             'tr',
             h('td', knob.key),
             h('td', String(knob.value)),
-            h('td', knob.source === 'override' ? h('span.phase.phase-exposed', 'override') : h('span.muted', 'env')),
+            h(
+              'td',
+              knob.source === 'override' ? h('span.muted', 'override') : h('span.faint', 'env'),
+              knob.pending ? [' ', h('span.phase.phase-exposed', { title: s.restartNotice }, 'pending restart')] : null,
+            ),
             h(
               'td',
               knob.editable
@@ -1265,8 +1371,64 @@ const settingsView = () => {
 /** The market being edited, or null when the form is closed. */
 let marketDraft = null
 
-/** `null` is the BTC leg everywhere below the wire; `BTC` is what an operator types. */
-const legLabel = (leg) => (leg === null ? 'BTC' : shortId(leg))
+// Assigned by the preview panel; a second declaration there is a load-time SyntaxError.
+let schedulePreview = () => {}
+
+const ASSET_ID = /^[0-9a-f]{68}$/
+
+/** Labels per asset id, for the page's lifetime: the id is content-addressed and its metadata immutable. */
+const assetLabels = new Map()
+
+const assetEntry = (assetId) => {
+  let entry = assetLabels.get(assetId)
+  if (!entry) {
+    entry = { label: null }
+    // A failed lookup is forgotten so the next paint asks again; the id renders meanwhile.
+    entry.ready = api(`/api/assets/${assetId}`).then(
+      (label) => (entry.label = label),
+      () => assetLabels.delete(assetId),
+    )
+    assetLabels.set(assetId, entry)
+  }
+  return entry
+}
+
+/**
+ * A market leg, painted now from what is known and again in place when the lookup
+ * lands — never via `render()`, which would take the caret out of a half-typed form.
+ */
+const liveLeg = (leg, paint) => {
+  if (leg === null || leg === 'BTC') return h('span', 'BTC')
+  if (!ASSET_ID.test(leg)) return h('span', { title: leg }, shortId(leg))
+  const entry = assetEntry(leg)
+  const node = h('span')
+  const fill = () => refill(node, paint(entry.label ?? { assetId: leg, shortId: shortId(leg) }))
+  fill()
+  if (!entry.label) entry.ready.then(fill)
+  return node
+}
+
+/** Ticker and short id: where the pair is the identity being read. */
+const legNode = (leg) => liveLeg(leg, assetLabel)
+
+/** Ticker alone, id on hover: where the leg only names a unit. */
+const legName = (leg) => liveLeg(leg, (asset) => h('span', { title: asset.assetId }, asset.ticker ?? asset.shortId))
+
+const carrierRfqPriced = () => state.data.markets?.carrier?.rfqPriced === true
+
+/** BESIDE the draft, never on it: `draftFrom` mirrors market COLUMNS, and a non-column there is one a PUT deletes. */
+let carrierDefaultDraft = false
+
+/** Sent only when the form moved it: an unchanged key stores an override row for a value the environment supplies. */
+const carrierDefaultOverride = () =>
+  carrierDefaultDraft === carrierRfqPriced() ? {} : { ASSET_CARRIER_PRICING: String(carrierDefaultDraft) }
+
+const openMarketForm = (draft) => {
+  marketDraft = draft
+  carrierDefaultDraft =
+    state.view === 'pricing' ? pricingOverrides().ASSET_CARRIER_PRICING === 'true' : carrierRfqPriced()
+  render()
+}
 
 const blankMarket = () => ({
   base: 'BTC',
@@ -1277,13 +1439,31 @@ const blankMarket = () => ({
   pricePath: '',
   toleranceBps: '10',
   feeBps: '0',
+  sellBaseFeeFlat: '0',
+  buyBaseFeeFlat: '0',
+  sellBaseFeeBps: '',
+  buyBaseFeeBps: '',
   sellBaseMin: '',
   sellBaseMax: '',
   buyBaseMin: '',
   buyBaseMax: '',
   enabled: true,
+  symbol: '',
+  servesOffer: false,
+  servesRfq: true,
+  rfqSellBase: true,
+  rfqBuyBase: true,
+  carrierMode: 'inherit',
+  marketKey: null,
 })
 
+/** Unset is blank here and `null` on the wire — never `0`, which is a spread an operator sets deliberately. */
+const bpsFrom = (value) => (value === null || value === undefined ? '' : String(value))
+
+/**
+ * EVERY editable column, including the ones no field below renders: PUT is a
+ * full replace, so a column the draft drops is one that save deletes.
+ */
 const draftFrom = (market) => ({
   base: market.base ?? 'BTC',
   quote: market.quote ?? 'BTC',
@@ -1293,11 +1473,22 @@ const draftFrom = (market) => ({
   pricePath: market.pricePath,
   toleranceBps: String(market.toleranceBps),
   feeBps: String(market.feeBps),
+  sellBaseFeeFlat: String(market.sellBaseFeeFlat),
+  buyBaseFeeFlat: String(market.buyBaseFeeFlat),
+  sellBaseFeeBps: bpsFrom(market.sellBaseFeeBps),
+  buyBaseFeeBps: bpsFrom(market.buyBaseFeeBps),
   sellBaseMin: market.sellBase?.min ?? '',
   sellBaseMax: market.sellBase?.max ?? '',
   buyBaseMin: market.buyBase?.min ?? '',
   buyBaseMax: market.buyBase?.max ?? '',
   enabled: market.enabled,
+  symbol: market.symbol ?? '',
+  servesOffer: market.servesOffer,
+  servesRfq: market.servesRfq,
+  rfqSellBase: market.rfqSellBase,
+  rfqBuyBase: market.rfqBuyBase,
+  carrierMode: market.carrierMode,
+  marketKey: market.marketKey,
 })
 
 /**
@@ -1306,6 +1497,14 @@ const draftFrom = (market) => ({
  * means the direction inherits the deployment-wide pair.
  */
 const draftBounds = (min, max) => (min.trim() === '' && max.trim() === '' ? null : { min: min.trim(), max: max.trim() })
+
+const draftBps = (value) => {
+  const trimmed = String(value ?? '').trim()
+  if (trimmed === '') return null
+  const n = Number(trimmed)
+  // Sent as raw text when invalid, so int() rejects it loudly — NaN would collapse to null, read as "inherit".
+  return Number.isNaN(n) ? trimmed : n
+}
 
 /**
  * Decimals and bps go as JSON NUMBERS because they are small and the server
@@ -1321,31 +1520,135 @@ const marketBody = (d) => ({
   pricePath: d.pricePath,
   toleranceBps: Number(d.toleranceBps),
   feeBps: Number(d.feeBps),
+  sellBaseFeeFlat: d.sellBaseFeeFlat.trim(),
+  buyBaseFeeFlat: d.buyBaseFeeFlat.trim(),
+  sellBaseFeeBps: draftBps(d.sellBaseFeeBps),
+  buyBaseFeeBps: draftBps(d.buyBaseFeeBps),
   sellBase: draftBounds(d.sellBaseMin, d.sellBaseMax),
   buyBase: draftBounds(d.buyBaseMin, d.buyBaseMax),
   enabled: d.enabled,
+  symbol: String(d.symbol ?? '').trim(),
+  servesOffer: d.servesOffer,
+  servesRfq: d.servesRfq,
+  rfqSellBase: d.rfqSellBase,
+  rfqBuyBase: d.rfqBuyBase,
+  carrierMode: d.carrierMode,
 })
 
-const field = (label, key, hint) =>
+const tip = (text) => h('span.tip', { tabindex: '0', role: 'note' }, '?', h('span.bubble', text))
+
+const group = (title) => h('span.group', title)
+
+const LEG_DECIMALS = { base: 'baseDecimals', quote: 'quoteDecimals' }
+
+/** Hint nodes for the two leg fields, repainted on every keystroke since decimals feed their warning. */
+const legHints = {}
+
+const paintLegHint = (key) => {
+  const node = legHints[key]
+  const leg = String(marketDraft?.[key] ?? '').trim()
+  if (!node || !marketDraft) return
+  if (!ASSET_ID.test(leg)) return refill(node, 'BTC, or a 68-character asset id')
+  const entry = assetEntry(leg)
+  if (!entry.label) {
+    refill(node, 'looking up the asset…')
+    // A failed lookup is dropped from the cache, so repainting here would ask again at once.
+    return void entry.ready.then(() =>
+      entry.label ? paintLegHint(key) : refill(node, 'asset lookup failed — the id is used as typed'),
+    )
+  }
+  const { ticker, name, decimals } = entry.label
+  const said = Number(marketDraft[LEG_DECIMALS[key]])
+  refill(
+    node,
+    ticker || name ? [ticker, name].filter(Boolean).join(' · ') : 'the indexer has no metadata for this asset',
+    typeof decimals === 'number' ? ` · ${decimals} decimals` : '',
+    typeof decimals === 'number' && decimals !== said
+      ? h(
+          'span.phase.phase-failed',
+          `issuer says ${decimals} decimals, this form says ${marketDraft[LEG_DECIMALS[key]]}`,
+        )
+      : null,
+  )
+}
+
+const legHint = (key) => {
+  if (!(key in LEG_DECIMALS)) return null
+  legHints[key] = h('span.hint')
+  paintLegHint(key)
+  return legHints[key]
+}
+
+const field = (label, key, hint, explain) => [
+  h('span.label', label, explain ? tip(explain) : null),
+  h('input', {
+    'aria-label': label,
+    readonly:
+      state.view === 'pricing' &&
+      state.data.markets?.markets.some((row) => row.marketKey === pricingSelection?.key) &&
+      (key === 'base' || key === 'quote'),
+    value: String(marketDraft[key] ?? ''),
+    oninput: (e) => (
+      (marketDraft[key] = e.target.value),
+      paintLegHint('base'),
+      paintLegHint('quote'),
+      schedulePreview()
+    ),
+  }),
+  legHint(key) ?? h('span.hint', hint ?? ''),
+]
+
+const checkbox = (label, key, hint) =>
   h(
     'p.toolbar',
     h('span.muted', label),
     h('input', {
-      value: String(marketDraft[key] ?? ''),
-      size: 44,
-      // No re-render: see the block header.
-      oninput: (e) => (marketDraft[key] = e.target.value),
+      type: 'checkbox',
+      ...(marketDraft[key] ? { checked: true } : {}),
+      oninput: (e) => ((marketDraft[key] = e.target.checked), schedulePreview()),
     }),
     hint ? h('span.faint', hint) : null,
   )
 
+const CARRIER_MODES = ['inherit', 'off', 'priced']
+
+/** The default this market's `inherit` points at. Edited HERE as well as on settings because the pair is
+ *  the one save that spans both stores, and the ordered save has nothing to sequence until one exists. */
+const carrierDefaultField = () =>
+  h(
+    'p.toolbar',
+    h('span.muted', 'deployment default'),
+    h('input', {
+      type: 'checkbox',
+      ...(carrierDefaultDraft ? { checked: true } : {}),
+      oninput: (e) => ((carrierDefaultDraft = e.target.checked), schedulePreview()),
+    }),
+    h('span.faint', 'ASSET_CARRIER_PRICING, deployment-wide — saved with this market, in one ordered save'),
+  )
+
+const carrierModeField = () =>
+  h(
+    'p.toolbar',
+    h('span.muted', 'carrier mode'),
+    h(
+      'select',
+      { onchange: (e) => ((marketDraft.carrierMode = e.target.value), schedulePreview()) },
+      ...CARRIER_MODES.map((mode) => h('option', { value: mode, selected: marketDraft.carrierMode === mode }, mode)),
+    ),
+    h('span.faint', 'whether an RFQ quote prices the carrier in; inherit follows ASSET_CARRIER_PRICING'),
+  )
+
+/** The carrier default rides the same request rather than a second one: the ordering this
+ *  route promises is a property of ONE save, so a form split across two has none of it. */
 const saveMarket = async () => {
   try {
-    await api('/api/markets', { method: 'PUT', body: JSON.stringify(marketBody(marketDraft)) })
+    await applyPricing(api, { markets: [marketBody(marketDraft)], overrides: carrierDefaultOverride() })
     marketDraft = null
     state.banner = null
     await load('markets')
   } catch (error) {
+    // Re-read first: an ordered save can land one half.
+    await load('markets')
     // Left OPEN on failure, deliberately. Every refusal here names one field,
     // and closing the form would make the operator retype ten others to fix it.
     fail(error)
@@ -1362,58 +1665,450 @@ const deleteMarket = async (key) => {
   }
 }
 
-const marketForm = () =>
+/* ---- the preview -------------------------------------------------------- */
+
+const PREVIEW_DEBOUNCE_MS = 300
+
+/** The panel's own node: a refresh replaces its contents, never the whole console. */
+let previewNode = null
+let previewData = null
+let previewError = null
+let previewTimer = null
+let previewDirection = 'sell_base'
+let previewSide = 'from'
+let previewRequest = 0
+let previewInFlight = false
+/** The draft feed the operator asked to read. Never sent unasked: the form would otherwise fetch every typed prefix. */
+let previewFeedFor = null
+const feedKey = () => `${marketDraft.feedUrl}\0${marketDraft.pricePath}`
+const readDraftFeed = () => previewFeedFor === feedKey()
+
+// Feed fetches stay bounded by the server's 15s cache; this only decides how soon a fresh read shows.
+const PREVIEW_REFRESH_MS = 5_000
+setInterval(() => {
+  if (marketDraft && previewNode?.isConnected && !previewTimer && !previewInFlight) void refreshPreview()
+}, PREVIEW_REFRESH_MS)
+
+// Assigned only: Task 10 declares `schedulePreview`, a second declaration is a load-time SyntaxError.
+schedulePreview = () => {
+  if (state.view === 'pricing') {
+    syncPricingMarket()
+    paintPricingChanges()
+    paintPricingTable()
+    previewRequest++
+    previewData = null
+    if (previewNode) paintPreview()
+  }
+  if (previewTimer) clearTimeout(previewTimer)
+  previewTimer = setTimeout(() => {
+    previewTimer = null
+    void refreshPreview()
+  }, PREVIEW_DEBOUNCE_MS)
+}
+
+const refreshPreview = async () => {
+  if ((!marketDraft && !(state.view === 'pricing' && pricingSelection?.kind === 'corridor')) || !previewNode) return
+  const request = ++previewRequest
+  previewInFlight = true
+  try {
+    const next = await api('/api/pricing/preview', {
+      method: 'POST',
+      body: JSON.stringify(
+        state.view === 'pricing'
+          ? pricingPreviewRequest()
+          : {
+              target: 'market',
+              market: marketBody(marketDraft),
+              marketKey: marketDraft.marketKey,
+              direction: previewDirection,
+              side: previewSide,
+              readDraftFeed: readDraftFeed(),
+            },
+      ),
+    })
+    if (request !== previewRequest) return
+    previewData = next
+    previewError = null
+  } catch (error) {
+    if (request !== previewRequest) return
+    previewData = null
+    previewError = error instanceof Error ? error.message : String(error)
+  } finally {
+    if (request === previewRequest) previewInFlight = false
+  }
+  paintPreview()
+}
+
+const paintPreview = () => {
+  if (!previewNode) return
+  clear(previewNode)
+  previewNode.appendChild(h('h2', 'preview — what a customer is quoted'))
+  previewNode.appendChild(previewBody())
+}
+
+const segment = (options, current, onPick) =>
+  h(
+    'span.seg',
+    { role: 'group' },
+    options.map(([value, label]) =>
+      h(
+        'button',
+        {
+          'aria-pressed': value === current ? 'true' : 'false',
+          onclick: () => (onPick(value), paintPreview(), void refreshPreview()),
+        },
+        label,
+      ),
+    ),
+  )
+
+const unit = (amount, decimals, label) => {
+  const digits = Number(decimals) || 0
+  if (digits === 0) return `${BigInt(amount).toLocaleString('en-US')} ${label}`
+  const negative = amount.startsWith('-')
+  const raw = (negative ? amount.slice(1) : amount).padStart(digits + 1, '0')
+  const whole = BigInt(raw.slice(0, -digits)).toLocaleString('en-US')
+  return `${negative ? '-' : ''}${whole}.${raw.slice(-digits)} ${label}`
+}
+
+const priceText = (mantissa, scale) => {
+  const text = unit(mantissa, scale, '').trim()
+  return text.includes('.') ? text.replace(/\.?0+$/, '') : text
+}
+
+/** The feed's number, stated the way the form defines it: this many quote units buy one whole base unit. */
+const feedLine = (feed) => {
+  if (!feed) return null
+  if (feed.state === 'resolved') {
+    return h(
+      'p.price',
+      '1 ',
+      legName(marketDraft.base),
+      ` = ${priceText(feed.mantissa, feed.scale)} `,
+      legName(marketDraft.quote),
+      h('span.faint', ` · feed read ${ago(Math.floor(feed.readAt / 1000))} ago · live`),
+    )
+  }
+  return h(
+    'p.notice',
+    `feed-unresolved — ${feed.reason} `,
+    readDraftFeed()
+      ? null
+      : h('button.act', { onclick: () => ((previewFeedFor = feedKey()), void refreshPreview()) }, 'read feed now'),
+  )
+}
+
+const amountIn = (amount, decimals, leg) => [unit(amount, decimals, ''), legName(leg)]
+
+const ladderRow = (sample, legs, loss) =>
+  sample.ok
+    ? h(
+        `tr${loss ? '.loss' : ''}`,
+        h('td', amountIn(sample.fromAmount, legs.fromDecimals, legs.from)),
+        h('td.num', amountIn(sample.toAmount, legs.toDecimals, legs.to)),
+        h('td.num', amountIn(sample.spreadFee, legs.toDecimals, legs.to)),
+        h('td.num', sample.marginBps === null ? '—' : `${sample.marginBps} bps`),
+      )
+    : h(
+        'tr.refused',
+        h(
+          'td',
+          previewSide === 'from'
+            ? amountIn(sample.amount, legs.fromDecimals, legs.from)
+            : amountIn(sample.amount, legs.toDecimals, legs.to),
+        ),
+        h('td.num', { colspan: 3 }, h('span.phase.phase-failed', sample.reason)),
+      )
+
+const breakEvenBlock = (breakEven) => {
+  if (breakEven.kind === 'never') {
+    return h(
+      'div.breakeven',
+      h('b', 'At a zero spread this direction never breaks even.'),
+      ' We fund the carrier out of margin on every payout and earn nothing back.',
+    )
+  }
+  if (breakEven.kind !== 'at') return null
+  return h(
+    'div.breakeven',
+    h('b', `Below ${BigInt(breakEven.amountSats).toLocaleString('en-US')} sats this direction loses money.`),
+    ` The carrier is not priced into the quote, so we pay it out of margin. Turn carrier pricing on and it is` +
+      ' recovered in full — margin is then flat at every size and there is no loss-making range at all.',
+  )
+}
+
+/** `resolveAssetQuote` is the only refusal this previews; the orchestrator also
+ *  refuses on inventory, a per-requester rate limit and a reused rfq id, none of
+ *  which are properties of the draft being edited, so they are named, not simulated. */
+const scopeLine = () =>
+  h(
+    'p.faint',
+    'This preview prices the configuration only. It does not check inventory, the per-customer rate limit, ' +
+      'or a repeated request id — a real quote can still be turned down for any of those.',
+  )
+
+const previewBody = () => {
+  if (previewError) return h('p.muted', previewError)
+  if (!previewData) return h('p.muted', 'pricing…')
+  if (previewData.invalid.length > 0) {
+    return h(
+      'div',
+      feedLine(previewData.feed),
+      h('p.muted', 'nothing is priced while a field is refused:'),
+      previewData.invalid.map((item) => h('p.faint', `${item.key} — ${item.reason}`)),
+    )
+  }
+  if (state.view === 'pricing' && pricingSelection?.kind === 'corridor') return corridorPreviewBody()
+  const feed = previewData.feed ?? { state: 'unresolved', reason: '' }
+  const controls = h(
+    'p.toolbar',
+    segment(
+      [
+        ['sell_base', h('span', 'customer gives ', legName(marketDraft.base))],
+        ['buy_base', h('span', 'customer gives ', legName(marketDraft.quote))],
+      ],
+      previewDirection,
+      (value) => (previewDirection = value),
+    ),
+    segment(
+      [
+        ['from', 'they name what they send'],
+        ['to', 'they name what they get'],
+      ],
+      previewSide,
+      (value) => (previewSide = value),
+    ),
+  )
+  if (feed.state === 'unresolved') {
+    return h('div', controls, feedLine(feed))
+  }
+
+  const { legs, samples, samplesReason, breakEven, carrier } = previewData
+  if (samples.length === 0) {
+    const reason = samplesReason ?? 'this direction admits no amount'
+    return h('div', controls, h('p.notice', `nothing to price for this direction — ${reason}`))
+  }
+  const lossUnder = breakEven.kind === 'at' ? BigInt(breakEven.amountSats) : null
+  const belowBreakEven = (sample) => sample.ok && lossUnder !== null && BigInt(sample.fromAmount) < lossUnder
+  return h(
+    'div',
+    controls,
+    feedLine(feed),
+    h(
+      'table.ladder',
+      h(
+        'thead',
+        h('tr', h('th', 'they send'), h('th.num', 'they receive'), h('th.num', 'we keep'), h('th.num', 'margin')),
+      ),
+      h(
+        'tbody',
+        samples.map((sample) => ladderRow(sample, legs, belowBreakEven(sample))),
+      ),
+    ),
+    breakEvenBlock(breakEven),
+    scopeLine(),
+    h(
+      'div.feedline',
+      h('span', `carrier ${carrier.sats} sats — ${carrier.priced ? 'priced into the quote' : 'paid out of margin'}`),
+      h('span.faint', 'preview only — nothing is quoted or stored'),
+    ),
+  )
+}
+
+const previewPanel = () => {
+  previewNode = h('section.panel.sticky')
+  paintPreview()
+  schedulePreview()
+  return previewNode
+}
+
+/** What is IN FORCE, not what the form asks for. `offerCharged` stays read-only: in no `editableKeys()`, and boot-read. */
+const carrierPolicyLine = () => {
+  const c = state.data.markets?.carrier
+  if (!c) return '—'
+  const who = [c.rfqPriced ? 'rfq quotes' : null, c.offerCharged ? 'offers' : null].filter(Boolean)
+  return who.length === 0 ? `nobody — we fund ${c.sats} sats per asset payout` : `charged on ${who.join(' + ')}`
+}
+
+const rfqDirectionLine = () => {
+  const row = (state.data.markets?.markets ?? []).find((market) => market.marketKey === marketDraft.marketKey)
+  const open = row?.rfqDirections
+  if (!open) return 'not yet served — save the market first'
+  const names = [open.sellBase ? 'customer gives base' : null, open.buyBase ? 'customer gives quote' : null].filter(
+    Boolean,
+  )
+  return names.length === 0 ? 'both closed' : names.join(' + ')
+}
+
+const boundsHint =
+  'Bounds on what we pay out in this direction, not on what the customer sends. Set both to 0 to close this direction while leaving everything else configured.'
+
+const marketForm = (save = saveMarket, close = () => ((marketDraft = null), render()), saveLabel = 'save') =>
   h(
     'section.panel',
     h('h2', 'market'),
     // The key is derived from the legs, so re-submitting a pair edits it. Said
     // out loud because there is no id field to make that obvious.
     h('p.faint', 'A pair may be configured once. Submitting one that exists edits it.'),
-    field('base', 'base', 'BTC, or a 68-character asset id'),
-    field('quote', 'quote', 'BTC, or a 68-character asset id'),
-    field('base decimals', 'baseDecimals'),
-    field('quote decimals', 'quoteDecimals'),
-    field('feed url', 'feedUrl', 'fetched and checked before this is stored'),
-    field('price path', 'pricePath', 'RFC 6901 pointer; blank derives it where the provider is known'),
-    field('tolerance bps', 'toleranceBps', 'deviation from the feed accepted; below 10000'),
-    field('fee bps', 'feeBps', 'margin folded against the maker; below 10000'),
-    field('sell-base min', 'sellBaseMin', 'atomic units of the want leg; blank inherits'),
-    field('sell-base max', 'sellBaseMax', '0 closes this direction'),
-    field('buy-base min', 'buyBaseMin'),
-    field('buy-base max', 'buyBaseMax'),
+    // Said here as well as in the notice above the table, which is read after the save.
     h(
-      'p.toolbar',
-      h('span.muted', 'enabled'),
-      h('input', {
-        type: 'checkbox',
-        ...(marketDraft.enabled ? { checked: true } : {}),
-        oninput: (e) => (marketDraft.enabled = e.target.checked),
-      }),
-      h('span.faint', 'a disabled market is served by neither direction'),
+      'p.faint',
+      'Tightening the price, tolerance or bounds below also re-judges maker offers ' +
+        'already recorded as fillable: they are refused rather than filled at the old ' +
+        'terms, and the maker is not told why their offer went unfilled.',
     ),
     h(
-      'p.toolbar',
-      h('button.act', { onclick: saveMarket }, 'save'),
-      h('button.act', { onclick: () => ((marketDraft = null), render()) }, 'cancel'),
+      'div.form-grid',
+      group('identity'),
+      field(
+        'base',
+        'base',
+        'BTC, or a 68-character asset id',
+        'Which asset the price is quoted per. Type BTC for the bitcoin side, or paste a 68-character asset id.',
+      ),
+      field(
+        'quote',
+        'quote',
+        'BTC, or a 68-character asset id',
+        "The other side of the pair. The feed's number means: this many quote units buy one whole base unit.",
+      ),
+      field(
+        'symbol',
+        'symbol',
+        'the env stem and the label — USDA',
+        'The short name this market trades under, and the stem its settings take in the environment. Required to serve RFQ; an offer-only market may leave it blank.',
+      ),
+      group('how it is priced'),
+      field(
+        'base decimals',
+        'baseDecimals',
+        undefined,
+        "How many digits this side's smallest unit has. Bitcoin is 8. Most stablecoins are 6. A wrong number here misprices by a factor of ten rather than failing.",
+      ),
+      field(
+        'quote decimals',
+        'quoteDecimals',
+        undefined,
+        "How many digits this side's smallest unit has. Bitcoin is 8. Most stablecoins are 6. A wrong number here misprices by a factor of ten rather than failing.",
+      ),
+      field(
+        'feed url',
+        'feedUrl',
+        'fetched and checked before this is stored',
+        'Where the price comes from. We fetch it and check it before saving, so a URL we cannot read is never stored.',
+      ),
+      field(
+        'price path',
+        'pricePath',
+        'like /data/price; blank works for a known provider',
+        "Where in the feed's reply the price sits, written like a folder path — /data/amount. Leave blank for a provider we already know.",
+      ),
+      group('what we charge'),
+      field(
+        'tolerance bps',
+        'toleranceBps',
+        'how far a named price may differ from the feed; under 10000',
+        "How far a customer's own price may sit from the feed before we turn their offer down. Only used when the customer names the price.",
+      ),
+      field(
+        'fee bps',
+        'feeBps',
+        'our cut of the trade, in bps; under 10000',
+        'Our margin, taken out of what the customer receives. 50 bps is half of one percent. Leave the two boxes below blank to charge it both ways.',
+      ),
+      field(
+        '↳ selling base',
+        'sellBaseFeeBps',
+        'blank inherits fee bps',
+        'Our margin when the customer hands us the base asset. Blank means use the box above.',
+      ),
+      field(
+        '↳ buying base',
+        'buyBaseFeeBps',
+        'blank inherits fee bps',
+        'Our margin when the customer hands us the quote asset. Blank means use the box above.',
+      ),
+      field(
+        'sell-base flat fee',
+        'sellBaseFeeFlat',
+        'smallest unit of the base asset, taken off the top; 330 covers the carrier when base is BTC',
+        'A fixed amount taken off the top before the margin, in the smallest unit of whatever the customer sends. For a cost that does not grow with the trade.',
+      ),
+      field(
+        'buy-base flat fee',
+        'buyBaseFeeFlat',
+        'smallest unit of the quote asset, taken off the top',
+        "The same, going the other way, in the other side's smallest unit.",
+      ),
+      group('limits'),
+      field('sell-base min', 'sellBaseMin', 'smallest units of what we pay out; blank inherits', boundsHint),
+      field('sell-base max', 'sellBaseMax', '0 closes this direction', boundsHint),
+      field('buy-base min', 'buyBaseMin', undefined, boundsHint),
+      field('buy-base max', 'buyBaseMax', undefined, boundsHint),
+      h(
+        'span.label',
+        'enabled',
+        tip(
+          'A switched-off market is served by nothing. It stays set up, so turning it back on does not mean retyping a 68-character asset id.',
+        ),
+      ),
+      h(
+        'span.span2',
+        h('input', {
+          type: 'checkbox',
+          ...(marketDraft.enabled ? { checked: true } : {}),
+          oninput: (e) => ((marketDraft.enabled = e.target.checked), schedulePreview()),
+        }),
+        ' ',
+        h('span.faint', 'a disabled market is served by neither path'),
+      ),
+      group('carrier sats'),
+      h(
+        'span.label',
+        'deployment default',
+        tip(
+          'An asset never moves alone — it rides on a small amount of bitcoin called the carrier, and with this ' +
+            'switched off we pay for it ourselves on every asset we send. Each market may override it below.',
+        ),
+      ),
+      h('span.span2', h('span.muted', carrierPolicyLine())),
+      h(
+        'span.label',
+        'RFQ directions live',
+        tip(
+          'What the running process is open on right now. The boxes below set this, but a direction can also be ' +
+            'closed by ASSET_<SYM>_<DIR>_ENABLED in the environment without touching the market.',
+        ),
+      ),
+      h('span.span2', h('span.muted', rfqDirectionLine())),
     ),
+    checkbox(
+      'serves offer',
+      'servesOffer',
+      'takes maker offer packets — live on a running offer path; starting a missing path needs a restart',
+    ),
+    checkbox('serves rfq', 'servesRfq', 'answers RFQ quote requests — live'),
+    checkbox('rfq sell base', 'rfqSellBase', 'open, per direction; false is CLOSED'),
+    checkbox('rfq buy base', 'rfqBuyBase'),
+    carrierModeField(),
+    state.view === 'pricing' ? null : carrierDefaultField(),
+    h('p.toolbar', h('button.act', { onclick: save }, saveLabel), h('button.act', { onclick: close }, 'close editor')),
   )
+
+const NOTHING_TITLE =
+  'No path fills this market. RFQ follows an enabled row with serves_rfq, a symbol and a bound; ' +
+  'the offer path needs serves_offer and a restart.'
 
 // `nothing` gets the failure chip: the row says `trading`, the offer is
 // published, and nothing else in the console says the solver is not listening.
-const servedByCell = (paths) =>
+// A gap is louder still — the row asks for something this process cannot do.
+const capabilityCell = (paths, gaps) =>
   h(
     'td',
     paths.length === 0
-      ? h(
-          'span.phase.phase-failed',
-          {
-            title:
-              'No path fills this market. OFFER_MARKETS drives the offer path and ASSET_MARKETS the RFQ ' +
-              'corridors; neither names this pair, so nothing is watching for it. Both are on the settings page.',
-          },
-          'nothing',
-        )
+      ? h('span.phase.phase-failed', { title: NOTHING_TITLE }, 'nothing')
       : h('span.muted', paths.join(' + ')),
+    ...gaps.map((gap) => h('span.phase.phase-failed', { title: gap.detail }, gap.kind)),
   )
 
 const marketsView = () => {
@@ -1422,12 +2117,10 @@ const marketsView = () => {
   const active = new Set(m.active)
   return h(
     'div',
-    // The same honesty the settings page carries, and it matters more here: a
-    // market added now is invisible to this process, so an operator watching
-    // for fills against it would be watching for something that cannot happen.
+    // Live on this process: a market added now is quoted on the next RFQ.
     h('p.notice', m.restartNotice),
-    h('p.toolbar', h('button.act', { onclick: () => ((marketDraft = blankMarket()), render()) }, 'add market')),
-    marketDraft ? marketForm() : null,
+    h('p.toolbar', h('button.act', { onclick: () => openMarketForm(blankMarket()) }, 'add market')),
+    marketDraft ? h('div.split', marketForm(), previewPanel()) : null,
     m.markets.length === 0
       ? h('p.muted', 'no markets configured — this solver trades no asset pairs and refuses every offer')
       : h(
@@ -1450,27 +2143,33 @@ const marketsView = () => {
             m.markets.map((market) =>
               h(
                 'tr',
-                h('td', { title: market.marketKey }, `${legLabel(market.base)} / ${legLabel(market.quote)}`),
+                h('td', { title: market.marketKey }, legNode(market.base), ' / ', legNode(market.quote)),
                 h('td.faint', { title: `${market.feedUrl} ${market.pricePath}` }, shortId(market.feedUrl)),
                 h('td.num', `${market.toleranceBps} bps`),
-                h('td.num', `${market.feeBps} bps`),
+                h(
+                  'td.num',
+                  `${market.feeBps} bps + ${market.sellBaseFeeFlat} `,
+                  legName(market.base),
+                  ` atomic / ${market.buyBaseFeeFlat} `,
+                  legName(market.quote),
+                  ' atomic',
+                ),
                 h(
                   'td',
-                  // Three states, not two, and the middle one is the point of
-                  // this column: stored-and-enabled is NOT the same as being
-                  // traded by the process answering this request.
+                  // Enabled+active is trading; enabled+not-active is a row
+                  // replaceMarkets has not yet attached (should not stick).
                   !market.enabled
                     ? h('span.muted', 'disabled')
                     : active.has(market.marketKey)
                       ? h('span.muted', 'trading')
-                      : h('span.phase.phase-exposed', 'pending restart'),
+                      : h('span.phase.phase-exposed', 'not quoting'),
                 ),
                 // A SECOND axis, never folded into `state`: a market can read
                 // `trading` and be filled by nothing.
-                servedByCell(market.servedBy ?? []),
+                capabilityCell(market.serving ?? [], market.gaps ?? []),
                 h(
                   'td',
-                  h('button.act', { onclick: () => ((marketDraft = draftFrom(market)), render()) }, 'edit'),
+                  h('button.act', { onclick: () => openMarketForm(draftFrom(market)) }, 'edit'),
                   ' ',
                   h('button.act', { onclick: () => deleteMarket(market.marketKey) }, 'delete'),
                 ),
@@ -1482,6 +2181,485 @@ const marketsView = () => {
 }
 
 /* ==== asset markets — END ================================================= */
+
+/* ---- unified pricing ---------------------------------------------------- */
+
+const pricingDraft = new PricingDraft()
+const pricingMarketForms = new Map()
+let pricingSelection = null
+let pricingOriginal = null
+let pricingChangesNode = null
+let pricingTableNode = null
+let pricingOutcome = null
+
+const BTC_CORRIDORS = [
+  { key: 'arkade:BTC->lightning:BTC', stem: 'LN_SEND', label: 'Arkade → Lightning' },
+  { key: 'lightning:BTC->arkade:BTC', stem: 'LN_RECEIVE', label: 'Lightning → Arkade' },
+  { key: 'arkade:BTC->onchain:BTC', stem: 'ONCHAIN_SEND', label: 'Arkade → onchain' },
+  { key: 'onchain:BTC->arkade:BTC', stem: 'ONCHAIN_RECEIVE', label: 'Onchain → Arkade' },
+]
+
+const pricingKnobs = () => state.data.settings?.knobs ?? []
+const pricingOverrides = () => pricingDraft.previewOverrides(pricingKnobs())
+const pricingMarketKey = (body) =>
+  [body.base, body.quote]
+    .map(
+      (leg) =>
+        `arkade:${
+          String(leg ?? '')
+            .trim()
+            .toUpperCase() === 'BTC' || !String(leg ?? '').trim()
+            ? 'btc'
+            : String(leg).trim()
+        }`,
+    )
+    .sort()
+    .join('/')
+
+const syncPricingMarket = () => {
+  if (!marketDraft || pricingDraft.busy || pricingSelection?.kind !== 'market') return
+  const body = marketBody(marketDraft)
+  const stored = state.data.markets.markets.some((row) => row.marketKey === pricingSelection.key)
+  const key = stored ? pricingSelection.key : pricingMarketKey(body)
+  if (JSON.stringify(body) === pricingOriginal) {
+    const stagedKey = pricingSelection.draftKey ?? key
+    pricingDraft.markets.delete(stagedKey)
+    pricingMarketForms.delete(stagedKey)
+  } else {
+    if (pricingSelection.draftKey && pricingSelection.draftKey !== key) {
+      pricingDraft.markets.delete(pricingSelection.draftKey)
+      pricingMarketForms.delete(pricingSelection.draftKey)
+    }
+    pricingSelection.draftKey = key
+    pricingDraft.stageMarket(key, body)
+    pricingMarketForms.set(key, { ...marketDraft })
+  }
+}
+
+const stagePricingOverride = (key, value) => {
+  const knob = pricingKnobs().find((item) => item.key === key)
+  if (!knob) return
+  if (value !== null && value === String(knob.value)) delete pricingDraft.overrides[key]
+  else pricingDraft.stageOverride(key, value)
+}
+
+const selectPricing = (selection, draft = null) => {
+  syncPricingMarket()
+  previewRequest++
+  previewData = null
+  previewError = null
+  pricingSelection = selection
+  if (selection?.key && pricingDraft.markets.has(selection.key)) selection.draftKey = selection.key
+  if (selection?.kind === 'market') {
+    const saved = state.data.markets.markets.find((row) => row.marketKey === selection.key)
+    pricingOriginal = JSON.stringify(marketBody(saved ? draftFrom(saved) : blankMarket()))
+    marketDraft = { ...(pricingMarketForms.get(selection.key) ?? draft ?? (saved ? draftFrom(saved) : blankMarket())) }
+    carrierDefaultDraft = pricingOverrides().ASSET_CARRIER_PRICING === 'true'
+  } else marketDraft = null
+  render()
+}
+
+const pricingPreviewRequest = () =>
+  pricingSelection?.kind === 'corridor'
+    ? { target: 'corridor', corridor: pricingSelection.key, side: previewSide, overrides: pricingOverrides() }
+    : {
+        target: 'market',
+        market: marketBody(marketDraft),
+        direction: previewDirection,
+        side: previewSide,
+        readDraftFeed: readDraftFeed(),
+        overrides: { ASSET_CARRIER_PRICING: pricingOverrides().ASSET_CARRIER_PRICING },
+      }
+
+const applyPricingDraft = async () => {
+  syncPricingMarket()
+  if (!pricingDraft.size || pricingDraft.busy) return
+  pricingOutcome = null
+  const applying = pricingDraft.apply(api)
+  render()
+  try {
+    const result = await applying
+    pricingOutcome = { message: `${result.applied.length} changes applied.`, revision: result.revision }
+  } catch (error) {
+    pricingOutcome = { message: error.message, revision: error.revision, failed: true }
+  } finally {
+    for (const key of pricingMarketForms.keys()) {
+      if (!pricingDraft.markets.has(key)) pricingMarketForms.delete(key)
+    }
+    marketDraft = null
+    pricingSelection = null
+    previewRequest++
+    await load('pricing')
+  }
+}
+
+const discardPricingDraft = () => {
+  pricingDraft.discard()
+  pricingMarketForms.clear()
+  marketDraft = null
+  pricingSelection = null
+  pricingOutcome = null
+  previewRequest++
+  render()
+}
+
+const removePricingMarket = async (market) => {
+  if (pricingDraft.size || pricingDraft.busy) return
+  if (
+    !window.confirm(
+      `Remove ${market.symbol || shortId(market.marketKey)}? This immediately stops new quotes for this market. In-flight swaps remain recoverable.`,
+    )
+  )
+    return
+  try {
+    await api(`/api/markets/${encodeURIComponent(market.marketKey)}`, { method: 'DELETE' })
+    marketDraft = null
+    pricingSelection = null
+    await load('pricing')
+  } catch (error) {
+    fail(error)
+  }
+}
+
+const paintPricingChanges = () => {
+  if (!pricingChangesNode) return
+  clear(pricingChangesNode)
+  const entries = [
+    ...[...pricingDraft.markets].map(([key, row]) => ({
+      key,
+      label: row.symbol || shortId(key),
+      value: 'market edited',
+    })),
+    ...Object.entries(pricingDraft.overrides).map(([key, value]) => ({
+      key,
+      label: key,
+      value: value === null ? 'use environment value' : value,
+    })),
+  ]
+  pricingChangesNode.appendChild(
+    h(
+      'div.pricing-apply',
+      h(
+        'div',
+        h('b', pricingDraft.busy ? 'Applying changes…' : `${entries.length} pending changes`),
+        h(
+          'p.faint',
+          'Changes stay in this tab until you apply or discard them. Restrictions are applied before relaxations.',
+        ),
+      ),
+      h(
+        'div.toolbar',
+        h(
+          'button.act',
+          { disabled: !entries.length || pricingDraft.busy, onclick: applyPricingDraft },
+          'apply changes',
+        ),
+        h(
+          'button.act',
+          { disabled: !entries.length || pricingDraft.busy, onclick: discardPricingDraft },
+          'discard changes',
+        ),
+      ),
+    ),
+  )
+  if (entries.length)
+    pricingChangesNode.appendChild(
+      h(
+        'details',
+        h('summary', 'review pending changes'),
+        h(
+          'ul',
+          entries.map((entry) => h('li', h('span.mono', entry.label), `: ${entry.value}`)),
+        ),
+      ),
+    )
+  if (pricingOutcome)
+    pricingChangesNode.appendChild(
+      h(
+        'p.notice',
+        { role: 'status' },
+        pricingOutcome.message,
+        entries.length ? ` ${entries.length} changes remain in the draft; review before retrying.` : '',
+        pricingOutcome.revision ? ` Audit revision: ${pricingOutcome.revision}.` : '',
+      ),
+    )
+}
+
+const pricingKnobField = (knob, label, explanation) => {
+  const value = pricingOverrides()[knob.key] ?? String(knob.value)
+  const change = (next) => {
+    stagePricingOverride(knob.key, next)
+    if (knob.key === 'ASSET_CARRIER_PRICING' && marketDraft) {
+      carrierDefaultDraft = next === 'true'
+    }
+    schedulePreview()
+  }
+  return [
+    h('label.label', { for: `pricing-${knob.key}` }, label, tip(explanation)),
+    h(
+      'span.pricing-input',
+      h('input', {
+        id: `pricing-${knob.key}`,
+        'aria-label': label,
+        ...(typeof knob.value === 'boolean'
+          ? { type: 'checkbox', checked: value === 'true', onchange: (event) => change(String(event.target.checked)) }
+          : { value, inputmode: 'numeric', oninput: (event) => change(event.target.value) }),
+        disabled: !knob.editable,
+      }),
+      knob.source === 'override'
+        ? h(
+            'button.act',
+            {
+              onclick: () => {
+                stagePricingOverride(knob.key, null)
+                if (knob.key === 'ASSET_CARRIER_PRICING' && marketDraft) {
+                  carrierDefaultDraft = String(knob.envValue) === 'true'
+                }
+                render()
+              },
+            },
+            'use env',
+          )
+        : null,
+    ),
+    h('span.hint', !knob.editable ? 'environment only' : knob.restartRequired ? 'after restart' : 'live after apply'),
+  ]
+}
+
+const corridorForm = () => {
+  const corridor = pricingSelection
+  const definitions = [
+    [
+      'ENABLED',
+      'enabled',
+      'Whether this direction accepts new swaps. A direction absent at boot must be enabled in the environment first.',
+    ],
+    ['FEE_BPS', 'fee bps', 'The percentage fee taken from the customer payout. 50 bps is half of one percent.'],
+    ['FEE_FLAT_SATS', 'flat fee sats', 'A fixed fee per swap, added to the percentage fee.'],
+    ['MIN_SATS', 'minimum sats', 'The smallest amount the customer may send, in satoshis.'],
+    ['MAX_SATS', 'maximum sats', 'The largest amount the customer may send, in satoshis.'],
+  ]
+  return h(
+    'section.panel',
+    h('h2', corridor.label),
+    h(
+      'p.notice',
+      'Stored fees, limits and enabled flags take effect after a solver restart. The preview shows the draft configuration.',
+    ),
+    h(
+      'div.form-grid',
+      definitions.flatMap(([suffix, label, explanation]) => {
+        const knob = pricingKnobs().find((item) => item.key === `${corridor.stem}_${suffix}`)
+        return knob ? pricingKnobField(knob, label, explanation) : []
+      }),
+    ),
+    h('p.toolbar', h('button.act', { onclick: () => selectPricing(null) }, 'close editor')),
+  )
+}
+
+const corridorPreviewBody = () =>
+  h(
+    'div',
+    h(
+      'p.toolbar',
+      segment(
+        [
+          ['from', 'they name what they send'],
+          ['to', 'they name what they get'],
+        ],
+        previewSide,
+        (value) => (previewSide = value),
+      ),
+    ),
+    !previewData.enabled
+      ? h('p.notice', 'This direction is disabled. The amounts below show its pricing if enabled.')
+      : null,
+    h(
+      'table.ladder',
+      h(
+        'thead',
+        h('tr', h('th', 'they send'), h('th.num', 'they receive'), h('th.num', 'spread fee'), h('th.num', 'flat fee')),
+      ),
+      h(
+        'tbody',
+        previewData.samples.map((row) =>
+          row.ok
+            ? h(
+                'tr',
+                h('td', `${sats(row.giveSats)} sats`),
+                h('td.num', `${sats(row.payoutSats)} sats`),
+                h('td.num', `${sats(row.spreadSats)} sats`),
+                h('td.num', `${sats(row.flatSats)} sats`),
+              )
+            : h('tr.refused', h('td', `${sats(row.amountSats)} sats`), h('td', { colspan: 3 }, row.reason)),
+        ),
+      ),
+    ),
+    h(
+      'p.faint',
+      'Fees are not profit: network costs are separate. This preview does not check inventory or Lightning routing.',
+    ),
+  )
+
+const pricingRows = () => {
+  const rows = new Map(state.data.markets.markets.map((row) => [row.marketKey, row]))
+  for (const [key, body] of pricingDraft.markets) rows.set(key, { ...rows.get(key), ...body, marketKey: key })
+  return rows
+}
+
+const pricingTable = (overrides, marketRows) =>
+  h(
+    'tbody',
+    BTC_CORRIDORS.map((corridor) =>
+      h(
+        'tr',
+        h('td', corridor.label),
+        h('td', `${overrides[`${corridor.stem}_FEE_BPS`]} bps + ${overrides[`${corridor.stem}_FEE_FLAT_SATS`]} sats`),
+        h('td', overrides[`${corridor.stem}_ENABLED`] === 'true' ? 'enabled' : 'disabled'),
+        h('td.muted', 'after restart'),
+        h('td', h('button.act', { onclick: () => selectPricing({ kind: 'corridor', ...corridor }) }, 'edit & preview')),
+      ),
+    ),
+    [...marketRows].map(([key, row]) =>
+      h(
+        'tr',
+        h('td', row.symbol ? h('b', row.symbol, ' ') : null, legNode(row.base), ' / ', legNode(row.quote)),
+        h('td', `${row.feeBps} bps`),
+        h(
+          'td',
+          row.enabled
+            ? `${row.servesRfq ? 'RFQ ' : ''}${row.servesOffer ? 'offers' : ''}`.trim() || 'no serving path'
+            : 'disabled',
+        ),
+        h('td.muted', pricingDraft.markets.has(key) ? 'draft; market terms live after apply' : 'market terms live'),
+        h(
+          'td',
+          h(
+            'button.act',
+            {
+              onclick: () => selectPricing({ kind: 'market', key }, pricingMarketForms.get(key) ?? draftFrom(row)),
+            },
+            'edit & preview',
+          ),
+          state.data.markets.markets.some((saved) => saved.marketKey === key)
+            ? h(
+                'button.act',
+                {
+                  disabled: pricingDraft.size > 0,
+                  title: 'Remove immediately. Apply or discard pending changes first.',
+                  onclick: () => removePricingMarket(row),
+                },
+                'remove',
+              )
+            : null,
+        ),
+      ),
+    ),
+  )
+
+const paintPricingTable = () => {
+  if (!pricingTableNode) return
+  const next = pricingTable(pricingOverrides(), pricingRows())
+  clear(pricingTableNode)
+  while (next.firstChild) pricingTableNode.appendChild(next.firstChild)
+}
+
+const pricingView = () => {
+  const settings = state.data.settings
+  const markets = state.data.markets
+  if (!settings || !markets) return h('p.muted', 'loading pricing…')
+  const overrides = pricingOverrides()
+  const marketRows = pricingRows()
+  pricingTableNode = pricingTable(overrides, marketRows)
+  pricingChangesNode = h('section.pricing-changes')
+  paintPricingChanges()
+  const close = () => selectPricing(null)
+  return h(
+    'fieldset.pricing-page',
+    { disabled: pricingDraft.busy },
+    h('h1', 'Pricing'),
+    h('p.muted', 'Configure markets and Bitcoin corridors together. Preview customer amounts before applying.'),
+    pricingChangesNode,
+    h(
+      'div.pricing-table',
+      h(
+        'table',
+        h(
+          'thead',
+          h(
+            'tr',
+            h('th', 'market or corridor'),
+            h('th', 'fees'),
+            h('th', 'state'),
+            h('th', 'takes effect'),
+            h('th', ''),
+          ),
+        ),
+        pricingTableNode,
+      ),
+    ),
+    h(
+      'p.toolbar',
+      h('button.act', { onclick: () => selectPricing({ kind: 'market', key: null }, blankMarket()) }, 'add market'),
+    ),
+    marketRows.size === 0
+      ? h('p.faint', 'No asset markets configured. Bitcoin corridors can still be configured above.')
+      : null,
+    pricingSelection
+      ? h(
+          'div.split',
+          pricingSelection.kind === 'corridor' ? corridorForm() : marketForm(close, close, 'keep in draft'),
+          previewPanel(),
+        )
+      : null,
+    h(
+      'section.panel',
+      h('h2', 'Deployment limits & carrier default'),
+      h(
+        'div.form-grid',
+        [
+          [
+            'MAX_EXPOSED_SATS',
+            'exposure cap sats',
+            'The most bitcoin the solver may have committed across swaps at once.',
+          ],
+          ['LOCKUP_TIMEOUT_SECONDS', 'funding window seconds', 'How long a customer has to fund a quoted swap.'],
+          [
+            'ASSET_CARRIER_PRICING',
+            'price the RFQ carrier',
+            'Charge the bitcoin carrier cost when a market uses inherit. Per-market off and priced modes override this default.',
+          ],
+        ].flatMap(([key, label, explanation]) => {
+          const knob = pricingKnobs().find((item) => item.key === key)
+          return knob ? pricingKnobField(knob, label, explanation) : []
+        }),
+      ),
+    ),
+    h(
+      'details',
+      h('summary', 'environment & serving capabilities'),
+      h('p.notice', markets.restartNotice),
+      h(
+        'table',
+        h(
+          'tbody',
+          pricingKnobs()
+            .filter((knob) => !knob.editable)
+            .map((knob) => h('tr', h('td', knob.key), h('td', String(knob.value)))),
+        ),
+      ),
+      h(
+        'table',
+        h(
+          'tbody',
+          markets.markets.map((row) =>
+            h('tr', h('td', row.symbol || shortId(row.marketKey)), capabilityCell(row.serving ?? [], row.gaps ?? [])),
+          ),
+        ),
+      ),
+    ),
+  )
+}
 
 const auditView = () => {
   const a = state.data.audit
@@ -1512,15 +2690,7 @@ const auditView = () => {
 
 /* ---- swap detail -------------------------------------------------------- */
 
-/**
- * Discovery: the registry card an operator copies, and the state of the Nostr
- * ad the solver publishes.
- *
- * Both on one page because an operator asking "am I discoverable?" does not
- * care that discovery has two mechanisms — a git-reviewed card in
- * solver-registry and a kind-38859 ad on a relay. They care whether each one
- * is current.
- */
+/** Discovery: the signed card, and the state of its kind-38859 publish. */
 const discoveryView = () => {
   const d = state.data.discovery
   if (!d) return h('p.muted', 'loading…')
@@ -1530,7 +2700,7 @@ const discoveryView = () => {
     'div.panels',
     h(
       'section.panel',
-      h('h2', 'registry card'),
+      h('h2', 'solver card'),
       // Whatever the card did: an unnameable corridor otherwise reads as unserved.
       (d.cardOmitted ?? []).map((note) => h('p.muted', note)),
       d.cardError
@@ -1571,7 +2741,13 @@ const discoveryView = () => {
     ),
     h(
       'section.panel',
-      h('h2', 'nostr advertisement'),
+      h('h2', 'nostr'),
+      h(
+        'p.muted',
+        publish.mode === 'manual'
+          ? 'post now publishes the card above as kind 38859; every 30 min the last posted card is re-sent unchanged'
+          : 'publishes the card above as kind 38859',
+      ),
       h(
         'dl.kv',
         h('dt', 'mode'),
@@ -1580,19 +2756,6 @@ const discoveryView = () => {
         h('dd.faint', publish.lastPublishedAt ? ago(publish.lastPublishedAt) : 'never'),
         h('dt', 'last error'),
         h('dd', publish.lastError ? h('span.sans', publish.lastError) : h('span.muted', '—')),
-        // What WOULD be published, so an operator can check the terms before
-        // posting rather than after. `adError` is reported rather than left
-        // blank: an ad that cannot be built is a different fact from a solver
-        // with nothing to advertise, and only one of them needs acting on.
-        h('dt', 'payload'),
-        h(
-          'dd',
-          d.adError
-            ? h('span.sans', d.adError)
-            : d.ad
-              ? h('pre.faint', JSON.stringify(d.ad, null, 2))
-              : h('span.muted', '—'),
-        ),
       ),
       h(
         'p.toolbar',
@@ -1612,7 +2775,7 @@ const discoveryView = () => {
         publish.mode === 'off'
           ? h('span.muted', ' NOSTR_AD_PUBLISH is off')
           : !publish.publisher
-            ? h('span.muted', ' nothing is wired to publish yet')
+            ? h('span.muted', ' only the relay command publishes')
             : null,
       ),
     ),
@@ -1620,7 +2783,7 @@ const discoveryView = () => {
 }
 
 /**
- * Publish the ad on demand.
+ * Publish the card on demand.
  *
  * Not `runAction`: a 409 here is a POLICY answer, not a fault. Refusing because
  * the operator set `off`, or because this mode has no relay, is the setting
@@ -1699,7 +2862,7 @@ const diagnosticsView = () => {
     d.publish
       ? h(
           'p.muted',
-          `ads ${d.publish.mode}`,
+          `nostr card ${d.publish.mode}`,
           d.publish.publisher ? '' : ' (nothing wired to publish)',
           ` · last ${d.publish.lastPublishedAt ? ago(d.publish.lastPublishedAt) : 'never'}`,
           d.publish.heartbeatSeconds ? ` · heartbeat ${duration(d.publish.heartbeatSeconds)}` : '',
@@ -2318,10 +3481,12 @@ const editKnob = (knob) => {
 
 const patchSetting = async (key, value) => {
   try {
-    await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ key, value }) })
+    await applyPricing(api, { overrides: { [key]: value } })
     state.banner = null
     await load('settings')
   } catch (error) {
+    // A LIVE key can be STORED and still refused by the reload, so the table is stale in the case the banner is about.
+    await load('settings')
     fail(error)
   }
 }
@@ -2337,6 +3502,497 @@ const MIN_SEARCH = 3
 const SEARCH_DEBOUNCE_MS = 250
 let searchTimer = null
 
+/* ---- p&l ---------------------------------------------------------------- */
+
+/**
+ * The book.
+ *
+ * EVERY PANEL IS PAIRED WITH A TABLE, and that is not belt-and-braces. A chart
+ * answers "is something wrong"; the number an operator then reconciles against
+ * a wallet has to be readable, copyable and exact. It is also the only form of
+ * these panels a screen reader can use.
+ *
+ * The gross caveat sits ABOVE the figures rather than under them. It decides
+ * what every number on the screen means — a corridor quoting 30bps into a fee
+ * market that took 40 shows a profit here and lost money in fact — and a reader
+ * who meets it after the totals has already formed the wrong impression.
+ */
+
+const signedSats = (value) =>
+  value === null || value === undefined ? '—' : `${value >= 0 ? '+' : '−'}${Math.abs(value).toLocaleString('en-US')}`
+
+const bps = (value) => (value === null || value === undefined ? '—' : `${value >= 0 ? '+' : '−'}${Math.abs(value)}bp`)
+
+/** A headline number. `tone` is only ever risk: see the palette rule in styles.css. */
+const figure = (label, value, note, tone) =>
+  h(
+    'div.figure',
+    h('b', tone ? { class: tone } : null, value),
+    h('span', label),
+    note ? h('span.faint', ` ${note}`) : null,
+  )
+
+/**
+ * Which toolbar control was last pressed, so `render` can give focus back.
+ *
+ * Every button here reloads, and a reload ends in `render`, which rebuilds the
+ * whole tree — so the pressed button leaves the document and focus falls to
+ * `body`. `render` restores focus for `input.search` alone, and there is no
+ * search box on this view, so a keyboard user had to tab from the top of the
+ * page after every window or bucket change.
+ */
+const pnlToolbar = () =>
+  h(
+    'div.toolbar',
+    h('span.muted', 'window'),
+    ...['1h', '6h', '24h', '7d', '30d', '90d'].map((name) =>
+      h(
+        'button',
+        {
+          'data-pnl-control': `window:${name}`,
+          'aria-current': String(state.pnl.window === name),
+          onclick: () => {
+            state.pnl.focus = `window:${name}`
+            state.pnl.window = name
+            // Cleared, not preserved: a 5-minute bucket chosen for an hour
+            // window is sixteen thousand points over ninety days. The server
+            // picks a readable default for whatever window is now in force.
+            state.pnl.bucket = ''
+            load('pnl')
+          },
+        },
+        name,
+      ),
+    ),
+    h('span.spacer'),
+    h('span.muted', 'bucket'),
+    ...['5m', '1h', '6h', '1d'].map((name) =>
+      h(
+        'button',
+        {
+          'data-pnl-control': `bucket:${name}`,
+          'aria-current': String(state.pnl.bucket === name),
+          onclick: () => {
+            state.pnl.focus = `bucket:${name}`
+            state.pnl.bucket = state.pnl.bucket === name ? '' : name
+            load('pnl')
+          },
+        },
+        name,
+      ),
+    ),
+  )
+
+const pnlFigures = (summary) =>
+  h(
+    'div.figures',
+    figure(
+      'gross, sats',
+      signedSats(summary.grossSats),
+      `over ${summary.pricedCount} priced swap${summary.pricedCount === 1 ? '' : 's'}`,
+      summary.grossSats < 0 ? 'c-loss' : null,
+    ),
+    // Named GROSS margin. Unqualified beside a net figure it reads as the net
+    // one, which is the same misreading the net column guards against.
+    figure('gross margin', bps(summary.marginBps), `on ${sats(summary.volumeSats)} sat volume`),
+    // NET, and only where a rail actually reported what execution cost. Shown
+    // beside the gross rather than instead of it, with the covered count on the
+    // label: a net figure that silently covers a third of the book, standing
+    // where the gross used to, is the one misreading this screen must prevent.
+    summary.costedCount > 0
+      ? figure(
+          'net, sats',
+          signedSats(summary.netSats),
+          `${bps(summary.netMarginBps)} after ${sats(summary.realizedCostSats)} sat cost · ` +
+            `${summary.costedCount} of ${summary.pricedCount} priced`,
+          summary.netSats !== null && summary.netSats < 0 ? 'c-loss' : null,
+        )
+      : figure('net', 'unknown', 'no rail reported an execution cost'),
+    // Only rendered when non-zero. A permanent "0 at risk" is a position the
+    // eye learns to skip, which is exactly where this number needs to be seen —
+    // the same rule the status bar's stuck count follows.
+    // The unknown count rides WITH the figure, not beside it: a zero at-risk
+    // total next to an uncounted unpriceable loss reads as "nothing
+    // outstanding", which is the one reassurance this screen must not give
+    // falsely.
+    summary.atRiskSats > 0 || summary.atRiskUnknownCount > 0
+      ? figure(
+          // `≤` when any corridor in the window reports a ceiling rather than a
+          // measurement, so the qualifier sits ON the number instead of in a
+          // footnote an operator reads once.
+          summary.atRiskUpperBound ? 'at risk, sats (at most)' : 'at risk, sats',
+          summary.atRiskSats > 0 ? `${summary.atRiskUpperBound ? '≤' : ''}${sats(summary.atRiskSats)}` : '?',
+          summary.atRiskUnknownCount > 0
+            ? `paid out, not recovered · ${summary.atRiskUnknownCount} more not priceable in sats`
+            : 'paid out, not recovered',
+          'c-risk',
+        )
+      : figure('at risk', 'none', 'nothing outstanding'),
+    figure('settled', String(summary.realizedCount), `${summary.failedCount} failed`),
+    figure('open', String(summary.openCount), 'still in flight'),
+    // Realized but not expressible in sats — an asset-to-asset fill. Shown only
+    // when there are any, because on a sats-only deployment it is always zero
+    // and a permanent zero teaches the reader to stop looking.
+    summary.unpricedCount > 0 ? figure('unpriced', String(summary.unpricedCount), 'cross-asset, see FX below') : null,
+  )
+
+const pnlBasis = (coverage) =>
+  h(
+    'p.basis',
+    h('b', coverage.basis === 'mixed' ? 'These figures are PART net, part gross. ' : 'These are GROSS figures. '),
+    coverage.note ??
+      'No corridor records what execution actually cost, so chain fees and routing fees are missing from every ' +
+        'total here rather than deducted from it.',
+    ' A corridor whose cost is unreported shows a profit here even where a fee market took more than its spread.',
+    coverage.unmeasured.length > 0
+      ? h(
+          'span',
+          h('br'),
+          h('b', 'Not measured: '),
+          coverage.unmeasured.join(', '),
+          ' — reported as unknown, not counted as zero.',
+        )
+      : null,
+    // A corridor that HAS the capability and threw is a fault, not a gap, and
+    // someone should go and look. Shown separately from `unmeasured` for that
+    // reason — folded together, a live incident reads as a corridor nobody has
+    // got round to instrumenting.
+    (coverage.failed ?? []).length > 0
+      ? h(
+          'span',
+          h('br'),
+          h('b', 'Failed to read: '),
+          coverage.failed.map((entry) => `${entry.corridor} (${entry.reason})`).join('; '),
+          ' — these are missing from every total above.',
+        )
+      : null,
+    coverage.truncated.length > 0
+      ? h(
+          'span',
+          h('br'),
+          h('b', 'Truncated: '),
+          `${coverage.truncated.join(', ')} had more rows in this window than were read. These totals cover part ` +
+            'of the book. Narrow the window.',
+        )
+      : null,
+  )
+
+/**
+ * The numbers behind the two time charts.
+ *
+ * Both of those are `role="img"`, which hides their `<title>` marks from a
+ * screen reader — and the marks are hover-only for a keyboard user besides. So
+ * without this the one panel on the page whose data was unreachable without
+ * sight was the headline one.
+ *
+ * ONLY buckets where something happened. The series deliberately carries empty
+ * buckets so a quiet period draws as a gap in the chart, but a table of two
+ * thousand rows reading "0" is not a reading aid, and the newest are the ones
+ * worth having first.
+ */
+const SERIES_ROWS = 40
+
+/**
+ * A bucket's start, in LOCAL time and the same shape `charts.js` labels its
+ * axis with. The two must agree: the table sits directly under the chart it
+ * describes, and a UTC table beside a local-time axis is two clocks for one
+ * bucket with nothing on screen saying which is which.
+ */
+const bucketLabel = (unixSeconds) => {
+  const date = new Date(unixSeconds * 1000)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+const seriesTable = (series) => {
+  const active = series.filter((point) => point.count > 0).reverse()
+  if (active.length === 0) return h('p.muted', 'Nothing settled in this window.')
+  const shown = active.slice(0, SERIES_ROWS)
+  return h(
+    'div',
+    h(
+      'table',
+      h(
+        'thead',
+        h(
+          'tr',
+          h('th', 'bucket'),
+          h('th.right', 'swaps'),
+          h('th.right', 'gross'),
+          h('th.right', 'cumulative'),
+          h('th.right', 'volume'),
+          h('th.right', 'at risk'),
+        ),
+      ),
+      h(
+        'tbody',
+        ...shown.map((point) =>
+          h(
+            'tr',
+            // LOCAL time, in the same shape the charts label their axis with.
+            // `toISOString()` is UTC, so the table and the chart directly above
+            // it showed two different clock values for the same bucket — and a
+            // reader has no way to tell which one their wallet's timestamps
+            // match.
+            h('td', bucketLabel(point.at)),
+            h('td.right', String(point.count)),
+            h('td.right', point.pricedCount === 0 ? h('span.faint', '—') : signedSats(point.grossSats)),
+            h('td.right', signedSats(point.cumulativeGrossSats)),
+            h('td.right', sats(point.volumeSats)),
+            h('td.right', point.atRiskSats > 0 ? h('span.at-risk', sats(point.atRiskSats)) : h('span.faint', '—')),
+          ),
+        ),
+      ),
+    ),
+    active.length > shown.length
+      ? h(
+          'p.faint',
+          `${active.length - shown.length} earlier bucket(s) not listed — the charts above cover all of them.`,
+        )
+      : null,
+  )
+}
+
+const corridorTable = (corridors) =>
+  h(
+    'table',
+    h(
+      'thead',
+      h(
+        'tr',
+        h('th', 'corridor'),
+        h('th.right', 'gross'),
+        // Each margin sits beside the figure it describes. A single `margin`
+        // column next to `net` reads as the net margin, and it is the gross.
+        h('th.right', 'gross bp'),
+        h('th.right', 'net'),
+        h('th.right', 'net bp'),
+        h('th.right', 'volume'),
+        h('th.right', 'settled'),
+        h('th.right', 'failed'),
+        h('th.right', 'at risk'),
+        h('th.right', 'median fill'),
+        h('th.right', 'p90 fill'),
+      ),
+    ),
+    h(
+      'tbody',
+      ...corridors.map((row) =>
+        h(
+          'tr',
+          h('td.mono', row.corridor, row.crossAsset ? h('span.faint', ' fx') : null),
+          h('td.right', row.pricedCount === 0 ? h('span.faint', '—') : signedSats(row.grossSats)),
+          h('td.right', bps(row.marginBps)),
+          h(
+            'td.right',
+            row.costedCount > 0
+              ? h(
+                  'span',
+                  { title: `after ${row.realizedCostSats.toLocaleString('en-US')} sats of realized cost` },
+                  signedSats(row.netSats),
+                )
+              : h('span.faint', { title: 'This rail reports no execution cost, so it cannot be netted.' }, '—'),
+          ),
+          h('td.right', bps(row.netMarginBps)),
+          h('td.right', sats(row.volumeSats)),
+          h('td.right', String(row.realizedCount)),
+          h('td.right', row.failedCount > 0 ? String(row.failedCount) : h('span.faint', '0')),
+          h(
+            'td.right',
+            row.atRiskSats > 0
+              ? h(
+                  'span.at-risk',
+                  {
+                    title: row.atRiskUpperBound
+                      ? 'An upper bound: this corridor parks every failure as stuck, whatever its exposure.'
+                      : 'Paid out and not recovered.',
+                  },
+                  `${row.atRiskUpperBound ? '≤' : ''}${sats(row.atRiskSats)}`,
+                )
+              : h('span.faint', '—'),
+          ),
+          h('td.right', duration(row.medianDurationSeconds)),
+          h('td.right', duration(row.p90DurationSeconds)),
+        ),
+      ),
+    ),
+  )
+
+/**
+ * Margin against how long the fill took.
+ *
+ * THE CHART THE FX QUESTION IS ASKED OF. A quote commits this solver to a price
+ * for its validity window while the market keeps moving, so a swap that took
+ * two hours was priced against a two-hour-old view. If the bottom band's margin
+ * is materially worse than the top's, that gap is what a drawn-out fill costs —
+ * and it is invisible in any total that does not split on time.
+ */
+const durationPanel = (bands) =>
+  h(
+    'section.panel',
+    h('h2', 'margin by time to fill'),
+    h(
+      'p.muted',
+      'A quote holds a price while the market moves. Margin falling down this table is the cost of a slow fill.',
+    ),
+    categoryChart(bands, {
+      // Basis points of MARGIN, not sats of gross — the default label would
+      // have announced the wrong quantity to a screen reader.
+      title: 'Realized margin in basis points, banded by time to fill',
+      label: (band) => band.label,
+      value: (band) => band.marginBps ?? 0,
+      note: (band) =>
+        `${band.label}: ${band.count} swap(s), ${bps(band.marginBps)} on ${band.volumeSats.toLocaleString('en-US')} sats`,
+    }),
+    h(
+      'table',
+      h(
+        'thead',
+        h(
+          'tr',
+          h('th', 'time to fill'),
+          h('th.right', 'swaps'),
+          h('th.right', 'margin'),
+          h('th.right', 'median'),
+          h('th.right', 'gross'),
+          h('th.right', 'volume'),
+        ),
+      ),
+      h(
+        'tbody',
+        ...bands.map((band) =>
+          h(
+            'tr',
+            h('td', band.label),
+            h('td.right', String(band.count)),
+            h('td.right', bps(band.marginBps)),
+            h('td.right', bps(band.medianBps)),
+            h('td.right', band.pricedCount === 0 ? h('span.faint', '—') : signedSats(band.grossSats)),
+            h('td.right', sats(band.volumeSats)),
+          ),
+        ),
+      ),
+    ),
+  )
+
+/**
+ * One panel per directional FX leg, against TWO benchmarks that answer
+ * different questions — which is why both are on screen and both are labelled.
+ *
+ * `vs peers` is this window's volume-weighted mean rate: the solver's own book.
+ * It finds a bad fill and is blind to a bad book, because a market that moved
+ * against every quote leaves them all looking fine beside each other.
+ *
+ * `vs market` compares the price a quote FIXED against a feed read again when
+ * the fill landed — two observations at two times. The spread sits inside it, so
+ * a flat market reads as roughly the margin and ZERO is the breakeven line:
+ * below it the market has moved further than the margin covered. The zero
+ * crossing is exact; the flat baseline is only approximately `feeBps`.
+ */
+const fxPanel = (leg) => {
+  const worst = [...leg.points].sort((a, b) => (a.driftBps ?? 0) - (b.driftBps ?? 0)).slice(0, 5)
+  return h(
+    'section.panel',
+    h('h2', leg.leg),
+    h(
+      'p.muted',
+      `${leg.count} fill${leg.count === 1 ? '' : 's'} on `,
+      h('span.mono', leg.corridor),
+      '. Drift is measured against this window’s volume-weighted mean rate — this solver’s own book. ' +
+        'Below the line is a fill that came in worse than its peers.',
+    ),
+    // The leg-level verdict peer drift cannot give. Coloured only against the
+    // solver, and it carries its own denominator: a median over an unstated
+    // share of the leg is the reading this screen works to prevent elsewhere.
+    leg.medianMarketDriftBps === null || leg.medianMarketDriftBps === undefined
+      ? h(
+          'p.faint',
+          `No market mark: none of these ${leg.count} fills carry both a quote price and a feed read at fill time.`,
+        )
+      : h(
+          'p.muted',
+          'Against the market when it filled, the median fill on this leg priced ',
+          leg.medianMarketDriftBps < 0
+            ? h('span.at-risk', `${bps(leg.medianMarketDriftBps)} under water`)
+            : h('b', `${bps(leg.medianMarketDriftBps)} ahead`),
+          `, over ${leg.markedCount ?? 0} of ${leg.count} marked. The spread is included, so zero is breakeven.`,
+        ),
+    // Named per leg, so N of these are distinguishable in a screen reader's
+    // list of figures rather than N repeats of one sentence.
+    decayChart(leg.points, { title: `Rate drift against time to fill, ${leg.leg} on ${leg.corridor}` }),
+    worst.length === 0
+      ? null
+      : h(
+          'table',
+          h(
+            'thead',
+            h(
+              'tr',
+              h('th', 'worst fills'),
+              h('th.right', 'took'),
+              h('th.right', 'vs peers'),
+              h('th.right', 'vs market'),
+              h('th.right', 'settled'),
+            ),
+          ),
+          h(
+            'tbody',
+            ...worst.map((point) =>
+              h(
+                'tr',
+                h('td.mono', shortId(point.id)),
+                h('td.right', duration(point.durationSeconds)),
+                h('td.right', (point.driftBps ?? 0) < 0 ? h('span.at-risk', bps(point.driftBps)) : bps(point.driftBps)),
+                h(
+                  'td.right',
+                  point.marketDriftBps === null || point.marketDriftBps === undefined
+                    ? h('span.faint', { title: 'No feed read landed against this fill.' }, '—')
+                    : point.marketDriftBps < 0
+                      ? h('span.at-risk', bps(point.marketDriftBps))
+                      : bps(point.marketDriftBps),
+                ),
+                h('td.right', ago(point.at)),
+              ),
+            ),
+          ),
+        ),
+  )
+}
+
+const pnlView = () => {
+  const data = state.data.pnl
+  if (!data) return h('section.panel', h('p.muted', 'loading…'))
+
+  return h(
+    'div',
+    pnlToolbar(),
+    pnlBasis(data.coverage),
+    pnlFigures(data.summary),
+    h(
+      'section.panel',
+      h('h2', 'cumulative gross'),
+      cumulativeChart(data.series),
+      h('h2', 'per bucket'),
+      h('p.muted', 'Profit up, sats at risk down. A loss is not a smaller profit.'),
+      barsChart(data.series),
+      seriesTable(data.series),
+    ),
+    h(
+      'section.panel',
+      h('h2', 'by corridor'),
+      categoryChart(data.corridors, {
+        title: 'Gross profit by corridor, in sats',
+        label: (row) => row.corridor,
+        value: (row) => row.grossSats,
+        note: (row) => `${row.corridor}: ${signedSats(row.grossSats)} sats over ${row.realizedCount} settled swap(s)`,
+      }),
+      corridorTable(data.corridors),
+    ),
+    durationPanel(data.durationBands),
+    ...data.fx.map(fxPanel),
+  )
+}
+
 /* ---- loading and rendering ---------------------------------------------- */
 
 const ENDPOINTS = {
@@ -2350,7 +4006,13 @@ const ENDPOINTS = {
     if (state.filters.q.trim().length >= MIN_SEARCH) params.set('q', state.filters.q.trim())
     return `/api/swaps?${params}`
   },
+  pnl: () => {
+    const params = new URLSearchParams({ window: state.pnl.window })
+    if (state.pnl.bucket) params.set('bucket', state.pnl.bucket)
+    return `/api/pnl?${params}`
+  },
   offers: () => '/api/offers',
+  refusals: () => '/api/rfq-refusals',
   quotes: () => '/api/quotes',
   wallet: () => '/api/wallet',
   backends: () => '/api/backends',
@@ -2361,19 +4023,108 @@ const ENDPOINTS = {
   audit: () => '/api/audit',
 }
 
-const load = async (view) => {
-  try {
-    state.overview = await api('/api/overview')
-    if (ENDPOINTS[view]) state.data[view] = await api(ENDPOINTS[view]())
-    state.banner = null
-  } catch (error) {
-    state.banner = error instanceof Error ? error.message : String(error)
+const activityLoadGenerations = {}
+const pendingViewReads = new Map()
+const readView = (path) => {
+  if (!pendingViewReads.has(path)) {
+    pendingViewReads.set(
+      path,
+      api(path).finally(() => pendingViewReads.delete(path)),
+    )
   }
-  render()
+  return pendingViewReads.get(path)
+}
+let overviewLoadGeneration = 0
+let overviewBalanceRead = null
+const readOverviewBalances = () => {
+  if (!overviewBalanceRead) {
+    overviewBalanceRead = api('/api/overview')
+      .then((overview) => overview.balances)
+      .finally(() => {
+        overviewBalanceRead = null
+      })
+  }
+  return overviewBalanceRead
+}
+
+const load = async (view) => {
+  const overviewGeneration = ++overviewLoadGeneration
+  const sections = view === 'activity' ? ACTIVITY_SECTIONS : ACTIVITY_SECTIONS.includes(view) ? [view] : []
+  const generations = Object.fromEntries(
+    sections.map((key) => [key, (activityLoadGenerations[key] = (activityLoadGenerations[key] ?? 0) + 1)]),
+  )
+  const ownsView = () => state.view === view || (state.view === 'activity' && ACTIVITY_SECTIONS.includes(view))
+  if (ownsView()) state.banner = null
+  const overviewRead = api('/api/overview?balances=false').then(
+    (overview) => {
+      if (overviewGeneration !== overviewLoadGeneration) return
+      state.overview = overview
+      state.overviewError = null
+      paintStatus()
+    },
+    (error) => {
+      if (overviewGeneration !== overviewLoadGeneration) return
+      state.overview = null
+      state.overviewError = error instanceof Error ? error.message : String(error)
+      paintStatus()
+    },
+  )
+  let balancesRead = Promise.resolve()
+  if (view === 'overview') {
+    delete state.data.overviewBalances
+    delete state.data.overviewBalanceError
+    balancesRead = readOverviewBalances().then(
+      (balances) => {
+        if (overviewGeneration !== overviewLoadGeneration || state.view !== 'overview') return
+        state.data.overviewBalances = balances
+        paintOverviewBalances()
+      },
+      (error) => {
+        if (overviewGeneration !== overviewLoadGeneration || state.view !== 'overview') return
+        state.data.overviewBalanceError = error instanceof Error ? error.message : String(error)
+        paintOverviewBalances()
+      },
+    )
+  }
+  const viewRead = (async () => {
+    if (sections.length) {
+      await Promise.all(
+        sections.map(async (key) => {
+          try {
+            const data = await api(ENDPOINTS[key]())
+            if (generations[key] !== activityLoadGenerations[key]) return
+            state.data[key] = data
+            delete state.activityErrors[key]
+          } catch (error) {
+            if (generations[key] !== activityLoadGenerations[key]) return
+            delete state.data[key]
+            state.activityErrors[key] = error instanceof Error ? error.message : String(error)
+          }
+        }),
+      )
+    } else if (ENDPOINTS[view]) {
+      const data = await readView(ENDPOINTS[view]())
+      if (overviewGeneration !== overviewLoadGeneration) return
+      state.data[view] = data
+    } else if (view === 'pricing') {
+      const [markets, settings] = await Promise.all([api('/api/markets'), api('/api/settings')])
+      if (overviewGeneration !== overviewLoadGeneration) return
+      state.data.markets = markets
+      state.data.settings = settings
+    } else return
+    if (ownsView()) render()
+  })().catch((error) => {
+    if (overviewGeneration !== overviewLoadGeneration || !ownsView()) return
+    state.banner = error instanceof Error ? error.message : String(error)
+    render()
+  })
+  await Promise.all([overviewRead, viewRead, balancesRead])
 }
 
 const viewFromHash = () => {
   const view = (location.hash || '#overview').slice(1)
+  if (view === 'markets' || view === 'settings') return 'pricing'
+  if (ACTIVITY_SECTIONS.includes(view)) return 'activity'
   return BODIES[view] ? view : 'overview'
 }
 
@@ -2390,10 +4141,10 @@ const go = (view) => {
 }
 
 const BODIES = {
+  pricing: pricingView,
   overview: overviewView,
-  swaps: swapsView,
-  offers: offersView,
-  quotes: quotesView,
+  pnl: pnlView,
+  activity: activityView,
   wallet: walletView,
   backends: backendsView,
   diagnostics: diagnosticsView,
@@ -2450,6 +4201,18 @@ const restartBanner = () => {
           'restart disabled',
         ),
   )
+}
+
+const paintStatus = () => {
+  if (state.view === 'overview') return render()
+  const root = document.getElementById('root')
+  root.querySelector('.status')?.replaceWith(statusBar())
+  const old = root.querySelector('.restart-banner')
+  const next = restartBanner()
+  if (old) {
+    if (next) old.replaceWith(next)
+    else old.remove()
+  } else if (next) root.querySelector('nav')?.after(next)
 }
 
 const render = () => {
@@ -2525,6 +4288,16 @@ const render = () => {
 
   // After everything is in the document: focusing a detached node does nothing,
   // which is how the modal scroll fix was wrong the first time.
+  // The P&L toolbar's equivalent of the search-box restore above, and needed
+  // for the same reason: the rebuild removed the button that was pressed. Read
+  // once and cleared, so a later render caused by anything else does not steal
+  // focus back to a control nobody touched.
+  if (state.pnl.focus) {
+    const control = root.querySelector(`[data-pnl-control="${state.pnl.focus}"]`)
+    state.pnl.focus = null
+    if (control) control.focus()
+  }
+
   if (typing) {
     const box = root.querySelector('input.search')
     if (box) {
@@ -2611,7 +4384,23 @@ const listen = () => {
     // reload buys nothing — and it would rebuild an open market form, handing
     // back an input with no focus and a caret at zero while someone is typing a
     // 68-character asset id into it.
-    if (state.view !== 'settings' && state.view !== 'markets' && !state.dialog) load(state.view)
+    //
+    // `pnl` joins them for a different reason, and a stronger one. It IS
+    // derived from swap state, but it is the most expensive read this console
+    // has — one full window scan of every swap store per request — and it
+    // answers a question about a window rather than about right now. Reloading
+    // it on every swap event turns the console into a load generator against
+    // the one endpoint built to avoid that, and drops keyboard focus off its
+    // toolbar each time (`render` restores focus only for `.search`). An
+    // operator who wants it fresher re-picks the window, which reloads.
+    if (
+      state.view !== 'pricing' &&
+      state.view !== 'settings' &&
+      state.view !== 'markets' &&
+      state.view !== 'pnl' &&
+      !state.dialog
+    )
+      load(state.view)
   })
   // EventSource reconnects on its own; nothing to do but not treat it as fatal.
   source.addEventListener('error', () => {})
@@ -2625,6 +4414,12 @@ window.addEventListener('hashchange', () => {
   if (view === state.view) return
   state.view = view
   load(view)
+})
+
+window.addEventListener('beforeunload', (event) => {
+  if (pricingDraft.size === 0) return
+  event.preventDefault()
+  event.returnValue = ''
 })
 
 state.view = viewFromHash()

@@ -1,141 +1,127 @@
-/**
- * Discovery, both halves, on one route.
- *
- * An operator asking "am I discoverable?" does not care that discovery has two
- * mechanisms — the git-reviewed registry card and the kind-38859 ad. They care
- * whether each is current, so both are reported together.
- */
+/** Discovery on one route: the signed card, and the state of its kind-38859 copy on Nostr. */
 import type { Hono } from 'hono'
 import {
-  assetCardMarkets,
   buildSolverCard,
   publishableAssetMarkets,
   signSolverCard,
   unpublishableCorridors,
-  type AssetCardMarket,
   type SolverCard,
 } from '@arkade-os/solver-core/core/registryCard.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
-import type { SolverAd } from '@arkade-os/solver-core/core/solverAd.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import type { Services } from '../../ops/services.js'
 import { publishStateOf } from '../publishState.js'
 import type { AdminDeps } from '../server.js'
+import { assetCardMarketsFromPolicy } from '../../ops/assetRfqMarkets.js'
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+/** `RELAY_URL` then `SOLVER_CARD_RELAYS`. */
+export const advertisedRelays = (relayUrl: string | null): string[] => {
+  const extra = (process.env.SOLVER_CARD_RELAYS ?? '')
+    .split(',')
+    .map((r) => r.trim())
+    .filter(Boolean)
+  return [...(relayUrl ? [relayUrl] : []), ...extra].map(withoutCredentials)
+}
+
+/** The card goes out with no human reading it, so a `?token=` or `user:pass@` in a relay URL must not ride along. */
+const withoutCredentials = (relay: string): string => {
+  try {
+    const url = new URL(relay)
+    return url.username || url.password || url.search || url.hash
+      ? `${url.protocol}//${url.host}${url.pathname}`
+      : relay
+  } catch {
+    return relay
+  }
+}
+
+/** `Services` satisfies it whole; `cli card`, which builds no stack, assembles one. */
+export type CardSource = Pick<
+  Services,
+  'config' | 'policy' | 'bootPolicy' | 'assetMarkets' | 'liveOfferMarkets' | 'assetRfqMarkets' | 'providerPubkey'
+> & { arkade: { identity: Pick<Services['arkade']['identity'], 'signMessage'> } }
+
+/** ENABLED already — `assetMarketPolicy` drops a pause. */
+const assetMarketsOf = (source: CardSource) =>
+  publishableAssetMarkets(
+    assetCardMarketsFromPolicy({
+      pricing: source.assetMarkets,
+      offerMarkets: source.liveOfferMarkets,
+      // BOOT: `AssetOfferService` reads these off constructor deps. `rfqMarkets` below is LIVE by contrast.
+      offerBounds: { min: source.bootPolicy.offerMinFillAmount, max: source.bootPolicy.offerMaxFillAmount },
+      rfqMarkets: source.assetRfqMarkets,
+      chargesDeliveredCarrier: source.bootPolicy.offerChargesDeliveredCarrier,
+    }),
+    source.config.network,
+  )
+
+export const cardOmissions = (source: CardSource): string[] => [
+  // LIVE unlike the corridor map: `rebuild` builds the corridor set from `livePolicy.evmCorridors`.
+  ...unpublishableCorridors(
+    source.policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
+  ),
+  ...assetMarketsOf(source).omitted,
+]
 
 /**
- * This deployment's signed registry card, built exactly as `cli card` builds it.
- *
- * `Services` carries no card — `createServices` builds none — so the console
- * assembles one here from the live stack rather than shelling out to the CLI,
- * which would need the mnemonic in a second process's environment for a value
- * this process can already sign.
- *
- * Deliberately ONE function, and the only place in the console that names a
- * card field. The card's shape is moving (`emulator_pubkey` is being retired as
- * a property of the network rather than of a solver), and a card assembled in
- * one place is one edit when it does.
+ * One builder for `/api/card`, `cli card` and the kind-38859 publisher.
  *
  * Throws rather than returning a partial card: every refusal below is a card
  * that would LIE about the deployment it names, and the route reports the
  * reason instead of publishing it.
  */
-const deploymentCard = async (services: Services, assetMarkets: readonly AssetCardMarket[]): Promise<SolverCard> => {
-  const { config, policy } = services
-  const name = process.env.SOLVER_NAME?.trim()
+export const deploymentCard = async (source: CardSource, name = process.env.SOLVER_NAME): Promise<SolverCard> => {
+  const { config, bootPolicy } = source
+  const trimmed = name?.trim()
   // Guarded here rather than left to `buildSolverCard`: an absent variable
   // reaches its name rule as the string "undefined", which matches
   // /^[a-z0-9-]+$/ perfectly and would file a card called `undefined`.
-  if (!name) {
+  if (!trimmed) {
     throw new Error('SOLVER_NAME is not set — it becomes the registry filename solvers/<network>/<name>.json')
   }
-  // Extra relays beyond RELAY_URL, for a deployment listening on several — the
-  // same two sources `cli card` reads, so the two cannot print different cards.
-  const extra = (process.env.SOLVER_CARD_RELAYS ?? '')
-    .split(',')
-    .map((r) => r.trim())
-    .filter(Boolean)
-  const relays = [...(config.relayUrl ? [config.relayUrl] : []), ...extra]
 
-  // Effective policy, not the raw environment: the card states terms, and a
-  // card quoting a corridor this process has overridden into silence is a
-  // listing that lies. Both the toggles AND the bounds come from `policy` now
-  // that the card publishes per-corridor limits — an override that narrows a
-  // corridor has to reach the listing, which reading `config.limits` would
-  // have hidden.
-  //
-  // The old hard refusal for a disabled LN_SEND is gone with the hardcoded
-  // market it protected: an onchain-only deployment now has an honest card to
-  // publish rather than none. `buildSolverCard` still refuses when NOTHING is
-  // served.
+  // BOOT, not live: the card is SIGNED, none of these three is in `LIVE_KEYS`, and each is snapshotted into a
+  // `private readonly` deps at construction — so boot is what the corridor will honour.
   const served = Object.fromEntries(
-    CORRIDORS.filter((corridor) => policy.corridorEnabled[corridor]).map((corridor) => [
+    CORRIDORS.filter((corridor) => bootPolicy.corridorEnabled[corridor]).map((corridor) => [
       corridor,
-      { limits: policy.corridorLimits[corridor], fee: policy.corridorFees[corridor] },
+      { limits: bootPolicy.corridorLimits[corridor], fee: bootPolicy.corridorFees[corridor] },
     ]),
   )
 
   return signSolverCard(
     buildSolverCard({
-      name,
+      name: trimmed,
+      network: config.network,
       // The wallet identity — the same x-only key makers already address RFQs
       // to, which is what makes the card's rendezvous data self-attesting.
-      discoveryPubkey: services.providerPubkey,
-      relays,
+      discoveryPubkey: source.providerPubkey,
+      relays: advertisedRelays(config.relayUrl),
       corridors: served,
-      assetMarkets,
+      assetMarkets: assetMarketsOf(source).publishable,
     }),
-    (digest) => services.arkade.identity.signMessage(digest, 'schnorr'),
+    (digest) => source.arkade.identity.signMessage(digest, 'schnorr'),
   )
 }
 
 export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/card', async (c) => {
-    // Outside the try: an unadvertisable market is still reported when the card
-    // fails for another reason. ENABLED already — `assetMarketPolicy` drops a pause.
-    const { publishable, omitted } = publishableAssetMarkets(
-      assetCardMarkets(deps.services.assetMarkets, {
-        min: deps.services.policy.offerMinFillAmount,
-        max: deps.services.policy.offerMaxFillAmount,
-      }),
-    )
-    // An unbuildable card degrades to a reported reason, never a 500: the ad
-    // half of this answer is still worth showing, and a console that goes dark
+    // An unbuildable card degrades to a reported reason, never a 500: the
+    // publish state is still worth showing, and a console that goes dark
     // because SOLVER_NAME is unset is the failure the console exists to end.
     let card: SolverCard | null = null
     let cardError: string | null = null
     try {
-      card = await deploymentCard(deps.services, publishable)
+      card = await deploymentCard(deps.services)
     } catch (error) {
       cardError = messageOf(error)
-    }
-    // The ad gets the SAME treatment, because it can fail the same way:
-    // `currentAd()` calls `buildAd()`, which in any real wiring closes over
-    // live policy and corridor limits. Left unwrapped it would reach
-    // `app.onError` as a 500 and take down the CARD, which built perfectly —
-    // "one dead backend must not blank the page" inverted, the failing half
-    // silencing the working one.
-    let ad: SolverAd | null = null
-    let adError: string | null = null
-    try {
-      ad = deps.adPublisher ? deps.adPublisher.currentAd() : null
-    } catch (error) {
-      adError = messageOf(error)
     }
     return c.json({
       card,
       // Named like `overridesError` on /api/diagnostics rather than a bare
       // `error`, which on this port means "the request failed".
       cardError,
-      // Reported even when the card failed: it describes the deployment, not the card.
-      cardOmitted: [
-        ...unpublishableCorridors(
-          deps.services.policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
-        ),
-        ...omitted,
-      ],
-      ad,
-      adError,
+      cardOmitted: cardOmissions(deps.services),
       publish: publishStateOf(deps),
     })
   })
@@ -166,7 +152,8 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
       return c.json({ error: 'refused', detail }, 409)
     }
     if (!deps.adPublisher) {
-      const detail = 'this mode has no relay connection'
+      const detail =
+        deps.mode === 'relay' ? 'no ad publisher is wired' : `${deps.mode} mode has no relay connection to publish on`
       await audit('error', detail)
       return c.json({ error: 'no_publisher', detail }, 409)
     }

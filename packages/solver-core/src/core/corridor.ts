@@ -11,6 +11,7 @@
  */
 import type { CorridorDescriptor } from './corridorDescriptor.js'
 import type { PageOptions } from './page.js'
+import type { CorridorLedger, LedgerWindow } from '../analytics/economics.js'
 
 /** What a corridor hands back from an RFQ. Mirrors `ingress/rfq.ts`'s outcome. */
 export interface CorridorRfqOutcome {
@@ -162,6 +163,22 @@ export interface CorridorReader {
 
   committedSats(): Promise<number>
 
+  /**
+   * This corridor's rows in a window, projected into the book's vocabulary.
+   *
+   * OPTIONAL, and absence means the P&L screen reports this corridor as
+   * UNMEASURED rather than as zero — the same rule `liveLockups` states, and
+   * here it protects the same thing. A corridor silently contributing nothing
+   * to a profit total is indistinguishable from one that broke even, and an
+   * operator reading a headline figure has no way to tell which they are
+   * looking at.
+   *
+   * Only the corridor can implement it: which of its columns the solver
+   * received and which it paid out is the same knowledge `project` needs, and
+   * getting the two the wrong way round reports a loss as a profit.
+   */
+  economics?(window: LedgerWindow): Promise<CorridorLedger>
+
   page(options: PageOptions): Promise<{ swaps: CorridorSwapView[]; nextCursor: string | null }>
 
   /** One row plus its timeline, or null when this corridor has no such id. */
@@ -258,6 +275,8 @@ export interface Corridor extends CorridorReader {
 export interface CorridorSet extends Iterable<Corridor> {
   get(pair: string): Corridor | undefined
   readonly size: number
+  /** Swap the serve list in place so a captured set (ingress, HTTP) sees new pairs. */
+  replace(corridors: readonly Corridor[]): void
 }
 
 /**
@@ -271,6 +290,7 @@ export interface CorridorSet extends Iterable<Corridor> {
 export interface CorridorReaderSet extends Iterable<CorridorReader> {
   get(pair: string): CorridorReader | undefined
   readonly size: number
+  replace(corridors: readonly CorridorReader[]): void
 }
 
 /**
@@ -285,18 +305,24 @@ export interface CorridorReaderSet extends Iterable<CorridorReader> {
  * rather than a build fault.
  */
 export const createCorridorSet = (corridors: readonly Corridor[]): CorridorSet => {
-  const byPair = new Map<string, Corridor>()
-  const stems = new Map<string, string>()
-  for (const corridor of corridors) {
-    const { pair, envStem } = corridor.descriptor
-    if (byPair.has(pair)) throw new Error(`duplicate corridor pair: ${pair}`)
-    const claimed = stems.get(envStem)
-    if (claimed !== undefined) throw new Error(`duplicate corridor env stem ${envStem}: ${claimed} and ${pair}`)
-    stems.set(envStem, pair)
-    byPair.set(pair, corridor)
+  let byPair = new Map<string, Corridor>()
+  const index = (list: readonly Corridor[]): void => {
+    const next = new Map<string, Corridor>()
+    const stems = new Map<string, string>()
+    for (const corridor of list) {
+      const { pair, envStem } = corridor.descriptor
+      if (next.has(pair)) throw new Error(`duplicate corridor pair: ${pair}`)
+      const claimed = stems.get(envStem)
+      if (claimed !== undefined) throw new Error(`duplicate corridor env stem ${envStem}: ${claimed} and ${pair}`)
+      stems.set(envStem, pair)
+      next.set(pair, corridor)
+    }
+    byPair = next
   }
+  index(corridors)
   return {
     get: (pair) => byPair.get(pair),
+    replace: index,
     get size() {
       return byPair.size
     },
@@ -315,15 +341,21 @@ export const createCorridorSet = (corridors: readonly Corridor[]): CorridorSet =
  * is the same class of silent narrowing this split exists to prevent.
  */
 export const createCorridorReaderSet = (corridors: readonly CorridorReader[]): CorridorReaderSet => {
-  const byPair = new Map<string, CorridorReader>()
-  for (const corridor of corridors) {
-    if (byPair.has(corridor.descriptor.pair)) {
-      throw new Error(`duplicate corridor pair: ${corridor.descriptor.pair}`)
+  let byPair = new Map<string, CorridorReader>()
+  const index = (list: readonly CorridorReader[]): void => {
+    const next = new Map<string, CorridorReader>()
+    for (const corridor of list) {
+      if (next.has(corridor.descriptor.pair)) {
+        throw new Error(`duplicate corridor pair: ${corridor.descriptor.pair}`)
+      }
+      next.set(corridor.descriptor.pair, corridor)
     }
-    byPair.set(corridor.descriptor.pair, corridor)
+    byPair = next
   }
+  index(corridors)
   return {
     get: (pair) => byPair.get(pair),
+    replace: index,
     get size() {
       return byPair.size
     },

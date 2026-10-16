@@ -16,8 +16,8 @@
  * What the compiler still cannot see is the part that matters most: passing
  * FOUR SEPARATE controls type-checks perfectly and is silently wrong. Each one
  * bounds its own corridor, every single-corridor test keeps passing, and the
- * global cap #96 introduced quietly becomes per-corridor again — which is the
- * bound #105 is about. Counting constructions is what pins that.
+ * global cap quietly becomes per-corridor again — which is the
+ * bound the shared reserve is about. Counting constructions is what pins that.
  *
  * The layout assertions are here for the same reason: opening a store by a
  * hardcoded suffixed path instead of the layout works perfectly on a legacy
@@ -48,7 +48,7 @@ describe('createServices — one admission control for every corridor', () => {
     // written for: the EVM corridors took `totalCommitted` WITHOUT the control,
     // and their quote() did a plain read-then-check. Two concurrent quotes could
     // each read the same pre-commit total and both pass a cap only one fits
-    // under — the #105 race, reopened for two corridors and invisible because
+    // under — the cap race, reopened for two corridors and invisible because
     // the number was hard-coded to the corridors that existed when it was written.
     // SEVEN since the onchain asset receive leg. This number tracks reality on
     // purpose — the paragraph above is what happened the last time it did not.
@@ -57,12 +57,26 @@ describe('createServices — one admission control for every corridor', () => {
     expect(body.match(/^\s*totalCommitted,$/gm) ?? []).toHaveLength(7)
   })
 
-  // The EVM block declares a SECOND `totalCommitted`, and either spelling type-checks.
-  it('reads the asset receive store in BOTH totalCommitted closures', () => {
+  // The asset receive leg quotes against the house cap, so its store must be
+  // read in the single house-wide closure — a second closure would type-check
+  // and silently split the cap again.
+  it('reads the asset receive store in the house-wide totalCommitted closure', () => {
     const body = createServicesBody()
-    const starts = [...body.matchAll(/const totalCommitted\b/g)].map((m) => m.index ?? 0)
-    expect(starts).toHaveLength(2)
-    for (const at of starts) expect(body.slice(at, at + 700)).toContain('onchainAssetReceiveStore')
+    const at = body.indexOf('const totalCommitted')
+    expect(body.slice(at, at + 700)).toContain('onchainAssetReceiveStore')
+  })
+
+  it('reads one house-wide committed total, every exposure-bearing store in it', () => {
+    const body = createServicesBody()
+    expect(body.match(/const totalCommitted/g) ?? []).toHaveLength(1)
+    for (const read of [
+      'evmSendStore?.committedSats()',
+      'evmReceiveStore?.committedSats()',
+      'onchainAssetReceiveStore?.committedSats() ?? 0',
+    ]) {
+      expect(body, `${read} is missing from the house-wide total`).toContain(read)
+    }
+    expect(body).toContain('assetRfqStore.committedSats()')
   })
 })
 

@@ -8,19 +8,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import {
-  AssetOfferService,
-  assertMarketsPriced,
-  parseAssetMarkets,
-  type AssetOfferDeps,
-} from '@arkade-os/solver-app/ops/assetOffers.js'
+import { AssetOfferService, parseAssetMarkets, type AssetOfferDeps } from '@arkade-os/solver-app/ops/assetOffers.js'
+import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
+import type { SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
 import { encodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap'
 import { Extension, UnknownPacket, asset } from '@arkade-os/sdk'
 import { Transaction } from '@scure/btc-signer'
-import { base64, hex } from '@scure/base'
+import { base64 } from '@scure/base'
 
 const USDT = '11'.repeat(34)
 const SCRIPT = new Uint8Array(34).fill(0xab)
@@ -46,6 +43,7 @@ const build = async (over: Partial<AssetOfferDeps> = {}) => {
   let n = 0
   const deps: AssetOfferDeps = {
     store,
+    carrierSats: 0n,
     markets: [{ a: USDT, b: null }],
     minFillAmount: 10n,
     maxFillAmount: 100_000n,
@@ -58,6 +56,20 @@ const build = async (over: Partial<AssetOfferDeps> = {}) => {
 }
 
 const found = { offer: offer(), txid: 'a'.repeat(64), vout: 0 }
+// BTC/USDT: the maker deposits 900 USDT-units and wants 1000 sats. Feed is
+// sats-per-USDT, so 1.12 admits the fixture and 0.5 is far out.
+const pricing = [
+  {
+    base: USDT,
+    quote: null,
+    baseDecimals: 0,
+    quoteDecimals: 0,
+    feedUrl: 'https://feed.test/p',
+    pricePath: '/price',
+    toleranceBps: 100,
+    feeBps: 0,
+  },
+]
 
 describe('consider', () => {
   it('records an intent for an offer it can fill', async () => {
@@ -143,21 +155,6 @@ describe('offer consistency — Swap Protocol V1 § 5.1', () => {
 })
 
 describe('the price gate', () => {
-  // BTC/USDT: the maker deposits 900 USDT-units and wants 1000 sats. Feed is
-  // sats-per-USDT so the fixture's ratio sits near it.
-  const pricing = [
-    {
-      base: USDT,
-      quote: null,
-      baseDecimals: 0,
-      quoteDecimals: 0,
-      feedUrl: 'https://feed.test/p',
-      pricePath: '/price',
-      toleranceBps: 100,
-      feeBps: 0,
-    },
-  ]
-
   it('takes an offer inside tolerance', async () => {
     const { service } = await build({ pricing, fetchPrice: async () => priceFrom('1.12') })
     expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
@@ -168,6 +165,42 @@ describe('the price gate', () => {
     const { store, service } = await build({ pricing, fetchPrice: async () => priceFrom('0.5') })
     expect(await service.consider(found)).toEqual({ fill: false, reason: 'price_out_of_tolerance' })
     expect(await store.listNonTerminal()).toHaveLength(0)
+  })
+
+  /** Charging this leg refuses an ALREADY-FUNDED offer, so it stays opt-in. */
+  describe('the carrier we deliver on an asset-want offer', () => {
+    const wantsAsset = {
+      offer: {
+        swapPkScript: SCRIPT,
+        wantAmount: 900n,
+        wantAsset: { toString: () => USDT },
+        offerAsset: undefined,
+      } as unknown as Offer,
+      txid: 'b'.repeat(64),
+      vout: 0,
+    }
+    const satsDeposit = async () => [{ script: SCRIPT_HEX, value: 1000 }]
+
+    it('is NOT charged by default, so a maker pricing off the card still fills', async () => {
+      const { service } = await build({
+        pricing,
+        fetchPrice: async () => priceFrom('1.12'),
+        carrierSats: 330n,
+        outputsAt: satsDeposit,
+      })
+      expect(await service.consider(wantsAsset)).toMatchObject({ fill: true })
+    })
+
+    it('is charged when the operator opts in', async () => {
+      const { service } = await build({
+        pricing,
+        fetchPrice: async () => priceFrom('1.12'),
+        carrierSats: 330n,
+        chargesDeliveredCarrier: true,
+        outputsAt: satsDeposit,
+      })
+      expect(await service.consider(wantsAsset)).toEqual({ fill: false, reason: 'price_out_of_tolerance' })
+    })
   })
 
   it('FAILS CLOSED when the feed cannot be read', async () => {
@@ -196,6 +229,11 @@ describe('the price gate', () => {
     // Opting out entirely is allowed; opting in halfway is not.
     const { service } = await build()
     expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+  })
+
+  it('FAILS CLOSED when configured pricing is empty', async () => {
+    const { service } = await build({ pricing: [] })
+    expect(await service.consider(found)).toEqual({ fill: false, reason: 'price_out_of_tolerance' })
   })
 
   it('does not read the feed for an offer the cheap gates already refused', async () => {
@@ -374,6 +412,7 @@ describe('refusals an operator can read', () => {
     // The second silence, driven for real in test/e2e/assetOffer.e2e.test.ts.
     expect(servicesSource).toMatch(/servesOffers\s*=\s*policy\.offerMarkets\.length > 0/)
     expect(servicesSource).toMatch(/servesOffers\s*\?\s*await OfferFillStore\.open/)
+    expect(servicesSource).toContain('replaceMarkets:')
   })
 })
 
@@ -418,23 +457,92 @@ describe('tickAll', () => {
   })
 })
 
+describe('replaceMarkets', () => {
+  it('starts refusing new offers once the serve list is emptied', async () => {
+    const { service } = await build()
+    expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+    await service.replaceMarkets({ markets: [] })
+    expect(await service.consider({ ...found, txid: 'b'.repeat(64) })).toEqual({
+      fill: false,
+      reason: 'unsupported_pair',
+    })
+  })
+
+  it('refuses an already-recorded intent when configured pricing disappears', async () => {
+    const settle = vi.fn(async () => '0xfill')
+    const { store, service } = await build({
+      pricing,
+      fetchPrice: async () => priceFrom('1.12'),
+      settle,
+    })
+    expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+    await service.replaceMarkets({ markets: [], pricing: [] })
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'refused', fillTxid: null })
+  })
+
+  // The console save, as `rebuild()` performs it (`ops/services.ts:1228`): the row is
+  // re-judged BEFORE the CAS, so it fails to `refused` and never reaches `filling`.
+  const edited = (toleranceBps: number) => [{ ...pricing[0]!, toleranceBps }]
+  const admittedUnder = async (toleranceBps: number) => {
+    const settle = vi.fn(async () => '0xfill')
+    const built = await build({ pricing: edited(toleranceBps), fetchPrice: async () => priceFrom('1'), settle })
+    expect(await built.service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+    expect(await built.store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+    return { ...built, settle }
+  }
+
+  it('refuses an already-fillable row after a market edit moves the tolerance', async () => {
+    const { store, service, settle } = await admittedUnder(9_999)
+    await service.replaceMarkets({ markets: [{ a: USDT, b: null }], pricing: edited(0) })
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    const row = await store.findById('fill-1')
+    expect(row).toMatchObject({ state: 'refused', fillTxid: null })
+    expect(row!.failureReason).toMatch(/price_out_of_tolerance/)
+  })
+
+  it('fills that same row when the save leaves the tolerance alone — the control', async () => {
+    const { store, service, settle } = await admittedUnder(9_999)
+    await service.replaceMarkets({ markets: [{ a: USDT, b: null }], pricing: edited(9_999) })
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled', fillTxid: '0xfill' })
+  })
+
+  it('waits for an in-flight consider before swapping the list', async () => {
+    let release!: () => void
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { service } = await build({
+      outputsAt: async () => {
+        await blocked
+        return [{ script: SCRIPT_HEX, value: 500, assets: [{ assetId: USDT, amount: 900n }] }]
+      },
+    })
+    const considering = service.consider(found)
+    let replaced = false
+    const replacing = service.replaceMarkets({ markets: [] }).then(() => {
+      replaced = true
+    })
+    await Promise.resolve()
+    expect(replaced).toBe(false)
+    release()
+    expect(await considering).toEqual({ fill: true, id: 'fill-1' })
+    await replacing
+    expect(replaced).toBe(true)
+    expect(await service.consider({ ...found, txid: 'b'.repeat(64) })).toEqual({
+      fill: false,
+      reason: 'unsupported_pair',
+    })
+  })
+})
+
 // `consider` admits a price; `tickAll` spends at it on a worker loop and at
 // startup recovery, arbitrary wall time later. Nothing between them re-asks.
 describe('tickAll re-runs price admission', () => {
-  // 900 USDT-units against 1000 sats wanted, so 1.12 admits and 0.5 is far out.
-  const pricing = [
-    {
-      base: USDT,
-      quote: null,
-      baseDecimals: 0,
-      quoteDecimals: 0,
-      feedUrl: 'https://feed.test/p',
-      pricePath: '/price',
-      toleranceBps: 100,
-      feeBps: 0,
-    },
-  ]
-
   let duringPriceRead: (() => Promise<void>) | null = null
   beforeEach(() => void (duringPriceRead = null))
 
@@ -651,57 +759,55 @@ describe('parseAssetMarkets', () => {
   })
 })
 
-/**
- * A served market with no pricing takes an offer at ANY price the maker names —
- * `assetOffers.ts` says so on `AssetMarketPricing`, and `withinTolerance`
- * returns true when the pricing list is empty. That is a FAIL-OPEN: the gate
- * reads as optional, and absent it is not lenient but disabled.
- *
- * It only became reachable when a producer for `markets` arrived without one for
- * `pricing` — `OFFER_MARKETS` names pairs, and the console's market rows are
- * what carry a feed. Either alone is a configuration a deployment can express;
- * this refuses the combination rather than serving it quietly.
- *
- * Note which direction is safe. Pricing WITHOUT a matching market is fine —
- * nothing is served. Pricing set but unreadable already refuses (`fetchPrice`
- * absent returns false). Only market-without-pricing fills blind.
- */
-describe('assertMarketsPriced', () => {
-  const BTC = null
-  const USDA = 'aa'.repeat(32)
-  const EURX = 'bb'.repeat(32)
-  const priced = (base: string | null, quote: string | null) =>
-    ({
-      base,
-      quote,
-      baseDecimals: 8,
-      quoteDecimals: 6,
-      feedUrl: 'https://f',
-      pricePath: '/p',
-      toleranceBps: 100,
-    }) as never
+describe('the approval gate on offer fills', () => {
+  const gateWith = (thresholdSats: number | null, assetThresholds?: ReadonlyMap<string, bigint>) => {
+    const requests: SwapApprovalRequest[] = []
+    return {
+      requests,
+      gate: approvalGateFor({
+        thresholdSats,
+        assetThresholds,
+        corridor: 'arkade offer fill',
+        store: {
+          isSwapApproved: async () => false,
+          recordApprovalRequest: async (request) => {
+            requests.push(request)
+            return true
+          },
+        },
+      }),
+    }
+  }
 
-  it('accepts a market its pricing covers', () => {
-    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [priced(BTC, USDA)])).not.toThrow()
+  it('submits nothing at the threshold, and leaves the row FILLABLE rather than filling', async () => {
+    const { requests, gate } = gateWith(1_000)
+    const settle = vi.fn(async () => '0xfill')
+    const { store, service } = await build({ settle, approvalGate: gate })
+    await service.consider(found)
+
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+    expect(requests).toEqual([{ swapId: 'fill-1', corridor: 'arkade offer fill', assetId: null, amount: 1_000n }])
   })
 
-  it('accepts it in either orientation — the market is unordered, the feed is not', () => {
-    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [priced(USDA, BTC)])).not.toThrow()
+  it('fills ONE SAT below the threshold, recording nothing and asking nobody', async () => {
+    const { requests, gate } = gateWith(1_001)
+    const settle = vi.fn(async () => '0xfill')
+    const { store, service } = await build({ settle, approvalGate: gate })
+    await service.consider(found)
+
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled', fillTxid: '0xfill' })
+    expect(requests).toEqual([])
   })
 
-  it('REFUSES a served market with no pricing at all', () => {
-    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [])).toThrow(/pricing|price/i)
-  })
-
-  it('refuses when the pricing covers a different market', () => {
-    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [priced(BTC, EURX)])).toThrow(/pricing|price/i)
-  })
-
-  it('names the market that is unpriced, so an operator can fix it', () => {
-    expect(() => assertMarketsPriced([{ a: BTC, b: USDA }], [])).toThrow(new RegExp(USDA.slice(0, 16)))
-  })
-
-  it('allows pricing with no market — nothing is served, nothing is at risk', () => {
-    expect(() => assertMarketsPriced([], [priced(BTC, USDA)])).not.toThrow()
+  it('fills as before when no gate is wired at all', async () => {
+    const settle = vi.fn(async () => '0xfill')
+    const { service } = await build({ settle })
+    await service.consider(found)
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(1)
   })
 })

@@ -39,19 +39,24 @@ export interface RefundTxParams {
 /** Standard tapscript leaf version — same literal Task 11's CLI code already uses. */
 const LEAF_VERSION = 0xc0
 
-const addRefundInput = (tx: InstanceType<typeof Transaction>, params: RefundTxParams): void => {
+/** The HTLC funding output as a script-path input spending `leafScript`. */
+export const addLeafInput = (
+  tx: InstanceType<typeof Transaction>,
+  params: Pick<RefundTxParams, 'fundingTxid' | 'fundingVout' | 'fundingValueSats'> & {
+    htlc: Pick<OnchainHtlc, 'pkScript'>
+  },
+  leafScript: Uint8Array,
+  controlBlock: Uint8Array,
+): void => {
   tx.addInput({
     txid: params.fundingTxid,
     index: params.fundingVout,
     witnessUtxo: { script: params.htlc.pkScript, amount: BigInt(params.fundingValueSats) },
-    // RBF-enabled AND non-final — the latter is required for CHECKLOCKTIMEVERIFY
-    // to mature at all, same sequence value the claim side already uses.
+    // RBF-enabled AND non-final: the refund leaf's CHECKLOCKTIMEVERIFY cannot
+    // mature without it; the claim leaf has no CLTV, so there it is only policy.
     sequence: 0xfffffffd,
     tapLeafScript: [
-      [
-        TaprootControlBlock.decode(params.htlc.refundControlBlock),
-        concatBytes(params.htlc.refundScript, new Uint8Array([LEAF_VERSION])),
-      ],
+      [TaprootControlBlock.decode(controlBlock), concatBytes(leafScript, new Uint8Array([LEAF_VERSION]))],
     ],
     sighashType: SigHash.DEFAULT,
   })
@@ -73,7 +78,7 @@ export const buildOnchainRefundTx = (params: RefundTxParams): InstanceType<typeo
     allowUnknownInputs: true,
     lockTime: params.htlc.refundLocktime,
   })
-  addRefundInput(tx, params)
+  addLeafInput(tx, params, params.htlc.refundScript, params.htlc.refundControlBlock)
   tx.addOutput({ script: params.destinationScript, amount: params.payoutAmountSats })
   return tx
 }

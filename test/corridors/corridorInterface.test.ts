@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { createCorridorSet, type Corridor } from '@arkade-os/solver-core/core/corridor.js'
+import { createCorridorSet, createCorridorReaderSet, type Corridor } from '@arkade-os/solver-core/core/corridor.js'
 import { respondToRfqRequest } from '@arkade-os/solver-transport/ingress/rfq.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 
@@ -54,8 +54,39 @@ describe('createCorridorSet', () => {
     expect([...set].map((c) => c.descriptor.pair)).toEqual(['a->b', 'c->d'])
   })
 
+  it('replaces its serve list in place so a captured set sees the new pair', () => {
+    const set = createCorridorSet([stub('a->b', 'A')])
+    set.replace([stub('c->d', 'C')])
+    expect(set.get('a->b')).toBeUndefined()
+    expect(set.get('c->d')?.descriptor.envStem).toBe('C')
+    expect([...set].map((c) => c.descriptor.pair)).toEqual(['c->d'])
+  })
+
+  it('leaves the previous list in force when replace refuses a collision', () => {
+    const set = createCorridorSet([stub('a->b', 'A')])
+    expect(() => set.replace([stub('x->y', 'X'), stub('x->y', 'Y')])).toThrow(/duplicate corridor pair/)
+    expect(set.get('a->b')?.descriptor.envStem).toBe('A')
+    expect(set.size).toBe(1)
+  })
+
   it('reports how many corridors it holds', () => {
     expect(createCorridorSet([stub('a->b', 'A'), stub('c->d', 'C')]).size).toBe(2)
+  })
+})
+
+describe('createCorridorReaderSet', () => {
+  it('replaces its serve list in place so a captured set sees the new pair', () => {
+    const set = createCorridorReaderSet([stub('a->b', 'A')])
+    set.replace([stub('c->d', 'C')])
+    expect(set.get('a->b')).toBeUndefined()
+    expect(set.get('c->d')?.descriptor.envStem).toBe('C')
+  })
+
+  it('leaves the previous list in force when replace refuses a collision', () => {
+    const set = createCorridorReaderSet([stub('a->b', 'A')])
+    expect(() => set.replace([stub('x->y', 'X'), stub('x->y', 'Y')])).toThrow(/duplicate corridor pair/)
+    expect(set.get('a->b')?.descriptor.envStem).toBe('A')
+    expect(set.size).toBe(1)
   })
 })
 
@@ -122,6 +153,48 @@ describe('the wire contract, enforced on a corridor’s way out', () => {
   it('passes a reason that IS in the closed set straight through', async () => {
     const outcome = await ask(rogue({ reason: 'exposure_cap' }))
     expect(outcome.payload).toMatchObject({ reason: 'exposure_cap' })
+  })
+
+  it('strips an error code outside the closed set without changing a valid reason', async () => {
+    const outcome = await ask(
+      rogue({
+        reason: 'exposure_cap',
+        error_code: 'backend_exception',
+        field: 'internal.inventory',
+        actual: 12.5,
+        limit: 20,
+        unit: 'widgets',
+      }),
+    )
+    expect(outcome.payload).toMatchObject({ reason: 'exposure_cap' })
+    expect(outcome.payload).not.toHaveProperty('error_code')
+    expect(outcome.payload).not.toHaveProperty('field')
+    expect(outcome.payload).not.toHaveProperty('actual')
+    expect(outcome.payload).not.toHaveProperty('limit')
+    expect(outcome.payload).not.toHaveProperty('unit')
+  })
+
+  it('strips malformed fields from a recognised diagnostic', async () => {
+    const outcome = await ask(
+      rogue({
+        reason: 'unsupported_payload',
+        error_code: 'invoice_amount_mismatch',
+        field: 42,
+        actual: 12.5,
+        expected: 12,
+        limit: Number.POSITIVE_INFINITY,
+        unit: 'widgets',
+      }),
+    )
+    expect(outcome.payload).toMatchObject({
+      reason: 'unsupported_payload',
+      error_code: 'invoice_amount_mismatch',
+      expected: 12,
+    })
+    expect(outcome.payload).not.toHaveProperty('field')
+    expect(outcome.payload).not.toHaveProperty('actual')
+    expect(outcome.payload).not.toHaveProperty('limit')
+    expect(outcome.payload).not.toHaveProperty('unit')
   })
 
   it('refuses an oversized payload rather than relaying it', async () => {

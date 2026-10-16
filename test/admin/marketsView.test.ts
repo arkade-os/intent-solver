@@ -5,14 +5,17 @@
  * reads the file — the approach `armedActions.test.ts` and `quotesView.test.ts`
  * already take, and for the same reason.
  *
- * The claims worth pinning are the honest ones. A console that shows a market as
- * configured and lets an operator read that as "we are trading it" is the
- * failure this screen most easily produces: nothing here reaches a running
- * solver, and a market added since boot cannot be filled against.
+ * The claims worth pinning are the honest ones. CRUD applies live; the notice
+ * and the `active` list are how the screen says a stored row is this process's
+ * serve list. A row that is stored but served by nothing is still the failure
+ * this screen most easily produces.
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+// The REAL ordered-save client, not a stand-in: it is what turns the route's 200-carrying-`unapplied`
+// into a throw, so a harness that stubbed it would be measuring its own mock rather than the seam.
+import { applyPricing } from '../../packages/solver-app/src/admin/static/pricingSave.js'
 
 const appSource = readFileSync(
   fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
@@ -37,9 +40,9 @@ describe('the markets screen is reachable', () => {
   it('is in the nav, the endpoint table and the view table', () => {
     // All three, because two of the three renders a dead tab: a nav entry with
     // no body falls through to the overview and looks like a broken link.
-    expect(appSource).toContain("['markets', 'markets']")
+    expect(appSource).toContain("['pricing', 'pricing']")
     expect(appSource).toContain("markets: () => '/api/markets'")
-    expect(appSource).toContain('markets: marketsView')
+    expect(appSource).toContain('pricing: pricingView')
   })
 
   it('is exempt from the swap-event reload, like settings', () => {
@@ -55,10 +58,10 @@ describe('the screen does not let a stored market read as a live one', () => {
     expect(marketsBlock()).toContain('m.restartNotice')
   })
 
-  it('distinguishes trading from pending restart, using the API’s active list', () => {
+  it('distinguishes trading from not quoting, using the API’s active list', () => {
     const block = marketsBlock()
     expect(block).toContain('new Set(m.active)')
-    expect(block).toMatch(/pending restart/)
+    expect(block).toMatch(/not quoting/)
     expect(block).toMatch(/trading/)
   })
 
@@ -91,6 +94,75 @@ describe('the form does not fight the operator', () => {
     expect(block.slice(start, end)).not.toContain('render()')
   })
 
+  /** `saveMarket` with every seam injected, so the draft it keeps or clears is observable.
+   *
+   *  `applyPricing` is the REAL ordered-save client, not a stand-in: a refusal arrives as a 200 whose
+   *  body the client has to read, so a stubbed reader would assert the mock instead of the seam. */
+  const savedWith = async (response: unknown, overrides: Record<string, string> = {}) => {
+    const block = marketsBlock()
+    const start = block.indexOf('const saveMarket')
+    if (start === -1) throw new Error('saveMarket is gone from the markets block')
+    const source = block.slice(start, block.indexOf('\n}', start) + 2)
+    const sent: { path: string; body: string }[] = []
+    const failures: string[] = []
+    const built = new Function(
+      'api',
+      'marketBody',
+      'carrierDefaultOverride',
+      'state',
+      'load',
+      'fail',
+      'applyPricing',
+      `let marketDraft = { marketKey: 'k' }
+       ${source}
+       return async () => (await saveMarket(), marketDraft)`,
+    ) as (...args: unknown[]) => () => Promise<unknown>
+    const draft = await built(
+      async (path: string, init: { body: string }) => (sent.push({ path, body: init.body }), response),
+      (d: unknown) => d,
+      () => overrides,
+      { banner: 'x' },
+      async () => {},
+      (error: Error) => failures.push(error.message),
+      applyPricing,
+    )()
+    return { draft, sent, failures }
+  }
+
+  it('saves through the ordered endpoint, not the single-market write', async () => {
+    const { sent } = await savedWith(
+      { revision: 'r', applied: ['k'], unapplied: [] },
+      { ASSET_CARRIER_PRICING: 'true' },
+    )
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.path).toBe('/api/pricing/apply')
+    // Both halves ride ONE request: the ordering the route promises is a property of one save.
+    expect(JSON.parse(sent[0]!.body)).toMatchObject({
+      markets: [{ marketKey: 'k' }],
+      overrides: { ASSET_CARRIER_PRICING: 'true' },
+    })
+  })
+
+  // A refusal arrives INSIDE a 200 here, so status alone is not success.
+  it('keeps the draft when the ordered save reports the market unapplied', async () => {
+    const { draft, failures } = await savedWith({
+      revision: 'r',
+      applied: [],
+      unapplied: [{ key: 'k', reason: 'the feed did not answer' }],
+    })
+    expect(draft).toEqual({ marketKey: 'k' })
+    // The operator has to see which key was refused as well as why.
+    expect(failures).toHaveLength(1)
+    expect(failures[0]).toContain('k')
+    expect(failures[0]).toContain('the feed did not answer')
+  })
+
+  it('clears the draft when nothing is unapplied', async () => {
+    const { draft, failures } = await savedWith({ revision: 'r', applied: ['k'], unapplied: [] })
+    expect(draft).toBeNull()
+    expect(failures).toEqual([])
+  })
+
   it('leaves the form open when a write is refused', () => {
     // Every refusal names one field. Closing the form would make the operator
     // retype the other ten to fix it.
@@ -120,5 +192,409 @@ describe('the form speaks the API’s dialect', () => {
   it('encodes the market key into the delete path', () => {
     // The key carries `/` and `:`; unencoded it would address a different route.
     expect(marketsBlock()).toContain('encodeURIComponent(key)')
+  })
+})
+
+describe('the form is laid out rather than run together', () => {
+  it('uses one grid for the whole form, not a toolbar per row', () => {
+    const block = marketsBlock()
+    expect(block).toContain("'div.form-grid'")
+    expect(block).not.toContain('const field = (label, key, hint) =>')
+  })
+
+  it('carries a plain-English sentence for the fields that decide money', () => {
+    const block = marketsBlock()
+    for (const phrase of [
+      'Our margin, taken out of what the customer receives',
+      'Bounds on what we pay out in this direction',
+      'Our margin when the customer hands us the base asset',
+    ]) {
+      expect(block).toContain(phrase)
+    }
+  })
+
+  it('renders the sentence through a tooltip rather than as a second hint', () => {
+    expect(marketsBlock()).toContain("h('span.tip'")
+  })
+
+  it('groups the fields, so the form reads as sections rather than a list', () => {
+    expect(marketsBlock()).toContain("group('what we charge')")
+  })
+
+  it('renders an input for each per-direction spread, which #171 stored but never showed', () => {
+    const block = marketsBlock()
+    expect(block).toContain("'sellBaseFeeBps'")
+    expect(block).toContain("'buyBaseFeeBps'")
+  })
+
+  it('carries the saved key on the draft, and keeps it off the wire body', () => {
+    const block = marketsBlock()
+    expect(block).toContain('marketKey: market.marketKey')
+    const body = block.slice(block.indexOf('const marketBody'), block.indexOf('const field'))
+    expect(body).not.toContain('marketKey')
+  })
+
+  it('declares schedulePreview exactly once, and as a `let` Task 11 can assign to', () => {
+    const block = marketsBlock()
+    expect(block).toContain('let schedulePreview')
+    expect(block.match(/(?:let|const|var)\s+schedulePreview\b/g)).toHaveLength(1)
+  })
+})
+
+describe('the preview styles spend no new colour', () => {
+  const css = readFileSync(
+    fileURLToPath(new URL('../../packages/solver-app/src/admin/static/styles.css', import.meta.url)),
+    'utf8',
+  )
+
+  const previewCss = (): string => {
+    const marker = '/* ---- the pricing editor'
+    const at = css.indexOf(marker)
+    expect(at).toBeGreaterThan(-1)
+    return css.slice(at)
+  }
+
+  it('introduces no token outside the two saturated ones', () => {
+    const block = previewCss()
+    expect(block.match(/var\(--failed\)/g)).toBeNull()
+    expect(block.match(/#[0-9a-fA-F]{3,6}/g)).toBeNull()
+  })
+
+  it('ships no rule this task does not render', () => {
+    const block = previewCss()
+    expect(block).not.toContain('.headline')
+    expect(block).not.toContain('.lead')
+    for (const cls of ['form-grid', 'tip']) expect(marketsBlock()).toContain(cls)
+  })
+})
+
+describe('the preview panel', () => {
+  it('posts to the preview route rather than reloading the markets list', () => {
+    const block = marketsBlock()
+    expect(block).toContain("'/api/pricing/preview'")
+    expect(block).toContain("method: 'POST'")
+  })
+
+  it('never calls render() from the refresh path, which would eat the caret', () => {
+    const block = marketsBlock()
+    const start = block.indexOf('const refreshPreview')
+    const end = block.indexOf('const previewPanel')
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    expect(block.slice(start, end)).not.toContain('render()')
+  })
+
+  it('debounces, so a held-down key is one request', () => {
+    expect(marketsBlock()).toContain('clearTimeout(previewTimer)')
+  })
+
+  it('sends the saved key, which is how the server knows which feed to price against', () => {
+    expect(marketsBlock()).toContain('marketKey: marketDraft.marketKey')
+  })
+
+  it('spends the amber only on a row under the break-even', () => {
+    const block = marketsBlock()
+    expect(block).toContain("loss ? '.loss' : ''")
+    expect(block).toContain('const belowBreakEven =')
+  })
+
+  it('declares schedulePreview nowhere — Task 10 owns the binding', () => {
+    expect(marketsBlock().match(/(?:let|const|var)\s+schedulePreview\b/g)).toHaveLength(1)
+  })
+
+  it('shows the carrier policy the console could not previously see', () => {
+    const block = marketsBlock()
+    expect(block).toContain('c.rfqPriced')
+    expect(block).toContain('c.offerCharged')
+    expect(block).toContain('rfqDirections')
+  })
+
+  it('says the RFQ directions and the carrier are read-only until the live-policy slice', () => {
+    // Not /restart|environment/: `m.restartNotice` already matches that before
+    // this task adds anything, which is how this first went green for free.
+    expect(marketsBlock()).toContain('needs a restart')
+  })
+})
+
+/** Instances of StubNode so `h`'s two `instanceof Node` checks take the element path. */
+class StubNode {
+  className = ''
+  attrs: Record<string, string> = {}
+  listeners: Record<string, unknown> = {}
+  childNodes: StubNode[] = []
+  constructor(
+    readonly tagName: string,
+    readonly text = '',
+  ) {}
+  get firstChild(): StubNode | null {
+    return this.childNodes[0] ?? null
+  }
+  appendChild(child: StubNode): StubNode {
+    this.childNodes.push(child)
+    return child
+  }
+  removeChild(child: StubNode): StubNode {
+    this.childNodes.splice(this.childNodes.indexOf(child), 1)
+    return child
+  }
+  setAttribute(key: string, value: string): void {
+    this.attrs[key] = value
+  }
+  addEventListener(type: string, fn: unknown): void {
+    this.listeners[type] = fn
+  }
+}
+
+const stubDoc = () => ({
+  createElement: (tag: string) => new StubNode(tag),
+  createTextNode: (text: string) => new StubNode('#text', text),
+})
+
+const textOf = (node: StubNode): string => [node.text, ...node.childNodes.map(textOf)].join(' ')
+
+const helperBlock = (): string => {
+  const start = appSource.indexOf('/* ---- tiny element helper')
+  const end = appSource.indexOf('/* ---- api ---')
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error('the element helper moved out of the slice this guard reads')
+  }
+  return appSource.slice(start, end)
+}
+
+// Same new-Function + named-error pattern as marketRoutes.test.ts:33-46: run rather than grepped.
+const previewHarness = (response: unknown, draft: Record<string, unknown> = {}) => {
+  const pending: (() => void)[] = []
+  const sent: (string | undefined)[] = []
+  const params = [
+    'document',
+    'Node',
+    'api',
+    'shortId',
+    'ago',
+    'state',
+    'render',
+    'load',
+    'fail',
+    'setTimeout',
+    'clearTimeout',
+  ]
+  const body = `${helperBlock()}\n${marketsBlock()}
+    marketDraft = { ...blankMarket(), marketKey: 'k', ...${JSON.stringify(draft)} }
+    return { previewPanel, refreshPreview, schedulePreview, marketsView }`
+  const args = [
+    stubDoc(),
+    StubNode,
+    async (path: string, init?: { body?: string }) => {
+      sent.push(init?.body ?? path)
+      if (path.startsWith('/api/assets/')) {
+        // A macrotask, so a retry loop fails this test instead of starving the event loop.
+        await new Promise((resolve) => setImmediate(resolve))
+        throw new Error('500')
+      }
+      return response
+    },
+    (value: unknown) => String(value),
+    () => '1m',
+    { data: { markets: { carrier: { sats: '330', rfqPriced: false, offerCharged: false }, markets: [] } } },
+    () => {
+      throw new Error('render() from the preview would eat the caret')
+    },
+    async () => {},
+    () => {},
+    (fn: () => void) => (pending.push(fn), pending.length),
+    () => pending.pop(),
+  ]
+  try {
+    const built = new Function(...params, body)(...args) as {
+      previewPanel: () => StubNode
+      refreshPreview: () => Promise<void>
+      schedulePreview: () => void
+      marketsView: () => StubNode
+    }
+    return { ...built, pending, sent }
+  } catch (error) {
+    throw new Error('the preview moved out of the slice this guard reads', { cause: error })
+  }
+}
+
+const findAll = (node: StubNode, match: (node: StubNode) => boolean): StubNode[] => [
+  ...(match(node) ? [node] : []),
+  ...node.childNodes.flatMap((child) => findAll(child, match)),
+]
+
+/** The control inside the `p.toolbar` carrying `label`, with both halves pinned before either is indexed. */
+const control = (root: StubNode, label: string, tag: string): StubNode => {
+  const bars = findAll(root, (node) => node.className.split(' ').includes('toolbar') && textOf(node).includes(label))
+  expect(bars, label).toHaveLength(1)
+  const found = findAll(bars[0]!, (node) => node.tagName === tag)
+  expect(found.length, `${label} ${tag}`).toBeGreaterThan(0)
+  return found[0]!
+}
+
+const fire = (node: StubNode, type: string, target: unknown): void =>
+  (node.listeners[type] as (event: unknown) => void)({ target })
+
+/** First node in the tree whose class list contains `className`, DOM-order (self before children). */
+const findByClass = (node: StubNode, className: string): StubNode | null => {
+  if (node.className.split(' ').includes(className)) return node
+  for (const child of node.childNodes) {
+    const found = findByClass(child, className)
+    if (found) return found
+  }
+  return null
+}
+
+/** Names a grid child by its own shape, so an unexpected one fails as itself rather than as a wrong total. */
+const gridChildShape = (node: StubNode): string => {
+  const classes = node.className.split(' ').filter(Boolean)
+  if (node.tagName === 'input' && classes.length === 0) return 'input'
+  for (const known of ['label', 'hint', 'group', 'span2']) {
+    if (node.tagName === 'span' && classes.includes(known)) return `span.${known}`
+  }
+  return `unexpected child: ${[node.tagName, ...classes].join('.')}`
+}
+
+const painted = async (response: unknown): Promise<string> => {
+  const panel = previewHarness(response)
+  const node = panel.previewPanel()
+  await panel.refreshPreview()
+  expect(node.childNodes.length).toBeGreaterThan(0)
+  return textOf(node)
+}
+
+const RESOLVED = {
+  invalid: [],
+  direction: 'sell_base',
+  side: 'from',
+  legs: { from: 'BTC', to: 'USDX', fromDecimals: 8, toDecimals: 6 },
+  carrier: { sats: '330', charged: '330', returned: '0', priced: true },
+  feed: { state: 'resolved', mantissa: '100000', scale: 0, readAt: 1_000 },
+  samples: [
+    {
+      ok: true,
+      amount: '100000000',
+      fromAmount: '100000000',
+      toAmount: '99500000000',
+      spreadFee: '500000000',
+      marginBps: 50,
+    },
+  ],
+  breakEven: { kind: 'none' },
+  offerCeiling: null,
+}
+
+describe('the preview panel, run rather than grepped', () => {
+  it('paints the amounts the server sent', async () => {
+    const text = await painted(RESOLVED)
+    expect(text).toContain('99,500')
+    expect(text).toContain('50 bps')
+  })
+
+  it('says feed-unresolved rather than showing a stale ladder', async () => {
+    const text = await painted({ invalid: [], samples: [], feed: { state: 'unresolved', reason: 'save this market' } })
+    expect(text).toMatch(/feed-unresolved|save this market/)
+    expect(text).not.toContain('99,500')
+  })
+
+  it('paints a break-even at a size, and none at all when there is none', async () => {
+    expect(await painted({ ...RESOLVED, breakEven: { kind: 'at', amountSats: '66000' } })).toContain('66,000')
+    expect(await painted(RESOLVED)).not.toMatch(/breaks even|loses money/)
+  })
+
+  it('says "never breaks even" instead of dividing by a zero spread', async () => {
+    expect(await painted({ ...RESOLVED, breakEven: { kind: 'never' } })).toContain('never breaks even')
+  })
+
+  it('names what it does NOT model, so a green ladder is not read as a promise to fill', async () => {
+    const text = await painted(RESOLVED)
+    expect(text).toContain('does not check')
+    for (const omission of ['inventory', 'rate limit', 'repeated request id']) {
+      expect(text.toLowerCase()).toContain(omission)
+    }
+  })
+
+  it('says why a closed direction has nothing to price, instead of a blank table', async () => {
+    const text = await painted({ ...RESOLVED, samples: [], samplesReason: 'this direction is closed' })
+    expect(text).toContain('this direction is closed')
+  })
+
+  it('collapses a held-down key into one pending request', () => {
+    const panel = previewHarness(RESOLVED)
+    panel.previewPanel()
+    panel.schedulePreview()
+    panel.schedulePreview()
+    expect(panel.pending).toHaveLength(1)
+  })
+
+  it('carries the carrier sentence in plain language', () => {
+    expect(marketsBlock()).toContain('rides on a small amount of bitcoin called the carrier')
+  })
+
+  it('labels a BTC leg as BTC, not sats — the amount is already decimals-formatted', async () => {
+    const text = await painted(RESOLVED)
+    expect(text).toMatch(/1\.00000000\s+BTC/)
+    expect(text).not.toContain('1.00000000 sats')
+  })
+})
+
+describe('asset labels in the form', () => {
+  it('asks once for an asset whose lookup fails, rather than re-asking on every repaint', async () => {
+    const panel = previewHarness(RESOLVED, { quote: 'ab'.repeat(34) })
+    const view = panel.marketsView()
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve))
+    expect(panel.sent.filter((sent) => sent?.startsWith('/api/assets/'))).toHaveLength(1)
+    expect(textOf(view)).toContain('asset lookup failed')
+  })
+})
+
+describe('the markets view mounts what it builds', () => {
+  it('renders the form and the preview panel side by side, not the panel alone', () => {
+    const panel = previewHarness(RESOLVED)
+    const text = textOf(panel.marketsView())
+    expect(text).toContain('A pair may be configured once. Submitting one that exists edits it.')
+    expect(text).toContain('preview — what a customer is quoted')
+  })
+
+  it('holds only the five known row shapes — a stray wrapper fails by name, not by a moved total', () => {
+    const panel = previewHarness(RESOLVED)
+    const grid = findByClass(panel.marketsView(), 'form-grid')
+    expect(grid).not.toBeNull()
+    const unexpected = grid!.childNodes.map(gridChildShape).filter((shape) => shape.startsWith('unexpected child:'))
+    expect(unexpected).toEqual([])
+  })
+})
+
+describe('a serving control repaints the preview it sits beside', () => {
+  // These came from a branch with no preview and the merge parked them next to one.
+  const cases = [
+    { label: 'serves rfq', tag: 'input', event: 'input', target: { checked: false } },
+    { label: 'rfq buy base', tag: 'input', event: 'input', target: { checked: false } },
+    { label: 'carrier mode', tag: 'select', event: 'change', target: { value: 'priced' } },
+  ] as const
+
+  it.each(cases)('reschedules the preview when $label changes', ({ label, tag, event, target }) => {
+    const panel = previewHarness(RESOLVED)
+    const view = panel.marketsView()
+    const before = panel.pending[0]
+    expect(before).toBeTypeOf('function')
+
+    fire(control(view, label, tag), event, target)
+
+    expect(panel.pending).toHaveLength(1)
+    expect(panel.pending[0]).toBeTypeOf('function')
+    expect(panel.pending[0]).not.toBe(before)
+  })
+
+  it('reprices against the new carrier mode, which moves the margin and the break-even', async () => {
+    const panel = previewHarness(RESOLVED)
+    const view = panel.marketsView()
+    fire(control(view, 'carrier mode', 'select'), 'change', { value: 'priced' })
+    await panel.refreshPreview()
+    const body = JSON.parse(String(panel.sent.at(-1))) as { market: { carrierMode: string; servesRfq: boolean } }
+    expect(body.market.carrierMode).toBe('priced')
+
+    fire(control(view, 'serves rfq', 'input'), 'input', { checked: false })
+    await panel.refreshPreview()
+    expect((JSON.parse(String(panel.sent.at(-1))) as typeof body).market.servesRfq).toBe(false)
   })
 })

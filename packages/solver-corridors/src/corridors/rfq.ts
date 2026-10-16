@@ -20,8 +20,20 @@
 import { ArkAddress } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { lockupDeadlineFor } from '@arkade-os/solver-core/core/send.js'
-import { decodeInvoice, InvalidInvoice } from '@arkade-os/solver-core/invoice/decode.js'
-import type { CorridorRfqOutcome as RfqOutcome } from '@arkade-os/solver-core/core/corridor.js'
+import {
+  amountSatsOf,
+  paymentHashOf,
+  InvalidInvoice,
+  type InvoiceRejection,
+} from '@arkade-os/solver-core/invoice/decode.js'
+import type { ZodType, ZodTypeDef } from 'zod'
+import {
+  extractRfqId,
+  zodDetail,
+  type RfqRefusalError,
+  type RfqRefusalErrorCode,
+} from '@arkade-os/solver-core/core/rfqProtocol.js'
+import type { CorridorRfqOutcome as RfqOutcome, QuoteOptions } from '@arkade-os/solver-core/core/corridor.js'
 import type { SendSwapService } from '../send/orchestrator.js'
 import type { OnchainSendSwapService } from '../send/onchainOrchestrator.js'
 import type { ReceiveSwapService } from '../receive/orchestrator.js'
@@ -41,31 +53,61 @@ import type { OnchainSendSwapStore } from '../db/onchainSwaps.js'
 import { RFQ_PAIR_SEND, RfqRequest, rfqQuotePayload, rfqRefusalPayload } from '../wire/payloads.js'
 import { RFQ_PAIR_ONCHAIN_SEND, OnchainRfqRequest, onchainRfqQuotePayload } from '../wire/onchainPayloads.js'
 
-// Corridor-neutral refusal helpers live with the RFQ vocabulary in core; the
-// transport reaches them through this module, so the re-export stays.
-export { extractRfqId, zodDetail } from '@arkade-os/solver-core/core/rfqProtocol.js'
-import { extractRfqId, zodDetail } from '@arkade-os/solver-core/core/rfqProtocol.js'
+const INVOICE_ERROR_CODES: Record<InvoiceRejection, RfqRefusalErrorCode> = {
+  too_long: 'invoice_too_long',
+  mixed_case: 'invoice_mixed_case',
+  malformed: 'invoice_malformed',
+  missing_payment_hash: 'invoice_missing_payment_hash',
+  missing_amount: 'invoice_missing_amount',
+  sub_satoshi_amount: 'invoice_sub_satoshi_amount',
+  missing_network: 'invoice_missing_network',
+  missing_timestamp: 'invoice_missing_timestamp',
+  cltv_too_large: 'invoice_cltv_too_large',
+}
+
+const invoiceRfqError = (error: InvalidInvoice): RfqRefusalError => ({
+  error_code: INVOICE_ERROR_CODES[error.reason],
+  field: 'profile.invoice',
+  ...error.context,
+})
+
+export const parseRfq = <T extends { rfq_id: string; pair: string }>(
+  schema: ZodType<T, ZodTypeDef, unknown>,
+  payload: unknown,
+  servedPair: string,
+  schemaLabel = 'schema',
+  wrongPair = (pair: string): string => `pair '${pair}' reached the wrong profile`,
+): { request: T } | { invalid: RfqOutcome } => {
+  const parsed = schema.safeParse(payload)
+  if (!parsed.success) {
+    return {
+      invalid: {
+        kind: 'invalid',
+        payload: rfqRefusalPayload(extractRfqId(payload), 'unsupported_payload'),
+        detail: `${schemaLabel}: ${zodDetail(parsed.error)}`,
+      },
+    }
+  }
+  if (parsed.data.pair !== servedPair) {
+    return {
+      invalid: {
+        kind: 'invalid',
+        payload: rfqRefusalPayload(parsed.data.rfq_id, 'unsupported_pair'),
+        detail: wrongPair(parsed.data.pair),
+      },
+    }
+  }
+  return { request: parsed.data }
+}
 
 export const respondToLightningReceiveRfqRequest = async (
   service: ReceiveSwapService,
   payload: unknown,
+  options?: QuoteOptions,
 ): Promise<RfqOutcome> => {
-  const parsed = LightningReceiveRfqRequest.safeParse(payload)
-  if (!parsed.success) {
-    return {
-      kind: 'invalid',
-      payload: rfqRefusalPayload(extractRfqId(payload), 'unsupported_payload'),
-      detail: `schema: ${zodDetail(parsed.error)}`,
-    }
-  }
-  const request = parsed.data
-  if (request.pair !== RFQ_PAIR_RECEIVE) {
-    return {
-      kind: 'invalid',
-      payload: rfqRefusalPayload(request.rfq_id, 'unsupported_pair'),
-      detail: `pair '${request.pair}' reached the wrong profile`,
-    }
-  }
+  const parsed = parseRfq(LightningReceiveRfqRequest, payload, RFQ_PAIR_RECEIVE)
+  if ('invalid' in parsed) return parsed.invalid
+  const { request } = parsed
 
   const outcome = await service.quote({
     paymentHash: request.profile.payment_hash,
@@ -75,6 +117,7 @@ export const respondToLightningReceiveRfqRequest = async (
     payoutPubkey: request.profile.payout_pubkey,
     claimPacket: request.profile.claim_packet ?? null,
     rfqId: request.rfq_id,
+    requesterKey: options?.requesterKey,
   })
   if (outcome.accepted) {
     return {
@@ -89,23 +132,11 @@ export const respondToLightningReceiveRfqRequest = async (
 export const respondToOnchainReceiveRfqRequest = async (
   service: OnchainReceiveSwapService,
   payload: unknown,
+  options?: QuoteOptions,
 ): Promise<RfqOutcome> => {
-  const parsed = OnchainReceiveRfqRequest.safeParse(payload)
-  if (!parsed.success) {
-    return {
-      kind: 'invalid',
-      payload: rfqRefusalPayload(extractRfqId(payload), 'unsupported_payload'),
-      detail: `schema: ${zodDetail(parsed.error)}`,
-    }
-  }
-  const request = parsed.data
-  if (request.pair !== RFQ_PAIR_ONCHAIN_RECEIVE) {
-    return {
-      kind: 'invalid',
-      payload: rfqRefusalPayload(request.rfq_id, 'unsupported_pair'),
-      detail: `pair '${request.pair}' reached the wrong profile`,
-    }
-  }
+  const parsed = parseRfq(OnchainReceiveRfqRequest, payload, RFQ_PAIR_ONCHAIN_RECEIVE)
+  if ('invalid' in parsed) return parsed.invalid
+  const { request } = parsed
 
   const outcome = await service.quote({
     paymentHash: request.profile.payment_hash,
@@ -116,6 +147,9 @@ export const respondToOnchainReceiveRfqRequest = async (
     payoutAddress: request.profile.payout_address,
     payoutPubkey: request.profile.payout_pubkey,
     rfqId: request.rfq_id,
+    minFromSats: request.min_from_amount,
+    maxFromSats: request.max_from_amount,
+    requesterKey: options?.requesterKey,
   })
   if (outcome.accepted) {
     return {
@@ -133,28 +167,17 @@ export const respondToLightningRfqRequest = async (
   /** The transport's requester identity, for quote admission control. */
   options?: { requesterKey?: string },
 ): Promise<RfqOutcome> => {
-  const parsed = RfqRequest.safeParse(payload)
-  if (!parsed.success) {
-    return {
-      kind: 'invalid',
-      payload: rfqRefusalPayload(extractRfqId(payload), 'unsupported_payload'),
-      detail: `rfq_request schema: ${zodDetail(parsed.error)}`,
-    }
-  }
-  const request = parsed.data
-
-  if (request.pair !== RFQ_PAIR_SEND) {
-    return {
-      kind: 'invalid',
-      payload: rfqRefusalPayload(request.rfq_id, 'unsupported_pair'),
-      detail: `pair '${request.pair}' reached the wrong profile`,
-    }
-  }
+  const parsed = parseRfq(RfqRequest, payload, RFQ_PAIR_SEND, 'rfq_request schema')
+  if ('invalid' in parsed) return parsed.invalid
+  const { request } = parsed
   // A client-supplied BOLT11 forces exact-out (spec § 4.1).
   if (request.amount_side !== 'to') {
     return {
       kind: 'invalid',
-      payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload'),
+      payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload', {
+        error_code: 'amount_side_unsupported',
+        field: 'amount_side',
+      }),
       detail: `amount_side is '${request.amount_side}', must be 'to' — a client bolt11 forces exact-out`,
     }
   }
@@ -168,24 +191,32 @@ export const respondToLightningRfqRequest = async (
   // refuse at the ingress exactly the invoice the denylist makes payable one
   // call later — the best-hint floor fires on the very hint we are declining to
   // price.
-  let decoded
+  let paymentHash: string
+  let invoiceAmountSats: number
   try {
-    decoded = decodeInvoice(request.profile.invoice, service.sendHintScidDenylist)
+    paymentHash = paymentHashOf(request.profile.invoice)
+    invoiceAmountSats = amountSatsOf(request.profile.invoice)
   } catch (error) {
     if (error instanceof InvalidInvoice) {
       return {
         kind: 'invalid',
-        payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload'),
+        payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload', invoiceRfqError(error)),
         detail: `profile.invoice did not decode: ${error.message}`,
       }
     }
     throw error
   }
-  if (request.amount !== undefined && request.amount !== decoded.amountSats) {
+  if (request.amount !== undefined && request.amount !== invoiceAmountSats) {
     return {
       kind: 'invalid',
-      payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload'),
-      detail: `amount ${request.amount} does not match the invoice's ${decoded.amountSats} sats`,
+      payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload', {
+        error_code: 'invoice_amount_mismatch',
+        field: 'amount',
+        actual: request.amount,
+        expected: invoiceAmountSats,
+        unit: 'sats',
+      }),
+      detail: `amount ${request.amount} does not match the invoice's ${invoiceAmountSats} sats`,
     }
   }
 
@@ -193,7 +224,7 @@ export const respondToLightningRfqRequest = async (
   // prior negotiation is in (spec § 4.5). Same content falls through to the
   // natural-key path below, which re-emits or conflicts as the row dictates.
   const prior = await store.findByRfqId(request.rfq_id)
-  if (prior && prior.paymentHash !== decoded.paymentHash) {
+  if (prior && prior.paymentHash !== paymentHash) {
     return {
       kind: 'refused',
       payload: rfqRefusalPayload(request.rfq_id, 'quote_conflict'),
@@ -212,7 +243,7 @@ export const respondToLightningRfqRequest = async (
     if (error instanceof InvalidInvoice) {
       return {
         kind: 'invalid',
-        payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload'),
+        payload: rfqRefusalPayload(request.rfq_id, 'unsupported_payload', invoiceRfqError(error)),
         detail: `quote rejected the invoice: ${error.message}`,
       }
     }
@@ -242,7 +273,7 @@ export const respondToLightningRfqRequest = async (
     // before it ever reaches address verification — re-emitting it here
     // would hand the client a payload its own code cannot parse, not a clean
     // refusal. Only an RFQ-family row's OWN key is ever binding.
-    const existing = await store.findLiveByPaymentHash(decoded.paymentHash)
+    const existing = await store.findLiveByPaymentHash(paymentHash)
     if (
       existing?.state === 'quoted' &&
       existing.clientRefundPubkey === request.profile.client_refund_pubkey &&
@@ -271,23 +302,11 @@ export const respondToOnchainRfqRequest = async (
   service: OnchainSendSwapService,
   store: OnchainSendSwapStore,
   payload: unknown,
+  options?: QuoteOptions,
 ): Promise<RfqOutcome> => {
-  const parsed = OnchainRfqRequest.safeParse(payload)
-  if (!parsed.success) {
-    return {
-      kind: 'invalid',
-      payload: rfqRefusalPayload(extractRfqId(payload), 'unsupported_payload'),
-      detail: `schema: ${zodDetail(parsed.error)}`,
-    }
-  }
-  const request = parsed.data
-  if (request.pair !== RFQ_PAIR_ONCHAIN_SEND) {
-    return {
-      kind: 'invalid',
-      payload: rfqRefusalPayload(request.rfq_id, 'unsupported_pair'),
-      detail: `pair '${request.pair}' reached the wrong profile`,
-    }
-  }
+  const parsed = parseRfq(OnchainRfqRequest, payload, RFQ_PAIR_ONCHAIN_SEND)
+  if ('invalid' in parsed) return parsed.invalid
+  const { request } = parsed
   // Unlike the BOLT11 profile, nothing implies the amount here: `amount` is
   // required by the zod schema, and `amount_side` decides what it names — the
   // corridor resolves exact-out into the give against its own fee.
@@ -309,6 +328,7 @@ export const respondToOnchainRfqRequest = async (
     refundAddress: request.profile.refund_address,
     clientRefundPubkey: request.profile.client_refund_pubkey,
     rfqId: request.rfq_id,
+    requesterKey: options?.requesterKey,
   })
   if (outcome.accepted) {
     return { kind: 'quote', payload: onchainRfqQuotePayload(outcome.swap, outcome.lockupDeadline, request.rfq_id) }

@@ -20,7 +20,8 @@
  * different argument set.
  */
 
-import { addressWord, concat, selectorFor, uintWord } from './erc20Swap.js'
+import { concatBytes } from '@noble/hashes/utils.js'
+import { addressWord, selectorFor, uintWord } from './erc20Swap.js'
 
 /**
  * `approve(address,uint256)` — selector `0x095ea7b3`, the canonical ERC-20 one.
@@ -49,7 +50,7 @@ const APPROVE_SELECTOR = selectorFor(APPROVE_SIGNATURE)
  * still being there.
  */
 export const encodeApprove = (spender: Uint8Array, amount: bigint): Uint8Array =>
-  concat([APPROVE_SELECTOR, addressWord(spender, 'spender'), uintWord(amount, 'amount')])
+  concatBytes(APPROVE_SELECTOR, addressWord(spender, 'spender'), uintWord(amount, 'amount'))
 
 /** `allowance(address,address)` — selector `0xdd62ed3e`. */
 export const ALLOWANCE_SIGNATURE = 'allowance(address,address)'
@@ -67,9 +68,11 @@ const ALLOWANCE_SELECTOR = selectorFor(ALLOWANCE_SIGNATURE)
  * USDC does not do this. Depending on that would be depending on which token
  * the operator configures, which is exactly the kind of assumption
  * `EVM_HTLC_ADDRESS` being configurable says not to make.
+ *
+ * Argument order is load-bearing: swapped, it typechecks and reads a zero allowance.
  */
 export const encodeAllowance = (owner: Uint8Array, spender: Uint8Array): Uint8Array =>
-  concat([ALLOWANCE_SELECTOR, addressWord(owner, 'owner'), addressWord(spender, 'spender')])
+  concatBytes(ALLOWANCE_SELECTOR, addressWord(owner, 'owner'), addressWord(spender, 'spender'))
 
 /** What to do before locking, given the allowance already in place. */
 export type ApprovalStep =

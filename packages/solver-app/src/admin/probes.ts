@@ -14,6 +14,7 @@
 
 import type { Services } from '../ops/services.js'
 import { requireLn, requireOnchain } from '../ops/rails.js'
+import { messageOf, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
 export interface BackendStatus {
   name: 'lightning' | 'arkade' | 'emulator' | 'onchain' | 'relay'
@@ -39,8 +40,6 @@ export interface RelayProbeTarget {
   isConnected(): boolean
 }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
-
 /**
  * Run one probe, converting any rejection into a reported failure.
  *
@@ -58,7 +57,7 @@ const probe = async (
     // Stamped after the read resolves, not before it: the question the stamp
     // answers is "when did this backend last actually speak", and a stamp taken
     // on entry would date a hung probe to the moment it was dispatched.
-    return { name, ok: true, detail, error: null, target, lastCheckedAt: Math.floor(Date.now() / 1000) }
+    return { name, ok: true, detail, error: null, target, lastCheckedAt: nowSeconds() }
   } catch (error) {
     // A failed probe is stamped too. An operator needs to tell "this has been
     // down since 09:00" from "this just went down", and an unstamped failure
@@ -69,7 +68,7 @@ const probe = async (
       detail: 'unreachable',
       error: messageOf(error),
       target,
-      lastCheckedAt: Math.floor(Date.now() / 1000),
+      lastCheckedAt: nowSeconds(),
     }
   }
 }
@@ -102,7 +101,19 @@ export const probeBackends = async (services: Services, relay?: RelayProbeTarget
       // its onchain sends are paid out of that pool — so an operator reading
       // both rows and adding them would believe they hold twice what they do.
       const shared = balance.sharedWithLightning ? ' (one pool, shared with lightning)' : ''
-      return `${balance.confirmedSats} sat confirmed, ${balance.unconfirmedSats} sat unconfirmed, ${rate} sat/vB${shared}`
+      const detail = `${balance.confirmedSats} sat confirmed, ${balance.unconfirmedSats} sat unconfirmed, ${rate} sat/vB${shared}`
+      // The comment above is the standard the balance alone did not meet: a
+      // REACHABLE wallet under this corridor's smallest payout answered green.
+      // Undefined floor means the corridor is off. Confirmed sats only, the
+      // standard `railWithdraw` already holds a withdrawal to.
+      const floor = services.onchainService?.minimumPayoutSats()
+      if (floor !== undefined && balance.confirmedSats < floor) {
+        throw new Error(
+          `${detail} — under the ${floor} sat smallest payout arkade:BTC->onchain:BTC would quote, ` +
+            'so this corridor is answering quotes it cannot fund',
+        )
+      }
+      return detail
     }),
   ]
 

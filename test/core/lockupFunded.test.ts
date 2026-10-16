@@ -6,7 +6,7 @@
  * the moment the amount lives in an asset, because a lockup funded with the
  * right sats carrier and the wrong asset amount reads as funded.
  *
- * The covenant will not catch that: `enforcePayToAsset` relates the refund
+ * The covenant will not catch that: its asset clause relates the refund
  * output to the input (`out >= in`), which is the only correct rule for a
  * refund. Binding it to the quote would refund an underfunding client MORE
  * than they locked.

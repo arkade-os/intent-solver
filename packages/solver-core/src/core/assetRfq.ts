@@ -29,6 +29,8 @@
  * other's arithmetic.
  */
 import type { Price } from './priceFeed.js'
+import { assetExactInPayout, assetExactOutInput } from './assetExactInPrice.js'
+import { ASSET_ID_HEX } from './marketKey.js'
 
 /**
  * One leg's asset: the canonical 68-hex Arkade asset id, or `null` for BTC.
@@ -47,8 +49,6 @@ export interface AssetPair {
   to: AssetLeg
 }
 
-/** § 2's identity rule: lowercase only, 32-byte txid then a u16 group index. */
-const ASSET_ID = /^[0-9a-f]{68}$/
 const ARKADE_PAIR = /^arkade:([A-Za-z0-9]+)->arkade:([A-Za-z0-9]+)$/
 
 const legOf = (ticker: string): AssetLeg | undefined => {
@@ -57,7 +57,7 @@ const legOf = (ticker: string): AssetLeg | undefined => {
   // with the reason: a pair is compared byte for byte elsewhere, so a spelling
   // accepted here and rejected there derives the right market key and is then
   // refused as unserved, with a stated reason that is a lie.
-  return ASSET_ID.test(ticker) ? ticker : undefined
+  return ASSET_ID_HEX.test(ticker) ? ticker : undefined
 }
 
 /**
@@ -96,19 +96,66 @@ export interface AssetQuoteMarket {
   quoteDecimals: number
   /** The solver's margin, taken out of the payout. */
   feeBps: number
+  sellBaseFeeBps?: number
+  buyBaseFeeBps?: number
+  /** Atomic units of the base input, charged when the client sells base. */
+  sellBaseFeeFlat?: bigint
+  /** Atomic units of the quote input, charged when the client buys base. */
+  buyBaseFeeFlat?: bigint
   /** Inclusive bounds on the PAYOUT — the `to` leg — in its atomic units. */
   minPayout: bigint
   maxPayout: bigint
 }
 
-export type AssetQuoteRefusal =
-  'unsupported_pair' | 'exact_out_unsupported' | 'price_unavailable' | 'fee_consumes_swap' | 'amount_out_of_range'
+export type AssetQuoteRefusal = 'unsupported_pair' | 'price_unavailable' | 'fee_consumes_swap' | 'amount_out_of_range'
+
+/** True if `pair`'s FROM leg is `market`'s base, false if the reverse, null if `pair` is not on `market` at all. */
+export const assetQuoteGivesBase = (pair: AssetPair, market: AssetQuoteMarket): boolean | null => {
+  if (pair.from === market.base && pair.to === market.quote) return true
+  if (pair.from === market.quote && pair.to === market.base) return false
+  return null
+}
+
+/** The direction's flat fee, atomic units of the FROM leg. Shared so a caller never restates the ternary. */
+export const assetFlatFeeFor = (givesBase: boolean, market: AssetQuoteMarket): bigint =>
+  (givesBase ? market.sellBaseFeeFlat : market.buyBaseFeeFlat) ?? 0n
+
+/** The direction's spread, basis points. Shared for the same reason {@link assetFlatFeeFor} is. */
+export const assetFeeBpsFor = (givesBase: boolean, market: AssetQuoteMarket): number =>
+  (givesBase ? market.sellBaseFeeBps : market.buyBaseFeeBps) ?? market.feeBps
 
 export type AssetQuoteOutcome =
   { ok: true; fromAmount: bigint; toAmount: bigint } | { ok: false; reason: AssetQuoteRefusal }
 
-const BPS = 10_000n
-const pow10 = (n: number): bigint => 10n ** BigInt(n)
+export interface CarrierLegs {
+  /** Netted OFF the deposit, when the solver delivers the asset. */
+  charged: bigint
+  /** Added TO the payout, when the client fronted it. */
+  returned: bigint
+}
+
+// BOTH legs counted: an asset deposit carries one, an asset payout needs one.
+export const carrierLegs = (pair: AssetPair, carrierSats: bigint): CarrierLegs => {
+  const clientFronts = pair.from !== null
+  const solverDelivers = pair.to !== null
+  return {
+    charged: solverDelivers && !clientFronts ? carrierSats : 0n,
+    returned: clientFronts && !solverDelivers ? carrierSats : 0n,
+  }
+}
+
+/** What the PRICE put on neither leg: `struckQuotePrice` takes these back off. */
+const flatPartsOf = (args: {
+  pair: AssetPair
+  market: AssetQuoteMarket
+  givesBase: boolean
+  carrierSats: bigint
+}): { flatFee: bigint; from: bigint; to: bigint } => {
+  const { pair, market, givesBase, carrierSats } = args
+  const flatFee = assetFlatFeeFor(givesBase, market)
+  const legs = carrierLegs(pair, carrierSats)
+  return { flatFee, from: flatFee + legs.charged, to: legs.returned }
+}
 
 /**
  * The two amounts a quote resolves, exactly — § 4.2's "the solver's fee lives
@@ -119,12 +166,8 @@ const pow10 = (n: number): bigint => 10n ** BigInt(n)
  * float64 rounding is real and it decides money. Here it would decide it in a
  * direction nobody chose.
  *
- * EXACT-IN ONLY. § 7.1.5 refuses exact-out on the EVM corridors because "the
- * two legs are different assets, so exact-out would mean inverting a fetched,
- * rounded, directional rate", and this corridor is cross-asset by construction
- * — `parseAssetPair` refuses a same-asset pair outright. So the same refusal
- * applies for the same reason, rather than a second rounding convention being
- * invented for one corridor.
+ * BOTH SIDES: `assetExactOutInput` searches the forward function, so one rounding
+ * convention decides each (§ 7.1.5's objection).
  */
 export const resolveAssetQuote = (args: {
   pair: AssetPair
@@ -132,52 +175,163 @@ export const resolveAssetQuote = (args: {
   amountSide: 'from' | 'to'
   market: AssetQuoteMarket
   feed: Price
+  /** Sats to NET as a pass-through. Zero quotes exactly as before it was priced. */
+  carrierSats: bigint
+  /** The Service's dust: a CHAIN constraint, equal in value to the carrier and unrelated in meaning. */
+  dustSats: bigint
 }): AssetQuoteOutcome => {
-  const { pair, amount, amountSide, market, feed } = args
-
-  if (amountSide !== 'from') return { ok: false, reason: 'exact_out_unsupported' }
+  const { pair, amount, amountSide, market, feed, carrierSats, dustSats } = args
 
   // Which way round the client is trading across this market's two legs.
-  const givesBase = pair.from === market.base && pair.to === market.quote
-  const givesQuote = pair.from === market.quote && pair.to === market.base
-  if (!givesBase && !givesQuote) return { ok: false, reason: 'unsupported_pair' }
+  const givesBase = assetQuoteGivesBase(pair, market)
+  if (givesBase === null) return { ok: false, reason: 'unsupported_pair' }
 
-  // A non-positive price is not a cheap swap, it is an unusable feed. Left
-  // unchecked, `givesQuote` would divide by zero and `givesBase` would price
-  // everything at nothing.
+  // A non-positive price is not a cheap swap, it is an unusable feed — left
+  // unchecked, either direction divides by zero or prices everything free.
   if (feed.mantissa <= 0n) return { ok: false, reason: 'price_unavailable' }
   if (market.feeBps < 0 || market.feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
   if (amount <= 0n) return { ok: false, reason: 'amount_out_of_range' }
 
-  const scale = pow10(feed.scale)
-  const baseUnit = pow10(market.baseDecimals)
-  const quoteUnit = pow10(market.quoteDecimals)
+  if (carrierSats < 0n || dustSats < 0n) return { ok: false, reason: 'price_unavailable' }
 
-  // The payout before the solver's margin, floored — one division, so one
-  // rounding, and it lands against the client the way every other payout in
-  // this repo does.
-  const mid = givesBase
-    ? (amount * feed.mantissa * quoteUnit) / (baseUnit * scale)
-    : (amount * baseUnit * scale) / (quoteUnit * feed.mantissa)
+  const flat = flatPartsOf({ pair, market, givesBase, carrierSats })
+  if (flat.flatFee < 0n) return { ok: false, reason: 'price_unavailable' }
+  const feeBps = assetFeeBpsFor(givesBase, market)
+  if (feeBps < 0 || feeBps >= 10_000) return { ok: false, reason: 'price_unavailable' }
+  const solverDelivers = pair.to !== null
 
-  // Fee rounded UP out of the floored mid, matching `corridorPolicy.ts`'s
-  // `feeSatsFor` exactly rather than inventing a second convention: rounding a
-  // fee down means the solver eats the remainder on every swap.
-  const fee = (mid * BigInt(market.feeBps) + BPS - 1n) / BPS
-  const toAmount = mid - fee
+  if (amountSide === 'to') {
+    // The named amount already holds whatever comes back to them.
+    const wanted = amount - flat.to
+    if (wanted <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
+    if (wanted < market.minPayout || wanted > market.maxPayout) {
+      return { ok: false, reason: 'amount_out_of_range' }
+    }
+    const netInput = assetExactOutInput({
+      payout: wanted,
+      givesBase,
+      baseDecimals: market.baseDecimals,
+      quoteDecimals: market.quoteDecimals,
+      feeBps,
+      feed,
+    })
+    if (netInput === null) return { ok: false, reason: 'price_unavailable' }
+    if (!solverDelivers && amount < dustSats) return { ok: false, reason: 'amount_out_of_range' }
+    return { ok: true, fromAmount: netInput + flat.from, toAmount: amount }
+  }
+
+  const netAmount = amount - flat.from
+  if (netAmount <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
+
+  const payout = assetExactInPayout({
+    netInput: netAmount,
+    givesBase,
+    baseDecimals: market.baseDecimals,
+    quoteDecimals: market.quoteDecimals,
+    feeBps,
+    feed,
+  })
 
   // Not clamped to zero, for the reason `payoutSatsFor` states: "the fee ate
   // the swap" and "the amount is below the minimum" want different refusals,
   // and a clamp would silently turn the first into a payout of nothing.
-  if (toAmount <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
+  if (payout <= 0n) return { ok: false, reason: 'fee_consumes_swap' }
 
   // Bounds are evaluated on the TO leg — what the solver pays out — which is
-  // § 4.6's rule for `min`/`max` and the registry card's own convention.
-  if (toAmount < market.minPayout || toAmount > market.maxPayout) {
+  // § 4.6's rule for `min`/`max` and the registry card's own convention. The
+  // carrier is a pass-through rather than payout, so it lands after them.
+  if (payout < market.minPayout || payout > market.maxPayout) {
+    return { ok: false, reason: 'amount_out_of_range' }
+  }
+
+  const toAmount = payout + flat.to
+
+  // arkd rejects a sub-dust output 0, priced carrier or not.
+  if (!solverDelivers && toAmount < dustSats) {
     return { ok: false, reason: 'amount_out_of_range' }
   }
 
   return { ok: true, fromAmount: amount, toAmount }
+}
+
+/**
+ * Extra decimal places the implied price carries beyond the feed's own.
+ *
+ * The implied price is a DIVISION, and at the feed's scale it quantises: a feed
+ * reporting `1.5` parses to `scale: 1`, so an implied price of 1.4955 truncates
+ * to `14` and the drift derived from it reads +714bp on a flat market and
+ * +607bp on a fill 70bp under water. CoinGecko returns unquoted JSON numbers and
+ * is a first-class provider here, so that is a real input, not a contrived one.
+ *
+ * Headroom is RELATIVE so the implied price can never be coarser than the feed
+ * that produced it, whatever scale that feed uses. Twelve places puts the
+ * quantisation floor (`10_000 / mantissa` bps) far below the basis point the
+ * figure is reported in.
+ */
+export const IMPLIED_PRICE_HEADROOM = 12
+
+/**
+ * This quote's OWN price — quote-asset per base-asset, as an exact integer
+ * mantissa at `scale + IMPLIED_PRICE_HEADROOM`.
+ *
+ * The half of a market mark that the solver controls. Compared against a feed
+ * read LATER, at fill time, it says how far the market moved while the quote was
+ * outstanding. Compared against the feed it was derived from it says nothing at
+ * all, which is the trap the first attempt at this fell into: `resolveAssetQuote`
+ * computes the payout FROM that feed, so the two cannot disagree by more than
+ * the configured spread.
+ *
+ * Both directions produce the same ratio, so a drift derived from it is
+ * comparable across them. Which direction is FAVOURABLE is not — see
+ * `marketDriftBps`.
+ *
+ * Null rather than zero on a degenerate result. A feed reporting `1.0` parses to
+ * `scale: 0`, and the division then truncates a real price to `0n`; storing that
+ * as valid reported a fill as +10000bp in the solver's favour.
+ */
+export const impliedQuotePrice = (args: {
+  fromAmount: bigint
+  toAmount: bigint
+  givesBase: boolean
+  baseDecimals: number
+  quoteDecimals: number
+  scale: number
+}): { mantissa: bigint; scale: number } | null => {
+  const { fromAmount, toAmount, givesBase, baseDecimals, quoteDecimals } = args
+  const baseAtomic = givesBase ? fromAmount : toAmount
+  const quoteAtomic = givesBase ? toAmount : fromAmount
+  if (baseAtomic <= 0n || quoteAtomic <= 0n || args.scale < 0) return null
+  const scale = args.scale + IMPLIED_PRICE_HEADROOM
+  const mantissa =
+    (quoteAtomic * 10n ** BigInt(baseDecimals) * 10n ** BigInt(scale)) / (baseAtomic * 10n ** BigInt(quoteDecimals))
+  return mantissa > 0n ? { mantissa, scale } : null
+}
+
+/**
+ * The rate this swap was STRUCK at — {@link impliedQuotePrice} net of the flat
+ * parts, which folded in bias the ratio by a term that GROWS as the swap
+ * shrinks. The bps spread stays: proportional, it shifts the ratio by the
+ * constant `marketDriftBps` already pins as the flat-market baseline.
+ */
+export const struckQuotePrice = (args: {
+  fromAmount: bigint
+  toAmount: bigint
+  pair: AssetPair
+  market: AssetQuoteMarket
+  carrierSats: bigint
+  givesBase: boolean
+  scale: number
+}): { mantissa: bigint; scale: number } | null => {
+  const { pair, market, givesBase, carrierSats } = args
+  const flat = flatPartsOf({ pair, market, givesBase, carrierSats })
+  return impliedQuotePrice({
+    fromAmount: args.fromAmount - flat.from,
+    toAmount: args.toAmount - flat.to,
+    givesBase,
+    baseDecimals: market.baseDecimals,
+    quoteDecimals: market.quoteDecimals,
+    scale: args.scale,
+  })
 }
 
 export type AssetFillRefusal = 'quote_expired' | 'deposit_short' | 'insufficient_inventory'

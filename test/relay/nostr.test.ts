@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { hex } from '@scure/base'
+import { schnorr } from '@noble/curves/secp256k1.js'
+import { bytesToHex } from '@noble/hashes/utils.js'
 import { MnemonicIdentity } from '@arkade-os/sdk'
-import { finalizeEvent } from 'nostr-tools/pure'
+import { FREE } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { buildSolverCard, cardDigest, verifyCardSig } from '@arkade-os/solver-core/core/registryCard.js'
+import { finalizeEvent, verifyEvent } from 'nostr-tools/pure'
 import { encrypt, getConversationKey } from 'nostr-tools/nip44'
 import {
   deriveNostrIdentity,
@@ -227,8 +231,42 @@ describe('nostrCodec events', () => {
   it('refuses to sign as anyone but its own identity, and refuses unaddressed events', () => {
     expect(() => solverCodec.encodeEvent(directed({ v: 1 }))).toThrow(/refusing to sign/)
     expect(() => clientCodec.encodeEvent({ id: 'x', author: client.pubkey, createdAtMs: 1, payload: {} })).toThrow(
-      /recipient or a topic/,
+      /recipient, a topic or a replaceable key/,
     )
+  })
+
+  const unsignedCard = buildSolverCard({
+    name: 'test-solver',
+    network: 'bitcoin',
+    discoveryPubkey: solver.pubkey,
+    relays: ['wss://relay.example'],
+    corridors: { 'arkade:BTC->lightning:BTC': { limits: { minSats: 1_000, maxSats: 50_000 }, fee: FREE } },
+  })
+  const card = { ...unsignedCard, sig: bytesToHex(schnorr.sign(cardDigest(unsignedCard), solver.secretKey)) }
+  const cardEvent = (over: Partial<RelayEvent> = {}): RelayEvent => ({
+    id: 'x',
+    author: solver.pubkey,
+    createdAtMs: 1_800_000_000_900,
+    payload: card,
+    replaceable: { kind: 38859, d: 'bitcoin' },
+    ...over,
+  })
+
+  it('encodes the solver card as a signed, plaintext, network-tagged kind-38859 event from the wallet key', () => {
+    const [tag, event] = JSON.parse(nostrCodecForWallet(MNEMONIC, true, solver.pubkey).encodeEvent(cardEvent()))
+    expect(tag).toBe('EVENT')
+    expect(event).toMatchObject({ kind: 38859, pubkey: solver.pubkey, created_at: 1_800_000_000 })
+    expect(event.tags).toEqual([['d', 'bitcoin']])
+    expect(JSON.parse(event.content)).toEqual(card)
+    expect(verifyCardSig(JSON.parse(event.content))).toBe(true)
+    expect(verifyEvent(event)).toBe(true)
+  })
+
+  it('never publishes a directed event in the clear, and refuses a non-addressable kind', () => {
+    const [, sealed] = JSON.parse(solverCodec.encodeEvent(cardEvent({ recipient: client.pubkey })))
+    expect(sealed.kind).toBe(NOSTR_KIND_DIRECTED)
+    expect(sealed.content).not.toContain('discovery_pubkey')
+    expect(() => solverCodec.encodeEvent(cardEvent({ replaceable: { kind: 1, d: 'bitcoin' } }))).toThrow(/addressable/)
   })
 })
 

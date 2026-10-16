@@ -33,6 +33,8 @@
  * crash-recovery story this module cannot supply on its own.
  */
 
+import { bytesToHex } from '@noble/hashes/utils.js'
+
 /** Reads the chain's view of an account's nonce. */
 export type NonceReader = (address: Uint8Array, block: 'latest' | 'pending') => Promise<bigint>
 
@@ -49,7 +51,7 @@ export interface NonceSource {
   release(address: Uint8Array, nonce: bigint): void
 }
 
-const key = (address: Uint8Array): string => Array.from(address, (b) => b.toString(16).padStart(2, '0')).join('')
+const key = bytesToHex
 
 /**
  * Caught here rather than at signing.

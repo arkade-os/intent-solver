@@ -304,7 +304,7 @@ export const solverInvoice = (paymentHash: string): Promise<LndInvoiceView> =>
   lncli<LndInvoiceView>(solverContainer(), ['lookupinvoice', paymentHash])
 
 /**
- * Mint an ORDINARY invoice on the solver's own node — the issue-#41 repro.
+ * Mint an ORDINARY invoice on the solver's own node — the self-payment repro.
  *
  * A write to the solver's node, which this module's header otherwise
  * forbids: everything the service does must go through the shipped adapter.

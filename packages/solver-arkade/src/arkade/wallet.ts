@@ -19,7 +19,7 @@ import {
   EsploraProvider,
   Extension,
   getArkPsbtFields,
-  hasTerminalSpend,
+  isVtxoSpent,
   matchServerCheckpoints,
   MnemonicIdentity,
   PrevArkTxField,
@@ -29,6 +29,7 @@ import {
   Wallet,
   type Recipient,
   type TapLeafScript,
+  type VirtualCoin,
 } from '@arkade-os/sdk'
 import { SQLiteContractRepository, SQLiteWalletRepository, type SQLExecutor } from '@arkade-os/sdk/repositories/sqlite'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -43,7 +44,8 @@ import { log } from '@arkade-os/solver-core/util/poll.js'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import { claimIdentity } from './claimIdentity.js'
 import type { CovenantSwapScript } from './covenant.js'
-import { vtxoPages } from './indexerPaging.js'
+import { virtualTxPages, vtxoPages } from './indexerPaging.js'
+import { SharedSyncIndexerProvider, TimedArkProvider, TimedIndexerProvider } from './latencyProviders.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
 
 /** The two views any spend below needs; CovenantSwapScript satisfies it (as would any VtxoScript wrapper). */
@@ -143,11 +145,16 @@ export interface ArkadeWalletConfig {
 export interface ArkadeContext {
   wallet: Awaited<ReturnType<typeof Wallet.create>>
   identity: MnemonicIdentity
+  /** The server the wallet was built against. Carried because the SDK's own
+   * entry points take it separately — the wallet does not expose it. */
+  arkServerUrl: string
   /** Unilateral delays this server will accept, derived from its own minimum. */
   unilateralDelays: UnilateralDelays
   /** As advertised, BEFORE `ARK_UNILATERAL_EXIT_DELAY`: a client compiles an
    * offer's exit leaf from this, so that covenant follows the server. */
   advertisedExitDelay: number
+  dustSats: bigint
+  vtxoMinSats: bigint
   /**
    * Which clock this deployment's covenant timelocks count on, INFERRED from the
    * server's own advertised exit delay rather than configured beside it.
@@ -252,10 +259,16 @@ export const resolveTimelockUnit = (params: {
 export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<ArkadeContext> => {
   const identity = MnemonicIdentity.fromMnemonic(config.mnemonic, { isMainnet: config.isMainnet })
   const executor = sqliteExecutor(config.databasePath)
+  const latencyDiagnostics = process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
 
   const wallet = await Wallet.create({
     identity,
     arkServerUrl: config.arkServerUrl,
+    arkProvider: latencyDiagnostics ? new TimedArkProvider(config.arkServerUrl) : undefined,
+    // The SDK's own default is a plain `RestIndexerProvider` at this same URL.
+    indexerProvider: latencyDiagnostics
+      ? new TimedIndexerProvider(config.arkServerUrl)
+      : new SharedSyncIndexerProvider(config.arkServerUrl),
     storage: {
       walletRepository: new SQLiteWalletRepository(executor),
       contractRepository: new SQLiteContractRepository(executor),
@@ -315,6 +328,16 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     )
   }
 
+  const dustSats = BigInt(info.dust)
+  // A quote prices against this; zero would remove the sats leg's dust floor.
+  if (dustSats <= 0n) {
+    throw new Error(`Arkade server at ${config.arkServerUrl} reports dust=${info.dust}, which no asset can ride on`)
+  }
+  const vtxoMinSats = BigInt(info.vtxoMinAmount ?? 0)
+  if (vtxoMinSats < 0n || vtxoMinSats > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`Arkade server at ${config.arkServerUrl} reports invalid vtxoMinAmount=${info.vtxoMinAmount}`)
+  }
+
   const advertisedExitDelay = Number(info.unilateralExitDelay)
   const { unit: advertisedUnit, notices } = resolveTimelockUnit({
     advertisedExitDelay,
@@ -326,8 +349,11 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   return {
     wallet,
     identity,
+    arkServerUrl: config.arkServerUrl,
     unilateralDelays: deriveUnilateralDelays(config.unilateralExitDelayOverride ?? advertisedExitDelay),
     advertisedExitDelay,
+    dustSats,
+    vtxoMinSats,
     timelockUnit: advertisedUnit,
     hrp: config.arkadeHrp,
     reservations: createReservationLedger(),
@@ -406,35 +432,10 @@ const candidateWitnessItems = (tx: InstanceType<typeof Transaction>, inputIndex:
 }
 
 /**
- * Read the preimage back out of whichever transaction claimed one of `outpoints`,
- * once covclaimd's autonomous non-interactive claim has landed.
- *
- * The Arkade-side counterpart to `src/onchain/port.ts`'s `findSpendWitness` +
- * `src/send/onchainOrchestrator.ts`'s `preimageFromClaimWitness`: the send leg
- * only ever reads a preimage from Lightning's `getPayment` or an ONCHAIN claim
- * witness; this is the first time this repo reads one back out of an ARKADE
- * spend. "Ask the indexer, don't trust local state" — same posture as
- * {@link findLockups}: every outpoint is checked (a lockup can be more than one
- * output), and every candidate this finds is verified against `paymentHashHex`
- * before being trusted — a matching witness SHAPE is not proof, only a matching
- * HASH is, exactly the discipline `send/orchestrator.ts`'s `preimageMatchesHash`
- * and `send/onchainOrchestrator.ts`'s `paymentHashOf(...) === row.paymentHash`
- * already apply to every other preimage this codebase consumes.
- *
- * Returns null when nothing is spent yet, when the indexer cannot produce the
- * spending transaction, or when nothing found hashes to `paymentHashHex` — all
- * three are "nothing provable yet", never distinguished, because a caller's
- * only correct response to any of them is the same: wait, or (past the refund
- * deadline) escalate to a human rather than guess.
- *
- * Worth knowing about the transaction this ends up reading: the indexer's
- * `spentBy` names the CHECKPOINT transaction, not the higher-level Ark
- * transaction id (`arkTxId`) — every offchain spend builds one checkpoint per
- * input (`buildOffchainTx`/`buildCheckpointTx`), and the checkpoint's own
- * input is the one carrying the swap-script `tapLeafScript`, so that is where
- * the claim leaf's witness actually lands. Matching that input back to the
- * outpoints asked for works either way, which is why this needs no special
- * case for it.
+ * The preimage from whichever transaction claimed one of `outpoints` (covclaimd's claim),
+ * verified against `paymentHashHex` — a matching witness SHAPE is not proof. Null means
+ * nothing provable yet. `spentBy` names the CHECKPOINT tx, whose input carries the claim
+ * leaf's witness, so matching its inputs to `outpoints` needs no special case.
  */
 export const findClaimPreimage = async (
   ctx: ArkadeContext,
@@ -442,35 +443,33 @@ export const findClaimPreimage = async (
   paymentHashHex: string,
 ): Promise<Uint8Array | null> => {
   if (outpoints.length === 0) return null
-  const { vtxos } = await ctx.wallet.indexerProvider.getVtxos({ outpoints: [...outpoints] })
+  // Paged: `arkd` clamps a page below the size the SDK asks for, so one read of a
+  // long outpoint list stops short and a claim past the ceiling never reveals `P`.
+  const vtxos: VirtualCoin[] = []
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { outpoints: [...outpoints] })) {
+    vtxos.push(...batch)
+  }
 
-  // Both spend facts, not just `spentBy`. The SDK's own `hasTerminalSpend`
-  // spells out why: "The wire contract permits `isSpent: true` with an empty
-  // `spentBy` (settlement inputs needing no forfeit are written that way)", so
-  // a `spentBy`-only read can look straight past a real spend and report
-  // nothing provable — which on this path means never learning `P` for a claim
-  // that did land. Either field naming a transaction is worth reading.
-  //
-  // Truthiness, never presence: both are documented as "" rather than absent
-  // for an output they do not apply to (the same rule `convertVtxo`'s own
-  // mapping applies).
+  // Both spend facts, not just `spentBy` — see lockupSpendEvidence. Truthiness, never
+  // presence: both are "" rather than absent for an output they do not apply to.
   const spendingTxids = [...new Set(vtxos.flatMap((v) => [v.spentBy, v.settledBy]).filter((id): id is string => !!id))]
   if (spendingTxids.length === 0) return null
 
-  const { txs } = await ctx.wallet.indexerProvider.getVirtualTxs(spendingTxids)
-  for (const raw of txs) {
-    // No options object, matching every other Transaction.fromPSBT call in
-    // this file (claimSwapScript, refundSwapScript) — confirmed against the
-    // pinned SDK build that the default already preserves Ark's proprietary
-    // PSBT fields (ConditionWitness among them) through this exact round trip.
-    const tx = Transaction.fromPSBT(base64.decode(raw))
-    for (let i = 0; i < tx.inputsLength; i++) {
-      const input = tx.getInput(i)
-      if (!input.txid) continue
-      const matchesOurOutpoint = outpoints.some((o) => hex.encode(input.txid!) === o.txid && input.index === o.vout)
-      if (!matchesOurOutpoint) continue
-      for (const candidate of candidateWitnessItems(tx, i)) {
-        if (hashMatches(candidate, paymentHashHex)) return candidate
+  // Same reason the vtxo read above is paged: a padded script names more spending
+  // transactions than one request carries back. A match stops the later chunks too.
+  for await (const batch of virtualTxPages(ctx.wallet.indexerProvider, spendingTxids)) {
+    for (const raw of batch) {
+      // No options object, as everywhere else in this file: confirmed against the
+      // pinned SDK that the default preserves ConditionWitness through this trip.
+      const tx = Transaction.fromPSBT(base64.decode(raw))
+      for (let i = 0; i < tx.inputsLength; i++) {
+        const input = tx.getInput(i)
+        if (!input.txid) continue
+        const matchesOurOutpoint = outpoints.some((o) => hex.encode(input.txid!) === o.txid && input.index === o.vout)
+        if (!matchesOurOutpoint) continue
+        for (const candidate of candidateWitnessItems(tx, i)) {
+          if (hashMatches(candidate, paymentHashHex)) return candidate
+        }
       }
     }
   }
@@ -481,35 +480,10 @@ export const totalValue = (outputs: readonly FundedOutput[]): number =>
   outputs.reduce((sum, output) => sum + output.value, 0)
 
 /**
- * Every outpoint this script has ever held — SPENT ONES INCLUDED, which is the
- * whole reason it exists separately from {@link findLockups}.
- *
- * `findLockups` answers "what can still be spent here" and so goes empty the
- * moment a claim lands, which is exactly when {@link findClaimPreimage} needs
- * the outpoint to look up what did the claiming. Reading the unfiltered set
- * recovers it from the indexer rather than making every caller persist the
- * outpoint at funding time.
- *
- * Passing NO filter is what makes that work, and is deliberate: every one of
- * `getVtxos`'s state filters is opt-in narrowing — `spendableOnly`,
- * `spentOnly`, `recoverableOnly`, `pendingOnly`, `renewableOnly`, each
- * documented as "Only return ..." — so an absent filter restricts nothing and
- * spent outputs are included. Adding one here would reintroduce exactly the
- * blindness this exists to avoid.
- *
- * `value` and `spent` come back alongside the outpoint because the Lightning
- * receive leg funds its OWN lockup and has to tell "this script was already
- * funded (and maybe already claimed)" apart from "somebody dusted a public
- * address": the outpoint alone cannot answer that, and the exact-value
- * comparison is what keeps a 1-sat payment from being adopted as the
- * provider's funding — or from blocking one. `spent` is `hasTerminalSpend`
- * rather than a hand-rolled `spentBy` test for the reason
- * {@link lockupProvablySpent} spells out: the wire contract permits
- * `isSpent: true` with an empty `spentBy`, and only the SDK's own predicate
- * cannot read a spent output back as unspent.
- *
- * Paged the same way {@link findLockups} is, and for the same reason now that
- * values are compared here: a truncated first page would undercount the lockup.
+ * Every outpoint this script has ever held — SPENT ONES INCLUDED, unlike {@link findLockups},
+ * so {@link findClaimPreimage} can still find the claimed outpoint. `value` lets the receive
+ * leg tell its own funding from a dust payment to a public address. Paged like findLockups;
+ * unfiltered and `isVtxoSpent` for the reasons at {@link lockupSpendEvidence}.
  */
 export const findLockupOutpoints = async (
   ctx: Pick<ArkadeContext, 'wallet'>,
@@ -518,38 +492,16 @@ export const findLockupOutpoints = async (
   const outpoints: { txid: string; vout: number; value: number; spent: boolean }[] = []
   for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
     for (const vtxo of batch) {
-      outpoints.push({ txid: vtxo.txid, vout: vtxo.vout, value: Number(vtxo.value), spent: hasTerminalSpend(vtxo) })
+      outpoints.push({ txid: vtxo.txid, vout: vtxo.vout, value: Number(vtxo.value), spent: isVtxoSpent(vtxo) })
     }
   }
   return outpoints
 }
 
 /**
- * Whether this script's money is provably GONE — it held at least one output,
- * and every one of them is spent.
- *
- * The positive counterpart to {@link findLockups}, and the reason the refund
- * sweeps no longer read an empty spendable answer as proof that somebody else
- * refunded. `findLockups` is `spendableOnly`, so it answers "what can still be
- * spent here" and goes empty for two unrelated reasons: the outputs really
- * were spent, or that view has not caught up. Absence of a spendable output is
- * not evidence of a spend, so this asks for the spend itself.
- *
- * Unfiltered for the same reason {@link findLockupOutpoints} is: every one of
- * `getVtxos`'s state filters is opt-in narrowing, so passing none is what
- * keeps spent outputs in the answer.
- *
- * `hasTerminalSpend` rather than a hand-rolled `spentBy` test, because the
- * wire contract permits `isSpent: true` with an empty `spentBy` — the SDK's
- * own predicate unions all three spend facts, and is the only one that cannot
- * read a spent output back as unspent. A SWEPT output is deliberately NOT a
- * terminal spend (the SDK keeps that fact separate), so a batch the server
- * swept answers false here and leaves the row actionable, rather than being
- * reported to a client as a refund it never received.
- *
- * An empty answer is FALSE, never true: a script the indexer knows nothing
- * about is lag, not proof, and callers only reach this for a row that already
- * recorded a funded lockup.
+ * Whether this script's money is provably GONE: it held at least one output and every one
+ * is spent. `findLockups` is `spendableOnly`, so its empty answer cannot tell a spend from
+ * a view that has not caught up — this asks for the spend itself. @see lockupSpendEvidence
  */
 export const lockupProvablySpent = async (ctx: Pick<ArkadeContext, 'wallet'>, pkScriptHex: string): Promise<boolean> =>
   (await lockupSpendEvidence(ctx, pkScriptHex)) === 'spent'
@@ -557,14 +509,25 @@ export const lockupProvablySpent = async (ctx: Pick<ArkadeContext, 'wallet'>, pk
 /** The same read {@link lockupProvablySpent} makes, keeping the answer its boolean folds away: `unknown` — no output at all — is permanent, where `unspent` is a view that may still catch up. */
 export type LockupSpendEvidence = 'unknown' | 'unspent' | 'spent'
 
+/**
+ * Unfiltered on purpose — every `getVtxos` state filter is opt-in narrowing, so none keeps
+ * spent outputs. `isVtxoSpent`, not a `spentBy` test: the wire contract permits
+ * `isSpent: true` with an empty `spentBy`. A SWEPT output is not a terminal spend, so a
+ * swept batch stays actionable; no output at all is `unknown` (lag), never proof.
+ * `spent` needs every page, being the one answer that lets a caller stop collecting.
+ */
 export const lockupSpendEvidence = async (
   ctx: Pick<ArkadeContext, 'wallet'>,
   pkScriptHex: string,
 ): Promise<LockupSpendEvidence> => {
-  const { vtxos } = await ctx.wallet.indexerProvider.getVtxos({ scripts: [pkScriptHex] })
-  const all = vtxos ?? []
-  if (all.length === 0) return 'unknown'
-  return all.every((vtxo) => hasTerminalSpend(vtxo)) ? 'spent' : 'unspent'
+  let seen = false
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
+    for (const vtxo of batch) {
+      seen = true
+      if (!isVtxoSpent(vtxo)) return 'unspent'
+    }
+  }
+  return seen ? 'spent' : 'unknown'
 }
 
 /**
@@ -893,9 +856,12 @@ export const refundWithoutReceiverSwapScript = async (
     checkpoints.map((c) => base64.encode(c.toPSBT())),
   )
 
+  assertSubmittedArkTxid(submitted, signedArkTx, 'refundWithoutReceiverSwapScript')
+  const matched = matchServerCheckpoints(submitted.signedCheckpointTxs, checkpoints, 'refundWithoutReceiverSwapScript')
+
   const finalCheckpoints = await Promise.all(
-    submitted.signedCheckpointTxs.map(async (encoded) => {
-      const signed = await ctx.identity.sign(Transaction.fromPSBT(base64.decode(encoded)), [0])
+    matched.map(async ({ server }) => {
+      const signed = await ctx.identity.sign(server, [0])
       return base64.encode(signed.toPSBT())
     }),
   )

@@ -71,6 +71,8 @@ const fakeServices = (over: { balance?: unknown; assetManager?: unknown; vtxos?:
     arkade: { arkServerUrl: 'http://ark.test' },
     maxExposedSats: 300_000,
     limits: { minSats: 1_000, maxSats: 100_000 },
+    offerMarkets: [],
+    assetRfqTokens: [],
     corridorEnabled: corridorMap(true),
     corridorFees: corridorMap({ bps: 0, flatSats: 0 }),
     corridorLimits: corridorMap({ minSats: 1_000, maxSats: 100_000 }),
@@ -80,10 +82,18 @@ const fakeServices = (over: { balance?: unknown; assetManager?: unknown; vtxos?:
     config,
     // The boot snapshots the restart banner diffs the store against.
     policy: config,
+    bootPolicy: config,
     assetMarkets: [],
+    liveOfferMarkets: [],
+    assetRfqMarkets: [],
     ...stores,
     readers: readerSetFromDeps(stores as unknown as FlatCorridorDeps),
-    adminStore: { getOverrides: vi.fn().mockResolvedValue({}), listMarkets: vi.fn().mockResolvedValue([]) },
+    adminStore: {
+      getOverrides: vi.fn().mockResolvedValue({}),
+      listMarkets: vi.fn().mockResolvedValue([]),
+      listPendingApprovals: vi.fn().mockResolvedValue([]),
+      repairedServing: [],
+    },
     bootOverrides: {},
     ln: { getBalance: vi.fn().mockResolvedValue({ availableSats: 500_000, incomingSats: 0 }) },
     arkade: {
@@ -286,6 +296,39 @@ describe('asset metadata', () => {
     await vi.waitFor(() => expect(getAssetDetails).toHaveBeenCalledTimes(2))
     const labelled = describeAssets(assets, { getAssetDetails })
     expect(labelled.map((asset) => asset.ticker)).toEqual(['AAA', 'BBB'])
+  })
+})
+
+describe('GET /api/assets/:assetId', () => {
+  it('waits for the indexer, so a market leg is labelled on the first read', async () => {
+    const getAssetDetails = vi.fn().mockResolvedValue({
+      assetId: ASSET,
+      supply: 1n,
+      metadata: { ticker: 'USDX', name: 'Dollar X', decimals: 6 },
+    })
+    const response = await get(`/api/assets/${ASSET}`, { assetManager: { getAssetDetails } })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      assetId: ASSET,
+      shortId: '46dc4479…0000',
+      ticker: 'USDX',
+      name: 'Dollar X',
+      decimals: 6,
+    })
+  })
+
+  it('answers with the id alone when the indexer refuses', async () => {
+    const getAssetDetails = vi.fn().mockRejectedValue(new Error('indexer down'))
+    const response = await get(`/api/assets/${ASSET}`, { assetManager: { getAssetDetails } })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ assetId: ASSET, shortId: '46dc4479…0000' })
+  })
+
+  it('refuses anything that is not an asset id before asking the indexer', async () => {
+    const getAssetDetails = vi.fn()
+    const response = await get(`/api/assets/${ASSET.toUpperCase()}`, { assetManager: { getAssetDetails } })
+    expect(response.status).toBe(400)
+    expect(getAssetDetails).not.toHaveBeenCalled()
   })
 })
 

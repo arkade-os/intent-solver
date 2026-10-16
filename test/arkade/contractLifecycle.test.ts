@@ -97,7 +97,7 @@ describe('planContractLifecycle', () => {
 
 /**
  * A row from before the client-unilateral refund leaf. `covenantScriptFromRow`
- * refuses these outright since #202 deleted the base three-leaf script, so this
+ * refuses these outright since the base three-leaf script was deleted, so this
  * is what a source has to survive rather than a hypothetical.
  */
 const legacyRow = (id: string) => ({
@@ -157,7 +157,7 @@ describe('lockupSource', () => {
   })
 
   /**
-   * The interaction with #202 that makes this isolation load-bearing rather
+   * The interaction with that deletion that makes this isolation load-bearing rather
    * than tidy: `runContractLifecycle` treats a THROWING source as an incomplete
    * live set and suppresses retirement for the whole pass. Without the per-row
    * catch, one un-rebuildable legacy row would freeze retirement permanently.

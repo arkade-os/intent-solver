@@ -15,23 +15,12 @@
  * disagree with the first.
  */
 
-import { sha256 } from '@noble/hashes/sha2.js'
-import { hex } from '@scure/base'
-import { NON_TERMINAL } from '@arkade-os/solver-corridors/db/swaps.js'
+import { preimageMatchesHash } from '@arkade-os/solver-core/core/preimage.js'
 import { requireLn } from './rails.js'
 import type { Services } from './services.js'
 
 /** Where the row was left. `claiming` means the sweep will finish it. */
 export type ClaimOutcome = { state: 'claiming' }
-
-/** `sha256(P)` against the row's payment hash — the same check the orchestrator makes. */
-export const preimageOpens = (preimageHex: string, paymentHashHex: string): boolean => {
-  try {
-    return hex.encode(sha256(hex.decode(preimageHex))) === paymentHashHex
-  } catch {
-    return false
-  }
-}
 
 /**
  * Put ONE stuck Lightning-corridor swap back on the claim path.
@@ -63,7 +52,7 @@ export const claimNow = async (services: Services, id: string, preimageHex?: str
     )
   }
 
-  if (!preimageOpens(preimage, row.paymentHash)) {
+  if (!preimageMatchesHash(preimage, row.paymentHash)) {
     throw new Error(`preimage does not match the payment hash of swap ${id} (${row.paymentHash})`)
   }
 
@@ -75,12 +64,3 @@ export const claimNow = async (services: Services, id: string, preimageHex?: str
   }
   return { state: 'claiming' }
 }
-
-/*
- * `parkSwap` used to live here, reaching `services.store` — the Lightning-send
- * store — while the console offered its button on every row. It is now
- * `Corridor.park`, implemented once as `parkVia` in
- * `@arkade-os/solver-core/core/corridor.ts` and supplied by each corridor with
- * its OWN live and parked state lists, which is the only place that knowledge
- * correctly lives.
- */

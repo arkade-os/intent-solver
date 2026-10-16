@@ -4,34 +4,46 @@
 (*                                                                         *)
 (* WHICH TYPESCRIPT THIS SPECIFIES                                         *)
 (*                                                                         *)
-(*   src/db/onchainSwaps.ts          the durable row, LEGAL_EDGES,         *)
-(*                                   transition(), patch(), fail(),        *)
-(*                                   committedSats(), findRecoverable()    *)
-(*   src/send/onchainOrchestrator.ts the whole state machine: step(),      *)
-(*                                   whenQuoted, whenFunded,               *)
-(*                                   whenFundingOnchain, recoverFunding,   *)
-(*                                   submitFunding, whenAwaitingClaim,     *)
-(*                                   whenClaiming, whenRefundingOnchain,   *)
-(*                                   pushOnchainHtlcRefund, tick()         *)
-(*   src/core/onchainSend.ts         DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,       *)
-(*                                   MIN_ONCHAIN_FUND_WINDOW,              *)
-(*                                   htlcLocktimeFor,                      *)
-(*                                   onchainRefundLocktimeFor,             *)
-(*                                   DEFAULT_MIN_CONFIRMATIONS,            *)
-(*                                   ONCHAIN_DUST_SATS                     *)
-(*   src/onchain/htlc.ts             the two leaves: a claim leaf with NO  *)
-(*                                   CHECKLOCKTIMEVERIFY, and a refund     *)
-(*                                   leaf gated on htlc_locktime           *)
-(*   src/onchain/claim.ts            the witness the client's claim leaves *)
-(*                                   behind — the solver's only source of P*)
-(*   src/onchain/refund.ts           the solver's refund spend, nLockTime  *)
-(*                                   = htlc_locktime, sequence 0xfffffffd  *)
-(*   src/send/arkadeOps.ts           claim() and assertScriptMatchesRow    *)
-(*   packages/solver-app/src/worker.ts                   the queue fan-out and its safety claim*)
+(*   packages/solver-corridors/src/                                        *)
+(*     db/onchainSwaps.ts          the durable row, LEGAL_EDGES, the       *)
+(*                                 SHAPE's live/exposed lists,             *)
+(*                                 findRecoverable().  transition(),       *)
+(*                                 patch(), fail() and committedSats()     *)
+(*                                 come from db/baseSwapStore.ts.          *)
+(*     send/onchainOrchestrator.ts the whole state machine: step(),        *)
+(*                                 whenQuoted, whenFunded,                 *)
+(*                                 whenFundingOnchain, recoverFunding,     *)
+(*                                 submitFunding, whenAwaitingClaim,       *)
+(*                                 whenClaiming, whenRefundingOnchain,     *)
+(*                                 pushOnchainHtlcRefund, tick()           *)
+(*     send/arkadeOps.ts           claim() and assertScriptMatchesRow      *)
+(*   packages/solver-core/src/                                             *)
+(*     core/onchainSend.ts         DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,         *)
+(*                                 MIN_ONCHAIN_FUND_WINDOW,                *)
+(*                                 htlcLocktimeFor,                        *)
+(*                                 onchainRefundLocktimeFor,               *)
+(*                                 DEFAULT_MIN_CONFIRMATIONS,              *)
+(*                                 ONCHAIN_DUST_SATS                       *)
+(*     ports/onchain.ts            findOutputs / findSpendWitness /        *)
+(*                                 broadcastRaw, the L1 rail seam          *)
+(*   packages/solver-arkade/src/                                           *)
+(*     arkade/wallet.ts             findLockups (spendableOnly), the       *)
+(*                                  read whose [] is not proof of a        *)
+(*                                  spend                                  *)
+(*   packages/solver-rails/src/                                            *)
+(*     onchain/htlc.ts             buildOnchainHtlc: a claim leaf with NO  *)
+(*                                 CHECKLOCKTIMEVERIFY, and a refund leaf  *)
+(*                                 gated on htlc_locktime                  *)
+(*     onchain/claim.ts            the witness the client's claim leaves   *)
+(*                                 behind — the solver's only source of P  *)
+(*     onchain/refund.ts           buildOnchainRefundTx: nLockTime =       *)
+(*                                 htlc_locktime, sequence 0xfffffffd      *)
+(*   packages/solver-app/src/                                              *)
+(*     worker.ts                   the queue fan-out and its safety claim  *)
 (*                                                                         *)
 (* AUTHORITY FOR THE EDGE TABLE                                            *)
 (*                                                                         *)
-(* src/db/onchainSwaps.ts lines 54-64, verbatim:                           *)
+(* LEGAL_EDGES in packages/solver-corridors/src/db/onchainSwaps.ts:        *)
 (*                                                                         *)
 (*   quoted:            ['funded', 'refused']                              *)
 (*   funded:            ['funding_onchain', 'refused']                     *)
@@ -44,7 +56,7 @@
 (*   refused:           []                                                 *)
 (*   stuck:             []                                                 *)
 (*                                                                         *)
-(* plus src/db/onchainSwaps.ts:39-52                                       *)
+(* plus the SHAPE's live/exposed lists                                     *)
 (*   NON_TERMINAL = quoted funded funding_onchain awaiting_claim           *)
 (*                  claiming refunding_onchain                             *)
 (*   EXPOSED      = funding_onchain awaiting_claim claiming                *)
@@ -52,7 +64,7 @@
 (*                                                                         *)
 (* `Edges` below adds exactly two edges the TypeScript does not have —     *)
 (* none -> {quoted, rejected} and rejected -> {} — which model quote()'s   *)
-(* INSERT-or-refuse (onchainOrchestrator.ts:172-251).  In the TypeScript   *)
+(* INSERT-or-refuse (the orchestrator's quote()).  In the TypeScript       *)
 (* that is a row appearing or not appearing, not a transition.  They are   *)
 (* marked in the definition.  Everything else diffs line for line.         *)
 (*                                                                         *)
@@ -65,7 +77,7 @@
 (*   claim leaf   SIZE 32 EQUALVERIFY HASH160 <h> EQUALVERIFY <ck> CHECKSIG*)
 (*                — NO CHECKLOCKTIMEVERIFY.  The client may spend it at    *)
 (*                any instant, forever, including long after the solver    *)
-(*                has decided to refund.  (src/onchain/htlc.ts:87-92)      *)
+(*                has decided to refund.  (buildOnchainHtlc)               *)
 (*   refund leaf  <htlc_locktime> CLTV DROP <rk> CHECKSIG — matures        *)
 (*                against MEDIAN-TIME-PAST, not wall clock.                *)
 (*                                                                         *)
@@ -81,11 +93,11 @@
 (* WHAT IS DELIBERATELY ABSTRACTED AWAY                                    *)
 (*                                                                         *)
 (*  - Amounts, overfunding, dust.  Every swap is `Amount` sats.  The       *)
-(*    ONCHAIN_DUST_SATS refusal (onchainOrchestrator.ts:773-791) routes to *)
+(*    ONCHAIN_DUST_SATS refusal (in submitFunding) routes to               *)
 (*    `stuck`, which NoSilentLoss already covers, and is a fee-market      *)
 (*    property rather than a concurrency one.                              *)
 (*  - The preimage column.  P is written in the SAME UPDATE as the         *)
-(*    transition into `claiming` (:636 and :691), so `st[s] = "claiming"`  *)
+(*    transition into `claiming` (whenAwaitingClaim, whenRefundingOnchain),*)
 (*    already means "P is on disk and the Arkade claim needs nothing       *)
 (*    external".  A separate variable could only disagree with the state.  *)
 (*  - patch(), the event log, column allowlists, the operator commands     *)
@@ -96,7 +108,7 @@
 (*    indistinguishable from the client's own refund; both are             *)
 (*    `ClientRefundLockup` here.                                           *)
 (*  - checkFunded (funding_onchain -> awaiting_claim with funding_txid     *)
-(*    already non-null, :539-541, :603-605).  DEAD EDGE: no code path      *)
+(*    already non-null, in submitFunding).  DEAD EDGE: no code path        *)
 (*    writes funding_txid without moving the state in the same UPDATE, so  *)
 (*    it is unreachable through the store's API.  Marked, not modelled.    *)
 (*                                                                         *)
@@ -153,7 +165,7 @@
 (*       outpoint keeps any conflicting spend from being relayed and       *)
 (*       confirmed (Bitcoin Core's first-seen policy).  This is the model  *)
 (*       constant that makes `refunded` a safe terminal state, and it is   *)
-(*       NOT what the code actually gets: src/onchain/refund.ts sets       *)
+(*       NOT what the code actually gets: buildOnchainRefundTx sets        *)
 (*       sequence 0xfffffffd, which enables nLockTime AND OPTS INTO RBF.   *)
 (*       0xfffffffe would enable the locktime without signalling           *)
 (*       replaceability.  OnchainSend_MempoolRace.cfg sets this FALSE and  *)
@@ -161,14 +173,14 @@
 (*                                                                         *)
 (*  (A4) FundIsIdempotent.  The funding backend deduplicates repeated      *)
 (*       calls for one swap.  It DOES NOT, and the code says so at         *)
-(*       onchainOrchestrator.ts:544-556: the funding call — LND's          *)
+(*       submitFunding: the funding call — LND's                           *)
 (*       sendToChainAddress — takes no idempotency key.  Today the only    *)
 (*       thing standing in for it is the in-process `inFlight` Set plus a  *)
 (*       chain read that may lag.  OnchainSend_DoubleFund.cfg sets this    *)
 (*       FALSE.                                                            *)
 (*                                                                         *)
 (*  (A5) The client's claim witness is parseable.  preimageFromClaimWitness*)
-(*       is literally `witness[1] ?? null` (:88) — POSITIONAL and          *)
+(*       is literally `witness[1] ?? null` — POSITIONAL and                *)
 (*       unauthenticated.  A structurally valid claim built with a         *)
 (*       different witness layout reads as "spent by something other than  *)
 (*       a matching claim" and parks the row in `stuck` while the client   *)
@@ -178,7 +190,7 @@
 (*       reported instead, and it is a real unguarded loss.                *)
 (*                                                                         *)
 (*  (A6) min_confirmations is the CLIENT's guardrail, not the solver's.    *)
-(*       `confirmations` is read NOWHERE in src/send/onchainOrchestrator.ts*)
+(*       `confirmations` is read NOWHERE in send/onchainOrchestrator.ts    *)
 (*       — funding_onchain -> awaiting_claim fires at ZERO depth.  So      *)
 (*       MinConfirmations appears here only where it really bites: the     *)
 (*       client will not claim until the funding output has the promised   *)
@@ -187,11 +199,11 @@
 (*       guard the code does not have.                                     *)
 (*                                                                         *)
 (*  (A7) findLockups() ANSWERS [] ONLY FOR A SPENT LOCKUP.  It does not:   *)
-(*       it is getVtxos({ spendableOnly: true }) (src/arkade/wallet.ts:    *)
-(*       133-136), so a swept, renewed or merely lagging vtxo reads []     *)
-(*       exactly as a spent one does — and whenClaiming (:645-649) fails   *)
+(*       it is getVtxos({ spendableOnly: true }) (findLockups in           *)
+(*       arkade/wallet.ts), so a swept, renewed or merely lagging vtxo     *)
+(*       reads [] exactly as a spent one does — and whenClaiming fails     *)
 (*       the row to `stuck` on that read ALONE, with none of the           *)
-(*       lockupProvablySpent second read pushRefund insists on (:313-317). *)
+(*       lockupProvablySpent second read pushRefund insists on.            *)
 (*       LockupReadIsReliable = TRUE is the idealisation; FALSE is the     *)
 (*       code.  OnchainSend_LaggingLockupRead.cfg sets it FALSE and TLC    *)
 (*       violates NoNetLoss in 25 states with no crash, no lost CAS and no *)
@@ -202,7 +214,7 @@
 (*       believe an empty spendableOnly read without a second, positive    *)
 (*       proof of the spend.                                               *)
 (*                                                                         *)
-(*  (A9) RefundNeedsConfirmation.  SHIPPED (#169, #204), not an open       *)
+(*  (A9) RefundNeedsConfirmation.  SHIPPED, not an open                    *)
 (*       assumption.  send/onchainOrchestrator.ts writes onchain_refund_txid*)
 (*       BEFORE broadcasting and holds the row in refunding_onchain until   *)
 (*       transactionOutcome on that id reports `confirmed`.  Two findings   *)
@@ -213,18 +225,18 @@
 (*       OnchainSend_UnconfirmedRefund.cfg.                                 *)
 (*                                                                         *)
 (*  (A8) THE `awaiting_claim -> stuck` EDGE IS NOT MODELLED, though it is  *)
-(*       in Edges and the code takes it twice: :610 (no funding txid/vout, *)
-(*       unreachable through the store's API for the same reason           *)
-(*       checkFunded is) and :633 (a spend that is not a recognisable      *)
-(*       claim).  The second is reachable in reality and is the (A5)       *)
-(*       hazard — an unparseable-but-valid client claim — for which this   *)
-(*       model has no third spend kind.  Marked so its absence reads as a  *)
-(*       decision: every other edge of the table has an action.            *)
+(*       in Edges and the code takes it twice, both in whenAwaitingClaim:  *)
+(*       no funding txid/vout (unreachable through the store's API for     *)
+(*       the same reason checkFunded is), and a spend that is not a        *)
+(*       recognisable claim.  The second is reachable in reality and is    *)
+(*       the (A5) hazard — an unparseable-but-valid client claim — for     *)
+(*       which this model has no third spend kind.  Marked so its absence  *)
+(*       reads as a decision: every other edge of the table has an action. *)
 (*                                                                         *)
 (*  (A9) THE PRE-BROADCAST RE-READ AND THE BROADCAST ARE ONE STEP.         *)
 (*       BroadcastRefund tests ~WitnessSeen(s) at the instant it writes    *)
-(*       l1, but whenRefundingOnchain reads the witness (:687) and then    *)
-(*       runs estimateFeeRate / build / sign / broadcastRaw (:762-795) —   *)
+(*       l1, but whenRefundingOnchain reads the witness and then           *)
+(*       runs estimateFeeRate / build / sign / broadcastRaw —              *)
 (*       four awaits in which a claim can be relayed behind a read that    *)
 (*       has already returned.  Consequence: RefundBroadcastable's         *)
 (*       `l1 = "claimSeen" /\ ~MempoolExclusive` disjunct is UNREACHABLE   *)
@@ -242,7 +254,7 @@
 (*  1. whenRefundingOnchain re-reads findSpendWitness IMMEDIATELY before   *)
 (*     broadcasting, and a hash-verified preimage takes the row to         *)
 (*     `claiming` instead.  See RefundSeesClaim and OnchainSend_Broken.cfg.*)
-(*  2. DONE (#204): `refunded` records a CONFIRMATION.  The row holds in    *)
+(*  2. DONE: `refunded` records a CONFIRMATION.  The row holds in           *)
 (*     refunding_onchain until transactionOutcome on its own pre-committed *)
 (*     txid says the spend mined, so RBF on the refund is no longer a way  *)
 (*     to lose money silently.  See (A9) and OnchainSend_MempoolRace.cfg,  *)
@@ -275,7 +287,7 @@
 (*                             split out because TLC's tableau over the    *)
 (*                             two-swap graph does not converge; see that  *)
 (*                             cfg and the note in OnchainSend.cfg.        *)
-(*   six mutation cfgs         see the results block at the end.           *)
+(*   seven mutation cfgs       see the results block at the end.           *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC, SwapCore
 
@@ -298,7 +310,7 @@ CONSTANTS
 (***************************************************************************)
 (* THE CONSTANT ORDERING IS THE WHOLE CONTENT OF THE TIMING GUARDS.        *)
 (*                                                                         *)
-(* Real values, from src/core/onchainSend.ts with minConfirmations = 1 and *)
+(* Real values, from core/onchainSend.ts with minConfirmations = 1 and     *)
 (* T0 = quote time:                                                        *)
 (*                                                                         *)
 (*   htlc_locktime            T0 + 11400   (600*1 + 2*5400)                *)
@@ -322,7 +334,7 @@ VARIABLES
                 \* > 1 == the solver paid the same HTLC twice out of its own wallet.
     fundConf,   \* [Swaps -> 0..MinConfirmations] depth of the funding output.
                 \* 0 also stands for "not yet visible to findOutputs" — the
-                \* residual crash window recoverFunding documents at :578-591.
+                \* residual crash window recoverFunding documents.
     l1          \* [Swaps -> L1Status] the L1 HTLC outpoint: what has been
                 \* broadcast for it and what the chain has confirmed.
 
@@ -366,7 +378,7 @@ L1Status == { "unspent", "claimSeen", "refundSeen", "contested",
               "claimed", "refunded" }
 
 (***************************************************************************)
-(* THE EDGE TABLE.  Diff this against src/db/onchainSwaps.ts:54-64.        *)
+(* THE EDGE TABLE.  Diff this against LEGAL_EDGES in db/onchainSwaps.ts.   *)
 (***************************************************************************)
 Row   == { "quoted", "funded", "funding_onchain", "awaiting_claim",
            "claiming", "claimed", "refunding_onchain", "refunded",
@@ -419,21 +431,21 @@ ClientTookLockup(s) == SpentBy(s, "clientRefund")    \* the client pulled it bac
 (* when the lockup was first seen.                                        *)
 (***************************************************************************)
 
-\* evaluateOnchainSendFunding, src/core/onchainSend.ts:120-126.
+\* evaluateOnchainSendFunding, in packages/solver-core/src/core/onchainSend.ts.
 \* `now >= refundLocktime - MIN_ONCHAIN_FUND_WINDOW` refuses; written as
 \* addition so Naturals never goes negative.
 FundGateOpen == clock + MinFundWindow < RefundLocktime
 
-\* whenQuoted's deadline, src/send/onchainOrchestrator.ts:506.
+\* whenQuoted's deadline, in send/onchainOrchestrator.ts.
 LockupTimedOut == clock >= LockupDeadline
 
-\* whenAwaitingClaim, :620-622.  The margin is a WALL-CLOCK proxy for "MTP has
+\* whenAwaitingClaim.  The margin is a WALL-CLOCK proxy for "MTP has
 \* passed htlc_locktime" (A1).  The mutation drops the margin AND the deadline.
 RefundArmed == BreakRefundTiming \/ clock >= HtlcLocktime + RefundMtpMargin
 
 \* onchain.findSpendWitness is THREE-VALUED and `null` is not proof of
 \* non-spend.  Esplora reads only `outspend.spent` and ignores
-\* `status.confirmed` (packages/solver-rails-esplora/src/esplora.ts:148-167),
+\* `status.confirmed` (packages/solver-rails-esplora/src/esplora.ts),
 \* so an UNCONFIRMED claim already reads as spent — which is what makes the
 \* pre-broadcast re-check worth anything at all.  LND's version resolves on a
 \* confirmation event and returns null after a 5 s timeout, i.e. "not seen
@@ -446,7 +458,7 @@ AlienWitness(s)  == WitnessSeen(s) /\ ~ClaimWitness(s)
 \* Can the solver's refund spend actually go out?  Three separate physical
 \* facts, none of them a policy choice:
 \*   - the outpoint is not already spent on-chain (else a plain double-spend);
-\*   - BIP65/BIP113: src/onchain/refund.ts:74 sets nLockTime = htlc_locktime
+\*   - BIP65/BIP113: buildOnchainRefundTx sets nLockTime = htlc_locktime
 \*     exactly, and IsFinalTx admits a time-based locktime only when
 \*     nLockTime < median-time-past — STRICTLY.  Hence `>`, not `>=`: at
 \*     MTP = htlc_locktime the refund is still non-final and every mempool
@@ -474,7 +486,7 @@ ClientFunds(s) ==
 
 \* A block lands on top of the solver's funding transaction.  Depth 0 means
 \* the output is not even visible to findOutputs yet, which is the residual
-\* crash window recoverFunding concedes (:578-591) — small on LND, and wider on
+\* crash window recoverFunding concedes — small on LND, and wider on
 \* any backend whose send call returns before the transaction is broadcast.
 ConfirmFunding(s) ==
     /\ fundOut[s] >= 1
@@ -580,7 +592,7 @@ ChainTick ==
 
 \* store.get(id) / findRecoverable(), and — when the handler is quote()
 \* rather than a tick — `await store.committedSats()` in the same breath
-\* (onchainOrchestrator.ts:175).  ALWAYS a separate step from the write that
+\* (the orchestrator's quote()).  ALWAYS a separate step from the write that
 \* follows it: every await in the TypeScript yields the event loop, and every
 \* goroutine boundary in Go yields the scheduler.
 ReadSwap(w, s) ==
@@ -600,10 +612,10 @@ GiveUp(w) ==
 
 Crash(w) == CrashCore(w) /\ UNCHANGED OsVars
 
-(***** quote() : src/send/onchainOrchestrator.ts:150-251 *******************)
+(***** quote() *************************************************************)
 
 \* insertQuote().  The partial UNIQUE index on payment_hash
-\* (src/db/onchainSwaps.ts:193-194) makes the INSERT itself single-winner,
+\* (the partial UNIQUE index in db/onchainSwaps.ts) makes the INSERT single-winner,
 \* modelled by the CAS on "none".  There is NO equivalent backstop for the
 \* exposure cap: with AtomicAdmission = FALSE the insert trusts the snapshot
 \* verdict, which is today's TypeScript.  With TRUE the cap is re-checked by
@@ -623,7 +635,7 @@ InsertQuote(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OsVars
 
-(***** whenQuoted : src/send/onchainOrchestrator.ts:502-523 ****************)
+(***** whenQuoted **********************************************************)
 
 \* arkade.findLockups() saw the exact amount, in time.  The indexer is allowed
 \* to LAG: a worker may simply not take this action even though lockup[s]
@@ -652,7 +664,7 @@ RefuseQuoted(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OsVars
 
-(***** whenFunded : src/send/onchainOrchestrator.ts:527-537 ****************)
+(***** whenFunded **********************************************************)
 
 \* THE INTENT COMMIT.  `const won = await store.transition(...); if (!won)
 \* return false` — the CAS runs BEFORE onchain.fund, and only the winner calls
@@ -681,7 +693,7 @@ RefuseFund(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OsVars
 
-(***** submitFunding / recoverFunding : :539-601 ***************************)
+(***** submitFunding / recoverFunding **************************************)
 
 \* TWO ENTRY POINTS, and this is the race the CAS does NOT cover.
 \*   (a) the funded->funding_onchain winner, straight from whenFunded;
@@ -694,8 +706,9 @@ RefuseFund(w, s) ==
 \* code cannot tell those apart — which is the whole residual window.
 \* `funding_txid IS NULL` needs no variable of its own: funding_txid and
 \* funding_vout are written in the SAME UPDATE as the move out of
-\* funding_onchain (:596-599, :587-590), so the column is a pure function of
-\* the state — and that is itself the property that makes recoverFunding's
+\* funding_onchain (submitFunding, recoverFunding), so the column is a pure
+\* function of the state — and that is itself the property that makes
+\* recoverFunding's
 \* branch selection sound.  A Go rewrite that writes the txid in a separate
 \* statement breaks this equivalence and needs the variable back.
 CanSubmitFunding(w, s) ==
@@ -703,7 +716,7 @@ CanSubmitFunding(w, s) ==
     \/ (Saw(w, s, "funding_onchain") /\ fundConf[s] = 0)
 
 \* IRREVERSIBLE.  Real Bitcoin leaves the solver's wallet, and neither backend
-\* accepts an idempotency key (:544-556), so nothing except FundIsIdempotent
+\* accepts an idempotency key (submitFunding), so nothing except FundIsIdempotent
 \* (A4) bounds how many times this fires.  The `fundOut >= 2` branch is the
 \* model's counter cap, not a code behaviour: NoDoublePay has already failed
 \* by then and the branch only exists so the action never becomes disabled and
@@ -721,7 +734,7 @@ SubmitFunding(w, s) ==
     /\ UNCHANGED << chainTime, lockup, fundConf, l1 >>
 
 \* funding_txid AND funding_vout are written in the SAME UPDATE as the state
-\* change (:596-599), so a lost CAS records nothing — which is what leaves the
+\* change (submitFunding's CAS), so a lost CAS records nothing — which leaves the
 \* row re-drivable through recoverFunding rather than half-written.
 RecordFunding(w, s) ==
     /\ At(w, s, "fundCalled")
@@ -744,7 +757,7 @@ AdoptFunding(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OsVars
 
-(***** whenAwaitingClaim : src/send/onchainOrchestrator.ts:607-636 *********)
+(***** whenAwaitingClaim ***************************************************)
 
 \* THE ONLY WAY THE SOLVER EVER LEARNS P ON THIS CORRIDOR.  The client's claim
 \* spend carries the preimage on its witness; the row records it in the SAME
@@ -772,10 +785,10 @@ ArmRefund(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OsVars
 
-(***** whenClaiming : src/send/onchainOrchestrator.ts:638-662 **************)
+(***** whenClaiming ********************************************************)
 
 \* arkade.claim() is submitted and the Arkade server co-signs it.  IRREVERSIBLE
-\* AND IT HAPPENS BEFORE THE CAS (:651-652).  Two workers may both be in
+\* AND IT HAPPENS BEFORE THE CAS (in whenClaiming).  Two workers may both be in
 \* `claiming` and both submit; the server accepts exactly one (SpendAccepted
 \* requires conf = {}), which is why the double claim costs bookkeeping and
 \* not money.
@@ -789,7 +802,7 @@ ArkadeClaimAccepted(w, s) ==
     /\ UNCHANGED OsVars
 
 \* The ONLY edge into `claimed`, and it holds our own claim txid.  Its return
-\* value is IGNORED in the TypeScript (:652), so a lost CAS silently discards
+\* value is IGNORED in the TypeScript (whenClaiming), so a lost CAS discards
 \* claim_ark_txid — modelled by CasLost simply passing.
 RecordArkadeClaim(w, s) ==
     /\ At(w, s, "claimSent")
@@ -800,16 +813,16 @@ RecordArkadeClaim(w, s) ==
     /\ UNCHANGED OsVars
 
 \* THE DELIBERATE FALSE NEGATIVE.  arkade.findLockups() returned [].  "Empty"
-\* is NOT "claimed": the read is spendableOnly (src/arkade/wallet.ts:133-136,
+\* is NOT "claimed": the read is spendableOnly (arkade/wallet.ts findLockups,
 \* getVtxos({ spendableOnly: true })) and answers [] for a swept, renewed or
 \* lagging vtxo exactly as it does after our own spend.  This corridor has NO
 \* lockupProvablySpent second read here, unlike pushRefund
-\* (onchainOrchestrator.ts:313-317) — so indexer lag alone can produce this
+\* (pushRefund's second read) — so indexer lag alone can produce this
 \* `stuck` row even without a crash.
 \*
 \* (A7) IS THE KNOB FOR EXACTLY THAT.  LockupReadIsReliable = TRUE keeps the
 \* `Spent(s)` precondition, which is an IDEALISATION and not the TypeScript:
-\* whenClaiming (:645-649) fails the row on the empty read alone, with no
+\* whenClaiming fails the row on the empty read alone, with no
 \* second read and no spend test.  Setting it FALSE is the code, and
 \* OnchainSend_LaggingLockupRead.cfg shows what that costs.
 ClaimSeesEmpty(w, s) ==
@@ -838,7 +851,7 @@ ClaimRefused(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OsVars
 
-(***** whenRefundingOnchain : src/send/onchainOrchestrator.ts:671-712 ******)
+(***** whenRefundingOnchain ************************************************)
 
 \* THE BACK EDGE, AND THE MOST IMPORTANT ACTION IN THIS MODULE.
 \*
@@ -851,7 +864,7 @@ ClaimRefused(w, s) ==
 \* P is never recovered, the Arkade lockup is never claimed, and the client
 \* unilaterally refunds that same lockup once refund_locktime passes.  Net:
 \* the solver pays out onchain AND loses the lockup.  That is the code's own
-\* comment at :678-687, and OnchainSend_Broken.cfg reproduces it.
+\* comment in whenRefundingOnchain, and OnchainSend_Broken.cfg reproduces it.
 RefundSeesClaim(w, s) ==
     /\ Saw(w, s, "refunding_onchain")
     /\ ~BreakRefundRecheck
@@ -862,7 +875,7 @@ RefundSeesClaim(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OsVars
 
-\* PRE-#169 ONLY.  Spent by something that is not a recognisable claim, which
+\* WITHOUT (A9) ONLY.  Spent by something that is not a recognisable claim, which
 \* in this model is ALWAYS the solver's own refund — nothing else can write
 \* `refundSeen` — and that is the finding rather than a modelling shortcut:
 \* witness shape cannot tell the two apart, so a refund that succeeded was
@@ -895,7 +908,7 @@ BroadcastRefund(w, s) ==
     /\ UNCHANGED << clock, st, conf, serverUp >>
     /\ UNCHANGED << chainTime, lockup, fundOut, fundConf >>
 
-\* `refunded` RECORDS A CONFIRMATION (#204).  The txid is patched onto the row
+\* `refunded` RECORDS A CONFIRMATION.  The txid is patched onto the row
 \* BEFORE broadcastRaw, so the verdict is a LATER READ — `transactionOutcome`
 \* on our own id — and there is no pending write for a crash to lose, which is
 \* why BroadcastRefund above parks.  The FALSE arm is what shipped before:
@@ -1072,7 +1085,7 @@ NoNetLoss == \A s \in Swaps : ~(ClientTookL1(s) /\ ClientTookLockup(s))
 
 \* Structural consequence of the edge table that refundSweep depends on:
 \* `refused` must be unreachable from every EXPOSED state, so the automatic
-\* sweep (src/db/onchainSwaps.ts:396-404, state='refused' ONLY) can never
+\* sweep (findRefundable in db/onchainSwaps.ts, state='refused' ONLY) can never
 \* select a swap whose L1 sats have already gone out.  Asserted as a theorem
 \* over the table rather than trusted.
 RefusedUnreachableFromExposed ==
@@ -1086,7 +1099,7 @@ RefusedUnreachableFromExposed ==
 \* table itself: a future edit that drops a -> stuck edge from an exposed
 \* row, or adds an exposed state without one, fails every cfg loudly.  (The
 \* `-coverage` argument proves actions were TAKEN, not that stuck is
-\* REACHABLE FROM every exposed state; see #218/#234.)
+\* REACHABLE FROM every exposed state.)
 StuckReachableFromEveryExposed ==
     \A x \in Exposed : "stuck" \in Edges[x]
 
@@ -1109,15 +1122,38 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (* MUTATION CHECKS — RESULTS                                               *)
 (*                                                                         *)
 (* A spec that passes because it is too weak to fail is worse than none.   *)
-(* Six guards were broken one at a time, each by a single constant, each   *)
-(* with its own .cfg.  FIVE produce a counterexample; the sixth is shipped *)
-(* precisely BECAUSE it does not, and that is a finding about the guard    *)
-(* rather than a hole in the invariants.                                   *)
+(* Seven guards were broken one at a time, each by a single constant, each *)
+(* with its own .cfg.  SIX produce a counterexample; the seventh is        *)
+(* shipped precisely BECAUSE it does not, and that is a finding about the  *)
+(* guard rather than a hole in the invariants.                             *)
+(*                                                                         *)
+(* "N states" in the entries below is the COUNTEREXAMPLE TRACE LENGTH, and *)
+(* the longer traces are enumerated step by step further down.  It is NOT  *)
+(* the number of states explored.  Where a run's generated/distinct pair   *)
+(* is quoted it says so, and names the model it was measured on.           *)
 (*                                                                         *)
 (*   OnchainSend_Broken.cfg        BreakRefundRecheck = TRUE               *)
 (*                                 -> NoNetLoss violated, 23 states, 5s    *)
 (*   OnchainSend_MempoolRace.cfg   MempoolExclusive   = FALSE              *)
-(*                                 -> NoSilentLoss violated, 24 states, 5s *)
+(*                                 -> NoNetLoss violated, 25 states, 4s    *)
+(*                                 (451,888 generated / 79,592 distinct,   *)
+(*                                 depth 25, measured on this model at     *)
+(*                                 8367b70 with TLC 2.19).  It fired       *)
+(*                                 NoSilentLoss until (A9) shipped; that   *)
+(*                                 half is unreachable there now, and the  *)
+(*                                 cfg header says so.                     *)
+(*   OnchainSend_UnconfirmedRefund.cfg                                     *)
+(*                                 RefundNeedsConfirmation = FALSE over    *)
+(*                                 MempoolExclusive = FALSE.  See (A9)     *)
+(*                                 -> NoSilentLoss violated, 24 states     *)
+(*                                 (360,282 generated / 64,481 distinct,   *)
+(*                                 depth 24, measured on this model at     *)
+(*                                 8367b70 with TLC 2.19).  That is the    *)
+(*                                 trace narrated below, reproduced at the *)
+(*                                 same length under THIS cfg's mutation   *)
+(*                                 on today's spec.  The shipped guard     *)
+(*                                 (RefundNeedsConfirmation = TRUE) cannot *)
+(*                                 reach it, which is the point of (A9).   *)
 (*   OnchainSend_DoubleFund.cfg    FundIsIdempotent   = FALSE              *)
 (*                                 -> NoDoublePay violated, 11 states, 1s  *)
 (*   OnchainSend_Overexposed.cfg   AtomicAdmission = FALSE, MaxExposed = 1 *)
@@ -1134,7 +1170,7 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*                                                                         *)
 (* THE MANDATED ONE, IN FULL.  OnchainSend_Broken.cfg removes only the     *)
 (* pre-broadcast findSpendWitness re-read from whenRefundingOnchain        *)
-(* (src/send/onchainOrchestrator.ts:678-704).  23 states:                  *)
+(* (whenRefundingOnchain).  23 states:                                     *)
 (*                                                                         *)
 (*   1-6   both swaps quoted at clock 0 (two workers, interleaved reads    *)
 (*         and inserts)                                                    *)
@@ -1184,8 +1220,13 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*   A spec that only asked about terminal states would have missed this,  *)
 (*   which is why both money invariants are carried.                       *)
 (*                                                                         *)
-(* THE SECOND-SHARPEST ONE.  OnchainSend_MempoolRace.cfg, 24 states.  The  *)
-(* first 18 are identical; then:                                           *)
+(* THE SECOND-SHARPEST ONE, AS IT RAN BEFORE (A9).  These 24 states were   *)
+(* OnchainSend_MempoolRace.cfg's; with RefundNeedsConfirmation shipped     *)
+(* that cfg cannot reach them, and OnchainSend_UnconfirmedRefund.cfg is    *)
+(* where the shape lives now — it sets the flag FALSE over the same        *)
+(* MempoolExclusive = FALSE — and reproduces there at the same 24, so the  *)
+(* count below is measured, not inherited.  The first 18 are identical;    *)
+(* then:                                                                   *)
 (*                                                                         *)
 (*   19-21 ReadSwap, ChainTick, the re-read finds NOTHING (l1 "unspent"),  *)
 (*         BroadcastRefund      so the solver broadcasts its refund — but  *)
@@ -1197,7 +1238,7 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*                              row again.                                 *)
 (*   23    ClientClaimsL1       the client's claim is relayed anyway and   *)
 (*                              REPLACES the refund — which is exactly     *)
-(*                              what src/onchain/refund.ts invites by      *)
+(*                              what onchain/refund.ts invites by          *)
 (*                              setting sequence 0xfffffffd (nLockTime     *)
 (*                              enabled AND opt-in RBF; 0xfffffffe would   *)
 (*                              enable the locktime without the second).   *)
@@ -1208,6 +1249,11 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*   says the client claimed.  P was revealed on a witness nobody will     *)
 (*   ever read, the Arkade lockup is never claimed, and NOTHING PAGES A    *)
 (*   HUMAN.  `refunded` records a broadcast, not a confirmation.           *)
+(*                                                                         *)
+(*   What OnchainSend_MempoolRace.cfg shows TODAY is the loud residual —   *)
+(*   NoNetLoss, not this — and its header carries that argument in full.   *)
+(*   Its trace is 25 states against this one's 24: near-identical size,    *)
+(*   different invariant.  Compare the NAME, not the verdict or the size.  *)
 (*                                                                         *)
 (* THE ONE THAT STAYS GREEN, AND WHY THAT IS THE RIGHT ANSWER.             *)
 (* OnchainSend_RefundTiming.cfg drops HTLC_REFUND_MTP_MARGIN and the       *)
@@ -1246,9 +1292,9 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*                                                                         *)
 (*   OnchainSend_LaggingLockupRead.cfg  LockupReadIsReliable = FALSE       *)
 (*                                 -> NoNetLoss violated, 25 states.       *)
-(*                                 (A7): the sixth mutation, and the only  *)
-(*                                 one that needs neither a crash, a lost  *)
-(*                                 CAS, nor two workers.                   *)
+(*                                 (A7), and the only mutation that needs  *)
+(*                                 neither a crash, a lost CAS, nor two    *)
+(*                                 workers.                                *)
 (*                                                                         *)
 (*   FundGateOpen deleted from FundGate -> NO ERROR, 711,946 distinct.     *)
 (*                                 Not shipped as a cfg because it is not  *)

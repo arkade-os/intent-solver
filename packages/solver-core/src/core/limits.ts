@@ -47,12 +47,6 @@ export const narrow = (base: Limits, override?: Partial<Limits>, label = 'limits
 }
 
 /**
- * The solver's spread in basis points. One constant so the registry card, the open-RFQ
- * bids and quote pricing cannot drift apart.
- */
-export const SOLVER_FEE_BPS = 0
-
-/**
  * The floor under {@link maxRoutingFeeSats}.
  *
  * Raised from 10, which sat one sat under a real backend minimum and made every swap

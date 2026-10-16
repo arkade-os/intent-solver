@@ -28,6 +28,12 @@ export interface RelayEvent {
    * docs/rfq-protocol.md § 4.6). Undefined for directed traffic.
    */
   topic?: string
+  /**
+   * A stored, replaceable document (Nostr's addressable range, keyed by author,
+   * kind and `d` tag) — the kind-38859 solver card. Ignored when `recipient` is
+   * set: a sealed event must never be downgraded to a public one.
+   */
+  replaceable?: { kind: number; d: string }
   /** Unix milliseconds the sender stamped. Used only for `since` filtering. */
   createdAtMs: number
   payload: unknown
@@ -203,12 +209,8 @@ export interface WebSocketRelayOptions {
    * torn-down subscription is otherwise invisible.
    */
   onNotice?: (notice: RelayNotice) => void
-  /**
-   * How far back a reconnect may ask the relay to replay, ms. Defaults to
-   * {@link DEFAULT_MAX_REPLAY_MS}. A subscriber that legitimately wants more
-   * backfill raises it here rather than being silently truncated.
-   */
-  maxReplayMs?: number
+  maxConcurrentHandlers?: number
+  maxQueuedEvents?: number
   now?: () => number
   /** Wire dialect; defaults to the dev broker framing ({@link devCodec}). */
   codec?: WireCodec
@@ -227,9 +229,9 @@ export interface WebSocketRelayOptions {
  *
  * Two minutes is shorter than any quote's validity: a request older than that
  * has no live client behind it (the reference wallet stops waiting after
- * 30 s). A caller that wants more sets `maxReplayMs`.
+ * 30 s).
  */
-export const DEFAULT_MAX_REPLAY_MS = 120_000
+export const MAX_REPLAY_MS = 120_000
 
 /**
  * Fixed safety margin subtracted from the high-water mark when resuming.
@@ -263,8 +265,14 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
   const delays = options.reconnectDelaysMs ?? [1000, 2000, 4000, 8000, 16000]
   const now = options.now ?? (() => Date.now())
   const codec = options.codec ?? devCodec
-
-  const maxReplayMs = options.maxReplayMs ?? DEFAULT_MAX_REPLAY_MS
+  const maxConcurrentHandlers = options.maxConcurrentHandlers ?? 8
+  const maxQueuedEvents = options.maxQueuedEvents ?? 256
+  if (!Number.isSafeInteger(maxConcurrentHandlers) || maxConcurrentHandlers < 1) {
+    throw new Error('maxConcurrentHandlers must be a positive integer')
+  }
+  if (!Number.isSafeInteger(maxQueuedEvents) || maxQueuedEvents < 0) {
+    throw new Error('maxQueuedEvents must be a non-negative integer')
+  }
 
   interface Subscription {
     /** The caller's floor, defaulted to subscribe time. Floor for every replay. */
@@ -280,6 +288,27 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
   let closed = false
   let attempt = 0
   let subCounter = 0
+  let activeHandlers = 0
+  let queuedHandlers: { sub: Subscription; event: RelayEvent; stampedAt: number }[] = []
+
+  const dispatch = (sub: Subscription, event: RelayEvent, stampedAt: number): void => {
+    activeHandlers++
+    if (stampedAt > sub.highWaterMs) sub.highWaterMs = stampedAt
+    const finished = () => {
+      activeHandlers--
+      while (!closed && activeHandlers < maxConcurrentHandlers && queuedHandlers.length > 0) {
+        const next = queuedHandlers.shift()!
+        dispatch(next.sub, next.event, next.stampedAt)
+      }
+    }
+    let result: Promise<void>
+    try {
+      result = Promise.resolve(sub.onEvent(event))
+    } catch (error) {
+      result = Promise.reject(error)
+    }
+    void result.then(finished, finished)
+  }
 
   /**
    * Events waiting for a socket. Subscriptions replay from their map on every
@@ -321,7 +350,7 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
    * `since` it carries must move with time rather than staying frozen at the
    * moment subscribe() was called. Resume from the newest event we actually
    * saw (minus an overlap for wire-stamp truncation), never earlier than the
-   * caller's own floor, and never further back than `maxReplayMs`.
+   * caller's own floor, and never further back than {@link MAX_REPLAY_MS}.
    *
    * The armed filter is what the CODEC says it encoded, so the local match can
    * never be stricter than the subscription we sent.
@@ -329,7 +358,7 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
   const armFilter = (sub: Subscription): RelayFilter => {
     const wire = {
       ...sub.filter,
-      sinceMs: Math.max(sub.filter.sinceMs, sub.highWaterMs - RESUME_OVERLAP_MS, now() - maxReplayMs),
+      sinceMs: Math.max(sub.filter.sinceMs, sub.highWaterMs - RESUME_OVERLAP_MS, now() - MAX_REPLAY_MS),
     }
     sub.armed = codec.effectiveFilter?.(wire) ?? wire
     return wire
@@ -396,7 +425,18 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
       // events that were published while no socket was open.
       for (const [id, sub] of subscriptions) send(codec.encodeSub(id, armFilter(sub)))
       while (pending.length > 0 && socket === ws && ws.readyState === ws.OPEN) {
-        send(codec.encodeEvent(pending.shift()!))
+        const event = pending.shift()!
+        try {
+          send(codec.encodeEvent(event))
+        } catch (error) {
+          // Dropped, per event: thrown out of this listener, one unencodable
+          // event would strand every queued reply behind it.
+          options.onNotice?.({
+            kind: 'rejected',
+            ref: event.id,
+            message: `dropped from the reconnect queue, cannot encode: ${error instanceof Error ? error.message : String(error)}`,
+          })
+        }
       }
     })
     ws.addEventListener('message', (ev: MessageEvent) => {
@@ -420,10 +460,9 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
       const stampedAt = Math.min(event.createdAtMs, now())
       for (const sub of subscriptions.values()) {
         if (!matchesFilter(event, sub.armed)) continue
-        // Advance before dispatch: a handler that throws must not make the
-        // subscription replay from an older point on the next reconnect.
-        if (stampedAt > sub.highWaterMs) sub.highWaterMs = stampedAt
-        void sub.onEvent(event)
+        if (activeHandlers < maxConcurrentHandlers) dispatch(sub, event, stampedAt)
+        else if (queuedHandlers.length < maxQueuedEvents) queuedHandlers.push({ sub, event, stampedAt })
+        // Overflow is dropped without advancing the replay cursor; clients can retry.
       }
     })
     ws.addEventListener('close', onDown)
@@ -444,25 +483,24 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
       return {
         close: async () => {
           subscriptions.delete(id)
+          queuedHandlers = queuedHandlers.filter((entry) => entry.sub !== sub)
           send(codec.encodeUnsub(id))
         },
       }
     },
     close: async () => {
       closed = true
+      queuedHandlers.length = 0
+      subscriptions.clear()
       if (reconnectTimer) clearTimeout(reconnectTimer)
       socket?.close()
     },
   }
 }
 
-// Uniqueness within a process run comes from the sequence; across restarts from
-// the run tag. Payload length alone collided: two same-millisecond replies with
-// equal-length JSON (refusals are all the same shape) got identical ids, and a
-// relay that dedups by id — the field's documented purpose — dropped one.
+// Uniqueness within a process run comes from the sequence; across restarts from the run tag.
 let eventSequence = 0
 const runTag = Math.random().toString(36).slice(2, 8)
 
 /** Stamp a fresh, unique event id: author + time + run tag + sequence. */
-export const eventId = (author: string, _payload: unknown, nowMs: number): string =>
-  `${author}:${nowMs}:${runTag}:${(eventSequence += 1)}`
+export const eventId = (author: string, nowMs: number): string => `${author}:${nowMs}:${runTag}:${(eventSequence += 1)}`

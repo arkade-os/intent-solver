@@ -12,6 +12,7 @@ import {
   MAX_MIN_CONFIRMATIONS,
   MIN_MIN_CONFIRMATIONS,
   DEFAULT_MIN_CONFIRMATIONS,
+  MIN_ONCHAIN_FUND_WINDOW,
   clampMinConfirmations,
 } from '@arkade-os/solver-core/core/onchainSend.js'
 import { HOUR } from '@arkade-os/solver-core/core/timelocks.js'
@@ -42,7 +43,7 @@ describe('onchainRefundLocktimeFor', () => {
   })
 
   /**
-   * TLA+ finding F7 (#104). The client's L1 claim leaf carries no timelock, so
+   * TLA+ finding F7. The client's L1 claim leaf carries no timelock, so
    * a claim can arrive at the very last instant — `htlcLocktime` plus the MTP
    * margin the solver waits out. From there the solver must claim the Arkade
    * lockup before `refundLocktime`, or the client takes it back on the refund
@@ -109,19 +110,58 @@ describe('evaluateOnchainSendAcceptance', () => {
 })
 
 describe('evaluateOnchainSendFunding', () => {
+  // Both deadlines wide open, so each refusal is attributable to the bound it moves.
+  const fundable = {
+    refundLocktime: 1_000_000 + 12 * HOUR,
+    htlcLocktime: 1_000_000 + 8 * HOUR,
+    minConfirmations: 1,
+    now: 1_000_000,
+  }
+  const claimWindowFor = (minConfirmations: number) =>
+    minConfirmations * ONCHAIN_SECONDS_PER_BLOCK + ONCHAIN_CLAIM_MARGIN_SECONDS
+
   it('funds when enough of the refund window remains', () => {
-    const result = evaluateOnchainSendFunding({ refundLocktime: 1_000_000 + 3 * 3600, now: 1_000_000 })
-    expect(result).toEqual({ fund: true })
+    expect(evaluateOnchainSendFunding(fundable)).toEqual({ fund: true })
   })
 
   it('refuses to fund inside the minimum claim window before the client refund opens', () => {
-    const result = evaluateOnchainSendFunding({ refundLocktime: 1_000_000 + 60, now: 1_000_000 })
+    const result = evaluateOnchainSendFunding({ ...fundable, refundLocktime: 1_000_000 + 60 })
     expect(result.fund).toBe(false)
+  })
+
+  it('refuses once the L1 claim window is spent, with the refund window still wide open', () => {
+    const now = fundable.htlcLocktime - claimWindowFor(fundable.minConfirmations)
+    expect(evaluateOnchainSendFunding({ ...fundable, now })).toMatchObject({ fund: false })
+    expect(now).toBeLessThan(fundable.refundLocktime - MIN_ONCHAIN_FUND_WINDOW)
+  })
+
+  it('still funds one second before that boundary', () => {
+    const now = fundable.htlcLocktime - claimWindowFor(fundable.minConfirmations) - 1
+    expect(evaluateOnchainSendFunding({ ...fundable, now })).toEqual({ fund: true })
+  })
+
+  it('reads the depth off the row, so a deeper quote stops funding sooner', () => {
+    const now = fundable.htlcLocktime - claimWindowFor(3)
+    expect(evaluateOnchainSendFunding({ ...fundable, minConfirmations: 3, now })).toMatchObject({ fund: false })
+    expect(evaluateOnchainSendFunding({ ...fundable, minConfirmations: 1, now })).toEqual({ fund: true })
+  })
+
+  it('refuses at the bound the whole quote is sized from, so a fresh quote is fundable at once', () => {
+    const now = 1_000_000
+    const htlcLocktime = htlcLocktimeFor(1, now)
+    expect(
+      evaluateOnchainSendFunding({
+        refundLocktime: onchainRefundLocktimeFor(htlcLocktime, 512, now),
+        htlcLocktime,
+        minConfirmations: 1,
+        now,
+      }),
+    ).toEqual({ fund: true })
   })
 })
 
 /**
- * TLA+ finding F2 (#38). Only the CEILING was applied, so a zero or negative
+ * TLA+ finding F2. Only the CEILING was applied, so a zero or negative
  * confirmation depth passed straight through — and zero means funding against
  * a transaction that is still replaceable. Unreachable from today's wire
  * schema, which is why it was ranked low; the clamp belongs at the domain

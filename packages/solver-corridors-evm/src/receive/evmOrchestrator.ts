@@ -14,12 +14,15 @@
  */
 
 import {
+  evmReceiveFundWindowClosed,
   planEvmReceive,
+  EVM_RECEIVE_FUND_WINDOW_REFUSAL,
   type EvmReceiveAction,
   type EvmReceiveObservation,
 } from '@arkade-os/solver-core/core/evmReceivePlan.js'
 import type { EvmReceiveSwapRow, EvmReceiveSwapStore } from '../db/evmReceiveSwaps.js'
-import type { EvmCall, EvmHtlcBackend, EvmTransactionOutcome } from '@arkade-os/solver-core/ports/evm.js'
+import type { EvmBroadcaster } from '../send/evmOrchestrator.js'
+import type { EvmHtlcBackend, EvmTransactionOutcome } from '@arkade-os/solver-core/ports/evm.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
@@ -40,8 +43,9 @@ import {
 import { deadlineSecondsForBlock, type EvmBlockCadence } from '@arkade-os/solver-rails-evm/evm/blockTime.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
-
-export type EvmBroadcaster = (call: EvmCall) => Promise<string>
+import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 
 export interface EvmReceiveServiceDeps {
   store: EvmReceiveSwapStore
@@ -75,6 +79,8 @@ export interface EvmReceiveServiceDeps {
     cadence: EvmBlockCadence
     /** How long the quoted rate binds, seconds. @see EvmChainConfig.quoteValiditySeconds */
     quoteValiditySeconds: number
+    /** Optional override for the Arkade-refund-before-EVM-timeout margin. */
+    orderMarginSeconds?: number
   }
   /**
    * The shared reservation control — the SAME instance every other corridor
@@ -152,8 +158,6 @@ export type EvmReceiveQuoteRefusal =
 export type EvmReceiveQuoteOutcome =
   { accepted: true; swap: EvmReceiveSwapRow } | { accepted: false; reason: EvmReceiveQuoteRefusal }
 
-const nowSeconds = (): number => Math.floor(Date.now() / 1000)
-
 export class EvmReceiveSwapService {
   private readonly inFlight = new Set<string>()
   private readonly admission: AdmissionControl
@@ -214,13 +218,8 @@ export class EvmReceiveSwapService {
     )
     return {
       evmLockPresent: present,
-      // MEASURED, and it matters more on this leg than on the send one. Here
-      // the depth check is the only thing standing between a client's lock and
-      // the solver's own sats: feeding the thresholds back made it pass at
-      // depth one, so the solver funded the Arkade lockup against a lock that
-      // could still reorg away — after which the client claims the sats and the
-      // solver's token claim finds nothing. `isLocked` reads `latest` and so
-      // reports existence, never depth; `minedAt` reads the block it landed in.
+      // MEASURED by `provenDepth`: on this leg it is all that stops the solver
+      // funding sats against a client lock that can still reorg away.
       evmLockConfirmations: depth.confirmations,
       evmLockAgeSeconds: depth.ageSeconds,
       arkadeLockupFunded: funded,
@@ -249,6 +248,14 @@ export class EvmReceiveSwapService {
         return false
 
       case 'fund_arkade': {
+        // RULE 2 again on a height read NOW - the planner's came from this tick's
+        // observation. Before the CAS, so a closed window refuses rather than parks.
+        if (evmReceiveFundWindowClosed(await this.deps.blockHeight(), row.evmTimeout)) {
+          await store.transition(row.id, row.state, 'refused', {
+            failure_reason: EVM_RECEIVE_FUND_WINDOW_REFUSAL,
+          })
+          return false
+        }
         // Exposed BEFORE the sats go out. A crash between the two must not leave
         // a funded lockup against a row that still reads `locked` - that lockup
         // would be invisible to the exposure accounting and to the refund sweep.
@@ -308,11 +315,9 @@ export class EvmReceiveSwapService {
    */
   async quote(request: EvmReceiveQuoteRequest): Promise<EvmReceiveQuoteOutcome> {
     const { store, arkade, chain } = this.deps
-    // Admission first, like every other corridor: a quote is free to request
-    // but holds provider capacity for its whole validity window and costs a
-    // feed fetch apiece, so the meter runs before any work happens.
-    if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
-      return { accepted: false, reason: 'rate_limited' }
+    if (request.requesterKey !== undefined) {
+      if (await store.findLiveByPaymentHash(request.paymentHash)) return { accepted: false, reason: 'duplicate_swap' }
+      if (!this.quoteLimiter.take(request.requesterKey)) return { accepted: false, reason: 'rate_limited' }
     }
     const served = this.deps.markets.get(request.tokenAddress.toLowerCase())
     if (served === undefined) return { accepted: false, reason: 'unsupported_token' }
@@ -394,7 +399,11 @@ export class EvmReceiveSwapService {
       nowSeconds,
       cadence: chain.cadence,
     })
-    const refundLocktime = arkadeRefundLocktimeFor({ evmTimeout: evmTimeoutSeconds, nowSeconds })
+    const refundLocktime = arkadeRefundLocktimeFor({
+      evmTimeout: evmTimeoutSeconds,
+      nowSeconds,
+      orderMarginSeconds: chain.orderMarginSeconds,
+    })
     if (refundLocktime === null) {
       // Recovered rather than collapsed, same as the send leg: null means no
       // safe value exists, and WHICH rule bit is what an operator can act on.
@@ -402,6 +411,7 @@ export class EvmReceiveSwapService {
         evmTimeout: evmTimeoutSeconds,
         refundLocktime: evmTimeoutSeconds,
         nowSeconds,
+        orderMarginSeconds: chain.orderMarginSeconds,
       })
       return { accepted: false, reason: decision.ok ? 'deadlines_cannot_be_ordered' : decision.reason }
     }
@@ -430,7 +440,7 @@ export class EvmReceiveSwapService {
     // RESERVED, not merely observed. The read-then-check this replaces let two
     // concurrent quotes both see the same headroom and both take it: a swap is
     // invisible to `totalCommitted()` until its row lands, so the window
-    // between check and insert admitted more than the cap allows (#105).
+    // between check and insert admitted more than the cap allows.
     //
     // The exposure is the PAYOUT, not what the client locked — the solver funds
     // this leg out of its own capital.
@@ -471,7 +481,7 @@ export class EvmReceiveSwapService {
       })
       return { accepted: true, swap }
     } catch (error) {
-      if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+      if (error instanceof UniqueConstraintError) {
         return { accepted: false, reason: 'duplicate_swap' }
       }
       throw error
@@ -482,34 +492,15 @@ export class EvmReceiveSwapService {
     }
   }
 
-  async tick(id: string): Promise<EvmReceiveSwapRow> {
-    const { store } = this.deps
-    if (this.inFlight.has(id)) return store.get(id)
-    this.inFlight.add(id)
-    try {
-      while (await this.step(await store.get(id))) {
-        // each successful step re-reads and tries the next
-      }
-      return await store.get(id)
-    } finally {
-      this.inFlight.delete(id)
-    }
+  tick(id: string): Promise<EvmReceiveSwapRow> {
+    return guardedTick(id, this.inFlight, this.deps.store, (row) => this.step(row))
   }
 
   async tickAll(): Promise<EvmReceiveSwapRow[]> {
-    const rows: EvmReceiveSwapRow[] = []
-    for (const row of await this.deps.store.findLive()) {
-      try {
-        rows.push(await this.tick(row.id))
-      } catch (error) {
-        this.deps.onTickError?.(row.id, error)
-        try {
-          rows.push(await this.deps.store.get(row.id))
-        } catch {
-          // Store fault rather than a swap fault - the next sweep retries.
-        }
-      }
-    }
-    return rows
+    return sweep(
+      await this.deps.store.findLive(),
+      { tick: (id) => this.tick(id), onTickError: (id, error) => this.deps.onTickError?.(id, error) },
+      this.deps.store,
+    )
   }
 }

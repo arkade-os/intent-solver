@@ -12,9 +12,18 @@
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { hex } from '@scure/base'
+import { schnorr } from '@noble/curves/secp256k1.js'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { ripemd160 } from '@noble/hashes/legacy.js'
 import { ArkAddress } from '@arkade-os/sdk'
 import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
 import * as floatOps from '@arkade-os/solver-app/ops/float.js'
+import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import {
+  lockupContractRegistration,
+  runVtxoLifecycle,
+  LOCKUP_CONTRACT_TYPE,
+} from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
 import type { LockupDeadline, VtxoLifecycleReport } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
 import {
   lockupDeadlinesOf,
@@ -137,6 +146,10 @@ const FLOAT_ADDRESS = new ArkAddress(new Uint8Array(32).fill(2), new Uint8Array(
 
 type SettleParams = { inputs: { txid: string; vout: number }[]; outputs: { address: string; amount: bigint }[] }
 
+/** arkd's active signer as `getInfo` reports it (compressed), and a rotated-away one (x-only). */
+const ACTIVE_SIGNER = `02${'11'.repeat(32)}`
+const OLD_SIGNER = '33'.repeat(32)
+
 const floatServices = (
   migrate: () => Promise<unknown>,
   vtxos: { txid: string; vout: number }[] = [],
@@ -158,13 +171,24 @@ const floatServices = (
         }),
         getContractManager: async () => ({
           getContractsWithVtxos: async () =>
-            vtxos.length === 0 ? [] : [{ contract: { script: 'aa', type: 'default' }, vtxos }],
+            vtxos.length === 0
+              ? []
+              : [{ contract: { script: 'aa', type: 'default', params: { serverPubKey: OLD_SIGNER } }, vtxos }],
         }),
         // The recovery guard's ungated read: nothing recoverable in these cases.
         getVtxos: async () => [],
-        arkProvider: { getInfo: async () => ({ fees: { intentFee: {} }, vtxoMaxAmount: 1_000_000n, dust: 330n }) },
+        arkProvider: {
+          getInfo: async () => ({
+            fees: { intentFee: {} },
+            vtxoMaxAmount: 1_000_000n,
+            dust: 330n,
+            signerPubkey: ACTIVE_SIGNER,
+            deprecatedSigners: [],
+          }),
+        },
         getAddress: async () => FLOAT_ADDRESS,
       },
+      dustSats: 330n,
       reservations: createReservationLedger(),
       // The recovery guard asks whether a lockup's `client` key is ours before
       // it lets one into an all-or-nothing sweep. No lockups in these cases, so
@@ -179,6 +203,45 @@ const floatServices = (
 
 const NO_DEPRECATED = { rotated: false, expired: [], signers: [], skipped: 'no-deprecated-vtxos' }
 
+// Something to renew AND to sweep, so the contract read is reached. Honours the
+// filter: the migration's own default/delegate read must survive a failing
+// lockup read, or the test cannot tell the two apart.
+const servicesWithLockupRead = (lockupRead: () => Promise<unknown[]>, seen: unknown[] = []): Services => {
+  const due = {
+    value: 500_000,
+    createdAt: new Date(Date.now() - 9 * 60 * 60 * 1000),
+    expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+  }
+  const services = floatServices(async () => NO_DEPRECATED, [], [due])
+  const wallet = services.arkade.wallet as unknown as Record<string, unknown>
+  wallet.getVtxos = async () => [{ txid: 'a'.repeat(64), vout: 0, script: 'aa', isSwept: true }]
+  const forFilter = async (filter?: { type?: string[] }): Promise<unknown[]> => {
+    seen.push(filter)
+    return filter?.type?.includes(LOCKUP_CONTRACT_TYPE) ? lockupRead() : []
+  }
+  wallet.getContractManager = async () => ({ getContracts: forFilter, getContractsWithVtxos: forFilter })
+  return services
+}
+
+describe('a failing contract read costs recovery only', () => {
+  it('does not throw out of the pass, and leaves renewal done', async () => {
+    const report = await runFloatLifecycle(
+      servicesWithLockupRead(async () => {
+        throw new Error('indexer 503')
+      }),
+    )
+    expect(report.renewed).toBe('settle-txid')
+    expect(report.failures.filter((f) => f.includes('indexer 503'))).toEqual(['recover: indexer 503'])
+    expect(report.recovered).toBeNull()
+  })
+
+  it('asks the repository only for lockup rows', async () => {
+    const seen: unknown[] = []
+    await runFloatLifecycle(servicesWithLockupRead(async () => [], seen))
+    expect(seen).toContainEqual({ type: [LOCKUP_CONTRACT_TYPE] })
+  })
+})
+
 /**
  * The role half of the recovery guard, derived where the deadlines are.
  *
@@ -189,11 +252,23 @@ const NO_DEPRECATED = { rotated: false, expired: [], signers: [], skipped: 'no-d
  * reading, not merely before the CLTV.
  */
 describe('lockupDeadlinesOf', () => {
-  const SOLVER = hex.encode(new Uint8Array(32).fill(4))
+  const SOLVER_KEY = schnorr.getPublicKey(new Uint8Array(32).fill(4))
+  const SOLVER = hex.encode(SOLVER_KEY)
 
-  const deadlinesFor = (rows: Record<string, unknown>[]): Promise<readonly LockupDeadline[]> =>
+  const deadlinesFor = (
+    rows: Record<string, unknown>[],
+    contracts: Record<string, unknown>[] = [],
+  ): Promise<readonly LockupDeadline[]> =>
     lockupDeadlinesOf({
-      arkade: { identity: { xOnlyPublicKey: async () => new Uint8Array(32).fill(4) } },
+      arkade: {
+        identity: { xOnlyPublicKey: async () => SOLVER_KEY },
+        wallet: {
+          getContractManager: async () => ({
+            getContracts: async (filter?: { type?: string[] }) =>
+              contracts.filter((c) => filter?.type === undefined || filter.type.includes(c.type as string)),
+          }),
+        },
+      },
       readers: readerSetFromDeps({
         store: { findRecoverable: async () => rows },
         onchainStore: { findRecoverable: async () => [] },
@@ -238,6 +313,98 @@ describe('lockupDeadlinesOf', () => {
   it('has no opinion on a row carrying no client refund key', async () => {
     const [deadline] = await deadlinesFor([sendRow(null)])
     expect(deadline?.refundable).toBeUndefined()
+  })
+
+  /** THE WEDGE: no live row, so no deadline, so a doomed batch every pass. */
+  describe('a terminal row whose lockup contract is still registered', () => {
+    const trader = schnorr.getPublicKey(new Uint8Array(32).fill(11))
+
+    const lockup = (client: Uint8Array): CovenantSwapScript =>
+      new CovenantSwapScript({
+        receiver: schnorr.getPublicKey(new Uint8Array(32).fill(1)),
+        server: schnorr.getPublicKey(new Uint8Array(32).fill(3)),
+        preimageHash: ripemd160(sha256(new Uint8Array(32).fill(7))),
+        refundLocktime: 1_800_000_000,
+        claimDelay: 4096,
+        client,
+        clientRefundDelay: 6144,
+        refundWithoutServerDelay: 5120,
+        nonInteractiveParameters: {
+          emulatorPubkey: schnorr.getPublicKey(new Uint8Array(32).fill(9)),
+          receiverPkScript: Uint8Array.from([0x51, 0x20, ...schnorr.getPublicKey(new Uint8Array(32).fill(13))]),
+          senderPkScript: Uint8Array.from([0x51, 0x20, ...schnorr.getPublicKey(new Uint8Array(32).fill(5))]),
+        },
+      })
+
+    // Built by the call that writes it, so the params are the stored ones.
+    const registered = (script: CovenantSwapScript) => ({
+      ...lockupContractRegistration(script, 'ark1test'),
+      state: 'active',
+      createdAt: 0,
+    })
+
+    it('names the send leg unrefundable with no live row to derive it from', async () => {
+      const script = lockup(trader)
+      const deadlines = await deadlinesFor([], [registered(script)])
+      expect(deadlines).toEqual([
+        { script: hex.encode(script.pkScript), refundLocktime: 1_800_000_000, refundable: false },
+      ])
+    })
+
+    it('holds recovery back instead of attempting the doomed settlement', async () => {
+      const script = lockup(trader)
+      const recoverVtxos = vi.fn(async () => 'txid')
+      const report = await runVtxoLifecycle({
+        renewVtxos: async () => {
+          throw new Error('No VTXOs available to renew')
+        },
+        recoverVtxos,
+        recoverableVtxos: async () => [{ txid: 'a'.repeat(64), vout: 0, script: hex.encode(script.pkScript) }],
+        lockupDeadlines: () => deadlinesFor([], [registered(script)]),
+        nowSeconds: () => 1_900_000_000,
+      })
+      expect(recoverVtxos).not.toHaveBeenCalled()
+      expect(report.recoverySkipped).toMatch(/no refund key of ours/)
+    })
+
+    // The SDK drops this one input itself; blocking would cost the whole batch.
+    it('contributes nothing for a receive-leg lockup, even before its CLTV', async () => {
+      const script = lockup(SOLVER_KEY)
+      expect(await deadlinesFor([], [registered(script)])).toEqual([])
+    })
+
+    it('does not hold recovery back for a terminal receive-leg lockup pre-CLTV', async () => {
+      const script = lockup(SOLVER_KEY)
+      const recoverVtxos = vi.fn(async () => 'txid')
+      const report = await runVtxoLifecycle({
+        renewVtxos: async () => {
+          throw new Error('No VTXOs available to renew')
+        },
+        recoverVtxos,
+        recoverableVtxos: async () => [{ txid: 'a'.repeat(64), vout: 0, script: hex.encode(script.pkScript) }],
+        lockupDeadlines: () => deadlinesFor([], [registered(script)]),
+        nowSeconds: () => 1_700_000_000,
+      })
+      expect(report.recoverySkipped).toBeNull()
+      expect(recoverVtxos).toHaveBeenCalledOnce()
+    })
+
+    // The over-blocking direction: this one IS ours to refund.
+    it('lets a matured receive-leg lockup through', async () => {
+      const script = lockup(SOLVER_KEY)
+      const recoverVtxos = vi.fn(async () => 'txid')
+      const report = await runVtxoLifecycle({
+        renewVtxos: async () => {
+          throw new Error('No VTXOs available to renew')
+        },
+        recoverVtxos,
+        recoverableVtxos: async () => [{ txid: 'a'.repeat(64), vout: 0, script: hex.encode(script.pkScript) }],
+        lockupDeadlines: () => deadlinesFor([], [registered(script)]),
+        nowSeconds: () => 1_900_000_000,
+      })
+      expect(report.recoverySkipped).toBeNull()
+      expect(recoverVtxos).toHaveBeenCalledOnce()
+    })
   })
 })
 
@@ -361,6 +528,115 @@ describe('runFloatLifecycle — migration throttle and count', () => {
     await runFloatLifecycle(services)
     expect(services.arkade.reservations.reserved().size).toBe(0)
   })
+
+  it('pins only coins off the active signer, leaving the float a funding draws from', async () => {
+    const services = floatServices(async () => NO_DEPRECATED)
+    let observed: ReadonlySet<string> = new Set()
+    const contract = (script: string, serverPubKey: string) => ({ script, type: 'default', params: { serverPubKey } })
+    services.arkade.wallet.getContractManager = async () =>
+      ({
+        getContractsWithVtxos: async () => [
+          { contract: contract('aa', OLD_SIGNER), vtxos: [{ txid: 'old', vout: 0 }] },
+          { contract: contract('bb', ACTIVE_SIGNER.slice(2)), vtxos: [{ txid: 'current', vout: 0 }] },
+        ],
+      }) as never
+    services.arkade.wallet.getVtxoManager = async () =>
+      ({
+        migrateDeprecatedSignerVtxos: async () => {
+          observed = services.arkade.reservations.reserved()
+          return NO_DEPRECATED
+        },
+        getExpiringVtxos: async () => [],
+        recoverVtxos: async () => null,
+      }) as never
+    await runFloatLifecycle(services)
+    expect([...observed]).toEqual(['old:0'])
+  })
+
+  it('defers, rather than racing it, when a funding holds one of its coins', async () => {
+    const migrate = vi.fn(async () => NO_DEPRECATED)
+    const coin = { txid: 'aa', vout: 0 }
+    const services = floatServices(migrate, [coin])
+    services.arkade.reservations.reserve([coin])
+    const report = await runFloatLifecycle(services)
+    expect(migrate).not.toHaveBeenCalled()
+    expect(report.failures.join(' ')).toContain('a funding holds one of its coins')
+  })
+})
+
+describe('runFloatLifecycle pins what recovery sweeps', () => {
+  const swept = { txid: 'swept', vout: 0, value: 5_000, script: 'aa', isSwept: true }
+  const subdust = { txid: 'subdust', vout: 0, value: 100, script: 'aa', isPreconfirmed: true }
+  const spendable = { txid: 'spendable', vout: 0, value: 50_000, script: 'aa', isPreconfirmed: true }
+
+  const recovering = (recoverVtxos: () => Promise<unknown>): Services => {
+    const services = servicesWithLockupRead(async () => [])
+    const wallet = services.arkade.wallet as unknown as Record<string, unknown>
+    wallet.getVtxos = async () => [swept, subdust, spendable]
+    wallet.getVtxoManager = async () => ({
+      migrateDeprecatedSignerVtxos: async () => NO_DEPRECATED,
+      getExpiringVtxos: async () => [],
+      getExpiredBoardingUtxos: async () => [],
+      recoverVtxos,
+    })
+    return services
+  }
+
+  it('pins the preconfirmed subdust it sweeps, which a funding could otherwise select', async () => {
+    let pinned: ReadonlySet<string> = new Set()
+    const services = recovering(async () => {
+      pinned = services.arkade.reservations.reserved()
+      return 'recover-txid'
+    })
+    const report = await runFloatLifecycle(services)
+    expect(report.recovered).toBe('recover-txid')
+    expect([...pinned].sort()).toEqual(['subdust:0', 'swept:0'])
+    expect(services.arkade.reservations.reserved().size).toBe(0)
+  })
+
+  it('does not sweep while a funding holds one of those coins', async () => {
+    const recoverVtxos = vi.fn(async () => 'recover-txid')
+    const services = recovering(recoverVtxos)
+    services.arkade.reservations.reserve([subdust])
+    const report = await runFloatLifecycle(services)
+    expect(recoverVtxos).not.toHaveBeenCalled()
+    expect(report.failures.join(' ')).toContain('a funding holds a coin recovery would sweep')
+  })
+
+  it('pins a coin past its HEIGHT expiry, on the chain tip the SDK sweeps by', async () => {
+    let pinned: ReadonlySet<string> = new Set()
+    const services = recovering(async () => {
+      pinned = services.arkade.reservations.reserved()
+      return 'recover-txid'
+    })
+    const wallet = services.arkade.wallet as unknown as Record<string, unknown>
+    const heightExpired = { txid: 'height', vout: 0, value: 5_000, script: 'aa', expiresAtHeight: 150 }
+    wallet.getVtxos = async () => [swept, heightExpired]
+    wallet.onchainProvider = { getChainTip: async () => ({ height: 200 }) }
+    await runFloatLifecycle(services)
+    expect([...pinned].sort()).toEqual(['height:0', 'swept:0'])
+  })
+})
+
+describe('runFloatLifecycle runs one pass at a time', () => {
+  it('starts a second pass only once the first has finished, whoever asked for it', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const services = floatServices(async () => NO_DEPRECATED)
+    const manager = services.arkade.wallet.getVtxoManager
+    let started = 0
+    services.arkade.wallet.getVtxoManager = async () => {
+      started += 1
+      if (started === 1) await gate
+      return manager()
+    }
+    const passes = [runFloatLifecycle(services), runFloatLifecycle(services)]
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(started).toBe(1)
+    release()
+    await Promise.all(passes)
+    expect(started).toBe(2)
+  })
 })
 
 /**
@@ -388,6 +664,42 @@ describe('runFloatLifecycle keeps renewal off reserved coins', () => {
     expect(report.renewed).toBe('settle-txid')
     const inputs = settle.mock.calls.at(-1)?.[0].inputs ?? []
     expect(inputs.map((i) => i.txid)).toEqual(['free'])
+  })
+
+  it('pins what it is settling, so a funding selecting mid-settle cannot take it', async () => {
+    const services = floatServices(async () => NO_DEPRECATED, [], [due('renewing', 200_000)])
+    const wallet = services.arkade.wallet as unknown as Record<string, unknown>
+    let pinnedDuringSettle: ReadonlySet<string> = new Set()
+    wallet.settle = async () => {
+      pinnedDuringSettle = services.arkade.reservations.reserved()
+      return 'settle-txid'
+    }
+
+    const report = await runFloatLifecycle(services)
+
+    expect(report.renewed).toBe('settle-txid')
+    expect([...pinnedDuringSettle]).toEqual(['renewing:0'])
+    // A pin outliving its settle shrinks the float with nothing left to free it.
+    expect(services.arkade.reservations.reserved().size).toBe(0)
+  })
+
+  it('does not settle a coin a funding pinned after the candidates were read', async () => {
+    const coin = due('contended', 200_000)
+    const settle = vi.fn(async (_params: SettleParams) => 'settle-txid')
+    const services = floatServices(async () => NO_DEPRECATED, [], [coin], { settle })
+    const wallet = services.arkade.wallet as unknown as Record<string, unknown>
+    // The window the candidate filter cannot cover: two network reads separate
+    // it from the settle, and a funding pins the coin inside them.
+    wallet.getAddress = async () => {
+      services.arkade.reservations.reserve([coin])
+      return FLOAT_ADDRESS
+    }
+
+    const report = await runFloatLifecycle(services)
+
+    expect(settle).not.toHaveBeenCalled()
+    expect(report.renewed).toBeNull()
+    expect(report.failures.join(' ')).toContain('pinned')
   })
 })
 
@@ -464,6 +776,18 @@ describe('runFloatLifecycle boards confirmed sats', () => {
     const [first, second] = settle.mock.calls.map((c) => c[0].inputs.map((i) => i.txid))
     expect(first).toEqual(['b-200000'])
     expect(second).toEqual(['expiring'])
+  })
+
+  it('refuses a deposit the per-output ceiling cannot carry whole', async () => {
+    const settle = vi.fn(async (_params: SettleParams) => 'boarding-txid')
+    const services = floatServices(async () => NO_DEPRECATED, [], [], { boarded: [boarded(2_000_000)], settle })
+    const wallet = services.arkade.wallet as unknown as Record<string, unknown>
+    wallet.arkProvider = { getInfo: async () => ({ fees: { intentFee: {} }, vtxoMaxAmount: 150_000n, dust: 330n }) }
+    const report = await runFloatLifecycle(services)
+
+    expect(settle).not.toHaveBeenCalled()
+    expect(report.boarded).toBeNull()
+    expect(report.failures.join(' ')).toContain('150000')
   })
 
   it('reports nothing and settles nothing when nothing is boarded', async () => {

@@ -118,6 +118,10 @@ export const resolveOnchainAssetPayout = (args: {
     amountSide: 'from',
     market,
     feed: args.feed,
+    // Unpriced, as before carrier legs existed: the solver's dust carrier is
+    // spent but not netted here.
+    carrierSats: 0n,
+    dustSats: 0n,
   })
   return resolved.ok ? { ok: true, payoutUnits: resolved.toAmount } : { ok: false, reason: resolved.reason }
 }

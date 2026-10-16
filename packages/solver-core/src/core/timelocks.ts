@@ -154,6 +154,17 @@ export const ceilToGranularity = (seconds: number): number =>
   Math.ceil(seconds / SEQUENCE_GRANULARITY_SECONDS) * SEQUENCE_GRANULARITY_SECONDS
 
 /**
+ * One rung of a block-typed ladder, re-clocked into seconds.
+ *
+ * Blocks × NOMINAL_BLOCK_SECONDS climbed to a 512s boundary, so the seconds
+ * rung opens no earlier — nominally — than the rung it replaces. The exact
+ * rule the quote side applies when a horizon overflows a block ladder, so a
+ * client re-deriving a script from a flipped quote must apply THIS and not
+ * its own rounding, or the addresses diverge. See `unilateralLadderFor`.
+ */
+export const secondsForBlockRung = (blocks: number): number => ceilToGranularity(blocks * NOMINAL_BLOCK_SECONDS)
+
+/**
  * Derive unilateral delays from the Arkade server's own minimum exit delay.
  *
  * Cannot be hardcoded: the minimum differs by orders of magnitude between deployments,

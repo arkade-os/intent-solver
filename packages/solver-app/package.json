@@ -1,6 +1,6 @@
 {
   "name": "@arkade-os/solver-app",
-  "version": "0.2.0",
+  "version": "0.3.2",
   "description": "Part of the Arkade intent-solver: the reference solver daemon.",
   "license": "MIT",
   "repository": {
@@ -18,12 +18,11 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.4.71",
+    "@arkade-os/sdk": "0.4.77",
     "@arkade-os/solver-arkade": "workspace:*",
     "@arkade-os/solver-core": "workspace:*",
     "@arkade-os/solver-corridors": "workspace:*",
     "@arkade-os/solver-corridors-evm": "workspace:*",
-    "@arkade-os/solver-db": "workspace:*",
     "@arkade-os/solver-rails": "workspace:*",
     "@arkade-os/solver-rails-esplora": "workspace:*",
     "@arkade-os/solver-rails-evm": "workspace:*",
@@ -39,6 +38,6 @@
     "hono": "^4.13.0"
   },
   "devDependencies": {
-    "@arkade-os/swap": "0.0.14"
+    "@arkade-os/swap": "0.0.23"
   }
 }

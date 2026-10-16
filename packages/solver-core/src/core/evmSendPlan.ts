@@ -192,10 +192,7 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
       if (seen.evmRefundLanded) return { do: 'record_refund' }
       return { do: 'wait' }
 
-    case 'claiming':
-      // In flight. The caller re-reads and retries; nothing here to decide.
-      return { do: 'wait' }
-
+    // `claiming` is in flight: the caller re-reads and retries; nothing here to decide.
     default:
       return { do: 'wait' }
   }

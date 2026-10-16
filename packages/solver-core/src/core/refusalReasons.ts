@@ -41,20 +41,27 @@ export interface RefusalExplanation {
 type OrchestratorRefusal =
   | 'duplicate_swap'
   | 'provider_at_capacity'
+  | 'insufficient_float'
   | 'invalid_refund_address'
   | 'invalid_payout_address'
   | 'rate_limited'
   | 'coupled_deadline_unsafe'
   | 'coupled_invoice_mismatch'
   | 'recourse_window_unservable'
+  | 'payable_amount_unmatchable'
   | 'fee_consumes_swap'
   | 'payout_below_dust'
   | 'amount_out_of_range'
+  | 'execution_unavailable'
 
 export type RefusalReason =
   SendAcceptanceRefusal | SendPaymentRefusal | ReceiveFundingRefusal | OrchestratorRefusal | InvoiceRejection
 
 export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
+  execution_unavailable: {
+    meaning: 'The payout execution could not be prepared at the requested terms.',
+    whatToDo: 'Check the execution adapter and its capacity before accepting new quotes.',
+  },
   // --- the invoice itself, before any swap exists ---
   too_long: {
     meaning: 'The BOLT11 string was longer than we will parse at all (2048 chars), so it was rejected unread.',
@@ -135,6 +142,12 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
     whatToDo:
       'Every quote on this corridor gets this answer until the operator lowers the unilateral exit delay, so a burst of these is a configuration alarm rather than traffic. Nothing about the client or their invoice will change it.',
   },
+  payable_amount_unmatchable: {
+    meaning:
+      "This deployment's Lightning backend wraps the hold invoice it publishes, adding a routing reserve on top of the hold it covers, and no hold amount could be found whose wrapped invoice asks exactly the exact-in amount requested. Exact-in requires the two to be equal, so the quote was declined rather than handed out asking a different number.",
+    whatToDo:
+      'Nothing for this request; the client can retry, and an exact-out request is unaffected. A persistent run of these means the wrapper’s reserve does not settle on a repeat mint for these sizes — check the wrapping service before assuming the corridor is at fault.',
+  },
   unilateral_recourse_after_htlc: {
     meaning:
       "The arriving HTLC expires before the solver's own unilateral refund leaf opens. Both sides would then be spendable with one preimage: the client can let the HTLC fail back to its payer for free and only then claim the Arkade payout, taking both legs.",
@@ -146,6 +159,12 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
       'Another live swap already holds this payment hash, in this corridor or a peer one. Two lockups and one payment means whichever client loses the race is claimed with no refund.',
     whatToDo:
       'Nothing. Check the other row if the client insists they only asked once — a live RECEIVE swap on the same hash is us being asked to pay our own hold invoice.',
+  },
+  insufficient_float: {
+    meaning:
+      'The payout rail does not hold enough spendable sats to fund this swap and its execution fee, counting payouts already owed by swaps that have not funded yet.',
+    whatToDo:
+      'Deposit into the rail. Unlike `provider_at_capacity` there is no cap to relax: the corridor keeps refusing until spendable balance covers this payout and those already owed.',
   },
   provider_at_capacity: {
     meaning: 'Serving this swap would push total exposure across live swaps past MAX_EXPOSED_SATS.',

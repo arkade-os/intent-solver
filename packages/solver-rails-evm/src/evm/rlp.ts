@@ -27,8 +27,6 @@ import { concatBytes } from '@noble/hashes/utils.js'
 /** What RLP can encode: a byte string, or a list of them. */
 export type RlpInput = Uint8Array | readonly RlpInput[]
 
-const concat = (parts: readonly Uint8Array[]): Uint8Array => concatBytes(...parts)
-
 /** A length as the shortest big-endian byte string that represents it. */
 const lengthBytes = (n: number): Uint8Array => {
   const out: number[] = []
@@ -37,9 +35,9 @@ const lengthBytes = (n: number): Uint8Array => {
 }
 
 const withPrefix = (payload: Uint8Array, short: number, long: number): Uint8Array => {
-  if (payload.length <= 55) return concat([Uint8Array.from([short + payload.length]), payload])
+  if (payload.length <= 55) return concatBytes(Uint8Array.from([short + payload.length]), payload)
   const len = lengthBytes(payload.length)
-  return concat([Uint8Array.from([long + len.length]), len, payload])
+  return concatBytes(Uint8Array.from([long + len.length]), len, payload)
 }
 
 export const rlpEncode = (input: RlpInput): Uint8Array => {
@@ -50,7 +48,7 @@ export const rlpEncode = (input: RlpInput): Uint8Array => {
     if (input.length === 1 && input[0]! < 0x80) return Uint8Array.from(input)
     return withPrefix(input, 0x80, 0xb7)
   }
-  return withPrefix(concat(input.map(rlpEncode)), 0xc0, 0xf7)
+  return withPrefix(concatBytes(...input.map(rlpEncode)), 0xc0, 0xf7)
 }
 
 /**

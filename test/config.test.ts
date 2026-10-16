@@ -86,6 +86,8 @@ const CONFIG_KEYS = [
   'EVM_SEND_USDC_MIN_SATS',
   'EVM_SEND_USDC_FEE_BPS',
   'EVM_RECEIVE_USDC_ENABLED',
+  'APPROVAL_THRESHOLD_SATS',
+  'BALANCE_REPORT_INTERVAL_MINUTES',
   'LN_BACKEND',
   // Listed for the same reason `EVM_TOKENS` is: a leaked `LN_SEND_ENABLED=false`
   // would silently exempt every later test from needing a rail at all.
@@ -105,6 +107,10 @@ const CONFIG_KEYS = [
   'FAKE_LN_STATE_PATH',
   'POOL_AUTO_MINT',
   'CONTRACT_RETENTION_DAYS',
+  // Listed for the same reason the rest are: a leaked bad value makes every
+  // later `loadConfig()` in the file throw.
+  'ONCHAIN_RECEIVE_MAX_BAND_SATS',
+  'ONCHAIN_RECEIVE_BAND_BELOW_SHARE',
   'LN_SEND_HINT_SCID_DENYLIST',
   // Listed for the same reason `EVM_TOKENS` is: a leaked `OFFER_MARKETS` would
   // give every later test in the run an offer path it never asked for, and one
@@ -119,6 +125,7 @@ const CONFIG_KEYS = [
   'ASSET_QUOTE_VALIDITY_SECONDS',
   'ASSET_USDA_BUY_ENABLED',
   'ASSET_USDA_SELL_ENABLED',
+  'ASSET_USDA_APPROVAL_THRESHOLD',
 ]
 
 /**
@@ -617,6 +624,52 @@ describe('CONTRACT_RETENTION_DAYS', () => {
   })
 })
 
+describe('ONCHAIN_RECEIVE_BAND_BELOW_SHARE', () => {
+  it('defaults to the whole retained width below the quote', () => {
+    expect(loadConfig().onchainReceiveBandBelowShare).toBe(1)
+  })
+
+  it.each(['0', '0.5', '1'])('accepts %s', (raw) => {
+    process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE = raw
+    expect(loadConfig().onchainReceiveBandBelowShare).toBe(Number(raw))
+  })
+
+  it.each(['-0.1', '1.1', 'abc', 'Infinity'])('rejects %s rather than clamping silently', (raw) => {
+    process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE = raw
+    expect(() => loadConfig()).toThrow(/ONCHAIN_RECEIVE_BAND_BELOW_SHARE must be a number between 0 and 1/)
+  })
+})
+
+describe('ONCHAIN_RECEIVE_MAX_BAND_SATS', () => {
+  it('defaults to the range that corridor already serves, so nothing new is offered or withheld', () => {
+    const config = loadConfig()
+    const limits = config.corridorLimits['onchain:BTC->arkade:BTC']
+    expect(config.onchainReceiveMaxBandSats).toBe(limits.maxSats - limits.minSats)
+  })
+
+  it('narrows how far a funded amount may drift from its quote', () => {
+    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '5000'
+    expect(loadConfig().onchainReceiveMaxBandSats).toBe(5_000)
+  })
+
+  it('accepts zero, which is exactly the strict equality shipped today', () => {
+    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '0'
+    expect(loadConfig().onchainReceiveMaxBandSats).toBe(0)
+  })
+
+  it('may only ever narrow, never widen past the corridor range', () => {
+    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '999999999999'
+    const config = loadConfig()
+    const limits = config.corridorLimits['onchain:BTC->arkade:BTC']
+    expect(config.onchainReceiveMaxBandSats).toBe(limits.maxSats - limits.minSats)
+  })
+
+  it.each(['-1', 'abc', '1.5', 'Infinity'])('rejects %s', (raw) => {
+    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = raw
+    expect(() => loadConfig()).toThrow(/ONCHAIN_RECEIVE_MAX_BAND_SATS must be a non-negative integer/)
+  })
+})
+
 /**
  * The one knob that makes the daemon spend without a human.
  *
@@ -802,7 +855,7 @@ describe('ARK_UNILATERAL_EXIT_DELAY', () => {
  * number you are prepared to lose.
  */
 describe('LN_RECEIVE_ACCEPT_UNILATERAL_GAP', () => {
-  it('is off when unset, so no deployment accepts the #69 window by omission', () => {
+  it('is off when unset, so no deployment accepts the unilateral gap by omission', () => {
     expect(loadConfig().lnReceiveAcceptUnilateralGap).toBe(false)
   })
 
@@ -985,8 +1038,14 @@ describe('ASSET_MARKETS', () => {
   it('parses SYMBOL:<asset id> with both directions open', () => {
     process.env.ASSET_MARKETS = `USDA:${USDA}`
     expect(loadConfig().assetRfqTokens).toEqual([
-      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true } },
+      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true }, approvalThresholdUnits: null },
     ])
+  })
+
+  it('reads ASSET_USDA_APPROVAL_THRESHOLD off the environment', () => {
+    process.env.ASSET_MARKETS = `USDA:${USDA}`
+    process.env.ASSET_USDA_APPROVAL_THRESHOLD = '250000'
+    expect(loadConfig().assetRfqTokens[0]!.approvalThresholdUnits).toBe(250_000n)
   })
 
   it('ASSET_USDA_BUY_ENABLED=false closes sell_base — the client GIVES the base leg', () => {
@@ -1016,5 +1075,56 @@ describe('ASSET_MARKETS', () => {
     expect(() => loadConfig()).toThrow(/ASSET_QUOTE_VALIDITY_SECONDS/)
     process.env.ASSET_QUOTE_VALIDITY_SECONDS = '901'
     expect(() => loadConfig()).toThrow(/ASSET_QUOTE_VALIDITY_SECONDS/)
+  })
+})
+
+// Beside `LN_BACKEND` for the same reason: unset must not resolve to a working
+// value. Here `Number('') === 0` would be a threshold of ZERO, gating everything.
+describe('APPROVAL_THRESHOLD_SATS', () => {
+  it('is NULL when unset, so a deployment that configures nothing has no gate', () => {
+    expect(loadConfig().approvalThresholdSats).toBeNull()
+  })
+
+  it('is null when set but blank, rather than becoming a zero threshold', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '   '
+    expect(loadConfig().approvalThresholdSats).toBeNull()
+  })
+
+  it('reads a configured threshold', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '1000000'
+    expect(loadConfig().approvalThresholdSats).toBe(1_000_000)
+  })
+
+  it('accepts an explicit zero, which gates everything', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '0'
+    expect(loadConfig().approvalThresholdSats).toBe(0)
+  })
+
+  it('refuses a negative threshold', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '-1'
+    expect(() => loadConfig()).toThrow(/APPROVAL_THRESHOLD_SATS/)
+  })
+
+  it('refuses a non-integer rather than truncating it', () => {
+    process.env.APPROVAL_THRESHOLD_SATS = '1.5'
+    expect(() => loadConfig()).toThrow(/APPROVAL_THRESHOLD_SATS/)
+  })
+})
+
+describe('BALANCE_REPORT_INTERVAL_MINUTES', () => {
+  it('is null when unset or blank, so no report is sent', () => {
+    expect(loadConfig().balanceReportIntervalMinutes).toBeNull()
+    process.env.BALANCE_REPORT_INTERVAL_MINUTES = '  '
+    expect(loadConfig().balanceReportIntervalMinutes).toBeNull()
+  })
+
+  it('reads a configured interval', () => {
+    process.env.BALANCE_REPORT_INTERVAL_MINUTES = '360'
+    expect(loadConfig().balanceReportIntervalMinutes).toBe(360)
+  })
+
+  it('refuses an interval short enough to flood the channel', () => {
+    process.env.BALANCE_REPORT_INTERVAL_MINUTES = '1'
+    expect(() => loadConfig()).toThrow(/BALANCE_REPORT_INTERVAL_MINUTES/)
   })
 })

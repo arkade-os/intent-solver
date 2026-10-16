@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { offerFillInputFrom, type OfferDeposit } from '@arkade-os/solver-arkade/arkade/offerFill.js'
+import { offerFillInputFrom } from '@arkade-os/solver-arkade/arkade/offerFill.js'
 import { evaluateOfferFill, type OfferFillPolicy } from '@arkade-os/solver-core/core/assetOffer.js'
 
 const ASSET = 'b227e0d9'.repeat(8) + '0000'

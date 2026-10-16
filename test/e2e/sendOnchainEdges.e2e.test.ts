@@ -299,7 +299,7 @@ describe('e2e arkade:BTC->onchain:BTC (send) — refusals, wrong preimages and t
       // clock, so the solver rebuilds the refund leaf FROM THE ROW, signs it,
       // and gets its own sats back.
       const present = await serviceWith()
-      // Holds at `refunding_onchain` until the refund CONFIRMS (#204) — ask for the block.
+      // Holds at `refunding_onchain` until the refund CONFIRMS — ask for the block.
       const broadcast = await poll(
         async () => {
           const row = await present.tick(swap.id)

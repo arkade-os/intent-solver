@@ -27,9 +27,9 @@
 import { hex } from '@scure/base'
 import type { ArkadeContext } from './wallet.js'
 import { offerFromFundingTx } from './offerPacket.js'
-import { offerFillInputFrom } from './offerFill.js'
+import { heldOf, offerFillInputFrom } from './offerFill.js'
 import { fulfillOffer } from './offerFulfill.js'
-import { heldOnOutpoint, liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
+import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
 
 /**
  * The recorded intent, structurally.
@@ -151,7 +151,7 @@ export const offerSettleFor = (deps: OfferSettleDeps): ((intent: OfferFillIntent
     // The asset leg, which the tx cannot show: amounts ride in the packet's receivers.
     let assetAmount: bigint | undefined
     if (terms.offerAssetId !== null) {
-      assetAmount = heldOnOutpoint(deposit, terms.offerAssetId)
+      assetAmount = heldOf(deposit, terms.offerAssetId)
       if (assetAmount < intent.offerAmount) {
         throw new Error(
           `${intent.offerTxid}:${intent.offerVout} holds ${assetAmount} of the deposit leg, ` +

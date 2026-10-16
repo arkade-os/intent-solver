@@ -26,7 +26,7 @@ export const RFQ_ID = z
 export const RFQ_PAIR = z.string().min(1).max(MAX_PAIR_LENGTH)
 export const AMOUNT_SIDE = z.enum(['from', 'to'])
 // § 2.1: a canonical decimal string of atomic units, with a JSON number
-// accepted only where it is provably lossless. @see ./amount.ts
+// accepted only where it is provably lossless. @see ./wireAmount.ts
 export const RFQ_AMOUNT = WIRE_AMOUNT
 
 /**
@@ -100,25 +100,10 @@ export const rfqBidPayload = (
   valid_until: bid.valid_until,
 })
 
-/** The closed RFQ refusal set. Anything a client does not recognise is a generic decline. */
-export type RfqRefusalReason =
-  | 'unsupported_pair'
-  | 'unsupported_payload'
-  | 'amount_out_of_range'
-  | 'exposure_cap'
-  | 'invoice_expired'
-  | 'quote_conflict'
-  | 'pricing_unavailable'
-  | 'rate_limited'
-
 /**
- * The same members as a value, so a runtime check can be made against the set.
- *
- * Needed because a CORRIDOR now builds its own refusal payload, and a corridor
- * is third-party code from the host's point of view — the host has to verify on
- * the way out what it used to guarantee by construction. The exhaustiveness
- * check below fails to COMPILE if a member is added to the union and not here,
- * so the guard cannot silently narrow as the vocabulary grows.
+ * The closed RFQ refusal set, as a value so a runtime check can be made against
+ * it: a CORRIDOR builds its own refusal payload, so the host has to verify on the
+ * way out. Anything a client does not recognise is a generic decline.
  */
 export const RFQ_REFUSAL_REASON_VALUES = [
   'unsupported_pair',
@@ -129,21 +114,73 @@ export const RFQ_REFUSAL_REASON_VALUES = [
   'quote_conflict',
   'pricing_unavailable',
   'rate_limited',
-] as const satisfies readonly RfqRefusalReason[]
+] as const
 
-const _EVERY_REASON_LISTED: Record<RfqRefusalReason, true> = {
-  unsupported_pair: true,
-  unsupported_payload: true,
-  amount_out_of_range: true,
-  exposure_cap: true,
-  invoice_expired: true,
-  quote_conflict: true,
-  pricing_unavailable: true,
-  rate_limited: true,
-}
+export type RfqRefusalReason = (typeof RFQ_REFUSAL_REASON_VALUES)[number]
 
 export const isRfqRefusalReason = (value: string): value is RfqRefusalReason =>
   (RFQ_REFUSAL_REASON_VALUES as readonly string[]).includes(value)
+
+export const RFQ_REFUSAL_ERROR_CODE_VALUES = [
+  'amount_side_unsupported',
+  'exact_out_unsupported',
+  'invalid_amount',
+  'invalid_payout_address',
+  'invalid_refund_address',
+  'invoice_amount_mismatch',
+  'invoice_cltv_too_large',
+  'invoice_malformed',
+  'invoice_missing_amount',
+  'invoice_missing_network',
+  'invoice_missing_payment_hash',
+  'invoice_missing_timestamp',
+  'invoice_mixed_case',
+  'invoice_sub_satoshi_amount',
+  'invoice_too_long',
+  'invoice_wrong_network',
+] as const
+
+export type RfqRefusalErrorCode = (typeof RFQ_REFUSAL_ERROR_CODE_VALUES)[number]
+
+export const isRfqRefusalErrorCode = (value: string): value is RfqRefusalErrorCode =>
+  (RFQ_REFUSAL_ERROR_CODE_VALUES as readonly string[]).includes(value)
+
+export const RFQ_REFUSAL_UNIT_VALUES = ['blocks', 'characters', 'sats'] as const
+export type RfqRefusalUnit = (typeof RFQ_REFUSAL_UNIT_VALUES)[number]
+
+export const isRfqRefusalUnit = (value: string): value is RfqRefusalUnit =>
+  (RFQ_REFUSAL_UNIT_VALUES as readonly string[]).includes(value)
+
+export interface RfqRefusalError {
+  error_code: RfqRefusalErrorCode
+  field?: string
+  actual?: number
+  expected?: number
+  limit?: number
+  unit?: RfqRefusalUnit
+}
+
+type ClientSafeErrorReason =
+  | 'cltv_too_large'
+  | 'exact_out_unsupported'
+  | 'invalid_evm_amount'
+  | 'invalid_payout_address'
+  | 'invalid_refund_address'
+  | 'wrong_network'
+  | 'zero_amount_invoice'
+
+const CLIENT_SAFE_ERRORS = {
+  cltv_too_large: { error_code: 'invoice_cltv_too_large', field: 'profile.invoice' },
+  exact_out_unsupported: { error_code: 'exact_out_unsupported', field: 'amount_side' },
+  invalid_evm_amount: { error_code: 'invalid_amount', field: 'amount' },
+  invalid_payout_address: { error_code: 'invalid_payout_address', field: 'profile.payout_address' },
+  invalid_refund_address: { error_code: 'invalid_refund_address', field: 'profile.refund_address' },
+  wrong_network: { error_code: 'invoice_wrong_network', field: 'profile.invoice' },
+  zero_amount_invoice: { error_code: 'invoice_missing_amount', field: 'profile.invoice' },
+} satisfies Record<ClientSafeErrorReason, RfqRefusalError>
+
+const clientSafeErrorFor = (reason: string): RfqRefusalError | undefined =>
+  Object.hasOwn(CLIENT_SAFE_ERRORS, reason) ? CLIENT_SAFE_ERRORS[reason as ClientSafeErrorReason] : undefined
 
 /**
  * Legacy/internal reason → the closed RFQ set. Everything the quote path can
@@ -158,7 +195,7 @@ export const isRfqRefusalReason = (value: string): value is RfqRefusalReason =>
  * which is why this is exported.
  */
 export const RFQ_REFUSAL_REASONS: Record<string, RfqRefusalReason> = {
-  wrong_network: 'unsupported_pair',
+  wrong_network: 'unsupported_payload',
   zero_amount_invoice: 'unsupported_payload',
   invalid_refund_address: 'unsupported_payload',
   // The receive legs' mirror of `invalid_refund_address`: an address WE cannot
@@ -188,15 +225,13 @@ export const RFQ_REFUSAL_REASONS: Record<string, RfqRefusalReason> = {
   // true thing the set can express: no quote is available right now, and it is
   // ours, not yours. The operator still sees the precise name in the logs.
   recourse_window_unservable: 'pricing_unavailable',
+  // The same choice among imperfect fits as above, except per-request rather
+  // than per-deployment: a client seeing this may retry rather than back off.
+  payable_amount_unmatchable: 'pricing_unavailable',
   // Nothing about the request is malformed, but the closed set has no name for
   // "this deployment's rail cannot contain the CLTV your invoice's worst route
-  // hint permits". `unsupported_payload` is what the same refusal already
-  // answered when it fired inside `decodeInvoice` and reached clients through
-  // the `InvalidInvoice` catch in `ingress/rfq.ts`, so mapping it here keeps
-  // client-visible behaviour byte-identical while the refusal moves onto the
-  // acceptance path. Explicit rather than via the fallback, for the reason the
-  // comment above this map gives: an accidental right answer and a missing
-  // entry look the same at the call site.
+  // hint permits". The coarse reason remains `unsupported_payload`; a
+  // client-safe error code now distinguishes it without exposing operator text.
   cltv_too_large: 'unsupported_payload',
   duplicate_swap: 'quote_conflict',
   // Also a conflict, though a subtler one: the two legs of a coupled
@@ -208,6 +243,10 @@ export const RFQ_REFUSAL_REASONS: Record<string, RfqRefusalReason> = {
   // internally only so the logs say which coupling gate refused.
   coupled_invoice_mismatch: 'quote_conflict',
   provider_at_capacity: 'exposure_cap',
+  // The float, not the cap. Same wire code for the reason `insufficient_inventory`
+  // takes it: the corridor would quote this again once the wallet is funded.
+  // Distinct internally because the two send an operator to different places.
+  insufficient_float: 'exposure_cap',
   unsupported_pair: 'unsupported_pair',
   quote_conflict: 'quote_conflict',
   pricing_unavailable: 'pricing_unavailable',
@@ -255,11 +294,16 @@ export const RFQ_REFUSAL_REASONS: Record<string, RfqRefusalReason> = {
 
 export const toRfqReason = (reason: string): RfqRefusalReason => RFQ_REFUSAL_REASONS[reason] ?? 'unsupported_payload'
 
-export const rfqRefusalPayload = (rfqId: string | undefined, reason: string): Record<string, unknown> => ({
+export const rfqRefusalPayload = (
+  rfqId: string | undefined,
+  reason: string,
+  error: RfqRefusalError | undefined = clientSafeErrorFor(reason),
+): Record<string, unknown> => ({
   v: 1,
   type: 'rfq_refusal',
   ...(rfqId !== undefined ? { rfq_id: rfqId } : {}),
   reason: toRfqReason(reason),
+  ...error,
 })
 
 export const extractRfqId = (payload: unknown): string | undefined => {

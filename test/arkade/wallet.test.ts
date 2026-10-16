@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
@@ -14,7 +14,7 @@ import {
   Extension,
   PrevArkTxField,
 } from '@arkade-os/sdk'
-import { CovenantSwapScript, parseAssetId } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import type { ArkadeContext, FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 interface AssetGroupView {
@@ -226,16 +226,20 @@ describe('refundWithoutReceiverSwapScript', () => {
       },
     })
 
-  const arkSubmitTx = vi.fn(async (_arkTxB64: string, checkpointsB64: string[]) => ({
-    arkTxid: 'a'.repeat(64),
+  const arkSubmitTx = vi.fn(async (arkTxB64: string, checkpointsB64: string[]) => ({
+    arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
     signedCheckpointTxs: checkpointsB64,
   }))
-  const arkFinalizeTx = vi.fn(async () => undefined)
+  const arkFinalizeTx = vi.fn(async (_arkTxid: string, _checkpointsB64: string[]) => undefined)
   const arkCtx = (): ArkadeContext =>
     ({
       identity: receiverIdentity,
       wallet: { serverUnrollScript, arkProvider: { submitTx: arkSubmitTx, finalizeTx: arkFinalizeTx } },
     }) as unknown as ArkadeContext
+
+  afterEach(() => {
+    if (vi.isMockFunction(receiverIdentity.sign)) vi.mocked(receiverIdentity.sign).mockRestore()
+  })
 
   it('spends the refundWithoutReceiver leaf, not the receiver-dependent refund leaf', async () => {
     arkSubmitTx.mockClear()
@@ -262,6 +266,74 @@ describe('refundWithoutReceiverSwapScript', () => {
     await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), FUNDED, DEST)
     const [arkTxB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
     expect(Transaction.fromPSBT(base64.decode(arkTxB64)).lockTime).toBe(REFUND_LOCKTIME)
+  })
+
+  it.each([
+    ['mismatched', 'b'.repeat(64)],
+    ['missing', undefined],
+  ] as const)('rejects a %s ark txid before signing returned checkpoints', async (_, arkTxid) => {
+    arkFinalizeTx.mockClear()
+    const sign = vi.spyOn(receiverIdentity, 'sign')
+    arkSubmitTx.mockImplementationOnce(
+      async (_arkTxB64, checkpointsB64) =>
+        ({
+          ...(arkTxid === undefined ? {} : { arkTxid }),
+          signedCheckpointTxs: checkpointsB64,
+        }) as Awaited<ReturnType<typeof arkSubmitTx>>,
+    )
+
+    await expect(refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), FUNDED, DEST)).rejects.toThrow(
+      /returned ark txid/,
+    )
+    expect(sign).toHaveBeenCalledTimes(1)
+    expect(arkFinalizeTx).not.toHaveBeenCalled()
+  })
+
+  it('rejects an unknown checkpoint before signing any returned checkpoint', async () => {
+    arkFinalizeTx.mockClear()
+    const sign = vi.spyOn(receiverIdentity, 'sign')
+    const funded = [FUNDED[0]!, { ...FUNDED[0]!, vout: 1 }]
+    arkSubmitTx.mockImplementationOnce(async (arkTxB64, checkpointsB64) => {
+      const forged = Transaction.fromPSBT(base64.decode(checkpointsB64[1]!))
+      forged.updateOutput(0, { script: RECEIVER_PAYOUT })
+      return {
+        arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
+        signedCheckpointTxs: [checkpointsB64[0]!, base64.encode(forged.toPSBT())],
+      }
+    })
+
+    await expect(refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), funded, DEST)).rejects.toThrow(
+      /does not match any submitted checkpoint/,
+    )
+    expect(sign).toHaveBeenCalledTimes(1)
+    expect(arkFinalizeTx).not.toHaveBeenCalled()
+  })
+
+  it('signs matching checkpoints in the order returned by the server', async () => {
+    arkSubmitTx.mockClear()
+    arkFinalizeTx.mockClear()
+    const funded = [FUNDED[0]!, { ...FUNDED[0]!, vout: 1 }]
+    arkSubmitTx.mockImplementationOnce(async (arkTxB64, checkpointsB64) => ({
+      arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
+      signedCheckpointTxs: [...checkpointsB64].reverse(),
+    }))
+
+    const result = await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), funded, DEST)
+    const [arkTxB64, checkpointsB64] = arkSubmitTx.mock.calls[0]!
+    const arkTxid = Transaction.fromPSBT(base64.decode(arkTxB64)).id
+    expect(result).toBe(arkTxid)
+    expect(arkFinalizeTx).toHaveBeenCalledOnce()
+    const [finalizedTxid, finalCheckpointsB64] = arkFinalizeTx.mock.calls[0]!
+    expect(finalizedTxid).toBe(arkTxid)
+    const finalCheckpoints = finalCheckpointsB64.map((encoded) => Transaction.fromPSBT(base64.decode(encoded)))
+    expect(finalCheckpoints.map((checkpoint) => checkpoint.id)).toEqual(
+      [...checkpointsB64].reverse().map((encoded) => Transaction.fromPSBT(base64.decode(encoded)).id),
+    )
+    for (const checkpoint of finalCheckpoints) {
+      expect(
+        checkpoint.getInput(0).tapScriptSig?.some(([sigKey]) => hex.encode(sigKey.pubKey) === hex.encode(RECEIVER)),
+      ).toBe(true)
+    }
   })
 
   it('rejects when there is nothing funded to refund', async () => {
@@ -307,11 +379,11 @@ describe('refunding an asset-carrying lockup', () => {
         receiverPkScript: RECEIVER_PAYOUT,
         senderPkScript: DEST,
       },
-      asset: parseAssetId(ASSET_A),
+      asset: asset.AssetId.fromString(ASSET_A),
     })
 
-  const arkSubmitTx = vi.fn(async (_arkTxB64: string, checkpointsB64: string[]) => ({
-    arkTxid: 'a'.repeat(64),
+  const arkSubmitTx = vi.fn(async (arkTxB64: string, checkpointsB64: string[]) => ({
+    arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
     signedCheckpointTxs: checkpointsB64,
   }))
   const arkCtx = (): ArkadeContext =>
@@ -538,7 +610,7 @@ describe('findClaimPreimage', () => {
   })
 
   it('reads a spend named only by settledBy, which spentBy alone would miss', async () => {
-    // The SDK's own `hasTerminalSpend` documents that the wire contract permits
+    // The SDK's own `isVtxoSpent` documents that the wire contract permits
     // `isSpent: true` with an EMPTY `spentBy` — so a reader that consults only
     // that field can look straight past a claim that really landed, and never
     // learn `P` for it. Union both, and this resolves.
@@ -620,7 +692,81 @@ describe('findClaimPreimage', () => {
     const ctx = indexerCtx({ getVtxos, virtualTxs: { [SPEND_TXID]: spendTxForOther } })
     const found = await findClaimPreimage(ctx, [OUTPOINT, other], PAYMENT_HASH)
     expect(found).toEqual(PREIMAGE)
-    expect(getVtxos).toHaveBeenCalledWith({ outpoints: [OUTPOINT, other] })
+    expect(getVtxos).toHaveBeenCalledWith({ outpoints: [OUTPOINT, other], pageIndex: 0, pageSize: 500 })
+  })
+
+  it('finds a claim the indexer did not fit on its first page', async () => {
+    // Padding a script past `arkd`'s 100-row page ceiling pushes the claimed
+    // outpoint onto a later page, leaving `P` unlearnable for a claim that landed.
+    const padding = Array.from({ length: 249 }, (_, vout) => ({ txid: 'e'.repeat(64), vout }))
+    const claimed = { txid: 'd'.repeat(64), vout: 9 }
+    const rows = [...padding, claimed].map((o) => ({
+      txid: o.txid,
+      vout: o.vout,
+      value: 330,
+      status: {},
+      spentBy: o.txid === claimed.txid ? SPEND_TXID : '',
+    }))
+    const getVtxos = vi.fn(async ({ pageIndex }: { pageIndex: number }) => {
+      const num = Math.max(pageIndex, 1)
+      const total = Math.ceil(rows.length / 100)
+      return {
+        vtxos: rows.slice((num - 1) * 100, num * 100),
+        page: { current: num, next: num < total ? num + 1 : total, total },
+      }
+    })
+    const ctx = indexerCtx({
+      getVtxos,
+      virtualTxs: { [SPEND_TXID]: buildSpendTxB64({ spends: claimed, conditionWitness: [PREIMAGE] }) },
+    })
+    await expect(findClaimPreimage(ctx, [...padding, claimed], PAYMENT_HASH)).resolves.toEqual(PREIMAGE)
+    expect(getVtxos).toHaveBeenCalledTimes(3)
+  })
+
+  it('reads every chunk of spending transactions, not just the first', async () => {
+    // A padded script puts one claim among many spends, and here it is a late one.
+    const CLAIMED = 140
+    const spent = Array.from({ length: 150 }, (_, vout) => ({ txid: 'a'.repeat(64), vout }))
+    const spentBy = Array.from({ length: 150 }, (_, i) => i.toString(16).padStart(64, '0'))
+    const spendTx = buildSpendTxB64({ spends: spent[CLAIMED], conditionWitness: [PREIMAGE] })
+    const getVtxos = vi.fn(async () => ({
+      vtxos: spent.map((o, i) => ({ txid: o.txid, vout: o.vout, value: 330, status: {}, spentBy: spentBy[i] })),
+    }))
+    // Answers at most 100 and says nothing about the rest — losing a claim silently.
+    const getVirtualTxs = vi.fn(async (txids: string[]) => ({
+      txs: txids
+        .slice(0, 100)
+        .filter((id) => id === spentBy[CLAIMED])
+        .map(() => spendTx),
+    }))
+    const ctx = {
+      wallet: { indexerProvider: { getVtxos, getVirtualTxs } } as unknown as ArkadeContext['wallet'],
+    } as ArkadeContext
+
+    await expect(findClaimPreimage(ctx, spent, PAYMENT_HASH)).resolves.toEqual(PREIMAGE)
+    expect(getVirtualTxs.mock.calls.length).toBeGreaterThan(1)
+    expect(Math.max(...getVirtualTxs.mock.calls.map(([txids]) => txids.length))).toBeLessThanOrEqual(100)
+  })
+
+  it('follows the page metadata when a spending-transaction read is itself paged', async () => {
+    const spendTx = buildSpendTxB64({ conditionWitness: [PREIMAGE] })
+    const decoy = buildSpendTxB64({ spends: { txid: 'c'.repeat(64), vout: 7 }, conditionWitness: [WRONG_PREIMAGE] })
+    const getVtxos = vi.fn(async () => ({
+      vtxos: [
+        { txid: OUTPOINT.txid, vout: OUTPOINT.vout, value: 50_000, status: {}, spentBy: SPEND_TXID, settledBy: '' },
+      ],
+    }))
+    const getVirtualTxs = vi.fn(async (_txids: string[], opts?: { pageIndex?: number }) =>
+      (opts?.pageIndex ?? 0) === 0
+        ? { txs: [decoy], page: { current: 1, next: 2, total: 2 } }
+        : { txs: [spendTx], page: { current: 2, next: 2, total: 2 } },
+    )
+    const ctx = {
+      wallet: { indexerProvider: { getVtxos, getVirtualTxs } } as unknown as ArkadeContext['wallet'],
+    } as ArkadeContext
+
+    await expect(findClaimPreimage(ctx, [OUTPOINT], PAYMENT_HASH)).resolves.toEqual(PREIMAGE)
+    expect(getVirtualTxs).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -648,7 +794,7 @@ describe('findLockupOutpoints', () => {
     // The Lightning receive leg funds its own lockup and decides whether to
     // fund by comparing this value against the row's payout — an outpoint
     // alone cannot tell its own funding from a stray dust payment to a public
-    // address. `spent` is `hasTerminalSpend`, so `isSpent: true` with an empty
+    // address. `spent` is `isVtxoSpent`, so `isSpent: true` with an empty
     // `spentBy` (which the wire contract permits) still reads as spent.
     const ctx = ctxReturning([
       { txid: SPENT.txid, vout: 0, value: 4_900, isSpent: true, spentBy: '', settledBy: '' },
@@ -699,7 +845,7 @@ describe('findLockupOutpoints', () => {
 
 describe('lockupProvablySpent', () => {
   // The module mock at the top of this file spreads `...actual`, so the
-  // `hasTerminalSpend` these exercise is the REAL SDK predicate, not a stub.
+  // `isVtxoSpent` these exercise is the REAL SDK predicate, not a stub.
   // That is the point: this is the SDK boundary, and the whole safety argument
   // for writing a permanent `refund_outcome: 'external'` rests on what that
   // predicate does with the fixtures below.
@@ -728,7 +874,7 @@ describe('lockupProvablySpent', () => {
     // refund the client never received, permanently, via a `refund_outcome`
     // write that `findRefundable` then filters out forever.
     //
-    // Holds because the SDK keeps the two facts separate: `hasTerminalSpend` is
+    // Holds because the SDK keeps the two facts separate: `isVtxoSpent` is
     // `isSpent || spentBy || settledBy` and never consults `isSwept`, which is
     // ORed in explicitly (and only) by `canSpendOffchain`/`canRecoverOnchain`.
     const ctx = ctxReturning([vtxo({ isSwept: true, isSpent: false, spentBy: '', settledBy: '' })])
@@ -771,7 +917,7 @@ describe('lockupProvablySpent', () => {
     const getVtxos = vi.fn(async () => ({ vtxos: [] }))
     const ctx = { wallet: { indexerProvider: { getVtxos } } as unknown as ArkadeContext['wallet'] } as ArkadeContext
     await lockupProvablySpent(ctx, SCRIPT)
-    expect(getVtxos).toHaveBeenCalledWith({ scripts: [SCRIPT] })
+    expect(getVtxos).toHaveBeenCalledWith({ scripts: [SCRIPT], pageIndex: 0, pageSize: 500 })
   })
 
   // The two answers the boolean folds into `false`; only one is worth waiting on.

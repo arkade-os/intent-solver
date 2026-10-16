@@ -7,11 +7,29 @@
 export declare const RFQ_PAIR_SEND: string
 export declare const MIN_HEADROOM_SECONDS: number
 export declare const TERMINAL_STATES: readonly string[]
+export declare const RFQ_REFUSAL_ERROR_CODES: readonly string[]
 
 export declare class SwapRefusal extends Error {
   reason: string
   rfqId: string | undefined
-  constructor(reason: string, rfqId?: string)
+  errorCode: string | undefined
+  field: string | undefined
+  actual: number | undefined
+  expected: number | undefined
+  limit: number | undefined
+  unit: 'blocks' | 'characters' | 'sats' | undefined
+  constructor(
+    reason: string,
+    rfqId?: string,
+    detail?: {
+      errorCode?: unknown
+      field?: unknown
+      actual?: unknown
+      expected?: unknown
+      limit?: unknown
+      unit?: unknown
+    },
+  )
 }
 
 export declare class AddressMismatch extends Error {

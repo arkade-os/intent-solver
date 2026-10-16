@@ -1,12 +1,13 @@
-// `pendingRestartKeys` diffs the override MAP and a market is a row, so one added
-// in the console got silence. `names a market added since boot` is the test that
-// has to fail without `marketDrift`.
+// A settings override needs a restart EXCEPT for a LIVE_KEYS member. Market CRUD
+// is live and must not appear on the overview banner.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
-import { marketDrift, settingsDrift } from '@arkade-os/solver-app/admin/drift.js'
+import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
+import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import { settingsDrift } from '@arkade-os/solver-app/admin/drift.js'
 import { pendingRestartKeys } from '@arkade-os/solver-app/admin/settings.js'
 import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
 import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
@@ -41,8 +42,11 @@ const baseConfig = {
     'onchain:BTC->arkade:BTC': true,
   },
   adminRestartEnabled: true,
+  assetCarrierPricing: false,
+  offerChargesDeliveredCarrier: false,
   offerMarkets: [],
   assetRfqTokens: [],
+  sendHintScidDenylist: new Set<string>(),
 }
 
 const config = (over: Record<string, unknown> = {}) => ({ ...structuredClone(baseConfig), ...over }) as never
@@ -57,6 +61,8 @@ const market = (over: Record<string, unknown> = {}) => ({
   pricePath: '/price',
   toleranceBps: 50,
   feeBps: 10,
+  sellBaseFeeFlat: 0n,
+  buyBaseFeeFlat: 0n,
   sellBase: null,
   buyBase: null,
   enabled: true,
@@ -75,8 +81,11 @@ const services = (over: Record<string, unknown> = {}) =>
   ({
     config: config(),
     policy: config(),
+    bootPolicy: config(),
     bootOverrides: {},
     assetMarkets: [],
+    liveOfferMarkets: [],
+    assetRfqMarkets: [],
     tickErrors: { failing: [] },
     providerPubkey: 'aa'.repeat(32),
     store: store(),
@@ -86,6 +95,8 @@ const services = (over: Record<string, unknown> = {}) =>
     adminStore: {
       getOverrides: vi.fn().mockResolvedValue({}),
       listMarkets: vi.fn().mockResolvedValue([]),
+      listPendingApprovals: vi.fn().mockResolvedValue([]),
+      repairedServing: [],
     },
     ln: { getBalance: vi.fn().mockResolvedValue({ availableSats: 1, incomingSats: 0 }) },
     arkade: { wallet: { getBalance: vi.fn().mockResolvedValue({ total: 1 }) } },
@@ -99,43 +110,63 @@ const overview = async (over: Record<string, unknown> = {}) => {
   return (await response.json()) as { pendingRestart: { key: string; loaded: string; stored: string }[] }
 }
 
-describe('marketDrift — the case the override diff cannot see', () => {
-  it('is empty when the stored rows are the ones this process loaded', () => {
-    expect(marketDrift([market()] as never, [market()] as never)).toEqual([])
+const buildReal = async () => {
+  const adminStore = await AdminStore.open(betterSqliteDriver(':memory:'), () => 1_000_000)
+  const svc = services({ adminStore }) as unknown as {
+    policy: unknown
+    bootPolicy: { maxExposedSats: number }
+    replacePolicy: (next: unknown) => Promise<void>
+  }
+  // Exactly what the shipped one does to these two: ASSIGN `policy`, never `bootPolicy`.
+  svc.replacePolicy = async (next) => {
+    svc.policy = next
+  }
+  return { app: buildAdminApp({ services: svc as never, startedAt: 1, mode: 'relay' }), services: svc, adminStore }
+}
+
+type App = ReturnType<typeof buildAdminApp>
+
+const patch = (app: App, key: string, value: string) =>
+  app.fetch(
+    new Request('http://admin/api/settings', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key, value }),
+    }),
+  )
+
+const settingsOf = async (app: App) =>
+  (await (await app.fetch(new Request('http://admin/api/settings'))).json()) as {
+    pendingRestart: string[]
+    knobs: { key: string; pending?: boolean; restartRequired?: boolean }[]
+  }
+
+describe('a live knob must not un-badge the knobs that are still waiting', () => {
+  it('keeps badging a NON-LIVE knob pending after a LIVE knob is flipped', async () => {
+    const { app, services: svc } = await buildReal()
+    // No seam reaches this one: `maxExposedSats` is copied BY VALUE into six deps literals.
+    expect((await patch(app, 'MAX_EXPOSED_SATS', '900000')).status).toBe(200)
+    expect((await settingsOf(app)).pendingRestart).toContain('MAX_EXPOSED_SATS')
+
+    expect((await patch(app, 'ASSET_CARRIER_PRICING', 'true')).status).toBe(200)
+
+    const after = await settingsOf(app)
+    expect(after.pendingRestart).toContain('MAX_EXPOSED_SATS')
+    expect(after.knobs.find((k) => k.key === 'MAX_EXPOSED_SATS')).toMatchObject({ pending: true })
+    expect(after.pendingRestart).not.toContain('ASSET_CARRIER_PRICING')
+    // Premise: `replacePolicy` really did rewrite `policy` over EVERY stored override.
+    expect(svc.bootPolicy.maxExposedSats).toBe(300_000)
+    expect((svc.policy as { maxExposedSats: number }).maxExposedSats).toBe(900_000)
   })
 
-  it('names a market added since boot', () => {
-    expect(marketDrift([], [market()] as never)).toEqual([
-      { key: `market ${KEY}`, loaded: 'not trading', stored: 'trading' },
-    ])
-  })
-
-  it('names a re-priced market rather than reading it as untouched', () => {
-    expect(marketDrift([market()] as never, [market({ feeBps: 40 })] as never)).toEqual([
-      { key: `market ${KEY}`, loaded: 'as booted', stored: 'edited' },
-    ])
-  })
-
-  it('names a market this process trades and the store no longer has', () => {
-    expect(marketDrift([market()] as never, [])).toEqual([
-      { key: `market ${KEY}`, loaded: 'trading', stored: 'not trading' },
-    ])
-  })
-
-  it('treats a paused market as leaving, because the next process will not trade it either', () => {
-    expect(marketDrift([market()] as never, [market({ enabled: false })] as never)).toEqual([
-      { key: `market ${KEY}`, loaded: 'trading', stored: 'not trading' },
-    ])
-  })
-
-  it('compares the bounds, whose atomic units are bigints', () => {
-    const bounded = market({ sellBase: { min: 1n, max: 2n } })
-    expect(marketDrift([bounded] as never, [bounded] as never)).toEqual([])
-    expect(marketDrift([bounded] as never, [market({ sellBase: { min: 1n, max: 3n } })] as never)).toHaveLength(1)
-  })
-
-  it('survives a stored row that has gone bad, because the overview must still render', () => {
-    expect(() => marketDrift([], [market({ toleranceBps: -1 })] as never)).not.toThrow()
+  it('says the same thing on /api/overview, which derives it independently', async () => {
+    const { app } = await buildReal()
+    await patch(app, 'MAX_EXPOSED_SATS', '900000')
+    await patch(app, 'ASSET_CARRIER_PRICING', 'true')
+    const body = (await (await app.fetch(new Request('http://admin/api/overview'))).json()) as {
+      pendingRestart: { key: string; loaded: string; stored: string }[]
+    }
+    expect(body.pendingRestart).toEqual([{ key: 'MAX_EXPOSED_SATS', loaded: '300000', stored: '900000' }])
   })
 })
 
@@ -166,14 +197,16 @@ describe('GET /api/overview — pendingRestart', () => {
     expect((await overview()).pendingRestart).toEqual([])
   })
 
-  it('names a market added since boot — the scenario the shipped alert stayed silent for', async () => {
+  it('does not treat a market added since boot as a pending restart', async () => {
     const body = await overview({
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({}),
         listMarkets: vi.fn().mockResolvedValue([market()]),
+        listPendingApprovals: vi.fn().mockResolvedValue([]),
+        repairedServing: [],
       },
     })
-    expect(body.pendingRestart).toEqual([{ key: `market ${KEY}`, loaded: 'not trading', stored: 'trading' }])
+    expect(body.pendingRestart).toEqual([])
   })
 
   it('carries an override with both of its values, not the bare key', async () => {
@@ -181,31 +214,36 @@ describe('GET /api/overview — pendingRestart', () => {
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({ LN_SEND_FEE_BPS: '25' }),
         listMarkets: vi.fn().mockResolvedValue([]),
+        listPendingApprovals: vi.fn().mockResolvedValue([]),
+        repairedServing: [],
       },
     })
     expect(body.pendingRestart).toEqual([{ key: 'LN_SEND_FEE_BPS', loaded: '0', stored: '25' }])
   })
 
-  it('reports a knob and a market together, from one banner', async () => {
+  it('still reports a settings knob while a new market is already live', async () => {
     const body = await overview({
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({ MAX_EXPOSED_SATS: '900000' }),
         listMarkets: vi.fn().mockResolvedValue([market()]),
+        listPendingApprovals: vi.fn().mockResolvedValue([]),
+        repairedServing: [],
       },
     })
-    expect(body.pendingRestart).toHaveLength(2)
-    expect(body.pendingRestart.map((item) => item.key)).toEqual(['MAX_EXPOSED_SATS', `market ${KEY}`])
+    expect(body.pendingRestart).toEqual([{ key: 'MAX_EXPOSED_SATS', loaded: '300000', stored: '900000' }])
   })
 
   it('stays quiet when the override is the one this process already loaded', async () => {
     const body = await overview({
       bootOverrides: { LN_SEND_FEE_BPS: '25' },
-      policy: config({
+      bootPolicy: config({
         corridorFees: { ...baseConfig.corridorFees, 'arkade:BTC->lightning:BTC': { bps: 25, flatSats: 0 } },
       }),
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({ LN_SEND_FEE_BPS: '25' }),
         listMarkets: vi.fn().mockResolvedValue([]),
+        listPendingApprovals: vi.fn().mockResolvedValue([]),
+        repairedServing: [],
       },
     })
     expect(body.pendingRestart).toEqual([])

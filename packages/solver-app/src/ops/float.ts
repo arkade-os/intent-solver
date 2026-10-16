@@ -9,9 +9,9 @@
  * and can fund nothing. Every corridor then refuses for a reason that names the
  * corridor rather than the float.
  *
- * **Shape** — split one fat coin into several. Funding PINS the coins it spends,
- * so a float of one coin funds one swap and refuses the next however large it
- * is. `poolPlan` answers "how many swaps can this fund at once", which is not
+ * **Shape** — split one fat coin into several, or merge a cluttered float into
+ * pieces. Funding PINS the coins it spends, so a float of one coin funds one swap
+ * and refuses the next however large it is. `poolPlan` answers "how many swaps can this fund at once", which is not
  * the same question as how many sats it holds.
  *
  * Here rather than inline in the watch loop so the console and the CLI drive the SAME
@@ -29,29 +29,41 @@
 
 import { hex } from '@scure/base'
 import {
+  canRecoverOnchain,
+  canSpendOffchain,
+  classifyAgainstSignerSet,
+  isSubdust,
+  signerSetFromInfo,
+  type TimeHeight,
+} from '@arkade-os/sdk'
+import { log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import {
   liveLockupRows,
   recoverableVtxosFrom,
+  registeredLockupDeadlines,
   renewExpiringVtxos,
   runVtxoLifecycle,
+  LOCKUP_CONTRACT_TYPE,
   RENEWAL_THRESHOLD_MS,
   type LockupDeadline,
   type VtxoLifecycleReport,
 } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
 import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import { poolTarget } from '@arkade-os/solver-arkade/arkade/vtxoPool.js'
-import { poolPlan, resplitFloat } from './pool.js'
+import { pinInputs, poolPlan, resplitFloat } from './pool.js'
 import { summariseSignerMigration } from '@arkade-os/solver-arkade/arkade/signerMigration.js'
 import { planBoardingSettle } from '@arkade-os/solver-arkade/arkade/boardingSettle.js'
 import type { Services } from './services.js'
 
 /**
- * Every live lockup's refund deadline, for the recovery guard.
+ * Every registered lockup's refund deadline, for the recovery guard.
  *
- * Derived from `liveLockupRows` exactly as the daemon's contract registration
- * derives it, rather than being handed over as that registration's by-product.
- * Registration and this guard want the same rows for different reasons, and
- * coupling them would mean a manual recovery could only be as safe as whatever
- * the last registration pass happened to leave behind.
+ * TWO SOURCES. Live rows are derived from `liveLockupRows` exactly as the
+ * daemon's contract registration derives them, rather than being handed over as
+ * that registration's by-product: registration and this guard want the same rows
+ * for different reasons, and coupling them would mean a manual recovery could
+ * only be as safe as whatever the last registration pass happened to leave
+ * behind. They are not enough on their own — @see registeredLockupDeadlines
  *
  * The ROLE travels with the deadline, because the deadline alone answers the
  * wrong question on a send leg — see {@link LockupDeadline.refundable}. The
@@ -73,16 +85,24 @@ export const lockupDeadlinesOf = async (services: Services): Promise<readonly Lo
   // send leg — so case can only ever confirm the correct outcome, never
   // invert it.
   const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
-  return rows.map((row) => ({
-    script: row.pkScript,
-    refundLocktime: row.refundLocktime,
-    // NULL IS "NO OPINION", not "not ours". A row carrying no client refund
-    // key at all predates that leaf, and `covenantScriptFromRow` refuses to
-    // rebuild it — so it is never registered, never in the contract snapshot,
-    // and never in the sweep set to block anything. Answering `false` for it
-    // would be inventing a refusal about a lockup this guard cannot see.
-    refundable: row.clientRefundPubkey === null ? undefined : row.clientRefundPubkey === solverPubkey,
-  }))
+  const manager = await services.arkade.wallet.getContractManager()
+  // `getContracts`, never `getContractsWithVtxos`: that one re-syncs against
+  // the indexer (every call, with `vtxoSyncMaxAgeMs` unset) and rethrows a
+  // non-retryable answer. Only the stored params are read here, already local.
+  const registered = await manager.getContracts({ type: [LOCKUP_CONTRACT_TYPE] })
+  return [
+    ...rows.map((row) => ({
+      script: row.pkScript,
+      refundLocktime: row.refundLocktime,
+      // NULL IS "NO OPINION", not "not ours". A row carrying no client refund
+      // key at all predates that leaf, and `covenantScriptFromRow` refuses to
+      // rebuild it — so it is never registered, never in the contract snapshot,
+      // and never in the sweep set to block anything. Answering `false` for it
+      // would be inventing a refusal about a lockup this guard cannot see.
+      refundable: row.clientRefundPubkey === null ? undefined : row.clientRefundPubkey === solverPubkey,
+    })),
+    ...registeredLockupDeadlines(registered, solverPubkey, log),
+  ]
 }
 
 /**
@@ -135,11 +155,21 @@ const migrationDue = (failed: boolean): boolean => {
  * pinned. `settle` and `sendBitcoin` are two independent spenders of one float,
  * and arkd resolves a collision by failing one of them — when that one is the
  * funding, a swap dies for no reason.
+ *
+ * QUEUED: the daemon's cadence and the `float-lifecycle` admin action both run
+ * it, and two passes would settle the same boarding UTXOs.
  */
-export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> => {
+export const runFloatLifecycle = (services: Services): Promise<VtxoLifecycleReport> => {
+  const pass = lifecycleQueue.then(() => floatLifecycle(services))
+  lifecycleQueue = pass.catch(() => undefined)
+  return pass
+}
+
+let lifecycleQueue: Promise<unknown> = Promise.resolve()
+
+const floatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> => {
   const wallet = services.arkade.wallet
   const vtxoManager = await wallet.getVtxoManager()
-  const deadlines = await lockupDeadlinesOf(services)
 
   // OURS BECAUSE IT IS NO LONGER THEIRS. The SDK ran this inside the boarding
   // poll that `settlementConfig: false` turns off, so it moves here rather than
@@ -153,30 +183,27 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
   const migration = { migrated: 0, failures: [] as string[] }
   const hadFailures = migrationThrottle.consecutiveFailures > 0
   if (migrationDue(hadFailures)) {
-    // The migration names coins from the wallet's default/delegate contracts
-    // with no knowledge of the reservation ledger — the same ledger renewal
-    // consults below — so a receive-leg funding holding a coin under a
-    // deprecated signer would race the migration for it, and the funding can
-    // be the leg arkd fails. `MigrateDeprecatedSignerOptions` has no filter
-    // hook (checked against 0.4.66), so the ledger is respected from THIS
-    // side instead: the candidates are read the way the SDK reads them
-    // (default/delegate contracts, spendable only — swept-but-unspent outputs
-    // are recovery's, not migration's) and pinned for the duration of the
-    // call. The window is named rather than hidden: a funding that lands
-    // between this read and the SDK's own selection loses on the MIGRATION
-    // side as VTXO_ALREADY_SPENT, which retries next pass — the acceptable
-    // direction, since a failed funding is a dead swap.
-    let release: ReleaseReservation = () => {}
+    // The SDK takes no exclusion hook (checked against 0.4.66), so the ledger is respected
+    // from THIS side: pin what it can migrate — spendable coins under any signer but the
+    // active one, the split its own classifier makes — and defer if a funding holds one.
+    // Pinning the active signer's coins too would hold every funding off for the call.
+    let release: ReleaseReservation | null = null
     try {
-      const contracts = await (
-        await wallet.getContractManager()
-      ).getContractsWithVtxos({
-        type: ['default', 'delegate'],
-      })
-      const candidates = contracts.flatMap(({ vtxos }) =>
-        vtxos.filter((vtxo) => !vtxo.isSwept && !(vtxo.isSpent || vtxo.spentBy || vtxo.settledBy)),
-      )
-      release = services.arkade.reservations.reserve(candidates)
+      const [contracts, info] = await Promise.all([
+        (await wallet.getContractManager()).getContractsWithVtxos({ type: ['default', 'delegate'] }),
+        wallet.arkProvider.getInfo(),
+      ])
+      const signers = signerSetFromInfo(info)
+      const candidates = contracts
+        .filter(({ contract }) => {
+          const signer = contract.params?.serverPubKey
+          return signer !== undefined && classifyAgainstSignerSet(signer, signers, nowSeconds()).status !== 'CURRENT'
+        })
+        .flatMap(({ vtxos }) =>
+          vtxos.filter((vtxo) => !vtxo.isSwept && !(vtxo.isSpent || vtxo.spentBy || vtxo.settledBy)),
+        )
+      release = pinInputs(services, candidates)
+      if (release === null) throw new Error('a funding holds one of its coins')
       const outcome = summariseSignerMigration(await vtxoManager.migrateDeprecatedSignerVtxos())
       migration.migrated = outcome.migrated
       migration.failures.push(...outcome.failures)
@@ -192,7 +219,7 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
         `deprecated-signer migration failed: ${error instanceof Error ? error.message : String(error)}`,
       )
     } finally {
-      release()
+      release?.()
     }
   }
 
@@ -200,7 +227,7 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
   // is float by the end of the same pass. @see arkade/boardingSettle.ts
   const boarding = { txid: null as string | null, failures: [] as string[] }
   try {
-    boarding.txid = await settleBoardedSats(services)
+    boarding.txid = await settleBoardedSats(services, (message) => boarding.failures.push(`boarding: ${message}`))
   } catch (error) {
     boarding.failures.push(`boarding settle failed: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -224,7 +251,19 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
           return expiring.filter((vtxo) => !reserved.has(`${vtxo.txid}:${vtxo.vout}`))
         },
         destination: () => wallet.getAddress(),
-        settle: (inputs, outputs) => wallet.settle({ inputs: [...inputs], outputs: [...outputs] }),
+        // PINNED for the whole settle, and the CHECK is the point: the filter above
+        // reads the ledger two network calls before selection is final, and a funding
+        // can pin a coin in between. The renewal yields: a failed funding is a dead
+        // swap, a deferred renewal one coin closer to expiry.
+        settle: async (inputs, outputs) => {
+          const release = pinInputs(services, inputs)
+          if (release === null) throw new Error('inputs pinned by a funding since selection')
+          try {
+            return await wallet.settle({ inputs: [...inputs], outputs: [...outputs] })
+          } finally {
+            release()
+          }
+        },
         // The shape a renewal should carve its proceeds into, so the float
         // comes back able to fund several swaps at once rather than one.
         // Same target `pool`/`mintPool` work from, so the two cannot drift.
@@ -234,12 +273,36 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
     // A SAFETY NET rather than the mechanism: the renewal settles straight into the
     // pool's shape above, so the float does not come back as one coin. This covers what
     // that cannot reach — too little to carve, or a float reshaped by something other
-    // than a renewal. @see #123
-    resplitFloat: async () => (await resplitFloat(services))?.txid ?? null,
-    recoverVtxos: () => vtxoManager.recoverVtxos(),
+    // than a renewal.
+    resplitFloat: async () => {
+      const result = await resplitFloat(services)
+      if (result !== null && 'skipped' in result) log('float re-split after renewal skipped:', result.skipped)
+      return result !== null && 'txid' in result ? result.txid : null
+    },
+    // Pinned like renewal: besides swept coins the SDK sweeps PRECONFIRMED SUBDUST, and coins
+    // past a HEIGHT expiry — both pass the funding filter's timestamp-only check. Same clock
+    // as the SDK's sweep, falling back to time alone as it does.
+    recoverVtxos: async () => {
+      const tip = await wallet.onchainProvider?.getChainTip().catch(() => undefined)
+      const now: TimeHeight = { timestamp: new Date(), height: tip?.height }
+      const sweeps = (await wallet.getVtxos({ withRecoverable: true, withUnrolled: false })).filter(
+        (vtxo) =>
+          canRecoverOnchain(vtxo, now) ||
+          (canSpendOffchain(vtxo, now) && vtxo.isPreconfirmed && isSubdust(vtxo, services.arkade.dustSats)),
+      )
+      const release = pinInputs(services, sweeps)
+      if (release === null) throw new Error('a funding holds a coin recovery would sweep')
+      try {
+        return await vtxoManager.recoverVtxos()
+      } finally {
+        release()
+      }
+    },
     recoverableVtxos: () => recoverableVtxosFrom(wallet),
-    lockupDeadlines: async () => deadlines,
-    nowSeconds: () => Math.floor(Date.now() / 1000),
+    // Lazy, so a throw from either source costs only recovery — which then
+    // fails closed — instead of migration, boarding and renewal before it.
+    lockupDeadlines: () => lockupDeadlinesOf(services),
+    nowSeconds,
   })
 
   // Folded in rather than returned separately: `failures` is already the one
@@ -262,7 +325,7 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
  * comes from the SDK rather than being re-derived: that judgement needs the exit
  * timelock and, in block mode, a chain tip.
  */
-const settleBoardedSats = async (services: Services): Promise<string | null> => {
+const settleBoardedSats = async (services: Services, warn: (message: string) => void): Promise<string | null> => {
   const wallet = services.arkade.wallet
   const utxos = await wallet.getBoardingUtxos()
   if (utxos.length === 0) return null
@@ -281,7 +344,16 @@ const settleBoardedSats = async (services: Services): Promise<string | null> => 
     address,
     target: poolTarget(services.config.limits.maxSats, services.config.maxExposedSats),
   })
-  if (!plan.settle) return null
+  if (!plan.settle) {
+    // Said not thrown, like a renewal's: every other reason clears itself later.
+    if (plan.reason === 'over-capacity') {
+      warn(
+        `a deposit exceeds what one settlement can carry at the operator's ${info.vtxoMaxAmount} sat per-output ` +
+          'ceiling and was left at the boarding address; split it on L1 and board the pieces',
+      )
+    }
+    return null
+  }
 
   return wallet.settle({
     inputs: plan.inputs,
@@ -295,7 +367,7 @@ export type AutoMintSkip = 'disabled' | 'shape_is_fine'
 export type AutoMintOutcome = { minted: false; skipped: AutoMintSkip } | { minted: true; result: unknown }
 
 /**
- * Split the float only when its SHAPE needs it — the automatic half of minting.
+ * Reshape the float only when its SHAPE needs it — the automatic half of minting.
  *
  * **Opt-in, off by default.** Renewal preserves what the solver already has; this
  * SPENDS on a timer with no human present, which is not a decision to make silently.

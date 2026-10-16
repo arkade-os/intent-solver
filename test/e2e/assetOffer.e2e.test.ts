@@ -28,18 +28,18 @@ import {
   tempStoreDir,
   type E2eArkade,
 } from './support/stack.js'
-import { streamOfferTxs, OFFER_PACKET_FILTER } from '@arkade-os/solver-arkade/arkade/offerStream.js'
+import { streamOfferTxs } from '@arkade-os/solver-arkade/arkade/offerStream.js'
 import { offerIsConsistent } from '@arkade-os/solver-arkade/arkade/offerConsistency.js'
 import { offerDepositFrom } from '@arkade-os/solver-arkade/arkade/offerDeposit.js'
 import { offerOutputsAt } from '@arkade-os/solver-arkade/arkade/offerOutputs.js'
 import { fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { poll } from '@arkade-os/solver-core/util/poll.js'
-import { assetMarketPolicy } from '@arkade-os/solver-core/core/assetMarketConfig.js'
-import { AssetOfferService, assertMarketsPriced, parseAssetMarkets } from '@arkade-os/solver-app/ops/assetOffers.js'
+import { assetMarketPolicy, DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { AssetOfferService, parseAssetMarkets } from '@arkade-os/solver-app/ops/assetOffers.js'
 import { createServices } from '@arkade-os/solver-app/ops/services.js'
 import { loadConfig } from '@arkade-os/solver-app/config.js'
-import { servedBy } from '@arkade-os/solver-app/admin/servedBy.js'
+import { marketCapability } from '@arkade-os/solver-app/admin/marketCapability.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
@@ -82,7 +82,6 @@ describe('e2e arkade offers — publish, discover, settle', () => {
       const watching = (async () => {
         for await (const event of streamOfferTxs({
           arkdUrl: ARKD_URL,
-          expressions: [OFFER_PACKET_FILTER],
           signal: controller.signal,
         })) {
           seen.push(event)
@@ -238,6 +237,7 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
     const refusals: { outpoint: string; reason: string; detail: string }[] = []
     const service = new AssetOfferService({
       store,
+      carrierSats: arkade.ctx.dustSats,
       markets: [{ a: null, b: assetId }],
       // Deliberately wide, so a refusal below can only have come from `sellBase`.
       minFillAmount: 1n,
@@ -319,10 +319,12 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
     SWAP_TIMEOUT_MS,
   )
 
-  // The boot-time derivation over a REAL stored market row. `servedBy` is #71's;
+  // The boot-time derivation over a REAL stored market row. `marketCapability` is #71's;
   // this pins it against a stored row rather than a hand-built one.
   describe('what this deployment says it will fill', () => {
     const rowFor = (over: Record<string, unknown> = {}) => ({
+      ...DEFAULT_SERVING,
+      symbol: 'E2E',
       base: null,
       quote: assetId,
       baseDecimals: 8,
@@ -340,19 +342,26 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
     it('reports a configured market as served by NOTHING when OFFER_MARKETS is unset', async () => {
       const admin = await AdminStore.open(betterSqliteDriver(':memory:'))
       await admin.putMarket(rowFor())
-      const boot = { offerMarkets: parseAssetMarkets(undefined), assetRfqTokens: [] }
-      expect(boot.offerMarkets).toEqual([])
-      expect(servedBy((await admin.listMarkets())[0]!, boot)).toEqual([])
+      const boot = { assetOffers: null, liveOfferMarkets: parseAssetMarkets(undefined), assetRfqMarkets: [] }
+      expect(boot.liveOfferMarkets).toEqual([])
+      expect(marketCapability((await admin.listMarkets())[0]!, boot).serving).toEqual([])
       await admin.close()
     })
 
-    it('refuses to boot when a served market has been disabled', async () => {
-      // A disabled row leaves `pricing`, so the pair is served and priced nowhere.
+    it('serves a disabled market on no path, rather than filling it unpriced', async () => {
+      // A disabled row leaves `pricing` empty, and the serve list is the priced
+      // subset of `OFFER_MARKETS` — so the env name alone fills nothing.
       const admin = await AdminStore.open(betterSqliteDriver(':memory:'))
       await admin.putMarket(rowFor({ enabled: false }))
       const policy = assetMarketPolicy(await admin.listMarkets())
       expect(policy.pricing).toEqual([])
-      expect(() => assertMarketsPriced(parseAssetMarkets(`BTC/${assetId}`), policy.pricing)).toThrow(/no pricing/)
+      const named = parseAssetMarkets(`BTC/${assetId}`)
+      const live = named.filter((pair) =>
+        policy.pricing.some(
+          (p) => (p.base === pair.a && p.quote === pair.b) || (p.base === pair.b && p.quote === pair.a),
+        ),
+      )
+      expect(live).toEqual([])
       await admin.close()
     })
   })
@@ -396,6 +405,8 @@ describe('e2e arkade offers — what OFFER_MARKETS actually builds', () => {
     const swapDbPath = join(dir, `services-${randomBytes(6).toString('hex')}.sqlite`)
     const admin = await AdminStore.open(betterSqliteDriver(swapDbPath))
     await admin.putMarket({
+      ...DEFAULT_SERVING,
+      symbol: 'E2E',
       base: null,
       quote: assetId,
       baseDecimals: 8,

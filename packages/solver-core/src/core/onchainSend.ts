@@ -27,7 +27,7 @@ export const ONCHAIN_ORDER_MARGIN_SECONDS = 2 * HOUR
 export const MAX_MIN_CONFIRMATIONS = 6
 
 /**
- * The FLOOR under `min_confirmations` (TLA+ F2, #38). Zero accepts an HTLC still in a
+ * The FLOOR under `min_confirmations` (TLA+ F2). Zero accepts an HTLC still in a
  * mempool; negative SHORTENS `htlcLocktimeFor`'s window, moving the deadline the wrong
  * way. Unreachable from the wire, but the guard belongs at the domain boundary.
  */
@@ -63,8 +63,8 @@ export const htlcLocktimeFor = (minConfirmations: number, now: number): number =
 export const HTLC_REFUND_MTP_MARGIN = 90 * MINUTE
 
 /**
- * What the solver needs after learning `P` to get its Arkade claim landed (TLA+ F7,
- * #104). A DEADLINE BUDGET, not a timeout: the room
+ * What the solver needs after learning `P` to get its Arkade claim landed (TLA+ F7).
+ * A DEADLINE BUDGET, not a timeout: the room
  * {@link onchainRefundLocktimeFor} reserves so a last-instant client claim cannot
  * leave the solver without time to answer.
  */
@@ -137,12 +137,33 @@ export const MIN_ONCHAIN_FUND_WINDOW = 90 * MINUTE
 
 export type OnchainSendFundingDecision = { fund: true } | { fund: false; reason: string }
 
+/**
+ * Two bounds, and the refund one cannot stand in for the HTLC one:
+ * {@link onchainRefundLocktimeFor} puts `refundLocktime` at least
+ * `2 * ONCHAIN_ORDER_MARGIN_SECONDS` past `htlcLocktime`, so it first fires hours
+ * INTO the window where the HTLC's claim and refund leaves are both live. The
+ * second bound is `@arkade-os/swap`'s own `claim_window_too_short`, which the
+ * client evaluates on WALL CLOCK — MTP lags, so reading it here would put the
+ * deadline later than the rule being mirrored.
+ */
 export const evaluateOnchainSendFunding = (params: {
   refundLocktime: number
+  htlcLocktime: number
+  minConfirmations: number
   now: number
 }): OnchainSendFundingDecision => {
   if (params.now >= params.refundLocktime - MIN_ONCHAIN_FUND_WINDOW) {
     return { fund: false, reason: 'refused to fund: refund window closing' }
+  }
+  const claimWindow = params.minConfirmations * ONCHAIN_SECONDS_PER_BLOCK + ONCHAIN_CLAIM_MARGIN_SECONDS
+  if (params.htlcLocktime - params.now <= claimWindow) {
+    return {
+      fund: false,
+      reason:
+        `refused to fund: ${params.htlcLocktime - params.now}s to htlc_locktime ${params.htlcLocktime} is inside ` +
+        `the ${claimWindow}s a ${params.minConfirmations}-confirmation claim needs — the client's arkade lockup is ` +
+        `untouched and refunds at ${params.refundLocktime}`,
+    }
   }
   return { fund: true }
 }

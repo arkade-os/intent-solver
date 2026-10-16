@@ -19,7 +19,7 @@
  *
  * Not `@arkade-os/swap`'s `Offer`, and not structurally compatible with it:
  * `Offer.wantAsset` is an optional `asset.AssetId` class, where this takes a
- * `string | null`. The adapter maps `AssetId -> serializeAssetId(...)` and
+ * `string | null`. The adapter maps `AssetId -> AssetId.toString()` and
  * `undefined -> null` ("no asset" means BTC on that leg).
  *
  * The 68-hex form is worth that mapping: this decision compares assets for equality

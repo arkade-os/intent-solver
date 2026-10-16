@@ -24,10 +24,9 @@ import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenant
 import type { EvmSendSwapRow } from '../db/evmSendSwaps.js'
 import type { EvmReceiveSwapRow } from '../db/evmReceiveSwaps.js'
 
-/** Send leg: the SOLVER claims the client's lockup, so it is the receiver. */
-export const evmSendCovenantRowFor = (row: EvmSendSwapRow): CovenantScriptRow => ({
+const covenantRowWith = (row: EvmSendSwapRow | EvmReceiveSwapRow, receiverPubkey: string): CovenantScriptRow => ({
   id: row.id,
-  receiverPubkey: row.providerPubkey,
+  receiverPubkey,
   serverPubkey: row.serverPubkey,
   paymentHash: row.paymentHash,
   refundLocktime: row.refundLocktime,
@@ -42,20 +41,10 @@ export const evmSendCovenantRowFor = (row: EvmSendSwapRow): CovenantScriptRow =>
   nonInteractiveParameters: row.nonInteractiveParameters,
 })
 
+/** Send leg: the SOLVER claims the client's lockup, so it is the receiver. */
+export const evmSendCovenantRowFor = (row: EvmSendSwapRow): CovenantScriptRow =>
+  covenantRowWith(row, row.providerPubkey)
+
 /** Receive leg: the CLIENT claims the solver's lockup, so the client is the receiver. */
-export const evmReceiveCovenantRowFor = (row: EvmReceiveSwapRow): CovenantScriptRow => ({
-  id: row.id,
-  receiverPubkey: row.payoutPubkey,
-  serverPubkey: row.serverPubkey,
-  paymentHash: row.paymentHash,
-  refundLocktime: row.refundLocktime,
-  claimDelay: row.claimDelay,
-  emulatorPubkey: row.emulatorPubkey,
-  refundPkScript: row.refundPkScript,
-  pkScript: row.pkScript,
-  clientRefundPubkey: row.clientRefundPubkey,
-  refundWithoutReceiverDelay: row.refundWithoutReceiverDelay,
-  refundDelay: row.refundDelay,
-  receiverPkScript: row.receiverPkScript,
-  nonInteractiveParameters: row.nonInteractiveParameters,
-})
+export const evmReceiveCovenantRowFor = (row: EvmReceiveSwapRow): CovenantScriptRow =>
+  covenantRowWith(row, row.payoutPubkey)

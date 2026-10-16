@@ -11,13 +11,6 @@
  * differently-shaped row onto the same `CovenantScriptRow`). This file stays
  * as thin as `send/arkadeOps.ts` is: no covenant-reconstruction logic of its
  * own, just wiring to the real wallet.
- *
- * `assertScriptMatchesRow` here is a deliberate, small duplicate of
- * `send/arkadeOps.ts`'s private (unexported) helper of the same name, rather
- * than an import from it — that file is shared, actively-touched
- * infrastructure this session's sibling work also depends on, and a four-line
- * equality check is cheaper to duplicate than to risk a cross-cutting edit to
- * a file this change does not otherwise need to touch.
  */
 
 import { hex } from '@scure/base'
@@ -29,27 +22,11 @@ import {
   refundWithoutReceiverSwapScript,
   type ArkadeContext,
 } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import { covenantScriptFromRow } from '../send/arkadeOps.js'
-import type { CovenantScriptRow } from '../send/orchestrator.js'
+import { assertScriptMatchesRow, covenantScriptFromRow, type EmulatorInfo } from '../send/arkadeOps.js'
 import { fundLockup } from './fundLockup.js'
-
-/** The emulator service the refund covenant is signed by — same shape `send/arkadeOps.ts`'s EmulatorInfo takes. */
-export interface EmulatorInfo {
-  url: string
-  /** Compressed pubkey, hex, from the emulator's /v1/info. */
-  pubkey: string
-}
 
 import type { ReceiveArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 export type { ReceiveArkadeOps }
-
-/** Refuse to sign against a lockup whose script does not re-derive from the row — same guard `send/arkadeOps.ts` applies. */
-const assertScriptMatchesRow = (script: { pkScript: Uint8Array }, row: CovenantScriptRow): void => {
-  const derived = hex.encode(script.pkScript)
-  if (derived !== row.pkScript) {
-    throw new Error(`script rebuilt from row ${row.id} derives ${derived}, lockup is at ${row.pkScript}`)
-  }
-}
 
 export const receiveArkadeOpsFromContext = async (
   ctx: ArkadeContext,

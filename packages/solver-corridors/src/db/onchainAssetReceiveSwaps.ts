@@ -312,7 +312,6 @@ const SHAPE: StoreShape<OnchainAssetReceiveSwapRow, OnchainAssetReceiveState> = 
   patchColumns: PATCH_COLUMNS,
   live: NON_TERMINAL,
   exposed: EXPOSED,
-  failStates: { exposed: 'stuck', clean: 'refused' },
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 
@@ -360,18 +359,13 @@ export class OnchainAssetReceiveSwapStore extends BaseSwapStore<OnchainAssetRece
    * No TTL, for the reason the sats leg gives: a lease that expires is one that
    * lets a second worker pay while the first may still be in flight.
    */
-  async claimFundLease(id: string, from: OnchainAssetReceiveState): Promise<boolean> {
-    const result = await this.driver.run(
-      `UPDATE receive_onchain_asset_swap SET fund_started_at = ?, updated_at = ?
-       WHERE id = ? AND state = ? AND fund_started_at IS NULL`,
-      [this.now(), this.now(), id, from],
-    )
-    return result.changes === 1
+  override async claimFundLease(id: string, from: OnchainAssetReceiveState): Promise<boolean> {
+    return super.claimFundLease(id, from)
   }
 
   /** Give the lease back when the payment provably did not happen — only when `fund()` THREW. */
-  async releaseFundLease(id: string): Promise<void> {
-    await this.driver.run(`UPDATE receive_onchain_asset_swap SET fund_started_at = NULL WHERE id = ?`, [id])
+  override async releaseFundLease(id: string): Promise<void> {
+    await super.releaseFundLease(id)
   }
 
   async insertQuote(quote: OnchainAssetReceiveQuoteRecord): Promise<OnchainAssetReceiveSwapRow> {
@@ -425,13 +419,5 @@ export class OnchainAssetReceiveSwapStore extends BaseSwapStore<OnchainAssetRece
     )
     await this.recordEvent(quote.id, null, 'quoted', null)
     return this.get(quote.id)
-  }
-
-  async findLiveByPaymentHash(paymentHash: string): Promise<OnchainAssetReceiveSwapRow | null> {
-    const raw = await this.driver.get<Raw>(
-      `SELECT * FROM receive_onchain_asset_swap WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
-      [paymentHash],
-    )
-    return raw ? toRow(raw) : null
   }
 }
