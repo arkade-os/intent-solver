@@ -997,6 +997,56 @@ describe('tick: refusals before money moves', () => {
     )
   })
 
+  describe("the lockup's batch expiry is a deadline too", () => {
+    it('caps the route so the HTLC ends a margin before the lockup is swept', async () => {
+      const outcome = await quoted()
+      const expiresAt = clock + 2 * 24 * 3600
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT, expiresAt }]
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+      await service.tick(outcome.swap.id)
+
+      const call = ln.payCalls[0]
+      if (call === undefined) throw new Error('expected the payment to be attempted')
+      const decoded = decodeInvoice(INVOICE)
+      expect(call.maxCltvBlocks).toBeLessThan(
+        worstCaseHtlcBlocks(cltvOf(decoded.minFinalCltvBlocks, decoded.worstRouteHintCltvBlocks)),
+      )
+      expect(clock + call.maxCltvBlocks * SECONDS_PER_BLOCK + REFUND_SAFETY_MARGIN).toBeLessThanOrEqual(expiresAt)
+    })
+
+    it('refuses to pay a lockup swept before a claim could land', async () => {
+      const outcome = await quoted()
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT, expiresAt: clock + 3600 }]
+      const row = await service.tick(outcome.swap.id)
+
+      expect(row.state).toBe('refused')
+      expect(row.failureReason).toContain('claim_window_too_short')
+      expect(ln.payCalls).toHaveLength(0)
+    })
+
+    it('is not applied on regtest, whose batches are shorter than any HTLC', async () => {
+      const regtest = new SendSwapService({
+        store,
+        ln,
+        arkade,
+        limits: { minSats: 500, maxSats: 10_000 },
+        invoicePrefix: 'bc',
+        maxExposedSats: 5_000,
+        totalCommitted: () => store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        now: () => clock,
+      })
+      const outcome = await regtest.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+      if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT, expiresAt: clock + 3600 }]
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+      await regtest.tick(outcome.swap.id)
+
+      expect(ln.payCalls).toHaveLength(1)
+    })
+  })
+
   it('builds the ceiling from the same hint the deadline was sized on', async () => {
     // The third `HtlcCltv` literal, and the one no gate builds for it —
     // `submitPayment`'s own `cltv`, whose output IS `max_timeout_height`.
