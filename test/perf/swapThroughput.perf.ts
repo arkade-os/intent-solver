@@ -1039,6 +1039,7 @@ describe('perf — parallel swaps across all four corridors', () => {
       store,
       ln,
       arkade: arkadeOps,
+      network: arkade.network,
       limits: arkade.limits,
       invoicePrefix: arkade.profile.invoicePrefix,
       maxExposedSats: arkade.maxExposedSats,
