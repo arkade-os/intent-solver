@@ -37,11 +37,20 @@ export class LockupPreimageReader {
     if (!this.onchain) return null
 
     const outputScript = hex.decode(row.pkScript)
+    let unread: { error: unknown } | undefined
     for (const outpoint of unrolled) {
-      const witness = await this.onchain.findSpendWitness({ txid: outpoint.txid, vout: outpoint.vout, outputScript })
-      const revealed = witness?.find((item) => item.length === 32 && paymentHashFromPreimage(item) === row.paymentHash)
-      if (revealed) return revealed
+      try {
+        const witness = await this.onchain.findSpendWitness({ txid: outpoint.txid, vout: outpoint.vout, outputScript })
+        const revealed = witness?.find(
+          (item) => item.length === 32 && paymentHashFromPreimage(item) === row.paymentHash,
+        )
+        if (revealed) return revealed
+      } catch (error) {
+        // One unreadable outpoint must not hide `P` in another; unread, though, nothing here is "not found".
+        unread ??= { error }
+      }
     }
+    if (unread) throw unread.error
     return null
   }
 }

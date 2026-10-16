@@ -192,6 +192,8 @@ let covclaimd: ReturnType<typeof buildFakeCovclaimd>
 let service: ReceiveSwapService
 /** L1 spend witnesses by `txid:vout`, as `onchain.findSpendWitness` answers them. */
 let l1Witnesses: Map<string, Uint8Array[]>
+/** `txid:vout`s whose L1 read throws, as a chain API that cannot answer does. */
+let l1Unreadable: Set<string>
 
 const LIMITS = { minSats: 1_000, maxSats: 1_000_000 }
 
@@ -206,13 +208,19 @@ beforeEach(async () => {
   arkade = buildFakeArkade()
   covclaimd = buildFakeCovclaimd()
   l1Witnesses = new Map()
+  l1Unreadable = new Set()
   service = new ReceiveSwapService({
     acceptUnilateralGap: false,
     store,
     ln,
     backendName: 'probe-backend',
     arkade: arkade.ops,
-    onchain: { findSpendWitness: async ({ txid, vout }) => l1Witnesses.get(`${txid}:${vout}`) ?? null },
+    onchain: {
+      findSpendWitness: async ({ txid, vout }) => {
+        if (l1Unreadable.has(`${txid}:${vout}`)) throw new Error('chain API cannot name the spender')
+        return l1Witnesses.get(`${txid}:${vout}`) ?? null
+      },
+    },
     covclaimd: covclaimd.client,
     limits: LIMITS,
     maxExposedSats: 1_000_000,
@@ -1485,6 +1493,24 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
       l1Witnesses.set('sibling:1', [P])
 
       expect((await service.tick(id)).state).toBe('settled')
+    })
+
+    it('does not let one unreadable outpoint hide P in another', async () => {
+      const id = unroll(await armAndFund())
+      const [lockup] = arkade.state.unrolledOutputs
+      l1Unreadable.add(`${lockup!.txid}:${lockup!.vout}`)
+      arkade.state.unrolledOutputs = [...arkade.state.unrolledOutputs, { txid: 'sibling', vout: 1, value: 1_000 }]
+      l1Witnesses.set('sibling:1', [P])
+
+      expect((await service.tick(id)).state).toBe('settled')
+    })
+
+    it('still retries when an outpoint cannot be read and none reveals P', async () => {
+      const id = unroll(await armAndFund())
+      const [lockup] = arkade.state.unrolledOutputs
+      l1Unreadable.add(`${lockup!.txid}:${lockup!.vout}`)
+
+      await expect(service.tick(id)).rejects.toThrow('chain API cannot name the spender')
     })
 
     it('takes nothing from a witness item that does not open the payment hash', async () => {
