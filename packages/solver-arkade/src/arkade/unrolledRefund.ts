@@ -275,22 +275,28 @@ export class UnrolledRefunder {
     return { txid, tx: hex.encode(raw), feeRate: 0, broadcastAt: this.deps.now(), cpfpTxid: null }
   }
 
-  /** The client's anchor spend of an unconfirmed unroll, priced from its prevouts. Null when the explorer cannot name it. */
+  /**
+   * The client's anchor spend of an unconfirmed unroll, priced from its prevouts. Null when the
+   * explorer cannot name it or serve it: a client churning anchor children must not stall the push.
+   */
   private async anchorChild(parentTxid: string, parent: Transaction): Promise<{ fee: number; vsize: number } | null> {
     const { chain } = this.deps
+    const read = (txid: string) => chain.getRawTransaction(txid).catch(() => null)
     let anchor = -1
     for (let i = 0; i < parent.outputsLength; i++) if (outputScript(parent, i) === P2A_SCRIPT) anchor = i
     const spender = anchor < 0 ? undefined : (await chain.getTxOutspends(parentTxid))[anchor]
     if (!spender?.spent || spender.txid === undefined) return null
-    const raw = await chain.getRawTransaction(spender.txid)
+    const raw = await read(spender.txid)
+    if (!raw) return null
     const child = Transaction.fromRaw(raw)
     let fee = 0
     for (let i = 0; i < child.inputsLength; i++) {
       const { txid, index } = child.getInput(i)
       if (txid === undefined || index === undefined) return null
       const prevTxid = hex.encode(txid)
-      const prev = prevTxid === parentTxid ? parent : Transaction.fromRaw(await chain.getRawTransaction(prevTxid))
-      if (index >= prev.outputsLength) return null
+      const prevRaw = prevTxid === parentTxid ? null : await read(prevTxid)
+      const prev = prevTxid === parentTxid ? parent : prevRaw && Transaction.fromRaw(prevRaw)
+      if (!prev || index >= prev.outputsLength) return null
       fee += Number(prev.getOutput(index).amount)
     }
     for (let i = 0; i < child.outputsLength; i++) fee -= Number(child.getOutput(i).amount)

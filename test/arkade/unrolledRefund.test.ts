@@ -227,6 +227,14 @@ describe('UnrolledRefunder', () => {
     expect(VALUE - Number(refund!.getOutput(0).amount)).toBe(Math.ceil(10 * (refund!.vsize + parent.vsize)))
   })
 
+  it('prices for the parent alone when the explorer names an anchor child it cannot serve', async () => {
+    chain.outspends.set(parent.id, [{ spent: false }, { spent: true, txid: 'ee'.repeat(32) }])
+
+    await pushed()
+    const [refund] = cosigned
+    expect(VALUE - Number(refund!.getOutput(0).amount)).toBe(Math.ceil(10 * (refund!.vsize + parent.vsize)))
+  })
+
   it('asks arkd nothing when the anchor child outbids all the lockup holds', async () => {
     await anchorChildPaying(VALUE)
 
