@@ -46,6 +46,7 @@ const row: OnchainReceiveSwapRow = {
   onchainClaimBroadcastAt: null,
   onchainClaimPriorTxids: [],
   arkadeRefundTxid: null,
+  unrolledRefund: null,
   refundOutcome: null,
   failureReason: null,
   rfqId: null,
