@@ -40,7 +40,7 @@ import {
   type TimelockUnit,
   type UnilateralDelays,
 } from '@arkade-os/solver-core/core/timelocks.js'
-import { log } from '@arkade-os/solver-core/util/poll.js'
+import { log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import { claimIdentity } from './claimIdentity.js'
 import type { CovenantSwapScript } from './covenant.js'
@@ -480,6 +480,52 @@ export const totalValue = (outputs: readonly FundedOutput[]): number =>
   outputs.reduce((sum, output) => sum + output.value, 0)
 
 /**
+ * How many lockup outputs ONE spend may carry.
+ *
+ * Anyone can pay a lockup address, so what sits at a script is not only the
+ * funding the swap asked for: a counterparty can spray dust vtxos
+ * (`vtxoMinAmount` is 330 sats on mainnet, 1 on mutinynet) until the spend
+ * exceeds arkd's `maxTxWeight` of 40000 and is rejected on every tick — the
+ * solver never claims (send legs) or never refunds itself (receive legs), and
+ * the counterparty's own deadline opens on schedule.
+ *
+ * 16 is conservative against that weight: a covenant-leaf input costs roughly
+ * 800 WU witness and all, so 16 lands near 13k of the 40000.
+ */
+export const MAX_LOCKUP_SPEND_INPUTS = 16
+
+/** Shorter than any sweep this could race, long enough that a spend built now still lands. */
+const LOCKUP_SPEND_EXPIRY_MARGIN = 5 * 60
+
+/**
+ * The outputs one spend takes: the most valuable that are not about to expire,
+ * capped at {@link MAX_LOCKUP_SPEND_INPUTS}. A near-expiry input would make the
+ * whole transaction unspendable rather than only itself, which is why it is
+ * dropped instead of carried. What is left over stays at the script for the
+ * next pass, or for the counterparty's own refund.
+ *
+ * Value chooses WHICH, never the order: the covenant refund is index-aligned
+ * against the caller's own array, so a sorted result would move an asset onto
+ * another input's output.
+ */
+export const boundedSpendInputs = (funded: readonly FundedOutput[], now: number): FundedOutput[] => {
+  const usable = funded.filter(
+    (output) => output.expiresAt === undefined || output.expiresAt - now > LOCKUP_SPEND_EXPIRY_MARGIN,
+  )
+  if (usable.length <= MAX_LOCKUP_SPEND_INPUTS) return usable
+  const kept = new Set([...usable].sort((a, b) => b.value - a.value).slice(0, MAX_LOCKUP_SPEND_INPUTS))
+  return usable.filter((output) => kept.has(output))
+}
+
+const spendable = (funded: readonly FundedOutput[], verb: string): FundedOutput[] => {
+  const inputs = boundedSpendInputs(funded, nowSeconds())
+  if (inputs.length === 0) {
+    throw new Error(`nothing to ${verb}: every one of the ${funded.length} funded outputs expires too soon to spend`)
+  }
+  return inputs
+}
+
+/**
  * Every outpoint this script has ever held — SPENT ONES INCLUDED, unlike {@link findLockups},
  * so {@link findClaimPreimage} can still find the claimed outpoint. `value` lets the receive
  * leg tell its own funding from a dust payment to a public address. Paged like findLockups;
@@ -568,17 +614,18 @@ export const claimSwapScript = async (
   destination: string,
 ): Promise<string> => {
   if (funded.length === 0) throw new Error('nothing to claim: no funded outputs')
+  const inputs = spendable(funded, 'claim')
   const signer = claimIdentity(ctx.identity, preimage)
 
   const { arkTx, checkpoints } = buildOffchainTx(
-    funded.map((output) => ({
+    inputs.map((output) => ({
       txid: output.txid,
       vout: output.vout,
       value: output.value,
       tapLeafScript: script.claim(),
       tapTree: script.encode(),
     })),
-    [{ script: ArkAddress.decode(destination).pkScript, amount: BigInt(totalValue(funded)) }],
+    [{ script: ArkAddress.decode(destination).pkScript, amount: BigInt(totalValue(inputs)) }],
     ctx.wallet.serverUnrollScript,
   )
 
@@ -666,8 +713,8 @@ export const refundAssetPacket = (
 }
 
 /**
- * Push a covenant refund: spend every funded output back to the refund
- * destination the script commits to.
+ * Push a covenant refund: spend the funded outputs {@link boundedSpendInputs}
+ * selects back to the refund destination the script commits to.
  *
  * The base program's refund leaf needs no signature of ours — its signers are
  * the Arkade server and the covenant-tweaked emulator key — so historically
@@ -717,9 +764,10 @@ export const refundSwapScript = async (
   refundPkScript: Uint8Array,
 ): Promise<string> => {
   if (funded.length === 0) throw new Error('nothing to refund: no funded outputs')
+  const inputs = spendable(funded, 'refund')
 
   const { arkTx, checkpoints } = buildOffchainTx(
-    funded.map((output) => ({
+    inputs.map((output) => ({
       txid: output.txid,
       vout: output.vout,
       value: output.value,
@@ -730,27 +778,27 @@ export const refundSwapScript = async (
     // the CURRENT INPUT'S index (PUSHCURRENTINPUTINDEX ... INSPECTOUTPUTSCRIPTPUBKEY),
     // so input i's check is satisfied by output i and nothing else. A single
     // aggregate output would fail every input past the first.
-    funded.map((output) => ({ script: refundPkScript, amount: BigInt(output.value) })),
+    inputs.map((output) => ({ script: refundPkScript, amount: BigInt(output.value) })),
     ctx.wallet.serverUnrollScript,
   )
 
-  const fundingTxids = [...new Set(funded.map((output) => output.txid))]
+  const fundingTxids = [...new Set(inputs.map((output) => output.txid))]
   const { txs: fundingTxs } = await ctx.wallet.indexerProvider.getVirtualTxs(fundingTxids)
   const fundingByTxid = new Map<string, Uint8Array>()
   for (const raw of fundingTxs) {
     const tx = Transaction.fromPSBT(base64.decode(raw))
     fundingByTxid.set(tx.id, tx.toBytes(true))
   }
-  funded.forEach((output, vin) => {
+  inputs.forEach((output, vin) => {
     const sourceTx = fundingByTxid.get(output.txid)
     if (!sourceTx) throw new Error(`indexer produced no virtual tx for ${output.txid}: cannot prove the refund prevout`)
     setArkPsbtField(arkTx, vin, PrevArkTxField, sourceTx)
   })
 
-  const assetPacket = refundAssetPacket(funded, 'per-input')
+  const assetPacket = refundAssetPacket(inputs, 'per-input')
   attachEmulatorPackets(arkTx, [
     EmulatorPacket.create(
-      funded.map((_, vin) => ({ vin, script: script.refundArkadeScript, witness: EMPTY_RAW_WITNESS })),
+      inputs.map((_, vin) => ({ vin, script: script.refundArkadeScript, witness: EMPTY_RAW_WITNESS })),
     ),
     ...(assetPacket ? [assetPacket] : []),
   ])
@@ -840,21 +888,22 @@ export const refundWithoutReceiverSwapScript = async (
   refundPkScript: Uint8Array,
 ): Promise<string> => {
   if (funded.length === 0) throw new Error('nothing to refund: no funded outputs')
+  const inputs = spendable(funded, 'refund')
 
   const { arkTx, checkpoints } = buildOffchainTx(
-    funded.map((output) => ({
+    inputs.map((output) => ({
       txid: output.txid,
       vout: output.vout,
       value: output.value,
       tapLeafScript: script.refundWithoutReceiver(),
       tapTree: script.encode(),
     })),
-    [{ script: refundPkScript, amount: BigInt(totalValue(funded)) }],
+    [{ script: refundPkScript, amount: BigInt(totalValue(inputs)) }],
     ctx.wallet.serverUnrollScript,
   )
 
   // BEFORE signing: the packet changes the output set the signature covers.
-  const assetPacket = refundAssetPacket(funded, 'aggregate')
+  const assetPacket = refundAssetPacket(inputs, 'aggregate')
   if (assetPacket) attachEmulatorPackets(arkTx, [assetPacket])
 
   // No index list: every input spends the same leaf, so all are signed.

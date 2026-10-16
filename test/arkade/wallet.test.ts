@@ -40,6 +40,7 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
 // time) — dynamic import keeps that ordering explicit rather than relying on
 // hoisting semantics.
 const {
+  claimSwapScript,
   refundSwapScript,
   refundWithoutReceiverSwapScript,
   findClaimPreimage,
@@ -47,6 +48,7 @@ const {
   findLockupOutpoints,
   lockupProvablySpent,
   lockupSpendEvidence,
+  MAX_LOCKUP_SPEND_INPUTS,
 } = await import('@arkade-os/solver-arkade/arkade/wallet.js')
 
 const key = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
@@ -340,6 +342,110 @@ describe('refundWithoutReceiverSwapScript', () => {
     await expect(refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), [], DEST)).rejects.toThrow(
       /nothing to refund/,
     )
+  })
+})
+
+/**
+ * Anyone can pay a lockup address, so what sits at one is not only the funding
+ * the swap asked for. A spend built over every output lets a counterparty price
+ * the solver out of its own claim or refund: enough sprayed dust and the tx
+ * exceeds arkd's `maxTxWeight`, or one near-expiry vtxo makes it unspendable —
+ * and it is rejected on every tick until the counterparty's own deadline opens.
+ */
+describe('a lockup sprayed with outputs anyone could have paid in', () => {
+  const receiveLegScript = () =>
+    new CovenantSwapScript({
+      receiver: key(2),
+      server: SERVER,
+      preimageHash: PREIMAGE_HASH,
+      refundLocktime: REFUND_LOCKTIME,
+      claimDelay: CLAIM_DELAY,
+      client: RECEIVER,
+      clientRefundDelay: CLIENT_REFUND_DELAY,
+      refundWithoutServerDelay: REFUND_WITHOUT_SERVER_DELAY,
+      nonInteractiveParameters: { emulatorPubkey: EMULATOR, receiverPkScript: RECEIVER_PAYOUT, senderPkScript: DEST },
+    })
+
+  // One real 50_000 funding at vout 0, then 20 dust at vouts 1..20 worth
+  // `329 + vout`. Keeping the 16 largest therefore keeps vout 0 and vouts
+  // 6..20, which is 55_130 sats — the five smallest are what must be dropped.
+  const SPRAYED: FundedOutput[] = [
+    { txid: FUNDING.id, vout: 0, value: 50_000 },
+    ...Array.from({ length: 20 }, (_, i) => ({ txid: FUNDING.id, vout: i + 1, value: 330 + i })),
+  ]
+  const KEPT_TOTAL = 55_130n
+
+  const arkSubmitTx = vi.fn(async (arkTxB64: string, checkpointsB64: string[]) => ({
+    arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
+    signedCheckpointTxs: checkpointsB64,
+  }))
+  const arkCtx = (): ArkadeContext =>
+    ({
+      identity: receiverIdentity,
+      wallet: {
+        serverUnrollScript,
+        arkProvider: { submitTx: arkSubmitTx, finalizeTx: vi.fn(async () => undefined) },
+        indexerProvider: { getVirtualTxs: vi.fn(async () => ({ txs: [FUNDING.b64] })) },
+      },
+    }) as unknown as ArkadeContext
+
+  const CLAIM_DEST = baseScript().address('tark', SERVER).encode()
+  const PREIMAGE = new Uint8Array(32).fill(7)
+
+  // The ark tx spends the CHECKPOINTS, one per lockup output and in the same
+  // order, so the outputs actually selected are named there and not on it.
+  const spentVouts = (checkpointsB64: string[]): number[] =>
+    checkpointsB64.map((encoded) => Transaction.fromPSBT(base64.decode(encoded)).getInput(0).index!)
+
+  it('claims at most the cap, taking the most valuable outputs', async () => {
+    arkSubmitTx.mockClear()
+    await claimSwapScript(arkCtx(), baseScript(), SPRAYED, PREIMAGE, CLAIM_DEST)
+    const [arkTxB64, checkpointsB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
+    const vouts = spentVouts(checkpointsB64)
+
+    expect(vouts).toHaveLength(MAX_LOCKUP_SPEND_INPUTS)
+    expect(vouts).toContain(0)
+    expect(Math.min(...vouts.filter((vout) => vout !== 0))).toBe(6)
+    // No other subset of this size is worth as much, and the payout is exactly
+    // what was spent rather than what sits at the script.
+    expect(Transaction.fromPSBT(base64.decode(arkTxB64)).getOutput(0).amount).toBe(KEPT_TOTAL)
+  })
+
+  it('refunds without the receiver at most the cap, paying only what it spent', async () => {
+    arkSubmitTx.mockClear()
+    await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), SPRAYED, DEST)
+    const [arkTxB64, checkpointsB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
+
+    expect(spentVouts(checkpointsB64)).toHaveLength(MAX_LOCKUP_SPEND_INPUTS)
+    expect(Transaction.fromPSBT(base64.decode(arkTxB64)).getOutput(0).amount).toBe(KEPT_TOTAL)
+  })
+
+  it('keeps the covenant refund index-aligned over the bounded subset', async () => {
+    submitTx.mockClear()
+    await refundSwapScript(ctx(), 'http://emulator.test', baseScript(), SPRAYED, DEST)
+    const [arkTxB64, checkpointsB64] = submitTx.mock.calls[0] as [string, string[]]
+    const tx = Transaction.fromPSBT(base64.decode(arkTxB64))
+    const vouts = spentVouts(checkpointsB64)
+    const paid = Array.from({ length: MAX_LOCKUP_SPEND_INPUTS }, (_, i) => tx.getOutput(i).amount!)
+
+    expect(vouts).toHaveLength(MAX_LOCKUP_SPEND_INPUTS)
+    expect(vouts).toContain(0)
+    expect(Math.min(...vouts.filter((vout) => vout !== 0))).toBe(6)
+    expect(paid[0]).toBe(50_000n)
+    expect(paid.reduce((sum, amount) => sum + amount, 0n)).toBe(KEPT_TOTAL)
+  })
+
+  it('skips an output expiring too soon to be relied on, and refuses when every one is', async () => {
+    arkSubmitTx.mockClear()
+    const expiring = { txid: FUNDING.id, vout: 0, value: 50_000, expiresAt: Math.floor(Date.now() / 1000) + 60 }
+    const healthy = { txid: FUNDING.id, vout: 1, value: 1_000 }
+
+    await claimSwapScript(arkCtx(), baseScript(), [expiring, healthy], PREIMAGE, CLAIM_DEST)
+    const [arkTxB64, checkpointsB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
+    expect(spentVouts(checkpointsB64)).toEqual([1])
+    expect(Transaction.fromPSBT(base64.decode(arkTxB64)).getOutput(0).amount).toBe(1_000n)
+
+    await expect(claimSwapScript(arkCtx(), baseScript(), [expiring], PREIMAGE, CLAIM_DEST)).rejects.toThrow(/expir/)
   })
 })
 
