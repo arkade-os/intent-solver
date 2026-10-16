@@ -3,11 +3,17 @@
  * the parts worth pinning: a solver that goes quietly deaf still looks healthy.
  *
  * The real transport is exercised against a live arkd, not here — see the
- * commit that added this for the observed txid.
+ * commit that added this for the observed txid. Only its reset path is below.
  */
 import { describe, it, expect, vi } from 'vitest'
 import { getEventListeners } from 'node:events'
-import { streamOfferTxs, OFFER_PACKET_FILTER, type GrpcTransport } from '@arkade-os/solver-arkade/arkade/offerStream.js'
+import { createServer, type AddressInfo } from 'node:net'
+import {
+  http2Transport,
+  streamOfferTxs,
+  OFFER_PACKET_FILTER,
+  type GrpcTransport,
+} from '@arkade-os/solver-arkade/arkade/offerStream.js'
 import { grpcFrame } from '@arkade-os/solver-arkade/arkade/grpcWire.js'
 
 const utf8 = new TextEncoder()
@@ -208,5 +214,23 @@ describe('streamOfferTxs', () => {
     }
     expect(out).toEqual([])
     expect(transport).not.toHaveBeenCalled()
+  })
+})
+
+describe('http2Transport', () => {
+  it('fails the read when the connection is reset, instead of crashing the process', async () => {
+    const server = createServer((socket) => socket.resetAndDestroy())
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const { port } = server.address() as AddressInfo
+    try {
+      const chunks = http2Transport(`http://127.0.0.1:${port}/x`, new Uint8Array(), new AbortController().signal)
+      await expect(
+        (async () => {
+          for await (const chunk of chunks) void chunk
+        })(),
+      ).rejects.toThrow()
+    } finally {
+      server.close()
+    }
   })
 })
