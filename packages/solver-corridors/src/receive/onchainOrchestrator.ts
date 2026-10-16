@@ -586,7 +586,7 @@ export class OnchainReceiveSwapService {
     }
     const outputs = await onchain.findOutputs({ address: row.onchainAddress })
     const output = outputs.find((o) => o.txid === row.fundingTxid && o.vout === row.fundingVout)
-    // Gone: a fee-bumped funding has a new txid. Nothing is exposed yet, so re-adopt.
+    // Gone: a fee-bumped funding has a new txid. Nothing is exposed yet, so re-adopt; the next tick gates it as below.
     if (!output) {
       const replacement = evaluateOnchainReceiveFill({
         outputs,
