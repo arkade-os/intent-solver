@@ -644,7 +644,12 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
     // of arkd, not of the loop, and tearing it down while a fill sweep is still
     // running would cut discovery off mid-decision for no gain.
     offers.abort()
-    await watcher.stop()
+    // Caught: a throw from `finally` would replace the error that ended the loop.
+    await watcher
+      .stop()
+      .catch((error: unknown) =>
+        log('lockup watcher stop failed:', error instanceof Error ? error.message : String(error)),
+      )
   }
 }
 

@@ -219,6 +219,25 @@ describe('the hot loop during a slow refund sweep or lifecycle pass', () => {
     expect(String(await watching)).toContain('backend gone')
   })
 
+  it('rejects with the loop’s own error when teardown fails too', async () => {
+    const { services, tickHot, watch } = harness({
+      LockupWatcher: class {
+        start() {}
+        sync() {}
+        async stop() {
+          throw new Error('unsubscribe failed')
+        }
+      },
+    })
+    tickHot.mockRejectedValueOnce(new Error('backend gone'))
+    const outcome = watch(services).then(
+      () => 'resolved',
+      (error: unknown) => String(error),
+    )
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(await outcome).toContain('backend gone')
+  })
+
   // Unguarded inline, a throwing refund sweep ended the whole watch loop.
   it('keeps the loop alive when a refund sweep throws', async () => {
     const refundSweep = vi.fn(async () => {
