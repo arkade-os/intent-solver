@@ -121,6 +121,7 @@ const PATCH_COLUMNS = new Set([
   'onchain_claim_fee_rate',
   'onchain_claim_broadcast_at',
   'onchain_claim_prior_txids',
+  'unrolled_refund',
 ])
 
 export interface OnchainReceiveSwapRow {
@@ -231,6 +232,8 @@ export interface OnchainReceiveSwapRow {
   /** The claim versions {@link onchainClaimTxid} replaced, newest first: until one confirms, ANY of them can be the one that does. */
   onchainClaimPriorTxids: string[]
   arkadeRefundTxid: string | null
+  /** JSON `UnrolledRefundRecord`: the L1 refund of a lockup the client unrolled. */
+  unrolledRefund: string | null
   refundOutcome: 'pushed' | 'external' | null
   failureReason: string | null
   rfqId: string | null
@@ -304,7 +307,8 @@ const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
   funded_value_sats                INTEGER,
   funded_payout_sats               INTEGER,
   min_from_sats                    INTEGER,
-  max_from_sats                    INTEGER
+  max_from_sats                    INTEGER,
+  unrolled_refund                  TEXT
 `
 
 const SCHEMA = `
@@ -377,6 +381,7 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   onchainClaimBroadcastAt: numberOrNull(raw.onchain_claim_broadcast_at),
   onchainClaimPriorTxids: txidList(raw.onchain_claim_prior_txids),
   arkadeRefundTxid: raw.arkade_refund_txid === null ? null : String(raw.arkade_refund_txid),
+  unrolledRefund: text(raw.unrolled_refund),
   refundOutcome: raw.refund_outcome === null ? null : (String(raw.refund_outcome) as 'pushed' | 'external'),
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
   rfqId: text(raw.rfq_id),
@@ -449,6 +454,7 @@ export const ONCHAIN_RECEIVE_SEARCH_COLUMNS: readonly string[] = [
   'arkade_claim_txid',
   'onchain_claim_txid',
   'arkade_refund_txid',
+  'unrolled_refund',
   'rfq_id',
 ]
 
@@ -515,6 +521,7 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
       ['onchain_claim_fee_rate', 'REAL'],
       ['onchain_claim_broadcast_at', 'INTEGER'],
       ['onchain_claim_prior_txids', 'TEXT'],
+      ['unrolled_refund', 'TEXT'],
     ])
   }
 
