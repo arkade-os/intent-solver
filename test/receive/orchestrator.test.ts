@@ -1613,6 +1613,17 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
         expect(row.failureReason).toMatch(/unrolled lockup spent on L1/)
       })
 
+      it('keeps a record saved before arkd answered, when the step then throws', async () => {
+        const { id } = await refunding()
+        arkade.ops.refundUnrolled = async (_row, _lockup, _previous, save) => {
+          await save(record)
+          throw new Error('arkd broadcast it, and the reply never arrived')
+        }
+
+        await expect(service.tick(id)).rejects.toThrow('reply never arrived')
+        expect((await store.get(id)).unrolledRefund).toBe(JSON.stringify(record))
+      })
+
       it('names the solo exit once arkd will no longer co-sign', async () => {
         const { id, htlcExpiresAt } = await refunding()
         now = htlcExpiresAt!
