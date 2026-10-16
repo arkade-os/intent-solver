@@ -51,8 +51,35 @@ const timed = async <T>(
   }
 }
 
-export class TimedIndexerProvider extends RestIndexerProvider {
-  override async getVtxos(options?: Parameters<RestIndexerProvider['getVtxos']>[0]) {
+type VtxoQuery = Parameters<RestIndexerProvider['getVtxos']>[0]
+
+/**
+ * Concurrent identical WINDOWED reads share one request: `after` marks the SDK's contract
+ * sync, which shares nothing in flight, so every caller finding the snapshot stale starts
+ * its own. Unwindowed reads stay unshared: an event-driven re-read must not get an answer
+ * asked for before the event.
+ */
+export class SharedSyncIndexerProvider extends RestIndexerProvider {
+  private readonly syncs = new Map<string, ReturnType<RestIndexerProvider['getVtxos']>>()
+
+  override getVtxos(options?: VtxoQuery) {
+    if (options?.after === undefined) return this.readVtxos(options)
+    const key = JSON.stringify(options)
+    let read = this.syncs.get(key)
+    if (!read) {
+      read = this.readVtxos(options).finally(() => this.syncs.delete(key))
+      this.syncs.set(key, read)
+    }
+    return read.then((result) => structuredClone(result))
+  }
+
+  protected readVtxos(options?: VtxoQuery) {
+    return super.getVtxos(options)
+  }
+}
+
+export class TimedIndexerProvider extends SharedSyncIndexerProvider {
+  protected override async readVtxos(options?: VtxoQuery) {
     const request = {
       fundRef: timingScope.getStore()?.fundRef,
       scripts: options?.scripts?.length ?? 0,
@@ -66,7 +93,7 @@ export class TimedIndexerProvider extends RestIndexerProvider {
     return timed(
       'indexer_vtxos_timing',
       request,
-      () => super.getVtxos(options),
+      () => super.readVtxos(options),
       (result) => ({ rows: result.vtxos.length }),
     )
   }
