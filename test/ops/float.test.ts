@@ -183,6 +183,7 @@ const floatServices = (
             vtxoMaxAmount: 1_000_000n,
             dust: 330n,
             signerPubkey: ACTIVE_SIGNER,
+            deprecatedSigners: [],
           }),
         },
         getAddress: async () => FLOAT_ADDRESS,
@@ -600,6 +601,41 @@ describe('runFloatLifecycle pins what recovery sweeps', () => {
     const report = await runFloatLifecycle(services)
     expect(recoverVtxos).not.toHaveBeenCalled()
     expect(report.failures.join(' ')).toContain('a funding holds a coin recovery would sweep')
+  })
+
+  it('pins a coin past its HEIGHT expiry, on the chain tip the SDK sweeps by', async () => {
+    let pinned: ReadonlySet<string> = new Set()
+    const services = recovering(async () => {
+      pinned = services.arkade.reservations.reserved()
+      return 'recover-txid'
+    })
+    const wallet = services.arkade.wallet as unknown as Record<string, unknown>
+    const heightExpired = { txid: 'height', vout: 0, value: 5_000, script: 'aa', expiresAtHeight: 150 }
+    wallet.getVtxos = async () => [swept, heightExpired]
+    wallet.onchainProvider = { getChainTip: async () => ({ height: 200 }) }
+    await runFloatLifecycle(services)
+    expect([...pinned].sort()).toEqual(['height:0', 'swept:0'])
+  })
+})
+
+describe('runFloatLifecycle runs one pass at a time', () => {
+  it('starts a second pass only once the first has finished, whoever asked for it', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const services = floatServices(async () => NO_DEPRECATED)
+    const manager = services.arkade.wallet.getVtxoManager
+    let started = 0
+    services.arkade.wallet.getVtxoManager = async () => {
+      started += 1
+      if (started === 1) await gate
+      return manager()
+    }
+    const passes = [runFloatLifecycle(services), runFloatLifecycle(services)]
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(started).toBe(1)
+    release()
+    await Promise.all(passes)
+    expect(started).toBe(2)
   })
 })
 

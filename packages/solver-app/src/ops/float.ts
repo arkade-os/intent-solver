@@ -28,7 +28,14 @@
  */
 
 import { hex } from '@scure/base'
-import { canRecoverOnchain, canSpendOffchain, isSubdust } from '@arkade-os/sdk'
+import {
+  canRecoverOnchain,
+  canSpendOffchain,
+  classifyAgainstSignerSet,
+  isSubdust,
+  signerSetFromInfo,
+  type TimeHeight,
+} from '@arkade-os/sdk'
 import { log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import {
   liveLockupRows,
@@ -47,9 +54,6 @@ import { pinInputs, poolPlan, resplitFloat } from './pool.js'
 import { summariseSignerMigration } from '@arkade-os/solver-arkade/arkade/signerMigration.js'
 import { planBoardingSettle } from '@arkade-os/solver-arkade/arkade/boardingSettle.js'
 import type { Services } from './services.js'
-
-/** A signer key as the SDK compares them: 33-byte compressed or 32-byte x-only hex. */
-const xOnlyHex = (key: string): string => (key.length === 66 ? key.slice(2) : key).toLowerCase()
 
 /**
  * Every registered lockup's refund deadline, for the recovery guard.
@@ -151,8 +155,19 @@ const migrationDue = (failed: boolean): boolean => {
  * pinned. `settle` and `sendBitcoin` are two independent spenders of one float,
  * and arkd resolves a collision by failing one of them — when that one is the
  * funding, a swap dies for no reason.
+ *
+ * QUEUED: the daemon's cadence and the `float-lifecycle` admin action both run
+ * it, and two passes would settle the same boarding UTXOs.
  */
-export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> => {
+export const runFloatLifecycle = (services: Services): Promise<VtxoLifecycleReport> => {
+  const pass = lifecycleQueue.then(() => floatLifecycle(services))
+  lifecycleQueue = pass.catch(() => undefined)
+  return pass
+}
+
+let lifecycleQueue: Promise<unknown> = Promise.resolve()
+
+const floatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> => {
   const wallet = services.arkade.wallet
   const vtxoManager = await wallet.getVtxoManager()
 
@@ -178,11 +193,11 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
         (await wallet.getContractManager()).getContractsWithVtxos({ type: ['default', 'delegate'] }),
         wallet.arkProvider.getInfo(),
       ])
-      const active = xOnlyHex(info.signerPubkey)
+      const signers = signerSetFromInfo(info)
       const candidates = contracts
         .filter(({ contract }) => {
           const signer = contract.params?.serverPubKey
-          return signer !== undefined && xOnlyHex(signer) !== active
+          return signer !== undefined && classifyAgainstSignerSet(signer, signers, nowSeconds()).status !== 'CURRENT'
         })
         .flatMap(({ vtxos }) =>
           vtxos.filter((vtxo) => !vtxo.isSwept && !(vtxo.isSpent || vtxo.spentBy || vtxo.settledBy)),
@@ -264,10 +279,12 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
       if (result !== null && 'skipped' in result) log('float re-split after renewal skipped:', result.skipped)
       return result !== null && 'txid' in result ? result.txid : null
     },
-    // Pinned like renewal: besides swept coins the SDK sweeps PRECONFIRMED SUBDUST, which is
-    // spendable, so a funding can select it.
+    // Pinned like renewal: besides swept coins the SDK sweeps PRECONFIRMED SUBDUST, and coins
+    // past a HEIGHT expiry — both pass the funding filter's timestamp-only check. Same clock
+    // as the SDK's sweep, falling back to time alone as it does.
     recoverVtxos: async () => {
-      const now = { timestamp: new Date() }
+      const tip = await wallet.onchainProvider?.getChainTip().catch(() => undefined)
+      const now: TimeHeight = { timestamp: new Date(), height: tip?.height }
       const sweeps = (await wallet.getVtxos({ withRecoverable: true, withUnrolled: false })).filter(
         (vtxo) =>
           canRecoverOnchain(vtxo, now) ||

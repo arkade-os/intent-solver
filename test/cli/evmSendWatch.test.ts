@@ -199,6 +199,26 @@ describe('the hot loop during a slow refund sweep or lifecycle pass', () => {
     }
   })
 
+  it('drains a pass in flight before rejecting, when the loop itself throws', async () => {
+    const blocked = deferred()
+    const { services, tickHot, watch } = harness({
+      runFloatLifecycle: async () => {
+        await blocked.promise
+        return { failures: [] }
+      },
+    })
+    tickHot.mockRejectedValueOnce(new Error('backend gone'))
+    let settled = false
+    const watching = watch(services).then(
+      () => (settled = true),
+      (error: unknown) => ((settled = true), error),
+    )
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(settled).toBe(false)
+    blocked.resolve()
+    expect(String(await watching)).toContain('backend gone')
+  })
+
   // Unguarded inline, a throwing refund sweep ended the whole watch loop.
   it('keeps the loop alive when a refund sweep throws', async () => {
     const refundSweep = vi.fn(async () => {

@@ -1670,6 +1670,27 @@ describe('OnchainSendSwapService', () => {
     expect(reads).toHaveBeenCalledTimes(2)
   })
 
+  it('refundSweep() forgets a parked verdict once its row is no longer refundable', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    now += DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
+    const row = await service.tick(outcome.swap.id)
+    now = row.refundLocktime + 1
+    const parked = (service as unknown as { unknownLockups: Map<string, unknown> }).unknownLockups
+
+    await service.refundSweep()
+    expect(parked.size).toBe(1)
+    await deps.store.patch(row.id, { refund_outcome: 'external' })
+    await service.refundSweep()
+    expect(parked.size).toBe(0)
+  })
+
   it('refundSweep() stops calling a stale read temporary once it outlasts the lockup timeout', async () => {
     const outcome = await service.quote({
       paymentHash,

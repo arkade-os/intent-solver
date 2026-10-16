@@ -159,7 +159,7 @@ class UnknownLockupError extends Error {}
  */
 const unrefundableReason = (evidence: 'unknown' | 'unspent', row: OnchainSendSwapRow, now: number): string => {
   if (evidence === 'unknown') {
-    return 'the unfiltered view reports no output at this lockup script, so no spend is provable and nothing is there to give back — retrying cannot change that, and it needs a human'
+    return 'the unfiltered view reports no output at this lockup script, so no spend is provable and nothing is there to give back — an unfunded quote stays this way and is rechecked hourly; a funded one needs a human'
   }
   const stale = now - row.refundLocktime
   return stale > DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
@@ -514,13 +514,17 @@ export class OnchainSendSwapService {
 
   async refundSweep(): Promise<string[]> {
     const pushed: string[] = []
-    for (const row of await this.deps.store.findRefundable(this.now())) {
+    const rows = await this.deps.store.findRefundable(this.now())
+    const refundable = new Set(rows.map((row) => row.id))
+    for (const id of this.unknownLockups.keys()) if (!refundable.has(id)) this.unknownLockups.delete(id)
+    for (const row of rows) {
       // An unfunded quote reads `unknown` for good; a late funding is still caught within one recheck.
       const parked = this.unknownLockups.get(row.id)
       if (parked && parked.until > this.now()) {
         this.onTickError?.(row.id, parked.error)
         continue
       }
+      this.unknownLockups.delete(row.id)
       try {
         if (await this.pushRefund(row)) pushed.push(row.id)
       } catch (error) {

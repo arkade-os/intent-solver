@@ -572,78 +572,80 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // Zero, so the first report goes out at boot and confirms the sinks are wired.
   let lastBalanceReport = 0
   let lastWatchSync = 0
-  while (!signal.aborted) {
-    await sleep(HOT_TICK_MS)
-    // Money already in flight, checked on its own cadence: waiting for the full
-    // sweep here rounds a sub-second Lightning payment up to that sweep's
-    // interval, inside the window where the provider is exposed.
-    await services.service?.tickHot()
-    if (Date.now() - lastFullSweep >= FULL_SWEEP_MS) {
-      lastFullSweep = Date.now()
-      // Every registered corridor on one cadence. The onchain and receive legs
-      // never had a hot-tick path of their own — HTLC confirmations are minutes
-      // wide — so riding the full sweep costs nothing and needs no cadence of
-      // its own, which is what the four hardcoded calls here already did.
+  try {
+    while (!signal.aborted) {
+      await sleep(HOT_TICK_MS)
+      // Money already in flight, checked on its own cadence: waiting for the full
+      // sweep here rounds a sub-second Lightning payment up to that sweep's
+      // interval, inside the window where the provider is exposed.
+      await services.service?.tickHot()
+      if (Date.now() - lastFullSweep >= FULL_SWEEP_MS) {
+        lastFullSweep = Date.now()
+        // Every registered corridor on one cadence. The onchain and receive legs
+        // never had a hot-tick path of their own — HTLC confirmations are minutes
+        // wide — so riding the full sweep costs nothing and needs no cadence of
+        // its own, which is what the four hardcoded calls here already did.
+        //
+        // SEQUENTIAL is load-bearing, not incidental: the receive legs all fund
+        // from one float, and awaiting each in turn is what keeps the reservation
+        // ledger's job small; the lifecycle pass runs beside it and pins against it.
+        // @see arkade/reservations.ts — do not turn this into a Promise.all.
+        //
+        // The EVM legs ride this same loop: no hot tick (an EVM confirmation
+        // depth is minutes wide, so a sub-second cadence would buy nothing but
+        // RPC calls), and their rows are driven by the sweep alone.
+        await tickEveryCorridor('sweep')
+        // The offer path rides the same cadence and needs no other: a fill is one
+        // Arkade transaction with no confirmation to wait on, so there is nothing
+        // a faster loop could observe.
+        //
+        // WRAPPED, unlike the corridors above. This path is new and optional, and
+        // an offer store that throws must not be able to end a watch loop those
+        // four corridors were already depending on. Per-fill failures are already
+        // recorded on their own rows by `tickAll`; this catches only what is left.
+        try {
+          const filled = (await services.assetOffers?.tickAll()) ?? 0
+          if (filled > 0) log(`filled ${filled} offer(s)`)
+        } catch (error) {
+          log('offer fill sweep failed:', error instanceof Error ? error.message : String(error))
+        }
+      }
+      // After the sweep, so a swap it just retired is dropped before this reads.
+      // Cheap enough to run often: local reads, and `watchScript` is asked once.
       //
-      // SEQUENTIAL is load-bearing, not incidental: the receive legs all fund
-      // from one float, and awaiting each in turn is what keeps the reservation
-      // ledger's job small; the lifecycle pass runs beside it and pins against it.
-      // @see arkade/reservations.ts — do not turn this into a Promise.all.
-      //
-      // The EVM legs ride this same loop: no hot tick (an EVM confirmation
-      // depth is minutes wide, so a sub-second cadence would buy nothing but
-      // RPC calls), and their rows are driven by the sweep alone.
-      await tickEveryCorridor('sweep')
-      // The offer path rides the same cadence and needs no other: a fill is one
-      // Arkade transaction with no confirmation to wait on, so there is nothing
-      // a faster loop could observe.
-      //
-      // WRAPPED, unlike the corridors above. This path is new and optional, and
-      // an offer store that throws must not be able to end a watch loop those
-      // four corridors were already depending on. Per-fill failures are already
-      // recorded on their own rows by `tickAll`; this catches only what is left.
-      try {
-        const filled = (await services.assetOffers?.tickAll()) ?? 0
-        if (filled > 0) log(`filled ${filled} offer(s)`)
-      } catch (error) {
-        log('offer fill sweep failed:', error instanceof Error ? error.message : String(error))
+      // Caught, unlike the corridor sweep above: the watcher is best-effort by
+      // contract, so a store that throws here must degrade to the sweep rather
+      // than end the loop every corridor depends on.
+      if (Date.now() - lastWatchSync >= WATCH_SYNC_MS) {
+        lastWatchSync = Date.now()
+        try {
+          await resyncWatchedScripts()
+        } catch (error) {
+          log('watched-script sync failed:', error instanceof Error ? error.message : String(error))
+        }
+      }
+      // Refreshed here and NOWHERE on the money path: the read costs ~951ms and a
+      // business event must never pay it. Absent unless a sink is configured.
+      // Not awaited: a hung wallet read must not stall the ticks below.
+      if (services.sampleBalances && Date.now() - lastBalanceSample > BALANCE_SAMPLE_MS) {
+        lastBalanceSample = Date.now()
+        void services.sampleBalances().catch((error: unknown) => log('balance sample failed:', messageOf(error)))
+      }
+      const reportEveryMs = (services.config.balanceReportIntervalMinutes ?? Infinity) * 60_000
+      if (services.reportBalances && Date.now() - lastBalanceReport > reportEveryMs) {
+        lastBalanceReport = Date.now()
+        void services.reportBalances().catch((error: unknown) => log('balance report failed:', messageOf(error)))
       }
     }
-    // After the sweep, so a swap it just retired is dropped before this reads.
-    // Cheap enough to run often: local reads, and `watchScript` is asked once.
-    //
-    // Caught, unlike the corridor sweep above: the watcher is best-effort by
-    // contract, so a store that throws here must degrade to the sweep rather
-    // than end the loop every corridor depends on.
-    if (Date.now() - lastWatchSync >= WATCH_SYNC_MS) {
-      lastWatchSync = Date.now()
-      try {
-        await resyncWatchedScripts()
-      } catch (error) {
-        log('watched-script sync failed:', error instanceof Error ? error.message : String(error))
-      }
-    }
-    // Refreshed here and NOWHERE on the money path: the read costs ~951ms and a
-    // business event must never pay it. Absent unless a sink is configured.
-    // Not awaited: a hung wallet read must not stall the ticks below.
-    if (services.sampleBalances && Date.now() - lastBalanceSample > BALANCE_SAMPLE_MS) {
-      lastBalanceSample = Date.now()
-      void services.sampleBalances().catch((error: unknown) => log('balance sample failed:', messageOf(error)))
-    }
-    const reportEveryMs = (services.config.balanceReportIntervalMinutes ?? Infinity) * 60_000
-    if (services.reportBalances && Date.now() - lastBalanceReport > reportEveryMs) {
-      lastBalanceReport = Date.now()
-      void services.reportBalances().catch((error: unknown) => log('balance report failed:', messageOf(error)))
-    }
+  } finally {
+    // On a throwing exit too: the caller closes the stores a pass in flight still reads.
+    await Promise.all(cadences.map((cadence) => cadence.stop()))
+    // Aborted after the loop rather than inside `stop`: the stream is a consumer
+    // of arkd, not of the loop, and tearing it down while a fill sweep is still
+    // running would cut discovery off mid-decision for no gain.
+    offers.abort()
+    await watcher.stop()
   }
-  // Drained BEFORE the teardown below: a pass in flight reads the contract
-  // manager and the stores this is about to close over.
-  await Promise.all(cadences.map((cadence) => cadence.stop()))
-  // Aborted after the loop rather than inside `stop`: the stream is a consumer
-  // of arkd, not of the loop, and tearing it down while a fill sweep is still
-  // running would cut discovery off mid-decision for no gain.
-  offers.abort()
-  await watcher.stop()
 }
 
 /** Tick one swap until it lands in a terminal state. */
