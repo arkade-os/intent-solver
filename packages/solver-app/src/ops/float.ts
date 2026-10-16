@@ -42,7 +42,7 @@ import {
 } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
 import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import { poolTarget } from '@arkade-os/solver-arkade/arkade/vtxoPool.js'
-import { poolPlan, resplitFloat } from './pool.js'
+import { pinInputs, poolPlan, resplitFloat } from './pool.js'
 import { summariseSignerMigration } from '@arkade-os/solver-arkade/arkade/signerMigration.js'
 import { planBoardingSettle } from '@arkade-os/solver-arkade/arkade/boardingSettle.js'
 import type { Services } from './services.js'
@@ -235,7 +235,21 @@ export const runFloatLifecycle = async (services: Services): Promise<VtxoLifecyc
           return expiring.filter((vtxo) => !reserved.has(`${vtxo.txid}:${vtxo.vout}`))
         },
         destination: () => wallet.getAddress(),
-        settle: (inputs, outputs) => wallet.settle({ inputs: [...inputs], outputs: [...outputs] }),
+        // PINNED for the whole settle, and the CHECK is the point: the candidate
+        // filter above reads the ledger two network calls before the selection
+        // is final, so a funding can pin one of these in between — a live window
+        // now this pass runs concurrently with the sweep. The renewal yields,
+        // because a failed funding is a dead swap and a deferred renewal is one
+        // coin a little closer to expiry.
+        settle: async (inputs, outputs) => {
+          const release = pinInputs(services, inputs)
+          if (release === null) throw new Error('inputs pinned by a funding since selection')
+          try {
+            return await wallet.settle({ inputs: [...inputs], outputs: [...outputs] })
+          } finally {
+            release()
+          }
+        },
         // The shape a renewal should carve its proceeds into, so the float
         // comes back able to fund several swaps at once rather than one.
         // Same target `pool`/`mintPool` work from, so the two cannot drift.

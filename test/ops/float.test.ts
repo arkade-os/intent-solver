@@ -541,6 +541,42 @@ describe('runFloatLifecycle keeps renewal off reserved coins', () => {
     const inputs = settle.mock.calls.at(-1)?.[0].inputs ?? []
     expect(inputs.map((i) => i.txid)).toEqual(['free'])
   })
+
+  it('pins what it is settling, so a funding selecting mid-settle cannot take it', async () => {
+    const services = floatServices(async () => NO_DEPRECATED, [], [due('renewing', 200_000)])
+    const wallet = services.arkade.wallet as unknown as Record<string, unknown>
+    let pinnedDuringSettle: ReadonlySet<string> = new Set()
+    wallet.settle = async () => {
+      pinnedDuringSettle = services.arkade.reservations.reserved()
+      return 'settle-txid'
+    }
+
+    const report = await runFloatLifecycle(services)
+
+    expect(report.renewed).toBe('settle-txid')
+    expect([...pinnedDuringSettle]).toEqual(['renewing:0'])
+    // A pin outliving its settle shrinks the float with nothing left to free it.
+    expect(services.arkade.reservations.reserved().size).toBe(0)
+  })
+
+  it('does not settle a coin a funding pinned after the candidates were read', async () => {
+    const coin = due('contended', 200_000)
+    const settle = vi.fn(async (_params: SettleParams) => 'settle-txid')
+    const services = floatServices(async () => NO_DEPRECATED, [], [coin], { settle })
+    const wallet = services.arkade.wallet as unknown as Record<string, unknown>
+    // The window the candidate filter cannot cover: two network reads separate
+    // it from the settle, and a funding pins the coin inside them.
+    wallet.getAddress = async () => {
+      services.arkade.reservations.reserve([coin])
+      return FLOAT_ADDRESS
+    }
+
+    const report = await runFloatLifecycle(services)
+
+    expect(settle).not.toHaveBeenCalled()
+    expect(report.renewed).toBeNull()
+    expect(report.failures.join(' ')).toContain('pinned')
+  })
 })
 
 /** Boarding: the half `settlementConfig: false` silently took away. */
