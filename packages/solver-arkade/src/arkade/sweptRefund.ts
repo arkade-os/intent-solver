@@ -61,7 +61,9 @@ import { EMPTY_RAW_WITNESS, type ArkadeContext, type FundedOutput } from './wall
 
 export const SWEPT_REFUND_BATCH_TIMEOUT_MS = 4 * 60_000
 
-const FEE_COIN_FILTER = { withRecoverable: false, genericallySpendableOnly: true } as const
+// Swept coins too: a solver idle long enough to strand a lockup has had its float swept with it,
+// and recovery stays blocked until the lockup is refunded.
+const FEE_COIN_FILTER = { withRecoverable: true, genericallySpendableOnly: true } as const
 
 interface FeePlan {
   coin?: ExtendedVirtualCoin
@@ -73,7 +75,7 @@ const priceIntent = (
   estimator: Estimator,
   swept: readonly FundedOutput[],
   refundPkScript: Uint8Array,
-  feeCoin?: { value: number; createdAt: Date },
+  feeCoin?: { value: number; createdAt: Date; isSwept?: boolean },
 ): bigint => {
   const script = hex.encode(refundPkScript)
   const inputFee = (params: Parameters<Estimator['evalOffchainInput']>[0]): bigint =>
@@ -87,7 +89,9 @@ const priceIntent = (
     fee += outputFee(output.value)
   }
   if (feeCoin) {
-    fee += inputFee(offchainInputFeeParams({ value: feeCoin.value, createdAt: feeCoin.createdAt }))
+    fee += inputFee(
+      offchainInputFeeParams({ value: feeCoin.value, createdAt: feeCoin.createdAt, isSwept: feeCoin.isSwept }),
+    )
     fee += outputFee(feeCoin.value)
   }
   return fee
@@ -137,6 +141,10 @@ const intentCoinsFor = (
   )
   return feeCoin ? [...lockups, feeCoin] : lockups
 }
+
+// arkd's `RequiresForfeit` is `!Swept` for a float coin. Not the SDK's `canRecoverOnchain`: that also
+// counts an expired coin not yet swept, which arkd still wants a forfeit for.
+const isSweptCoin = (coin: ExtendedVirtualCoin): boolean => coin.isSwept === true
 
 const forfeitInput = (coin: ExtendedVirtualCoin) => ({
   txid: coin.txid,
@@ -214,8 +222,8 @@ export const sweptRefundBatchHandler = (deps: {
       if (connectorTree) validateConnectorsTxGraph(event.commitmentTx, connectorTree)
       const commitmentTx = Transaction.fromPSBT(base64.decode(event.commitmentTx))
       assertFinalCommitmentMatchesValidated(commitmentTx, validatedCommitmentTxid, 'swept refund finalization')
-      // arkd rejects `submitSignedForfeitTxs` with both arguments empty.
-      if (!feeCoin) return
+      // arkd rejects `submitSignedForfeitTxs` with both arguments empty, and asks none for a swept coin.
+      if (!feeCoin || isSweptCoin(feeCoin)) return
       const info = await arkProvider.getInfo()
       const forfeit = await identity.sign(
         buildForfeitTx(

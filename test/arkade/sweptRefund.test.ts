@@ -25,7 +25,8 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
   }
 })
 
-const { refundSweptSwapScript } = await import('@arkade-os/solver-arkade/arkade/sweptRefund.js')
+const { refundSweptSwapScript, sweptRefundBatchHandler } =
+  await import('@arkade-os/solver-arkade/arkade/sweptRefund.js')
 
 const key = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const p2tr = (program: Uint8Array): Uint8Array => Uint8Array.from([0x51, 0x20, ...program])
@@ -77,7 +78,7 @@ interface Stack {
 const stack = (options: {
   swept: readonly FundedOutput[]
   inputFee?: string
-  floatCoins?: { txid: string; vout: number; value: number }[]
+  floatCoins?: { txid: string; vout: number; value: number; isSwept?: boolean }[]
   duringFloatRead?: (reservations: ReturnType<typeof createReservationLedger>) => void
 }): Stack => {
   const virtualTxs = new Map<string, string>()
@@ -96,15 +97,19 @@ const stack = (options: {
     wallet: {
       arkServerPublicKey: SERVER,
       getAddress: async () => new ArkAddress(SERVER, key(21), 'ark').encode(),
-      getSpendableVtxos: async () => {
+      // Honours `withRecoverable` as the SDK read does: off, a swept coin is not returned.
+      getSpendableVtxos: async (filter?: { withRecoverable?: boolean }) => {
         options.duringFloatRead?.(reservations)
-        return (options.floatCoins ?? []).map((coin) => ({
-          ...coin,
-          createdAt: new Date(0),
-          tapTree: FLOAT_TAPTREE,
-          forfeitTapLeafScript: FLOAT_LEAF,
-          intentTapLeafScript: FLOAT_LEAF,
-        }))
+        return (options.floatCoins ?? [])
+          .filter((coin) => filter?.withRecoverable === true || coin.isSwept !== true)
+          .map((coin) => ({
+            ...coin,
+            isSwept: coin.isSwept === true,
+            createdAt: new Date(0),
+            tapTree: FLOAT_TAPTREE,
+            forfeitTapLeafScript: FLOAT_LEAF,
+            intentTapLeafScript: FLOAT_LEAF,
+          }))
       },
       arkProvider: {
         getInfo: async () => ({
@@ -246,6 +251,45 @@ describe('refundSweptSwapScript builds an intent the covenant can satisfy', () =
     await refundSweptSwapScript(ctx, 'http://emulator', swapScript(), swept, CLIENT_REFUND)
 
     expect(hex.encode(proofOf(registered).getInput(2).txid!)).toBe(next.txid)
+  })
+
+  // Mining past an expiry, or a solver idle that long, leaves the whole float swept.
+  it('pays the fee from a swept coin of its own when nothing spendable is left', async () => {
+    const swept: FundedOutput[] = [{ txid: sourceTx(0, 1976n).id, vout: 0, value: 1976 }]
+    const sweptFloat = { txid: sourceTx(9, 50_000n).id, vout: 9, value: 50_000, isSwept: true }
+    const { ctx, registered } = stack({ swept, inputFee: 'amount * 0.01', floatCoins: [sweptFloat] })
+
+    await refundSweptSwapScript(ctx, 'http://emulator', swapScript(), swept, CLIENT_REFUND)
+
+    expect(hex.encode(proofOf(registered).getInput(2).txid!)).toBe(sweptFloat.txid)
+  })
+
+  it('submits no forfeit for a swept fee coin, which arkd does not ask one for', async () => {
+    const submitSignedForfeitTxs = vi.fn(async () => {})
+    const handler = sweptRefundBatchHandler({
+      intentId: 'intent-1',
+      arkProvider: { submitSignedForfeitTxs } as unknown as Parameters<
+        typeof sweptRefundBatchHandler
+      >[0]['arkProvider'],
+      identity,
+      session: identity.signerSession(),
+      network: { bech32: 'bcrt', pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef } as never,
+      recipients: [],
+      feeCoin: {
+        txid: 'f'.repeat(64),
+        vout: 0,
+        value: 50_000,
+        isSwept: true,
+        tapTree: FLOAT_TAPTREE,
+        forfeitTapLeafScript: FLOAT_LEAF,
+        intentTapLeafScript: FLOAT_LEAF,
+      } as never,
+    })
+    const commitment = sourceTx(0, 1_000n)
+
+    await handler.onBatchFinalization!({ commitmentTx: commitment.b64 } as never, undefined as never, undefined)
+
+    expect(submitSignedForfeitTxs).not.toHaveBeenCalled()
   })
 
   it('releases the fee coin reservation once the batch is over', async () => {
