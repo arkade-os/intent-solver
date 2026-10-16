@@ -110,7 +110,10 @@ export const poolPlan = async (services: Services): Promise<PoolPlan> => {
 }
 
 /** Pin `coins` unless a funding pinned one since the plan; synchronous, so nothing lands between. */
-const pinInputs = (services: Services, coins: readonly ExtendedVirtualCoin[]): ReleaseReservation | null => {
+export const pinInputs = (
+  services: Services,
+  coins: readonly { txid: string; vout: number }[],
+): ReleaseReservation | null => {
   const pinned = services.arkade.reservations.reserved()
   if (coins.some((coin) => pinned.has(outpointKey(coin.txid, coin.vout)))) return null
   return services.arkade.reservations.reserve(coins)

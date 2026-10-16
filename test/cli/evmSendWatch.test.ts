@@ -8,6 +8,7 @@ import { createDirectFillRecovery } from '@arkade-os/solver-app/ops/directFillRe
 import { DirectFillAttempts } from '@arkade-os/solver-arkade/arkade/directFillAttempts.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import { sqliteExecutor } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { startCadence } from '@arkade-os/solver-app/ops/cadence.js'
 
 const source = ts.createSourceFile(
   'cli.ts',
@@ -50,6 +51,7 @@ const watchLoopIn = (signals: EventEmitter, overrides: Record<string, unknown> =
   runInNewContext(`${compiled}; watchUntilStopped`, {
     process: signals,
     withEvmSendSweep,
+    startCadence,
     assetRfqPairFor: (from: string | null, to: string | null) => `${from}->${to}`,
     log: () => {},
     CORRIDORS: [],
@@ -117,6 +119,143 @@ describe('the watch loop during slow wallet maintenance', () => {
     } finally {
       signals.emit('SIGTERM')
       blocked.resolve()
+      // The loop idles in `sleep(HOT_TICK_MS)` rather than inside the blocked
+      // pass, so it needs one tick to see the abort and drain its cadences.
+      await vi.advanceTimersByTimeAsync(250)
+      await watching
+    }
+  })
+})
+
+/**
+ * In production a lifecycle pass takes 55-70s and a refund sweep ~10s. Inline,
+ * that stopped the hot tick and the sweep for exactly as long.
+ */
+describe('the hot loop during a slow refund sweep or lifecycle pass', () => {
+  const harness = (overrides: Record<string, unknown> = {}, corridor: Record<string, unknown> = {}) => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_800_000_000_000)
+    const signals = new EventEmitter()
+    const tickHot = vi.fn(async () => {})
+    const tickAll = vi.fn(async () => 0)
+    const services = {
+      config: { corridorEnabled: {}, contractRetentionMs: 0, poolAutoMint: false },
+      policy: {},
+      arkade: { wallet: { getContractManager: async () => ({}) } },
+      readers: [],
+      evmSendService: null,
+      service: { tickHot },
+      corridors: [
+        {
+          descriptor: { pair: 'lightning:BTC->arkade:BTC', envStem: 'LN' },
+          tickAll,
+          findRecoverable: async () => [],
+          ...corridor,
+        },
+      ],
+      assetRfqService: { tickAll: async () => [], stop: async () => {} },
+      assetRfqMarkets: [],
+    }
+    return { signals, services, tickHot, tickAll, watch: watchLoopIn(signals, overrides) }
+  }
+
+  it('keeps ticking and sweeping while a float lifecycle pass never resolves', async () => {
+    const blocked = deferred()
+    const pass = vi.fn(() => blocked.promise)
+    const { signals, services, tickHot, tickAll, watch } = harness({
+      runFloatLifecycle: async () => {
+        await pass()
+        return { failures: [] }
+      },
+    })
+    const watching = watch(services)
+    try {
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(pass).toHaveBeenCalledOnce()
+      expect(tickHot.mock.calls.length).toBeGreaterThan(30)
+      expect(tickAll.mock.calls.length).toBeGreaterThan(2)
+    } finally {
+      signals.emit('SIGTERM')
+      blocked.resolve()
+      await vi.advanceTimersByTimeAsync(250)
+      await watching
+    }
+  })
+
+  it('keeps ticking and sweeping while a corridor refund sweep never resolves', async () => {
+    const blocked = deferred()
+    const refundSweep = vi.fn(async () => {
+      await blocked.promise
+      return []
+    })
+    const { signals, services, tickHot, tickAll, watch } = harness({}, { refundSweep })
+    const watching = watch(services)
+    try {
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(refundSweep).toHaveBeenCalledOnce()
+      expect(tickHot.mock.calls.length).toBeGreaterThan(30)
+      expect(tickAll.mock.calls.length).toBeGreaterThan(2)
+    } finally {
+      signals.emit('SIGTERM')
+      blocked.resolve()
+      await vi.advanceTimersByTimeAsync(250)
+      await watching
+    }
+  })
+
+  it('drains a pass in flight before rejecting, when the loop itself throws', async () => {
+    const blocked = deferred()
+    const { services, tickHot, watch } = harness({
+      runFloatLifecycle: async () => {
+        await blocked.promise
+        return { failures: [] }
+      },
+    })
+    tickHot.mockRejectedValueOnce(new Error('backend gone'))
+    let settled = false
+    const watching = watch(services).then(
+      () => (settled = true),
+      (error: unknown) => ((settled = true), error),
+    )
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(settled).toBe(false)
+    blocked.resolve()
+    expect(String(await watching)).toContain('backend gone')
+  })
+
+  it('rejects with the loop’s own error when teardown fails too', async () => {
+    const { services, tickHot, watch } = harness({
+      LockupWatcher: class {
+        start() {}
+        sync() {}
+        async stop() {
+          throw new Error('unsubscribe failed')
+        }
+      },
+    })
+    tickHot.mockRejectedValueOnce(new Error('backend gone'))
+    const outcome = watch(services).then(
+      () => 'resolved',
+      (error: unknown) => String(error),
+    )
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(await outcome).toContain('backend gone')
+  })
+
+  // Unguarded inline, a throwing refund sweep ended the whole watch loop.
+  it('keeps the loop alive when a refund sweep throws', async () => {
+    const refundSweep = vi.fn(async () => {
+      throw new Error('store unavailable')
+    })
+    const { signals, services, tickHot, watch } = harness({}, { refundSweep })
+    const watching = watch(services)
+    try {
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(refundSweep).toHaveBeenCalled()
+      expect(tickHot.mock.calls.length).toBeGreaterThan(30)
+    } finally {
+      signals.emit('SIGTERM')
+      await vi.advanceTimersByTimeAsync(250)
       await watching
     }
   })

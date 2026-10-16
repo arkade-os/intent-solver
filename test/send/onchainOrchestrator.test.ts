@@ -1,10 +1,14 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import { SigHash } from '@scure/btc-signer'
-import { OnchainSendSwapService, HTLC_REFUND_MTP_MARGIN } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
+import {
+  OnchainSendSwapService,
+  HTLC_REFUND_MTP_MARGIN,
+  UNKNOWN_LOCKUP_RECHECK_SECONDS,
+} from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
 import {
   ARKADE_CLAIM_WINDOW_SECONDS,
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
@@ -1635,6 +1639,56 @@ describe('OnchainSendSwapService', () => {
 
     expect(String(errors[0])).not.toMatch(/indexer lag/)
     expect(String(errors[0])).toMatch(/unfiltered view reports no output at this lockup script/)
+  })
+
+  it('refundSweep() re-reads an unknown lockup only once per recheck window, still reporting it every sweep', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    now += DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
+    const row = await service.tick(outcome.swap.id)
+    now = row.refundLocktime + 1
+    const reads = vi.spyOn(deps.arkade, 'findLockups')
+    const errors: unknown[] = []
+    service.onTickError = (_id, error) => errors.push(error)
+
+    expect(await service.refundSweep()).toEqual([])
+    now += UNKNOWN_LOCKUP_RECHECK_SECONDS - 1
+    expect(await service.refundSweep()).toEqual([])
+    expect(reads).toHaveBeenCalledTimes(1)
+    expect(errors.map(String)).toEqual([String(errors[0]), String(errors[0])])
+
+    // A late funding is still refunded, one window later.
+    deps.outputs.set(row.pkScript, [{ txid: 'late-lockup-tx', vout: 0, value: 50_000 }])
+    now += 1
+    expect(await service.refundSweep()).toEqual([row.id])
+    expect(reads).toHaveBeenCalledTimes(2)
+  })
+
+  it('refundSweep() forgets a parked verdict once its row is no longer refundable', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    now += DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
+    const row = await service.tick(outcome.swap.id)
+    now = row.refundLocktime + 1
+    const parked = (service as unknown as { unknownLockups: Map<string, unknown> }).unknownLockups
+
+    await service.refundSweep()
+    expect(parked.size).toBe(1)
+    await deps.store.patch(row.id, { refund_outcome: 'external' })
+    await service.refundSweep()
+    expect(parked.size).toBe(0)
   })
 
   it('refundSweep() stops calling a stale read temporary once it outlasts the lockup timeout', async () => {
