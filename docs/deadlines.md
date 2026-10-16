@@ -70,19 +70,20 @@ that way end to end. That is true even when the covenant's own CSV leaves count
 BLOCKS, which they do against a block-typed arkd (see the runbook's "Block-typed
 timelocks").
 
-The two meet at exactly four bounds, and each converts before it adds:
+The two meet at exactly five bounds, and each converts before it adds:
 
 | bound | where |
 |---|---|
 | `refundLocktimeFor`'s unilateral bound | `core/send.ts` |
 | `onchainRefundLocktimeFor`'s server-independent bound | `core/onchainSend.ts` |
 | `minHtlcWindowFor`'s gate (d) | `core/receive.ts` |
+| `evaluateReceiveFunding`'s gate (d) | `core/receive.ts` |
 | `evaluateOnchainReceiveFunding`'s gate (d) | `core/onchainReceive.ts` |
 
 Conversion is at `NOMINAL_BLOCK_SECONDS` (600), the SDK's own figure — this
 number's job is to agree with whoever derives the same script.
 
-> A block delay left unconverted at any of those three does not lose precision,
+> A block delay left unconverted at any of those five does not lose precision,
 > it collapses the bound: 20 blocks read as 20 seconds puts the client's refund
 > essentially at `now`. That is the double-collect window the bound exists to
 > close.
