@@ -41,6 +41,8 @@ export const http2Transport: GrpcTransport = async function* (url, body, signal)
     'content-type': 'application/grpc',
     te: 'trailers',
   })
+  // Unlistened, a session 'error' (a connection reset) is an uncaught exception that ends the process.
+  client.on('error', (error) => request.destroy(error))
   const onAbort = (): void => {
     request.close()
     client.close()
