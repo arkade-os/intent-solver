@@ -9,7 +9,9 @@ import {
   HTLC_REFUND_MTP_MARGIN,
   UNKNOWN_LOCKUP_RECHECK_SECONDS,
 } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
-import { FEE_BUMP_FACTOR, FEE_BUMP_INTERVAL_SECONDS } from '@arkade-os/solver-rails/onchain/feeBump.js'
+import { FEE_BUMP_ALL_IN_SECONDS, FEE_BUMP_INTERVAL_SECONDS } from '@arkade-os/solver-rails/onchain/feeBump.js'
+import { deriveUnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
+import { onchainRefundConfirmDeadline } from '@arkade-os/solver-core/core/onchainSend.js'
 import {
   ARKADE_CLAIM_WINDOW_SECONDS,
   CLIENT_LOCKUP_RELEASE_DELAY_SECONDS,
@@ -68,6 +70,7 @@ const signer: OnchainSigner = {
 }
 /** Any valid 34-byte P2TR script — the fake backend doesn't care where refunds go. */
 const refundDestinationScript = Uint8Array.from([0x51, 0x20, ...keyBytes(8)])
+const MAINNET_EXIT_DELAY = 605_184
 const REFUND_VSIZE = refundSpendVsize({ network: ONCHAIN_NETWORKS.regtest, destinationScript: refundDestinationScript })
 
 // A real, decodable Arkade address for the client's refund destination —
@@ -1398,7 +1401,9 @@ describe('OnchainSendSwapService', () => {
     expect(after.refundArkTxid).toBeNull()
   })
 
-  const driveToBroadcastRefund = async (): Promise<OnchainSendSwapRow> => {
+  /** `exitDelay` 605184 is mainnet's: `refund_locktime`, and with it the refund's deadline, a week out. */
+  const driveToBroadcastRefund = async (exitDelay?: number): Promise<OnchainSendSwapRow> => {
+    if (exitDelay !== undefined) deps.arkade.delays = deriveUnilateralDelays(exitDelay)
     const outcome = await service.quote({
       paymentHash,
       amountSats: 50_000,
@@ -1469,7 +1474,7 @@ describe('OnchainSendSwapService', () => {
    * stretches that window towards `refund_locktime`.
    */
   it('leaves a refund alone until the bump interval is up', async () => {
-    const row = await driveToBroadcastRefund()
+    const row = await driveToBroadcastRefund(MAINNET_EXIT_DELAY)
     expect(row.onchainRefundFeeRate).toBe(5)
     expect(row.onchainRefundBroadcastAt).toBe(now)
     const broadcasts = captureBroadcasts()
@@ -1492,15 +1497,16 @@ describe('OnchainSendSwapService', () => {
     await expect(service.tick(row.id)).resolves.toMatchObject({ state: 'refunding_onchain' })
   })
 
-  it('replaces a refund at the factor once the interval is up, keeping the old version tracked', async () => {
-    const first = await driveToBroadcastRefund()
+  it('replaces a refund the estimate has overtaken, keeping the old version tracked', async () => {
+    const first = await driveToBroadcastRefund(MAINNET_EXIT_DELAY)
 
     now += FEE_BUMP_INTERVAL_SECONDS
+    deps.onchain.setFeeRate(8)
     const bumped = await service.tick(first.id)
 
     expect(bumped.state).toBe('refunding_onchain')
     expect(bumped.onchainRefundTxid).not.toBe(first.onchainRefundTxid)
-    expect(bumped.onchainRefundFeeRate).toBe(5 * FEE_BUMP_FACTOR)
+    expect(bumped.onchainRefundFeeRate).toBe(8)
     expect(bumped.onchainRefundPriorTxids).toEqual([first.onchainRefundTxid])
     expect(bumped.onchainRefundBroadcastAt).toBe(now)
   })
@@ -1540,7 +1546,41 @@ describe('OnchainSendSwapService', () => {
 
     expect(bumped.onchainRefundTxid).not.toBe(first.onchainRefundTxid)
     expect(bumped.onchainRefundPriorTxids).toEqual([first.onchainRefundTxid])
-    expect(bumped.onchainRefundFeeRate).toBe(5 * FEE_BUMP_FACTOR)
+    // On the ramp, so above both the estimate and the rate the first version went out at.
+    expect(bumped.onchainRefundFeeRate).toBeGreaterThan(first.onchainRefundFeeRate!)
+  })
+
+  it('does not escalate a refund merely waiting, a week from its deadline', async () => {
+    const first = await driveToBroadcastRefund(MAINNET_EXIT_DELAY)
+    const broadcasts = captureBroadcasts()
+
+    for (let bump = 0; bump < 18; bump++) {
+      now += FEE_BUMP_INTERVAL_SECONDS
+      await service.tick(first.id)
+    }
+
+    expect(broadcasts).toEqual([])
+    expect((await deps.store.get(first.id)).onchainRefundTxid).toBe(first.onchainRefundTxid)
+  })
+
+  it('pays everything above dust before a deadline only an hour away', async () => {
+    const first = await driveToBroadcastRefund()
+    const deadline = onchainRefundConfirmDeadline(first.refundLocktime)
+    expect(deadline - now).toBeLessThan(3600)
+    expect(first.onchainRefundFeeRate).toBeGreaterThan(5)
+    const broadcasts = captureBroadcasts()
+
+    while (now < deadline - FEE_BUMP_ALL_IN_SECONDS) {
+      now += FEE_BUMP_INTERVAL_SECONDS
+      await service.tick(first.id)
+    }
+
+    const last = Transaction.fromRaw(hex.decode(broadcasts.at(-1)!), {
+      allowUnknownOutputs: true,
+      allowUnknownInputs: true,
+    })
+    expect(last.getOutput(0).amount).toBe(BigInt(ONCHAIN_DUST_SATS))
+    expect(now).toBeLessThan(deadline)
   })
 
   it('reclaimOnchainHtlc() replaces a refund still in the mempool rather than repeating it', async () => {

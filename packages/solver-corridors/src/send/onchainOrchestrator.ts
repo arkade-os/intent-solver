@@ -28,6 +28,7 @@ import {
   evaluateOnchainSendAcceptance,
   evaluateOnchainSendFunding,
   expiryBeforeClaimDeadline,
+  onchainRefundConfirmDeadline,
   type OnchainSendAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/onchainSend.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
@@ -45,7 +46,7 @@ import {
   type OnchainSigner,
 } from '@arkade-os/solver-rails/onchain/refund.js'
 import { refundSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
-import { affordableFee, bumpDue, outcomeOfAny, replacementFeeRate } from '@arkade-os/solver-rails/onchain/feeBump.js'
+import { affordableFee, bumpDue, outcomeOfAny, urgencyFeeRate } from '@arkade-os/solver-rails/onchain/feeBump.js'
 import type { OnchainSendBackend, ReceiveSettlement } from '@arkade-os/solver-core/ports/onchain.js'
 import type { OnchainSendSwapRow, OnchainSendSwapStore } from '../db/onchainSwaps.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
@@ -682,7 +683,7 @@ export class OnchainSendSwapService {
         return (await this.replaceOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)) ?? waiting
       }
       const attempt = await this.pushOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout, {
-        feeRate: await onchain.estimateFeeRate(),
+        estimate: await onchain.estimateFeeRate(),
         previousFeeRate: null,
       })
       if (!attempt.broadcast) throw new Error(attempt.reason)
@@ -1034,7 +1035,7 @@ export class OnchainSendSwapService {
     }
 
     const attempt = await this.pushOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout, {
-      feeRate: await onchain.estimateFeeRate(),
+      estimate: await onchain.estimateFeeRate(),
       previousFeeRate: null,
     })
     if (!attempt.broadcast) {
@@ -1058,9 +1059,7 @@ export class OnchainSendSwapService {
     if (!bumpDue(broadcastAt, this.now())) return null
     const estimate = await this.deps.onchain.estimateFeeRate()
     const previousFeeRate = row.onchainRefundFeeRate ?? estimate
-    const feeRate = replacementFeeRate({ feeRate: previousFeeRate, broadcastAt }, estimate, this.now())
-    if (feeRate === null) return null
-    const attempt = await this.pushOnchainHtlcRefund(row, fundingTxid, fundingVout, { feeRate, previousFeeRate })
+    const attempt = await this.pushOnchainHtlcRefund(row, fundingTxid, fundingVout, { estimate, previousFeeRate })
     return attempt.broadcast ? attempt.txid : null
   }
 
@@ -1086,7 +1085,7 @@ export class OnchainSendSwapService {
     row: OnchainSendSwapRow,
     fundingTxid: string,
     fundingVout: number,
-    version: { feeRate: number; previousFeeRate: number | null },
+    version: { estimate: number; previousFeeRate: number | null },
   ): Promise<OnchainHtlcRefundAttempt> {
     const { onchain, signer, refundDestinationScript, network } = this.deps
 
@@ -1127,7 +1126,10 @@ export class OnchainSendSwapService {
       payoutAmountSats: BigInt(row.payoutSats),
     }
     const vsize = estimateRefundTxVsize(sizingParams)
-    const fee = affordableFee(vsize, version.feeRate, row.payoutSats, ONCHAIN_DUST_SATS)
+    const capRate = (row.payoutSats - ONCHAIN_DUST_SATS) / vsize
+    const deadline = onchainRefundConfirmDeadline(row.refundLocktime)
+    const feeRate = urgencyFeeRate(version.estimate, capRate, deadline, this.now())
+    const fee = affordableFee(vsize, feeRate, row.payoutSats, ONCHAIN_DUST_SATS)
     if (fee === null) {
       // Capped at what leaves dust, so no later rate relays it; only batching would.
       return {
@@ -1140,11 +1142,11 @@ export class OnchainSendSwapService {
       version.previousFeeRate === null
         ? null
         : affordableFee(vsize, version.previousFeeRate, row.payoutSats, ONCHAIN_DUST_SATS)
-    // At the cap: BIP125 rule 4 wants +1 sat/vB over an identical vsize, so less relays as nothing.
+    // BIP125 rule 4 wants +1 sat/vB over an identical vsize; short of that the standing version already pays enough.
     if (previous !== null && fee - previous < vsize) {
       return {
         broadcast: false,
-        reason: `refund at ${previous} sats cannot be raised by the ${vsize} sat relay increment: this HTLC carries ${fee}`,
+        reason: `refund at ${previous} sats stands: ${fee} is all the time left calls for, under the ${vsize} sat relay increment above it`,
         retry: true,
       }
     }
@@ -1156,7 +1158,7 @@ export class OnchainSendSwapService {
     await this.deps.store.patch(row.id, {
       onchain_refund_txid: signed.id,
       onchain_refund_prior_txids: [...new Set(trackedRefundTxids(row))].filter((txid) => txid !== signed.id).join(' '),
-      onchain_refund_fee_rate: version.feeRate,
+      onchain_refund_fee_rate: feeRate,
       onchain_refund_broadcast_at: this.now(),
     })
     await onchain.broadcastRaw(hex.encode(signed.extract()))

@@ -8,7 +8,7 @@ import { SigHash, Transaction } from '@scure/btc-signer'
 import { ArkAddress } from '@arkade-os/sdk'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { EMPTY_LOCKUP_GRACE, REFUND_CENSORSHIP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
-import { FEE_BUMP_FACTOR, FEE_BUMP_INTERVAL_SECONDS } from '@arkade-os/solver-rails/onchain/feeBump.js'
+import { FEE_BUMP_ALL_IN_SECONDS, FEE_BUMP_INTERVAL_SECONDS } from '@arkade-os/solver-rails/onchain/feeBump.js'
 import { claimSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { ONCHAIN_DUST_SATS } from '@arkade-os/solver-core/core/onchainReceive.js'
@@ -1478,9 +1478,9 @@ describe('OnchainReceiveSwapService', () => {
     })
 
     /**
-     * Fee-bumping the L1 claim (#160). By `claimed` the lockup is paid and `P`
-     * is public, so a claim still in the mempool at `htlc_locktime` loses the
-     * whole HTLC to the client's refund.
+     * Fee-bumping the L1 claim (#160). By `claimed` the lockup is paid, so a
+     * claim still in the mempool at `htlc_locktime` loses the whole HTLC to the
+     * client's refund.
      */
     describe('replacing a claim the mempool has not taken', () => {
       const captureBroadcasts = (): string[] => {
@@ -1519,16 +1519,17 @@ describe('OnchainReceiveSwapService', () => {
         await expect(service.tick(claimed.id)).resolves.toMatchObject({ state: 'claimed' })
       })
 
-      it('replaces it at the factor once the interval is up, keeping the old version tracked', async () => {
+      it('replaces it once the estimate has overtaken it, keeping the old version tracked', async () => {
         const claimed = await driveToClaimed()
         const first = await service.tick(claimed.id)
 
         now += FEE_BUMP_INTERVAL_SECONDS
+        deps.onchain.setFeeRate(8)
         const bumped = await service.tick(claimed.id)
 
         expect(bumped.state).toBe('claimed')
         expect(bumped.onchainClaimTxid).not.toBe(first.onchainClaimTxid)
-        expect(bumped.onchainClaimFeeRate).toBe(5 * FEE_BUMP_FACTOR)
+        expect(bumped.onchainClaimFeeRate).toBe(8)
         expect(bumped.onchainClaimPriorTxids).toEqual([first.onchainClaimTxid])
         expect(bumped.onchainClaimBroadcastAt).toBe(now)
       })
@@ -1537,6 +1538,7 @@ describe('OnchainReceiveSwapService', () => {
         const claimed = await driveToClaimed()
         const first = await service.tick(claimed.id)
         now += FEE_BUMP_INTERVAL_SECONDS
+        deps.onchain.setFeeRate(8)
         const bumped = await service.tick(claimed.id)
 
         // The replacement never made it; the version it replaced did.
@@ -1551,17 +1553,39 @@ describe('OnchainReceiveSwapService', () => {
       it('bumps a row broadcast before these columns existed, off updated_at', async () => {
         const claimed = await driveToClaimed()
         const first = await service.tick(claimed.id)
+        // Its rate is unknown, so it is taken to pay the estimate: only the deadline moves it.
+        now = claimed.htlcLocktime - FEE_BUMP_ALL_IN_SECONDS
         await deps.driver.run(
           `UPDATE receive_onchain_swap SET onchain_claim_fee_rate = NULL, onchain_claim_broadcast_at = NULL, updated_at = ? WHERE id = ?`,
-          [now, claimed.id],
+          [now - FEE_BUMP_INTERVAL_SECONDS, claimed.id],
         )
 
-        now += FEE_BUMP_INTERVAL_SECONDS
         const bumped = await service.tick(claimed.id)
 
         expect(bumped.onchainClaimTxid).not.toBe(first.onchainClaimTxid)
         expect(bumped.onchainClaimPriorTxids).toEqual([first.onchainClaimTxid])
-        expect(bumped.onchainClaimFeeRate).toBe(5 * FEE_BUMP_FACTOR)
+        expect(bumped.onchainClaimFeeRate).toBeGreaterThan(5)
+      })
+
+      it('claims above the estimate when P arrives late, and pays everything above dust before htlc_locktime', async () => {
+        const claimed = await driveToClaimed()
+        // The latest P can arrive: our own Arkade refund deadline, 70 minutes before the CLTV.
+        now = claimed.htlcLocktime - 70 * 60
+        const first = await service.tick(claimed.id)
+        expect(first.onchainClaimFeeRate).toBeGreaterThan(5)
+        const broadcasts = captureBroadcasts()
+
+        while (now < claimed.htlcLocktime - FEE_BUMP_ALL_IN_SECONDS) {
+          now += FEE_BUMP_INTERVAL_SECONDS
+          await service.tick(claimed.id)
+        }
+
+        const last = Transaction.fromRaw(hex.decode(broadcasts.at(-1)!), {
+          allowUnknownOutputs: true,
+          allowUnknownInputs: true,
+        })
+        expect(last.getOutput(0).amount).toBe(BigInt(ONCHAIN_DUST_SATS))
+        expect(now).toBeLessThan(claimed.htlcLocktime)
       })
 
       it('claims at the fee the HTLC can carry rather than parking it in stuck', async () => {
