@@ -147,6 +147,11 @@ export interface OnchainQuoteRequest {
 /** Extract the preimage from a claim witness: `[signature, preimage, claimScript, controlBlock]`. */
 const preimageFromClaimWitness = (witness: Uint8Array[]): Uint8Array | null => witness[1] ?? null
 
+/** How long the refund sweep trusts an `unknown` verdict before asking the indexer again. */
+export const UNKNOWN_LOCKUP_RECHECK_SECONDS = 3600
+
+class UnknownLockupError extends Error {}
+
 /**
  * Why {@link OnchainSendSwapService.pushRefund} could not act on an empty
  * lockup. Wording only — neither branch records an outcome. The `unspent` bound
@@ -225,6 +230,7 @@ export class OnchainSendSwapService {
 
   private readonly admission: AdmissionStrategy
   private refundVsize?: number
+  private readonly unknownLockups = new Map<string, { error: Error; until: number }>()
 
   constructor(private readonly deps: OnchainSendServiceDeps) {
     this.now = deps.now ?? nowSeconds
@@ -495,7 +501,8 @@ export class OnchainSendSwapService {
       // — the very mistake this guard exists to stop making to a client.
       const evidence = await arkade.lockupSpendEvidence(row.pkScript)
       if (evidence !== 'spent') {
-        throw new Error(`swap ${row.id}: ${unrefundableReason(evidence, row, this.now())}`)
+        const message = `swap ${row.id}: ${unrefundableReason(evidence, row, this.now())}`
+        throw evidence === 'unknown' ? new UnknownLockupError(message) : new Error(message)
       }
       await store.patch(row.id, { refund_outcome: 'external' })
       return null
@@ -508,9 +515,18 @@ export class OnchainSendSwapService {
   async refundSweep(): Promise<string[]> {
     const pushed: string[] = []
     for (const row of await this.deps.store.findRefundable(this.now())) {
+      // An unfunded quote reads `unknown` for good; a late funding is still caught within one recheck.
+      const parked = this.unknownLockups.get(row.id)
+      if (parked && parked.until > this.now()) {
+        this.onTickError?.(row.id, parked.error)
+        continue
+      }
       try {
         if (await this.pushRefund(row)) pushed.push(row.id)
       } catch (error) {
+        if (error instanceof UnknownLockupError) {
+          this.unknownLockups.set(row.id, { error, until: this.now() + UNKNOWN_LOCKUP_RECHECK_SECONDS })
+        }
         this.onTickError?.(row.id, error)
       }
     }
