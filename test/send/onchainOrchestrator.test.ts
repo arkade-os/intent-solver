@@ -1488,8 +1488,6 @@ describe('OnchainSendSwapService', () => {
 
     const refunded = await service.tick(first.id)
     expect(refunded.state).toBe('refunded')
-    // The column must name the version that exists on chain. Left at the
-    // replacement it names a transaction nobody can ever look up.
     expect(refunded.onchainRefundTxid).toBe(first.onchainRefundTxid)
   })
 

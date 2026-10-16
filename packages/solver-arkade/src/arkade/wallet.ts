@@ -480,17 +480,9 @@ export const totalValue = (outputs: readonly FundedOutput[]): number =>
   outputs.reduce((sum, output) => sum + output.value, 0)
 
 /**
- * How many lockup outputs ONE spend may carry.
- *
- * Anyone can pay a lockup address, so what sits at a script is not only the
- * funding the swap asked for: a counterparty can spray dust vtxos
- * (`vtxoMinAmount` is 330 sats on mainnet, 1 on mutinynet) until the spend
- * exceeds arkd's `maxTxWeight` of 40000 and is rejected on every tick — the
- * solver never claims (send legs) or never refunds itself (receive legs), and
- * the counterparty's own deadline opens on schedule.
- *
- * 16 is conservative against that weight: a covenant-leaf input costs roughly
- * 800 WU witness and all, so 16 lands near 13k of the 40000.
+ * How many lockup outputs ONE spend may carry. The address is public, so
+ * unbounded a counterparty's sprayed dust pushes every attempt past arkd's
+ * 40000 `maxTxWeight`; 16 covenant-leaf inputs run near 13k of it.
  */
 export const MAX_LOCKUP_SPEND_INPUTS = 16
 
@@ -498,15 +490,9 @@ export const MAX_LOCKUP_SPEND_INPUTS = 16
 const LOCKUP_SPEND_EXPIRY_MARGIN = 5 * 60
 
 /**
- * The outputs one spend takes: the most valuable that are not about to expire,
- * capped at {@link MAX_LOCKUP_SPEND_INPUTS}. A near-expiry input would make the
- * whole transaction unspendable rather than only itself, which is why it is
- * dropped instead of carried. What is left over stays at the script for the
- * next pass, or for the counterparty's own refund.
- *
- * Value chooses WHICH, never the order: the covenant refund is index-aligned
- * against the caller's own array, so a sorted result would move an asset onto
- * another input's output.
+ * The most valuable outputs not about to expire, capped at {@link MAX_LOCKUP_SPEND_INPUTS}:
+ * a near-expiry input makes the whole transaction unspendable, not only itself. Value picks
+ * WHICH, never the order — the covenant refund is index-aligned against the caller's array.
  */
 export const boundedSpendInputs = (funded: readonly FundedOutput[], now: number): FundedOutput[] => {
   const usable = funded.filter(

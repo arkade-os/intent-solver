@@ -1099,8 +1099,7 @@ describe('OnchainReceiveSwapService', () => {
       deps.arkadeFake.spendLockup(awaitingClaim.pkScript, null)
 
       // Indistinguishable from read lag on the first look, so it has to
-      // PERSIST past the grace — and past `htlcLocktime`, after which no claim
-      // of the client's can land — before it counts as inexplicable.
+      // PERSIST past the grace and past `htlcLocktime` to count as inexplicable.
       expect((await service.tick(awaitingClaim.id)).state).toBe('refunding_arkade')
       now = awaitingClaim.htlcLocktime
 
@@ -1109,11 +1108,7 @@ describe('OnchainReceiveSwapService', () => {
       expect(row.failureReason).toMatch(/no matching claim/)
     })
 
-    /**
-     * `stuck` is never ticked again, so parking ends the preimage recheck that
-     * is the only thing still collecting this swap — and the client can reveal
-     * `P` right up to `htlcLocktime`, then refund its own L1 HTLC after it.
-     */
+    // Parking ends the preimage recheck, and `P` can still arrive until `htlcLocktime`.
     it('keeps rechecking past the grace while the client could still reveal P', async () => {
       const awaitingClaim = await driveToAwaitingClaim()
       now = awaitingClaim.refundLocktime + 1
@@ -1375,7 +1370,6 @@ describe('OnchainReceiveSwapService', () => {
       const outpoint = deps.arkadeFake.lockups.get(awaitingClaim.pkScript)![0]!
       now = awaitingClaim.refundLocktime + 1
       await store.transition(awaitingClaim.id, 'awaiting_claim', 'refunding_arkade', {})
-      // Out of the spendable view the moment it unrolls, with `unilateralClaim` unspent.
       deps.arkadeFake.unrollLockup(awaitingClaim.pkScript)
       deps.onchain.receiveExternal({
         address: awaitingClaim.lockupAddress,
@@ -1551,8 +1545,6 @@ describe('OnchainReceiveSwapService', () => {
 
         const settled = await service.tick(claimed.id)
         expect(settled.state).toBe('settled')
-        // `settle_txid` goes out on the wire. Left at the replacement it names a
-        // transaction that never reached the chain.
         expect(settled.onchainClaimTxid).toBe(first.onchainClaimTxid)
       })
 
@@ -1683,7 +1675,6 @@ describe('OnchainReceiveSwapService', () => {
         expect(await service.claimNow(claimed.id)).toEqual({ txid: first.onchainClaimTxid })
       })
 
-      /** Automatic tick and operator override on one row, the second entering mid-attempt. */
       const raceClaimAttempts = async (first: 'tick' | 'claimNow'): Promise<OnchainReceiveSwapRow> => {
         const claimed = await driveToClaimed()
         let broadcasts = 0
@@ -1692,7 +1683,6 @@ describe('OnchainReceiveSwapService', () => {
           if (broadcasts++ > 0) throw new Error('txn-mempool-conflict')
           return broadcastRaw(txHex)
         }
-        // Hold the leader mid-attempt; the follower's rate is what makes the txids differ.
         let entered: () => void = () => {}
         let release: () => void = () => {}
         const held = new Promise<void>((resolve) => (release = resolve))

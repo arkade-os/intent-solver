@@ -345,13 +345,6 @@ describe('refundWithoutReceiverSwapScript', () => {
   })
 })
 
-/**
- * Anyone can pay a lockup address, so what sits at one is not only the funding
- * the swap asked for. A spend built over every output lets a counterparty price
- * the solver out of its own claim or refund: enough sprayed dust and the tx
- * exceeds arkd's `maxTxWeight`, or one near-expiry vtxo makes it unspendable —
- * and it is rejected on every tick until the counterparty's own deadline opens.
- */
 describe('a lockup sprayed with outputs anyone could have paid in', () => {
   const receiveLegScript = () =>
     new CovenantSwapScript({
@@ -366,9 +359,8 @@ describe('a lockup sprayed with outputs anyone could have paid in', () => {
       nonInteractiveParameters: { emulatorPubkey: EMULATOR, receiverPkScript: RECEIVER_PAYOUT, senderPkScript: DEST },
     })
 
-  // One real 50_000 funding at vout 0, then 20 dust at vouts 1..20 worth
-  // `329 + vout`. Keeping the 16 largest therefore keeps vout 0 and vouts
-  // 6..20, which is 55_130 sats — the five smallest are what must be dropped.
+  // One real 50_000 at vout 0, then 20 dust at vouts 1..20 worth `329 + vout`.
+  // The 16 largest are vout 0 and vouts 6..20, together 55_130 sats.
   const SPRAYED: FundedOutput[] = [
     { txid: FUNDING.id, vout: 0, value: 50_000 },
     ...Array.from({ length: 20 }, (_, i) => ({ txid: FUNDING.id, vout: i + 1, value: 330 + i })),
@@ -406,8 +398,6 @@ describe('a lockup sprayed with outputs anyone could have paid in', () => {
     expect(vouts).toHaveLength(MAX_LOCKUP_SPEND_INPUTS)
     expect(vouts).toContain(0)
     expect(Math.min(...vouts.filter((vout) => vout !== 0))).toBe(6)
-    // No other subset of this size is worth as much, and the payout is exactly
-    // what was spent rather than what sits at the script.
     expect(Transaction.fromPSBT(base64.decode(arkTxB64)).getOutput(0).amount).toBe(KEPT_TOTAL)
   })
 

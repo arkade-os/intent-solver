@@ -975,7 +975,6 @@ export class OnchainSendSwapService {
     const tracked = trackedRefundTxids(row)
     if (tracked.length > 0) {
       const { outcome, txid } = await outcomeOfAny(onchain, tracked)
-      // Recorded, because the one that confirmed need not be the latest.
       if (outcome === 'confirmed')
         return store.transition(row.id, 'refunding_onchain', 'refunded', { onchain_refund_txid: txid })
       // Until it confirms the untimelocked claim leaf stays open, stretching toward `refundLocktime`.

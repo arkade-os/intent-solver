@@ -866,8 +866,7 @@ export class OnchainReceiveSwapService {
     const tracked = trackedClaimTxids(row)
     if (tracked.length > 0) {
       const { outcome, txid } = await outcomeOfAny(onchain, tracked)
-      // Recorded, because the one that confirmed need not be the latest — and
-      // `settle_txid` goes out on the wire from this column.
+      // The one that confirmed need not be the latest, and this column ships as `settle_txid`.
       if (outcome === 'confirmed') return store.transition(row.id, 'claimed', 'settled', { onchain_claim_txid: txid })
       // `P` is public: still unconfirmed at `htlcLocktime`, the client's refund replaces it.
       if (outcome === 'mempool') {
@@ -1037,16 +1036,9 @@ export class OnchainReceiveSwapService {
     if (!row.fundingTxid || row.fundingVout === null) {
       return { refused: 'no funding txid/vout on the row: nothing to claim from' }
     }
-    // The SAME slot `tick()` takes, and the send leg's `reclaimOnchainHtlc`
-    // takes for the identical race: both branches below pre-commit a txid and
-    // broadcast, each at its own fee estimate, so two interleaved leave the row
-    // holding the loser's. The winner's is then readable only through the
-    // witness path, which settles a claim still sitting in the mempool.
-    //
-    // Held across the reads too, unlike the send leg's: the mempool branch here
-    // replaces before the spend read, and moving that read in front of it would
-    // turn "bump my own unconfirmed claim" into "already spent" the moment an
-    // explorer reports mempool spends.
+    // The SAME slot `tick()` takes: both branches below pre-commit a txid and
+    // broadcast at their own fee estimate, so the row keeps the loser's. Held
+    // across the reads too — the mempool branch replaces before the spend read.
     if (this.inFlight.has(id)) {
       return { refused: `swap ${id} is already being ticked; retry once that tick finishes` }
     }
@@ -1128,10 +1120,7 @@ export class OnchainReceiveSwapService {
       // and let the recheck above run again on the next tick.
       if (this.now() - row.updatedAt < EMPTY_LOCKUP_GRACE) return false
       // `stuck` is swept by nothing, so parking also stops the recheck above —
-      // and this state is entered MIN_ARKADE_FUND_WINDOW before `refundLocktime`,
-      // so the grace expires while the client can still reveal `P` (its own L1
-      // refund does not open until `htlcLocktime`). The Lightning receive leg
-      // refuses the same way at its own `E`.
+      // and entry here predates `htlcLocktime`, up to which the client can reveal.
       if (this.now() < row.htlcLocktime) return false
       // Still nothing, long past any read lag. Same "needs a human" posture
       // the send leg takes for the identical ambiguity.
