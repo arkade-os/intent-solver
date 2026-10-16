@@ -884,7 +884,9 @@ export class SendSwapService {
       return false
     }
     const txid = await arkade.refund(row, outputs)
-    await store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
+    // One refund spends at most MAX_LOCKUP_SPEND_INPUTS: the row stays refundable for the rest.
+    const all = outputs.length <= MAX_LOCKUP_SPEND_INPUTS
+    await store.patch(row.id, all ? { refund_outcome: 'pushed', refund_ark_txid: txid } : { refund_ark_txid: txid })
     return true
   }
 
@@ -927,6 +929,7 @@ export class SendSwapService {
     }
     // One claim spends at most this many; the rest would stay for the client to refund.
     if (locked === row.amountSats && outputs.length > MAX_LOCKUP_SPEND_INPUTS) {
+      await store.patch(row.id, { lockup_value: locked })
       await store.fail(row.id, 'quoted', `lockup funded in ${outputs.length} outputs, over ${MAX_LOCKUP_SPEND_INPUTS}`)
       return false
     }
@@ -1474,12 +1477,22 @@ export class SendSwapService {
    * sweep would keep both sides.
    */
   private async payDeadline(row: SendSwapRow, refundDeadline: number): Promise<number> {
-    if (this.deps.network === 'regtest') return refundDeadline
     const outputs = await this.deps.arkade.findLockups(row.pkScript)
     const held = outputs.reduce((sum, o) => sum + o.value, 0)
+    const funded = row.lockupValue ?? held
     // Swept or spent before we paid, in whole or part: no deadline protects that, so refuse.
-    if (outputs.length === 0 || held < (row.lockupValue ?? 0)) return this.now()
-    return Math.min(refundDeadline, ...outputs.flatMap((o) => (o.expiresAt === undefined ? [] : [o.expiresAt])))
+    if (outputs.length === 0 || held < funded) return this.now()
+    if (this.deps.network === 'regtest') return refundDeadline
+    // Only the latest-expiring outputs that cover the funding: anyone can add a soon-swept
+    // output to the public lockup address, and the claim leaves out one that has expired.
+    let deadline = refundDeadline
+    let covered = 0
+    for (const output of [...outputs].sort((a, b) => (b.expiresAt ?? Infinity) - (a.expiresAt ?? Infinity))) {
+      if (covered >= funded) break
+      covered += output.value
+      if (output.expiresAt !== undefined) deadline = Math.min(deadline, output.expiresAt)
+    }
+    return deadline
   }
 
   private async refuseUnsubmittedPayment(row: SendSwapRow, detail: string): Promise<void> {
