@@ -1479,6 +1479,14 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
       expect((await service.tick(id)).state).toBe('settled')
     })
 
+    it('reads every unrolled outpoint, not only the first', async () => {
+      const id = unroll(await armAndFund(), [new Uint8Array(64)])
+      arkade.state.unrolledOutputs = [...arkade.state.unrolledOutputs, { txid: 'sibling', vout: 1, value: 1_000 }]
+      l1Witnesses.set('sibling:1', [P])
+
+      expect((await service.tick(id)).state).toBe('settled')
+    })
+
     it('takes nothing from a witness item that does not open the payment hash', async () => {
       const id = unroll(await armAndFund(), [new Uint8Array(32).fill(7)])
 
