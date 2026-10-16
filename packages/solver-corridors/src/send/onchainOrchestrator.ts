@@ -156,6 +156,11 @@ const preimageFromClaimWitness = (witness: Uint8Array[]): Uint8Array | null => w
 const trackedRefundTxids = (row: OnchainSendSwapRow): string[] =>
   row.onchainRefundTxid === null ? row.onchainRefundPriorTxids : [row.onchainRefundTxid, ...row.onchainRefundPriorTxids]
 
+/** How long the refund sweep trusts an `unknown` verdict before asking the indexer again. */
+export const UNKNOWN_LOCKUP_RECHECK_SECONDS = 3600
+
+class UnknownLockupError extends Error {}
+
 /**
  * Why {@link OnchainSendSwapService.pushRefund} could not act on an empty
  * lockup. Wording only — neither branch records an outcome. The `unspent` bound
@@ -163,7 +168,7 @@ const trackedRefundTxids = (row: OnchainSendSwapRow): string[] =>
  */
 const unrefundableReason = (evidence: 'unknown' | 'unspent', row: OnchainSendSwapRow, now: number): string => {
   if (evidence === 'unknown') {
-    return 'the unfiltered view reports no output at this lockup script, so no spend is provable and nothing is there to give back — retrying cannot change that, and it needs a human'
+    return 'the unfiltered view reports no output at this lockup script, so no spend is provable and nothing is there to give back — an unfunded quote stays this way and is rechecked hourly; a funded one needs a human'
   }
   const stale = now - row.refundLocktime
   return stale > DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
@@ -234,6 +239,7 @@ export class OnchainSendSwapService {
 
   private readonly admission: AdmissionStrategy
   private refundVsize?: number
+  private readonly unknownLockups = new Map<string, { error: Error; until: number }>()
 
   constructor(private readonly deps: OnchainSendServiceDeps) {
     this.now = deps.now ?? nowSeconds
@@ -504,7 +510,8 @@ export class OnchainSendSwapService {
       // — the very mistake this guard exists to stop making to a client.
       const evidence = await arkade.lockupSpendEvidence(row.pkScript)
       if (evidence !== 'spent') {
-        throw new Error(`swap ${row.id}: ${unrefundableReason(evidence, row, this.now())}`)
+        const message = `swap ${row.id}: ${unrefundableReason(evidence, row, this.now())}`
+        throw evidence === 'unknown' ? new UnknownLockupError(message) : new Error(message)
       }
       await store.patch(row.id, { refund_outcome: 'external' })
       return null
@@ -538,11 +545,23 @@ export class OnchainSendSwapService {
     const pushed: string[] = []
     const now = this.now()
     const rows = [...(await this.deps.store.findRefundable(now)), ...(await this.deps.store.findReleasable(now))]
+    const refundable = new Set(rows.map((row) => row.id))
+    for (const id of this.unknownLockups.keys()) if (!refundable.has(id)) this.unknownLockups.delete(id)
     for (const row of rows) {
+      // An unfunded quote reads `unknown` for good; a late funding is still caught within one recheck.
+      const parked = this.unknownLockups.get(row.id)
+      if (parked && parked.until > this.now()) {
+        this.onTickError?.(row.id, parked.error)
+        continue
+      }
+      this.unknownLockups.delete(row.id)
       try {
         if (row.state === 'refunded' && !(await this.onchainRefundIsFinal(row))) continue
         if (await this.pushRefund(row)) pushed.push(row.id)
       } catch (error) {
+        if (error instanceof UnknownLockupError) {
+          this.unknownLockups.set(row.id, { error, until: this.now() + UNKNOWN_LOCKUP_RECHECK_SECONDS })
+        }
         this.onTickError?.(row.id, error)
       }
     }

@@ -33,6 +33,7 @@ import {
   lockupDeadlineFor,
   payableCltvBlocks,
   deadlineContainsHtlc,
+  hintCltvBlocks,
   unilateralLadderFor,
   refundWithoutReceiverDelayCovers,
   type SendAcceptanceRefusal,
@@ -42,6 +43,7 @@ import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/app
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { FREE, giveSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
+import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
 import { absoluteLocktimeFor, refundDeadlineReached, refundDeadlineSeconds } from '../chainClock.js'
 import {
@@ -147,6 +149,8 @@ export interface SendServiceDeps {
    * knob on this interface is: the orchestrator takes deps, not an environment.
    */
   sendHintScidDenylist?: ReadonlySet<string>
+  /** Regtest's batches expire before any HTLC could, so the lockup-expiry deadline is skipped there. */
+  network?: SwapNetwork
   /**
    * Funding window a quote grants, seconds (`LOCKUP_TIMEOUT_SECONDS`; defaults
    * to {@link DEFAULT_LOCKUP_TIMEOUT}). Quote deadline, sweep abandonment and
@@ -880,7 +884,9 @@ export class SendSwapService {
       return false
     }
     const txid = await arkade.refund(row, outputs)
-    await store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
+    // One refund spends at most MAX_LOCKUP_SPEND_INPUTS: the row stays refundable for the rest.
+    const all = outputs.length <= MAX_LOCKUP_SPEND_INPUTS
+    await store.patch(row.id, all ? { refund_outcome: 'pushed', refund_ark_txid: txid } : { refund_ark_txid: txid })
     return true
   }
 
@@ -923,6 +929,7 @@ export class SendSwapService {
     }
     // One claim spends at most this many; the rest would stay for the client to refund.
     if (locked === row.amountSats && outputs.length > MAX_LOCKUP_SPEND_INPUTS) {
+      await store.patch(row.id, { lockup_value: locked })
       await store.fail(row.id, 'quoted', `lockup funded in ${outputs.length} outputs, over ${MAX_LOCKUP_SPEND_INPUTS}`)
       return false
     }
@@ -1064,7 +1071,7 @@ export class SendSwapService {
     // window against MIN_CLAIM_WINDOW, and a raw height there reads as a deadline in 1970.
     const decision = evaluateSendPayment({
       invoiceExpiresAt: row.invoiceExpiresAt,
-      refundLocktime: refundDeadline,
+      refundLocktime: await this.payDeadline(row, refundDeadline),
       lockedSats: row.lockupValue ?? 0,
       expectedSats: row.amountSats,
       // Re-decoded from the row's own invoice, for the reason `submitPayment`
@@ -1382,8 +1389,18 @@ export class SendSwapService {
     // gates. Refuse only on `nothingCommitted` (the caller's proof nothing was paid);
     // a backend with no probe has proved nothing, so that row still parks `stuck`.
     // Seconds, as in `whenFunded`: the CLTV budget is Lightning's wall clock.
-    if (!ln.enforcesRouteCltv && !deadlineContainsHtlc(cltv, refundDeadlineForCltv, this.now())) {
+    const payDeadline = await this.payDeadline(row, refundDeadlineForCltv)
+    if (!ln.enforcesRouteCltv && !deadlineContainsHtlc(cltv, payDeadline, this.now())) {
       const reason = 'refused to pay: uncapped_route_deadline_too_short'
+      if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
+      else await store.fail(row.id, row.state, reason)
+      return false
+    }
+    const maxCltvBlocks = payableCltvBlocks(cltv, payDeadline, this.now())
+    // `evaluateSendPayment`'s floor, which `whenPaying` never asks: a budget this short is
+    // a refusal, not a ceiling (see `payableCltvBlocks`).
+    if (maxCltvBlocks <= cltv.minFinalCltvBlocks + hintCltvBlocks(cltv)) {
+      const reason = 'refused to pay: cltv_budget_too_short'
       if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
       else await store.fail(row.id, row.state, reason)
       return false
@@ -1394,7 +1411,7 @@ export class SendSwapService {
         invoice: row.invoice,
         maxFeeSats: row.quotedRoutingFeeSats ?? maxRoutingFeeSats(invoice.amountSats),
         idempotencyKey: row.idempotencyKey,
-        maxCltvBlocks: payableCltvBlocks(cltv, refundDeadlineForCltv, this.now()),
+        maxCltvBlocks,
       })
     } catch (error) {
       if (!(error instanceof PaymentNotStarted) || !nothingCommitted) throw error
@@ -1452,6 +1469,30 @@ export class SendSwapService {
     // window; when it is absent, `settleFromBackend` polls exactly as it always did.
     if (result.preimage) await this.claimWithPreimage(row.id, row.paymentHash, result.preimage)
     return true
+  }
+
+  /**
+   * The refund deadline, or the lockup's batch expiry when that comes first. A swept lockup
+   * is recoverable only through the client's leaf, so a client holding our HTLC past the
+   * sweep would keep both sides.
+   */
+  private async payDeadline(row: SendSwapRow, refundDeadline: number): Promise<number> {
+    const outputs = await this.deps.arkade.findLockups(row.pkScript)
+    const held = outputs.reduce((sum, o) => sum + o.value, 0)
+    const funded = row.lockupValue ?? held
+    // Swept or spent before we paid, in whole or part: no deadline protects that, so refuse.
+    if (outputs.length === 0 || held < funded) return this.now()
+    if (this.deps.network === 'regtest') return refundDeadline
+    // Only the latest-expiring outputs that cover the funding: anyone can add a soon-swept
+    // output to the public lockup address, and the claim leaves out one that has expired.
+    let deadline = refundDeadline
+    let covered = 0
+    for (const output of [...outputs].sort((a, b) => (b.expiresAt ?? Infinity) - (a.expiresAt ?? Infinity))) {
+      if (covered >= funded) break
+      covered += output.value
+      if (output.expiresAt !== undefined) deadline = Math.min(deadline, output.expiresAt)
+    }
+    return deadline
   }
 
   private async refuseUnsubmittedPayment(row: SendSwapRow, detail: string): Promise<void> {
