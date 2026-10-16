@@ -234,6 +234,19 @@ describe('UnrolledRefunder', () => {
     expect(order).toEqual([])
   })
 
+  it('reports a lockup too small to pay for its own refund as closed, asking arkd nothing', async () => {
+    const small = new Transaction({ version: 3 })
+    small.addInput({ txid: 'dd'.repeat(32), index: 0 })
+    small.addOutput({ script: script.pkScript, amount: 400n })
+    small.updateInput(0, { finalScriptWitness: [new Uint8Array(64)] }, true)
+    chain.raw.set(small.id, small.toBytes(true, true))
+    chain.status.set(small.id, { confirmed: true, blockTime: NOW - 600, blockHeight: 899_999 })
+
+    const step = await refunder().advance({ ...lockup, txid: small.id }, null, save)
+    expect(step).toMatchObject({ kind: 'closed', reason: expect.stringContaining('cannot pay for its own') })
+    expect(order).toEqual([])
+  })
+
   it('reports a lockup someone else spent instead of pushing', async () => {
     chain.outspends.set(parent.id, [{ spent: true, txid: spendOfLockup(p2tr(await keyOf(13))) }])
     expect(await refunder().advance(lockup, null, save)).toEqual({ kind: 'spent' })
@@ -367,6 +380,20 @@ describe('UnrolledRefunder', () => {
       now += 60
       expect((await refunder().advance(lockup, record, save)).kind).toBe('pending')
       expect(cosigned).toHaveLength(1)
+    })
+
+    it('reports a failed bump once, then waits another interval before asking again', async () => {
+      const record = await slowRefund()
+      cosignFails = new Error('arkd unreachable')
+      await expect(refunder().advance(lockup, record, save)).rejects.toThrow('arkd unreachable')
+      const kept = saved.at(-1)!
+      expect(kept).toMatchObject({ txid: record.txid, cpfpTxid: null, broadcastAt: now })
+
+      cosignFails = null
+      now += 60
+      order.length = 0
+      expect(await refunder().advance(lockup, kept, save)).toEqual({ kind: 'pending', record: kept })
+      expect(order).toEqual([])
     })
   })
 })

@@ -37,7 +37,7 @@ export type UnrolledRefundStep =
   | { kind: 'waiting' }
   /** Spent by a transaction that is not this refund — the client's claim, normally. */
   | { kind: 'spent' }
-  /** arkd will not co-sign any more: the client's own CSV is about to open. */
+  /** No co-signed refund will happen: arkd stopped co-signing, or the lockup cannot pay for one. */
   | { kind: 'closed'; reason: string }
   | { kind: 'pending'; record: UnrolledRefundRecord }
   | { kind: 'confirmed'; record: UnrolledRefundRecord }
@@ -82,6 +82,9 @@ const P2A_SCRIPT = '51024e73'
 
 type Chain = UnrolledRefundDeps['chain']
 
+/** No fee rate makes this refund relay, so no later tick will push one either. */
+class UnrefundableLockup extends Error {}
+
 const feeRateNow = async (chain: Chain): Promise<number> => {
   const rate = await chain.getFeeRate()
   if (rate === undefined || !(rate > 0)) throw new Error('no fee estimate to price a transaction arkd co-signs once')
@@ -89,7 +92,8 @@ const feeRateNow = async (chain: Chain): Promise<number> => {
 }
 
 /** vsize once finalized with two schnorr signatures, the leaf script and its control block. */
-const signedVsize = (tx: Transaction, [controlBlock, scriptWithVersion]: TapLeafScript): number => {
+const signedVsize = (unsigned: Transaction, [controlBlock, scriptWithVersion]: TapLeafScript): number => {
+  const tx = unsigned.clone()
   tx.updateInput(
     0,
     {
@@ -177,12 +181,14 @@ export class UnrolledRefunder {
     try {
       return { kind: 'pending', record: await this.push(lockup, save) }
     } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      if (error instanceof UnrefundableLockup) return { kind: 'closed', reason }
       const unroll = await chain.getTxStatus(lockup.txid).catch(() => null)
       if (
         unroll?.confirmed &&
         this.deps.now() >= unroll.blockTime + lockup.exitDelaySeconds - COSIGN_EXIT_MARGIN_SECONDS
       ) {
-        return { kind: 'closed', reason: error instanceof Error ? error.message : String(error) }
+        return { kind: 'closed', reason }
       }
       throw error
     }
@@ -203,7 +209,7 @@ export class UnrolledRefunder {
       spendTx(input, leaf, lockup.script.encode(), boarding.pkScript, fee, lockup.refundLocktime)
     const vsize = signedVsize(build(0), leaf)
     const cap = value - ONCHAIN_DUST_SATS
-    if (cap < vsize) throw new Error(`a ${value} sat lockup cannot pay for its own L1 refund`)
+    if (cap < vsize) throw new UnrefundableLockup(`a ${value} sat lockup cannot pay for its own L1 refund`)
 
     let fee = Math.ceil(feeRate * vsize)
     if (!(await chain.getTxStatus(lockup.txid)).confirmed) {
@@ -236,7 +242,7 @@ export class UnrolledRefunder {
     if (status?.confirmed) return { kind: 'confirmed', record }
     if (status) {
       const tx = record.tx ?? hex.encode(await chain.getRawTransaction(record.txid))
-      return { kind: 'pending', record: await this.bump(lockup, { ...record, tx }) }
+      return { kind: 'pending', record: await this.bump(lockup, { ...record, tx }, save) }
     }
     const out = (await chain.getTxOutspends(lockup.txid))[lockup.vout]
     if (out?.spent && out.txid !== undefined && out.txid !== record.txid) {
@@ -305,6 +311,7 @@ export class UnrolledRefunder {
   private async bump(
     lockup: UnrolledLockup,
     record: UnrolledRefundRecord & { tx: string },
+    save: SaveUnrolledRefund,
   ): Promise<UnrolledRefundRecord> {
     const { chain, boarding } = this.deps
     if (record.cpfpTxid !== null || this.deps.now() - record.broadcastAt < BUMP_AFTER_SECONDS) return record
@@ -332,8 +339,14 @@ export class UnrolledRefunder {
     const fee = Math.min(Math.ceil(feeRate * (refundVsize + childVsize)) - refundFee, cap)
     // No pre-commit: losing the reply loses only the bump, and arkd refuses a second child.
     const signed = await this.deps.signer.sign(build(fee), [0])
-    const cpfpTxid = await this.deps.cosign(base64.encode(signed.toPSBT()))
-    return { ...record, cpfpTxid, feeRate, broadcastAt: this.deps.now() }
+    try {
+      const cpfpTxid = await this.deps.cosign(base64.encode(signed.toPSBT()))
+      return { ...record, cpfpTxid, feeRate, broadcastAt: this.deps.now() }
+    } catch (error) {
+      // The refund stands without its bump: ask again after another interval, not every tick.
+      await save({ ...record, broadcastAt: this.deps.now() })
+      throw error
+    }
   }
 }
 
