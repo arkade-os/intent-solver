@@ -45,7 +45,7 @@ import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import { claimIdentity } from './claimIdentity.js'
 import type { CovenantSwapScript } from './covenant.js'
 import { virtualTxPages, vtxoPages } from './indexerPaging.js'
-import { TimedArkProvider, TimedIndexerProvider } from './latencyProviders.js'
+import { SharedSyncIndexerProvider, TimedArkProvider, TimedIndexerProvider } from './latencyProviders.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
 
 /** The two views any spend below needs; CovenantSwapScript satisfies it (as would any VtxoScript wrapper). */
@@ -265,7 +265,10 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     identity,
     arkServerUrl: config.arkServerUrl,
     arkProvider: latencyDiagnostics ? new TimedArkProvider(config.arkServerUrl) : undefined,
-    indexerProvider: latencyDiagnostics ? new TimedIndexerProvider(config.arkServerUrl) : undefined,
+    // The SDK's own default is a plain `RestIndexerProvider` at this same URL.
+    indexerProvider: latencyDiagnostics
+      ? new TimedIndexerProvider(config.arkServerUrl)
+      : new SharedSyncIndexerProvider(config.arkServerUrl),
     storage: {
       walletRepository: new SQLiteWalletRepository(executor),
       contractRepository: new SQLiteContractRepository(executor),
