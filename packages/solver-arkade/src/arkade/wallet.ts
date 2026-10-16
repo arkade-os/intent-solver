@@ -479,20 +479,14 @@ export const findClaimPreimage = async (
 export const totalValue = (outputs: readonly FundedOutput[]): number =>
   outputs.reduce((sum, output) => sum + output.value, 0)
 
-/**
- * How many lockup outputs ONE spend may carry. The address is public, so
- * unbounded a counterparty's sprayed dust pushes every attempt past arkd's
- * 40000 `maxTxWeight`; 16 covenant-leaf inputs run near 13k of it.
- */
+/** The address is public: uncapped, sprayed dust pushes every spend past arkd's 40000 `maxTxWeight` (16 run near 13k). */
 export const MAX_LOCKUP_SPEND_INPUTS = 16
 
-/** Shorter than any sweep this could race, long enough that a spend built now still lands. */
 const LOCKUP_SPEND_EXPIRY_MARGIN = 5 * 60
 
 /**
- * The most valuable outputs not about to expire, capped at {@link MAX_LOCKUP_SPEND_INPUTS}:
- * a near-expiry input makes the whole transaction unspendable, not only itself. Value picks
- * WHICH, never the order — the covenant refund is index-aligned against the caller's array.
+ * One near-expiry input sinks the whole spend. Value picks WHICH outputs, never their
+ * order: the covenant refund is index-aligned against the caller's array.
  */
 export const boundedSpendInputs = (funded: readonly FundedOutput[], now: number): FundedOutput[] => {
   const usable = funded.filter(

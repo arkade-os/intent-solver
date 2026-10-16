@@ -97,11 +97,9 @@ export const arkadeClaimDeadline = (htlcLocktime: number): number =>
   latestClaimArrival(htlcLocktime) + ARKADE_CLAIM_WINDOW_SECONDS
 
 /**
- * The earliest lockup expiry falling before {@link arkadeClaimDeadline}, or null when none
- * does. A lockup inherits its inputs' batch expiry, so a client can fund one from a coin about
- * to expire: the swept batch leaves nothing spendable offchain for the solver to claim — the
- * SDK's recovery leaf is the SENDER's, never a receiver's — while the client's own refund leaf
- * still pays out, taking both legs. An absent expiry is not judged; see `FundedOutput`.
+ * A lockup inherits its inputs' batch expiry. Swept, nothing is left for the solver to claim
+ * offchain — the SDK recovers through the SENDER's leaf only — while the client's refund still
+ * pays out. An absent expiry is not judged.
  */
 export const expiryBeforeClaimDeadline = (
   outputs: readonly { expiresAt?: number }[],

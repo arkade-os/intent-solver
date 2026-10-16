@@ -72,9 +72,7 @@ export const EXPOSED: readonly OnchainReceiveSwapState[] = [
 
 const LEGAL_EDGES: Record<OnchainReceiveSwapState, readonly OnchainReceiveSwapState[]> = {
   quoted: ['awaiting_confirmations', 'refused'],
-  // The self-edge records a RE-ADOPTION, the client having fee-bumped its
-  // funding. A transition, not a patch: its compare-and-swap is what stops two
-  // workers recording different replacements.
+  // The self-edge re-adopts a fee-bumped client funding; nothing is exposed yet.
   awaiting_confirmations: ['funding_arkade', 'refused', 'awaiting_confirmations'],
   funding_arkade: ['awaiting_claim', 'stuck'],
   awaiting_claim: ['claimed', 'refunding_arkade', 'stuck'],

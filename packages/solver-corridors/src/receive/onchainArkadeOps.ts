@@ -2,10 +2,8 @@
  * Production {@link OnchainReceiveArkadeOps}: the bridge from the receive
  * orchestrator's row-shaped world to the real Arkade wallet.
  *
- * Reuses `send/arkadeOps.ts`'s `arkadeOpsFromContext` except for `refund`: that
- * one spends `nonInteractiveRefund`, signed by server + RECEIVER + emulator,
- * and here the receiver is the CLIENT. `refundWithoutReceiver` is this leg's
- * recourse, as it is the Lightning receive leg's (`receive/arkadeOps.ts`).
+ * Reuses `send/arkadeOps.ts`'s `arkadeOpsFromContext` except for `refund`, whose
+ * leaf needs the receiver's signature — the client's, here. @see refundReceiveLockup
  */
 
 import { arkadeOpsFromContext, type EmulatorInfo } from '../send/arkadeOps.js'
