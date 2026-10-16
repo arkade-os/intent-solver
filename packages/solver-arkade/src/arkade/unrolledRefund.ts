@@ -95,7 +95,10 @@ const signedVsize = (tx: Transaction, [controlBlock, scriptWithVersion]: TapLeaf
   return tx.vsize
 }
 
-/** The fee for `vsize` at `feeRate`, capped to leave dust. Null when even the cap cannot pay 1 sat/vB. */
+/**
+ * The fee for `vsize` at `feeRate`, capped to leave dust. Null when even the cap cannot pay
+ * 1 sat/vB. solver-rails' `affordableFee`, restated: this layer may import only core.
+ */
 const affordableFee = (vsize: number, feeRate: number, valueSats: number): number | null => {
   const cap = valueSats - ONCHAIN_DUST_SATS
   return cap < vsize ? null : Math.min(Math.ceil(vsize * feeRate), cap)
