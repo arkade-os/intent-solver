@@ -24,6 +24,7 @@ import {
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { FakeOnchainBackend } from '@arkade-os/solver-rails-fake/onchain/fake/backend.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { refundSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
@@ -466,6 +467,28 @@ describe('OnchainSendSwapService', () => {
     expect(row.onchainLockupTxid).toBe('lockup-tx')
     expect(row.onchainLockupVout).toBe(0)
     expect(row.onchainLockupValue).toBe(50_000)
+  })
+
+  it('refuses a lockup funded in more pieces than one claim can spend, before funding L1', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const pieces = MAX_LOCKUP_SPEND_INPUTS + 1
+    deps.outputs.set(
+      outcome.swap.pkScript,
+      Array.from({ length: pieces }, (_, vout) => ({ txid: 'lockup-tx', vout, value: 50_000 / 50 })).concat([
+        { txid: 'lockup-tx', vout: pieces, value: 50_000 - (pieces * 50_000) / 50 },
+      ]),
+    )
+
+    const row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('refused')
+    expect(row.fundingTxid).toBeNull()
   })
 
   // Regtest is exempt from the lockup-expiry gate, so these go through a network that is not.

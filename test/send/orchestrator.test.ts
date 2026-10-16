@@ -31,7 +31,7 @@ import {
 } from '@arkade-os/solver-core/core/send.js'
 import { QUOTE_RATE_LIMIT } from '@arkade-os/solver-core/core/rateLimit.js'
 import { TickErrorTracker } from '@arkade-os/solver-app/ops/tickErrors.js'
-import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { MAX_LOCKUP_SPEND_INPUTS, type FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
 import type {
   EstimateSendFeeParams,
@@ -698,6 +698,18 @@ describe('tick: the full drive', () => {
     const row = await service.tick(swap.id)
     expect(row.state).not.toBe('quoted')
     expect(row.lockupValue).toBe(2_100)
+  })
+
+  it('refuses a lockup funded in more pieces than one claim can spend, before paying', async () => {
+    const { swap } = await quoted()
+    const pieces = MAX_LOCKUP_SPEND_INPUTS + 1
+    const small = Math.floor(AMOUNT / (2 * pieces))
+    arkade.lockups = Array.from({ length: pieces }, (_, vout) => ({ txid: 'f1', vout, value: small }))
+    arkade.lockups.push({ txid: 'f1', vout: pieces, value: AMOUNT - pieces * small })
+
+    const row = await service.tick(swap.id)
+    expect(row.state).toBe('refused')
+    expect(ln.payCalls).toHaveLength(0)
   })
 
   it('refuses an overfunded lockup rather than claim the excess', async () => {

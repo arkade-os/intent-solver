@@ -36,6 +36,7 @@ import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/co
 import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
+import { MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import {
   buildOnchainRefundTx,
@@ -723,6 +724,11 @@ export class OnchainSendSwapService {
 
     if (locked > row.amountSats) {
       await store.fail(row.id, 'quoted', `overfunded lockup: ${locked} > ${row.amountSats} sats`)
+      return false
+    }
+    // One claim spends at most this many; the rest would stay for the client to refund.
+    if (locked === row.amountSats && outputs.length > MAX_LOCKUP_SPEND_INPUTS) {
+      await store.fail(row.id, 'quoted', `lockup funded in ${outputs.length} outputs, over ${MAX_LOCKUP_SPEND_INPUTS}`)
       return false
     }
     if (locked === row.amountSats && !timedOut) {

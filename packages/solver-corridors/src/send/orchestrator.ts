@@ -53,6 +53,7 @@ import {
 import { preimageMatchesHash, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
+import { MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { HoldState, ReceiveBackend, SendBackend, SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
@@ -918,6 +919,11 @@ export class SendSwapService {
     if (locked > row.amountSats) {
       await store.patch(row.id, { lockup_value: locked })
       await store.fail(row.id, 'quoted', `overfunded lockup: ${locked} > ${row.amountSats} sats`)
+      return false
+    }
+    // One claim spends at most this many; the rest would stay for the client to refund.
+    if (locked === row.amountSats && outputs.length > MAX_LOCKUP_SPEND_INPUTS) {
+      await store.fail(row.id, 'quoted', `lockup funded in ${outputs.length} outputs, over ${MAX_LOCKUP_SPEND_INPUTS}`)
       return false
     }
 
