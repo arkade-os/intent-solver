@@ -95,7 +95,7 @@ number's job is to agree with whoever derives the same script.
 |---|---|---|
 | `REFUND_SAFETY_MARGIN` | `core/send.ts` | Margin on top of the **worst-case HTLC lifetime** before the client's refund may open. Not derived from the 90 above. |
 | `MAX_LOCKUP_TIMEOUT` | `core/send.ts` | `= REFUND_SAFETY_MARGIN`. A funding window longer than the margin would quote a deadline the refund cannot sit behind. |
-| `MAX_REFUND_HORIZON` | `core/receive.ts` | The **Lightning** receive leg's own refund deadline. Also the horizon `selectLockupFunding` prefers coins to outlive — on **both** receive legs, including the onchain one, whose own refund now opens later than it. |
+| `MAX_REFUND_HORIZON` | `core/receive.ts` | The **Lightning** receive leg's own refund deadline, and the horizon `selectLockupFunding` prefers that leg's coins to outlive. The onchain receive leg passes the time left to its own refund instead. |
 | `ONCHAIN_ORDER_MARGIN_SECONDS` | `core/onchainSend.ts` | Ordering margin between the two legs' deadlines. |
 | `EVM_ORDER_MARGIN_SECONDS` | `core/evmSend.ts` | Same role on the EVM corridors. |
 
@@ -200,11 +200,11 @@ which at one confirmation is ≈145 min after funding against a ten-minute block
 the quote rather than 3 h 10 m. Both are the price of not failing honest swaps.
 
 `MAX_REFUND_HORIZON` is now declared once, in `core/receive.ts`, where it is
-the Lightning payer's window via `DEFAULT_HOLD_INVOICE_WINDOW` and the horizon
-`selectLockupFunding` prefers coins to outlive. That second use applies to
-**both** receive legs while this leg's own refund opens later than it, so coin
-selection can prefer a batch that expires before `R`; it warns rather than
-refuses. Whether the Lightning horizon should rise for payer UX is open (#161).
+the Lightning payer's window via `DEFAULT_HOLD_INVOICE_WINDOW` and that leg's
+coin-selection horizon. This leg passes `selectLockupFunding` the time left
+until its own `R` instead, so it prefers coins that outlive this swap's
+refund; it still warns rather than refuses when none do. Whether the Lightning
+horizon should rise for payer UX is open (#161).
 
 The evidence #161 asked for is now collected rather than argued: every Lightning
 receive arm writes a `cltv headroom <E - now>s — <spare>s spare` note against its
