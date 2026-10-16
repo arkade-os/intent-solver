@@ -18,7 +18,8 @@ import { mineBlocks } from './support/chain.js'
 import { requireStack } from './support/preflight.js'
 import { openArkade, SETUP_TIMEOUT_MS, type E2eArkade } from './support/stack.js'
 
-const SWEEP_TIMEOUT_MS = 20 * 60_000
+// Every wait below at its worst (two polls, the mining steps, one batch), inside the job's 60.
+const SWEEP_TIMEOUT_MS = 35 * 60_000
 
 const SWEPT_POLL_TIMEOUT_MS = 8 * 60_000
 const SWEPT_POLL_MS = 5_000
