@@ -8,6 +8,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { Hono } from 'hono'
+import { hex } from '@scure/base'
+import { sha256 } from '@noble/hashes/sha2.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { buildDemoConsole, type DemoConsole } from '@arkade-os/solver-app/ops/adminDemo.js'
 
@@ -60,6 +62,27 @@ describe('the demo console', () => {
       const { status } = await get(`/api/swaps/${encodeURIComponent(corridor)}/${row.id}`)
       expect({ corridor, status }).toEqual({ corridor, status: 200 })
     }
+  })
+
+  // Seeded rows skip the orchestrators, so hold them to what the orchestrators verify before writing.
+  it('seeds only rows the orchestrators could have written', async () => {
+    const { body } = await get('/api/swaps?limit=100')
+    let preimages = 0
+    for (const row of body.swaps as { id: string; corridor: string }[]) {
+      const { body: detail } = await get(`/api/swaps/${encodeURIComponent(row.corridor)}/${row.id}`)
+      const raw = detail.raw as Record<string, unknown>
+      if (typeof raw.preimage === 'string') {
+        preimages++
+        expect({ id: row.id, hash: hex.encode(sha256(hex.decode(raw.preimage))) }).toEqual({
+          id: row.id,
+          hash: raw.paymentHash,
+        })
+      }
+      if (row.corridor === 'lightning:BTC->arkade:BTC' && raw.arkadeLockupValue != null) {
+        expect({ id: row.id, lockup: raw.arkadeLockupValue }).toEqual({ id: row.id, lockup: raw.payoutSats })
+      }
+    }
+    expect(preimages).toBeGreaterThan(10)
   })
 
   // The design rule is colour for risk only; a demo without risk would hide it.

@@ -124,6 +124,13 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
     nonInteractiveParameters: true,
   })
 
+  // Each edge carries exactly the fields its orchestrator writes on it, every preimage hashes to its payment hash,
+  // and every failure reason is one the solver writes: the console reads all three.
+  const secret = () => {
+    const preimage = bytes(32)
+    return { preimage: hex.encode(preimage), hash: sha256(preimage), paymentHash: hex.encode(sha256(preimage)) }
+  }
+
   /** Arkade → Lightning. The lockup is the intake; the invoice is what was paid. */
   const send = async (
     ago: number,
@@ -132,7 +139,7 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
   ) => {
     at(ago)
     const id = uuid()
-    const paymentHash = bytes(32)
+    const { preimage, hash, paymentHash } = secret()
     const lockup = invoiceSats + Math.max(150, Math.round(invoiceSats * 0.004))
     await store.insertQuote({
       id,
@@ -141,9 +148,9 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
         amountSats: invoiceSats,
         timestamp: now(),
         expirySeconds: HOUR,
-        paymentHash,
+        paymentHash: hash,
       }),
-      paymentHash: hex.encode(paymentHash),
+      paymentHash,
       amountSats: lockup,
       invoiceExpiresAt: now() + HOUR,
       quotedRefundDeadline: now() + 2 * HOUR,
@@ -154,40 +161,59 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
     })
     if (end === 'quoted') return id
     if (end === 'refused') {
-      at(ago - 600)
-      await store.transition(id, 'quoted', 'refused', { failure_reason: 'quote expired before funding' })
+      at(ago - config.lockupTimeoutSeconds)
+      await store.fail(id, 'quoted', 'lockup timeout')
       return id
     }
     at(ago - 40)
-    await store.transition(id, 'quoted', 'funded', { lockup_txid: hexOf(32), lockup_vout: 0, lockup_value: lockup })
+    const lockupTx = { txid: hexOf(32), vout: 0, value: lockup }
+    await store.noteFundings(id, [lockupTx])
+    await store.transition(id, 'quoted', 'funded', {
+      lockup_txid: lockupTx.txid,
+      lockup_vout: 0,
+      lockup_value: lockup,
+    })
     if (end === 'funded') return id
-    await store.transition(id, 'funded', 'paying', { pay_attempted_at: now() })
+    await store.transition(id, 'funded', 'paying', {
+      pay_attempted_at: now(),
+      idempotency_key: `swap-${paymentHash}`,
+    })
     if (end === 'stuck') {
       at(ago - 900)
-      await store.transition(id, 'paying', 'stuck', { failure_reason: 'payment outcome unknown after 3 reads' })
+      await store.fail(id, 'paying', 'backend settled the payment but reported no preimage')
       return id
     }
     at(ago - 45)
     await store.transition(id, 'paying', 'paid', { payment_id: hexOf(32) })
     if (end === 'paid') return id
-    await store.transition(id, 'paid', 'claiming', { preimage: hexOf(32) })
+    await store.transition(id, 'paid', 'claiming', { preimage })
     at(ago - 52)
     await store.transition(id, 'claiming', 'claimed', { claim_ark_txid: hexOf(32) })
     return id
   }
 
-  /** Lightning → Arkade. */
-  const receive = async (ago: number, sats: number, end: 'settled' | 'funded' | 'stuck' | 'refunded' | 'armed') => {
+  /** Lightning → Arkade. The solver funds the payout lockup once the payer's HTLC is held. */
+  const receive = async (
+    ago: number,
+    sats: number,
+    end: 'settled' | 'funded' | 'stuck' | 'refunded' | 'armed' | 'quoted',
+  ) => {
     at(ago)
     const id = uuid()
-    const preimage = bytes(32)
-    const paymentHash = sha256(preimage)
+    const { preimage, hash, paymentHash } = secret()
+    const payout = sats - Math.max(150, Math.round(sats * 0.005))
     await receiveStore.insertQuote({
       id,
-      paymentHash: hex.encode(paymentHash),
+      paymentHash,
       amountSats: sats,
-      payoutSats: sats - Math.max(150, Math.round(sats * 0.005)),
-      invoice: forgeInvoice({ network: 'bcrt', amountSats: sats, timestamp: now(), expirySeconds: 600, paymentHash }),
+      payoutSats: payout,
+      invoice: forgeInvoice({
+        network: 'bcrt',
+        amountSats: sats,
+        timestamp: now(),
+        expirySeconds: 600,
+        paymentHash: hash,
+      }),
       invoiceExpiresAt: now() + 600,
       payoutAddress: arkAddress(),
       payoutPkScript: '5120' + hexOf(32),
@@ -198,43 +224,44 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
       solverRefundPkScript: '5120' + hexOf(32),
       ...covenant(),
     })
+    if (end === 'quoted') return { id, payout, preimage }
+    at(ago - 20)
     await receiveStore.transition(id, 'quoted', 'armed', { htlc_expires_at: now() + HOUR })
-    if (end === 'armed') return id
+    if (end === 'armed') return { id, payout, preimage }
     at(ago - 30)
     await receiveStore.transition(id, 'armed', 'funded', {
       arkade_lockup_txid: hexOf(32),
       arkade_lockup_vout: 0,
-      arkade_lockup_value: sats,
+      arkade_lockup_value: payout,
       fund_started_at: now(),
     })
-    if (end === 'funded') return id
+    if (end === 'funded') return { id, payout, preimage }
     if (end === 'refunded') {
-      at(ago - 4 * HOUR)
-      await receiveStore.transition(id, 'funded', 'refunding', { failure_reason: 'payer never revealed the preimage' })
+      at(ago - 2 * HOUR - 60)
+      await receiveStore.transition(id, 'funded', 'refunding')
       await receiveStore.transition(id, 'refunding', 'refunded', { refund_ark_txid: hexOf(32) })
-      return id
+      return { id, payout, preimage }
     }
     at(ago - 70)
-    await receiveStore.transition(id, 'funded', 'claimed', { preimage: hex.encode(preimage) })
+    await receiveStore.transition(id, 'funded', 'claimed', { preimage })
     if (end === 'stuck') {
-      at(ago - 1_800)
-      await receiveStore.transition(id, 'claimed', 'stuck', {
-        failure_reason: 'hold invoice settle refused: htlc expired',
-      })
-      return id
+      at(ago - HOUR - 120)
+      await receiveStore.fail(id, 'claimed', 'settle failing past E: hold invoice is no longer accepted')
+      return { id, payout, preimage }
     }
     at(ago - 75)
     await receiveStore.transition(id, 'claimed', 'settled')
-    return id
+    return { id, payout, preimage }
   }
 
-  /** Arkade → onchain. */
+  /** Arkade → onchain. `onchain_lockup_*` is the client's Arkade lockup; `funding_*` is our L1 HTLC. */
   const onchainSend = async (ago: number, sats: number, end: 'claimed' | 'awaiting_claim' | 'refunded') => {
     at(ago)
     const id = uuid()
+    const { preimage, paymentHash } = secret()
     await onchainStore.insertQuote({
       id,
-      paymentHash: hexOf(32),
+      paymentHash,
       amountSats: sats,
       payoutSats: sats - Math.max(600, Math.round(sats * 0.006)),
       refundLocktime: now() + 6 * HOUR,
@@ -251,35 +278,37 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
       ...covenant(),
     })
     at(ago - 60)
-    await onchainStore.transition(id, 'quoted', 'funded')
-    await onchainStore.transition(id, 'funded', 'funding_onchain', { funding_txid: hexOf(32), funding_vout: 1 })
-    at(ago - 700)
-    await onchainStore.transition(id, 'funding_onchain', 'awaiting_claim', {
+    await onchainStore.transition(id, 'quoted', 'funded', {
       onchain_lockup_txid: hexOf(32),
       onchain_lockup_vout: 0,
       onchain_lockup_value: sats,
     })
+    await onchainStore.transition(id, 'funded', 'funding_onchain')
+    at(ago - 90)
+    await onchainStore.transition(id, 'funding_onchain', 'awaiting_claim', { funding_txid: hexOf(32), funding_vout: 1 })
     if (end === 'awaiting_claim') return
     if (end === 'refunded') {
-      at(ago - 3 * HOUR)
+      at(ago - 3 * HOUR - 1_800)
       await onchainStore.transition(id, 'awaiting_claim', 'refunding_onchain')
-      at(ago - 3 * HOUR - 900)
-      await onchainStore.transition(id, 'refunding_onchain', 'refunded', { onchain_refund_txid: hexOf(32) })
+      await onchainStore.patch(id, { onchain_refund_txid: hexOf(32) })
+      at(ago - 3 * HOUR - 2_400)
+      await onchainStore.transition(id, 'refunding_onchain', 'refunded')
       return
     }
     at(ago - 1_400)
-    await onchainStore.transition(id, 'awaiting_claim', 'claiming', { preimage: hexOf(32) })
+    await onchainStore.transition(id, 'awaiting_claim', 'claiming', { preimage })
     await onchainStore.transition(id, 'claiming', 'claimed', { claim_ark_txid: hexOf(32) })
   }
 
-  /** Onchain → Arkade. */
+  /** Onchain → Arkade. The client's L1 HTLC confirms, we fund the payout on Arkade, then claim the HTLC. */
   const onchainReceive = async (ago: number, sats: number, end: 'settled' | 'awaiting_confirmations') => {
     at(ago)
     const id = uuid()
+    const { preimage, paymentHash } = secret()
     const payout = sats - Math.max(600, Math.round(sats * 0.006))
     await onchainReceiveStore.insertQuote({
       id,
-      paymentHash: hexOf(32),
+      paymentHash,
       amountSats: sats,
       payoutSats: payout,
       htlcLocktime: now() + 6 * HOUR,
@@ -300,22 +329,18 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
     await onchainReceiveStore.transition(id, 'quoted', 'awaiting_confirmations', {
       funding_txid: hexOf(32),
       funding_vout: 0,
+      funded_value_sats: sats,
+      funded_payout_sats: payout,
     })
     if (end === 'awaiting_confirmations') return
     at(ago - 720)
-    await onchainReceiveStore.transition(id, 'awaiting_confirmations', 'funding_arkade', {
-      funded_value_sats: sats,
-      funded_payout_sats: payout,
-      arkade_fund_txid: hexOf(32),
-    })
-    await onchainReceiveStore.transition(id, 'funding_arkade', 'awaiting_claim')
+    await onchainReceiveStore.transition(id, 'awaiting_confirmations', 'funding_arkade')
+    await onchainReceiveStore.transition(id, 'funding_arkade', 'awaiting_claim', { arkade_fund_txid: hexOf(32) })
     at(ago - 800)
-    await onchainReceiveStore.transition(id, 'awaiting_claim', 'claimed', {
-      preimage: hexOf(32),
-      arkade_claim_txid: hexOf(32),
-    })
+    await onchainReceiveStore.transition(id, 'awaiting_claim', 'claimed', { preimage })
+    await onchainReceiveStore.patch(id, { onchain_claim_txid: hexOf(32) })
     at(ago - 1_500)
-    await onchainReceiveStore.transition(id, 'claimed', 'settled', { onchain_claim_txid: hexOf(32) })
+    await onchainReceiveStore.transition(id, 'claimed', 'settled')
   }
 
   // A week of delivered swaps, oldest first, so the P&L chart has a shape.
@@ -366,11 +391,11 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
     dustSats: 330n,
     pricedByDefault: config.assetCarrierPricing,
   })
-  /** BTC → USDA at a quoted price, filled at a slightly different one: the P&L screen's FX drift. */
-  const assetFill = async (ago: number, sats: number, quoted: number, filled: number) => {
+  /** BTC → USDA priced off `feed` less the 40 bps fee, marked at `filled`: the P&L screen's FX drift. */
+  const assetFill = async (ago: number, sats: number, feed: number, filled: number) => {
     at(ago)
     const id = uuid()
-    const cents = BigInt(Math.floor((sats / 1e8) * quoted * 100 * 0.996))
+    const cents = BigInt(Math.floor((sats / 1e8) * feed * 100 * 0.996))
     await assetRfqStore.insertQuote({
       id,
       rfqId: uuid(),
@@ -385,7 +410,7 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
       offerAddress: arkAddress(),
       solverPubkey: hexOf(32),
       validUntil: now() + 60,
-      quotePrice: { impliedMantissa: BigInt(Math.round(quoted * 100)), scale: 2, givesBase: true },
+      quotePrice: { impliedMantissa: (cents * 100_000_000n) / BigInt(sats), scale: 2, givesBase: true },
     })
     at(ago - 20)
     await assetRfqStore.transition(id, 'quoted', 'funded', { deposit_txid: hexOf(32), deposit_vout: 0 })
@@ -456,22 +481,24 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
   const failing = new Error('lightning backend: getPayment timed out after 30s')
   tickErrors.record(paid, failing)
   const timers = [setInterval(() => tickErrors.record(paid, failing), 60_000)]
-  let live: { id: string; sats: number; state: 'armed' | 'funded' | 'claimed' } | null = null
+  let live: (Awaited<ReturnType<typeof receive>> & { state: 'quoted' | 'armed' | 'funded' | 'claimed' }) | null = null
   const advance = async () => {
     if (live === null) {
-      const sats = between(10_000, 250_000)
-      live = { id: await receive(0, sats, 'armed'), sats, state: 'armed' }
+      live = { ...(await receive(0, between(10_000, 250_000), 'quoted')), state: 'quoted' }
       pinned = null
+    } else if (live.state === 'quoted') {
+      await receiveStore.transition(live.id, 'quoted', 'armed', { htlc_expires_at: now() + HOUR })
+      live.state = 'armed'
     } else if (live.state === 'armed') {
       await receiveStore.transition(live.id, 'armed', 'funded', {
         arkade_lockup_txid: hexOf(32),
         arkade_lockup_vout: 0,
-        arkade_lockup_value: live.sats,
+        arkade_lockup_value: live.payout,
         fund_started_at: now(),
       })
       live.state = 'funded'
     } else if (live.state === 'funded') {
-      await receiveStore.transition(live.id, 'funded', 'claimed', { preimage: hexOf(32) })
+      await receiveStore.transition(live.id, 'funded', 'claimed', { preimage: live.preimage })
       live.state = 'claimed'
     } else {
       await receiveStore.transition(live.id, 'claimed', 'settled')
