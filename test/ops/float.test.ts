@@ -146,6 +146,10 @@ const FLOAT_ADDRESS = new ArkAddress(new Uint8Array(32).fill(2), new Uint8Array(
 
 type SettleParams = { inputs: { txid: string; vout: number }[]; outputs: { address: string; amount: bigint }[] }
 
+/** arkd's active signer as `getInfo` reports it (compressed), and a rotated-away one (x-only). */
+const ACTIVE_SIGNER = `02${'11'.repeat(32)}`
+const OLD_SIGNER = '33'.repeat(32)
+
 const floatServices = (
   migrate: () => Promise<unknown>,
   vtxos: { txid: string; vout: number }[] = [],
@@ -167,13 +171,23 @@ const floatServices = (
         }),
         getContractManager: async () => ({
           getContractsWithVtxos: async () =>
-            vtxos.length === 0 ? [] : [{ contract: { script: 'aa', type: 'default' }, vtxos }],
+            vtxos.length === 0
+              ? []
+              : [{ contract: { script: 'aa', type: 'default', params: { serverPubKey: OLD_SIGNER } }, vtxos }],
         }),
         // The recovery guard's ungated read: nothing recoverable in these cases.
         getVtxos: async () => [],
-        arkProvider: { getInfo: async () => ({ fees: { intentFee: {} }, vtxoMaxAmount: 1_000_000n, dust: 330n }) },
+        arkProvider: {
+          getInfo: async () => ({
+            fees: { intentFee: {} },
+            vtxoMaxAmount: 1_000_000n,
+            dust: 330n,
+            signerPubkey: ACTIVE_SIGNER,
+          }),
+        },
         getAddress: async () => FLOAT_ADDRESS,
       },
+      dustSats: 330n,
       reservations: createReservationLedger(),
       // The recovery guard asks whether a lockup's `client` key is ours before
       // it lets one into an all-or-nothing sweep. No lockups in these cases, so
@@ -512,6 +526,80 @@ describe('runFloatLifecycle — migration throttle and count', () => {
     }, [{ txid: 'aa', vout: 0 }])
     await runFloatLifecycle(services)
     expect(services.arkade.reservations.reserved().size).toBe(0)
+  })
+
+  it('pins only coins off the active signer, leaving the float a funding draws from', async () => {
+    const services = floatServices(async () => NO_DEPRECATED)
+    let observed: ReadonlySet<string> = new Set()
+    const contract = (script: string, serverPubKey: string) => ({ script, type: 'default', params: { serverPubKey } })
+    services.arkade.wallet.getContractManager = async () =>
+      ({
+        getContractsWithVtxos: async () => [
+          { contract: contract('aa', OLD_SIGNER), vtxos: [{ txid: 'old', vout: 0 }] },
+          { contract: contract('bb', ACTIVE_SIGNER.slice(2)), vtxos: [{ txid: 'current', vout: 0 }] },
+        ],
+      }) as never
+    services.arkade.wallet.getVtxoManager = async () =>
+      ({
+        migrateDeprecatedSignerVtxos: async () => {
+          observed = services.arkade.reservations.reserved()
+          return NO_DEPRECATED
+        },
+        getExpiringVtxos: async () => [],
+        recoverVtxos: async () => null,
+      }) as never
+    await runFloatLifecycle(services)
+    expect([...observed]).toEqual(['old:0'])
+  })
+
+  it('defers, rather than racing it, when a funding holds one of its coins', async () => {
+    const migrate = vi.fn(async () => NO_DEPRECATED)
+    const coin = { txid: 'aa', vout: 0 }
+    const services = floatServices(migrate, [coin])
+    services.arkade.reservations.reserve([coin])
+    const report = await runFloatLifecycle(services)
+    expect(migrate).not.toHaveBeenCalled()
+    expect(report.failures.join(' ')).toContain('a funding holds one of its coins')
+  })
+})
+
+describe('runFloatLifecycle pins what recovery sweeps', () => {
+  const swept = { txid: 'swept', vout: 0, value: 5_000, script: 'aa', isSwept: true }
+  const subdust = { txid: 'subdust', vout: 0, value: 100, script: 'aa', isPreconfirmed: true }
+  const spendable = { txid: 'spendable', vout: 0, value: 50_000, script: 'aa', isPreconfirmed: true }
+
+  const recovering = (recoverVtxos: () => Promise<unknown>): Services => {
+    const services = servicesWithLockupRead(async () => [])
+    const wallet = services.arkade.wallet as unknown as Record<string, unknown>
+    wallet.getVtxos = async () => [swept, subdust, spendable]
+    wallet.getVtxoManager = async () => ({
+      migrateDeprecatedSignerVtxos: async () => NO_DEPRECATED,
+      getExpiringVtxos: async () => [],
+      getExpiredBoardingUtxos: async () => [],
+      recoverVtxos,
+    })
+    return services
+  }
+
+  it('pins the preconfirmed subdust it sweeps, which a funding could otherwise select', async () => {
+    let pinned: ReadonlySet<string> = new Set()
+    const services = recovering(async () => {
+      pinned = services.arkade.reservations.reserved()
+      return 'recover-txid'
+    })
+    const report = await runFloatLifecycle(services)
+    expect(report.recovered).toBe('recover-txid')
+    expect([...pinned].sort()).toEqual(['subdust:0', 'swept:0'])
+    expect(services.arkade.reservations.reserved().size).toBe(0)
+  })
+
+  it('does not sweep while a funding holds one of those coins', async () => {
+    const recoverVtxos = vi.fn(async () => 'recover-txid')
+    const services = recovering(recoverVtxos)
+    services.arkade.reservations.reserve([subdust])
+    const report = await runFloatLifecycle(services)
+    expect(recoverVtxos).not.toHaveBeenCalled()
+    expect(report.failures.join(' ')).toContain('a funding holds a coin recovery would sweep')
   })
 })
 

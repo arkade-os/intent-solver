@@ -547,12 +547,9 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   }
 
   /**
-   * The two slow cadences, CONCURRENT with the loop below rather than inside it.
-   *
-   * A lifecycle pass takes 55-70s in production; awaited inline, it stopped the
-   * hot tick for as long, inside the window where a paid-but-unclaimed swap is
-   * exposed. The cost is that renewal can now overlap a funding, which is why
-   * the renewal settle pins its inputs. @see ops/float.ts
+   * The two slow cadences, CONCURRENT with the loop below: a pass can take a
+   * minute, and the hot tick must not wait on it. So a pass can overlap a
+   * funding, which is why every float spender in it pins its inputs. @see ops/float.ts
    */
   const cadences = [
     startCadence({
@@ -590,7 +587,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
       //
       // SEQUENTIAL is load-bearing, not incidental: the receive legs all fund
       // from one float, and awaiting each in turn is what keeps the reservation
-      // ledger's job small — renewal now runs concurrently and pins against it.
+      // ledger's job small; the lifecycle pass runs beside it and pins against it.
       // @see arkade/reservations.ts — do not turn this into a Promise.all.
       //
       // The EVM legs ride this same loop: no hot tick (an EVM confirmation
