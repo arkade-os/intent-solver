@@ -22,7 +22,7 @@ const now = 1_800_000_000
 /**
  * The solver's own window to get an L1 claim confirmed after a late Arkade
  * claim reveals `P` — the one deadline on this leg whose miss costs real money
- * rather than a failed swap (#141).
+ * rather than a failed swap (#160).
  *
  * Pinned in ABSOLUTE MINUTES, deliberately, and this is the whole point of the
  * block. Every other test here is written in terms of the constants, so it
@@ -33,7 +33,7 @@ const now = 1_800_000_000
  * window toward `SETTLE_SAFETY_MARGIN` = 15 minutes, and nothing said so.
  *
  * If these numbers change, that is a decision about how long an L1 claim needs,
- * and #141 is where it gets made — not a constant nudge with a side effect.
+ * and #160 is where it gets made — not a constant nudge with a side effect.
  */
 describe('the L1 claim window this leg actually gives the solver', () => {
   it.each([
@@ -58,7 +58,7 @@ describe('the L1 claim window this leg actually gives the solver', () => {
 
   /**
    * The DEFAULT configuration is already below this module's own figure, and
-   * that is the live substance of #141 rather than a hypothetical.
+   * that is the live substance of #160 rather than a hypothetical.
    *
    * `MIN_SETTLE_WINDOW` = 90 minutes is what this file says noticing a
    * preimage, settling and retrying takes. An L1 claim has neither a retry nor
@@ -75,7 +75,7 @@ describe('the L1 claim window this leg actually gives the solver', () => {
   it('clears the floor at six confirmations and does NOT at the default', () => {
     // 120 min >= 90 min.
     expect(onchainReceiveClaimWindow(MAX_MIN_CONFIRMATIONS, now)).toBeGreaterThanOrEqual(MIN_SETTLE_WINDOW)
-    // 70 min < 90 min. Deliberately asserted as a FAILURE of the floor: if #141
+    // 70 min < 90 min. Deliberately asserted as a FAILURE of the floor: if #160
     // resolves by making the documented SETTLE_SAFETY_MARGIN branch bind, this
     // line changes with it, and the change is the decision being recorded.
     expect(onchainReceiveClaimWindow(DEFAULT_MIN_CONFIRMATIONS, now)).toBeLessThan(MIN_SETTLE_WINDOW)
@@ -188,7 +188,7 @@ describe('evaluateOnchainReceiveFunding', () => {
   })
 
   /**
-   * #69's timeline, on this corridor: with the Arkade server gone the trader's
+   * The unilateral-gap timeline, on this corridor: with the Arkade server gone the trader's
    * `unilateralClaim` opens before the solver's own leaf, so if the onchain
    * htlc times out first the trader can reclaim their onchain funds AND then
    * claim the Arkade payout.
@@ -210,7 +210,7 @@ describe('evaluateOnchainReceiveFunding', () => {
 })
 
 /**
- * TLA+ finding F2 (#38), on the leg it was written against. Zero is the
+ * TLA+ finding F2, on the leg it was written against. Zero is the
  * dangerous value here: this leg waits for the CLIENT's onchain HTLC to
  * confirm before funding the Arkade side, so a zero-confirmation depth means
  * funding against a transaction that can still be replaced —

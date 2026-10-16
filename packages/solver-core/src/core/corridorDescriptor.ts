@@ -13,7 +13,7 @@ import type { RailId } from './rail.js'
  * inversion: it moves from "core will not compile until a maintainer answers"
  * to "the corridor will not compile until its author answers". What must never
  * happen is a field becoming optional with a default — that would retire the
- * question silently, which is exactly the fund-loss shape issue #88 took.
+ * question silently, which is exactly the fund-loss shape a silently retired bound takes.
  */
 
 /**

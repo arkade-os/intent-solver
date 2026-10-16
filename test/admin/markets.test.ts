@@ -10,7 +10,12 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { AdminStore, type AssetMarketRow } from '@arkade-os/solver-app/admin/db.js'
-import { assetMarketKey, type AssetMarketConfig } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import {
+  assetMarketKey,
+  DEFAULT_SERVING,
+  type AssetMarketConfig,
+} from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
 const USDT = 'aa'.repeat(34)
 const OTHER = 'bb'.repeat(34)
@@ -20,6 +25,7 @@ const clock = () => now
 let store: AdminStore
 
 const market = (over: Partial<AssetMarketConfig> = {}): AssetMarketConfig => ({
+  ...DEFAULT_SERVING,
   base: null,
   quote: USDT,
   baseDecimals: 8,
@@ -28,6 +34,8 @@ const market = (over: Partial<AssetMarketConfig> = {}): AssetMarketConfig => ({
   pricePath: '/price',
   toleranceBps: 10,
   feeBps: 25,
+  sellBaseFeeFlat: 0n,
+  buyBaseFeeFlat: 0n,
   sellBase: null,
   buyBase: null,
   enabled: true,
@@ -49,9 +57,21 @@ describe('markets', () => {
   })
 
   it('round-trips every field', async () => {
-    const written = await store.putMarket(market({ sellBase: { min: 1n, max: 2n } }))
+    // 26 placeholders, and SQLite takes a value in the wrong one. The two directions differ so a SWAP shows too.
+    const serving = {
+      symbol: 'USDT',
+      servesOffer: true,
+      servesRfq: false,
+      rfqSellBase: false,
+      rfqBuyBase: true,
+      carrierMode: 'priced',
+    } as const
+    const written = await store.putMarket(
+      market({ sellBaseFeeFlat: 330n, buyBaseFeeFlat: 1_000_000n, sellBase: { min: 1n, max: 2n }, ...serving }),
+    )
     const [read] = await store.listMarkets()
     expect(read).toEqual(written)
+    expect(read).toMatchObject(serving)
     expect(read).toMatchObject({
       base: null,
       quote: USDT,
@@ -61,10 +81,56 @@ describe('markets', () => {
       pricePath: '/price',
       toleranceBps: 10,
       feeBps: 25,
+      sellBaseFeeFlat: 330n,
+      buyBaseFeeFlat: 1_000_000n,
       sellBase: { min: 1n, max: 2n },
       buyBase: null,
       enabled: true,
     })
+  })
+
+  it('adds zero flat fees to a market table created by an older release', async () => {
+    await store.close()
+    const legacy = betterSqliteDriver(':memory:')
+    await legacy.exec(`
+      CREATE TABLE admin_market (
+        market_key TEXT PRIMARY KEY, base TEXT, quote TEXT, base_decimals INTEGER NOT NULL,
+        quote_decimals INTEGER NOT NULL, feed_url TEXT NOT NULL, price_path TEXT NOT NULL,
+        tolerance_bps INTEGER NOT NULL, fee_bps INTEGER NOT NULL, sell_base_min TEXT, sell_base_max TEXT,
+        buy_base_min TEXT, buy_base_max TEXT, enabled INTEGER NOT NULL, created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `)
+    await legacy.run('INSERT INTO admin_market VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+      assetMarketKey(null, USDT),
+      null,
+      USDT,
+      8,
+      6,
+      'https://feed.test/price',
+      '/price',
+      10,
+      25,
+      null,
+      null,
+      null,
+      null,
+      1,
+      1,
+      1,
+    ])
+    store = await AdminStore.open(legacy, clock)
+    expect(await store.listMarkets()).toMatchObject([{ sellBaseFeeFlat: 0n, buyBaseFeeFlat: 0n }])
+
+    const edited = await store.putMarket(market({ sellBaseFeeFlat: 330n, buyBaseFeeFlat: 1_000_000n }))
+    expect(edited).toMatchObject({ sellBaseFeeFlat: 330n, buyBaseFeeFlat: 1_000_000n })
+  })
+
+  it('refuses a second market under a symbol already taken, but not a second NULL', async () => {
+    await store.putMarket(market({ symbol: 'DUP' }))
+    await expect(store.putMarket(market({ base: USDT, quote: OTHER, symbol: 'DUP' }))).rejects.toThrow(/UNIQUE/)
+    await store.putMarket(market({ base: USDT, quote: OTHER }))
+    expect(await store.listMarkets()).toHaveLength(2)
   })
 
   it('files a market under the key its own legs derive', async () => {

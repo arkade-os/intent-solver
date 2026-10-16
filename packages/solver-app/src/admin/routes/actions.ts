@@ -40,6 +40,7 @@ import { requestRestart } from '../../ops/restart.js'
 import type { Services } from '../../ops/services.js'
 import type { AdminDeps } from '../server.js'
 import { clampLimit } from '@arkade-os/solver-core/core/page.js'
+import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { CORRIDORS, isCorridor, type Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 
 export type ActionTier = 'safe' | 'armed'
@@ -137,8 +138,7 @@ const requireReason = (body: ActionBody): string => {
   return body.reason
 }
 
-const idConfirm = (body: ActionBody): string | null => (typeof body.id === 'string' ? body.id : null)
-const idTarget = (body: ActionBody): string | null => (typeof body.id === 'string' ? body.id : null)
+const bodyId = (body: ActionBody): string | null => (typeof body.id === 'string' ? body.id : null)
 
 /**
  * Where a withdrawal is going. Trimmed, because a trailing space pasted out of a
@@ -264,7 +264,7 @@ export const ACTIONS: Record<string, ActionDefinition> = {
    */
   tick: {
     tier: 'safe',
-    target: idTarget,
+    target: bodyId,
     run: async (services, body) => {
       const id = requireId(body)
       const corridor = requireCorridorName(body)
@@ -293,7 +293,7 @@ export const ACTIONS: Record<string, ActionDefinition> = {
    */
   'read-payment': {
     tier: 'safe',
-    target: idTarget,
+    target: bodyId,
     run: async (services, body) => {
       const id = requireId(body)
       const corridor = requireCorridor(body)
@@ -422,6 +422,34 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     },
   },
 
+  /**
+   * THE ONLY WAY AN APPROVAL ARRIVES — deliberately not an inbound webhook, which
+   * would be a public listener on a port that is `127.0.0.1`-only and off by
+   * default. Confirmed by the SWAP ID for the reason `fund-withdraw` gives, and
+   * refuses an id the gate never held. No `deny-swap`: `park-swap` already lands
+   * an unexposed row in `refused`, which routes the lockup to the refund sweep.
+   */
+  'approve-swap': {
+    tier: 'armed',
+    confirmKind: 'swap-id',
+    expectedConfirm: bodyId,
+    target: bodyId,
+    warning:
+      'AUTHORISES THE SOLVER TO PAY OUT on a swap held for being at or above the approval threshold. The next tick ' +
+      'will fund or pay it. Read the row first — the amount, the corridor, and how long it has been waiting. To ' +
+      'refuse instead use park-swap, which stops it being driven and routes the client’s lockup to the refund sweep.',
+    run: async (services, body) => {
+      const id = requireId(body)
+      if (!(await services.adminStore.approveSwap(id))) {
+        throw new Error(
+          `no swap is being held for approval under id ${id} — approval is only possible for one the gate has ` +
+            'already held, so check the id against the pending list on the overview',
+        )
+      }
+      return { approved: id }
+    },
+  },
+
   /** Read the float's shape. Spends nothing; the dry run of `pool-mint`. */
   'pool-plan': {
     tier: 'safe',
@@ -434,8 +462,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'refund-now': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       'Pushes the covenant refund for this swap immediately, bypassing the deadline gate that deliberately ' +
       'excludes swaps which were ever exposed. Only do this after looking at the row and deciding a refund is warranted.',
@@ -455,8 +483,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'claim-now': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       'For this swap the solver ALREADY PAID. Records the preimage and returns the row to claiming so the sweep ' +
       'pushes the claim. Run read-payment first: if it says paid-do-not-refund then refunding this row instead ' +
@@ -480,8 +508,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'park-swap': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       'STOPS this swap being driven. The sweep will not touch it again and it cannot resolve itself afterwards; an ' +
       'exposed row lands in `stuck` for a human, an unexposed one in `refused`. Use it when a swap is failing in a ' +
@@ -526,7 +554,7 @@ export const ACTIONS: Record<string, ActionDefinition> = {
    */
   'unilateral-exit-plan': {
     tier: 'safe',
-    target: idTarget,
+    target: bodyId,
     run: async (services, body) => {
       const id = requireId(body)
       const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
@@ -548,8 +576,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'onchain-refund-now': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       'REFUNDS THE CLIENT THEIR ARKADE LOCKUP. For a `stuck` row this is correct in some cases and A DOUBLE-PAYOUT ' +
       'in others — the solver may already have paid out on the onchain leg. Read the row and the onchain HTLC first. ' +
@@ -570,8 +598,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'receive-refund-now': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       "RECOVERS THE SOLVER'S OWN Arkade lockup on the lightning:BTC->arkade:BTC leg — this money is ours, not the " +
       'client’s. The risk here is different from the send legs: if the client can still claim, this spends the ' +
@@ -583,8 +611,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'onchain-receive-refund-now': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       "RECOVERS THE SOLVER'S OWN Arkade lockup on the onchain:BTC->arkade:BTC leg. Same direction and same caveat " +
       'as receive-refund-now: our money, but refunding under a client who can still claim kills a live swap.',
@@ -601,8 +629,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'onchain-receive-claim-now': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       "Retries the solver's own claim of the CLIENT's L1 HTLC at today's fee rate, for a row that parked in " +
       '`stuck` because the fee once left less than dust. Safe to repeat — every attempt spends the same output, ' +
@@ -614,8 +642,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
   'reclaim-l1-htlc': {
     tier: 'armed',
     confirmKind: 'swap-id',
-    expectedConfirm: idConfirm,
-    target: idTarget,
+    expectedConfirm: bodyId,
+    target: bodyId,
     warning:
       "Re-broadcasts the solver's own Bitcoin L1 HTLC refund, to the solver. Safe to repeat — both legs spend the " +
       'same output, so a redundant refund is a double-spend the network rejects rather than a second payout.',
@@ -672,7 +700,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     confirmKind: 'literal:MINT',
     expectedConfirm: () => 'MINT',
     warning:
-      'Spends: splits the float into smaller pieces in one Arkade transaction. Refused while any corridor has a ' +
+      'Spends: reshapes the float in one Arkade transaction to the solver’s own address — splitting it into pool ' +
+      'pieces, or merging small coins into them once it holds too many. Refused while any corridor has a ' +
       'non-terminal swap, because coin reservations are process-local and a concurrent provider could be holding them.',
     run: (services, body) => mintPool(services, { force: body.force === true }),
   },
@@ -813,9 +842,9 @@ export const ACTIONS: Record<string, ActionDefinition> = {
    *    amount by the confirmed balance, because a wrong-chain address is
    *    precisely the mistake retyping cannot catch: the operator confirms the
    *    same wrong string twice.
-   *  - and MOST SOURCES DO NOT OFFER IT AT ALL. The Arkade float does not,
-   *    because paying an arbitrary address out of it would spend coins outside
-   *    the process-local reservation ledger.
+   *  - and a source offers it only where the spend can honour the reservation
+   *    ledger. The Arkade float selects the coins itself, filtered against the
+   *    ledger and pinned for the spend. @see ops/arkadeFunds.ts
    */
   'fund-withdraw': {
     tier: 'armed',
@@ -831,8 +860,11 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'SENDS THIS SOURCE’S MONEY OUT OF THE SOLVER, to an address you type. Irreversible, and it is the only ' +
       'action here whose destination is not fixed by a swap. On the lightning rail it moves the ONCHAIN wallet and ' +
       'NOT channel liquidity — that is the wallet the onchain corridors fund from, so withdrawing leaves less to ' +
-      'fund them with. NOT SAFE TO REPEAT: each attempt is a separate payment, so a withdrawal that times out must ' +
-      'be checked against the chain before you try again.',
+      'fund them with. On the arkade float an Arkade address is paid offchain at once, while a bitcoin address ' +
+      'is paid by collaborative exit at the server’s next batch — so the request can take a minute. Either way ' +
+      'the float withdrawal holds every free coin until it settles, so swaps cannot be funded from the float ' +
+      'meanwhile, and it leaves less float to fund them with afterwards. NOT SAFE TO REPEAT: each attempt is a separate payment, so a ' +
+      'withdrawal that times out must be checked against the chain before you try again.',
     run: async (services, body) => {
       const source = requireFundSource(fundSources(services), body.source)
       if (!source.withdraw) {
@@ -842,8 +874,6 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     },
   },
 }
-
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 export const registerActionRoutes = (app: Hono, deps: AdminDeps): void => {
   /** So the UI can render buttons, tiers and warnings without hardcoding them. */

@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import {
-  phaseOf,
   projectSend,
   projectReceive,
   projectOnchainSend,
   projectOnchainReceive,
-} from '@arkade-os/solver-app/admin/projection.js'
+} from '@arkade-os/solver-corridors/corridors/projections.js'
+import { phaseOf } from '../support/phaseOf.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import type { ReceiveSwapRow } from '@arkade-os/solver-corridors/db/receiveSwaps.js'

@@ -11,8 +11,6 @@
 
 import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
-import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
-import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import {
   claimSwapScript,
   findLockups,
@@ -34,7 +32,7 @@ import { covenantScriptFromRow } from '@arkade-os/solver-arkade/arkade/covenantR
 export { covenantScriptFromRow }
 
 /** Refuse to sign against a lockup whose script does not re-derive from the row. */
-const assertScriptMatchesRow = (script: { pkScript: Uint8Array }, row: CovenantScriptRow): void => {
+export const assertScriptMatchesRow = (script: { pkScript: Uint8Array }, row: CovenantScriptRow): void => {
   const derived = hex.encode(script.pkScript)
   if (derived !== row.pkScript) {
     throw new Error(`script rebuilt from row ${row.id} derives ${derived}, lockup is at ${row.pkScript}`)

@@ -1,67 +1,13 @@
 /**
- * What an offer's own script actually holds, read from local wallet state.
- *
- * The producer for `offerFillInputFrom`'s `OfferDeposit`, which does no reading of
- * its own so that whoever calls it owns the deposit's freshness. This is the half
- * that observes.
- *
- * It stays pure — outputs in, a deposit out — because the read has its own failure
- * modes, and burying it here would make the summing untestable without them.
- *
- * LOCAL STATE, NOT A DIRECT INDEXER READ. An offer sits at the maker's script,
- * which this wallet does not own, so the naive conclusion is that only
- * `indexerProvider.getVtxos({ scripts })` can see it. That is not how this repo
- * reaches a foreign script: `registerLiveLockups` in `cli.ts` already registers
- * every live lockup with `getContractManager()`, and the manager syncs those
- * contracts' virtual outputs into the wallet's own repository. An offer's script
- * is the same kind of foreign script and takes the same route — register it,
- * then read `getContractsWithVtxos()`.
- *
- * The difference is not stylistic. A direct indexer read gives this module a
- * second, independent view of the chain that nothing else in the process shares,
- * so a fill could be decided against outputs the rest of the solver has never
- * seen — and the two views drift silently, because nothing compares them. Going
- * through the contract manager means one sync, one repository, and one answer to
- * "what is funded", which is the same discipline every other corridor here
- * already follows.
- *
- * WHICH SOURCE ALSO DECIDES THE SHAPE, and three of them disagree. Measured,
- * not read off the types, because the types are behind the runtime:
- *
- *     getContractsWithVtxos()   assets[].amount is a BIGINT   <- this module
- *     wallet.getSpendableVtxos() assets[].amount is a STRING
- *     indexerProvider.getVtxos() assets[].amount is a BIGINT
- *
- * Taking `bigint` is not a preference: an asset amount is 256-bit, and the SDK
- * says so where it declares the type — "typed as `bigint` because asset supplies
- * routinely exceed Number.MAX_SAFE_INTEGER". A module that accepted the string
- * form as well would be quietly serving a caller reading the wrong source.
- *
- * Worth knowing while reading those types: `VirtualCoin` does not declare `assets` at
- * all, though the runtime plainly returns it. The compile-time assertion in the test
- * is what pins this module to the real shape.
- *
- * SATS ARE A JS NUMBER, which is safe here and nowhere near an asset. The cap is
- * 21e14, comfortably inside 2^53 - 1, so a sats total cannot lose precision. An
- * asset amount is 256-bit and would, which is why those become `bigint` on the
- * way in and stay there.
- *
- * SPENT AND SWEPT OUTPUTS DO NOT COUNT. An offer whose deposit has already been
- * spent still has a history in the repository; summing it would resurrect a
- * deposit that is gone and let the offer be filled against nothing. Both flags
- * are optional on this shape, so absent means "not flagged" rather than unknown.
+ * What an offer's own script holds: the producer for `offerFillInputFrom`'s `OfferDeposit`.
+ * Pure so the summing is testable without the read (`offerOutputs.ts`), which owns freshness.
+ * Asset amounts stay `bigint` (256-bit); sats are safe as a JS number under the 21e14 cap.
+ * Spent and swept outputs do not count — summing one would let an offer fill against nothing.
  */
 
 import type { OfferDeposit } from './offerFill.js'
 
-/**
- * The slice of a synced contract VTXO this reads.
- *
- * Structural rather than the SDK's `ExtendedContractVtxo`, and for the reason
- * `offerFill.ts` gives about `AssetId`: two SDK copies can be installed at once,
- * so naming a type here would tie this to whichever one an offer arrived
- * through. These fields are the whole dependency.
- */
+/** The slice of a VTXO this reads — structural, since these fields are the whole dependency. */
 export interface OfferOutputView {
   /** The output's pkScript, hex. Compared against the offer's own. */
   script: string

@@ -22,6 +22,7 @@
  */
 
 import type { Asset, AssetDetails, KnownMetadata, WalletBalance } from '@arkade-os/sdk'
+import { json } from '@arkade-os/solver-core/util/poll.js'
 
 /**
  * Enough of each end of an id to tell two apart at a glance, while staying short
@@ -65,30 +66,21 @@ export type ConsoleBalance = Omit<WalletBalance, 'assets' | 'availableAssets'> &
   availableAssets: ConsoleAsset[]
 }
 
-/**
- * Every `bigint` anywhere in `value`, as a decimal string.
- *
- * GENERIC RATHER THAN NAMING `assets`/`availableAssets`, which would be shorter and
- * would break again silently. The balance is "an object whose keys vary by SDK
- * version" — the console renders it key-by-key for that reason — so naming today's two
- * bigint-bearing fields means the next bigint the SDK adds takes the whole console
- * down again, as a 500 on every view, with nothing naming the new field.
- */
-const jsonSafe = (value: unknown): unknown => {
-  if (typeof value === 'bigint') return value.toString()
-  // Left whole: recursing into one would flatten it to `{}`, and a date is already
-  // something `JSON.stringify` knows how to encode.
-  if (value instanceof Date) return value
-  if (Array.isArray(value)) return value.map(jsonSafe)
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, jsonSafe(inner)]))
-  }
-  return value
-}
-
 /** What {@link describeAssets} needs from the wallet — `IReadonlyAssetManager`'s one read. */
 export interface AssetDetailSource {
   getAssetDetails(assetId: string): Promise<AssetDetails>
+}
+
+/**
+ * The wallet's asset-metadata reader, when there is one.
+ *
+ * Optional rather than assumed: `assetManager` is on the SDK's wallet interface, but a
+ * route must not 500 because something stood a narrower wallet in its place. Labels
+ * are decoration — {@link consoleBalance} renders ids without them.
+ */
+export const assetSource = (wallet: unknown): AssetDetailSource | undefined => {
+  const manager = (wallet as { assetManager?: Partial<AssetDetailSource> } | null)?.assetManager
+  return typeof manager?.getAssetDetails === 'function' ? (manager as AssetDetailSource) : undefined
 }
 
 /**
@@ -108,7 +100,7 @@ export interface AssetDetailSource {
  * immutable field, so re-asking could only cost round trips.
  */
 const metadataCache = new Map<string, KnownMetadata>()
-const inFlight = new Set<string>()
+const inFlight = new Map<string, Promise<void>>()
 
 /** Test seam: module state, and one suite's fixtures must not label the next suite's ids. */
 export const resetAssetMetadata = (): void => {
@@ -128,10 +120,11 @@ export const resetAssetMetadata = (): void => {
  * `inFlight` is what keeps that honest: without it, every request during the first
  * fetch starts another, so a page opened while the indexer is slow fans out.
  */
-const warmMetadata = (assetId: string, source: AssetDetailSource): void => {
-  if (metadataCache.has(assetId) || inFlight.has(assetId)) return
-  inFlight.add(assetId)
-  void source
+const warmMetadata = (assetId: string, source: AssetDetailSource): Promise<void> => {
+  if (metadataCache.has(assetId)) return Promise.resolve()
+  const existing = inFlight.get(assetId)
+  if (existing) return existing
+  const pending = source
     .getAssetDetails(assetId)
     .then((details) => {
       metadataCache.set(assetId, details.metadata ?? {})
@@ -143,6 +136,32 @@ const warmMetadata = (assetId: string, source: AssetDetailSource): void => {
     .finally(() => {
       inFlight.delete(assetId)
     })
+  inFlight.set(assetId, pending)
+  return pending
+}
+
+/** Whatever is known about an id now, never an amount. */
+const labelled = (assetId: string): Omit<ConsoleAsset, 'amount'> => {
+  const metadata = metadataCache.get(assetId)
+  return {
+    assetId,
+    shortId: shortAssetId(assetId),
+    ticker: metadata?.ticker,
+    name: metadata?.name,
+    decimals: metadata?.decimals,
+  }
+}
+
+/**
+ * One id's labels, WAITING for the indexer — unlike {@link describeAssets}. Only the
+ * console's own label lookup calls this, a request nothing else on the page blocks on.
+ */
+export const describeAssetId = async (
+  assetId: string,
+  source?: AssetDetailSource,
+): Promise<Omit<ConsoleAsset, 'amount'>> => {
+  if (source) await warmMetadata(assetId, source)
+  return labelled(assetId)
 }
 
 /**
@@ -157,16 +176,8 @@ const warmMetadata = (assetId: string, source: AssetDetailSource): void => {
  */
 export const describeAssets = (assets: readonly Asset[] | undefined, source?: AssetDetailSource): ConsoleAsset[] =>
   (assets ?? []).map((asset) => {
-    if (source) warmMetadata(asset.assetId, source)
-    const metadata = metadataCache.get(asset.assetId)
-    return {
-      assetId: asset.assetId,
-      amount: asset.amount.toString(),
-      shortId: shortAssetId(asset.assetId),
-      ticker: metadata?.ticker,
-      name: metadata?.name,
-      decimals: metadata?.decimals,
-    }
+    if (source) void warmMetadata(asset.assetId, source)
+    return { ...labelled(asset.assetId), amount: asset.amount.toString() }
   })
 
 /**
@@ -177,10 +188,8 @@ export const describeAssets = (assets: readonly Asset[] | undefined, source?: As
  * than copied per route.
  */
 export const consoleBalance = (balance: WalletBalance, source?: AssetDetailSource): ConsoleBalance => ({
-  // Cast because the sweep is value-level: it cannot express "the same shape with
-  // every bigint widened to string" in the type system, and every field the routes
-  // actually read back off this is a number either way.
-  ...(jsonSafe(balance) as Omit<ConsoleBalance, 'assets' | 'availableAssets'>),
+  // Every bigint as a string, not just today's fields: the keys vary by SDK version. Cast: types can't say so.
+  ...(JSON.parse(json(balance)) as Omit<ConsoleBalance, 'assets' | 'availableAssets'>),
   assets: describeAssets(balance.assets, source),
   availableAssets: describeAssets(balance.availableAssets, source),
 })

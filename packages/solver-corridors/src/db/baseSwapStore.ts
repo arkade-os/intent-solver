@@ -17,17 +17,26 @@
  */
 import type { SqlDriver } from './driver.js'
 import {
+  clampLimit,
+  decodeCursor,
   pageQuery,
   takePage,
   type FindByStatesOptions,
   type PageOptions,
   type PageRawFields,
 } from '@arkade-os/solver-core/core/page.js'
+import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
+import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
 /** A row as the driver hands it back, before the store's own mapper narrows it. */
 export type RawRow = Record<string, unknown>
 
 /** Everything the shared methods need that genuinely differs per store. */
+/** `fail()` routes to `stuck` / `refused`, so a store whose states lack either must not compile. */
+type FailStatesIn<State extends string> = 'stuck' | 'refused' extends State
+  ? unknown
+  : { 'State must include stuck and refused': never }
+
 export interface StoreShape<Row, State extends string> {
   readonly table: string
   readonly eventTable: string
@@ -48,6 +57,7 @@ export interface StoreShape<Row, State extends string> {
    */
   readonly lifecycleLabel: string
   readonly searchColumns: readonly string[]
+  readonly recoveryOrderIndex?: string
   readonly legalEdges: Readonly<Record<State, readonly State[]>>
   readonly transitionColumns: ReadonlySet<string>
   readonly patchColumns: ReadonlySet<string>
@@ -55,23 +65,43 @@ export interface StoreShape<Row, State extends string> {
   readonly live: readonly State[]
   /** States in which the solver may have paid out and not been made whole. */
   readonly exposed: readonly State[]
-  /**
-   * Where `fail()` sends a row.
-   *
-   * All four stores spell these `stuck` and `refused`, but the words are a
-   * corridor's own vocabulary rather than this file's, and a corridor that
-   * named them differently would otherwise get a silent illegal-edge throw at
-   * the worst possible moment — the moment something already went wrong.
-   */
-  readonly failStates: { readonly exposed: State; readonly clean: State }
   toRow(raw: RawRow): Row
 }
 
-const assertColumns = (columns: string[], allowed: ReadonlySet<string>, method: string): void => {
+export const assertColumns = (columns: string[], allowed: ReadonlySet<string>, method: string): void => {
   for (const column of columns) {
     if (!allowed.has(column)) throw new Error(`${method} may not set column '${column}'`)
   }
 }
+
+/** A nullable column; `undefined` (a column this database predates) reads as null too. */
+export const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value))
+
+export const numberOrNull = (value: unknown): number | null =>
+  value === null || value === undefined ? null : Number(value)
+
+/** Additive migration: `CREATE TABLE IF NOT EXISTS` never alters an existing table. */
+const SQL_IDENTIFIER = /^[a-z_][a-z0-9_]*$/
+const SQL_COLUMN_TYPE = /^(TEXT|INTEGER|REAL|BLOB)( NOT NULL)?( DEFAULT (-?\d+|'[^']*'))?$/
+
+export const addColumns = async (
+  driver: SqlDriver,
+  table: string,
+  columns: readonly (readonly [column: string, type: string])[],
+): Promise<void> => {
+  for (const name of [table, ...columns.map(([column]) => column)]) {
+    if (!SQL_IDENTIFIER.test(name)) throw new Error(`addColumns: not a plain SQL identifier: ${name}`)
+  }
+  for (const [, type] of columns) {
+    if (!SQL_COLUMN_TYPE.test(type)) throw new Error(`addColumns: not a plain column type: ${type}`)
+  }
+  const existing = new Set((await driver.all<{ name: string }>(`PRAGMA table_info(${table})`)).map((c) => c.name))
+  for (const [column, type] of columns) {
+    if (!existing.has(column)) await driver.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`)
+  }
+}
+
+const sqlStringLiteral = (value: string): string => `'${value.replaceAll("'", "''")}'`
 
 export abstract class BaseSwapStore<Row, State extends string> {
   protected constructor(
@@ -88,7 +118,7 @@ export abstract class BaseSwapStore<Row, State extends string> {
    * base-constructor logic that reached for it would silently see `undefined`.
    * If this constructor ever needs the shape, take it as a parameter instead.
    */
-  protected abstract readonly shape: StoreShape<Row, State>
+  protected abstract readonly shape: StoreShape<Row, State> & FailStatesIn<State>
 
   async close(): Promise<void> {
     await this.driver.close()
@@ -113,6 +143,24 @@ export abstract class BaseSwapStore<Row, State extends string> {
     const raw = await this.driver.get<RawRow>(
       `SELECT * FROM ${this.shape.table} WHERE rfq_id = ? ORDER BY created_at DESC LIMIT 1`,
       [rfqId],
+    )
+    return raw ? this.shape.toRow(raw) : null
+  }
+
+  /** Most recent swap for a hash, any state — the status lookup's view. */
+  async findByPaymentHash(paymentHash: string): Promise<Row | null> {
+    const raw = await this.driver.get<RawRow>(
+      `SELECT * FROM ${this.shape.table} WHERE payment_hash = ? ORDER BY created_at DESC LIMIT 1`,
+      [paymentHash],
+    )
+    return raw ? this.shape.toRow(raw) : null
+  }
+
+  /** The swap that BLOCKS a new quote for this hash, if any — mirrors the partial unique index. */
+  async findLiveByPaymentHash(paymentHash: string): Promise<Row | null> {
+    const raw = await this.driver.get<RawRow>(
+      `SELECT * FROM ${this.shape.table} WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
+      [paymentHash],
     )
     return raw ? this.shape.toRow(raw) : null
   }
@@ -153,6 +201,53 @@ export abstract class BaseSwapStore<Row, State extends string> {
 
   async findRecoverable(): Promise<Row[]> {
     return this.findByStates(this.shape.live)
+  }
+
+  async pageRecoverable(
+    options: Pick<PageOptions, 'cursor' | 'limit'> = {},
+  ): Promise<{ rows: Row[]; nextCursor: string | null }> {
+    const limit = clampLimit(options.limit)
+    const cursor = decodeCursor(options.cursor)
+    const placeholders = this.shape.live.map(() => '?').join(',')
+    const indexClause = this.shape.recoveryOrderIndex ? ` INDEXED BY ${this.shape.recoveryOrderIndex}` : ''
+    const stateClause = this.shape.recoveryOrderIndex
+      ? `state IN (${this.shape.live.map(sqlStringLiteral).join(',')})`
+      : `state IN (${placeholders})`
+    const cursorClause = cursor ? ' AND (created_at, rowid) > (?, ?)' : ''
+    const params: unknown[] = this.shape.recoveryOrderIndex ? [] : [...this.shape.live]
+    if (cursor) params.push(cursor.createdAt, cursor.rowid)
+    const raw = await this.driver.all<RawRow & PageRawFields>(
+      `SELECT *, rowid AS _rowid FROM ${this.shape.table}${indexClause}
+       WHERE ${stateClause}${cursorClause}
+       ORDER BY created_at ASC, rowid ASC LIMIT ?`,
+      [...params, limit + 1],
+    )
+    const { page, nextCursor } = takePage(raw, limit)
+    return { rows: page.map((row) => this.shape.toRow(row)), nextCursor }
+  }
+
+  /**
+   * Every row whose LAST MOVEMENT falls in a window, newest first, capped.
+   *
+   * `updated_at` rather than `created_at`, because this backs the P&L read and
+   * a swap belongs to the day its money moved, not the day it was quoted. There
+   * is no index on that column and deliberately so: this is an operator screen
+   * over a table of at most tens of thousands of rows, a scan costs
+   * milliseconds, and an index on a column every transition writes would be paid
+   * for on the money path to save time on a dashboard.
+   *
+   * One row over the cap is fetched so `truncated` is a fact rather than a
+   * guess — `rows.length === limit` cannot tell a window that exactly filled
+   * from one that overflowed, and a partial book reported as a total is the one
+   * failure a profit screen must not have.
+   */
+  async ledgerRows(window: LedgerWindow): Promise<{ rows: Row[]; truncated: boolean }> {
+    const limit = clampLedgerLimit(window.limit)
+    const raw = await this.driver.all<RawRow>(
+      `SELECT * FROM ${this.shape.table} WHERE updated_at >= ? AND updated_at < ? ORDER BY updated_at DESC LIMIT ?`,
+      [window.since, window.until, limit + 1],
+    )
+    return { rows: raw.slice(0, limit).map((r) => this.shape.toRow(r)), truncated: raw.length > limit }
   }
 
   async page(options: PageOptions = {}): Promise<{ rows: Row[]; nextCursor: string | null }> {
@@ -217,9 +312,19 @@ export abstract class BaseSwapStore<Row, State extends string> {
       id,
       from,
     ])
-    if (result.changes === 1) await this.recordEvent(id, from, to, null)
+    if (result.changes === 1) {
+      await this.recordEvent(id, from, to, null)
+      announceTransition(this.onTransition, id, from, to)
+    }
     return result.changes === 1
   }
+
+  /**
+   * Under the same `changes === 1` guard as `recordEvent`, so it inherits the
+   * compare-and-swap's exactly-once property: the loser of a race announces
+   * nothing. Synchronous and void — an awaitable hook could delay a settlement.
+   */
+  onTransition?: TransitionHook
 
   async patch(id: string, fields: Record<string, unknown>): Promise<void> {
     const columns = Object.keys(fields)
@@ -238,8 +343,26 @@ export abstract class BaseSwapStore<Row, State extends string> {
    * need a human, and flattening them into "failed" hides that.
    */
   async fail(id: string, from: State, reason: string): Promise<void> {
-    const to = this.shape.exposed.includes(from) ? this.shape.failStates.exposed : this.shape.failStates.clean
+    const to = (this.shape.exposed.includes(from) ? 'stuck' : 'refused') as State
     await this.transition(id, from, to, { failure_reason: reason })
+  }
+
+  /**
+   * Won by ONE caller before it spends; the `transition` CAS after gates only recording.
+   * No TTL: an expiry lets a second worker pay while the first is in flight. Protected
+   * because `send_swap` has no `fund_started_at`; stores with the column widen it.
+   */
+  protected async claimFundLease(id: string, from: State): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE ${this.shape.table} SET fund_started_at = ?, updated_at = ?
+       WHERE id = ? AND state = ? AND fund_started_at IS NULL`,
+      [this.now(), this.now(), id, from],
+    )
+    return result.changes === 1
+  }
+
+  protected async releaseFundLease(id: string): Promise<void> {
+    await this.driver.run(`UPDATE ${this.shape.table} SET fund_started_at = NULL WHERE id = ?`, [id])
   }
 
   protected async recordEvent(swapId: string, from: State | null, to: State, detail: string | null): Promise<void> {

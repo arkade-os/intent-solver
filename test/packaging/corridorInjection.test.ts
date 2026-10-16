@@ -49,8 +49,8 @@ describe('a consumer corridor joins the shipped registry', () => {
   })
 
   it('is driven by the same sweep, so its swaps reach a terminal state', async () => {
-    // The watch loop is `for (const corridor of services.corridors) corridor.tickAll()`.
-    // Absent from the set, an injected corridor quotes and then never advances.
+    // The watch loop iterates `services.corridors` (ASSET_ plugin corridors skip
+    // and ride `assetRfqService.tickAll()` once). An injected stem is still driven.
     const set = corridorSetFromDeps(bareDeps, [corridorFor('arkade:BTC->example:BTC', 'EXAMPLE')])
     let ticked = 0
     for (const corridor of set) ticked += await corridor.tickAll()
@@ -92,7 +92,8 @@ describe('createServices exposes the extension point', () => {
   it('threads opts.corridors into BOTH the quoting set and the readers', () => {
     // Passing it to only one leaves a corridor that quotes but reports no
     // status, or reports status it never served.
-    expect(servicesSource).toContain('corridorSetFromDeps(corridorDeps, opts?.corridors ?? [])')
-    expect(servicesSource).toContain('readerSetFromDeps(corridorDeps, opts?.corridors ?? [])')
+    expect(servicesSource).toContain('const extraCorridors = opts?.corridors ?? []')
+    expect(servicesSource).toContain('corridorSetFromDeps({ ...shared, assetRfqMarkets: serving }, extraCorridors)')
+    expect(servicesSource).toContain('readerSetFromDeps({ ...shared, assetRfqMarkets: readable }, extraCorridors)')
   })
 })

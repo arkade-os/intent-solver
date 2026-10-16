@@ -9,10 +9,9 @@
  * key touches orchestrator code here either.
  */
 
-import { Transaction, SigHash, TaprootControlBlock } from '@scure/btc-signer'
-import { concatBytes } from '@noble/hashes/utils.js'
+import { Transaction } from '@scure/btc-signer'
 import type { OnchainHtlc } from './htlc.js'
-import type { OnchainSigner } from './refund.js'
+import { addLeafInput, type OnchainSigner } from './refund.js'
 
 export interface ClaimTxParams {
   htlc: Pick<OnchainHtlc, 'pkScript' | 'claimScript' | 'claimControlBlock'>
@@ -30,28 +29,6 @@ export interface ClaimTxParams {
   payoutAmountSats: bigint
 }
 
-/** Standard tapscript leaf version — same literal `refund.ts` uses. */
-const LEAF_VERSION = 0xc0
-
-const addClaimInput = (tx: InstanceType<typeof Transaction>, params: ClaimTxParams): void => {
-  tx.addInput({
-    txid: params.fundingTxid,
-    index: params.fundingVout,
-    witnessUtxo: { script: params.htlc.pkScript, amount: BigInt(params.fundingValueSats) },
-    // RBF-enabled, same sequence value the refund side and the CLI's client
-    // self-test both use — the claim leaf carries no CLTV, so non-finality
-    // is a policy choice here, not a maturity requirement.
-    sequence: 0xfffffffd,
-    tapLeafScript: [
-      [
-        TaprootControlBlock.decode(params.htlc.claimControlBlock),
-        concatBytes(params.htlc.claimScript, new Uint8Array([LEAF_VERSION])),
-      ],
-    ],
-    sighashType: SigHash.DEFAULT,
-  })
-}
-
 /**
  * The unsigned claim transaction: one input (the funding output, tagged for
  * the claim leaf), one output. Unlike `buildOnchainRefundTx`, no `lockTime`:
@@ -61,7 +38,7 @@ const addClaimInput = (tx: InstanceType<typeof Transaction>, params: ClaimTxPara
  */
 export const buildOnchainClaimTx = (params: ClaimTxParams): InstanceType<typeof Transaction> => {
   const tx = new Transaction({ allowUnknownOutputs: true, allowUnknownInputs: true })
-  addClaimInput(tx, params)
+  addLeafInput(tx, params, params.htlc.claimScript, params.htlc.claimControlBlock)
   tx.addOutput({ script: params.destinationScript, amount: params.payoutAmountSats })
   return tx
 }

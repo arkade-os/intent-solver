@@ -194,7 +194,6 @@ describe('e2e arkade:BTC->lightning:BTC (send) — refusals, refunds and recover
   it(
     'refuses an overfunded lockup and gives every sat of it back through the covenant refund',
     async () => {
-      await assertArkadeSpendable(arkade, AMOUNT_SATS * 2)
       const { invoice } = ln.forgeInvoice(AMOUNT_SATS)
       const refundAddress = await arkade.ctx.wallet.getAddress()
 
@@ -207,7 +206,8 @@ describe('e2e arkade:BTC->lightning:BTC (send) — refusals, refunds and recover
       // so the refund below can actually be pushed.
       expect(swap.refundLocktime).toBeLessThan(nowSeconds())
 
-      const overfunded = AMOUNT_SATS + 1000
+      const overfunded = swap.amountSats + 1000
+      await assertArkadeSpendable(arkade, overfunded)
       await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: overfunded })
       await awaitFunding(swap.pkScript, overfunded)
 
@@ -215,7 +215,7 @@ describe('e2e arkade:BTC->lightning:BTC (send) — refusals, refunds and recover
       // overfunded lockup hands the solver the excess with no way back.
       const refused = await driveUntil(serviceWith(), swap.id, TERMINAL)
       expect(refused.state).toBe('refused')
-      expect(refused.failureReason).toBe(`overfunded lockup: ${overfunded} > ${AMOUNT_SATS} sats`)
+      expect(refused.failureReason).toBe(`overfunded lockup: ${overfunded} > ${swap.amountSats} sats`)
       expect(refused.lockupValue).toBe(overfunded)
 
       // And now the part only a live stack can prove: the emulator and arkd
@@ -276,7 +276,6 @@ describe('e2e arkade:BTC->lightning:BTC (send) — refusals, refunds and recover
   it(
     'refuses a lockup funded twice, and refunds both vtxos in one covenant spend',
     async () => {
-      await assertArkadeSpendable(arkade, AMOUNT_SATS * 2)
       const { invoice } = ln.forgeInvoice(AMOUNT_SATS)
       const refundAddress = await arkade.ctx.wallet.getAddress()
 
@@ -285,6 +284,7 @@ describe('e2e arkade:BTC->lightning:BTC (send) — refusals, refunds and recover
       })
       if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
       const swap = outcome.swap
+      await assertArkadeSpendable(arkade, swap.amountSats * 2)
 
       // A client that resends after a timeout it did not actually suffer. Both
       // payments are for the EXACT quoted amount, so neither is wrong on its
@@ -293,11 +293,11 @@ describe('e2e arkade:BTC->lightning:BTC (send) — refusals, refunds and recover
       // Load-bearing wait: back to back, the second send selects against a view
       // the first has not moved yet — a byte-identical rebuild arkd rejects as
       // `duplicated offchain tx`, or an already-spent outpoint, VTXO_NOT_FOUND (#104).
-      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: AMOUNT_SATS })
-      await awaitFunding(swap.pkScript, AMOUNT_SATS)
-      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: AMOUNT_SATS })
+      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: swap.amountSats })
+      await awaitFunding(swap.pkScript, swap.amountSats)
+      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: swap.amountSats })
 
-      const doubled = AMOUNT_SATS * 2
+      const doubled = swap.amountSats * 2
       // Both, not either: a tick between the two payments sees exactly the
       // quoted amount and would transition the swap to `funded` — a legitimate
       // outcome for a lockup that was correctly funded once, and the wrong
@@ -307,7 +307,7 @@ describe('e2e arkade:BTC->lightning:BTC (send) — refusals, refunds and recover
 
       const refused = await driveUntil(serviceWith(), swap.id, TERMINAL)
       expect(refused.state).toBe('refused')
-      expect(refused.failureReason).toBe(`overfunded lockup: ${doubled} > ${AMOUNT_SATS} sats`)
+      expect(refused.failureReason).toBe(`overfunded lockup: ${doubled} > ${swap.amountSats} sats`)
 
       // Two vtxos, ONE refund transaction. `refundSweep` hands every output it
       // finds at the script to a single covenant spend, and a live arkd has to
@@ -344,9 +344,9 @@ describe('e2e arkade:BTC->lightning:BTC (send) — refusals, refunds and recover
       })
       if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
       const swap = outcome.swap
-      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: AMOUNT_SATS })
+      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: swap.amountSats })
 
-      const outputs = await awaitFunding(swap.pkScript, AMOUNT_SATS)
+      const outputs = await awaitFunding(swap.pkScript, swap.amountSats)
 
       // THE ASSERTION THIS TEST EXISTS FOR. The covenant's claim leaf is
       // `HASH160 <h> EQUALVERIFY ...`; nothing local enforces it, so the only
@@ -374,8 +374,8 @@ describe('e2e arkade:BTC->lightning:BTC (send) — refusals, refunds and recover
       })
       if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
       const swap = outcome.swap
-      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: AMOUNT_SATS })
-      await awaitFunding(swap.pkScript, AMOUNT_SATS)
+      await arkade.ctx.wallet.send({ address: swap.lockupAddress, amount: swap.amountSats })
+      await awaitFunding(swap.pkScript, swap.amountSats)
 
       // NOT TICKED. This is the crash the recovery sweep exists for: the client
       // funded and the process died before the solver ever looked. The row on

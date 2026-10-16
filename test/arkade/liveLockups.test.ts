@@ -101,7 +101,7 @@ describe('liveLockupRows', () => {
   })
 
   /**
-   * The gap the emptiness throw cannot see, raised in review of #215.
+   * The gap the emptiness throw cannot see, raised in review of the workspace split.
    *
    * The test above is the SAFE reading of partial silence; this is the unsafe
    * one. `answered` is non-zero, so the throw passes, and a corridor that

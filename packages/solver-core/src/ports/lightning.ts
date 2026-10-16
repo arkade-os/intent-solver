@@ -31,7 +31,7 @@ export type PaymentStatus = 'pending' | 'succeeded' | 'failed'
  * so an empty read would flag healthy payments as stalled far more often than stalled
  * ones.
  *
- * Diagnostic only. Nothing decides whether money moves on this.
+ * Nothing moves money on this; `no_record` only ever WITHHOLDS a refund.
  */
 export type PaymentEvidence = 'no_record' | 'in_flight' | 'terminal'
 
@@ -70,6 +70,28 @@ export interface PaymentResult {
    * preimage as failure.
    */
   preimage?: string
+  /**
+   * What routing this payment ACTUALLY cost, in sats — the fee the backend
+   * paid, not the one it was budgeted.
+   *
+   * THE ONLY REALIZED EXECUTION COST ANY PORT IN THIS SERVICE REPORTS. Without
+   * it the solver knows what it quoted to keep and never what it kept: a
+   * corridor priced at 30bps into a fee market that took 40 is a loss that
+   * every figure on the P&L screen renders as a profit. `maxFeeSats` bounds it
+   * and `estimateSendFee` predicts it; neither is a record of what happened.
+   *
+   * Present only alongside `succeeded`, and only from a backend that knows. A
+   * failed payment cost nothing to route — nothing was delivered — and the
+   * in-flight case has no answer yet.
+   *
+   * OPTIONAL, under `ln/port.ts`'s rule that an absent capability is a
+   * documented degradation: a backend that cannot answer must not guess, and
+   * `undefined` here means UNMEASURED rather than free. Every consumer treats
+   * the two differently — `analytics/economics.ts` will not net a cost it was
+   * never given, and says so on the screen rather than quietly reporting gross
+   * as though it were net.
+   */
+  feePaidSats?: number
 }
 
 /**
@@ -91,6 +113,14 @@ export class PaymentHashRegistered extends Error {
   constructor(reason: string) {
     super(reason)
     this.name = 'PaymentHashRegistered'
+  }
+}
+
+/** The backend rejected this invocation before it submitted or committed a payment. */
+export class PaymentNotStarted extends Error {
+  constructor(reason: string) {
+    super(reason)
+    this.name = 'PaymentNotStarted'
   }
 }
 
@@ -173,7 +203,11 @@ export interface HoldInvoice {
    * because a backend may hand out an invoice that WRAPS the one it minted — same
    * payment hash, so both settle atomically on one preimage, but asking slightly more
    * to cover the wrapper's routing reserve. The client pays THIS number, so this is
-   * what the corridor must quote.
+   * what the corridor must quote — on an EXACT-OUT request, where the give is the
+   * solver's to solve. Exact-in fixes what the client pays, so a corridor serving it
+   * must hold LESS by the reserve and price its payout off that: it asks {@link
+   * ReceiveBackend.holdForPayable} what to mint BEFORE minting, and never quotes the
+   * larger number.
    *
    * NOT what the provider receives: the held HTLC is still worth `amountSats` and the
    * payout was priced off that, so nothing downstream may substitute this for it.
@@ -202,29 +236,6 @@ export interface PayInvoiceParams {
    * compile. Backends that cannot express a ceiling ignore it.
    */
   maxCltvBlocks: number
-  /**
-   * The token off a {@link SendFeeEstimate}, where the backend minted one and the
-   * caller is spending against it.
-   *
-   * The EXECUTE half of prepare-then-execute. Without a field here the shape is not
-   * expressible at all — an adapter whose prepare call reserves a price would have to
-   * key that reservation on state only it can see, and hope the payment leaves the same
-   * process. This send leg makes no such promise: it is crash-driven, re-reads the row,
-   * and may pay from a process that never ran the prepare. That is also why the token is
-   * a STRING rather than an object or a closure: what cannot be written to a row cannot
-   * be re-driven, and a handle that quietly works until the first restart is worse than
-   * one that was never offered.
-   *
-   * Optional on both sides. Absent means what it has always meant — pay at whatever the
-   * backend charges now, bounded by {@link maxFeeSats} — so a backend that mints no
-   * token never sees one and a caller that keeps none never sends one.
-   *
-   * A backend handed a token it cannot honour (expired, unknown, minted against a
-   * different invoice) MUST fail rather than fall back to paying at the current price.
-   * The caller passed it because the quote was priced off it, so a silent fallback pays
-   * a number nobody quoted, on a swap whose spread was computed against a different one.
-   */
-  feeHandle?: string
 }
 
 /** What {@link SendBackend.estimateSendFee} is asked about. */
@@ -279,20 +290,16 @@ export interface SendFeeEstimate {
    */
   feeSats: number
   /**
-   * An opaque token the backend will honour if it is handed back to
-   * {@link SendBackend.payInvoice} as {@link PayInvoiceParams.feeHandle}.
+   * The part of {@link feeSats} this rail wants included in the client quote.
    *
-   * Optional, and most backends mint nothing: an estimate is usually just a reading. It
-   * exists so the prepare-then-execute backends are expressible — the ones where the
-   * first call returns the fee for THIS payment and the second spends against it — since
-   * without it their exact figure would have to be re-derived by a second estimate that
-   * may answer differently.
-   *
-   * Opaque to everything above the adapter, and persistable by construction. See
-   * {@link PayInvoiceParams.feeHandle} for what a backend must do with one it cannot
-   * honour.
+   * Omit it to bill the full backend cost. A rail may set a smaller value when
+   * it deliberately subsidizes a provider-specific component, but it may never
+   * exceed `feeSats`: this only separates price from cost; it does not create a
+   * larger margin or weaken the payment cap. The send orchestrator persists
+   * `feeSats` as {@link PayInvoiceParams.maxFeeSats} and uses this field only to
+   * calculate the lockup amount.
    */
-  feeHandle?: string
+  billableFeeSats?: number
 }
 
 export interface Balance {
@@ -414,7 +421,7 @@ export interface SendBackend {
    * swap, or refuse to quote one, because this answered null. It prices; it does not
    * admit.
    *
-   * NOT A PROMISE either, with or without a {@link SendFeeEstimate.feeHandle}. A quote is
+   * NOT A PROMISE either. A quote is
    * followed by the client funding a lockup, which takes as long as it takes, and the fee
    * can move in between. `maxFeeSats` is what guards payment time; this only makes the
    * quote honest.
@@ -500,14 +507,27 @@ export interface SendBackend {
     /** Unix seconds. Required: an invoice the console cannot age is one an operator pays late. */
     expiresAt: number
   }>
+
+  /** Mint a native rail address for operator deposits, when the backend supports one. */
+  createDepositAddress?(): Promise<{ address: string; addressKind: string }>
 }
 
 /** The receive leg's view: issue a hold invoice and settle it with the preimage. */
 export interface ReceiveBackend {
   createHoldInvoice(params: CreateHoldInvoiceParams): Promise<HoldInvoice>
 
+  /**
+   * The hold whose PUBLISHED invoice would ask exactly `payableSats`, answered
+   * BEFORE the real mint. Must not touch the swap's payment hash, which gets
+   * exactly one invoice. Throws when no such hold exists.
+   */
+  holdForPayable?(payableSats: number): Promise<number>
+
   /** Read the hold's status and, once armed, its settle deadline `E`. */
   getHoldState(paymentHash: string): Promise<HoldState>
+
+  /** `onHeld` once an HTLC for this hold is accepted: a nudge, never evidence. Returns an unsubscribe. */
+  onHoldAccepted?(paymentHash: string, onHeld: () => void): () => void
 
   /** Settle a held HTLC by revealing the preimage. `preimage` is hex. */
   settleHold(preimage: string): Promise<void>
@@ -532,6 +552,9 @@ export interface ReceiveBackend {
    * the conservative outcome.
    */
   getOwnInvoiceState?(paymentHash: string): Promise<HoldState | null>
+
+  /** Live state for a DB-proven own invoice; negative answers must exhaust the backend's HTLC view. */
+  getKnownInvoiceState?(paymentHash: string): Promise<HoldState>
 
   /**
    * Retire an invoice that has NOT been paid, so nothing can pay it later.

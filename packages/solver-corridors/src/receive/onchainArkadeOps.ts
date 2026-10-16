@@ -80,12 +80,8 @@ export const onchainReceiveArkadeOpsFromContext = async (
     refund: base.refund,
     findLockupOutpoints: (pkScriptHex) => findLockupOutpoints(ctx, pkScriptHex),
     findClaimPreimage: (outpoints, paymentHashHex) => findClaimPreimage(ctx, outpoints, paymentHashHex),
-    // The SHARED funding path, not `wallet.send`. This corridor called
-    // `wallet.send` while the lightning one applied coin selection and the
-    // reservation ledger — the same money, the same covenant, one of them
-    // guarded. Regtest cannot tell the two apart (its batches are shorter than
-    // the refund horizon, so the wrong pick and the right one are the same
-    // coin), so the difference would only have surfaced on mainnet.
+    // The SHARED funding path, not `wallet.send`: coin selection and the
+    // reservation ledger apply here too. @see fundLockup.ts
     fund: async (params) => fundLockup(ctx, params.address, params.amountSats, params.stamp),
   }
 }

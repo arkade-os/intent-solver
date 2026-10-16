@@ -21,13 +21,9 @@
  * no operator-forced refund at all.
  */
 import {
-  createCorridorReaderSet,
-  createCorridorSet,
   parkVia,
   type Corridor,
   type CorridorReader,
-  type CorridorReaderSet,
-  type CorridorSet,
   type CorridorSwapView,
 } from '@arkade-os/solver-core/core/corridor.js'
 import { NON_TERMINAL as LN_SEND_LIVE } from '../db/swaps.js'
@@ -42,6 +38,8 @@ import { receiveCovenantRowFor as onchainReceiveCovenantRowFor } from '../receiv
 import type { PageOptions } from '@arkade-os/solver-core/core/page.js'
 import { LN_SEND, LN_RECEIVE, ONCHAIN_SEND, ONCHAIN_RECEIVE } from './index.js'
 import { projectSend, projectReceive, projectOnchainSend, projectOnchainReceive } from './projections.js'
+import { sendEconomics, receiveEconomics, onchainSendEconomics, onchainReceiveEconomics } from './economics.js'
+import type { LedgerWindow, SwapEconomics } from '@arkade-os/solver-core/analytics/economics.js'
 import {
   respondToLightningRfqRequest,
   respondToLightningReceiveRfqRequest,
@@ -66,6 +64,7 @@ interface ReadableStore<Row> {
   findByRfqId(rfqId: string): Promise<Row | null>
   findRecoverable(): Promise<Row[]>
   committedSats(): Promise<number>
+  ledgerRows(window: LedgerWindow): Promise<{ rows: Row[]; truncated: boolean }>
   page(options: PageOptions): Promise<{ rows: Row[]; nextCursor: string | null }>
   get(id: string): Promise<Row>
   history(id: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>
@@ -95,6 +94,8 @@ const readerFor = <Row extends { id: string; pkScript: string; preimage: string 
    * own lockup, and the settlement layer only asks.
    */
   toCovenantRow: (row: Row) => CovenantScriptRow,
+  /** This corridor's row → the book's vocabulary. @see corridors/economics.ts */
+  toEconomics: (row: Row) => SwapEconomics,
 ): CorridorReader => ({
   descriptor,
   liveLockups: async () => (await store.findRecoverable()).map(toCovenantRow),
@@ -117,6 +118,10 @@ const readerFor = <Row extends { id: string; pkScript: string; preimage: string 
   },
   findRecoverable: () => store.findRecoverable(),
   committedSats: () => store.committedSats(),
+  economics: async (window) => {
+    const { rows, truncated } = await store.ledgerRows(window)
+    return { corridor: descriptor.pair, records: rows.map(toEconomics), truncated }
+  },
   page: async (options) => {
     const { rows, nextCursor } = await store.page(options)
     return { swaps: rows.map(project), nextCursor }
@@ -133,24 +138,36 @@ const readerFor = <Row extends { id: string; pkScript: string; preimage: string 
 })
 
 export const lightningSendReader = (store: SwapStore): CorridorReader =>
-  readerFor(LN_SEND, store, projectSend, rfqStatusPayload, (row) => row)
+  readerFor(LN_SEND, store, projectSend, rfqStatusPayload, (row) => row, sendEconomics)
 
 export const lightningReceiveReader = (store: ReceiveSwapStore): CorridorReader =>
-  readerFor(LN_RECEIVE, store, projectReceive, lightningReceiveRfqStatusPayload, receiveCovenantRowFor)
+  readerFor(
+    LN_RECEIVE,
+    store,
+    projectReceive,
+    lightningReceiveRfqStatusPayload,
+    receiveCovenantRowFor,
+    receiveEconomics,
+  )
 
 export const onchainSendReader = (store: OnchainSendSwapStore): CorridorReader =>
-  readerFor(ONCHAIN_SEND, store, projectOnchainSend, onchainRfqStatusPayload, covenantRowFor)
+  readerFor(ONCHAIN_SEND, store, projectOnchainSend, onchainRfqStatusPayload, covenantRowFor, onchainSendEconomics)
 
 export const onchainReceiveReader = (store: OnchainReceiveSwapStore): CorridorReader =>
-  readerFor(ONCHAIN_RECEIVE, store, projectOnchainReceive, onchainReceiveRfqStatusPayload, onchainReceiveCovenantRowFor)
+  readerFor(
+    ONCHAIN_RECEIVE,
+    store,
+    projectOnchainReceive,
+    onchainReceiveRfqStatusPayload,
+    onchainReceiveCovenantRowFor,
+    onchainReceiveEconomics,
+  )
 
 /**
  * Where a parked row lands, for all four BTC corridors.
  *
- * One constant because all four stores declare the same
- * `failStates: { exposed: 'stuck', clean: 'refused' }` — see each store's shape.
- * A corridor that renamed either word would need its own list, which is exactly
- * why `parkVia` takes it rather than assuming these two.
+ * The two words `BaseSwapStore.fail()` routes to. A corridor that renamed
+ * either would need its own list, which is why `parkVia` takes it.
  */
 const BTC_PARKED = ['stuck', 'refused'] as const
 
@@ -170,7 +187,7 @@ export const lightningSendCorridor = (service: SendSwapService, store: SwapStore
 
 export const lightningReceiveCorridor = (service: ReceiveSwapService, store: ReceiveSwapStore): Corridor => ({
   ...lightningReceiveReader(store),
-  quote: (payload) => respondToLightningReceiveRfqRequest(service, payload),
+  quote: (payload, options) => respondToLightningReceiveRfqRequest(service, payload, options),
   tick: async (id) => {
     await service.tick(id)
   },
@@ -181,7 +198,7 @@ export const lightningReceiveCorridor = (service: ReceiveSwapService, store: Rec
 
 export const onchainSendCorridor = (service: OnchainSendSwapService, store: OnchainSendSwapStore): Corridor => ({
   ...onchainSendReader(store),
-  quote: (payload) => respondToOnchainRfqRequest(service, store, payload),
+  quote: (payload, options) => respondToOnchainRfqRequest(service, store, payload, options),
   tick: async (id) => {
     await service.tick(id)
   },
@@ -196,7 +213,7 @@ export const onchainReceiveCorridor = (
   store: OnchainReceiveSwapStore,
 ): Corridor => ({
   ...onchainReceiveReader(store),
-  quote: (payload) => respondToOnchainReceiveRfqRequest(service, payload),
+  quote: (payload, options) => respondToOnchainReceiveRfqRequest(service, payload, options),
   tick: async (id) => {
     await service.tick(id)
   },

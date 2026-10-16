@@ -11,6 +11,7 @@ import {
   type OfferPriceMarket,
 } from '@arkade-os/solver-core/core/assetOfferPrice.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
+import { resolveAssetQuote } from '@arkade-os/solver-core/core/assetRfq.js'
 
 /** BTC/USDT: base is BTC (8 decimals), quote is USDT (6). Feed is USDT per BTC. */
 const market = (over: Partial<OfferPriceMarket> = {}): OfferPriceMarket => ({
@@ -18,6 +19,8 @@ const market = (over: Partial<OfferPriceMarket> = {}): OfferPriceMarket => ({
   quoteDecimals: 6,
   toleranceBps: 10,
   feeBps: 0,
+  sellBaseFeeFlat: 0n,
+  buyBaseFeeFlat: 0n,
   ...over,
 })
 
@@ -43,6 +46,19 @@ const buy = (usdt: number, over: Partial<OfferPriceMarket> = {}) =>
     market: market(over),
     feed,
   })
+
+describe('a spread per direction', () => {
+  it('refuses on the widened side and leaves the other alone', () => {
+    expect(sell(100_000)).toBe(true)
+    expect(sell(100_000, { sellBaseFeeBps: 900 })).toBe(false)
+    expect(sell(100_000, { buyBaseFeeBps: 900 })).toBe(true)
+  })
+
+  it('is symmetric in the mirror direction', () => {
+    expect(buy(100_000, { buyBaseFeeBps: 900 })).toBe(false)
+    expect(buy(100_000, { sellBaseFeeBps: 900 })).toBe(buy(100_000))
+  })
+})
 
 describe('sell_base — the maker sells BTC, we pay USDT', () => {
   it('takes an offer at the feed price', () => {
@@ -97,6 +113,101 @@ describe('the fee is folded in against the maker', () => {
     expect(buy(100_000, { feeBps: 100 })).toBe(false)
     expect(buy(101_000, { feeBps: 100 })).toBe(true)
     expect(buy(98_000, { feeBps: 100 })).toBe(false)
+  })
+
+  it('prices a sell from the deposit left after its base-side flat fee', () => {
+    const priced = (wantAmount: bigint) =>
+      offerWithinTolerance({
+        depositAmount: 100_000_000n,
+        wantAmount,
+        direction: 'sell_base',
+        market: market({ toleranceBps: 0, sellBaseFeeFlat: 330n }),
+        feed,
+      })
+    expect(priced(99_999_670_000n)).toBe(true)
+    expect(priced(99_999_670_001n)).toBe(false)
+  })
+
+  it('takes bps from the converted sell payout after the flat fee', () => {
+    const priced = (wantAmount: bigint) =>
+      offerWithinTolerance({
+        depositAmount: 100_000_000n,
+        wantAmount,
+        direction: 'sell_base',
+        market: market({ toleranceBps: 0, feeBps: 100, sellBaseFeeFlat: 330n }),
+        feed,
+      })
+    expect(priced(98_999_673_300n)).toBe(true)
+    expect(priced(98_999_673_301n)).toBe(false)
+  })
+
+  it('prices a buy from the deposit left after its quote-side flat fee', () => {
+    const priced = (depositAmount: bigint) =>
+      offerWithinTolerance({
+        depositAmount,
+        wantAmount: 100_000_000n,
+        direction: 'buy_base',
+        market: market({ toleranceBps: 0, buyBaseFeeFlat: 1_000_000n }),
+        feed,
+      })
+    expect(priced(100_001_000_000n)).toBe(true)
+    expect(priced(100_000_999_999n)).toBe(false)
+  })
+
+  it('takes bps from the converted buy payout after the flat fee', () => {
+    const priced = (wantAmount: bigint) =>
+      offerWithinTolerance({
+        depositAmount: 100_001_000_000n,
+        wantAmount,
+        direction: 'buy_base',
+        market: market({ toleranceBps: 0, feeBps: 100, buyBaseFeeFlat: 1_000_000n }),
+        feed,
+      })
+    expect(priced(99_000_000n)).toBe(true)
+    expect(priced(99_000_001n)).toBe(false)
+  })
+
+  it('matches RFQ exact-in pricing in both directions', () => {
+    const asset = 'aa'.repeat(34)
+    const priced = market({ toleranceBps: 0, feeBps: 100, sellBaseFeeFlat: 330n, buyBaseFeeFlat: 1_000_000n })
+    for (const trade of [
+      { from: null, to: asset, amount: 100_000_000n, direction: 'sell_base' as const },
+      { from: asset, to: null, amount: 100_001_000_000n, direction: 'buy_base' as const },
+    ]) {
+      const quote = resolveAssetQuote({
+        pair: { from: trade.from, to: trade.to },
+        amount: trade.amount,
+        amountSide: 'from',
+        market: { ...priced, base: null, quote: asset, minPayout: 1n, maxPayout: 10n ** 20n },
+        feed,
+        carrierSats: 330n,
+        dustSats: 330n,
+      })
+      expect(quote.ok).toBe(true)
+      if (!quote.ok) continue
+      expect(
+        offerWithinTolerance({
+          depositAmount: trade.amount,
+          wantAmount: quote.toAmount,
+          direction: trade.direction,
+          market: priced,
+          feed,
+          carrierCharged: trade.to === null ? 0n : 330n,
+          carrierReturned: trade.to === null ? 330n : 0n,
+        }),
+      ).toBe(true)
+      expect(
+        offerWithinTolerance({
+          depositAmount: trade.amount,
+          wantAmount: quote.toAmount + 1n,
+          direction: trade.direction,
+          market: priced,
+          feed,
+          carrierCharged: trade.to === null ? 0n : 330n,
+          carrierReturned: trade.to === null ? 330n : 0n,
+        }),
+      ).toBe(false)
+    }
   })
 })
 
@@ -258,5 +369,49 @@ describe('offerDirectionOn', () => {
     const EURC = '22'.repeat(34)
     expect(offerDirectionOn({ base: USDT, quote: EURC }, USDT, EURC)).toBe('sell_base')
     expect(offerDirectionOn({ base: USDT, quote: EURC }, EURC, USDT)).toBe('buy_base')
+  })
+})
+
+describe('the carrier a BTC-wanting maker fronted', () => {
+  const deposit = 100_000_000_000n
+  const at = (wantAmount: bigint, carrierReturned: bigint) =>
+    offerWithinTolerance({
+      depositAmount: deposit,
+      wantAmount,
+      direction: 'buy_base',
+      market: market(),
+      feed,
+      carrierReturned,
+    })
+
+  const payout = 100_100_100n
+
+  it('is not granted when no carrier is supplied', () => {
+    expect(at(payout, 0n)).toBe(true)
+    expect(at(payout + 1n, 0n)).toBe(false)
+  })
+
+  it('grants exactly one carrier of headroom, never two', () => {
+    expect(at(payout + 330n, 330n)).toBe(true)
+    expect(at(payout + 331n, 330n)).toBe(false)
+  })
+})
+
+/** Without this the packet path still funds the carrier it delivers. */
+describe('the carrier an asset-wanting maker is delivered', () => {
+  const at = (wantAmount: bigint, carrierCharged: bigint) =>
+    offerWithinTolerance({
+      depositAmount: 100_000_000n,
+      wantAmount,
+      direction: 'sell_base',
+      market: market(),
+      feed,
+      carrierCharged,
+    })
+
+  it('is charged against the deposit, tightening what we will fill', () => {
+    expect(at(100_100_000_000n, 0n)).toBe(true)
+    expect(at(100_100_000_000n, 330n)).toBe(false)
+    expect(at(100_099_669_670n, 330n)).toBe(true)
   })
 })

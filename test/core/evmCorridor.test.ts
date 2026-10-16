@@ -9,13 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import {
-  CORRIDORS,
-  evmCorridorFor,
-  evmTokenOf,
-  isCorridor,
-  isEvmCorridor,
-} from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { CORRIDORS, evmCorridorFor, evmTokenOf, isCorridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
 
@@ -50,18 +44,17 @@ describe('EVM corridors', () => {
     // fifth FIXED corridor still fails to compile.
     for (const corridor of CORRIDORS) {
       expect(isCorridor(corridor)).toBe(true)
-      expect(isEvmCorridor(corridor)).toBe(false)
       expect(evmTokenOf(corridor)).toBeNull()
     }
     const evm = evmCorridorFor(TOKEN, 'send')
-    expect(isEvmCorridor(evm)).toBe(true)
+    expect(evmTokenOf(evm)).toBe(TOKEN)
     expect(isCorridor(evm)).toBe(false)
   })
 
   it('does not accept a malformed EVM corridor as one', () => {
-    expect(isEvmCorridor('arkade:BTC->ethereum:0xNOTHEX')).toBe(false)
-    expect(isEvmCorridor('arkade:BTC->ethereum:')).toBe(false)
-    expect(isEvmCorridor(`ethereum:${TOKEN}->lightning:BTC`)).toBe(false)
-    expect(isEvmCorridor(`arkade:BTC->ethereum:${TOKEN.toUpperCase()}`)).toBe(false)
+    expect(evmTokenOf('arkade:BTC->ethereum:0xNOTHEX')).toBeNull()
+    expect(evmTokenOf('arkade:BTC->ethereum:')).toBeNull()
+    expect(evmTokenOf(`ethereum:${TOKEN}->lightning:BTC`)).toBeNull()
+    expect(evmTokenOf(`arkade:BTC->ethereum:${TOKEN.toUpperCase()}`)).toBeNull()
   })
 })

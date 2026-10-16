@@ -164,8 +164,9 @@ await services.close()
 ### Except the loop
 
 `watchUntilStopped` is a module-private `const` at `cli.ts:164-484` — 321 lines
-carrying the boot recovery pass, four cadences (`HOT_TICK_MS` 250ms,
-`FULL_SWEEP_MS` 3s, `REFUND_SWEEP_MS` 60s, `VTXO_LIFECYCLE_MS` 300s), the lockup
+carrying the boot recovery pass, five cadences (`HOT_TICK_MS` 250ms,
+`WATCH_SYNC_MS` 500ms, `FULL_SWEEP_MS` 3s, `REFUND_SWEEP_MS` 60s,
+`VTXO_LIFECYCLE_MS` 300s), the lockup
 watcher, the contract lifecycle and the refund sweep. **`cli.ts` has zero
 exports** and calls `main().then(() => process.exit(...))` at module load.
 

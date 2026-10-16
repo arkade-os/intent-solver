@@ -37,9 +37,9 @@
 import { parkVia, type Corridor, type CorridorReader } from '@arkade-os/solver-core/core/corridor.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 import { diagnose, phaseOfStates, type AdminSwap } from '@arkade-os/solver-core/core/swapView.js'
-import type { CorridorRfqOutcome as RfqOutcome } from '@arkade-os/solver-core/core/corridor.js'
-import { extractRfqId, zodDetail } from '@arkade-os/solver-core/core/rfqProtocol.js'
+import type { CorridorRfqOutcome as RfqOutcome, QuoteOptions } from '@arkade-os/solver-core/core/corridor.js'
 import { rfqRefusalPayload } from '../wire/payloads.js'
+import { parseRfq } from './rfq.js'
 import {
   AssetRfqRequest,
   assetRfqPairFor,
@@ -54,6 +54,7 @@ import {
   type AssetRfqSwapStore,
 } from '../db/assetRfqSwaps.js'
 import type { AssetRfqMarket, AssetRfqSwapService } from '../asset/assetRfqOrchestrator.js'
+import { assetRfqEconomics } from './economics.js'
 
 /** Which way round a market is being served. */
 export type AssetRfqDirection = 'sell_base' | 'buy_base'
@@ -83,8 +84,21 @@ export const assetRfqLegs = (
 ): { from: string | null; to: string | null } =>
   direction === 'sell_base' ? { from: market.base, to: market.quote } : { from: market.quote, to: market.base }
 
+/** Narrower than `AssetRfqMarket` on purpose: a market recovered from a live
+ * swap row has no configured pricing, and this leaves nowhere to invent any. */
+export type ReadableAssetRfqMarket = Pick<AssetRfqMarket, 'base' | 'quote' | 'symbol'>
+
+const ASSET_RFQ_STATES: CorridorDescriptor<AssetRfqSwapState>['states'] = {
+  live: NON_TERMINAL,
+  exposed: EXPOSED,
+  // `filled` and nothing else. `refused` covers both a declined quote and
+  // one that lapsed — neither delivered anything, and neither left this
+  // solver out of pocket.
+  delivered: ['filled'],
+}
+
 export const assetRfqDescriptor = (
-  market: Pick<AssetRfqMarket, 'base' | 'quote' | 'symbol'>,
+  market: ReadableAssetRfqMarket,
   direction: AssetRfqDirection,
 ): CorridorDescriptor<AssetRfqSwapState> => {
   const legs = assetRfqLegs(market, direction)
@@ -94,19 +108,8 @@ export const assetRfqDescriptor = (
     // Both legs are Arkade, so the payout always comes out of the Arkade float
     // — whether it is paid in sats or in an asset.
     payoutRail: 'arkade',
-    states: {
-      live: NON_TERMINAL,
-      exposed: EXPOSED,
-      // `filled` and nothing else. `refused` covers both a declined quote and
-      // one that lapsed — neither delivered anything, and neither left this
-      // solver out of pocket.
-      delivered: ['filled'],
-    },
+    states: ASSET_RFQ_STATES,
   }
-}
-
-const STATES_ONLY = {
-  states: { live: NON_TERMINAL, exposed: EXPOSED, delivered: ['filled' as const] },
 }
 
 /**
@@ -123,7 +126,7 @@ export const projectAssetRfq = (row: AssetRfqSwapRow): AdminSwap => ({
   id: row.id,
   corridor: row.pair,
   state: row.state,
-  phase: phaseOfStates(STATES_ONLY.states, row.state),
+  phase: phaseOfStates(ASSET_RFQ_STATES, row.state),
   amountSats: row.fromAssetId === null ? Number(row.fromAmount) : 0,
   payoutSats: row.toAssetId === null ? Number(row.toAmount) : null,
   // No hash lock anywhere in this class, so there is no payment hash to show.
@@ -144,13 +147,22 @@ export const assetRfqReader = (descriptor: CorridorDescriptor, store: AssetRfqSw
     return row && row.pair === descriptor.pair ? assetRfqStatusPayload(row, rfqId) : null
   },
   findRecoverable: async () =>
-    (await store.findRecoverable())
+    (await store.listNonTerminal())
       .filter((row) => row.pair === descriptor.pair)
       // The script worth watching is the CLIENT's offer deposit — the only
       // contract in this corridor that holds money.
       .map((row) => ({ id: row.id, pkScript: row.offerPkScript })),
   // Narrowed like every other read here: one store backs every market.
   committedSats: () => store.committedSats(descriptor.pair),
+  // Narrowed IN SQL, not afterwards. One store backs every market, so a filter
+  // applied after the store's `LIMIT` would let a busy market's rows evict a
+  // quiet one's from the window — under-reporting that corridor to zero while
+  // the screen looks healthy. It is also what makes `truncated` a fact about
+  // THIS corridor rather than about the table.
+  economics: async (window) => {
+    const { rows, truncated } = await store.ledgerRows(window, descriptor.pair)
+    return { corridor: descriptor.pair, records: rows.map((row) => assetRfqEconomics(row, descriptor)), truncated }
+  },
   page: async (options) => {
     const { rows, nextCursor } = await store.page(options)
     return { swaps: rows.filter((row) => row.pair === descriptor.pair).map(projectAssetRfq), nextCursor }
@@ -176,7 +188,7 @@ export const assetRfqCorridor = (
   store: AssetRfqSwapStore,
 ): Corridor => ({
   ...assetRfqReader(descriptor, store),
-  quote: (payload) => respondToAssetRfqRequest(service, descriptor.pair, payload),
+  quote: (payload, options) => respondToAssetRfqRequest(service, descriptor.pair, payload, options),
   tick: (id) => service.tick(id),
   tickAll: async () => (await service.tickAll()).length,
   park: (id, reason) => parkVia(store, { live: NON_TERMINAL, parked: ASSET_RFQ_PARKED }, id, reason),
@@ -195,27 +207,20 @@ export const respondToAssetRfqRequest = async (
   service: AssetRfqSwapService,
   servedPair: string,
   payload: unknown,
+  options?: QuoteOptions,
 ): Promise<RfqOutcome> => {
-  const parsed = AssetRfqRequest.safeParse(payload)
-  if (!parsed.success) {
-    return {
-      kind: 'invalid',
-      payload: rfqRefusalPayload(extractRfqId(payload), 'unsupported_payload'),
-      detail: `asset rfq_request schema: ${zodDetail(parsed.error)}`,
-    }
-  }
-  const request = parsed.data
-
   // Byte-for-byte against the pair THIS corridor serves. § 2 is explicit that
   // asset ids are compared without normalisation, so a differently-spelled pair
   // that reached the right corridor is still refused rather than served.
-  if (request.pair !== servedPair) {
-    return {
-      kind: 'invalid',
-      payload: rfqRefusalPayload(request.rfq_id, 'unsupported_pair'),
-      detail: `pair '${request.pair}' reached the corridor serving '${servedPair}'`,
-    }
-  }
+  const parsed = parseRfq(
+    AssetRfqRequest,
+    payload,
+    servedPair,
+    'asset rfq_request schema',
+    (pair) => `pair '${pair}' reached the corridor serving '${servedPair}'`,
+  )
+  if ('invalid' in parsed) return parsed.invalid
+  const { request } = parsed
 
   const outcome = await service.quote({
     rfqId: request.rfq_id,
@@ -224,9 +229,12 @@ export const respondToAssetRfqRequest = async (
     amountSide: request.amount_side,
     makerPkScript: request.profile.maker_pk_script,
     makerPublicKey: request.profile.maker_public_key,
+    requesterKey: options?.requesterKey,
   })
   if (outcome.accepted) {
-    return { kind: 'quote', payload: assetRfqQuotePayload(outcome.swap, request.rfq_id) }
+    // Off the OUTCOME, not the service: the serialiser wraps `quote` alone, and nothing revalidates this
+    // figure afterwards — `evaluateAssetFill` compares the asset leg only.
+    return { kind: 'quote', payload: assetRfqQuotePayload(outcome.swap, request.rfq_id, outcome.carrierSats) }
   }
   return {
     kind: 'refused',

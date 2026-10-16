@@ -17,8 +17,9 @@
  * script parameter — @see db/evmSendSwaps.ts.
  */
 
+import { hex } from '@scure/base'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
-import type { EvmSendSwapRow } from '../db/evmSendSwaps.js'
+import type { EvmSendSwapRow, EvmSendQuoteRecord } from '../db/evmSendSwaps.js'
 import type { EvmReceiveSwapRow } from '../db/evmReceiveSwaps.js'
 import type { AssetEvmSendSwapRow } from '../db/assetEvmSendSwaps.js'
 
@@ -27,9 +28,7 @@ const bytesFromHex = (value: string, name: string, length: number): Uint8Array =
   if (body.length !== length * 2 || !/^[0-9a-fA-F]*$/.test(body)) {
     throw new Error(name + ' must be ' + length + ' bytes of hex, got ' + JSON.stringify(value))
   }
-  const out = new Uint8Array(length)
-  for (let i = 0; i < length; i++) out[i] = Number.parseInt(body.slice(i * 2, i * 2 + 2), 16)
-  return out
+  return hex.decode(body)
 }
 
 /**
@@ -45,13 +44,7 @@ const amountOf = (raw: string, name: string): bigint => {
   return BigInt(raw)
 }
 
-/**
- * The lock the SOLVER created, for `arkade:BTC->ethereum:<token>`.
- *
- * The solver claims nothing here — the CLIENT does, with the preimage — so
- * `claimAddress` is the client's and `refundAddress` is the solver's own.
- */
-export const sendLockFromRow = (row: EvmSendSwapRow): Erc20SwapLock => ({
+const lockFromRow = (row: EvmSendSwapRow | EvmReceiveSwapRow | EvmSendQuoteRecord): Erc20SwapLock => ({
   preimageHash: bytesFromHex(row.paymentHash, 'paymentHash', 32),
   amount: amountOf(row.evmAmount, 'evmAmount'),
   tokenAddress: bytesFromHex(row.tokenAddress, 'tokenAddress', 20),
@@ -79,6 +72,13 @@ export const assetSendLockFromRow = (row: AssetEvmSendSwapRow): Erc20SwapLock =>
   refundAddress: bytesFromHex(row.evmRefundAddress, 'evmRefundAddress', 20),
   timelock: BigInt(row.evmTimeout),
 })
+/**
+ * The lock the SOLVER created, for `arkade:BTC->ethereum:<token>`.
+ *
+ * The solver claims nothing here — the CLIENT does, with the preimage — so
+ * `claimAddress` is the client's and `refundAddress` is the solver's own.
+ */
+export const sendLockFromRow = (row: EvmSendSwapRow | EvmSendQuoteRecord): Erc20SwapLock => lockFromRow(row)
 
 /**
  * The lock the CLIENT created, for `ethereum:<token>->arkade:BTC`.
@@ -88,11 +88,4 @@ export const assetSendLockFromRow = (row: AssetEvmSendSwapRow): Erc20SwapLock =>
  * a lock the solver cannot claim and the client can refund immediately — which
  * is why they are two named functions rather than one with a direction flag.
  */
-export const receiveLockFromRow = (row: EvmReceiveSwapRow): Erc20SwapLock => ({
-  preimageHash: bytesFromHex(row.paymentHash, 'paymentHash', 32),
-  amount: amountOf(row.evmAmount, 'evmAmount'),
-  tokenAddress: bytesFromHex(row.tokenAddress, 'tokenAddress', 20),
-  claimAddress: bytesFromHex(row.evmClaimAddress, 'evmClaimAddress', 20),
-  refundAddress: bytesFromHex(row.evmRefundAddress, 'evmRefundAddress', 20),
-  timelock: BigInt(row.evmTimeout),
-})
+export const receiveLockFromRow = (row: EvmReceiveSwapRow): Erc20SwapLock => lockFromRow(row)

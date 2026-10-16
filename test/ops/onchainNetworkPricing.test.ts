@@ -23,7 +23,6 @@ import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
-import { ArkAddress } from '@arkade-os/sdk'
 import { fixedFeePricing } from '@arkade-os/solver-core/core/pricing.js'
 import type { Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
@@ -326,8 +325,8 @@ describe('createServices wires both onchain corridors and neither Lightning one'
 
   it('passes a pricing strategy to exactly the two onchain corridors', () => {
     expect(pricingLines()).toHaveLength(2)
-    expect(body).toContain("onchainPricingFor(\n          'arkade:BTC->onchain:BTC',")
-    expect(body).toContain("onchainPricingFor(\n          'onchain:BTC->arkade:BTC',")
+    expect(body).toMatch(/onchainPricingFor\(\s*'arkade:BTC->onchain:BTC',/)
+    expect(body).toMatch(/onchainPricingFor\(\s*'onchain:BTC->arkade:BTC',/)
   })
 
   it('sizes each direction off the transaction that direction broadcasts', () => {
@@ -335,9 +334,9 @@ describe('createServices wires both onchain corridors and neither Lightning one'
     // client funded. Swapping these bills each corridor for the other's
     // transaction — and would still typecheck, still pass every other test
     // here, and quietly misprice both directions.
-    const send = body.indexOf("'arkade:BTC->onchain:BTC',\n          fundingTxVsize(")
-    const receive = body.indexOf("'onchain:BTC->arkade:BTC',\n          claimSpendVsize(")
-    expect({ send: send !== -1, receive: receive !== -1 }).toEqual({ send: true, receive: true })
+    const send = /'arkade:BTC->onchain:BTC',\s*fundingTxVsize\(/.test(body)
+    const receive = /'onchain:BTC->arkade:BTC',\s*claimSpendVsize\(/.test(body)
+    expect({ send, receive }).toEqual({ send: true, receive: true })
   })
 
   it('keeps each direction on its own destination script', () => {
@@ -346,10 +345,10 @@ describe('createServices wires both onchain corridors and neither Lightning one'
     // still compiles and still runs — both are addresses from the same wallet.
     // They are deliberately separate so the two flows stay separable in that
     // wallet's history, and so each corridor is sized off the output it pays.
-    expect(body).toContain('claimDestinationScript: onchainClaimDestinationScript!')
-    expect(body).toContain('refundDestinationScript: onchainRefundDestinationScript!')
-    expect(body).toContain('destinationScript: onchainClaimDestinationScript!')
-    expect(body).toContain('changeScript: onchainRefundDestinationScript!')
+    expect(body).toContain('claimDestinationScript: onchainClaimDestinationScript,')
+    expect(body).toContain('refundDestinationScript: onchainRefundDestinationScript,')
+    expect(body).toContain('destinationScript: onchainClaimDestinationScript,')
+    expect(body).toContain('changeScript: onchainRefundDestinationScript,')
   })
 
   it('leaves the Lightning corridors alone', () => {

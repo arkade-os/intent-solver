@@ -71,6 +71,8 @@ const solverConfig = (): Config => {
       'arkade:BTC->onchain:BTC': free,
       'onchain:BTC->arkade:BTC': free,
     },
+    onchainReceiveMaxBandSats: limits.maxSats - limits.minSats,
+    onchainReceiveBandBelowShare: 1,
     // Null on every corridor: no live chain-cost pricing, which is what an
     // unset `<STEM>_FEE_CAP_SATS` produces and the only shape this app —
     // which serves no built-in corridor — could want.
@@ -103,11 +105,17 @@ const solverConfig = (): Config => {
     offerMarkets: [],
     offerMinFillAmount: 0n,
     offerMaxFillAmount: 0n,
+    offerChargesDeliveredCarrier: false,
+    assetCarrierPricing: false,
     // No asset named, so the atomic-class corridors are off and the window unread.
     assetRfqTokens: [],
     assetQuoteValiditySeconds: 30,
     lnReceiveAcceptUnilateralGap: false,
     maxExposedSats: 1_000_000,
+    // Off, which is the default an operator who configures nothing gets.
+    approvalThresholdSats: null,
+    notify: { telegramBotToken: null, telegramChatId: null, slackWebhookUrl: null },
+    balanceReportIntervalMinutes: null,
     contractRetentionMs: 86_400_000,
     sweepConcurrency: 4,
     lockupTimeoutSeconds: 3600,
@@ -167,7 +175,7 @@ describe('a deployment described in code rather than in the environment', () => 
     // The branch that makes `lnBackend: null` a supported deployment rather than
     // a crash. Without it the registry would be mandatory for everyone, and with
     // it a consumer serving their own corridors never mutates module state.
-    expect(servicesSource).toContain('config.lnBackend === null ? null : await createRail(config)')
+    expect(servicesSource).toMatch(/config\.lnBackend === null\s*\? null\s*:\s*await createRail\(config,\s*\{/)
   })
 
   it('takes corridors as a PARAMETER, with no global to mutate first', () => {
@@ -175,7 +183,8 @@ describe('a deployment described in code rather than in the environment', () => 
     // state that `loadConfig` reads once, so registration has to happen before
     // the entrypoint runs. Corridors have no such ordering hazard: they are
     // arguments.
-    expect(servicesSource).toContain('corridorSetFromDeps(corridorDeps, opts?.corridors ?? [])')
+    expect(servicesSource).toContain('const extraCorridors = opts?.corridors ?? []')
+    expect(servicesSource).toContain('corridorSetFromDeps({ ...shared, assetRfqMarkets: serving }, extraCorridors)')
     expect(sdk.createServices.length).toBeGreaterThanOrEqual(1)
   })
 })
@@ -222,13 +231,16 @@ describe('the sweep a consumer has to write themselves', () => {
   })
 
   it('is what the shipped loop does at boot, over exactly the same set', () => {
-    // `services.corridors` is a `CorridorSet`, and the daemon's recovery pass is
-    // this loop verbatim. A consumer reproducing the cadences is reproducing
-    // policy; reproducing this is reproducing the contract.
+    // Recovery still iterates `services.corridors`. Asset RFQ plugin corridors
+    // skip that pass because they share one service; exact pairs identify them
+    // so an injected corridor remains driven regardless of its env stem.
     const cliSource = readFileSync(
       fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)),
       'utf8',
     )
-    expect(cliSource).toContain('for (const corridor of services.corridors) recovered += await corridor.tickAll()')
+    expect(cliSource).toContain('for (const corridor of services.corridors)')
+    expect(cliSource).toContain('if (assetRfqPairs.has(corridor.descriptor.pair)) continue')
+    expect(cliSource).toContain('ticked += await corridor.tickAll()')
+    expect(cliSource).toContain('ticked += (await services.assetRfqService.tickAll()).length')
   })
 })

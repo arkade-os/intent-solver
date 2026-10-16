@@ -83,6 +83,7 @@ const build = async (over: Partial<EvmReceiveServiceDeps> = {}) => {
       minAgeSeconds: 780,
       cadence: CADENCE,
       quoteValiditySeconds: 60,
+      orderMarginSeconds: 7_500,
     },
     maxExposedSats: 100_000_000,
     admission: new AdmissionControl(),
@@ -128,7 +129,7 @@ describe('the happy path', () => {
     expect(outcome.accepted).toBe(true)
     if (outcome.accepted) {
       const evmTimeoutSeconds = NOW + (TIMEOUT_BLOCK - CURRENT_BLOCK) * CADENCE.fastestSecondsPerBlock
-      expect(outcome.swap.refundLocktime + EVM_ORDER_MARGIN_SECONDS).toBeLessThanOrEqual(evmTimeoutSeconds)
+      expect(outcome.swap.refundLocktime + 7_500).toBeLessThanOrEqual(evmTimeoutSeconds)
     }
   })
 
@@ -253,6 +254,12 @@ describe('refusals', () => {
     expect(await other.service.quote(request())).toEqual({ accepted: false, reason: 'duplicate_swap' })
   })
 
+  it('lets a non-constraint failure whose message says UNIQUE surface', async () => {
+    const { service, store } = await build()
+    vi.spyOn(store, 'insertQuote').mockRejectedValueOnce(new TypeError('UNIQUE quote construction failed'))
+    await expect(service.quote(request())).rejects.toThrow(TypeError)
+  })
+
   it('measures capacity against the PAYOUT, which is what the solver risks', async () => {
     // The headroom is chosen to sit BETWEEN the two figures: 99_500 fits the
     // 99_000 payout and not the 100_000 the client locked. A cap read against
@@ -299,7 +306,7 @@ describe('refusals', () => {
 })
 
 /**
- * THE #105 RACE on the receive leg, where the sats at stake are the SOLVER's
+ * THE CAP RACE on the receive leg, where the sats at stake are the SOLVER's
  * own — it funds this side out of its own capital, so the cap is what bounds
  * how much of it can be committed at once.
  *

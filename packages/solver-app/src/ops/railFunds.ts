@@ -33,31 +33,18 @@ import { randomUUID } from 'node:crypto'
 import { Address } from '@scure/btc-signer'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { requireLn, requireOnchain } from './rails.js'
+import { attempt } from './attempt.js'
 import type { Services } from './services.js'
-import type { FundBalance, FundDeposit, FundSettlement, FundSource, FundWithdrawal } from './fundSources.js'
+import {
+  parseWholeSats,
+  type FundBalance,
+  type FundDeposit,
+  type FundSettlement,
+  type FundSource,
+  type FundWithdrawal,
+} from './fundSources.js'
 
 export const RAIL_FUND_SOURCE_ID = 'rail'
-
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
-
-/**
- * Read one side, or report why it could not be read.
- *
- * Per SIDE rather than one try around the pair, because the two are separate
- * connections and the answer an operator needs is usually about the one that DID
- * respond: "L1 holds 500k, the node is unreachable" is a decision, whereas a
- * single error for the whole read is only a shrug. Same discipline as the
- * console's overview, which must render with a backend down.
- */
-const attempt = async <T>(
-  read: () => Promise<T>,
-): Promise<{ value: T; error: null } | { value: null; error: string }> => {
-  try {
-    return { value: await read(), error: null }
-  } catch (error) {
-    return { value: null, error: messageOf(error) }
-  }
-}
 
 /** A figure that failed to read carries the reason INSTEAD of a number, never a zero beside it. */
 const figure = (label: string, amount: number | null | undefined, error: string | null) =>
@@ -68,6 +55,7 @@ const figure = (label: string, amount: number | null | undefined, error: string 
 const railBalance = async (services: Services): Promise<FundBalance> => {
   const ln = requireLn(services.ln)
   const onchain = requireOnchain(services.onchain)
+  // Per SIDE, not one try around the pair: "L1 holds 500k, the node is unreachable" is a decision.
   const [lightning, chain, feeRate] = await Promise.all([
     attempt(() => ln.getBalance()),
     attempt(() => onchain.getBalance()),
@@ -190,6 +178,22 @@ const railInvoiceDeposit = async (
   }
 }
 
+const railNativeDeposit = async (services: Services): Promise<{ option: FundDeposit | null; error: string | null }> => {
+  const ln = services.ln
+  if (!ln?.createDepositAddress) return { option: null, error: null }
+  const minted = await attempt(() => ln.createDepositAddress!())
+  if (minted.error !== null) return { option: null, error: minted.error }
+  return {
+    option: {
+      address: minted.value.address,
+      addressKind: minted.value.addressKind,
+      settleRequired: false,
+      note: 'Lands directly in this rail’s native spendable balance.',
+    },
+    error: null,
+  }
+}
+
 /**
  * Turn deposits the rail is holding into balance it can spend.
  *
@@ -256,14 +260,7 @@ const railWithdraw = async (
   const { address } = params
   const network = services.config.network
 
-  const amountSats = Number(params.amount)
-  // Round-tripped, not merely coerced: `Number('1e3')` is 1000 and
-  // `Number(' 12 ')` is 12, so a lenient parse would accept strings an operator
-  // did not mean as sat counts, and a 256-bit quantity would silently lose
-  // precision.
-  if (!Number.isSafeInteger(amountSats) || amountSats <= 0 || String(amountSats) !== params.amount.trim()) {
-    throw new Error(`amount must be a whole positive number of sats, got ${JSON.stringify(params.amount)}`)
-  }
+  const amountSats = parseWholeSats(params.amount)
   try {
     Address(ONCHAIN_NETWORKS[network]).decode(address)
   } catch {
@@ -287,6 +284,9 @@ const railWithdraw = async (
   // not be. `randomUUID` is what every swap id in this tree is minted from.
   const idempotencyKey = `admin-withdraw-${randomUUID()}`
   const { txid, vout } = await onchain.fund({ address, amountSats, idempotencyKey })
+  // Left the wallet the send corridor admits against, with no row to count it:
+  // the one case a stale float is wrong in the PERMISSIVE direction.
+  services.onchainFloat?.invalidate()
   return { reference: txid, address, amount: String(amountSats), detail: { vout, idempotencyKey } }
 }
 
@@ -315,19 +315,27 @@ export const railFundSource = (services: Services): FundSource | null => {
     // the one that needs no settle step. The onchain option is always present,
     // so a backend that cannot mint one still has somewhere to send.
     depositOptions: async () => {
-      const invoice = await railInvoiceDeposit(services)
+      const [invoice, native] = await Promise.all([railInvoiceDeposit(services), railNativeDeposit(services)])
       // AFTER the invoice attempt and unconditionally: this is the option that
       // must survive a node which cannot mint. `railDeposit` is still allowed to
       // throw, because the only thing it throws on is an address belonging to
       // another chain — a fault where handing back SOMETHING is the dangerous
       // answer, not the safe one.
       const onchain = await railDeposit(services)
-      if (invoice.option) return [invoice.option, onchain]
-      if (invoice.error === null) return [onchain]
+      const options = [invoice.option, native.option, onchain].filter(
+        (option): option is FundDeposit => option !== null,
+      )
+      const unavailable = [
+        invoice.error === null ? null : `Lightning deposit unavailable: ${invoice.error}`,
+        native.error === null ? null : `Native deposit unavailable: ${native.error}`,
+      ].filter((message): message is string => message !== null)
+      if (unavailable.length === 0) return options
       // The rail CAN mint invoices and could not this time. Said on the option
       // the operator is left with, because the alternative is a Lightning route
       // that vanishes without explanation and reads as never having existed.
-      return [{ ...onchain, note: `${onchain.note} Lightning deposit unavailable: ${invoice.error}` }]
+      return options.map((option) =>
+        option === onchain ? { ...option, note: `${option.note} ${unavailable.join(' ')}` } : option,
+      )
     },
     ...(onchain.settleReceiveAddress === undefined ? {} : { settleDeposits: () => railSettle(services) }),
     withdraw: (params) => railWithdraw(services, params),

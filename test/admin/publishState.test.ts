@@ -18,6 +18,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
+import type { SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { AdPublisher, type AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 
 const SECRET = hexToBytes('B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF'.toLowerCase())
@@ -31,10 +32,10 @@ const allCorridors = <T>(value: T) => ({
   'onchain:BTC->arkade:BTC': value,
 })
 
-const ad = { v: 1 as const, type: 'solver_ad' as const, pairs: [], relays: ['wss://relay.example'] }
+const card = { version: 0, name: 'test-solver', discovery_pubkey: PUBKEY, markets: [] } as unknown as SolverCard
 
 const publisherWith = (mode: AdPublishMode, publish = vi.fn(async () => {})) =>
-  new AdPublisher({ mode, buildAd: () => ad, publish, now: () => 1_800_000_000, heartbeatSeconds: 1800 })
+  new AdPublisher({ mode, buildAd: async () => card, publish, now: () => 1_800_000_000, heartbeatSeconds: 1800 })
 
 /**
  * A double complete for BOTH routes — every member either handler reaches.
@@ -44,6 +45,16 @@ const publisherWith = (mode: AdPublishMode, publish = vi.fn(async () => {})) =>
  * missing member surfaces there as a `cardError` or a failed probe rather than
  * as two routes cheerfully agreeing on nothing.
  */
+const bootPolicy = {
+  corridorLimits: allCorridors({ minSats: 1_000, maxSats: 50_000 }),
+  corridorFees: allCorridors({ bps: 0, flatSats: 0 }),
+  corridorEnabled: allCorridors(true),
+  maxExposedSats: 100_000,
+  evmCorridors: [],
+  offerMinFillAmount: 0n,
+  offerMaxFillAmount: 0n,
+}
+
 const makeDeps = (over: { nostrAdPublish?: AdPublishMode; adPublisher?: AdPublisher } = {}) =>
   ({
     services: {
@@ -52,6 +63,7 @@ const makeDeps = (over: { nostrAdPublish?: AdPublishMode; adPublisher?: AdPublis
         arkade: { arkServerUrl: 'http://ark' },
         emulatorUrl: 'http://emu',
         relayUrl: 'wss://relay.example',
+        network: 'mutinynet',
         limits: { minSats: 1_000, maxSats: 50_000 },
         corridorLimits: allCorridors({ minSats: 1_000, maxSats: 50_000 }),
         corridorFees: allCorridors({ bps: 0, flatSats: 0 }),
@@ -59,16 +71,11 @@ const makeDeps = (over: { nostrAdPublish?: AdPublishMode; adPublisher?: AdPublis
         maxExposedSats: 100_000,
         nostrAdPublish: over.nostrAdPublish ?? 'off',
       },
-      policy: {
-        corridorLimits: allCorridors({ minSats: 1_000, maxSats: 50_000 }),
-        corridorFees: allCorridors({ bps: 0, flatSats: 0 }),
-        corridorEnabled: allCorridors(true),
-        maxExposedSats: 100_000,
-        evmCorridors: [],
-        offerMinFillAmount: 0n,
-        offerMaxFillAmount: 0n,
-      },
+      policy: bootPolicy,
+      bootPolicy,
       assetMarkets: [],
+      liveOfferMarkets: [],
+      assetRfqMarkets: [],
       ln: { getBalance: async () => ({ availableSats: 100_000, incomingSats: 0 }) },
       arkade: {
         wallet: {

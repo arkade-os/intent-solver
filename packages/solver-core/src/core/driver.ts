@@ -17,7 +17,10 @@
 export interface SqlDriver {
   /** Run one or more statements that return no rows (schema, ALTER TABLE). */
   exec(sql: string): Promise<void>
-  /** Run one write statement. `changes` is SQLite's changes() count — the compare-and-swap depends on it. */
+  /**
+   * Run one write statement. `changes` is SQLite's changes() count — the compare-and-swap depends on it.
+   * Drivers whose runtime spells a refused UNIQUE write differently must normalise to `UniqueConstraintError`.
+   */
   run(sql: string, params?: unknown[]): Promise<{ changes: number }>
   /** First row or undefined. Drivers whose runtime says "no row" differently must normalise to undefined. */
   get<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | undefined>
@@ -25,10 +28,20 @@ export interface SqlDriver {
   /**
    * Run `fn` inside a transaction where the runtime supports one, rolling back
    * if it throws. better-sqlite3 gives real atomicity; D1 has no interactive
-   * transaction over discrete calls, so it runs `fn` as-is (best effort). Used
-   * only by the one-time legacy table rebuild, so the D1 best-effort path is
-   * acceptable — a fresh D1 database never carries the constraint being rebuilt.
+   * transaction over discrete calls, so it runs `fn` as-is (best effort) — a
+   * caller needing atomicity on D1 cannot rely on this.
    */
   transaction<T>(fn: () => Promise<T>): Promise<T>
   close(): Promise<void>
+}
+
+/**
+ * A write a UNIQUE index or primary key refused. A TYPE, not a wording, because
+ * an unrelated failure is free to contain the word and be answered as duplicate.
+ */
+export class UniqueConstraintError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'UniqueConstraintError'
+  }
 }

@@ -15,9 +15,8 @@
  */
 
 import { hex } from '@scure/base'
-import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
+import type { AdmissionStrategy, FloatRequirement } from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { RFQ_PAIR_ONCHAIN_SEND } from '../wire/onchainPayloads.js'
-import { sha256 } from '@noble/hashes/sha2.js'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
   ARKADE_CLAIM_WINDOW_SECONDS,
@@ -32,8 +31,9 @@ import {
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
-import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
+import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import {
   buildOnchainRefundTx,
@@ -41,16 +41,21 @@ import {
   signOnchainRefundTx,
   type OnchainSigner,
 } from '@arkade-os/solver-rails/onchain/refund.js'
+import { refundSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 import type { OnchainSendBackend, ReceiveSettlement } from '@arkade-os/solver-core/ports/onchain.js'
 import type { OnchainSendSwapRow, OnchainSendSwapStore } from '../db/onchainSwaps.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
-import { MINUTE } from '@arkade-os/solver-core/core/timelocks.js'
+import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
+import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
+import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
+import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 export type { ArkadeOps as OnchainArkadeOps } from './orchestrator.js'
 
 export interface OnchainSendServiceDeps {
+  quoteLimiter?: RateLimiter
   /**
    * How this corridor prices. Absent means the configured flat+bps `fee`,
    * which is what every deployment used before pricing became injectable.
@@ -65,11 +70,18 @@ export interface OnchainSendServiceDeps {
   /** Sum of committed sats across every corridor, not just this notebook. */
   totalCommitted: () => Promise<number>
   /**
-   * Reserves cap headroom for a quote that has not yet inserted its row (#105).
+   * Reserves cap headroom for a quote that has not yet inserted its row.
    * SHARE one instance across every corridor — a per-corridor control bounds
    * only its own concurrency, which is the narrower half of the problem.
    */
   admission: AdmissionStrategy
+  /** The wallet this corridor pays from. Absent leaves admission at the cap alone. */
+  float?: {
+    read(): { sats: number; ageMs: number } | null
+    fundingFeeSats(): number
+  }
+  /** Sampled sat/vB — never an upstream call per quote. Null or absent falls back to {@link MIN_RELAY_FEE_RATE}. */
+  feeRate?: () => number | null
   /** Signs the solver's own onchain refund spend — matches `ArkadeContext.identity`'s shape exactly. */
   signer: OnchainSigner
   /** Where the solver's own refunded onchain sats go. A P2TR pkScript the solver controls. */
@@ -88,21 +100,26 @@ export interface OnchainSendServiceDeps {
    * closes.
    */
   peerStores?: readonly { findLiveByPaymentHash(paymentHash: string): Promise<unknown> }[]
+  /** The large-swap approval gate. Absent means no gate. @see core/approvalGate.ts */
+  approvalGate?: ApprovalCheck
   now?: () => number
 }
 
 export type QuoteRefusal =
   | OnchainSendAcceptanceRefusal
+  | 'rate_limited'
   | 'fee_consumes_swap'
   | 'payout_below_dust'
   | 'duplicate_swap'
   | 'provider_at_capacity'
+  | 'insufficient_float'
   | 'invalid_refund_address'
 
 export type QuoteOutcome =
   { accepted: true; swap: OnchainSendSwapRow; lockupDeadline: number } | { accepted: false; reason: QuoteRefusal }
 
 export interface OnchainQuoteRequest {
+  requesterKey?: string
   /** `sha256(P)`, hex (64 chars) — client-chosen; the client is the eventual onchain claimer. Same wire field as `payment_hash`. */
   paymentHash: string
   /**
@@ -127,11 +144,13 @@ export interface OnchainQuoteRequest {
   rfqId?: string
 }
 
-/** `sha256(P)`, hex — the same wire-form comparison `row.paymentHash` already uses. */
-const paymentHashOf = (preimage: Uint8Array): string => hex.encode(sha256(preimage))
-
 /** Extract the preimage from a claim witness: `[signature, preimage, claimScript, controlBlock]`. */
 const preimageFromClaimWitness = (witness: Uint8Array[]): Uint8Array | null => witness[1] ?? null
+
+/** How long the refund sweep trusts an `unknown` verdict before asking the indexer again. */
+export const UNKNOWN_LOCKUP_RECHECK_SECONDS = 3600
+
+class UnknownLockupError extends Error {}
 
 /**
  * Why {@link OnchainSendSwapService.pushRefund} could not act on an empty
@@ -140,7 +159,7 @@ const preimageFromClaimWitness = (witness: Uint8Array[]): Uint8Array | null => w
  */
 const unrefundableReason = (evidence: 'unknown' | 'unspent', row: OnchainSendSwapRow, now: number): string => {
   if (evidence === 'unknown') {
-    return 'the unfiltered view reports no output at this lockup script, so no spend is provable and nothing is there to give back — retrying cannot change that, and it needs a human'
+    return 'the unfiltered view reports no output at this lockup script, so no spend is provable and nothing is there to give back — an unfunded quote stays this way and is rechecked hourly; a funded one needs a human'
   }
   const stale = now - row.refundLocktime
   return stale > DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
@@ -160,7 +179,12 @@ const unrefundableReason = (evidence: 'unknown' | 'unspent', row: OnchainSendSwa
  * refund is impossible" — the distinction that keeps a network blip from
  * permanently sticking a row that only needed the next sweep.
  */
-type OnchainHtlcRefundAttempt = { broadcast: true; txid: string } | { broadcast: false; reason: string }
+type OnchainHtlcRefundAttempt =
+  | { broadcast: true; txid: string }
+  /** `retry`: a fee this payout cannot carry is a verdict about one moment's mempool; a bad rebuild is not. */
+  | { broadcast: false; reason: string; retry: boolean }
+
+const MIN_RELAY_FEE_RATE = 1
 
 /**
  * Re-exported, not defined here: `core/onchainSend.ts` owns it now, because
@@ -198,15 +222,19 @@ export const covenantRowFor = (row: OnchainSendSwapRow): CovenantScriptRow => ({
 
 export class OnchainSendSwapService {
   private readonly now: () => number
+  private readonly quoteLimiter: RateLimiter
   private readonly inFlight = new Set<string>()
   private readonly fee: Fee
   /** How this corridor prices. Defaults to the configured flat+bps fee. */
   private readonly pricing: PricingStrategy
 
   private readonly admission: AdmissionStrategy
+  private refundVsize?: number
+  private readonly unknownLockups = new Map<string, { error: Error; until: number }>()
 
   constructor(private readonly deps: OnchainSendServiceDeps) {
     this.now = deps.now ?? nowSeconds
+    this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
     this.fee = deps.fee ?? FREE
     this.pricing = deps.pricing ?? fixedFeePricing(this.fee)
     this.admission = deps.admission
@@ -276,7 +304,7 @@ export class OnchainSendSwapService {
     if (request.amountSide !== 'to' && payoutSats <= 0) {
       return { accepted: false, reason: 'fee_consumes_swap' }
     }
-    if (payoutSats < ONCHAIN_DUST_SATS) {
+    if (payoutSats < this.refundablePayoutFloor()) {
       return { accepted: false, reason: 'payout_below_dust' }
     }
 
@@ -290,18 +318,26 @@ export class OnchainSendSwapService {
         return { accepted: false, reason: 'duplicate_swap' }
       }
     }
+    if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
+      return { accepted: false, reason: 'rate_limited' }
+    }
     // RESERVED, not merely observed: the row below is what makes this swap
     // visible to `totalCommitted()`, and until it lands a concurrent quote
-    // would read the same headroom and take it too (#105). Held until the
+    // would read the same headroom and take it too. Held until the
     // insert succeeds, and handed back on every path that does not insert.
+    const refusal: { ceiling?: 'exposure' | 'float' } = {}
     const reservation = await this.admission.admit({
       pair: RFQ_PAIR_ONCHAIN_SEND,
       giveSats: giveSats,
       capSats: this.deps.maxExposedSats,
       committedSats: this.deps.totalCommitted,
+      float: this.floatRequirement(payoutSats),
+      onRefused: (ceiling) => {
+        refusal.ceiling = ceiling
+      },
     })
     if (reservation === null) {
-      return { accepted: false, reason: 'provider_at_capacity' }
+      return { accepted: false, reason: refusal.ceiling === 'float' ? 'insufficient_float' : 'provider_at_capacity' }
     }
     try {
       const serverKey = hex.decode(arkade.serverPubkey)
@@ -379,7 +415,7 @@ export class OnchainSendSwapService {
         })
         return { accepted: true, swap, lockupDeadline: this.now() + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT }
       } catch (error) {
-        if (error instanceof Error && /UNIQUE/i.test(error.message)) {
+        if (error instanceof UniqueConstraintError) {
           return { accepted: false, reason: 'duplicate_swap' }
         }
         throw error
@@ -392,48 +428,46 @@ export class OnchainSendSwapService {
     }
   }
 
-  async tick(id: string): Promise<OnchainSendSwapRow> {
-    const { store } = this.deps
-    if (this.inFlight.has(id)) return store.get(id)
-    this.inFlight.add(id)
-    try {
-      while (await this.step(await store.get(id))) {
-        // each successful step re-reads the row and tries the next
-      }
-      return await store.get(id)
-    } finally {
-      this.inFlight.delete(id)
+  // Payout PLUS the broadcast fee: the payout alone would admit a swap that
+  // then fails inside `fund()`, the same defect one layer up.
+  private floatRequirement(payoutSats: number): FloatRequirement | undefined {
+    const float = this.deps.float
+    if (!float) return undefined
+    return {
+      requiredSats: payoutSats + float.fundingFeeSats(),
+      available: float.read(),
+      owedSats: () => this.deps.store.owedPayoutSats(),
     }
   }
 
+  // Dust PLUS the refund's own fee: under it an unclaimed HTLC cannot be returned, and its claim leaf never expires.
+  private refundablePayoutFloor(): number {
+    this.refundVsize ??= refundSpendVsize({
+      network: ONCHAIN_NETWORKS[this.deps.network],
+      destinationScript: this.deps.refundDestinationScript,
+    })
+    const rate = Math.max(this.deps.feeRate?.() ?? 0, MIN_RELAY_FEE_RATE)
+    return ONCHAIN_DUST_SATS + Math.ceil(this.refundVsize * rate)
+  }
+
+  /**
+   * The smallest payout this corridor would fund — the floor under a float that
+   * can serve at all. Answered here because a second derivation in a caller
+   * would drift from what admission actually accepts.
+   */
+  minimumPayoutSats(): number {
+    return Math.max(
+      this.refundablePayoutFloor(),
+      this.pricing.payoutFor({ pair: RFQ_PAIR_ONCHAIN_SEND, giveSats: this.deps.limits.minSats }),
+    )
+  }
+
+  tick(id: string): Promise<OnchainSendSwapRow> {
+    return guardedTick(id, this.inFlight, this.deps.store, (row) => this.step(row))
+  }
+
   async tickAll(): Promise<OnchainSendSwapRow[]> {
-    const rows: OnchainSendSwapRow[] = []
-    for (const row of await this.deps.store.findRecoverable()) {
-      // Held off after repeated failures, or already being ticked elsewhere.
-      // Neither means the swap advanced, so the row comes back unchanged and
-      // `onTickSuccess` does not fire. Gated here rather than in `tick` so a
-      // direct caller — an operator's recheck, a one-shot CLI tick — is never
-      // throttled: only this timer is.
-      if (this.shouldSkipTick?.(row.id) || this.inFlight.has(row.id)) {
-        rows.push(row)
-        continue
-      }
-      try {
-        rows.push(await this.tick(row.id))
-        // Ran, and did not throw: the fault is over. The host clears the
-        // backoff on this rather than on membership of the returned array,
-        // which also holds skipped rows and rows that threw.
-        this.onTickSuccess?.(row.id)
-      } catch (error) {
-        this.onTickError?.(row.id, error)
-        try {
-          rows.push(await this.deps.store.get(row.id))
-        } catch {
-          // Store fault, not a swap fault — skip, the next sweep retries.
-        }
-      }
-    }
-    return rows
+    return sweep(await this.deps.store.findRecoverable(), this, this.deps.store, { inFlight: this.inFlight })
   }
 
   /**
@@ -453,7 +487,7 @@ export class OnchainSendSwapService {
     const { store, arkade } = this.deps
     const outputs = await arkade.findLockups(row.pkScript)
     if (outputs.length === 0) {
-      // The Lightning leg's `refundSweep` guards this identically, for the
+      // The Lightning leg's `pushRefund` guards this identically, for the
       // identical reason: `findLockups` is `spendableOnly`, so an empty answer
       // is not proof of a spend, and `findRefundable` (src/db/onchainSwaps.ts)
       // filters `refund_outcome IS NULL` — so recording one shuts the row for
@@ -467,7 +501,8 @@ export class OnchainSendSwapService {
       // — the very mistake this guard exists to stop making to a client.
       const evidence = await arkade.lockupSpendEvidence(row.pkScript)
       if (evidence !== 'spent') {
-        throw new Error(`swap ${row.id}: ${unrefundableReason(evidence, row, this.now())}`)
+        const message = `swap ${row.id}: ${unrefundableReason(evidence, row, this.now())}`
+        throw evidence === 'unknown' ? new UnknownLockupError(message) : new Error(message)
       }
       await store.patch(row.id, { refund_outcome: 'external' })
       return null
@@ -479,10 +514,23 @@ export class OnchainSendSwapService {
 
   async refundSweep(): Promise<string[]> {
     const pushed: string[] = []
-    for (const row of await this.deps.store.findRefundable(this.now())) {
+    const rows = await this.deps.store.findRefundable(this.now())
+    const refundable = new Set(rows.map((row) => row.id))
+    for (const id of this.unknownLockups.keys()) if (!refundable.has(id)) this.unknownLockups.delete(id)
+    for (const row of rows) {
+      // An unfunded quote reads `unknown` for good; a late funding is still caught within one recheck.
+      const parked = this.unknownLockups.get(row.id)
+      if (parked && parked.until > this.now()) {
+        this.onTickError?.(row.id, parked.error)
+        continue
+      }
+      this.unknownLockups.delete(row.id)
       try {
         if (await this.pushRefund(row)) pushed.push(row.id)
       } catch (error) {
+        if (error instanceof UnknownLockupError) {
+          this.unknownLockups.set(row.id, { error, until: this.now() + UNKNOWN_LOCKUP_RECHECK_SECONDS })
+        }
         this.onTickError?.(row.id, error)
       }
     }
@@ -503,8 +551,9 @@ export class OnchainSendSwapService {
    * a swap that was ever EXPOSED — and here `stuck` conflates outcomes that are
    * opposites. `whenClaiming` reaches it holding a preimage the client already
    * revealed, so the solver has PAID OUT and refunding would pay the client twice;
-   * `whenRefundingOnchain`'s dust case reaches it having just confirmed the client did
-   * NOT claim, where refunding is correct. Nothing on the row separates the two —
+   * `whenRefundingOnchain`'s dust case reaches it with that output UNSPENT, which the claim
+   * leaf's missing locktime makes "not yet" rather than "never" — so reclaim that leg first
+   * ({@link reclaimOnchainHtlc}) or refunding hands over BOTH. Nothing on the row separates the two —
    * `failure_reason` is free text, and even the "spent by something other than a
    * matching claim" verdict is a guess, since `preimageFromClaimWitness` reads
    * `witness[1]`. A human reads the chain; this is how they act on it.
@@ -567,7 +616,7 @@ export class OnchainSendSwapService {
       outputScript: hex.decode(row.onchainPkScript),
     })
     const preimage = witness ? preimageFromClaimWitness(witness) : null
-    if (preimage && paymentHashOf(preimage) === row.paymentHash) {
+    if (preimage && paymentHashFromPreimage(preimage) === row.paymentHash) {
       throw new Error(
         `swap ${id}'s onchain HTLC was already claimed by the client, preimage ${hex.encode(preimage)} — ` +
           'a refund of it can never confirm; claim the Arkade lockup with that preimage instead',
@@ -584,7 +633,7 @@ export class OnchainSendSwapService {
     // did, and the operator reads which from the error.
 
     // The SAME slot `tick()` takes: each attempt re-reads the fee rate, so two
-    // interleaved pre-commit different txids and the row keeps the loser's (#169).
+    // interleaved pre-commit different txids and the row keeps the loser's.
     if (this.inFlight.has(id)) throw new Error(`swap ${id} is already being ticked; retry once that tick finishes`)
     this.inFlight.add(id)
     try {
@@ -666,14 +715,25 @@ export class OnchainSendSwapService {
 
   private async whenFunded(row: OnchainSendSwapRow): Promise<boolean> {
     const { store } = this.deps
-    const decision = evaluateOnchainSendFunding({ refundLocktime: row.refundLocktime, now: this.now() })
+    const decision = this.fundingDecision(row)
     if (!decision.fund) {
       await store.fail(row.id, 'funded', decision.reason)
       return false
     }
+    // After the funding decision, before the CAS: a held swap still reaches its deadline and refuses.
+    if (!(await askApproval(this.deps.approvalGate, row.id, row.amountSats))) return false
     const won = await store.transition(row.id, 'funded', 'funding_onchain', {})
     if (!won) return false
     return this.submitFunding(await store.get(row.id))
+  }
+
+  private fundingDecision(row: OnchainSendSwapRow) {
+    return evaluateOnchainSendFunding({
+      refundLocktime: row.refundLocktime,
+      htlcLocktime: row.htlcLocktime,
+      minConfirmations: row.minConfirmations,
+      now: this.now(),
+    })
   }
 
   private async whenFundingOnchain(row: OnchainSendSwapRow): Promise<boolean> {
@@ -726,6 +786,17 @@ export class OnchainSendSwapService {
     // Losing is not a failure: another worker holds this swap, so yield.
     if (!(await store.claimFundLease(row.id, 'funding_onchain'))) return false
 
+    // Asked AGAIN here, not only on the `funded` edge that got the row this far:
+    // nothing else bounds a `fund()` that keeps throwing. AFTER the lease and
+    // after `recoverFunding`'s read, both deliberately — a check before either
+    // would let one worker park a row another is inside `fund()` on, or park a
+    // funding that really went out, losing the outpoint `reclaimOnchainHtlc` needs.
+    const decision = this.fundingDecision(row)
+    if (!decision.fund) {
+      await store.fail(row.id, 'funding_onchain', decision.reason)
+      return false
+    }
+
     let result
     try {
       result = await onchain.fund({
@@ -777,7 +848,7 @@ export class OnchainSendSwapService {
     }
 
     const preimage = preimageFromClaimWitness(witness)
-    if (!preimage || paymentHashOf(preimage) !== row.paymentHash) {
+    if (!preimage || paymentHashFromPreimage(preimage) !== row.paymentHash) {
       // A spend exists but does not look like our claim leaf (or reveals a
       // preimage that does not fit) — most likely the SOLVER'S OWN refund
       // spend after a timeout, not the client's claim. Routed to a human:
@@ -785,7 +856,7 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'awaiting_claim', 'onchain HTLC spent by something other than a matching claim')
       return false
     }
-    // TLA+ FINDING F7 (#104), THE HALF NO LOCKTIME CAN FIX.
+    // TLA+ FINDING F7, THE HALF NO LOCKTIME CAN FIX.
     //
     // `onchainRefundLocktimeFor` reserves ARKADE_CLAIM_WINDOW_SECONDS past the
     // last instant a claim can arrive, so the GEOMETRY of a quote always leaves
@@ -820,6 +891,13 @@ export class OnchainSendSwapService {
     }
     const outputs = await arkade.findLockups(row.pkScript)
     if (outputs.length === 0) {
+      // Proof of neither our claim nor the lockup's spend: `findLockups` is
+      // spendableOnly. {@link pushRefund}'s refusal applies here too, and harder —
+      // `stuck` has no `step` case, so parking ends collection after we paid out.
+      const evidence = await arkade.lockupSpendEvidence(row.pkScript)
+      if (evidence !== 'spent' && this.now() < row.refundLocktime) {
+        throw new Error(`swap ${row.id}: lockup reads empty while claiming but no spend is provable (${evidence})`)
+      }
       await store.fail(row.id, 'claiming', 'lockup empty while claiming with no claim txid recorded; needs review')
       return false
     }
@@ -830,7 +908,8 @@ export class OnchainSendSwapService {
     } catch (error) {
       if (this.now() >= row.refundLocktime) {
         const detail = error instanceof Error ? error.message : String(error)
-        await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail}`)
+        const recourse = unilateralExitRecourse(covenantRowFor(row), { solverPubkey: arkade.providerPubkey })
+        await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail} — ${recourse}`)
         return false
       }
       throw error
@@ -851,7 +930,7 @@ export class OnchainSendSwapService {
       return false
     }
 
-    // OUR OWN EARLIER ATTEMPT, BY NAME (#169, #204): the pre-committed txid stops
+    // OUR OWN EARLIER ATTEMPT, BY NAME: the pre-committed txid stops
     // a refund that went out before a crash being written off as a foreign spend
     // below. Before the claim read, because a CONFIRMED refund of this outpoint
     // means no claim can exist; the reverse is not true.
@@ -877,7 +956,7 @@ export class OnchainSendSwapService {
     })
     if (claimWitness) {
       const preimage = preimageFromClaimWitness(claimWitness)
-      if (preimage && paymentHashOf(preimage) === row.paymentHash) {
+      if (preimage && paymentHashFromPreimage(preimage) === row.paymentHash) {
         return store.transition(row.id, 'refunding_onchain', 'claiming', { preimage: hex.encode(preimage) })
       }
       // Neither a matching claim nor the refund above: genuinely unrecognisable.
@@ -887,6 +966,9 @@ export class OnchainSendSwapService {
 
     const attempt = await this.pushOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)
     if (!attempt.broadcast) {
+      // Parking before refundLocktime would end both the claim re-check above and the
+      // retry; `refunding_onchain` is recoverable, so the next sweep re-reads the rate.
+      if (attempt.retry && this.now() < row.refundLocktime) throw new Error(attempt.reason)
       await store.fail(row.id, 'refunding_onchain', attempt.reason)
       return false
     }
@@ -937,7 +1019,11 @@ export class OnchainSendSwapService {
       // parameters and the funded output have genuinely diverged, and only a
       // human reading both can say which one is wrong — hence a refusal that
       // says so, rather than a loop.
-      return { broadcast: false, reason: 'onchain HTLC rebuilt from row does not match the funded pkScript' }
+      return {
+        broadcast: false,
+        reason: 'onchain HTLC rebuilt from row does not match the funded pkScript',
+        retry: false,
+      }
     }
 
     const feeRate = await onchain.estimateFeeRate()
@@ -960,22 +1046,23 @@ export class OnchainSendSwapService {
       // The one lever a human has here is the fee rate, and it is a real one:
       // `estimateFeeRate` is re-read on every attempt, so an HTLC priced out
       // by a mempool spike becomes refundable again once fees fall, and
-      // {@link reclaimOnchainHtlc} is how that retry is driven. Below that,
+      // both {@link whenRefundingOnchain} and {@link reclaimOnchainHtlc} retry. Below that,
       // nothing in this module helps — dust is a floor on the OUTPUT value,
       // so an HTLC too small to cover its own spend at ANY plausible rate can
       // only be recovered by batching it with other inputs, which the
       // deliberately single-input builder in `src/onchain/refund.ts` cannot
-      // express. An accepted limit, not a TODO in disguise; the rate goes in
+      // express — the case {@link refundablePayoutFloor} refuses; the rate goes in
       // the reason so the two cases can be told apart from the row alone.
       return {
         broadcast: false,
         reason: `refund fee ${fee} at ${feeRate} sat/vB leaves ${payoutAmountSats} sats from a ${row.payoutSats} sat HTLC — below the ${ONCHAIN_DUST_SATS} sat dust limit`,
+        retry: true,
       }
     }
 
     const unsigned = buildOnchainRefundTx({ ...sizingParams, payoutAmountSats })
     const signed = await signOnchainRefundTx(unsigned, signer)
-    // PRE-COMMITTED, here so both callers get it (#169). Holding the id of a
+    // PRE-COMMITTED, here so both callers get it. Holding the id of a
     // broadcast that threw is the safe direction: `unknown`, then rebuild.
     await this.deps.store.patch(row.id, { onchain_refund_txid: signed.id })
     await onchain.broadcastRaw(hex.encode(signed.extract()))

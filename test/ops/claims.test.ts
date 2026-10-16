@@ -15,6 +15,7 @@ const quote = (): QuoteRecord => ({
   paymentHash: PAYMENT_HASH,
   amountSats: 500,
   invoiceExpiresAt: 1_003_600,
+  quotedRefundDeadline: 1_007_200,
   refundLocktime: 1_007_200,
   senderPubkey: '01'.repeat(32),
   receiverPubkey: '02'.repeat(32),

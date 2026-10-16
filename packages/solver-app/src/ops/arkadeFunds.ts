@@ -25,22 +25,31 @@
  *    `settle()` merges the whole float into ONE coin, flattening the very piece
  *    count `pool-mint` exists to build. The deposit's `note` names the action to
  *    use instead.
- *  - NO `withdraw`. Paying an arbitrary address out of the float means either an
- *    Arkade-address transfer or an offboard, and neither is "send n sats to this
- *    L1 address". Both would also spend float coins OUTSIDE the process-local
- *    reservation ledger, taking a coin out from under an in-flight lockup
- *    funding — the exact hazard `arkade/reservations.ts` exists for. The float's
- *    intended exits are the corridors.
+ *  - `withdraw` — BOTH ways out of the float, routed by the destination's form:
+ *    an Arkade address is paid offchain, a bitcoin address by collaborative
+ *    exit. The SDK's `PaymentRouter` prices, settles and refuses; this file only
+ *    hands it, as `selectedVtxos`, every coin no live swap's funding has pinned,
+ *    because the router's own selection cannot be told "not that one".
  *
- * That last pair is the point of a capability seam rather than an interface
- * every source must satisfy: absent is a fact the console can render, whereas a
- * method that threw would put two buttons on the screen that can only ever fail.
+ * The absent half of that pair is the point of a capability seam rather than an
+ * interface every source must satisfy: absent is a fact the console can render,
+ * whereas a method that threw would put a button on the screen that can only
+ * ever fail.
  */
 
-import { networks } from '@arkade-os/sdk'
+import { PaymentRouter, arkRail, isBtcAddress, networks, onchainRail } from '@arkade-os/sdk'
+import { Address } from '@scure/btc-signer'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
+import { outpointKey } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
+import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { Services } from './services.js'
-import type { FundBalance, FundDeposit, FundSource } from './fundSources.js'
+import {
+  parseWholeSats,
+  type FundBalance,
+  type FundDeposit,
+  type FundSource,
+  type FundWithdrawal,
+} from './fundSources.js'
 
 export const ARKADE_FUND_SOURCE_ID = 'arkade'
 
@@ -120,34 +129,8 @@ const arkadeDeposit = async (services: Services): Promise<FundDeposit> => {
 /**
  * The Arkade address: a VTXO sent here IS float on arrival.
  *
- * The other half of the answer, and usually the one an operator wants. Boarding
- * takes L1 sats and needs a settlement before they are spendable; this takes a
- * VTXO from anyone already on Arkade and needs nothing afterwards. Offering only
- * the first — which this source did — quietly told an operator already holding
- * VTXOs to go out to L1 and wait.
- *
- * PREFIX-CHECKED, exactly like the boarding address below.
- *
- * An earlier version of this skipped the check, on the reasoning that an Arkade
- * address is derived from the server this wallet is connected to and so has no
- * wrong-chain form. That reasoning is wrong, and the SDK's own network table is
- * the proof: `hrp` is `ark` on bitcoin and `tark` on every test network, so a
- * wallet pointed at a mainnet server on a regtest-configured deployment hands
- * back a perfectly well-formed `ark1…` while this file labels it
- * `arkade regtest`. That is the identical hazard the boarding guard exists for
- * — an irreversible send to a wallet this solver is not running, against an
- * address the operator never typed and has no reason to doubt.
- *
- * The HRP comes from the SDK's `networks` rather than a table written here, for
- * the same reason the boarding check reads `ONCHAIN_NETWORKS`: a mapping
- * maintained beside the thing it describes cannot drift from it.
- *
- * In practice the misconfiguration that produces a wrong `ark1…` also produces a
- * wrong boarding address, which `arkadeDeposit` already refuses — and since
- * `depositOptions` awaits both, either refusal takes the whole answer down and
- * the operator is shown nothing rather than one good option beside one bad one.
- * This guard is therefore belt-and-braces, which is the correct posture for the
- * one mistake nobody downstream can catch.
+ * PREFIX-CHECKED like boarding: the SDK's `networks` gives `ark` on bitcoin and `tark` elsewhere, so a
+ * wallet on the wrong Arkade server is refused rather than handed out under this network's label.
  */
 const arkadeOffchainDeposit = async (services: Services): Promise<FundDeposit> => {
   const network = services.config.network
@@ -169,6 +152,65 @@ const arkadeOffchainDeposit = async (services: Services): Promise<FundDeposit> =
   }
 }
 
+/** The SDK's exit decodes a destination on any network, and `isBtcAddress` is format-only — so this check stays here. */
+const assertOnchainNetwork = (address: string, network: SwapNetwork): void => {
+  if (!isBtcAddress(address)) return
+  try {
+    Address(ONCHAIN_NETWORKS[network]).decode(address)
+  } catch {
+    throw new Error(`${address} is a bitcoin address for another network, not ${network} — nothing was sent`)
+  }
+}
+
+/**
+ * Pay `amount` sats out of the float to an address the operator chose. The
+ * destination receives EXACTLY `amount` on both routes: the exit's intent fees
+ * are paid out of the change, never out of what the operator typed.
+ */
+const arkadeWithdraw = async (
+  services: Services,
+  params: { address: string; amount: string },
+): Promise<FundWithdrawal> => {
+  const { wallet, reservations } = services.arkade
+  const { address } = params
+  const amountSats = parseWholeSats(params.amount)
+  assertOnchainNetwork(address, services.config.network)
+
+  // Swept coins fund nothing; an asset coin would move its asset onto the one change coin, which no sats swap can fund from.
+  const spendable = (await wallet.getSpendableVtxos({ withRecoverable: false })).filter((v) => !v.assets?.length)
+  // No await between this read and the `reserve` below: the filter and the pin
+  // are one synchronous section, or the ledger arbitrates nothing.
+  const pinned = reservations.reserved()
+  const candidates = spendable.filter((vtxo) => !pinned.has(outpointKey(vtxo.txid, vtxo.vout)))
+  if (candidates.length === 0) {
+    throw new Error(
+      "every asset-free coin in the float is pinned by a live swap's funding, or there are none — nothing was sent",
+    )
+  }
+  const release = reservations.reserve(candidates)
+  try {
+    const router = new PaymentRouter({ wallet, prefs: {} })
+      .use(arkRail())
+      .use(onchainRail({ feeInfo: async () => (await wallet.arkProvider.getInfo()).fees }))
+    const quote = await router.route({ raw: address, amount: amountSats, selectedVtxos: candidates })
+    const { txid } = await (await quote.send()).settled()
+    if (!txid) {
+      throw new Error(
+        `the ${quote.railId} rail settled without a transaction id — the payment may still have gone out; ` +
+          'check the wallet and chain before retrying',
+      )
+    }
+    return {
+      reference: txid,
+      address,
+      amount: String(amountSats),
+      detail: quote.railId === 'onchain' ? { route: 'onchain', feeSats: String(quote.fee) } : { route: 'arkade' },
+    }
+  } finally {
+    release()
+  }
+}
+
 /**
  * Always present — unlike the rail's, which is null without `LN_BACKEND`.
  *
@@ -180,6 +222,7 @@ export const arkadeFundSource = (services: Services): FundSource => ({
   label: 'arkade float',
   unit: 'sats',
   readBalance: () => arkadeBalance(services),
+  withdraw: (params) => arkadeWithdraw(services, params),
   // Arkade FIRST: it is the one that needs no settlement, so an operator who
   // takes the top option gets spendable float rather than a second chore.
   //

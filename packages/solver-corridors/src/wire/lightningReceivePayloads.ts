@@ -35,7 +35,7 @@ import { z } from 'zod'
 import { WIRE_AMOUNT } from '@arkade-os/solver-core/core/wireAmount.js'
 import { MAX_PAIR_LENGTH } from '@arkade-os/solver-core/core/marketKey.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
-import { type RfqState, rfqRefusalPayload } from './payloads.js'
+import type { RfqState } from './payloads.js'
 
 export const RFQ_PAIR_RECEIVE = 'lightning:BTC->arkade:BTC'
 
@@ -182,5 +182,3 @@ export const lightningReceiveRfqStatusPayload = (row: ReceiveSwapRow, rfqId: str
     },
   }
 }
-
-export { rfqRefusalPayload }

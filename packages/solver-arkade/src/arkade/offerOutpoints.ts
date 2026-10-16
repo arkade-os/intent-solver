@@ -15,9 +15,10 @@
  * output a fill would spend, which reads as "the client never funded it" rather
  * than as an error.
  */
-import { hasTerminalSpend } from '@arkade-os/sdk'
+import { isVtxoSpent } from '@arkade-os/sdk'
 import type { ArkadeContext } from './wallet.js'
 import { vtxoPages } from './indexerPaging.js'
+import { heldOf } from './offerFill.js'
 
 /** One live output at an offer's script. Satisfies the corridor's `ObservedDeposit`. */
 export interface OfferOutpoint {
@@ -42,7 +43,7 @@ export const liveOfferOutpoints = async (
   const outpoints: OfferOutpoint[] = []
   for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
     for (const vtxo of batch) {
-      if (hasTerminalSpend(vtxo) || vtxo.isSwept === true) continue
+      if (isVtxoSpent(vtxo) || vtxo.isSwept === true) continue
       const carried = (vtxo as { assets?: { assetId: string; amount: bigint | string }[] }).assets ?? []
       outpoints.push({
         txid: vtxo.txid,
@@ -56,14 +57,6 @@ export const liveOfferOutpoints = async (
     }
   }
   return outpoints
-}
-
-/** How much of one leg an outpoint holds — sats when the leg is BTC. */
-export const heldOnOutpoint = (outpoint: OfferOutpoint, leg: string | null): bigint => {
-  if (leg === null) return outpoint.sats
-  let held = 0n
-  for (const entry of outpoint.assets) if (entry.assetId === leg) held += entry.amount
-  return held
 }
 
 /**
@@ -86,8 +79,8 @@ export const heldOnOutpoint = (outpoint: OfferOutpoint, leg: string | null): big
 export const largestOfferOutpoint = (outpoints: readonly OfferOutpoint[], leg: string | null): OfferOutpoint | null =>
   outpoints.reduce<OfferOutpoint | null>((best, next) => {
     if (best === null) return next
-    const a = heldOnOutpoint(next, leg)
-    const b = heldOnOutpoint(best, leg)
+    const a = heldOf(next, leg)
+    const b = heldOf(best, leg)
     if (a !== b) return a > b ? next : best
     return next.sats > best.sats ? next : best
   }, null)
