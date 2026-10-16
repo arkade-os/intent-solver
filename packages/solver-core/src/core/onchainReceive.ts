@@ -17,7 +17,7 @@
  * two drift and leave one funding swaps the other refuses.
  */
 
-import { HOUR, MINUTE, rawDelaySeconds } from './timelocks.js'
+import { MINUTE, rawDelaySeconds } from './timelocks.js'
 import { UNILATERAL_RECOURSE_MARGIN } from './receive.js'
 import type { Limits } from './limits.js'
 
@@ -49,41 +49,34 @@ export const ONCHAIN_DUST_SATS = 330
 /** rfq-protocol.md §9's receive-direction invariants, unchanged from `core/receive.ts`. */
 export const MIN_SETTLE_WINDOW = 90 * MINUTE
 export const SETTLE_SAFETY_MARGIN = 15 * MINUTE
-export const MAX_REFUND_HORIZON = 2 * HOUR
+
+/** Re-evaluated immediately before funding the ARKADE lockup — not at quote time. */
+export const MIN_ARKADE_FUND_WINDOW = 90 * MINUTE
+
+export const SLOW_BLOCK_ALLOWANCE = 30 * MINUTE
 
 /**
- * The onchain HTLC's CLTV deadline — on this leg the CLIENT's refund path.
- *
- * Sized for everything past the client's broadcast: the confirmation wait, then our
- * settle process (notice, fund Arkade, covclaimd claims, notice `P`, claim the HTLC).
+ * What the client gets to broadcast AND confirm in, since the gate above is measured
+ * back from the END of it. TWICE the expected wait because inter-block intervals are
+ * exponential; the flat 30 minutes this replaced lost that coin flip at 1 conf (#160).
  */
+export const onchainReceiveFundingBudget = (minConfirmations: number): number =>
+  DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT + 2 * minConfirmations * ONCHAIN_SECONDS_PER_BLOCK + SLOW_BLOCK_ALLOWANCE
+
+export const arkadeRefundLocktimeFor = (minConfirmations: number, now: number): number =>
+  now + onchainReceiveFundingBudget(minConfirmations) + MIN_ARKADE_FUND_WINDOW
+
+/** The CLIENT's L1 refund path. Chained off the refund so the GAP is chosen, not left over. */
 export const htlcLocktimeFor = (minConfirmations: number, now: number): number =>
-  now + minConfirmations * ONCHAIN_SECONDS_PER_BLOCK + 2 * MIN_SETTLE_WINDOW
-
-/**
- * When the SOLVER's own Arkade refund may open.
- *
- * `min` of two upper bounds, not `max` of two lower ones: on this leg our refund must
- * land BEFORE the cross-side deadline.
- *
- * THE CAP ALWAYS WINS in the reachable input range, and that is load-bearing rather
- * than incidental (#160). It supplies 70–120 minutes of L1 claim slack where the
- * written formula would supply `SETTLE_SAFETY_MARGIN`'s 15. Raising
- * `MAX_REFUND_HORIZON` shrinks that toward 15; {@link onchainReceiveClaimWindow}
- * states the quantity so it can be pinned instead of emerging.
- */
-export const arkadeRefundLocktimeFor = (htlcLocktime: number, now: number): number =>
-  Math.min(htlcLocktime - SETTLE_SAFETY_MARGIN, now + MAX_REFUND_HORIZON)
+  arkadeRefundLocktimeFor(minConfirmations, now) + MIN_SETTLE_WINDOW
 
 /**
  * How long the solver has to confirm its HTLC claim once a late Arkade claim reveals
  * `P`. The one deadline on this leg whose miss costs REAL MONEY: past it we have
  * refunded our lockup while the counterparty can still sweep the HTLC.
  */
-export const onchainReceiveClaimWindow = (minConfirmations: number, now: number): number => {
-  const htlcLocktime = htlcLocktimeFor(minConfirmations, now)
-  return htlcLocktime - arkadeRefundLocktimeFor(htlcLocktime, now)
-}
+export const onchainReceiveClaimWindow = (minConfirmations: number, now: number): number =>
+  htlcLocktimeFor(minConfirmations, now) - arkadeRefundLocktimeFor(minConfirmations, now)
 
 export type OnchainReceiveAcceptanceRefusal = 'amount_out_of_range'
 
@@ -116,18 +109,14 @@ export const evaluateOnchainReceiveAcceptance = (params: OnchainReceiveAcceptanc
     return { accept: false, reason: 'amount_out_of_range' }
   }
   const minConfirmations = clampMinConfirmations(params.minConfirmations)
-  const htlcLocktime = htlcLocktimeFor(minConfirmations, params.now)
   return {
     accept: true,
-    htlcLocktime,
-    arkadeRefundLocktime: arkadeRefundLocktimeFor(htlcLocktime, params.now),
+    htlcLocktime: htlcLocktimeFor(minConfirmations, params.now),
+    arkadeRefundLocktime: arkadeRefundLocktimeFor(minConfirmations, params.now),
     minConfirmations,
     lockupDeadline: params.now + DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT,
   }
 }
-
-/** Re-evaluated immediately before funding the ARKADE lockup — not at quote time. */
-export const MIN_ARKADE_FUND_WINDOW = 90 * MINUTE
 
 export type OnchainReceiveFundingDecision = { fund: true } | { fund: false; reason: string }
 
