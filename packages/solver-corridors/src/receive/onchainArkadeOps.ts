@@ -8,21 +8,11 @@
  * recourse, as it is the Lightning receive leg's (`receive/arkadeOps.ts`).
  */
 
-import { hex } from '@scure/base'
-import {
-  arkadeOpsFromContext,
-  assertScriptMatchesRow,
-  covenantScriptFromRow,
-  type EmulatorInfo,
-} from '../send/arkadeOps.js'
+import { arkadeOpsFromContext, type EmulatorInfo } from '../send/arkadeOps.js'
+import { refundReceiveLockup } from './arkadeOps.js'
 import { fundLockup } from './fundLockup.js'
 import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
-import {
-  findClaimPreimage,
-  findLockupOutpoints,
-  refundWithoutReceiverSwapScript,
-  type ArkadeContext,
-} from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { findClaimPreimage, findLockupOutpoints, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { ArkadeOps } from '../send/orchestrator.js'
 
 export interface OnchainReceiveArkadeOps extends Pick<
@@ -78,11 +68,7 @@ export const onchainReceiveArkadeOpsFromContext = async (
     delays: base.delays,
     hrp: base.hrp,
     findLockups: base.findLockups,
-    refund: async (row, outputs) => {
-      const script = covenantScriptFromRow(row)
-      assertScriptMatchesRow(script, row)
-      return refundWithoutReceiverSwapScript(ctx, script, [...outputs], hex.decode(row.refundPkScript!))
-    },
+    refund: refundReceiveLockup(ctx),
     findLockupOutpoints: (pkScriptHex) => findLockupOutpoints(ctx, pkScriptHex),
     findClaimPreimage: (outpoints, paymentHashHex) => findClaimPreimage(ctx, outpoints, paymentHashHex),
     // The SHARED funding path, not `wallet.send`: coin selection and the

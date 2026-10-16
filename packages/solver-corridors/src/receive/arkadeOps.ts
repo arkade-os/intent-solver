@@ -28,6 +28,18 @@ import { fundLockup } from './fundLockup.js'
 import type { ReceiveArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 export type { ReceiveArkadeOps }
 
+/**
+ * Both receive legs' refund: `refundWithoutReceiver`, NOT `refund`. On these legs the
+ * receiver is the client, so `refund`'s receiver signature is unobtainable.
+ */
+export const refundReceiveLockup =
+  (ctx: ArkadeContext): ReceiveArkadeOps['refund'] =>
+  async (row, outputs) => {
+    const script = covenantScriptFromRow(row)
+    assertScriptMatchesRow(script, row)
+    return refundWithoutReceiverSwapScript(ctx, script, [...outputs], hex.decode(row.refundPkScript!))
+  }
+
 export const receiveArkadeOpsFromContext = async (
   ctx: ArkadeContext,
   emulator: EmulatorInfo,
@@ -47,14 +59,7 @@ export const receiveArkadeOpsFromContext = async (
     // soonest-batch-expiry first — the one coin a lockup must not inherit from.
     // @see lockupFunding.ts for why, and reservations.ts for the other half.
     fund: (address, amountSats, stamp) => fundLockup(ctx, address, amountSats, stamp),
-    refund: async (row, outputs) => {
-      const script = covenantScriptFromRow(row)
-      assertScriptMatchesRow(script, row)
-      // `refundWithoutReceiver`, NOT `refund`: on this leg the receiver is the
-      // client-user, so `refund`'s receiver signature is unobtainable. See the
-      // role note on `solverPubkey` above.
-      return refundWithoutReceiverSwapScript(ctx, script, [...outputs], hex.decode(row.refundPkScript!))
-    },
+    refund: refundReceiveLockup(ctx),
     findClaimPreimage: (outpoints, paymentHashHex) => findClaimPreimage(ctx, outpoints, paymentHashHex),
   }
 }
