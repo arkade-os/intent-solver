@@ -1099,13 +1099,36 @@ describe('OnchainReceiveSwapService', () => {
       deps.arkadeFake.spendLockup(awaitingClaim.pkScript, null)
 
       // Indistinguishable from read lag on the first look, so it has to
-      // PERSIST past the grace before it counts as inexplicable.
+      // PERSIST past the grace — and past `htlcLocktime`, after which no claim
+      // of the client's can land — before it counts as inexplicable.
       expect((await service.tick(awaitingClaim.id)).state).toBe('refunding_arkade')
-      now += EMPTY_LOCKUP_GRACE
+      now = awaitingClaim.htlcLocktime
 
       const row = await service.tick(awaitingClaim.id)
       expect(row.state).toBe('stuck')
       expect(row.failureReason).toMatch(/no matching claim/)
+    })
+
+    /**
+     * `stuck` is never ticked again, so parking ends the preimage recheck that
+     * is the only thing still collecting this swap — and the client can reveal
+     * `P` right up to `htlcLocktime`, then refund its own L1 HTLC after it.
+     */
+    it('keeps rechecking past the grace while the client could still reveal P', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      now = awaitingClaim.refundLocktime + 1
+      await store.transition(awaitingClaim.id, 'awaiting_claim', 'refunding_arkade', {})
+      deps.arkadeFake.spendLockup(awaitingClaim.pkScript, null)
+
+      expect((await service.tick(awaitingClaim.id)).state).toBe('refunding_arkade')
+      now += EMPTY_LOCKUP_GRACE
+      expect(now).toBeLessThan(awaitingClaim.htlcLocktime)
+      expect((await service.tick(awaitingClaim.id)).state).toBe('refunding_arkade')
+
+      deps.arkadeFake.spendLockup(awaitingClaim.pkScript, P)
+      const row = await service.tick(awaitingClaim.id)
+      expect(row.state).toBe('claimed')
+      expect(row.preimage).toBe(hex.encode(P))
     })
 
     it('names the server-independent recourse on a refund it parks after the censorship grace', async () => {
@@ -1261,7 +1284,7 @@ describe('OnchainReceiveSwapService', () => {
       // which point the empty lockup surfaces for a human.
       now = awaitingClaim.refundLocktime + 1
       expect((await service.tick(awaitingClaim.id)).state).toBe('refunding_arkade')
-      now += EMPTY_LOCKUP_GRACE
+      now = awaitingClaim.htlcLocktime
       expect((await service.tick(awaitingClaim.id)).state).toBe('stuck')
     })
 
@@ -1342,6 +1365,31 @@ describe('OnchainReceiveSwapService', () => {
 
       const row = await service.tick(awaitingClaim.id)
 
+      expect(row.state).toBe('claimed')
+      expect(row.preimage).toBe(hex.encode(P))
+      expect(deps.arkadeFake.refundCalls).toBe(0)
+    })
+
+    it('catches an L1 claim that lands after the grace but before htlc_locktime', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      const outpoint = deps.arkadeFake.lockups.get(awaitingClaim.pkScript)![0]!
+      now = awaitingClaim.refundLocktime + 1
+      await store.transition(awaitingClaim.id, 'awaiting_claim', 'refunding_arkade', {})
+      // Out of the spendable view the moment it unrolls, with `unilateralClaim` unspent.
+      deps.arkadeFake.unrollLockup(awaitingClaim.pkScript)
+      deps.onchain.receiveExternal({
+        address: awaitingClaim.lockupAddress,
+        amountSats: outpoint.value,
+        txid: outpoint.txid,
+        vout: outpoint.vout,
+      })
+
+      expect((await service.tick(awaitingClaim.id)).state).toBe('refunding_arkade')
+      now += EMPTY_LOCKUP_GRACE
+      expect((await service.tick(awaitingClaim.id)).state).toBe('refunding_arkade')
+
+      deps.onchain.spendClaim(outpoint.txid, outpoint.vout, [P])
+      const row = await service.tick(awaitingClaim.id)
       expect(row.state).toBe('claimed')
       expect(row.preimage).toBe(hex.encode(P))
       expect(deps.arkadeFake.refundCalls).toBe(0)

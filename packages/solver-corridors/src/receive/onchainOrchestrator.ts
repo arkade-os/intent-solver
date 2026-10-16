@@ -1107,6 +1107,12 @@ export class OnchainReceiveSwapService {
       // this leg patches a row, so `updatedAt` does not move while we wait —
       // and let the recheck above run again on the next tick.
       if (this.now() - row.updatedAt < EMPTY_LOCKUP_GRACE) return false
+      // `stuck` is swept by nothing, so parking also stops the recheck above —
+      // and this state is entered MIN_ARKADE_FUND_WINDOW before `refundLocktime`,
+      // so the grace expires while the client can still reveal `P` (its own L1
+      // refund does not open until `htlcLocktime`). The Lightning receive leg
+      // refuses the same way at its own `E`.
+      if (this.now() < row.htlcLocktime) return false
       // Still nothing, long past any read lag. Same "needs a human" posture
       // the send leg takes for the identical ambiguity.
       await store.fail(row.id, 'refunding_arkade', 'lockup empty with no matching claim; needs review')
