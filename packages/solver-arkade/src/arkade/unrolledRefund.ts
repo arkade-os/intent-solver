@@ -77,6 +77,7 @@ const BUMP_FACTOR = 1.5
 /** Long enough for arkd's broadcast to reach the explorer before the client can evict it. */
 const READ_ATTEMPTS = 3
 const READ_PAUSE_MS = 2_000
+/** Pay-to-anchor, `OP_1 <0x4e73>`: the anchor every SDK virtual tx carries. */
 const P2A_SCRIPT = '51024e73'
 
 type Chain = UnrolledRefundDeps['chain']
@@ -250,7 +251,8 @@ export class UnrolledRefunder {
       return { kind: 'pending', record }
     }
     // Never seen: arkd refused it, or it left before any explorer kept it. Ask again, once
-    // a lagging explorer has had time to show it; arkd refuses only if it did co-sign this outpoint.
+    // a lagging explorer has had time to show it. In the second case arkd refuses every retry
+    // ("inputs already signed") and the row escalates when the window closes, naming the solo leaf.
     if (this.deps.now() - record.broadcastAt < RETRY_AFTER_SECONDS) return { kind: 'pending', record }
     return this.start(lockup, save)
   }
