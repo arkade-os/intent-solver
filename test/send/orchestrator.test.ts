@@ -1024,6 +1024,15 @@ describe('tick: refusals before money moves', () => {
       expect(ln.payCalls).toHaveLength(0)
     })
 
+    it('refuses to pay a funded row whose lockup is no longer spendable', async () => {
+      const { swap } = await quoted()
+      await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+      const row = await service.tick(swap.id)
+
+      expect(row.state).toBe('refused')
+      expect(ln.payCalls).toHaveLength(0)
+    })
+
     it('is not applied on regtest, whose batches are shorter than any HTLC', async () => {
       const regtest = new SendSwapService({
         store,
@@ -1362,8 +1371,7 @@ describe('tick: failure and recovery', () => {
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
     ln.payResult = { id: 'pay-1', status: 'failed' }
     const realFind = arkade.findLockups.bind(arkade)
-    let reads = 0
-    arkade.findLockups = async (pkScript: string) => (++reads === 1 ? realFind(pkScript) : [])
+    arkade.findLockups = async (pkScript: string) => (ln.payCalls.length === 0 ? realFind(pkScript) : [])
     const realPatch = store.patch.bind(store)
     store.patch = async (id, patch) => {
       if (patch.refund_attempt === 'nothing-at-script') throw new Error('SQLITE_BUSY')
@@ -1411,8 +1419,7 @@ describe('tick: failure and recovery', () => {
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
     ln.payResult = { id: 'pay-1', status: 'failed' }
     const realFind = arkade.findLockups.bind(arkade)
-    let reads = 0
-    arkade.findLockups = async (pkScript: string) => (++reads === 1 ? realFind(pkScript) : [])
+    arkade.findLockups = async (pkScript: string) => (ln.payCalls.length === 0 ? realFind(pkScript) : [])
 
     const row = await service.tick(swap.id)
     expect(row.refundAttempt).toBe('nothing-at-script')
@@ -1705,7 +1712,9 @@ describe('tick: failure and recovery', () => {
     // Funded per the row, but nothing spendable at the script by the time we
     // look — the one-way-door case refundSweep documents. Recording `pushed`
     // here would tell a client they were refunded when they were not.
-    arkade.lockups = []
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    const realFind = arkade.findLockups.bind(arkade)
+    arkade.findLockups = async (pkScript: string) => (ln.payCalls.length === 0 ? realFind(pkScript) : [])
     await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
     ln.payResult = { id: 'pay-1', status: 'failed' }
 
@@ -1949,6 +1958,22 @@ describe('tick: failure and recovery', () => {
 
     expect((await service.tick(swap.id)).state).toBe('paid')
     expect(ln.payCalls).toHaveLength(1)
+  })
+
+  it.each<[string, FundedOutput[]]>([
+    ['gone', []],
+    ['short of what funded it', [{ txid: 'f1', vout: 0, value: AMOUNT / 2 }]],
+  ])('refuses to re-submit a mid-payment row once its lockup is %s', async (_, lockups) => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    const swap = outcome.swap
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+    await store.transition(swap.id, 'funded', 'paying', { idempotency_key: `swap-${swap.paymentHash}` })
+    arkade.lockups = lockups
+
+    const row = await service.tick(swap.id)
+    expect(ln.payCalls).toHaveLength(0)
+    expect(row.failureReason).toContain('cltv_budget_too_short')
   })
 
   it('resumes a swap that died after payment by polling the recorded id', async () => {
@@ -3575,6 +3600,7 @@ describe('SendSwapService — block-typed timelocks', () => {
       })
       if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
       await seed.transition(outcome.swap.id, 'quoted', 'funded', { lockup_value: outcome.swap.amountSats })
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: outcome.swap.amountSats }]
       seed.close()
       // Funding is not instant, and the gate's whole subject is the gap.
       clock += 60

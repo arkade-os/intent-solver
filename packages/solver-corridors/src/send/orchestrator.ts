@@ -33,6 +33,7 @@ import {
   lockupDeadlineFor,
   payableCltvBlocks,
   deadlineContainsHtlc,
+  hintCltvBlocks,
   unilateralLadderFor,
   refundWithoutReceiverDelayCovers,
   type SendAcceptanceRefusal,
@@ -1392,13 +1393,22 @@ export class SendSwapService {
       else await store.fail(row.id, row.state, reason)
       return false
     }
+    const maxCltvBlocks = payableCltvBlocks(cltv, payDeadline, this.now())
+    // `evaluateSendPayment`'s floor, which `whenPaying` never asks: a budget this short is
+    // a refusal, not a ceiling (see `payableCltvBlocks`).
+    if (maxCltvBlocks <= cltv.minFinalCltvBlocks + hintCltvBlocks(cltv)) {
+      const reason = 'refused to pay: cltv_budget_too_short'
+      if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
+      else await store.fail(row.id, row.state, reason)
+      return false
+    }
     let result
     try {
       result = await ln.payInvoice({
         invoice: row.invoice,
         maxFeeSats: row.quotedRoutingFeeSats ?? maxRoutingFeeSats(invoice.amountSats),
         idempotencyKey: row.idempotencyKey,
-        maxCltvBlocks: payableCltvBlocks(cltv, payDeadline, this.now()),
+        maxCltvBlocks,
       })
     } catch (error) {
       if (!(error instanceof PaymentNotStarted) || !nothingCommitted) throw error
@@ -1466,6 +1476,9 @@ export class SendSwapService {
   private async payDeadline(row: SendSwapRow, refundDeadline: number): Promise<number> {
     if (this.deps.network === 'regtest') return refundDeadline
     const outputs = await this.deps.arkade.findLockups(row.pkScript)
+    const held = outputs.reduce((sum, o) => sum + o.value, 0)
+    // Swept or spent before we paid, in whole or part: no deadline protects that, so refuse.
+    if (outputs.length === 0 || held < (row.lockupValue ?? 0)) return this.now()
     return Math.min(refundDeadline, ...outputs.flatMap((o) => (o.expiresAt === undefined ? [] : [o.expiresAt])))
   }
 
