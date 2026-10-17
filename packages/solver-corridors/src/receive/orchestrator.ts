@@ -50,7 +50,7 @@ import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
-import { claimPacketStamp } from './claimPacket.js'
+import { claimPacketStamp, isDelegateeClaimPacket } from './claimPacket.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
 import { FundNotSubmittedError } from './fundLockup.js'
 import type { CovclaimdClient } from './covclaimd.js'
@@ -1106,7 +1106,7 @@ export class ReceiveSwapService {
   /** Hand the sealed claim packet to covclaimd. Only called when both a covclaimd and a packet exist. Idempotent to retry — see this file's own top comment. */
   private async revealToCovclaimd(row: ReceiveSwapRow): Promise<void> {
     const { store, covclaimd } = this.deps
-    if (!covclaimd || row.claimPacket === null) return
+    if (!covclaimd || row.claimPacket === null || isDelegateeClaimPacket(row.claimPacket)) return
     // `stampedAt`, NOT the packet shape: an adopted output carries nothing the
     // shape promises, and skipping the reveal on it strands the swap.
     if (row.stampedAt !== null) return
