@@ -13,12 +13,15 @@ import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
   claimSwapScript,
+  findLockupOutpoints,
   findLockups,
   lockupProvablySpent,
   lockupSpendEvidence,
   refundSwapScript,
   type ArkadeContext,
 } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
+import { unrolledSpenderFor } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 
 /** The emulator service the refund covenant is signed by. */
@@ -39,12 +42,29 @@ export const assertScriptMatchesRow = (script: { pkScript: Uint8Array }, row: Co
   }
 }
 
+export const unrolledLockupOf = (row: CovenantScriptRow, lockup: { txid: string; vout: number }) => {
+  const script = covenantScriptFromRow(row)
+  assertScriptMatchesRow(script, row)
+  const exitDelaySeconds = Math.min(
+    ...[row.claimDelay, row.refundDelay, row.refundWithoutReceiverDelay].map(rawDelaySeconds),
+  )
+  return { script, txid: lockup.txid, vout: lockup.vout, exitDelaySeconds }
+}
+
 export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: EmulatorInfo): Promise<ArkadeOps> => {
   const providerPubkey = hex.encode(await ctx.identity.xOnlyPublicKey())
   // The same general-purpose receiving address claimSwapScript already sends
   // interactive claims to (`destination` below) — decoded to its pkScript so
   // `nonInteractiveClaim`'s covenant can commit to it at quote time.
   const receiverPkScript = hex.encode(ArkAddress.decode(await ctx.wallet.getAddress()).pkScript)
+  const spender = unrolledSpenderFor(ctx)
+  // assertScriptMatchesRow proves the row is self-consistent; this proves
+  // the LIVE key can spend it. A rotated mnemonic would otherwise surface
+  // deep in the server round-trip as a signature error naming nothing.
+  const keyMismatch = (row: CovenantScriptRow): string | null =>
+    row.receiverPubkey === providerPubkey
+      ? null
+      : `swap ${row.id} was quoted under a different provider key; the live key cannot claim it`
   return {
     providerPubkey,
     serverPubkey: hex.encode(ctx.wallet.arkServerPublicKey),
@@ -56,12 +76,8 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
     lockupProvablySpent: (pkScriptHex) => lockupProvablySpent(ctx, pkScriptHex),
     lockupSpendEvidence: (pkScriptHex) => lockupSpendEvidence(ctx, pkScriptHex),
     claim: async (row, outputs, preimageHex) => {
-      // assertScriptMatchesRow proves the row is self-consistent; this proves
-      // the LIVE key can spend it. A rotated mnemonic would otherwise surface
-      // deep in the server round-trip as a signature error naming nothing.
-      if (row.receiverPubkey !== providerPubkey) {
-        throw new Error(`swap ${row.id} was quoted under a different provider key; the live key cannot claim it`)
-      }
+      const mismatch = keyMismatch(row)
+      if (mismatch) throw new Error(mismatch)
       const script = covenantScriptFromRow(row)
       assertScriptMatchesRow(script, row)
       const destination = await ctx.wallet.getAddress()
@@ -71,6 +87,13 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
       const script = covenantScriptFromRow(row)
       assertScriptMatchesRow(script, row)
       return refundSwapScript(ctx, emulator.url, script, outputs, hex.decode(row.refundPkScript!))
+    },
+    findLockupOutpoints: (pkScriptHex) => findLockupOutpoints(ctx, pkScriptHex),
+    // Closed, not thrown: a held throw would keep the row claiming with nothing left to try.
+    claimUnrolled: async (row, lockup, record, save, preimageHex) => {
+      const reason = keyMismatch(row)
+      if (reason) return { kind: 'closed', reason }
+      return spender.advance({ ...unrolledLockupOf(row, lockup), preimage: hex.decode(preimageHex) }, record, save)
     },
   }
 }

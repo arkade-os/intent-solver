@@ -99,6 +99,8 @@ const PATCH_COLUMNS = new Set([
   'payment_backend',
   'payment_wallet',
   'routing_fee_paid_sats',
+  'unrolled_claim',
+  'claim_ark_txid',
 ])
 
 export interface SendSwapRow {
@@ -200,6 +202,8 @@ export interface SendSwapRow {
   paymentId: string | null
   preimage: string | null
   claimArkTxid: string | null
+  /** JSON, by outpoint: the last step of each L1 claim of a lockup output the client unrolled. */
+  unrolledClaim: string | null
   failureReason: string | null
   /**
    * The backend's last word on the outbound payment — `in_flight` vs `wedged`
@@ -295,7 +299,8 @@ const SEND_SWAP_COLUMNS = `
   rfq_id                        TEXT,
   payment_evidence              TEXT,
   payment_failure_reason        TEXT,
-  routing_fee_paid_sats         INTEGER
+  routing_fee_paid_sats         INTEGER,
+  unrolled_claim                TEXT
 `
 
 const SCHEMA = `
@@ -375,6 +380,7 @@ const toRow = (raw: Raw): SendSwapRow => ({
   paymentFailureReason: text(raw.payment_failure_reason),
   rfqId: text(raw.rfq_id),
   routingFeePaidSats: numberOrNull(raw.routing_fee_paid_sats),
+  unrolledClaim: text(raw.unrolled_claim),
 })
 
 export interface QuoteRecord {
@@ -427,6 +433,7 @@ export const SEND_SEARCH_COLUMNS: readonly string[] = [
   'lockup_txid',
   'claim_ark_txid',
   'refund_ark_txid',
+  'unrolled_claim',
   'rfq_id',
 ]
 
@@ -492,6 +499,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
       // and sorts and sums wrongly the day anything asks SQLite to do either.
       ['routing_fee_paid_sats', 'INTEGER'],
       ['quoted_refund_deadline', 'INTEGER'],
+      ['unrolled_claim', 'TEXT'],
     ])
 
     // Databases created when payment_hash carried a column-level UNIQUE burn a

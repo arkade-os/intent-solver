@@ -55,6 +55,7 @@ import {
 import { preimageMatchesHash, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
+import { advanceUnrolledClaims, settleUnrolledClaims } from '../unrolledSpendStep.js'
 import { MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { HoldState, ReceiveBackend, SendBackend, SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
@@ -1697,7 +1698,9 @@ export class SendSwapService {
       return false
     }
     const outputs = await arkade.findLockups(row.pkScript)
-    if (outputs.length === 0) {
+    // `findLockups` leaves out an output the client unrolled: arkd refuses it every offchain spend.
+    const unrolled = await advanceUnrolledClaims(store, row, arkade, row, row.preimage)
+    if (outputs.length === 0 && unrolled === null) {
       // The script is empty, but we hold no claim txid — so we have NO positive
       // proof our claim landed. `findLockups` returns [] for a swept, renewed or
       // lagging vtxo exactly as it does after our own spend (`spendableOnly`
@@ -1706,8 +1709,8 @@ export class SendSwapService {
       // full-amount loss — a swept lockup, or a client refund after we paid — as
       // `claimed`. Route to `stuck` for a human: a false `stuck` (we really did
       // claim and a crash ate the record) costs a glance; a false `claimed` costs
-      // the funds. The only path that ever records `claimed` is the one below,
-      // which has our own claim txid in hand.
+      // the funds. The only paths that ever record `claimed` are below, each
+      // with our own claim txids in hand.
       // Nor is it proof the lockup is GONE, and `stuck` is terminal — so parking
       // on a lagging view ends collection of an invoice we already paid.
       const evidence = await arkade.lockupSpendEvidence(row.pkScript)
@@ -1719,10 +1722,9 @@ export class SendSwapService {
     }
 
     // Funds still present. Try the collaborative claim.
+    let txid: string | null = null
     try {
-      const txid = await arkade.claim(row, outputs, row.preimage)
-      await store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: txid })
-      return false
+      if (outputs.length > 0) txid = await arkade.claim(row, outputs, row.preimage)
     } catch (error) {
       // Past the deadline, a persistently failing claim means the Arkade Service
       // is censoring or down while the client's refund is open and racing us.
@@ -1744,5 +1746,13 @@ export class SendSwapService {
       }
       throw error
     }
+    if (unrolled === null) {
+      await store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: txid })
+      return false
+    }
+    if (txid !== null) await store.patch(row.id, { claim_ark_txid: txid })
+    return settleUnrolledClaims(store, row.id, { from: 'claiming', to: 'claimed' }, unrolled, () =>
+      unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey }),
+    )
   }
 }

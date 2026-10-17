@@ -107,6 +107,8 @@ const PATCH_COLUMNS = new Set([
   'onchain_refund_fee_rate',
   'onchain_refund_broadcast_at',
   'onchain_refund_prior_txids',
+  'unrolled_claim',
+  'claim_ark_txid',
 ])
 
 export interface OnchainSendSwapRow {
@@ -177,6 +179,8 @@ export interface OnchainSendSwapRow {
   fundingVout: number | null
   preimage: string | null
   claimArkTxid: string | null
+  /** JSON, by outpoint: the last step of each L1 claim of a lockup output the client unrolled. */
+  unrolledClaim: string | null
   /** Written BEFORE the broadcast: the refund ATTEMPTED, not one that landed. */
   onchainRefundTxid: string | null
   /** The sat/vB {@link onchainRefundTxid} was built at, so the next version can be priced above it. */
@@ -239,7 +243,8 @@ const SEND_ONCHAIN_SWAP_COLUMNS = `
   refund_outcome                TEXT,
   failure_reason                TEXT,
   rfq_id                        TEXT,
-  fund_started_at               INTEGER
+  fund_started_at               INTEGER,
+  unrolled_claim                TEXT
 `
 
 const SCHEMA = `
@@ -313,6 +318,7 @@ const toRow = (raw: Raw): OnchainSendSwapRow => ({
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
   rfqId: text(raw.rfq_id),
   fundStartedAt: numberOrNull(raw.fund_started_at),
+  unrolledClaim: text(raw.unrolled_claim),
 })
 
 export interface OnchainQuoteRecord {
@@ -380,6 +386,7 @@ export const ONCHAIN_SEND_SEARCH_COLUMNS: readonly string[] = [
   'claim_ark_txid',
   'onchain_refund_txid',
   'refund_ark_txid',
+  'unrolled_claim',
   'rfq_id',
 ]
 
@@ -437,6 +444,7 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
       ['onchain_refund_fee_rate', 'REAL'],
       ['onchain_refund_broadcast_at', 'INTEGER'],
       ['onchain_refund_prior_txids', 'TEXT'],
+      ['unrolled_claim', 'TEXT'],
     ])
   }
 

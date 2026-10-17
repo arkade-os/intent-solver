@@ -36,6 +36,7 @@ import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/co
 import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
+import { advanceUnrolledClaims, settleUnrolledClaims } from '../unrolledSpendStep.js'
 import { MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import {
@@ -785,9 +786,21 @@ export class OnchainSendSwapService {
     }
     // After the funding decision, before the CAS: a held swap still reaches its deadline and refuses.
     if (!(await askApproval(this.deps.approvalGate, row.id, row.amountSats))) return false
+    const shortfall = await this.lockupShortfall(row)
+    if (shortfall) {
+      await store.fail(row.id, 'funded', shortfall)
+      return false
+    }
     const won = await store.transition(row.id, 'funded', 'funding_onchain', {})
     if (!won) return false
     return this.submitFunding(await store.get(row.id))
+  }
+
+  /** Read again right before money moves: an approval wait or a failing `fund()` is time the client can spend unrolling it. */
+  private async lockupShortfall(row: OnchainSendSwapRow): Promise<string | null> {
+    const held = (await this.deps.arkade.findLockups(row.pkScript)).reduce((sum, o) => sum + o.value, 0)
+    const funded = row.onchainLockupValue ?? row.amountSats
+    return held < funded ? `lockup holds ${held} of ${funded} sats at funding: unrolled, swept or spent` : null
   }
 
   private fundingDecision(row: OnchainSendSwapRow) {
@@ -862,6 +875,11 @@ export class OnchainSendSwapService {
 
     let result
     try {
+      const shortfall = await this.lockupShortfall(row)
+      if (shortfall) {
+        await store.fail(row.id, 'funding_onchain', shortfall)
+        return false
+      }
       result = await onchain.fund({
         address: row.onchainAddress,
         amountSats: row.payoutSats,
@@ -953,7 +971,8 @@ export class OnchainSendSwapService {
       return false
     }
     const outputs = await arkade.findLockups(row.pkScript)
-    if (outputs.length === 0) {
+    const unrolled = await advanceUnrolledClaims(store, row, arkade, covenantRowFor(row), row.preimage)
+    if (outputs.length === 0 && unrolled === null) {
       // Proof of neither our claim nor the lockup's spend: `findLockups` is
       // spendableOnly. {@link pushRefund}'s refusal applies here too, and harder —
       // `stuck` has no `step` case, so parking ends collection after we paid out.
@@ -964,10 +983,9 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'claiming', 'lockup empty while claiming with no claim txid recorded; needs review')
       return false
     }
+    let txid: string | null = null
     try {
-      const txid = await arkade.claim(covenantRowFor(row), outputs, row.preimage)
-      await store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: txid })
-      return false
+      if (outputs.length > 0) txid = await arkade.claim(covenantRowFor(row), outputs, row.preimage)
     } catch (error) {
       if (this.now() >= row.refundLocktime) {
         const detail = error instanceof Error ? error.message : String(error)
@@ -977,6 +995,14 @@ export class OnchainSendSwapService {
       }
       throw error
     }
+    if (unrolled === null) {
+      await store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: txid })
+      return false
+    }
+    if (txid !== null) await store.patch(row.id, { claim_ark_txid: txid })
+    return settleUnrolledClaims(store, row.id, { from: 'claiming', to: 'claimed' }, unrolled, () =>
+      unilateralExitRecourse(covenantRowFor(row), { solverPubkey: arkade.providerPubkey }),
+    )
   }
 
   /**

@@ -1,57 +1,60 @@
 /**
- * The solver's refund of a lockup the client unrolled onto Bitcoin, through arkd's
- * `CosignOnchainTx` (v0.9.22, `POST /v1/tx/onchain/cosign`).
+ * The solver's spend of a lockup the client unrolled onto Bitcoin, through arkd's
+ * `CosignOnchainTx` (v0.9.22, `POST /v1/tx/onchain/cosign`): the refund on a receive leg,
+ * the claim on a send leg.
  *
- * arkd refuses every offchain spend of an unrolled VTXO, and the unroll restarts both
- * solo CSVs with the client's first. `refundWithoutReceiver` carries only a CLTV, so
- * the unroll cannot delay it. arkd co-signs an outpoint ONCE, which also shuts out the
- * client's own co-signed L1 claim, but means the refund is never replaced: a dropped
- * one is rebroadcast, and a slow one gets one co-signed CPFP child.
+ * arkd refuses every offchain spend of an unrolled VTXO, and the unroll restarts every solo
+ * CSV. `refundWithoutReceiver` carries only a CLTV and `claim` no timelock, so the unroll
+ * delays neither. arkd co-signs an outpoint ONCE, which shuts out the client's own co-signed
+ * spend, but means ours is never replaced: a dropped one is rebroadcast, and a slow one gets
+ * one co-signed CPFP child.
  */
 
 import { setArkPsbtField, Transaction, VtxoTaprootTree, type OnchainProvider, type TapLeafScript } from '@arkade-os/sdk'
 import { base64, hex } from '@scure/base'
+import { claimIdentity } from './claimIdentity.js'
 import { ONCHAIN_DUST_SATS } from '@arkade-os/solver-core/core/onchainReceive.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import type { CovenantSwapScript } from './covenant.js'
 import type { ArkadeContext } from './wallet.js'
 
 /** What the row keeps between ticks. */
-export interface UnrolledRefundRecord {
+export interface UnrolledSpendRecord {
   txid: string
   /** The final transaction, hex, once an explorer has it. */
   tx: string | null
-  /** sat/vB the newest version was priced at: the refund alone, or with its CPFP child. */
+  /** sat/vB the newest version was priced at: the spend alone, or with its CPFP child. */
   feeRate: number
   broadcastAt: number
   cpfpTxid: string | null
+  /** The final child, hex, once an explorer has it: arkd co-signs one, so a dropped one is resent. */
+  cpfpTx?: string | null
 }
 
 /** Persists a record before arkd is asked to co-sign it, so a lost reply cannot lose arkd's one signature. */
-export type SaveUnrolledRefund = (record: UnrolledRefundRecord) => Promise<void>
+export type SaveUnrolledSpend = (record: UnrolledSpendRecord) => Promise<void>
 
-export const parseUnrolledRefund = (raw: string | null): UnrolledRefundRecord | null =>
-  raw === null ? null : (JSON.parse(raw) as UnrolledRefundRecord)
+export const parseUnrolledSpend = (raw: string | null): UnrolledSpendRecord | null =>
+  raw === null ? null : (JSON.parse(raw) as UnrolledSpendRecord)
 
-export type UnrolledRefundStep =
+export type UnrolledSpendStep =
   | { kind: 'waiting' }
-  /** Spent by a transaction that is not this refund — the client's claim, normally. */
+  /** Spent by a transaction that is not ours: the client's own spend, normally. */
   | { kind: 'spent' }
-  /** No co-signed refund will happen: arkd stopped co-signing, or the lockup cannot pay for one. */
+  /** No co-signed spend will happen: arkd stopped co-signing, or the lockup cannot pay for one. */
   | { kind: 'closed'; reason: string }
-  | { kind: 'pending'; record: UnrolledRefundRecord }
-  | { kind: 'confirmed'; record: UnrolledRefundRecord }
+  | { kind: 'pending'; record: UnrolledSpendRecord }
+  | { kind: 'confirmed'; record: UnrolledSpendRecord }
 
-export interface UnrolledLockup {
+export type UnrolledSpend = {
   script: CovenantSwapScript
   txid: string
   vout: number
-  refundLocktime: number
   /** The script's shortest CSV, seconds: arkd stops co-signing as it nears. */
   exitDelaySeconds: number
-}
+} & ({ refundLocktime: number } | { preimage: Uint8Array })
 
-export interface UnrolledRefundDeps {
+export interface UnrolledSpendDeps {
   chain: Pick<
     OnchainProvider,
     'getChainTip' | 'getFeeRate' | 'getRawTransaction' | 'getTxStatus' | 'getTxOutspends' | 'broadcastTransaction'
@@ -59,7 +62,7 @@ export interface UnrolledRefundDeps {
   signer: { sign(tx: Transaction, inputIndexes?: number[]): Promise<Transaction> }
   /** arkd adds its signature, broadcasts, and returns the txid. */
   cosign(psbtBase64: string): Promise<string>
-  /** The wallet's boarding script: the refund lands back in the float. */
+  /** The wallet's boarding script: the spend lands back in the float. */
   boarding: { pkScript: Uint8Array; forfeit(): TapLeafScript; encode(): Uint8Array }
   now(): number
   pause?: (ms: number) => Promise<void>
@@ -80,10 +83,15 @@ const READ_PAUSE_MS = 2_000
 /** Pay-to-anchor, `OP_1 <0x4e73>`: the anchor every SDK virtual tx carries. */
 const P2A_SCRIPT = '51024e73'
 
-type Chain = UnrolledRefundDeps['chain']
+type Chain = UnrolledSpendDeps['chain']
 
-/** No fee rate makes this refund relay, so no later tick will push one either. */
-class UnrefundableLockup extends Error {}
+/** No fee rate makes this spend relay, so no later tick will push one either. */
+class UnspendableLockup extends Error {}
+
+const leafOf = (lockup: UnrolledSpend) =>
+  'preimage' in lockup
+    ? { leaf: lockup.script.claim(), lockTime: 0, preimage: lockup.preimage }
+    : { leaf: lockup.script.refundWithoutReceiver(), lockTime: lockup.refundLocktime, preimage: null }
 
 const feeRateNow = async (chain: Chain): Promise<number> => {
   const rate = await chain.getFeeRate()
@@ -91,8 +99,12 @@ const feeRateNow = async (chain: Chain): Promise<number> => {
   return rate
 }
 
-/** vsize once finalized with two schnorr signatures, the leaf script and its control block. */
-const signedVsize = (unsigned: Transaction, [controlBlock, scriptWithVersion]: TapLeafScript): number => {
+/** vsize once finalized with two schnorr signatures, any preimage, the leaf script and its control block. */
+const signedVsize = (
+  unsigned: Transaction,
+  [controlBlock, scriptWithVersion]: TapLeafScript,
+  preimage: Uint8Array | null,
+): number => {
   const tx = unsigned.clone()
   tx.updateInput(
     0,
@@ -100,6 +112,7 @@ const signedVsize = (unsigned: Transaction, [controlBlock, scriptWithVersion]: T
       finalScriptWitness: [
         new Uint8Array(64),
         new Uint8Array(64),
+        ...(preimage ? [preimage] : []),
         scriptWithVersion.subarray(0, -1),
         new Uint8Array(33 + 32 * controlBlock.merklePath.length),
       ],
@@ -148,16 +161,16 @@ const outputScript = (tx: Transaction, vout: number): string | null => {
   return script ? hex.encode(script) : null
 }
 
-export class UnrolledRefunder {
+export class UnrolledSpender {
   private readonly lastAdvance = new Map<string, number>()
 
-  constructor(private readonly deps: UnrolledRefundDeps) {}
+  constructor(private readonly deps: UnrolledSpendDeps) {}
 
   async advance(
-    lockup: UnrolledLockup,
-    record: UnrolledRefundRecord | null,
-    save: SaveUnrolledRefund,
-  ): Promise<UnrolledRefundStep> {
+    lockup: UnrolledSpend,
+    record: UnrolledSpendRecord | null,
+    save: SaveUnrolledSpend,
+  ): Promise<UnrolledSpendStep> {
     const key = `${lockup.txid}:${lockup.vout}`
     const now = this.deps.now()
     if (now - (this.lastAdvance.get(key) ?? -Infinity) < ADVANCE_INTERVAL_SECONDS) return { kind: 'waiting' }
@@ -165,14 +178,13 @@ export class UnrolledRefunder {
     return record ? this.track(lockup, record, save) : this.start(lockup, save)
   }
 
-  private async start(lockup: UnrolledLockup, save: SaveUnrolledRefund): Promise<UnrolledRefundStep> {
+  private async start(lockup: UnrolledSpend, save: SaveUnrolledSpend): Promise<UnrolledSpendStep> {
     const { chain } = this.deps
-    const tip = await chain.getChainTip()
-    const matured =
-      lockup.refundLocktime < LOCKTIME_THRESHOLD
-        ? tip.height >= lockup.refundLocktime
-        : tip.time > lockup.refundLocktime
-    if (!matured) return { kind: 'waiting' }
+    const { lockTime } = leafOf(lockup)
+    if (lockTime > 0) {
+      const tip = await chain.getChainTip()
+      if (lockTime < LOCKTIME_THRESHOLD ? tip.height < lockTime : tip.time <= lockTime) return { kind: 'waiting' }
+    }
     const out = (await chain.getTxOutspends(lockup.txid))[lockup.vout]
     if (out?.spent) {
       const ours = out.txid === undefined ? null : await this.adopt(out.txid)
@@ -182,7 +194,7 @@ export class UnrolledRefunder {
       return { kind: 'pending', record: await this.push(lockup, save) }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
-      if (error instanceof UnrefundableLockup) return { kind: 'closed', reason }
+      if (error instanceof UnspendableLockup) return { kind: 'closed', reason }
       const unroll = await chain.getTxStatus(lockup.txid).catch(() => null)
       if (
         unroll?.confirmed &&
@@ -194,7 +206,7 @@ export class UnrolledRefunder {
     }
   }
 
-  private async push(lockup: UnrolledLockup, save: SaveUnrolledRefund): Promise<UnrolledRefundRecord> {
+  private async push(lockup: UnrolledSpend, save: SaveUnrolledSpend): Promise<UnrolledSpendRecord> {
     const { chain, boarding } = this.deps
     const parentRaw = await chain.getRawTransaction(lockup.txid)
     const parent = Transaction.fromRaw(parentRaw)
@@ -203,53 +215,53 @@ export class UnrolledRefunder {
     }
     const value = Number(parent.getOutput(lockup.vout).amount)
     const feeRate = await feeRateNow(chain)
-    const leaf = lockup.script.refundWithoutReceiver()
+    const { leaf, lockTime, preimage } = leafOf(lockup)
     const input = { txid: lockup.txid, vout: lockup.vout, script: lockup.script.pkScript, value }
-    const build = (fee: number) =>
-      spendTx(input, leaf, lockup.script.encode(), boarding.pkScript, fee, lockup.refundLocktime)
-    const vsize = signedVsize(build(0), leaf)
+    const build = (fee: number) => spendTx(input, leaf, lockup.script.encode(), boarding.pkScript, fee, lockTime)
+    const vsize = signedVsize(build(0), leaf, preimage)
     const cap = value - ONCHAIN_DUST_SATS
-    if (cap < vsize) throw new UnrefundableLockup(`a ${value} sat lockup cannot pay for its own L1 refund`)
+    if (cap < vsize) throw new UnspendableLockup(`a ${value} sat lockup cannot pay for its own L1 spend`)
 
     let fee = Math.ceil(feeRate * vsize)
     if (!(await chain.getTxStatus(lockup.txid)).confirmed) {
-      // A zero-fee TRUC parent whose one child is the client's anchor spend. This refund
+      // A zero-fee TRUC parent whose one child is the client's anchor spend. This spend
       // replaces that child, so it pays for the parent and beats the child's fee and
-      // feerate; arkd stays free to co-sign the client's claim past E until it does.
+      // feerate; until it does, the client's own co-signed spend can still win.
       fee = Math.ceil(feeRate * (vsize + vsizeOf(parentRaw)))
       const sibling = await this.anchorChild(lockup.txid, parent)
       if (sibling) {
         fee = Math.max(fee, sibling.fee + vsize, Math.ceil((sibling.fee / sibling.vsize + 1) * vsize))
-        // No refund can replace a child bidding past the lockup, but a parent carried that high confirms.
-        if (fee > cap) throw new Error(`the client's anchor child outbids all ${cap} sats this refund can pay`)
+        // No spend can replace a child bidding past the lockup, but a parent carried that high confirms.
+        if (fee > cap) throw new Error(`the client's anchor child outbids all ${cap} sats this spend can pay`)
       }
     }
-    const signed = await this.deps.signer.sign(build(Math.min(fee, cap)), [0])
+    const signer = preimage ? claimIdentity(this.deps.signer, preimage) : this.deps.signer
+    const signed = await signer.sign(build(Math.min(fee, cap)), [0])
     const record = { txid: signed.id, tx: null, feeRate, broadcastAt: this.deps.now(), cpfpTxid: null }
     await save(record)
     const txid = await this.deps.cosign(base64.encode(signed.toPSBT()))
-    if (txid !== signed.id) throw new Error(`arkd broadcast ${txid}, expected the refund ${signed.id}`)
+    if (txid !== signed.id) throw new Error(`arkd broadcast ${txid}, expected ${signed.id}`)
     return { ...record, tx: await this.readSoon(txid) }
   }
 
   private async track(
-    lockup: UnrolledLockup,
-    record: UnrolledRefundRecord,
-    save: SaveUnrolledRefund,
-  ): Promise<UnrolledRefundStep> {
+    lockup: UnrolledSpend,
+    record: UnrolledSpendRecord,
+    save: SaveUnrolledSpend,
+  ): Promise<UnrolledSpendStep> {
     const { chain } = this.deps
     const status = await chain.getTxStatus(record.txid).catch(() => null)
     if (status?.confirmed) return { kind: 'confirmed', record }
     if (status) {
       const tx = record.tx ?? hex.encode(await chain.getRawTransaction(record.txid))
-      return { kind: 'pending', record: await this.bump(lockup, { ...record, tx }, save) }
+      return { kind: 'pending', record: await this.bump(lockup, await this.keepChild({ ...record, tx }), save) }
     }
     const out = (await chain.getTxOutspends(lockup.txid))[lockup.vout]
     if (out?.spent && out.txid !== undefined && out.txid !== record.txid) {
       const ours = await this.adopt(out.txid)
       return ours ? this.track(lockup, ours, save) : { kind: 'spent' }
     }
-    // Spent by this refund, or by a spender the explorer does not name: wait.
+    // Spent by this spend, or by a spender the explorer does not name: wait.
     if (out?.spent) return { kind: 'pending', record }
     // Dropped: the same signed transaction is always safe to resend.
     if (record.tx) {
@@ -264,11 +276,11 @@ export class UnrolledRefunder {
   }
 
   /**
-   * A spend whose one output pays our boarding script is one of our refunds: a client sending
+   * A spend whose one output pays our boarding script is one of ours: a client sending
    * it there only gives the sats back. Exactly one, so a claim with a dust output to us beside
-   * its own cannot pass for a refund.
+   * its own cannot pass for ours.
    */
-  private async adopt(txid: string): Promise<UnrolledRefundRecord | null> {
+  private async adopt(txid: string): Promise<UnrolledSpendRecord | null> {
     const raw = await this.deps.chain.getRawTransaction(txid)
     const tx = Transaction.fromRaw(raw)
     if (tx.outputsLength !== 1 || outputScript(tx, 0) !== hex.encode(this.deps.boarding.pkScript)) return null
@@ -303,6 +315,19 @@ export class UnrolledRefunder {
     return { fee, vsize: vsizeOf(raw) }
   }
 
+  /** arkd co-signs one child: keep its final tx once an explorer serves it, and resend it if it drops. */
+  private async keepChild<R extends UnrolledSpendRecord>(record: R): Promise<R> {
+    const { chain } = this.deps
+    if (record.cpfpTxid === null) return record
+    if (!(await chain.getTxStatus(record.cpfpTxid).catch(() => null))) {
+      if (record.cpfpTx) await chain.broadcastTransaction(record.cpfpTx)
+      return record
+    }
+    if (record.cpfpTx) return record
+    const raw = await chain.getRawTransaction(record.cpfpTxid).catch(() => null)
+    return raw ? { ...record, cpfpTx: hex.encode(raw) } : record
+  }
+
   /** arkd returns no tx, and the client can evict this one at once: read it while it is still around. */
   private async readSoon(txid: string): Promise<string | null> {
     const pause = this.deps.pause ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
@@ -315,10 +340,10 @@ export class UnrolledRefunder {
   }
 
   private async bump(
-    lockup: UnrolledLockup,
-    record: UnrolledRefundRecord & { tx: string },
-    save: SaveUnrolledRefund,
-  ): Promise<UnrolledRefundRecord> {
+    lockup: UnrolledSpend,
+    record: UnrolledSpendRecord & { tx: string },
+    save: SaveUnrolledSpend,
+  ): Promise<UnrolledSpendRecord> {
     const { chain, boarding } = this.deps
     if (record.cpfpTxid !== null || this.deps.now() - record.broadcastAt < BUMP_AFTER_SECONDS) return record
     // TRUC: a child of the refund while the unroll is unconfirmed would be a third generation.
@@ -333,21 +358,25 @@ export class UnrolledRefunder {
     const refundFee = lockupValue - output
     const estimate = await feeRateNow(chain)
     if (refundFee >= refundVsize * estimate) return record
+    // Only we can spend output 0, so a spender is the child arkd broadcast for a reply we lost.
+    const child = (await chain.getTxOutspends(record.txid))[0]
+    if (child?.spent && child.txid !== undefined) {
+      return { ...record, cpfpTxid: child.txid, cpfpTx: await this.readSoon(child.txid) }
+    }
 
     const feeRate = estimate * BUMP_FACTOR
     const leaf = boarding.forfeit()
     const input = { txid: record.txid, vout: 0, script: boarding.pkScript, value: output }
     const build = (fee: number) => spendTx(input, leaf, boarding.encode(), boarding.pkScript, fee)
-    const childVsize = signedVsize(build(0), leaf)
+    const childVsize = signedVsize(build(0), leaf, null)
     const cap = output - ONCHAIN_DUST_SATS
     if (cap < childVsize) return record
     // The child pays the refund's shortfall at `feeRate` as well as its own way.
     const fee = Math.min(Math.ceil(feeRate * (refundVsize + childVsize)) - refundFee, cap)
-    // No pre-commit: losing the reply loses only the bump, and arkd refuses a second child.
     const signed = await this.deps.signer.sign(build(fee), [0])
     try {
       const cpfpTxid = await this.deps.cosign(base64.encode(signed.toPSBT()))
-      return { ...record, cpfpTxid, feeRate, broadcastAt: this.deps.now() }
+      return { ...record, cpfpTxid, cpfpTx: await this.readSoon(cpfpTxid), feeRate, broadcastAt: this.deps.now() }
     } catch (error) {
       // The refund stands without its bump: ask again after another interval, not every tick.
       await save({ ...record, broadcastAt: this.deps.now() })
@@ -371,8 +400,8 @@ export const cosignOnchainTx = async (arkServerUrl: string, psbtBase64: string):
   return txid
 }
 
-export const unrolledRefunderFor = (ctx: ArkadeContext): UnrolledRefunder =>
-  new UnrolledRefunder({
+export const unrolledSpenderFor = (ctx: ArkadeContext): UnrolledSpender =>
+  new UnrolledSpender({
     chain: ctx.wallet.onchainProvider,
     signer: ctx.identity,
     cosign: (psbt) => cosignOnchainTx(ctx.arkServerUrl, psbt),

@@ -108,7 +108,7 @@ shipped — plus scenario and mutation cfgs:
 Every mutation cfg states its expected verdict in its header — normally an
 `EXPECTED RESULT` line, though `OnchainSend_RefundTiming.cfg` says `EXPECTED
 TO STAY GREEN` on its first line instead; the per-module green cfgs also say
-so in their first line. The full set is 60 cfgs — 17 green, 43 expected
+so in their first line. The full set is 62 cfgs — 17 green, 45 expected
 violations — and the green modules' checkpoint comments record the per-cfg
 results. That split is a count of the files as they stand, so re-count it from
 the headers rather than trusting this line after cfgs are added or removed.
@@ -134,7 +134,7 @@ raises a false alarm on all six; read the header, not the filename.
   says so — do not "fix" the spec until it goes away; fix the guard in the
   TypeScript, or accept the finding and track it.
 - **Compare the invariant NAME, not just green-vs-red.** Because TLC stops at
-  the first violated invariant, and 22 of the 23 cfgs whose header expects
+  the first violated invariant, and 24 of the 25 cfgs whose header expects
   `NoNetLoss` list `NoSilentLoss` above it in `INVARIANTS`, a regression can
   change WHICH invariant fires while the verdict stays `VIOLATED` and the
   sweep still looks healthy. `EvmSend_LateLock.cfg`'s header records that

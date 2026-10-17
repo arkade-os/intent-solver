@@ -25,7 +25,7 @@ import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
 import type { OnchainReceiveArkadeOps } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
 import { FundNotSubmittedError } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import type { CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
-import type { UnrolledRefundRecord, UnrolledRefundStep } from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
+import type { UnrolledSpendRecord, UnrolledSpendStep } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 
 const keyBytes = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 
@@ -1402,14 +1402,14 @@ describe('OnchainReceiveSwapService', () => {
     })
 
     describe('its refund on L1 through arkd', () => {
-      const record: UnrolledRefundRecord = {
+      const record: UnrolledSpendRecord = {
         txid: 'cd'.repeat(32),
         tx: null,
         feeRate: 10,
         broadcastAt: 1,
         cpfpTxid: null,
       }
-      let steps: UnrolledRefundStep[]
+      let steps: UnrolledSpendStep[]
       let lockups: { txid: string; vout: number }[]
 
       beforeEach(() => {
@@ -1437,6 +1437,19 @@ describe('OnchainReceiveSwapService', () => {
         expect((await service.tick(row.id)).state).toBe('refunded')
         expect(lockups[0]).toEqual({ txid: row.arkadeFundTxid, vout: 0 })
         expect(deps.arkadeFake.refundCalls).toBe(0)
+      })
+
+      it('refuses to pick between two unrolled outputs of its fund tx', async () => {
+        const awaitingClaim = await driveToAwaitingClaim()
+        const second = { txid: awaitingClaim.arkadeFundTxid!, vout: 1, value: 1_000 }
+        deps.arkadeFake.seedLockup(awaitingClaim.lockupAddress, second)
+        now = awaitingClaim.refundLocktime + 1
+        await store.transition(awaitingClaim.id, 'awaiting_claim', 'refunding_arkade', {})
+        deps.arkadeFake.unrollLockup(awaitingClaim.pkScript)
+
+        await expect(service.tick(awaitingClaim.id)).rejects.toThrow('2 unrolled outputs')
+        expect(lockups).toEqual([])
+        expect((await store.get(awaitingClaim.id)).state).toBe('refunding_arkade')
       })
 
       it('escalates a closed window only once htlc_locktime has passed', async () => {

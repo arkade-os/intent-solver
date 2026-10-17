@@ -232,7 +232,7 @@ export interface OnchainReceiveSwapRow {
   /** The claim versions {@link onchainClaimTxid} replaced, newest first: until one confirms, ANY of them can be the one that does. */
   onchainClaimPriorTxids: string[]
   arkadeRefundTxid: string | null
-  /** JSON `UnrolledRefundRecord`: the L1 refund of a lockup the client unrolled. */
+  /** JSON `UnrolledSpendRecord`: the L1 refund of a lockup the client unrolled. */
   unrolledRefund: string | null
   refundOutcome: 'pushed' | 'external' | null
   failureReason: string | null
