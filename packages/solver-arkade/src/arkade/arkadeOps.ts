@@ -54,7 +54,7 @@ export interface ArkadeOps {
  * level, before reading the packet, and that reads as a swap that never settled.
  */
 export interface ClaimPacketStamp {
-  /** covclaimd's three-TLV `ClaimPacket` body, as an Arkade extension packet. */
+  /** A type-4 claim packet: legacy covclaimd TLVs or a versioned delegatee envelope. */
   packet: Uint8Array
   /** `VtxoScript.encode()` form, for `PSBT_OUT_TAP_TREE`. */
   tapTree: Uint8Array

@@ -1,8 +1,21 @@
 import { appendArkadeScript, claimPacketShape as canonicalClaimPacketShape } from '@arkade-os/swap'
+import { base64 } from '@scure/base'
 import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import type { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 
 export { CLAIM_PACKET_TYPE, appendArkadeScript } from '@arkade-os/swap'
+
+const marker = new TextEncoder().encode('delegatee-secrets/v1')
+const delegateePrefix = Uint8Array.of(127, 0, marker.length, ...marker)
+
+export const isDelegateeClaimPacket = (encoded: string): boolean => {
+  try {
+    const raw = base64.decode(encoded)
+    return delegateePrefix.every((byte, i) => raw[i] === byte)
+  } catch {
+    return false
+  }
+}
 
 export type ClaimPacketShape =
   | { kind: 'ciphertext' }
@@ -27,6 +40,11 @@ export const claimPacketStamp = (
   script: CovenantSwapScript,
 ): ClaimPacketStamp | undefined => {
   if (claimPacket === null) return undefined
+  if (isDelegateeClaimPacket(claimPacket)) {
+    const arkadeScript = script.nonInteractiveClaimArkadeScript
+    if (!arkadeScript) throw new Error('delegatee claim packet requires a noninteractive claim leaf')
+    return { packet: appendArkadeScript(base64.decode(claimPacket), arkadeScript), tapTree: script.encode() }
+  }
   const shape = canonicalClaimPacketShape(claimPacket)
   if (shape.kind !== 'packet') return undefined
   // Without `0x03` no covclaimd's filter selects the tx, so stamping would
