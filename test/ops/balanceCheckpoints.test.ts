@@ -8,6 +8,7 @@ import { registerStatusRoutes } from '@arkade-os/solver-app/admin/routes/status.
 import type { AdminDeps } from '@arkade-os/solver-app/admin/server.js'
 import {
   recordBalanceCheckpoint,
+  balanceCheckpointScope,
   withBalanceCheckpoints,
   checkpointChanges,
   formatCheckpointWarning,
@@ -50,7 +51,7 @@ describe('balance checkpoints', () => {
     expect(checkpoint.arkade?.assets).toEqual({ [f.arkade.assets[0]!.assetId]: '10000000000000000000000000' })
     expect(checkpoint.previousId).toBeNull()
     expect(checkpoint.decreases).toEqual([])
-    expect(await f.services.adminStore.listBalanceCheckpoints()).toEqual([checkpoint])
+    expect(await f.services.adminStore.listBalanceCheckpoints(checkpoint.scope)).toEqual([checkpoint])
   })
 
   it('does not double count a shared Lightning/onchain pool', async () => {
@@ -108,7 +109,7 @@ describe('balance checkpoints', () => {
     const recovered = await restarted.sample()
     expect(recovered.previousId).toBe(baseline.id)
     expect(recovered.decreases[0]?.decrease).toBe('5')
-    expect((await restarted.services.adminStore.listBalanceCheckpoints()).map((row) => row.id)).toEqual([
+    expect((await restarted.services.adminStore.listBalanceCheckpoints(baseline.scope)).map((row) => row.id)).toEqual([
       recovered.id,
       incomplete.id,
       baseline.id,
@@ -195,11 +196,48 @@ describe('balance checkpoints', () => {
     const checkpoint = await f.sample()
     const app = new Hono()
     registerStatusRoutes(app, { services: f.services } as AdminDeps)
-    expect(await (await app.request('/api/balance-checkpoints?limit=1')).json()).toEqual({ checkpoints: [checkpoint] })
+    expect(await (await app.request('/api/balance-checkpoints?limit=1')).json()).toEqual({
+      scope: checkpoint.scope,
+      checkpoints: [checkpoint],
+    })
     for (const limit of ['0', '201', '-1', '1.5', '1e2', '']) {
       expect((await app.request(`/api/balance-checkpoints?limit=${limit}`)).status).toBe(400)
     }
     expect(f.services.arkade.wallet.getBalance).toHaveBeenCalledTimes(1)
+  })
+
+  it('filters history by the current deployment scope before applying the limit', async () => {
+    const f = await fixture()
+    const first = await f.sample()
+    f.services.providerPubkey = 'other-provider'
+    const other = await f.sample()
+    f.services.providerPubkey = 'provider'
+    const latest = await f.sample()
+    f.services.config.arkade.arkServerUrl = 'http://other-arkade.test'
+    const otherServer = await f.sample()
+    f.services.config.arkade.arkServerUrl = 'http://arkade.test'
+    const app = new Hono()
+    registerStatusRoutes(app, { services: f.services } as AdminDeps)
+    expect(await (await app.request('/api/balance-checkpoints')).json()).toEqual({
+      scope: first.scope,
+      checkpoints: [latest, first],
+    })
+    expect(await (await app.request('/api/balance-checkpoints?limit=1')).json()).toEqual({
+      scope: first.scope,
+      checkpoints: [latest],
+    })
+    f.services.providerPubkey = 'other-provider'
+    expect(await (await app.request('/api/balance-checkpoints')).json()).toEqual({
+      scope: other.scope,
+      checkpoints: [other],
+    })
+    f.services.config.arkade.arkServerUrl = 'http://empty-arkade.test'
+    expect(await (await app.request('/api/balance-checkpoints')).json()).toEqual({
+      scope: balanceCheckpointScope(f.services),
+      checkpoints: [],
+    })
+    expect(otherServer.scope).not.toBe(first.scope)
+    expect(f.services.arkade.wallet.getBalance).toHaveBeenCalledTimes(4)
   })
 
   it('retains the previous report baseline across intermediate checkpoints and restarts', async () => {
@@ -289,7 +327,7 @@ describe('scheduled balance checkpoints', () => {
     expect(messages).toHaveLength(1)
     expect(messages[0]).toContain('BTC: -10 sats')
     await vi.advanceTimersByTimeAsync(60_000)
-    expect(await f.services.adminStore.listBalanceCheckpoints()).toHaveLength(3)
+    expect(await f.services.adminStore.listBalanceCheckpoints(balanceCheckpointScope(f.services))).toHaveLength(3)
     controller.abort()
     finish()
     await run
@@ -314,13 +352,13 @@ describe('scheduled balance checkpoints', () => {
         }),
     })
     await vi.advanceTimersByTimeAsync(0)
-    expect(await f.services.adminStore.listBalanceCheckpoints()).toHaveLength(1)
+    expect(await f.services.adminStore.listBalanceCheckpoints(balanceCheckpointScope(f.services))).toHaveLength(1)
     f.arkade.total -= 10
     await vi.advanceTimersByTimeAsync(60_000)
     expect(log).toHaveBeenCalledWith(expect.stringContaining('POSSIBLE LOSS'))
     controller.abort()
     await vi.advanceTimersByTimeAsync(60_000)
-    expect(await f.services.adminStore.listBalanceCheckpoints()).toHaveLength(2)
+    expect(await f.services.adminStore.listBalanceCheckpoints(balanceCheckpointScope(f.services))).toHaveLength(2)
     finish()
     await run
     expect(vi.getTimerCount()).toBe(0)

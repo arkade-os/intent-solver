@@ -595,10 +595,10 @@ export class AdminStore {
     )
   }
 
-  async listBalanceCheckpoints(limit = 100): Promise<BalanceCheckpoint[]> {
+  async listBalanceCheckpoints(scope: string, limit = 100): Promise<BalanceCheckpoint[]> {
     const rows = await this.driver.all<{ id: number; snapshot: string }>(
-      'SELECT id, snapshot FROM balance_checkpoint ORDER BY id DESC LIMIT ?',
-      [limit],
+      'SELECT id, snapshot FROM balance_checkpoint WHERE scope = ? ORDER BY id DESC LIMIT ?',
+      [scope, limit],
     )
     return rows.map((row) => ({ ...JSON.parse(row.snapshot), id: row.id }))
   }

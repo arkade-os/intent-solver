@@ -107,7 +107,9 @@ files it replaced.
 `watch`, `serve`, and `relay` persist a balance checkpoint at startup and every
 minute in the admin database (`balance_checkpoint`). For a manual checkpoint,
 run `cli balance-checkpoint`. Read history through the admin endpoint
-`GET /api/balance-checkpoints?limit=100` (maximum 200, newest first).
+`GET /api/balance-checkpoints?limit=100` (maximum 200, newest first). The response
+includes the current deployment's `scope` and only checkpoints matching it;
+records from earlier provider or backend configurations remain stored separately.
 
 Checkpoints track Arkade's total BTC and asset balances, Lightning outbound
 liquidity, and confirmed plus unconfirmed onchain BTC. Inbound Lightning
@@ -132,6 +134,8 @@ that changes are unavailable.
 
 The report baseline advances when a complete report is queued, using the existing
 best-effort delivery. A failed notification delivery does not roll it back.
+The next report compares from that advanced baseline, so changes from an
+undelivered report are not repeated after delivery retries are exhausted.
 
 This is a sanity check, not reconciled profit or solvency: fees, withdrawals,
 token trades, pending HTLCs and non-atomic reads during transfers can cause
