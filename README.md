@@ -210,7 +210,8 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   port, from inside the running provider. Off unless `ADMIN_PORT` is set. **It
   has no authentication: anything that can reach that port can move money.** Put
   a reverse proxy in front of it, or tunnel to the default loopback bind. See
-  `docs/runbook.md` § "The admin console".
+  `docs/runbook.md` § "The admin console". To work on the console itself,
+  `pnpm admin:dev` serves it over seeded data with nothing else running.
 
   Its **p&l** tab (and `GET /api/pnl`) charts what the book made, by corridor,
   by time to fill, and per cross-asset fill against the window's own mean rate —
