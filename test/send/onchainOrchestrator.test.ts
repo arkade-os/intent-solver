@@ -748,6 +748,18 @@ describe('OnchainSendSwapService', () => {
       expect((await deps.store.get(row.id)).state).toBe('funding_onchain')
     })
 
+    it('re-reads the lockup before a retry, and parks the row once it has gone', async () => {
+      const { row, attempts, fundForReal } = await stalled()
+      await expect(service.tick(row.id)).rejects.toThrow('insufficient funds')
+      deps.outputs.delete(row.pkScript)
+      deps.onchain.fund = fundForReal
+      const parked = await service.tick(row.id)
+      expect(attempts).toHaveLength(1)
+      expect(parked.state).toBe('stuck')
+      expect(parked.failureReason).toContain('lockup holds 0 of 50000 sats')
+      expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(0)
+    })
+
     it('stops attempting once the L1 claim window is gone, and parks the row', async () => {
       const { row, attempts } = await stalled()
       now = row.htlcLocktime - claimWindow(row)

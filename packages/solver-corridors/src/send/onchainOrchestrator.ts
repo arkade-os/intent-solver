@@ -778,7 +778,7 @@ export class OnchainSendSwapService {
   }
 
   private async whenFunded(row: OnchainSendSwapRow): Promise<boolean> {
-    const { store, arkade } = this.deps
+    const { store } = this.deps
     const decision = this.fundingDecision(row)
     if (!decision.fund) {
       await store.fail(row.id, 'funded', decision.reason)
@@ -786,16 +786,21 @@ export class OnchainSendSwapService {
     }
     // After the funding decision, before the CAS: a held swap still reaches its deadline and refuses.
     if (!(await askApproval(this.deps.approvalGate, row.id, row.amountSats))) return false
-    // Read again right before money moves: an approval wait is time the client can spend unrolling it.
-    const held = (await arkade.findLockups(row.pkScript)).reduce((sum, o) => sum + o.value, 0)
-    const funded = row.onchainLockupValue ?? row.amountSats
-    if (held < funded) {
-      await store.fail(row.id, 'funded', `lockup holds ${held} of ${funded} sats at funding: unrolled, swept or spent`)
+    const shortfall = await this.lockupShortfall(row)
+    if (shortfall) {
+      await store.fail(row.id, 'funded', shortfall)
       return false
     }
     const won = await store.transition(row.id, 'funded', 'funding_onchain', {})
     if (!won) return false
     return this.submitFunding(await store.get(row.id))
+  }
+
+  /** Read again right before money moves: an approval wait or a failing `fund()` is time the client can spend unrolling it. */
+  private async lockupShortfall(row: OnchainSendSwapRow): Promise<string | null> {
+    const held = (await this.deps.arkade.findLockups(row.pkScript)).reduce((sum, o) => sum + o.value, 0)
+    const funded = row.onchainLockupValue ?? row.amountSats
+    return held < funded ? `lockup holds ${held} of ${funded} sats at funding: unrolled, swept or spent` : null
   }
 
   private fundingDecision(row: OnchainSendSwapRow) {
@@ -865,6 +870,11 @@ export class OnchainSendSwapService {
     const decision = this.fundingDecision(row)
     if (!decision.fund) {
       await store.fail(row.id, 'funding_onchain', decision.reason)
+      return false
+    }
+    const shortfall = await this.lockupShortfall(row)
+    if (shortfall) {
+      await store.fail(row.id, 'funding_onchain', shortfall)
       return false
     }
 
