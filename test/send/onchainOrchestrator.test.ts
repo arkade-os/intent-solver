@@ -29,6 +29,7 @@ import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { FakeOnchainBackend } from '@arkade-os/solver-rails-fake/onchain/fake/backend.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { refundSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
@@ -113,7 +114,7 @@ const buildDeps = async (fundingVout = 0) => {
   const spent = new Set<string>()
   // `outputs` goes empty both for a script that never held anything and for a lagging view; this separates them.
   const known = new Map<string, { txid: string; vout: number; value: number }[]>()
-  const arkade = {
+  const arkade: ArkadeOps = {
     providerPubkey,
     serverPubkey,
     emulatorPubkey,
@@ -1028,6 +1029,40 @@ describe('OnchainSendSwapService', () => {
     now = row.refundLocktime
 
     expect((await service.tick(row.id)).state).toBe('stuck')
+  })
+
+  it('claims a lockup output the client unrolled on L1, recording claimed once that claim confirms', async () => {
+    const row = await claiming()
+    deps.outputs.set(row.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 25_000 }])
+    deps.arkade.findLockupOutpoints = async () => [
+      { txid: 'lockup-tx', vout: 0, spent: false, unrolled: false },
+      { txid: 'lockup-tx-2', vout: 0, spent: false, unrolled: true },
+    ]
+    const confirmed = { now: false }
+    const preimages: string[] = []
+    deps.arkade.claimUnrolled = async (_row, lockup, record, save, preimage) => {
+      preimages.push(preimage)
+      const claim = record ?? {
+        txid: `l1-claim-${lockup.txid}`,
+        tx: null,
+        feeRate: 10,
+        broadcastAt: now,
+        cpfpTxid: null,
+      }
+      if (!record) await save(claim)
+      return { kind: confirmed.now ? 'confirmed' : 'pending', record: claim }
+    }
+
+    const first = await service.tick(row.id)
+    expect(first.state).toBe('claiming')
+    expect(first.claimArkTxid).toBe('claim-ark-txid')
+    expect(preimages).toEqual([hex.encode(P)])
+
+    deps.outputs.delete(row.pkScript)
+    confirmed.now = true
+    const done = await service.tick(row.id)
+    expect(done.state).toBe('claimed')
+    expect(JSON.parse(done.unrolledClaim!)).toMatchObject({ 'lockup-tx-2:0': { kind: 'confirmed' } })
   })
 
   /**

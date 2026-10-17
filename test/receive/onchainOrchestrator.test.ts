@@ -25,7 +25,7 @@ import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
 import type { OnchainReceiveArkadeOps } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
 import { FundNotSubmittedError } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import type { CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
-import type { UnrolledRefundRecord, UnrolledRefundStep } from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
+import type { UnrolledSpendRecord, UnrolledSpendStep } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 
 const keyBytes = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 
@@ -1402,14 +1402,14 @@ describe('OnchainReceiveSwapService', () => {
     })
 
     describe('its refund on L1 through arkd', () => {
-      const record: UnrolledRefundRecord = {
+      const record: UnrolledSpendRecord = {
         txid: 'cd'.repeat(32),
         tx: null,
         feeRate: 10,
         broadcastAt: 1,
         cpfpTxid: null,
       }
-      let steps: UnrolledRefundStep[]
+      let steps: UnrolledSpendStep[]
       let lockups: { txid: string; vout: number }[]
 
       beforeEach(() => {

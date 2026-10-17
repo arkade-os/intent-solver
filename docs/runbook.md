@@ -580,7 +580,8 @@ the reasons to take one.
   "Working a `stuck` row" below.**
 - **`claimed` with `claim_ark_txid: null`** = claim landed but a crash ate the
   txid (only recorded as success BEFORE the refund deadline, where nobody else
-  could spend). Verify once by hand if you care about the txid.
+  could spend). Verify once by hand if you care about the txid. A row carrying
+  `unrolled_claim` is the exception: it claimed on L1 (see below).
 - **`claimed` carrying an `onchain_claim_txid`, or `refunding_onchain` carrying
   an `onchain_refund_txid`, is a row WAITING FOR A BLOCK** and needs nothing.
   The spend is broadcast and the row stays non-terminal until it confirms,
@@ -600,6 +601,15 @@ the reasons to take one.
     That happens when the lockup was spent with no `P` in the witness, or when
     arkd stops co-signing because the client's own exit is near. The failure
     reason then names the solo leaf.
+- **A send row in `claiming` carrying `unrolled_claim` is claiming lockup
+  outputs the client unrolled onto Bitcoin**, one co-signed L1 claim per output,
+  through the same arkd endpoint. It records `claimed` once every claim
+  confirms. If every output was unrolled, `claim_ark_txid` stays null and
+  `unrolled_claim` holds the L1 txids.
+  - The row escalates to `stuck` once an output is lost and no claim is still
+    pending. An output is lost when the client's refund spent it, or when arkd
+    stopped co-signing. The failure reason names each lost output and the solo
+    `unilateralClaim` leaf.
 - **`settled` with `onchain_claim_txid: null` on onchain-receive** is a LEGACY
   recovery path, not a missing write, and only a row quoted before the txid was
   pre-committed can show it. The solver crashed after broadcasting its

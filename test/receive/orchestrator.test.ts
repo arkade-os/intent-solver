@@ -34,7 +34,7 @@ import type { ReceiveArkadeOps } from '@arkade-os/solver-corridors/receive/arkad
 import { FundNotSubmittedError } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import type { CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import type { UnrolledRefundRecord, UnrolledRefundStep } from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
+import type { UnrolledSpendRecord, UnrolledSpendStep } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 
 const keyBytes = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const p2tr = (program: Uint8Array): Uint8Array => Uint8Array.from([0x51, 0x20, ...program])
@@ -1553,9 +1553,9 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
     })
 
     describe('its refund on L1 through arkd', () => {
-      let steps: UnrolledRefundStep[]
-      let calls: { lockup: { txid: string; vout: number }; record: UnrolledRefundRecord | null }[]
-      const record: UnrolledRefundRecord = {
+      let steps: UnrolledSpendStep[]
+      let calls: { lockup: { txid: string; vout: number }; record: UnrolledSpendRecord | null }[]
+      const record: UnrolledSpendRecord = {
         txid: 'ab'.repeat(32),
         tx: null,
         feeRate: 10,

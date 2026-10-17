@@ -10,7 +10,7 @@ import { arkadeOpsFromContext, type EmulatorInfo } from '../send/arkadeOps.js'
 import { refundReceiveLockup, refundUnrolledLockup } from './arkadeOps.js'
 import { fundLockup } from './fundLockup.js'
 import type { ClaimPacketStamp, ReceiveArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
-import { unrolledRefunderFor } from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
+import { unrolledSpenderFor } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 import { findClaimPreimage, findLockupOutpoints, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { ArkadeOps } from '../send/orchestrator.js'
 
@@ -75,6 +75,6 @@ export const onchainReceiveArkadeOpsFromContext = async (
     // The SHARED funding path, not `wallet.send`: coin selection and the
     // reservation ledger apply here too. @see fundLockup.ts
     fund: async (params) => fundLockup(ctx, params.address, params.amountSats, params.stamp),
-    refundUnrolled: refundUnrolledLockup(unrolledRefunderFor(ctx)),
+    refundUnrolled: refundUnrolledLockup(unrolledSpenderFor(ctx)),
   }
 }

@@ -48,13 +48,13 @@ import { RFQ_PAIR_RECEIVE } from '../wire/lightningReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
-import { parseUnrolledRefund, type UnrolledRefundRecord } from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
+import { parseUnrolledSpend, type UnrolledSpendRecord } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { claimPacketStamp } from './claimPacket.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
 import { LockupPreimageReader } from './lockupPreimage.js'
-import { applyUnrolledRefundStep } from './unrolledRefundStep.js'
+import { applyUnrolledSpendStep } from '../unrolledSpendStep.js'
 import type { OnchainBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { FundNotSubmittedError } from './fundLockup.js'
 import type { CovclaimdClient } from './covclaimd.js'
@@ -1245,9 +1245,9 @@ export class ReceiveSwapService {
     )
     if (unrolled && arkade.refundUnrolled) {
       const covenantRow = receiveCovenantRowFor(row)
-      const save = (record: UnrolledRefundRecord) => store.patch(row.id, { unrolled_refund: JSON.stringify(record) })
-      const step = await arkade.refundUnrolled(covenantRow, unrolled, parseUnrolledRefund(row.unrolledRefund), save)
-      return applyUnrolledRefundStep(
+      const save = (record: UnrolledSpendRecord) => store.patch(row.id, { unrolled_refund: JSON.stringify(record) })
+      const step = await arkade.refundUnrolled(covenantRow, unrolled, parseUnrolledSpend(row.unrolledRefund), save)
+      return applyUnrolledSpendStep(
         store,
         row,
         { from: 'refunding', to: 'refunded' },

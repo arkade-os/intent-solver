@@ -2,20 +2,30 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { base64, hex } from '@scure/base'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
-import { DefaultVtxo, getArkPsbtFields, SingleKey, Transaction, VtxoTaprootTree } from '@arkade-os/sdk'
+import { schnorr } from '@noble/curves/secp256k1.js'
+import {
+  ConditionWitness,
+  DefaultVtxo,
+  getArkPsbtFields,
+  SingleKey,
+  Transaction,
+  VtxoTaprootTree,
+} from '@arkade-os/sdk'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import {
-  UnrolledRefunder,
-  type UnrolledLockup,
-  type UnrolledRefundDeps,
-  type UnrolledRefundRecord,
-} from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
+  UnrolledSpender,
+  type UnrolledSpend,
+  type UnrolledSpendDeps,
+  type UnrolledSpendRecord,
+} from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 
 const solver = SingleKey.fromPrivateKey(new Uint8Array(32).fill(11))
 const server = SingleKey.fromPrivateKey(new Uint8Array(32).fill(3))
 const keyOf = (fill: number) => SingleKey.fromPrivateKey(new Uint8Array(32).fill(fill)).xOnlyPublicKey()
 const p2tr = (program: Uint8Array) => Uint8Array.from([0x51, 0x20, ...program])
 
+const PREIMAGE = new Uint8Array(32).fill(7)
+const PREIMAGE_HASH = ripemd160(sha256(PREIMAGE))
 const REFUND_LOCKTIME = 1_800_000_000
 const VALUE = 100_000
 const EXIT_DELAY = 4096
@@ -24,7 +34,7 @@ const NOW = REFUND_LOCKTIME + 7200
 let script: CovenantSwapScript
 let boarding: DefaultVtxo.Script
 let parent: Transaction
-let lockup: UnrolledLockup
+let lockup: UnrolledSpend
 
 type Status = { confirmed: false } | { confirmed: true; blockTime: number; blockHeight: number }
 
@@ -38,7 +48,7 @@ const chain = {
   calls: 0,
 }
 
-const fakeChain: UnrolledRefundDeps['chain'] = {
+const fakeChain: UnrolledSpendDeps['chain'] = {
   getChainTip: async () => (chain.calls++, chain.tip),
   getFeeRate: async () => (chain.calls++, chain.feeRate),
   getRawTransaction: async (txid) => {
@@ -71,8 +81,20 @@ const cosign = async (psbt: string): Promise<string> => {
   expect(input.tapLeafScript).toHaveLength(1)
   expect(getArkPsbtFields(tx, 0, VtxoTaprootTree)).toHaveLength(1)
   expect(input.tapScriptSig?.map(([k]) => hex.encode(k.pubKey))).toEqual([hex.encode(await solver.xOnlyPublicKey())])
+  const [, scriptWithVersion] = input.tapLeafScript![0]!
+  const { script: prevout, amount } = input.witnessUtxo!
+  const leafScript = scriptWithVersion.subarray(0, -1)
+  const sighash = tx.preimageWitnessV1(0, [prevout], 0, [amount], undefined, leafScript, scriptWithVersion.at(-1))
+  for (const [{ pubKey }, sig] of input.tapScriptSig!) expect(schnorr.verify(sig, sighash, pubKey)).toBe(true)
+  const condition = getArkPsbtFields(tx, 0, ConditionWitness).flat()
   const signed = await server.sign(tx, [0])
   signed.finalize()
+  if (condition.length > 0) {
+    // arkd evaluates the condition, then puts its witness between the signatures and the script.
+    expect(hex.encode(ripemd160(sha256(condition[0]!)))).toBe(hex.encode(PREIMAGE_HASH))
+    const witness = signed.getInput(0).finalScriptWitness!
+    signed.updateInput(0, { finalScriptWitness: [...witness.slice(0, -2), ...condition, ...witness.slice(-2)] }, true)
+  }
   cosigned.push(signed)
   if (!explorerLags) {
     chain.status.set(signed.id, { confirmed: false })
@@ -82,15 +104,15 @@ const cosign = async (psbt: string): Promise<string> => {
   return signed.id
 }
 
-const saved: UnrolledRefundRecord[] = []
-const save = async (record: UnrolledRefundRecord) => {
+const saved: UnrolledSpendRecord[] = []
+const save = async (record: UnrolledSpendRecord) => {
   order.push('save')
   saved.push(record)
 }
 
 let now = NOW
 const refunder = () =>
-  new UnrolledRefunder({ chain: fakeChain, signer: solver, cosign, boarding, now: () => now, pause: async () => {} })
+  new UnrolledSpender({ chain: fakeChain, signer: solver, cosign, boarding, now: () => now, pause: async () => {} })
 
 /** A transaction spending the lockup to `to`, as the explorer would serve it. */
 const spendOfLockup = (to: Uint8Array): string => {
@@ -122,7 +144,7 @@ beforeEach(async () => {
   script = new CovenantSwapScript({
     receiver: await keyOf(1),
     server: serverKey,
-    preimageHash: ripemd160(sha256(new Uint8Array(32).fill(7))),
+    preimageHash: PREIMAGE_HASH,
     refundLocktime: REFUND_LOCKTIME,
     claimDelay: EXIT_DELAY,
     client: solverKey,
@@ -149,13 +171,13 @@ beforeEach(async () => {
   lockup = { script, txid: parent.id, vout: 0, refundLocktime: REFUND_LOCKTIME, exitDelaySeconds: EXIT_DELAY }
 })
 
-const pushed = async (): Promise<UnrolledRefundRecord> => {
+const pushed = async (): Promise<UnrolledSpendRecord> => {
   const step = await refunder().advance(lockup, null, save)
   if (step.kind !== 'pending') throw new Error(`expected a push, got ${step.kind}`)
   return step.record
 }
 
-describe('UnrolledRefunder', () => {
+describe('UnrolledSpender', () => {
   it('waits until median-time-past passes the refund locktime', async () => {
     chain.tip = { ...chain.tip, time: REFUND_LOCKTIME }
     expect(await refunder().advance(lockup, null, save)).toEqual({ kind: 'waiting' })
@@ -336,7 +358,7 @@ describe('UnrolledRefunder', () => {
     const tracked = await refunder().advance(lockup, record, save)
     expect(tracked).toEqual({ kind: 'pending', record: { ...record, tx: hex.encode(cosigned[0]!.extract()) } })
 
-    const withTx = (tracked as { record: UnrolledRefundRecord }).record
+    const withTx = (tracked as { record: UnrolledSpendRecord }).record
     chain.status.delete(record.txid)
     expect(await refunder().advance(lockup, withTx, save)).toEqual({ kind: 'pending', record: withTx })
     expect(chain.broadcasts).toEqual([withTx.tx])
@@ -355,8 +377,53 @@ describe('UnrolledRefunder', () => {
     expect(await refunder().advance(lockup, record, save)).toEqual({ kind: 'spent' })
   })
 
+  describe('the claim', () => {
+    let claim: UnrolledSpend
+
+    beforeEach(async () => {
+      const solverKey = await solver.xOnlyPublicKey()
+      const claimScript = new CovenantSwapScript({
+        receiver: solverKey,
+        server: await server.xOnlyPublicKey(),
+        preimageHash: PREIMAGE_HASH,
+        refundLocktime: REFUND_LOCKTIME,
+        claimDelay: EXIT_DELAY,
+        client: await keyOf(1),
+        clientRefundDelay: EXIT_DELAY * 2,
+        refundWithoutServerDelay: EXIT_DELAY,
+        nonInteractiveParameters: {
+          emulatorPubkey: await keyOf(9),
+          receiverPkScript: p2tr(solverKey),
+          senderPkScript: p2tr(await keyOf(13)),
+        },
+      })
+      const unroll = new Transaction({ version: 3 })
+      unroll.addInput({ txid: 'bb'.repeat(32), index: 0 })
+      unroll.addOutput({ script: claimScript.pkScript, amount: BigInt(VALUE) })
+      unroll.updateInput(0, { finalScriptWitness: [new Uint8Array(64)] }, true)
+      chain.raw.set(unroll.id, unroll.toBytes(true, true))
+      chain.status.set(unroll.id, { confirmed: true, blockTime: NOW - 600, blockHeight: 899_999 })
+      claim = { script: claimScript, txid: unroll.id, vout: 0, preimage: PREIMAGE, exitDelaySeconds: EXIT_DELAY }
+    })
+
+    it('goes out at once through the claim leaf, revealing P only to it', async () => {
+      chain.tip = { ...chain.tip, time: REFUND_LOCKTIME - 7200 }
+      const step = await refunder().advance(claim, null, save)
+      const [tx] = cosigned
+      expect(step).toMatchObject({ kind: 'pending', record: { txid: tx!.id } })
+      expect(order).toEqual(['save', 'cosign'])
+      expect(tx!.lockTime).toBe(0)
+      expect(tx!.getInput(0).sequence).toBe(0xffffffff)
+      const witness = tx!.getInput(0).finalScriptWitness!
+      expect(hex.encode(witness.at(-2)!)).toBe(hex.encode(claim.script.claim()[1].subarray(0, -1)))
+      expect(witness.at(-3)).toEqual(PREIMAGE)
+      expect(hex.encode(tx!.getOutput(0).script!)).toBe(hex.encode(boarding.pkScript))
+      expect(VALUE - Number(tx!.getOutput(0).amount)).toBe(Math.ceil(10 * tx!.vsize))
+    })
+  })
+
   describe('the CPFP bump', () => {
-    const slowRefund = async (): Promise<UnrolledRefundRecord> => {
+    const slowRefund = async (): Promise<UnrolledSpendRecord> => {
       chain.status.set(parent.id, { confirmed: true, blockTime: NOW - 600, blockHeight: 899_999 })
       const record = { ...(await pushed()), tx: null }
       now += 20 * 60
@@ -375,7 +442,20 @@ describe('UnrolledRefunder', () => {
       expect(packageFee).toBeGreaterThanOrEqual(60 * (refund!.vsize + child!.vsize))
 
       now += 20 * 60
-      await refunder().advance(lockup, (step as { record: UnrolledRefundRecord }).record, save)
+      await refunder().advance(lockup, (step as { record: UnrolledSpendRecord }).record, save)
+      expect(cosigned).toHaveLength(2)
+    })
+
+    it('resends a dropped child, since arkd co-signs only one', async () => {
+      const step = await refunder().advance(lockup, await slowRefund(), save)
+      const bumped = (step as { record: UnrolledSpendRecord }).record
+      const [, child] = cosigned
+      expect(bumped.cpfpTx).toBe(hex.encode(child!.extract()))
+
+      chain.status.delete(child!.id)
+      now += 60
+      await refunder().advance(lockup, bumped, save)
+      expect(chain.broadcasts).toEqual([bumped.cpfpTx])
       expect(cosigned).toHaveLength(2)
     })
 
