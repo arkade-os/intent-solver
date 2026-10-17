@@ -1035,8 +1035,8 @@ describe('OnchainSendSwapService', () => {
     const row = await claiming()
     deps.outputs.set(row.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 25_000 }])
     deps.arkade.findLockupOutpoints = async () => [
-      { txid: 'lockup-tx', vout: 0, spent: false, unrolled: false },
-      { txid: 'lockup-tx-2', vout: 0, spent: false, unrolled: true },
+      { txid: 'lockup-tx', vout: 0, unrolled: false },
+      { txid: 'lockup-tx-2', vout: 0, unrolled: true },
     ]
     const confirmed = { now: false }
     const preimages: string[] = []

@@ -48,9 +48,7 @@ export interface ArkadeOps {
   claim(row: CovenantScriptRow, outputs: FundedOutput[], preimageHex: string): Promise<string>
   /** Push the covenant refund of the script the row describes. Needs no keys of ours. */
   refund(row: CovenantScriptRow, outputs: FundedOutput[]): Promise<string>
-  findLockupOutpoints?(
-    pkScriptHex: string,
-  ): Promise<{ txid: string; vout: number; spent: boolean; unrolled: boolean }[]>
+  findLockupOutpoints?(pkScriptHex: string): Promise<{ txid: string; vout: number; unrolled: boolean }[]>
   /** One step of the co-signed L1 claim of one output the client unrolled. Absent: it waits for the operator. */
   claimUnrolled?(
     row: CovenantScriptRow,

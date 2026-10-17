@@ -56,12 +56,9 @@ export const advanceUnrolledClaims = async (
   preimageHex: string,
 ): Promise<UnrolledClaims | null> => {
   if (!arkade.findLockupOutpoints || !arkade.claimUnrolled) return null
-  const steps = (row.unrolledClaim === null ? {} : JSON.parse(row.unrolledClaim)) as Record<string, UnrolledSpendStep>
-  const unrolled = (await arkade.findLockupOutpoints(row.pkScript)).filter(
-    // Spent offchain before the unroll (our own claim, normally): arkd leaves it to its checkpoint.
-    (o) => o.unrolled && (!o.spent || `${o.txid}:${o.vout}` in steps),
-  )
+  const unrolled = (await arkade.findLockupOutpoints(row.pkScript)).filter((o) => o.unrolled)
   if (unrolled.length === 0) return null
+  const steps = (row.unrolledClaim === null ? {} : JSON.parse(row.unrolledClaim)) as Record<string, UnrolledSpendStep>
   const keep = async (key: string, step: UnrolledSpendStep) => {
     if (JSON.stringify(step) === JSON.stringify(steps[key])) return
     steps[key] = step

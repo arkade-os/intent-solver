@@ -606,10 +606,18 @@ the reasons to take one.
   through the same arkd endpoint. It records `claimed` once every claim
   confirms. If every output was unrolled, `claim_ark_txid` stays null and
   `unrolled_claim` holds the L1 txids.
+  - A `claiming` row can already carry `claim_ark_txid`. It is not done: the
+    outputs still on Arkade were claimed, and the L1 claims have not all
+    confirmed.
   - The row escalates to `stuck` once an output is lost and no claim is still
-    pending. An output is lost when the client's refund spent it, or when arkd
+    pending. An output is lost when another transaction spent it, or when arkd
     stopped co-signing. The failure reason names each lost output and the solo
-    `unilateralClaim` leaf.
+    `unilateralClaim` leaf. An output the client unrolled after the solver had
+    already claimed it on Arkade also ends up here: arkd spends it with its own
+    checkpoint transaction, and the solver's claim stands.
+  - A `stuck` row carrying `unrolled_claim` can still have claims in the
+    mempool. For example, the Arkade claim of the other outputs may have failed
+    past the refund deadline. Look up each txid before acting.
 - **`settled` with `onchain_claim_txid: null` on onchain-receive** is a LEGACY
   recovery path, not a missing write, and only a row quoted before the txid was
   pre-committed can show it. The solver crashed after broadcasting its

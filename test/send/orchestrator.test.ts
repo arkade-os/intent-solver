@@ -2111,7 +2111,7 @@ describe('tick: failure and recovery', () => {
 
   // The client, holding the HTLC as payee, unrolls a lockup output before settling it.
   describe('an output the client unrolled', () => {
-    let outpoints: { txid: string; vout: number; spent: boolean; unrolled: boolean }[]
+    let outpoints: { txid: string; vout: number; unrolled: boolean }[]
     const l1 = {
       calls: [] as { lockup: string; record: UnrolledSpendRecord | null; preimage: string }[],
       confirmed: new Set<string>(),
@@ -2120,7 +2120,7 @@ describe('tick: failure and recovery', () => {
     }
 
     beforeEach(() => {
-      outpoints = [{ txid: 'u1', vout: 0, spent: false, unrolled: true }]
+      outpoints = [{ txid: 'u1', vout: 0, unrolled: true }]
       l1.calls.length = 0
       l1.confirmed.clear()
       l1.spent.clear()
@@ -2156,7 +2156,7 @@ describe('tick: failure and recovery', () => {
     it('claims what is still on Arkade at once, but records claimed only once the L1 claim confirms', async () => {
       const row = await claiming()
       arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT / 2 }]
-      outpoints = [{ txid: 'f1', vout: 0, spent: false, unrolled: false }, ...outpoints]
+      outpoints = [{ txid: 'f1', vout: 0, unrolled: false }, ...outpoints]
 
       const first = await service.tick(row.id)
       expect(first.state).toBe('claiming')
@@ -2169,19 +2169,6 @@ describe('tick: failure and recovery', () => {
       expect(done.state).toBe('claimed')
       expect(done.claimArkTxid).toBe('claim-txid')
       expect(arkade.claimCalls).toHaveLength(1)
-    })
-
-    it('leaves an output it already claimed offchain to arkd, though the client unrolled it after', async () => {
-      const row = await claiming()
-      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT / 2 }]
-      outpoints = [{ txid: 'f1', vout: 0, spent: false, unrolled: false }, ...outpoints]
-      expect((await service.tick(row.id)).claimArkTxid).toBe('claim-txid')
-
-      arkade.lockups = []
-      outpoints[0] = { txid: 'f1', vout: 0, spent: true, unrolled: true }
-      l1.confirmed.add('u1:0')
-      expect((await service.tick(row.id)).state).toBe('claimed')
-      expect(l1.calls.map((c) => c.lockup)).toEqual(['u1:0', 'u1:0'])
     })
 
     it('keeps a claim saved before arkd answered when the step then throws', async () => {
@@ -2199,7 +2186,7 @@ describe('tick: failure and recovery', () => {
 
     it('advances every unrolled output when one throws, then surfaces the error', async () => {
       const row = await claiming()
-      outpoints = [...outpoints, { txid: 'u2', vout: 1, spent: false, unrolled: true }]
+      outpoints = [...outpoints, { txid: 'u2', vout: 1, unrolled: true }]
       l1.failing.add('u1:0')
 
       await expect(service.tick(row.id)).rejects.toThrow('explorer cannot serve u1:0')
@@ -2209,7 +2196,7 @@ describe('tick: failure and recovery', () => {
 
     it('parks the row once one is lost, naming the solo claim, but not while another is still out', async () => {
       const row = await claiming()
-      outpoints = [...outpoints, { txid: 'u2', vout: 1, spent: false, unrolled: true }]
+      outpoints = [...outpoints, { txid: 'u2', vout: 1, unrolled: true }]
       l1.spent.add('u1:0')
 
       expect((await service.tick(row.id)).state).toBe('claiming')
