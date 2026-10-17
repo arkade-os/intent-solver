@@ -40,6 +40,7 @@ import type { RfqQuote } from '@arkade-os/swap'
 import { lightningReceiveRfqQuotePayload } from '@arkade-os/solver-corridors/wire/lightningReceivePayloads.js'
 import { rfqQuotePayload } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { onchainRfqQuotePayload } from '@arkade-os/solver-corridors/wire/onchainPayloads.js'
+import { onchainReceiveRfqQuotePayload } from '@arkade-os/solver-corridors/wire/onchainReceivePayloads.js'
 import { DEFAULT_HOLD_INVOICE_WINDOW } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { MAX_REFUND_HORIZON } from '@arkade-os/solver-core/core/receive.js'
 import {
@@ -56,9 +57,17 @@ import {
   ONCHAIN_CLAIM_MARGIN_SECONDS,
   ONCHAIN_SECONDS_PER_BLOCK,
 } from '@arkade-os/solver-core/core/onchainSend.js'
+import {
+  evaluateOnchainReceiveAcceptance,
+  evaluateOnchainReceiveFunding,
+  onchainReceiveFundingBudget,
+  DEFAULT_MIN_CONFIRMATIONS,
+  MAX_MIN_CONFIRMATIONS,
+} from '@arkade-os/solver-core/core/onchainReceive.js'
 import type { ReceiveSwapRow } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import type { SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import type { OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import type { OnchainReceiveSwapRow } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 
 /** A fixed clock, so a deadline is a number rather than a race. */
 const NOW = 1_800_000_000
@@ -324,5 +333,95 @@ describe('the shipped client and this solver stop funding an onchain SEND at the
 
   it('is a bound the refund window could never have supplied', () => {
     expect(quoted.refundLocktime - MIN_ONCHAIN_FUND_WINDOW).toBeGreaterThan(quoted.htlcLocktime)
+  })
+})
+
+// `assertFundable` is over-strict rather than wrong here, as the SDK's own doc comment
+// says, because `refund_locktime` is the SOLVER's. Nothing ran it against this corridor
+// until #160 moved both deadlines.
+describe('the shipped client accepts our onchain RECEIVE quote', () => {
+  const quoteAt = (minConfirmations: number) => {
+    const accepted = evaluateOnchainReceiveAcceptance({
+      amountSats: 50_000,
+      limits: { minSats: 1_000, maxSats: 1_000_000 },
+      now: NOW,
+      minConfirmations,
+    })
+    if (!accepted.accept) throw new Error('expected an accepted onchain receive quote')
+    return accepted
+  }
+
+  const receiveQuote = (
+    accepted: ReturnType<typeof quoteAt>,
+    refundLocktime = accepted.arkadeRefundLocktime,
+  ): RfqQuote =>
+    onchainReceiveRfqQuotePayload(
+      {
+        amountSats: 50_000,
+        payoutSats: 49_000,
+        providerPubkey: SOLVER_PUBKEY,
+        refundLocktime,
+        paymentHash: PAYMENT_HASH,
+        htlcPubkey: SOLVER_PUBKEY,
+        htlcLocktime: accepted.htlcLocktime,
+        minConfirmations: accepted.minConfirmations,
+        minFromSats: null,
+        maxFromSats: null,
+        lockupAddress: LOCKUP_ADDRESS,
+        onchainAddress: 'bcrt1qexamplehtlcaddressforgatetests',
+        refundPkScript: '5120' + 'c'.repeat(64),
+      } as unknown as OnchainReceiveSwapRow,
+      accepted.lockupDeadline,
+      'rfq-onchain-receive',
+    ) as unknown as RfqQuote
+
+  const clientAccepts = (accepted: ReturnType<typeof quoteAt>, now: number, refundLocktime?: number) =>
+    assertFundable({
+      quote: receiveQuote(accepted, refundLocktime),
+      now,
+      onchain: {
+        htlcLocktime: accepted.htlcLocktime,
+        minConfirmations: accepted.minConfirmations,
+        direction: 'receive',
+      },
+    })
+
+  it.each([
+    ['the default depth', DEFAULT_MIN_CONFIRMATIONS],
+    ['the maximum depth', MAX_MIN_CONFIRMATIONS],
+  ])('passes assertFundable at %s, for as long as the quote is live', (_what, depth) => {
+    const accepted = quoteAt(depth)
+    expect(() => clientAccepts(accepted, NOW)).not.toThrow()
+    expect(() => clientAccepts(accepted, accepted.lockupDeadline - 1)).not.toThrow()
+  })
+
+  // Ours and the SDK's `MIN_HEADROOM_SECONDS` are both 90 min, so both close at
+  // `quote + budget` — the solver one second first, which is the safe side.
+  it.each([
+    ['the default depth', DEFAULT_MIN_CONFIRMATIONS],
+    ['the maximum depth', MAX_MIN_CONFIRMATIONS],
+  ])('stops funding at %s no later than the client stops accepting', (_what, depth) => {
+    const accepted = quoteAt(depth)
+    const solverFunds = (now: number) =>
+      evaluateOnchainReceiveFunding({
+        arkadeRefundLocktime: accepted.arkadeRefundLocktime,
+        htlcLocktime: accepted.htlcLocktime,
+        unilateralRefundWithoutReceiverDelay: 2 * 3600,
+        now,
+      }).fund
+    const lastFundable = NOW + onchainReceiveFundingBudget(depth) - 1
+    expect(solverFunds(lastFundable)).toBe(true)
+    expect(solverFunds(lastFundable + 1)).toBe(false)
+    expect(accepted.arkadeRefundLocktime - lastFundable).toBeGreaterThanOrEqual(90 * 60)
+  })
+
+  it('REFUSES a refund deadline inside the headroom, so we know the gate is live', () => {
+    const accepted = quoteAt(DEFAULT_MIN_CONFIRMATIONS)
+    try {
+      clientAccepts(accepted, NOW, NOW + 89 * 60)
+      expect.unreachable('a refund deadline inside 90 minutes must be refused')
+    } catch (error) {
+      expect((error as { reason?: string }).reason).toBe('insufficient_headroom')
+    }
   })
 })

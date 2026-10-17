@@ -1,5 +1,5 @@
 import { UNILATERAL_RECOURSE_MARGIN } from '@arkade-os/solver-core/core/receive.js'
-import { NOMINAL_BLOCK_SECONDS } from '@arkade-os/solver-core/core/timelocks.js'
+import { NOMINAL_BLOCK_SECONDS, SOLO_REFUND_HEADROOM_SECONDS } from '@arkade-os/solver-core/core/timelocks.js'
 import { describe, it, expect } from 'vitest'
 import {
   ONCHAIN_SECONDS_PER_BLOCK,
@@ -9,8 +9,10 @@ import {
   clampMinConfirmations,
   MIN_SETTLE_WINDOW,
   SETTLE_SAFETY_MARGIN,
-  MAX_REFUND_HORIZON,
   MIN_ARKADE_FUND_WINDOW,
+  DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT,
+  SLOW_BLOCK_ALLOWANCE,
+  onchainReceiveFundingBudget,
   htlcLocktimeFor,
   arkadeRefundLocktimeFor,
   onchainReceiveClaimWindow,
@@ -20,106 +22,101 @@ import {
 
 const now = 1_800_000_000
 
-/**
- * The solver's own window to get an L1 claim confirmed after a late Arkade
- * claim reveals `P` — the one deadline on this leg whose miss costs real money
- * rather than a failed swap (#160).
- *
- * Pinned in ABSOLUTE MINUTES, deliberately, and this is the whole point of the
- * block. Every other test here is written in terms of the constants, so it
- * follows them wherever they go and can never notice that they moved. This
- * window is not configured anywhere: it is what `MAX_REFUND_HORIZON` happens to
- * leave over once it out-binds `htlcLocktime - SETTLE_SAFETY_MARGIN`, which it
- * does across the entire reachable input range. Raising the horizon shrinks the
- * window toward `SETTLE_SAFETY_MARGIN` = 15 minutes, and nothing said so.
- *
- * If these numbers change, that is a decision about how long an L1 claim needs,
- * and #160 is where it gets made — not a constant nudge with a side effect.
- */
-describe('the L1 claim window this leg actually gives the solver', () => {
+const fundingAt = (minConfirmations: number, at: number) =>
+  evaluateOnchainReceiveFunding({
+    arkadeRefundLocktime: arkadeRefundLocktimeFor(minConfirmations, now),
+    htlcLocktime: htlcLocktimeFor(minConfirmations, now),
+    // A 2h exit ladder, which this leg's own htlcLocktime clears at every depth.
+    unilateralRefundWithoutReceiverDelay: 2 * 3600,
+    now: at,
+  })
+
+// ABSOLUTE MINUTES, deliberately: every other test here is written in terms of the
+// constants and so follows them wherever they go. Changing these is the #160 decision.
+describe('the deadlines this leg quotes', () => {
   it.each([
-    ['default (1 confirmation)', DEFAULT_MIN_CONFIRMATIONS, 70],
-    ['maximum (6 confirmations)', MAX_MIN_CONFIRMATIONS, 120],
+    ['default (1 confirmation)', DEFAULT_MIN_CONFIRMATIONS, 155, 245],
+    ['maximum (6 confirmations)', MAX_MIN_CONFIRMATIONS, 255, 345],
+  ])('at %s: arkade refund +%s min, onchain htlc +%s min', (_label, minConfirmations, refundMin, htlcMin) => {
+    expect(arkadeRefundLocktimeFor(minConfirmations, now)).toBe(now + refundMin * 60)
+    expect(htlcLocktimeFor(minConfirmations, now)).toBe(now + htlcMin * 60)
+  })
+
+  it.each([DEFAULT_MIN_CONFIRMATIONS, 3, MAX_MIN_CONFIRMATIONS])('leaves 90 minutes to claim at %s conf', (depth) => {
+    expect(onchainReceiveClaimWindow(depth, now)).toBe(90 * 60)
+    expect(onchainReceiveClaimWindow(depth, now)).toBe(MIN_SETTLE_WINDOW)
+    expect(onchainReceiveClaimWindow(depth, now)).toBeGreaterThanOrEqual(SETTLE_SAFETY_MARGIN)
+  })
+})
+
+describe('a client that unrolls the lockup', () => {
+  // arkd's UnrolledVtxoMinExpiryMargin default: it stops co-signing our refund this long before the client's exit.
+  const arkdCosignMargin = 300
+
+  it.each([DEFAULT_MIN_CONFIRMATIONS, 3, MAX_MIN_CONFIRMATIONS])(
+    'cannot both shut out our co-signed refund and outlast the htlc before our solo refund opens, at %s conf',
+    (depth) => {
+      expect(onchainReceiveClaimWindow(depth, now)).toBeGreaterThanOrEqual(
+        SOLO_REFUND_HEADROOM_SECONDS + arkdCosignMargin,
+      )
+    },
+  )
+})
+
+// THE DEFECT #160 CLOSED: against a `now + 2h` refund, the gate below opened for
+// 30 minutes, in which the client had to broadcast AND reach min_confirmations.
+describe('the client has the whole funding budget to confirm in', () => {
+  it.each([
+    ['default (1 confirmation)', DEFAULT_MIN_CONFIRMATIONS, 65],
+    ['maximum (6 confirmations)', MAX_MIN_CONFIRMATIONS, 165],
   ])('is %s minutes at %s', (_label, minConfirmations, expectedMinutes) => {
-    expect(onchainReceiveClaimWindow(minConfirmations, now)).toBe(expectedMinutes * 60)
+    expect(onchainReceiveFundingBudget(minConfirmations)).toBe(expectedMinutes * 60)
   })
 
-  it('is supplied by the CAP, not by the documented margin', () => {
-    // The branch the JSDoc describes would leave SETTLE_SAFETY_MARGIN. It never
-    // runs, so the window is 4.6x wider than the formula reads. Asserted rather
-    // than described, because a future change that makes the first bound bind
-    // would silently cut the window to 15 minutes and every other test here
-    // would still pass.
-    for (const minConfirmations of [DEFAULT_MIN_CONFIRMATIONS, MAX_MIN_CONFIRMATIONS]) {
-      const htlcLocktime = htlcLocktimeFor(minConfirmations, now)
-      expect(arkadeRefundLocktimeFor(htlcLocktime, now)).toBe(now + MAX_REFUND_HORIZON)
-      expect(onchainReceiveClaimWindow(minConfirmations, now)).toBeGreaterThan(SETTLE_SAFETY_MARGIN)
+  it.each([DEFAULT_MIN_CONFIRMATIONS, 3, MAX_MIN_CONFIRMATIONS])(
+    'funds through the last second of the budget at %s conf, and refuses after it',
+    (depth) => {
+      const budget = onchainReceiveFundingBudget(depth)
+      expect(fundingAt(depth, now + budget - 1)).toEqual({ fund: true })
+      expect(fundingAt(depth, now + budget)).toEqual({
+        fund: false,
+        reason: 'refused to fund: arkade refund window closing',
+      })
+    },
+  )
+
+  it('covers a broadcast at the lockup deadline plus twice the expected confirmation wait', () => {
+    for (const depth of [DEFAULT_MIN_CONFIRMATIONS, 3, MAX_MIN_CONFIRMATIONS]) {
+      const broadcastAt = now + DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT
+      const confirmedAt = broadcastAt + 2 * depth * ONCHAIN_SECONDS_PER_BLOCK
+      expect(fundingAt(depth, confirmedAt)).toEqual({ fund: true })
+      expect(onchainReceiveFundingBudget(depth) - (confirmedAt - now)).toBe(SLOW_BLOCK_ALLOWANCE)
     }
-  })
-
-  /**
-   * The DEFAULT configuration is already below this module's own figure, and
-   * that is the live substance of #160 rather than a hypothetical.
-   *
-   * `MIN_SETTLE_WINDOW` = 90 minutes is what this file says noticing a
-   * preimage, settling and retrying takes. An L1 claim has neither a retry nor
-   * fee-bump room, so it is the weaker case, not the stronger one — and at one
-   * confirmation it gets 70.
-   *
-   * Asserted in BOTH directions on purpose. An earlier version of this block
-   * checked the floor only at `MAX_MIN_CONFIRMATIONS`, where it holds, and read
-   * as though the floor held everywhere. Pinning only the case that passes is
-   * how a contradiction stays invisible — which is the exact failure this whole
-   * describe block exists to prevent, so it should not have been reproduced in
-   * it.
-   */
-  it('clears the floor at six confirmations and does NOT at the default', () => {
-    // 120 min >= 90 min.
-    expect(onchainReceiveClaimWindow(MAX_MIN_CONFIRMATIONS, now)).toBeGreaterThanOrEqual(MIN_SETTLE_WINDOW)
-    // 70 min < 90 min. Deliberately asserted as a FAILURE of the floor: if #160
-    // resolves by making the documented SETTLE_SAFETY_MARGIN branch bind, this
-    // line changes with it, and the change is the decision being recorded.
-    expect(onchainReceiveClaimWindow(DEFAULT_MIN_CONFIRMATIONS, now)).toBeLessThan(MIN_SETTLE_WINDOW)
   })
 })
 
 describe('htlcLocktimeFor', () => {
-  it('covers the confirmation wait plus double the settle margin', () => {
-    const result = htlcLocktimeFor(1, now)
-    expect(result).toBe(now + 1 * ONCHAIN_SECONDS_PER_BLOCK + 2 * MIN_SETTLE_WINDOW)
+  it('sits one MIN_SETTLE_WINDOW past the arkade refund', () => {
+    expect(htlcLocktimeFor(1, now)).toBe(arkadeRefundLocktimeFor(1, now) + MIN_SETTLE_WINDOW)
   })
 
-  it('scales with minConfirmations', () => {
-    const one = htlcLocktimeFor(1, now)
-    const six = htlcLocktimeFor(6, now)
-    expect(six - one).toBe(5 * ONCHAIN_SECONDS_PER_BLOCK)
+  it('scales with minConfirmations at twice the block interval', () => {
+    expect(htlcLocktimeFor(6, now) - htlcLocktimeFor(1, now)).toBe(2 * 5 * ONCHAIN_SECONDS_PER_BLOCK)
   })
 })
 
 describe('arkadeRefundLocktimeFor', () => {
-  it('opens SETTLE_SAFETY_MARGIN before the onchain htlcLocktime when that is the binding bound', () => {
-    const htlcLocktime = now + 10 * MAX_REFUND_HORIZON // push the chain bound far out so MAX_REFUND_HORIZON binds instead — see next test
-    const result = arkadeRefundLocktimeFor(htlcLocktime, now)
-    expect(result).toBe(now + MAX_REFUND_HORIZON)
-  })
-
-  it('caps at MAX_REFUND_HORIZON from now when htlcLocktime is far away', () => {
-    const htlcLocktime = now + MAX_REFUND_HORIZON + 10 * SETTLE_SAFETY_MARGIN
-    const result = arkadeRefundLocktimeFor(htlcLocktime, now)
-    expect(result).toBe(now + MAX_REFUND_HORIZON)
-  })
-
-  it('is bounded by htlcLocktime - SETTLE_SAFETY_MARGIN when that is tighter than the horizon cap', () => {
-    const htlcLocktime = now + MIN_SETTLE_WINDOW // close by, well inside MAX_REFUND_HORIZON
-    const result = arkadeRefundLocktimeFor(htlcLocktime, now)
-    expect(result).toBe(htlcLocktime - SETTLE_SAFETY_MARGIN)
+  it('leaves a full MIN_ARKADE_FUND_WINDOW after the budget closes', () => {
+    for (const depth of [1, 3, 6]) {
+      expect(arkadeRefundLocktimeFor(depth, now)).toBe(
+        now + onchainReceiveFundingBudget(depth) + MIN_ARKADE_FUND_WINDOW,
+      )
+    }
   })
 
   it('always leaves the arkade refund strictly before the onchain htlcLocktime', () => {
     for (const minConfirmations of [1, 3, 6]) {
-      const htlcLocktime = htlcLocktimeFor(minConfirmations, now)
-      const refundLocktime = arkadeRefundLocktimeFor(htlcLocktime, now)
-      expect(refundLocktime).toBeLessThan(htlcLocktime)
+      expect(arkadeRefundLocktimeFor(minConfirmations, now)).toBeLessThan(htlcLocktimeFor(minConfirmations, now))
     }
   })
 })
@@ -133,7 +130,7 @@ describe('evaluateOnchainReceiveAcceptance', () => {
     if (!result.accept) throw new Error('expected acceptance')
     expect(result.minConfirmations).toBe(DEFAULT_MIN_CONFIRMATIONS)
     expect(result.htlcLocktime).toBe(htlcLocktimeFor(DEFAULT_MIN_CONFIRMATIONS, now))
-    expect(result.arkadeRefundLocktime).toBe(arkadeRefundLocktimeFor(result.htlcLocktime, now))
+    expect(result.arkadeRefundLocktime).toBe(arkadeRefundLocktimeFor(DEFAULT_MIN_CONFIRMATIONS, now))
     expect(result.lockupDeadline).toBeGreaterThan(now)
   })
 

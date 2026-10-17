@@ -52,6 +52,7 @@ export const fundLockup = async (
   address: string,
   amountSats: number,
   stamp?: ClaimPacketStamp,
+  horizonSeconds: number = MAX_REFUND_HORIZON,
 ): Promise<string> => {
   const started = performance.now()
   const fundRef = randomUUID()
@@ -61,7 +62,7 @@ export const fundLockup = async (
   let reserveMs = 0
   let release: () => void
   try {
-    const selection = await selectFundingInputs(ctx, amountSats, fundRef)
+    const selection = await selectFundingInputs(ctx, amountSats, fundRef, horizonSeconds)
     inputs = selection.inputs
     readMs = selection.readMs
     selectMs = selection.selectMs
@@ -149,7 +150,7 @@ export const fundLockup = async (
 }
 
 /** The read-select-refuse half, which runs entirely before any funding request exists. */
-const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number, scope: string) => {
+const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number, scope: string, horizonSeconds: number) => {
   // GATED read, not `getVtxos`. The SDK's own note on `getVtxos` is that
   // feeding it to `sendBitcoin({ selectedVtxos })` bypasses the
   // generic-spending gate — which here would mean funding one lockup out of
@@ -167,7 +168,7 @@ const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number, scope
   const selection = selectLockupFunding({
     candidates: spendable,
     amountSats,
-    horizonSeconds: MAX_REFUND_HORIZON,
+    horizonSeconds,
     nowSeconds: nowSeconds(),
     reserved: ctx.reservations.reserved(),
     dustSats: Number(ctx.dustSats),
@@ -182,7 +183,7 @@ const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number, scope
     // the swap resolves, which is worth seeing in a log when a claim later
     // fails for reasons that look unrelated.
     log(
-      `funding lockup of ${amountSats} sats from coins that do not outlive the ${MAX_REFUND_HORIZON}s refund horizon:`,
+      `funding lockup of ${amountSats} sats from coins that do not outlive the ${horizonSeconds}s refund horizon:`,
       'float needs renewing, or this network batches shorter than the horizon',
     )
   }
