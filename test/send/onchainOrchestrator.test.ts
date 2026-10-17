@@ -2318,6 +2318,19 @@ describe('OnchainSendSwapService', () => {
       expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(0)
     })
 
+    it('refuses to fund a lockup the client unrolled while the gate held it', async () => {
+      let proceed = false
+      const svc = gated(async () => (proceed ? { proceed: true } : { proceed: false, reason: APPROVAL_REFUSAL }))
+      const swap = await fundedRow(svc)
+      expect((await svc.tick(swap.id)).state).toBe('funded')
+
+      deps.outputs.delete(swap.pkScript)
+      proceed = true
+      const row = await svc.tick(swap.id)
+      expect(row.state).toBe('refused')
+      expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(0)
+    })
+
     it('broadcasts once the gate proceeds', async () => {
       const svc = gated(async () => ({ proceed: true }))
       const swap = await fundedRow(svc)

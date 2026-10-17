@@ -778,7 +778,7 @@ export class OnchainSendSwapService {
   }
 
   private async whenFunded(row: OnchainSendSwapRow): Promise<boolean> {
-    const { store } = this.deps
+    const { store, arkade } = this.deps
     const decision = this.fundingDecision(row)
     if (!decision.fund) {
       await store.fail(row.id, 'funded', decision.reason)
@@ -786,6 +786,13 @@ export class OnchainSendSwapService {
     }
     // After the funding decision, before the CAS: a held swap still reaches its deadline and refuses.
     if (!(await askApproval(this.deps.approvalGate, row.id, row.amountSats))) return false
+    // Read again right before money moves: an approval wait is time the client can spend unrolling it.
+    const held = (await arkade.findLockups(row.pkScript)).reduce((sum, o) => sum + o.value, 0)
+    const funded = row.onchainLockupValue ?? row.amountSats
+    if (held < funded) {
+      await store.fail(row.id, 'funded', `lockup holds ${held} of ${funded} sats at funding: unrolled, swept or spent`)
+      return false
+    }
     const won = await store.transition(row.id, 'funded', 'funding_onchain', {})
     if (!won) return false
     return this.submitFunding(await store.get(row.id))
