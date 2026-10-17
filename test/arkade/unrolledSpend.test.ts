@@ -483,5 +483,22 @@ describe('UnrolledSpender', () => {
       expect(await refunder().advance(lockup, kept, save)).toEqual({ kind: 'pending', record: kept })
       expect(order).toEqual([])
     })
+
+    it('adopts the child arkd broadcast when its reply was lost, instead of asking again', async () => {
+      const record = await slowRefund()
+      replyLost = true
+      await expect(refunder().advance(lockup, record, save)).rejects.toThrow('reply never arrived')
+      replyLost = false
+      const [refund, child] = cosigned
+      chain.outspends.set(refund!.id, [{ spent: true, txid: child!.id }])
+      now += 20 * 60
+
+      const step = await refunder().advance(lockup, saved.at(-1)!, save)
+      expect(step).toMatchObject({
+        kind: 'pending',
+        record: { cpfpTxid: child!.id, cpfpTx: hex.encode(child!.extract()) },
+      })
+      expect(cosigned).toHaveLength(2)
+    })
   })
 })

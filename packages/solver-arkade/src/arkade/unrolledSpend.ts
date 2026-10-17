@@ -348,6 +348,11 @@ export class UnrolledSpender {
     const refundFee = lockupValue - output
     const estimate = await feeRateNow(chain)
     if (refundFee >= refundVsize * estimate) return record
+    // Only we can spend output 0, so a spender is the child arkd broadcast for a reply we lost.
+    const child = (await chain.getTxOutspends(record.txid))[0]
+    if (child?.spent && child.txid !== undefined) {
+      return { ...record, cpfpTxid: child.txid, cpfpTx: await this.readSoon(child.txid) }
+    }
 
     const feeRate = estimate * BUMP_FACTOR
     const leaf = boarding.forfeit()
@@ -358,7 +363,6 @@ export class UnrolledSpender {
     if (cap < childVsize) return record
     // The child pays the refund's shortfall at `feeRate` as well as its own way.
     const fee = Math.min(Math.ceil(feeRate * (refundVsize + childVsize)) - refundFee, cap)
-    // No pre-commit: losing the reply loses only the bump, and arkd refuses a second child.
     const signed = await this.deps.signer.sign(build(fee), [0])
     try {
       const cpfpTxid = await this.deps.cosign(base64.encode(signed.toPSBT()))
