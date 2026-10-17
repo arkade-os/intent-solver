@@ -254,10 +254,7 @@ export class UnrolledSpender {
     if (status?.confirmed) return { kind: 'confirmed', record }
     if (status) {
       const tx = record.tx ?? hex.encode(await chain.getRawTransaction(record.txid))
-      if (record.cpfpTxid && record.cpfpTx && !(await chain.getTxStatus(record.cpfpTxid).catch(() => null))) {
-        await chain.broadcastTransaction(record.cpfpTx)
-      }
-      return { kind: 'pending', record: await this.bump(lockup, { ...record, tx }, save) }
+      return { kind: 'pending', record: await this.bump(lockup, await this.keepChild({ ...record, tx }), save) }
     }
     const out = (await chain.getTxOutspends(lockup.txid))[lockup.vout]
     if (out?.spent && out.txid !== undefined && out.txid !== record.txid) {
@@ -316,6 +313,19 @@ export class UnrolledSpender {
     }
     for (let i = 0; i < child.outputsLength; i++) fee -= Number(child.getOutput(i).amount)
     return { fee, vsize: vsizeOf(raw) }
+  }
+
+  /** arkd co-signs one child: keep its final tx once an explorer serves it, and resend it if it drops. */
+  private async keepChild<R extends UnrolledSpendRecord>(record: R): Promise<R> {
+    const { chain } = this.deps
+    if (record.cpfpTxid === null) return record
+    if (!(await chain.getTxStatus(record.cpfpTxid).catch(() => null))) {
+      if (record.cpfpTx) await chain.broadcastTransaction(record.cpfpTx)
+      return record
+    }
+    if (record.cpfpTx) return record
+    const raw = await chain.getRawTransaction(record.cpfpTxid).catch(() => null)
+    return raw ? { ...record, cpfpTx: hex.encode(raw) } : record
   }
 
   /** arkd returns no tx, and the client can evict this one at once: read it while it is still around. */

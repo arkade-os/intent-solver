@@ -459,6 +459,27 @@ describe('UnrolledSpender', () => {
       expect(cosigned).toHaveLength(2)
     })
 
+    it('keeps the child once an explorer serves it, so it can still be resent', async () => {
+      const record = await slowRefund()
+      explorerLags = true
+      const step = await refunder().advance(lockup, record, save)
+      explorerLags = false
+      const lagged = (step as { record: UnrolledSpendRecord }).record
+      const [, child] = cosigned
+      expect(lagged).toMatchObject({ cpfpTxid: child!.id, cpfpTx: null })
+
+      chain.raw.set(child!.id, child!.extract())
+      chain.status.set(child!.id, { confirmed: false })
+      now += 60
+      const kept = ((await refunder().advance(lockup, lagged, save)) as { record: UnrolledSpendRecord }).record
+      expect(kept.cpfpTx).toBe(hex.encode(child!.extract()))
+
+      chain.status.delete(child!.id)
+      now += 60
+      await refunder().advance(lockup, kept, save)
+      expect(chain.broadcasts).toEqual([kept.cpfpTx])
+    })
+
     it('leaves a refund alone while the unroll is unconfirmed or the refund already pays the rate', async () => {
       const record = await slowRefund()
       chain.status.set(parent.id, { confirmed: false })
