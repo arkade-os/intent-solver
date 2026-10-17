@@ -31,7 +31,7 @@ import {
 } from '@arkade-os/solver-core/core/send.js'
 import { QUOTE_RATE_LIMIT } from '@arkade-os/solver-core/core/rateLimit.js'
 import { TickErrorTracker } from '@arkade-os/solver-app/ops/tickErrors.js'
-import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { MAX_LOCKUP_SPEND_INPUTS, type FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
 import type {
   EstimateSendFeeParams,
@@ -700,6 +700,34 @@ describe('tick: the full drive', () => {
     expect(row.lockupValue).toBe(2_100)
   })
 
+  it('refuses a lockup funded in more pieces than one claim can spend, before paying', async () => {
+    const { swap } = await quoted()
+    const pieces = MAX_LOCKUP_SPEND_INPUTS + 1
+    const small = Math.floor(AMOUNT / (2 * pieces))
+    arkade.lockups = Array.from({ length: pieces }, (_, vout) => ({ txid: 'f1', vout, value: small }))
+    arkade.lockups.push({ txid: 'f1', vout: pieces, value: AMOUNT - pieces * small })
+
+    const row = await service.tick(swap.id)
+    expect(row.state).toBe('refused')
+    expect(ln.payCalls).toHaveLength(0)
+    expect(row.lockupValue).toBe(AMOUNT)
+  })
+
+  it('keeps refunding an over-limit lockup until every piece is back', async () => {
+    const { swap } = await quoted()
+    const pieces = MAX_LOCKUP_SPEND_INPUTS + 1
+    const small = Math.floor(AMOUNT / (2 * pieces))
+    arkade.lockups = Array.from({ length: pieces }, (_, vout) => ({ txid: 'f1', vout, value: small }))
+    arkade.lockups.push({ txid: 'f1', vout: pieces, value: AMOUNT - pieces * small })
+    await service.tick(swap.id)
+
+    expect(await service.refundSweep()).toEqual([swap.id])
+    expect((await store.get(swap.id)).refundOutcome).toBeNull()
+    arkade.lockups = arkade.lockups.slice(MAX_LOCKUP_SPEND_INPUTS)
+    expect(await service.refundSweep()).toEqual([swap.id])
+    expect((await store.get(swap.id)).refundOutcome).toBe('pushed')
+  })
+
   it('refuses an overfunded lockup rather than claim the excess', async () => {
     // The claim leaf sweeps whole vtxos, so paying an overfunded lockup would
     // keep the excess with no way for the client to recover it. Refusing routes
@@ -983,6 +1011,97 @@ describe('tick: refusals before money moves', () => {
     expect(payAt + call.maxCltvBlocks * SECONDS_PER_BLOCK + REFUND_SAFETY_MARGIN).toBeLessThanOrEqual(
       outcome.swap.refundLocktime,
     )
+  })
+
+  describe("the lockup's batch expiry is a deadline too", () => {
+    it('caps the route so the HTLC ends a margin before the lockup is swept', async () => {
+      const outcome = await quoted()
+      const expiresAt = clock + 2 * 24 * 3600
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT, expiresAt }]
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+      await service.tick(outcome.swap.id)
+
+      const call = ln.payCalls[0]
+      if (call === undefined) throw new Error('expected the payment to be attempted')
+      const decoded = decodeInvoice(INVOICE)
+      expect(call.maxCltvBlocks).toBeLessThan(
+        worstCaseHtlcBlocks(cltvOf(decoded.minFinalCltvBlocks, decoded.worstRouteHintCltvBlocks)),
+      )
+      expect(clock + call.maxCltvBlocks * SECONDS_PER_BLOCK + REFUND_SAFETY_MARGIN).toBeLessThanOrEqual(expiresAt)
+    })
+
+    it('refuses to pay a lockup swept before a claim could land', async () => {
+      const outcome = await quoted()
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT, expiresAt: clock + 3600 }]
+      const row = await service.tick(outcome.swap.id)
+
+      expect(row.state).toBe('refused')
+      expect(row.failureReason).toContain('claim_window_too_short')
+      expect(ln.payCalls).toHaveLength(0)
+    })
+
+    it('refuses to pay a funded row whose lockup is no longer spendable', async () => {
+      const { swap } = await quoted()
+      await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+      const row = await service.tick(swap.id)
+
+      expect(row.state).toBe('refused')
+      expect(ln.payCalls).toHaveLength(0)
+    })
+
+    it('ignores an output someone added later that is swept sooner', async () => {
+      const { swap } = await quoted()
+      await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+      const expiresAt = clock + 2 * 24 * 3600
+      arkade.lockups = [
+        { txid: 'f1', vout: 0, value: AMOUNT, expiresAt },
+        { txid: 'spray', vout: 0, value: 1, expiresAt: clock + 3600 },
+      ]
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+      await service.tick(swap.id)
+
+      const call = ln.payCalls[0]
+      if (call === undefined) throw new Error('expected the payment to be attempted')
+      expect(clock + call.maxCltvBlocks * SECONDS_PER_BLOCK + REFUND_SAFETY_MARGIN).toBeLessThanOrEqual(expiresAt)
+    })
+
+    describe('on regtest, whose batches are shorter than any HTLC', () => {
+      const regtest = () =>
+        new SendSwapService({
+          store,
+          ln,
+          arkade,
+          limits: { minSats: 500, maxSats: 10_000 },
+          invoicePrefix: 'bc',
+          maxExposedSats: 5_000,
+          totalCommitted: () => store.committedSats(),
+          admission: new AdmissionControl(),
+          network: 'regtest',
+          now: () => clock,
+        })
+
+      it('does not cap the route by the expiry', async () => {
+        const svc = regtest()
+        const outcome = await svc.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+        if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+        arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT, expiresAt: clock + 3600 }]
+        ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+        await svc.tick(outcome.swap.id)
+
+        expect(ln.payCalls).toHaveLength(1)
+      })
+
+      it('still refuses a funded row whose lockup is gone', async () => {
+        const svc = regtest()
+        const outcome = await svc.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+        if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+        await store.transition(outcome.swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+        const row = await svc.tick(outcome.swap.id)
+
+        expect(row.state).toBe('refused')
+        expect(ln.payCalls).toHaveLength(0)
+      })
+    })
   })
 
   it('builds the ceiling from the same hint the deadline was sized on', async () => {
@@ -1300,8 +1419,7 @@ describe('tick: failure and recovery', () => {
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
     ln.payResult = { id: 'pay-1', status: 'failed' }
     const realFind = arkade.findLockups.bind(arkade)
-    let reads = 0
-    arkade.findLockups = async (pkScript: string) => (++reads === 1 ? realFind(pkScript) : [])
+    arkade.findLockups = async (pkScript: string) => (ln.payCalls.length === 0 ? realFind(pkScript) : [])
     const realPatch = store.patch.bind(store)
     store.patch = async (id, patch) => {
       if (patch.refund_attempt === 'nothing-at-script') throw new Error('SQLITE_BUSY')
@@ -1349,8 +1467,7 @@ describe('tick: failure and recovery', () => {
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
     ln.payResult = { id: 'pay-1', status: 'failed' }
     const realFind = arkade.findLockups.bind(arkade)
-    let reads = 0
-    arkade.findLockups = async (pkScript: string) => (++reads === 1 ? realFind(pkScript) : [])
+    arkade.findLockups = async (pkScript: string) => (ln.payCalls.length === 0 ? realFind(pkScript) : [])
 
     const row = await service.tick(swap.id)
     expect(row.refundAttempt).toBe('nothing-at-script')
@@ -1643,7 +1760,9 @@ describe('tick: failure and recovery', () => {
     // Funded per the row, but nothing spendable at the script by the time we
     // look — the one-way-door case refundSweep documents. Recording `pushed`
     // here would tell a client they were refunded when they were not.
-    arkade.lockups = []
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    const realFind = arkade.findLockups.bind(arkade)
+    arkade.findLockups = async (pkScript: string) => (ln.payCalls.length === 0 ? realFind(pkScript) : [])
     await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
     ln.payResult = { id: 'pay-1', status: 'failed' }
 
@@ -1887,6 +2006,22 @@ describe('tick: failure and recovery', () => {
 
     expect((await service.tick(swap.id)).state).toBe('paid')
     expect(ln.payCalls).toHaveLength(1)
+  })
+
+  it.each<[string, FundedOutput[]]>([
+    ['gone', []],
+    ['short of what funded it', [{ txid: 'f1', vout: 0, value: AMOUNT / 2 }]],
+  ])('refuses to re-submit a mid-payment row once its lockup is %s', async (_, lockups) => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    const swap = outcome.swap
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+    await store.transition(swap.id, 'funded', 'paying', { idempotency_key: `swap-${swap.paymentHash}` })
+    arkade.lockups = lockups
+
+    const row = await service.tick(swap.id)
+    expect(ln.payCalls).toHaveLength(0)
+    expect(row.failureReason).toContain('cltv_budget_too_short')
   })
 
   it('resumes a swap that died after payment by polling the recorded id', async () => {
@@ -3513,6 +3648,7 @@ describe('SendSwapService — block-typed timelocks', () => {
       })
       if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
       await seed.transition(outcome.swap.id, 'quoted', 'funded', { lockup_value: outcome.swap.amountSats })
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: outcome.swap.amountSats }]
       seed.close()
       // Funding is not instant, and the gate's whole subject is the gap.
       clock += 60

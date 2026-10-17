@@ -32,7 +32,15 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
-import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
+import {
+  BaseSwapStore,
+  addColumns,
+  numberOrNull,
+  text,
+  txidList,
+  type RawRow,
+  type StoreShape,
+} from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
 export type OnchainReceiveSwapState =
@@ -64,7 +72,8 @@ export const EXPOSED: readonly OnchainReceiveSwapState[] = [
 
 const LEGAL_EDGES: Record<OnchainReceiveSwapState, readonly OnchainReceiveSwapState[]> = {
   quoted: ['awaiting_confirmations', 'refused'],
-  awaiting_confirmations: ['funding_arkade', 'refused'],
+  // The self-edge re-adopts a fee-bumped client funding; nothing is exposed yet.
+  awaiting_confirmations: ['funding_arkade', 'refused', 'awaiting_confirmations'],
   funding_arkade: ['awaiting_claim', 'stuck'],
   awaiting_claim: ['claimed', 'refunding_arkade', 'stuck'],
   claimed: ['settled', 'stuck'],
@@ -103,7 +112,16 @@ const TRANSITION_COLUMNS = new Set([
  * finding F4 — runs against a `stuck` row with no outgoing edge and must record
  * the txid without a transition.
  */
-const PATCH_COLUMNS = new Set(['refund_outcome', 'arkade_refund_txid', 'onchain_claim_txid', 'stamped_at'])
+/** The `onchain_claim_fee_rate`/`_broadcast_at`/`_prior_txids` trio is PATCH-only: a fee bump writes them with the row standing still in `claimed`. */
+const PATCH_COLUMNS = new Set([
+  'refund_outcome',
+  'arkade_refund_txid',
+  'onchain_claim_txid',
+  'stamped_at',
+  'onchain_claim_fee_rate',
+  'onchain_claim_broadcast_at',
+  'onchain_claim_prior_txids',
+])
 
 export interface OnchainReceiveSwapRow {
   id: string
@@ -207,6 +225,11 @@ export interface OnchainReceiveSwapRow {
    * gap. @see receive/onchainOrchestrator.ts `whenClaimed`
    */
   onchainClaimTxid: string | null
+  /** The sat/vB {@link onchainClaimTxid} was built at, so the next version can be priced above it. */
+  onchainClaimFeeRate: number | null
+  onchainClaimBroadcastAt: number | null
+  /** The claim versions {@link onchainClaimTxid} replaced, newest first: until one confirms, ANY of them can be the one that does. */
+  onchainClaimPriorTxids: string[]
   arkadeRefundTxid: string | null
   refundOutcome: 'pushed' | 'external' | null
   failureReason: string | null
@@ -269,6 +292,9 @@ const RECEIVE_ONCHAIN_SWAP_COLUMNS = `
   preimage                         TEXT,
   arkade_claim_txid                TEXT,
   onchain_claim_txid               TEXT,
+  onchain_claim_fee_rate           REAL,
+  onchain_claim_broadcast_at       INTEGER,
+  onchain_claim_prior_txids        TEXT,
   arkade_refund_txid               TEXT,
   refund_outcome                   TEXT,
   failure_reason                   TEXT,
@@ -347,6 +373,9 @@ const toRow = (raw: Raw): OnchainReceiveSwapRow => ({
   preimage: raw.preimage === null ? null : String(raw.preimage),
   arkadeClaimTxid: raw.arkade_claim_txid === null ? null : String(raw.arkade_claim_txid),
   onchainClaimTxid: raw.onchain_claim_txid === null ? null : String(raw.onchain_claim_txid),
+  onchainClaimFeeRate: numberOrNull(raw.onchain_claim_fee_rate),
+  onchainClaimBroadcastAt: numberOrNull(raw.onchain_claim_broadcast_at),
+  onchainClaimPriorTxids: txidList(raw.onchain_claim_prior_txids),
   arkadeRefundTxid: raw.arkade_refund_txid === null ? null : String(raw.arkade_refund_txid),
   refundOutcome: raw.refund_outcome === null ? null : (String(raw.refund_outcome) as 'pushed' | 'external'),
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
@@ -483,6 +512,9 @@ export class OnchainReceiveSwapStore extends BaseSwapStore<OnchainReceiveSwapRow
       ['funded_payout_sats', 'INTEGER'],
       ['min_from_sats', 'INTEGER'],
       ['max_from_sats', 'INTEGER'],
+      ['onchain_claim_fee_rate', 'REAL'],
+      ['onchain_claim_broadcast_at', 'INTEGER'],
+      ['onchain_claim_prior_txids', 'TEXT'],
     ])
   }
 

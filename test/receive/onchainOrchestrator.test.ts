@@ -8,6 +8,11 @@ import { SigHash, Transaction } from '@scure/btc-signer'
 import { ArkAddress } from '@arkade-os/sdk'
 import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { EMPTY_LOCKUP_GRACE, REFUND_CENSORSHIP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
+import { FEE_BUMP_FACTOR, FEE_BUMP_INTERVAL_SECONDS } from '@arkade-os/solver-rails/onchain/feeBump.js'
+import { claimSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
+import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
+import { ONCHAIN_DUST_SATS } from '@arkade-os/solver-core/core/onchainReceive.js'
+import { deriveUnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
 import {
   OnchainReceiveSwapStore,
   type OnchainReceiveSwapRow,
@@ -93,6 +98,8 @@ interface ArkadeFake {
    * is `findClaimPreimage`'s problem, and covered by its own tests.
    */
   spendLockup: (pkScriptHex: string, preimage: Uint8Array | null) => void
+  /** Out of Arkade: no longer spendable offchain, and its outpoints now live on L1 under the same txid/vout. */
+  unrollLockup: (pkScriptHex: string) => void
   refundCalls: number
 }
 
@@ -102,6 +109,7 @@ const buildArkadeFake = (): ArkadeFake => {
   // `findLockupOutpoints` serves, and the reason a claim stays readable after
   // it has already spent the output.
   const everSeen = new Map<string, { txid: string; vout: number }[]>()
+  const unrolled = new Set<string>()
   const claimed = new Map<string, Uint8Array>()
   let fundCounter = 0
   const fundStamps: ArkadeFake['fundStamps'] = []
@@ -117,6 +125,10 @@ const buildArkadeFake = (): ArkadeFake => {
       lockups.delete(pkScriptHex)
       if (preimage) claimed.set(pkScriptHex, preimage)
     },
+    unrollLockup: (pkScriptHex) => {
+      for (const seen of everSeen.get(pkScriptHex) ?? []) unrolled.add(`${seen.txid}:${seen.vout}`)
+      lockups.delete(pkScriptHex)
+    },
     refundCalls: 0,
     arkade: {
       providerPubkey,
@@ -126,7 +138,11 @@ const buildArkadeFake = (): ArkadeFake => {
       delays: { unilateralClaimDelay: 512, unilateralRefundDelay: 1024, unilateralRefundWithoutReceiverDelay: 1536 },
       hrp: 'tark',
       findLockups: async (pkScriptHex) => lockups.get(pkScriptHex) ?? [],
-      findLockupOutpoints: async (pkScriptHex) => everSeen.get(pkScriptHex) ?? [],
+      findLockupOutpoints: async (pkScriptHex) =>
+        (everSeen.get(pkScriptHex) ?? []).map((seen) => ({
+          ...seen,
+          unrolled: unrolled.has(`${seen.txid}:${seen.vout}`),
+        })),
       findClaimPreimage: async (outpoints, paymentHashHex) => {
         // Resolve the outpoints back to their script the way the indexer does,
         // then answer only for a preimage that actually hashes right — the
@@ -389,6 +405,16 @@ describe('OnchainReceiveSwapService', () => {
     it('refuses an amount outside limits', async () => {
       const outcome = await service.quote(quoteRequest({ amountSats: 10 }))
       expect(outcome).toEqual({ accepted: false, reason: 'amount_out_of_range' })
+    })
+
+    // Mainnet's own advertised exit delay (605184s).
+    it('refuses the quote outright when the solo recourse could never open before the htlc timeout', async () => {
+      deps.arkadeFake.arkade.delays = deriveUnilateralDelays(605_184)
+
+      const outcome = await service.quote(quoteRequest())
+
+      expect(outcome).toEqual({ accepted: false, reason: 'recourse_window_unservable' })
+      expect(await store.findLiveByPaymentHash(paymentHash)).toBeNull()
     })
 
     it('refuses an invalid payout address', async () => {
@@ -753,6 +779,37 @@ describe('OnchainReceiveSwapService', () => {
       expect(row.state).toBe('refused')
       expect(deps.arkadeFake.lockups.size).toBe(0) // never funded — nothing exposed
     })
+
+    it('re-adopts the replacement when the client RBFs its funding', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      const first = deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      expect((await service.tick(outcome.swap.id)).fundingTxid).toBe(first.txid)
+
+      deps.onchain.dropOutput(first.txid, first.vout)
+      const bumped = deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+
+      const readopted = await service.tick(outcome.swap.id)
+      expect(readopted.state).toBe('awaiting_confirmations')
+      expect(readopted.fundingTxid).toBe(bumped.txid)
+
+      deps.onchain.mineBlocks(1)
+      expect((await service.tick(outcome.swap.id)).state).toBe('awaiting_claim')
+    })
+
+    it('keeps waiting rather than adopting a replacement the fill rules refuse', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      const first = deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      await service.tick(outcome.swap.id)
+
+      deps.onchain.dropOutput(first.txid, first.vout)
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 1_000 })
+
+      const row = await service.tick(outcome.swap.id)
+      expect(row.state).toBe('awaiting_confirmations')
+      expect(row.fundingTxid).toBe(first.txid)
+    })
   })
 
   describe('whenFundingArkade re-checks the funding gate', () => {
@@ -957,6 +1014,39 @@ describe('OnchainReceiveSwapService', () => {
       expect(deps.arkadeFake.refundCalls).toBe(1)
     })
 
+    // The funding gate shuts MIN_ARKADE_FUND_WINDOW before `refundLocktime`, so
+    // this leg enters `refunding_arkade` with its own CLTV still immature.
+    it('does not push a refund before refundLocktime matures', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+
+      now = awaitingClaim.refundLocktime - 1
+      const waiting = await service.tick(awaitingClaim.id)
+      expect(waiting.state).toBe('refunding_arkade')
+      expect(deps.arkadeFake.refundCalls).toBe(0)
+
+      now = awaitingClaim.refundLocktime
+      expect((await service.tick(awaitingClaim.id)).state).toBe('refunded')
+      expect(deps.arkadeFake.refundCalls).toBe(1)
+    })
+
+    it('counts the censorship grace from the deadline, not from an entry that predates it', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      deps.arkadeFake.arkade.refund = async () => {
+        throw new Error('server refused to co-sign')
+      }
+
+      now = awaitingClaim.refundLocktime - 1800
+      const entered = await service.tick(awaitingClaim.id)
+      expect(entered.state).toBe('refunding_arkade')
+
+      // A grace after entry, but not after the first push that could succeed.
+      now = entered.updatedAt + REFUND_CENSORSHIP_GRACE
+      await expect(service.tick(awaitingClaim.id)).rejects.toThrow('server refused to co-sign')
+
+      now = awaitingClaim.refundLocktime + REFUND_CENSORSHIP_GRACE
+      expect((await service.tick(awaitingClaim.id)).state).toBe('stuck')
+    })
+
     it('recovers to claimed when a late-but-valid claim lands during the refund attempt', async () => {
       const awaitingClaim = await driveToAwaitingClaim()
       now = awaitingClaim.refundLocktime + 1
@@ -1009,13 +1099,31 @@ describe('OnchainReceiveSwapService', () => {
       deps.arkadeFake.spendLockup(awaitingClaim.pkScript, null)
 
       // Indistinguishable from read lag on the first look, so it has to
-      // PERSIST past the grace before it counts as inexplicable.
+      // PERSIST past the grace and past `htlcLocktime` to count as inexplicable.
       expect((await service.tick(awaitingClaim.id)).state).toBe('refunding_arkade')
-      now += EMPTY_LOCKUP_GRACE
+      now = awaitingClaim.htlcLocktime
 
       const row = await service.tick(awaitingClaim.id)
       expect(row.state).toBe('stuck')
       expect(row.failureReason).toMatch(/no matching claim/)
+    })
+
+    // Parking ends the preimage recheck, and `P` can still arrive until `htlcLocktime`.
+    it('keeps rechecking past the grace while the client could still reveal P', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      now = awaitingClaim.refundLocktime + 1
+      await store.transition(awaitingClaim.id, 'awaiting_claim', 'refunding_arkade', {})
+      deps.arkadeFake.spendLockup(awaitingClaim.pkScript, null)
+
+      expect((await service.tick(awaitingClaim.id)).state).toBe('refunding_arkade')
+      now += EMPTY_LOCKUP_GRACE
+      expect(now).toBeLessThan(awaitingClaim.htlcLocktime)
+      expect((await service.tick(awaitingClaim.id)).state).toBe('refunding_arkade')
+
+      deps.arkadeFake.spendLockup(awaitingClaim.pkScript, P)
+      const row = await service.tick(awaitingClaim.id)
+      expect(row.state).toBe('claimed')
+      expect(row.preimage).toBe(hex.encode(P))
     })
 
     it('names the server-independent recourse on a refund it parks after the censorship grace', async () => {
@@ -1171,7 +1279,7 @@ describe('OnchainReceiveSwapService', () => {
       // which point the empty lockup surfaces for a human.
       now = awaitingClaim.refundLocktime + 1
       expect((await service.tick(awaitingClaim.id)).state).toBe('refunding_arkade')
-      now += EMPTY_LOCKUP_GRACE
+      now = awaitingClaim.htlcLocktime
       expect((await service.tick(awaitingClaim.id)).state).toBe('stuck')
     })
 
@@ -1192,6 +1300,104 @@ describe('OnchainReceiveSwapService', () => {
       const row = await service.tick(awaitingClaim.id)
       expect(row.state).toBe('refunded')
       expect(deps.arkadeFake.refundCalls).toBe(1)
+    })
+  })
+
+  // `P` is then in an L1 witness and nowhere the Arkade read can see it — and
+  // past `htlc_locktime` the client refunds its L1 HTLC too.
+  describe('a lockup the client unrolled onto L1', () => {
+    const driveToAwaitingClaim = async (): Promise<OnchainReceiveSwapRow> => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+      return service.tick(outcome.swap.id)
+    }
+
+    /** The unroll puts the vtxo on L1 at the outpoint it already had; the claim spends it there. */
+    const unrollAndClaimOnL1 = (row: OnchainReceiveSwapRow, witness: Uint8Array[]) => {
+      const outpoint = deps.arkadeFake.lockups.get(row.pkScript)![0]!
+      deps.arkadeFake.unrollLockup(row.pkScript)
+      deps.onchain.receiveExternal({
+        address: row.lockupAddress,
+        amountSats: outpoint.value,
+        txid: outpoint.txid,
+        vout: outpoint.vout,
+      })
+      deps.onchain.spendClaim(outpoint.txid, outpoint.vout, witness)
+    }
+
+    it('reads P off the L1 witness and claims the htlc with it', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      const reported: string[] = []
+      service.onTickError = (_id, error) => reported.push(error instanceof Error ? error.message : String(error))
+      unrollAndClaimOnL1(awaitingClaim, [new Uint8Array(64), P, new Uint8Array(33).fill(2)])
+
+      const row = await service.tick(awaitingClaim.id)
+
+      expect(row.state).toBe('claimed')
+      expect(row.preimage).toBe(hex.encode(P))
+      expect(row.onchainClaimTxid).toBeTruthy()
+      expect(reported).toHaveLength(1)
+      expect(reported[0]).toMatch(/unrolled/)
+    })
+
+    it('ignores a witness that does not open the payment hash', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      unrollAndClaimOnL1(awaitingClaim, [new Uint8Array(32).fill(0xff)])
+
+      const row = await service.tick(awaitingClaim.id)
+
+      expect(row.state).toBe('awaiting_claim')
+      expect(row.preimage).toBeNull()
+    })
+
+    it('recovers the late claim instead of refunding a lockup that has left arkade', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      now = awaitingClaim.refundLocktime + 1
+      await store.transition(awaitingClaim.id, 'awaiting_claim', 'refunding_arkade', {})
+      unrollAndClaimOnL1(awaitingClaim, [P])
+
+      const row = await service.tick(awaitingClaim.id)
+
+      expect(row.state).toBe('claimed')
+      expect(row.preimage).toBe(hex.encode(P))
+      expect(deps.arkadeFake.refundCalls).toBe(0)
+    })
+
+    it('catches an L1 claim that lands after the grace but before htlc_locktime', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      const outpoint = deps.arkadeFake.lockups.get(awaitingClaim.pkScript)![0]!
+      now = awaitingClaim.refundLocktime + 1
+      await store.transition(awaitingClaim.id, 'awaiting_claim', 'refunding_arkade', {})
+      deps.arkadeFake.unrollLockup(awaitingClaim.pkScript)
+      deps.onchain.receiveExternal({
+        address: awaitingClaim.lockupAddress,
+        amountSats: outpoint.value,
+        txid: outpoint.txid,
+        vout: outpoint.vout,
+      })
+
+      expect((await service.tick(awaitingClaim.id)).state).toBe('refunding_arkade')
+      now += EMPTY_LOCKUP_GRACE
+      expect((await service.tick(awaitingClaim.id)).state).toBe('refunding_arkade')
+
+      deps.onchain.spendClaim(outpoint.txid, outpoint.vout, [P])
+      const row = await service.tick(awaitingClaim.id)
+      expect(row.state).toBe('claimed')
+      expect(row.preimage).toBe(hex.encode(P))
+      expect(deps.arkadeFake.refundCalls).toBe(0)
+    })
+
+    it('retries rather than reading an unanswered L1 query as unspent', async () => {
+      const awaitingClaim = await driveToAwaitingClaim()
+      unrollAndClaimOnL1(awaitingClaim, [P])
+      deps.onchain.findSpendWitness = async () => {
+        throw new Error('esplora unreachable')
+      }
+
+      await expect(service.tick(awaitingClaim.id)).rejects.toThrow('esplora unreachable')
+      expect((await store.get(awaitingClaim.id)).state).toBe('awaiting_claim')
     })
   })
 
@@ -1272,6 +1478,147 @@ describe('OnchainReceiveSwapService', () => {
     })
 
     /**
+     * Fee-bumping the L1 claim (#160). By `claimed` the lockup is paid and `P`
+     * is public, so a claim still in the mempool at `htlc_locktime` loses the
+     * whole HTLC to the client's refund.
+     */
+    describe('replacing a claim the mempool has not taken', () => {
+      const captureBroadcasts = (): string[] => {
+        const broadcasts: string[] = []
+        const original = deps.onchain.broadcastRaw.bind(deps.onchain)
+        deps.onchain.broadcastRaw = async (txHex) => {
+          broadcasts.push(txHex)
+          return original(txHex)
+        }
+        return broadcasts
+      }
+
+      it('leaves a claim alone until the bump interval is up', async () => {
+        const claimed = await driveToClaimed()
+        const first = await service.tick(claimed.id)
+        expect(first.onchainClaimFeeRate).toBe(5)
+        expect(first.onchainClaimBroadcastAt).toBe(now)
+        const broadcasts = captureBroadcasts()
+
+        now += FEE_BUMP_INTERVAL_SECONDS - 1
+        const after = await service.tick(claimed.id)
+
+        expect(broadcasts).toEqual([])
+        expect(after.onchainClaimTxid).toBe(first.onchainClaimTxid)
+        expect(after.onchainClaimPriorTxids).toEqual([])
+      })
+
+      it('asks for no fee estimate before a bump is due', async () => {
+        const claimed = await driveToClaimed()
+        await service.tick(claimed.id)
+        deps.onchain.estimateFeeRate = async () => {
+          throw new Error('estimator down')
+        }
+
+        now += FEE_BUMP_INTERVAL_SECONDS - 1
+        await expect(service.tick(claimed.id)).resolves.toMatchObject({ state: 'claimed' })
+      })
+
+      it('replaces it at the factor once the interval is up, keeping the old version tracked', async () => {
+        const claimed = await driveToClaimed()
+        const first = await service.tick(claimed.id)
+
+        now += FEE_BUMP_INTERVAL_SECONDS
+        const bumped = await service.tick(claimed.id)
+
+        expect(bumped.state).toBe('claimed')
+        expect(bumped.onchainClaimTxid).not.toBe(first.onchainClaimTxid)
+        expect(bumped.onchainClaimFeeRate).toBe(5 * FEE_BUMP_FACTOR)
+        expect(bumped.onchainClaimPriorTxids).toEqual([first.onchainClaimTxid])
+        expect(bumped.onchainClaimBroadcastAt).toBe(now)
+      })
+
+      it('settles on an OLDER version when that is the one a miner took', async () => {
+        const claimed = await driveToClaimed()
+        const first = await service.tick(claimed.id)
+        now += FEE_BUMP_INTERVAL_SECONDS
+        const bumped = await service.tick(claimed.id)
+
+        // The replacement never made it; the version it replaced did.
+        deps.onchain.dropFromMempool(bumped.onchainClaimTxid!)
+        deps.onchain.mineBlocks(1)
+
+        const settled = await service.tick(claimed.id)
+        expect(settled.state).toBe('settled')
+        expect(settled.onchainClaimTxid).toBe(first.onchainClaimTxid)
+      })
+
+      it('bumps a row broadcast before these columns existed, off updated_at', async () => {
+        const claimed = await driveToClaimed()
+        const first = await service.tick(claimed.id)
+        await deps.driver.run(
+          `UPDATE receive_onchain_swap SET onchain_claim_fee_rate = NULL, onchain_claim_broadcast_at = NULL, updated_at = ? WHERE id = ?`,
+          [now, claimed.id],
+        )
+
+        now += FEE_BUMP_INTERVAL_SECONDS
+        const bumped = await service.tick(claimed.id)
+
+        expect(bumped.onchainClaimTxid).not.toBe(first.onchainClaimTxid)
+        expect(bumped.onchainClaimPriorTxids).toEqual([first.onchainClaimTxid])
+        expect(bumped.onchainClaimFeeRate).toBe(5 * FEE_BUMP_FACTOR)
+      })
+
+      it('claims at the fee the HTLC can carry rather than parking it in stuck', async () => {
+        const claimed = await driveToClaimed()
+        deps.onchain.setFeeRate(1_000)
+        const broadcasts = captureBroadcasts()
+
+        const row = await service.tick(claimed.id)
+
+        expect(row.state).toBe('claimed')
+        expect(row.onchainClaimTxid).toBeTruthy()
+        const claimTx = Transaction.fromRaw(hex.decode(broadcasts[0]!), {
+          allowUnknownOutputs: true,
+          allowUnknownInputs: true,
+        })
+        expect(claimTx.getOutput(0).amount).toBe(BigInt(ONCHAIN_DUST_SATS))
+      })
+
+      it('does not replace when the cap leaves less than the relay increment to add', async () => {
+        const claimed = await driveToClaimed()
+        // An HTLC whose cap sits one sat above what 1 sat/vB already pays: the
+        // replacement can only add that sat, which BIP125 rule 4 rejects.
+        const vsize = claimSpendVsize({ network: ONCHAIN_NETWORKS.regtest, destinationScript: claimDestinationScript })
+        await deps.driver.run('UPDATE receive_onchain_swap SET funded_value_sats = ? WHERE id = ?', [
+          ONCHAIN_DUST_SATS + vsize + 1,
+          claimed.id,
+        ])
+        deps.onchain.setFeeRate(1)
+        const first = await service.tick(claimed.id)
+        expect(first.onchainClaimTxid).toBeTruthy()
+        const broadcasts = captureBroadcasts()
+
+        now += FEE_BUMP_INTERVAL_SECONDS
+        deps.onchain.setFeeRate(1_000)
+        const after = await service.tick(claimed.id)
+
+        expect(broadcasts).toEqual([])
+        expect(after.onchainClaimTxid).toBe(first.onchainClaimTxid)
+      })
+
+      it('does not replace a claim already paying everything above dust', async () => {
+        const claimed = await driveToClaimed()
+        deps.onchain.setFeeRate(1_000)
+        const first = await service.tick(claimed.id)
+        const broadcasts = captureBroadcasts()
+
+        now += FEE_BUMP_INTERVAL_SECONDS
+        deps.onchain.setFeeRate(5_000)
+        const after = await service.tick(claimed.id)
+
+        expect(broadcasts).toEqual([])
+        expect(after.onchainClaimTxid).toBe(first.onchainClaimTxid)
+        expect(after.onchainClaimPriorTxids).toEqual([])
+      })
+    })
+
+    /**
      * `claimNow` — the operator's fee-dust retry (TLA+ finding F4). arkana's
      * review raised two things about it, and this is the second: the
      * tests added there asserted action-registry metadata only, so every
@@ -1316,6 +1663,56 @@ describe('OnchainReceiveSwapService', () => {
           refused: expect.stringContaining('does not match'),
         })
       })
+
+      it('hands back the version that confirmed, not the latest one broadcast', async () => {
+        const claimed = await driveToClaimed()
+        const first = await service.tick(claimed.id)
+        now += FEE_BUMP_INTERVAL_SECONDS
+        const bumped = await service.tick(claimed.id)
+        deps.onchain.dropFromMempool(bumped.onchainClaimTxid!)
+        deps.onchain.mineBlocks(1)
+
+        expect(await service.claimNow(claimed.id)).toEqual({ txid: first.onchainClaimTxid })
+      })
+
+      const raceClaimAttempts = async (first: 'tick' | 'claimNow'): Promise<OnchainReceiveSwapRow> => {
+        const claimed = await driveToClaimed()
+        let broadcasts = 0
+        const broadcastRaw = deps.onchain.broadcastRaw.bind(deps.onchain)
+        deps.onchain.broadcastRaw = async (txHex) => {
+          if (broadcasts++ > 0) throw new Error('txn-mempool-conflict')
+          return broadcastRaw(txHex)
+        }
+        let entered: () => void = () => {}
+        let release: () => void = () => {}
+        const held = new Promise<void>((resolve) => (release = resolve))
+        const arrived = new Promise<void>((resolve) => (entered = resolve))
+        const estimateFeeRate = deps.onchain.estimateFeeRate.bind(deps.onchain)
+        deps.onchain.estimateFeeRate = async () => {
+          deps.onchain.estimateFeeRate = estimateFeeRate
+          entered()
+          await held
+          return 4
+        }
+
+        const run = (which: 'tick' | 'claimNow') =>
+          (which === 'tick' ? service.tick(claimed.id) : service.claimNow(claimed.id)).catch(() => null)
+        const leading = run(first)
+        await arrived
+        await run(first === 'tick' ? 'claimNow' : 'tick')
+        release()
+        await leading
+        return store.get(claimed.id)
+      }
+
+      it.each(['tick', 'claimNow'] as const)(
+        'never leaves a claim txid nobody broadcast when %s gets there first',
+        async (first) => {
+          const after = await raceClaimAttempts(first)
+          expect(after.onchainClaimTxid).toBeTruthy()
+          expect(await deps.onchain.transactionOutcome(after.onchainClaimTxid!)).not.toBe('unknown')
+        },
+      )
 
       it('recognises its OWN claim on re-entry rather than reporting the client refunded', async () => {
         const claimed = await driveToClaimed()

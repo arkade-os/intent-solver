@@ -139,6 +139,19 @@ describe('OnchainSendSwapStore', () => {
   })
 })
 
+describe('findRefundable()', () => {
+  it('returns a refused row at once, its refund leaf having no timelock', async () => {
+    await store.insertQuote(baseQuote)
+    await store.fail('swap-1', 'quoted', 'lockup timeout')
+    expect(now).toBeLessThan(baseQuote.refundLocktime)
+
+    expect((await store.findRefundable(now)).map((r) => r.id)).toEqual(['swap-1'])
+
+    await store.patch('swap-1', { refund_outcome: 'pushed' })
+    expect(await store.findRefundable(baseQuote.refundLocktime)).toEqual([])
+  })
+})
+
 describe('OnchainSendSwapStore — migration', () => {
   /** Minimal SqlDriver over a pre-populated better-sqlite3 handle — same shape betterSqliteDriver wraps, without its file-pragma side effects. */
   const driverOver = (db: Database.Database): SqlDriver => ({
@@ -243,6 +256,11 @@ describe('OnchainSendSwapStore — migration', () => {
     const fresh = await migrated.get('swap-1')
     expect(fresh.clientRefundPubkey).toBe(baseQuote.clientRefundPubkey)
     expect(fresh.receiverPkScript).toBe(baseQuote.receiverPkScript)
+
+    // No client refund key, so no untimelocked leaf: the deadline really gates this one.
+    await migrated.fail('pre-existing-row', 'quoted', 'lockup timeout')
+    expect(await migrated.findRefundable(1_000_000)).toEqual([])
+    expect((await migrated.findRefundable(1_000_000 + 3600)).map((r) => r.id)).toEqual(['pre-existing-row'])
     await migrated.close()
   })
 
