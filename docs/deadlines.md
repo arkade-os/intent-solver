@@ -194,6 +194,16 @@ retry or fee-bump room to make up the difference — because it was whatever a
 `MAX_REFUND_HORIZON` cap happened to leave over. That declaration is gone; the
 floor is the formula.
 
+**`E - R` also bounds a client that unrolls the lockup.** The unroll restarts
+both solo CSVs at a confirmation the client times. arkd co-signs our
+`refundWithoutReceiver` on L1 only until the client's own exit is 300 s from
+opening, and our solo refund opens `SOLO_REFUND_HEADROOM_SECONDS` (4096 s)
+after the client's solo claim. If `E - R` is under 4396 s, the client can time
+the unroll so arkd stops co-signing before `R`. It then refunds the HTLC at `E`
+and still claims the lockup before our solo leaf opens. The old 70 min was
+196 s short of this; 90 min clears it by 1,004 s.
+`test/core/onchainReceive.test.ts` pins the bound.
+
 What it costs: the solver's capital can sit in an unclaimed lockup until `R`,
 which at one confirmation is ≈145 min after funding against a ten-minute block
 (up from ≈110), and a failed swap's client refund opens at `E` — 4 h 05 m after

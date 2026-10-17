@@ -1,5 +1,5 @@
 import { UNILATERAL_RECOURSE_MARGIN } from '@arkade-os/solver-core/core/receive.js'
-import { NOMINAL_BLOCK_SECONDS } from '@arkade-os/solver-core/core/timelocks.js'
+import { NOMINAL_BLOCK_SECONDS, SOLO_REFUND_HEADROOM_SECONDS } from '@arkade-os/solver-core/core/timelocks.js'
 import { describe, it, expect } from 'vitest'
 import {
   ONCHAIN_SECONDS_PER_BLOCK,
@@ -47,6 +47,20 @@ describe('the deadlines this leg quotes', () => {
     expect(onchainReceiveClaimWindow(depth, now)).toBe(MIN_SETTLE_WINDOW)
     expect(onchainReceiveClaimWindow(depth, now)).toBeGreaterThanOrEqual(SETTLE_SAFETY_MARGIN)
   })
+})
+
+describe('a client that unrolls the lockup', () => {
+  // arkd's UnrolledVtxoMinExpiryMargin default: it stops co-signing our refund this long before the client's exit.
+  const arkdCosignMargin = 300
+
+  it.each([DEFAULT_MIN_CONFIRMATIONS, 3, MAX_MIN_CONFIRMATIONS])(
+    'cannot both shut out our co-signed refund and outlast the htlc before our solo refund opens, at %s conf',
+    (depth) => {
+      expect(onchainReceiveClaimWindow(depth, now)).toBeGreaterThanOrEqual(
+        SOLO_REFUND_HEADROOM_SECONDS + arkdCosignMargin,
+      )
+    },
+  )
 })
 
 // THE DEFECT #160 CLOSED: against a `now + 2h` refund, the gate below opened for
