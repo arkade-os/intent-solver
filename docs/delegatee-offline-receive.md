@@ -4,6 +4,13 @@ Lightning and onchain receive already support a client that omits `claim_packet`
 The solver funds the agreed covenant and recovers the preimage from its claim witness.
 That is also the path used by a delegatee claim; no solver-side delegatee URL is required.
 
+The receiving application needs the client APIs from
+[ts-sdk#1090](https://github.com/arkade-os/ts-sdk/pull/1090) and the server changes in
+[delegatee#5](https://github.com/arkade-os/delegatee/pull/5). The SDK and swap versions
+pinned in this solver repository do not include those APIs. Upgrade the receiving
+application after the companion changes are released, and deploy delegatee with the
+trusted template before enabling the option.
+
 Use the SDK swap client's `offlineReceive` configuration with a `RestDelegateeProvider`
 and the operator-trusted `offline_receive` template ID. The client registers a durable
 watch before returning payment instructions. Its encrypted payload binds the preimage
