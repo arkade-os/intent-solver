@@ -872,14 +872,14 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'funding_onchain', decision.reason)
       return false
     }
-    const shortfall = await this.lockupShortfall(row)
-    if (shortfall) {
-      await store.fail(row.id, 'funding_onchain', shortfall)
-      return false
-    }
 
     let result
     try {
+      const shortfall = await this.lockupShortfall(row)
+      if (shortfall) {
+        await store.fail(row.id, 'funding_onchain', shortfall)
+        return false
+      }
       result = await onchain.fund({
         address: row.onchainAddress,
         amountSats: row.payoutSats,

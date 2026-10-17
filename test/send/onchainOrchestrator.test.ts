@@ -760,6 +760,14 @@ describe('OnchainSendSwapService', () => {
       expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(0)
     })
 
+    it('hands the lease back when that lockup read fails, so the next tick still funds', async () => {
+      const { row, fundForReal } = await stalled()
+      deps.onchain.fund = fundForReal
+      vi.spyOn(deps.arkade, 'findLockups').mockRejectedValueOnce(new Error('indexer 429'))
+      await expect(service.tick(row.id)).rejects.toThrow('indexer 429')
+      expect((await service.tick(row.id)).state).toBe('awaiting_claim')
+    })
+
     it('stops attempting once the L1 claim window is gone, and parks the row', async () => {
       const { row, attempts } = await stalled()
       now = row.htlcLocktime - claimWindow(row)
