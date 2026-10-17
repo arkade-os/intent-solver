@@ -121,6 +121,40 @@ const deposit = (over: Partial<ObservedDeposit> = {}): ObservedDeposit => ({
 })
 
 describe('quote', () => {
+  it.each(['filling', 'stuck'] as const)('recovers a direct %s fill and records its price only once', async (state) => {
+    const price = vi.fn(async () => ({ mantissa: 100_000n, scale: 0 }))
+    const { service, store } = await harness({ fetchPrice: price })
+    await service.quote(request())
+    await store.transition('swap-1', 'quoted', 'funded', { deposit_txid: 'ff'.repeat(32), deposit_vout: 0 })
+    await store.transition('swap-1', 'funded', 'filling')
+    if (state === 'stuck') await store.fail('swap-1', 'filling', 'reply lost')
+    const proof = { id: 'swap-1', depositTxid: 'ff'.repeat(32), depositVout: 0, offerPkScript: OFFER_SCRIPT }
+    const reads = price.mock.calls.length
+    expect(await service.recoverDirectFill(proof, 'fa'.repeat(32))).toBe(true)
+    expect(price.mock.calls.length).toBe(reads + 1)
+    const marked = await store.get('swap-1')
+    expect(marked).toMatchObject({ state: 'filled', fillPriceMantissa: 100_000n, fillTxid: 'fa'.repeat(32) })
+    expect(await service.recoverDirectFill(proof, 'fa'.repeat(32))).toBe(true)
+    expect(price.mock.calls.length).toBe(reads + 1)
+    expect((await store.get('swap-1')).updatedAt).toBe(marked.updatedAt)
+  })
+
+  it('recovers an original fill with its market disabled without inventing a price mark', async () => {
+    const errors: unknown[] = []
+    const { service, store } = await harness({ onError: (_id, error) => errors.push(error) })
+    await service.quote(request())
+    await store.transition('swap-1', 'quoted', 'funded', { deposit_txid: 'ff'.repeat(32), deposit_vout: 0 })
+    await store.transition('swap-1', 'funded', 'filling')
+    await service.replaceMarkets([])
+    expect(
+      await service.recoverDirectFill(
+        { id: 'swap-1', depositTxid: 'ff'.repeat(32), depositVout: 0, offerPkScript: OFFER_SCRIPT },
+        'fa'.repeat(32),
+      ),
+    ).toBe(true)
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillPriceMantissa: null })
+    expect(errors).toHaveLength(1)
+  })
   it('resolves both amounts and records the terms before answering', async () => {
     const { service, store } = await harness()
     const outcome = await service.quote(request())
@@ -741,30 +775,39 @@ describe('replaceMarkets', () => {
       newId: sequentialIds(),
       deriveOffer: perClientOffer,
     })
-    const quoted = service.quote(request())
-    const swapping = service.replaceMarkets([{ ...MARKET, carrierSats: 0n }])
-    const outcome = await quoted
+    const outcome = await service.quote(request())
+    await service.replaceMarkets([{ ...MARKET, carrierSats: 0n }])
     expect(outcome.accepted && outcome.carrierSats).toBe(330n)
-    await swapping
     // Premise: the swap really landed, so the 330n above is a captured figure and not a no-op.
     const next = await service.quote(request({ rfqId: 'f'.repeat(64), makerPublicKey: 'c'.repeat(64) }))
     expect(next.accepted && next.carrierSats).toBe(0n)
   })
 
   it('waits for an in-flight quote before swapping the list', async () => {
-    let release!: (price: { mantissa: bigint; scale: number }) => void
-    const blocked = new Promise<{ mantissa: bigint; scale: number }>((resolve) => {
+    let release!: () => void
+    let entered!: () => void
+    const blocked = new Promise<void>((resolve) => {
       release = resolve
     })
-    const { service } = await harness({ fetchPrice: () => blocked })
+    const inserting = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const { service, store } = await harness()
+    const insertQuote = store.insertQuote.bind(store)
+    vi.spyOn(store, 'insertQuote').mockImplementationOnce(async (record) => {
+      entered()
+      await blocked
+      return insertQuote(record)
+    })
     const quoting = service.quote(request())
+    await inserting
     let replaced = false
     const replacing = service.replaceMarkets([]).then(() => {
       replaced = true
     })
     await Promise.resolve()
     expect(replaced).toBe(false)
-    release({ mantissa: 100_000n, scale: 0 })
+    release()
     expect(await quoting).toMatchObject({ accepted: true })
     await replacing
     expect(replaced).toBe(true)

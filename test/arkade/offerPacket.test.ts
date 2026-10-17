@@ -10,7 +10,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { Extension, UnknownPacket, asset, type ExtensionPacket } from '@arkade-os/sdk'
-import { encodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap'
+import { encodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap/protocol'
 import { Transaction } from '@scure/btc-signer'
 import { base64, hex } from '@scure/base'
 import { offerFromFundingTx } from '@arkade-os/solver-arkade/arkade/offerPacket.js'

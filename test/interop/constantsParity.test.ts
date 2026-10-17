@@ -33,8 +33,9 @@
  * because they would all move together. The last section pins them APART.
  */
 
-import { describe, it, expect } from 'vitest'
-import * as swap from '@arkade-os/swap'
+import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest'
+import * as swap from '@arkade-os/swap/protocol'
+import { observedReceiveClaimFloor } from './clientAdmission.js'
 // EVERY local copy, not one of each.
 //
 // `core/*.ts` modules are self-contained on purpose: a value that coincides
@@ -187,6 +188,12 @@ describe('quantities this service shares with @arkade-os/swap', () => {
  * has to argue with a test rather than with a comment.
  */
 describe('quantities that look shared and are not', () => {
+  let clientClaimFloor: number
+  beforeAll(async () => {
+    vi.useFakeTimers()
+    clientClaimFloor = await observedReceiveClaimFloor(1_800_000_000, LIGHTNING_RECEIVE_HORIZON)
+  })
+  afterAll(() => vi.useRealTimers())
   it('keeps our claim margin distinct from the client’s claim-window floor', () => {
     // The SDK's is the CLIENT's minimum: the least it will accept between the
     // last moment a payer can arm a swap and the solver's own refund, below
@@ -200,7 +207,7 @@ describe('quantities that look shared and are not', () => {
     // and no test would notice because they would move together.
     // `toBeGreaterThan` already implies they differ, so the separate `not.toBe`
     // it replaced was noise rather than a second guarantee.
-    expect(MIN_CLAIM_WINDOW).toBeGreaterThan(swap.MIN_CLAIM_WINDOW_SECONDS)
+    expect(MIN_CLAIM_WINDOW).toBeGreaterThan(clientClaimFloor)
   })
 
   /**
@@ -213,7 +220,7 @@ describe('quantities that look shared and are not', () => {
    * to prevent, arriving through the constants instead of through a derivation.
    */
   it('is strictly more conservative than the client requires, never less', () => {
-    expect(MIN_CLAIM_WINDOW).toBeGreaterThanOrEqual(swap.MIN_CLAIM_WINDOW_SECONDS)
+    expect(MIN_CLAIM_WINDOW).toBeGreaterThanOrEqual(clientClaimFloor)
   })
 })
 

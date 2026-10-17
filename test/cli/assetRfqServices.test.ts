@@ -10,6 +10,11 @@
  * configured markets really do become registered corridors — is, at the bottom.
  */
 import { describe, it, expect } from 'vitest'
+import { runInNewContext } from 'node:vm'
+import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
+import { DirectFillAttempts } from '@arkade-os/solver-arkade/arkade/directFillAttempts.js'
+import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
+import { sqliteExecutor } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { corridorSetFromDeps, readerSetFromDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
 import { assetRfqMarketsFrom, recoverReadableMarkets } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import type { ReadableAssetRfqMarket } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
@@ -22,6 +27,37 @@ const USDA = '1a'.repeat(34)
 const body = () => createServicesBody()
 
 describe('createServices — the asset RFQ service', () => {
+  it('opens the real offer store for journal recovery when no offer market is configured', async () => {
+    const db = sqliteExecutor(':memory:')
+    const directFills = await DirectFillAttempts.open(db, createReservationLedger(), 'wallet', '5120' + '33'.repeat(32))
+    const source = body()
+    const branch = source.slice(source.indexOf('const recoverOffers ='), source.indexOf('const leg ='))
+    expect(branch).toContain('await OfferFillStore.open(swapFile)')
+    const open = () =>
+      runInNewContext(`(async () => { ${branch}; return offerStore })()`, {
+        arkade: { directFills },
+        servesOffers: false,
+        OfferFillStore,
+        swapFile: ':memory:',
+      }) as Promise<OfferFillStore | null>
+    let recovered: OfferFillStore | null = null
+    try {
+      expect(await open()).toBeNull()
+      await directFills.prepare({
+        parent: { kind: 'offer', id: 'pending-offer' },
+        deposit: { txid: '11'.repeat(32), vout: 0 },
+        funding: [{ txid: '22'.repeat(32), vout: 0, value: 1000, script: '5120' + '33'.repeat(32), assets: [] }],
+        offerPkScript: '5120' + '44'.repeat(32),
+        proceedsScript: '5120' + '33'.repeat(32),
+      })
+      recovered = await open()
+      expect(recovered).toBeInstanceOf(OfferFillStore)
+      expect(await recovered!.listNonTerminal()).toEqual([])
+    } finally {
+      await recovered?.close()
+      db.close()
+    }
+  })
   it('constructs one, which is the whole of #23', () => {
     expect(body()).toContain('new AssetRfqSwapService(')
   })
@@ -84,7 +120,7 @@ describe('the four Arkade seams', () => {
   it('reads AVAILABLE inventory, never the total', () => {
     // A wallet whose batch expired reports millions and can spend nothing;
     // quoting off `total` accepts every swap and fails every fill.
-    expect(body()).toContain('balance: async () => offerInventoryFrom(await arkade.wallet.getBalance())')
+    expect(body()).toContain('balance: () => offerInventoryFor(arkade)')
   })
 
   it('watches ONE outpoint, because a fill spends one input', () => {

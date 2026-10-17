@@ -125,12 +125,28 @@ import {
   ungatedAssetSymbols,
 } from './assetRfqMarkets.js'
 import { marketServingDivergence } from './marketDivergence.js'
-import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
-import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { offerInventoryFor } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import {
+  offerExitDelay,
+  offerHexFrom,
+  offerScriptFrom,
+  xOnlyPubkey,
+} from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
+import {
+  carrierChainTip,
+  createCarrierPinLedger,
+  restoreCarrierAttemptPins,
+  spendableCarrierCoins,
+  taxiReceiveCarrier,
+} from './assetRfqTaxi.js'
+import { completeTaxiReceiveCarrier } from './assetRfqTaxiAdapter.js'
+import type { TaxiUrlPolicy } from './taxiUrlGuard.js'
+import { directFillRecoveryFor } from './directFillRecovery.js'
 
 export interface Services {
+  directFillRecovery?: Awaited<ReturnType<typeof directFillRecoveryFor>>
   /**
    * The ENVIRONMENT's configuration, exactly as `loadConfig()` read it.
    *
@@ -480,6 +496,10 @@ export const createServices = async (
   config: Config,
   opts?: { allCorridors?: boolean; corridors?: readonly CorridorPlugin[] },
 ): Promise<Services> => {
+  const taxiReceiverAllowPrivate = process.env.TAXI_RECEIVER_ALLOW_PRIVATE === '1'
+  if (config.arkade.isMainnet && taxiReceiverAllowPrivate) {
+    throw new Error('TAXI_RECEIVER_ALLOW_PRIVATE=1 is not allowed on mainnet')
+  }
   // One file on a fresh install, the five it already has on an existing one —
   // see src/db/layout.ts for why nothing ever moves rows between them.
   const layout = resolveDbLayout(config.swapDbPath)
@@ -816,7 +836,8 @@ export const createServices = async (
   // either reaches `assetOffers?.replaceMarkets` on a NULL service and no-ops.
   const servesOffers = policy.offerMarkets.length > 0 || marketRows.some((row) => row.enabled && row.servesOffer)
   const liveOfferMarkets = offerMarketsFrom(assetMarkets.pricing)
-  const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
+  const recoverOffers = (await arkade.directFills.list()).some((attempt) => attempt.parent.kind === 'offer')
+  const offerStore = servesOffers || recoverOffers ? await OfferFillStore.open(swapFile) : null
   const leg = (assetId: string | null, amount: bigint) =>
     `${amount} ${assetId === null ? 'sats' : (assetSymbols.get(assetId) ?? assetId.slice(0, 8))}`
   // NOT a corridor, so no descriptor: an offer fill has no HTLC, deadline or
@@ -839,42 +860,43 @@ export const createServices = async (
   }
   const offerRefusals = createOfferRefusalTail()
   const rfqRefusals = createRfqRefusalTail()
-  const assetOffers = offerStore
-    ? new AssetOfferService({
-        store: offerStore,
-        markets: liveOfferMarkets,
-        // The console's market rows, in the shape this service consumes. Every
-        // served market is in here by construction — see the serve list above.
-        pricing: assetMarkets.pricing,
-        // Same reader the EVM corridors price from — the market config
-        // deliberately speaks `evmCorridorConfig.ts`'s feed-plus-pointer dialect
-        // so one implementation serves both.
-        fetchPrice: createPriceFeed(),
-        carrierSats: arkade.dustSats,
-        chargesDeliveredCarrier: policy.offerChargesDeliveredCarrier,
-        minFillAmount: policy.offerMinFillAmount,
-        maxFillAmount: policy.offerMaxFillAmount,
-        // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
-        balance: () => arkade.wallet.getBalance(),
-        outputsAt: (offerPkScript) => offerOutputsAt(arkade, offerPkScript),
-        // Swap Protocol V1 § 5.1 is a MUST, and the key it needs is one this
-        // process already holds — so it is passed rather than left optional.
-        // Absent, `consider()` documents itself as skipping that check.
-        serverPubkey: arkade.wallet.arkServerPublicKey,
-        // THE SPEND. Wired here because this is where the wallet and the
-        // emulator meet; every guard on it lives in `arkade/offerSettle.ts`.
-        settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
-        approvalGate: gateFor('arkade offer fill'),
-        onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
-        // Refusals are NOT errors, so they never reached `onError` above. The log
-        // line alone is invisible to an operator in a browser, so the console's
-        // tail is fed from the same handler.
-        onRefused: (outpoint, reason, detail) => {
-          log(`offer ${outpoint} refused: ${reason} — ${detail}`)
-          offerRefusals.record({ at: nowSeconds(), outpoint, reason, detail })
-        },
-      })
-    : null
+  const assetOffers =
+    servesOffers && offerStore
+      ? new AssetOfferService({
+          store: offerStore,
+          markets: liveOfferMarkets,
+          // The console's market rows, in the shape this service consumes. Every
+          // served market is in here by construction — see the serve list above.
+          pricing: assetMarkets.pricing,
+          // Same reader the EVM corridors price from — the market config
+          // deliberately speaks `evmCorridorConfig.ts`'s feed-plus-pointer dialect
+          // so one implementation serves both.
+          fetchPrice: createPriceFeed(),
+          carrierSats: arkade.dustSats,
+          chargesDeliveredCarrier: policy.offerChargesDeliveredCarrier,
+          minFillAmount: policy.offerMinFillAmount,
+          maxFillAmount: policy.offerMaxFillAmount,
+          // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
+          balance: () => arkade.wallet.getBalance(),
+          outputsAt: (offerPkScript) => offerOutputsAt(arkade, offerPkScript),
+          // Swap Protocol V1 § 5.1 is a MUST, and the key it needs is one this
+          // process already holds — so it is passed rather than left optional.
+          // Absent, `consider()` documents itself as skipping that check.
+          serverPubkey: arkade.wallet.arkServerPublicKey,
+          // THE SPEND. Wired here because this is where the wallet and the
+          // emulator meet; every guard on it lives in `arkade/offerSettle.ts`.
+          settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
+          approvalGate: gateFor('arkade offer fill'),
+          onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
+          // Refusals are NOT errors, so they never reached `onError` above. The log
+          // line alone is invisible to an operator in a browser, so the console's
+          // tail is fed from the same handler.
+          onRefused: (outpoint, reason, detail) => {
+            log(`offer ${outpoint} refused: ${reason} — ${detail}`)
+            offerRefusals.record({ at: nowSeconds(), outpoint, reason, detail })
+          },
+        })
+      : null
 
   /**
    * The atomic class over RFQ. Always constructed, even with an empty list, so
@@ -912,6 +934,88 @@ export const createServices = async (
     // Boot-captured beside the two keys above, all three from one `getInfo()`.
     exitDelay: offerExitDelay(arkade.advertisedExitDelay),
   }
+  /**
+   * The receive-carrier READ half: exists regardless of
+   * `TAXI_URL`, since a request naming its own Taxi resolves against that one
+   * either way — and so does the fill half below. Every identity a quote is
+   * verified against comes from the context above, never from a URL.
+   */
+  const taxiUrlPolicy: TaxiUrlPolicy = {
+    isMainnet: config.arkade.isMainnet,
+    allowPrivate: taxiReceiverAllowPrivate,
+  }
+  const taxiCarrier = await taxiReceiveCarrier({
+    taxiUrl: config.taxiUrl,
+    policy: taxiUrlPolicy,
+    trust: async () => ({
+      serverKey: arkade.wallet.arkServerPublicKey,
+      emulatorKey: assetRfqDerivation.emulatorPubkey,
+      dustSats: arkade.dustSats,
+      vtxoMinAmount: arkade.vtxoMinSats,
+      hrp: arkade.hrp,
+      locktimeDomain: arkade.timelockUnit === 'blocks' ? 'height' : 'time',
+      inputExpiryMargin: BigInt(arkade.advertisedExitDelay),
+    }),
+    // What the carrier itself is worth: no more than one dust to recycle one.
+    maxServiceFareSats: arkade.dustSats,
+    contracts: () => arkade.wallet.getContractManager(),
+    reserved: () => arkade.reservations.reserved(),
+    // The SAME number the service binds a quote for.
+    quoteValiditySeconds: policy.assetQuoteValiditySeconds,
+    // NOT the shared `chainTip` below, which holds a reading for 15s.
+    tipHeight: config.chainTipEsploraUrl
+      ? carrierChainTip(createEsploraClient(config.chainTipEsploraUrl)).height
+      : undefined,
+  })
+  /**
+   * BEFORE any service exists to tick it, and gated on ROWS rather than on the
+   * knob: an operator who unsets `TAXI_URL` with an attempt outstanding would
+   * otherwise leave its coins free for the float to spend. A never-configured
+   * solver finds none — one `SELECT` on a handle that is already open.
+   */
+  const carrierPins = createCarrierPinLedger()
+  const restoredPins = await restoreCarrierAttemptPins({
+    attempts: () => assetRfqStore.listUnresolvedCarrierAttempts(),
+    reserve: (outpoints) => arkade.reservations.reserve(outpoints),
+    pins: carrierPins,
+  })
+  if (restoredPins.length > 0) {
+    log(`receive carrier: re-pinned the inputs of ${restoredPins.length} unresolved attempt(s)`)
+  }
+  /**
+   * The fill half. With no `TAXI_URL` a sender-paid recycle is still refused, by
+   * the resolve and the settle that find no configured Taxi.
+   */
+  const carrierOfferHex = offerHexFrom(assetRfqDerivation)
+  const receiveCarrier = completeTaxiReceiveCarrier(taxiCarrier, {
+    taxiUrl: config.taxiUrl,
+    policy: taxiUrlPolicy,
+    store: assetRfqStore,
+    chain: arkade.wallet.indexerProvider,
+    pins: carrierPins,
+    coins: async () => spendableCarrierCoins(await arkade.wallet.getContractManager()),
+    reserved: () => arkade.reservations.reserved(),
+    reserve: (outpoints) => arkade.reservations.reserve(outpoints),
+    wallet: arkade.wallet,
+    identity: arkade.identity,
+    arkServerUrl: arkade.arkServerUrl,
+    dustSats: arkade.dustSats,
+    offerHex: (row) =>
+      carrierOfferHex(
+        {
+          wantAmount: row.toAmount,
+          wantAssetId: row.toAssetId,
+          offerAssetId: row.fromAssetId,
+          makerPkScript: row.makerPkScript,
+          makerPublicKey: row.makerPublicKey,
+        },
+        row.offerPkScript,
+      ),
+    proceedsAddress: await arkade.wallet.getAddress(),
+    solverKeys: [hex.encode(await arkade.identity.xOnlyPublicKey())],
+    serverKey: () => arkade.wallet.arkServerPublicKey,
+    now: () => Math.floor(Date.now() / 1000),
+  })
   const assetRfqService = new AssetRfqSwapService({
     quoteLimiter,
     store: assetRfqStore,
@@ -923,16 +1027,29 @@ export const createServices = async (
     depositAt: async (offerPkScript, depositLeg) =>
       largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),
     // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
-    balance: async () => offerInventoryFrom(await arkade.wallet.getBalance()),
+    balance: () => offerInventoryFor(arkade),
     fetchPrice: createPriceFeed(),
     settle: quotedOfferSettleFor({
       ctx: arkade,
       emulatorUrl: config.emulatorUrl,
       derivation: assetRfqDerivation,
     }),
+    receiveCarrierQuotes: receiveCarrier,
     approvalGate: gateFor('arkade asset RFQ'),
     onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
   })
+  const directFillRecovery = await directFillRecoveryFor(
+    arkade,
+    (kind) =>
+      kind === 'offer'
+        ? offerStore
+        : {
+            recoverDirectFill: (proof, txid) => assetRfqService.recoverDirectFill(proof, txid),
+            cancelDirectFill: (proof, txid) => assetRfqStore.cancelDirectFill(proof, txid),
+          },
+    (key, error) => log(`direct fill ${key} recovery failed:`, messageOf(error)),
+  )
+  await directFillRecovery.sweep()
 
   // ONE reading, whole house: a narrower one lends out headroom another corridor
   // holds. EVM and asset read direct — their readers narrow per token and pair.
@@ -1601,6 +1718,7 @@ export const createServices = async (
     config,
     policy,
     bootPolicy: policy,
+    directFillRecovery,
     bootOverrides,
     assetMarkets: assetMarkets.pricing,
     store,

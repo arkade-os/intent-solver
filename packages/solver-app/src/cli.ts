@@ -211,6 +211,7 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       onError: (error) => log('EVM send sweep failed:', error instanceof Error ? error.message : String(error)),
     })
   } finally {
+    await services.assetRfqService.stop()
     // Aborted on EVERY exit path, not just a signal: the watch loop's cadences
     // clear their intervals off this, and a loop that threw never drained.
     controller.abort()
@@ -231,6 +232,11 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // may also start with ASSET_. The service's own `tickAll` covers them all.
   const tickEveryCorridor = async (phase: string): Promise<number> => {
     let ticked = 0
+    try {
+      await services.directFillRecovery?.sweep()
+    } catch (error) {
+      log(`direct fill ${phase} failed:`, error instanceof Error ? error.message : String(error))
+    }
     const assetRfqPairs = new Set(
       services.assetRfqMarkets.flatMap(({ base, quote }) => [
         assetRfqPairFor(base, quote),
@@ -242,7 +248,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
       ticked += await corridor.tickAll()
     }
     try {
-      ticked += (await services.assetRfqService.tickAll()).length
+      ticked += (await services.assetRfqService.tickAll({ backgroundNamed: true })).length
     } catch (error) {
       log(`asset rfq ${phase} failed:`, error instanceof Error ? error.message : String(error))
     }
@@ -649,6 +655,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   } finally {
     // On a throwing exit too: the caller closes the stores a pass in flight still reads.
     await Promise.all(cadences.map((cadence) => cadence.stop()))
+    await services.assetRfqService.stop()
     // Aborted after the loop rather than inside `stop`: the stream is a consumer
     // of arkd, not of the loop, and tearing it down while a fill sweep is still
     // running would cut discovery off mid-decision for no gain.

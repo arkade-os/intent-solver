@@ -23,6 +23,7 @@ import {
   matchServerCheckpoints,
   MnemonicIdentity,
   PrevArkTxField,
+  RestArkProvider,
   RestEmulatorProvider,
   setArkPsbtField,
   Transaction,
@@ -45,8 +46,9 @@ import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import { claimIdentity } from './claimIdentity.js'
 import type { CovenantSwapScript } from './covenant.js'
 import { virtualTxPages, vtxoPages } from './indexerPaging.js'
-import { SharedSyncIndexerProvider, TimedArkProvider, TimedIndexerProvider } from './latencyProviders.js'
+import { TimedArkProvider, TimedIndexerProvider } from './latencyProviders.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
+import { DirectFillAttempts } from './directFillAttempts.js'
 
 /** The two views any spend below needs; CovenantSwapScript satisfies it (as would any VtxoScript wrapper). */
 export interface ClaimableScript {
@@ -173,6 +175,7 @@ export interface ArkadeContext {
    * agree on nothing. @see reservations.ts
    */
   reservations: ReservationLedger
+  directFills: DirectFillAttempts
   /** Checkpoint and release the SQLite handle. */
   close(): void
 }
@@ -263,12 +266,10 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
 
   const wallet = await Wallet.create({
     identity,
-    arkServerUrl: config.arkServerUrl,
-    arkProvider: latencyDiagnostics ? new TimedArkProvider(config.arkServerUrl) : undefined,
-    // The SDK's own default is a plain `RestIndexerProvider` at this same URL.
-    indexerProvider: latencyDiagnostics
-      ? new TimedIndexerProvider(config.arkServerUrl)
-      : new SharedSyncIndexerProvider(config.arkServerUrl),
+    arkProvider: latencyDiagnostics
+      ? new TimedArkProvider(config.arkServerUrl)
+      : new RestArkProvider(config.arkServerUrl),
+    indexerProvider: latencyDiagnostics ? new TimedIndexerProvider(config.arkServerUrl) : undefined,
     storage: {
       walletRepository: new SQLiteWalletRepository(executor),
       contractRepository: new SQLiteContractRepository(executor),
@@ -346,6 +347,13 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   })
   for (const notice of notices) log(notice)
 
+  const reservations = createReservationLedger()
+  const directFills = await DirectFillAttempts.open(
+    executor,
+    reservations,
+    `${config.arkServerUrl}:${hex.encode(wallet.arkServerPublicKey)}:${hex.encode(await identity.xOnlyPublicKey())}`,
+    hex.encode(ArkAddress.decode(await wallet.getAddress()).pkScript),
+  )
   return {
     wallet,
     identity,
@@ -356,7 +364,8 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     vtxoMinSats,
     timelockUnit: advertisedUnit,
     hrp: config.arkadeHrp,
-    reservations: createReservationLedger(),
+    reservations,
+    directFills,
     close: () => executor.close(),
   }
 }

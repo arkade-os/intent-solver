@@ -54,7 +54,11 @@ jobs:
         with:
           node-version: '22'
           registry-url: https://registry.npmjs.org
+      - name: Carrier artifacts
+        run: node scripts/carrier-artifacts/verify.mjs
       - run: pnpm install --frozen-lockfile
+      - name: Carrier artifacts, as installed
+        run: node scripts/carrier-artifacts/verify.mjs --installed
       - run: pnpm -r build
 
       # The tag is the source of truth for the version. Publishing a package

@@ -24,11 +24,21 @@
  * - **The § 5.1 abort.** Re-checked here rather than trusted from the caller,
  *   because this is the function that spends.
  */
-import { selectVirtualCoins, selectCoinsWithAsset, type ExtendedVirtualCoin } from '@arkade-os/sdk'
-import { ASSET_CARRIER_SATS, encodeOffer, fillOffer, type FillFunding, type Offer } from '@arkade-os/swap'
+import {
+  RestEmulatorProvider,
+  ArkAddress,
+  VtxoScript,
+  selectVirtualCoins,
+  selectCoinsWithAsset,
+  type ExtendedVirtualCoin,
+} from '@arkade-os/sdk'
+import { ASSET_CARRIER_SATS, encodeOffer, fillOffer, type FillFunding, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import { type ArkadeContext } from './wallet.js'
 import { offerIsConsistent } from './offerConsistency.js'
+import { outpointKey } from './lockupFunding.js'
+import type { DirectFillAttempt, DirectFillParent } from './directFillAttempts.js'
+import { assertDirectFillResponse, directFillFinalized, validateDirectFillGraph } from './directFillGraph.js'
 
 /** The dust carrier output[0] takes when the maker is paid in an ASSET, not sats.
  * Re-exported from the SDK rather than restated: it is a covenant constant, and a
@@ -62,6 +72,7 @@ export const fulfillOffer = async (
   emulatorUrl: string,
   offer: Offer,
   deposit: OfferDepositOutpoint,
+  parent: DirectFillParent = { kind: 'standalone', id: `${deposit.txid}:${deposit.vout}` },
 ): Promise<string> => {
   const serverPubkey = ctx.wallet.arkServerPublicKey
   if (!offerIsConsistent(offer, serverPubkey)) {
@@ -81,7 +92,11 @@ export const fulfillOffer = async (
   const wantedAssetId = offer.wantAsset?.toString()
   // GATED, as `fundLockup` reads it: `getVtxos` carries the escrowed and locked buckets
   // `offerInventory.ts` keeps out of the float this fill was admitted against.
-  const spendable = (await ctx.wallet.getSpendableVtxos()) as ExtendedVirtualCoin[]
+  const coins = (await ctx.wallet.getSpendableVtxos({
+    withRecoverable: false,
+    genericallySpendableOnly: true,
+  })) as ExtendedVirtualCoin[]
+  const spendable = unreservedOfferCoins(ctx, coins)
 
   // What output[0] must carry in SATS. An asset-wanting maker is paid through
   // the asset packet, so its BTC leg is only this server's own dust (§ 4.1).
@@ -111,30 +126,124 @@ export const fulfillOffer = async (
   }
   if (funding.length === 0) throw new Error(`no spendable coins to pay the maker ${wantAmount} sats`)
 
-  return await fillOffer(ctx.wallet, ctx.arkServerUrl, hex.encode(encodeOffer(offer)), {
-    // Inputs 1..n, in this order. Every asset a coin carries is declared, not
-    // just the two the swap is about: arkd refuses with ASSET_NOT_FOUND when an
-    // input owns an asset the packet does not mention, and selection picks for
-    // sats or for the wanted asset — whatever else rides along comes too.
-    fund: funding.map((coin): FillFunding => ({
-      txid: coin.txid,
-      vout: coin.vout,
-      value: coin.value,
-      tapLeafScript: coin.forfeitTapLeafScript,
-      tapTree: coin.tapTree,
-      assets: assetsOn(coin),
-    })),
-    // The deposit this fill was admitted against. Identical offers share one
-    // address, so without it `fillOffer` refuses rather than guessing.
-    fundingTxid: deposit.txid,
-    assetCarrierSats: carrierSats,
-    emulator: emulatorUrl,
-    // No `emulatorPubkey`: that override is 33-byte COMPRESSED and an offer
-    // carries the x-only 32, which cannot be widened — the parity bit is not in
-    // it. It only ever names the client's own key anyway; the covenant here is
-    // rebuilt from the offer's, and a mismatch fails loudly against
-    // `swapPkScript` rather than silently.
-  })
+  const release = ctx.reservations.reserve(funding)
+  let attempt: DirectFillAttempt | undefined
+  let enteredProvider = false
+  const emulator = new RestEmulatorProvider(emulatorUrl)
+  const submitTx = emulator.submitTx.bind(emulator)
+  emulator.submitTx = async (arkTx, checkpoints) => {
+    if (!attempt || attempt.phase !== 'prepared') throw new Error('direct fill has no prepared journal')
+    const graph = { arkTx, checkpoints }
+    validateDirectFillGraph(graph, [attempt.deposit, ...attempt.funding])
+    const submitting: DirectFillAttempt = { ...attempt, phase: 'submitting', graph }
+    if (!(await ctx.directFills.change(attempt, submitting))) throw new Error('direct fill submission CAS lost')
+    attempt = submitting
+    enteredProvider = true
+    const response = await submitTx(arkTx, checkpoints)
+    assertDirectFillResponse(graph, response)
+    return response
+  }
+  try {
+    if (!ctx.directFills) throw new Error('direct fill journal unavailable')
+    attempt = await ctx.directFills.prepare({
+      parent,
+      deposit: { txid: deposit.txid, vout: deposit.vout },
+      funding: funding.map((coin) => ({
+        txid: coin.txid,
+        vout: coin.vout,
+        value: coin.value,
+        script: hex.encode(VtxoScript.decode(coin.tapTree).pkScript),
+        assets: assetsOn(coin).map(({ assetId, amount }) => ({ assetId, amount: amount.toString() })),
+      })),
+      offerPkScript: hex.encode(offer.swapPkScript),
+      proceedsScript: hex.encode(ArkAddress.decode(await ctx.wallet.getAddress()).pkScript),
+    })
+    release()
+    const txid = await fillOffer(ctx.wallet, ctx.arkServerUrl, hex.encode(encodeOffer(offer)), {
+      // Inputs 1..n, in this order. Every asset a coin carries is declared, not
+      // just the two the swap is about: arkd refuses with ASSET_NOT_FOUND when an
+      // input owns an asset the packet does not mention, and selection picks for
+      // sats or for the wanted asset — whatever else rides along comes too.
+      fund: funding.map((coin): FillFunding => ({
+        txid: coin.txid,
+        vout: coin.vout,
+        value: coin.value,
+        tapLeafScript: coin.forfeitTapLeafScript,
+        tapTree: coin.tapTree,
+        assets: assetsOn(coin),
+      })),
+      // The deposit this fill was admitted against. Identical offers share one
+      // address, so without it `fillOffer` refuses rather than guessing.
+      fundingTxid: deposit.txid,
+      assetCarrierSats: carrierSats,
+      emulator,
+      // No `emulatorPubkey`: that override is 33-byte COMPRESSED and an offer
+      // carries the x-only 32, which cannot be widened — the parity bit is not in
+      // it. It only ever names the client's own key anyway; the covenant here is
+      // rebuilt from the offer's, and a mismatch fails loudly against
+      // `swapPkScript` rather than silently.
+    })
+    const committed = await ctx.directFills.read(attempt.key)
+    if (
+      !committed?.graph ||
+      !(await directFillFinalized(ctx.wallet.indexerProvider, committed.graph, [
+        committed.deposit,
+        ...committed.funding,
+      ]))
+    )
+      throw new Error(`direct fill ${attempt.key} finalization is not yet proven`)
+    if (committed.phase === 'submitting' || committed.phase === 'cancelling') {
+      if (!(await ctx.directFills.change(committed, { ...committed, phase: 'settled', outcomeTxid: txid }))) {
+        throw new Error(`direct fill ${attempt.key} outcome CAS lost`)
+      }
+    } else if (committed.phase !== 'settled' || committed.outcomeTxid !== txid) {
+      throw new Error(`direct fill ${attempt.key} has a conflicting outcome`)
+    }
+    if (parent.kind === 'standalone') {
+      const settled = await ctx.directFills.read(attempt.key)
+      if (!settled || settled.phase !== 'settled' || settled.outcomeTxid !== txid) {
+        throw new Error(`direct fill ${attempt.key} lost its proven standalone outcome`)
+      }
+      if (!settled.acknowledged) await ctx.directFills.acknowledge(settled)
+    }
+    return txid
+  } finally {
+    if (attempt) {
+      ctx.directFills.finishInvocation(attempt.key)
+      if (!enteredProvider) {
+        const stored = await ctx.directFills.read(attempt.key)
+        if (stored?.phase === 'prepared') {
+          const abandoned: DirectFillAttempt = { ...stored, phase: 'abandoned' }
+          if (await ctx.directFills.change(stored, abandoned)) await ctx.directFills.acknowledge(abandoned)
+        }
+      }
+    } else release()
+  }
+}
+
+const unreservedOfferCoins = (ctx: ArkadeContext, coins: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] => {
+  const reserved = ctx.reservations.reserved()
+  return coins.filter((coin) => !reserved.has(outpointKey(coin.txid, coin.vout)))
+}
+
+export const offerInventoryFor = async (ctx: ArkadeContext): Promise<ReadonlyMap<string | null, bigint>> => {
+  const coins = (await ctx.wallet.getSpendableVtxos({
+    withRecoverable: false,
+    genericallySpendableOnly: true,
+  })) as ExtendedVirtualCoin[]
+  const inventory = new Map<string | null, bigint>()
+  const spendable = unreservedOfferCoins(ctx, coins)
+  for (const coin of spendable) {
+    inventory.set(null, (inventory.get(null) ?? 0n) + BigInt(coin.value))
+    for (const { assetId, amount } of assetsOn(coin)) {
+      inventory.set(assetId, (inventory.get(assetId) ?? 0n) + amount)
+    }
+  }
+  if (spendable.some((coin) => (coin.assets?.length ?? 0) > 0)) {
+    const sats = (inventory.get(null) ?? 0n) - ctx.dustSats
+    inventory.set(null, sats > 0n ? sats : 0n)
+  }
+  return inventory
 }
 
 /** The maker's script, hex, for logging a fill against its offer. */
