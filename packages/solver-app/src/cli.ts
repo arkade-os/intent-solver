@@ -206,6 +206,7 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
           run: () => watchSwaps(services, startSweep, controller.signal),
           signal: controller.signal,
           log,
+          onCheckpoint: services.onBalanceCheckpoint,
         }),
       onError: (error) => log('EVM send sweep failed:', error instanceof Error ? error.message : String(error)),
     })

@@ -51,6 +51,12 @@ CREATE TABLE IF NOT EXISTS balance_checkpoint (
   snapshot TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_balance_checkpoint_scope ON balance_checkpoint(scope, complete, id);
+CREATE INDEX IF NOT EXISTS idx_balance_checkpoint_latest ON balance_checkpoint(scope, id);
+
+CREATE TABLE IF NOT EXISTS balance_report_checkpoint (
+  scope TEXT PRIMARY KEY,
+  checkpoint_id INTEGER NOT NULL
+);
 
 -- The asset markets this deployment trades, one row per PAIR.
 --
@@ -560,6 +566,33 @@ export class AdminStore {
       [scope],
     )
     return row ? { ...JSON.parse(row.snapshot), id: row.id } : undefined
+  }
+
+  async latestBalanceCheckpoint(scope: string): Promise<BalanceCheckpoint | undefined> {
+    const row = await this.driver.get<{ id: number; snapshot: string }>(
+      'SELECT id, snapshot FROM balance_checkpoint WHERE scope = ? ORDER BY id DESC LIMIT 1',
+      [scope],
+    )
+    return row ? { ...JSON.parse(row.snapshot), id: row.id } : undefined
+  }
+
+  async previousBalanceReportCheckpoint(scope: string): Promise<BalanceCheckpoint | undefined> {
+    const row = await this.driver.get<{ id: number; snapshot: string }>(
+      'SELECT c.id, c.snapshot FROM balance_checkpoint c JOIN balance_report_checkpoint r ' +
+        'ON c.id = r.checkpoint_id AND c.scope = r.scope WHERE r.scope = ?',
+      [scope],
+    )
+    return row ? { ...JSON.parse(row.snapshot), id: row.id } : undefined
+  }
+
+  async markBalanceReportCheckpoint(id: number): Promise<void> {
+    await this.driver.run(
+      'INSERT INTO balance_report_checkpoint (scope, checkpoint_id) ' +
+        'SELECT scope, id FROM balance_checkpoint WHERE id = ? AND complete = 1 ' +
+        'ON CONFLICT(scope) DO UPDATE SET checkpoint_id = excluded.checkpoint_id ' +
+        'WHERE excluded.checkpoint_id > balance_report_checkpoint.checkpoint_id',
+      [id],
+    )
   }
 
   async listBalanceCheckpoints(limit = 100): Promise<BalanceCheckpoint[]> {

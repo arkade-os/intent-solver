@@ -6,7 +6,13 @@ import { Hono } from 'hono'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { registerStatusRoutes } from '@arkade-os/solver-app/admin/routes/status.js'
 import type { AdminDeps } from '@arkade-os/solver-app/admin/server.js'
-import { recordBalanceCheckpoint, withBalanceCheckpoints } from '@arkade-os/solver-app/ops/balanceCheckpoints.js'
+import {
+  recordBalanceCheckpoint,
+  withBalanceCheckpoints,
+  checkpointChanges,
+  formatCheckpointWarning,
+} from '@arkade-os/solver-app/ops/balanceCheckpoints.js'
+import { createNotifier } from '@arkade-os/solver-app/ops/notify.js'
 
 const stores: AdminStore[] = []
 const directories: string[] = []
@@ -195,9 +201,103 @@ describe('balance checkpoints', () => {
     }
     expect(f.services.arkade.wallet.getBalance).toHaveBeenCalledTimes(1)
   })
+
+  it('retains the previous report baseline across intermediate checkpoints and restarts', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'solver-balance-reports-'))
+    directories.push(directory)
+    const path = join(directory, 'admin.sqlite')
+    const f = await fixture(path)
+    const baseline = await f.sample()
+    await f.services.adminStore.markBalanceReportCheckpoint(baseline.id)
+    f.arkade.total += 100
+    await f.sample()
+    await f.services.adminStore.close()
+    const restarted = await fixture(path)
+    restarted.arkade.total += 300
+    const current = await restarted.sample()
+    const previous = await restarted.services.adminStore.previousBalanceReportCheckpoint(current.scope)
+    expect(previous).toEqual(baseline)
+    expect(checkpointChanges(previous!, current)?.[0]?.delta).toBe('300')
+    expect(await restarted.services.adminStore.latestBalanceCheckpoint(current.scope)).toEqual(current)
+    await restarted.services.adminStore.markBalanceReportCheckpoint(current.id)
+    await restarted.services.adminStore.markBalanceReportCheckpoint(baseline.id)
+    vi.mocked(restarted.services.ln!.getBalance).mockRejectedValueOnce(new Error('offline'))
+    const incomplete = await restarted.sample()
+    await restarted.services.adminStore.markBalanceReportCheckpoint(incomplete.id)
+    expect(await restarted.services.adminStore.previousBalanceReportCheckpoint(current.scope)).toEqual(current)
+    expect(await restarted.services.adminStore.latestBalanceCheckpoint(current.scope)).toEqual(incomplete)
+    expect(await restarted.services.adminStore.previousBalanceReportCheckpoint('other provider')).toBeUndefined()
+  })
+
+  it('formats bounded loss warnings and sends none for a healthy checkpoint', async () => {
+    const f = await fixture()
+    const initial = await f.sample()
+    expect(formatCheckpointWarning(initial, 'regtest')).toBeNull()
+    f.arkade.total -= 10
+    const loss = await f.sample()
+    const text = formatCheckpointWarning(loss, 'regtest')!
+    expect(text).toContain(`POSSIBLE LOSS — regtest — checkpoint #${loss.id}`)
+    expect(text).toContain('BTC: -10 sats (6,400 → 6,390)')
+    expect(text).toContain('not reconciled')
+    const large = formatCheckpointWarning(
+      { ...loss, decreases: Array.from({ length: 300 }, () => loss.decreases[0]!) },
+      'regtest',
+    )!
+    expect(large.length).toBeLessThanOrEqual(4000)
+    expect(large).toContain('message cut')
+  })
 })
 
 describe('scheduled balance checkpoints', () => {
+  it('queues loss alerts through the notifier while a sink remains unresolved', async () => {
+    vi.useFakeTimers()
+    const f = await fixture()
+    const controller = new AbortController()
+    let finish!: () => void
+    let delivered!: () => void
+    const messages: string[] = []
+    const notifier = createNotifier({
+      sinks: [
+        {
+          name: 'test',
+          send: (text) => {
+            messages.push(text)
+            return new Promise<void>((resolve) => {
+              delivered = resolve
+            })
+          },
+        },
+      ],
+    })
+    const run = withBalanceCheckpoints({
+      checkpoint: f.sample,
+      signal: controller.signal,
+      log: vi.fn(),
+      onCheckpoint: (checkpoint) => {
+        const text = formatCheckpointWarning(checkpoint, 'regtest')
+        if (text) notifier.post(text)
+      },
+      run: () =>
+        new Promise<void>((resolve) => {
+          finish = resolve
+        }),
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(messages).toEqual([])
+    f.arkade.total -= 10
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toContain('BTC: -10 sats')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await f.services.adminStore.listBalanceCheckpoints()).toHaveLength(3)
+    controller.abort()
+    finish()
+    await run
+    delivered()
+    await notifier.flush()
+    expect(notifier.stats().sent).toBe(1)
+  })
+
   it('samples at startup and every minute, logs possible losses, and stops on abort', async () => {
     vi.useFakeTimers()
     const f = await fixture()

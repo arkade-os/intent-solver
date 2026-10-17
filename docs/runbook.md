@@ -121,6 +121,18 @@ incomplete, never zero, and do not replace the comparison baseline. The baseline
 survives restarts and is separated by network, Arkade server, provider identity,
 and backend (including the LND socket).
 
+With notification sinks configured, checkpoint decreases also send a
+`POSSIBLE LOSS` alert through the existing notification queue. These alerts do not
+require `BALANCE_REPORT_INTERVAL_MINUTES`. Periodic balance reports include signed
+BTC and Arkade asset changes since the previous complete report, using a separate
+baseline retained across restarts. Minute checkpoints
+do not reset that report baseline. The first report establishes a baseline;
+missing or incomplete checkpoints, or the absence of a newer checkpoint, show
+that changes are unavailable.
+
+The report baseline advances when a complete report is queued, using the existing
+best-effort delivery. A failed notification delivery does not roll it back.
+
 This is a sanity check, not reconciled profit or solvency: fees, withdrawals,
 token trades, pending HTLCs and non-atomic reads during transfers can cause
 warnings; deposits or gains can mask losses. Investigate warnings against swap

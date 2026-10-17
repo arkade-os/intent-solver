@@ -99,6 +99,7 @@ describe('the watch loop during slow wallet maintenance', () => {
       ],
       assetRfqService: { tickAll: async () => [] },
       assetRfqMarkets: [],
+      onBalanceCheckpoint: vi.fn(),
     }
     const watch = watchLoopIn(signals, {
       runContractLifecycle: stage === 'contract' ? maintenance : async () => {},
@@ -126,6 +127,7 @@ describe('the watch loop during slow wallet maintenance', () => {
       // pass, so it needs one tick to see the abort and drain its cadences.
       await vi.advanceTimersByTimeAsync(250)
       await watching
+      expect(services.onBalanceCheckpoint).toHaveBeenCalledOnce()
     }
   })
 })
