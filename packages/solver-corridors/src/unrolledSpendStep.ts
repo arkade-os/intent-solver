@@ -56,9 +56,15 @@ export const advanceUnrolledClaims = async (
   preimageHex: string,
 ): Promise<UnrolledClaims | null> => {
   if (!arkade.findLockupOutpoints || !arkade.claimUnrolled) return null
-  const unrolled = (await arkade.findLockupOutpoints(row.pkScript)).filter((o) => o.unrolled)
-  if (unrolled.length === 0) return null
   const steps = (row.unrolledClaim === null ? {} : JSON.parse(row.unrolledClaim)) as Record<string, UnrolledSpendStep>
+  const found = (await arkade.findLockupOutpoints(row.pkScript)).filter((o) => o.unrolled)
+  // A claim already under way is followed through, whatever a lagging read leaves out.
+  const keys = new Set([...Object.keys(steps), ...found.map((o) => `${o.txid}:${o.vout}`)])
+  if (keys.size === 0) return null
+  const unrolled = [...keys].map((key) => {
+    const [txid, vout] = key.split(':')
+    return { txid: txid!, vout: Number(vout) }
+  })
   const keep = async (key: string, step: UnrolledSpendStep) => {
     if (JSON.stringify(step) === JSON.stringify(steps[key])) return
     steps[key] = step

@@ -2171,6 +2171,22 @@ describe('tick: failure and recovery', () => {
       expect(arkade.claimCalls).toHaveLength(1)
     })
 
+    it('follows a claim through when a later read stops reporting its output', async () => {
+      const row = await claiming()
+      expect((await service.tick(row.id)).state).toBe('claiming')
+
+      outpoints = []
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT / 2 }]
+      const second = await service.tick(row.id)
+      expect(second.state).toBe('claiming')
+      expect(second.claimArkTxid).toBe('claim-txid')
+
+      arkade.lockups = []
+      l1.confirmed.add('u1:0')
+      expect((await service.tick(row.id)).state).toBe('claimed')
+      expect(l1.calls.map((c) => c.lockup)).toEqual(['u1:0', 'u1:0', 'u1:0'])
+    })
+
     it('keeps a claim saved before arkd answered when the step then throws', async () => {
       const row = await claiming()
       arkade.claimUnrolled = async (_row, _lockup, record, save) => {
