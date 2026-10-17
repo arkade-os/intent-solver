@@ -102,6 +102,31 @@ the single file is deliberately not automatic — it would mean copying funded
 rows between databases at startup, and a half-finished copy is worse than the
 files it replaced.
 
+### Balance checkpoints
+
+`watch`, `serve`, and `relay` persist a balance checkpoint at startup and every
+minute in the admin database (`balance_checkpoint`). For a manual checkpoint,
+run `cli balance-checkpoint`. Read history through the admin endpoint
+`GET /api/balance-checkpoints?limit=100` (maximum 200, newest first).
+
+Checkpoints track Arkade's total BTC and asset balances, Lightning outbound
+liquidity, and confirmed plus unconfirmed onchain BTC. Inbound Lightning
+capacity is excluded; a shared Lightning/onchain pool is counted once. Asset
+quantities stay in their own atomic units. EVM wallets and custom fund sources
+are not covered.
+
+A decrease since the last complete checkpoint emits `POSSIBLE LOSS` with the
+before, after, and decrease amounts. Failed or invalid reads are stored as
+incomplete, never zero, and do not replace the comparison baseline. The baseline
+survives restarts and is separated by network, Arkade server, provider identity,
+and backend (including the LND socket).
+
+This is a sanity check, not reconciled profit or solvency: fees, withdrawals,
+token trades, pending HTLCs and non-atomic reads during transfers can cause
+warnings; deposits or gains can mask losses. Investigate warnings against swap
+and operator history. They do not stop trading. Checkpoints are retained until
+removed by the operator; back up the admin database to preserve the history.
+
 ## Shape 1a — the same thing as a Docker image (recommended)
 
 ```

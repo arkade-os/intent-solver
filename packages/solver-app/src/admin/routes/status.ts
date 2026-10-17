@@ -233,6 +233,15 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
     return c.json(await describeAssetId(assetId, assetSource(deps.services.arkade.wallet)))
   })
 
+  app.get('/api/balance-checkpoints', async (c) => {
+    const raw = c.req.query('limit') ?? '100'
+    const limit = Number(raw)
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+      return c.json({ error: 'invalid_limit', message: 'limit must be an integer between 1 and 200' }, 400)
+    }
+    return c.json({ checkpoints: await deps.services.adminStore.listBalanceCheckpoints(limit) })
+  })
+
   app.get('/api/wallet', async (c) => {
     const { services } = deps
     const [arkadeAddress, arkadeBalance, lightningBalance, feeRate, pool] = await Promise.all([
