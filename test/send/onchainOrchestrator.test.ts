@@ -2031,3 +2031,88 @@ describe('OnchainSendSwapService', () => {
     })
   })
 })
+
+/**
+ * `findLockups` is `spendableOnly`, so once the batch is swept `pushRefund`
+ * throws every pass and the output wedges float recovery. Reaching it costs a
+ * batch round, so the unattended sweep must not.
+ */
+describe('the swept Arkade lockup', () => {
+  const SWEPT = [{ txid: 'e'.repeat(64), vout: 0, value: 50_000 }]
+  let deps: Awaited<ReturnType<typeof buildDeps>>
+  let service: OnchainSendSwapService
+
+  beforeEach(async () => {
+    now = 1_800_000_000
+    deps = await buildDeps()
+    service = new OnchainSendSwapService({
+      store: deps.store,
+      onchain: deps.onchain,
+      arkade: deps.arkade,
+      limits: { minSats: 1_000, maxSats: 1_000_000 },
+      maxExposedSats: 1_000_000,
+      totalCommitted: () => deps.store.committedSats(),
+      admission: new AdmissionControl(),
+      network: 'regtest',
+      signer,
+      refundDestinationScript,
+      now: clock,
+    })
+  })
+
+  const quoteRefused = async (paymentHash: string) => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+      requesterKey: 'client',
+    })
+    if (!outcome.accepted) throw new Error(`fixture quote refused: ${outcome.reason}`)
+    await deps.store.fail(outcome.swap.id, 'quoted', 'lockup timeout')
+    return deps.store.get(outcome.swap.id)
+  }
+
+  const withSweptOps = () => {
+    const refundSwept = vi.fn(async () => 'batch-txid')
+    Object.assign(deps.arkade, { findSweptLockups: async () => SWEPT, refundSwept })
+    return refundSwept
+  }
+
+  it('refundSweptLockup refunds a refused row and records the outcome', async () => {
+    const refundSwept = withSweptOps()
+    const row = await quoteRefused('11'.repeat(32))
+
+    expect(await service.refundSweptLockup(row.pkScript)).toEqual({
+      swapId: row.id,
+      txid: 'batch-txid',
+      recorded: true,
+    })
+    expect(refundSwept).toHaveBeenCalledOnce()
+    const after = await deps.store.get(row.id)
+    expect(after.refundOutcome).toBe('pushed')
+    expect(after.refundArkTxid).toBe('batch-txid')
+  })
+
+  it('refundNow reaches the batch refund; the unattended sweep does not', async () => {
+    const refundSwept = withSweptOps()
+    const row = await quoteRefused('22'.repeat(32))
+
+    // The sweep reads an empty spendable set and refuses to record anything —
+    // the existing discipline, unchanged.
+    expect(await service.refundSweep()).toEqual([])
+    expect(refundSwept).not.toHaveBeenCalled()
+
+    expect(await service.refundNow(row.id)).toBe('batch-txid')
+    expect(refundSwept).toHaveBeenCalledOnce()
+  })
+
+  it('refundNow still refuses an empty script rather than recording a refund', async () => {
+    // No swept outputs either: `nothing-at-script` is unprovable, so the
+    // existing refusal stands.
+    Object.assign(deps.arkade, { findSweptLockups: async () => [], refundSwept: vi.fn() })
+    const row = await quoteRefused('33'.repeat(32))
+    await expect(service.refundNow(row.id)).rejects.toThrow(/no spend is provable/)
+  })
+})

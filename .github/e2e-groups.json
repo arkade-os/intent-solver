@@ -27,6 +27,17 @@
     "arkdTimelocks": "blocks"
   },
   {
+    "name": "swept-refund",
+    "why": "Mines past the batch expiry so arkd sweeps a send lockup, and that sweeps every float batch on the stack with it, so this file gets a stack of its own rather than starving the next one. Block-typed because the compose default expiry is 180 BLOCKS, which a test can mine past; a seconds-typed 6144s expiry would have to be waited out.",
+    "profiles": "emulator",
+    "files": ["sweptSendRefund.e2e.test.ts"],
+    "mintAsset": false,
+    "lnd": false,
+    "covclaimdImage": "",
+    "evmChain": false,
+    "arkdTimelocks": "blocks"
+  },
+  {
     "name": "pool",
     "why": "Reshapes the solver's own float: it mints seventy coins and merges fifty, which would change what every corridor file's coin selection sees. Seconds-typed because the planner judges renewal by wall-clock expiry, and on a block-typed arkd every expiry is a height.",
     "profiles": "emulator",

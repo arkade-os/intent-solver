@@ -559,6 +559,15 @@ export interface VtxoLifecycleDeps {
   nowSeconds(): number
 }
 
+export interface BlockedLockupOutput {
+  txid: string
+  vout: number
+  script: string
+  reason: string
+  /** The arm no clock clears: no refund key of ours. @see LockupDeadline.refundable */
+  notOurs: boolean
+}
+
 export interface VtxoLifecycleReport {
   /**
    * Settlement txid that turned boarded L1 sats into float. Always null here —
@@ -573,6 +582,12 @@ export interface VtxoLifecycleReport {
   recovered: string | null
   /** Why recovery did not run, when it was deliberately held back. */
   recoverySkipped: string | null
+  /**
+   * The same outputs as data, so a caller can ACT on the block rather than only
+   * log it. Optional and absent-rather-than-empty: a consumer compiled against
+   * the earlier shape — a fork, or a test building this literal — must work.
+   */
+  recoveryBlockedBy?: readonly BlockedLockupOutput[]
   /**
    * Inputs moved off deprecated signers this pass, by the cooperative
    * migration `runFloatLifecycle` owns since `settlementConfig: false` stopped
@@ -728,13 +743,24 @@ export const runVtxoLifecycle = async (deps: VtxoLifecycleDeps): Promise<VtxoLif
       }
     }
     const blocking = recoverable.flatMap((vtxo) => {
-      const reason =
-        (vtxo.confirmedRecoverable === false ? undefined : notOurs.get(vtxo.script)) ?? immature.get(vtxo.script)
-      return reason === undefined ? [] : [`${vtxo.txid}:${vtxo.vout} at ${vtxo.script} (${reason})`]
+      const notOursReason = vtxo.confirmedRecoverable === false ? undefined : notOurs.get(vtxo.script)
+      const reason = notOursReason ?? immature.get(vtxo.script)
+      if (reason === undefined) return []
+      return [{ txid: vtxo.txid, vout: vtxo.vout, script: vtxo.script, reason, notOurs: notOursReason !== undefined }]
     })
     if (blocking.length > 0) {
-      recoverySkipped = `${blocking.length} recoverable lockup output(s) not safe to sweep at ${now}: ${blocking.join(', ')}`
-      return { boarded: null, renewed, resplit, recovered, recoverySkipped, migrated: 0, failures }
+      const named = blocking.map((output) => `${output.txid}:${output.vout} at ${output.script} (${output.reason})`)
+      recoverySkipped = `${blocking.length} recoverable lockup output(s) not safe to sweep at ${now}: ${named.join(', ')}`
+      return {
+        boarded: null,
+        renewed,
+        resplit,
+        recovered,
+        recoverySkipped,
+        recoveryBlockedBy: blocking,
+        migrated: 0,
+        failures,
+      }
     }
 
     recovered = await deps.recoverVtxos()
