@@ -1078,7 +1078,12 @@ export class OnchainReceiveSwapService {
 
     // Ahead of `findLockups`, which reads an unrolled lockup as empty. An adopted
     // row records no fund txid, and stays on the empty-lockup path below.
-    const unrolled = outpoints.find((o) => o.unrolled && o.txid === row.arkadeFundTxid)
+    // The fund tx pays this script once; thrown, not parked, so the claim recheck above keeps running.
+    const matches = outpoints.filter((o) => o.unrolled && o.txid === row.arkadeFundTxid)
+    if (matches.length > 1) {
+      throw new Error(`swap ${row.id}: ${matches.length} unrolled outputs of fund tx ${row.arkadeFundTxid}`)
+    }
+    const [unrolled] = matches
     if (unrolled && arkade.refundUnrolled) {
       const covenantRow = receiveCovenantRowFor(row)
       const save = (record: UnrolledSpendRecord) => store.patch(row.id, { unrolled_refund: JSON.stringify(record) })

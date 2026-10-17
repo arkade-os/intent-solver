@@ -597,6 +597,12 @@ the reasons to take one.
   - arkd co-signs an outpoint once, so the refund is never replaced. If it
     drops, the row rebroadcasts the same transaction. If it has not confirmed
     after 20 minutes, it gets one co-signed CPFP child.
+  - A refund that dropped before any explorer kept it cannot be resent. arkd
+    refuses to co-sign the outpoint again, so every retry shows up as a tick
+    error naming arkd's refusal. The row escalates once arkd's window closes,
+    and the failure reason names the solo leaf.
+  - On arkd older than v0.9.22 the co-sign endpoint returns 404. That also
+    shows up as a tick error every interval, not as a startup check.
   - The row escalates to `stuck` only once `P` can no longer be collected.
     That happens when the lockup was spent with no `P` in the witness, or when
     arkd stops co-signing because the client's own exit is near. The failure

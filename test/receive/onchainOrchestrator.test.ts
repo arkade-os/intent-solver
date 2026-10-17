@@ -1439,6 +1439,19 @@ describe('OnchainReceiveSwapService', () => {
         expect(deps.arkadeFake.refundCalls).toBe(0)
       })
 
+      it('refuses to pick between two unrolled outputs of its fund tx', async () => {
+        const awaitingClaim = await driveToAwaitingClaim()
+        const second = { txid: awaitingClaim.arkadeFundTxid!, vout: 1, value: 1_000 }
+        deps.arkadeFake.seedLockup(awaitingClaim.lockupAddress, second)
+        now = awaitingClaim.refundLocktime + 1
+        await store.transition(awaitingClaim.id, 'awaiting_claim', 'refunding_arkade', {})
+        deps.arkadeFake.unrollLockup(awaitingClaim.pkScript)
+
+        await expect(service.tick(awaitingClaim.id)).rejects.toThrow('2 unrolled outputs')
+        expect(lockups).toEqual([])
+        expect((await store.get(awaitingClaim.id)).state).toBe('refunding_arkade')
+      })
+
       it('escalates a closed window only once htlc_locktime has passed', async () => {
         const row = await refundingUnrolled()
         steps.push({ kind: 'closed', reason: 'exit closure' }, { kind: 'closed', reason: 'exit closure' })
