@@ -101,6 +101,9 @@ import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/o
 import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
 import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
+import { onchainAssetReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainAssetArkadeOps.js'
+import { OnchainAssetReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainAssetReceiveSwaps.js'
+import { OnchainAssetReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainAssetOrchestrator.js'
 import { json, log, messageOf, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { watchRail, type RailWatch } from './railWatch.js'
 import { createSerialiser } from '@arkade-os/solver-core/util/serialise.js'
@@ -507,6 +510,11 @@ export const createServices = async (
   const servesEvm = config.evmCorridors.length > 0
   const evmSendStore = servesEvm ? await EvmSendSwapStore.open(swapFile) : null
   const evmReceiveStore = servesEvm ? await EvmReceiveSwapStore.open(swapFile) : null
+  // Conditional for the same reason: a deployment serving no asset should not
+  // grow tables for one. ONE store across every market — `payout_asset_id` is a
+  // column, exactly as `token_address` is on the EVM stores.
+  const servesOnchainAsset = config.onchainAssetMarkets.length > 0
+  const onchainAssetReceiveStore = servesOnchainAsset ? await OnchainAssetReceiveSwapStore.open(swapFile) : null
   // Opened unconditionally, even when the console is off: the audit log is
   // written by operator actions the CLI can run too, and a store that exists
   // only sometimes is a branch every caller would have to think about.
@@ -941,6 +949,7 @@ export const createServices = async (
       committedAcrossCorridors(readerSetFromDeps({ store, onchainStore, receiveStore, onchainReceiveStore })),
       evmSendStore?.committedSats() ?? 0,
       evmReceiveStore?.committedSats() ?? 0,
+      onchainAssetReceiveStore?.committedSats() ?? 0,
       assetRfqStore.committedSats(),
     ])
     return totals.reduce((sum, value) => sum + value, 0)
@@ -1276,16 +1285,61 @@ export const createServices = async (
     wireTickErrors(onchainReceiveService, 'onchain receive tick')
   }
 
+  // The same leg with an asset payout. It reuses the sats leg's L1 side whole —
+  // the same rail, claim destination and signer — because only the Arkade side
+  // differs: what the solver funds the lockup WITH.
+  //
+  // Built with the other onchain legs rather than inline: the L1 side needs an
+  // LND that answers, so a node that is down at boot delays this leg like the
+  // two BTC ones instead of throwing out of startup.
+  let onchainAssetReceiveService: OnchainAssetReceiveSwapService | undefined
+  const onchainAssetReceiveOps = servesOnchainAsset
+    ? await onchainAssetReceiveArkadeOpsFromContext(arkade, {
+        url: config.emulatorUrl,
+        pubkey: emulatorInfo.signerPubkey,
+      })
+    : undefined
+  const buildOnchainAssetReceive = async (): Promise<void> => {
+    if (!servesOnchainAsset || !onchainAssetReceiveStore || !onchainAssetReceiveOps || onchainAssetReceiveService)
+      return
+    onchainClaimAddress ??= await rail!.onchain.newReceiveAddress()
+    const onchainAssetClaimDestinationScript = OutScript.encode(
+      Address(ONCHAIN_NETWORKS[config.network]).decode(onchainClaimAddress),
+    )
+    onchainAssetReceiveService = new OnchainAssetReceiveSwapService({
+      store: onchainAssetReceiveStore,
+      onchain: rail!.onchain,
+      arkade: onchainAssetReceiveOps,
+      markets: config.onchainAssetMarkets,
+      fetchPrice: createPriceFeed(),
+      limits: policy.corridorLimits['onchain:BTC->arkade:BTC'],
+      network: config.network,
+      maxExposedSats: policy.maxExposedSats,
+      totalCommitted,
+      admission,
+      signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
+      claimDestinationScript: onchainAssetClaimDestinationScript,
+      now: nowSeconds,
+    })
+    onchainAssetReceiveService.onTickError = (id, error) => {
+      const { line } = tickErrors.record(id, error)
+      if (line) log(`onchain asset receive tick ${id} failed:`, line)
+    }
+    onchainAssetReceiveService.onTickSuccess = (id) => tickErrors.clear(id)
+    onchainAssetReceiveService.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
+  }
   // Both onchain legs need an LND address, and `createChainAddress` is a write with no deadline: asked only of a
   // node that just answered, else a half-open one would hang boot. Missing legs are built when it next answers.
   const onchainLegsMissing = (): boolean =>
     (enabled('arkade:BTC->onchain:BTC') && !onchainService) ||
-    (enabled('onchain:BTC->arkade:BTC') && !onchainReceiveService)
+    (enabled('onchain:BTC->arkade:BTC') && !onchainReceiveService) ||
+    (servesOnchainAsset && !onchainAssetReceiveService)
   let onchainLegsError: string | undefined
   const buildOnchainLegs = async (): Promise<void> => {
     try {
       await buildOnchainSend()
       await buildOnchainReceive()
+      await buildOnchainAssetReceive()
     } catch (error) {
       const message = messageOf(error)
       if (message !== onchainLegsError) log(`onchain corridors wait for LND: ${message}`)
@@ -1500,6 +1554,9 @@ export const createServices = async (
       evmCorridors: livePolicy.evmCorridors,
       assetRfqService,
       assetRfqStore,
+      onchainAssetReceiveService,
+      onchainAssetReceiveStore,
+      onchainAssetMarkets: config.onchainAssetMarkets,
       railUp: rail?.probe ? () => railWatch?.up() ?? false : undefined,
     }
     return {
@@ -1535,10 +1592,15 @@ export const createServices = async (
   const completeOnchainLegs = (): void => {
     if (onchainLegsBuilding || !onchainLegsMissing()) return
     onchainLegsBuilding = true
-    const had = { send: onchainService, receive: onchainReceiveService }
+    const had = { send: onchainService, receive: onchainReceiveService, assetReceive: onchainAssetReceiveService }
     buildOnchainLegs()
       .then(() => {
-        if (onchainService === had.send && onchainReceiveService === had.receive) return
+        if (
+          onchainService === had.send &&
+          onchainReceiveService === had.receive &&
+          onchainAssetReceiveService === had.assetReceive
+        )
+          return
         return replaceQueue(async () => {
           services.onchainService = onchainService
           services.onchainReceiveService = onchainReceiveService

@@ -164,8 +164,8 @@ export const assetRfqReader = (descriptor: CorridorDescriptor, store: AssetRfqSw
     return { corridor: descriptor.pair, records: rows.map((row) => assetRfqEconomics(row, descriptor)), truncated }
   },
   page: async (options) => {
-    const { rows, nextCursor } = await store.page(options)
-    return { swaps: rows.filter((row) => row.pair === descriptor.pair).map(projectAssetRfq), nextCursor }
+    const { rows, nextCursor } = await store.page({ ...options, pair: descriptor.pair })
+    return { swaps: rows.map(projectAssetRfq), nextCursor }
   },
   detail: async (id) => {
     try {
