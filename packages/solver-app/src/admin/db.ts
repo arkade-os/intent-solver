@@ -24,6 +24,7 @@ import {
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { samePair, type AssetRfqToken } from '../ops/assetRfqMarkets.js'
+import type { BalanceCheckpoint } from '../ops/balanceCheckpoints.js'
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS admin_override (
@@ -42,6 +43,20 @@ CREATE TABLE IF NOT EXISTS admin_action (
   detail  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_admin_action_at ON admin_action(at);
+
+CREATE TABLE IF NOT EXISTS balance_checkpoint (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope TEXT NOT NULL,
+  complete INTEGER NOT NULL,
+  snapshot TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_balance_checkpoint_scope ON balance_checkpoint(scope, complete, id);
+CREATE INDEX IF NOT EXISTS idx_balance_checkpoint_latest ON balance_checkpoint(scope, id);
+
+CREATE TABLE IF NOT EXISTS balance_report_checkpoint (
+  scope TEXT PRIMARY KEY,
+  checkpoint_id INTEGER NOT NULL
+);
 
 -- The asset markets this deployment trades, one row per PAIR.
 --
@@ -534,6 +549,58 @@ export class AdminStore {
     if (!before) return false
     await this.driver.run('DELETE FROM admin_market WHERE market_key = ?', [marketKey])
     return true
+  }
+
+  async recordBalanceCheckpoint(entry: Omit<BalanceCheckpoint, 'id'>): Promise<BalanceCheckpoint> {
+    const row = await this.driver.get<{ id: number }>(
+      'INSERT INTO balance_checkpoint (scope, complete, snapshot) VALUES (?, ?, ?) RETURNING id',
+      [entry.scope, entry.totalSats === null ? 0 : 1, JSON.stringify(entry)],
+    )
+    if (!row) throw new Error('balance checkpoint insert returned no id')
+    return { ...entry, id: row.id }
+  }
+
+  async latestCompleteBalanceCheckpoint(scope: string): Promise<BalanceCheckpoint | undefined> {
+    const row = await this.driver.get<{ id: number; snapshot: string }>(
+      'SELECT id, snapshot FROM balance_checkpoint WHERE scope = ? AND complete = 1 ORDER BY id DESC LIMIT 1',
+      [scope],
+    )
+    return row ? { ...JSON.parse(row.snapshot), id: row.id } : undefined
+  }
+
+  async latestBalanceCheckpoint(scope: string): Promise<BalanceCheckpoint | undefined> {
+    const row = await this.driver.get<{ id: number; snapshot: string }>(
+      'SELECT id, snapshot FROM balance_checkpoint WHERE scope = ? ORDER BY id DESC LIMIT 1',
+      [scope],
+    )
+    return row ? { ...JSON.parse(row.snapshot), id: row.id } : undefined
+  }
+
+  async previousBalanceReportCheckpoint(scope: string): Promise<BalanceCheckpoint | undefined> {
+    const row = await this.driver.get<{ id: number; snapshot: string }>(
+      'SELECT c.id, c.snapshot FROM balance_checkpoint c JOIN balance_report_checkpoint r ' +
+        'ON c.id = r.checkpoint_id AND c.scope = r.scope WHERE r.scope = ?',
+      [scope],
+    )
+    return row ? { ...JSON.parse(row.snapshot), id: row.id } : undefined
+  }
+
+  async markBalanceReportCheckpoint(id: number): Promise<void> {
+    await this.driver.run(
+      'INSERT INTO balance_report_checkpoint (scope, checkpoint_id) ' +
+        'SELECT scope, id FROM balance_checkpoint WHERE id = ? AND complete = 1 ' +
+        'ON CONFLICT(scope) DO UPDATE SET checkpoint_id = excluded.checkpoint_id ' +
+        'WHERE excluded.checkpoint_id > balance_report_checkpoint.checkpoint_id',
+      [id],
+    )
+  }
+
+  async listBalanceCheckpoints(scope: string, limit = 100): Promise<BalanceCheckpoint[]> {
+    const rows = await this.driver.all<{ id: number; snapshot: string }>(
+      'SELECT id, snapshot FROM balance_checkpoint WHERE scope = ? ORDER BY id DESC LIMIT ?',
+      [scope, limit],
+    )
+    return rows.map((row) => ({ ...JSON.parse(row.snapshot), id: row.id }))
   }
 
   async recordAction(entry: AuditEntry): Promise<void> {

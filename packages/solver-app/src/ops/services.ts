@@ -75,6 +75,7 @@ import { createNotifier } from './notify.js'
 import { sinksFrom } from './notifySinks.js'
 import { btcSwapSize, createBalanceSampler, createSwapOutcomeReporter } from './businessEvents.js'
 import { createBalanceReportReader, formatBalanceReport } from './balanceReport.js'
+import { balanceCheckpointScope, formatCheckpointWarning, type BalanceCheckpoint } from './balanceCheckpoints.js'
 import { createSwapSummaryReader } from './swapSummary.js'
 import { fundSources } from './fundSources.js'
 import { assetSource, describeAssetId } from '../admin/assets.js'
@@ -303,6 +304,7 @@ export interface Services {
   sampleBalances?: () => Promise<void>
   /** Post every fund source's balance to the sinks. ABSENT without a sink or `BALANCE_REPORT_INTERVAL_MINUTES`. */
   reportBalances?: () => Promise<void>
+  onBalanceCheckpoint?: (checkpoint: BalanceCheckpoint) => void
   /** Emulator signer key (compressed hex), fetched once at startup. */
   emulatorPubkey: string
   /** Provider x-only pubkey (hex) — the relay address clients send offers to. */
@@ -1558,24 +1560,41 @@ export const createServices = async (
     now: nowSeconds,
     firstSince: nowSeconds() - (config.balanceReportIntervalMinutes ?? 0) * 60,
   })
-  const postBalanceReport = async (): Promise<void> => {
-    const report = await readBalanceReport({
-      network: config.network,
-      sources: fundSources(services),
-      readAssets: async () => {
-        const source = assetSource(arkade.wallet)
-        const { assets } = await arkade.wallet.getBalance()
-        return Promise.all(
-          (assets ?? []).map(async (a) => ({
-            ...(await describeAssetId(a.assetId, source)),
-            amount: a.amount.toString(),
-          })),
-        )
-      },
-      readCommittedSats: () => totalCommitted(),
-      readSwaps: () => readSwapSummary(services.readers),
+  let balanceReportInFlight: Promise<void> | undefined
+  const postBalanceReport = (): Promise<void> => {
+    if (balanceReportInFlight) return balanceReportInFlight
+    balanceReportInFlight = (async () => {
+      const report = await readBalanceReport({
+        network: config.network,
+        sources: fundSources(services),
+        readAssets: async () => {
+          const source = assetSource(arkade.wallet)
+          const { assets } = await arkade.wallet.getBalance()
+          return Promise.all(
+            (assets ?? []).map(async (a) => ({
+              ...(await describeAssetId(a.assetId, source)),
+              amount: a.amount.toString(),
+            })),
+          )
+        },
+        readCommittedSats: () => totalCommitted(),
+        readSwaps: () => readSwapSummary(services.readers),
+        readCheckpoint: async () => {
+          const scope = balanceCheckpointScope(services)
+          const [current, previous] = await Promise.all([
+            adminStore.latestBalanceCheckpoint(scope),
+            adminStore.previousBalanceReportCheckpoint(scope),
+          ])
+          return { current: current ?? null, previous: previous ?? null }
+        },
+      })
+      notifier.post(formatBalanceReport(report))
+      const checkpoint = report.checkpoint?.value?.current
+      if (checkpoint?.totalSats != null) await adminStore.markBalanceReportCheckpoint(checkpoint.id)
+    })().finally(() => {
+      balanceReportInFlight = undefined
     })
-    notifier.post(formatBalanceReport(report))
+    return balanceReportInFlight
   }
 
   const services: Services = {
@@ -1624,6 +1643,13 @@ export const createServices = async (
     sampleBalances: notifySinks.length > 0 ? () => balances.sample() : undefined,
     reportBalances:
       notifySinks.length > 0 && config.balanceReportIntervalMinutes !== null ? postBalanceReport : undefined,
+    onBalanceCheckpoint:
+      notifySinks.length > 0
+        ? (checkpoint) => {
+            const warning = formatCheckpointWarning(checkpoint, config.network)
+            if (warning) notifier.post(warning)
+          }
+        : undefined,
     tickErrors,
     emulatorPubkey: emulatorInfo.signerPubkey,
     providerPubkey: arkadeOps.providerPubkey,
@@ -1634,6 +1660,7 @@ export const createServices = async (
       // sequential await chain with no isolation would skip both if
       // store.close() (first, and least likely to matter) threw first.
       const steps: Array<[string, () => Promise<void> | void]> = [
+        ['balanceReport', () => balanceReportInFlight],
         // FIRST: `APPROVAL NEEDED` is the only signal a held swap gives, and every
         // step below tears down what delivering it needs. Bounded by the sinks'
         // own AbortSignal.timeout, so it cannot hang the shutdown it precedes.

@@ -5,6 +5,7 @@ import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { withEvmSendSweep } from '@arkade-os/solver-app/ops/evmSendSweep.js'
 import { startCadence } from '@arkade-os/solver-app/ops/cadence.js'
+import { withBalanceCheckpoints } from '@arkade-os/solver-app/ops/balanceCheckpoints.js'
 
 const source = ts.createSourceFile(
   'cli.ts',
@@ -47,6 +48,8 @@ const watchLoopIn = (signals: EventEmitter, overrides: Record<string, unknown> =
   runInNewContext(`${compiled}; watchUntilStopped`, {
     process: signals,
     withEvmSendSweep,
+    withBalanceCheckpoints,
+    recordBalanceCheckpoint: async () => ({ totalSats: '0', decreases: [] }),
     startCadence,
     assetRfqPairFor: (from: string | null, to: string | null) => `${from}->${to}`,
     log: () => {},
@@ -68,7 +71,7 @@ const watchLoopIn = (signals: EventEmitter, overrides: Record<string, unknown> =
   }) as (services: unknown) => Promise<void>
 
 describe('the watch loop during slow wallet maintenance', () => {
-  it.each(['contract', 'float'])('drives EVM sends while %s maintenance is unresolved', async (stage) => {
+  it.each(['contract', 'float', 'balance'])('drives EVM sends while %s maintenance is unresolved', async (stage) => {
     vi.useFakeTimers()
     vi.setSystemTime(1_800_000_000_000)
     const blocked = deferred()
@@ -96,12 +99,17 @@ describe('the watch loop during slow wallet maintenance', () => {
       ],
       assetRfqService: { tickAll: async () => [] },
       assetRfqMarkets: [],
+      onBalanceCheckpoint: vi.fn(),
     }
     const watch = watchLoopIn(signals, {
       runContractLifecycle: stage === 'contract' ? maintenance : async () => {},
       runFloatLifecycle: async () => {
         if (stage === 'float') await maintenance()
         return { failures: [] }
+      },
+      recordBalanceCheckpoint: async () => {
+        if (stage === 'balance') await maintenance()
+        return { totalSats: '0', decreases: [] }
       },
     })
     const watching = watch(services)
@@ -119,6 +127,7 @@ describe('the watch loop during slow wallet maintenance', () => {
       // pass, so it needs one tick to see the abort and drain its cadences.
       await vi.advanceTimersByTimeAsync(250)
       await watching
+      expect(services.onBalanceCheckpoint).toHaveBeenCalledOnce()
     }
   })
 })

@@ -1,0 +1,402 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { Hono } from 'hono'
+import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
+import { registerStatusRoutes } from '@arkade-os/solver-app/admin/routes/status.js'
+import type { AdminDeps } from '@arkade-os/solver-app/admin/server.js'
+import {
+  recordBalanceCheckpoint,
+  balanceCheckpointScope,
+  withBalanceCheckpoints,
+  checkpointChanges,
+  formatCheckpointWarning,
+} from '@arkade-os/solver-app/ops/balanceCheckpoints.js'
+import { createNotifier } from '@arkade-os/solver-app/ops/notify.js'
+
+const stores: AdminStore[] = []
+const directories: string[] = []
+const openStore = async (path = ':memory:') => {
+  const store = await AdminStore.open(path)
+  stores.push(store)
+  return store
+}
+const fixture = async (path?: string) => {
+  const arkade = { total: 1_000, assets: [{ assetId: 'aa'.repeat(34), amount: 10n ** 25n }] }
+  const lightning = { availableSats: 2_000, incomingSats: 90_000 }
+  const onchain = { confirmedSats: 3_000, unconfirmedSats: 400, sharedWithLightning: false }
+  const services = {
+    adminStore: await openStore(path),
+    config: { network: 'regtest', lnBackend: 'lnd', arkade: { arkServerUrl: 'http://arkade.test' } },
+    providerPubkey: 'provider',
+    arkade: { wallet: { getBalance: vi.fn(async () => arkade) } },
+    ln: { getBalance: vi.fn(async () => lightning) },
+    onchain: { getBalance: vi.fn(async () => onchain) },
+  } as unknown as Parameters<typeof recordBalanceCheckpoint>[0]
+  return { services, arkade, lightning, onchain, sample: () => recordBalanceCheckpoint(services) }
+}
+
+afterEach(async () => {
+  vi.useRealTimers()
+  await Promise.all(stores.splice(0).map((store) => store.close()))
+  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true })
+})
+
+describe('balance checkpoints', () => {
+  it('persists owned BTC and exact asset amounts, excluding inbound capacity', async () => {
+    const f = await fixture()
+    const checkpoint = await f.sample()
+    expect(checkpoint.totalSats).toBe('6400')
+    expect(checkpoint.arkade?.assets).toEqual({ [f.arkade.assets[0]!.assetId]: '10000000000000000000000000' })
+    expect(checkpoint.previousId).toBeNull()
+    expect(checkpoint.decreases).toEqual([])
+    expect(await f.services.adminStore.listBalanceCheckpoints(checkpoint.scope)).toEqual([checkpoint])
+  })
+
+  it('does not double count a shared Lightning/onchain pool', async () => {
+    const f = await fixture()
+    f.onchain.sharedWithLightning = true
+    expect((await f.sample()).totalSats).toBe('4400')
+    f.lightning.availableSats = 1
+    expect((await f.sample()).decreases).toEqual([])
+  })
+
+  it('does not report internal BTC transfers or confirmations as losses', async () => {
+    const f = await fixture()
+    await f.sample()
+    f.arkade.total -= 500
+    f.lightning.availableSats += 500
+    f.onchain.confirmedSats += 400
+    f.onchain.unconfirmedSats = 0
+    expect((await f.sample()).decreases).toEqual([])
+  })
+
+  it('reports net BTC decreases and assets disappearing without rounding', async () => {
+    const f = await fixture()
+    const baseline = await f.sample()
+    f.arkade.total -= 12
+    f.lightning.availableSats += 2
+    f.arkade.assets = []
+    const checkpoint = await f.sample()
+    expect(checkpoint.previousId).toBe(baseline.id)
+    expect(checkpoint.decreases).toEqual([
+      { asset: 'BTC', before: '6400', after: '6390', decrease: '10' },
+      {
+        asset: `arkade:${'aa'.repeat(34)}`,
+        before: '10000000000000000000000000',
+        after: '0',
+        decrease: '10000000000000000000000000',
+      },
+    ])
+  })
+
+  it('compares across a restart and incomplete readings against the last complete checkpoint', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'solver-balance-checkpoints-'))
+    directories.push(directory)
+    const path = join(directory, 'admin.sqlite')
+    const f = await fixture(path)
+    const baseline = await f.sample()
+    await f.services.adminStore.close()
+    const restarted = await fixture(path)
+    vi.mocked(restarted.services.ln!.getBalance).mockRejectedValueOnce(new Error('offline'))
+    const incomplete = await restarted.sample()
+    expect(incomplete.totalSats).toBeNull()
+    expect(incomplete.lightningSats).toBeNull()
+    expect(incomplete.errors).toEqual({ lightning: 'offline' })
+    expect(incomplete.decreases).toEqual([])
+    restarted.lightning.availableSats -= 5
+    const recovered = await restarted.sample()
+    expect(recovered.previousId).toBe(baseline.id)
+    expect(recovered.decreases[0]?.decrease).toBe('5')
+    expect((await restarted.services.adminStore.listBalanceCheckpoints(baseline.scope)).map((row) => row.id)).toEqual([
+      recovered.id,
+      incomplete.id,
+      baseline.id,
+    ])
+  })
+
+  it('checks each asset independently even when BTC increases', async () => {
+    const f = await fixture()
+    await f.sample()
+    f.arkade.total += 1_000
+    f.arkade.assets[0]!.amount -= 1n
+    const checkpoint = await f.sample()
+    expect(checkpoint.decreases).toEqual([
+      {
+        asset: `arkade:${f.arkade.assets[0]!.assetId}`,
+        before: '10000000000000000000000000',
+        after: '9999999999999999999999999',
+        decrease: '1',
+      },
+    ])
+  })
+
+  it('keeps providers and backends in separate baselines', async () => {
+    const f = await fixture()
+    await f.sample()
+    f.arkade.total = 0
+    f.services.providerPubkey = 'other-provider'
+    expect((await f.sample()).previousId).toBeNull()
+    f.services.config.lnBackend = 'fake'
+    expect((await f.sample()).previousId).toBeNull()
+  })
+
+  it('supports deployments without a BTC rail', async () => {
+    const f = await fixture()
+    f.services.ln = null
+    f.services.onchain = null
+    expect((await f.sample()).totalSats).toBe('1000')
+  })
+
+  it.each([NaN, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])('rejects invalid sats: %s', async (value) => {
+    const f = await fixture()
+    f.arkade.total = value
+    const checkpoint = await f.sample()
+    expect(checkpoint.totalSats).toBeNull()
+    expect(checkpoint.errors.arkade).toContain('safe integer')
+  })
+
+  it('bounds a backend read that never answers', async () => {
+    vi.useFakeTimers()
+    const f = await fixture()
+    vi.mocked(f.services.ln!.getBalance).mockImplementationOnce(() => new Promise(() => {}))
+    const pending = f.sample()
+    await vi.advanceTimersByTimeAsync(10_000)
+    const checkpoint = await pending
+    expect(checkpoint.totalSats).toBeNull()
+    expect(checkpoint.errors.lightning).toContain('no answer within')
+  })
+
+  it('joins a timed-out backend read until it finishes instead of starting another', async () => {
+    vi.useFakeTimers()
+    const f = await fixture()
+    let release!: (balance: typeof f.lightning) => void
+    vi.mocked(f.services.ln!.getBalance).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve
+        }),
+    )
+    const first = f.sample()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect((await first).totalSats).toBeNull()
+    const second = f.sample()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect((await second).totalSats).toBeNull()
+    expect(f.services.ln!.getBalance).toHaveBeenCalledTimes(1)
+    release(f.lightning)
+    await vi.advanceTimersByTimeAsync(0)
+    expect((await f.sample()).totalSats).toBe('6400')
+    expect(f.services.ln!.getBalance).toHaveBeenCalledTimes(2)
+  })
+
+  it('serves bounded checkpoint history without reading wallets', async () => {
+    const f = await fixture()
+    const checkpoint = await f.sample()
+    const app = new Hono()
+    registerStatusRoutes(app, { services: f.services } as AdminDeps)
+    expect(await (await app.request('/api/balance-checkpoints?limit=1')).json()).toEqual({
+      scope: checkpoint.scope,
+      checkpoints: [checkpoint],
+    })
+    for (const limit of ['0', '201', '-1', '1.5', '1e2', '']) {
+      expect((await app.request(`/api/balance-checkpoints?limit=${limit}`)).status).toBe(400)
+    }
+    expect(f.services.arkade.wallet.getBalance).toHaveBeenCalledTimes(1)
+  })
+
+  it('filters history by the current deployment scope before applying the limit', async () => {
+    const f = await fixture()
+    const first = await f.sample()
+    f.services.providerPubkey = 'other-provider'
+    const other = await f.sample()
+    f.services.providerPubkey = 'provider'
+    const latest = await f.sample()
+    f.services.config.arkade.arkServerUrl = 'http://other-arkade.test'
+    const otherServer = await f.sample()
+    f.services.config.arkade.arkServerUrl = 'http://arkade.test'
+    const app = new Hono()
+    registerStatusRoutes(app, { services: f.services } as AdminDeps)
+    expect(await (await app.request('/api/balance-checkpoints')).json()).toEqual({
+      scope: first.scope,
+      checkpoints: [latest, first],
+    })
+    expect(await (await app.request('/api/balance-checkpoints?limit=1')).json()).toEqual({
+      scope: first.scope,
+      checkpoints: [latest],
+    })
+    f.services.providerPubkey = 'other-provider'
+    expect(await (await app.request('/api/balance-checkpoints')).json()).toEqual({
+      scope: other.scope,
+      checkpoints: [other],
+    })
+    f.services.config.arkade.arkServerUrl = 'http://empty-arkade.test'
+    expect(await (await app.request('/api/balance-checkpoints')).json()).toEqual({
+      scope: balanceCheckpointScope(f.services),
+      checkpoints: [],
+    })
+    expect(otherServer.scope).not.toBe(first.scope)
+    expect(f.services.arkade.wallet.getBalance).toHaveBeenCalledTimes(4)
+  })
+
+  it('retains the previous report baseline across intermediate checkpoints and restarts', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'solver-balance-reports-'))
+    directories.push(directory)
+    const path = join(directory, 'admin.sqlite')
+    const f = await fixture(path)
+    const baseline = await f.sample()
+    await f.services.adminStore.markBalanceReportCheckpoint(baseline.id)
+    f.arkade.total += 100
+    await f.sample()
+    await f.services.adminStore.close()
+    const restarted = await fixture(path)
+    restarted.arkade.total += 300
+    const current = await restarted.sample()
+    const previous = await restarted.services.adminStore.previousBalanceReportCheckpoint(current.scope)
+    expect(previous).toEqual(baseline)
+    expect(checkpointChanges(previous!, current)?.[0]?.delta).toBe('300')
+    expect(await restarted.services.adminStore.latestBalanceCheckpoint(current.scope)).toEqual(current)
+    await restarted.services.adminStore.markBalanceReportCheckpoint(current.id)
+    await restarted.services.adminStore.markBalanceReportCheckpoint(baseline.id)
+    vi.mocked(restarted.services.ln!.getBalance).mockRejectedValueOnce(new Error('offline'))
+    const incomplete = await restarted.sample()
+    await restarted.services.adminStore.markBalanceReportCheckpoint(incomplete.id)
+    expect(await restarted.services.adminStore.previousBalanceReportCheckpoint(current.scope)).toEqual(current)
+    expect(await restarted.services.adminStore.latestBalanceCheckpoint(current.scope)).toEqual(incomplete)
+    expect(await restarted.services.adminStore.previousBalanceReportCheckpoint('other provider')).toBeUndefined()
+  })
+
+  it('formats bounded loss warnings and sends none for a healthy checkpoint', async () => {
+    const f = await fixture()
+    const initial = await f.sample()
+    expect(formatCheckpointWarning(initial, 'regtest')).toBeNull()
+    f.arkade.total -= 10
+    const loss = await f.sample()
+    const text = formatCheckpointWarning(loss, 'regtest')!
+    expect(text).toContain(`POSSIBLE LOSS — regtest — checkpoint #${loss.id}`)
+    expect(text).toContain('BTC: -10 sats (6,400 → 6,390)')
+    expect(text).toContain('not reconciled')
+    const large = formatCheckpointWarning(
+      { ...loss, decreases: Array.from({ length: 300 }, () => loss.decreases[0]!) },
+      'regtest',
+    )!
+    expect(large.length).toBeLessThanOrEqual(4000)
+    expect(large).toContain('message cut')
+  })
+})
+
+describe('scheduled balance checkpoints', () => {
+  it('queues loss alerts through the notifier while a sink remains unresolved', async () => {
+    vi.useFakeTimers()
+    const f = await fixture()
+    const controller = new AbortController()
+    let finish!: () => void
+    let delivered!: () => void
+    const messages: string[] = []
+    const notifier = createNotifier({
+      sinks: [
+        {
+          name: 'test',
+          send: (text) => {
+            messages.push(text)
+            return new Promise<void>((resolve) => {
+              delivered = resolve
+            })
+          },
+        },
+      ],
+    })
+    const run = withBalanceCheckpoints({
+      checkpoint: f.sample,
+      signal: controller.signal,
+      log: vi.fn(),
+      onCheckpoint: (checkpoint) => {
+        const text = formatCheckpointWarning(checkpoint, 'regtest')
+        if (text) notifier.post(text)
+      },
+      run: () =>
+        new Promise<void>((resolve) => {
+          finish = resolve
+        }),
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(messages).toEqual([])
+    f.arkade.total -= 10
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toContain('BTC: -10 sats')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await f.services.adminStore.listBalanceCheckpoints(balanceCheckpointScope(f.services))).toHaveLength(3)
+    controller.abort()
+    finish()
+    await run
+    delivered()
+    await notifier.flush()
+    expect(notifier.stats().sent).toBe(1)
+  })
+
+  it('samples at startup and every minute, logs possible losses, and stops on abort', async () => {
+    vi.useFakeTimers()
+    const f = await fixture()
+    const controller = new AbortController()
+    const log = vi.fn()
+    let finish!: () => void
+    const run = withBalanceCheckpoints({
+      checkpoint: f.sample,
+      log,
+      signal: controller.signal,
+      run: () =>
+        new Promise<void>((resolve) => {
+          finish = resolve
+        }),
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(await f.services.adminStore.listBalanceCheckpoints(balanceCheckpointScope(f.services))).toHaveLength(1)
+    f.arkade.total -= 10
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('POSSIBLE LOSS'))
+    controller.abort()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await f.services.adminStore.listBalanceCheckpoints(balanceCheckpointScope(f.services))).toHaveLength(2)
+    finish()
+    await run
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('contains errors, avoids overlapping samples, and drains before shutdown', async () => {
+    vi.useFakeTimers()
+    const controller = new AbortController()
+    const log = vi.fn()
+    let reject!: (error: Error) => void
+    let finish!: () => void
+    const checkpoint = vi.fn(
+      () =>
+        new Promise<never>((_, fail) => {
+          reject = fail
+        }),
+    )
+    const running = withBalanceCheckpoints({
+      checkpoint,
+      log,
+      signal: controller.signal,
+      run: () =>
+        new Promise<void>((resolve) => {
+          finish = resolve
+        }),
+    })
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(checkpoint).toHaveBeenCalledTimes(1)
+    finish()
+    let done = false
+    void running.then(() => {
+      done = true
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(done).toBe(false)
+    reject(new Error('database unavailable'))
+    await running
+    expect(log).toHaveBeenCalledWith('balance checkpoint failed: database unavailable')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
