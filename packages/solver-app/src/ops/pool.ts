@@ -138,6 +138,18 @@ export const committedAcrossCorridors = async (corridors: CorridorReaderSet): Pr
   return totals.reduce((sum, value) => sum + value, 0)
 }
 
+export const arkadeFundingOwed = async (readers: CorridorReaderSet): Promise<number> => {
+  const amounts = await Promise.all(
+    [...readers].map((reader) => reader.outstandingArkadeSats?.() ?? reader.committedSats()),
+  )
+  const total = amounts.reduce((sum, value) => {
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error('invalid outstanding Arkade funding obligation')
+    return sum + value
+  }, 0)
+  if (!Number.isSafeInteger(total)) throw new Error('Arkade funding obligations exceed safe integer range')
+  return total
+}
+
 export type MintOutcome =
   /** `committedSats` rides along so a caller can report a forced mint honestly. */
   | { minted: readonly number[]; spent: readonly string[]; txid: string; committedSats: number }

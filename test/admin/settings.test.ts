@@ -215,7 +215,7 @@ describe('describeSettings', () => {
     for (const knob of describeSettings(config, {}).filter((k) => k.editable)) {
       expect(knob.restartRequired, `${knob.key}`).toBe(!LIVE_KEYS.has(knob.key))
     }
-    expect([...LIVE_KEYS]).toEqual(['ASSET_CARRIER_PRICING'])
+    expect([...LIVE_KEYS]).toEqual(['ASSET_CARRIER_PRICING', 'REBALANCE_POLICY'])
   })
 
   it('never marks a read-only knob restart-required — there is nothing to restart for', () => {

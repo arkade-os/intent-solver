@@ -31,6 +31,7 @@ import { registerPnlRoutes } from './routes/pnl.js'
 import { registerActionRoutes } from './routes/actions.js'
 import { registerCardRoutes } from './routes/card.js'
 import { registerEventRoutes } from './routes/events.js'
+import { registerRebalanceRoutes } from './routes/rebalance.js'
 import type { ChangeFeed } from './events.js'
 import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
@@ -138,6 +139,7 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   registerCardRoutes(app, deps)
   registerActionRoutes(app, deps)
   registerEventRoutes(app, deps)
+  registerRebalanceRoutes(app, deps)
 
   // Last, so it can never shadow an /api route: this handler answers almost
   // everything, falling back to index.html for the client's own routing.

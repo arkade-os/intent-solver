@@ -212,6 +212,10 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   a reverse proxy in front of it, or tunnel to the default loopback bind. See
   `docs/runbook.md` § "The admin console".
 
+  The wallet's manual transfers and automatic backend refills are documented in
+  [Wallet rebalancing](docs/wallet-rebalancing.md), including policy limits and
+  recovery of uncertain submissions.
+
   Its **p&l** tab (and `GET /api/pnl`) charts what the book made, by corridor,
   by time to fill, and per cross-asset fill against the window's own mean rate —
   which is how a drawn-out swap that priced against a stale view becomes
