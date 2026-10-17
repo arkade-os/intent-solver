@@ -150,6 +150,7 @@ beforeAll(async () => {
     arkade: ops,
     solverEvmAddress: solver,
     blockHeight: async () => Number(await evm.currentBlock()),
+    timelockHeight: () => evm.timelockClock(),
     maxExposedSats: 1_000_000_000,
     admission: new AdmissionControl(),
     totalCommitted: async () => 0,
@@ -178,6 +179,7 @@ beforeAll(async () => {
       minAgeSeconds: 0,
       // Anvil mines on demand; the cadence bounds only need to be honest.
       cadence: { fastestSecondsPerBlock: 1, slowestSecondsPerBlock: 1 },
+      timelockCadence: { fastestSecondsPerBlock: 1, slowestSecondsPerBlock: 1 },
       quoteValiditySeconds: 60,
     },
   })
