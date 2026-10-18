@@ -32,6 +32,7 @@ const TXID = 'a'.repeat(64)
 /** A BTC deposit buying the asset — the direction the e2e drives. */
 const intent = (over: Partial<QuotedOfferIntent> = {}): QuotedOfferIntent => {
   const base = {
+    id: 'quoted-offer',
     fromAssetId: null,
     fromAmount: 20_000n,
     toAssetId: USDA,
@@ -77,15 +78,63 @@ const settleWith = (
 })
 
 describe('quotedOfferSettleFor', () => {
+  it('refuses persisted recycle terms before reading or spending an outpoint', async () => {
+    const outpointsAt = vi.fn(async () => [funded()])
+    const fulfill = vi.fn<typeof fulfillOffer>(async () => 'fill'.padEnd(64, '0'))
+    const settle = quotedOfferSettleFor({
+      ctx: {} as never,
+      emulatorUrl: 'http://emulator.test',
+      derivation,
+      outpointsAt,
+      fulfill,
+    })
+
+    await expect(settle({ ...intent(), carrierTerms: { mode: 'recycle' } })).rejects.toThrow(/recycle/)
+    expect(outpointsAt).not.toHaveBeenCalled()
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
+  /** Task 21 wires this mode's own settle; until then it must go `stuck`
+   * here, never a silent fulfill that never repaid the payee's Taxi. */
+  it('refuses persisted receiver-paid terms before reading or spending an outpoint', async () => {
+    const outpointsAt = vi.fn(async () => [funded()])
+    const fulfill = vi.fn<typeof fulfillOffer>(async () => 'fill'.padEnd(64, '0'))
+    const settle = quotedOfferSettleFor({
+      ctx: {} as never,
+      emulatorUrl: 'http://emulator.test',
+      derivation,
+      outpointsAt,
+      fulfill,
+    })
+
+    await expect(settle({ ...intent(), carrierTerms: { mode: 'recycle_receiver' } })).rejects.toThrow(
+      /recycle_receiver/,
+    )
+    expect(outpointsAt).not.toHaveBeenCalled()
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
+  it('keeps persisted purchase terms on direct settlement', async () => {
+    const { settle, fulfill } = settleWith([funded()])
+    await settle({ ...intent(), carrierTerms: { mode: 'purchase' } })
+    expect(fulfill).toHaveBeenCalledOnce()
+  })
+
   it('spends the outpoint the row recorded, at the value the chain reports', async () => {
     const { settle, fulfill } = settleWith([funded({ vout: 0, sats: 999n }), funded()])
     await settle(intent())
-    expect(fulfill).toHaveBeenCalledWith(expect.anything(), 'http://emulator.test', expect.anything(), {
-      txid: TXID,
-      vout: 1,
-      value: 20_000,
-      assetAmount: undefined,
-    })
+    expect(fulfill).toHaveBeenCalledWith(
+      expect.anything(),
+      'http://emulator.test',
+      expect.anything(),
+      {
+        txid: TXID,
+        vout: 1,
+        value: 20_000,
+        assetAmount: undefined,
+      },
+      { kind: 'rfq', id: 'quoted-offer' },
+    )
   })
 
   it('hands `fulfill` an offer whose script is the DERIVED one', async () => {

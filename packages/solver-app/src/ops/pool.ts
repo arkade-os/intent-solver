@@ -69,7 +69,10 @@ export const poolPlan = async (services: Services): Promise<PoolPlan> => {
   const info = await services.arkade.wallet.arkProvider.getInfo()
   const dustSats = Number(info.dust)
   const maxAmount = Number(info.vtxoMaxAmount ?? -1)
-  const vtxos = await services.arkade.wallet.getSpendableVtxos()
+  const vtxos = await services.arkade.wallet.getSpendableVtxos({
+    withRecoverable: false,
+    genericallySpendableOnly: true,
+  })
   const reserved = services.arkade.reservations.reserved()
   const unreserved = vtxos.filter((vtxo) => !reserved.has(outpointKey(vtxo.txid, vtxo.vout)))
   const usable = unreserved.map((vtxo) => Math.max(0, usableSatsOf(vtxo, dustSats)))

@@ -19,7 +19,7 @@
  * loop that was iterating.
  */
 import { Extension, Transaction } from '@arkade-os/sdk'
-import { decodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap'
+import { decodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap/protocol'
 import { base64, hex } from '@scure/base'
 
 /** A decoded offer, funded at a known outpoint of the transaction that carried it. */

@@ -14,7 +14,7 @@ import type { SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
-import { encodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap'
+import { encodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap/protocol'
 import { Extension, UnknownPacket, asset } from '@arkade-os/sdk'
 import { Transaction } from '@scure/btc-signer'
 import { base64 } from '@scure/base'
@@ -411,7 +411,8 @@ describe('refusals an operator can read', () => {
   it('serves offers only when OFFER_MARKETS names a market', () => {
     // The second silence, driven for real in test/e2e/assetOffer.e2e.test.ts.
     expect(servicesSource).toMatch(/servesOffers\s*=\s*policy\.offerMarkets\.length > 0/)
-    expect(servicesSource).toMatch(/servesOffers\s*\?\s*await OfferFillStore\.open/)
+    expect(servicesSource).toMatch(/const assetOffers =\s*servesOffers && offerStore\s*\?/)
+    expect(servicesSource).toMatch(/servesOffers \|\| recoverOffers \? await OfferFillStore\.open/)
     expect(servicesSource).toContain('replaceMarkets:')
   })
 })

@@ -11,7 +11,7 @@
  * something else — and a taker that priced the packet would spend the deposit
  * under terms it never checked.
  */
-import { offerVtxoScript, type Offer } from '@arkade-os/swap'
+import { offerContract, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 
 /**
@@ -23,7 +23,7 @@ import { hex } from '@scure/base'
  */
 export const offerIsConsistent = (offer: Offer, serverPubkey: Uint8Array): boolean => {
   try {
-    return hex.encode(offerVtxoScript(offer, serverPubkey).pkScript) === hex.encode(offer.swapPkScript)
+    return hex.encode(offerContract(offer, serverPubkey).pkScript) === hex.encode(offer.swapPkScript)
   } catch {
     return false
   }

@@ -50,10 +50,12 @@ const makeDeps = (
     relay?: { url: string; isConnected: () => boolean }
     nostrAdPublish?: AdPublishMode
     adPublisher?: AdPublisher
+    directFillDiagnostics?: () => Promise<unknown>
   } = {},
 ) =>
   ({
     services: {
+      directFillRecovery: over.directFillDiagnostics ? { diagnostics: over.directFillDiagnostics } : undefined,
       config: {
         lnBackend: 'lnd',
         arkade: { arkServerUrl: 'http://ark' },
@@ -133,6 +135,31 @@ const corridorsOf = async (d: ReturnType<typeof makeDeps>): Promise<Record<strin
 }
 
 describe('GET /api/diagnostics', () => {
+  it('keeps other diagnostics available when the direct-fill journal cannot be read', async () => {
+    const { response, body } = await diagnose(
+      makeDeps({
+        directFillDiagnostics: async () => {
+          throw new Error('direct fill pinned journal row vanished')
+        },
+      }),
+    )
+    expect(response.status).toBe(200)
+    expect(body.directFills).toBeNull()
+    expect(body.directFillsError).toBe('direct fill pinned journal row vanished')
+    expect(body.backends).toHaveLength(4)
+    expect(body.corridors).toHaveLength(4)
+    expect(body.overridesError).toBeNull()
+  })
+
+  it('distinguishes an unavailable direct-fill service from an empty journal', async () => {
+    const unavailable = await diagnose(makeDeps())
+    expect(unavailable.body.directFills).toBeNull()
+    expect(unavailable.body.directFillsError).toBeNull()
+    const healthy = await diagnose(makeDeps({ directFillDiagnostics: async () => ({ unresolved: 0, attempts: [] }) }))
+    expect(healthy.body.directFills).toEqual({ unresolved: 0, attempts: [] })
+    expect(healthy.body.directFillsError).toBeNull()
+  })
+
   it('stamps every probe so a frozen one is distinguishable from a fresh one', async () => {
     const app = new Hono()
     registerDiagnosticsRoutes(app, deps)

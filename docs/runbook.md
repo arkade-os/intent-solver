@@ -52,6 +52,27 @@ the API on Workers if you want Workers at all.
 | `<CORRIDOR>_ENABLED`                 | no (`true`)                                                  | `false` darkens that corridor (`LN_SEND`, `LN_RECEIVE`, `ONCHAIN_SEND`, `ONCHAIN_RECEIVE`): never constructed, and its pair is refused `unsupported_pair` at the ingress. Rows already on disk stay readable, but the sweep stops driving them. **Exactly `true` or `false` once trimmed** — unset, empty or whitespace is on, anything else refuses to boot; see "When the solver refuses to boot on an _ENABLED value"                                                                                                               |
 | `PAYEE_MNEMONIC`                     | test-only                                                    | payee wallet for `invoice` self-tests, which mint from a wallet of their own                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
+## Direct-fill journal startup refusal
+
+`ARK_DB_PATH` also holds the wallet's `direct_fill_attempt` journal. Errors such as
+`invalid direct fill journal row`, `funding commitment changed`, or
+`pinned journal row vanished` stop startup because the solver cannot establish
+which inputs remain liable. Restarting does not resolve corrupt or missing evidence.
+
+Stop admission and retain the failing database, its `-wal`/`-shm` files, the exact
+solver revision and the full error. Take a SQLite-consistent backup before
+investigation. Do not delete a journal row, set `acknowledged`, clear reservations,
+or start with an empty wallet database to bypass the refusal. Those actions can
+admit a second spend while the original fill remains unresolved.
+
+Reconstruct the row from a consistent backup and its recorded wallet identity,
+deposit, funding and signed graph. Confirm the original or recorded conflict's
+settlement using the configured Arkade provider and indexer; a missing indexer
+entry or an expired quote is insufficient. If the evidence cannot be restored,
+keep the affected wallet offline and escalate for operator/protocol review.
+After evidence repair, restart the same wallet and let the normal reconciler
+verify settlement and acknowledge the matching parent before releasing holds.
+
 ## Shape 1 — single Node process
 
 ```

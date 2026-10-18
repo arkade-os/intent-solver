@@ -166,6 +166,13 @@ const toRow = (raw: Raw): OfferFillRow => ({
   rfqId: raw.rfq_id === null ? null : String(raw.rfq_id),
 })
 
+export interface DirectFillParentProof {
+  id: string
+  depositTxid: string
+  depositVout: number
+  offerPkScript: string
+}
+
 export class OfferFillStore {
   private constructor(
     readonly driver: SqlDriver,
@@ -330,6 +337,56 @@ export class OfferFillStore {
     }
     const to: OfferFillState = from === 'fillable' ? 'refused' : 'stuck'
     await this.transition(id, from, to, { failure_reason: reason })
+  }
+
+  async recoverDirectFill(proof: DirectFillParentProof, fillTxid: string): Promise<boolean> {
+    return this.resolveDirectFill(proof, fillTxid, false)
+  }
+
+  async cancelDirectFill(proof: DirectFillParentProof, conflictTxid: string): Promise<boolean> {
+    return this.resolveDirectFill(proof, conflictTxid, true)
+  }
+
+  private async resolveDirectFill(proof: DirectFillParentProof, txid: string, cancelled: boolean): Promise<boolean> {
+    if (!/^[0-9a-f]{64}$/.test(txid)) return false
+    return this.driver.transaction(async () => {
+      const row = await this.findById(proof.id)
+      if (
+        !row ||
+        row.offerTxid !== proof.depositTxid ||
+        row.offerVout !== proof.depositVout ||
+        row.offerPkScript !== proof.offerPkScript
+      )
+        return false
+      const reason = `direct fill cancelled by confirmed conflict ${txid}`
+      if (cancelled && row.state === 'stuck' && row.fillTxid === null && row.failureReason === reason) return true
+      if (!cancelled && row.state === 'filled' && row.fillTxid === txid) return true
+      if (row.state !== 'filling' && row.state !== 'stuck') return false
+      if (row.failureReason?.startsWith('direct fill cancelled by confirmed conflict ')) return false
+      if (row.fillTxid !== null && (cancelled || row.fillTxid !== txid)) return false
+      const next: OfferFillState = cancelled ? 'stuck' : 'filled'
+      const result = await this.driver.run(
+        `UPDATE offer_fill SET state = ?, updated_at = ?, fill_txid = ?, failure_reason = ?
+         WHERE id = ? AND state = ? AND offer_txid = ? AND offer_vout = ? AND offer_pk_script = ?
+         AND fill_txid IS ? AND failure_reason IS ?`,
+        [
+          next,
+          this.now(),
+          cancelled ? null : txid,
+          cancelled ? reason : null,
+          proof.id,
+          row.state,
+          proof.depositTxid,
+          proof.depositVout,
+          proof.offerPkScript,
+          row.fillTxid,
+          row.failureReason,
+        ],
+      )
+      if (result.changes !== 1) return false
+      await this.recordEvent(proof.id, row.state, next, cancelled ? reason : txid)
+      return true
+    })
   }
 
   private async recordEvent(

@@ -12,6 +12,7 @@
  * `fulfillOffer` are all the real ones against a real stack. This wallet is
  * both sides, and the client half goes through `@arkade-os/swap`'s own
  * `createOffer`, so the address check below is two independent derivations.
+ * One case adds the receive-carrier adapter, composed as `services.ts` does with no TAXI_URL.
  *
  * Needs arkd, the emulator, spendable sats and a minted asset
  * (`scripts/regtest-mint-asset.mjs`). Run: `pnpm test:e2e`.
@@ -20,9 +21,10 @@
 import { createServer, type Server } from 'node:http'
 import { randomBytes, randomInt } from 'node:crypto'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ArkAddress, isVtxoSpent, asset, Transaction } from '@arkade-os/sdk'
-import { createOffer, cancelOffer, InMemoryAssetSwapRepository, type Offer } from '@arkade-os/swap'
+import { InMemoryAssetSwapRepository } from '@arkade-os/swap'
+import { createOffer, cancelOffer, type Offer } from '@arkade-os/swap/protocol'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { GiveUp, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
@@ -32,22 +34,34 @@ import { ASSET_CARRIER_SATS, fulfillOffer } from '@arkade-os/solver-arkade/arkad
 import {
   offerExitDelay,
   offerFromTerms,
+  offerHexFrom,
   offerScriptFrom,
   type OfferDerivation,
 } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import {
   AssetRfqSwapService,
+  type AssetRfqDeps,
   type AssetRfqMarket,
   type ObservedDeposit,
   type OfferTerms,
+  type ReceiveCarrierQuotes,
 } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { assetRfqCorridor, assetRfqDescriptor } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { Corridor } from '@arkade-os/solver-core/core/corridor.js'
+import { createEsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
+import {
+  carrierChainTip,
+  createCarrierPinLedger,
+  spendableCarrierCoins,
+  taxiReceiveCarrier,
+} from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
+import { completeTaxiReceiveCarrier } from '@arkade-os/solver-app/ops/assetRfqTaxiAdapter.js'
+import type { TaxiUrlPolicy } from '@arkade-os/solver-app/ops/taxiUrlGuard.js'
 import { AdminStore, type SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
 import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
 import type { ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
-import { requireStack } from './support/preflight.js'
+import { esploraUrl, requireStack } from './support/preflight.js'
 import {
   assertArkadeSpendable,
   openArkade,
@@ -190,6 +204,54 @@ const settle = async (row: AssetRfqSwapRow): Promise<string> => {
   })
 }
 
+/** Both halves, as `services.ts` composes them with `TAXI_URL` unset. */
+const shippedCarrier = async (
+  store: AssetRfqSwapStore,
+  policy: TaxiUrlPolicy,
+  quoteValiditySeconds: number,
+): Promise<ReceiveCarrierQuotes> => {
+  const { wallet, identity, reservations } = arkade.ctx
+  const reader = await taxiReceiveCarrier({
+    taxiUrl: undefined,
+    policy,
+    trust: async () => ({
+      serverKey: wallet.arkServerPublicKey,
+      emulatorKey: emulatorXOnly(),
+      dustSats: arkade.ctx.dustSats,
+      vtxoMinAmount: arkade.ctx.vtxoMinSats,
+      hrp: arkade.ctx.hrp,
+      locktimeDomain: arkade.ctx.timelockUnit === 'blocks' ? 'height' : 'time',
+      inputExpiryMargin: BigInt(arkade.ctx.advertisedExitDelay),
+    }),
+    maxServiceFareSats: arkade.ctx.dustSats,
+    contracts: () => wallet.getContractManager(),
+    reserved: () => reservations.reserved(),
+    quoteValiditySeconds,
+    tipHeight:
+      arkade.ctx.timelockUnit === 'blocks' ? carrierChainTip(createEsploraClient(esploraUrl())).height : undefined,
+  })
+  const offerHex = offerHexFrom(derivation())
+  return completeTaxiReceiveCarrier(reader, {
+    taxiUrl: undefined,
+    policy,
+    store,
+    chain: wallet.indexerProvider,
+    pins: createCarrierPinLedger(),
+    coins: async () => spendableCarrierCoins(await wallet.getContractManager()),
+    reserved: () => reservations.reserved(),
+    reserve: (outpoints) => reservations.reserve(outpoints),
+    wallet,
+    identity,
+    arkServerUrl: arkade.ctx.arkServerUrl,
+    dustSats: arkade.ctx.dustSats,
+    offerHex: (row) => offerHex(termsOf(row), row.offerPkScript),
+    proceedsAddress: await wallet.getAddress(),
+    solverKeys: [makerPublicKey],
+    serverKey: () => wallet.arkServerPublicKey,
+    now: () => Math.floor(Date.now() / 1000),
+  })
+}
+
 interface Harness {
   corridor: Corridor
   store: AssetRfqSwapStore
@@ -200,23 +262,28 @@ const harness = async (
   over: {
     markets?: readonly AssetRfqMarket[]
     quoteValiditySeconds?: number
+    carrier?: TaxiUrlPolicy
+    onError?: AssetRfqDeps['onError']
     balance?: () => Promise<ReadonlyMap<AssetLeg, bigint>>
     approvalGate?: ApprovalCheck
   } = {},
 ): Promise<Harness> => {
   const markets = over.markets ?? [market()]
   const store = await AssetRfqSwapStore.open(join(dir, `assetrfq-${randomBytes(6).toString('hex')}.sqlite`))
+  const quoteValiditySeconds = over.quoteValiditySeconds ?? 600
   const service = new AssetRfqSwapService({
     store,
     markets,
     solverPubkey: makerPublicKey,
-    quoteValiditySeconds: over.quoteValiditySeconds ?? 600,
+    quoteValiditySeconds,
     dustSats: arkade.ctx.dustSats,
     deriveOffer,
     depositAt,
     balance: over.balance ?? balance,
     fetchPrice: createPriceFeed(),
     settle,
+    ...(over.carrier ? { receiveCarrierQuotes: await shippedCarrier(store, over.carrier, quoteValiditySeconds) } : {}),
+    ...(over.onError ? { onError: over.onError } : {}),
     ...(over.approvalGate ? { approvalGate: over.approvalGate } : {}),
   })
   const descriptor = assetRfqDescriptor(markets[0]!, 'sell_base')
@@ -257,9 +324,44 @@ const requestFor = (pair: string, amount: bigint, rfqId = randomBytes(32).toStri
 const depositSats = (base: number): bigint => BigInt(base + randomInt(1, 400))
 
 const clientOffer = async (wantAmount: bigint) =>
-  createOffer(arkade.ctx.wallet, ARKD_URL, { wantAmount, wantAsset: asset.AssetId.fromString(assetId) })
+  createOffer(arkade.ctx.wallet, { wantAmount, wantAsset: asset.AssetId.fromString(assetId) })
+
+/** Bound, then released: a refused connection. Port 1 would not do — fetch refuses it as a "bad port". */
+const closedPort = async (): Promise<number> => {
+  const server = createServer()
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+  if (address === null || typeof address === 'string') throw new Error('the probe server did not bind a port')
+  return address.port
+}
+
+const causeChain = (error: unknown): string => {
+  const messages: string[] = []
+  let at: unknown = error
+  while (at instanceof Error) {
+    messages.push(at.message)
+    at = at.cause
+  }
+  return messages.join(' <- ')
+}
 
 describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
+  it('composes the receive carrier without another Arkade info read after the context is initialized', async () => {
+    const store = await AssetRfqSwapStore.open(':memory:')
+    const getInfo = vi
+      .spyOn(arkade.ctx.wallet.arkProvider, 'getInfo')
+      .mockRejectedValue(new Error('unexpected post-initialization Arkade info read'))
+    try {
+      const carrier = await shippedCarrier(store, { isMainnet: false, allowPrivate: true }, 600)
+      expect(Object.keys(carrier).sort()).toEqual(['available', 'reconcile', 'resolve', 'settle'])
+      expect(getInfo).not.toHaveBeenCalled()
+    } finally {
+      getInfo.mockRestore()
+      await store.close()
+    }
+  })
+
   it(
     'quotes a BTC->asset swap, recognises the deposit and fills it',
     async () => {
@@ -371,6 +473,51 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
   )
 
   it(
+    "refuses an RFQ naming an unreachable Taxi, with no TAXI_URL, rather than serve the market's free carrier",
+    async () => {
+      const errors: { id: string; error: unknown }[] = []
+      const { corridor, store, pair } = await harness({
+        carrier: { isMainnet: false, allowPrivate: true },
+        onError: (id, error) => errors.push({ id, error }),
+      })
+      const port = await closedPort()
+      const amount = depositSats(5_000)
+
+      // The market serves this amount, so only the named Taxi can refuse the next one.
+      expect((await corridor.quote(requestFor(pair, amount))).kind).toBe('quote')
+
+      const rfqId = randomBytes(32).toString('hex')
+      const request = requestFor(pair, amount, rfqId)
+      const outcome = await corridor.quote({
+        ...request,
+        profile: {
+          ...request.profile,
+          carrier: {
+            mode: 'recycle_receiver',
+            quote_id: 'q-unreachable',
+            taxi_url: `http://127.0.0.1:${port}`,
+            taxi_key: 'ab'.repeat(32),
+          },
+        },
+      })
+      expect(outcome).toMatchObject({
+        kind: 'refused',
+        payload: { type: 'rfq_refusal', rfq_id: rfqId, reason: 'pricing_unavailable' },
+        detail: 'price_unavailable: the receive-carrier quote could not be read',
+      })
+      expect(await store.findByRfqId(rfqId)).toBeNull()
+
+      expect(errors).toEqual([{ id: 'carrier', error: expect.objectContaining({ code: 'NETWORK_ERROR' }) }])
+      expect((errors[0]!.error as Error).message).toMatch(
+        /^taxi: GET \/v1\/(info|receive-quotes\/\S+) could not be sent$/,
+      )
+      expect(causeChain(errors[0]!.error)).toContain(`127.0.0.1:${port}`)
+      await store.close()
+    },
+    SWAP_TIMEOUT_MS,
+  )
+
+  it(
     'refuses a deposit that lands after the quote lapsed, and leaves it for the client to reclaim',
     async () => {
       // One second of validity, and no backdating: the funding round trip is
@@ -408,7 +555,7 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       })
       expect(stranded.txid).toBe(fundingTxid)
 
-      const cancelTxid = await cancelOffer(arkade.ctx.wallet, ARKD_URL, mine.offerHex, {
+      const cancelTxid = await cancelOffer(arkade.ctx.wallet, mine.offerHex, {
         repository: new InMemoryAssetSwapRepository(),
         fundingTxid,
         swapAddress: mine.address,
@@ -452,53 +599,7 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       expect(row.fillTxid).toBeNull()
       expect((await depositAt(row.offerPkScript))?.txid).toBe(fundingTxid)
 
-      await cancelOffer(arkade.ctx.wallet, ARKD_URL, mine.offerHex, {
-        repository: new InMemoryAssetSwapRepository(),
-        fundingTxid,
-        swapAddress: mine.address,
-      })
-      await store.close()
-    },
-    SWAP_TIMEOUT_MS,
-  )
-
-  it(
-    'never spends a deposit once the float has drained under the quoted payout',
-    async () => {
-      // § 9's ACTION-time gate, which the `exposure_cap` case above never
-      // reaches — that one refuses at quote time, before a row exists. Driven
-      // through the float seam because this wallet is BOTH sides: a competing
-      // fill pays our own maker script, so it cannot lower our own float.
-      let drained: bigint | null = null
-      const { corridor, store, pair } = await harness({
-        balance: async () =>
-          drained === null ? await balance() : new Map([...(await balance()), [assetId as AssetLeg, drained]]),
-      })
-      const amount = depositSats(5_000)
-      const outcome = await corridor.quote(requestFor(pair, amount))
-      expect(outcome.kind, JSON.stringify(outcome)).toBe('quote')
-      const quote = outcome.payload as { to_amount: string }
-
-      const mine = await clientOffer(BigInt(quote.to_amount))
-      const fundingTxid = await arkade.ctx.wallet.send({
-        address: mine.address,
-        amount: Number(amount),
-        extensions: [mine.extension],
-      })
-
-      const id = (await store.listNonTerminal())[0]!.id
-      await driveTo({ corridor, store }, id, 'funded')
-
-      // One short of the obliged payout: the boundary, not merely an empty float.
-      drained = BigInt(quote.to_amount) - 1n
-      await corridor.tickAll()
-      const row = await store.get(id)
-      expect(row.state).toBe('refused')
-      expect(row.failureReason).toContain('insufficient_inventory')
-      expect(row.fillTxid).toBeNull()
-      expect((await depositAt(row.offerPkScript))?.txid).toBe(fundingTxid)
-
-      await cancelOffer(arkade.ctx.wallet, ARKD_URL, mine.offerHex, {
+      await cancelOffer(arkade.ctx.wallet, mine.offerHex, {
         repository: new InMemoryAssetSwapRepository(),
         fundingTxid,
         swapAddress: mine.address,

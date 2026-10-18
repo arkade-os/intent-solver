@@ -28,6 +28,8 @@
  */
 
 import { hex } from '@scure/base'
+import type { SettleParams } from '@arkade-os/sdk'
+import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import {
   canRecoverOnchain,
   canSpendOffchain,
@@ -53,7 +55,31 @@ import { poolTarget } from '@arkade-os/solver-arkade/arkade/vtxoPool.js'
 import { pinInputs, poolPlan, resplitFloat } from './pool.js'
 import { summariseSignerMigration } from '@arkade-os/solver-arkade/arkade/signerMigration.js'
 import { planBoardingSettle } from '@arkade-os/solver-arkade/arkade/boardingSettle.js'
+
 import type { Services } from './services.js'
+
+export const settleReservedRenewal = async (arkade: ArkadeContext, params: SettleParams): Promise<string> => {
+  const reserved = arkade.reservations.reserved()
+  if (params.inputs.some((coin) => reserved.has(`${coin.txid}:${coin.vout}`))) {
+    throw new Error('renewal input is reserved by another operation')
+  }
+  const release = arkade.reservations.reserve(params.inputs)
+  let preparing = false
+  let registrationAttempted = false
+  try {
+    const txid = await arkade.wallet.settle(params, undefined, {
+      onPhase: (phase) => {
+        if (phase === 'preparing') preparing = true
+        if (phase === 'registration_attempt') registrationAttempted = true
+      },
+    })
+    release()
+    return txid
+  } catch (error) {
+    if (preparing && !registrationAttempted) release()
+    throw error
+  }
+}
 
 /**
  * Every registered lockup's refund deadline, for the recovery guard.
@@ -246,8 +272,8 @@ const floatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> 
           return { intentFee: info.fees.intentFee, vtxoMaxAmount: info.vtxoMaxAmount, dust: info.dust }
         },
         expiringVtxos: async () => {
-          const reserved = services.arkade.reservations.reserved()
           const expiring = await vtxoManager.getExpiringVtxos(RENEWAL_THRESHOLD_MS)
+          const reserved = services.arkade.reservations.reserved()
           return expiring.filter((vtxo) => !reserved.has(`${vtxo.txid}:${vtxo.vout}`))
         },
         destination: () => wallet.getAddress(),

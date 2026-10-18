@@ -177,6 +177,22 @@ exact boundaries. The orchestrator holds the one rule that matters
 operationally: **the row is the truth**; every step commits intent before the
 irreversible side effect and is safe to re-run from any crash.
 
+### Freezing carrier packages
+
+The maintainer command accepts a verified SDK bundle containing `manifest.json`
+and its pinned SDK/swap archives:
+
+```
+node scripts/carrier-artifacts/pack.mjs --sdk <clean-sdk-checkout> --taxi <clean-taxi-checkout> --sdk-bundle <verified-sdk-bundle>
+```
+
+Both checkouts must be clean and match the source pins. Omitting `--sdk-bundle`
+uses the Taxi checkout's vendor manifest. Source, digest, size and installed-export
+checks still apply. This command also rebuilds the three Taxi libraries; an SDK-only
+refresh instead copies the canonical SDK pair and retains the existing Taxi bytes.
+Run `pnpm install` and `node scripts/carrier-artifacts/verify.mjs --installed`
+after updating the pins, manifest and package overrides together.
+
 ## Running it
 
 - **Node 22 or 24** (`engines.node` is `>=22.6.0 <27`). Both ends are exercised
@@ -408,6 +424,8 @@ the emitted fields.
 | `RELAY_HEALTH_PATH`                           | `.data/relay-health` (`/data/relay-health` in the image) | `relay` touches this mtime every 10s while the socket is up; the image's `HEALTHCHECK` reads exactly this path                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `NOSTR_AD_PUBLISH`                            | `off`                                                    | whether this solver publishes its signed card on Nostr (kind 38859, `d` = network, `docs/rfq-protocol.md` § 3). Only the `relay` command publishes, to `RELAY_URL`, and only with `SOLVER_NAME` set: `manual` when asked (console **post now**), then re-sends that same card every 30 min, so a changed card waits for the next **post now**; `auto` also on change and every 30 min while connected. Under `off` the console's **post now** action is REFUSED, not merely unused — a policy an action can override is advisory. Any other value throws                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `COVCLAIMD_URL`                               | none                                                     | base URL of the non-interactive claim daemon. Unset = receive legs claim nothing on a client's behalf (the client claims its own lockup); set = funded lockups are revealed to it so an offline client still gets paid. **On `bitcoin` this must be `https://`** unless the host is loopback, and `loadConfig` throws otherwise: suppressing the reveal strands an offline client's lockup until refund |
+| `TAXI_URL`                                    | none                                                     | base URL of the Taxi operator the asset-RFQ **receive-carrier** rail recycles a client's dust carrier through. Unset = a `recycle` quote is refused by name rather than priced; a Taxi the payer names itself (`recycle_receiver`) is quoted and settled either way. The ONLY knob the rail adds — the Arkade Service key, the emulator key, the dust split, the address prefix and the locktime domain all come from the context this process already trusts, so naming an operator here cannot widen what it may charge or which coins it may admit. **On `bitcoin` this must be `https://`** unless the host is loopback, and `loadConfig` throws otherwise. A block-typed deployment additionally needs `CHAIN_TIP_ESPLORA_URL` (or `LND_ESPLORA_URL`): the minimum input expiry this solver will accept is anchored on the tip, and startup refuses rather than accept an unanchored floor |
+| `TAXI_RECEIVER_ALLOW_PRIVATE`                 | `0`                                                      | `1` lifts the loopback/private-suffix refusal in the SSRF guard a **payer-named** Taxi URL is checked against (`ops/taxiUrlGuard.ts`) — the regtest stack's own knob. Startup refuses `1` on `bitcoin`. Never affects `TAXI_URL` above, which keeps its own, looser, config-time gate |
 | `SENTRY_DSN`                                  | none                                                     | crash reporting. **Unset (the default) builds no reporter and sends no packet.** Set it and a process-level panic, an unhandled rejection and an ingress FAULT are reported — a refusal never is. Only the exception type, a scrubbed message and a file/line stack leave the box: no config, no env, no locals, no source, no breadcrumbs. A malformed DSN throws at startup rather than reporting nowhere |
 | `SENTRY_ENVIRONMENT`                          | `SWAP_NETWORK`                                           | the environment tag on reported events                                                                                                                                                                                                                                                                                                                                                                 |
 | `SENTRY_RELEASE`                              | none                                                     | optional release tag, for grouping events by deployed version                                                                                                                                                                                                                                                                                                                                          |
@@ -1000,6 +1018,15 @@ accepts a preimage from a client. The provider only ever sees a preimage once
 it appears in a claim witness — after the Arkade side is already funded.
 
 ## Known limits
+
+Direct fills journal their selected funding and signed graph before contacting
+the emulator. Recovery runs even when the original market is disabled;
+`/api/diagnostics` reports unresolved attempts, held inputs and recovery errors.
+A lost reply retains those inputs until the original fill or a recorded
+conflicting self-spend is positively proven finalized. Ambiguous fills created
+before this journal still require operator resolution: their exact selected
+funding was never stored and cannot be inferred reliably. This change does not
+perform a production cutover or infer holds for those older rows.
 
 Stated in full in `docs/environment.md` § "Known trust assumptions and limits":
 no server-independent claim implemented yet (the leaf exists; the unroll flow

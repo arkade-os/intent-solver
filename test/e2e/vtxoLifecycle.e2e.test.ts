@@ -51,6 +51,8 @@ import {
   renewExpiringVtxos,
   runVtxoLifecycle,
 } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
+import { settleReservedRenewal } from '@arkade-os/solver-app/ops/float.js'
+import type { SettleParams } from '@arkade-os/sdk'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { requireStack } from './support/preflight.js'
 import { openArkade, SETUP_TIMEOUT_MS, SWAP_TIMEOUT_MS, type E2eArkade } from './support/stack.js'
@@ -73,7 +75,7 @@ const liveDeps = async (lockupDeadlines: () => Promise<readonly { script: string
         },
         expiringVtxos: () => vtxoManager.getExpiringVtxos(RENEWAL_THRESHOLD_MS),
         destination: () => arkade.ctx.wallet.getAddress(),
-        settle: (inputs, outputs) => arkade.ctx.wallet.settle({ inputs: [...inputs], outputs: [...outputs] }),
+        settle: (inputs, outputs) => settleReservedRenewal(arkade.ctx, { inputs: [...inputs], outputs: [...outputs] }),
         // Exercised deliberately: without a target the renewal takes the
         // one-output path and this suite would say nothing about the split that
         // is the whole point of the change. Small rungs so a regtest float can
@@ -97,6 +99,29 @@ describe('e2e vtxo lifecycle — the solver’s own float', () => {
   afterAll(() => {
     arkade?.close()
   })
+
+  it(
+    'releases renewal inputs rejected before intent registration without debiting the wallet',
+    async () => {
+      const inputs = await arkade.ctx.wallet.getVtxos({ withRecoverable: false, withUnrolled: false })
+      expect(inputs.length).toBeGreaterThan(0)
+      const balance = await arkade.ctx.wallet.getBalance()
+      await expect(
+        settleReservedRenewal(arkade.ctx, {
+          inputs,
+          outputs: [
+            {
+              address: 'invalid-renewal-destination',
+              amount: BigInt(inputs.reduce((sum, coin) => sum + coin.value, 0)),
+            },
+          ],
+        }),
+      ).rejects.toBeInstanceOf(Error)
+      expect(await arkade.ctx.wallet.getBalance()).toEqual(balance)
+      expect(arkade.ctx.reservations.reserved().size).toBe(0)
+    },
+    SWAP_TIMEOUT_MS,
+  )
 
   it(
     'contains a live renewal failure inside the report instead of throwing out of the pass',
@@ -229,9 +254,11 @@ describe('e2e vtxo lifecycle — the solver’s own float', () => {
       const spendable = async () => [
         ...(await arkade.ctx.wallet.getVtxos({ withRecoverable: false, withUnrolled: false })),
       ]
-      const before = new Set((await spendable()).map(outpoint))
+      const beforeCoins = await spendable()
+      const before = new Set(beforeCoins.map(outpoint))
 
       const asked: bigint[] = []
+      let renewal: SettleParams | undefined
       const settled = await renewExpiringVtxos({
         serverInfo: async () => {
           const info = await arkade.ctx.wallet.arkProvider.getInfo()
@@ -241,7 +268,8 @@ describe('e2e vtxo lifecycle — the solver’s own float', () => {
         destination: () => arkade.ctx.wallet.getAddress(),
         settle: (inputs, outputs) => {
           asked.push(...outputs.map((output) => output.amount))
-          return arkade.ctx.wallet.settle({ inputs: [...inputs], outputs: [...outputs] })
+          renewal = { inputs: [...inputs], outputs: [...outputs] }
+          return settleReservedRenewal(arkade.ctx, renewal)
         },
         poolTarget: target,
         nowMs: () => Date.now() + A_YEAR_MS,
@@ -263,6 +291,22 @@ describe('e2e vtxo lifecycle — the solver’s own float', () => {
       // One settlement, so one transaction: several outputs of the same batch
       // rather than several batches that each produced one.
       expect(new Set(landed.map((vtxo) => vtxo.txid)).size).toBe(1)
+      expect(arkade.ctx.reservations.reserved().size).toBe(0)
+      expect(renewal).toBeDefined()
+      expect((await spendable()).reduce((sum, coin) => sum + coin.value, 0)).toBe(
+        beforeCoins.reduce((sum, coin) => sum + coin.value, 0) -
+          renewal!.inputs.reduce((sum, coin) => sum + coin.value, 0) +
+          Number(asked.reduce((sum, amount) => sum + amount, 0n)),
+      )
+      const { vtxos: spent } = await arkade.ctx.wallet.indexerProvider.getVtxos({ outpoints: renewal!.inputs })
+      expect(spent).toHaveLength(renewal!.inputs.length)
+      expect(spent.every((coin) => coin.isSpent)).toBe(true)
+      const balance = await arkade.ctx.wallet.getBalance()
+      await expect(settleReservedRenewal(arkade.ctx, renewal!)).rejects.toBeInstanceOf(Error)
+      expect(await arkade.ctx.wallet.getBalance()).toEqual(balance)
+      expect(arkade.ctx.reservations.reserved()).toEqual(
+        new Set(renewal!.inputs.map((coin) => `${coin.txid}:${coin.vout}`)),
+      )
     },
     SWAP_TIMEOUT_MS,
   )

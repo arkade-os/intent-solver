@@ -7,7 +7,7 @@
   "type": "module",
   "packageManager": "pnpm@10.25.0",
   "engines": {
-    "node": ">=22.6.0 <27",
+    "node": ">=22.13.0 <27",
     "pnpm": ">=10"
   },
   "scripts": {
@@ -21,16 +21,18 @@
     "test:watch": "vitest",
     "format": "prettier --write test packages",
     "format:check": "prettier --check test packages",
-    "test:perf": "vitest run --config vitest.perf.config.ts"
+    "test:perf": "vitest run --config vitest.perf.config.ts",
+    "verify:artifacts": "node scripts/carrier-artifacts/verify.mjs"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.4.77",
+    "@arkade-os/sdk": "0.5.0-rc.22",
+    "@arkade-os/swap": "0.1.0-rc.25",
     "@hono/node-server": "^2.1.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
     "@scure/bip39": "^2.2.0",
-    "@scure/btc-signer": "^2.0.1",
+    "@scure/btc-signer": "2.4.1",
     "@arkade-os/solver-arkade": "workspace:*",
     "@arkade-os/solver-core": "workspace:*",
     "@arkade-os/solver-corridors": "workspace:*",
@@ -42,14 +44,15 @@
     "@arkade-os/solver-rails-fake": "workspace:*",
     "@arkade-os/solver-rails-lnd": "workspace:*",
     "@arkade-os/solver-transport": "workspace:*",
+    "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.0.0-f27ae4b6.tgz",
     "better-sqlite3": "^12.11.1",
     "hono": "^4.13.0",
     "light-bolt11-decoder": "^3.2.0",
     "lightning": "^12.2.3",
-    "nostr-tools": "^2.24.1"
+    "nostr-tools": "^2.24.1",
+    "undici": "7.29.1"
   },
   "devDependencies": {
-    "@arkade-os/swap": "0.0.23",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^24.13.3",
     "@types/ws": "^8.18.1",
@@ -66,6 +69,13 @@
       "esbuild",
       "protobufjs",
       "@foundry-rs/anvil"
-    ]
+    ],
+    "overrides": {
+      "@arkade-os/sdk": "file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.5.0-rc.22-3c369d3a.tgz",
+      "@arkade-os/swap": "file:packages/solver-app/vendor/carrier/arkade-os-swap-0.1.0-rc.25-3c369d3a.tgz",
+      "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.0.0-f27ae4b6.tgz",
+      "@arkade-taxi/covenant": "file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-0.0.0-f27ae4b6.tgz",
+      "@arkade-taxi/protocol": "file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-0.0.0-f27ae4b6.tgz"
+    }
   }
 }

@@ -13,7 +13,7 @@
 import { describe, it, expect } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { asset } from '@arkade-os/sdk'
-import { offerVtxoScript } from '@arkade-os/swap'
+import { offerContract } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import {
   offerExitDelay,
@@ -46,7 +46,7 @@ const derive = offerScriptFrom(derivation)
 
 describe('offerScriptFrom', () => {
   it('compiles the same covenant the SDK does from the equivalent offer', () => {
-    const direct = offerVtxoScript(
+    const direct = offerContract(
       {
         wantAmount: 1_000n,
         wantAsset: asset.AssetId.fromString(USDA),
