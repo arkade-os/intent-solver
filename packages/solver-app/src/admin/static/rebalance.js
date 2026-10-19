@@ -59,10 +59,14 @@ export class RebalancePanel {
     if (!this.loaded) void this.refresh()
     const field = (label, object, key, type = 'text') =>
       h(
-        'label',
+        'label.wallet-field',
         label,
         h('input', {
           type,
+          inputmode:
+            type === 'text' && key !== 'solverPubkey' && key !== 'confirm' && key !== 'policyConfirm'
+              ? 'numeric'
+              : undefined,
           value: object[key] ?? '',
           disabled: this.busy,
           oninput: (e) => {
@@ -73,32 +77,44 @@ export class RebalancePanel {
       )
     const button = (label, action) => h('button.act', { disabled: this.busy, onclick: action }, label)
     const children = [
-      h('h2', 'rebalance backend liquidity'),
+      h(
+        'div.wallet-section-heading',
+        h('h2', 'Rebalance liquidity'),
+        button('Refresh', () => this.refresh()),
+      ),
       h(
         'p.muted',
         'Arkade funds replenish configured pools. Minimum credit and maximum source debit are checked before sending.',
       ),
-      button('refresh rebalancing', () => this.refresh()),
     ]
-    if (this.error) children.push(h('p.banner', this.error))
+    if (this.error) children.push(h('p.banner', { role: 'alert' }, this.error))
     if (!this.data)
-      return h('section.panel', children, h('p.muted', this.loaded ? 'Rebalancing unavailable.' : 'loading…'))
+      return h(
+        'section.wallet-section',
+        children,
+        h('p.muted', this.error ? 'Rebalancing unavailable. Refresh to retry.' : 'Loading liquidity…'),
+      )
     const pools = this.data.pools
     children.push(
       h(
-        'ul',
+        'div.wallet-pools',
         pools.map((p) =>
           h(
-            'li',
-            `${p.label}: ${p.balanceSats === null ? 'unreadable' : `${p.balanceSats} sat`} (${p.kinds.join(', ')})`,
-            p.error ? ` — ${p.error}` : '',
+            'div.wallet-pool',
+            h('span', p.label),
+            h(
+              'strong.wallet-number',
+              p.balanceSats === null ? 'Unavailable' : `${Number(p.balanceSats).toLocaleString('en-US')} sat`,
+            ),
+            h('span.muted', `Routes: ${p.kinds.join(', ')}`),
+            p.error ? h('p.banner', p.error) : null,
           ),
         ),
       ),
     )
     const select = (label, key, options) =>
       h(
-        'label',
+        'label.wallet-field',
         label,
         h(
           'select',
@@ -113,18 +129,29 @@ export class RebalancePanel {
         ),
       )
     children.push(
-      select(
-        'destination pool',
-        'poolId',
-        pools.map((p) => [p.id, p.label]),
+      h(
+        'div.wallet-manual',
+        h('h3', 'Move Arkade funds'),
+        h('p.muted', 'Choose a destination and amount, then review the quote before sending.'),
+        h(
+          'div.wallet-form-grid',
+          select(
+            'Destination pool',
+            'poolId',
+            pools.map((p) => [p.id, p.label]),
+          ),
+          select('Deposit route', 'kind', [
+            ['', 'Automatic · lowest bounded cost'],
+            ['onchain', 'Onchain'],
+            ['lightning', 'Lightning'],
+          ]),
+          field('Minimum credit (sat)', this.draft, 'amount'),
+        ),
+        h(
+          'div.wallet-actions',
+          button('Review quote', () => this.act('quote', this.quoteBody())),
+        ),
       ),
-      select('deposit route', 'kind', [
-        ['', 'auto (lowest bounded cost)'],
-        ['onchain', 'onchain'],
-        ['lightning', 'lightning'],
-      ]),
-      field('minimum credit (sat)', this.draft, 'amount'),
-      button('prepare quote', () => this.act('quote', this.quoteBody())),
     )
     const transfers = this.data.transfers
     const quote = transfers.find((t) => t.id === this.quote?.id) ?? this.quote
@@ -137,30 +164,41 @@ export class RebalancePanel {
       )
       if (quote.state === 'quoted')
         children.push(
-          field('type quote ID to send', this.draft, 'confirm'),
-          button('send confirmed quote', () => this.act('submit', { id: quote.id, confirm: this.draft.confirm })),
+          h(
+            'div.wallet-confirm',
+            field('Type quote ID to send', this.draft, 'confirm'),
+            button('Send confirmed quote', () => this.act('submit', { id: quote.id, confirm: this.draft.confirm })),
+          ),
         )
     }
     children.push(
-      h('h3', 'transfer history'),
-      transfers.map((t) =>
-        h(
-          'div',
-          h(
-            'p',
-            `${t.id}: ${t.state}; minimum ${t.netSats} sat; debit ${t.debitSats} sat${t.creditedSats === undefined ? '' : `; credited ${t.creditedSats} sat`}${t.error ? ` — ${t.error}` : ''}`,
-          ),
-          t.state === 'quoted'
-            ? button('cancel unsubmitted quote', () => this.act('cancel', { id: t.id, confirm: t.id }))
-            : null,
-        ),
+      h(
+        'div.wallet-history',
+        h('h3', 'Transfer history'),
+        transfers.length === 0
+          ? h('p.wallet-empty', 'No transfers yet. Review a quote to start a transfer.')
+          : transfers.map((t) =>
+              h(
+                'div.wallet-transfer',
+                h(
+                  'p',
+                  `${t.id}: ${t.state}; minimum ${t.netSats} sat; debit ${t.debitSats} sat${t.creditedSats === undefined ? '' : `; credited ${t.creditedSats} sat`}${t.error ? ` — ${t.error}` : ''}`,
+                ),
+                t.state === 'quoted'
+                  ? button('cancel unsubmitted quote', () => this.act('cancel', { id: t.id, confirm: t.id }))
+                  : null,
+              ),
+            ),
       ),
     )
     const policy = this.policy
-    children.push(
-      h('h3', 'automatic policy'),
+    const policyChildren = [
       h(
-        'label',
+        'p.muted',
+        'Refill pools when they fall below your minimum. Saving these settings also sets the spending limits for manual transfers.',
+      ),
+      h(
+        'label.wallet-toggle',
         h('input', {
           type: 'checkbox',
           checked: policy.enabled,
@@ -169,50 +207,89 @@ export class RebalancePanel {
             policy.enabled = e.target.checked
           },
         }),
-        'enable automatic rebalancing',
+        'Enable automatic rebalancing',
       ),
-    )
+    ]
+    const limits = []
     for (const [key, label] of Object.entries({
       reserveSats: 'Arkade reserve (sat)',
-      maxDebitSats: 'maximum debit per transfer (sat)',
-      dailyDebitSats: 'maximum debit per 24 hours (sat)',
-      maxFeeSats: 'maximum fees (sat)',
-      maxFeeBps: 'maximum fees (basis points)',
-      minTransferSats: 'minimum transfer (sat)',
-      cooldownSeconds: 'cooldown (seconds)',
+      maxDebitSats: 'Maximum debit per transfer (sat)',
+      dailyDebitSats: 'Maximum debit per 24 hours (sat)',
+      maxFeeSats: 'Maximum fees (sat)',
+      maxFeeBps: 'Maximum fees (basis points)',
+      minTransferSats: 'Minimum transfer (sat)',
+      cooldownSeconds: 'Cooldown (seconds)',
     }))
-      children.push(field(label, policy, key))
+      limits.push(field(label, policy, key))
+    policyChildren.push(
+      h('fieldset.wallet-fieldset', h('legend', 'Spending limits'), h('div.wallet-form-grid', limits)),
+    )
     for (const pool of pools) {
       policy.targets[pool.id] ??= { minimumSats: '', targetSats: '' }
-      children.push(
-        h('h4', pool.label),
-        field('minimum trigger (sat)', policy.targets[pool.id], 'minimumSats'),
-        field('refill target (sat)', policy.targets[pool.id], 'targetSats'),
+      policyChildren.push(
+        h(
+          'fieldset.wallet-fieldset',
+          h('legend', pool.label),
+          h(
+            'div.wallet-form-grid',
+            field('Refill below (sat)', policy.targets[pool.id], 'minimumSats'),
+            field('Refill to (sat)', policy.targets[pool.id], 'targetSats'),
+          ),
+        ),
       )
     }
     policy.counterparty ??= { solverPubkey: '', relays: [] }
-    children.push(
-      field('external solver public key', policy.counterparty, 'solverPubkey'),
+    policyChildren.push(
       h(
-        'label',
-        'relay URLs (one per line)',
+        'fieldset.wallet-fieldset',
+        h('legend', 'External Lightning counterparty'),
+        h('p.muted', 'Required for Lightning refills through an external solver.'),
         h(
-          'textarea',
-          {
-            disabled: this.busy,
-            oninput: (e) => {
-              policy.counterparty.relays = e.target.value.split(/\s+/).filter(Boolean)
-            },
-          },
-          policy.counterparty.relays.join('\n'),
+          'div.wallet-form-grid',
+          field('Solver public key', policy.counterparty, 'solverPubkey'),
+          h(
+            'label.wallet-field',
+            'Relay URLs (one per line)',
+            h(
+              'textarea',
+              {
+                disabled: this.busy,
+                rows: 3,
+                oninput: (e) => {
+                  policy.counterparty.relays = e.target.value.split(/\s+/).filter(Boolean)
+                },
+              },
+              policy.counterparty.relays.join('\n'),
+            ),
+          ),
         ),
       ),
-      field('type REBALANCE to save any policy change', this.draft, 'policyConfirm'),
-      button('save confirmed policy', () => this.savePolicy()),
+      h(
+        'div.wallet-confirm',
+        field('Type REBALANCE to save changes', this.draft, 'policyConfirm'),
+        button('Save policy', () => this.savePolicy()),
+      ),
+    )
+    children.push(
+      h(
+        'details.wallet-policy',
+        {
+          open: this.policyOpen ?? policy.enabled,
+          ontoggle: (e) => {
+            this.policyOpen = e.target.open
+          },
+        },
+        h(
+          'summary',
+          'Automatic rebalancing & limits',
+          h('span.phase', this.data.policy.enabled ? 'Enabled' : 'Disabled'),
+        ),
+        h('div.wallet-policy-body', policyChildren),
+      ),
     )
     if (this.data.lastEvaluation)
       children.push(h('p.muted', `Last automatic evaluation: ${this.data.lastEvaluation.reason}`))
-    return h('section.panel', children)
+    return h('section.wallet-section', children)
   }
 
   savePolicy() {

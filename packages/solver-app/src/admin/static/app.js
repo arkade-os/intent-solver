@@ -1182,8 +1182,12 @@ const fundsPanel = () => {
     return h('section.panel', h('h2', 'funding'), h('p.muted', 'loading…'))
   }
   return h(
-    'div',
-    h('h2.sans', 'funding'),
+    'section.wallet-section',
+    h(
+      'div.wallet-section-heading',
+      h('h2', 'Deposits & withdrawals'),
+      actButton('button.act', { 'data-action': 'fund-balance', onclick: () => loadFunds() }, 'Refresh balances'),
+    ),
     // The honest headline, and the reason no button here is called "fund
     // lightning". Neither the Lightning port nor the onchain one has a channel
     // primitive, so a deposit lands in a wallet and becomes channel liquidity
@@ -1197,10 +1201,6 @@ const fundsPanel = () => {
     h(
       'div.panels',
       f.sources.map((source) => fundSourcePanel(source, f.balances[source.id])),
-    ),
-    h(
-      'div.toolbar',
-      actButton('button.act', { 'data-action': 'fund-balance', onclick: () => loadFunds() }, 're-read balances'),
     ),
   )
 }
@@ -1216,82 +1216,116 @@ const walletView = () => {
   if (!w) return h('p.muted', 'loading…')
   const pool = w.arkade.pool
   return h(
-    'div',
+    'div.wallet-page',
     h(
-      'div.panels',
+      'header.wallet-heading',
+      h('div', h('h1', 'Wallet'), h('p.muted', 'Manage balances, move funds and keep liquidity ready.')),
+    ),
+    h(
+      'div.panels.wallet-balances',
       h(
         'section.panel',
-        h('h2', 'arkade'),
+        h('h2', 'Arkade'),
         h(
-          'dl.kv',
-          h('dt', 'address'),
-          h('dd.faint', w.arkade.addressError ? h('span.muted', w.arkade.addressError) : (w.arkade.address ?? '—')),
-          h('dt', 'balance'),
-          h('dd', w.arkade.balanceError ? h('span.muted', w.arkade.balanceError) : balanceRows(w.arkade.balance)),
-          /* assets: begin */
-          ...(w.arkade.balanceError ? [] : assetRowsPair(w.arkade.balance)),
-          /* assets: end */
+          'p.wallet-number',
+          w.arkade.balanceError ? 'Unavailable' : sats(w.arkade.balance?.available),
+          w.arkade.balanceError ? null : h('span', ' sat available'),
+        ),
+        h(
+          'details.wallet-balance-more',
+          {
+            open: state.walletDetailsOpen,
+            ontoggle: (e) => {
+              state.walletDetailsOpen = e.target.open
+            },
+          },
+          h('summary', 'Balance details & address'),
+          h(
+            'dl.kv',
+            h('dt', 'Address'),
+            h('dd.faint', w.arkade.addressError ? h('span.muted', w.arkade.addressError) : (w.arkade.address ?? '—')),
+            h('dt', 'Balance details'),
+            h(
+              'dd.wallet-balance-details',
+              w.arkade.balanceError ? h('span.muted', w.arkade.balanceError) : balanceRows(w.arkade.balance),
+            ),
+            /* assets: begin */
+            ...(w.arkade.balanceError ? [] : assetRowsPair(w.arkade.balance)),
+            /* assets: end */
+          ),
         ),
       ),
       h(
         'section.panel',
-        h('h2', 'lightning'),
+        h('h2', 'Lightning'),
+        h(
+          'p.wallet-number',
+          w.lightning.error ? 'Unavailable' : sats(w.lightning.balance?.availableSats),
+          w.lightning.error ? null : h('span', ' sat available'),
+        ),
+        w.lightning.error ? h('p.banner', w.lightning.error) : null,
         h(
           'dl.kv',
-          h('dt', 'available'),
-          h('dd', w.lightning.error ? h('span.muted', w.lightning.error) : sats(w.lightning.balance?.availableSats)),
-          h('dt', 'incoming'),
+          h('dt', 'Incoming (sat)'),
           h('dd', w.lightning.error ? h('span.muted', '—') : sats(w.lightning.balance?.incomingSats)),
         ),
       ),
       h(
         'section.panel',
-        h('h2', 'onchain'),
+        h('h2', 'Onchain'),
         h(
-          'dl.kv',
-          h('dt', 'fee rate'),
-          h('dd', w.onchain.error ? h('span.muted', w.onchain.error) : `${w.onchain.feeRate} sat/vB`),
+          'p.wallet-number',
+          w.onchain.error ? 'Unavailable' : w.onchain.feeRate,
+          w.onchain.error ? null : h('span', ' sat/vB'),
         ),
+        h('p.muted', w.onchain.error ?? 'Estimated network fee'),
       ),
     ),
     /* fund sources: the one call into the block above. */
     fundsPanel(),
     rebalancePanel.render(h),
-    h('h2.sans', 'vtxo pool'),
-    // The number that actually constrains throughput: funding pins the coins it
-    // spends, so one fat coin funds one swap and refuses the next however large.
-    h('p.notice', 'How many swaps this float can fund AT ONCE — not how many sats it holds.'),
-    w.arkade.poolError
-      ? h('p.banner', w.arkade.poolError)
-      : pool
-        ? h(
-            'div',
-            h('p', `${pool.pieces.length} piece(s): `, h('span.faint', pool.pieces.slice(0, 16).map(sats).join('  '))),
-            h('p.muted', pool.plan.reason),
-            /* assets: begin — why the pieces above add up to less than the balance */
-            pool.assetEncumberedSats
-              ? h(
-                  'p.muted',
-                  `${sats(pool.assetEncumberedSats)} sat across ${pool.assetBearingPieces} piece(s) cannot fund a swap: ` +
-                    'those sats are carrying an asset, and an asset has to ride on sats.',
-                )
-              : null,
-            /* assets: end */
-            h(
-              'div.toolbar',
-              actButton(
-                'button.act',
-                { 'data-action': 'pool-plan', onclick: () => runAction('pool-plan', {}) },
-                're-plan (read-only)',
+    h(
+      'section.wallet-section',
+      h('h2', 'VTXO pool'),
+      // The number that actually constrains throughput: funding pins the coins it
+      // spends, so one fat coin funds one swap and refuses the next however large.
+      h('p.muted', 'Each available piece can fund a concurrent swap. Reshaping changes how the balance is split.'),
+      w.arkade.poolError
+        ? h('p.banner', w.arkade.poolError)
+        : pool
+          ? h(
+              'div',
+              h(
+                'p',
+                `${pool.pieces.length} piece(s): `,
+                h('span.faint', pool.pieces.slice(0, 16).map(sats).join('  ')),
               ),
-              actButton(
-                'button.act.armed',
-                { 'data-action': 'pool-mint', onclick: () => armDialog('pool-mint', {}) },
-                'reshape pool…',
+              h('p.muted', pool.plan.reason),
+              /* assets: begin — why the pieces above add up to less than the balance */
+              pool.assetEncumberedSats
+                ? h(
+                    'p.muted',
+                    `${sats(pool.assetEncumberedSats)} sat across ${pool.assetBearingPieces} piece(s) cannot fund a swap: ` +
+                      'those sats are carrying an asset, and an asset has to ride on sats.',
+                  )
+                : null,
+              /* assets: end */
+              h(
+                'div.toolbar',
+                actButton(
+                  'button.act',
+                  { 'data-action': 'pool-plan', onclick: () => runAction('pool-plan', {}) },
+                  're-plan (read-only)',
+                ),
+                actButton(
+                  'button.act.armed',
+                  { 'data-action': 'pool-mint', onclick: () => armDialog('pool-mint', {}) },
+                  'reshape pool…',
+                ),
               ),
-            ),
-          )
-        : h('p.muted', '—'),
+            )
+          : h('p.muted', '—'),
+    ),
   )
 }
 
