@@ -28,6 +28,7 @@ import {
 } from './receiver.js'
 import type { DurableEvmSender } from './durableSender.js'
 import { decodeSignedTransaction } from './transaction.js'
+import { readTimelockClock } from './timelockClock.js'
 import { verifyEvmClaimEvidence } from './claimEvidence.js'
 
 type Header = { number: string; hash: string; timestamp: string }
@@ -63,6 +64,8 @@ export interface ReceiverInspection {
   binding: IntentReceiverBinding
   observedBlock: bigint
   currentBlock: bigint
+  /** `block.number` at `currentBlock`: the clock activation cutoffs and the HTLC timelock are in. */
+  currentClock: bigint
   observedBlockHash: string
   currentBlockHash: string
   observedTimestamp: bigint
@@ -228,6 +231,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
     )
     const activated = deployed && bool(await read(receiverAddress, 'activated()', [], tag))
     const htlcPresent = bool(await read(binding.swapContract, 'swaps(bytes32)', [swapKey(binding.lock)], tag))
+    const currentClock = await readTimelockClock(rpc, current.number)
     const invalidExactLock = htlcPresent && (!activated || swapTokenBalance < binding.lock.amount)
     await stable(observed)
     await stable(current)
@@ -238,6 +242,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
       binding,
       observedBlock: target,
       currentBlock: tip,
+      currentClock,
       observedBlockHash: observed.hash,
       currentBlockHash: current.hash,
       observedTimestamp: quantity(observed.timestamp),
@@ -327,7 +332,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
       const observation = await inspect(address, binding, policy)
       if (
         !observation.activated &&
-        (observation.currentBlock >= binding.activationCutoff ||
+        (observation.currentClock >= binding.activationCutoff ||
           observation.currentTimestamp >= binding.activationCutoffTimestamp ||
           BigInt(finality.nowSeconds()) >= binding.activationCutoffTimestamp ||
           observation.tokenBalance < binding.lock.amount)
@@ -345,7 +350,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
       const observation = await inspect(address, binding, policy)
       if (
         observation.activated ||
-        observation.currentBlock >= binding.activationCutoff ||
+        observation.currentClock >= binding.activationCutoff ||
         observation.currentTimestamp >= binding.activationCutoffTimestamp ||
         BigInt(finality.nowSeconds()) >= binding.activationCutoffTimestamp ||
         observation.tokenBalance < binding.lock.amount
@@ -363,7 +368,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
       const signed = decodeSignedTransaction(hexToBytes(current.rawTransaction.slice(2))).fields
       const [latest, networkTip] = await Promise.all([header('latest'), rpc('eth_maxPriorityFeePerGas', [])])
       if (
-        quantity(latest.number) >= binding.activationCutoff ||
+        (await readTimelockClock(rpc, latest.number)) >= binding.activationCutoff ||
         quantity(latest.timestamp) >= binding.activationCutoffTimestamp ||
         BigInt(finality.nowSeconds()) >= binding.activationCutoffTimestamp
       )
@@ -389,7 +394,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
     ) {
       const observation = await inspect(address, binding, policy)
       if (
-        observation.currentBlock < binding.activationCutoff &&
+        observation.currentClock < binding.activationCutoff &&
         observation.currentTimestamp < binding.activationCutoffTimestamp
       )
         throw new Error('original activation is not guaranteed expired on chain')
@@ -405,7 +410,8 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
     async refund(id: string, binding: IntentReceiverBinding) {
       if (binding.chainId !== deps.chainId) throw new Error('receiver binding chain mismatch')
       const observed = await view()
-      if (observed.target < binding.lock.timelock) throw new Error('destination refund not mature')
+      if ((await readTimelockClock(rpc, observed.target)) < binding.lock.timelock)
+        throw new Error('destination refund not mature')
       await allowed(binding.swapContract, deps.allowedSwapCodeHashes, observed.tag)
       return deps.transactions.submit(id, { to: binding.swapContract, data: encodeRefundFor(binding.lock) })
     },

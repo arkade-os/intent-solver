@@ -7,6 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { asTimelockHeight } from '@arkade-os/solver-core/ports/evm.js'
 import { planEvmSend, type EvmSendObservation } from '@arkade-os/solver-core/core/evmSendPlan.js'
 import type { EvmSendSwapRow } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import type { EvmSendSwapState } from '@arkade-os/solver-core/core/evmSwapState.js'
@@ -39,7 +40,7 @@ const seen = (over: Partial<EvmSendObservation> = {}): EvmSendObservation => ({
   evmLockAgeSeconds: 0,
   preimage: null,
   nowSeconds: NOW,
-  evmBlockHeight: EVM_TIMEOUT - 1,
+  evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT - 1),
   ...over,
 })
 
@@ -103,12 +104,18 @@ describe('rule 2 - never claim the Arkade lockup past the refund locktime', () =
 
 describe('rule 3 - refund the ERC20 only at or after evm_timeout', () => {
   it('waits below the timeout, because the contract would reject it', () => {
-    const action = planEvmSend(row({ state: 'awaiting_claim' }), seen({ evmBlockHeight: EVM_TIMEOUT - 1 }))
+    const action = planEvmSend(
+      row({ state: 'awaiting_claim' }),
+      seen({ evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT - 1) }),
+    )
     expect(action).toEqual({ do: 'wait' })
   })
 
   it('refunds at the timeout exactly, not one block later', () => {
-    const action = planEvmSend(row({ state: 'awaiting_claim' }), seen({ evmBlockHeight: EVM_TIMEOUT }))
+    const action = planEvmSend(
+      row({ state: 'awaiting_claim' }),
+      seen({ evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT) }),
+    )
     expect(action).toEqual({ do: 'refund_evm' })
   })
 })
@@ -120,7 +127,7 @@ describe('rule 4 - a revealed preimage outranks everything', () => {
     // tokens they claimed, once in the sats refund they would then take.
     const action = planEvmSend(
       row({ state: 'awaiting_claim' }),
-      seen({ preimage: 'cd'.repeat(32), evmBlockHeight: EVM_TIMEOUT + 100 }),
+      seen({ preimage: 'cd'.repeat(32), evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT + 100) }),
     )
     expect(action).toEqual({ do: 'claim_arkade', preimage: 'cd'.repeat(32) })
   })
@@ -161,7 +168,9 @@ describe('the confirmation policy is depth AND age', () => {
 
   it('treats an absent lock as not-yet while nothing says otherwise, until the timeout', () => {
     expect(planEvmSend(row({ state: 'locking_evm' }), seen())).toEqual({ do: 'wait' })
-    expect(planEvmSend(row({ state: 'locking_evm' }), seen({ evmBlockHeight: EVM_TIMEOUT }))).toEqual({
+    expect(
+      planEvmSend(row({ state: 'locking_evm' }), seen({ evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT) })),
+    ).toEqual({
       do: 'refund_evm',
     })
   })
@@ -169,7 +178,12 @@ describe('the confirmation policy is depth AND age', () => {
   it('does not withhold the timeout from a lock that is present but never proven deep', () => {
     const action = planEvmSend(
       row({ state: 'locking_evm' }),
-      seen({ evmLockPresent: true, evmLockConfirmations: 0, evmLockAgeSeconds: 0, evmBlockHeight: EVM_TIMEOUT }),
+      seen({
+        evmLockPresent: true,
+        evmLockConfirmations: 0,
+        evmLockAgeSeconds: 0,
+        evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT),
+      }),
     )
     expect(action).toEqual({ do: 'refund_evm' })
   })
@@ -185,7 +199,7 @@ describe('rule 6 - a mined revert created no lock', () => {
   it('does not refund a lock the contract never held', () => {
     const action = planEvmSend(
       row({ state: 'locking_evm' }),
-      seen({ evmLockReverted: true, evmBlockHeight: EVM_TIMEOUT }),
+      seen({ evmLockReverted: true, evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT) }),
     )
     expect(action).toEqual(reverted)
   })
@@ -250,30 +264,42 @@ describe('rule 8 - a refund that was never recorded was never sent', () => {
   const stranded = row({ state: 'refunding_evm', evmRefundTxid: null })
 
   it('sends a refund when none is on record and the lock is there to take back', () => {
-    const action = planEvmSend(stranded, seen({ evmLockPresent: true, evmBlockHeight: EVM_TIMEOUT }))
+    const action = planEvmSend(
+      stranded,
+      seen({ evmLockPresent: true, evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT) }),
+    )
     expect(action).toEqual({ do: 'refund_evm' })
   })
 
   it('waits below the timeout, where the resend would only revert', () => {
-    const action = planEvmSend(stranded, seen({ evmLockPresent: true, evmBlockHeight: EVM_TIMEOUT - 1 }))
+    const action = planEvmSend(
+      stranded,
+      seen({ evmLockPresent: true, evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT - 1) }),
+    )
     expect(action).toEqual({ do: 'wait' })
   })
 
   it('leaves a recorded refund alone, however long it stays unmined', () => {
     const recorded = row({ state: 'refunding_evm', evmRefundTxid: '0xrefund' })
-    const action = planEvmSend(recorded, seen({ evmLockPresent: true, evmBlockHeight: EVM_TIMEOUT }))
+    const action = planEvmSend(
+      recorded,
+      seen({ evmLockPresent: true, evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT) }),
+    )
     expect(action).toEqual({ do: 'wait' })
   })
 
   it('sends nothing when there is no lock to refund', () => {
-    const action = planEvmSend(stranded, seen({ evmLockPresent: false, evmBlockHeight: EVM_TIMEOUT }))
+    const action = planEvmSend(
+      stranded,
+      seen({ evmLockPresent: false, evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT) }),
+    )
     expect(action).toEqual({ do: 'wait' })
   })
 
   it('still yields to a revealed preimage', () => {
     const action = planEvmSend(
       stranded,
-      seen({ evmLockPresent: true, evmBlockHeight: EVM_TIMEOUT, preimage: 'cd'.repeat(32) }),
+      seen({ evmLockPresent: true, evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT), preimage: 'cd'.repeat(32) }),
     )
     expect(action).toEqual({ do: 'claim_arkade', preimage: 'cd'.repeat(32) })
   })
