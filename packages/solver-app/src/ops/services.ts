@@ -19,6 +19,12 @@ import type { Corridor as CorridorPlugin } from '@arkade-os/solver-core/core/cor
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { resolveDbLayout } from '@arkade-os/solver-corridors/db/layout.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
+import { disabledRebalancePolicy, validateRebalancePolicy } from '@arkade-os/solver-core/core/rebalancePolicy.js'
+import { RebalanceService } from './rebalance.js'
+import { RebalanceStore } from './rebalanceStore.js'
+import { createArkadeRebalanceSource } from './rebalanceRoutes.js'
+import { createLndRebalanceBackend } from '@arkade-os/solver-rails-lnd/rebalance.js'
+import { arkadeFundingOwed } from './pool.js'
 import { RestEmulatorProvider } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { Address, OutScript } from '@scure/btc-signer'
@@ -249,6 +255,7 @@ export interface Services {
    * is inside createServices.
    */
   tickErrors: TickErrorTracker
+  rebalance?: RebalanceService
   /**
    * The BTC rail's two legs, or NULL on a deployment that serves no BTC corridor.
    *
@@ -352,7 +359,8 @@ const createRail = async (
     // loadConfig() only produces lnBackend: 'lnd' together with a populated lnd config. Opened, not probed: a
     // node that is down leaves its corridors refusing (`watchRail`) instead of the whole solver crash-looping.
     const ln = LndLightningBackendAdapter.open(config.lnd!)
-    return { ln, onchain: LndOnchainAdapter.open(config.lnd!), probe: () => ln.probe() }
+    const onchain = LndOnchainAdapter.open(config.lnd!)
+    return { ln, onchain, rebalance: createLndRebalanceBackend(ln, onchain), probe: () => ln.probe() }
   }
   // Non-null: the caller only reaches this for a configured rail.
   const rail = lightningRailFor(config.lnBackend!)
@@ -646,7 +654,25 @@ export const createServices = async (
    * cap is global, so two corridors quoting at once must contend for the
    * same headroom or the bound is only ever per-corridor again.
    */
-  const admission = new AdmissionControl()
+  let runtimeRebalance: RebalanceService | undefined
+  let rebalanceTimer: ReturnType<typeof setInterval> | undefined
+  const inventoryAdmission: AdmissionControl = new AdmissionControl(async (request) => {
+    const rebalancePolicy = runtimeRebalance?.policy()
+    if (
+      !request.pair.includes('->arkade:') ||
+      (!rebalancePolicy?.maxDebitSats && inventoryAdmission.outstandingInventorySats('arkade') === 0)
+    ) {
+      return undefined
+    }
+    const balance = await arkade.wallet.getBalance()
+    return {
+      poolId: 'arkade',
+      requiredSats: request.giveSats,
+      available: { sats: balance.available, ageMs: 0 },
+      owedSats: async () => (rebalancePolicy?.reserveSats ?? 0) + (await arkadeFundingOwed(services.readers)),
+    }
+  })
+  const admission = inventoryAdmission
   const quoteLimiter = new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, nowSeconds)
   /**
    * ONE tracker for every corridor: the backoff exists so a FAILING BACKEND is
@@ -1683,6 +1709,13 @@ export const createServices = async (
         // step below tears down what delivering it needs. Bounded by the sinks'
         // own AbortSignal.timeout, so it cannot hang the shutdown it precedes.
         ['notifier', () => notifier.flush()],
+        [
+          'rebalance',
+          async () => {
+            clearInterval(rebalanceTimer)
+            await runtimeRebalance?.close()
+          },
+        ],
         ['railWatch', () => railWatch?.stop()],
         ['payoutFunding', () => payoutFundingRegistration?.close?.()],
         ['store', () => store.close()],
@@ -1707,6 +1740,29 @@ export const createServices = async (
   }
   if (rail?.probe) {
     railWatch = watchRail({ probe: rail.probe, intervalMs: RAIL_PROBE_MS, log, onReachable: completeOnchainLegs })
+  }
+  if (rail?.rebalance) {
+    const storedPolicy = bootOverrides.REBALANCE_POLICY
+    const rebalancePolicy =
+      storedPolicy === undefined ? disabledRebalancePolicy() : validateRebalancePolicy(JSON.parse(storedPolicy))
+    const rebalanceStore = await RebalanceStore.open(swapFile)
+    const source = await createArkadeRebalanceSource(services, swapFile, inventoryAdmission)
+    runtimeRebalance = await RebalanceService.create({
+      store: rebalanceStore,
+      backend: rail.rebalance,
+      source,
+      policy: rebalancePolicy,
+      savePolicy: async (next) => adminStore.setOverride('REBALANCE_POLICY', JSON.stringify(next)),
+    })
+    services.rebalance = runtimeRebalance
+    const tickRebalance = (): void => {
+      void runtimeRebalance
+        ?.tick()
+        .catch((error) => log('rebalance pass failed:', error instanceof Error ? error.message : String(error)))
+    }
+    rebalanceTimer = setInterval(tickRebalance, 60_000)
+    rebalanceTimer.unref()
+    tickRebalance()
   }
   return services
 }
