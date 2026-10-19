@@ -110,6 +110,19 @@ describe('rebalance wallet panel', () => {
     expect(panel.data).toEqual(overview)
     expect(api.mock.calls[1]?.[0]).toBe('/api/rebalance')
   })
+  it('clears a failed balance read when the operator retries with Refresh', async () => {
+    const api = vi.fn().mockRejectedValueOnce(new Error('backend unavailable')).mockResolvedValue(overview)
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    expect(panel.error).toBe('backend unavailable')
+    const refresh = nodesIn(panel.render(h)).find(
+      (node) => node.tag === 'button.act' && node.children[1] === 'Refresh',
+    )!
+    await refresh.children[0].onclick()
+    expect(panel.error).toBeNull()
+    expect(panel.data).toEqual(overview)
+    expect(api).toHaveBeenCalledTimes(2)
+  })
   it('groups labelled transfer fields separately from policy and gives empty history a next action', async () => {
     const panel = new RebalancePanel(vi.fn().mockResolvedValue(overview), vi.fn())
     await panel.refresh()

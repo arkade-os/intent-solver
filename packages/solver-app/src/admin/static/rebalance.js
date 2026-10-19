@@ -80,7 +80,10 @@ export class RebalancePanel {
       h(
         'div.wallet-section-heading',
         h('h2', 'Rebalance liquidity'),
-        button('Refresh', () => this.refresh()),
+        button('Refresh', () => {
+          this.error = null
+          return this.refresh()
+        }),
       ),
       h(
         'p.muted',
