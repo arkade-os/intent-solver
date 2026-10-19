@@ -18,6 +18,11 @@ const overview = {
   transfers: [],
 }
 const h = (tag: string, ...children: unknown[]) => ({ tag, children })
+const nodesIn = (tree: any): { tag: string; children: any[] }[] => {
+  if (Array.isArray(tree)) return tree.flatMap(nodesIn)
+  if (!tree?.tag) return []
+  return [tree, ...tree.children.flatMap(nodesIn)]
+}
 
 describe('rebalance wallet panel', () => {
   it('omits untouched automatic targets when saving a manual-only policy after rendering', async () => {
@@ -84,19 +89,13 @@ describe('rebalance wallet panel', () => {
     const tree = panel.render(h)
     expect(JSON.stringify(tree)).toContain('fee upper bound 5 sat; source debit 128 sat')
     expect(api).toHaveBeenCalledTimes(1)
-    const nodes: { tag: string; children: any[] }[] = []
-    const walk = (node: any): void => {
-      if (Array.isArray(node)) node.forEach(walk)
-      else if (node?.tag) {
-        nodes.push(node)
-        node.children.forEach(walk)
-      }
-    }
-    walk(tree)
-    const label = nodes.find((node) => node.tag === 'label' && node.children[0] === 'type quote ID to send')!
+    const nodes = nodesIn(tree)
+    const label = nodes.find(
+      (node) => node.tag === 'label.wallet-field' && node.children[0] === 'Type quote ID to send',
+    )!
     const input = label.children[1]
     input.children[0].oninput({ target: { value: 'quote-1' } })
-    const send = nodes.find((node) => node.tag === 'button.act' && node.children[1] === 'send confirmed quote')!
+    const send = nodes.find((node) => node.tag === 'button.act' && node.children[1] === 'Send confirmed quote')!
     await send.children[0].onclick()
     expect(api.mock.calls[1]).toEqual([
       '/api/rebalance/submit',
@@ -110,5 +109,50 @@ describe('rebalance wallet panel', () => {
     expect(panel.error).toBe('needs reconciliation')
     expect(panel.data).toEqual(overview)
     expect(api.mock.calls[1]?.[0]).toBe('/api/rebalance')
+  })
+  it('clears a failed balance read when the operator retries with Refresh', async () => {
+    const api = vi.fn().mockRejectedValueOnce(new Error('backend unavailable')).mockResolvedValue(overview)
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    expect(panel.error).toBe('backend unavailable')
+    const refresh = nodesIn(panel.render(h)).find(
+      (node) => node.tag === 'button.act' && node.children[1] === 'Refresh',
+    )!
+    await refresh.children[0].onclick()
+    expect(panel.error).toBeNull()
+    expect(panel.data).toEqual(overview)
+    expect(api).toHaveBeenCalledTimes(2)
+  })
+  it('groups labelled transfer fields separately from policy and gives empty history a next action', async () => {
+    const panel = new RebalancePanel(vi.fn().mockResolvedValue(overview), vi.fn())
+    await panel.refresh()
+    const nodes = nodesIn(panel.render(h))
+    const manual = nodes.find((node) => node.tag === 'div.wallet-manual')!
+    expect(
+      nodesIn(manual)
+        .filter((node) => node.tag === 'label.wallet-field')
+        .map((node) => node.children[0]),
+    ).toEqual(['Destination pool', 'Deposit route', 'Minimum credit (sat)'])
+    const settings = nodes.find((node) => node.tag === 'details.wallet-policy')!
+    expect(settings.children[0].open).toBe(false)
+    expect(nodesIn(settings).some((node) => node.tag === 'fieldset.wallet-fieldset')).toBe(true)
+    expect(JSON.stringify(nodes)).toContain('No transfers yet. Review a quote to start a transfer.')
+  })
+  it('keeps expanded policy and edits through a balance refresh without saving or enabling automation', async () => {
+    const api = vi.fn().mockResolvedValue(overview)
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    const nodes = nodesIn(panel.render(h))
+    nodes.find((node) => node.tag === 'details.wallet-policy')!.children[0].ontoggle({ target: { open: true } })
+    const reserve = nodes.find(
+      (node) => node.tag === 'label.wallet-field' && node.children[0] === 'Arkade reserve (sat)',
+    )!
+    reserve.children[1].children[0].oninput({ target: { value: '25000' } })
+    await panel.refresh()
+    const settings = nodesIn(panel.render(h)).find((node) => node.tag === 'details.wallet-policy')!
+    expect(settings.children[0].open).toBe(true)
+    expect(panel.policy.reserveSats).toBe('25000')
+    expect(panel.policy.enabled).toBe(false)
+    expect(api.mock.calls.map(([path]) => path)).toEqual(['/api/rebalance', '/api/rebalance'])
   })
 })
