@@ -533,7 +533,7 @@ describe('Arkade rebalance source routes', () => {
       receiver: schnorr.getPublicKey(new Uint8Array(32).fill(4)),
       server: schnorr.getPublicKey(new Uint8Array(32).fill(5)),
       preimageHash: ripemd160(hex.decode(paymentHash)),
-      // 2 hours: @arkade-os/swap's own REFUND_MTP_LAG_SECONDS, no longer exported.
+      // 2 hours: @arkade-os/swap's own REFUND_MTP_LAG_SECONDS, unexported (arkade-os/ts-sdk#1095).
       refundLocktime: BigInt(condition === 'early' ? timestamp() + 600 : timestamp() - 2 * 60 * 60 - 10),
       unilateralClaimDelay: { type: 'seconds', value: 512n },
       unilateralRefundDelay: { type: 'seconds', value: 1024n },

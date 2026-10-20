@@ -40,6 +40,7 @@ import * as swap from '@arkade-os/swap/protocol'
  * `@arkade-os/swap`'s own floor (`chunk-4X56MN56.js`'s `MIN_CLAIM_WINDOW_SECONDS`,
  * still `30 * 60` as of swap@0.1.0-rc.28), hardcoded because rc.28 stopped
  * exporting it from any public entry point — there is no longer a symbol to import.
+ * Import it again once arkade-os/ts-sdk#1095 lands.
  */
 const SWAP_MIN_CLAIM_WINDOW_SECONDS = 30 * 60
 // EVERY local copy, not one of each.
