@@ -16,7 +16,7 @@ import { createServer, type Server } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { createOffer, decodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap'
+import { createOffer, decodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap/protocol'
 import { asset, Extension } from '@arkade-os/sdk'
 import { base64, hex } from '@scure/base'
 import { Transaction } from '@scure/btc-signer'
@@ -93,7 +93,7 @@ describe('e2e arkade offers — publish, discover, settle', () => {
       // arkd matches on arrival, so an offer funded first is simply missed.
       await new Promise((resolve) => setTimeout(resolve, 3_000))
 
-      const offer = await createOffer(arkade.ctx.wallet, ARKD_URL, {
+      const offer = await createOffer(arkade.ctx.wallet, {
         wantAmount,
         wantAsset: asset.AssetId.fromString(held.assetId),
       })
@@ -187,7 +187,7 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
     feedUrl = `http://127.0.0.1:${bound.port}/price`
     dir = tempStoreDir()
 
-    const offer = await createOffer(arkade.ctx.wallet, ARKD_URL, {
+    const offer = await createOffer(arkade.ctx.wallet, {
       wantAmount: WANT_UNITS,
       wantAsset: asset.AssetId.fromString(assetId),
     })

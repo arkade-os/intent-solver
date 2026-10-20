@@ -23,6 +23,7 @@ import {
   matchServerCheckpoints,
   MnemonicIdentity,
   PrevArkTxField,
+  RestArkProvider,
   RestEmulatorProvider,
   setArkPsbtField,
   Transaction,
@@ -263,8 +264,9 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
 
   const wallet = await Wallet.create({
     identity,
-    arkServerUrl: config.arkServerUrl,
-    arkProvider: latencyDiagnostics ? new TimedArkProvider(config.arkServerUrl) : undefined,
+    arkProvider: latencyDiagnostics
+      ? new TimedArkProvider(config.arkServerUrl)
+      : new RestArkProvider(config.arkServerUrl),
     // The SDK's own default is a plain `RestIndexerProvider` at this same URL.
     indexerProvider: latencyDiagnostics
       ? new TimedIndexerProvider(config.arkServerUrl)

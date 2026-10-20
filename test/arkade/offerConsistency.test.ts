@@ -9,7 +9,7 @@
  * that matters: it is the actual attack.
  */
 import { describe, it, expect } from 'vitest'
-import { offerVtxoScript, type Offer } from '@arkade-os/swap'
+import { offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { offerIsConsistent } from '@arkade-os/solver-arkade/arkade/offerConsistency.js'
 

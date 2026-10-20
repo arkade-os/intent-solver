@@ -20,10 +20,13 @@ import {
   RfqSwapManager,
   type RfqSwapRecord,
   type RfqSwapRecordStore,
-} from '@arkade-os/swap'
+} from '@arkade-os/swap/protocol'
+import type { RfqSwapPageCursor, RfqSwapPageFilter } from '@arkade-os/swap'
 import { nostrRfqTransport } from '@arkade-os/swap/nostr'
 import { base64, hex } from '@scure/base'
 import { Address } from '@scure/btc-signer'
+import type { PageRequest, PageResult } from '@arkade-os/sdk'
+import { pageResult } from '@arkade-os/sdk'
 import type { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import type { SqlDriver } from '@arkade-os/solver-core/core/driver.js'
 import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
@@ -95,6 +98,22 @@ class RebalanceRfqRepository implements RfqSwapRecordStore {
       (row) => JSON.parse(row.record_json) as RfqSwapRecord,
     )
   }
+  async getRfqSwapsPage(
+    filter: RfqSwapPageFilter,
+    page: PageRequest<RfqSwapPageCursor>,
+  ): Promise<PageResult<RfqSwapRecord, RfqSwapPageCursor>> {
+    const sorted = (await this.getAllRfqSwaps())
+      .filter((record) => filter.state === undefined || record.state === filter.state)
+      .filter((record) => filter.since === undefined || record.updatedAt >= filter.since)
+      .sort((a, b) => a.updatedAt - b.updatedAt || a.rfqId.localeCompare(b.rfqId))
+    const after = page.after
+    const remaining = after
+      ? sorted.filter(
+          (r) => r.updatedAt > after.updatedAt || (r.updatedAt === after.updatedAt && r.rfqId > after.rfqId),
+        )
+      : sorted
+    return pageResult(remaining, page.limit, (record) => ({ updatedAt: record.updatedAt, rfqId: record.rfqId }))
+  }
   async removeRfqSwap(id: string): Promise<void> {
     await this.driver.run('DELETE FROM rebalance_rfq WHERE rfq_id = ?', [id])
   }
@@ -119,8 +138,9 @@ export const createArkadeRebalanceSource = async (
     saveRfqSwap: (record) => repository.saveRfqSwap(record),
     getRfqSwap: (id) => repository.getRfqSwap(id),
     removeRfqSwap: (id) => repository.removeRfqSwap(id),
-    getAllRfqSwaps: async () => {
-      return (await repository.getAllRfqSwaps()).filter((record) => validTxid(record.fundingArkTxid))
+    getRfqSwapsPage: async (filter, page) => {
+      const result = await repository.getRfqSwapsPage(filter, page)
+      return { ...result, items: result.items.filter((record) => validTxid(record.fundingTxid)) }
     },
   }
   let managerStack:
@@ -129,7 +149,9 @@ export const createArkadeRebalanceSource = async (
     managerStack ??= (async () => {
       const contracts = await wallet.getContractManager()
       const manager = new RfqSwapManager({ indexer, contracts, repository: managerRepository })
-      manager.setCallbacks({ refundArkade: arkadeRefunder({ ark: wallet.arkProvider, wallet, contracts, repository }) })
+      manager.setCallbacks({
+        refundArkade: arkadeRefunder({ operator: wallet.arkProvider, wallet, contracts, repository }),
+      })
       const restored = await manager.restoreFromRepository()
       if (restored.failed.length) throw new Error('rebalance RFQ recovery could not restore a funded contract')
       await manager.start()
@@ -140,7 +162,7 @@ export const createArkadeRebalanceSource = async (
     })
     return managerStack
   }
-  if ((await managerRepository.getAllRfqSwaps()).length) await ensureManager()
+  if ((await managerRepository.getRfqSwapsPage({}, { limit: 1 })).items.length) await ensureManager()
 
   const routerQuote = (
     destination: string,
@@ -247,7 +269,7 @@ export const createArkadeRebalanceSource = async (
   const proveRefund = async (record: RfqSwapRecord, amount: number): Promise<boolean> => {
     const address = record.profile.refundAddress
     if (typeof address !== 'string') return false
-    for (const txid of [...new Set([record.refundArkTxid, ...(record.lockupSpendArkTxids ?? [])].filter(validTxid))]) {
+    for (const txid of [...new Set([record.refundTxid, ...(record.lockupSpendTxids ?? [])].filter(validTxid))]) {
       if (await proveArkOutput(txid, address, amount)) return true
     }
     return false
@@ -278,7 +300,7 @@ export const createArkadeRebalanceSource = async (
         if (invoice.expiresAt <= now()) throw new Error('rebalance invoice expired')
         const transport = nostrRfqTransport(counterparty)
         try {
-          const request = await requestLightningSend(wallet, services.arkade.arkServerUrl, transport, {
+          const request = await requestLightningSend(wallet, transport, {
             invoice: {
               raw: destination,
               paymentHash: invoice.paymentHash,
@@ -356,7 +378,7 @@ export const createArkadeRebalanceSource = async (
         }
       } catch (error) {
         // No transfer row references this RFQ yet, so it can never be funded. Not a time-based
-        // sweep: a funded lockup whose txid was never recorded also has no fundingArkTxid.
+        // sweep: a funded lockup whose txid was never recorded also has no fundingTxid.
         if (routeData) await repository.removeRfqSwap(routeData.rfqId as string)
         throw error
       }
@@ -410,17 +432,17 @@ export const createArkadeRebalanceSource = async (
         const { manager, contracts } = await ensureManager()
         const stored = await storedRfq(row)
         const record = stored.record
-        if (record.fundingArkTxid) throw new Error('source funding already recorded')
+        if (record.fundingTxid) throw new Error('source funding already recorded')
         if (stored.validUntil <= now() || row.expiresAt <= now()) throw new Error('external source quote expired')
         txid = await wallet.send({
           recipients: [{ address: record.lockupAddress, amount: stored.fundAmount }],
           selectedVtxos: selected,
         })
         if (validTxid(txid)) {
-          await repository.saveRfqSwap({ ...record, fundingArkTxid: txid, state: 'pending', updatedAt: now() })
+          await repository.saveRfqSwap({ ...record, fundingTxid: txid, state: 'pending', updatedAt: now() })
           await manager.addSwap(
             rebuildRfqSwap(
-              { ...record, fundingArkTxid: txid, state: 'pending' },
+              { ...record, fundingTxid: txid, state: 'pending' },
               await lockupContractParams(contracts, record.lockupAddress),
             ),
           )
@@ -451,15 +473,15 @@ export const createArkadeRebalanceSource = async (
       const possible = [
         ...new Set(source.flatMap((coin) => (coin?.arkTxId && validTxid(coin.arkTxId) ? [coin.arkTxId] : []))),
       ]
-      const funding = record.fundingArkTxid ?? row.fundingTxid ?? (possible.length === 1 ? possible[0] : undefined)
+      const funding = record.fundingTxid ?? row.fundingTxid ?? (possible.length === 1 ? possible[0] : undefined)
       const proven =
         funding &&
         source.length === row.inputs.length &&
         source.every((coin) => coin?.arkTxId === funding) &&
         (await proveArkOutput(funding, record.lockupAddress, stored.fundAmount))
       if (proven && (await proveRefund(record, stored.fundAmount))) return { state: 'refunded' }
-      if (proven && !record.fundingArkTxid) {
-        record = { ...record, fundingArkTxid: funding, state: 'pending', updatedAt: now() }
+      if (proven && !record.fundingTxid) {
+        record = { ...record, fundingTxid: funding, state: 'pending', updatedAt: now() }
         await repository.saveRfqSwap(record)
       }
       if (proven || lockup.length) {
@@ -476,7 +498,7 @@ export const createArkadeRebalanceSource = async (
               !coin.isSwept &&
               !coin.isUnrolled,
           )
-        if ((record.state === 'failed' || record.state === 'refunded') && refundable && !record.refundArkTxid) {
+        if ((record.state === 'failed' || record.state === 'refunded') && refundable && !record.refundTxid) {
           const rebuilt = rebuildRfqSwap(record, await lockupContractParams(contracts, record.lockupAddress))
           if (rebuilt.kind !== 'lightning_send' || now() < rebuilt.refundLocktime)
             throw new Error('source refund is not yet eligible')

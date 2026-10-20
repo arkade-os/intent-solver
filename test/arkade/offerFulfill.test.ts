@@ -6,7 +6,7 @@
  * `test/e2e/assetOffer.e2e.test.ts` settles a real offer instead.
  */
 import { describe, it, expect } from 'vitest'
-import { offerVtxoScript, type Offer } from '@arkade-os/swap'
+import { offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { asset } from '@arkade-os/sdk'
 import { fulfillOffer, ASSET_CARRIER_SATS, makerScriptHex } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
