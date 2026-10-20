@@ -72,7 +72,7 @@ describe('rebalance wallet panel', () => {
     expect(first).not.toHaveProperty('destination')
     expect(first).not.toHaveProperty('kind')
   })
-  it('renders a fee preview before submitting and sends the typed quote confirmation', async () => {
+  it('renders a fee preview before submitting and sends the quote id the server checks', async () => {
     const quote = {
       id: 'quote-1',
       state: 'quoted',
@@ -90,12 +90,7 @@ describe('rebalance wallet panel', () => {
     expect(JSON.stringify(tree)).toContain('fee upper bound 5 sat; source debit 128 sat')
     expect(api).toHaveBeenCalledTimes(1)
     const nodes = nodesIn(tree)
-    const label = nodes.find(
-      (node) => node.tag === 'label.wallet-field' && node.children[0] === 'Type quote ID to send',
-    )!
-    const input = label.children[1]
-    input.children[0].oninput({ target: { value: 'quote-1' } })
-    const send = nodes.find((node) => node.tag === 'button.act' && node.children[1] === 'Send confirmed quote')!
+    const send = nodes.find((node) => node.tag === 'button.act' && node.children[1] === 'Send')!
     await send.children[0].onclick()
     expect(api.mock.calls[1]).toEqual([
       '/api/rebalance/submit',

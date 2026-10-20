@@ -13,20 +13,19 @@ Unsupported deployments show rebalancing as unavailable.
 
 ## Prepare and send a manual transfer
 
-1. In **automatic policy**, configure the reserve, debit limits, fee limits and
-   minimum transfer size described below. Automation may remain unchecked;
-   these limits also govern manual transfers. Leave both trigger and target
-   blank for pools you do not want to refill automatically. Type `REBALANCE` and select
-   **save confirmed policy**.
+1. In **automatic rebalancing & limits**, configure the reserve, debit limits,
+   fee limits and minimum transfer size described below. Automation may remain
+   unchecked; these limits also govern manual transfers. Leave both trigger and
+   target blank for pools you do not want to refill automatically, then select
+   **Save policy**.
 2. Select a **destination pool**, a **deposit route**, and **minimum credit
    (sat)**. The automatic route choice compares the bounded costs of routes
    offered by that pool. Selecting a specific route restricts the quote to it.
-3. Select **prepare quote**. Review its ID, minimum credit, fee upper bound,
+3. Select **Review quote**. Review its ID, minimum credit, fee upper bound,
    source debit, route and expiry. The source debit is the authorized maximum;
    actual costs or credited funds can differ within those bounds.
-4. Type the quote ID into **type quote ID to send**, then select
-   **send confirmed quote**. Follow its state in **transfer history** and use
-   **refresh rebalancing** to update the display.
+4. Select **Send** under the quote. Follow its state in **transfer history** and
+   use **Refresh** to update the display.
 
 All amounts are whole satoshis. The backend creates the receive address or
 fixed-amount plain Lightning invoice; the browser cannot supply a replacement
@@ -61,8 +60,8 @@ Both fee limits apply, including to manual transfers. Setting either fee limit
 to zero permits only transfers with no quoted fees. All policy values must be
 nonnegative safe integers; zero is permitted for the reserve and cooldown.
 
-Choose values for your deployment, enable **automatic rebalancing**, type
-`REBALANCE`, and save. Policy changes are stored in the `REBALANCE_POLICY`
+Choose values for your deployment, enable **automatic rebalancing**, and save.
+Policy changes are stored in the `REBALANCE_POLICY`
 settings override and applied to the running service without a restart.
 To stop new automatic jobs, uncheck automation and save; existing transfers
 continue reconciliation and recovery.

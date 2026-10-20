@@ -112,9 +112,8 @@ describe('actButton — what the operator sees', () => {
   })
 
   it('does not un-disable a button that was already disabled for its own reason', () => {
-    // The confirm dialog's `run it` is disabled until the operator has typed
-    // the swap id. An `||` keeps that; assigning `busy` alone would drop it
-    // and arm the one button that actually moves money.
+    // The confirm dialog's park button is disabled until a reason is typed. An
+    // `||` keeps that; assigning `busy` alone would drop it and arm the button.
     expect(bodyOf('actButton')).toMatch(/disabled: busy \|\| attrs\.disabled === true/)
   })
 
@@ -165,55 +164,24 @@ describe('coverage — no action button escapes the lock', () => {
 })
 
 /**
- * Taking the lock re-renders, and `render` rebuilds the whole tree — so the
- * detail modal is a NEW node and its scroll resets to the top.
- *
- * Confirmed in a browser before this was written: with the modal scrolled to
- * its action row, clicking `read payment` moved scrollTop 1040 -> 0, and the
- * node identity check said the dialog had been replaced. The operator clicks a
- * button at the bottom of a long timeline and is thrown to the top — so they
- * cannot see the spinner that click was supposed to show them, and the result
- * lands off-screen too.
- *
- * The same rebuild already reset the modal at the END of every action, and on
- * every `swaps` event from the stream: that listener skips a reload while the
- * CONFIRM dialog is open but not while the detail modal is, so on a busy solver
- * a reader gets thrown to the top by an unrelated swap. Preserving the offset
- * in `render` fixes all three, which is why it goes there rather than in the
- * lock.
+ * Taking the lock re-renders, and every stream tick re-renders too. When
+ * `render` swapped in a new tree, the detail modal came back as a NEW node
+ * scrolled to the top (1040 -> 0 on `read payment`, confirmed in a browser) and
+ * the search box lost its caret. `render` now patches the live tree in place,
+ * so the pane, its scroll and the focused field are the same nodes afterwards;
+ * `morph.test.ts` runs that patch against a DOM.
  */
-describe('the detail modal keeps its place', () => {
-  it('reads the scroll offset before tearing the tree down', () => {
+describe('render keeps the live tree', () => {
+  it('patches the page instead of tearing it down', () => {
     const body = bodyOf('render')
-    const read = body.indexOf('scrollTop')
-    expect(read).toBeGreaterThan(-1)
-    expect(read).toBeLessThan(body.indexOf('clear(root)'))
+    expect(body).toContain('morphChildren(root,')
+    expect(body).not.toContain('clear(root)')
+    expect(body).not.toContain('root.appendChild')
   })
 
-  it('restores it after the modal is back in the document', () => {
-    // Assigning scrollTop to a detached node silently does nothing, so the
-    // order here is half the fix.
-    const body = bodyOf('render')
-    const appended = body.indexOf('root.appendChild(detail)')
-    expect(appended).toBeGreaterThan(-1)
-    expect(body.indexOf('scrollTop', appended)).toBeGreaterThan(appended)
-  })
-
-  it('restores onto the scrolling pane, not the scrim around it', () => {
-    // The other half, and the one that was shipped wrong: `detailDialog`
-    // returns the SCRIM, and the scrim does not scroll. Assigning to it is a
-    // silent no-op — every structural check above still passed while the modal
-    // went on jumping to the top, which only rendering it caught.
-    const restore = bodyOf('render').slice(bodyOf('render').indexOf('root.appendChild(detail)'))
-    expect(restore).toContain("querySelector('.dialog.detail')")
-    expect(restore).toMatch(/scrollTop = detailScroll/)
-  })
-
-  it('targets the detail modal specifically, not whichever dialog is first', () => {
-    // The confirm dialog is a `.dialog` too, and both are in the document at
-    // once while a refund is armed.
+  it('still renders the detail pane as the scrolling dialog', () => {
     expect(appSource).toContain("'div.dialog.detail'")
-    expect(bodyOf('render')).toContain('.dialog.detail')
+    expect(bodyOf('render')).toContain('detailDialog()')
   })
 })
 
@@ -235,42 +203,5 @@ describe('the spinner is visible without motion', () => {
     expect(at).toBeGreaterThan(-1)
     expect(css.slice(at)).toMatch(/animation: none/)
     expect(css.slice(at)).toMatch(/border-right-color: currentColor/)
-  })
-})
-
-/**
- * The search box re-renders while the operator is still typing.
- *
- * `render` rebuilds the whole tree, so the input that comes back is a NEW node
- * with no focus and a caret at zero. Confirmed in a browser before this was
- * written: typing into the search field and pausing moved `document.activeElement`
- * to `body` and `selectionStart` to 0. The value survives, because it lives in
- * `state.filters.q` — so the field looks fine and simply stops accepting input,
- * which is worse than losing the text.
- *
- * It is the same fault as the detail modal's scroll, and it has the same fix:
- * read the state before the teardown, put it back once the node is in the
- * document.
- */
-describe('the search box survives its own re-render', () => {
-  const renderBody = () => bodyOf('render')
-
-  it('reads focus and selection before tearing the tree down', () => {
-    const body = renderBody()
-    const read = body.search(/selectionStart/)
-    expect(read).toBeGreaterThan(-1)
-    expect(read).toBeLessThan(body.indexOf('clear(root)'))
-  })
-
-  it('restores focus after the tree is rebuilt', () => {
-    const body = renderBody()
-    const cleared = body.indexOf('clear(root)')
-    expect(body.indexOf('.focus()', cleared)).toBeGreaterThan(cleared)
-  })
-
-  it('puts the caret back where it was, not at the end', () => {
-    // Editing the middle of a pasted hash otherwise jumps the cursor on every
-    // debounce, which is the same bug wearing a different hat.
-    expect(renderBody()).toContain('setSelectionRange')
   })
 })
