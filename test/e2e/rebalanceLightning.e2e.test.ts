@@ -94,6 +94,7 @@ describe('e2e Arkade surplus rebalance to own Lightning channels through another
       maxExposedSats: arkade.maxExposedSats,
       totalCommitted: () => peerStore.committedSats(),
       admission: new AdmissionControl(),
+      network: arkade.network,
     })
     relay = await startRebalanceRelay()
     connection = webSocketRelayConnection(relay.url, {
