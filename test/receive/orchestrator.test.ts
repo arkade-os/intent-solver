@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { delegateePacket } from '../support/delegateePacket.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -1261,6 +1262,26 @@ describe('ReceiveSwapService.tick — reveal to covclaimd', () => {
     // Stamping it would hide the tx from every covclaimd's filter.
     expect(arkade.state.fundCalls[0]?.stamp).toBeUndefined()
     expect(covclaimd.state.revealCalls).toBe(1)
+  })
+
+  it.each([false, true])('keeps delegatee claims packet-only when funding is adopted: %s', async (adopted) => {
+    const packet = delegateePacket()
+    const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(packet) }))
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    if (adopted) arkade.state.outputs = [{ txid: 'prior-funding', vout: 0, value: outcome.swap.payoutSats }]
+
+    const row = await service.tick(outcome.swap.id)
+
+    expect(row.state).toBe('funded')
+    expect(covclaimd.state.revealCalls).toBe(0)
+    expect(arkade.state.fundCalls).toHaveLength(adopted ? 0 : 1)
+    if (!adopted) {
+      const stamp = arkade.state.fundCalls[0]!.stamp!
+      expect(stamp.packet.subarray(0, packet.length)).toEqual(packet)
+      expect(stamp.packet[packet.length]).toBe(2)
+      expect(stamp.tapTree.length).toBeGreaterThan(0)
+    }
   })
 
   it('completes a client packet with the arkade script the covenant commits to', async () => {

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
+import { delegateePacket } from '../support/delegateePacket.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
@@ -1054,6 +1055,33 @@ describe('OnchainReceiveSwapService', () => {
       deps.onchain.mineBlocks(1)
       return service.tick(outcome.swap.id)
     }
+
+    it.each([false, true])('keeps delegatee claims packet-only when funding is adopted: %s', async (adopted) => {
+      const packet = delegateePacket()
+      const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(packet) }))
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      if (adopted) {
+        deps.arkadeFake.seedLockup(outcome.swap.lockupAddress, {
+          txid: 'prior-funding',
+          vout: 0,
+          value: outcome.swap.payoutSats,
+        })
+      }
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+
+      const row = await service.tick(outcome.swap.id)
+
+      expect(row.state).toBe('awaiting_claim')
+      expect(deps.covclaimdCalls).toHaveLength(0)
+      expect(deps.arkadeFake.fundStamps).toHaveLength(adopted ? 0 : 1)
+      if (!adopted) {
+        const stamp = deps.arkadeFake.fundStamps[0]!
+        expect(stamp.packet.subarray(0, packet.length)).toEqual(packet)
+        expect(stamp.packet[packet.length]).toBe(2)
+        expect(stamp.tapTree.length).toBeGreaterThan(0)
+      }
+    })
 
     it('stamps a client packet into the funding and skips the reveal, as the lightning leg does', async () => {
       const clientPacket = Uint8Array.from([...CIPHERTEXT, ...PUBKEY])

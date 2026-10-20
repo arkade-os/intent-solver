@@ -28,7 +28,7 @@
  */
 
 import { hex, base64 } from '@scure/base'
-import { claimPacketStamp } from './claimPacket.js'
+import { claimPacketStamp, isDelegateeClaimPacket } from './claimPacket.js'
 import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
@@ -742,10 +742,12 @@ export class OnchainReceiveSwapService {
       return store.transition(row.id, 'awaiting_claim', 'refunding_arkade', {})
     }
 
-    // `stampedAt`, NOT the packet shape: an adopted output carries nothing the
-    // shape promises, and skipping the reveal on it strands the swap. No packet
-    // is the same case as no covclaimd: the client claims it itself.
-    const packet = row.stampedAt === null ? row.claimPacket : null
+    // Legacy packets on adopted funding still need Reveal. Delegatee envelopes
+    // can only be delivered in the funding transaction.
+    const packet =
+      row.stampedAt === null && row.claimPacket !== null && !isDelegateeClaimPacket(row.claimPacket)
+        ? row.claimPacket
+        : null
     const script = covclaimd && packet !== null ? covenantScriptFromRow(receiveCovenantRowFor(row)) : undefined
     if (covclaimd && script && packet !== null) {
       if (!script.nonInteractiveClaimArkadeScript) {
