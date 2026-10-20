@@ -60,7 +60,7 @@ importers:
         specifier: ^2.2.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: ^2.4.1
+        specifier: 2.4.1
         version: 2.4.1
       better-sqlite3:
         specifier: ^12.11.1
@@ -166,7 +166,7 @@ importers:
         specifier: ^2.2.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: ^2.4.1
+        specifier: 2.4.1
         version: 2.4.1
       hono:
         specifier: ^4.13.0
@@ -297,7 +297,7 @@ importers:
         specifier: ^2.0.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: ^2.4.1
+        specifier: 2.4.1
         version: 2.4.1
 
   packages/solver-rails-esplora:
@@ -312,7 +312,7 @@ importers:
         specifier: ^2.0.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: ^2.4.1
+        specifier: 2.4.1
         version: 2.4.1
 
   packages/solver-rails-evm:
@@ -345,7 +345,7 @@ importers:
         specifier: ^2.0.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: ^2.4.1
+        specifier: 2.4.1
         version: 2.4.1
 
   packages/solver-rails-lnd:
@@ -360,7 +360,7 @@ importers:
         specifier: ^2.0.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: ^2.4.1
+        specifier: 2.4.1
         version: 2.4.1
       lightning:
         specifier: ^12.2.3
@@ -1737,7 +1737,7 @@ snapshots:
       - expo-task-manager
       - utf-8-validate
 
-  '@bitcoinerlab/descriptors-core@3.1.7(@noble/curves@2.4.0)(@noble/hashes@2.2.0)(@scure/base@2.4.0)(@scure/bip32@2.2.0)(@scure/btc-signer@2.4.1)':
+  '@bitcoinerlab/descriptors-core@3.1.7(@noble/curves@2.4.0)(@noble/hashes@2.4.0)(@scure/base@2.4.0)(@scure/bip32@2.2.0)(@scure/btc-signer@2.4.1)':
     dependencies:
       '@bitcoinerlab/miniscript': 2.0.0
       lodash.memoize: 4.1.2
@@ -1745,16 +1745,16 @@ snapshots:
       varuint-bitcoin: 2.0.0
     optionalDependencies:
       '@noble/curves': 2.4.0
-      '@noble/hashes': 2.2.0
+      '@noble/hashes': 2.4.0
       '@scure/base': 2.4.0
       '@scure/bip32': 2.2.0
       '@scure/btc-signer': 2.4.1
 
   '@bitcoinerlab/descriptors-scure@3.1.7':
     dependencies:
-      '@bitcoinerlab/descriptors-core': 3.1.7(@noble/curves@2.4.0)(@noble/hashes@2.2.0)(@scure/base@2.4.0)(@scure/bip32@2.2.0)(@scure/btc-signer@2.4.1)
+      '@bitcoinerlab/descriptors-core': 3.1.7(@noble/curves@2.4.0)(@noble/hashes@2.4.0)(@scure/base@2.4.0)(@scure/bip32@2.2.0)(@scure/btc-signer@2.4.1)
       '@noble/curves': 2.4.0
-      '@noble/hashes': 2.2.0
+      '@noble/hashes': 2.4.0
       '@scure/base': 2.4.0
       '@scure/bip32': 2.2.0
       '@scure/btc-signer': 2.4.1

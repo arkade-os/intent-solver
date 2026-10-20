@@ -30,7 +30,7 @@
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
     "@scure/bip39": "^2.2.0",
-    "@scure/btc-signer": "^2.4.1",
+    "@scure/btc-signer": "2.4.1",
     "@arkade-os/solver-arkade": "workspace:*",
     "@arkade-os/solver-core": "workspace:*",
     "@arkade-os/solver-corridors": "workspace:*",

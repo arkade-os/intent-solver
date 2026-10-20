@@ -35,7 +35,7 @@
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
     "@scure/bip39": "^2.2.0",
-    "@scure/btc-signer": "^2.4.1",
+    "@scure/btc-signer": "2.4.1",
     "hono": "^4.13.0"
   }
 }
