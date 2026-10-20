@@ -356,6 +356,9 @@ describe('the shipped client and this solver stop funding an onchain SEND at the
       expect.unreachable('must refuse one second past the last fundable instant')
     } catch (error) {
       expect((error as { check?: string }).check).toBe('refund_window')
+      expect(((error as { cause?: unknown }).cause as { reason?: string } | undefined)?.reason).toBe(
+        'claim_window_too_short',
+      )
       expect((error as { actual?: string }).actual).toMatch(/claim window/i)
     }
     expect(solverFunds(lastFundable + 1)).toBe(false)
