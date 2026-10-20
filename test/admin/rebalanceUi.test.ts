@@ -99,6 +99,7 @@ describe('rebalance wallet panel', () => {
   })
   it.each([
     ['Minimum credit (sat)', 'oninput'],
+    ['Destination pool', 'onchange'],
     ['Deposit route', 'onchange'],
   ])('drops a reviewed quote and its Send once %s changes', async (label, event) => {
     const quote = { id: 'q1', state: 'quoted', netSats: 1, feeSats: 1, debitSats: 2, kind: 'onchain', expiresAt: 2e9 }
