@@ -70,6 +70,16 @@ export type { CovenantScriptRow }
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 export type { ArkadeOps }
 
+import {
+  refundSweptLockupFor,
+  sweptOpsFrom,
+  type SweptLockupRefund,
+  type SweptRefundDecision,
+} from '@arkade-os/solver-arkade/arkade/sweptLockupRefund.js'
+
+/** Each has a legal edge to `refused`. `claiming` must stay absent: it holds a revealed preimage, so a refund there pays twice. */
+export const RECONCILABLE_SWEPT_STATES: readonly SendSwapState[] = ['paying', 'paid', 'stuck']
+
 const SEND_FEE_ESTIMATE_TIMEOUT_MS = 5_000
 
 const DEADLINE_SECONDS_PURPOSE = 'size the remaining claim window'
@@ -888,6 +898,31 @@ export class SendSwapService {
     const all = outputs.length <= MAX_LOCKUP_SPEND_INPUTS
     await store.patch(row.id, all ? { refund_outcome: 'pushed', refund_ark_txid: txid } : { refund_ark_txid: txid })
     return true
+  }
+
+  /**
+   * Not reachable from {@link refundSweep}, which never sees most of these: it
+   * skips a refused row with no recorded lockup value, the shape a funding seen
+   * too late leaves. The float pass finds them through the recovery guard.
+   * `decide` is the caller's because the evidence lives on the Lightning rail.
+   */
+  async refundSweptLockup(
+    pkScript: string,
+    decide?: (row: SendSwapRow) => Promise<SweptRefundDecision>,
+  ): Promise<SweptLockupRefund> {
+    const { store, arkade } = this.deps
+    const ops = sweptOpsFrom<SendSwapRow>(arkade, (row) => row)
+    if (!ops) return null
+    return refundSweptLockupFor(pkScript, {
+      ...ops,
+      find: (script) => store.findByPkScript(script),
+      record: (row, fields) => store.patch(row.id, { ...fields }),
+      ...(decide ? { decide } : {}),
+      close: async (row, reason) => {
+        await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
+      },
+      closableStates: RECONCILABLE_SWEPT_STATES,
+    })
   }
 
   /** @returns true when the swap moved to a new state and the next step should run. */

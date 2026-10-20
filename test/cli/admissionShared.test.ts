@@ -34,7 +34,7 @@ const cliSource = readFileSync(fileURLToPath(new URL('../../packages/solver-app/
 
 describe('createServices — one admission control for every corridor', () => {
   it('constructs exactly one AdmissionControl', () => {
-    const constructions = createServicesBody().match(/new AdmissionControl\(\)/g) ?? []
+    const constructions = createServicesBody().match(/new AdmissionControl\(/g) ?? []
     expect(constructions).toHaveLength(1)
   })
 

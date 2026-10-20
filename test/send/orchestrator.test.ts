@@ -3687,3 +3687,94 @@ describe('SendSwapService — block-typed timelocks', () => {
     expect(row.quotedRefundDeadline).toBe(row.refundLocktime)
   })
 })
+
+/**
+ * `findLockups` is `spendableOnly`, so once arkd sweeps the batch a lockup sat
+ * in, `pushRefund` reads empty, `lockupProvablySpent` is false for want of a
+ * spend fact, and the row waits on a sweep that reads the same answer forever.
+ */
+describe('refundSweptLockup', () => {
+  const SWEPT = [{ txid: 'f'.repeat(64), vout: 0, value: 1505 }]
+
+  const withSweptOps = () => {
+    const refundSwept = vi.fn(async () => 'batch-txid')
+    Object.assign(arkade, { findSweptLockups: async () => SWEPT, refundSwept })
+    return refundSwept
+  }
+
+  it('refunds a refused row whose lockup has been swept, and records what was there', async () => {
+    const refundSwept = withSweptOps()
+    const { swap } = await quoted()
+    // The incident's shape exactly: refused on a lockup timeout, so
+    // `lockup_value` was never written and the deadline-gated sweep skips it.
+    await store.fail(swap.id, 'quoted', 'lockup timeout')
+
+    const outcome = await service.refundSweptLockup((await store.get(swap.id)).pkScript)
+
+    expect(refundSwept).toHaveBeenCalledOnce()
+    expect(outcome).toEqual({ swapId: swap.id, txid: 'batch-txid', recorded: true })
+    const row = await store.get(swap.id)
+    expect(row.refundOutcome).toBe('pushed')
+    expect(row.refundArkTxid).toBe('batch-txid')
+    expect(row.lockupValue).toBe(1505)
+  })
+
+  it('does not touch an exposed row without a verdict, and names it instead', async () => {
+    const refundSwept = withSweptOps()
+    const { swap } = await quoted()
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+    await store.transition(swap.id, 'funded', 'paying')
+    await store.fail(swap.id, 'paying', 'lightning payment failed terminally')
+
+    const row = await store.get(swap.id)
+    expect(await service.refundSweptLockup(row.pkScript)).toEqual({ swapId: swap.id, heldInState: 'stuck' })
+    expect(refundSwept).not.toHaveBeenCalled()
+  })
+
+  it('refunds and closes an exposed row once a verdict clears it', async () => {
+    const refundSwept = withSweptOps()
+    const { swap } = await quoted()
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+    await store.transition(swap.id, 'funded', 'paying')
+    await store.fail(swap.id, 'paying', 'lightning payment failed terminally')
+
+    const row = await store.get(swap.id)
+    const outcome = await service.refundSweptLockup(row.pkScript, async () => ({
+      refund: true,
+      reason: 'the htlc came back',
+    }))
+
+    expect(refundSwept).toHaveBeenCalledOnce()
+    expect(outcome).toMatchObject({ swapId: swap.id, txid: 'batch-txid', closedFrom: 'stuck' })
+    const closed = await store.get(swap.id)
+    expect(closed.state).toBe('refused')
+    expect(closed.failureReason).toBe('the htlc came back')
+  })
+
+  it('answers null for a script no row of ours holds', async () => {
+    withSweptOps()
+    expect(await service.refundSweptLockup('ab'.repeat(17))).toBeNull()
+  })
+
+  it('answers null rather than throwing when the ops bridge predates this path', async () => {
+    // Both methods are optional on `ArkadeOps`: a build compiled against the
+    // earlier interface must keep working rather than crash the float pass.
+    const { swap } = await quoted()
+    await store.fail(swap.id, 'quoted', 'lockup timeout')
+    const row = await store.get(swap.id)
+    expect(await service.refundSweptLockup(row.pkScript)).toBeNull()
+  })
+
+  it('is NOT reachable from the unattended refund sweep', async () => {
+    // The scope rule this change turns on: a batch round inside the 60s sweep
+    // would stall the hot tick that drives in-flight Lightning payments.
+    const refundSwept = withSweptOps()
+    const { swap } = await quoted()
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+    await store.fail(swap.id, 'funded', 'lockup timeout')
+    arkade.lockups = []
+
+    expect(await service.refundSweep()).toEqual([])
+    expect(refundSwept).not.toHaveBeenCalled()
+  })
+})

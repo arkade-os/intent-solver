@@ -60,6 +60,7 @@ const build = async (over: Partial<EvmReceiveServiceDeps> = {}) => {
     arkadePreimage: vi.fn(),
     lockFor: vi.fn(),
     blockHeight: vi.fn().mockResolvedValue(CURRENT_BLOCK),
+    timelockHeight: vi.fn().mockResolvedValue(CURRENT_BLOCK),
     arkade: {
       solverPubkey: key(1),
       serverPubkey: key(2),
@@ -81,7 +82,7 @@ const build = async (over: Partial<EvmReceiveServiceDeps> = {}) => {
       chainId: 8453,
       minConfirmations: 12,
       minAgeSeconds: 780,
-      cadence: CADENCE,
+      timelockCadence: CADENCE,
       quoteValiditySeconds: 60,
       orderMarginSeconds: 7_500,
     },
@@ -138,6 +139,12 @@ describe('the happy path', () => {
     const outcome = await service.quote(request())
     expect(outcome.accepted).toBe(true)
     if (outcome.accepted) expect(outcome.swap.evmTimeout).toBe(TIMEOUT_BLOCK)
+  })
+
+  it('reads the client timeout on the block.number clock, not the chain height', async () => {
+    const { service } = await build({ blockHeight: vi.fn().mockResolvedValue(514_431_756) })
+    const outcome = await service.quote(request())
+    expect(outcome.accepted).toBe(true)
   })
 
   it('gives the covenant the exchanged roles', async () => {

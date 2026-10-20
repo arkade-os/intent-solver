@@ -19,6 +19,12 @@ import type { Corridor as CorridorPlugin } from '@arkade-os/solver-core/core/cor
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { resolveDbLayout } from '@arkade-os/solver-corridors/db/layout.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
+import { disabledRebalancePolicy, validateRebalancePolicy } from '@arkade-os/solver-core/core/rebalancePolicy.js'
+import { RebalanceService } from './rebalance.js'
+import { RebalanceStore } from './rebalanceStore.js'
+import { createArkadeRebalanceSource } from './rebalanceRoutes.js'
+import { createLndRebalanceBackend } from '@arkade-os/solver-rails-lnd/rebalance.js'
+import { arkadeFundingOwed } from './pool.js'
 import { RestEmulatorProvider } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { Address, OutScript } from '@scure/btc-signer'
@@ -39,6 +45,7 @@ import { loadEvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
 import { createJsonRpc } from '@arkade-os/solver-rails-evm/evm/rpc.js'
 import { createEvmHtlcBackend } from '@arkade-os/solver-rails-evm/evm/backend.js'
 import { probeLogScanRange } from '@arkade-os/solver-rails-evm/evm/logScanProbe.js'
+import { probeTimelockClock } from '@arkade-os/solver-rails-evm/evm/timelockClock.js'
 import { assertEvmClaimTraceSupport } from '@arkade-os/solver-rails-evm/evm/claimTraceProbe.js'
 import { createEvmBroadcaster, nonceSourceFor } from '@arkade-os/solver-rails-evm/evm/broadcast.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
@@ -75,6 +82,7 @@ import { createNotifier } from './notify.js'
 import { sinksFrom } from './notifySinks.js'
 import { btcSwapSize, createBalanceSampler, createSwapOutcomeReporter } from './businessEvents.js'
 import { createBalanceReportReader, formatBalanceReport } from './balanceReport.js'
+import { balanceCheckpointScope, checkpointNotices, type BalanceCheckpoint } from './balanceCheckpoints.js'
 import { createSwapSummaryReader } from './swapSummary.js'
 import { fundSources } from './fundSources.js'
 import { assetSource, describeAssetId } from '../admin/assets.js'
@@ -247,6 +255,7 @@ export interface Services {
    * is inside createServices.
    */
   tickErrors: TickErrorTracker
+  rebalance?: RebalanceService
   /**
    * The BTC rail's two legs, or NULL on a deployment that serves no BTC corridor.
    *
@@ -303,6 +312,7 @@ export interface Services {
   sampleBalances?: () => Promise<void>
   /** Post every fund source's balance to the sinks. ABSENT without a sink or `BALANCE_REPORT_INTERVAL_MINUTES`. */
   reportBalances?: () => Promise<void>
+  onBalanceCheckpoint?: (checkpoint: BalanceCheckpoint) => void
   /** Emulator signer key (compressed hex), fetched once at startup. */
   emulatorPubkey: string
   /** Provider x-only pubkey (hex) — the relay address clients send offers to. */
@@ -349,7 +359,8 @@ const createRail = async (
     // loadConfig() only produces lnBackend: 'lnd' together with a populated lnd config. Opened, not probed: a
     // node that is down leaves its corridors refusing (`watchRail`) instead of the whole solver crash-looping.
     const ln = LndLightningBackendAdapter.open(config.lnd!)
-    return { ln, onchain: LndOnchainAdapter.open(config.lnd!), probe: () => ln.probe() }
+    const onchain = LndOnchainAdapter.open(config.lnd!)
+    return { ln, onchain, rebalance: createLndRebalanceBackend(ln, onchain), probe: () => ln.probe() }
   }
   // Non-null: the caller only reaches this for a configured rail.
   const rail = lightningRailFor(config.lnBackend!)
@@ -643,7 +654,25 @@ export const createServices = async (
    * cap is global, so two corridors quoting at once must contend for the
    * same headroom or the bound is only ever per-corridor again.
    */
-  const admission = new AdmissionControl()
+  let runtimeRebalance: RebalanceService | undefined
+  let rebalanceTimer: ReturnType<typeof setInterval> | undefined
+  const inventoryAdmission: AdmissionControl = new AdmissionControl(async (request) => {
+    const rebalancePolicy = runtimeRebalance?.policy()
+    if (
+      !request.pair.includes('->arkade:') ||
+      (!rebalancePolicy?.maxDebitSats && inventoryAdmission.outstandingInventorySats('arkade') === 0)
+    ) {
+      return undefined
+    }
+    const balance = await arkade.wallet.getBalance()
+    return {
+      poolId: 'arkade',
+      requiredSats: request.giveSats,
+      available: { sats: balance.available, ageMs: 0 },
+      owedSats: async () => (rebalancePolicy?.reserveSats ?? 0) + (await arkadeFundingOwed(services.readers)),
+    }
+  })
+  const admission = inventoryAdmission
   const quoteLimiter = new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, nowSeconds)
   /**
    * ONE tracker for every corridor: the backoff exists so a FAILING BACKEND is
@@ -1322,6 +1351,7 @@ export const createServices = async (
       contractAddress: evmChain.contractAddress,
       rpc,
       logScanRange: evmChain.logScanRange,
+      timelockClockIsHeight: evmChain.timelockCadence === null,
     })
     // @see logScanProbe.ts on why this is asked at boot, and on the split.
     const probe = await probeLogScanRange({
@@ -1345,10 +1375,23 @@ export const createServices = async (
     } else if (probe.blocks < BigInt(evmChain.logScanRange)) {
       log(`evm: EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} unproven — the chain is only ${probe.blocks} blocks long`)
     }
+    // Boot only fails fast; every timelock read re-checks, so an inconclusive probe cannot let a mismatch through.
+    const clock = await probeTimelockClock(rpc)
+    if (clock.kind === 'distinct' && evmChain.timelockCadence === null) {
+      throw new Error(
+        `${endpointHost(evmChain.rpcUrl)} is at block ${clock.height} but contracts read block.number ${clock.clock}: ` +
+          'set EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK and EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK for that clock',
+      )
+    }
+    if (clock.kind === 'inconclusive') {
+      log(`evm: could not compare block.number with the height of ${endpointHost(evmChain.rpcUrl)}`, clock.message)
+    }
     // Number, not bigint, because that is what both orchestrators' deps take.
     // Safe for as long as block heights stay under 2^53 — nine orders of
     // magnitude away on every chain this could serve.
     const blockHeight = async (): Promise<number> => Number(await evm.currentBlock())
+    const timelockHeight = () => evm.timelockClock()
+    const timelockCadence = evmChain.timelockCadence ?? evmChain.cadence
     // ONE broadcaster across both legs, and the nonce source is why. It is
     // per-ACCOUNT, not per-corridor: both legs sign with the same key, so two
     // sources would hand out the same nonce twice and one of the two
@@ -1409,6 +1452,7 @@ export const createServices = async (
         ? async () => {}
         : (tokenAddress) => assertEvmClaimTraceSupport(rpc, tokenAddress),
       blockHeight,
+      timelockHeight,
       ...evmSendArkadeDeps(arkadeOps),
       arkade: arkadeOps,
       // The account the broadcaster signs from, so the allowance read below
@@ -1429,6 +1473,7 @@ export const createServices = async (
         minConfirmations: evmChain.minConfirmations,
         minAgeSeconds: evmChain.minAgeSeconds,
         cadence: evmChain.cadence,
+        timelockCadence,
         quoteValiditySeconds: evmChain.quoteValiditySeconds,
         orderMarginSeconds: evmChain.orderMarginSeconds,
       },
@@ -1442,6 +1487,7 @@ export const createServices = async (
       evm,
       broadcast,
       blockHeight,
+      timelockHeight,
       ...evmReceiveArkadeDeps(receiveOps),
       arkade: receiveOps,
       markets: marketsFor('receive'),
@@ -1454,7 +1500,7 @@ export const createServices = async (
         chainId: evmChain.chainId,
         minConfirmations: evmChain.minConfirmations,
         minAgeSeconds: evmChain.minAgeSeconds,
-        cadence: evmChain.cadence,
+        timelockCadence,
         quoteValiditySeconds: evmChain.quoteValiditySeconds,
         orderMarginSeconds: evmChain.orderMarginSeconds,
       },
@@ -1559,24 +1605,41 @@ export const createServices = async (
     now: nowSeconds,
     firstSince: nowSeconds() - (config.balanceReportIntervalMinutes ?? 0) * 60,
   })
-  const postBalanceReport = async (): Promise<void> => {
-    const report = await readBalanceReport({
-      network: config.network,
-      sources: fundSources(services),
-      readAssets: async () => {
-        const source = assetSource(arkade.wallet)
-        const { assets } = await arkade.wallet.getBalance()
-        return Promise.all(
-          (assets ?? []).map(async (a) => ({
-            ...(await describeAssetId(a.assetId, source)),
-            amount: a.amount.toString(),
-          })),
-        )
-      },
-      readCommittedSats: () => totalCommitted(),
-      readSwaps: () => readSwapSummary(services.readers),
+  let balanceReportInFlight: Promise<void> | undefined
+  const postBalanceReport = (): Promise<void> => {
+    if (balanceReportInFlight) return balanceReportInFlight
+    balanceReportInFlight = (async () => {
+      const report = await readBalanceReport({
+        network: config.network,
+        sources: fundSources(services),
+        readAssets: async () => {
+          const source = assetSource(arkade.wallet)
+          const { assets } = await arkade.wallet.getBalance()
+          return Promise.all(
+            (assets ?? []).map(async (a) => ({
+              ...(await describeAssetId(a.assetId, source)),
+              amount: a.amount.toString(),
+            })),
+          )
+        },
+        readCommittedSats: () => totalCommitted(),
+        readSwaps: () => readSwapSummary(services.readers),
+        readCheckpoint: async () => {
+          const scope = balanceCheckpointScope(services)
+          const [current, previous] = await Promise.all([
+            adminStore.latestBalanceCheckpoint(scope),
+            adminStore.previousBalanceReportCheckpoint(scope),
+          ])
+          return { current: current ?? null, previous: previous ?? null }
+        },
+      })
+      notifier.post(formatBalanceReport(report))
+      const checkpoint = report.checkpoint?.value?.current
+      if (checkpoint?.totalSats != null) await adminStore.markBalanceReportCheckpoint(checkpoint.id)
+    })().finally(() => {
+      balanceReportInFlight = undefined
     })
-    notifier.post(formatBalanceReport(report))
+    return balanceReportInFlight
   }
 
   const services: Services = {
@@ -1625,6 +1688,8 @@ export const createServices = async (
     sampleBalances: notifySinks.length > 0 ? () => balances.sample() : undefined,
     reportBalances:
       notifySinks.length > 0 && config.balanceReportIntervalMinutes !== null ? postBalanceReport : undefined,
+    onBalanceCheckpoint:
+      notifySinks.length > 0 ? checkpointNotices(config.network, (text) => notifier.post(text)) : undefined,
     tickErrors,
     emulatorPubkey: emulatorInfo.signerPubkey,
     providerPubkey: arkadeOps.providerPubkey,
@@ -1635,10 +1700,18 @@ export const createServices = async (
       // sequential await chain with no isolation would skip both if
       // store.close() (first, and least likely to matter) threw first.
       const steps: Array<[string, () => Promise<void> | void]> = [
+        ['balanceReport', () => balanceReportInFlight],
         // FIRST: `APPROVAL NEEDED` is the only signal a held swap gives, and every
         // step below tears down what delivering it needs. Bounded by the sinks'
         // own AbortSignal.timeout, so it cannot hang the shutdown it precedes.
         ['notifier', () => notifier.flush()],
+        [
+          'rebalance',
+          async () => {
+            clearInterval(rebalanceTimer)
+            await runtimeRebalance?.close()
+          },
+        ],
         ['railWatch', () => railWatch?.stop()],
         ['payoutFunding', () => payoutFundingRegistration?.close?.()],
         ['store', () => store.close()],
@@ -1663,6 +1736,29 @@ export const createServices = async (
   }
   if (rail?.probe) {
     railWatch = watchRail({ probe: rail.probe, intervalMs: RAIL_PROBE_MS, log, onReachable: completeOnchainLegs })
+  }
+  if (rail?.rebalance) {
+    const storedPolicy = bootOverrides.REBALANCE_POLICY
+    const rebalancePolicy =
+      storedPolicy === undefined ? disabledRebalancePolicy() : validateRebalancePolicy(JSON.parse(storedPolicy))
+    const rebalanceStore = await RebalanceStore.open(swapFile)
+    const source = await createArkadeRebalanceSource(services, swapFile, inventoryAdmission)
+    runtimeRebalance = await RebalanceService.create({
+      store: rebalanceStore,
+      backend: rail.rebalance,
+      source,
+      policy: rebalancePolicy,
+      savePolicy: async (next) => adminStore.setOverride('REBALANCE_POLICY', JSON.stringify(next)),
+    })
+    services.rebalance = runtimeRebalance
+    const tickRebalance = (): void => {
+      void runtimeRebalance
+        ?.tick()
+        .catch((error) => log('rebalance pass failed:', error instanceof Error ? error.message : String(error)))
+    }
+    rebalanceTimer = setInterval(tickRebalance, 60_000)
+    rebalanceTimer.unref()
+    tickRebalance()
   }
   return services
 }
