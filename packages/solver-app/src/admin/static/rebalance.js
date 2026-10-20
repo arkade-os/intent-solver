@@ -6,7 +6,7 @@ export class RebalancePanel {
     this.error = null
     this.busy = false
     this.loaded = false
-    this.draft = { poolId: '', amount: '', kind: '', confirm: '', policyConfirm: '' }
+    this.draft = { poolId: '', amount: '', kind: '' }
     this.policy = null
     this.requestKey = null
   }
@@ -33,7 +33,6 @@ export class RebalancePanel {
       const answer = await this.api(`/api/rebalance/${action}`, { method: 'POST', body: JSON.stringify(body) })
       if (action === 'quote') {
         this.quote = answer.result
-        this.draft.confirm = ''
         this.requestKey = null
       }
       if (action === 'policy') this.policy = structuredClone(answer.result)
@@ -43,6 +42,14 @@ export class RebalancePanel {
       this.busy = false
       await this.refresh()
     }
+  }
+
+  /** A quote prices the fields it was asked with; once one changes, Send waits for a fresh review. */
+  invalidateQuote() {
+    this.requestKey = null
+    if (!this.quote) return
+    this.quote = null
+    this.redraw()
   }
 
   quoteBody() {
@@ -63,15 +70,12 @@ export class RebalancePanel {
         label,
         h('input', {
           type,
-          inputmode:
-            type === 'text' && key !== 'solverPubkey' && key !== 'confirm' && key !== 'policyConfirm'
-              ? 'numeric'
-              : undefined,
+          inputmode: type === 'text' && key !== 'solverPubkey' ? 'numeric' : undefined,
           value: object[key] ?? '',
           disabled: this.busy,
           oninput: (e) => {
             object[key] = e.target.value
-            if (object === this.draft && ['poolId', 'amount', 'kind'].includes(key)) this.requestKey = null
+            if (object === this.draft && ['poolId', 'amount', 'kind'].includes(key)) this.invalidateQuote()
           },
         }),
       )
@@ -79,15 +83,18 @@ export class RebalancePanel {
     const children = [
       h(
         'div.wallet-section-heading',
-        h('h2', 'Rebalance liquidity'),
+        h(
+          'h2',
+          {
+            title:
+              'Arkade funds replenish configured pools. Minimum credit and maximum source debit are checked before sending.',
+          },
+          'Rebalance liquidity',
+        ),
         button('Refresh', () => {
           this.error = null
           return this.refresh()
         }),
-      ),
-      h(
-        'p.muted',
-        'Arkade funds replenish configured pools. Minimum credit and maximum source debit are checked before sending.',
       ),
     ]
     if (this.error) children.push(h('p.banner', { role: 'alert' }, this.error))
@@ -125,7 +132,7 @@ export class RebalancePanel {
             disabled: this.busy,
             onchange: (e) => {
               this.draft[key] = e.target.value
-              this.requestKey = null
+              this.invalidateQuote()
             },
           },
           options.map(([value, text]) => h('option', { value, selected: this.draft[key] === value }, text)),
@@ -135,7 +142,6 @@ export class RebalancePanel {
       h(
         'div.wallet-manual',
         h('h3', 'Move Arkade funds'),
-        h('p.muted', 'Choose a destination and amount, then review the quote before sending.'),
         h(
           'div.wallet-form-grid',
           select(
@@ -165,12 +171,12 @@ export class RebalancePanel {
           `Quote ${quote.id}: minimum credit ${quote.netSats} sat; fee upper bound ${quote.feeSats} sat; source debit ${quote.debitSats} sat; ${quote.kind}; expires ${new Date(quote.expiresAt * 1000).toISOString()}`,
         ),
       )
+      // The server still checks the quote id; the button supplies it, the review above is the confirmation.
       if (quote.state === 'quoted')
         children.push(
           h(
             'div.wallet-confirm',
-            field('Type quote ID to send', this.draft, 'confirm'),
-            button('Send confirmed quote', () => this.act('submit', { id: quote.id, confirm: this.draft.confirm })),
+            button('Send', () => this.act('submit', { id: quote.id, confirm: quote.id })),
           ),
         )
     }
@@ -187,19 +193,14 @@ export class RebalancePanel {
                   'p',
                   `${t.id}: ${t.state}; minimum ${t.netSats} sat; debit ${t.debitSats} sat${t.creditedSats === undefined ? '' : `; credited ${t.creditedSats} sat`}${t.error ? ` — ${t.error}` : ''}`,
                 ),
-                t.state === 'quoted'
-                  ? button('cancel unsubmitted quote', () => this.act('cancel', { id: t.id, confirm: t.id }))
-                  : null,
+                t.state === 'quoted' ? button('Cancel', () => this.act('cancel', { id: t.id, confirm: t.id })) : null,
               ),
             ),
       ),
     )
     const policy = this.policy
     const policyChildren = [
-      h(
-        'p.muted',
-        'Refill pools when they fall below your minimum. Saving these settings also sets the spending limits for manual transfers.',
-      ),
+      h('p.notice', 'These limits also govern manual transfers.'),
       h(
         'label.wallet-toggle',
         h('input', {
@@ -245,8 +246,11 @@ export class RebalancePanel {
     policyChildren.push(
       h(
         'fieldset.wallet-fieldset',
-        h('legend', 'External Lightning counterparty'),
-        h('p.muted', 'Required for Lightning refills through an external solver.'),
+        h(
+          'legend',
+          { title: 'Required for Lightning refills through an external solver.' },
+          'External Lightning counterparty',
+        ),
         h(
           'div.wallet-form-grid',
           field('Solver public key', policy.counterparty, 'solverPubkey'),
@@ -269,7 +273,6 @@ export class RebalancePanel {
       ),
       h(
         'div.wallet-confirm',
-        field('Type REBALANCE to save changes', this.draft, 'policyConfirm'),
         button('Save policy', () => this.savePolicy()),
       ),
     )
@@ -284,6 +287,9 @@ export class RebalancePanel {
         },
         h(
           'summary',
+          {
+            title: 'Refill pools when they fall below your minimum.',
+          },
           'Automatic rebalancing & limits',
           h('span.phase', this.data.policy.enabled ? 'Enabled' : 'Disabled'),
         ),
@@ -297,7 +303,7 @@ export class RebalancePanel {
 
   savePolicy() {
     try {
-      void this.act('policy', { policy: this.policyPayload(), confirm: this.draft.policyConfirm })
+      void this.act('policy', { policy: this.policyPayload(), confirm: 'REBALANCE' })
     } catch (error) {
       this.error = error.message
       this.redraw()

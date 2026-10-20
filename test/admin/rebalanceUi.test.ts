@@ -72,7 +72,7 @@ describe('rebalance wallet panel', () => {
     expect(first).not.toHaveProperty('destination')
     expect(first).not.toHaveProperty('kind')
   })
-  it('renders a fee preview before submitting and sends the typed quote confirmation', async () => {
+  it('renders a fee preview before submitting and sends the quote id the server checks', async () => {
     const quote = {
       id: 'quote-1',
       state: 'quoted',
@@ -90,17 +90,32 @@ describe('rebalance wallet panel', () => {
     expect(JSON.stringify(tree)).toContain('fee upper bound 5 sat; source debit 128 sat')
     expect(api).toHaveBeenCalledTimes(1)
     const nodes = nodesIn(tree)
-    const label = nodes.find(
-      (node) => node.tag === 'label.wallet-field' && node.children[0] === 'Type quote ID to send',
-    )!
-    const input = label.children[1]
-    input.children[0].oninput({ target: { value: 'quote-1' } })
-    const send = nodes.find((node) => node.tag === 'button.act' && node.children[1] === 'Send confirmed quote')!
+    const send = nodes.find((node) => node.tag === 'button.act' && node.children[1] === 'Send')!
     await send.children[0].onclick()
     expect(api.mock.calls[1]).toEqual([
       '/api/rebalance/submit',
       { method: 'POST', body: JSON.stringify({ id: 'quote-1', confirm: 'quote-1' }) },
     ])
+  })
+  it.each([
+    ['Minimum credit (sat)', 'oninput'],
+    ['Destination pool', 'onchange'],
+    ['Deposit route', 'onchange'],
+  ])('drops a reviewed quote and its Send once %s changes', async (label, event) => {
+    const quote = { id: 'q1', state: 'quoted', netSats: 1, feeSats: 1, debitSats: 2, kind: 'onchain', expiresAt: 2e9 }
+    const redraw = vi.fn()
+    const panel = new RebalancePanel(vi.fn().mockResolvedValue({ ...overview, transfers: [quote] }), redraw)
+    await panel.refresh()
+    panel.quote = quote
+    const sends = () => nodesIn(panel.render(h)).filter((node) => node.children[1] === 'Send')
+    expect(sends()).toHaveLength(1)
+    const field = nodesIn(panel.render(h)).find(
+      (node) => node.tag === 'label.wallet-field' && node.children[0] === label,
+    )!
+    field.children[1].children[0][event]({ target: { value: '124' } })
+    expect(panel.quote).toBeNull()
+    expect(redraw).toHaveBeenCalledTimes(2)
+    expect(sends()).toHaveLength(0)
   })
   it('keeps failures visible after refreshing transfer status', async () => {
     const api = vi.fn().mockRejectedValueOnce(new Error('needs reconciliation')).mockResolvedValue(overview)

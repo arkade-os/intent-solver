@@ -1214,8 +1214,8 @@ describe('the wallet page’s funding panel', () => {
   })
 
   it('puts the source, amount and destination in front of the operator before the confirm box', () => {
-    // `armDialog`'s third argument is the override gate: a banner plus a checkbox
-    // that must be ticked before the typed address counts.
+    // `armDialog`'s third argument is the line the confirmation shows: source,
+    // amount and the full destination.
     const start = appSource.indexOf('const fundWithdraw')
     expect(start).toBeGreaterThan(-1)
     const block = appSource.slice(start, appSource.indexOf('const fundFigureRows', start))

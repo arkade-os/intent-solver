@@ -57,7 +57,7 @@ interface ActionBody {
   reason?: unknown
   /** The `fund-*` actions: which source of the solver's own liquidity this is about. */
   source?: unknown
-  /** `fund-withdraw` only: where the money goes. Also what must be typed back. */
+  /** `fund-withdraw` only: where the money goes. Also what the confirmation must echo. */
   address?: unknown
   /**
    * `fund-withdraw` only: how much leaves, as a decimal STRING in the source's
@@ -157,7 +157,7 @@ const requireAddress = (body: ActionBody): string => {
 }
 
 /**
- * The confirmation a withdrawal must carry: the destination address, typed back.
+ * The confirmation a withdrawal must carry: the destination address, echoed back.
  *
  * Trimmed on BOTH sides through {@link requireAddress}, so what is compared is
  * what will be paid. Null when the body carries no address at all — the route
@@ -833,10 +833,9 @@ export const ACTIONS: Record<string, ActionDefinition> = {
    *    memory; a confirmation that differs per request cannot, and it puts the
    *    exact string the money is going to in front of the operator at the moment
    *    they commit.
-   *  - the console adds a second gate on top (`armDialog`'s override checkbox,
-   *    naming the source, amount and destination) — but that is a convenience,
-   *    and this comparison is the boundary, checked before `run` for a bare
-   *    `fetch` too.
+   *  - the console's confirmation names the source, amount and full destination
+   *    and echoes this value — a convenience; this comparison is the boundary,
+   *    checked before `run` for a bare `fetch` too.
    *  - the SOURCE then applies its own checks before it touches a backend. The
    *    rail decodes the address against this deployment's network and bounds the
    *    amount by the confirmed balance, because a wrong-chain address is
