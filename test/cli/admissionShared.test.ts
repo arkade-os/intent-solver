@@ -50,15 +50,30 @@ describe('createServices — one admission control for every corridor', () => {
     // each read the same pre-commit total and both pass a cap only one fits
     // under — the cap race, reopened for two corridors and invisible because
     // the number was hard-coded to the corridors that existed when it was written.
+    // SEVEN since the onchain asset receive leg. This number tracks reality on
+    // purpose — the paragraph above is what happened the last time it did not.
     const body = createServicesBody()
-    expect(body.match(/^\s*admission,$/gm) ?? []).toHaveLength(6)
-    expect(body.match(/^\s*totalCommitted,$/gm) ?? []).toHaveLength(6)
+    expect(body.match(/^\s*admission,$/gm) ?? []).toHaveLength(7)
+    expect(body.match(/^\s*totalCommitted,$/gm) ?? []).toHaveLength(7)
+  })
+
+  // The asset receive leg quotes against the house cap, so its store must be
+  // read in the single house-wide closure — a second closure would type-check
+  // and silently split the cap again.
+  it('reads the asset receive store in the house-wide totalCommitted closure', () => {
+    const body = createServicesBody()
+    const at = body.indexOf('const totalCommitted')
+    expect(body.slice(at, at + 700)).toContain('onchainAssetReceiveStore')
   })
 
   it('reads one house-wide committed total, every exposure-bearing store in it', () => {
     const body = createServicesBody()
     expect(body.match(/const totalCommitted/g) ?? []).toHaveLength(1)
-    for (const read of ['evmSendStore?.committedSats()', 'evmReceiveStore?.committedSats()']) {
+    for (const read of [
+      'evmSendStore?.committedSats()',
+      'evmReceiveStore?.committedSats()',
+      'onchainAssetReceiveStore?.committedSats() ?? 0',
+    ]) {
       expect(body, `${read} is missing from the house-wide total`).toContain(read)
     }
     expect(body).toContain('assetRfqStore.committedSats()')

@@ -16,6 +16,12 @@
 export interface PageOptions {
   /** Corridor-native state words. Empty or absent means every state. */
   states?: readonly string[]
+  /**
+   * One corridor's rows, where a single table backs every market. In the SQL
+   * because {@link takePage} derives the cursor from the rows it was handed:
+   * narrowing afterwards short-pages the caller and misreports the cursor.
+   */
+  pair?: string
   limit?: number
   cursor?: string | null
   /**
@@ -157,6 +163,10 @@ export const pageQuery = (table: string, options: PageOptions): { sql: string; p
   if (options.states && options.states.length > 0) {
     clauses.push(`state IN (${options.states.map(() => '?').join(',')})`)
     params.push(...options.states)
+  }
+  if (options.pair !== undefined) {
+    clauses.push('pair = ?')
+    params.push(options.pair)
   }
   // The tie-break on rowid is what makes the cursor total: created_at is a
   // second-resolution clock, so several swaps quoted in the same second would
