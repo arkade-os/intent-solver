@@ -108,7 +108,7 @@ export const formatCheckpointRecovery = (checkpoint: BalanceCheckpoint, network:
     : limitNotification(
         [
           `RECOVERED — ${network} — checkpoint #${checkpoint.id}`,
-          'The earlier POSSIBLE LOSS was temporary: the balance came back.',
+          'The balance is back to its level before the drop; the cause is not reconciled.',
           ...recovered.map(
             ({ checkpointId, asset, before, after }) =>
               `${formatBalanceChange({ asset, before, after, delta: String(BigInt(after) - BigInt(before)) })} since before the drop at checkpoint #${checkpointId}`,

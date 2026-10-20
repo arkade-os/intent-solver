@@ -362,7 +362,7 @@ describe('balance checkpoints', () => {
       formatCheckpointWarning(drop, 'regtest'),
       [
         `RECOVERED — regtest — checkpoint #${back.id}`,
-        'The earlier POSSIBLE LOSS was temporary: the balance came back.',
+        'The balance is back to its level before the drop; the cause is not reconciled.',
         `BTC: 0 sats (6,400 → 6,400) since before the drop at checkpoint #${drop.id}`,
       ].join('\n'),
     ])
