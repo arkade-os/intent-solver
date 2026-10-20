@@ -285,7 +285,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
     const htlcLocktime = htlcLocktimeFor(DEFAULT_MIN_CONFIRMATIONS, at)
     const soloRecourse = rawDelaySeconds(services.arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay)
     const servable = evaluateOnchainReceiveFunding({
-      arkadeRefundLocktime: arkadeRefundLocktimeFor(htlcLocktime, at),
+      arkadeRefundLocktime: arkadeRefundLocktimeFor(DEFAULT_MIN_CONFIRMATIONS, at),
       htlcLocktime,
       unilateralRefundWithoutReceiverDelay: services.arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay,
       now: at,

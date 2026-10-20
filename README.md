@@ -782,8 +782,9 @@ guardrail is written in terms of exactly these constants.
 | `DEFAULT_ONCHAIN_LOCKUP_TIMEOUT`                                    | 15 min                | send leg                                                                                                                                                       |
 | `DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT`                            | 15 min                | receive leg                                                                                                                                                    |
 | `MIN_ONCHAIN_FUND_WINDOW`                                           | 90 min                | re-checked immediately before funding the onchain HTLC                                                                                                         |
-| `MIN_ARKADE_FUND_WINDOW`                                            | 90 min                | re-checked immediately before funding the Arkade lockup                                                                                                        |
-| `MIN_SETTLE_WINDOW` / `SETTLE_SAFETY_MARGIN` / `MAX_REFUND_HORIZON` | 90 min / 15 min / 2 h | redeclared in `onchainReceive.ts` under the same names and values as `receive.ts` — one invariant set, applying to every receive-direction profile             |
+| `MIN_ARKADE_FUND_WINDOW`                                            | 90 min                | re-checked immediately before funding the Arkade lockup, and the term the receive leg's `refund_locktime` is built on top of                                   |
+| `SLOW_BLOCK_ALLOWANCE`                                              | 30 min                | receive leg: one long block, inside `onchainReceiveFundingBudget`                                                                                              |
+| `MIN_SETTLE_WINDOW` / `SETTLE_SAFETY_MARGIN`                        | 90 min / 15 min       | redeclared in `onchainReceive.ts` under the same names and values as `receive.ts` — one invariant set, applying to every receive-direction profile             |
 
 The two directions mirror each other and the direction of the bound flips:
 
@@ -792,17 +793,20 @@ send    htlcLocktime   = now + minConf × 600 + 2 × 90min
         refundLocktime = max(htlcLocktime + 2 × 2h,
                              now + unilateralClaimDelay + 2h)
 
-receive htlcLocktime   = now + minConf × 600 + 2 × 90min
-        arkadeRefund   = min(htlcLocktime - 15min, now + 2h)
+receive budget         = 15min + 2 × minConf × 600 + 30min
+        arkadeRefund   = now + budget + 90min
+        htlcLocktime   = arkadeRefund + 90min
 ```
 
 On **send** the client funds the Arkade lockup and the solver funds the onchain
 HTLC, so the Arkade refund must land safely _after_ the onchain deadline —
 hence `max` of two lower bounds. On **receive** the roles invert, the solver
 funds Arkade, and its refund must open safely _before_ the onchain deadline —
-hence `min` of two upper bounds. Both margins are doubled rather than sized to
-the boundary, so a quote is not refused by ordinary clock skew between solver
-and client.
+so the two are **chained** rather than derived side by side, and the gap is
+`MIN_SETTLE_WINDOW` by construction at every depth (#160). The send margins are
+doubled rather than sized to the boundary, so a quote is not refused by
+ordinary clock skew; on receive the doubling is on the confirmation wait
+instead, which is the term that actually varies.
 
 ### Invoice parsing (`packages/solver-core/src/invoice/decode.ts`)
 
