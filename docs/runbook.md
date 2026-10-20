@@ -123,8 +123,18 @@ incomplete, never zero, and do not replace the comparison baseline. The baseline
 survives restarts and is separated by network, Arkade server, provider identity,
 and backend (including the LND socket).
 
+Each decrease is then followed against its own before amount. The first later
+complete checkpoint where that asset is back at or above it emits `RECOVERED`,
+naming the checkpoint that reported the drop. Followed decreases are carried in
+the checkpoint record, so restarts and incomplete reads do not lose them; only
+the 20 most recent unrecovered ones are kept. `RECOVERED` means the balance is
+back, not that the cause was reconciled. A drop that offsets a gain from the
+previous minute, such as the second leg of one swap, gets its follow-up only
+once the balance passes the amount before that drop.
+
 With notification sinks configured, checkpoint decreases also send a
-`POSSIBLE LOSS` alert through the existing notification queue. These alerts do not
+`POSSIBLE LOSS` alert through the existing notification queue, and recoveries a
+`RECOVERED` follow-up. These alerts do not
 require `BALANCE_REPORT_INTERVAL_MINUTES`. Periodic balance reports include signed
 BTC and Arkade asset changes since the previous complete report, using a separate
 baseline retained across restarts. Minute checkpoints

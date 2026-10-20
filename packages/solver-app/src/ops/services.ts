@@ -82,7 +82,7 @@ import { createNotifier } from './notify.js'
 import { sinksFrom } from './notifySinks.js'
 import { btcSwapSize, createBalanceSampler, createSwapOutcomeReporter } from './businessEvents.js'
 import { createBalanceReportReader, formatBalanceReport } from './balanceReport.js'
-import { balanceCheckpointScope, formatCheckpointWarning, type BalanceCheckpoint } from './balanceCheckpoints.js'
+import { balanceCheckpointScope, checkpointNotices, type BalanceCheckpoint } from './balanceCheckpoints.js'
 import { createSwapSummaryReader } from './swapSummary.js'
 import { fundSources } from './fundSources.js'
 import { assetSource, describeAssetId } from '../admin/assets.js'
@@ -1688,12 +1688,7 @@ export const createServices = async (
     reportBalances:
       notifySinks.length > 0 && config.balanceReportIntervalMinutes !== null ? postBalanceReport : undefined,
     onBalanceCheckpoint:
-      notifySinks.length > 0
-        ? (checkpoint) => {
-            const warning = formatCheckpointWarning(checkpoint, config.network)
-            if (warning) notifier.post(warning)
-          }
-        : undefined,
+      notifySinks.length > 0 ? checkpointNotices(config.network, (text) => notifier.post(text)) : undefined,
     tickErrors,
     emulatorPubkey: emulatorInfo.signerPubkey,
     providerPubkey: arkadeOps.providerPubkey,

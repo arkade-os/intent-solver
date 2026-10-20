@@ -16,7 +16,20 @@ export interface BalanceCheckpoint {
   errors: Record<string, string>
   previousId: number | null
   decreases: { asset: string; before: string; after: string; decrease: string }[]
+  // Optional: checkpoints stored before recovery tracking have neither.
+  recovered?: (FollowedDecrease & { after: string })[]
+  unrecovered?: FollowedDecrease[]
 }
+
+/** A decrease reported at `checkpointId`, followed until its asset is back to `before`. */
+export interface FollowedDecrease {
+  checkpointId: number
+  asset: string
+  before: string
+}
+
+// ponytail: oldest dropped past this; a time window instead if late follow-ups turn into noise.
+const UNRECOVERED_LIMIT = 20
 
 type CheckpointServices = Pick<Services, 'arkade' | 'ln' | 'onchain' | 'adminStore' | 'config' | 'providerPubkey'>
 
@@ -81,11 +94,36 @@ export const formatCheckpointWarning = (checkpoint: BalanceCheckpoint, network: 
         [
           `POSSIBLE LOSS — ${network} — checkpoint #${checkpoint.id}`,
           'Fees, withdrawals and funds in flight are not reconciled.',
+          'A RECOVERED follow-up is sent if the balance comes back.',
           ...checkpoint.decreases.map(({ asset, before, after, decrease }) =>
             formatBalanceChange({ asset, before, after, delta: String(-BigInt(decrease)) }),
           ),
         ].join('\n'),
       )
+
+export const formatCheckpointRecovery = (checkpoint: BalanceCheckpoint, network: string): string | null => {
+  const recovered = checkpoint.recovered ?? []
+  return recovered.length === 0
+    ? null
+    : limitNotification(
+        [
+          `RECOVERED — ${network} — checkpoint #${checkpoint.id}`,
+          'The earlier POSSIBLE LOSS was temporary: the balance came back.',
+          ...recovered.map(
+            ({ checkpointId, asset, before, after }) =>
+              `${formatBalanceChange({ asset, before, after, delta: String(BigInt(after) - BigInt(before)) })} since before the drop at checkpoint #${checkpointId}`,
+          ),
+        ].join('\n'),
+      )
+}
+
+export const checkpointNotices =
+  (network: string, post: (text: string) => void) =>
+  (checkpoint: BalanceCheckpoint): void => {
+    for (const text of [formatCheckpointRecovery(checkpoint, network), formatCheckpointWarning(checkpoint, network)]) {
+      if (text) post(text)
+    }
+  }
 
 const balanceReads = new WeakMap<CheckpointServices, ReturnType<typeof createJoin>>()
 
@@ -147,6 +185,15 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
   const decreases = (changes ?? [])
     .filter(({ delta }) => BigInt(delta) < 0n)
     .map(({ asset, before, after, delta }) => ({ asset, before, after, decrease: String(-BigInt(delta)) }))
+  const levels = new Map((changes ?? []).map(({ asset, after }) => [asset, BigInt(after)]))
+  const level = (asset: string) => levels.get(asset) ?? 0n
+  const followed: FollowedDecrease[] = previous
+    ? [
+        ...(previous.unrecovered ?? []),
+        ...previous.decreases.map(({ asset, before }) => ({ checkpointId: previous.id, asset, before })),
+      ]
+    : []
+  const isBack = ({ asset, before }: FollowedDecrease) => level(asset) >= BigInt(before)
   return services.adminStore.recordBalanceCheckpoint({
     scope,
     startedAt,
@@ -158,6 +205,8 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
     errors,
     previousId: previous?.id ?? null,
     decreases,
+    recovered: followed.filter(isBack).map((d) => ({ ...d, after: String(level(d.asset)) })),
+    unrecovered: followed.filter((d) => !isBack(d)).slice(-UNRECOVERED_LIMIT),
   })
 }
 
@@ -179,6 +228,9 @@ export const withBalanceCheckpoints = async (input: {
           `POSSIBLE LOSS: balance decreased at checkpoint ${checkpoint.id}: ${json(decrease)}; ` +
             'fees, withdrawals and funds in flight are not reconciled',
         )
+      }
+      for (const recovery of checkpoint.recovered ?? []) {
+        input.log(`RECOVERED: balance back at checkpoint ${checkpoint.id}: ${json(recovery)}`)
       }
       input.onCheckpoint?.(checkpoint)
     },
