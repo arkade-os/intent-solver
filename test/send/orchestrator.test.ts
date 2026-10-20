@@ -728,6 +728,18 @@ describe('tick: the full drive', () => {
     expect((await store.get(swap.id)).refundOutcome).toBe('pushed')
   })
 
+  it('keeps refunding a lockup whose refund had to leave a near-expiry output behind', async () => {
+    const { swap } = await quoted()
+    arkade.lockups = [
+      { txid: 'f1', vout: 0, value: AMOUNT },
+      { txid: 'f2', vout: 1, value: AMOUNT, expiresAt: clock + 60 },
+    ]
+    expect((await service.tick(swap.id)).state).toBe('refused')
+
+    expect(await service.refundSweep()).toEqual([swap.id])
+    expect((await store.get(swap.id)).refundOutcome).toBeNull()
+  })
+
   it('refuses an overfunded lockup rather than claim the excess', async () => {
     // The claim leaf sweeps whole vtxos, so paying an overfunded lockup would
     // keep the excess with no way for the client to recover it. Refusing routes
