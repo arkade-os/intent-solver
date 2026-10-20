@@ -495,6 +495,28 @@ describe('OnchainSendSwapService', () => {
     expect(row.fundingTxid).toBeNull()
   })
 
+  it('keeps refunding an over-limit lockup until every piece is back', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const pieces = MAX_LOCKUP_SPEND_INPUTS + 1
+    const lockups = Array.from({ length: pieces }, (_, vout) => ({ txid: 'lockup-tx', vout, value: 1_000 }))
+    lockups.push({ txid: 'lockup-tx', vout: pieces, value: 50_000 - pieces * 1_000 })
+    deps.outputs.set(outcome.swap.pkScript, lockups)
+    expect((await service.tick(outcome.swap.id)).state).toBe('refused')
+
+    expect(await service.refundSweep()).toEqual([outcome.swap.id])
+    expect((await deps.store.get(outcome.swap.id)).refundOutcome).toBeNull()
+    deps.outputs.set(outcome.swap.pkScript, lockups.slice(MAX_LOCKUP_SPEND_INPUTS))
+    expect(await service.refundSweep()).toEqual([outcome.swap.id])
+    expect((await deps.store.get(outcome.swap.id)).refundOutcome).toBe('pushed')
+  })
+
   // Regtest is exempt from the lockup-expiry gate, so these go through a network that is not.
   const gated = () =>
     new OnchainSendSwapService({

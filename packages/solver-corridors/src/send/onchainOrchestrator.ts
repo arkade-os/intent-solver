@@ -516,7 +516,9 @@ export class OnchainSendSwapService {
       return null
     }
     const txid = await arkade.refund(covenantRowFor(row), outputs)
-    await store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
+    // One refund spends at most MAX_LOCKUP_SPEND_INPUTS: the row stays refundable for the rest.
+    const all = outputs.length <= MAX_LOCKUP_SPEND_INPUTS
+    await store.patch(row.id, all ? { refund_outcome: 'pushed', refund_ark_txid: txid } : { refund_ark_txid: txid })
     return txid
   }
 
