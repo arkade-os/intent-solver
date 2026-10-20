@@ -442,6 +442,22 @@ describe('Arkade rebalance source routes', () => {
     expect(mocks.restoreIds).toEqual([['rfq-1']])
   })
 
+  it('pages same-timestamp records in the code-unit order its cursor resumes from', async () => {
+    // localeCompare puts 'rfq-a' first; the cursor's `>` puts 'rfq-B' first, so a
+    // mismatched sort would return one id twice and drop the other.
+    for (const rfqId of ['rfq-a', 'rfq-B'])
+      await driver.run(
+        'INSERT INTO rebalance_rfq (rfq_id, record_json, fund_amount, valid_until) VALUES (?, ?, ?, ?)',
+        [rfqId, JSON.stringify({ rfqId, state: 'pending', updatedAt: 100, fundingTxid: txid }), 1_040, 1],
+      )
+    await source.close?.()
+    source = await createArkadeRebalanceSource(services, driver, admission)
+    const repository = mocks.managerRepositories.at(-1)!
+    const first = await repository.getRfqSwapsPage({}, { limit: 1 })
+    const second = await repository.getRfqSwapsPage({}, { limit: 1, after: first.nextCursor })
+    expect([...first.items, ...second.items].map((record) => record.rfqId)).toEqual(['rfq-B', 'rfq-a'])
+  })
+
   it('leaves Lightning timeout funding quarantined across restart without refunding an empty quote', async () => {
     const receiving = lightningDeposit()
     mockRequest(receiving)

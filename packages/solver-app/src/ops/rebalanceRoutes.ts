@@ -105,7 +105,7 @@ class RebalanceRfqRepository implements RfqSwapRecordStore {
     const sorted = (await this.getAllRfqSwaps())
       .filter((record) => filter.state === undefined || record.state === filter.state)
       .filter((record) => filter.since === undefined || record.updatedAt >= filter.since)
-      .sort((a, b) => a.updatedAt - b.updatedAt || a.rfqId.localeCompare(b.rfqId))
+      .sort((a, b) => a.updatedAt - b.updatedAt || (a.rfqId < b.rfqId ? -1 : a.rfqId > b.rfqId ? 1 : 0))
     const after = page.after
     const remaining = after
       ? sorted.filter(
