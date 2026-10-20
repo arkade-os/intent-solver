@@ -1373,18 +1373,21 @@ hard way. The numbers below are the smallest legal values, not arbitrary ones.
 - **`ARKD_CHECKPOINT_EXIT_DELAY=1536`, NOT 1200.** BIP68 encodes relative
   timelocks in 512-second units, so 1200s is representable only as
   `floor(1200/512) = 2` units = **1024s**, which is under the SDK's own regtest
-  floor (`REGTEST_MIN_CHECKPOINT_EXIT_DELAY_SECONDS = 1200`, pinned SDK
-  `dist/chunk-DVOQZAAX.js:2352`). 1536 = 3x512 is the smallest multiple of the
-  granularity that clears it.
-  **On any non-regtest network that floor is `DEFAULT_MIN_CHECKPOINT_EXIT_DELAY_SECONDS`
-  = 86400 (24h)** (same file, line 2351) and `Wallet.create` throws outright
-  below it — worth knowing before this configuration is copied toward mainnet.
+  floor (`REGTEST_MIN_CHECKPOINT_EXIT_DELAY_SECONDS = 1200`, SDK
+  `defaultCheckpointExitDelayPolicy`). 1536 = 3x512 is the smallest multiple of
+  the granularity that clears it.
+  **Off regtest that floor is per network: mutinynet 4096, signet 86016, mainnet
+  (and anything unrecognised) `DEFAULT_MIN_CHECKPOINT_EXIT_DELAY_SECONDS` = 86400
+  (24h)**, and `Wallet.create` throws outright below it — worth knowing before
+  this configuration is copied toward mainnet. The SDK picks the floor by the
+  server's advertised `info.network`, so our network profiles pin it for every
+  non-regtest network (`packages/solver-core/src/core/networks.ts`).
 - **`ARKD_VTXO_TREE_EXPIRY=6144.`** There is a SECOND, independent floor —
-  `REGTEST_MIN_BATCH_EXPIRY_SECONDS = 6000` (same file, line 2336) — and it is
-  checked at **settle**, not at startup. A smaller value (1024, say) therefore
-  brings the stack up perfectly happily and only fails once funds are actually
-  settled. Non-regtest equivalent: `DEFAULT_MIN_BATCH_EXPIRY_SECONDS = 86400`
-  (line 2335).
+  `REGTEST_MIN_BATCH_EXPIRY_SECONDS = 6000` (SDK `defaultBatchExpiryPolicy`) —
+  and it is checked at **settle**, not at startup. A smaller value (1024, say)
+  therefore brings the stack up perfectly happily and only fails once funds are
+  actually settled. Non-regtest equivalent: `DEFAULT_MIN_BATCH_EXPIRY_SECONDS =
+  86400`.
 - **`COVCLAIMD_IMAGE` must be set explicitly, and at `v0.0.1-rc.5` or above.**
   `regtest.mjs` silently drops covclaimd from the stack when it is unset — no
   error, the container simply is not there. Setting it is not enough on its own:

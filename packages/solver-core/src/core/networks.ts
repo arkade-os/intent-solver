@@ -76,7 +76,9 @@ export const NETWORKS = {
     arkdNetwork: 'bitcoin',
     backendNetwork: 'MAINNET',
     isMainnet: true,
-    minCheckpointExitDelaySeconds: undefined,
+    // The SDK's own mainnet floor, pinned so a server advertising another network
+    // cannot relax it. See mutinynet below.
+    minCheckpointExitDelaySeconds: 86400,
     explorers: { arkade: 'https://arkade.space', onchain: 'https://mempool.arkade.sh' },
   },
   // Mutinynet is a signet: the Lightning side cannot tell the two apart, so they
@@ -88,13 +90,11 @@ export const NETWORKS = {
     arkdNetwork: 'mutinynet',
     backendNetwork: 'SIGNET',
     isMainnet: false,
-    // The hosted Service advertises 4096s, and the SDK cannot tell mutinynet from
-    // signet — both are byte-identical `Network` structs — so it applies the 86400s
-    // mainnet-grade floor and `Wallet.create` refuses to connect. Upstream rejected
-    // keying the floor off the server's own `info.network` because that would make
-    // the relaxed bound operator-selectable (arkade-os/ts-sdk#706); the same
-    // objection rules out reading the advertised `checkpointTapscript`, which is the
-    // value being validated. So the number is pinned here, on the client.
+    // The SDK picks this floor by the name the server advertises in `info.network`
+    // (`defaultCheckpointExitDelayPolicy`), and does so inside `Wallet.create`, before
+    // our own network check runs, so an unpinned floor is operator-selectable (the
+    // objection in arkade-os/ts-sdk#706). Hence every non-regtest profile pins it;
+    // on regtest the SDK floor is already the lowest, so a lie can only raise it.
     //
     // Exact, not lower: the SDK compares with a strict `<`, so 4096 accepts this
     // Service and refuses one that later shortens its delay. arkade-os/wallet#891
@@ -109,7 +109,9 @@ export const NETWORKS = {
     arkdNetwork: 'signet',
     backendNetwork: 'SIGNET',
     isMainnet: false,
-    minCheckpointExitDelaySeconds: undefined,
+    // The SDK's own signet floor, pinned so a server advertising `mutinynet` cannot
+    // relax it to 4096. See mutinynet above.
+    minCheckpointExitDelaySeconds: 86016,
     explorers: { arkade: 'https://explorer.signet.arkade.sh', onchain: 'https://mempool.signet.arkade.sh' },
   },
   regtest: {
