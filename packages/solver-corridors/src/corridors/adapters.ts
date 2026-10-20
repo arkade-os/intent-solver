@@ -137,31 +137,43 @@ const readerFor = <Row extends { id: string; pkScript: string; preimage: string 
   close: () => store.close(),
 })
 
-export const lightningSendReader = (store: SwapStore): CorridorReader =>
-  readerFor(LN_SEND, store, projectSend, rfqStatusPayload, (row) => row, sendEconomics)
+export const lightningSendReader = (store: SwapStore): CorridorReader => ({
+  ...readerFor(LN_SEND, store, projectSend, rfqStatusPayload, (row) => row, sendEconomics),
+  outstandingArkadeSats: async () => 0,
+})
 
-export const lightningReceiveReader = (store: ReceiveSwapStore): CorridorReader =>
-  readerFor(
+export const lightningReceiveReader = (store: ReceiveSwapStore): CorridorReader => ({
+  ...readerFor(
     LN_RECEIVE,
     store,
     projectReceive,
     lightningReceiveRfqStatusPayload,
     receiveCovenantRowFor,
     receiveEconomics,
-  )
+  ),
+  outstandingArkadeSats: async () =>
+    (await store.findRecoverable())
+      .filter((row) => !row.arkadeLockupTxid)
+      .reduce((sum, row) => sum + row.payoutSats, 0),
+})
 
-export const onchainSendReader = (store: OnchainSendSwapStore): CorridorReader =>
-  readerFor(ONCHAIN_SEND, store, projectOnchainSend, onchainRfqStatusPayload, covenantRowFor, onchainSendEconomics)
+export const onchainSendReader = (store: OnchainSendSwapStore): CorridorReader => ({
+  ...readerFor(ONCHAIN_SEND, store, projectOnchainSend, onchainRfqStatusPayload, covenantRowFor, onchainSendEconomics),
+  outstandingArkadeSats: async () => 0,
+})
 
-export const onchainReceiveReader = (store: OnchainReceiveSwapStore): CorridorReader =>
-  readerFor(
+export const onchainReceiveReader = (store: OnchainReceiveSwapStore): CorridorReader => ({
+  ...readerFor(
     ONCHAIN_RECEIVE,
     store,
     projectOnchainReceive,
     onchainReceiveRfqStatusPayload,
     onchainReceiveCovenantRowFor,
     onchainReceiveEconomics,
-  )
+  ),
+  outstandingArkadeSats: async () =>
+    (await store.findRecoverable()).filter((row) => !row.arkadeFundTxid).reduce((sum, row) => sum + row.payoutSats, 0),
+})
 
 /**
  * Where a parked row lands, for all four BTC corridors.

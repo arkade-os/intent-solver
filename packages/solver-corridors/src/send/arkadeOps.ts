@@ -14,11 +14,13 @@ import { ArkAddress } from '@arkade-os/sdk'
 import {
   claimSwapScript,
   findLockups,
+  findSweptLockups,
   lockupProvablySpent,
   lockupSpendEvidence,
   refundSwapScript,
   type ArkadeContext,
 } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { refundSweptSwapScript } from '@arkade-os/solver-arkade/arkade/sweptRefund.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 
 /** The emulator service the refund covenant is signed by. */
@@ -71,6 +73,12 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
       const script = covenantScriptFromRow(row)
       assertScriptMatchesRow(script, row)
       return refundSwapScript(ctx, emulator.url, script, outputs, hex.decode(row.refundPkScript!))
+    },
+    findSweptLockups: (pkScriptHex) => findSweptLockups(ctx, pkScriptHex),
+    refundSwept: async (row, swept) => {
+      const script = covenantScriptFromRow(row)
+      assertScriptMatchesRow(script, row)
+      return refundSweptSwapScript(ctx, emulator.url, script, swept, hex.decode(row.refundPkScript!))
     },
   }
 }

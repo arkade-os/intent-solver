@@ -86,6 +86,7 @@ export interface CorridorSwapView {
  */
 export interface CorridorReader {
   readonly descriptor: CorridorDescriptor
+  outstandingArkadeSats?(): Promise<number>
 
   /**
    * This corridor's status payload for an rfq id, or null when the id is not

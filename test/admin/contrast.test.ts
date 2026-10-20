@@ -71,7 +71,9 @@ const PAIRS: readonly (readonly [fg: string, bg: string, where: string])[] = [
   ['text-faint', 'ground', 'the raw row JSON and timeline cells'],
   ['text-faint', 'raised', 'the same inside the detail dialog'],
   ['failed', 'ground', 'failure text'],
+  ['failed', 'raised', 'a stuck state in the swap pane, a loss figure in its tile'],
   ['failed', 'failed-bg', 'the failed chip'],
+  ['text', 'failed-bg', 'an error banner'],
   ['exposed', 'ground', 'exposed text'],
   ['exposed', 'exposed-bg', 'the exposed chip'],
   // `.panel .at-risk` — sats outstanding in the p&l tables, which sit in a

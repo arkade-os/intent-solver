@@ -92,7 +92,7 @@ const GLOBAL_KEYS = ['MAX_EXPOSED_SATS', 'LOCKUP_TIMEOUT_SECONDS', 'ASSET_CARRIE
  * TRAP for whoever widens it: `services.ts`'s `float.fundingFeeSats` closes over the BOOT `const policy`, and
  * `replacePolicy` ASSIGNS a field rather than rebinding a const, so such a reader stays FROZEN ON BOOT.
  */
-export const LIVE_KEYS: ReadonlySet<string> = new Set(['ASSET_CARRIER_PRICING'])
+export const LIVE_KEYS: ReadonlySet<string> = new Set(['ASSET_CARRIER_PRICING', 'REBALANCE_POLICY'])
 
 /** Every key the console may write. Derived from the corridor list so it cannot drift from it. */
 export const editableKeys = (): string[] => [

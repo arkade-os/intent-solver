@@ -13,7 +13,8 @@
  */
 
 import { hex } from '@scure/base'
-import { findLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { findLockups, findSweptLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { refundSweptSwapScript } from '@arkade-os/solver-arkade/arkade/sweptRefund.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import type { Services } from './services.js'
 
@@ -39,8 +40,26 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
     throw new Error(`swap ${id} is not a covenant swap: missing refund destination or emulator key`)
   }
   const script = covenantScriptFromRow(row)
-  const outputs = await findLockups(services.arkade, hex.encode(script.pkScript))
-  if (outputs.length === 0) return { skipped: NOTHING_AT_SCRIPT }
+  const pkScript = hex.encode(script.pkScript)
+  const outputs = await findLockups(services.arkade, pkScript)
+  // A SWEPT lockup is invisible to `findLockups` and unspendable offchain, so
+  // it goes through a batch round. Unattended, the float pass does the same
+  // off the recovery guard. @see arkade/sweptRefund.ts
+  if (outputs.length === 0) {
+    const swept = await findSweptLockups(services.arkade, pkScript)
+    if (swept.length === 0) return { skipped: NOTHING_AT_SCRIPT }
+    await services.store.noteFundings(row.id, swept)
+    const txid = await refundSweptSwapScript(
+      services.arkade,
+      services.config.emulatorUrl,
+      script,
+      swept,
+      hex.decode(row.refundPkScript),
+    )
+    await services.store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
+    if (row.state === 'stuck') await services.store.transition(row.id, 'stuck', 'refused')
+    return { txid }
+  }
 
   // Record what is ACTUALLY at the script before spending it — the force-check a second
   // funding needs. A lockup can be funded more than once, the lifecycle has only one

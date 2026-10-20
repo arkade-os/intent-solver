@@ -151,6 +151,15 @@ export abstract class BaseSwapStore<Row, State extends string> {
     return raw ? this.shape.toRow(raw) : null
   }
 
+  /** Newest first for `findByRfqId`'s reason: two rows share a script only through a re-quote against one secret, and then the live row is the later. */
+  async findByPkScript(pkScript: string): Promise<Row | null> {
+    const raw = await this.driver.get<RawRow>(
+      `SELECT * FROM ${this.shape.table} WHERE pk_script = ? ORDER BY created_at DESC LIMIT 1`,
+      [pkScript],
+    )
+    return raw ? this.shape.toRow(raw) : null
+  }
+
   /** Most recent swap for a hash, any state — the status lookup's view. */
   async findByPaymentHash(paymentHash: string): Promise<Row | null> {
     const raw = await this.driver.get<RawRow>(

@@ -26,6 +26,11 @@ export interface EvmChainConfig {
   chainId: number
   cadence: EvmBlockCadence
   /**
+   * The cadence of `block.number`, which HTLC timelocks follow, when it is not `cadence`: Arbitrum-stack chains
+   * report the parent chain's height there. Null means the two are one clock, which boot verifies.
+   */
+  timelockCadence: EvmBlockCadence | null
+  /**
    * Confirmations before a lock is treated as real — the depth half of the
    * acceptance policy.
    */
@@ -232,12 +237,26 @@ export const loadEvmChainConfig = (env: NodeJS.ProcessEnv = process.env): EvmCha
   // downstream — both conversions keep working and silently return the unsafe
   // answer on every swap — so startup is the only place this is catchable.
   assertCadence(cadence)
+  const timelockSet = ['EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK', 'EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK'].filter(
+    (name) => env[name]?.trim(),
+  ).length
+  if (timelockSet === 1)
+    throw new Error('EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK and EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK go together')
+  const timelockCadence: EvmBlockCadence | null =
+    timelockSet === 0
+      ? null
+      : {
+          fastestSecondsPerBlock: numberFrom(env, 'EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK', Number.MIN_VALUE),
+          slowestSecondsPerBlock: numberFrom(env, 'EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK', Number.MIN_VALUE),
+        }
+  if (timelockCadence !== null) assertCadence(timelockCadence)
 
   return {
     contractAddress: addressFromHex(required(env, 'EVM_HTLC_ADDRESS'), 'EVM_HTLC_ADDRESS'),
     rpcUrl: required(env, 'EVM_RPC_URL'),
     chainId: intFrom(env, 'EVM_CHAIN_ID', 1),
     cadence,
+    timelockCadence,
     minConfirmations: intFrom(env, 'EVM_MIN_CONFIRMATIONS', 1),
     // Positive, not non-negative — same sentinel as the cadence knobs. Zero
     // is depth-only wearing a two-knob disguise.
