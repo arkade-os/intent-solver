@@ -1457,18 +1457,19 @@ const backendsView = () => {
       h('thead', h('tr', h('th', ''), h('th', 'backend'), h('th', 'detail'), h('th', 'target'), h('th', 'checked'))),
       h(
         'tbody',
-        state.data.diagnostics.backends.map((backend) =>
-          h(
+        state.data.diagnostics.backends.map((backend) => {
+          const said = backend.ok ? backend.detail : backend.error
+          return h(
             'tr',
             h('td', h(`span.dot${backend.ok ? '' : '.down'}`)),
             h('td', backend.name),
-            h('td.clip', backend.ok ? h('span.muted', backend.detail) : h('span.sans', backend.error)),
-            h('td.faint.clip', backend.target ?? '—'),
+            h('td', h(`span.clip${backend.ok ? '.muted' : '.sans'}`, { title: said }, said)),
+            h('td.faint', h('span.clip', { title: backend.target ?? '' }, backend.target ?? '—')),
             // The timestamp is the point: without it a frozen probe and a fresh
             // one look identical.
             h('td.faint', ago(backend.lastCheckedAt)),
-          ),
-        ),
+          )
+        }),
       ),
     ),
   )
@@ -2830,7 +2831,7 @@ const auditView = () => {
               h('td.faint', shortId(row.target)),
               h('td', row.outcome === 'ok' ? h('span.muted', 'ok') : h('span.phase.phase-failed', 'error')),
               // Clipped to one line with the whole text on hover: a raw result can run to kilobytes.
-              h('td.faint.clip', { title: row.detail ?? '' }, row.detail ?? ''),
+              h('td.faint', { title: row.detail ?? '' }, h('span.clip', row.detail ?? '')),
             ),
           ),
         ),

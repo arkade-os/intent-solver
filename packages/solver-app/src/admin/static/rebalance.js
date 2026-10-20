@@ -44,6 +44,14 @@ export class RebalancePanel {
     }
   }
 
+  /** A quote prices the fields it was asked with; once one changes, Send waits for a fresh review. */
+  invalidateQuote() {
+    this.requestKey = null
+    if (!this.quote) return
+    this.quote = null
+    this.redraw()
+  }
+
   quoteBody() {
     this.requestKey ??= crypto.randomUUID()
     return {
@@ -67,7 +75,7 @@ export class RebalancePanel {
           disabled: this.busy,
           oninput: (e) => {
             object[key] = e.target.value
-            if (object === this.draft && ['poolId', 'amount', 'kind'].includes(key)) this.requestKey = null
+            if (object === this.draft && ['poolId', 'amount', 'kind'].includes(key)) this.invalidateQuote()
           },
         }),
       )
@@ -124,7 +132,7 @@ export class RebalancePanel {
             disabled: this.busy,
             onchange: (e) => {
               this.draft[key] = e.target.value
-              this.requestKey = null
+              this.invalidateQuote()
             },
           },
           options.map(([value, text]) => h('option', { value, selected: this.draft[key] === value }, text)),
@@ -192,6 +200,7 @@ export class RebalancePanel {
     )
     const policy = this.policy
     const policyChildren = [
+      h('p.notice', 'These limits also govern manual transfers.'),
       h(
         'label.wallet-toggle',
         h('input', {
@@ -279,8 +288,7 @@ export class RebalancePanel {
         h(
           'summary',
           {
-            title:
-              'Refill pools when they fall below your minimum. Saving these settings also sets the spending limits for manual transfers.',
+            title: 'Refill pools when they fall below your minimum.',
           },
           'Automatic rebalancing & limits',
           h('span.phase', this.data.policy.enabled ? 'Enabled' : 'Disabled'),

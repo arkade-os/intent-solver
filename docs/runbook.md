@@ -494,17 +494,16 @@ A consumer adds its own source with `registerFundSource`, at import time above
 the entrypoint — same shape and same reasoning as `registerLightningRail`.
 
 `fund-withdraw` is the only action in the console whose destination is not fixed
-by a swap, which is why it is confirmed with the destination address rather than
-a fixed word: a literal becomes muscle memory, and a confirmation that differs
-per request cannot. Each source checks the address against this deployment's
-network before any money moves (the one mistake retyping cannot catch, since an
-operator confirming a wrong-chain address types the same wrong string twice) —
-the float's Arkade addresses inside the SDK's `wallet.send`, everything else in
-the source. The rail refuses an amount above the **confirmed** balance; the float
-refuses when a live swap's funding pins every coin, or when the unpinned coins
-cannot cover the amount and the exit fee. It is **not safe to repeat**: nothing
-persists or re-drives it, so each attempt is a separate payment and a withdrawal
-that timed out must be checked against the chain before retrying.
+by a swap, so its `confirm` is the destination address itself rather than a
+fixed word; the console's confirmation shows the source, amount and full address
+and sends that address back. Each source checks the address against this
+deployment's network before any money moves — the float's Arkade addresses
+inside the SDK's `wallet.send`, everything else in the source. The rail refuses
+an amount above the **confirmed** balance; the float refuses when a live swap's
+funding pins every coin, or when the unpinned coins cannot cover the amount and
+the exit fee. It is **not safe to repeat**: nothing persists or re-drives it, so
+each attempt is a separate payment and a withdrawal that timed out must be
+checked against the chain before retrying.
 
 Remember what `ADMIN_HOST` is: with the console reachable, `fund-withdraw` lets
 anything that can reach the port send a source's balance to an address of its
@@ -807,8 +806,9 @@ which is a question the other three do not have. Their resolve actions:
 `recheck` and `park-swap` apply everywhere.
 
 The swap pane orders all of this for you: one sentence names the next step and
-one button does it — **read payment** until a verdict exists, then **refund** or
-**claim** when the verdict supports one, otherwise **recheck**. Everything else
+one button does it — **refund** or **claim** when the last verdict supports one,
+**read payment** on a stuck or exposed `arkade:BTC->lightning:BTC` row that has
+no verdict yet, otherwise **recheck**. Everything else
 is under **More**; an armed action the last verdict does not support is labelled
 _anyway_, and its confirmation names the verdict.
 

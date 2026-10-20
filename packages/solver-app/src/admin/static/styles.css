@@ -430,10 +430,13 @@ td.num {
   text-align: right;
 }
 
-td.clip {
+/* A block inside the cell, because an auto-layout table may ignore a cell's own max-width. */
+.clip {
+  display: block;
   max-width: 56ch;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- phase, the only coloured thing ------------------------------------ */

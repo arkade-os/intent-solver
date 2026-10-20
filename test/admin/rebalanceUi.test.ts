@@ -97,6 +97,25 @@ describe('rebalance wallet panel', () => {
       { method: 'POST', body: JSON.stringify({ id: 'quote-1', confirm: 'quote-1' }) },
     ])
   })
+  it.each([
+    ['Minimum credit (sat)', 'oninput'],
+    ['Deposit route', 'onchange'],
+  ])('drops a reviewed quote and its Send once %s changes', async (label, event) => {
+    const quote = { id: 'q1', state: 'quoted', netSats: 1, feeSats: 1, debitSats: 2, kind: 'onchain', expiresAt: 2e9 }
+    const redraw = vi.fn()
+    const panel = new RebalancePanel(vi.fn().mockResolvedValue({ ...overview, transfers: [quote] }), redraw)
+    await panel.refresh()
+    panel.quote = quote
+    const sends = () => nodesIn(panel.render(h)).filter((node) => node.children[1] === 'Send')
+    expect(sends()).toHaveLength(1)
+    const field = nodesIn(panel.render(h)).find(
+      (node) => node.tag === 'label.wallet-field' && node.children[0] === label,
+    )!
+    field.children[1].children[0][event]({ target: { value: '124' } })
+    expect(panel.quote).toBeNull()
+    expect(redraw).toHaveBeenCalledTimes(2)
+    expect(sends()).toHaveLength(0)
+  })
   it('keeps failures visible after refreshing transfer status', async () => {
     const api = vi.fn().mockRejectedValueOnce(new Error('needs reconciliation')).mockResolvedValue(overview)
     const panel = new RebalancePanel(api, vi.fn())
