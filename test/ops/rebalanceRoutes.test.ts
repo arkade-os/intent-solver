@@ -419,6 +419,29 @@ describe('Arkade rebalance source routes', () => {
     expect(mocks.close).toHaveBeenCalledOnce()
   })
 
+  it('restores funded records at startup behind an older abandoned unfunded quote', async () => {
+    const receiving = lightningDeposit()
+    mockRequest(receiving)
+    const row = rowFrom(await source.quote(receiving, policy), receiving)
+    const release = await source.reserve(row, policy)
+    expect(await source.submit(row)).toBe(txid)
+    release()
+    const funded = await driver.get<{ record_json: string }>('SELECT record_json FROM rebalance_rfq WHERE rfq_id = ?', [
+      'rfq-1',
+    ])
+    const { fundingTxid: _, ...unfunded } = JSON.parse(funded!.record_json) as RfqSwapRecord
+    await driver.run('INSERT INTO rebalance_rfq (rfq_id, record_json, fund_amount, valid_until) VALUES (?, ?, ?, ?)', [
+      'rfq-0',
+      JSON.stringify({ ...unfunded, rfqId: 'rfq-0', state: 'quoted', updatedAt: 1 }),
+      1_040,
+      1,
+    ])
+    await source.close?.()
+    mocks.restoreIds.length = 0
+    source = await createArkadeRebalanceSource(services, driver, admission)
+    expect(mocks.restoreIds).toEqual([['rfq-1']])
+  })
+
   it('leaves Lightning timeout funding quarantined across restart without refunding an empty quote', async () => {
     const receiving = lightningDeposit()
     mockRequest(receiving)

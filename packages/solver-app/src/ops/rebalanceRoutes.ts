@@ -162,7 +162,7 @@ export const createArkadeRebalanceSource = async (
     })
     return managerStack
   }
-  if ((await managerRepository.getRfqSwapsPage({}, { limit: 1 })).items.length) await ensureManager()
+  if ((await repository.getAllRfqSwaps()).some((record) => validTxid(record.fundingTxid))) await ensureManager()
 
   const routerQuote = (
     destination: string,
