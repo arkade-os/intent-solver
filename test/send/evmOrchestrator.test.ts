@@ -1653,3 +1653,46 @@ describe('a lock that lands after the books closed', () => {
     await store.close()
   })
 })
+
+/** `findLockups` is `spendableOnly`, so `refundSweep` skips a swept lockup silently while it wedges float recovery — and reaching it costs a batch round. */
+describe('refundSweptLockup on the EVM send corridor', () => {
+  const SWEPT = [{ txid: 'ee'.repeat(32), vout: 0, value: 50_000 }]
+
+  const refused = async () => {
+    const refundSwept = vi.fn(async () => 'batch-txid')
+    const { store, service, deps } = await build({})
+    Object.assign(deps.arkade, {
+      findLockups: async () => [],
+      lockupProvablySpent: async () => false,
+      findSweptLockups: async () => SWEPT,
+      refundSwept,
+    })
+    await store.transition('swap-1', 'quoted', 'refused', { failure_reason: 'lockup timeout' })
+    return { store, service, refundSwept }
+  }
+
+  it('refunds a refused row and records the outcome', async () => {
+    const { store, service, refundSwept } = await refused()
+
+    expect(await service.refundSweptLockup(quote().pkScript)).toEqual({
+      swapId: 'swap-1',
+      txid: 'batch-txid',
+      recorded: true,
+    })
+    expect(refundSwept).toHaveBeenCalledOnce()
+    const row = await store.get('swap-1')
+    expect(row.refundOutcome).toBe('pushed')
+    expect(row.refundArkTxid).toBe('batch-txid')
+  })
+
+  it('is not reachable from the unattended refund sweep', async () => {
+    const { service, refundSwept } = await refused()
+    expect(await service.refundSweep()).toEqual([])
+    expect(refundSwept).not.toHaveBeenCalled()
+  })
+
+  it('answers null for a script no row of ours holds', async () => {
+    const { service } = await refused()
+    expect(await service.refundSweptLockup('5120' + '99'.repeat(32))).toBeNull()
+  })
+})
