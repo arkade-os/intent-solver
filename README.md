@@ -186,7 +186,7 @@ irreversible side effect and is safe to re-run from any crash.
   supported**; nothing here requires 24.
 
   The Docker image defaults to 22 for that reason. Build it on 24 with
-  `--build-arg NODE_VERSION=24`.
+  `--build-arg NODE_VERSION=24.22.1`.
 
   The upper bound is deliberate: `<27` keeps an untested major from being picked
   up silently, and is meant to be raised once one is tested. Note that it will
