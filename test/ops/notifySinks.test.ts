@@ -23,6 +23,14 @@ describe('telegramSink', () => {
     })
   })
 
+  it('sends plain text, without the mrkdwn markers', async () => {
+    const fetchImpl = okFetch()
+    await telegramSink(TOKEN, '-1', fetchImpl).send('*Swap STUCK* `ab12` receive_payable_unmatchable')
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]![1].body))).toMatchObject({
+      text: 'Swap STUCK ab12 receive_payable_unmatchable',
+    })
+  })
+
   it('throws on a non-2xx so the notifier retries', async () => {
     await expect(telegramSink(TOKEN, '-1', badFetch()).send('x')).rejects.toThrow()
   })
@@ -57,6 +65,14 @@ describe('slackSink', () => {
     const [url, init] = fetchImpl.mock.calls[0]!
     expect(String(url)).toBe(WEBHOOK)
     expect(JSON.parse(String((init as RequestInit).body))).toMatchObject({ text: 'a swap failed' })
+  })
+
+  it('keeps mrkdwn and escapes what Slack would read as markup', async () => {
+    const fetchImpl = okFetch()
+    await slackSink(WEBHOOK, fetchImpl).send('*Swap STUCK* `ab12` <x> & y')
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]![1].body))).toMatchObject({
+      text: '*Swap STUCK* `ab12` &lt;x&gt; &amp; y',
+    })
   })
 
   it('throws on a non-2xx so the notifier retries', async () => {

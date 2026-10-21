@@ -89,8 +89,11 @@ export interface SwapTransition {
 
 export const btcSwapSize = (amountSats: number, payoutSats: number | null): string =>
   payoutSats === null
-    ? `amount ${formatSats(amountSats)} sats`
-    : `amount ${formatSats(amountSats)} sats -> payout ${formatSats(payoutSats)} sats`
+    ? `${formatSats(amountSats)} sats`
+    : `${formatSats(amountSats)} sats → payout ${formatSats(payoutSats)} sats`
+
+// Samples come from a timer, so an age is only worth a word once it outlives a few ticks.
+const STALE_SAMPLE_SECONDS = 120
 
 const message = (
   options: SwapOutcomeReporterOptions,
@@ -100,25 +103,29 @@ const message = (
   reading: BalanceReading | null,
 ): string => {
   const { corridor, lightning: hasLightning, now } = options
-  const headline =
-    outcome === 'fulfilled' ? `Swap fulfilled — ${corridor} — ${swapId}` : `Swap STUCK — ${corridor} — ${swapId}`
-  const age = (at: number) => `${Math.max(0, now() - at)}s old`
-  const lines = [headline, size ?? 'amount unread']
+  const status = outcome === 'fulfilled' ? '✅ *Swap fulfilled*' : '🚨 *Swap STUCK*'
+  const balances: string[] = [`\`${swapId}\``]
+  const ages: number[] = []
   if (hasLightning) {
     const lightning = reading?.lightning ?? null
-    const label = 'Lightning'
-    lines.push(
-      lightning === null
-        ? `${label}: unread`
-        : `${label}: ${formatSats(lightning.value.availableSats)} sats available, ` +
-            `${formatSats(lightning.value.incomingSats)} sats incoming (${age(lightning.at)})`,
-    )
+    if (lightning === null) balances.push('Lightning unread')
+    else {
+      const { availableSats, incomingSats } = lightning.value
+      balances.push(
+        `Lightning ${formatSats(availableSats)}${incomingSats > 0 ? ` (+${formatSats(incomingSats)} incoming)` : ''}`,
+      )
+      ages.push(now() - lightning.at)
+    }
   }
   const arkade = reading?.arkade ?? null
-  lines.push(
-    arkade === null ? 'Arkade: unread' : `Arkade: ${formatSats(arkade.value)} sats available (${age(arkade.at)})`,
-  )
-  return lines.join('\n')
+  if (arkade === null) balances.push('Arkade unread')
+  else {
+    balances.push(`Arkade ${formatSats(arkade.value)}`)
+    ages.push(now() - arkade.at)
+  }
+  const oldest = Math.max(0, ...ages)
+  if (oldest > STALE_SAMPLE_SECONDS) balances.push(`balances ${oldest}s old`)
+  return [`${status} · ${corridor.replace('->', ' → ')} · ${size ?? 'amount unread'}`, balances.join(' · ')].join('\n')
 }
 
 /** Never rejects: the store calls this from the money path. */

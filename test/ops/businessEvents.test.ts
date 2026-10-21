@@ -74,9 +74,9 @@ describe('createSwapOutcomeReporter', () => {
     const { report, posted } = reporter()
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
     await vi.waitFor(() => expect(posted).toHaveLength(1))
-    expect(posted[0]).toContain('Swap fulfilled')
-    expect(posted[0]).toContain('arkade:BTC->lightning:BTC')
-    expect(posted[0]).toContain('swap-1')
+    expect(posted[0]).toContain('✅ *Swap fulfilled*')
+    expect(posted[0]).toContain('arkade:BTC → lightning:BTC')
+    expect(posted[0]).toContain('`swap-1`')
   })
 
   it('does not page a refusal — never funded, nothing moved', async () => {
@@ -114,10 +114,8 @@ describe('createSwapOutcomeReporter', () => {
     await vi.waitFor(() => expect(posted).toHaveLength(1))
     expect(posted[0]).toBe(
       [
-        'Swap STUCK — lightning:BTC->arkade:BTC — 29975e63-b613-44fe-a392-43d5025b1f11',
-        'amount 80,362 sats -> payout 80,000 sats',
-        'Lightning: 1,200,000 sats available, 800,000 sats incoming (40s old)',
-        'Arkade: 5,074,074 sats available (40s old)',
+        '🚨 *Swap STUCK* · lightning:BTC → arkade:BTC · 80,362 sats → payout 80,000 sats',
+        '`29975e63-b613-44fe-a392-43d5025b1f11` · Lightning 1,200,000 (+800,000 incoming) · Arkade 5,074,074',
       ].join('\n'),
     )
   })
@@ -126,10 +124,21 @@ describe('createSwapOutcomeReporter', () => {
     const { report, posted } = reporter({ terms: async () => terms(btcSwapSize(71_945, null)) })
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
     await vi.waitFor(() => expect(posted).toHaveLength(1))
-    expect(posted[0]).toContain('amount 71,945 sats')
+    expect(posted[0]).toContain('· 71,945 sats\n')
     expect(posted[0]).not.toContain('payout')
-    expect(posted[0]).toContain('Lightning: 2,000,000 sats available, 3,000,000 sats incoming')
-    expect(posted[0]).toContain('Arkade: 1,000,000 sats available')
+    expect(posted[0]).toContain('Lightning 2,000,000 (+3,000,000 incoming) · Arkade 1,000,000')
+  })
+
+  it('leaves out an incoming figure of zero and the age of a fresh sample', async () => {
+    const { report, posted } = reporter({
+      balances: sampler({
+        arkade: { value: 1_000_000, at: 1_900 },
+        lightning: { value: { availableSats: 2, incomingSats: 0 }, at: 1_900 },
+      }),
+    })
+    report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
+    await vi.waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0]!.split('\n')[1]).toBe('`swap-1` · Lightning 2 · Arkade 1,000,000')
   })
 
   it('says how stale each float reading is', async () => {
@@ -141,7 +150,7 @@ describe('createSwapOutcomeReporter', () => {
     })
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
     await vi.waitFor(() => expect(posted).toHaveLength(1))
-    expect(posted[0]).toContain('600s old')
+    expect(posted[0]).toContain('balances 600s old')
   })
 
   it('still announces when no balance has been sampled yet', async () => {
@@ -157,8 +166,7 @@ describe('createSwapOutcomeReporter', () => {
     })
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
     await vi.waitFor(() => expect(posted).toHaveLength(1))
-    expect(posted[0]).toContain('Lightning: unread')
-    expect(posted[0]).toContain('Arkade: 1,000,000 sats available')
+    expect(posted[0]).toContain('Lightning unread · Arkade 1,000,000')
   })
 
   it('still announces when the swap row cannot be read', async () => {
