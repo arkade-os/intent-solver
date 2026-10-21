@@ -293,6 +293,16 @@ describe('the balance sampler is DRIVEN on the shipped daemon', () => {
     expect(cliSource).toMatch(/void services\.reportBalances\(\)\.catch\(/)
   })
 
+  it('an unreadable source is followed until it answers, and a new report or close drops the follow-up', () => {
+    expect(servicesSource).toMatch(
+      /followUnreadable\(sources\.filter\(\(_, i\) => report\.sources\[i\]!\.balance\.error !== null\)\)/,
+    )
+    expect(servicesSource).toMatch(/notifier\.post\(formatSourceRecovered\(config\.network, label, balance\.value\)\)/)
+    expect(servicesSource).toMatch(/if \(balanceReportsClosed \|\| sources\.length === 0\) return/)
+    expect(servicesSource).toMatch(/followUnreadable\(\[\]\)\n\s+balanceReportInFlight = \(async/)
+    expect(servicesSource).toMatch(/balanceReportsClosed = true\n\s+followUnreadable\(\[\]\)/)
+  })
+
   it('the balance report carries the swap summary over every corridor reader', () => {
     expect(servicesSource).toMatch(/const readSwapSummary = createSwapSummaryReader\(\{/)
     expect(servicesSource).toMatch(/readSwaps: \(\) => readSwapSummary\(services\.readers\)/)

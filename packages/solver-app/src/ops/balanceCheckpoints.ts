@@ -1,7 +1,7 @@
 import type { Services } from './services.js'
 import { json, messageOf, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { startCadence } from './cadence.js'
-import { createJoin, within } from './guardedRead.js'
+import { createJoin, STALE_READ_MS, within } from './guardedRead.js'
 import { limitNotification } from './notify.js'
 
 export interface BalanceCheckpoint {
@@ -135,7 +135,7 @@ const sats = (value: number): string => {
 export const recordBalanceCheckpoint = async (services: CheckpointServices): Promise<BalanceCheckpoint> => {
   const startedAt = nowSeconds()
   const errors: Record<string, string> = {}
-  const joined = balanceReads.get(services) ?? createJoin()
+  const joined = balanceReads.get(services) ?? createJoin(STALE_READ_MS)
   balanceReads.set(services, joined)
   const read = async <T>(name: string, fetch: () => Promise<T>): Promise<T | null> => {
     try {
