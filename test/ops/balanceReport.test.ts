@@ -207,8 +207,9 @@ describe('balance report', () => {
     const [still] = await reader.readSources([rail], 10)
     expect(still!.balance.error).toBe('no answer within 10ms')
 
+    const retry = reader.readSources([rail], 1000)
     answer(sats(['channel out', '5000']))
-    const [back] = await reader.readSources([rail], 10)
+    const [back] = await retry
     expect(slow).toHaveBeenCalledTimes(1)
     expect(formatSourceRecovered('bitcoin', back!.label, back!.balance.value!)).toBe(
       'RECOVERED — bitcoin — lightning rail readable again\nlightning rail (sats): channel out 5,000',

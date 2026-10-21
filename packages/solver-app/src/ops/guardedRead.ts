@@ -1,5 +1,7 @@
 /** Reads for the periodic reports: bounded in time, and not repeated while one is still running. */
 
+import { log } from '@arkade-os/solver-core/util/poll.js'
+
 /** Rejects after `ms`. The read itself keeps running: no port here takes a cancellation signal. */
 export const within =
   <T>(read: () => Promise<T>, ms: number) =>
@@ -29,6 +31,8 @@ export const createJoin = (maxAgeMs = Infinity) => {
     (): Promise<T> => {
       const entry = running.get(key)
       if (entry !== undefined && Date.now() - entry.startedAt < maxAgeMs) return entry.pending as Promise<T>
+      if (entry !== undefined)
+        log(`read '${key}' still running after ${Date.now() - entry.startedAt}ms; starting a fresh one`)
       const pending: Promise<T> = Promise.resolve()
         .then(read)
         .finally(() => {
