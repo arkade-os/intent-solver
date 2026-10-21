@@ -1613,9 +1613,10 @@ export const createServices = async (
   // Silent until a source answers, so a long outage costs one report line, not a message per retry.
   let unreadableRetry: ReturnType<typeof setTimeout> | undefined
   let unreadableFollow = 0
+  let balanceReportsClosed = false
   const followUnreadable = (sources: FundSource[], follow = ++unreadableFollow): void => {
     clearTimeout(unreadableRetry)
-    if (sources.length === 0) return
+    if (balanceReportsClosed || sources.length === 0) return
     unreadableRetry = setTimeout(() => {
       void readBalanceReport
         .readSources(sources)
@@ -1635,6 +1636,7 @@ export const createServices = async (
   }
   const postBalanceReport = (): Promise<void> => {
     if (balanceReportInFlight) return balanceReportInFlight
+    followUnreadable([])
     balanceReportInFlight = (async () => {
       const sources = fundSources(services)
       const report = await readBalanceReport({
@@ -1732,8 +1734,8 @@ export const createServices = async (
         [
           'balanceReport',
           () => {
-            unreadableFollow++
-            clearTimeout(unreadableRetry)
+            balanceReportsClosed = true
+            followUnreadable([])
             return balanceReportInFlight
           },
         ],
