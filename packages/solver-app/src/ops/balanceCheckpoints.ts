@@ -162,7 +162,8 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
       const balance = await services.arkade.wallet.getBalance()
       // `total` counts every lockup the wallet watches. One a user funded is theirs until we claim it,
       // so counting it turns each refund into a loss. An unbounded age never syncs, so this reads the
-      // repository getBalance just read, even when its sync failed.
+      // repository getBalance just read, even when its sync failed. Not atomic: a write landing between
+      // the two reads skews one sample, and the one-checkpoint alert hold absorbs it.
       const lockups = await (
         await services.arkade.wallet.getContractManager()
       ).getContractsWithVtxos({ type: [LOCKUP_CONTRACT_TYPE] }, undefined, {
