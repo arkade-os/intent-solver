@@ -105,7 +105,7 @@ describe('balance checkpoints', () => {
     f.arkade.total += 500
     expect((await f.sample()).arkade?.totalSats).toBe('1200')
     expect(f.getContractsWithVtxos).toHaveBeenCalledWith({ type: [LOCKUP_CONTRACT_TYPE] }, undefined, {
-      maxSyncAgeMs: 60_000,
+      maxSyncAgeMs: Number.MAX_SAFE_INTEGER,
       unspentOnly: true,
     })
     f.lockups.shift()
