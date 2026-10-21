@@ -2,8 +2,10 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   createBalanceReportReader,
   formatBalanceReport,
+  formatSourceRecovered,
   type BalanceReportInput,
 } from '@arkade-os/solver-app/ops/balanceReport.js'
+import { createJoin } from '@arkade-os/solver-app/ops/guardedRead.js'
 import type { FundBalance, FundSource } from '@arkade-os/solver-app/ops/fundSources.js'
 import type { SwapSummary } from '@arkade-os/solver-app/ops/swapSummary.js'
 import type { BalanceCheckpoint } from '@arkade-os/solver-app/ops/balanceCheckpoints.js'
@@ -192,6 +194,45 @@ describe('balance report', () => {
     expect(second).toBe(first)
     expect(hung).toHaveBeenCalledTimes(1)
     expect(healthy).toHaveBeenCalledTimes(2)
+  })
+
+  it('re-reads a source through the report join, and names it RECOVERED once it answers', async () => {
+    const reader = createBalanceReportReader()
+    let answer: (b: FundBalance) => void = () => {}
+    const slow = vi.fn(() => new Promise<FundBalance>((resolve) => (answer = resolve)))
+    const rail = source('lightning rail', slow)
+
+    const report = await read({ sources: [rail], deadlineMs: 10 }, reader)
+    expect(formatBalanceReport(report)).toContain('lightning rail: unreadable (no answer within 10ms)')
+    const [still] = await reader.readSources([rail], 10)
+    expect(still!.balance.error).toBe('no answer within 10ms')
+
+    answer(sats(['channel out', '5000']))
+    const [back] = await reader.readSources([rail], 10)
+    expect(slow).toHaveBeenCalledTimes(1)
+    expect(formatSourceRecovered('bitcoin', back!.label, back!.balance.value!)).toBe(
+      'RECOVERED — bitcoin — lightning rail readable again\nlightning rail (sats): channel out 5,000',
+    )
+  })
+
+  it('starts a fresh read once the joined one is stale', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const joined = createJoin(1000)
+      const hung = vi.fn(() => new Promise<never>(() => {}))
+      void joined('k', hung)()
+      void joined('k', hung)()
+      vi.advanceTimersByTime(999)
+      void joined('k', hung)()
+      await new Promise((resolve) => setImmediate(resolve))
+      expect(hung).toHaveBeenCalledTimes(1)
+      vi.advanceTimersByTime(1)
+      void joined('k', hung)()
+      await new Promise((resolve) => setImmediate(resolve))
+      expect(hung).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('leaves a non-sats amount exactly as the source wrote it', async () => {
