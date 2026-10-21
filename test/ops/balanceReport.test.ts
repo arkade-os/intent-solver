@@ -54,14 +54,14 @@ describe('balance report', () => {
     const previous = checkpoint(1, '6400', { changed: '10000000000000000000000000', spent: '10' })
     const current = checkpoint(3, '7400', { changed: '10000000000000000000000001', added: '25' })
     const text = formatBalanceReport(await read({ readCheckpoint: async () => ({ current, previous }) }))
-    expect(text).toContain('Balance change since 1970-01-01T00:01:00.000Z (checkpoint at 1970-01-01T00:03:00.000Z)')
+    expect(text).toContain('*Balance change* 1970-01-01 00:01 to 00:03 UTC')
     expect(text).toContain('BTC: +1,000 sats (6,400 → 7,400)')
     expect(text).toContain(
       'arkade:changed: +1 base units (10,000,000,000,000,000,000,000,000 → 10,000,000,000,000,000,000,000,001)',
     )
     expect(text).toContain('arkade:spent: -10 base units (10 → 0)')
     expect(text).toContain('arkade:added: +25 base units (0 → 25)')
-    expect(text).toContain('arkade float (sats)')
+    expect(text).toContain('*arkade float* (sats)')
   })
 
   it('includes negative and zero BTC deltas without inventing a delta on the first report', async () => {
@@ -116,11 +116,11 @@ describe('balance report', () => {
     )
     expect(text).toBe(
       [
-        'Balance report — mutinynet',
-        'arkade float (sats): available 1,234,567 · total 1,300,000',
-        'BTC rail (sats): channel out 2,000,000 · onchain confirmed 300,000',
-        'arkade assets (base units): USDA 1250000000 · bbbbbbbb…bbbb 42',
-        'committed to live swaps: 150,000 sats',
+        '📊 *Balance report* · mutinynet',
+        '*arkade float* (sats): available 1,234,567 · total 1,300,000',
+        '*BTC rail* (sats): channel out 2,000,000 · onchain confirmed 300,000',
+        '*arkade assets* (base units): USDA 1250000000 · bbbbbbbb…bbbb 42',
+        '*committed to live swaps*: 150,000 sats',
       ].join('\n'),
     )
   })
@@ -140,7 +140,7 @@ describe('balance report', () => {
       }),
     )
     expect(text).toContain('BTC rail: unreadable (node unreachable)')
-    expect(text).toContain('arkade float (sats): available 5')
+    expect(text).toContain('*arkade float* (sats): available 5')
     expect(text).toContain('arkade assets: unreadable (indexer down)')
   })
 
@@ -161,7 +161,7 @@ describe('balance report', () => {
       }),
     )
     expect(text).toContain(
-      'BTC rail (sats): channel out 700 · channel in: lnd timed out · pools: ONE pool. · x: unread',
+      '*BTC rail* (sats): channel out 700 · channel in: lnd timed out · pools: ONE pool. · x: unread',
     )
   })
 
@@ -178,7 +178,7 @@ describe('balance report', () => {
       }),
     )
     expect(text).toContain('BTC rail: unreadable (no answer within 10ms)')
-    expect(text).toContain('arkade float (sats): available 5')
+    expect(text).toContain('*arkade float* (sats): available 5')
     expect(text).toContain('committed to live swaps: unreadable (no answer within 10ms)')
   })
 
@@ -212,7 +212,7 @@ describe('balance report', () => {
     const [back] = await retry
     expect(slow).toHaveBeenCalledTimes(1)
     expect(formatSourceRecovered('bitcoin', back!.label, back!.balance.value!)).toBe(
-      'RECOVERED — bitcoin — lightning rail readable again\nlightning rail (sats): channel out 5,000',
+      '✅ *RECOVERED* · bitcoin · lightning rail readable again\n*lightning rail* (sats): channel out 5,000',
     )
   })
 
@@ -243,7 +243,7 @@ describe('balance report', () => {
         sources: [source('usdc', async () => ({ unit: 'USDC', figures: [{ label: 'held', amount: big }] }))],
       }),
     )
-    expect(text).toContain(`usdc (USDC): held ${big}`)
+    expect(text).toContain(`*usdc* (USDC): held ${big}`)
   })
 
   it('omits the assets line when the float holds none', async () => {
@@ -262,7 +262,7 @@ describe('balance report', () => {
   it('appends the swap summary after the balances, and only when asked for one', async () => {
     expect(formatBalanceReport(await read())).not.toContain('Swaps')
     const text = formatBalanceReport(await read({ readSwaps: async () => summary() }))
-    expect(text.split('\n').at(-1)).toBe('Swaps 2025-10-14 06:00 to 12:00 UTC: none finished')
+    expect(text.split('\n').at(-1)).toBe('*Swaps* 2025-10-14 06:00 to 12:00 UTC: none finished')
   })
 
   it('reports a summary that could not be read without losing the balances', async () => {
@@ -273,7 +273,7 @@ describe('balance report', () => {
         },
       }),
     )
-    expect(text).toContain('arkade float (sats): available 1,234,567')
+    expect(text).toContain('*arkade float* (sats): available 1,234,567')
     expect(text).toContain('swaps: unreadable (db locked)')
   })
 

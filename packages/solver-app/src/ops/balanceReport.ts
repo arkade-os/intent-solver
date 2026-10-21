@@ -8,7 +8,7 @@ import { formatSats } from '@arkade-os/solver-core/core/businessEvent.js'
 import { attempt } from './attempt.js'
 import type { FundBalance, FundFigure, FundSource } from './fundSources.js'
 import type { ConsoleAsset } from '../admin/assets.js'
-import { formatSwapSummary, type SwapSummary } from './swapSummary.js'
+import { formatSwapSummary, stampSpan, type SwapSummary } from './swapSummary.js'
 import { createJoin, STALE_READ_MS, within } from './guardedRead.js'
 import { checkpointChanges, formatBalanceChange, type BalanceCheckpointReport } from './balanceCheckpoints.js'
 import { limitNotification } from './notify.js'
@@ -91,13 +91,13 @@ const figure = (unit: string, f: FundFigure): string =>
 const unreadable = (label: string, error: string): string => `${label}: unreadable (${error})`
 
 const sourceLine = (label: string, balance: FundBalance): string =>
-  `${label} (${balance.unit}): ${balance.figures.map((f) => figure(balance.unit, f)).join(' · ')}`
+  `*${label}* (${balance.unit}): ${balance.figures.map((f) => figure(balance.unit, f)).join(' · ')}`
 
 export const formatSourceRecovered = (network: string, label: string, balance: FundBalance): string =>
-  limitNotification(`RECOVERED — ${network} — ${label} readable again\n${sourceLine(label, balance)}`)
+  limitNotification(`✅ *RECOVERED* · ${network} · ${label} readable again\n${sourceLine(label, balance)}`)
 
 export const formatBalanceReport = (report: BalanceReport): string => {
-  const lines = [`Balance report — ${report.network}`]
+  const lines = [`📊 *Balance report* · ${report.network}`]
   const { checkpoint } = report
   if (checkpoint) {
     if (checkpoint.error !== null) lines.push(unreadable('balance change', checkpoint.error))
@@ -113,9 +113,7 @@ export const formatBalanceReport = (report: BalanceReport): string => {
         const changes = checkpointChanges(previous, current)
         if (changes === null) lines.push('Balance change: no comparable report baseline.')
         else {
-          lines.push(
-            `Balance change since ${new Date(previous.finishedAt * 1000).toISOString()} (checkpoint at ${new Date(current.finishedAt * 1000).toISOString()}):`,
-          )
+          lines.push(`*Balance change* ${stampSpan(previous.finishedAt, current.finishedAt)}`)
           lines.push(...changes.filter(({ asset, delta }) => asset === 'BTC' || delta !== '0').map(formatBalanceChange))
         }
       }
@@ -128,13 +126,13 @@ export const formatBalanceReport = (report: BalanceReport): string => {
   if (assets.error !== null) lines.push(unreadable('arkade assets', assets.error))
   else if (assets.value.length > 0) {
     lines.push(
-      `arkade assets (base units): ${assets.value.map((a) => `${a.ticker ?? a.shortId} ${a.amount}`).join(' · ')}`,
+      `*arkade assets* (base units): ${assets.value.map((a) => `${a.ticker ?? a.shortId} ${a.amount}`).join(' · ')}`,
     )
   }
   lines.push(
     committedSats.error !== null
       ? unreadable('committed to live swaps', committedSats.error)
-      : `committed to live swaps: ${formatSats(committedSats.value)} sats`,
+      : `*committed to live swaps*: ${formatSats(committedSats.value)} sats`,
   )
   const { swaps } = report
   if (swaps) lines.push(...(swaps.error !== null ? [unreadable('swaps', swaps.error)] : formatSwapSummary(swaps.value)))
