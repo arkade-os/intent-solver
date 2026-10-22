@@ -12,6 +12,7 @@ import {
   arkadeRefunder,
   createRfqSwapRecord,
   lockupContractParams,
+  normalizeRfqSwapRecord,
   rebuildRfqSwap,
   requestLightningSend,
   rfqSecretsProfile,
@@ -42,6 +43,8 @@ import type { Services } from './services.js'
 const now = (): number => Math.floor(Date.now() / 1000)
 const validTxid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value)
 const sum = (coins: readonly { value: number }[]): number => coins.reduce((total, coin) => total + coin.value, 0)
+// Rows written before swap 0.1.0 carry fundingArkTxid/refundArkTxid/lockupSpendArkTxids.
+const parseRecord = (json: string): RfqSwapRecord => normalizeRfqSwapRecord(JSON.parse(json) as RfqSwapRecord)
 const wholeSats = (value: number): void => {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error('invalid source debit')
 }
@@ -75,7 +78,7 @@ class RebalanceRfqRepository implements RfqSwapRecordStore {
     )
     return (
       row && {
-        record: JSON.parse(row.record_json) as RfqSwapRecord,
+        record: parseRecord(row.record_json),
         fundAmount: row.fund_amount,
         validUntil: row.valid_until,
       }
@@ -94,8 +97,8 @@ class RebalanceRfqRepository implements RfqSwapRecordStore {
     return (await this.stored(id))?.record
   }
   async getAllRfqSwaps(): Promise<RfqSwapRecord[]> {
-    return (await this.driver.all<{ record_json: string }>('SELECT record_json FROM rebalance_rfq')).map(
-      (row) => JSON.parse(row.record_json) as RfqSwapRecord,
+    return (await this.driver.all<{ record_json: string }>('SELECT record_json FROM rebalance_rfq')).map((row) =>
+      parseRecord(row.record_json),
     )
   }
   async getRfqSwapsPage(

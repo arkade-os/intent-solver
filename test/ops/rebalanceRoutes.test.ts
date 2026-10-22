@@ -442,6 +442,30 @@ describe('Arkade rebalance source routes', () => {
     expect(mocks.restoreIds).toEqual([['rfq-1']])
   })
 
+  it('restores a funded record stored under the pre-0.1.0 field names', async () => {
+    const receiving = lightningDeposit()
+    mockRequest(receiving)
+    const row = rowFrom(await source.quote(receiving, policy), receiving)
+    const release = await source.reserve(row, policy)
+    expect(await source.submit(row)).toBe(txid)
+    release()
+    const funded = await driver.get<{ record_json: string }>('SELECT record_json FROM rebalance_rfq WHERE rfq_id = ?', [
+      'rfq-1',
+    ])
+    const { fundingTxid, ...rest } = JSON.parse(funded!.record_json) as RfqSwapRecord
+    await driver.run('UPDATE rebalance_rfq SET record_json = ? WHERE rfq_id = ?', [
+      JSON.stringify({ ...rest, fundingArkTxid: fundingTxid }),
+      'rfq-1',
+    ])
+    await source.close?.()
+    mocks.restoreIds.length = 0
+    source = await createArkadeRebalanceSource(services, driver, admission)
+    expect(mocks.restoreIds).toEqual([['rfq-1']])
+    const record = await mocks.managerRepositories.at(-1)!.getRfqSwap('rfq-1')
+    expect(record).toMatchObject({ fundingTxid: txid })
+    expect(record).not.toHaveProperty('fundingArkTxid')
+  })
+
   it('pages same-timestamp records in the code-unit order its cursor resumes from', async () => {
     // localeCompare puts 'rfq-a' first; the cursor's `>` puts 'rfq-B' first, so a
     // mismatched sort would return one id twice and drop the other.
