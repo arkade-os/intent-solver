@@ -495,6 +495,7 @@ export const createServices = async (
   opts?: { allCorridors?: boolean; corridors?: readonly CorridorPlugin[] },
 ): Promise<Services> => {
   setLatencyDiagnostics(config.latencyDiagnostics)
+  const settingPath = (id: string): string => config.configPaths?.get(id) ?? id
   // One file on a fresh install, the five it already has on an existing one —
   // see src/db/layout.ts for why nothing ever moves rows between them.
   const layout = resolveDbLayout(config.swapDbPath)
@@ -737,15 +738,15 @@ export const createServices = async (
   if (policy.approvalThresholdSats !== null || assetThresholds.size > 0) {
     const ungated = ungatedAssetSymbols(config.assetRfqTokens)
     if (ungated.length > 0) {
-      log(`approval gate: no ASSET_<SYMBOL>_APPROVAL_THRESHOLD for ${ungated.join(', ')} — payouts in them are ungated`)
+      log(`approval gate: no approvalThreshold in assets for ${ungated.join(', ')} — payouts in them are ungated`)
     }
     const offerAssets = [...new Set(policy.offerMarkets.flatMap((m) => [m.a, m.b]))].filter(
       (id): id is string => id !== null && !assetThresholds.has(id),
     )
     if (offerAssets.length > 0) {
       log(
-        `approval gate: OFFER_MARKETS pays ${offerAssets.join(', ')} with no threshold — ` +
-          'name the asset in ASSET_MARKETS to give it a symbol one can be set under',
+        `approval gate: offers.markets pays ${offerAssets.join(', ')} with no threshold — ` +
+          'list the asset in assets to give it an approvalThreshold',
       )
     }
   }
@@ -1343,7 +1344,7 @@ export const createServices = async (
   const evmChain = config.evmChain
   if (servesEvm && evmChain === null) {
     throw new Error(
-      'EVM_TOKENS names corridors but EVM_RPC_URL is not set — ' +
+      `assets lists erc20 tokens but ${settingPath('EVM_RPC_URL')} is not set — ` +
         'the ingress would quote swaps no orchestrator exists to drive',
     )
   }
@@ -1366,7 +1367,7 @@ export const createServices = async (
     })
     if (probe.kind === 'range_rejected') {
       throw new Error(
-        `EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} is wider than ${endpointHost(evmChain.rpcUrl)} allows: ` +
+        `${settingPath('EVM_LOG_SCAN_RANGE')} ${evmChain.logScanRange} is wider than ${endpointHost(evmChain.rpcUrl)} allows: ` +
           `${probe.message}. Lower it to the endpoint's cap; too low only costs round trips, ` +
           'too high loses claims silently.',
       )
@@ -1374,18 +1375,20 @@ export const createServices = async (
     if (probe.kind === 'inconclusive') {
       // NOT fatal: a node that blinked is not evidence about the setting.
       log(
-        `evm: could not verify EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} against ${endpointHost(evmChain.rpcUrl)}`,
+        `evm: could not verify ${settingPath('EVM_LOG_SCAN_RANGE')} ${evmChain.logScanRange} against ${endpointHost(evmChain.rpcUrl)}`,
         probe.message,
       )
     } else if (probe.blocks < BigInt(evmChain.logScanRange)) {
-      log(`evm: EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} unproven — the chain is only ${probe.blocks} blocks long`)
+      log(
+        `evm: ${settingPath('EVM_LOG_SCAN_RANGE')} ${evmChain.logScanRange} unproven — the chain is only ${probe.blocks} blocks long`,
+      )
     }
     // Boot only fails fast; every timelock read re-checks, so an inconclusive probe cannot let a mismatch through.
     const clock = await probeTimelockClock(rpc)
     if (clock.kind === 'distinct' && evmChain.timelockCadence === null) {
       throw new Error(
         `${endpointHost(evmChain.rpcUrl)} is at block ${clock.height} but contracts read block.number ${clock.clock}: ` +
-          'set EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK and EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK for that clock',
+          `set ${settingPath('EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK')} and ${settingPath('EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK')} for that clock`,
       )
     }
     if (clock.kind === 'inconclusive') {
@@ -1416,7 +1419,9 @@ export const createServices = async (
       // unmined until the base fee falls — an operator needs to know that from
       // the log rather than infer it from swaps that stop settling.
       onCappedByPolicy: (call) =>
-        log(`evm fee capped by policy on a call to ${call.to} — raise EVM_MAX_FEE_PER_GAS_CEILING or wait`),
+        log(
+          `evm fee capped by policy on a call to ${call.to} — raise ${settingPath('EVM_MAX_FEE_PER_GAS_CEILING')} or wait`,
+        ),
     })
     // Keyed by token address: one store per DIRECTION serves every token, so one
     // service does too. @see EvmSendServiceDeps.markets

@@ -159,8 +159,8 @@ export const lightningRailFor = (name: string): LightningRailModule | undefined 
  * of reporting a zero balance, which is what a solver with no float looks like.
  */
 const NO_RAIL =
-  'this deployment has no BTC rail: LN_BACKEND is unset, which is permitted only while all four BTC ' +
-  'corridors are disabled. Set LN_BACKEND to serve them.'
+  'this deployment has no BTC rail: rails.lightning.backend is unset, which is permitted only while all four ' +
+  'BTC corridors are disabled. Set rails.lightning.backend to serve them.'
 
 export const requireLn = (ln: LightningBackend | null): LightningBackend => {
   // Truthiness rather than `=== null`, though the type says null: an absent

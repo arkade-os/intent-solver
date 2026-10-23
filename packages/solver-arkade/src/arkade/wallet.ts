@@ -219,7 +219,7 @@ export const resolveTimelockUnit = (params: {
     // disagreeing sources was right.
     if (overrideUnit !== unit) {
       throw new Error(
-        `ARK_UNILATERAL_EXIT_DELAY=${unilateralExitDelayOverride} is ${overrideUnit}, but this server ` +
+        `rails.arkade.unilateralExitDelay ${unilateralExitDelayOverride} is ${overrideUnit}, but this server ` +
           `advertises ${advertisedExitDelay}, which is ${unit} — an override must be expressed in the ` +
           'same unit as the server it overrides',
       )
@@ -230,7 +230,7 @@ export const resolveTimelockUnit = (params: {
     // server claims to require — and to see BOTH numbers, since the whole reason
     // the override exists is that they disagree.
     notices.push(
-      `ARK_UNILATERAL_EXIT_DELAY=${unilateralExitDelayOverride} ${overrideUnit} overrides the ` +
+      `rails.arkade.unilateralExitDelay ${unilateralExitDelayOverride} ${overrideUnit} overrides the ` +
         `${advertisedExitDelay} ${unit} this server advertises; every covenant written from now uses the override`,
     )
   }
@@ -329,7 +329,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   if (info.network !== config.expectedArkdNetwork) {
     throw new Error(
       `Arkade server at ${config.arkServerUrl} reports network '${info.network}', ` +
-        `expected '${config.expectedArkdNetwork}' — check ARK_SERVER_URL / SWAP_NETWORK`,
+        `expected '${config.expectedArkdNetwork}' — check rails.arkade.serverUrl / network`,
     )
   }
 
