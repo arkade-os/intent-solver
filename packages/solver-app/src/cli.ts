@@ -49,8 +49,8 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { Transaction, SigHash, p2tr } from '@scure/btc-signer'
-import { sentryOptionsFromKnobs, swapDbPath, type Config, type Knobs } from './config.js'
-import { loadConfig, loadKnobsForInspection } from './config/load.js'
+import { swapDbPath, type Config } from './config.js'
+import { loadConfig, loadKnobsForInspection, loadSentryOptions } from './config/load.js'
 import { exportConfig } from './config/fromEnv.js'
 import { createErrorReporter, type ErrorReporter } from './ops/sentry.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
@@ -2071,17 +2071,8 @@ const panic = async (context: string, error: unknown): Promise<void> => {
 }
 
 const main = async (): Promise<void> => {
-  // Before the command resolves: a panic while reading the config is one worth
-  // reporting, and `loadConfig` has not run yet. No document yet means no
-  // reporter rather than no command: the command's own load says what is wrong,
-  // and `config-from-env` runs before any document exists.
-  let earlyKnobs: Knobs = {}
-  try {
-    earlyKnobs = loadKnobsForInspection()
-  } catch {
-    earlyKnobs = {}
-  }
-  reporter = createErrorReporter(sentryOptionsFromKnobs(earlyKnobs))
+  // Before the command resolves: a panic while reading the config is one worth reporting.
+  reporter = createErrorReporter(loadSentryOptions())
   if (reporter) {
     process.on('uncaughtException', (error) => void panic('uncaught exception', error))
     process.on('unhandledRejection', (reason) => void panic('unhandled rejection', reason))

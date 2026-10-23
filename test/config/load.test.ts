@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { swapDbPath } from '@arkade-os/solver-app/config.js'
-import { loadConfig, loadKnobsForInspection } from '@arkade-os/solver-app/config/load.js'
+import { loadConfig, loadKnobsForInspection, loadSentryOptions } from '@arkade-os/solver-app/config/load.js'
 import type { SolverDocument } from '@arkade-os/solver-app/config/document.js'
 
 const minimalDoc = {
@@ -148,5 +148,15 @@ describe('loadKnobsForInspection', () => {
 
   it('still reads the storage the document names', () => {
     expect(swapDbPath(loadKnobsForInspection(inline({ storage: { dir: 'vol' } })))).toBe(join('vol', 'swaps.sqlite'))
+  })
+})
+
+describe('loadSentryOptions', () => {
+  it('refuses a malformed DSN under its path', () => {
+    expect(() => loadSentryOptions(inline({ sentry: { dsn: 'not a url' } }))).toThrow(/^sentry\.dsn is not a URL$/)
+  })
+
+  it('is off, not refused, before any document exists', () => {
+    expect(loadSentryOptions({})).toBeNull()
   })
 })

@@ -4,8 +4,9 @@
  */
 import { readFileSync } from 'node:fs'
 import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
-import { configFromKnobs, type Config, type Knobs } from '../config.js'
+import { configFromKnobs, sentryOptionsFromKnobs, type Config, type Knobs } from '../config.js'
 import { lightningRailNames } from '../ops/rails.js'
+import type { SentryOptions } from '../ops/sentry.js'
 import { parseDocument, type SolverDocument } from './document.js'
 import { documentToKnobs, PATHS, renameKnobs } from './knobs.js'
 
@@ -86,6 +87,26 @@ export const loadConfig = (opts: LoadOptions = {}): Config => {
   }
 }
 
+const inspect = (env: NodeJS.ProcessEnv) => documentToKnobs(parseDocument(readDocument(env), lightningRailNames()))
+
 /** Enough to find the databases: no requirement checked, and an unmigrated environment tolerated. */
-export const loadKnobsForInspection = (env: NodeJS.ProcessEnv = process.env): Knobs =>
-  documentToKnobs(parseDocument(readDocument(env), lightningRailNames())).knobs
+export const loadKnobsForInspection = (env: NodeJS.ProcessEnv = process.env): Knobs => inspect(env).knobs
+
+/**
+ * Crash reporting, read before a command loads its config. No readable document
+ * means no reporter rather than no command: the command's own load says what is
+ * wrong, and `config-from-env` runs before any document exists.
+ */
+export const loadSentryOptions = (env: NodeJS.ProcessEnv = process.env): SentryOptions | null => {
+  let inspected: ReturnType<typeof inspect>
+  try {
+    inspected = inspect(env)
+  } catch {
+    return null
+  }
+  try {
+    return sentryOptionsFromKnobs(inspected.knobs)
+  } catch (error) {
+    throw new Error(renameKnobs(messageOf(error), inspected.pathOf))
+  }
+}
