@@ -1926,7 +1926,9 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const config = loadConfig()
     const name = args.find((arg) => !arg.startsWith('--')) ?? config.solverName
     if (!name) {
-      throw new GiveUp('usage: card [name] [--pointer]   (or set SOLVER_NAME; becomes solvers/<network>/<name>.json)')
+      throw new GiveUp(
+        'usage: card [name] [--pointer]   (or set name in the config; becomes solvers/<network>/<name>.json)',
+      )
     }
     // This command does not build the service stack, but the card it writes
     // must state the terms the stack would actually enforce — so it resolves

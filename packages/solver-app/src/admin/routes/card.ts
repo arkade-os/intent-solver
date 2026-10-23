@@ -75,7 +75,7 @@ export const deploymentCard = async (
   // reaches its name rule as the string "undefined", which matches
   // /^[a-z0-9-]+$/ perfectly and would file a card called `undefined`.
   if (!trimmed) {
-    throw new Error('SOLVER_NAME is not set — it becomes the registry filename solvers/<network>/<name>.json')
+    throw new Error('name is not set in the config — it becomes the registry filename solvers/<network>/<name>.json')
   }
 
   // BOOT, not live: the card is SIGNED, none of these three is in `LIVE_KEYS`, and each is snapshotted into a
@@ -145,7 +145,7 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
     // not mask a policy the operator actually set. "You configured off" is the
     // true answer to this request; "nothing is wired" is incidental.
     if (deps.services.config.nostrAdPublish === 'off') {
-      const detail = 'NOSTR_AD_PUBLISH is off: this solver is configured not to publish to Nostr'
+      const detail = 'relay.adPublish is off: this solver is configured not to publish to Nostr'
       await audit('error', detail)
       return c.json({ error: 'refused', detail }, 409)
     }

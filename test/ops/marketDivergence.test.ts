@@ -71,6 +71,12 @@ describe('marketServingDivergence', () => {
     expect(line).toMatch(/ASSET_USDA_TO_BTC_ENABLED/)
   })
 
+  it('names the setting by its config path when it has one', () => {
+    const paths = new Map([['ASSET_USDA_TO_BTC_ENABLED', 'corridors["USDA->arkade:BTC"].enabled']])
+    const [line] = marketServingDivergence([row({ rfqBuyBase: false })], env, paths)
+    expect(line).toContain('corridors["USDA->arkade:BTC"].enabled says true')
+  })
+
   it('names a market the environment declares for offers and the row does not', () => {
     const [line] = marketServingDivergence([row()], { ...env, offerMarkets: [{ a: null, b: USDA }] })
     expect(line).toMatch(/OFFER_MARKETS/)
@@ -155,7 +161,7 @@ describe('createServices tells the operator at boot', () => {
     expect(body()).toContain('for (const line of adminStore.repairedServing)')
   })
 
-  it('logs every disagreement between the rows and the environment', () => {
-    expect(body()).toContain('marketServingDivergence(marketRows, {')
+  it('logs every disagreement between the rows and the config, named by config path', () => {
+    expect(body()).toMatch(/marketServingDivergence\(\s*marketRows,[\s\S]{0,200}?config\.configPaths,?\s*\)/)
   })
 })

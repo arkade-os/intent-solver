@@ -555,7 +555,7 @@ describe('an incoherent serving row cannot brick startup', () => {
     const driver = await rolledBack()
     const store = await AdminStore.open(driver, () => 2_000)
     expect(store.repairedServing[0]).toContain(`wrote symbol = ${rfqSymbolFor(USDA)}`)
-    expect(store.repairedServing[0]).toContain('ASSET_MARKETS named no token')
+    expect(store.repairedServing[0]).toContain('the config named no asset')
   })
 
   it('says what it wrote to the row when it fails closed, never that the market stopped quoting', async () => {

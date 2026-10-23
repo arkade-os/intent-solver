@@ -162,12 +162,16 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       markets: marketCards(storedMarkets, services),
       servingDivergence: [
         // The boot repairs first: a row this process REWROTE outranks a row it
-        // merely disagrees with the environment about.
+        // merely disagrees with the config about.
         ...services.adminStore.repairedServing,
-        ...marketServingDivergence(storedMarkets, {
-          offerMarkets: services.config.offerMarkets,
-          tokens: services.config.assetRfqTokens,
-        }),
+        ...marketServingDivergence(
+          storedMarkets,
+          {
+            offerMarkets: services.config.offerMarkets,
+            tokens: services.config.assetRfqTokens,
+          },
+          services.config.configPaths,
+        ),
       ],
       corridors: CORRIDORS.map((corridor) => ({
         corridor,

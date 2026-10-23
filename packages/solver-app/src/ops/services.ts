@@ -788,10 +788,14 @@ export const createServices = async (
    * price API. @see admin/routes/markets.ts
    */
   const marketRows = await adminStore.listMarkets()
-  for (const line of marketServingDivergence(marketRows, {
-    offerMarkets: config.offerMarkets,
-    tokens: config.assetRfqTokens,
-  })) {
+  for (const line of marketServingDivergence(
+    marketRows,
+    {
+      offerMarkets: config.offerMarkets,
+      tokens: config.assetRfqTokens,
+    },
+    config.configPaths,
+  )) {
     log(`market serving divergence — ${line}`)
   }
   const assetMarkets = assetMarketPolicy(marketRows)

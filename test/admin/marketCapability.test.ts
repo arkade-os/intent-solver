@@ -228,7 +228,7 @@ describe('the settings page shows what decides whether a market is filled', () =
     expect(knob({ offerMarkets: [{ a: null, b: USDT }] }, 'OFFER_MARKETS')).toMatchObject({
       value: KEY,
       editable: false,
-      source: 'env',
+      source: 'config',
     })
   })
 

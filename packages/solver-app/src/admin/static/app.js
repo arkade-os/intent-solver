@@ -881,7 +881,7 @@ const offersView = () => {
   return h(
     'div',
     h('h2.sans', 'offer fills'),
-    d.serving ? null : h('p.notice', 'No offer market served: OFFER_MARKETS is unset.'),
+    d.serving ? null : h('p.notice', 'No offer market served: offers.markets is empty in the config.'),
     d.offers.length === 0
       ? h('p.muted', d.serving ? 'No offers yet.' : 'Nothing to show.')
       : h(
@@ -1491,11 +1491,11 @@ const settingsView = () => {
         s.knobs.map((knob) =>
           h(
             'tr',
-            h('td', knob.key),
+            h('td', { title: knob.key }, knob.path ?? knob.key),
             h('td', String(knob.value)),
             h(
               'td',
-              knob.source === 'override' ? h('span.muted', 'override') : h('span.faint', 'env'),
+              knob.source === 'override' ? h('span.muted', 'override') : h('span.faint', 'config'),
               knob.pending ? [' ', h('span.phase.phase-exposed', { title: s.restartNotice }, 'pending restart')] : null,
             ),
             h(
@@ -1583,7 +1583,7 @@ const carrierRfqPriced = () => state.data.markets?.carrier?.rfqPriced === true
 /** BESIDE the draft, never on it: `draftFrom` mirrors market COLUMNS, and a non-column there is one a PUT deletes. */
 let carrierDefaultDraft = false
 
-/** Sent only when the form moved it: an unchanged key stores an override row for a value the environment supplies. */
+/** Sent only when the form moved it: an unchanged key stores an override row for a value the config supplies. */
 const carrierDefaultOverride = () =>
   carrierDefaultDraft === carrierRfqPriced() ? {} : { ASSET_CARRIER_PRICING: String(carrierDefaultDraft) }
 
@@ -2143,8 +2143,8 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
       field(
         'symbol',
         'symbol',
-        'the env stem and the label — USDA',
-        'The short name this market trades under, and the stem its settings take in the environment. Required to serve RFQ; an offer-only market may leave it blank.',
+        'the label — USDA',
+        'The short name this market trades under, and its label under assets in the config. Required to serve RFQ; an offer-only market may leave it blank.',
       ),
       group('how it is priced'),
       field(
@@ -2245,7 +2245,7 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
         'RFQ directions live',
         tip(
           'What the running process is open on right now. The boxes below set this, but a direction can also be ' +
-            'closed by ASSET_<SYM>_<DIR>_ENABLED in the environment without touching the market.',
+            'closed by the enabled flag of its corridor in the config without touching the market.',
         ),
       ),
       h('span.span2', h('span.muted', rfqDirectionLine())),
@@ -2501,7 +2501,7 @@ const paintPricingChanges = () => {
     ...Object.entries(pricingDraft.overrides).map(([key, value]) => ({
       key,
       label: key,
-      value: value === null ? 'use environment value' : value,
+      value: value === null ? 'use config value' : value,
     })),
   ]
   // Nothing to apply, nothing to show: a permanent "0 pending" bar is one more thing to read past.
@@ -2586,7 +2586,7 @@ const pricingKnobField = (knob, label, explanation) => {
           )
         : null,
     ),
-    h('span.hint', !knob.editable ? 'environment only' : knob.restartRequired ? 'after restart' : 'live after apply'),
+    h('span.hint', !knob.editable ? 'config file only' : knob.restartRequired ? 'after restart' : 'live after apply'),
   ]
 }
 
@@ -2596,7 +2596,7 @@ const corridorForm = () => {
     [
       'ENABLED',
       'enabled',
-      'Whether this direction accepts new swaps. A direction absent at boot must be enabled in the environment first.',
+      'Whether this direction accepts new swaps. A direction absent at boot must be enabled in the config first.',
     ],
     ['FEE_BPS', 'fee bps', 'The percentage fee taken from the customer payout. 50 bps is half of one percent.'],
     ['FEE_FLAT_SATS', 'flat fee sats', 'A fixed fee per swap, added to the percentage fee.'],
@@ -2786,7 +2786,7 @@ const pricingView = () => {
     ),
     h(
       'details',
-      h('summary', 'environment & serving capabilities'),
+      h('summary', 'config & serving capabilities'),
       h('p.notice', markets.restartNotice),
       h(
         'table',
@@ -2794,7 +2794,7 @@ const pricingView = () => {
           'tbody',
           pricingKnobs()
             .filter((knob) => !knob.editable)
-            .map((knob) => h('tr', h('td', knob.key), h('td', String(knob.value)))),
+            .map((knob) => h('tr', h('td', { title: knob.key }, knob.path ?? knob.key), h('td', String(knob.value)))),
         ),
       ),
       h(
@@ -4413,7 +4413,7 @@ const restartBanner = () => {
           'span.muted',
           {
             title:
-              'Set ADMIN_RESTART_ENABLED=true, and only where a supervisor restarts the process. ' +
+              'Set admin.restartEnabled to true in the config, and only where a supervisor restarts the process. ' +
               'Without one this stops the solver and nothing brings it back.',
           },
           'restart disabled',

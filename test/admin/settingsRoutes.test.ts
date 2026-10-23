@@ -231,7 +231,7 @@ describe('PATCH /api/settings', () => {
     const { app, setOverrideWithAudit } = build()
     const response = await patch(app, { key: 'ONCHAIN_SEND_ENABLED', value: 'true' })
     expect(response.status).toBe(400)
-    expect(((await response.json()) as { message: string }).message).toMatch(/disabled in the environment/i)
+    expect(((await response.json()) as { message: string }).message).toMatch(/disabled in the config/i)
     expect(setOverrideWithAudit).not.toHaveBeenCalled()
   })
 

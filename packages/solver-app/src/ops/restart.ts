@@ -24,7 +24,7 @@ export class RestartDisabledError extends Error {
 
   constructor() {
     super(
-      'Restart is disabled. Set ADMIN_RESTART_ENABLED=true to enable it, and only where a supervisor ' +
+      'Restart is disabled. Set admin.restartEnabled to true in the config to enable it, and only where a supervisor ' +
         'restarts the process (docker-compose sets restart: unless-stopped; systemd needs Restart=always). ' +
         'Without one, this stops the solver and nothing brings it back.',
     )

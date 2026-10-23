@@ -343,7 +343,7 @@ describe('GET /api/card', () => {
     const { status, body } = await getCard(makeDeps({ solverName: null }))
     expect(status).toBe(200)
     expect(body.card).toBeNull()
-    expect(body.cardError).toContain('SOLVER_NAME')
+    expect(body.cardError).toContain('name is not set')
   })
 
   // An unset SOLVER_NAME reaches the card's own /^[a-z0-9-]+$/ rule as the
@@ -467,11 +467,11 @@ describe('GET /api/card', () => {
 
     const posted = await postAd(deps as never)
     expect(posted.status).toBe(409)
-    expect(String(posted.body['detail'])).toContain('SOLVER_NAME')
+    expect(String(posted.body['detail'])).toContain('name is not set')
     expect(publish).not.toHaveBeenCalled()
     const { status, body } = await getCard(deps as never)
     expect(status).toBe(200)
-    expect(body.publish.lastError).toContain('SOLVER_NAME')
+    expect(body.publish.lastError).toContain('name is not set')
   })
 })
 

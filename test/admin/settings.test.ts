@@ -177,7 +177,7 @@ describe('corridor toggles', () => {
   })
 
   it('refuses to enable a corridor the environment disabled — no service exists for it', () => {
-    expect(() => validateOverride(config, 'ONCHAIN_SEND_ENABLED', 'true')).toThrow(/disabled in the environment/i)
+    expect(() => validateOverride(config, 'ONCHAIN_SEND_ENABLED', 'true')).toThrow(/disabled in the config/i)
   })
 
   it('still allows re-enabling one the console itself disabled', () => {
@@ -205,10 +205,23 @@ describe('non-editable keys', () => {
 })
 
 describe('describeSettings', () => {
-  it('marks a knob as overridden once it is set, and env otherwise', () => {
+  it('marks a knob as overridden once it is set, and config otherwise', () => {
     const knobs = describeSettings(config, { LN_SEND_FEE_BPS: '25' })
     expect(knobs.find((k) => k.key === 'LN_SEND_FEE_BPS')).toMatchObject({ value: 25, source: 'override' })
-    expect(knobs.find((k) => k.key === 'LN_SEND_FEE_FLAT_SATS')).toMatchObject({ source: 'env' })
+    expect(knobs.find((k) => k.key === 'LN_SEND_FEE_FLAT_SATS')).toMatchObject({ source: 'config' })
+  })
+
+  it('labels each knob by where the config document holds it', () => {
+    const path = 'corridors["arkade:BTC->lightning:BTC"].feeBps'
+    const withPaths = { ...config, configPaths: new Map([['LN_SEND_FEE_BPS', path]]) } as unknown as Config
+    expect(describeSettings(withPaths, {}).find((k) => k.key === 'LN_SEND_FEE_BPS')).toMatchObject({
+      key: 'LN_SEND_FEE_BPS',
+      path,
+      source: 'config',
+    })
+    expect(describeSettings(withPaths, {}).find((k) => k.key === 'SWAP_NETWORK')).toMatchObject({
+      path: 'SWAP_NETWORK',
+    })
   })
 
   it('reports every editable knob as restart-required EXCEPT the ones a seam now reaches', () => {

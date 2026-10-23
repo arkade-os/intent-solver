@@ -58,7 +58,7 @@ export const marketCapability = (market: Market, runtime: ServingRuntime): Marke
     gaps.push({
       kind: 'offer_path_not_built',
       detail:
-        'this process booted with no offer path, so the flag reaches nothing. Restart with OFFER_MARKETS set, ' +
+        'this process booted with no offer path, so the flag reaches nothing. Restart with offers.markets set in the config, ' +
         'or with at least one enabled market row declaring serves_offer.',
     })
     // Off `serving`, so the two cannot disagree: a built path that never took this pair is the

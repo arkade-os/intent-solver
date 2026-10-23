@@ -52,7 +52,7 @@ import type { AdminDeps } from '../server.js'
 export const RESTART_NOTICE =
   'Corridor fees, limits and caps are read once at startup: createServices resolves overrides and hands the result ' +
   'to every service, and nothing re-reads it afterwards. A knob badged pending is one whose override differs from ' +
-  'what this process loaded at boot; every other value here is what it is quoting right now. ASSET_MARKETS and OFFER_MARKETS ' +
+  'what this process loaded at boot; every other value here is what it is quoting right now. assets and offers.markets ' +
   'below are read once at startup like everything else on this page, not an exception to it. The markets this ' +
   'solver actually trades are a separate, live list — edited with no restart on the markets screen.'
 

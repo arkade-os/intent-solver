@@ -394,7 +394,7 @@ export class AdminStore {
           taken.add(symbol)
           notes.push(
             `${row.marketKey}: no symbol stored; wrote symbol = ${symbol} to the row, the stem an older binary ` +
-              `served when ASSET_MARKETS named no token for the asset.`,
+              `served when the config named no asset for it.`,
           )
           await this.driver.run('UPDATE admin_market SET symbol = ? WHERE market_key = ?', [symbol, row.marketKey])
           continue
