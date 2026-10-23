@@ -2753,6 +2753,16 @@ const pricingView = () => {
             `Remove ${saved.symbol || 'this market'}`,
           )
         : null,
+      h(
+        'span.revert',
+        revertButton({ scope: 'all' }, 'Revert to config file'),
+        saved
+          ? revertButton(
+              { scope: 'market', marketKey: saved.marketKey },
+              `Revert ${saved.symbol || 'this market'} to config`,
+            )
+          : null,
+      ),
     ),
     pricingSelection
       ? h(
@@ -3289,7 +3299,7 @@ const noteLinks = (corridor, detail) => {
  */
 const actButton = (spec, attrs, ...label) => {
   const busy = Boolean(state.running)
-  const mine = state.running?.name === attrs['data-action']
+  const mine = busy && state.running.name === attrs['data-action']
   return h(
     spec,
     {
@@ -3629,6 +3639,7 @@ const closeConfirm = () => {
 const confirmDialog = () => {
   const d = state.dialog
   if (!d) return null
+  if (d.kind === 'revert') return revertDialog(d)
   const needsReason = d.name === 'park-swap'
   return h(
     'div.scrim',
@@ -3681,6 +3692,136 @@ const confirmDialog = () => {
         ),
       ),
     ),
+  )
+}
+
+/**
+ * Revert to config file: console state put back to what the config this solver booted with implies.
+ * The dialog is built from a dry run, and the apply carries that run's basis, so what the operator
+ * confirms is exactly what is written.
+ */
+const openRevert = async (scope) => {
+  try {
+    const plan = await api('/api/config/revert', { method: 'POST', body: JSON.stringify({ ...scope, dryRun: true }) })
+    if (plan.changes.length === 0) {
+      // Including a stale dialog whose review found nothing left: the reload makes the buttons say so.
+      state.dialog = null
+      await load(state.view)
+      return
+    }
+    state.dialog = {
+      kind: 'revert',
+      scope,
+      plan,
+      error: null,
+      stale: false,
+      armedAt: performance.now(),
+      opener: document.activeElement,
+    }
+    render()
+    document.querySelector('.dialog.confirm button.cancel')?.focus()
+  } catch (error) {
+    fail(error)
+  }
+}
+
+const applyRevert = async () => {
+  const d = state.dialog
+  if (!d || state.running) return
+  state.running = { name: 'config-revert', forSwap: null }
+  render()
+  try {
+    await api('/api/config/revert', {
+      method: 'POST',
+      body: JSON.stringify({ ...d.scope, dryRun: false, basis: d.plan.basis }),
+    })
+    state.dialog = null
+    await load(state.view)
+  } catch (error) {
+    // In the dialog, which the page banner sits behind. A stale preview is read again, never re-applied.
+    d.error = error instanceof Error ? error.message : String(error)
+    d.stale = error?.status === 409
+  } finally {
+    state.running = null
+    render()
+  }
+}
+
+const revertDialog = (d) => {
+  const group = (applies, title) => {
+    const rows = d.plan.changes.filter((change) => change.applies === applies)
+    if (rows.length === 0) return null
+    return h(
+      'section',
+      h('h3', title),
+      h(
+        'table.revert-changes',
+        h(
+          'tbody',
+          rows.map((change) =>
+            h(
+              'tr',
+              h('td', change.target),
+              h('td.faint', change.field),
+              h('td', `${change.current} → ${change.config}`),
+            ),
+          ),
+        ),
+      ),
+    )
+  }
+  return h(
+    'div.scrim',
+    { onclick: (e) => e.target.classList.contains('scrim') && !state.running && closeConfirm() },
+    h(
+      'div.dialog.confirm.revert',
+      { role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': 'confirm-title' },
+      h('h2', { id: 'confirm-title' }, 'Revert to config file'),
+      h('p.faint', `Config as loaded at ${new Date(d.plan.loadedAt * 1000).toLocaleString()}`),
+      group('now', 'Applies now'),
+      group('restart', 'Applies after restart'),
+      h('div.dialog-error', d.error ? h('p.banner', d.error) : null),
+      h('p.fine', 'This replaces console changes. To undo, edit them again.'),
+      h(
+        'div.row.end',
+        actButton('button.act.cancel', { onclick: closeConfirm }, 'Cancel'),
+        d.stale
+          ? actButton(
+              'button.act',
+              { 'data-action': 'config-revert', onclick: () => openRevert(d.scope) },
+              'review again',
+            )
+          : actButton(
+              'button.act.armed',
+              {
+                'data-action': 'config-revert',
+                onclick: (e) => {
+                  // As for every armed action: the second click of the double-click that opened it does not count.
+                  if (e.detail > 1 || performance.now() - d.armedAt < 500) return
+                  applyRevert()
+                },
+              },
+              'revert',
+            ),
+      ),
+    ),
+  )
+}
+
+/** Disabled, and saying so, when the console already matches; absent when the preview could not be read. */
+const revertButton = (scope, label) => {
+  const changes = state.data.revert?.changes
+  if (!Array.isArray(changes)) return null
+  const pending = scope.scope === 'all' ? changes : changes.filter((change) => change.marketKey === scope.marketKey)
+  if (scope.scope === 'market' && pending.length === 0) return null
+  return h(
+    'button.act',
+    {
+      disabled: pending.length === 0,
+      title: 'Put console changes back to the config file this solver booted with.',
+      onclick: () => openRevert(scope),
+    },
+    pending.length === 0 ? 'matches config file' : label,
   )
 }
 
@@ -4321,10 +4462,18 @@ const load = async (view) => {
       if (overviewGeneration !== overviewLoadGeneration) return
       state.data[view] = data
     } else if (view === 'pricing') {
-      const [markets, settings] = await Promise.all([api('/api/markets'), api('/api/settings')])
+      const [markets, settings, revert] = await Promise.all([
+        api('/api/markets'),
+        api('/api/settings'),
+        // A preview only, and optional: the revert buttons stay away rather than fail the page.
+        api('/api/config/revert', { method: 'POST', body: JSON.stringify({ scope: 'all', dryRun: true }) }).catch(
+          () => null,
+        ),
+      ])
       if (overviewGeneration !== overviewLoadGeneration) return
       state.data.markets = markets
       state.data.settings = settings
+      state.data.revert = revert
     } else if (view === 'health') {
       const [diagnostics, discovery] = await Promise.all(
         // Not `/api/backends` as well: it runs the same probes, and diagnostics already carries each target.

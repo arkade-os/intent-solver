@@ -857,6 +857,22 @@ summary {
   max-width: 440px;
 }
 
+/* Paths and market keys are long; they wrap rather than push the change off the dialog. */
+.dialog.confirm.revert {
+  max-width: 640px;
+}
+
+.revert-changes {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.revert-changes td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+}
+
 .dialog.confirm input.reason {
   width: 100%;
 }

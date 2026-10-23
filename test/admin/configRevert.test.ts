@@ -93,7 +93,7 @@ describe('POST /api/config/revert — the preview', () => {
     expect(status).toBe(200)
     expect(body.changes).toEqual([
       // BTC is this row's base, so the client buying USDA is the client GIVING the base: sell_base.
-      { target: 'USDA', field: 'rfqSellBase', current: 'true', config: 'false', applies: 'now' },
+      { target: 'USDA', marketKey: KEY_A, field: 'rfqSellBase', current: 'true', config: 'false', applies: 'now' },
       { target: FEE_PATH, field: 'value', current: '25', config: '0', applies: 'restart' },
     ])
     expect(body.basis).toMatch(/^[0-9a-f]{64}$/)
@@ -105,6 +105,14 @@ describe('POST /api/config/revert — the preview', () => {
     const { post } = await setup()
     const { body } = await post({ scope: 'all', dryRun: true })
     expect(JSON.stringify(body.changes)).not.toContain('REBALANCE_POLICY')
+  })
+
+  it('names a row without a symbol by the symbol the config gives it', async () => {
+    const { store, post } = await setup()
+    await store.putMarket({ ...market(USDB, rfqSymbolFor(USDB)), symbol: null, servesRfq: false })
+    const { body } = await post({ scope: 'market', marketKey: KEY_B, dryRun: true })
+    expect(body.changes.map((change: { target: string }) => change.target)).toContain(rfqSymbolFor(USDB))
+    expect(JSON.stringify(body.changes)).not.toContain(`"target":"${KEY_B}"`)
   })
 
   it('answers 404 for a market that does not exist', async () => {

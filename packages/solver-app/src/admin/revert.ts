@@ -15,6 +15,8 @@ export type RevertScope = { scope: 'all' } | { scope: 'market'; marketKey: strin
 
 export interface RevertChange {
   target: string
+  /** Set on a market row change, so the console can tell which market a change is for. */
+  marketKey?: string
   field: string
   current: string
   config: string
@@ -59,7 +61,8 @@ export const planRevert = async (
     serving.push({ marketKey: row.marketKey, fields })
     for (const field of moved) {
       changes.push({
-        target: row.symbol ?? row.marketKey,
+        target: row.symbol ?? fields.symbol ?? row.marketKey,
+        marketKey: row.marketKey,
         field,
         current: shown(row[field]),
         config: shown(fields[field]),
