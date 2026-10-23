@@ -299,6 +299,16 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
       )
     }
   }
+  if (
+    services.config.corridorEnabled['lightning:BTC->arkade:BTC'] &&
+    services.config.lnBackend === 'lnd' &&
+    !services.config.lnd?.esploraUrl
+  ) {
+    log(
+      'lightning receive has no LND_ESPLORA_URL to read Bitcoin with: a client that unrolls its lockup and claims ' +
+        'it on L1 reveals P only there, so that swap is reported and left for review instead of settled',
+    )
+  }
   // Said out loud at every boot, not just recorded in the console. This is the
   // only setting here that accepts a LOSS, and an operator who inherits a
   // deployment should meet it in the log rather than by reading the unit file.

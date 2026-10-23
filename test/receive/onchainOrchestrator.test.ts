@@ -25,6 +25,7 @@ import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
 import type { OnchainReceiveArkadeOps } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
 import { FundNotSubmittedError } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import type { CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
+import type { UnrolledRefundRecord, UnrolledRefundStep } from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
 
 const keyBytes = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 
@@ -1398,6 +1399,56 @@ describe('OnchainReceiveSwapService', () => {
 
       await expect(service.tick(awaitingClaim.id)).rejects.toThrow('esplora unreachable')
       expect((await store.get(awaitingClaim.id)).state).toBe('awaiting_claim')
+    })
+
+    describe('its refund on L1 through arkd', () => {
+      const record: UnrolledRefundRecord = {
+        txid: 'cd'.repeat(32),
+        tx: null,
+        feeRate: 10,
+        broadcastAt: 1,
+        cpfpTxid: null,
+      }
+      let steps: UnrolledRefundStep[]
+      let lockups: { txid: string; vout: number }[]
+
+      beforeEach(() => {
+        steps = []
+        lockups = []
+        deps.arkadeFake.arkade.refundUnrolled = async (_row, lockup) => {
+          lockups.push({ txid: lockup.txid, vout: lockup.vout })
+          return steps.shift() ?? { kind: 'waiting' }
+        }
+      })
+
+      const refundingUnrolled = async (): Promise<OnchainReceiveSwapRow> => {
+        const awaitingClaim = await driveToAwaitingClaim()
+        now = awaitingClaim.refundLocktime + 1
+        await store.transition(awaitingClaim.id, 'awaiting_claim', 'refunding_arkade', {})
+        deps.arkadeFake.unrollLockup(awaitingClaim.pkScript)
+        return store.get(awaitingClaim.id)
+      }
+
+      it('refunds the lockup it funded, and records refunded once that confirms', async () => {
+        const row = await refundingUnrolled()
+        steps.push({ kind: 'pending', record }, { kind: 'confirmed', record })
+
+        expect((await service.tick(row.id)).unrolledRefund).toBe(JSON.stringify(record))
+        expect((await service.tick(row.id)).state).toBe('refunded')
+        expect(lockups[0]).toEqual({ txid: row.arkadeFundTxid, vout: 0 })
+        expect(deps.arkadeFake.refundCalls).toBe(0)
+      })
+
+      it('escalates a closed window only once htlc_locktime has passed', async () => {
+        const row = await refundingUnrolled()
+        steps.push({ kind: 'closed', reason: 'exit closure' }, { kind: 'closed', reason: 'exit closure' })
+
+        expect((await service.tick(row.id)).state).toBe('refunding_arkade')
+        now = row.htlcLocktime
+        const stuck = await service.tick(row.id)
+        expect(stuck.state).toBe('stuck')
+        expect(stuck.failureReason).toMatch(/exit closure — server-independent recourse/)
+      })
     })
   })
 

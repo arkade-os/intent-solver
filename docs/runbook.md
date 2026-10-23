@@ -639,6 +639,18 @@ the reasons to take one.
   moved. If one sits for many blocks, look the txid up: still in the mempool is
   a fee-rate problem, and absent from the chain entirely means the broadcast
   never stuck — the next sweep rebuilds it at today's rate on its own.
+- **A receive row in `refunding` or `refunding_arkade` carrying
+  `unrolled_refund` is refunding a lockup the client unrolled onto Bitcoin.**
+  arkd co-signs the refund on L1 through `CosignOnchainTx`, so this needs arkd
+  v0.9.22 or later. The refund pays the solver's boarding address, and the
+  float's boarding settle brings it back into Arkade.
+  - arkd co-signs an outpoint once, so the refund is never replaced. If it
+    drops, the row rebroadcasts the same transaction. If it has not confirmed
+    after 20 minutes, it gets one co-signed CPFP child.
+  - The row escalates to `stuck` only once `P` can no longer be collected.
+    That happens when the lockup was spent with no `P` in the witness, or when
+    arkd stops co-signing because the client's own exit is near. The failure
+    reason then names the solo leaf.
 - **`settled` with `onchain_claim_txid: null` on onchain-receive** is a LEGACY
   recovery path, not a missing write, and only a row quoted before the txid was
   pre-committed can show it. The solver crashed after broadcasting its

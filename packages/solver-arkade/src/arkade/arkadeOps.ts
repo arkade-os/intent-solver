@@ -12,6 +12,7 @@
 import type { UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
 import type { FundedOutput, LockupSpendEvidence } from './wallet.js'
 import type { CovenantScriptRow } from './covenantRow.js'
+import type { UnrolledRefundRecord, UnrolledRefundStep } from './unrolledRefund.js'
 
 /** The Arkade operations the send-side orchestrators need, shaped for injection. */
 export interface ArkadeOps {
@@ -89,9 +90,12 @@ export interface ReceiveArkadeOps {
    * The spend-aware read `findLockups` cannot be: it is `spendableOnly`, so a
    * lockup that was funded and then claimed vanishes from it — and on THIS leg
    * that blind spot is a double-spend of the provider's own capital, because
-   * the funding decision is made against it. See `whenArmed`.
+   * the funding decision is made against it. See `whenArmed`. `unrolled`: spent on
+   * BITCOIN, so a claim of it reveals `P` in an L1 witness only.
    */
-  findLockupOutpoints(pkScriptHex: string): Promise<{ txid: string; vout: number; value: number; spent: boolean }[]>
+  findLockupOutpoints(
+    pkScriptHex: string,
+  ): Promise<{ txid: string; vout: number; value: number; spent: boolean; unrolled: boolean }[]>
   /** Pay `amountSats` from the solver's own Arkade balance to `address` — funds the lockup. @returns the Arkade txid. */
   fund(address: string, amountSats: number, stamp?: ClaimPacketStamp): Promise<string>
   /** Push the covenant refund of the script the row describes, back to the solver's own address. Needs no client keys. */
@@ -101,4 +105,10 @@ export interface ReceiveArkadeOps {
     outpoints: readonly { txid: string; vout: number }[],
     paymentHashHex: string,
   ): Promise<Uint8Array | null>
+  /** One step of the co-signed L1 refund of a lockup the client unrolled. Absent: it waits for the operator. */
+  refundUnrolled?(
+    row: CovenantScriptRow,
+    lockup: { txid: string; vout: number },
+    record: UnrolledRefundRecord | null,
+  ): Promise<UnrolledRefundStep>
 }
