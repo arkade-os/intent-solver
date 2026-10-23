@@ -454,6 +454,9 @@ describe('OnchainReceiveSwapStore — migration', () => {
       funded_payout_sats: undefined,
       min_from_sats: undefined,
       max_from_sats: undefined,
+      onchain_claim_fee_rate: undefined,
+      onchain_claim_broadcast_at: undefined,
+      onchain_claim_prior_txids: undefined,
     }
     const after = db.prepare(`SELECT * FROM receive_onchain_swap WHERE id = 'pre-band-row'`).get() as Record<
       string,

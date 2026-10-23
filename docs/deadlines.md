@@ -70,18 +70,20 @@ that way end to end. That is true even when the covenant's own CSV leaves count
 BLOCKS, which they do against a block-typed arkd (see the runbook's "Block-typed
 timelocks").
 
-The two meet at exactly three bounds, and each converts before it adds:
+The two meet at exactly five bounds, and each converts before it adds:
 
 | bound | where |
 |---|---|
 | `refundLocktimeFor`'s unilateral bound | `core/send.ts` |
 | `onchainRefundLocktimeFor`'s server-independent bound | `core/onchainSend.ts` |
 | `minHtlcWindowFor`'s gate (d) | `core/receive.ts` |
+| `evaluateReceiveFunding`'s gate (d) | `core/receive.ts` |
+| `evaluateOnchainReceiveFunding`'s gate (d) | `core/onchainReceive.ts` |
 
 Conversion is at `NOMINAL_BLOCK_SECONDS` (600), the SDK's own figure — this
 number's job is to agree with whoever derives the same script.
 
-> A block delay left unconverted at any of those three does not lose precision,
+> A block delay left unconverted at any of those five does not lose precision,
 > it collapses the bound: 20 blocks read as 20 seconds puts the client's refund
 > essentially at `now`. That is the double-collect window the bound exists to
 > close.
@@ -97,6 +99,12 @@ number's job is to agree with whoever derives the same script.
 | `ONCHAIN_ORDER_MARGIN_SECONDS` | `core/onchainSend.ts` | Ordering margin between the two legs' deadlines. |
 | `EVM_ORDER_MARGIN_SECONDS` | `core/evmSend.ts` | Same role on the EVM corridors. |
 
+### 1 hour
+
+| Constant | Where | Why |
+|---|---|---|
+| `CLIENT_LOCKUP_RELEASE_DELAY_SECONDS` | `core/onchainSend.ts` | Reorg depth (~6 blocks) under the solver's own L1 refund before the client's Arkade lockup is handed back. **Not a race margin**: once that refund stands the client can never reveal `P`, so the lockup is unclaimable and worth nothing to the solver. What is being waited out is a reorg replacing our refund with their claim, which would turn the release into a double payout. |
+
 ### 15 minutes
 
 | Constant | Where | Why |
@@ -105,6 +113,24 @@ number's job is to agree with whoever derives the same script.
 | `DEFAULT_ONCHAIN_LOCKUP_TIMEOUT` | `core/onchainSend.ts` | The same, for the onchain send leg. |
 | `DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT` | `core/onchainReceive.ts` | The same, client-funded side. |
 | `SETTLE_SAFETY_MARGIN` | `core/receive.ts`, `core/onchainReceive.ts` | Slack between the solver's Arkade refund and the cross-side deadline. |
+
+### 20 minutes
+
+| Constant | Where | Why |
+|---|---|---|
+| `FEE_BUMP_INTERVAL_SECONDS` | `onchain/feeBump.ts` | How long an L1 spend of ours may sit in the mempool before it is replaced at a higher fee. About two blocks, so an ordinary confirmation beats the replacement rather than racing it. |
+
+### Not a duration: the fee-bump factor
+
+`FEE_BUMP_FACTOR` (`onchain/feeBump.ts`) is **1.5**, and a replacement pays
+`max(estimate, 1.5 x previous, previous + 1 sat/vB)`. The `+ 1` is BIP125 rule
+4: the vsize is identical across versions, so a factor that rounded to the same
+sat/vB would relay as a duplicate rather than as a replacement.
+
+It belongs on this page because it answers the same question everything else
+here does. Both onchain legs race a deadline they cannot move — `htlc_locktime`
+for the receive claim, `refund_locktime` for the send refund — and once the
+spend is broadcast the fee is the only lever left.
 
 ### 2 minutes
 

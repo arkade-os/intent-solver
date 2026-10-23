@@ -196,7 +196,10 @@ export const evaluateReceiveFunding = (input: ReceiveFundingInput): ReceiveFundi
   // opens they can let the htlc fail back for free and then claim the payout — both
   // sides, one preimage. Checked LAST, so accepting it changes exactly one
   // thing and every gate above still declines.
-  if (!acceptUnilateralGap && now + unilateralRefundWithoutReceiverDelay + UNILATERAL_RECOURSE_MARGIN > htlcExpiresAt) {
+  if (
+    !acceptUnilateralGap &&
+    now + rawDelaySeconds(unilateralRefundWithoutReceiverDelay) + UNILATERAL_RECOURSE_MARGIN > htlcExpiresAt
+  ) {
     return { fund: false, reason: 'unilateral_recourse_after_htlc' }
   }
 

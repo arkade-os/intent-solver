@@ -80,6 +80,10 @@ export const text = (value: unknown): string | null => (value === null || value 
 export const numberOrNull = (value: unknown): number | null =>
   value === null || value === undefined ? null : Number(value)
 
+/** A space-separated txid column: the earlier versions of a spend this row has replaced, oldest last. */
+export const txidList = (value: unknown): string[] =>
+  value === null || value === undefined ? [] : String(value).split(' ').filter(Boolean)
+
 /** Additive migration: `CREATE TABLE IF NOT EXISTS` never alters an existing table. */
 const SQL_IDENTIFIER = /^[a-z_][a-z0-9_]*$/
 const SQL_COLUMN_TYPE = /^(TEXT|INTEGER|REAL|BLOB)( NOT NULL)?( DEFAULT (-?\d+|'[^']*'))?$/

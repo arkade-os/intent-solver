@@ -1083,6 +1083,7 @@ export const createServices = async (
         sweepConcurrency: config.sweepConcurrency,
         lockupTimeout: config.lockupTimeoutSeconds,
         sendHintScidDenylist: config.sendHintScidDenylist,
+        network: config.network,
         approvalGate: gateFor('arkade:BTC->lightning:BTC'),
         // Every other corridor's store, so a hash that is live anywhere is
         // spoken for here too.

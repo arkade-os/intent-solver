@@ -50,6 +50,7 @@ import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr, secp256k1 } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { Address, OutScript } from '@scure/btc-signer'
+import { DefaultVtxo } from '@arkade-os/sdk'
 import { HOUR, MINUTE } from '@arkade-os/solver-core/core/timelocks.js'
 import {
   OnchainReceiveSwapStore,
@@ -109,10 +110,21 @@ const serviceWith = async (now?: () => number): Promise<OnchainReceiveSwapServic
     ...(now ? { now } : {}),
   })
 
-/** The client's half of a quote request. `P` is sealed to nobody: no covclaimd claims on any path here. */
+/**
+ * The client's half of a quote request; nobody holds `P` or the payout key.
+ * Quoting the SOLVER's key made it the covenant's `receiver`, the one shape in
+ * which a receiver-signed refund works — so the refund test below passed.
+ */
 const clientQuoteRequest = async (amountSats = AMOUNT_SATS) => {
   const sealed = newSealedPreimage(hex.encode(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true)))
   const refundPriv = schnorr.utils.randomSecretKey()
+  const payoutPubkey = schnorr.getPublicKey(schnorr.utils.randomSecretKey())
+  const serverKey = arkade.ctx.wallet.arkServerPublicKey
+  const payoutScript = new DefaultVtxo.Script({
+    pubKey: payoutPubkey,
+    serverPubKey: serverKey,
+    csvTimelock: DefaultVtxo.Script.DEFAULT_TIMELOCK,
+  })
   return {
     sealed,
     refundPubkey: schnorr.getPublicKey(refundPriv),
@@ -121,8 +133,8 @@ const clientQuoteRequest = async (amountSats = AMOUNT_SATS) => {
       amountSats,
       claimPacket: sealed.packet,
       refundPubkey: hex.encode(schnorr.getPublicKey(refundPriv)),
-      payoutAddress: await arkade.ctx.wallet.getAddress(),
-      payoutPubkey: hex.encode(await arkade.ctx.identity.xOnlyPublicKey()),
+      payoutAddress: payoutScript.address(arkade.ctx.hrp, serverKey).encode(),
+      payoutPubkey: hex.encode(payoutPubkey),
     },
   }
 }

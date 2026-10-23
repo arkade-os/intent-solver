@@ -70,8 +70,14 @@ import {
   maxServableExitDelay,
   minFinalCltvBlocksFor,
 } from '@arkade-os/solver-core/core/receive.js'
+import {
+  arkadeRefundLocktimeFor,
+  DEFAULT_MIN_CONFIRMATIONS,
+  evaluateOnchainReceiveFunding,
+  htlcLocktimeFor,
+} from '@arkade-os/solver-core/core/onchainReceive.js'
 import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
-import { relativeDelayFrom, secondsForBlockRung } from '@arkade-os/solver-core/core/timelocks.js'
+import { rawDelaySeconds, relativeDelayFrom, secondsForBlockRung } from '@arkade-os/solver-core/core/timelocks.js'
 import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
 import { FakeLightningBackend } from '@arkade-os/solver-rails-fake/ln/fake/backend.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
@@ -271,6 +277,27 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
         `${cliff}s or less (ARK_UNILATERAL_EXIT_DELAY, if the server enforces less than it advertises), ` +
         `or by accepting the gap where the trader's recourse opens first (LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true)`,
     )
+  }
+  // The other receive leg's version of the same deployment fact, asked of the
+  // gate itself at the depth every quote defaults to.
+  if (services.config.corridorEnabled['onchain:BTC->arkade:BTC']) {
+    const at = nowSeconds()
+    const htlcLocktime = htlcLocktimeFor(DEFAULT_MIN_CONFIRMATIONS, at)
+    const soloRecourse = rawDelaySeconds(services.arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay)
+    const servable = evaluateOnchainReceiveFunding({
+      arkadeRefundLocktime: arkadeRefundLocktimeFor(htlcLocktime, at),
+      htlcLocktime,
+      unilateralRefundWithoutReceiverDelay: services.arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay,
+      now: at,
+    })
+    if (!servable.fund) {
+      log(
+        `onchain receive will refuse EVERY quote: this server's ${soloRecourse}s solo recourse opens after the ` +
+          `${htlcLocktime - at}s onchain htlc this leg quotes at ${DEFAULT_MIN_CONFIRMATIONS} confirmation(s). ` +
+          `Serve it by lowering the exit delay (ARK_UNILATERAL_EXIT_DELAY, if the server enforces less than it ` +
+          `advertises). Quotes are refused rather than funded: funding would strand the client's L1 HTLC`,
+      )
+    }
   }
   // Said out loud at every boot, not just recorded in the console. This is the
   // only setting here that accepts a LOSS, and an operator who inherits a
@@ -1565,7 +1592,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         log('onchain refunds NOT checked: LND did not answer at boot; run this again once it does')
       const evmPushed = (await services.evmSendService?.refundSweep()) ?? []
       if (pushed.length === 0 && onchainPushed.length === 0 && evmPushed.length === 0) {
-        log('nothing eligible: refunds need a failed swap past its deadline with funds at the script')
+        log('nothing eligible: no failed swap has funds at its lockup that its refund leaf can move yet')
         return
       }
       for (const id of pushed) log('refunded', id, json((await services.store.get(id)).refundArkTxid))

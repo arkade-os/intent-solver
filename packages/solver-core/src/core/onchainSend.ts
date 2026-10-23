@@ -62,6 +62,9 @@ export const htlcLocktimeFor = (minConfirmations: number, now: number): number =
  */
 export const HTLC_REFUND_MTP_MARGIN = 90 * MINUTE
 
+/** Reorg depth (~6 blocks) under the solver's own L1 refund before the client's lockup goes back. */
+export const CLIENT_LOCKUP_RELEASE_DELAY_SECONDS = 60 * MINUTE
+
 /**
  * What the solver needs after learning `P` to get its Arkade claim landed (TLA+ F7).
  * A DEADLINE BUDGET, not a timeout: the room
@@ -86,8 +89,25 @@ export const onchainRefundLocktimeFor = (htlcLocktime: number, unilateralClaimDe
   // `unilateralBound`: a block-typed delay against a unix-seconds deadline collapses
   // this bound to nothing rather than merely blurring it.
   const serverIndependentBound = now + rawDelaySeconds(unilateralClaimDelay) + ONCHAIN_ORDER_MARGIN_SECONDS
-  const claimAnswerBound = latestClaimArrival(htlcLocktime) + ARKADE_CLAIM_WINDOW_SECONDS
-  return Math.max(chainBound, serverIndependentBound, claimAnswerBound)
+  return Math.max(chainBound, serverIndependentBound, arkadeClaimDeadline(htlcLocktime))
+}
+
+/** The claim-answer bound {@link onchainRefundLocktimeFor} reserves: the last instant the solver may still need to spend the lockup. */
+export const arkadeClaimDeadline = (htlcLocktime: number): number =>
+  latestClaimArrival(htlcLocktime) + ARKADE_CLAIM_WINDOW_SECONDS
+
+/**
+ * A lockup inherits its inputs' batch expiry. Swept, nothing is left for the solver to claim
+ * offchain — the SDK recovers through the SENDER's leaf only — while the client's refund still
+ * pays out. An absent expiry is not judged.
+ */
+export const expiryBeforeClaimDeadline = (
+  outputs: readonly { expiresAt?: number }[],
+  htlcLocktime: number,
+): number | null => {
+  const deadline = arkadeClaimDeadline(htlcLocktime)
+  const early = outputs.flatMap((o) => (o.expiresAt !== undefined && o.expiresAt < deadline ? [o.expiresAt] : []))
+  return early.length > 0 ? Math.min(...early) : null
 }
 
 /**

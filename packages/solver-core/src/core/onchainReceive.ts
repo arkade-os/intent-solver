@@ -17,7 +17,7 @@
  * two drift and leave one funding swaps the other refuses.
  */
 
-import { HOUR, MINUTE } from './timelocks.js'
+import { HOUR, MINUTE, rawDelaySeconds } from './timelocks.js'
 import { UNILATERAL_RECOURSE_MARGIN } from './receive.js'
 import type { Limits } from './limits.js'
 
@@ -146,7 +146,10 @@ export const evaluateOnchainReceiveFunding = (params: {
   // the COLLABORATIVE refund, which needs the Arkade server; with it gone the trader's
   // `unilateralClaim` opens first, so an HTLC timing out before our own leaf opens lets
   // them reclaim onchain and then claim the Arkade payout — both sides.
-  if (params.now + params.unilateralRefundWithoutReceiverDelay + UNILATERAL_RECOURSE_MARGIN > params.htlcLocktime) {
+  // CONVERTED, as `minHtlcWindowFor`'s gate (d) is: left raw, a 20-BLOCK delay reads
+  // as 20 seconds against a unix timestamp and the bound collapses.
+  const soloRecourseSeconds = rawDelaySeconds(params.unilateralRefundWithoutReceiverDelay)
+  if (params.now + soloRecourseSeconds + UNILATERAL_RECOURSE_MARGIN > params.htlcLocktime) {
     return { fund: false, reason: 'refused to fund: solver unilateral recourse opens after the onchain htlc timeout' }
   }
   return { fund: true }
