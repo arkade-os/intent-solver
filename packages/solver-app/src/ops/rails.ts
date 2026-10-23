@@ -82,9 +82,10 @@ export interface LightningRailModule {
   /**
    * Open the wallet(s) and return both legs.
    *
-   * Handed the WHOLE config rather than a vendor-shaped slice: a rail this repo
-   * has never heard of reads its own environment variables, and a slice would
-   * mean `Config` growing a field per consumer.
+   * Handed the WHOLE config rather than a vendor-shaped slice. A rail this repo
+   * has never heard of reads its settings from `config.lightningRailBlock`, its
+   * own block of the document (`rails.lightning.<name>`), and validates it
+   * itself: its shape is the rail's business, not `Config`'s.
    *
    * Called at most once per process, from `createServices`. Two backend wallets
    * brought up concurrently tear each other down, which is why `createServices`

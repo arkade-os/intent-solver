@@ -170,3 +170,42 @@ describe('the rail seam is reachable from the entrypoint', () => {
     expect(sdk.lightningRailFor(RAIL)).toBe(injected)
   })
 })
+
+describe('a registered rail reads its own block of the config document', () => {
+  const document = (lightning: Record<string, unknown>) => ({
+    network: 'regtest',
+    rails: {
+      arkade: {
+        mnemonic: 'test mnemonic, never a real one',
+        serverUrl: 'http://localhost:7070',
+        emulatorUrl: 'http://localhost:7073',
+      },
+      lightning,
+    },
+  })
+  const load = (doc: unknown, options: Omit<sdk.LoadOptions, 'env'> = {}) =>
+    sdk.loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) }, ...options })
+
+  it('hands the selected rail its block, whose shape is the rail’s own', () => {
+    expect(load(document({ backend: RAIL, [RAIL]: { apiKey: 'k' } })).lightningRailBlock).toEqual({ apiKey: 'k' })
+  })
+
+  it('accepts the block while another backend is selected, and hands it to nobody', () => {
+    expect(load(document({ backend: 'fake', [RAIL]: { apiKey: 'k' } })).lightningRailBlock).toBeNull()
+  })
+
+  it('lets a deployment profile default a corridor off before anything is validated', () => {
+    const profile = (doc: sdk.SolverDocument): sdk.SolverDocument => ({
+      ...doc,
+      corridors: { 'onchain:BTC->arkade:BTC': { enabled: false }, ...doc.corridors },
+    })
+    expect(load(document({ backend: 'fake' }), { profile }).corridorEnabled['onchain:BTC->arkade:BTC']).toBe(false)
+  })
+
+  it('surfaces a profile’s own refusal unchanged', () => {
+    const profile = (): sdk.SolverDocument => {
+      throw new Error('this deployment serves no EVM receive')
+    }
+    expect(() => load(document({ backend: 'fake' }), { profile })).toThrow(/^this deployment serves no EVM receive$/)
+  })
+})

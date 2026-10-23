@@ -29,6 +29,8 @@ import type {
   RailId,
   CovenantScriptRow,
   StoreShape,
+  LoadOptions,
+  SolverDocument,
 } from '@arkade-os/solver-app/index.js'
 
 /** Referenced so the type imports above are load-bearing rather than elidable. */
@@ -46,6 +48,8 @@ type _Surface = [
   RailId,
   CovenantScriptRow,
   StoreShape<unknown, string>,
+  LoadOptions,
+  SolverDocument,
 ]
 
 describe('the solver SDK surface', () => {
@@ -73,6 +77,9 @@ describe('the solver SDK surface', () => {
     'rfqRefusalPayload',
     // The SHARED exposure cap; a corridor building its own is uncapped.
     'AdmissionControl',
+    // The config document: a fork loads it with its own profile, and checks a document it writes.
+    'loadConfig',
+    'parseDocument',
   ])('exports %s, so a consumer can build against it', (name) => {
     expect(sdk[name as keyof typeof sdk]).toBeDefined()
   })
