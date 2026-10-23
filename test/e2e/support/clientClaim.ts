@@ -12,7 +12,7 @@
  * The spend goes through the covenant's COLLABORATIVE claim leaf
  * (`preimage + receiver + arkade server`, `src/arkade/covenant.ts`). No CSV,
  * no unilateral exit: the client signs, arkd co-signs, and the preimage rides
- * along in the `ConditionWitness` PSBT field that `claimIdentity.ts` attaches.
+ * along in the `ConditionWitness` PSBT field the SDK's `claimWithPreimageIdentity` attaches.
  * That is precisely the field the solver then reads back out via
  * `findClaimPreimage`, which is what makes these tests a real check of that
  * round trip against a live node.
