@@ -24,6 +24,7 @@ import { registerOfferRoutes } from './routes/offers.js'
 import { registerStatusRoutes } from './routes/status.js'
 import { registerDiagnosticsRoutes } from './routes/diagnostics.js'
 import { registerSettingsRoutes } from './routes/settings.js'
+import { registerConfigRevertRoutes } from './routes/configRevert.js'
 import { registerMarketRoutes } from './routes/markets.js'
 import { registerPricingRoutes } from './routes/pricing.js'
 import { registerPricingApplyRoutes } from './routes/pricingApply.js'
@@ -118,6 +119,7 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   registerOfferRoutes(app, deps)
   app.get('/api/rfq-refusals', (c) => c.json(deps.services.rfqRefusals.recent()))
   registerSettingsRoutes(app, deps)
+  registerConfigRevertRoutes(app, deps)
   // Built once and shared: `feeds.read` is for the preview, never the write probe.
   // Two readers: a saved row may be a grandfathered private feed, a typed URL may not.
   const savedPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()

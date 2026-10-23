@@ -23,7 +23,7 @@ import {
   type CarrierMode,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
-import { servingFor, type AssetRfqToken } from '../ops/assetRfqMarkets.js'
+import { servingFor, type AssetRfqToken, type ServingFields } from '../ops/assetRfqMarkets.js'
 import type { BalanceCheckpoint } from '../ops/balanceCheckpoints.js'
 
 const SCHEMA = `
@@ -439,6 +439,37 @@ export class AdminStore {
   async setOverrideWithAudit(key: string, value: string | null, entry: AuditEntry): Promise<void> {
     await this.driver.transaction(async () => {
       await this.setOverride(key, value)
+      await this.recordAction(entry)
+    })
+  }
+
+  /** The console's own state put back to what the config implies, in one transaction with its audit row. */
+  async revertToConfig(
+    serving: readonly { marketKey: string; fields: ServingFields }[],
+    overrideKeys: readonly string[],
+    entry: AuditEntry,
+  ): Promise<void> {
+    await this.driver.transaction(async () => {
+      // Symbols first, all of them: a symbol moving between rows would otherwise meet itself in the unique index.
+      for (const { marketKey } of serving) {
+        await this.driver.run('UPDATE admin_market SET symbol = NULL WHERE market_key = ?', [marketKey])
+      }
+      for (const { marketKey, fields } of serving) {
+        await this.driver.run(
+          'UPDATE admin_market SET symbol = ?, serves_offer = ?, serves_rfq = ?, rfq_sell_base = ?, ' +
+            'rfq_buy_base = ?, updated_at = ? WHERE market_key = ?',
+          [
+            fields.symbol,
+            fields.servesOffer ? 1 : 0,
+            fields.servesRfq ? 1 : 0,
+            fields.rfqSellBase ? 1 : 0,
+            fields.rfqBuyBase ? 1 : 0,
+            this.now(),
+            marketKey,
+          ],
+        )
+      }
+      for (const key of overrideKeys) await this.setOverride(key, null)
       await this.recordAction(entry)
     })
   }
