@@ -24,7 +24,7 @@ import { RebalanceService } from './rebalance.js'
 import { RebalanceStore } from './rebalanceStore.js'
 import { createArkadeRebalanceSource } from './rebalanceRoutes.js'
 import { createLndRebalanceBackend } from '@arkade-os/solver-rails-lnd/rebalance.js'
-import { arkadeFundingOwed } from './pool.js'
+import { arkadeFundableSats, arkadeFundingOwed } from './pool.js'
 import { RestEmulatorProvider } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { Address, OutScript } from '@scure/btc-signer'
@@ -669,11 +669,10 @@ export const createServices = async (
     ) {
       return undefined
     }
-    const balance = await arkade.wallet.getBalance()
     return {
       poolId: 'arkade',
       requiredSats: request.giveSats,
-      available: { sats: balance.available, ageMs: 0 },
+      available: { sats: await arkadeFundableSats(arkade), ageMs: 0 },
       owedSats: async () => (rebalancePolicy?.reserveSats ?? 0) + (await arkadeFundingOwed(services.readers)),
     }
   })
