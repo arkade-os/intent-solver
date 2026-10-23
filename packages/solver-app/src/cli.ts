@@ -49,7 +49,8 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { Transaction, SigHash, p2tr } from '@scure/btc-signer'
-import { loadConfig, sentryOptionsFromKnobs, swapDbPath, type Config } from './config.js'
+import { sentryOptionsFromKnobs, swapDbPath, type Config, type Knobs } from './config.js'
+import { loadConfig, loadKnobsForInspection } from './config/load.js'
 import { createErrorReporter, type ErrorReporter } from './ops/sentry.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
@@ -863,7 +864,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
   async status([id]) {
     if (!id) throw new GiveUp('usage: status <id>')
-    const store = await SwapStore.open(swapDbPath(process.env))
+    const store = await SwapStore.open(swapDbPath(loadKnobsForInspection()))
     try {
       log(json(printable(await store.get(id))))
       log('history:', json(await store.history(id)))
@@ -896,7 +897,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    * when the solver first SAW the lockup, not when the client sent it.
    */
   async timeline([ref]) {
-    const store = await SwapStore.open(swapDbPath(process.env))
+    const store = await SwapStore.open(swapDbPath(loadKnobsForInspection()))
     try {
       const row = ref
         ? ((await store.findByLockupTxid(ref)) ??
@@ -973,7 +974,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
   },
 
   async list() {
-    const store = await SwapStore.open(swapDbPath(process.env))
+    const store = await SwapStore.open(swapDbPath(loadKnobsForInspection()))
     try {
       for (const row of await store.findRecoverable()) log(json(printable(row)))
       log('(non-terminal swaps only; use status <id> for any specific swap)')
@@ -2062,9 +2063,17 @@ const panic = async (context: string, error: unknown): Promise<void> => {
 }
 
 const main = async (): Promise<void> => {
-  // Before the command resolves: a panic while reading the environment is one
-  // worth reporting, and `loadConfig` has not run yet.
-  reporter = createErrorReporter(sentryOptionsFromKnobs(process.env))
+  // Before the command resolves: a panic while reading the config is one worth
+  // reporting, and `loadConfig` has not run yet. No document yet means no
+  // reporter rather than no command: the command's own load says what is wrong,
+  // and `config-from-env` runs before any document exists.
+  let earlyKnobs: Knobs = {}
+  try {
+    earlyKnobs = loadKnobsForInspection()
+  } catch {
+    earlyKnobs = {}
+  }
+  reporter = createErrorReporter(sentryOptionsFromKnobs(earlyKnobs))
   if (reporter) {
     process.on('uncaughtException', (error) => void panic('uncaught exception', error))
     process.on('unhandledRejection', (reason) => void panic('unhandled rejection', reason))

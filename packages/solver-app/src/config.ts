@@ -1,9 +1,10 @@
 /**
- * Configuration, read once from the environment.
+ * Configuration, read once from a knobs map: the config document flattened to
+ * setting ids by `config/knobs.ts`, and loaded by `config/load.ts`.
  *
- * Secrets are only ever read from the environment. They are never written to the
- * repository, never logged, and never included in an error message — a mnemonic
- * that reaches a log is a mnemonic that has to be rotated.
+ * Secrets are never written to the repository, never logged, and never
+ * included in an error message — a mnemonic that reaches a log is a mnemonic
+ * that has to be rotated.
  */
 
 import { readFileSync } from 'node:fs'
@@ -468,6 +469,10 @@ export interface Config {
   latencyDiagnostics: boolean
   /** Null when `EVM_RPC_URL` is unset: no chain, so no EVM corridor can run. */
   evmChain: EvmChainConfig | null
+  /** Setting id to its path in the config document; empty when no document was read. */
+  configPaths: ReadonlyMap<string, string>
+  /** A registered rail's own block of the document, for that rail to validate. */
+  lightningRailBlock: unknown | null
   /**
    * Whether this solver advertises itself on Nostr (kind 38859).
    *
@@ -1092,6 +1097,8 @@ export const configFromKnobs = (env: Knobs): Config => {
       .filter(Boolean),
     latencyDiagnostics: env.SOLVER_LATENCY_DIAGNOSTICS === '1',
     evmChain: loadEvmChainConfig(env),
+    configPaths: new Map(),
+    lightningRailBlock: null,
     /** `off` (default) | `manual` | `auto`. See docs/rfq-protocol.md § 3. */
     nostrAdPublish: ((): AdPublishMode => {
       const raw = (env.NOSTR_AD_PUBLISH ?? 'off').trim().toLowerCase()
@@ -1146,6 +1153,3 @@ export const configFromKnobs = (env: Knobs): Config => {
     },
   }
 }
-
-/** Until the JSON loader lands, the environment is the knobs map. */
-export const loadConfig = (): Config => configFromKnobs(process.env)

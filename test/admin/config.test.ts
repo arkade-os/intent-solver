@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { loadConfig } from '@arkade-os/solver-app/config.js'
+import { configFromKnobs } from '@arkade-os/solver-app/config.js'
 
 const CONFIG_KEYS = ['ADMIN_PORT', 'ADMIN_HOST', 'LN_BACKEND', 'LN_MNEMONIC', 'PORT', 'HOST']
 
@@ -48,45 +48,45 @@ afterEach(() => {
 
 describe('the admin console port', () => {
   it('is off when ADMIN_PORT is unset — no new socket for an existing deployment', () => {
-    expect(loadConfig().adminPort).toBeNull()
+    expect(configFromKnobs(process.env).adminPort).toBeNull()
   })
 
   it('treats a set-but-empty value as unset, like every other knob here', () => {
     process.env.ADMIN_PORT = '   '
-    expect(loadConfig().adminPort).toBeNull()
+    expect(configFromKnobs(process.env).adminPort).toBeNull()
   })
 
   it('reads a port when one is given', () => {
     process.env.ADMIN_PORT = '8788'
-    expect(loadConfig().adminPort).toBe(8788)
+    expect(configFromKnobs(process.env).adminPort).toBe(8788)
   })
 
   it('refuses a port outside the legal range', () => {
     process.env.ADMIN_PORT = '70000'
-    expect(() => loadConfig()).toThrow(/ADMIN_PORT/)
+    expect(() => configFromKnobs(process.env)).toThrow(/ADMIN_PORT/)
   })
 
   it('refuses a non-numeric port rather than silently disabling the console', () => {
     process.env.ADMIN_PORT = 'yes'
-    expect(() => loadConfig()).toThrow(/ADMIN_PORT/)
+    expect(() => configFromKnobs(process.env)).toThrow(/ADMIN_PORT/)
   })
 })
 
 describe('the admin console binding', () => {
   it('defaults to loopback, matching HOST', () => {
     process.env.ADMIN_PORT = '8788'
-    expect(loadConfig().adminHost).toBe('127.0.0.1')
+    expect(configFromKnobs(process.env).adminHost).toBe('127.0.0.1')
   })
 
   it('ALLOWS a non-loopback bind — the reverse proxy is the access control', () => {
     process.env.ADMIN_PORT = '8788'
     process.env.ADMIN_HOST = '0.0.0.0'
-    expect(loadConfig().adminHost).toBe('0.0.0.0')
+    expect(configFromKnobs(process.env).adminHost).toBe('0.0.0.0')
   })
 
   it('does not disturb the RFQ port and host', () => {
     process.env.ADMIN_PORT = '8788'
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     expect(config.port).toBe(8787)
     expect(config.host).toBe('127.0.0.1')
   })

@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 import * as sdk from '@arkade-os/solver-app/index.js'
 import { lightningRailFor, lightningRailNames, registerLightningRail } from '@arkade-os/solver-app/ops/rails.js'
 import type { LightningRail, LightningRailModule } from '@arkade-os/solver-app/index.js'
-import { loadConfig } from '@arkade-os/solver-app/config.js'
+import { configFromKnobs } from '@arkade-os/solver-app/config.js'
 import { valueImports } from '../support/importScan.js'
 
 const servicesSource = readFileSync(
@@ -96,7 +96,7 @@ describe('a consumer rail joins the shipped daemon', () => {
     // The whole seam in one assertion: the operator names the rail in the
     // environment, and `loadConfig` — which every command already calls —
     // accepts it because it asks the registry what exists.
-    expect(loadConfig().lnBackend).toBe(RAIL)
+    expect(configFromKnobs(process.env).lnBackend).toBe(RAIL)
     expect(lightningRailNames()).toContain(RAIL)
   })
 
@@ -142,7 +142,7 @@ describe('a consumer rail joins the shipped daemon', () => {
   it('costs `loadConfig` no runtime dependency, which is what lets config read it', () => {
     // `config.ts` value-imports the registry, and `db/driver.ts` statically
     // imports the `better-sqlite3` NATIVE binding. A value import added here
-    // would be one hop from being loaded by every caller of `loadConfig()` —
+    // would be one hop from being loaded by every caller of `configFromKnobs(process.env)` —
     // including tests that touch no database at all. The same property
     // `test/corridors/registry.test.ts` protects for the descriptor modules,
     // and the reason this module holds only `import type`.
@@ -152,7 +152,7 @@ describe('a consumer rail joins the shipped daemon', () => {
   it('can mint the payee invoice the `invoice` command asks for', async () => {
     // Optional on the port, because opening a second wallet from a second seed
     // is a vendor capability rather than something the CLI can synthesise.
-    expect(await lightningRailFor(RAIL)?.mintPayeeInvoice?.(loadConfig(), 1000)).toBe('lnbcrt1injected')
+    expect(await lightningRailFor(RAIL)?.mintPayeeInvoice?.(configFromKnobs(process.env), 1000)).toBe('lnbcrt1injected')
   })
 })
 

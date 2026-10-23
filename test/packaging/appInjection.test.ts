@@ -141,6 +141,8 @@ const solverConfig = (): Config => {
     cardRelays: [],
     latencyDiagnostics: false,
     evmChain: null,
+    configPaths: new Map(),
+    lightningRailBlock: null,
     nostrAdPublish: 'off',
   }
 }

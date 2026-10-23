@@ -28,7 +28,7 @@
 // would spend them too. That is fine here — this runs against a test wallet
 // between e2e runs, never against one mid-swap — but it is why this lives in
 // `scripts/` and not in the service.
-import { loadConfig } from '../packages/solver-app/dist/config.js'
+import { loadConfig } from '../packages/solver-app/dist/config/load.js'
 import { createArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { settleTimeoutMessage, settleTimeoutMs, settleWithin, unsettledSats } from './settle-plan.mjs'
 

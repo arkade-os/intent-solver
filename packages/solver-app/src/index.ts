@@ -64,7 +64,8 @@ export {
 } from '@arkade-os/solver-core/core/timelocks.js'
 export { resolveLimits, maxRoutingFeeSats, type Limits } from '@arkade-os/solver-core/core/limits.js'
 export { NETWORKS, type SwapNetwork, type NetworkProfile } from '@arkade-os/solver-core/core/networks.js'
-export { loadConfig, type Config } from './config.js'
+export { type Config } from './config.js'
+export { loadConfig } from './config/load.js'
 export { buildApp, type HttpDeps } from '@arkade-os/solver-transport/http/server.js'
 export {
   RFQ_PAIR_SEND,

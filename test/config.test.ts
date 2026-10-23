@@ -38,7 +38,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { basename, join } from 'node:path'
-import { loadConfig } from '@arkade-os/solver-app/config.js'
+import { configFromKnobs } from '@arkade-os/solver-app/config.js'
 import { adminDbPath } from '@arkade-os/solver-app/admin/db.js'
 import { registerLightningRail, type LightningRailModule } from '@arkade-os/solver-app/ops/rails.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
@@ -108,7 +108,7 @@ const CONFIG_KEYS = [
   'POOL_AUTO_MINT',
   'CONTRACT_RETENTION_DAYS',
   // Listed for the same reason the rest are: a leaked bad value makes every
-  // later `loadConfig()` in the file throw.
+  // later `configFromKnobs(process.env)` in the file throw.
   'ONCHAIN_RECEIVE_MAX_BAND_SATS',
   'ONCHAIN_RECEIVE_BAND_BELOW_SHARE',
   'LN_SEND_HINT_SCID_DENYLIST',
@@ -164,49 +164,49 @@ afterEach(() => {
 describe('loadConfig — LN_BACKEND', () => {
   it('accepts fake', () => {
     process.env.LN_BACKEND = 'fake'
-    expect(loadConfig().lnBackend).toBe('fake')
+    expect(configFromKnobs(process.env).lnBackend).toBe('fake')
   })
 
   it('tolerates surrounding whitespace rather than reading it as a typo', () => {
     // A trailing space in an env file is invisible in every editor and, before
     // the exact-match chain was replaced, silently meant the default backend.
     process.env.LN_BACKEND = ' fake '
-    expect(loadConfig().lnBackend).toBe('fake')
+    expect(configFromKnobs(process.env).lnBackend).toBe('fake')
   })
 
   it('refuses a value that differs only in case', () => {
     process.env.LN_BACKEND = 'LND'
-    expect(() => loadConfig()).toThrow(/LN_BACKEND/)
+    expect(() => configFromKnobs(process.env)).toThrow(/LN_BACKEND/)
   })
 
   it('refuses a typo instead of quietly selecting a working backend', () => {
     process.env.LN_BACKEND = 'Ind'
-    expect(() => loadConfig()).toThrow(/LN_BACKEND/)
+    expect(() => configFromKnobs(process.env)).toThrow(/LN_BACKEND/)
   })
 
   it('names the values it will accept, so the error is self-fixing', () => {
     process.env.LN_BACKEND = 'nonsense'
     // The built-ins AND the registry: an operator who mistyped a consumer
     // rail's name is told what this build actually has, not just what it ships.
-    expect(() => loadConfig()).toThrow(/lnd.*fake.*test-rail/)
+    expect(() => configFromKnobs(process.env)).toThrow(/lnd.*fake.*test-rail/)
   })
 
   it('refuses a retired name rather than keeping it alive by accident', () => {
     // A deprecation that goes on working through a fall-through is the least
     // discoverable way for a deprecation to not happen.
     process.env.LN_BACKEND = 'real'
-    expect(() => loadConfig()).toThrow(/LN_BACKEND/)
+    expect(() => configFromKnobs(process.env)).toThrow(/LN_BACKEND/)
   })
 
   it('refuses LN_BACKEND=fake on mainnet — it can claim lockups without paying', () => {
     process.env.SWAP_NETWORK = 'bitcoin'
     process.env.LN_BACKEND = 'fake'
-    expect(() => loadConfig()).toThrow(/LN_BACKEND=fake/)
+    expect(() => configFromKnobs(process.env)).toThrow(/LN_BACKEND=fake/)
   })
 
   it('carries the network the Arkade server must report from the profile', () => {
     process.env.SWAP_NETWORK = 'bitcoin'
-    expect(loadConfig().arkade.expectedArkdNetwork).toBe('bitcoin')
+    expect(configFromKnobs(process.env).arkade.expectedArkdNetwork).toBe('bitcoin')
   })
 })
 
@@ -216,48 +216,48 @@ describe('loadConfig — LN_BACKEND', () => {
  */
 describe('loadConfig — COVCLAIMD_URL', () => {
   it('is undefined when unset — the client claims its own lockup', () => {
-    expect(loadConfig().covclaimdUrl).toBeUndefined()
+    expect(configFromKnobs(process.env).covclaimdUrl).toBeUndefined()
   })
 
   it('accepts https on mainnet', () => {
     process.env.SWAP_NETWORK = 'bitcoin'
     process.env.COVCLAIMD_URL = 'https://covclaimd.example.com'
-    expect(loadConfig().covclaimdUrl).toBe('https://covclaimd.example.com')
+    expect(configFromKnobs(process.env).covclaimdUrl).toBe('https://covclaimd.example.com')
   })
 
   it('accepts http to loopback on mainnet — nothing reaches a wire', () => {
     process.env.SWAP_NETWORK = 'bitcoin'
     for (const url of ['http://localhost:7271', 'http://127.0.0.1:7271', 'http://[::1]:7271']) {
       process.env.COVCLAIMD_URL = url
-      expect(loadConfig().covclaimdUrl).toBe(url)
+      expect(configFromKnobs(process.env).covclaimdUrl).toBe(url)
     }
   })
 
   it('refuses http to a remote host on mainnet — a suppressed reveal strands the lockup', () => {
     process.env.SWAP_NETWORK = 'bitcoin'
     process.env.COVCLAIMD_URL = 'http://covclaimd.example.com'
-    expect(() => loadConfig()).toThrow(/COVCLAIMD_URL must use https on mainnet/)
+    expect(() => configFromKnobs(process.env)).toThrow(/COVCLAIMD_URL must use https on mainnet/)
   })
 
   it('accepts http to a container host off mainnet — the regtest stack has no TLS', () => {
     process.env.COVCLAIMD_URL = 'http://covclaimd:7071'
-    expect(loadConfig().covclaimdUrl).toBe('http://covclaimd:7071')
+    expect(configFromKnobs(process.env).covclaimdUrl).toBe('http://covclaimd:7071')
   })
 
   it('refuses a value that is not a URL rather than failing at the first reveal', () => {
     process.env.COVCLAIMD_URL = 'not-a-url'
-    expect(() => loadConfig()).toThrow(/COVCLAIMD_URL must be an absolute URL/)
+    expect(() => configFromKnobs(process.env)).toThrow(/COVCLAIMD_URL must be an absolute URL/)
   })
 
   it('refuses a host that merely starts with 127. — it is a name, not the loopback range', () => {
     process.env.SWAP_NETWORK = 'bitcoin'
     process.env.COVCLAIMD_URL = 'http://127.evil.com'
-    expect(() => loadConfig()).toThrow(/COVCLAIMD_URL must use https on mainnet/)
+    expect(() => configFromKnobs(process.env)).toThrow(/COVCLAIMD_URL must use https on mainnet/)
   })
 
   it('refuses a scheme that is neither http nor https, on any network', () => {
     process.env.COVCLAIMD_URL = 'ftp://covclaimd.example.com'
-    expect(() => loadConfig()).toThrow(/COVCLAIMD_URL must be http or https/)
+    expect(() => configFromKnobs(process.env)).toThrow(/COVCLAIMD_URL must be http or https/)
   })
 })
 
@@ -276,7 +276,7 @@ describe('loadConfig — COVCLAIMD_URL', () => {
 describe('loadConfig — a registered rail', () => {
   it('is accepted by name, exactly like a built-in', () => {
     process.env.LN_BACKEND = TEST_RAIL
-    expect(loadConfig().lnBackend).toBe(TEST_RAIL)
+    expect(configFromKnobs(process.env).lnBackend).toBe(TEST_RAIL)
   })
 
   it('cannot take a built-in name', () => {
@@ -312,12 +312,12 @@ describe('loadConfig — LN_BACKEND is required unless no BTC corridor is served
 
   it('refuses an unset value while any BTC corridor is enabled', () => {
     delete process.env.LN_BACKEND
-    expect(() => loadConfig()).toThrow(/LN_BACKEND/)
+    expect(() => configFromKnobs(process.env)).toThrow(/LN_BACKEND/)
   })
 
   it('treats set-but-empty as unset, like every other knob here', () => {
     process.env.LN_BACKEND = '   '
-    expect(() => loadConfig()).toThrow(/LN_BACKEND/)
+    expect(() => configFromKnobs(process.env)).toThrow(/LN_BACKEND/)
   })
 
   it('still refuses it when only the ONCHAIN corridors are left on', () => {
@@ -328,19 +328,19 @@ describe('loadConfig — LN_BACKEND is required unless no BTC corridor is served
     delete process.env.LN_BACKEND
     process.env.LN_SEND_ENABLED = 'false'
     process.env.LN_RECEIVE_ENABLED = 'false'
-    expect(() => loadConfig()).toThrow(/LN_BACKEND/)
+    expect(() => configFromKnobs(process.env)).toThrow(/LN_BACKEND/)
   })
 
   it('names the accepted set and the exemption, so the error is self-fixing', () => {
     delete process.env.LN_BACKEND
-    expect(() => loadConfig()).toThrow(/lnd, fake/)
-    expect(() => loadConfig()).toThrow(/_ENABLED=false/)
+    expect(() => configFromKnobs(process.env)).toThrow(/lnd, fake/)
+    expect(() => configFromKnobs(process.env)).toThrow(/_ENABLED=false/)
   })
 
   it('allows it to be unset once every BTC corridor is disabled', () => {
     delete process.env.LN_BACKEND
     disableAll()
-    expect(loadConfig().lnBackend).toBeNull()
+    expect(configFromKnobs(process.env).lnBackend).toBeNull()
   })
 
   it('still honours an explicit rail on such a deployment', () => {
@@ -349,7 +349,7 @@ describe('loadConfig — LN_BACKEND is required unless no BTC corridor is served
     // not need a second edit.
     disableAll()
     process.env.LN_BACKEND = 'fake'
-    expect(loadConfig().lnBackend).toBe('fake')
+    expect(configFromKnobs(process.env).lnBackend).toBe('fake')
   })
 })
 
@@ -362,12 +362,12 @@ describe('loadConfig — checkpoint exit delay override', () => {
     // Exact, not lower: the SDK's comparison is a strict `<`, so this accepts
     // that Service and refuses one that later shortens its delay further.
     process.env.SWAP_NETWORK = 'mutinynet'
-    expect(loadConfig().arkade.minCheckpointExitDelaySeconds).toBe(4096)
+    expect(configFromKnobs(process.env).arkade.minCheckpointExitDelaySeconds).toBe(4096)
   })
 
   it('pins signet to its SDK floor so a server claiming mutinynet cannot relax it', () => {
     process.env.SWAP_NETWORK = 'signet'
-    expect(loadConfig().arkade.minCheckpointExitDelaySeconds).toBe(86016)
+    expect(configFromKnobs(process.env).arkade.minCheckpointExitDelaySeconds).toBe(86016)
   })
 
   it('pins mainnet to the SDK 24h floor', () => {
@@ -375,12 +375,12 @@ describe('loadConfig — checkpoint exit delay override', () => {
     // the network profile: there is no input to loadConfig that reaches it, so
     // a testnet env file copied toward mainnet carries nothing that can.
     process.env.SWAP_NETWORK = 'bitcoin'
-    expect(loadConfig().arkade.minCheckpointExitDelaySeconds).toBe(86400)
+    expect(configFromKnobs(process.env).arkade.minCheckpointExitDelaySeconds).toBe(86400)
   })
 
   it('leaves regtest alone, where the SDK floor is already 1200', () => {
     process.env.SWAP_NETWORK = 'regtest'
-    expect(loadConfig().arkade.minCheckpointExitDelaySeconds).toBeUndefined()
+    expect(configFromKnobs(process.env).arkade.minCheckpointExitDelaySeconds).toBeUndefined()
   })
 })
 
@@ -399,12 +399,12 @@ describe('loadConfig — checkpoint exit delay override', () => {
 describe('loadConfig — ARK_ESPLORA_URL', () => {
   it('passes the operator-supplied explorer through to the wallet config', () => {
     process.env.ARK_ESPLORA_URL = 'http://mempool_web/api'
-    expect(loadConfig().arkade.esploraUrl).toBe('http://mempool_web/api')
+    expect(configFromKnobs(process.env).arkade.esploraUrl).toBe('http://mempool_web/api')
   })
 
   it('leaves it undefined when unset, keeping the SDK per-network default', () => {
     delete process.env.ARK_ESPLORA_URL
-    expect(loadConfig().arkade.esploraUrl).toBeUndefined()
+    expect(configFromKnobs(process.env).arkade.esploraUrl).toBeUndefined()
   })
 
   it('is independent of the Lightning side explorer', () => {
@@ -414,7 +414,7 @@ describe('loadConfig — ARK_ESPLORA_URL', () => {
     // with it.
     process.env.LND_ESPLORA_URL = 'http://lightning-side/api'
     delete process.env.ARK_ESPLORA_URL
-    expect(loadConfig().arkade.esploraUrl).toBeUndefined()
+    expect(configFromKnobs(process.env).arkade.esploraUrl).toBeUndefined()
   })
 })
 
@@ -429,18 +429,18 @@ describe('loadConfig — ARK_ESPLORA_URL', () => {
  */
 describe('loadConfig — NOSTR_AD_PUBLISH', () => {
   it('defaults to off, so a deployment that sets nothing touches no relay', () => {
-    expect(loadConfig().nostrAdPublish).toBe('off')
+    expect(configFromKnobs(process.env).nostrAdPublish).toBe('off')
   })
 
   it('treats set-but-empty as unset', () => {
     process.env.NOSTR_AD_PUBLISH = '   '
-    expect(loadConfig().nostrAdPublish).toBe('off')
+    expect(configFromKnobs(process.env).nostrAdPublish).toBe('off')
   })
 
   it('accepts each mode', () => {
     for (const mode of ['off', 'manual', 'auto'] as const) {
       process.env.NOSTR_AD_PUBLISH = mode
-      expect(loadConfig().nostrAdPublish).toBe(mode)
+      expect(configFromKnobs(process.env).nostrAdPublish).toBe(mode)
     }
   })
 
@@ -449,17 +449,17 @@ describe('loadConfig — NOSTR_AD_PUBLISH', () => {
     // which vendor holds real money; this one only decides whether to
     // advertise, so normalising costs nothing a wrong answer would cost there.
     process.env.NOSTR_AD_PUBLISH = ' Auto '
-    expect(loadConfig().nostrAdPublish).toBe('auto')
+    expect(configFromKnobs(process.env).nostrAdPublish).toBe('auto')
   })
 
   it('refuses a typo instead of quietly meaning off', () => {
     process.env.NOSTR_AD_PUBLISH = 'ato'
-    expect(() => loadConfig()).toThrow(/NOSTR_AD_PUBLISH/)
+    expect(() => configFromKnobs(process.env)).toThrow(/NOSTR_AD_PUBLISH/)
   })
 
   it('names the values it will accept, so the error is self-fixing', () => {
     process.env.NOSTR_AD_PUBLISH = 'yes'
-    expect(() => loadConfig()).toThrow(/off.*manual.*auto/)
+    expect(() => configFromKnobs(process.env)).toThrow(/off.*manual.*auto/)
   })
 })
 
@@ -479,7 +479,7 @@ describe('loadConfig — NOSTR_AD_PUBLISH', () => {
  */
 describe('loadConfig — DB_DIR', () => {
   it('defaults to .data, where every database went before it existed', () => {
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     expect(config.swapDbPath).toBe(join('.data', 'swaps.sqlite'))
     expect(config.arkade.databasePath).toBe(join('.data', 'ark.sqlite'))
     expect(config.fakeLnStatePath).toBe(join('.data', 'fake-ln.json'))
@@ -487,7 +487,7 @@ describe('loadConfig — DB_DIR', () => {
 
   it('places every database file, so one variable answers the whole question', () => {
     process.env.DB_DIR = '/data'
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     expect(config.swapDbPath).toBe(join('/data', 'swaps.sqlite'))
     expect(config.arkade.databasePath).toBe(join('/data', 'ark.sqlite'))
     expect(config.fakeLnStatePath).toBe(join('/data', 'fake-ln.json'))
@@ -500,7 +500,7 @@ describe('loadConfig — DB_DIR', () => {
   it('keeps the filenames, so an existing volume is picked up rather than started fresh', () => {
     // The whole non-breaking claim in one assertion: only the directory is new.
     process.env.DB_DIR = '/data'
-    expect(basename(loadConfig().swapDbPath)).toBe('swaps.sqlite')
+    expect(basename(configFromKnobs(process.env).swapDbPath)).toBe('swaps.sqlite')
   })
 
   it('yields to a path that names one file, so no deployment moves under it', () => {
@@ -510,7 +510,7 @@ describe('loadConfig — DB_DIR', () => {
     process.env.DB_DIR = '/somewhere/else'
     process.env.SWAP_DB_PATH = '/data/swaps.sqlite'
     process.env.ARK_DB_PATH = '/data/ark.sqlite'
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     expect(config.swapDbPath).toBe('/data/swaps.sqlite')
     expect(config.arkade.databasePath).toBe('/data/ark.sqlite')
   })
@@ -518,7 +518,7 @@ describe('loadConfig — DB_DIR', () => {
   it('lets the two paths disagree with each other, as they always could', () => {
     process.env.DB_DIR = '/data'
     process.env.ARK_DB_PATH = '/wallets/ark.sqlite'
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     // Verbatim, not joined: an explicit path is passed through untouched.
     expect(config.arkade.databasePath).toBe('/wallets/ark.sqlite')
     expect(config.swapDbPath).toBe(join('/data', 'swaps.sqlite'))
@@ -530,19 +530,19 @@ describe('loadConfig — DB_DIR', () => {
     // row to a file it discarded on exit.
     process.env.DB_DIR = '   '
     process.env.SWAP_DB_PATH = ''
-    expect(loadConfig().swapDbPath).toBe(join('.data', 'swaps.sqlite'))
+    expect(configFromKnobs(process.env).swapDbPath).toBe(join('.data', 'swaps.sqlite'))
   })
 
   it('tolerates a trailing slash, which is how a directory is usually typed', () => {
     // The assertion is that '/data/' and '/data' land in the same place, which
     // is `join` normalising rather than the two strings being spelled alike.
     process.env.DB_DIR = '/data/'
-    expect(loadConfig().swapDbPath).toBe(join('/data', 'swaps.sqlite'))
+    expect(configFromKnobs(process.env).swapDbPath).toBe(join('/data', 'swaps.sqlite'))
   })
 
   it('accepts a relative directory, for a checkout that keeps state beside it', () => {
     process.env.DB_DIR = 'var/state'
-    expect(loadConfig().swapDbPath).toBe(join('var/state', 'swaps.sqlite'))
+    expect(configFromKnobs(process.env).swapDbPath).toBe(join('var/state', 'swaps.sqlite'))
   })
 })
 
@@ -566,7 +566,7 @@ describe('loadConfig — DB_DIR', () => {
  */
 describe('loadConfig — LOCKUP_TIMEOUT_SECONDS', () => {
   it('defaults to the 15-minute constant', () => {
-    expect(loadConfig().lockupTimeoutSeconds).toBe(900)
+    expect(configFromKnobs(process.env).lockupTimeoutSeconds).toBe(900)
   })
 
   it('accepts a window past the retired 3480s ceiling', () => {
@@ -574,12 +574,12 @@ describe('loadConfig — LOCKUP_TIMEOUT_SECONDS', () => {
     // right: a longer window is clipped to the invoice at quote time and the
     // CLTV ceiling is clipped to the deadline at payment time.
     process.env.LOCKUP_TIMEOUT_SECONDS = '3600'
-    expect(loadConfig().lockupTimeoutSeconds).toBe(3600)
+    expect(configFromKnobs(process.env).lockupTimeoutSeconds).toBe(3600)
   })
 
   it('accepts a window at exactly the safety margin', () => {
     process.env.LOCKUP_TIMEOUT_SECONDS = String(REFUND_SAFETY_MARGIN)
-    expect(loadConfig().lockupTimeoutSeconds).toBe(REFUND_SAFETY_MARGIN)
+    expect(configFromKnobs(process.env).lockupTimeoutSeconds).toBe(REFUND_SAFETY_MARGIN)
   })
 
   it('refuses a window past the safety margin, which would spend the whole claim budget', () => {
@@ -588,19 +588,19 @@ describe('loadConfig — LOCKUP_TIMEOUT_SECONDS', () => {
     // below anything routable and the swap would refuse itself. Refusing at boot
     // says so once instead of once per swap.
     process.env.LOCKUP_TIMEOUT_SECONDS = String(REFUND_SAFETY_MARGIN + 1)
-    expect(() => loadConfig()).toThrow(/LOCKUP_TIMEOUT_SECONDS/)
+    expect(() => configFromKnobs(process.env)).toThrow(/LOCKUP_TIMEOUT_SECONDS/)
   })
 
   it('still refuses a window below the 60s floor', () => {
     // The lower bound is untouched and unrelated: a window shorter than a minute
     // is a quote nobody can fund, not a policy choice.
     process.env.LOCKUP_TIMEOUT_SECONDS = '59'
-    expect(() => loadConfig()).toThrow(/LOCKUP_TIMEOUT_SECONDS/)
+    expect(() => configFromKnobs(process.env)).toThrow(/LOCKUP_TIMEOUT_SECONDS/)
   })
 
   it('names both bounds in the error, so the error is self-fixing', () => {
     process.env.LOCKUP_TIMEOUT_SECONDS = 'soon'
-    expect(() => loadConfig()).toThrow(new RegExp(`an integer between 60 and ${REFUND_SAFETY_MARGIN}`))
+    expect(() => configFromKnobs(process.env)).toThrow(new RegExp(`an integer between 60 and ${REFUND_SAFETY_MARGIN}`))
   })
 })
 
@@ -612,12 +612,12 @@ describe('loadConfig — LOCKUP_TIMEOUT_SECONDS', () => {
  */
 describe('CONTRACT_RETENTION_DAYS', () => {
   it('defaults to 30 days', () => {
-    expect(loadConfig().contractRetentionMs).toBe(30 * 86_400_000)
+    expect(configFromKnobs(process.env).contractRetentionMs).toBe(30 * 86_400_000)
   })
 
   it.each(['0', '-1', 'abc', 'Infinity'])('rejects %s', (raw) => {
     process.env.CONTRACT_RETENTION_DAYS = raw
-    expect(() => loadConfig()).toThrow(/CONTRACT_RETENTION_DAYS must be a positive finite number/)
+    expect(() => configFromKnobs(process.env)).toThrow(/CONTRACT_RETENTION_DAYS must be a positive finite number/)
   })
 
   it('accepts a fractional day, which the validator permits', () => {
@@ -625,53 +625,55 @@ describe('CONTRACT_RETENTION_DAYS', () => {
     // `MAX_EXPOSED_SATS` exactly, so 0.5 -> 12h passes. If a fractional day is
     // ever ruled out, this test is where that decision gets recorded.
     process.env.CONTRACT_RETENTION_DAYS = '0.5'
-    expect(loadConfig().contractRetentionMs).toBe(0.5 * 86_400_000)
+    expect(configFromKnobs(process.env).contractRetentionMs).toBe(0.5 * 86_400_000)
   })
 })
 
 describe('ONCHAIN_RECEIVE_BAND_BELOW_SHARE', () => {
   it('defaults to the whole retained width below the quote', () => {
-    expect(loadConfig().onchainReceiveBandBelowShare).toBe(1)
+    expect(configFromKnobs(process.env).onchainReceiveBandBelowShare).toBe(1)
   })
 
   it.each(['0', '0.5', '1'])('accepts %s', (raw) => {
     process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE = raw
-    expect(loadConfig().onchainReceiveBandBelowShare).toBe(Number(raw))
+    expect(configFromKnobs(process.env).onchainReceiveBandBelowShare).toBe(Number(raw))
   })
 
   it.each(['-0.1', '1.1', 'abc', 'Infinity'])('rejects %s rather than clamping silently', (raw) => {
     process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE = raw
-    expect(() => loadConfig()).toThrow(/ONCHAIN_RECEIVE_BAND_BELOW_SHARE must be a number between 0 and 1/)
+    expect(() => configFromKnobs(process.env)).toThrow(
+      /ONCHAIN_RECEIVE_BAND_BELOW_SHARE must be a number between 0 and 1/,
+    )
   })
 })
 
 describe('ONCHAIN_RECEIVE_MAX_BAND_SATS', () => {
   it('defaults to the range that corridor already serves, so nothing new is offered or withheld', () => {
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     const limits = config.corridorLimits['onchain:BTC->arkade:BTC']
     expect(config.onchainReceiveMaxBandSats).toBe(limits.maxSats - limits.minSats)
   })
 
   it('narrows how far a funded amount may drift from its quote', () => {
     process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '5000'
-    expect(loadConfig().onchainReceiveMaxBandSats).toBe(5_000)
+    expect(configFromKnobs(process.env).onchainReceiveMaxBandSats).toBe(5_000)
   })
 
   it('accepts zero, which is exactly the strict equality shipped today', () => {
     process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '0'
-    expect(loadConfig().onchainReceiveMaxBandSats).toBe(0)
+    expect(configFromKnobs(process.env).onchainReceiveMaxBandSats).toBe(0)
   })
 
   it('may only ever narrow, never widen past the corridor range', () => {
     process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '999999999999'
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     const limits = config.corridorLimits['onchain:BTC->arkade:BTC']
     expect(config.onchainReceiveMaxBandSats).toBe(limits.maxSats - limits.minSats)
   })
 
   it.each(['-1', 'abc', '1.5', 'Infinity'])('rejects %s', (raw) => {
     process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = raw
-    expect(() => loadConfig()).toThrow(/ONCHAIN_RECEIVE_MAX_BAND_SATS must be a non-negative integer/)
+    expect(() => configFromKnobs(process.env)).toThrow(/ONCHAIN_RECEIVE_MAX_BAND_SATS must be a non-negative integer/)
   })
 })
 
@@ -685,7 +687,7 @@ describe('ONCHAIN_RECEIVE_MAX_BAND_SATS', () => {
  */
 describe('POOL_AUTO_MINT', () => {
   it('is off when unset, so nothing spends by omission', () => {
-    expect(loadConfig().poolAutoMint).toBe(false)
+    expect(configFromKnobs(process.env).poolAutoMint).toBe(false)
   })
 
   it.each([
@@ -693,23 +695,23 @@ describe('POOL_AUTO_MINT', () => {
     ['false', false],
   ])('reads %s literally', (raw, expected) => {
     process.env.POOL_AUTO_MINT = raw
-    expect(loadConfig().poolAutoMint).toBe(expected)
+    expect(configFromKnobs(process.env).poolAutoMint).toBe(expected)
   })
 
   it('tolerates surrounding whitespace, which a .env file adds silently', () => {
     process.env.POOL_AUTO_MINT = '  true  '
-    expect(loadConfig().poolAutoMint).toBe(true)
+    expect(configFromKnobs(process.env).poolAutoMint).toBe(true)
   })
 
   it.each(['1', '0', 'yes', 'no', 'TRUE', 'False', 'on', 'enabled'])('refuses %s rather than guessing', (raw) => {
     process.env.POOL_AUTO_MINT = raw
-    expect(() => loadConfig()).toThrow(/POOL_AUTO_MINT must be 'true' or 'false'/)
+    expect(() => configFromKnobs(process.env)).toThrow(/POOL_AUTO_MINT must be 'true' or 'false'/)
   })
 
   it('treats a blank value as unset rather than as an error or a yes', () => {
     // A key present with no value is what an unfilled .env template looks like.
     process.env.POOL_AUTO_MINT = '   '
-    expect(loadConfig().poolAutoMint).toBe(false)
+    expect(configFromKnobs(process.env).poolAutoMint).toBe(false)
   })
 })
 
@@ -720,14 +722,14 @@ describe('loadConfig — EVM corridors', () => {
     // The property that matters for every existing deployment: setting nothing
     // means no EVM store is opened and no EVM corridor is constructed, so
     // behaviour is what it was before this field existed.
-    expect(loadConfig().evmCorridors).toEqual([])
+    expect(configFromKnobs(process.env).evmCorridors).toEqual([])
   })
 
   it('serves both directions for a named token', () => {
     process.env.EVM_TOKENS = `USDC:${USDC}:6`
     process.env.EVM_USDC_PRICE_FEED = 'http://pricefeed/btc-usdc'
     process.env.EVM_USDC_PRICE_PATH = '/btc/usdc'
-    const corridors = loadConfig().evmCorridors
+    const corridors = configFromKnobs(process.env).evmCorridors
     expect(corridors.map((c) => c.corridor)).toEqual([`arkade:BTC->ethereum:${USDC}`, `ethereum:${USDC}->arkade:BTC`])
     expect(corridors.every((c) => c.enabled)).toBe(true)
   })
@@ -739,7 +741,7 @@ describe('loadConfig — EVM corridors', () => {
     process.env.EVM_TOKENS = `USDC:${USDC}:6`
     process.env.EVM_USDC_PRICE_FEED = 'http://pricefeed/btc-usdc'
     process.env.EVM_USDC_PRICE_PATH = '/btc/usdc'
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     for (const corridor of config.evmCorridors) {
       expect(corridor.limits.maxSats).toBeLessThanOrEqual(config.limits.maxSats)
       expect(corridor.limits.minSats).toBeGreaterThanOrEqual(config.limits.minSats)
@@ -752,15 +754,15 @@ describe('loadConfig — EVM corridors', () => {
     process.env.EVM_TOKENS = `USDC:${USDC}:6`
     process.env.EVM_USDC_PRICE_FEED = 'http://pricefeed/btc-usdc'
     process.env.EVM_USDC_PRICE_PATH = '/btc/usdc'
-    process.env.EVM_SEND_USDC_MAX_SATS = String(Number(loadConfig().limits.maxSats) + 1)
-    expect(() => loadConfig()).toThrow(/may not exceed/)
+    process.env.EVM_SEND_USDC_MAX_SATS = String(Number(configFromKnobs(process.env).limits.maxSats) + 1)
+    expect(() => configFromKnobs(process.env)).toThrow(/may not exceed/)
   })
 
   it('refuses at startup a token with no price feed', () => {
     // A token that cannot be priced cannot be quoted, so the deployment must not
     // start and advertise the pair. Loud here, where an operator is watching.
     process.env.EVM_TOKENS = `USDC:${USDC}:6`
-    expect(() => loadConfig()).toThrow(/EVM_USDC_PRICE_FEED is not set/)
+    expect(() => configFromKnobs(process.env)).toThrow(/EVM_USDC_PRICE_FEED is not set/)
   })
 
   it('refuses at startup a feed whose pointer cannot be derived', () => {
@@ -768,12 +770,12 @@ describe('loadConfig — EVM corridors', () => {
     // the failure lands on a client request. Here the deployment does not start.
     process.env.EVM_TOKENS = `USDC:${USDC}:6`
     process.env.EVM_USDC_PRICE_FEED = 'http://pricefeed/btc-usdc'
-    expect(() => loadConfig()).toThrow(/EVM_USDC_PRICE_PATH is required/)
+    expect(() => configFromKnobs(process.env)).toThrow(/EVM_USDC_PRICE_PATH is required/)
   })
 
   it('refuses a malformed token list rather than serving nothing silently', () => {
     process.env.EVM_TOKENS = 'USDC'
-    expect(() => loadConfig()).toThrow(/SYMBOL:0xaddress:decimals/)
+    expect(() => configFromKnobs(process.env)).toThrow(/SYMBOL:0xaddress:decimals/)
   })
 
   it('switches one direction off without disturbing the other', () => {
@@ -781,7 +783,7 @@ describe('loadConfig — EVM corridors', () => {
     process.env.EVM_USDC_PRICE_FEED = 'http://pricefeed/btc-usdc'
     process.env.EVM_USDC_PRICE_PATH = '/btc/usdc'
     process.env.EVM_RECEIVE_USDC_ENABLED = 'false'
-    const corridors = loadConfig().evmCorridors
+    const corridors = configFromKnobs(process.env).evmCorridors
     expect(corridors.find((c) => c.direction === 'send')?.enabled).toBe(true)
     expect(corridors.find((c) => c.direction === 'receive')?.enabled).toBe(false)
   })
@@ -796,22 +798,22 @@ describe('loadConfig — EVM corridors', () => {
  */
 describe('ARK_UNILATERAL_EXIT_DELAY', () => {
   it('is absent when unset, so the server is believed', () => {
-    expect(loadConfig().arkade.unilateralExitDelayOverride).toBeUndefined()
+    expect(configFromKnobs(process.env).arkade.unilateralExitDelayOverride).toBeUndefined()
   })
 
   it('reads a whole number of seconds', () => {
     process.env.ARK_UNILATERAL_EXIT_DELAY = '259200'
-    expect(loadConfig().arkade.unilateralExitDelayOverride).toBe(259_200)
+    expect(configFromKnobs(process.env).arkade.unilateralExitDelayOverride).toBe(259_200)
   })
 
   it.each(['0', '-1', '1.5', 'three days', '3d', '', '  '])('refuses %s', (raw) => {
     process.env.ARK_UNILATERAL_EXIT_DELAY = raw
     // Blank reads as unset rather than as an error — an unfilled .env template.
     if (raw.trim() === '') {
-      expect(loadConfig().arkade.unilateralExitDelayOverride).toBeUndefined()
+      expect(configFromKnobs(process.env).arkade.unilateralExitDelayOverride).toBeUndefined()
       return
     }
-    expect(() => loadConfig()).toThrow(/ARK_UNILATERAL_EXIT_DELAY must be a positive whole number/)
+    expect(() => configFromKnobs(process.env)).toThrow(/ARK_UNILATERAL_EXIT_DELAY must be a positive whole number/)
   })
 
   it.each([
@@ -828,17 +830,17 @@ describe('ARK_UNILATERAL_EXIT_DELAY', () => {
     // `createArkadeContext` and says "server exit delay", sending an operator to
     // debug arkd over a value they set themselves.
     process.env.ARK_UNILATERAL_EXIT_DELAY = String(raw)
-    expect(() => loadConfig()).toThrow(message)
+    expect(() => configFromKnobs(process.env)).toThrow(message)
   })
 
   it.each([1, 20, 144, 503])('accepts %s as a block count, deferring the unit check to the server', (raw) => {
     process.env.ARK_UNILATERAL_EXIT_DELAY = String(raw)
-    expect(loadConfig().arkade.unilateralExitDelayOverride).toBe(raw)
+    expect(configFromKnobs(process.env).arkade.unilateralExitDelayOverride).toBe(raw)
   })
 
   it('accepts the BIP68 ceiling itself, since the bound is inclusive', () => {
     process.env.ARK_UNILATERAL_EXIT_DELAY = String(MAX_BIP68_SECONDS)
-    expect(loadConfig().arkade.unilateralExitDelayOverride).toBe(MAX_BIP68_SECONDS)
+    expect(configFromKnobs(process.env).arkade.unilateralExitDelayOverride).toBe(MAX_BIP68_SECONDS)
   })
 
   it('allows raising the delay as well as lowering it', () => {
@@ -846,7 +848,7 @@ describe('ARK_UNILATERAL_EXIT_DELAY', () => {
     // direction — the server accepts any script at or above its minimum — so a
     // deployment wanting a longer recourse than its server demands may have one.
     process.env.ARK_UNILATERAL_EXIT_DELAY = String(10 * 24 * 3600)
-    expect(loadConfig().arkade.unilateralExitDelayOverride).toBe(864_000)
+    expect(configFromKnobs(process.env).arkade.unilateralExitDelayOverride).toBe(864_000)
   })
 })
 
@@ -861,33 +863,33 @@ describe('ARK_UNILATERAL_EXIT_DELAY', () => {
  */
 describe('LN_RECEIVE_ACCEPT_UNILATERAL_GAP', () => {
   it('is off when unset, so no deployment accepts the unilateral gap by omission', () => {
-    expect(loadConfig().lnReceiveAcceptUnilateralGap).toBe(false)
+    expect(configFromKnobs(process.env).lnReceiveAcceptUnilateralGap).toBe(false)
   })
 
   it.each(['1', '0', 'yes', 'no', 'TRUE', 'False', 'on', 'enabled'])('refuses %s rather than guessing', (raw) => {
     process.env.LN_RECEIVE_ACCEPT_UNILATERAL_GAP = raw
-    expect(() => loadConfig()).toThrow(/LN_RECEIVE_ACCEPT_UNILATERAL_GAP must be 'true' or 'false'/)
+    expect(() => configFromKnobs(process.env)).toThrow(/LN_RECEIVE_ACCEPT_UNILATERAL_GAP must be 'true' or 'false'/)
   })
 
   it('needs no corridor cap on a test network, where nothing is at risk', () => {
     process.env.SWAP_NETWORK = 'regtest'
     process.env.LN_RECEIVE_ACCEPT_UNILATERAL_GAP = 'true'
     delete process.env.LN_RECEIVE_MAX_SATS
-    expect(loadConfig().lnReceiveAcceptUnilateralGap).toBe(true)
+    expect(configFromKnobs(process.env).lnReceiveAcceptUnilateralGap).toBe(true)
   })
 
   it('refuses to accept the window on bitcoin without an explicit corridor cap', () => {
     process.env.SWAP_NETWORK = 'bitcoin'
     process.env.LN_RECEIVE_ACCEPT_UNILATERAL_GAP = 'true'
     delete process.env.LN_RECEIVE_MAX_SATS
-    expect(() => loadConfig()).toThrow(/also needs LN_RECEIVE_MAX_SATS set explicitly/)
+    expect(() => configFromKnobs(process.env)).toThrow(/also needs LN_RECEIVE_MAX_SATS set explicitly/)
   })
 
   it('accepts the window on bitcoin once the operator has stated the bound', () => {
     process.env.SWAP_NETWORK = 'bitcoin'
     process.env.LN_RECEIVE_ACCEPT_UNILATERAL_GAP = 'true'
     process.env.LN_RECEIVE_MAX_SATS = '50000'
-    expect(loadConfig().lnReceiveAcceptUnilateralGap).toBe(true)
+    expect(configFromKnobs(process.env).lnReceiveAcceptUnilateralGap).toBe(true)
   })
 
   it('does not demand the cap merely for declining the window on bitcoin', () => {
@@ -897,7 +899,7 @@ describe('LN_RECEIVE_ACCEPT_UNILATERAL_GAP', () => {
     process.env.SWAP_NETWORK = 'bitcoin'
     process.env.LN_RECEIVE_ACCEPT_UNILATERAL_GAP = 'false'
     delete process.env.LN_RECEIVE_MAX_SATS
-    expect(loadConfig().lnReceiveAcceptUnilateralGap).toBe(false)
+    expect(configFromKnobs(process.env).lnReceiveAcceptUnilateralGap).toBe(false)
   })
 })
 
@@ -919,19 +921,19 @@ describe('LN_RECEIVE_ACCEPT_UNILATERAL_GAP', () => {
  */
 describe('LN_SEND_HINT_SCID_DENYLIST', () => {
   it('is empty when unset, so every hint is priced as it always was', () => {
-    expect(loadConfig().sendHintScidDenylist.size).toBe(0)
+    expect(configFromKnobs(process.env).sendHintScidDenylist.size).toBe(0)
   })
 
   it('treats a blank value as unset rather than as a one-entry list', () => {
     // What an unfilled .env template looks like. `''.split(',')` is `['']`,
     // which would otherwise be an entry that matches nothing and throws.
     process.env.LN_SEND_HINT_SCID_DENYLIST = '   '
-    expect(loadConfig().sendHintScidDenylist.size).toBe(0)
+    expect(configFromKnobs(process.env).sendHintScidDenylist.size).toBe(0)
   })
 
   it('parses a comma-separated list', () => {
     process.env.LN_SEND_HINT_SCID_DENYLIST = 'f42400f424000001,0102030405060708'
-    const denylist = loadConfig().sendHintScidDenylist
+    const denylist = configFromKnobs(process.env).sendHintScidDenylist
     expect(denylist.has('f42400f424000001')).toBe(true)
     expect(denylist.has('0102030405060708')).toBe(true)
     expect(denylist.size).toBe(2)
@@ -942,14 +944,14 @@ describe('LN_SEND_HINT_SCID_DENYLIST', () => {
     // pasted an uppercase scid out of a block explorer would otherwise have
     // written a list that matches nothing.
     process.env.LN_SEND_HINT_SCID_DENYLIST = ' F42400F424000001 , 0102030405060708 '
-    expect(loadConfig().sendHintScidDenylist.has('f42400f424000001')).toBe(true)
+    expect(configFromKnobs(process.env).sendHintScidDenylist.has('f42400f424000001')).toBe(true)
   })
 
   it.each(['f42400f42400000', 'f42400f4240000012', 'not-hex-at-all', '0xf42400f424000001', '16000000'])(
     'refuses %s rather than keeping an entry that can never match',
     (raw) => {
       process.env.LN_SEND_HINT_SCID_DENYLIST = raw
-      expect(() => loadConfig()).toThrow(/LN_SEND_HINT_SCID_DENYLIST entries must be 16 hex chars/)
+      expect(() => configFromKnobs(process.env)).toThrow(/LN_SEND_HINT_SCID_DENYLIST entries must be 16 hex chars/)
     },
   )
 
@@ -957,7 +959,7 @@ describe('LN_SEND_HINT_SCID_DENYLIST', () => {
     // Not "keep the good ones": a list an operator wrote is one intent, and
     // silently honouring half of it is how the half that matters goes missing.
     process.env.LN_SEND_HINT_SCID_DENYLIST = 'f42400f424000001,oops'
-    expect(() => loadConfig()).toThrow(/got 'oops'/)
+    expect(() => configFromKnobs(process.env)).toThrow(/got 'oops'/)
   })
 })
 
@@ -976,11 +978,11 @@ describe('LN_SEND_HINT_SCID_DENYLIST', () => {
  */
 describe('OFFER_MARKETS', () => {
   it('serves no market when unset, which is the whole path off', () => {
-    expect(loadConfig().offerMarkets).toEqual([])
+    expect(configFromKnobs(process.env).offerMarkets).toEqual([])
   })
 
   it('reads BTC as the null leg and needs no bounds while it serves nothing', () => {
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     expect(config.offerMarkets).toEqual([])
     expect(config.offerMinFillAmount).toBe(0n)
     expect(config.offerMaxFillAmount).toBe(0n)
@@ -991,7 +993,7 @@ describe('OFFER_MARKETS', () => {
     process.env.OFFER_MARKETS = `BTC/${usd}`
     process.env.OFFER_MIN_FILL_AMOUNT = '1000'
     process.env.OFFER_MAX_FILL_AMOUNT = '500000'
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     expect(config.offerMarkets).toEqual([{ a: null, b: usd }])
     expect(config.offerMinFillAmount).toBe(1_000n)
     expect(config.offerMaxFillAmount).toBe(500_000n)
@@ -999,28 +1001,28 @@ describe('OFFER_MARKETS', () => {
 
   it('refuses a market with no bounds rather than filling at any size', () => {
     process.env.OFFER_MARKETS = 'BTC/' + '11'.repeat(34)
-    expect(() => loadConfig()).toThrow(/OFFER_MIN_FILL_AMOUNT/)
+    expect(() => configFromKnobs(process.env)).toThrow(/OFFER_MIN_FILL_AMOUNT/)
   })
 
   it('refuses a bound that is not a whole number', () => {
     process.env.OFFER_MARKETS = 'BTC/' + '11'.repeat(34)
     process.env.OFFER_MIN_FILL_AMOUNT = '1000'
     process.env.OFFER_MAX_FILL_AMOUNT = '5e5'
-    expect(() => loadConfig()).toThrow(/OFFER_MAX_FILL_AMOUNT/)
+    expect(() => configFromKnobs(process.env)).toThrow(/OFFER_MAX_FILL_AMOUNT/)
   })
 
   it('refuses a negative bound', () => {
     process.env.OFFER_MARKETS = 'BTC/' + '11'.repeat(34)
     process.env.OFFER_MIN_FILL_AMOUNT = '-1'
     process.env.OFFER_MAX_FILL_AMOUNT = '500000'
-    expect(() => loadConfig()).toThrow(/OFFER_MIN_FILL_AMOUNT/)
+    expect(() => configFromKnobs(process.env)).toThrow(/OFFER_MIN_FILL_AMOUNT/)
   })
 
   it('refuses a max below the min, which could only ever refuse every offer', () => {
     process.env.OFFER_MARKETS = 'BTC/' + '11'.repeat(34)
     process.env.OFFER_MIN_FILL_AMOUNT = '5000'
     process.env.OFFER_MAX_FILL_AMOUNT = '1000'
-    expect(() => loadConfig()).toThrow(/OFFER_MAX_FILL_AMOUNT/)
+    expect(() => configFromKnobs(process.env)).toThrow(/OFFER_MAX_FILL_AMOUNT/)
   })
 })
 
@@ -1037,12 +1039,12 @@ describe('ASSET_MARKETS', () => {
   const USDA = '1a'.repeat(34)
 
   it('names no asset when unset, which is the atomic-class corridors off', () => {
-    expect(loadConfig().assetRfqTokens).toEqual([])
+    expect(configFromKnobs(process.env).assetRfqTokens).toEqual([])
   })
 
   it('parses SYMBOL:<asset id> with both directions open', () => {
     process.env.ASSET_MARKETS = `USDA:${USDA}`
-    expect(loadConfig().assetRfqTokens).toEqual([
+    expect(configFromKnobs(process.env).assetRfqTokens).toEqual([
       {
         symbol: 'USDA',
         assetId: USDA,
@@ -1055,36 +1057,39 @@ describe('ASSET_MARKETS', () => {
   it('reads ASSET_USDA_APPROVAL_THRESHOLD off the environment', () => {
     process.env.ASSET_MARKETS = `USDA:${USDA}`
     process.env.ASSET_USDA_APPROVAL_THRESHOLD = '250000'
-    expect(loadConfig().assetRfqTokens[0]!.approvalThresholdUnits).toBe(250_000n)
+    expect(configFromKnobs(process.env).assetRfqTokens[0]!.approvalThresholdUnits).toBe(250_000n)
   })
 
   it('ASSET_USDA_TO_BTC_ENABLED=false closes the direction in which the client GIVES the asset', () => {
     process.env.ASSET_MARKETS = `USDA:${USDA}`
     process.env.ASSET_USDA_TO_BTC_ENABLED = 'false'
-    expect(loadConfig().assetRfqTokens[0]!.enabled).toEqual({ clientGivesAsset: false, clientGetsAsset: true })
+    expect(configFromKnobs(process.env).assetRfqTokens[0]!.enabled).toEqual({
+      clientGivesAsset: false,
+      clientGetsAsset: true,
+    })
   })
 
   it('refuses a malformed entry at boot rather than at the first quote', () => {
     process.env.ASSET_MARKETS = USDA
-    expect(() => loadConfig()).toThrow(/ASSET_MARKETS/)
+    expect(() => configFromKnobs(process.env)).toThrow(/ASSET_MARKETS/)
   })
 
   it('defaults the quote window to seconds, not minutes', () => {
     // Every pair here is cross-asset by construction, so the window IS the
     // exposure: the solver is short the market until the client funds.
-    expect(loadConfig().assetQuoteValiditySeconds).toBe(30)
+    expect(configFromKnobs(process.env).assetQuoteValiditySeconds).toBe(30)
   })
 
   it('takes an operator window inside the permitted range', () => {
     process.env.ASSET_QUOTE_VALIDITY_SECONDS = '45'
-    expect(loadConfig().assetQuoteValiditySeconds).toBe(45)
+    expect(configFromKnobs(process.env).assetQuoteValiditySeconds).toBe(45)
   })
 
   it('refuses a window nobody could fund against, and one that binds for an hour', () => {
     process.env.ASSET_QUOTE_VALIDITY_SECONDS = '1'
-    expect(() => loadConfig()).toThrow(/ASSET_QUOTE_VALIDITY_SECONDS/)
+    expect(() => configFromKnobs(process.env)).toThrow(/ASSET_QUOTE_VALIDITY_SECONDS/)
     process.env.ASSET_QUOTE_VALIDITY_SECONDS = '901'
-    expect(() => loadConfig()).toThrow(/ASSET_QUOTE_VALIDITY_SECONDS/)
+    expect(() => configFromKnobs(process.env)).toThrow(/ASSET_QUOTE_VALIDITY_SECONDS/)
   })
 })
 
@@ -1092,49 +1097,49 @@ describe('ASSET_MARKETS', () => {
 // value. Here `Number('') === 0` would be a threshold of ZERO, gating everything.
 describe('APPROVAL_THRESHOLD_SATS', () => {
   it('is NULL when unset, so a deployment that configures nothing has no gate', () => {
-    expect(loadConfig().approvalThresholdSats).toBeNull()
+    expect(configFromKnobs(process.env).approvalThresholdSats).toBeNull()
   })
 
   it('is null when set but blank, rather than becoming a zero threshold', () => {
     process.env.APPROVAL_THRESHOLD_SATS = '   '
-    expect(loadConfig().approvalThresholdSats).toBeNull()
+    expect(configFromKnobs(process.env).approvalThresholdSats).toBeNull()
   })
 
   it('reads a configured threshold', () => {
     process.env.APPROVAL_THRESHOLD_SATS = '1000000'
-    expect(loadConfig().approvalThresholdSats).toBe(1_000_000)
+    expect(configFromKnobs(process.env).approvalThresholdSats).toBe(1_000_000)
   })
 
   it('accepts an explicit zero, which gates everything', () => {
     process.env.APPROVAL_THRESHOLD_SATS = '0'
-    expect(loadConfig().approvalThresholdSats).toBe(0)
+    expect(configFromKnobs(process.env).approvalThresholdSats).toBe(0)
   })
 
   it('refuses a negative threshold', () => {
     process.env.APPROVAL_THRESHOLD_SATS = '-1'
-    expect(() => loadConfig()).toThrow(/APPROVAL_THRESHOLD_SATS/)
+    expect(() => configFromKnobs(process.env)).toThrow(/APPROVAL_THRESHOLD_SATS/)
   })
 
   it('refuses a non-integer rather than truncating it', () => {
     process.env.APPROVAL_THRESHOLD_SATS = '1.5'
-    expect(() => loadConfig()).toThrow(/APPROVAL_THRESHOLD_SATS/)
+    expect(() => configFromKnobs(process.env)).toThrow(/APPROVAL_THRESHOLD_SATS/)
   })
 })
 
 describe('BALANCE_REPORT_INTERVAL_MINUTES', () => {
   it('is null when unset or blank, so no report is sent', () => {
-    expect(loadConfig().balanceReportIntervalMinutes).toBeNull()
+    expect(configFromKnobs(process.env).balanceReportIntervalMinutes).toBeNull()
     process.env.BALANCE_REPORT_INTERVAL_MINUTES = '  '
-    expect(loadConfig().balanceReportIntervalMinutes).toBeNull()
+    expect(configFromKnobs(process.env).balanceReportIntervalMinutes).toBeNull()
   })
 
   it('reads a configured interval', () => {
     process.env.BALANCE_REPORT_INTERVAL_MINUTES = '360'
-    expect(loadConfig().balanceReportIntervalMinutes).toBe(360)
+    expect(configFromKnobs(process.env).balanceReportIntervalMinutes).toBe(360)
   })
 
   it('refuses an interval short enough to flood the channel', () => {
     process.env.BALANCE_REPORT_INTERVAL_MINUTES = '1'
-    expect(() => loadConfig()).toThrow(/BALANCE_REPORT_INTERVAL_MINUTES/)
+    expect(() => configFromKnobs(process.env)).toThrow(/BALANCE_REPORT_INTERVAL_MINUTES/)
   })
 })

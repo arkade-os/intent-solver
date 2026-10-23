@@ -19,7 +19,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { loadConfig } from '@arkade-os/solver-app/config.js'
+import { configFromKnobs } from '@arkade-os/solver-app/config.js'
 
 const BASE_ENV: Record<string, string> = {
   SWAP_NETWORK: 'regtest',
@@ -63,7 +63,7 @@ afterEach(() => {
 
 describe('per-corridor fee knobs', () => {
   it('charges nothing on every corridor when nothing is set', () => {
-    const { corridorFees } = loadConfig()
+    const { corridorFees } = configFromKnobs(process.env)
     for (const pair of Object.values(PAIR_OF)) {
       expect({ pair, fee: corridorFees[pair] }).toEqual({ pair, fee: { bps: 0, flatSats: 0 } })
     }
@@ -72,7 +72,7 @@ describe('per-corridor fee knobs', () => {
   it.each(STEMS)('reads %s_FEE_BPS and _FEE_FLAT_SATS onto that corridor alone', (stem) => {
     process.env[`${stem}_FEE_BPS`] = '25'
     process.env[`${stem}_FEE_FLAT_SATS`] = '110'
-    const { corridorFees } = loadConfig()
+    const { corridorFees } = configFromKnobs(process.env)
     expect(corridorFees[PAIR_OF[stem]]).toEqual({ bps: 25, flatSats: 110 })
     for (const other of STEMS) {
       if (other === stem) continue
@@ -82,24 +82,26 @@ describe('per-corridor fee knobs', () => {
 
   it('refuses a spread at or above 100%', () => {
     process.env.LN_SEND_FEE_BPS = '10000'
-    expect(() => loadConfig()).toThrow(/LN_SEND_FEE_BPS must be an integer between 0 and 9999/)
+    expect(() => configFromKnobs(process.env)).toThrow(/LN_SEND_FEE_BPS must be an integer between 0 and 9999/)
   })
 
   it('refuses a negative flat fee', () => {
     process.env.ONCHAIN_SEND_FEE_FLAT_SATS = '-1'
-    expect(() => loadConfig()).toThrow(/ONCHAIN_SEND_FEE_FLAT_SATS must be an integer between 0 and 1000000/)
+    expect(() => configFromKnobs(process.env)).toThrow(
+      /ONCHAIN_SEND_FEE_FLAT_SATS must be an integer between 0 and 1000000/,
+    )
   })
 })
 
 describe('per-corridor enablement', () => {
   it('serves every corridor when nothing is set', () => {
-    const { corridorEnabled } = loadConfig()
+    const { corridorEnabled } = configFromKnobs(process.env)
     for (const pair of Object.values(PAIR_OF)) expect({ pair, on: corridorEnabled[pair] }).toEqual({ pair, on: true })
   })
 
   it.each(STEMS)('darks only %s when its _ENABLED is false', (stem) => {
     process.env[`${stem}_ENABLED`] = 'false'
-    const { corridorEnabled } = loadConfig()
+    const { corridorEnabled } = configFromKnobs(process.env)
     expect(corridorEnabled[PAIR_OF[stem]]).toBe(false)
     for (const other of STEMS) {
       if (other === stem) continue
@@ -114,7 +116,7 @@ describe('per-corridor enablement', () => {
    */
   it.each(['FALSE', '0', 'no', 'off'])('refuses %s rather than reading it as on', (raw) => {
     process.env.LN_RECEIVE_ENABLED = raw
-    expect(() => loadConfig()).toThrow(/LN_RECEIVE_ENABLED must be 'true' or 'false'/)
+    expect(() => configFromKnobs(process.env)).toThrow(/LN_RECEIVE_ENABLED must be 'true' or 'false'/)
   })
 })
 
@@ -122,12 +124,12 @@ describe('per-corridor amount bounds', () => {
   it.each(STEMS)('narrows %s_MAX_SATS onto that corridor alone', (stem) => {
     process.env[`${stem}_MIN_SATS`] = '2000'
     process.env[`${stem}_MAX_SATS`] = '30000'
-    const { corridorLimits } = loadConfig()
+    const { corridorLimits } = configFromKnobs(process.env)
     expect(corridorLimits[PAIR_OF[stem]]).toEqual({ minSats: 2000, maxSats: 30000 })
   })
 
   it('refuses a zero bound, which would be a corridor nobody can use', () => {
     process.env.ONCHAIN_RECEIVE_MIN_SATS = '0'
-    expect(() => loadConfig()).toThrow(/ONCHAIN_RECEIVE_MIN_SATS must be a positive integer/)
+    expect(() => configFromKnobs(process.env)).toThrow(/ONCHAIN_RECEIVE_MIN_SATS must be a positive integer/)
   })
 })

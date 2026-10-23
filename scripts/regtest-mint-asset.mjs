@@ -20,7 +20,7 @@
 // select — so issuing into a wallet that is also serving corridors changes
 // what its float looks like. That is fine for a test wallet between runs, and
 // is why this lives in `scripts/` rather than anywhere the service can reach.
-import { loadConfig } from '../packages/solver-app/dist/config.js'
+import { loadConfig } from '../packages/solver-app/dist/config/load.js'
 import { createArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const [amountArg = '1000', ticker = 'TEST'] = process.argv.slice(2)

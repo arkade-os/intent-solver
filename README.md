@@ -358,6 +358,13 @@ group can widen a safety bound: `MAX_SWAP_SATS` may only narrow the per-swap
 range (`resolveLimits` takes a `Math.min` against the network default), and
 that is the only knob that touches an amount at risk at all.
 
+The settings below are read from one JSON config document, not from the
+environment: `SOLVER_CONFIG` names the file, or `SOLVER_CONFIG_JSON` carries the
+document itself — set exactly one. Each name in the tables is the setting id the
+document is flattened to; any of them still set in the environment stops the
+solver at startup, and `cli config-from-env` prints the document for an existing
+environment.
+
 ### Environment — required
 
 | Var              | Default       | What breaks without it                                                                                                              |

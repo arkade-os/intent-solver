@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { loadConfig } from '@arkade-os/solver-app/config.js'
+import { configFromKnobs } from '@arkade-os/solver-app/config.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 
@@ -60,13 +60,13 @@ afterEach(() => {
 
 describe('corridorEnabled', () => {
   it('serves every corridor when nothing is set', () => {
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     for (const corridor of CORRIDORS) expect(config.corridorEnabled[corridor]).toBe(true)
   })
 
   it('switches one corridor off without touching the other three', () => {
     process.env.ONCHAIN_RECEIVE_ENABLED = 'false'
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     expect(config.corridorEnabled['onchain:BTC->arkade:BTC']).toBe(false)
     for (const corridor of CORRIDORS) {
       if (corridor === 'onchain:BTC->arkade:BTC') continue
@@ -76,13 +76,13 @@ describe('corridorEnabled', () => {
 
   it('accepts an explicit true', () => {
     process.env.LN_SEND_ENABLED = 'true'
-    expect(loadConfig().corridorEnabled['arkade:BTC->lightning:BTC']).toBe(true)
+    expect(configFromKnobs(process.env).corridorEnabled['arkade:BTC->lightning:BTC']).toBe(true)
   })
 
   it('can leave a Lightning-only deployment', () => {
     process.env.ONCHAIN_SEND_ENABLED = 'false'
     process.env.ONCHAIN_RECEIVE_ENABLED = 'false'
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     expect(config.corridorEnabled['arkade:BTC->lightning:BTC']).toBe(true)
     expect(config.corridorEnabled['lightning:BTC->arkade:BTC']).toBe(true)
     expect(config.corridorEnabled['arkade:BTC->onchain:BTC']).toBe(false)
@@ -91,17 +91,17 @@ describe('corridorEnabled', () => {
 
   it('can switch every corridor off — a solver that quotes nothing is a legal state', () => {
     for (const stem of STEMS) process.env[`${stem}_ENABLED`] = 'false'
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     for (const corridor of CORRIDORS) expect(config.corridorEnabled[corridor]).toBe(false)
   })
 
   it.each(['FALSE', 'False', '0', 'no', 'off', 'disabled'])('REFUSES %s rather than reading it as on', (value) => {
     process.env.LN_SEND_ENABLED = value
-    expect(() => loadConfig()).toThrow(/LN_SEND_ENABLED/)
+    expect(() => configFromKnobs(process.env)).toThrow(/LN_SEND_ENABLED/)
   })
 
   it('treats a set-but-empty value as unset', () => {
     process.env.LN_SEND_ENABLED = '   '
-    expect(loadConfig().corridorEnabled['arkade:BTC->lightning:BTC']).toBe(true)
+    expect(configFromKnobs(process.env).corridorEnabled['arkade:BTC->lightning:BTC']).toBe(true)
   })
 })
