@@ -159,14 +159,19 @@ describe('a live knob must not un-badge the knobs that are still waiting', () =>
     expect((svc.policy as { maxExposedSats: number }).maxExposedSats).toBe(900_000)
   })
 
-  it('says the same thing on /api/overview, which derives it independently', async () => {
-    const { app } = await buildReal()
+  it('says the same thing on /api/overview, which derives it independently, by config path', async () => {
+    const { app, services } = await buildReal()
+    ;(services as unknown as { config: { configPaths: Map<string, string> } }).config.configPaths = new Map([
+      ['MAX_EXPOSED_SATS', 'limits.maxExposedSats'],
+    ])
     await patch(app, 'MAX_EXPOSED_SATS', '900000')
     await patch(app, 'ASSET_CARRIER_PRICING', 'true')
     const body = (await (await app.fetch(new Request('http://admin/api/overview'))).json()) as {
-      pendingRestart: { key: string; loaded: string; stored: string }[]
+      pendingRestart: { key: string; path: string; loaded: string; stored: string }[]
     }
-    expect(body.pendingRestart).toEqual([{ key: 'MAX_EXPOSED_SATS', loaded: '300000', stored: '900000' }])
+    expect(body.pendingRestart).toEqual([
+      { key: 'MAX_EXPOSED_SATS', path: 'limits.maxExposedSats', loaded: '300000', stored: '900000' },
+    ])
   })
 })
 
@@ -218,7 +223,9 @@ describe('GET /api/overview — pendingRestart', () => {
         repairedServing: [],
       },
     })
-    expect(body.pendingRestart).toEqual([{ key: 'LN_SEND_FEE_BPS', loaded: '0', stored: '25' }])
+    expect(body.pendingRestart).toEqual([
+      { key: 'LN_SEND_FEE_BPS', path: 'LN_SEND_FEE_BPS', loaded: '0', stored: '25' },
+    ])
   })
 
   it('still reports a settings knob while a new market is already live', async () => {
@@ -230,7 +237,9 @@ describe('GET /api/overview — pendingRestart', () => {
         repairedServing: [],
       },
     })
-    expect(body.pendingRestart).toEqual([{ key: 'MAX_EXPOSED_SATS', loaded: '300000', stored: '900000' }])
+    expect(body.pendingRestart).toEqual([
+      { key: 'MAX_EXPOSED_SATS', path: 'MAX_EXPOSED_SATS', loaded: '300000', stored: '900000' },
+    ])
   })
 
   it('stays quiet when the override is the one this process already loaded', async () => {

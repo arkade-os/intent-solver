@@ -1783,7 +1783,7 @@ const CARRIER_MODES = ['inherit', 'off', 'priced']
 const carrierDefaultField = () =>
   h(
     'label.check.toolbar',
-    { title: 'ASSET_CARRIER_PRICING, deployment-wide — saved with this market, in one ordered save' },
+    { title: 'offers.carrierPricing, deployment-wide — saved with this market, in one ordered save' },
     h('input', {
       type: 'checkbox',
       ...(carrierDefaultDraft ? { checked: true } : {}),
@@ -1795,7 +1795,7 @@ const carrierDefaultField = () =>
 const carrierModeField = () =>
   h(
     'label.check.toolbar',
-    { title: 'Whether an RFQ quote prices the carrier in; inherit follows ASSET_CARRIER_PRICING.' },
+    { title: 'Whether an RFQ quote prices the carrier in; inherit follows offers.carrierPricing.' },
     'carrier mode ',
     h(
       'select',
@@ -2582,7 +2582,7 @@ const pricingKnobField = (knob, label, explanation) => {
                 render()
               },
             },
-            'Use env',
+            'Use config',
           )
         : null,
     ),
@@ -2942,7 +2942,7 @@ const discoveryView = () => {
           'Post now',
         ),
         publish.mode === 'off'
-          ? h('span.muted', ' NOSTR_AD_PUBLISH is off')
+          ? h('span.muted', ' relay.adPublish is off')
           : !publish.publisher
             ? h('span.muted', ' only the relay command publishes')
             : null,
@@ -4532,7 +4532,8 @@ const inFlightLine = (o) =>
 // `KNOB 0 → 25` — whether the change is worth interrupting swaps for. `.muted`
 // not `.faint`: these are the banner's substance, and --text-faint reads 4.02:1
 // on --exposed-bg, under the AA floor. See contrast.test.ts.
-const pendingItem = (item) => h('span.mono', item.key, h('span.muted', ` ${item.loaded} → ${item.stored}`))
+const pendingItem = (item) =>
+  h('span.mono', { title: item.key }, item.path ?? item.key, h('span.muted', ` ${item.loaded} → ${item.stored}`))
 
 // On EVERY panel: an operator who changed a knob and moved on is by definition
 // not looking at Settings. Same reasoning as the status bar's stuck-row count.

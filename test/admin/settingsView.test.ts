@@ -37,7 +37,17 @@ describe('no screen tells the operator to edit the environment', () => {
     'environment only',
     'ADMIN_RESTART_ENABLED',
     '_ENABLED in the',
+    "'Use env'",
+    'NOSTR_AD_PUBLISH is off',
+    'follows ASSET_CARRIER_PRICING',
+    "'ASSET_CARRIER_PRICING, deployment-wide",
   ])('%s', (phrase) => {
     expect(appSource).not.toContain(phrase)
+  })
+
+  it('names a setting waiting for a restart by its config path', () => {
+    expect(appSource).toMatch(
+      /const pendingItem = \(item\) =>\s*h\('span\.mono', \{ title: item\.key \}, item\.path \?\? item\.key/,
+    )
   })
 })

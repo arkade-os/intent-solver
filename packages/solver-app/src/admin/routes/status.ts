@@ -156,7 +156,9 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
         services.bootPolicy,
         effective,
         pendingRestartKeys(services.bootOverrides, overrides),
-      ).filter((item) => !LIVE_KEYS.has(item.key)),
+      )
+        .filter((item) => !LIVE_KEYS.has(item.key))
+        .map((item) => ({ ...item, path: services.config.configPaths?.get(item.key) ?? item.key })),
       restartEnabled: services.config.adminRestartEnabled,
       providerPubkey: services.providerPubkey,
       markets: marketCards(storedMarkets, services),
